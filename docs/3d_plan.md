@@ -3131,7 +3131,7 @@ clip, and **ropes** (chains of capsules with constraints). Checks: determinism (
 `--check-determinism`: three lockstep runs agree, with physics on), unit tests per feature,
 a scripted-input run of the climbing test level, the physics step's cost with 500 bodies.
 Risk to watch: Jolt is large to compile; this machine has 14 GB of RAM and a nearly full
-disk (see HANDOFF.md): build with `-j8`, check the disk first.
+disk: check available space and choose build parallelism for the current machine.
 
 P2 done: P2a (the core), P2b (queries, events, constraints, debug draw, ECS), P2c (the character controller), P2d (grab and
 climb) and P2e (ragdolls and ropes), each with its results below.
@@ -8501,8 +8501,8 @@ bodies, tethers and resources, replication of terrain edits. Its own plan, after
 
 Order: P1, P2, P3 (independent of P2: may run beside it), P4, P5a throughout, then P5b and P6.
 Each step is planned with the user before it starts, implemented by a Sonnet 5.5 subagent
-with the usual checks (opt-in, byte-identical when off, mutation-checked tests, the memory
-rules in HANDOFF.md), and verified by the coordinator.
+with the usual checks (opt-in, byte-identical when off, mutation-checked tests and bounded
+memory use), and verified by the coordinator.
 
 ## How it is tested
 

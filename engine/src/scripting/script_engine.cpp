@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/dialogue/dialogue.hpp>
@@ -498,6 +499,9 @@ void write_lua_report_value(JsonWriter& json, const sol::object& value, i32 dept
 struct ScriptEntityApi {
     ScriptEngineHost* scene = nullptr;
     EcsEntity entity;
+    std::function<bool()> lease;
+
+    bool lease_valid() const { return !lease || lease(); }
 
     EcsId id() const {
         return entity.id();
@@ -508,11 +512,11 @@ struct ScriptEntityApi {
     }
 
     bool valid() const {
-        return entity.valid();
+        return lease_valid() && entity.valid();
     }
 
     bool alive() const {
-        return entity.alive();
+        return lease_valid() && entity.alive();
     }
 
     void destroy() {
@@ -601,7 +605,7 @@ struct ScriptEntityApi {
         if (!found.is_valid() || !found.is_alive()) {
             return sol::nil;
         }
-        return sol::make_object(state, ScriptEntityApi{scene, EcsEntity{found}});
+        return sol::make_object(state, ScriptEntityApi{scene, EcsEntity{found}, lease});
     }
 
     ScriptEntityApi& patch(std::string_view component, sol::table values) {
@@ -636,10 +640,15 @@ struct ScriptEntityApi {
                 result[std::string{name}] = component_value_to_lua(state, value);
             });
         const std::string component_name{component};
-        result["commit"] = [scene = scene, entity = entity, component_name](sol::table self) -> sol::table {
-            const std::vector<ComponentPatchValue> patch_values = component_patch_values_from_lua(scene->ecs(), component_name, self);
+        result["commit"] = [scene = scene, entity = entity, component_name, lease = lease](sol::stack_object self) -> sol::table {
+            if (self.get_type() != sol::type::table)
+                throw std::runtime_error("component commit requires its table; call with ':'");
+            if (scene->closing || !entity.alive() || (lease && !lease()))
+                throw std::runtime_error("component entity or 3D lease is stale");
+            sol::table table = self.as<sol::table>();
+            const std::vector<ComponentPatchValue> patch_values = component_patch_values_from_lua(scene->ecs(), component_name, table);
             apply_component_patch_values(scene->ecs(), entity, component_name, patch_values);
-            return self;
+            return table;
         };
         return sol::object{result};
     }
@@ -1326,13 +1335,54 @@ struct ScriptDialoguePlayerApi {
     }
 };
 
+
+// Check self without changing legacy argument conversions (including numeric
+// colours). Sol2's unchecked member thunk dereferences a missing receiver.
+template <class C> C& script_self(const sol::stack_object& value, bool property = false) {
+    if (!value.is<C>()) {
+        lua_State* state = value.lua_state();
+        luaL_where(state, 1);
+        std::string message = lua_tostring(state, -1);
+        lua_pop(state, 1);
+        message += property ? "invalid property receiver" : "invalid method receiver; call the method with ':'";
+        throw std::runtime_error(message);
+    }
+    return value.as<C&>();
+}
+template <class Method, class C, class... A> decltype(auto) script_invoke(Method method, C& self, A&&... args) {
+    if constexpr (std::is_same_v<C, ScriptEntityApi>) {
+        bool checks_liveness = false;
+        if constexpr (std::is_same_v<Method, bool (ScriptEntityApi::*)() const>)
+            checks_liveness = method == &ScriptEntityApi::alive || method == &ScriptEntityApi::valid;
+        if (!checks_liveness && !self.lease_valid())
+            throw std::runtime_error("3D entity lease is stale");
+    }
+    return std::invoke(method, self, std::forward<A>(args)...);
+}
+template <class R, class C, class... A> auto script_method(R (C::*method)(A...)) {
+    return [method](sol::stack_object self, A... arguments) -> R {
+        return script_invoke(method, script_self<C>(self), std::forward<A>(arguments)...);
+    };
+}
+template <class R, class C, class... A> auto script_method(R (C::*method)(A...) const) {
+    return [method](sol::stack_object self, A... arguments) -> R {
+        return script_invoke(method, script_self<C>(self), std::forward<A>(arguments)...);
+    };
+}
+template <class R, class C> auto script_property(R (C::*method)() const) {
+    return sol::property([method](sol::this_state state) -> R {
+        return std::invoke(method, script_self<C>(sol::stack_object(state, 1), true));
+    });
+}
+
+
 } // namespace
 
 EcsEntity scripting_detail::script_entity(const sol::object& object) {
     if (!object.is<ScriptEntityApi>())
         throw std::runtime_error("expected a KinEntity");
     const auto& value = object.as<const ScriptEntityApi&>();
-    return value.scene && !value.scene->closing && value.entity.alive() ? value.entity : EcsEntity{};
+    return value.scene && !value.scene->closing && value.alive() ? value.entity : EcsEntity{};
 }
 
 void scripting_detail::script_component_access(std::string_view component, bool write) {
@@ -1559,105 +1609,105 @@ bool ScriptEngine::call_optional_const(std::string_view name, Args&&... args) co
 }
 
 void ScriptEngine::register_bindings() {
-    _impl->lua.registry()["kin.entity"] = [this](EcsEntity e) {
+    _impl->lua.registry()["kin.entity"] = [this](EcsEntity e, std::function<bool()> lease) {
         if (!_impl->host || _impl->host->closing || !e || e.raw().world().c_ptr() != _impl->host->world->raw().c_ptr())
             throw std::runtime_error("entity does not belong to this Lua scene");
-        return ScriptEntityApi{_impl->host.get(), e};
+        return ScriptEntityApi{_impl->host.get(), e, std::move(lease)};
     };
     scripting_detail::bind_l10n(_impl->lua, true);
     _impl->lua.new_usertype<ScriptEntityApi>("KinEntity",
         sol::no_constructor,
-        "id", &ScriptEntityApi::id,
-        "name", &ScriptEntityApi::name,
-        "valid", &ScriptEntityApi::valid,
-        "alive", &ScriptEntityApi::alive,
-        "destroy", &ScriptEntityApi::destroy,
-        "has", &ScriptEntityApi::has,
-        "get", &ScriptEntityApi::get,
-        "component", &ScriptEntityApi::component,
-        "timer", &ScriptEntityApi::timer,
-        "cooldown", &ScriptEntityApi::cooldown,
-        "ready", &ScriptEntityApi::ready,
-        "child", &ScriptEntityApi::child,
-        "patch", &ScriptEntityApi::patch,
-        "add_script_owned", &ScriptEntityApi::add_script_owned,
-        "remove", &ScriptEntityApi::remove,
-        "set_transform", &ScriptEntityApi::set_transform,
-        "get_transform", &ScriptEntityApi::get_transform,
-        "translate", &ScriptEntityApi::translate,
-        "set_rect", &ScriptEntityApi::set_rect,
-        "get_rect", &ScriptEntityApi::get_rect,
-        "set_line", &ScriptEntityApi::set_line,
-        "get_line", &ScriptEntityApi::get_line);
+        "id", script_method(&ScriptEntityApi::id),
+        "name", script_method(&ScriptEntityApi::name),
+        "valid", script_method(&ScriptEntityApi::valid),
+        "alive", script_method(&ScriptEntityApi::alive),
+        "destroy", script_method(&ScriptEntityApi::destroy),
+        "has", script_method(&ScriptEntityApi::has),
+        "get", script_method(&ScriptEntityApi::get),
+        "component", script_method(&ScriptEntityApi::component),
+        "timer", script_method(&ScriptEntityApi::timer),
+        "cooldown", script_method(&ScriptEntityApi::cooldown),
+        "ready", script_method(&ScriptEntityApi::ready),
+        "child", script_method(&ScriptEntityApi::child),
+        "patch", script_method(&ScriptEntityApi::patch),
+        "add_script_owned", script_method(&ScriptEntityApi::add_script_owned),
+        "remove", script_method(&ScriptEntityApi::remove),
+        "set_transform", script_method(&ScriptEntityApi::set_transform),
+        "get_transform", script_method(&ScriptEntityApi::get_transform),
+        "translate", script_method(&ScriptEntityApi::translate),
+        "set_rect", script_method(&ScriptEntityApi::set_rect),
+        "get_rect", script_method(&ScriptEntityApi::get_rect),
+        "set_line", script_method(&ScriptEntityApi::set_line),
+        "get_line", script_method(&ScriptEntityApi::get_line));
 
     _impl->lua.new_usertype<ScriptDeferredEntityApi>("KinDeferredEntity",
         sol::no_constructor,
-        "index", sol::property(&ScriptDeferredEntityApi::index));
+        "index", script_property(&ScriptDeferredEntityApi::index));
 
     _impl->lua.new_usertype<ScriptCommandBufferApi>("KinCommandBuffer",
         sol::no_constructor,
-        "valid", sol::property(&ScriptCommandBufferApi::valid),
-        "size", sol::property(&ScriptCommandBufferApi::size),
-        "create", &ScriptCommandBufferApi::create,
-        "destroy", &ScriptCommandBufferApi::destroy,
-        "add", &ScriptCommandBufferApi::add,
-        "remove", &ScriptCommandBufferApi::remove,
-        "patch", &ScriptCommandBufferApi::patch);
+        "valid", script_property(&ScriptCommandBufferApi::valid),
+        "size", script_property(&ScriptCommandBufferApi::size),
+        "create", script_method(&ScriptCommandBufferApi::create),
+        "destroy", script_method(&ScriptCommandBufferApi::destroy),
+        "add", script_method(&ScriptCommandBufferApi::add),
+        "remove", script_method(&ScriptCommandBufferApi::remove),
+        "patch", script_method(&ScriptCommandBufferApi::patch));
 
     _impl->lua.new_usertype<ScriptSystemContextApi>("KinSystemContext",
         sol::no_constructor,
-        "dt", sol::property(&ScriptSystemContextApi::dt),
-        "system_id", sol::property(&ScriptSystemContextApi::system_id),
-        "phase", sol::property(&ScriptSystemContextApi::phase),
-        "running_parallel", sol::property(&ScriptSystemContextApi::running_parallel),
-        "commands", sol::property(&ScriptSystemContextApi::commands));
+        "dt", script_property(&ScriptSystemContextApi::dt),
+        "system_id", script_property(&ScriptSystemContextApi::system_id),
+        "phase", script_property(&ScriptSystemContextApi::phase),
+        "running_parallel", script_property(&ScriptSystemContextApi::running_parallel),
+        "commands", script_property(&ScriptSystemContextApi::commands));
 
     _impl->lua.new_usertype<ScriptSceneApi>("KinScene",
         sol::no_constructor,
-        "entity", &ScriptSceneApi::entity,
-        "find", &ScriptSceneApi::find,
-        "authored", &ScriptSceneApi::authored,
-        "entities", &ScriptSceneApi::entities,
-        "with", &ScriptSceneApi::with,
-        "count", &ScriptSceneApi::count,
-        "register_system", &ScriptSceneApi::register_system,
-        "clear_script_entities", &ScriptSceneApi::clear_script_entities,
-        "set_clear_color", &ScriptSceneApi::set_clear_color,
-        "mark_render_cache_dirty", &ScriptSceneApi::mark_render_cache_dirty);
+        "entity", script_method(&ScriptSceneApi::entity),
+        "find", script_method(&ScriptSceneApi::find),
+        "authored", script_method(&ScriptSceneApi::authored),
+        "entities", script_method(&ScriptSceneApi::entities),
+        "with", script_method(&ScriptSceneApi::with),
+        "count", script_method(&ScriptSceneApi::count),
+        "register_system", script_method(&ScriptSceneApi::register_system),
+        "clear_script_entities", script_method(&ScriptSceneApi::clear_script_entities),
+        "set_clear_color", script_method(&ScriptSceneApi::set_clear_color),
+        "mark_render_cache_dirty", script_method(&ScriptSceneApi::mark_render_cache_dirty));
 
     _impl->lua.new_usertype<ScriptInputApi>("KinInput",
         sol::no_constructor,
-        "pressed", &ScriptInputApi::pressed,
-        "held", &ScriptInputApi::held,
-        "released", &ScriptInputApi::released);
+        "pressed", script_method(&ScriptInputApi::pressed),
+        "held", script_method(&ScriptInputApi::held),
+        "released", script_method(&ScriptInputApi::released));
 
     _impl->lua.new_usertype<ScriptAppApi>("KinApp",
         sol::no_constructor,
-        "quit", &ScriptAppApi::quit);
+        "quit", script_method(&ScriptAppApi::quit));
 
     _impl->lua.new_usertype<ScriptContextApi>("KinContext",
         sol::no_constructor,
-        "dt", sol::property(&ScriptContextApi::dt),
-        "input", sol::property(&ScriptContextApi::input),
-        "app", sol::property(&ScriptContextApi::app));
+        "dt", script_property(&ScriptContextApi::dt),
+        "input", script_property(&ScriptContextApi::input),
+        "app", script_property(&ScriptContextApi::app));
 
     _impl->lua.new_usertype<ScriptActionsApi>("KinActions",
         sol::no_constructor,
-        "add", &ScriptActionsApi::add);
+        "add", script_method(&ScriptActionsApi::add));
 
     _impl->lua.new_usertype<ScriptDialoguePlayerApi>("KinDialoguePlayer",
         sol::constructors<ScriptDialoguePlayerApi()>(),
-        "load", &ScriptDialoguePlayerApi::load,
-        "start", &ScriptDialoguePlayerApi::start,
-        "advance", &ScriptDialoguePlayerApi::advance,
-        "choose_index", &ScriptDialoguePlayerApi::choose_index,
-        "choose_id", &ScriptDialoguePlayerApi::choose_id,
-        "skip_line", &ScriptDialoguePlayerApi::skip_line,
-        "reset", &ScriptDialoguePlayerApi::reset,
-        "ended", sol::property(&ScriptDialoguePlayerApi::ended),
-        "current_node", sol::property(&ScriptDialoguePlayerApi::current_node),
-        "view", &ScriptDialoguePlayerApi::view,
-        "consume_events", &ScriptDialoguePlayerApi::consume_events);
+        "load", script_method(&ScriptDialoguePlayerApi::load),
+        "start", script_method(&ScriptDialoguePlayerApi::start),
+        "advance", script_method(&ScriptDialoguePlayerApi::advance),
+        "choose_index", script_method(&ScriptDialoguePlayerApi::choose_index),
+        "choose_id", script_method(&ScriptDialoguePlayerApi::choose_id),
+        "skip_line", script_method(&ScriptDialoguePlayerApi::skip_line),
+        "reset", script_method(&ScriptDialoguePlayerApi::reset),
+        "ended", script_property(&ScriptDialoguePlayerApi::ended),
+        "current_node", script_property(&ScriptDialoguePlayerApi::current_node),
+        "view", script_method(&ScriptDialoguePlayerApi::view),
+        "consume_events", script_method(&ScriptDialoguePlayerApi::consume_events));
 }
 
 } // namespace kin

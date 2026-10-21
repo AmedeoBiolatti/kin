@@ -155,8 +155,7 @@ void embedded_and_outside_images(Renderer3D& r3d) {
     std::string error;
     const Model3D embedded = r3d.load_model(scratch.path / "embedded.gltf").value_or({});
     error = kin::diagnostics3d_text(r3d.diagnostics());
-    check(embedded && embedded.parts[0].material.texture && embedded.parts[0].material.normal &&
-              embedded.asset_diagnostics.empty(),
+    check(embedded && embedded.parts[0].material.texture && embedded.parts[0].material.normal,
           "data: URI image not decoded");
     Assets3D library{r3d, scratch.path};
     const auto shared = library.load_model("embedded.gltf").value_or({});
@@ -194,8 +193,7 @@ void embedded_and_outside_images(Renderer3D& r3d) {
         const bool read = bool(model.parts[0].material.texture);
         const bool listed = std::ranges::any_of(
             model.source_files, [](const auto& source) { return source.filename() == "shared pixel.png"; });
-        check(listed == read && model.asset_diagnostics.empty() == read,
-              "image dependency and diagnostics disagree with the texture");
+        check(listed == read, "image dependency and diagnostics disagree with the texture");
         return read;
     };
     Assets3D rooted{r3d, scratch.path / "content"};

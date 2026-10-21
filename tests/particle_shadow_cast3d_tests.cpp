@@ -129,7 +129,8 @@ void selection_and_cache(Fixture& f) {
           "per-map culling submitted a wide batch's distant particles");
     s.camera = Camera3D::look_at({0, 0, 0}, {.02f, 0, -1}, 60);
     f.shoot(view, s);
-    check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws,
+    check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws &&
+              !f.r3d.debug_stats().particle_shadow_uploaded_bytes,
           "camera turn invalidated a camera-independent particle map");
     // Alternating selected/rejected sprites must still use a single compact draw.
     particles.assign(32768, sprite());
@@ -152,7 +153,8 @@ void selection_and_cache(Fixture& f) {
         f.shoot(view, s);
         s.camera = Camera3D::look_at({0, 0, 0}, {.02f, 0, -1}, 60);
         f.shoot(view, s);
-        check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws,
+        check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws &&
+                  !f.r3d.debug_stats().particle_shadow_uploaded_bytes,
               "camera turn invalidated unchanged axis/stretched caster quads");
     }
     l.facing = ParticleFacing3D::Flat;
@@ -162,8 +164,22 @@ void selection_and_cache(Fixture& f) {
     (void)s.draw_particles(l, particles);
     s.lights.cache_shadows = false;
     f.shoot(view, s);
-    check(f.r3d.debug_stats().particle_shadow_instances == 16384,
-          "particle shadow map exceeded its independent budget");
+    check(f.r3d.debug_stats().particle_shadow_instances == 16384 &&
+              f.r3d.debug_stats().particle_shadow_map_dropped == 1024,
+          "particle shadow map budget/drop accounting is incorrect");
+    // A fixed-area sun map depends on its selected flat casters, not the
+    // camera or a caster outside the map.
+    s = f.scene(0, l, sprite(), false, false);
+    s.clear(); // isolate the particle cache from mesh caster reach/camera culling
+    particles.assign(2, sprite());
+    particles[1].position = {1000, 0, -4};
+    (void)s.draw_particles(l, particles);
+    f.shoot(view, s);
+    f.shoot(view, s); // the sun cache takes a snapshot after two equal draws
+    s.camera = Camera3D::look_at({0, 0, 0}, {.02f, 0, -1}, 60);
+    f.shoot(view, s);
+    check(f.r3d.stats().shadow_cached && !f.r3d.debug_stats().particle_shadow_uploaded_bytes,
+          "camera turn invalidated a fixed sun map's flat casters");
 }
 
 void interactions(Fixture& f) {

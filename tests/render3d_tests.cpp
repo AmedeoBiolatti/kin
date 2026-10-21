@@ -17748,6 +17748,7 @@ void test_gpu_taa_live_transparency() {
         if (lacks(r3d.capabilities().temporal_aa && r3d.capabilities().particles, "TAA particles"))
             return;
         const auto box = make_box(r3d, {1, 1, 1});
+        const auto unrelated = make_box(r3d, {.2f, .2f, .2f});
         std::vector<kin::u8> pixels(32 * 32 * 4, 255);
         for (int y = 0; y < 32; ++y)
             for (int x = 0; x < 32; ++x)
@@ -17759,7 +17760,7 @@ void test_gpu_taa_live_transparency() {
             custom =
                 r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
                     .value_or({});
-        for (int mode = 0; mode < 6; ++mode) {
+        for (int mode = 0; mode < 7; ++mode) {
             if (mode == 4 && !custom)
                 continue;
             auto accumulated = r3d.create_view({160, 120}).value_or({});
@@ -17772,14 +17773,18 @@ void test_gpu_taa_live_transparency() {
                 scene.lights.sun.color = {};
                 scene.lights.ambient = {1, 1, 1};
                 scene.taa = {.enabled = true, .blend = .98f};
+                // Adding an unrelated earlier draw must not change the stable
+                // transparent draw's appearance/history identity.
+                if (mode == 3 && frame % 2)
+                    (void)scene.draw(unrelated, Mat4f::translation({-3, 3, 0}), {.unlit = true});
                 (void)scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
                 // Unrelated motion used to reject every transparent pixel.
                 (void)scene.draw(box, Mat4f::translation({-3, .1f * frame, 1}), {.unlit = true});
-                if (mode < 3 || mode == 5) {
+                if (mode < 3 || mode >= 5) {
                     kin::ParticleLook3D l;
                     l.texture = checker;
-                    l.blend = static_cast<kin::ParticleBlend3D>(mode == 5 ? 0 : mode);
-                    if (mode == 5) {
+                    l.blend = static_cast<kin::ParticleBlend3D>(mode >= 5 ? 0 : mode);
+                    if (mode >= 5) {
                         // camp_walk uses TAA with flickering fires and a carried lantern.
                         l.lit = 1;
                         scene.lights.ambient = {.2f, .2f, .2f};
@@ -17788,7 +17793,12 @@ void test_gpu_taa_live_transparency() {
                                                        .color = {3 + .03f * float(frame % 2), 1, .5f},
                                                        .radius = 8});
                     }
-                    auto p = sprite({.1f + .01f * frame, 0, 1}, 2, {.7f, .7f, .7f}, .7f);
+                    if (mode == 6) {
+                        // A stationary lit sprite under 1% colour-only fire flicker.
+                        scene.lights.points[0].position = {0, 1, 3};
+                        scene.lights.sun.color = {.1f, .1f, .1f};
+                    }
+                    auto p = sprite({.1f + (mode == 6 ? 0.f : .01f * frame), 0, 1}, 2, {.7f, .7f, .7f}, .7f);
                     p.id = 7;
                     (void)scene.draw_particles(l, std::span{&p, 1}, 19);
                 } else {
@@ -17817,7 +17827,7 @@ void test_gpu_taa_live_transparency() {
                             retained_pixels += largest_difference(actual.at(x, y), expected.at(x, y)) > 2;
             }
             std::cerr << "live TAA mode " << mode << " retained pixels " << retained_pixels << "\n";
-            assert(retained_pixels > 20);
+            assert(retained_pixels > (mode == 4 ? 2000 : 12000));
         }
         // A moving sprite must uncover the old checker immediately while its
         // current pixels can still use their reprojected history.
@@ -17864,31 +17874,69 @@ void test_gpu_taa_static_glass() {
                 for (int c = 0; c < 3; ++c)
                     texels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
         const auto checker = renderer.create_texture_from_rgba(texels.data(), {32, 32});
-        auto accumulated = r3d.create_view({160, 120}).value_or({});
-        auto spatial = r3d.create_view({160, 120}).value_or({});
-        int worst = 0;
-        for (int frame = 0; frame < 24; ++frame) {
-            kin::Scene3D scene;
-            scene.camera = kin::Camera3D::look_at({0, 0, 6}, {0, 0, 0}, 60);
-            scene.taa = {.enabled = true, .blend = .98f};
-            scene.debug.freeze_jitter = true;
-            const float x = frame < 8 ? 0 : .12f * float(frame - 7);
-            (void)scene.draw(box, Mat4f::translation({x, 0, 0}) * Mat4f::scaling({12, 8, .1f}),
-                             {.unlit = true, .texture = checker});
-            kin::Material3D glass{.color = Color::rgba(40, 80, 120, 80), .unlit = true, .blend = kin::Blend3D::Alpha};
-            (void)scene.draw(box, Mat4f::translation({0, 0, 1}) * Mat4f::scaling({8, 6, .05f}), glass);
-            const auto actual = shoot_view(renderer, r3d, accumulated, scene);
-            renderer.present();
-            scene.taa.blend = 0;
-            const auto expected = shoot_view(renderer, r3d, spatial, scene);
-            renderer.present();
-            if (frame >= 12)
-                for (int y = 40; y < 80; ++y)
-                    for (int x = 50; x < 110; ++x)
-                        worst = std::max(worst, largest_difference(actual.at(x, y), expected.at(x, y)));
+        for (const bool smoke : {false, true}) {
+            auto accumulated = r3d.create_view({160, 120}).value_or({});
+            auto spatial = r3d.create_view({160, 120}).value_or({});
+            int worst = 0;
+            for (int frame = 0; frame < 24; ++frame) {
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({0, 0, 6}, {0, 0, 0}, 60);
+                scene.taa = {.enabled = true, .blend = .98f};
+                scene.debug.freeze_jitter = true;
+                const float x = frame < 8 ? 0 : .12f * float(frame - 7);
+                (void)scene.draw(box, Mat4f::translation({x, 0, 0}) * Mat4f::scaling({12, 8, .1f}),
+                                 {.unlit = true, .texture = checker});
+                kin::Material3D glass{
+                    .color = Color::rgba(40, 80, 120, 80), .unlit = true, .blend = kin::Blend3D::Alpha};
+                (void)scene.draw(box, Mat4f::translation({0, 0, 1}) * Mat4f::scaling({8, 6, .05f}), glass);
+                if (smoke) {
+                    auto particle = sprite({0, 0, .5f}, 3, {.4f, .4f, .4f}, .35f);
+                    particle.id = 66;
+                    (void)scene.draw_particles({}, std::span{&particle, 1}, 61);
+                }
+                const auto actual = shoot_view(renderer, r3d, accumulated, scene);
+                renderer.present();
+                scene.taa.blend = 0;
+                const auto expected = shoot_view(renderer, r3d, spatial, scene);
+                renderer.present();
+                if (frame >= 12)
+                    for (int y = 40; y < 80; ++y)
+                        for (int x = 50; x < 110; ++x)
+                            worst = std::max(worst, largest_difference(actual.at(x, y), expected.at(x, y)));
+            }
+            std::cerr << "static glass moving backdrop, smoke=" << smoke << " max " << worst << "\n";
+            assert(worst <= 3);
         }
-        std::cerr << "static glass moving backdrop max " << worst << "\n";
-        assert(worst <= 3);
+        for (bool rotate : {false, true})
+            for (bool background : {false, true}) {
+                auto temporal = r3d.create_view({160, 120}).value_or({});
+                auto reference = r3d.create_view({160, 120}).value_or({});
+                int retained = 0;
+                for (int frame = 0; frame < 24; ++frame) {
+                    kin::Scene3D scene;
+                    const float x = frame * .008f;
+                    scene.camera = kin::Camera3D::look_at({rotate ? 0 : x, 0, 6}, {x, 0, 0}, 60);
+                    scene.taa = {.enabled = true, .blend = .98f};
+                    if (background)
+                        (void)scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.unlit = true});
+                    kin::Material3D glass{.color = Color::rgba(255, 255, 255, 180),
+                                          .unlit = true,
+                                          .blend = kin::Blend3D::Alpha,
+                                          .texture = checker};
+                    (void)scene.draw(box, Mat4f::translation({0, 0, 1}) * Mat4f::scaling({2, 2, .05f}), glass);
+                    const auto actual = shoot_view(renderer, r3d, temporal, scene);
+                    renderer.present();
+                    scene.taa.blend = 0;
+                    const auto expected = shoot_view(renderer, r3d, reference, scene);
+                    renderer.present();
+                    if (frame >= 12)
+                        for (int y = 40; y < 80; ++y)
+                            for (int x = 60; x < 100; ++x)
+                                retained += largest_difference(actual.at(x, y), expected.at(x, y)) > 2;
+                }
+                std::cerr << "glass parallax retained " << rotate << "/" << background << ": " << retained << "\n";
+                assert(retained > 10000);
+            }
     });
 }
 
@@ -18359,8 +18407,9 @@ void test_gpu_particle_local_lights() {
                         assert(error <= 3);
                     }
         std::cerr << "particle local-light formula: worst " << worst << " levels\n";
-        // Moving a light must update the lit interior while temporal coverage
-        // remains available at the sprite's edges (tested above with motion).
+        // Moving illumination must update the complete sprite, including its
+        // antialiased edge. Freeze jitter for an exact current-light reference;
+        // the live TAA test above separately proves retained history.
         if (lacks(r3d.capabilities().temporal_aa, "TAA"))
             return;
         auto accumulated = r3d.create_view({160, 120}).value_or({});
@@ -18382,15 +18431,14 @@ void test_gpu_particle_local_lights() {
             look.lit = 1;
             (void)scene.draw_particles(look, std::span{&p, 1});
             scene.taa = {.enabled = true, .blend = 0};
+            scene.debug.freeze_jitter = true;
             const auto expected = shoot_view(renderer, r3d, current, scene);
             renderer.present();
             scene.taa.blend = .98f;
             const auto actual = shoot_view(renderer, r3d, accumulated, scene);
             renderer.present();
-            const auto centre = scene.camera.project(p.position, screen);
-            assert(centre);
-            for (int y = int(centre->pos.y) - 2; y <= int(centre->pos.y) + 2; ++y)
-                for (int x = int(centre->pos.x) - 2; x <= int(centre->pos.x) + 2; ++x)
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x)
                     assert(largest_difference(actual.at(x, y), expected.at(x, y)) <= 3);
         }
     });
@@ -19975,8 +20023,7 @@ void test_gpu_compressed_texture_files() {
             std::cerr << "quad.gltf: " << error << '\n';
             assert(false);
         }
-        assert(model->parts.size() == 1 && model->parts[0].material.texture == texture &&
-               model->asset_diagnostics.empty());
+        assert(model->parts.size() == 1 && model->parts[0].material.texture == texture);
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);

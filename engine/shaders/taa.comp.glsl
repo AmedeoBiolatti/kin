@@ -16,16 +16,19 @@
 // (params.z) sharpens a finished picture: a small local-contrast boost kept
 // inside the neighbours' range.
 layout(local_size_x = 8, local_size_y = 8) in;
-layout(set = 0, binding = 0) uniform sampler2D uCurrent; // this frame, or in sharpen mode the result so far; linear, premultiplied
+layout(set = 0, binding = 0)
+    uniform sampler2D uCurrent; // this frame, or in sharpen mode the result so far; linear, premultiplied
 layout(set = 0, binding = 1) uniform sampler2D uHistory;
-layout(set = 0, binding = 2) uniform sampler2D uMotion;  // BA: contributing-layer motion; R > 1: coverage; G: receiving irradiance
+layout(set = 0, binding = 2)
+    uniform sampler2D uMotion; // BA: contributing-layer motion; R > 1: coverage; G: opaque independent motion
 layout(set = 0, binding = 3) uniform sampler2D uPastMotion; // the same, of the last frame
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uResult;
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // the picture's width and height, and 1 over them
     vec4 params; // x: history weight, y: 1 when there is no history, z: 1 to sharpen instead, w: sharpness
-    vec4 jitter; // xy: jitter, z: coverage present, w: physical coverage changed (excluding jitter)
-} params;
+    vec4 jitter; // xy: jitter, z: coverage present (2: frozen jitter), w: physical coverage changed (excluding jitter)
+}
+params;
 
 vec3 compress(vec3 c) {
     return c / (1.0 + max(c.r, max(c.g, c.b)));
@@ -88,15 +91,20 @@ void sharpen(ivec2 p) {
     imageStore(uResult, p, vec4(expand(sharp), centre.a));
 }
 
-// G records shadowed irradiance only for receiving particle coverage. Compare
-// it only when a map was redrawn, so jitter on a stationary shadow can converge.
-// Moving shadows reject their changed pixels rather than the whole receiver.
-bool changed_shadow(ivec2 pixel, vec4 motion) {
-    if (motion.r < 2.2 || motion.r > 2.5)
-        return false;
+// R: mesh=2, new mesh=3, matched particle=4+irradiance, new
+// particle=6+irradiance, relit particle=8+irradiance. G retains the
+// opaque independent-motion marker through every transparent layer.
+bool fresh(float coverage) {
+    return (coverage > 2.5 && coverage < 3.5) || (coverage > 5.5 && coverage < 7.5);
+}
+float changed_light(ivec2 pixel, vec4 motion) {
+    if (motion.r < 7.5)
+        return 0.0;
+    if (params.jitter.z > 1.5)
+        return 1.0;
     const vec2 past = (vec2(pixel) + .5) * params.sizes.zw - motion.ba;
     const vec4 before = textureLod(uPastMotion, past, 0.0);
-    return before.r > 2.1 && abs(before.g - motion.g) > .0001;
+    return before.r > 3.5 ? abs(fract(before.r) - fract(motion.r)) : 0.0;
 }
 
 void main() {
@@ -112,7 +120,8 @@ void main() {
     const vec2 velocity = texelFetch(uMotion, p, 0).ba;
     const vec2 uv = (vec2(p) + 0.5) * params.sizes.zw;
     const vec2 past = uv - velocity;
-    if (params.params.y > 0.5 || any(lessThan(past, vec2(0.0))) || any(greaterThan(past, vec2(1.0))) || any(isnan(velocity))) {
+    if (params.params.y > 0.5 || any(lessThan(past, vec2(0.0))) || any(greaterThan(past, vec2(1.0))) ||
+        any(isnan(velocity))) {
         imageStore(uResult, p, current);
         return;
     }
@@ -130,13 +139,15 @@ void main() {
     vec3 filtered = vec3(0.0);
     float filtered_alpha = 0.0, filtered_weight = 0.0;
     bool transient = false;
+    float lighting_change = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             const vec4 c = fetch(p + ivec2(x, y));
             if (params.jitter.z > 0.5) {
                 const ivec2 pixel = clamp(p + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
                 const vec4 motion = texelFetch(uMotion, pixel, 0);
-                transient = transient || motion.r > 2.5 || changed_shadow(pixel, motion);
+                transient = transient || fresh(motion.r) || (motion.r > 1.5 && motion.g > 2.0);
+                lighting_change = max(lighting_change, changed_light(pixel, motion));
             }
             const vec3 compressed = compress(c.rgb);
             const vec2 away = vec2(x, y) - params.jitter.xy;
@@ -154,13 +165,13 @@ void main() {
         }
     }
     const float coverage = texelFetch(uMotion, p, 0).r;
-    if (params.jitter.z > .5 && coverage > 2.2 && coverage < 2.5) {
+    if (params.jitter.z > .5 && coverage > 7.5) {
         // Reconstruction and Catmull-Rom can carry a shadow change from just
         // beyond the 3x3 colour box. Cover both filters' complete footprint.
         for (int y = -2; y <= 2 && !transient; ++y)
             for (int x = -2; x <= 2; ++x) {
                 const ivec2 pixel = clamp(p + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
-                transient = transient || changed_shadow(pixel, texelFetch(uMotion, pixel, 0));
+                lighting_change = max(lighting_change, changed_light(pixel, texelFetch(uMotion, pixel, 0)));
             }
     }
     if (params.jitter.z > 0.5) {
@@ -171,9 +182,11 @@ void main() {
         for (int y = -1; y <= 2 && !transient; ++y) {
             for (int x = -1; x <= 2; ++x) {
                 const ivec2 pixel = clamp(base + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
-                const float old_coverage = texelFetch(uPastMotion, pixel, 0).r;
-                transient = transient || old_coverage > 2.5 ||
-                    (params.jitter.w > .5 && texelFetch(uMotion, p, 0).r < 1.5 && old_coverage > 1.5);
+                const vec4 old_motion = texelFetch(uPastMotion, pixel, 0);
+                const float old_coverage = old_motion.r;
+                transient = transient || fresh(old_coverage) ||
+                            (old_coverage > 1.5 && old_motion.g > 2.0) ||
+                            (params.jitter.w > .5 && texelFetch(uMotion, p, 0).r < 1.5 && old_coverage > 1.5);
             }
         }
         if (transient) {
@@ -214,6 +227,14 @@ void main() {
     const float mismatch_px = length((texelFetch(uPastMotion, nearest, 0).ba - velocity) * params.sizes.xy);
     const float speed = length(velocity * params.sizes.xy);
     float weight = params.params.x;
+    // Illumination changes lower confidence continuously. Small fire flicker
+    // still accumulates coverage samples; larger moving-light/shadow changes
+    // respond promptly over the full reconstruction footprint.
+    weight *= min(1.0, .0005 / max(lighting_change, .0005));
+    // With frozen sample positions there are no new edge samples to retain.
+    // Match the current illumination exactly for deterministic inspection.
+    if (params.jitter.z > 1.5 && lighting_change > 0.0)
+        weight = 0.0;
     // A composite has several depths. Use the foremost contributing layer's
     // reprojection with bounded confidence, rather than disabling temporal AA
     // for every transparent whenever anything moves elsewhere in the scene.

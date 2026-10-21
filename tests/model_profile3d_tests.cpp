@@ -102,6 +102,26 @@ void profile(Renderer3D& renderer, bool gpu) {
                   "direct loader retained drawable fragments of a rejected model");
         }
     };
+    // Missing inverseBindMatrices means identity matrices in glTF, including
+    // when equivalent skins are compared during profile validation.
+    auto identity_binds = two_skins(false);
+    std::size_t omitted_binds = 0;
+    for (;;) {
+        const auto bind_start = identity_binds.find("\"inverseBindMatrices\":");
+        if (bind_start == std::string::npos)
+            break;
+        const auto end = identity_binds.find(',', bind_start);
+        check(end != std::string::npos, "identity bind fixture changed");
+        identity_binds.erase(bind_start, end - bind_start + 1);
+        ++omitted_binds;
+    }
+    check(omitted_binds == 2, "equivalent-skin fixture changed");
+    source.write("identity-binds.gltf", identity_binds);
+    auto identity_model = assets.load_model("identity-binds.gltf").value_or({});
+    check(identity_model && identity_model->parts.size() == 2 && identity_model->skeletons.size() == 1,
+          "optional inverse binds did not preserve equivalent palettes");
+    for (const auto& bind : identity_model->skeletons[0].inverse_bind)
+        check(bind == Mat4f{}, "omitted inverse bind matrix is not identity");
     rejected("multi.gltf", two_skins(true), "multiple distinct skin palettes");
     ModelData3D inspected;
     check(
@@ -111,9 +131,12 @@ void profile(Renderer3D& renderer, bool gpu) {
     skin_fixtures::GltfOptions options;
     options.joint_count = 257;
     rejected("large.gltf", skin_fixtures::make_gltf(options).json, "257 joints");
+    auto lines = skin_fixtures::make_gltf({}).json;
+    replace(lines, "\"attributes\":", "\"mode\":1,\"attributes\":");
+    rejected("lines.gltf", lines, "only TRIANGLES");
     options = {};
     options.bad_index = true;
-    rejected("index.gltf", skin_fixtures::make_gltf(options).json, "joints past the skin");
+    rejected("index.gltf", skin_fixtures::make_gltf(options).json, "valid joint indices");
     options = {};
     options.morph_channel = true;
     rejected("morph.gltf", skin_fixtures::make_gltf(options).json, "morph target");
@@ -143,7 +166,7 @@ void profile(Renderer3D& renderer, bool gpu) {
     check(bool(assets.load_model("transformed.gltf").value_or({})), "shared texture placement rejected");
     auto different = quad;
     replace(different, "\"index\": 0", placement);
-    rejected("uv-conflict.gltf", different, "textures place themselves differently");
+    rejected("uv-conflict.gltf", different, "matching KHR_texture_transform");
     auto missing = quad;
     replace(missing, "\"TEXCOORD_0\": 1", "\"_UNUSED_UV\": 1");
     rejected("uv-missing.gltf", missing, "TEXCOORD");

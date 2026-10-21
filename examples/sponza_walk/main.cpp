@@ -785,6 +785,7 @@ public:
             _s.sensitivity = _options.sensitivity;
     }
     ~SponzaScene() override { release_mouse(); }
+    bool unavailable() const { return _unavailable; }
 
     std::string_view name() const override { return "Sponza Walk"; }
 
@@ -902,6 +903,7 @@ private:
                     ctx.window.size().x, ctx.window.size().y, ctx.window.pixel_size().x, ctx.window.pixel_size().y,
                     double(ctx.window.display_scale()), ctx.renderer.output_size().x, ctx.renderer.output_size().y);
         if (!_r3d->available()) {
+            _unavailable = true;
             fail(
                 ctx,
                 "this renderer cannot draw 3D: it needs SDL_GPU (KIN_RENDER_BACKEND=gpu, a Vulkan/Metal/D3D12 device)");
@@ -2766,6 +2768,7 @@ private:
 
     Options _options;
     fs::path _model_path;
+    bool _unavailable = false;
     Settings _s;
     Caps _caps;
     int _default_msaa = 2;
@@ -2916,7 +2919,9 @@ int run(int argc, char** argv) {
                       << "    python3 tools/reference/fetch.py\n"
                       << "  which downloads it (and the HDRIs) into $KIN_REFERENCE_CACHE or ~/.cache/kin/reference,\n"
                       << "  or pass --model PATH to a Sponza.gltf.\n";
-            return options.skip_if_unavailable ? exit_skipped : 1;
+            const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
+            const bool require_gpu = required && required[0] && std::string_view(required) != "0";
+            return options.skip_if_unavailable && !require_gpu ? exit_skipped : 1;
         }
 
         InputMap input;
@@ -2935,7 +2940,12 @@ int run(int argc, char** argv) {
         // big as asked.
         window.high_pixel_density = !headless.enabled;
         SceneManager scenes;
-        const auto build = [&](SceneManager& manager) { manager.push(std::make_unique<SponzaScene>(options, model)); };
+        SponzaScene* scene = nullptr;
+        const auto build = [&](SceneManager& manager) {
+            auto next = std::make_unique<SponzaScene>(options, model);
+            scene = next.get();
+            manager.push(std::move(next));
+        };
         build(scenes);
         const int code = run_scene_app({.window = window,
                                         .headless = headless,
@@ -2943,6 +2953,11 @@ int run(int argc, char** argv) {
                                         .render_headless = headless_picture,
                                         .reset_scenes = build},
                                        scenes);
+        if (scene && scene->unavailable()) {
+            const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
+            const bool require_gpu = required && required[0] && std::string_view(required) != "0";
+            return options.skip_if_unavailable && !require_gpu ? exit_skipped : 1;
+        }
         return code;
     } catch (const std::exception& e) {
         std::cerr << "sponza_walk: " << e.what() << '\n';

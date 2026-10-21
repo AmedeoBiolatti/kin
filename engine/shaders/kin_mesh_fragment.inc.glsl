@@ -11,6 +11,7 @@
 layout(location = 5) in vec3 vCurrent;
 layout(location = 6) in vec3 vPrevious;
 layout(location = 7) flat in float vFresh;
+layout(location = 8) in float vIndependent;
 layout(location = 1) out vec4 FragVelocity;
 #include "kin_velocity.inc.glsl"
 #endif
@@ -34,6 +35,6 @@ void main() {
     }
     FragColor = kin_output(c, alpha);
 #ifdef KIN_VELOCITY
-    FragVelocity = vec4(0.0, 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
+    FragVelocity = vec4(0.0, vIndependent > 1e-5 ? 4.0 : 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
 #endif
 }

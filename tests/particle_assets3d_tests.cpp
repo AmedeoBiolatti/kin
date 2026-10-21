@@ -244,13 +244,12 @@ void particle_gpu(Renderer2D& renderer) {
     auto* active = session.world();
     const auto hash = a.get<ParticleEmitter3D>()->system.state_hash();
     write(scratch.path / "shared pixel.png", "broken");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-              session.world() == active && a.get<ParticleEmitter3D>()->system.state_hash() == hash,
+    check(!session.reload_if_changed() && session.world() == active &&
+              a.get<ParticleEmitter3D>()->system.state_hash() == hash,
           "bad texture reload replaced simulation");
     ok(session.step(1.f / 60), "last good effect cannot continue");
     write(scratch.path / "shared pixel.png", png);
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
-              session.world() != active,
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated && session.world() != active,
           "particle texture reload failed to recover");
     a = emitter(*session.instance(), "left");
     check(a.get<ParticleEmitter3D>()->system.time() == 0 &&
@@ -265,11 +264,9 @@ void particle_gpu(Renderer2D& renderer) {
     write(
         scratch.path / "effect.kinprefab",
         std::string(config).replace(config.find(capacity_field), capacity_field.size(), "\"max_particles\":999999999"));
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
-          "oversized prefab capacities accepted");
+    check(!session.reload_if_changed(), "oversized prefab capacities accepted");
     write(scratch.path / "effect.kinprefab", config);
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "valid prefab edit did not recover");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "valid prefab edit did not recover");
     Scratch archive;
     check(write_content_pack(scratch.path, archive.path / "effects.kinpak").ok, "effect pack failed");
     const auto mount = archive.path / "virtual";

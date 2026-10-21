@@ -1024,7 +1024,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _particle_temporal_vertex =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "particle_temporal.vert.spv", 4, 0, 2);
             _reactive_shader =
-                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "taa_reactive.frag.spv", 1, 2);
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "taa_reactive.frag.spv", 1, 1);
             _taa_available = true;
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: temporal anti-aliasing not available",
@@ -1566,8 +1566,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::particle_pipeline(SDL_GPUTextureFormat f
         .samples = sample_count(samples),
         .extra_format = velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
         .extra_write = false,
-        .write_mask = SDL_GPUColorComponentFlags(reactive ? SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
-                                                                SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A
+        .write_mask = SDL_GPUColorComponentFlags(reactive ? SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_B |
+                                                                SDL_GPU_COLORCOMPONENT_A
                                                           : SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
                                                                 SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A)});
 }
@@ -2570,7 +2570,7 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     for (const GpuTexture* t :
          {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw,
           &view._contact_across, &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion,
-          &view._taa_opaque_motion, &view._taa_history[0], &view._taa_history[1], &view._occ_depth}) {
+          &view._taa_history[0], &view._taa_history[1], &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
@@ -2592,12 +2592,11 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
         return;
     }
     std::vector<GpuView3D::ParticleHistory>().swap(view._taa_particles);
-    std::vector<u64>().swap(view._taa_mesh_effects);
+    decltype(view._taa_mesh_effects){}.swap(view._taa_mesh_effects);
     view._taa_depth = {};
     view._taa_in = {};
     view._taa_sharp = {};
     view._taa_motion = {};
-    view._taa_opaque_motion = {};
     view._taa_history = {};
     view._taa_valid = false;
     view._taa_coverage_key = 0;
@@ -2934,7 +2933,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
 
 const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
                                              const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive,
-                                             bool reject, RenderDebugStats3D& stats) {
+                                             bool reject, bool fixed_jitter, RenderDebugStats3D& stats) {
     const f32 w = static_cast<f32>(view._size.x), h = static_cast<f32>(view._size.y);
     const GpuTexture& past_motion = reset ? view._ao_normals : view._taa_motion;
     const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history,
@@ -2946,7 +2945,8 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
             SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler}};
         const TaaUniforms u{{w, h, 1.0f / w, 1.0f / h},
                             {std::clamp(taa.blend, 0.0f, 0.98f), reset ? 1.0f : 0.0f, sharpen, sharpness},
-                            {jitter.x, jitter.y, (reactive || view._taa_reactive) ? 1.0f : 0.0f, reject ? 1.0f : 0.0f}};
+                            {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
+                             reject ? 1.0f : 0.0f}};
         if (!compute_pass(commands, _taa_pipeline, target, inputs, &u, sizeof(u))) {
             return false;
         }
@@ -2995,13 +2995,12 @@ struct GpuRenderer3D::FrameCtx {
     u64 coverage_key = 1469598103934665603ull;
     u64 shadow_revision = 0;
     bool shadow_changed = false;
-    u64 particle_cast_key = 0;
-    bool particle_cast_unstable = false;
     Vec2f jitter{};
     Mat4f main_projection; // what the pre-pass's compute unprojects with: the camera's, jittered with temporal
                            // anti-aliasing
 
     // The sun's shadow: one map over the area, or a plan of cascades.
+    bool sun_shadow_cached = false;
     bool shadows = false;
     u32 cascades = 0; // the maps to draw
     Mat4f light_vp{};
@@ -3093,11 +3092,8 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
     // The normals are also the main pass's velocity, and the TAA's last velocity swaps with them while it runs.
     age(v._idle_normals, ctx.prepass_ran || ctx.main_velocity, static_cast<bool>(v._ao_normals),
         [&] { v._ao_normals = {}; });
-    age(v._idle_taa_opaque, ctx.mesh_coverage, static_cast<bool>(v._taa_opaque_motion),
-        [&] { v._taa_opaque_motion = {}; });
     age(v._idle_taa, ctx.taa,
-        v._taa_depth || v._taa_history[0] || v._taa_history[1] || v._taa_in || v._taa_sharp || v._taa_motion ||
-            v._taa_opaque_motion,
+        v._taa_depth || v._taa_history[0] || v._taa_history[1] || v._taa_in || v._taa_sharp || v._taa_motion,
         [&] { release_taa(v); });
     age(v._idle_occlusion, ctx.occlusion, v._hiz_levels > 0 || v._occ_depth || v._occ_history[0] || v._occ_history[1],
         [&] {
@@ -3250,6 +3246,27 @@ void GpuRenderer3D::prepare_weather(FrameCtx& ctx) {
             put_f(v);
         }
     }
+    const std::array weather_layers{&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist};
+    const bool weather_casts =
+        has_weather && std::any_of(weather_layers.begin(), weather_layers.end(),
+                                   [](const auto* l) { return l->intensity > 0 && l->look.casts_shadow; });
+    std::vector<GpuFrustum> caster_frustums;
+    if (weather_casts && scene.cull) {
+        const auto map = [&](const Mat4f& matrix) {
+            key.insert(key.end(), std::begin(matrix.m), std::end(matrix.m));
+            caster_frustums.push_back(frustum_of(matrix));
+        };
+        if (ctx.shadows) {
+            if (ctx.cascades > 1)
+                for (u32 c = 0; c < ctx.cascades; ++c)
+                    map(ctx.plan.cascade[c].view_projection);
+            else
+                map(ctx.light_vp);
+        }
+        for (const auto& view : _local_views)
+            if (view.wanted)
+                map(view.view_projection);
+    }
     const bool weather_kept = has_weather && key == _weather_key;
     if (!weather_kept) {
         _weather_sprites.clear();
@@ -3266,13 +3283,13 @@ void GpuRenderer3D::prepare_weather(FrameCtx& ctx) {
                 ? ParallelFor3D{[jobs](i32 n, const std::function<void(i32)>& body) { jobs->parallel_for(n, body); }}
                 : ParallelFor3D{};
         const GpuFrustum& view_frustum = ctx.frustums[0];
-        const std::array layers{&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist};
-        const bool weather_casts = std::any_of(layers.begin(), layers.end(),
-                                               [](const auto* l) { return l->intensity > 0 && l->look.casts_shadow; });
-        const bool cull = scene.cull && !weather_casts;
-        const SphereTest3D in_view =
-            cull ? SphereTest3D{[&view_frustum](Vec3f c, f32 r) { return sphere_in(view_frustum, c, r); }}
-                 : SphereTest3D{};
+        const SphereTest3D in_view = scene.cull ? SphereTest3D{[&](Vec3f centre, f32 radius) {
+            if (sphere_in(view_frustum, centre, radius))
+                return true;
+            return std::any_of(caster_frustums.begin(), caster_frustums.end(),
+                               [&](const auto& frustum) { return sphere_in(frustum, centre, radius); });
+        }}
+                                                : SphereTest3D{};
         weather_sprites(scene.weather, scene.camera, _weather_sprites, _weather_batches, parallel, in_view);
         _weather_key = key;
     }
@@ -3306,7 +3323,7 @@ void GpuRenderer3D::prepare_particle_casts(FrameCtx& ctx, std::span<const Partic
     // The colour stream below retains its existing cull/order and counters.
     const bool maps = ctx.shadows || ctx.moon_cascades > 0 || !_local_views.empty();
     if (maps && _capabilities.particle_shadows) {
-        u64 key = 1469598103934665603ull;
+
         for (const ParticleSource& src : sources) {
             if (!src.look->casts_shadow || !src.count)
                 continue;
@@ -3330,61 +3347,28 @@ void GpuRenderer3D::prepare_particle_casts(FrameCtx& ctx, std::span<const Partic
                       std::min(lo.z, p.position.z - r)};
                 hi = {std::max(hi.x, p.position.x + r), std::max(hi.y, p.position.y + r),
                       std::max(hi.z, p.position.z + r)};
-                taa_hash(key, p.position);
-                taa_hash(key, p.size);
-                taa_hash(key, p.rotation);
-                taa_hash(key, p.alpha);
-                taa_hash(key, p.velocity);
-                taa_hash(key, p.frame);
             }
             batch.centre = (lo + hi) * .5f;
             batch.radius = length(hi - lo) * .5f;
-            const auto& l = batch.look;
-            taa_hash(key, l.facing);
-            taa_hash(key, l.axis);
-            taa_hash(key, l.stretch);
-            taa_hash(key, l.stretch_min);
-            taa_hash(key, l.softness);
-            taa_hash(key, l.ring);
-            taa_hash(key, l.shadow_cutoff);
-            taa_hash(key, l.atlas_columns);
-            taa_hash(key, l.atlas_rows);
-            taa_hash(key, l.atlas_frames);
-            taa_hash(key, l.blend_frames);
-            ctx.particle_cast_unstable |= taa_texture_hash(key, l.texture.backend().get());
+
             _particle_cast_batches.push_back(std::move(batch));
         }
         if (!_particle_cast_sprites.empty()) {
             _particle_cast_idle = 0;
-            taa_hash(key, scene.camera.view());
-            ctx.particle_cast_key = key;
-            const u32 submitted = static_cast<u32>(_particle_cast_sprites.size());
-            // Compact each map's selected sprites before recording GPU passes.
-            // One contiguous run per source/map avoids one draw per scattered sprite.
+
+            // Cache keys need culled contents, but cached maps need neither
+            // packed sprites nor a GPU upload. Packing follows cache selection.
             if (ctx.shadows) {
                 if (ctx.cascades > 1)
                     for (u32 c = 0; c < ctx.cascades; ++c)
-                        particle_cast_view(ctx, ctx.plan.cascade[c].view_projection);
+                        build_particle_cast_view(ctx, ctx.plan.cascade[c].view_projection, false);
                 else
-                    particle_cast_view(ctx, ctx.light_vp);
+                    build_particle_cast_view(ctx, ctx.light_vp, false);
             }
             for (const auto& view : _local_views)
                 if (view.wanted)
-                    particle_cast_view(ctx, view.view_projection);
-            const u32 count = static_cast<u32>(_particle_cast_order.size());
-            const u32 bytes = count * static_cast<u32>(sizeof(GpuParticle3D));
-            ensure_buffer(_particle_cast_buffer, bytes, min_particle_buffer);
-            const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
-                for (u32 i = 0; i < count; ++i) {
-                    const auto& p = _particle_cast_sprites[_particle_cast_order[i]];
-                    const GpuParticle3D g = pack_particle(p);
-                    std::memcpy(out.data() + std::size_t(i) * sizeof(g), &g, sizeof(g));
-                }
-            };
-            if (bytes)
-                _device->upload_storage_buffer(_particle_cast_buffer->handle(), 0, bytes, nullptr, true, &fill);
-            stats.particle_shadow_submitted = submitted;
-            stats.particle_shadow_bytes = _particle_cast_buffer->size();
+                    build_particle_cast_view(ctx, view.view_projection, false);
+            stats.particle_shadow_submitted = static_cast<u32>(_particle_cast_sprites.size());
         }
     } else if (maps && !_capabilities.particle_shadows &&
                std::any_of(sources.begin(), sources.end(),
@@ -3525,6 +3509,10 @@ void GpuRenderer3D::match_particles(FrameCtx& ctx, u32 total) {
         return nullptr;
     };
     _particle_history_now.clear();
+    const auto farther = [&](const auto& a, const auto& b) {
+        const auto distance = [&](const auto& record) { return length_squared(record.centre - scene.camera.position); };
+        return std::tuple{distance(a), a.source, a.id} < std::tuple{distance(b), b.source, b.id};
+    };
     ensure_buffer(_particle_previous, total * 64u, min_particle_buffer);
     const std::function<void(std::span<u8>)> previous = [&](std::span<u8> out) {
         u32 at = 0;
@@ -3552,9 +3540,17 @@ void GpuRenderer3D::match_particles(FrameCtx& ctx, u32 total) {
                     data[c][3] = known ? 0.f : 1.f;
                 }
                 std::memcpy(out.data() + std::size_t(at) * 64, data, 64);
-                if (_particle_history_now.size() < history_budget)
-                    _particle_history_now.push_back(
-                        {batch.source, id, batch.look_key, quad, p.position, p.colour, p.alpha, p.frame});
+                const GpuView3D::ParticleHistory record{batch.source, id,       batch.look_key, quad,
+                                                        p.position,   p.colour, p.alpha,        p.frame};
+                if (_particle_history_now.size() < history_budget) {
+                    _particle_history_now.push_back(record);
+                    if (total > history_budget && _particle_history_now.size() == history_budget)
+                        std::make_heap(_particle_history_now.begin(), _particle_history_now.end(), farther);
+                } else if (farther(record, _particle_history_now.front())) {
+                    std::pop_heap(_particle_history_now.begin(), _particle_history_now.end(), farther);
+                    _particle_history_now.back() = record;
+                    std::push_heap(_particle_history_now.begin(), _particle_history_now.end(), farther);
+                }
             }
         }
     };
@@ -3603,8 +3599,12 @@ void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     _particle_batches.clear();
     _particle_history_now.clear();
-    if (_particle_previous && ++_particle_taa_idle >= _release_after)
+    if (++_particle_taa_idle >= _release_after) {
         _particle_previous.reset();
+        std::vector<u32>().swap(_particle_history_lookup);
+        decltype(_particle_history_now)().swap(_particle_history_now);
+        _particle_taa_idle = _release_after;
+    }
     _particle_cast_batches.clear();
     _particle_cast_views.clear();
     _particle_cast_sprites.clear();
@@ -3612,6 +3612,7 @@ void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     if (_particle_cast_buffer && ++_particle_cast_idle >= _release_after) {
         _particle_cast_buffer.reset();
         std::vector<ParticleSprite3D>().swap(_particle_cast_sprites);
+        std::vector<u32>().swap(_particle_cast_order);
     }
     stats.particle_shadow_bytes = _particle_cast_buffer ? _particle_cast_buffer->size() : 0;
     ctx.particles = false;
@@ -3658,35 +3659,52 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::particle_cast_pipeline() const {
                                                  .depth_only = true});
 }
 
-const GpuRenderer3D::ParticleCastView& GpuRenderer3D::particle_cast_view(FrameCtx& ctx, const Mat4f& matrix) {
+const GpuRenderer3D::ParticleCastView* GpuRenderer3D::particle_cast_view(const Mat4f& matrix) const {
     for (const auto& view : _particle_cast_views)
-        if (view.matrix == matrix)
-            return view;
-    auto& view = _particle_cast_views.emplace_back();
+        if (std::memcmp(view.matrix.m, matrix.m, sizeof(matrix.m)) == 0)
+            return &view;
+    return nullptr;
+}
+
+const GpuRenderer3D::ParticleCastView& GpuRenderer3D::build_particle_cast_view(FrameCtx& ctx, const Mat4f& matrix,
+                                                                               bool pack) {
+    auto* found = const_cast<ParticleCastView*>(particle_cast_view(matrix));
+    if (found && (!pack || found->packed))
+        return *found;
+    // Every map is registered before cache decisions and before any upload.
+    // Draw-time lookup can never append a new view or grow the packed stream.
+    auto& view = found ? *found : _particle_cast_views.emplace_back();
     view.matrix = matrix;
+    view.packed = pack;
     const auto frustum = frustum_of(matrix);
     // A hard cap per map, including each point-light face. Selection is stable
     // submission order and independent of camera visibility or colour budgets.
     constexpr u32 budget = 16384;
-    u32 used = 0;
+    u32 used = 0, dropped = 0;
     u64 key = 1469598103934665603ull;
-    for (u32 b = 0; b < _particle_cast_batches.size() && used < budget; ++b) {
+    for (u32 b = 0; b < _particle_cast_batches.size(); ++b) {
         const auto& batch = _particle_cast_batches[b];
         if (!sphere_in(frustum, batch.centre, batch.radius))
             continue;
         const auto& l = batch.look;
         bool selected = false;
-        for (u32 i = 0; i < batch.count && used < budget; ++i) {
+        for (u32 i = 0; i < batch.count; ++i) {
             const auto& p = _particle_cast_sprites[batch.first + i];
             const f32 radius =
                 p.size * .75f + (l.facing == ParticleFacing3D::Stretched ? length(particle_streak(p, l)) : 0.f);
             if (!sphere_in(frustum, p.position, radius))
                 continue;
+            if (used == budget) {
+                ++dropped;
+                continue;
+            }
             selected = true;
-            if (view.ranges.empty() || view.ranges.back().batch != b)
-                view.ranges.push_back({b, static_cast<u32>(_particle_cast_order.size()), 0});
-            ++view.ranges.back().count;
-            _particle_cast_order.push_back(batch.first + i);
+            if (pack) {
+                if (view.ranges.empty() || view.ranges.back().batch != b)
+                    view.ranges.push_back({b, static_cast<u32>(_particle_cast_order.size()), 0});
+                ++view.ranges.back().count;
+                _particle_cast_order.push_back(batch.first + i);
+            }
             ++used;
             taa_hash(key, particle_quad(p, l, ctx.scene.camera));
             taa_hash(key, p.alpha);
@@ -3708,8 +3726,39 @@ const GpuRenderer3D::ParticleCastView& GpuRenderer3D::particle_cast_view(FrameCt
         taa_hash(key, l.blend_frames);
         view.unstable |= taa_texture_hash(key, l.texture.backend().get());
     }
+    if (!pack)
+        ctx.stats.particle_shadow_map_dropped += dropped;
     view.key = used ? key : 0;
     return view;
+}
+
+void GpuRenderer3D::upload_particle_casts(FrameCtx& ctx) {
+    if (_particle_cast_batches.empty())
+        return;
+    if (ctx.shadows && !ctx.sun_shadow_cached) {
+        if (ctx.cascades > 1)
+            for (u32 c = 0; c < ctx.cascades; ++c)
+                build_particle_cast_view(ctx, ctx.plan.cascade[c].view_projection, true);
+        else
+            build_particle_cast_view(ctx, ctx.light_vp, true);
+    }
+    for (const auto& view : _local_views)
+        if (view.drawn)
+            build_particle_cast_view(ctx, view.view_projection, true);
+    const auto count = u32(_particle_cast_order.size());
+    if (!count)
+        return;
+    const auto bytes = count * u32(sizeof(GpuParticle3D));
+    ensure_buffer(_particle_cast_buffer, bytes, min_particle_buffer);
+    const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
+        for (u32 i = 0; i < count; ++i) {
+            const auto packed = pack_particle(_particle_cast_sprites[_particle_cast_order[i]]);
+            std::memcpy(out.data() + std::size_t(i) * sizeof(packed), &packed, sizeof(packed));
+        }
+    };
+    _device->upload_storage_buffer(_particle_cast_buffer->handle(), 0, bytes, nullptr, true, &fill);
+    ctx.stats.particle_shadow_uploaded_bytes = bytes;
+    ctx.stats.particle_shadow_bytes = _particle_cast_buffer->size();
 }
 
 bool GpuRenderer3D::draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass, const Mat4f& light_view, bool local,
@@ -3719,7 +3768,9 @@ bool GpuRenderer3D::draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass
     auto* pipeline = particle_cast_pipeline();
     if (!pipeline)
         return false;
-    const auto& selected = particle_cast_view(ctx, light_view);
+    const auto* selected = particle_cast_view(light_view);
+    if (!selected)
+        return false;
     SDL_BindGPUGraphicsPipeline(pass, pipeline);
     auto* storage = _particle_cast_buffer->handle();
     SDL_BindGPUVertexStorageBuffers(pass, 0, &storage, 1);
@@ -3731,7 +3782,7 @@ bool GpuRenderer3D::draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass
     put(v.up, camera.up(), 0);
     put(v.eye, camera.position, camera.projection == Projection3D::Orthographic ? 1.0f : 0.0f);
     put(v.forward, camera.forward(), 0);
-    for (const auto& range : selected.ranges) {
+    for (const auto& range : selected->ranges) {
         const auto& batch = _particle_cast_batches[range.batch];
         const auto& l = batch.look;
         const auto axis = length_squared(l.axis) > 0 ? normalize(l.axis) : Vec3f{0, 1, 0};
@@ -3868,7 +3919,7 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         const bool textured = picture.texture != _owner->_white.handle();
         ParticleFragUniforms f{};
         const LinearRgb tint = mix(LinearRgb{1.0f, 1.0f, 1.0f}, light_tint, std::clamp(look.lit, 0.0f, 1.0f));
-        put_color(f.tint, tint, reactive && receive ? (ctx.shadow_changed ? 1.f : 0.f) : 1.f);
+        put_color(f.tint, tint, reactive && (receive || lit_locally) ? (ctx.shadow_changed ? 1.f : 0.f) : 1.f);
         put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, static_cast<f32>(static_cast<u32>(look.blend))},
             textured ? 1.0f : 0.0f);
         put(f.disc, {look.softness, look.ring, soft ? look.soft_distance : 0.0f},
@@ -4879,8 +4930,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             continue;
         }
         LocalCache& cache = _local_cache[view.cache];
-        const auto& particles = particle_cast_view(ctx, view.view_projection);
-        bool cacheable = cache_on && !particles.unstable;
+        const auto* particles = particle_cast_view(view.view_projection);
+        bool cacheable = cache_on && (!particles || !particles->unstable);
         if (cacheable) {
             std::vector<u8>& bytes = _local_payload;
             bytes.clear();
@@ -4888,7 +4939,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             payload.value(view.moon ? generation_moon : generation_local);
             payload.value(view.layer);
             payload.value(view.size);
-            payload.value(particles.key);
+            payload.value(particles ? particles->key : u64{0});
             payload.append(view.view_projection.m, sizeof(view.view_projection.m));
             for (const Found& f : found[v]) {
                 const DrawRef& ref = _refs[f.ref];
@@ -7572,7 +7623,7 @@ void GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
     // The shadow maps: casters (seen or casting into view) from the sun, a
     // pass to each cascade's layer.
     stats.shadow_cascades = ctx.shadows ? ctx.cascades : 0;
-    if (ctx.shadows && shadow_unchanged(ctx)) {
+    if (ctx.sun_shadow_cached) {
         stats.shadow_cached = true; // the maps hold what this render would draw into them
         return;
     }
@@ -7711,7 +7762,7 @@ template <class Consume> bool GpuRenderer3D::visit_shadow_copy_bytes(Consume&& c
 bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
     ShadowCache& c = _shadow_cache;
     c.eligible = false;
-    if (!ctx.scene.lights.cache_shadows || ctx.particle_cast_unstable) {
+    if (!ctx.scene.lights.cache_shadows) {
         c.valid = false;
         c.prev_key.clear();
         return false;
@@ -7722,8 +7773,17 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
     const Lights3D& lights = ctx.scene.lights;
     const Lod3D& lod = ctx.scene.lod;
     payload.value(_shadow_generation);
-    if (ctx.particle_cast_key)
-        payload.value(ctx.particle_cast_key);
+    const u32 maps = ctx.cascades > 1 ? ctx.cascades : 1;
+    for (u32 i = 0; i < maps; ++i) {
+        const auto* particles =
+            particle_cast_view(ctx.cascades > 1 ? ctx.plan.cascade[i].view_projection : ctx.light_vp);
+        if (particles && particles->unstable) {
+            c.valid = false;
+            c.prev_key.clear();
+            return false;
+        }
+        payload.value(particles ? particles->key : u64{0});
+    }
     payload.value(_shadow_size);
     payload.value(_shadow_layers);
     payload.value(ctx.cascades);
@@ -7745,10 +7805,14 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
     payload.value(lv.orthographic);
     payload.value(lv.pixels);
     payload.value(lv.per_unit);
-    payload.value(lv.eye);
-    payload.value(lv.forward);
-    payload.matrix(ctx.view_projections[0]);
-    payload.frustum(ctx.frustums[0]);
+    // Mesh caster reach/LOD and cascade fitting depend on the camera. A
+    // particle-only fixed map instead depends on its selected quad keys.
+    if (ctx.cascades > 1 || std::any_of(_refs.begin(), _refs.end(), [](const auto& ref) { return ref.caster; })) {
+        payload.value(lv.eye);
+        payload.value(lv.forward);
+        payload.matrix(ctx.view_projections[0]);
+        payload.frustum(ctx.frustums[0]);
+    }
     payload.matrix(ctx.light_vp);
     payload.frustum(ctx.light_frustum);
     if (ctx.cascades > 1) {
@@ -8004,7 +8068,6 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
 // blended mesh coverage needs to detect independently moving layers.
 bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     auto* view = ctx.view;
-    taa_hash(ctx.coverage_key, ctx.view_projections);
     // Revisions belong to each view's history, not just the renderer's current
     // cache hit: another view may have updated the same map in between.
     u64 revision = 1469598103934665603ull;
@@ -8033,26 +8096,6 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     }
     ctx.shadow_revision = revision;
     ctx.shadow_changed = revision != view->_taa_shadow_revision;
-    if (ctx.mesh_coverage) {
-        const auto w = static_cast<u32>(view->_size.x), h = static_cast<u32>(view->_size.y);
-        try {
-            if (!view->_taa_opaque_motion || view->_taa_opaque_motion.width() != w ||
-                view->_taa_opaque_motion.height() != h)
-                view->_taa_opaque_motion = _device->create_target(
-                    w, h, hdr_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
-        } catch (const std::exception& error) {
-            KIN_LOG_WARN_F("render", "3D: transparent motion target not made",
-                           (LogFields{{.name = "reason", .value = error.what()}}));
-            return false;
-        }
-        auto* copy = SDL_BeginGPUCopyPass(ctx.commands);
-        if (!copy)
-            return false;
-        const SDL_GPUTextureLocation from{.texture = view->_ao_normals.handle()};
-        const SDL_GPUTextureLocation to{.texture = view->_taa_opaque_motion.handle()};
-        SDL_CopyGPUTextureToTexture(copy, &from, &to, w, h, 1, true);
-        SDL_EndGPUCopyPass(copy);
-    }
     SDL_GPUColorTargetInfo target{};
     target.texture = view->_ao_normals.handle();
     target.load_op = SDL_GPU_LOADOP_LOAD;
@@ -8069,7 +8112,27 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
         draw_particles(ctx, pass, true);
         particles_ok = ctx.stats.taa_reactive_draws - before == ctx.stats.particle_batches;
     };
-    std::vector<u64> effects(_refs.size(), 0);
+    std::unordered_map<u64, u64> effects;
+    std::unordered_map<u64, u32> mesh_offsets;
+    std::vector<u64> identities(_refs.size());
+    for (u32 r = 0; r < _refs.size(); ++r) {
+        const auto& ref = _refs[r];
+        u64 identity = mix64(ref.mesh->serial * 2 + ref.scene);
+        auto& offset = mesh_offsets[identity];
+        const auto first = offset;
+        offset += ref.draw->count;
+        if (pass_of(ref.draw->material) == Pass::Opaque)
+            continue;
+        bool identified = true;
+        for (u32 i = 0; i < ref.draw->count; ++i) {
+            identified &= ref.instances[i].id != 0;
+            taa_hash(identity, ref.instances[i].id);
+        }
+        if (!identified)
+            taa_hash(identity, first);
+        taa_hash(identity, ref.draw->count);
+        identities[r] = identity;
+    }
     DrawBinder binder{pass};
     _phase = Phase::All;
     for (u32 which = 0; which < 2; ++which) {
@@ -8091,6 +8154,10 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
                 continue;
             if (ref.skinned && !(ctx.joints && ctx.joint_offsets))
                 continue;
+            if (ref.retained != ~0u) {
+                SDL_EndGPURenderPass(pass);
+                return false;
+            }
             const auto coverage = material.wireframe ? Pass::ReactiveWire : Pass::Reactive;
             auto* pipeline = this->pipeline(hdr_format, 1, !material.double_sided, coverage, false, nullptr, false,
                                             ref.skinned, false, false, Unlit::Off, ref.retained != ~0u);
@@ -8101,20 +8168,12 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
             const std::array<SDL_GPUBuffer*, 6> buffers{ctx.storage,         ctx.previous_storage,
                                                         ctx.joints,          ctx.joint_offsets,
                                                         ctx.previous_joints, ctx.previous_joint_offsets};
-            const std::array<SDL_GPUBuffer*, 2> retained{ref.retained != ~0u ? _retained[ref.retained].buffer->handle()
-                                                                             : nullptr,
-                                                         _retained_indices ? _retained_indices->handle() : nullptr};
-            binder.bind_pipeline(pipeline, ref.retained != ~0u ? retained.data() : buffers.data(),
-                                 ref.retained != ~0u ? 2
-                                 : ref.skinned       ? 6
-                                                     : 2);
+            binder.bind_pipeline(pipeline, buffers.data(), ref.skinned ? 6 : 2);
             binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index_buffer() : nullptr);
             if (ref.skinned)
                 binder.bind_skin(ref.mesh);
-            const std::array<SDL_GPUTextureSamplerBinding, 2> pictures{
-                texture_binding(material.texture, material.wrap_u, material.wrap_v),
-                SDL_GPUTextureSamplerBinding{view->_taa_opaque_motion.handle(), _point_sampler}};
-            SDL_BindGPUFragmentSamplers(pass, 0, pictures.data(), pictures.size());
+            const auto picture = texture_binding(material.texture, material.wrap_u, material.wrap_v);
+            SDL_BindGPUFragmentSamplers(pass, 0, &picture, 1);
             u64 key = 1469598103934665603ull;
             taa_hash(key, ref.mesh->serial);
             taa_hash(key, material.color);
@@ -8127,12 +8186,12 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
             const bool unstable = taa_texture_hash(key, material.texture.backend().get());
             for (u32 i = 0; i < ref.draw->count; ++i)
                 taa_hash(key, ref.instances[i].tint);
-            effects[index] = key;
+            effects[identities[index]] = key;
             taa_hash(ctx.coverage_key, key);
             for (u32 i = 0; i < ref.draw->count; ++i)
                 taa_hash(ctx.coverage_key, ref.instances[i].transform);
-            const bool changed =
-                unstable || index >= view->_taa_mesh_effects.size() || view->_taa_mesh_effects[index] != key;
+            const auto prior = view->_taa_mesh_effects.find(identities[index]);
+            const bool changed = unstable || prior == view->_taa_mesh_effects.end() || prior->second != key;
             const Vec4f flags{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0};
             SDL_PushGPUFragmentUniformData(ctx.commands, 0, &flags, sizeof(flags));
             if (ref.clustered) {
@@ -8698,10 +8757,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     }
     SDL_EndGPURenderPass(pass);
     if (ctx.taa_reactive && !reactive_pass(ctx)) {
+        // The colour pass is complete. Show it and reset temporal history;
+        // an unavailable optional coverage pass must not drop the frame.
+        ctx.velocity_drawn = false;
+        ctx.taa_reset = true;
         view->_taa_valid = false;
         view->_taa_coverage_key = 0;
-        resume_2d();
-        return false;
     }
     return true;
 }
@@ -8724,7 +8785,7 @@ void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
         }
         ctx.shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings,
                                 ctx.taa_reset || !ctx.velocity_drawn, ctx.jitter, ctx.taa_reactive,
-                                ctx.coverage_key != view->_taa_coverage_key, stats);
+                                ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter, stats);
         view->_taa_valid = ctx.velocity_drawn;
         for (u32 s = 0; s < 2; ++s) {
             if (ctx.scenes[s]) {
@@ -8846,6 +8907,8 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     prepare_particles(ctx);
     order_draws(ctx);
     build_local_shadows(ctx);
+    ctx.sun_shadow_cached = ctx.shadows && shadow_unchanged(ctx);
+    upload_particle_casts(ctx);
     begin_commands(ctx);
     // Debug markers stay in the existing command buffer. External profilers can
     // timestamp them without the submission splits of the fence-based scopes.

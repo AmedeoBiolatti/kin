@@ -492,7 +492,7 @@ struct SceneSession3D::Data {
     PhysicsAssets3D collision_assets;
     std::unique_ptr<State> current, pending;
     std::vector<std::string> errors;
-    u64 generation = 0;
+    u64 generation = 0, next_generation = 0;
     const u64 identity = next_session_id.fetch_add(1);
     u64 next_spawn = 1;
     u64 next_resource = 1;
@@ -698,7 +698,6 @@ struct SceneSession3D::Data {
                 if (!renderer.asset.id.empty())
                     watch(state, renderer.asset.id);
                 if (renderer.model) {
-                    append(errors, renderer.model->asset_diagnostics);
                     for (const auto& source : renderer.model->source_files) {
                         watch(state, source);
                         if (!content_file_exists(source))
@@ -749,7 +748,6 @@ struct SceneSession3D::Data {
             if (const auto* c = entity.get<T>()) {
                 watch(state, c->asset.id);
                 if (c->model) {
-                    append(errors, c->model->asset_diagnostics);
                     for (const auto& file : c->model->source_files) {
                         watch(state, file);
                         if (!content_file_exists(file))
@@ -921,11 +919,14 @@ struct SceneSession3D::Data {
                 same_options(current->options, view_options))
                 replacement = current->view;
             else {
-                replacement = renderer.create_view(options.viewport, view_options).value_or({});
-                if (!replacement) {
-                    errors.push_back("scene view creation failed");
+                auto created = renderer.create_view(options.viewport, view_options);
+                if (!created) {
+                    append(errors, created.diagnostics);
+                    if (created.diagnostics.empty())
+                        errors.push_back("scene view creation failed");
                     return false;
                 }
+                replacement = std::move(*created.value);
                 if (options.warm_up && !renderer.warm_up(replacement, state.scene)) {
                     errors.push_back("scene GPU warm-up failed");
                     return false;
@@ -1104,7 +1105,8 @@ bool SceneSession3D::activate_operation() {
     }
     BoolScope busy(d.editing);
     auto candidate = std::move(d.pending);
-    candidate->world.raw().set(SceneIdentity3D{d.identity, d.generation + 1});
+    const auto candidate_generation = ++d.next_generation;
+    candidate->world.raw().set(SceneIdentity3D{d.identity, candidate_generation});
     candidate->commands->active = true;
     try {
         if (candidate->script) {
@@ -1135,7 +1137,7 @@ bool SceneSession3D::activate_operation() {
     if (d.current)
         d.exit_script(*d.current);
     d.current = std::move(candidate);
-    ++d.generation;
+    d.generation = candidate_generation;
     d.current->world.components().set_field_patch_handler(
         [this](EcsEntity entity, std::string_view component, std::string_view field, const ComponentFieldValue& value,
                std::string& error) -> std::optional<bool> {
@@ -1194,7 +1196,7 @@ Status3D SceneSession3D::unload() {
     }
     auto& d = *_data;
     if (d.current || d.pending)
-        ++d.generation;
+        d.generation = ++d.next_generation;
     BoolScope busy(d.editing);
     d.pending.reset();
     if (d.current)
@@ -1437,8 +1439,9 @@ struct SceneSession3D::Data::EditTransaction {
             }
         });
         if (d.renderer.available() && !same_options(new_options, active.options)) {
-            new_view = d.renderer.create_view(d.options.viewport, new_options).value_or({});
-            require(bool(new_view), "edited scene view creation failed");
+            auto created = d.renderer.create_view(d.options.viewport, new_options);
+            require(created.ok(), diagnostics3d_text(created.diagnostics));
+            new_view = std::move(*created.value);
         }
     }
     std::vector<WorldPhysicsState3D::BodyEdit> prepare_bodies() {
@@ -2606,7 +2609,14 @@ std::optional<ScenePick3D> SceneSession3D::pick_operation(Vec2i pixel) {
         configuration_error("picking requires SceneSession3DOptions::view.pick");
         return {};
     }
-    const auto hit = d.renderer.pick(state.view, pixel).value_or({});
+    auto result = d.renderer.pick(state.view, pixel);
+    if (!result) {
+        d.errors = std::move(result.diagnostics);
+        if (d.errors.empty())
+            fail3d(d.errors, "SceneSession3D::pick", "renderer picking failed");
+        return {};
+    }
+    const auto& hit = *result;
     if (!hit.hit)
         return {};
     return ScenePick3D{d.pick_entity(state, hit.id), hit.id, hit.position};

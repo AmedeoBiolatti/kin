@@ -31,7 +31,7 @@ size_t capacity(const sol::optional<sol::table>& options) {
 Quatf orientation(const sol::optional<sol::table>& options) {
     if (options)
         if (sol::object value = (*options)["rotation"]; value != sol::nil)
-            return rotation(checked<sol::table>(value, "value"));
+            return rotation(checked<sol::table>(value, "rotation"));
     return {};
 }
 template <class Hit> sol::table hit_table(sol::state_view lua, const SceneQueryHit3D<Hit>& hit) {
@@ -114,17 +114,17 @@ RagdollStart3D start_options(const sol::optional<sol::table>& options) {
     out.blend_seconds = number(*options, "blend_seconds", 0, 0, infinity);
     if (sol::object value = (*options)["velocity"]; value != sol::nil) {
         out.set_velocity = true;
-        out.velocity = vector(checked<sol::table>(value, "value"));
+        out.velocity = vector(checked<sol::table>(value, "velocity"));
     }
     const auto bone = number(*options, "impulse_bone", -1, -1, 65535);
     if (std::trunc(bone) != bone)
         throw std::runtime_error("impulse_bone must be a zero-based integer");
     out.impulse_bone = static_cast<i32>(bone);
     if (sol::object value = (*options)["impulse"]; value != sol::nil)
-        out.impulse = vector(checked<sol::table>(value, "value"));
+        out.impulse = vector(checked<sol::table>(value, "impulse"));
     if (sol::object value = (*options)["impulse_point"]; value != sol::nil) {
         out.point_given = true;
-        out.impulse_point = vector(checked<sol::table>(value, "value"));
+        out.impulse_point = vector(checked<sol::table>(value, "impulse_point"));
     }
     return out;
 }
@@ -232,16 +232,16 @@ void bind_physics(sol::state& lua, sol::table table, std::shared_ptr<LuaScene3DB
         fields(options, {"grab", "reach", "pull_up", "jump_off", "drop"});
         TraversalInput3D input;
         if (sol::object value = options["grab"]; value != sol::nil) {
-            const auto limbs = checked<sol::table>(value, "value");
+            const auto limbs = checked<sol::table>(value, "grab");
             for (const auto& [key, held] : limbs) {
-                if (!key.is<int>() || checked<int>(key, "key") < 1 ||
-                    checked<int>(key, "key") > static_cast<int>(max_grip_limbs3d) || !held.is<bool>())
+                if (!key.is<int>() || checked<int>(key, "grab index") < 1 ||
+                    checked<int>(key, "grab index") > static_cast<int>(max_grip_limbs3d) || !held.is<bool>())
                     throw std::runtime_error("grab requires boolean limb entries indexed 1..4");
-                input.grab[static_cast<size_t>(checked<int>(key, "key") - 1)] = checked<bool>(held, "held");
+                input.grab[static_cast<size_t>(checked<int>(key, "grab index") - 1)] = checked<bool>(held, "held");
             }
         }
         if (sol::object value = options["reach"]; value != sol::nil)
-            input.reach = vector(checked<sol::table>(value, "value"));
+            input.reach = vector(checked<sol::table>(value, "reach"));
         input.pull_up = option(options, "pull_up", false);
         input.jump_off = option(options, "jump_off", false);
         input.drop = option(options, "drop", false);

@@ -28,6 +28,11 @@ check `.ok()` for success and `*result` (after checking) or `.value_or(false)`
 for the payload. Replace `if (file.poll())` with a checked result then `if (*changed)`.
 Unchanged failed model sources return cached diagnostics; only source edits or
 pack remounts retry. Owner `diagnostics()` accessors remain inspection snapshots.
+`Model3D::asset_diagnostics` has been removed. Check the diagnostics on the failed
+`load_model()` result; asset loaders reject the whole model and return no drawable
+fragments. CPU inspection still exposes `ModelData3D::asset_diagnostics` for tools
+that deliberately inspect unsupported content.
+
 Each result owns its diagnostics, so later calls cannot overwrite an earlier
 failure. A successful `false` or empty payload is still success. Failed results
 have no value. `value_or(fallback)` explicitly chooses a fallback.
@@ -292,3 +297,20 @@ python3 tools/format_3d.py --check
 ```
 
 Pass `--clang-format /path/to/clang-format` when it is not on PATH. The check exits nonzero for formatting differences and does not write files. It covers the 3D renderer, authoring/runtime glue, samples, tools and their tests; it excludes third-party and generated code.
+
+Scene reload polling reports `Unchanged` or `Activated` in a successful result;
+inspect failed `Result3D` diagnostics instead of the removed `Failed` enum value.
+`scene3d.entity(id)` returns nil for an absent authored ID. Resolved Lua `KinEntity`
+values retain their prefab-pool lease: `alive()`/`valid()` become false after return
+and mutation through an expired lease raises an error even if the slot is reused.
+
+Scene generation IDs are monotonic and may have gaps: a failed activation reserves
+a unique candidate ID while leaving the active scene's generation and handles valid.
+
+Resolved entity children and saved `component()` editors retain the same pool
+lease. Returning the prefab invalidates their later mutations too. The physics
+bridge now drains native constraint break events each step; consume its
+`constraint_events()` span or the `ConstraintEvents3D` singleton afterward.
+
+Raw ECS query values track physical entities. For a pooled actor, cache a token
+from `scene3d.handle(e)` and resolve that token when accessing the current lease.

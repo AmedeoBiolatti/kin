@@ -75,6 +75,10 @@ function on_enter(ctx)
     assert(not pcall(scene3d.handle, 17))
     local h = scene3d.entity("crate")
     assert(h:alive() and not pcall(h.alive) and not pcall(h.alive, 17))
+    assert(scene3d.entity("absent") == nil)
+    assert(not pcall(scene3d.resolve(h).alive))
+    assert(not pcall(function() return KinSceneEntity3D.id end))
+    assert(not pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {musk=7}))
     assert(pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {mask=2^3}))
     for _, bad in ipairs({8.5, -1, 2^64, math.huge, 0/0}) do
         assert(not pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {mask=bad}))
@@ -191,7 +195,14 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     Renderer3D rendering{renderer};
     Assets3D assets{rendering, source.path};
     int exits = 0;
-    SceneSession3D session{rendering, assets, options(app, exits)};
+    SceneEntity3D rejected_handle;
+    auto settings = options(app, exits);
+    const auto bind = settings.scripts.bind;
+    settings.scripts.bind = [&, bind](sol::state& lua) {
+        bind(lua);
+        lua["capture_rejected"] = [&](SceneEntity3D entity) { rejected_handle = entity; };
+    };
+    SceneSession3D session{rendering, assets, settings};
     ok(session, session.load("test.kinscene"), "Lua scene load failed");
     auto* initial = session.world();
     const auto generation = session.generation();
@@ -255,8 +266,7 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     // Syntax, initialization and enter failures preserve the live world/VM.
     const auto hash = session.physics()->state_hash();
     write(source.path / "logic.lua", "not valid lua");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
-          "bad Lua reload accepted");
+    check(!session.reload_if_changed(), "bad Lua reload accepted");
     check(session.world() == initial && session.generation() == generation && session.physics()->state_hash() == hash,
           "failed Lua reload modified the active world");
     ok(session, session.step(.1f), "last good Lua VM did not survive reload failure");
@@ -267,9 +277,17 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
       error('load boom') end)lua");
     write(source.path / "bad.kinscene", R"({"script":"bad.lua","entities":[]})");
     check(!session.load("bad.kinscene") && session.world() == initial, "on_load failure replaced the active world");
-    write(source.path / "bad.lua", "function on_enter(c) scene3d.spawn('prop.kinprefab'); error('enter boom') end");
+    const auto live_handle = session.handle(session.entity("crate"));
+    const auto live_generation = session.generation();
+    auto rejected_scene = std::string(scene);
+    rejected_scene.replace(rejected_scene.find("logic.lua"), std::string("logic.lua").size(), "bad.lua");
+    write(source.path / "bad.kinscene", rejected_scene);
+    write(source.path / "bad.lua", "function on_enter(c) capture_rejected(scene3d.entity('crate')); "
+                                   "scene3d.spawn('prop.kinprefab'); error('enter boom') end");
     check(!session.load("bad.kinscene") && session.world() == initial && !session.prepared(),
           "on_enter failure replaced the active world");
+    check(session.generation() == live_generation && session.resolve(live_handle),
+          "failed candidate invalidated the active scene's handles");
     write(source.path / "logic.lua", R"lua(
       local crate
       function on_load(scene) crate=scene:authored('crate') end
@@ -286,6 +304,8 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     ok(session, session.prepare("test.kinscene"), "Lua reload preparation failed");
     write(source.path / "tuning.lua", "return {kick=5}");
     ok(session, session.activate(), "prepared Lua activation failed");
+    check(rejected_handle && !session.resolve(rejected_handle),
+          "failed candidate handle came alive in a later scene generation");
     check(exits == 1 && !session.changed_sources().empty(),
           "module changed after preparation was acknowledged without reload");
     app.input().set_action_pressed("launch");
@@ -320,6 +340,51 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
         check(report(session).find("cancelled") != std::string::npos, "failed callback request stayed pending");
     }
     assert(session.unload());
+
+    // Resolving a pooled handle must retain its lease across slot reuse.
+    auto pooled_prefab = std::string(prefab);
+    pooled_prefab.insert(pooled_prefab.find("\"Transform3D\""), R"("TestStats":{"ticks":0},)");
+    write(source.path / "prop.kinprefab", pooled_prefab);
+    write(source.path / "logic.lua", R"lua(
+      local ticks, prepared, pool, spawned, old, old_id, editor = 0
+      function update(ctx)
+        ticks=ticks+1
+        if ticks==1 then prepared=scene3d.preload('prop.kinprefab')
+        elseif ticks==2 then
+          assert(prepared.status=='succeeded')
+          pool=scene3d.create_pool(prepared.prepared, {capacity=1})
+        elseif ticks==3 then
+          assert(pool.status=='succeeded'); spawned=scene3d.spawn(pool.pool)
+        elseif ticks==4 then
+          assert(spawned.status=='succeeded')
+          old=scene3d.resolve(spawned.prefab.root); old_id=old:id()
+          assert(old:alive())
+          editor=old:component('TestStats')
+          assert(not pcall(editor.commit))
+          editor.ticks=7; assert(editor:commit()==editor)
+          assert(old:get('TestStats').ticks==7)
+          scene3d.despawn(spawned)
+        elseif ticks==5 then
+          assert(not old:alive() and not old:valid())
+          spawned=scene3d.spawn(pool.pool)
+        elseif ticks==6 then
+          local fresh=scene3d.resolve(spawned.prefab.root)
+          assert(fresh:id()==old_id and fresh:alive())
+          assert(not old:alive() and not old:valid())
+          fresh:patch('TestStats', {ticks=11})
+          assert(not pcall(editor.commit, editor))
+          assert(fresh:get('TestStats').ticks==11)
+          assert(not pcall(old.destroy, old))
+          assert(not pcall(scene3d.handle, old))
+          assert(fresh:alive())
+        end
+      end
+    )lua");
+    ok(session, session.load("test.kinscene"), "pooled Lua lease fixture failed");
+    for (int i = 0; i < 6; ++i)
+        ok(session, session.step(.1f), "pooled Lua lease step failed");
+    assert(session.unload());
+    write(source.path / "prop.kinprefab", prefab);
 
     // A script host needs neither a physics world nor application/input pointers.
     write(source.path / "logic.lua", R"lua(

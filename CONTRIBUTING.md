@@ -22,8 +22,8 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure -j 8
 ```
 
-CI builds and tests on Linux (GCC and Clang) and Windows (MSVC); a pull request
-needs all three green. [docs/testing.md](docs/testing.md) covers the test layout
+CI checks Linux GCC/Clang, Windows MSVC, formatting, the 2D-only build and
+Release/Debug lavapipe coverage. Required checks must pass before merging. [docs/testing.md](docs/testing.md) covers the test layout
 and how to keep tests fast and deterministic.
 
 ## Code guidelines

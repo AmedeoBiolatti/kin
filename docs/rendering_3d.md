@@ -1170,14 +1170,15 @@ reads `.ktx2` and `.dds` paths the same way; Basis Universal ones need a
 transcoder and are a missing texture (see
 [compressed textures](assets.md#compressed-textures)). Geometry that cannot
 be read as it is (Draco or meshopt compression, sparse accessors, a `POSITION` or `NORMAL` that is not `VEC3`, a
-`TEXCOORD_0` that is not `VEC2`) leaves its primitive out, with a line in the
-log and in `Model3D::asset_diagnostics`, rather than loading as zeros. A file
+`TEXCOORD_0` that is not `VEC2`) rejects the complete asset with diagnostics in
+the failed `Result3D<Model3D>`. Unsupported geometry, skins and animation are
+validated before meshes or textures are uploaded. A file
 named by an absolute path is never read, and a model under the content root or
 in a mounted pack cannot leave it with `..` (`../textures/` from `models/`
 still reads; a loose model opened from elsewhere keeps `..`). A file not read
 fails the model, a buffer and an image alike: an image that cannot be read or
-decoded is a line in `Model3D::asset_diagnostics`, and `valid()` needs them
-empty (`Renderer3D::load_model` then returns no model). Nodes nest
+decoded fails `Renderer3D::load_model` with the asset's specific diagnostic;
+a failed result has no model payload. Nodes nest
 at most 512 deep. A plain node between two of a skin's joints is kept as a joint
 of the skeleton that no vertex is bound to, so the joints below it rest where
 their inverse bind matrices say (the asset is rejected if that would take
@@ -3631,18 +3632,26 @@ is rejected locally; unrelated instance motion does not reject every effect.
 Opaque custom materials use the opaque velocity path. Simulated particles have
 stable birth identities; immediate callers may set `ParticleSprite3D::id` and
 an emitter `history_id` on `draw_particles`. Zero IDs use submission order.
-History retains at most 65,536 visible sprites per view; additional sprites use
+History retains the nearest 65,536 visible sprites per view; additional sprites use
 spatial reconstruction. Overlapping independently moving translucent layers
 share the foremost contributing velocity, so history confidence is capped.
-Blended mesh coverage rejects history locally when opaque motion behind it differs
-by more than one pixel, including the following frame's old coverage. The opaque
-motion snapshot is allocated only for blended mesh coverage and released after
-120 unused renders. Light motion does not change particle geometry identities.
+Blended mesh and particle coverage reject history where opaque geometry behind them moves
+independently of the camera, including the following frame's old footprint.
+Static geometry at different depths retains history during camera translation
+and rotation. The existing motion/normal target carries the marker; there is
+no extra opaque-motion target or fullscreen copy. Lit particles record local
+irradiance as shadow receivers do. Small lighting changes retain temporal coverage
+samples; larger changes lower history weight locally over the full reconstruction
+footprint. Frozen-jitter inspection uses current illumination wherever it changed.
+These changes do not reset particle geometry identities.
 
 Particle casters are culled individually against each light map and capped at
 16,384 per map in stable submission order, including each point-light face.
+`particle_shadow_map_dropped` counts per-map budget omissions across the frame.
 The global caster upload cap remains 1,048,576. Local shadow caches depend only
-on their selected particle casters. Flat sprites do not depend on the camera;
+on their selected particle casters. Only maps selected for redraw pack and upload
+casters; `particle_shadow_uploaded_bytes` is zero when all caster maps are cached.
+Flat sprites do not depend on the camera;
 billboard maps update when their actual camera-dependent quads change.
 
 Lua bridges reflected ECS entities and session handles with

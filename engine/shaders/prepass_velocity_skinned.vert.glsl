@@ -21,7 +21,8 @@ layout(set = 1, binding = 0) uniform Draw {
     uvec4 first;          // x: this draw's first instance
     mat4 current;         // without the jitter, this frame's camera
     mat4 prior;           // and the last frame's
-} draw;
+}
+draw;
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec2 vUV;
@@ -30,6 +31,7 @@ layout(location = 3) out vec3 vCurrent;  // clip x, y, w this frame
 layout(location = 4) out vec3 vPrevious; // and the last
 layout(location = 5) flat out float vFresh;
 layout(location = 6) out vec3 vWorld;
+layout(location = 7) out float vIndependent;
 
 void main() {
     const uint at = draw.first.x + uint(gl_InstanceIndex);
@@ -42,7 +44,9 @@ void main() {
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
     vCurrent = (draw.current * world).xyw;
-    vPrevious = (draw.prior * (before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0)))).xyw;
+    const vec4 previous_world = before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0));
+    vPrevious = (draw.prior * previous_world).xyw;
+    vIndependent = length(world.xyz - previous_world.xyz);
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * normalize(mat3(skin) * aNormal);
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;

@@ -1,10 +1,14 @@
-// Ragdolls of kin/physics3d (kin/physics3d/ragdoll3d.hpp), without a GPU: the auto-built desc, the states and blends, bone
-// lengths and limits under a fall, continuous collision, partial ragdolls, hand-over to and recovery from a character
-// controller, the pose written into the animator, determinism with 0, 1 and 4 workers and saved states.
+// Ragdolls of kin/physics3d (kin/physics3d/ragdoll3d.hpp), without a GPU: the auto-built desc, the states and blends,
+// bone lengths and limits under a fall, continuous collision, partial ragdolls, hand-over to and recovery from a
+// character controller, the pose written into the animator, determinism with 0, 1 and 4 workers and saved states.
 // docs/physics_3d.md ("Ragdolls").
 
 #include "skin_fixtures.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
@@ -12,11 +16,6 @@
 #include <kin/render3d/ik3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
 #include <kin/scene/scene_frame3d.hpp>
-
-#include <algorithm>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -27,23 +26,24 @@ using namespace kin;
 int failures = 0;
 bool verbose = false;
 
-#define CHECK(cond)                                                                                  \
-    do {                                                                                             \
-        if (!(cond)) {                                                                               \
-            ++failures;                                                                              \
-            std::fprintf(stderr, "physics3d_ragdoll_tests:%d: CHECK failed: %s\n", __LINE__, #cond); \
-        }                                                                                            \
+#define CHECK(cond)                                                                                                    \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ++failures;                                                                                                \
+            std::fprintf(stderr, "physics3d_ragdoll_tests:%d: CHECK failed: %s\n", __LINE__, #cond);                   \
+        }                                                                                                              \
     } while (0)
 
-#define CHECK_NEAR(value, expected, eps)                                                                              \
-    do {                                                                                                              \
-        const double v_ = static_cast<double>(value), e_ = static_cast<double>(expected);                             \
-        if (verbose) std::printf("  %s = %.4f (expected %.4f +- %.4f)\n", #value, v_, e_, static_cast<double>(eps));    \
-        if (!(std::fabs(v_ - e_) <= static_cast<double>(eps))) {                                                      \
-            ++failures;                                                                                               \
-            std::fprintf(stderr, "physics3d_ragdoll_tests:%d: %s = %.5f, expected %.5f +- %.5f\n", __LINE__, #value, v_, \
-                         e_, static_cast<double>(eps));                                                               \
-        }                                                                                                             \
+#define CHECK_NEAR(value, expected, eps)                                                                               \
+    do {                                                                                                               \
+        const double v_ = static_cast<double>(value), e_ = static_cast<double>(expected);                              \
+        if (verbose)                                                                                                   \
+            std::printf("  %s = %.4f (expected %.4f +- %.4f)\n", #value, v_, e_, static_cast<double>(eps));            \
+        if (!(std::fabs(v_ - e_) <= static_cast<double>(eps))) {                                                       \
+            ++failures;                                                                                                \
+            std::fprintf(stderr, "physics3d_ragdoll_tests:%d: %s = %.5f, expected %.5f +- %.5f\n", __LINE__, #value,   \
+                         v_, e_, static_cast<double>(eps));                                                            \
+        }                                                                                                              \
     } while (0)
 
 constexpr f32 dt = 1.0f / 60.0f;
@@ -55,7 +55,9 @@ World3DConfig serial() {
     return c;
 }
 
-bool near(Vec3f a, Vec3f b, f32 eps) { return length(a - b) <= eps; }
+bool near(Vec3f a, Vec3f b, f32 eps) {
+    return length(a - b) <= eps;
+}
 
 // A biped and a ragdoll of it at `at` (the model's origin is at the feet), over a floor whose top is y = 0.
 struct Rig {
@@ -74,8 +76,11 @@ struct Rig {
         : world(cfg) {
         origin = at;
         if (with_floor) {
-            floor = world.create_body({.shape = Shape3D::box({20.0f, 0.5f, 20.0f}), .motion = Body3DMotion::Static,
-                                       .position = {0.0f, -0.5f, 0.0f}, .friction = 0.6f, .user_id = 7});
+            floor = world.create_body({.shape = Shape3D::box({20.0f, 0.5f, 20.0f}),
+                                       .motion = Body3DMotion::Static,
+                                       .position = {0.0f, -0.5f, 0.0f},
+                                       .friction = 0.6f,
+                                       .user_id = 7});
         }
         desc = auto_ragdoll_desc(skeleton, skeleton.rest_pose(), options);
         compute_world_matrices(skeleton, skeleton.rest_pose(), model_world);
@@ -130,7 +135,8 @@ struct Rig {
 void test_auto_desc() {
     const Skeleton3D sk = skin_fixtures::make_biped();
     const RagdollDesc d = auto_ragdoll_desc(sk, sk.rest_pose());
-    // The pelvis and everything below it: pelvis, spine, chest, neck, head, hips, knees, ankles, shoulders, elbows, hands.
+    // The pelvis and everything below it: pelvis, spine, chest, neck, head, hips, knees, ankles, shoulders, elbows,
+    // hands.
     CHECK(d.bones.size() == 17);
     CHECK(d.root_bone == 0 && d.bones[0].joint == B::pelvis && d.bones[0].parent == -1);
     for (std::size_t i = 0; i < d.bones.size(); ++i) {
@@ -140,13 +146,19 @@ void test_auto_desc() {
         CHECK(d.bones[i].half_height > 0.0f);
     }
     // The thigh runs from the hip to the knee (0.5 m): a capsule of that length in all.
-    const RagdollBoneDesc3D& thigh = d.bones[0].joint == B::pelvis ? d.bones[static_cast<std::size_t>(std::find_if(d.bones.begin(), d.bones.end(), [](const auto& b) { return b.joint == B::hip_l; }) - d.bones.begin())] : d.bones[0];
+    const RagdollBoneDesc3D& thigh =
+        d.bones[0].joint == B::pelvis
+            ? d.bones[static_cast<std::size_t>(
+                  std::find_if(d.bones.begin(), d.bones.end(), [](const auto& b) { return b.joint == B::hip_l; }) -
+                  d.bones.begin())]
+            : d.bones[0];
     CHECK_NEAR(2.0f * (thigh.half_height + thigh.radius), 0.5f, 0.01f);
     CHECK_NEAR(length(thigh.offset), 0.25f, 0.01f);
     // Knees and elbows are hinges, the rest swing-twist.
     int hinges = 0;
     for (const RagdollBoneDesc3D& b : d.bones) {
-        const bool should = b.joint == B::knee_l || b.joint == B::knee_r || b.joint == B::elbow_l || b.joint == B::elbow_r;
+        const bool should =
+            b.joint == B::knee_l || b.joint == B::knee_r || b.joint == B::elbow_l || b.joint == B::elbow_r;
         CHECK((b.joint_kind == RagdollJoint3D::Hinge) == should);
         hinges += b.joint_kind == RagdollJoint3D::Hinge ? 1 : 0;
     }
@@ -158,7 +170,9 @@ void test_auto_desc() {
     }
     CHECK_NEAR(total, 70.0f, 0.5f);
     // A foot is a capsule along the way the character faces (+Z), not down into the floor.
-    const RagdollBoneDesc3D& foot = d.bones[static_cast<std::size_t>(std::find_if(d.bones.begin(), d.bones.end(), [](const auto& b) { return b.joint == B::ankle_l; }) - d.bones.begin())];
+    const RagdollBoneDesc3D& foot = d.bones[static_cast<std::size_t>(
+        std::find_if(d.bones.begin(), d.bones.end(), [](const auto& b) { return b.joint == B::ankle_l; }) -
+        d.bones.begin())];
     CHECK(foot.offset.z > 0.05f && std::fabs(foot.offset.y) < 0.01f);
     // Options: skip names, a bigger radius, no overrides.
     AutoRagdollOptions o;
@@ -167,7 +181,8 @@ void test_auto_desc() {
     o.overrides.clear();
     const RagdollDesc d2 = auto_ragdoll_desc(sk, sk.rest_pose(), o);
     CHECK(d2.bones.size() == 15);
-    CHECK(std::none_of(d2.bones.begin(), d2.bones.end(), [](const auto& b) { return b.joint_kind == RagdollJoint3D::Hinge; }));
+    CHECK(std::none_of(d2.bones.begin(), d2.bones.end(),
+                       [](const auto& b) { return b.joint_kind == RagdollJoint3D::Hinge; }));
     // A skeleton with a pose of the wrong size or nothing: an empty desc.
     CHECK(auto_ragdoll_desc(Skeleton3D{}, Pose3D{}).bones.empty());
 }
@@ -224,17 +239,21 @@ void test_animated_follows_targets() {
 void test_animated_bodies_are_hit() {
     // A ball thrown at the chest of an animated ragdoll is stopped by the kinematic bodies (they do not move).
     Rig rig({0.0f, 0.0f, 0.0f});
-    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f), .motion = Body3DMotion::Dynamic,
-                                               .position = {0.0f, 1.3f, 3.0f}, .linear_velocity = {0.0f, 0.0f, -12.0f},
-                                               .mass = 2.0f, .gravity_factor = 0.0f, .continuous = true});
+    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f),
+                                               .motion = Body3DMotion::Dynamic,
+                                               .position = {0.0f, 1.3f, 3.0f},
+                                               .linear_velocity = {0.0f, 0.0f, -12.0f},
+                                               .mass = 2.0f,
+                                               .gravity_factor = 0.0f,
+                                               .continuous = true});
     const Vec3f chest_before = rig.world.position(rig.body_of_joint(B::chest));
     rig.set_targets({0.0f, 0.0f, 0.0f});
     for (int i = 0; i < 90; ++i) {
         rig.set_targets({0.0f, 0.0f, 0.0f});
         rig.step();
     }
-    CHECK(rig.world.position(ball).z > 0.0f);                                 // it did not go through
-    CHECK(rig.world.linear_velocity(ball).z > -2.0f);                          // it bounced or stopped
+    CHECK(rig.world.position(ball).z > 0.0f);         // it did not go through
+    CHECK(rig.world.linear_velocity(ball).z > -2.0f); // it bounced or stopped
     CHECK(near(rig.world.position(rig.body_of_joint(B::chest)), chest_before, 0.01f));
 }
 
@@ -249,9 +268,12 @@ void test_parked_bodies_are_not_hit() {
     d.animated_bodies = false;
     rig.desc = d;
     rig.make();
-    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f), .motion = Body3DMotion::Dynamic,
-                                               .position = {0.0f, 1.3f, 3.0f}, .linear_velocity = {0.0f, 0.0f, -12.0f},
-                                               .mass = 2.0f, .gravity_factor = 0.0f});
+    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f),
+                                               .motion = Body3DMotion::Dynamic,
+                                               .position = {0.0f, 1.3f, 3.0f},
+                                               .linear_velocity = {0.0f, 0.0f, -12.0f},
+                                               .mass = 2.0f,
+                                               .gravity_factor = 0.0f});
     rig.step(2);
     for (int i = 0; i < 60; ++i) {
         rig.step();
@@ -263,7 +285,8 @@ void test_parked_bodies_are_not_hit() {
     CHECK(st.mode == RagdollMode3D::Ragdoll && st.dynamic_bodies == 17);
 }
 
-// ---- falling ------------------------------------------------------------------------------------------------------------
+// ---- falling
+// ------------------------------------------------------------------------------------------------------------
 
 // Drops a standing ragdoll `height` m and runs `steps`; returns the greatest joint separation seen (m).
 f32 drop_and_measure(Rig& rig, int steps, f32* lowest_seen = nullptr) {
@@ -282,7 +305,8 @@ f32 drop_and_measure(Rig& rig, int steps, f32* lowest_seen = nullptr) {
                 const Constraint3DInfo info = rig.world.constraint_info(c);
                 now = std::max(now, length(info.point_a - info.point_b));
             }
-            std::printf("    step %d stretch %.4f lowest %.3f pelvis y %.3f\n", i, now, rig.lowest(), rig.world.position(rig.bodies[0]).y);
+            std::printf("    step %d stretch %.4f lowest %.3f pelvis y %.3f\n", i, now, rig.lowest(),
+                        rig.world.position(rig.bodies[0]).y);
         }
     }
     if (lowest_seen != nullptr) {
@@ -298,15 +322,19 @@ void test_fall_settles_and_holds_together() {
     f32 low = 0.0f;
     const f32 worst = drop_and_measure(rig, 360, &low);
     const RagdollState3D st = rig.world.ragdoll_state(rig.ragdoll);
-    if (verbose) std::printf("  stretch %.4f, lowest %.3f, settled %d, awake %u, speed %.3f\n", worst, low, st.settled ? 1 : 0, st.awake_bodies, st.max_speed);
-    CHECK(worst < 0.06f);          // no joint opened by more than 6 cm (the impact; 2 cm at rest)
-    CHECK(low > -0.06f);           // nothing went through the floor (the capsules' skin a few cm into it at the impact)
+    if (verbose)
+        std::printf("  stretch %.4f, lowest %.3f, settled %d, awake %u, speed %.3f\n", worst, low, st.settled ? 1 : 0,
+                    st.awake_bodies, st.max_speed);
+    CHECK(worst < 0.06f); // no joint opened by more than 6 cm (the impact; 2 cm at rest)
+    CHECK(low > -0.06f);  // nothing went through the floor (the capsules' skin a few cm into it at the impact)
     CHECK(st.settled);
     // Lying down on the floor: the pelvis near the floor, no body far from it.
-    if (verbose) std::printf("  pelvis y %.3f\n", rig.world.position(rig.body_of_joint(B::pelvis)).y);
+    if (verbose)
+        std::printf("  pelvis y %.3f\n", rig.world.position(rig.body_of_joint(B::pelvis)).y);
     CHECK(rig.world.position(rig.body_of_joint(B::pelvis)).y < 0.6f);
     const auto events = rig.world.drain_ragdoll_events();
-    CHECK(events.size() == 2 && events[0].kind == RagdollEventKind3D::Started && events[1].kind == RagdollEventKind3D::Settled);
+    CHECK(events.size() == 2 && events[0].kind == RagdollEventKind3D::Started &&
+          events[1].kind == RagdollEventKind3D::Settled);
     // Asleep or nearly so, which is the cost control: after settling the bodies sleep by themselves.
     for (int i = 0; i < 120; ++i) {
         rig.step();
@@ -325,12 +353,16 @@ void test_freeze_on_settle() {
         rig.step();
         if (verbose && i % 30 == 0) {
             f32 w = 0.0f;
-            for (const Body3D b : rig.bodies) w = std::max(w, length(rig.world.angular_velocity(b)));
-            std::printf("    step %d speed %.3f ang %.3f awake %u\n", i, rig.world.ragdoll_state(rig.ragdoll).max_speed, w, rig.world.ragdoll_state(rig.ragdoll).awake_bodies);
+            for (const Body3D b : rig.bodies)
+                w = std::max(w, length(rig.world.angular_velocity(b)));
+            std::printf("    step %d speed %.3f ang %.3f awake %u\n", i, rig.world.ragdoll_state(rig.ragdoll).max_speed,
+                        w, rig.world.ragdoll_state(rig.ragdoll).awake_bodies);
         }
     }
     const RagdollState3D st = rig.world.ragdoll_state(rig.ragdoll);
-    if (verbose) std::printf("  freeze: settled %d frozen %d dynamic %u awake %u mode %d\n", st.settled, st.frozen, st.dynamic_bodies, st.awake_bodies, static_cast<int>(st.mode));
+    if (verbose)
+        std::printf("  freeze: settled %d frozen %d dynamic %u awake %u mode %d\n", st.settled, st.frozen,
+                    st.dynamic_bodies, st.awake_bodies, static_cast<int>(st.mode));
     CHECK(st.settled && st.frozen && st.dynamic_bodies == 0 && st.awake_bodies == 0);
     for (const Body3D b : rig.bodies) {
         CHECK(rig.world.motion(b) == Body3DMotion::Kinematic && !rig.world.is_active(b));
@@ -345,11 +377,15 @@ void test_freeze_on_settle() {
         min_x = std::min(min_x, rig.world.position(b).x);
         max_x = std::max(max_x, rig.world.position(b).x);
     }
-    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.06f), .motion = Body3DMotion::Dynamic,
+    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.06f),
+                                               .motion = Body3DMotion::Dynamic,
                                                .position = {min_x - 1.5f, centre.y, centre.z},
-                                               .linear_velocity = {6.0f, 0.0f, 0.0f}, .mass = 1.0f, .gravity_factor = 0.0f});
+                                               .linear_velocity = {6.0f, 0.0f, 0.0f},
+                                               .mass = 1.0f,
+                                               .gravity_factor = 0.0f});
     rig.step(150);
-    if (verbose) std::printf("  ball x %.3f, bodies x %.3f .. %.3f\n", rig.world.position(ball).x, min_x, max_x);
+    if (verbose)
+        std::printf("  ball x %.3f, bodies x %.3f .. %.3f\n", rig.world.position(ball).x, min_x, max_x);
     CHECK(rig.world.position(ball).x < max_x + 0.1f);
     CHECK(near(rig.world.position(rig.body_of_joint(B::pelvis)), lying, 1e-5f));
     // Starting again thaws it.
@@ -373,14 +409,17 @@ void test_limits_respected() {
         rig.step();
         for (const Constraint3D c : rig.world.constraints()) {
             const Constraint3DInfo info = rig.world.constraint_info(c);
-            if (info.kind == Constraint3DKind::Hinge && (info.b == rig.body_of_joint(B::knee_l) || info.b == rig.body_of_joint(B::knee_r))) {
-                if (verbose && info.value < -1.0f) std::printf("    step %d knee %.1f\n", i, info.value);
+            if (info.kind == Constraint3DKind::Hinge &&
+                (info.b == rig.body_of_joint(B::knee_l) || info.b == rig.body_of_joint(B::knee_r))) {
+                if (verbose && info.value < -1.0f)
+                    std::printf("    step %d knee %.1f\n", i, info.value);
                 knee_min = std::min(knee_min, info.value);
                 knee_max = std::max(knee_max, info.value);
             }
         }
     }
-    if (verbose) std::printf("  knee angle %.1f .. %.1f\n", knee_min, knee_max);
+    if (verbose)
+        std::printf("  knee angle %.1f .. %.1f\n", knee_min, knee_max);
     CHECK(knee_min > -3.0f && knee_max < 143.0f);
 }
 
@@ -395,9 +434,12 @@ void test_no_tunnelling_at_speed() {
     for (const auto& b : d.bones) {
         bw.push_back(Mat4f::translation({0.0f, 6.0f, 0.0f}) * mw[static_cast<std::size_t>(b.joint)]);
     }
-    world.create_body({.shape = Shape3D::box({20.0f, 0.01f, 20.0f}), .motion = Body3DMotion::Static, .position = {0.0f, -0.01f, 0.0f}});
+    world.create_body({.shape = Shape3D::box({20.0f, 0.01f, 20.0f}),
+                       .motion = Body3DMotion::Static,
+                       .position = {0.0f, -0.01f, 0.0f}});
     // A wall as well.
-    world.create_body({.shape = Shape3D::box({0.01f, 5.0f, 20.0f}), .motion = Body3DMotion::Static, .position = {3.0f, 3.0f, 0.0f}});
+    world.create_body(
+        {.shape = Shape3D::box({0.01f, 5.0f, 20.0f}), .motion = Body3DMotion::Static, .position = {3.0f, 3.0f, 0.0f}});
     const RagdollHandle3D r = world.create_ragdoll(d, bw);
     world.set_ragdoll_targets(r, bw);
     world.start_ragdoll(r, {.set_velocity = true, .velocity = {25.0f, -40.0f, 0.0f}});
@@ -415,8 +457,9 @@ void test_no_tunnelling_at_speed() {
 }
 
 void test_connected_bones_do_not_collide() {
-    // Without gravity a ragdoll at rest stays as it is: the capsules of neighbours overlap at the joints, and would push
-    // each other apart if they collided. With self collision ON, so that the joints (not the group) are what keeps them from it.
+    // Without gravity a ragdoll at rest stays as it is: the capsules of neighbours overlap at the joints, and would
+    // push each other apart if they collided. With self collision ON, so that the joints (not the group) are what keeps
+    // them from it.
     Rig rig({0.0f, 5.0f, 0.0f});
     rig.world.destroy_ragdoll(rig.ragdoll);
     rig.desc.self_collision = true;
@@ -434,8 +477,8 @@ void test_connected_bones_do_not_collide() {
         moved = std::max(moved, length(rig.world.position(rig.bodies[i]) - before[i]));
     }
     CHECK(moved < 0.01f);
-    // And no contact is ever made between a bone and the one it hangs from (the joint is the pair's whole business), while
-    // the world does report contacts of other pairs of the ragdoll's bones (the legs against the spine, say).
+    // And no contact is ever made between a bone and the one it hangs from (the joint is the pair's whole business),
+    // while the world does report contacts of other pairs of the ragdoll's bones (the legs against the spine, say).
     int neighbours = 0;
     for (const ContactEvent3D& e : rig.world.drain_events()) {
         const auto a = std::find(rig.bodies.begin(), rig.bodies.end(), e.a);
@@ -444,7 +487,8 @@ void test_connected_bones_do_not_collide() {
             continue;
         }
         const i32 ia = static_cast<i32>(a - rig.bodies.begin()), ib = static_cast<i32>(b - rig.bodies.begin());
-        if (rig.desc.bones[static_cast<std::size_t>(ia)].parent == ib || rig.desc.bones[static_cast<std::size_t>(ib)].parent == ia) {
+        if (rig.desc.bones[static_cast<std::size_t>(ia)].parent == ib ||
+            rig.desc.bones[static_cast<std::size_t>(ib)].parent == ia) {
             ++neighbours;
         }
     }
@@ -452,10 +496,11 @@ void test_connected_bones_do_not_collide() {
 }
 
 void test_disabled_character_is_left_alone() {
-    // A character handed over is not updated: a held move command does not walk it, nothing is reported for it, its body
-    // collides with nothing; enabled again it walks from where it stands.
+    // A character handed over is not updated: a held move command does not walk it, nothing is reported for it, its
+    // body collides with nothing; enabled again it walks from where it stands.
     World3D world(serial());
-    world.create_body({.shape = Shape3D::box({20.0f, 0.5f, 20.0f}), .motion = Body3DMotion::Static, .position = {0.0f, -0.5f, 0.0f}});
+    world.create_body(
+        {.shape = Shape3D::box({20.0f, 0.5f, 20.0f}), .motion = Body3DMotion::Static, .position = {0.0f, -0.5f, 0.0f}});
     CharacterDesc3D d;
     d.position = {0.0f, 0.0f, 0.0f};
     const Character3D c = world.create_character(d);
@@ -472,8 +517,10 @@ void test_disabled_character_is_left_alone() {
     }
     CHECK(near(world.character(c).position, at, 1e-5f));
     // Its body is in no one's way: a ball dropped on it falls through to the floor.
-    const Body3D ball = world.create_body({.shape = Shape3D::sphere(0.2f), .motion = Body3DMotion::Dynamic,
-                                           .position = at + Vec3f{0.0f, 3.0f, 0.0f}, .mass = 2.0f});
+    const Body3D ball = world.create_body({.shape = Shape3D::sphere(0.2f),
+                                           .motion = Body3DMotion::Dynamic,
+                                           .position = at + Vec3f{0.0f, 3.0f, 0.0f},
+                                           .mass = 2.0f});
     for (int i = 0; i < 120; ++i) {
         (void)world.step(dt);
     }
@@ -502,8 +549,9 @@ void test_self_collision_flag() {
         rig.step(30);
         gap[with] = length(rig.world.position(r) - rig.world.position(l));
     }
-    if (verbose) std::printf("  thigh gap: off %.3f on %.3f\n", gap[0], gap[1]);
-    CHECK(gap[0] < 0.2f);     // off: still through each other (the joints hold them near)
+    if (verbose)
+        std::printf("  thigh gap: off %.3f on %.3f\n", gap[0], gap[1]);
+    CHECK(gap[0] < 0.2f);           // off: still through each other (the joints hold them near)
     CHECK(gap[1] > gap[0] + 0.02f); // on: pushed apart
 }
 
@@ -605,8 +653,8 @@ void test_get_up_blends_from_the_lying_pose() {
 }
 
 void test_get_up_turned_round() {
-    // Started again in the middle of a get-up: the bodies are put where the pose shows them (between the lying pose and the
-    // clip's), not where the clip is, so nothing pops; and it is a ragdoll again.
+    // Started again in the middle of a get-up: the bodies are put where the pose shows them (between the lying pose and
+    // the clip's), not where the clip is, so nothing pops; and it is a ragdoll again.
     Rig rig({0.0f, 1.0f, 0.0f});
     rig.set_targets({0.0f, 1.0f, 0.0f});
     rig.world.start_ragdoll(rig.ragdoll, {});
@@ -667,9 +715,13 @@ void test_projectile_starts_ragdoll() {
     cfg.contact_events = true;
     Rig rig({0.0f, 0.0f, 0.0f}, cfg);
     rig.set_targets({0.0f, 0.0f, 0.0f});
-    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f), .motion = Body3DMotion::Dynamic,
-                                               .position = {0.0f, 1.3f, 3.0f}, .linear_velocity = {0.0f, 0.0f, -15.0f},
-                                               .mass = 5.0f, .gravity_factor = 0.0f, .continuous = true});
+    const Body3D ball = rig.world.create_body({.shape = Shape3D::sphere(0.15f),
+                                               .motion = Body3DMotion::Dynamic,
+                                               .position = {0.0f, 1.3f, 3.0f},
+                                               .linear_velocity = {0.0f, 0.0f, -15.0f},
+                                               .mass = 5.0f,
+                                               .gravity_factor = 0.0f,
+                                               .continuous = true});
     bool started = false;
     const Vec3f chest_before = rig.world.position(rig.body_of_joint(B::chest));
     for (int i = 0; i < 120; ++i) {
@@ -681,8 +733,10 @@ void test_projectile_starts_ragdoll() {
                                  (std::find(rig.bodies.begin(), rig.bodies.end(), e.a) != rig.bodies.end() ||
                                   std::find(rig.bodies.begin(), rig.bodies.end(), e.b) != rig.bodies.end());
                 if (hit && e.kind == ContactKind3D::Begin) {
-                    rig.world.start_ragdoll(rig.ragdoll, {.impulse_bone = rig.bone_of(B::chest), .impulse = {0.0f, 0.0f, -75.0f},
-                                                          .impulse_point = e.point, .point_given = true});
+                    rig.world.start_ragdoll(rig.ragdoll, {.impulse_bone = rig.bone_of(B::chest),
+                                                          .impulse = {0.0f, 0.0f, -75.0f},
+                                                          .impulse_point = e.point,
+                                                          .point_given = true});
                     started = true;
                 }
             }
@@ -708,7 +762,8 @@ void test_events_sorted() {
     CHECK(rig.world.ragdoll_events().empty());
 }
 
-// ---- the place to get up at ----------------------------------------------------------------------------------------------
+// ---- the place to get up at
+// ----------------------------------------------------------------------------------------------
 
 void test_get_up_place() {
     Rig rig({0.0f, 1.0f, 0.0f});
@@ -739,7 +794,8 @@ void test_lying_poses_face() {
         const Quatf turn = Quatf::axis_angle({1.0f, 0.0f, 0.0f}, back == 1 ? -90.0f : 90.0f);
         std::vector<Mat4f> bw = rig.bone_world({0.0f, 0.0f, 0.0f});
         // Turn about the pelvis (0, 1, 0) and lower it to the floor.
-        const Mat4f about = Mat4f::translation({0.0f, 0.2f, 0.0f}) * Mat4f::rotation(turn) * Mat4f::translation({0.0f, -1.0f, 0.0f});
+        const Mat4f about =
+            Mat4f::translation({0.0f, 0.2f, 0.0f}) * Mat4f::rotation(turn) * Mat4f::translation({0.0f, -1.0f, 0.0f});
         for (Mat4f& m : bw) {
             m = about * m;
         }
@@ -747,7 +803,8 @@ void test_lying_poses_face() {
         rig.ragdoll = rig.world.create_ragdoll(rig.desc, bw);
         rig.bodies = rig.world.ragdoll_bodies(rig.ragdoll);
         rig.world.start_ragdoll(rig.ragdoll, {});
-        const RagdollPlace3D place = rig.world.ragdoll_get_up_place(rig.ragdoll, {0.0f, 1.0f, 0.0f}, all_layers3d, 3.0f);
+        const RagdollPlace3D place =
+            rig.world.ragdoll_get_up_place(rig.ragdoll, {0.0f, 1.0f, 0.0f}, all_layers3d, 3.0f);
         CHECK(place.found && place.lying);
         CHECK(place.face_down == (back == 0));
         const Vec3f facing = place.rotation.rotate({0.0f, 0.0f, 1.0f});
@@ -755,17 +812,24 @@ void test_lying_poses_face() {
     }
 }
 
-// ---- determinism ---------------------------------------------------------------------------------------------------------
+// ---- determinism
+// ---------------------------------------------------------------------------------------------------------
 
 // A scene: three ragdolls dropped at different places and speeds, boxes to land on, hit by a ball; the per-step hashes.
 std::vector<u64> run_scene(World3DConfig cfg, int steps) {
     Rig rig({0.0f, 2.0f, 0.0f}, cfg);
-    rig.world.create_body({.shape = Shape3D::box({0.6f, 0.2f, 0.6f}), .motion = Body3DMotion::Static,
-                           .position = {0.7f, 0.2f, 0.0f}, .rotation = Quatf::axis_angle({0, 0, 1}, 25.0f)});
+    rig.world.create_body({.shape = Shape3D::box({0.6f, 0.2f, 0.6f}),
+                           .motion = Body3DMotion::Static,
+                           .position = {0.7f, 0.2f, 0.0f},
+                           .rotation = Quatf::axis_angle({0, 0, 1}, 25.0f)});
     const RagdollHandle3D b = rig.world.create_ragdoll(rig.desc, rig.bone_world({3.0f, 1.5f, 0.5f}));
     const RagdollHandle3D c = rig.world.create_ragdoll(rig.desc, rig.bone_world({-3.0f, 3.0f, -0.5f}));
-    rig.world.create_body({.shape = Shape3D::sphere(0.2f), .motion = Body3DMotion::Dynamic, .position = {-6.0f, 3.0f, -0.5f},
-                           .linear_velocity = {6.0f, 0.0f, 0.0f}, .mass = 6.0f, .gravity_factor = 0.5f});
+    rig.world.create_body({.shape = Shape3D::sphere(0.2f),
+                           .motion = Body3DMotion::Dynamic,
+                           .position = {-6.0f, 3.0f, -0.5f},
+                           .linear_velocity = {6.0f, 0.0f, 0.0f},
+                           .mass = 6.0f,
+                           .gravity_factor = 0.5f});
     std::vector<u64> hashes;
     for (int i = 0; i < steps; ++i) {
         if (i == 0) {
@@ -855,7 +919,8 @@ void test_redirected_gravity() {
     // Gravity along +X: the ragdoll falls to a wall at x = 3 and lies against it.
     Rig rig({0.0f, 1.0f, 0.0f}, serial(), false);
     rig.world.set_gravity({9.81f, 0.0f, 0.0f});
-    rig.world.create_body({.shape = Shape3D::box({0.5f, 10.0f, 10.0f}), .motion = Body3DMotion::Static, .position = {3.5f, 0.0f, 0.0f}});
+    rig.world.create_body(
+        {.shape = Shape3D::box({0.5f, 10.0f, 10.0f}), .motion = Body3DMotion::Static, .position = {3.5f, 0.0f, 0.0f}});
     rig.set_targets({0.0f, 1.0f, 0.0f});
     rig.world.start_ragdoll(rig.ragdoll, {});
     rig.step(240);
@@ -868,7 +933,8 @@ void test_redirected_gravity() {
     CHECK(rig.world.ragdoll_state(rig.ragdoll).settled);
 }
 
-// ---- the ECS system: pose written into the animator, hand-over, recovery -----------------------------------------------------
+// ---- the ECS system: pose written into the animator, hand-over, recovery
+// -----------------------------------------------------
 
 struct EcsRig {
     kin::EcsWorld ecs;
@@ -879,10 +945,9 @@ struct EcsRig {
     flecs::entity hero;
     flecs::entity floor;
 
-    explicit EcsRig(Vec3f at = {0.0f, 0.0f, 0.0f}, World3DConfig cfg = serial(), bool with_character = false, bool ragdoll = true)
-        : physics(cfg)
-        , bodies(ecs, physics)
-        , render(ecs) {
+    explicit EcsRig(Vec3f at = {0.0f, 0.0f, 0.0f}, World3DConfig cfg = serial(), bool with_character = false,
+                    bool ragdoll = true)
+        : physics(cfg), bodies(ecs, physics), render(ecs) {
         model = std::make_shared<Model3D>();
         model->skeletons.push_back(skin_fixtures::make_biped());
         AnimClip3D idle;
@@ -890,11 +955,17 @@ struct EcsRig {
         idle.duration = 1.0f;
         idle.channels.resize(model->skeletons[0].joint_count());
         model->clips.push_back(idle);
-        floor = ecs.raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(Collider3D{.kind = Collider3D::Kind::Box,
-                                      .half_extents = {20.0f, 0.5f, 20.0f}});
+        floor = ecs.raw()
+                    .entity()
+                    .set(Transform3D{.position = {0.0f, -0.5f, 0.0f}})
+                    .set(Collider3D{.kind = Collider3D::Kind::Box, .half_extents = {20.0f, 0.5f, 20.0f}});
         Animator3D animator;
         animator.clip = "idle";
-        hero = ecs.raw().entity().set(Transform3D{.position = at}).set(SkinnedMeshRenderer3D{.model = model}).set(animator);
+        hero = ecs.raw()
+                   .entity()
+                   .set(Transform3D{.position = at})
+                   .set(SkinnedMeshRenderer3D{.model = model})
+                   .set(animator);
         if (with_character) {
             CharacterController3D controller;
             hero.set(controller);
@@ -935,12 +1006,18 @@ struct EcsRig {
 
 void test_ecs_ragdoll_made_in_order() {
     EcsRig rig;
-    // A second skinned entity with a ragdoll and a character on the first: made after the bodies and characters, in id order.
-    const flecs::entity other = rig.ecs.raw().entity().set(Transform3D{.position = {3.0f, 0.0f, 0.0f}}).set(SkinnedMeshRenderer3D{.model = rig.model}).set(Ragdoll3D{});
+    // A second skinned entity with a ragdoll and a character on the first: made after the bodies and characters, in id
+    // order.
+    const flecs::entity other = rig.ecs.raw()
+                                    .entity()
+                                    .set(Transform3D{.position = {3.0f, 0.0f, 0.0f}})
+                                    .set(SkinnedMeshRenderer3D{.model = rig.model})
+                                    .set(Ragdoll3D{});
     rig.bodies.sync_bodies();
     CHECK(rig.bodies.ragdoll_of(rig.hero).valid() && rig.bodies.ragdoll_of(other).valid());
     CHECK(rig.bodies.ragdoll_of(rig.hero).index == 0 && rig.bodies.ragdoll_of(other).index == 1);
-    CHECK(rig.hero.get<PhysicsRagdoll3D>() != nullptr && rig.hero.get<PhysicsRagdoll3D>()->ragdoll == rig.bodies.ragdoll_of(rig.hero));
+    CHECK(rig.hero.get<PhysicsRagdoll3D>() != nullptr &&
+          rig.hero.get<PhysicsRagdoll3D>()->ragdoll == rig.bodies.ragdoll_of(rig.hero));
     // The floor's body is number 0, the ragdolls' bodies after it.
     CHECK(rig.physics.body_count() == 1 + 17 + 17);
     // A ragdoll's bodies carry the entity's id as their user id (events name it).
@@ -978,17 +1055,22 @@ void test_pose_reaches_the_animator() {
         const Mat4f world = rig.hero.get<Transform3D>()->matrix() * a.ik_world[static_cast<std::size_t>(j)];
         // The rotation of the matrix against the body's: the image of +X and +Y.
         const Vec3f x = q.rotate({1, 0, 0}), y = q.rotate({0, 1, 0});
-        worst_turn = std::max({worst_turn, length(Vec3f{world.m[0], world.m[1], world.m[2]} - x), length(Vec3f{world.m[4], world.m[5], world.m[6]} - y)});
+        worst_turn = std::max({worst_turn, length(Vec3f{world.m[0], world.m[1], world.m[2]} - x),
+                               length(Vec3f{world.m[4], world.m[5], world.m[6]} - y)});
         const i32 parent = sk.parents[static_cast<std::size_t>(j)];
         if (parent >= 0 && rig.body_of_joint(parent).valid()) {
-            const f32 bind = length(Vec3f{rest[static_cast<std::size_t>(j)].m[12], rest[static_cast<std::size_t>(j)].m[13], rest[static_cast<std::size_t>(j)].m[14]} -
-                                    Vec3f{rest[static_cast<std::size_t>(parent)].m[12], rest[static_cast<std::size_t>(parent)].m[13], rest[static_cast<std::size_t>(parent)].m[14]});
+            const f32 bind =
+                length(Vec3f{rest[static_cast<std::size_t>(j)].m[12], rest[static_cast<std::size_t>(j)].m[13],
+                             rest[static_cast<std::size_t>(j)].m[14]} -
+                       Vec3f{rest[static_cast<std::size_t>(parent)].m[12], rest[static_cast<std::size_t>(parent)].m[13],
+                             rest[static_cast<std::size_t>(parent)].m[14]});
             worst_length = std::max(worst_length, std::fabs(length(rig.joint(j) - rig.joint(parent)) - bind));
         }
     }
-    if (verbose) std::printf("  pose: place %.4f, bone length %.6f, turn %.5f\n", worst_place, worst_length, worst_turn);
-    CHECK(worst_place < 0.12f);   // the joints' own opening, summed down a chain (the pose is a rigid skeleton)
-    CHECK(worst_length < 2e-5f);  // exact: the pose keeps the bind pose's lengths
+    if (verbose)
+        std::printf("  pose: place %.4f, bone length %.6f, turn %.5f\n", worst_place, worst_length, worst_turn);
+    CHECK(worst_place < 0.12f);  // the joints' own opening, summed down a chain (the pose is a rigid skeleton)
+    CHECK(worst_length < 2e-5f); // exact: the pose keeps the bind pose's lengths
     CHECK(worst_turn < 1e-3f);
     // The pelvis (the top of the ragdolled part) is exactly where its body is.
     CHECK(near(rig.joint(B::pelvis), rig.physics.position(rig.body_of_joint(B::pelvis)), 1e-4f));
@@ -1014,8 +1096,8 @@ void test_alpha_zero_is_the_clip_bit_for_bit_and_one_is_the_body() {
     bool same = a->ik_pose.joints.size() == clip.joints.size() && a->ik_world.size() == clip_world.size();
     for (std::size_t j = 0; same && j < clip.joints.size(); ++j) {
         same = same && a->ik_pose.joints[j].translation == clip.joints[j].translation &&
-               a->ik_pose.joints[j].rotation == clip.joints[j].rotation && a->ik_pose.joints[j].scale == clip.joints[j].scale &&
-               a->ik_world[j] == clip_world[j];
+               a->ik_pose.joints[j].rotation == clip.joints[j].rotation &&
+               a->ik_pose.joints[j].scale == clip.joints[j].scale && a->ik_world[j] == clip_world[j];
     }
     CHECK(same);
     // All weights 1 and bodies given: the joints' world places are those.
@@ -1049,7 +1131,8 @@ void test_partial_ragdoll_leaves_the_rest_exact() {
     int arm_moved = 0;
     for (std::size_t j = 0; j < sk.joint_count(); ++j) {
         const bool same = a.ik_pose.joints[j].translation == clip.joints[j].translation &&
-                          a.ik_pose.joints[j].rotation == clip.joints[j].rotation && a.ik_pose.joints[j].scale == clip.joints[j].scale;
+                          a.ik_pose.joints[j].rotation == clip.joints[j].rotation &&
+                          a.ik_pose.joints[j].scale == clip.joints[j].scale;
         if (arm[j] == 0) {
             CHECK(same); // exactly the clip's
         } else if (!same) {
@@ -1065,8 +1148,8 @@ void test_partial_ragdoll_leaves_the_rest_exact() {
 }
 
 void test_ik_after_the_pose_is_written() {
-    // The left arm is a ragdoll, the right hand reaches a target by IK: the IK is solved first and the pose written over
-    // the ragdolled joints only, so that the IK arm is where the IK put it.
+    // The left arm is a ragdoll, the right hand reaches a target by IK: the IK is solved first and the pose written
+    // over the ragdolled joints only, so that the IK arm is where the IK put it.
     EcsRig rig({0.0f, 1.0f, 0.0f});
     IKConstraint3D hand;
     hand.name = "hand";
@@ -1109,7 +1192,8 @@ void test_hand_over_and_recovery() {
     for (const Body3D b : bs) {
         mean_speed += length(rig.physics.linear_velocity(b)) / static_cast<f32>(bs.size());
     }
-    if (verbose) std::printf("  hand over: character %.2f m/s, bodies %.2f\n", speed, mean_speed);
+    if (verbose)
+        std::printf("  hand over: character %.2f m/s, bodies %.2f\n", speed, mean_speed);
     CHECK_NEAR(mean_speed, speed, 1.0f);
     // It slides and falls and lies; the entity follows the pelvis's ground point.
     rig.run(240);
@@ -1161,15 +1245,18 @@ void test_recovery_blocked_without_room() {
     const Character3D c = rig.bodies.character_of(rig.hero);
     const Vec3f pelvis = rig.physics.position(rig.body_of_joint(B::pelvis));
     // A low ceiling over where it lies (after it has settled): standing would not fit.
-    rig.ecs.raw().entity().set(Transform3D{.position = {pelvis.x, 1.1f, pelvis.z}}).set(Collider3D{.kind = Collider3D::Kind::Box,
-                               .half_extents = {2.0f, 0.1f, 2.0f}});
+    rig.ecs.raw()
+        .entity()
+        .set(Transform3D{.position = {pelvis.x, 1.1f, pelvis.z}})
+        .set(Collider3D{.kind = Collider3D::Kind::Box, .half_extents = {2.0f, 0.1f, 2.0f}});
     rig.bodies.sync_bodies();
     const RagdollRecoverResult3D r = rig.bodies.recover_from_ragdoll(rig.hero, {});
     CHECK(!r.recovered && r.blocked && r.place.found);
     CHECK(!rig.physics.character_enabled(c));
     CHECK(rig.physics.ragdoll_state(rig.bodies.ragdoll_of(rig.hero)).mode == RagdollMode3D::Ragdoll);
     const auto events = rig.bodies.ragdoll_events();
-    CHECK(std::any_of(events.begin(), events.end(), [](const RagdollEvent3D& e) { return e.kind == RagdollEventKind3D::Blocked; }));
+    CHECK(std::any_of(events.begin(), events.end(),
+                      [](const RagdollEvent3D& e) { return e.kind == RagdollEventKind3D::Blocked; }));
     // No ground at all: refused too (a ragdoll far above the world).
     EcsRig air({0.0f, 100.0f, 0.0f}, serial(), true);
     air.bodies.sync_bodies();
@@ -1187,7 +1274,11 @@ void test_recovery_blocked_without_room() {
 std::vector<u64> ecs_scene_hashes(World3DConfig cfg, int steps) {
     EcsRig rig({0.0f, 1.5f, 0.0f}, cfg, true);
     // A second character and a rope in the scene as well.
-    rig.ecs.raw().entity().set(Transform3D{.position = {4.0f, 1.0f, 0.0f}}).set(SkinnedMeshRenderer3D{.model = rig.model}).set(Ragdoll3D{});
+    rig.ecs.raw()
+        .entity()
+        .set(Transform3D{.position = {4.0f, 1.0f, 0.0f}})
+        .set(SkinnedMeshRenderer3D{.model = rig.model})
+        .set(Ragdoll3D{});
     std::vector<u64> hashes;
     for (int i = 0; i < steps; ++i) {
         if (i == 5) {
@@ -1234,7 +1325,7 @@ void test_interpolation_of_the_pose() {
         const auto* pose = rig.bodies.presentation_pose(rig.hero);
         CHECK(pose && pose->position.size() == latest.size());
         if (pose)
-            for (std::size_t j=0; j<latest.size(); ++j)
+            for (std::size_t j = 0; j < latest.size(); ++j)
                 CHECK(near(pose->position[j], lerp(before_last[j], latest[j], alpha), 1e-5f));
         CHECK(rig.animator().pose_override.position == latest && rig.physics.state_hash() == hash);
     }
@@ -1350,7 +1441,7 @@ void test_hands_on_a_rope_by_ik() {
             const auto centre = lerp(point(segment), point(segment + 1), along - static_cast<f32>(segment));
             const auto normal = normalize(lerp(previous.normal, current.normal, alpha));
             const auto* hand = rig.animator().find_ik("hand_L");
-            const auto expected = alpha == 1 ? current.point + current.normal * .06f : centre + normal * .06f;
+            const auto expected = centre + normal * .06f;
             CHECK(near(hand->last_target, expected, 2e-5f));
             CHECK(hand->target.position == target && hand->target_rotation == rotation);
             CHECK(rig.physics.state_hash() == hash);
@@ -1385,7 +1476,7 @@ void test_hands_on_a_rope_by_ik() {
     const auto latest = rig.bodies.presentation_ik_target(*rig.animator().find_ik("hand_L"));
     CHECK(reset && latest && near(reset->position, latest->position, 1e-6f));
     CHECK(frame.collect(scene, nullptr, 1));
-    CHECK(rig.animator().find_ik("hand_L")->last_target == rig.animator().find_ik("hand_L")->target.position);
+    CHECK(latest && near(rig.animator().find_ik("hand_L")->last_target, latest->position, 1e-6f));
     rig.hero.get_mut<CharacterController3D>()->traversal.drop = true;
     rig.frame();
     rig.bodies.prepare_presentation(.5f);
@@ -1436,12 +1527,12 @@ void test_hand_presentation_on_a_rotating_hold() {
             if (!place)
                 continue;
             const auto* hand = rig.animator().find_ik("hand_L");
-            const auto expected = alpha == 1 ? grip.point + grip.normal * .06f
-                                             : place->apply(grip.local_point + grip.local_normal * .06f);
+            const auto expected = place->apply(grip.local_point + grip.local_normal * .06f);
             CHECK(near(hand->last_target, expected, 2e-5f));
             const auto root =
-                alpha < 1 ? rig.bodies.presentation_transform(rig.hero).value_or(rig.hero.get<WorldTransform3D>()->matrix)
-                          : rig.hero.get<WorldTransform3D>()->matrix;
+                alpha < 1
+                    ? rig.bodies.presentation_transform(rig.hero).value_or(rig.hero.get<WorldTransform3D>()->matrix)
+                    : rig.hero.get<WorldTransform3D>()->matrix;
             const auto joint = root * rig.animator().ik_world[B::hand_l];
             // Undo the authored hand offset: +Z points into the hold's surface.
             const auto palm = joint * Mat4f::rotation(Quatf::axis_angle({1, 0, 0}, -15));
@@ -1453,8 +1544,8 @@ void test_hand_presentation_on_a_rotating_hold() {
     CHECK(sampled == 60);
 }
 
-// A bone is the ragdoll's: destroying, reshaping or switching it from outside is refused (the ragdoll would go on driving a
-// dead or changed body), while the ragdoll's own switching and destroy_ragdoll still reach it.
+// A bone is the ragdoll's: destroying, reshaping or switching it from outside is refused (the ragdoll would go on
+// driving a dead or changed body), while the ragdoll's own switching and destroy_ragdoll still reach it.
 void test_bones_belong_to_the_ragdoll() {
     Rig rig({0.0f, 0.0f, 0.0f});
     const Body3D bone = rig.bodies[0];
@@ -1463,11 +1554,13 @@ void test_bones_belong_to_the_ragdoll() {
     const Vec3f at = rig.world.position(bone);
     CHECK(!rig.world.destroy_body(bone));
     CHECK(rig.world.contains(bone) && rig.world.body_count() == 18);
-    const auto layer=rig.world.layer(bone);const auto group=rig.world.group(bone);
-    CHECK(!rig.world.set_layer(bone,layers3d::Sensor));
-    rig.world.set_sensor(bone,true);rig.world.set_group(bone,123);
-    rig.world.set_no_collisions(bone,true);
-    CHECK(!rig.world.is_sensor(bone) && rig.world.layer(bone)==layer && rig.world.group(bone)==group);
+    const auto layer = rig.world.layer(bone);
+    const auto group = rig.world.group(bone);
+    CHECK(!rig.world.set_layer(bone, layers3d::Sensor));
+    rig.world.set_sensor(bone, true);
+    rig.world.set_group(bone, 123);
+    rig.world.set_no_collisions(bone, true);
+    CHECK(!rig.world.is_sensor(bone) && rig.world.layer(bone) == layer && rig.world.group(bone) == group);
     CHECK(!rig.world.set_shape(bone, Shape3D::sphere(0.1f)));
     CHECK(!rig.world.set_motion(bone, Body3DMotion::Dynamic));
     CHECK(rig.world.motion(bone) == Body3DMotion::Kinematic); // still Animated
@@ -1480,9 +1573,9 @@ void test_bones_belong_to_the_ragdoll() {
     CHECK(!rig.world.contains(bone) && rig.world.body_count() == 1);
 }
 
-// Past max_events the newest are dropped, as the world's contact events are: two ragdolls started in one step with room for
-// one event keep the first ragdoll's Started (the second's was kept when the oldest were dropped). Contact events are off, so
-// the count is the ragdoll's alone.
+// Past max_events the newest are dropped, as the world's contact events are: two ragdolls started in one step with room
+// for one event keep the first ragdoll's Started (the second's was kept when the oldest were dropped). Contact events
+// are off, so the count is the ragdoll's alone.
 void test_events_cap_keeps_the_first() {
     World3DConfig cfg = serial();
     cfg.max_events = 1;
@@ -1503,7 +1596,8 @@ void test_events_cap_keeps_the_first() {
 
 int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "-v") verbose = true;
+        if (std::string(argv[i]) == "-v")
+            verbose = true;
     }
     test_auto_desc();
     test_create_and_refusals();

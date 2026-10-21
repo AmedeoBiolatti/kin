@@ -157,14 +157,28 @@ if(BUILD_TESTING)
         COMMAND signal_siege "--content=${_siege_pack}" --headless --frames=30 --seed=7 --locale=fr
                 --fail-on-missing-text --mute --report=-)
     if(KIN_EXPERIMENTAL_3D)
-        # Sponza Walk renders a few frames headless and checks the picture is
-        # not blank. It skips (77) without Sponza in the reference cache or a
-        # GPU device (lavapipe is enough), and fails without one when
-        # KIN_REQUIRE_GPU_TESTS is set.
+        # Exercise the Sponza host with a vendored model so clean CI never
+        # depends on an external reference cache. The full Sponza benchmark
+        # still uses the separately downloaded asset. Required GPU runs fail
+        # when the device is unavailable; optional runs may skip.
+        foreach(_example IN ITEMS sponza_walk summit)
+            if(_example STREQUAL "sponza_walk")
+                set(_smoke_mode sponza)
+            else()
+                set(_smoke_mode summit)
+            endif()
+            add_test(NAME ${_example}-required-gpu-policy
+                COMMAND ${CMAKE_COMMAND} "-DPROGRAM=$<TARGET_FILE:${_example}>" "-DMODE=${_smoke_mode}"
+                        -P "${PROJECT_SOURCE_DIR}/tests/required_gpu_smoke.cmake")
+            set_tests_properties(${_example}-required-gpu-policy PROPERTIES TIMEOUT 90)
+        endforeach()
+        set(_sponza_no_reference "${CMAKE_CURRENT_BINARY_DIR}/sponza_smoke_no_reference")
+        file(WRITE "${_sponza_no_reference}" "Smoke tests must use their explicit vendored model.\n")
         add_test(NAME sponza-walk-smoke
             COMMAND sponza_walk --headless --frames 3 --width 480 --height 300
+                    --model "${PROJECT_SOURCE_DIR}/tests/fixtures/models/parts.glb" --eye 0,0,6 --target 0,0,0
                     "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/sponza_walk_smoke.png" --preset ao --skip-if-unavailable)
-        set_tests_properties(sponza-walk-smoke PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu" SKIP_RETURN_CODE 77
+        set_tests_properties(sponza-walk-smoke PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu;KIN_REFERENCE_CACHE=${_sponza_no_reference}" SKIP_RETURN_CODE 77
             TIMEOUT 300 PASS_REGULAR_EXPRESSION "differ from the background")
     endif()
 

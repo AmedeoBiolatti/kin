@@ -105,22 +105,22 @@ std::optional<kin::NavPoint3D> on = kin::nearest(nav, click, {1.0f, 2.0f, 1.0f})
 std::optional<kin::NavPoint3D> wander = kin::random_point(nav, key);
 ```
 
-`max_step_height` joins oppositely oriented tread edges whose projected endpoints
-match within `weld_distance` and whose vertical gap is within the setting. Zero
-keeps the original shared-edge topology. Stair paths include both heights at each
-step so a movement controller can perform the ascent/descent. This joins matching
-edges; it does not bridge horizontal gaps or manufacture ramps. Height clearance
-still applies. Use tessellated walk surfaces for radius erosion, which removes
-whole unsafe triangles conservatively. Border clearance propagates locally along
-connected walk surfaces, so an upper floor does not erode the floor below it.
+`max_step_height` joins oppositely oriented tread boundaries within the configured
+rise. Construction subdivides mismatched seams and same-height T junctions; it
+also accepts an upper tread overlapping the lower support by up to this distance
+(a nosing). Empty horizontal gaps are never bridged. Zero disables step/seam
+construction. Stair paths include both heights at each crossing. Stairs may be
+placed on a continuous floor: hidden lower triangles are filtered, new entry
+seams are joined, and blocking walls are checked again before radius erosion.
+Use tessellated walk surfaces to control conservative whole-triangle clearance.
 
 - `find_path` snaps both ends onto the mesh (within `NavPathOptions3D::extents`
   on each axis) and returns the path's corners: an A* search over the triangles'
   edges finds a corridor, the funnel algorithm pulls the string through it taut,
   and the corridor is moved past any vertex the string turned at that is not on a
-  border. Corners are border vertices only. Seen from above the path is the
+  border. Corners include border vertices and explicit step crossings. Seen from above the path is the
   shortest round the obstacles on the sides it takes; going round another side
-  is sometimes shorter, by about 1 % at most in the tests (0.03 % on average).
+  can be shorter; stair routes additionally depend on the selected step portals.
   A segment between two corners is straight, so it can pass under a crest or
   over a dip; follow the ground with `nearest` if the height matters. Empty when
   an end is off the mesh or the ends are in different regions (`region_of`).
@@ -138,20 +138,25 @@ Agent dimensions affect construction. A nonzero `agent_height` discards floor
 triangles whose vertical prism intersects any input geometry above the supporting
 surface, including small/sloping ceilings and vertical walls. The test covers the
 whole triangle footprint, not just its vertices or centroid. With a nonzero radius,
-headroom also includes the maximum uphill rise across that radius in the original
-connected region. A nonzero `agent_radius` then discards triangles within that
+headroom includes the nearby slope rise across that radius, without spreading
+the margin across step joins or distant parts of the level. Local slope searches
+run only when an overhead obstacle could make that margin relevant. A nonzero `agent_radius` then discards triangles within that
 horizontal distance of a walkable boundary, including boundaries made by headroom
 rejection. Different disconnected layers do not erode each other merely because
-their boundaries project to the same place. Both dimensions zero keep the original
-point-agent mesh; a zero individual dimension disables its corresponding check.
+their boundaries project to the same place. Both dimensions zero disable ordinary clearance checks. With step construction
+on, floor hidden under a climbable tread is still removed to expose its seam.
 
-Clearance is conservative: triangles are removed whole, never clipped or subdivided.
+Clearance is conservative: unsafe triangles are removed whole. Step construction
+subdivides mismatched boundary edges and narrow tread strips before clearance;
+it accepts overlapping stair nosings up to `max_step_height`, but never jumps
+empty horizontal gaps. Paths retain both sides of every step.
 Tessellate the walk surface finely enough for the margin the game needs (the clearance
-regressions use 0.1 m cells); a single large floor triangle touching a border can be
+regressions use 0.1 m cells; a grid-aligned doorway needs up to two extra cells
+beyond the agent diameter); a single large floor triangle touching a border can be
 removed entirely. Include walls and ceilings in the source soup, not only the intended
 walkable floor. Empty geometry after clearance is a valid empty result; check `valid()`
 before finding paths. All queries, including nearest/raycast/random sampling, use
-this same filtered geometry. Connectivity and regions are rebuilt after filtering.
+this same filtered geometry. Surviving connectivity is preserved and regions are relabelled after filtering.
 A 1e-5 world-unit tolerance separates support contact from head obstruction.
 
 This is static navigation for an upright agent aligned with `up`, not a physics

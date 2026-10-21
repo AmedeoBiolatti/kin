@@ -1265,8 +1265,11 @@ int run(int argc, char** argv) {
         const int code = run_scene_app(
             {.window = window, .headless = headless, .game = &game, .render_headless = true, .rendering_3d = true},
             scenes);
-        if (scene != nullptr && scene->unavailable() && options.skip_if_unavailable)
-            return exit_skipped;
+        if (scene != nullptr && scene->unavailable()) {
+            const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
+            const bool require_gpu = required && required[0] && std::string_view(required) != "0";
+            return options.skip_if_unavailable && !require_gpu ? exit_skipped : 1;
+        }
         return code;
     } catch (const std::exception& e) {
         std::cerr << "summit: " << e.what() << '\n';

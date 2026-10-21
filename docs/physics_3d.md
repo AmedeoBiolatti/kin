@@ -154,7 +154,8 @@ kin::Body3D crate = world.create_body({.shape = kin::Shape3D::box({0.5f, 0.5f, 0
 world.optimize_broad_phase();                    // once, after a level's bodies are in
 
 for (;;) {                                       // the engine's fixed step
-    world.step(1.0f / 60.0f);
+    const auto report = world.step(1.0f / 60.0f);
+    if (report.any()) break; // increase World3DConfig capacities before continuing
     kin::Vec3f p = world.position(crate);
     kin::Quatf q = world.rotation(crate);
 }
@@ -462,7 +463,8 @@ desc.position = {0, 1, 0};
 const kin::Character3D hero = world.create_character(desc);
 ...each fixed step:
 world.set_character_input(hero, {.move = {0, 1}, .forward = camera.forward(), .jump = pressed, .sprint = held});
-world.step(dt);                                  // characters first (in number order), then the world
+const auto step_report = world.step(dt);
+if (step_report.any()) return report_physics_failure(step_report);                                  // characters first (in number order), then the world
 const kin::CharacterState3D s = world.character(hero);   // position (feet), velocity, ground, ground_body, ground_speed, ...
 for (const kin::CharacterEvent3D& e : world.drain_character_events()) { /* Landed, LeftGround, HitHead, ContactBegin, ContactEnd */ }
 ```
@@ -567,12 +569,14 @@ kin::CharacterDesc3D desc;
 desc.traversal.enabled = true;                          // two hands (limb_count 2), reach 0.8 m, 100 units of stamina
 const kin::Character3D hero = world.create_character(desc);
 world.set_surface_material(ice, {.slip = 1.0f, .drain = 2.0f, .tag = 1});     // data, not code
-world.set_hold(rung, {.quality = 0.8f, .snap = true, .anchor = {0, 0, 0}});   // an authored hold
+if (!world.set_hold(rung, {.quality = 0.8f, .snap = true, .anchor = {0, 0, 0}}))
+    return report_invalid_hold();   // an authored hold
 ...each fixed step:
 world.set_character_input(hero, {.move = {0, 1}, .forward = wall_direction}); // hanging: x along the surface, y up it
 world.set_traversal_input(hero, {.grab = {left_held, right_held}, .reach = camera.forward(),
                                  .pull_up = f, .jump_off = space, .drop = x});
-world.step(dt);
+const auto step_report = world.step(dt);
+if (step_report.any()) return report_physics_failure(step_report);
 const kin::TraversalState3D t = world.traversal(hero);  // mode, the grips, the resource
 ```
 
@@ -702,7 +706,8 @@ kin::RagdollDesc desc = kin::auto_ragdoll_desc(skeleton, skeleton.rest_pose()); 
 const kin::RagdollHandle3D r = world.create_ragdoll(desc, bone_world_matrices);    // starts Animated: kinematic bodies at the pose
 ...each fixed step:
 world.set_ragdoll_targets(r, clip_pose_in_the_world);   // what the kinematic bodies follow
-world.step(dt);
+const auto step_report = world.step(dt);
+if (step_report.any()) return report_physics_failure(step_report);
 world.start_ragdoll(r, {.blend_seconds = 0.15f, .set_velocity = true, .velocity = v, .impulse_bone = chest, .impulse = hit});
 world.ragdoll_pose(r, bones);                           // per bone: share, place (what a pose writer takes)
 const kin::RagdollPlace3D at = world.ragdoll_get_up_place(r);   // the ground under the pelvis, its facing, lying face up or down

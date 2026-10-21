@@ -9,6 +9,31 @@ releases may change APIs.
 
 ### Fixed
 
+- Repair short-edge stair seam triangulation, exact-position welding, mixed-grid
+  nosings and stairs on continuous floors. Recheck new joins against blocking walls.
+- Retain lit-particle TAA under 1% fire flicker; preserve opaque motion through
+  particles and glass, and show completed colour frames if coverage replay fails.
+- Avoid Lua registry references per 2D method/property call, preserve script locations
+  on receiver errors, and preserve prefab leases across `scene3d.resolve`.
+- Keep rope-hand IK continuous at alpha 1; drain/publish constraint break events.
+- Exercise Sponza smoke with vendored geometry under an empty reference cache.
+
+- Restore safe 2D Lua method/property receivers in Release without changing 2D
+  numeric conversions. Missing/wrong `self` raises a Lua error.
+- Avoid terrain-wide ramp-margin floods and per-candidate clipping allocations;
+  preserve interior-wall corner links, exact-radius doorway clearance, radius-only
+  ramp joins, nosed stairs with mismatched tessellation, and mandatory step points.
+- Preserve transparent TAA under camera parallax without an opaque-motion copy;
+  validate moving local lights across the complete particle image.
+- Pack/upload particle casters only for maps being redrawn, prevent draw-time
+  creation of cast views, and release caster-order and particle-history scratch.
+- Preserve model rejection reasons even with no usable primitives; validate the
+  profile before GPU uploads and support omitted glTF inverse bind matrices.
+  Remove `Model3D::asset_diagnostics`; failed load results own the diagnostics.
+- Preserve renderer failures through session picking. Make required GPU example
+  tests fail on missing devices/assets, and use a vendored Sponza-host smoke model.
+- Correct headless interpolation and Lua-safety documentation.
+
 - Restore Clang aggregate animator construction; make headless `App::run_for`
   render the completed step and exercise that callback in runtime tests.
 - Preserve traversable stair joins for nonzero agent radii, distinguish risers
@@ -22,9 +47,8 @@ releases may change APIs.
 - Wake loads after dynamic support reshaping, narrow support wake queries to
   actual contacts, and avoid redundant kinematic/layer wake queries. Bound rope
   and constraint events, restore identity one-child compound bakes, remove stale
-  ECS physics handle components, and reuse rope readback storage. Report Jolt
-  capacity exhaustion through `StepReport3D` in Debug as well as Release, and
-  provide valid internal motion properties for kinematic surface shapes.
+  ECS physics handle components, reuse rope readback storage, and provide valid
+  internal motion properties for kinematic surface shapes.
 - Keep the required lavapipe CI check name, enable 3D branch pushes, install glslc
   across the compiler matrix, cover example GPU workflows, and compare Summit
   replay hashes and exact step counts within each build rather than against one
@@ -52,7 +76,7 @@ releases may change APIs.
 - Restore sleeping-body wakeups after collision-layer/group/filter changes,
   keep disabled contacts readable, and avoid full body reconciliation for an
   unchanged refused body. Preserve native particle emission controls.
-- Check Lua option and userdata types, enable sol2 safety checks, and bridge
+- Check Lua 3D option, argument and userdata types locally, and bridge
   reflected entities/session handles with `scene3d.handle` and `scene3d.resolve`.
 - Add read-only fixed-step presentation through session/frame collection alpha,
   including body/character descendants and joint-attachment roots.
@@ -64,7 +88,70 @@ releases may change APIs.
 - Document units, authored skinned component spelling and the accumulated 3D
   breaking changes in [the migration guide](3d_api_migration.md).
 
+- Experimental 3D review: ordinary and shipping builds leave `KIN_EXPERIMENTAL_3D` off;
+  the `3d` preset and CI opt in explicitly. Jolt follows kin's MSVC runtime selection.
+  Renderer tests have a software-GPU timeout and reserve timing comparisons for hardware GPUs.
+- Experimental 3D physics: deterministic contact payload ordering, compound child IDs through
+  offset wrappers, waking neighbours after static-body edits, teleport interpolation resets,
+  rollback motion types and temporary masses, and arbitrary convex-face debug drawing.
+  Contact recording now defaults off; games consuming contact events must opt in.
+- Experimental 3D rendering and scenes: transparent additive output is encoded, contact shadows
+  respect sun strength, indirect cluster draws use the CPU fallback on D3D12, failed mesh-pool
+  fence waits retain the fence, and authored environments preserve caller-owned picking.
+  LOD and additional shadow settings can be authored. Collected scenes reuse two retained
+  snapshots with threshold hysteresis; particles use the existing fog-colour table.
+- Experimental 3D assets and simulation: equivalent skins share a palette and animation channels
+  reach every skin that uses a joint; supported texture transforms are applied and incompatible
+  transforms produce diagnostics. Root motion retains multiple loops, IK handles larger skeletons,
+  particle catch-up is bounded, and the time-of-day clock accumulates in double precision.
+- Experimental 3D renderer: `pick()` before the first render or after a resize read an
+  uncleared target; TAA gave a re-made mesh the history of the mesh freed at the same address
+  (keyed by serial now); readback fence waits were released unchecked (a failed wait keeps the
+  fence and returns false); the occlusion cut warned every frame when its history was too small,
+  and at all for a scene with nothing clustered.
+- Experimental 3D lighting: spot, point and moon shadows biased by the normal-mapped normal
+  (acne on bumpy surfaces; the sun used the geometric one, now all do); sky fog ignored
+  `start`; fog over an Image sky takes the fixed colour as documented; the view output
+  tonemapped premultiplied colour over partial alpha (dark fringes on HDR edges); TAA blended
+  black where a history sample was NaN; the environment filter spread a NaN texel.
+- Experimental 3D animation: root motion wrapped the wrong way at negative speed; a model with
+  several skins drew only the first skin's parts (distinct unposed skins are diagnosed); an
+  `Animator3D` kept pointing at a model that `ModelFile3D::poll` had replaced.
+- Experimental 3D physics: Jolt's capacity flags (manifold cache, body pairs, contact
+  constraints) were discarded: `World3D::step` returns a `StepReport3D`, logged once; the ECS
+  bridge re-cooked a refused body every step (once now, until its components change) and had
+  no way back from `restore_state` (`WorldPhysicsState3D::resync_from_world`); rope and ragdoll
+  bodies could be destroyed or reshaped from outside (`owner_of`; refused); a kinematic body
+  could not become dynamic; a rotated collider on an entity with a non-uniform scale is refused
+  (as the asset cooker refuses it) instead of being made the wrong size; capped event lists
+  kept the last events instead of the first; the ECS bridge, scene sessions and
+  particles compile without FMA contraction so a step is the same on GCC and Clang.
+- Experimental 3D: `SceneSession3D`'s error for a lifecycle request made while a replacement
+  scene is prepared says the request is cancelled, not held.
+
+- Rebind changed vertex storage buffers when consecutive 3D draws share a graphics pipeline. Multiple retained instance
+  batches previously kept the first table bound, hiding or misplacing later geometry despite correct draw counters. Add
+  streamed/retained RGBA and picking regression coverage for depth, shadows, AO/contact, MSAA and TAA, plus a mutation check.
+
+- SDL_GPU: mip chains of textures that are not square had levels nobody wrote. SDL's mip generation stops at the level where the shorter side
+  is 1, but kin counted levels by the longer side, so a mipmapped 1024 x 512 texture had a last 1 x 1 level holding whatever its memory held,
+  read when the texture is drawn very small. Mipmapped textures (`ScaleMode::Mipmapped`) and 3D environments now have only the levels that
+  are written (`GpuDevice::complete_mip_levels`); in 3D this was the intermittent green metal spheres with image-based light (the NaN in that level
+  went into the environment's filtered copies), and the cause of 1 to 2 level differences between runs of the same picture.
+- 3D: draws were ordered by their mesh's heap address, so two surfaces tied in depth (the kiln, the crowd under TAA) came out in a different order from
+  one process to the next; the order is now the order the meshes were made. The reference scenes' "flaky" pictures are identical in every run.
+- Debug: `KIN_POISON_TEXTURES=1|2` and `KIN_POISON_BUFFERS=1` fill new targets, environment textures, the levels of a mip chain to be generated and cluster
+  buffers with NaN (or 3e4, or 0xFF bytes) before first use, so a read of unwritten memory shows every time; unset, they cost nothing per frame.
+
+- SDL_GPU: a hidden or minimized window let the CPU run frames ahead of
+  the GPU without bound (no swapchain texture, so nothing waited): GPU
+  memory grew until the device was lost. Such frames now wait for the
+  GPU when more than two are pending.
+
 ### Changed
+
+- Remove the unreachable `SceneSession3DReload::Failed` enumerator; failures use
+  the existing `Result3D` diagnostics. `scene3d.entity` returns nil for missing IDs.
 
 - Native physics result predicates/mutations and `StepReport3D` are
   `[[nodiscard]]`. Physics state hashing now always includes temporary mass,
@@ -95,6 +182,70 @@ releases may change APIs.
   travel in returned results instead of output strings. See the migration guide for
   C++ type/header renames, shader bindings, supported-model acceptance and the
   navigation clearance behavior change.
+
+- Give experimental 3D public types and headers consistent 3D suffixes, including Mesh3D/Model3D, ViewOptions3D and RenderStats3D. Light inputs use explicit LinearRgb channels with the existing sRGB conversion helpers; scene/prefab RGB triples keep their linear/HDR meaning. Add a 2D build preset that excludes 3D shaders, and a shared clang-format policy with a check for rendering/authoring sources. See docs/3d_api_migration.md.
+
+- Make normal ECS collection retain large opaque/masked mesh/model buckets automatically, with changed-run updates,
+  conservative range bounds, snapshot isolation and bounded CPU records. Reuse renderer layouts after exact structural
+  validation of clear/resubmission into the same scene. Preserve feature quality and GPU/workload/budget fallbacks.
+
+- Retire the renderer's implementation A/B environment controls and remove their
+  obsolete paths, including point-light tile-mask and cutout-depth experiments.
+  Preserve automatic capability/workload fallbacks and bounded caches. GPU pass
+  labels now use `Scene3D::debug.gpu_pass_markers`; profiling samples expose
+  `--gpu-pass-markers`. Remove `kin_reference --ab` and stale experiment counters.
+
+
+- Experimental 3D physics: `World3D::save_state` blobs carry their length and a checksum, and
+  `restore_state` checks the whole blob before touching the world (a short or corrupt blob
+  changes nothing and returns false); blobs saved before this are refused. Kinematic bodies
+  report their mass, so they can become dynamic later with `set_motion`, and `state_hash` of a
+  world with kinematic bodies changes.
+- Experimental 3D models: the glTF reader refuses what it cannot read correctly instead of
+  loading it silently wrong: Draco/meshopt-compressed and sparse accessors (they read as zeros),
+  absolute paths and `..` that leaves the content root or the mounted pack, nodes nested over
+  512 deep. `data:` images are decoded. A plain node between two of a skin's joints is kept as
+  a joint instead of breaking the chain.
+- ECS: `MeshRenderer3D` entities have a pick id (the entity id, or `MeshRenderer3D::id`), so
+  `Renderer3D::pick` names them; it returned 0 for every one.
+
+- Experimental 3D performance round (measured before/after, interleaved, medians):
+  - Retained instance tables are keyed by batch and material colour (two views drawing one
+    batch in two colours no longer re-upload the table every frame), release expired tables
+    without a device-wide wait, evict least-recently-used tables when the 128-table / 32 MiB
+    budget is full (one upgrade per frame, so the largest batches win and nothing thrashes),
+    and upload only the edited records of a batch (grove with 2,000 moving instances: 256 KB
+    instead of 1.28 MB a frame, frame time -11%). New `RenderDebugStats3D` counters
+    `retained_evictions`, `retained_refused`, `device_waits`.
+  - The adaptive upload staging buffer grows after a batch it had to split, up to 64 MiB
+    (streaming 17 MiB a frame: one submission instead of 1.8, fence time -25%).
+  - The local shadow array is sized by the lights that get a map this render, not by every
+    light with shadows enabled, and shrinks after 120 renders.
+  - Fog coloured by the procedural sky reads a 48-row elevation table built on the CPU when
+    the sky changes instead of integrating the atmosphere per fragment (fogged cameras
+    10-37% less GPU time at 1280x720; pictures move by at most one level; fixed-colour fog
+    is byte-identical).
+  - `InstanceBatch3D::update` grows group bounds incrementally and re-measures a group only
+    when a bounding copy moved inward (2,000 scattered single-copy edits: 354 ms to 0.24 ms a
+    frame); past 16 edits `changed_since` is rounded to 16-copy blocks instead of the whole
+    batch, and `changed_ranges_since` lists the edited ranges.
+  - Particle wind is evaluated per 1/120 s step with the sines' time phases precomputed and
+    a vectorised polynomial sine (20k particles with gusts and turbulence: 16 ms to 0.57 ms
+    per update; the wind field agrees with `Wind3D::velocity` to 1.4e-5 m/s).
+  - The ECS physics bridge re-reads its bound set only when flecs reports a structural change
+    (or a rebuild, refusal, motion change or lost body asks for it), stamps static and
+    kinematic transforms, and reuses event vectors when publishing singletons (500 resting bodies:
+    0.085 ms to 0.038 ms a step of bridge overhead). `SceneSession3D::step` skips the editor
+    hook's transform propagation and particle-budget check when no later-phase system ran.
+  - Animation blends in place into the player's scratch poses and caches the animator's
+    state/layer keys (five times fewer allocations in the skeleton tests). `World3D::shape`
+    returns the stored handle without allocating; Summit turns `contact_events` off.
+  - Clustered meshes release their welded CPU vertices after upload (`MeshClusterBuild3D`
+    holds them only while a mesh is made; `MeshClusters3D` is the hierarchy alone), and flat
+    unindexed meshes' LOD levels index shared zero-normal vertices instead of three per
+    triangle per level (a 2 M-triangle soup with 4 levels: -168 MB resident, -325 MB peak;
+    the levels then ignore a normal map, as flat clusters do). Benchmarks
+    `kin_render3d_bench` (batch edits, wind) and `kin_physics3d_bench ecs` are added.
 
 ### Added
 
@@ -691,134 +842,6 @@ releases may change APIs.
   against `kin_material.inc.glsl`, which has kin's lighting as functions.
   Shader building passes `-I` for the engine's includes. Reference scenes
   `ibl_spheres` and `ibl_helmet` with Poly Haven's Kloofendal sky (CC0).
-
-### Changed
-
-- Give experimental 3D public types and headers consistent 3D suffixes, including Mesh3D/Model3D, ViewOptions3D and RenderStats3D. Light inputs use explicit LinearRgb channels with the existing sRGB conversion helpers; scene/prefab RGB triples keep their linear/HDR meaning. Add a 2D build preset that excludes 3D shaders, and a shared clang-format policy with a check for rendering/authoring sources. See docs/3d_api_migration.md.
-
-- Make normal ECS collection retain large opaque/masked mesh/model buckets automatically, with changed-run updates,
-  conservative range bounds, snapshot isolation and bounded CPU records. Reuse renderer layouts after exact structural
-  validation of clear/resubmission into the same scene. Preserve feature quality and GPU/workload/budget fallbacks.
-
-- Retire the renderer's implementation A/B environment controls and remove their
-  obsolete paths, including point-light tile-mask and cutout-depth experiments.
-  Preserve automatic capability/workload fallbacks and bounded caches. GPU pass
-  labels now use `Scene3D::debug.gpu_pass_markers`; profiling samples expose
-  `--gpu-pass-markers`. Remove `kin_reference --ab` and stale experiment counters.
-
-
-- Experimental 3D physics: `World3D::save_state` blobs carry their length and a checksum, and
-  `restore_state` checks the whole blob before touching the world (a short or corrupt blob
-  changes nothing and returns false); blobs saved before this are refused. Kinematic bodies
-  report their mass, so they can become dynamic later with `set_motion`, and `state_hash` of a
-  world with kinematic bodies changes.
-- Experimental 3D models: the glTF reader refuses what it cannot read correctly instead of
-  loading it silently wrong: Draco/meshopt-compressed and sparse accessors (they read as zeros),
-  absolute paths and `..` that leaves the content root or the mounted pack, nodes nested over
-  512 deep. `data:` images are decoded. A plain node between two of a skin's joints is kept as
-  a joint instead of breaking the chain.
-- ECS: `MeshRenderer3D` entities have a pick id (the entity id, or `MeshRenderer3D::id`), so
-  `Renderer3D::pick` names them; it returned 0 for every one.
-
-- Experimental 3D performance round (measured before/after, interleaved, medians):
-  - Retained instance tables are keyed by batch and material colour (two views drawing one
-    batch in two colours no longer re-upload the table every frame), release expired tables
-    without a device-wide wait, evict least-recently-used tables when the 128-table / 32 MiB
-    budget is full (one upgrade per frame, so the largest batches win and nothing thrashes),
-    and upload only the edited records of a batch (grove with 2,000 moving instances: 256 KB
-    instead of 1.28 MB a frame, frame time -11%). New `RenderDebugStats3D` counters
-    `retained_evictions`, `retained_refused`, `device_waits`.
-  - The adaptive upload staging buffer grows after a batch it had to split, up to 64 MiB
-    (streaming 17 MiB a frame: one submission instead of 1.8, fence time -25%).
-  - The local shadow array is sized by the lights that get a map this render, not by every
-    light with shadows enabled, and shrinks after 120 renders.
-  - Fog coloured by the procedural sky reads a 48-row elevation table built on the CPU when
-    the sky changes instead of integrating the atmosphere per fragment (fogged cameras
-    10-37% less GPU time at 1280x720; pictures move by at most one level; fixed-colour fog
-    is byte-identical).
-  - `InstanceBatch3D::update` grows group bounds incrementally and re-measures a group only
-    when a bounding copy moved inward (2,000 scattered single-copy edits: 354 ms to 0.24 ms a
-    frame); past 16 edits `changed_since` is rounded to 16-copy blocks instead of the whole
-    batch, and `changed_ranges_since` lists the edited ranges.
-  - Particle wind is evaluated per 1/120 s step with the sines' time phases precomputed and
-    a vectorised polynomial sine (20k particles with gusts and turbulence: 16 ms to 0.57 ms
-    per update; the wind field agrees with `Wind3D::velocity` to 1.4e-5 m/s).
-  - The ECS physics bridge re-reads its bound set only when flecs reports a structural change
-    (or a rebuild, refusal, motion change or lost body asks for it), stamps static and
-    kinematic transforms, and reuses event vectors when publishing singletons (500 resting bodies:
-    0.085 ms to 0.038 ms a step of bridge overhead). `SceneSession3D::step` skips the editor
-    hook's transform propagation and particle-budget check when no later-phase system ran.
-  - Animation blends in place into the player's scratch poses and caches the animator's
-    state/layer keys (five times fewer allocations in the skeleton tests). `World3D::shape`
-    returns the stored handle without allocating; Summit turns `contact_events` off.
-  - Clustered meshes release their welded CPU vertices after upload (`MeshClusterBuild3D`
-    holds them only while a mesh is made; `MeshClusters3D` is the hierarchy alone), and flat
-    unindexed meshes' LOD levels index shared zero-normal vertices instead of three per
-    triangle per level (a 2 M-triangle soup with 4 levels: -168 MB resident, -325 MB peak;
-    the levels then ignore a normal map, as flat clusters do). Benchmarks
-    `kin_render3d_bench` (batch edits, wind) and `kin_physics3d_bench ecs` are added.
-
-### Fixed
-
-- Experimental 3D review: ordinary and shipping builds leave `KIN_EXPERIMENTAL_3D` off;
-  the `3d` preset and CI opt in explicitly. Jolt follows kin's MSVC runtime selection.
-  Renderer tests have a software-GPU timeout and reserve timing comparisons for hardware GPUs.
-- Experimental 3D physics: deterministic contact payload ordering, compound child IDs through
-  offset wrappers, waking neighbours after static-body edits, teleport interpolation resets,
-  rollback motion types and temporary masses, and arbitrary convex-face debug drawing.
-  Contact recording now defaults off; games consuming contact events must opt in.
-- Experimental 3D rendering and scenes: transparent additive output is encoded, contact shadows
-  respect sun strength, indirect cluster draws use the CPU fallback on D3D12, failed mesh-pool
-  fence waits retain the fence, and authored environments preserve caller-owned picking.
-  LOD and additional shadow settings can be authored. Collected scenes reuse two retained
-  snapshots with threshold hysteresis; particles use the existing fog-colour table.
-- Experimental 3D assets and simulation: equivalent skins share a palette and animation channels
-  reach every skin that uses a joint; supported texture transforms are applied and incompatible
-  transforms produce diagnostics. Root motion retains multiple loops, IK handles larger skeletons,
-  particle catch-up is bounded, and the time-of-day clock accumulates in double precision.
-- Experimental 3D renderer: `pick()` before the first render or after a resize read an
-  uncleared target; TAA gave a re-made mesh the history of the mesh freed at the same address
-  (keyed by serial now); readback fence waits were released unchecked (a failed wait keeps the
-  fence and returns false); the occlusion cut warned every frame when its history was too small,
-  and at all for a scene with nothing clustered.
-- Experimental 3D lighting: spot, point and moon shadows biased by the normal-mapped normal
-  (acne on bumpy surfaces; the sun used the geometric one, now all do); sky fog ignored
-  `start`; fog over an Image sky takes the fixed colour as documented; the view output
-  tonemapped premultiplied colour over partial alpha (dark fringes on HDR edges); TAA blended
-  black where a history sample was NaN; the environment filter spread a NaN texel.
-- Experimental 3D animation: root motion wrapped the wrong way at negative speed; a model with
-  several skins drew only the first skin's parts (distinct unposed skins are diagnosed); an
-  `Animator3D` kept pointing at a model that `ModelFile3D::poll` had replaced.
-- Experimental 3D physics: Jolt's capacity flags (manifold cache, body pairs, contact
-  constraints) were discarded: `World3D::step` returns a `StepReport3D`, logged once; the ECS
-  bridge re-cooked a refused body every step (once now, until its components change) and had
-  no way back from `restore_state` (`WorldPhysicsState3D::resync_from_world`); rope and ragdoll
-  bodies could be destroyed or reshaped from outside (`owner_of`; refused); a kinematic body
-  could not become dynamic; a rotated collider on an entity with a non-uniform scale is refused
-  (as the asset cooker refuses it) instead of being made the wrong size; capped event lists
-  kept the last events instead of the first; the ECS bridge, scene sessions and
-  particles compile without FMA contraction so a step is the same on GCC and Clang.
-- Experimental 3D: `SceneSession3D`'s error for a lifecycle request made while a replacement
-  scene is prepared says the request is cancelled, not held.
-
-- Rebind changed vertex storage buffers when consecutive 3D draws share a graphics pipeline. Multiple retained instance
-  batches previously kept the first table bound, hiding or misplacing later geometry despite correct draw counters. Add
-  streamed/retained RGBA and picking regression coverage for depth, shadows, AO/contact, MSAA and TAA, plus a mutation check.
-
-- SDL_GPU: mip chains of textures that are not square had levels nobody wrote. SDL's mip generation stops at the level where the shorter side
-  is 1, but kin counted levels by the longer side, so a mipmapped 1024 x 512 texture had a last 1 x 1 level holding whatever its memory held,
-  read when the texture is drawn very small. Mipmapped textures (`ScaleMode::Mipmapped`) and 3D environments now have only the levels that
-  are written (`GpuDevice::complete_mip_levels`); in 3D this was the intermittent green metal spheres with image-based light (the NaN in that level
-  went into the environment's filtered copies), and the cause of 1 to 2 level differences between runs of the same picture.
-- 3D: draws were ordered by their mesh's heap address, so two surfaces tied in depth (the kiln, the crowd under TAA) came out in a different order from
-  one process to the next; the order is now the order the meshes were made. The reference scenes' "flaky" pictures are identical in every run.
-- Debug: `KIN_POISON_TEXTURES=1|2` and `KIN_POISON_BUFFERS=1` fill new targets, environment textures, the levels of a mip chain to be generated and cluster
-  buffers with NaN (or 3e4, or 0xFF bytes) before first use, so a read of unwritten memory shows every time; unset, they cost nothing per frame.
-
-- SDL_GPU: a hidden or minimized window let the CPU run frames ahead of
-  the GPU without bound (no swapchain texture, so nothing waited): GPU
-  memory grew until the device was lost. Such frames now wait for the
-  GPU when more than two are pending.
 
 ## [0.2.6] — 2026-10-07
 

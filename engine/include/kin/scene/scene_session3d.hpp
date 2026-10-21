@@ -231,7 +231,7 @@ struct SceneSession3DOptions {
     SceneScriptOptions3D scripts;
 };
 
-enum class SceneSession3DReload { Unchanged, Activated, Failed };
+enum class SceneSession3DReload { Unchanged, Activated };
 
 struct SceneFieldEdit3D {
     EcsEntity entity;

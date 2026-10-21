@@ -1,12 +1,8 @@
-#include <kin/physics3d/shape3d.hpp>
-
 #include "jolt_runtime.hpp"
 
-#include <kin/assets/bake_cache.hpp>
-
 #include <Jolt/Core/Factory.h>
-#include <Jolt/Core/Memory.h>
 #include <Jolt/Core/IssueReporting.h>
+#include <Jolt/Core/Memory.h>
 #include <Jolt/Core/StreamIn.h>
 #include <Jolt/Core/StreamOut.h>
 #include <Jolt/Geometry/IndexedTriangle.h>
@@ -21,10 +17,11 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/RegisterTypes.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <kin/assets/bake_cache.hpp>
+#include <kin/physics3d/shape3d.hpp>
 #include <mutex>
 #include <string_view>
 
@@ -32,29 +29,11 @@ namespace kin {
 
 namespace physics3d_detail {
 
-#ifdef JPH_ENABLE_ASSERTS
-namespace {
-JPH::AssertFailedFunction previous_assert = nullptr;
-bool jolt_assert(const char* expression, const char* message, const char* file, JPH::uint line) {
-    // Jolt reports recoverable capacity exhaustion twice: this assertion and
-    // Update's return value. World3D consumes the latter as StepReport3D and
-    // logs it once per world, including in Debug. Preserve every other assert.
-    if (std::strcmp(expression, "errors == EPhysicsUpdateError::None") == 0 &&
-        std::string_view{file}.ends_with("PhysicsSystem.cpp"))
-        return false;
-    return previous_assert ? previous_assert(expression, message, file, line) : true;
-}
-} // namespace
-#endif
-
 void ensure_jolt_runtime() {
     static std::once_flag once;
     std::call_once(once, [] {
         JPH::RegisterDefaultAllocator();
-#ifdef JPH_ENABLE_ASSERTS
-        previous_assert = JPH::AssertFailed;
-        JPH::AssertFailed = jolt_assert;
-#endif
+
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
     });
@@ -70,8 +49,12 @@ using physics3d_detail::to_jolt;
 // Jolt's own default for the rounded edge of boxes, cylinders and hulls.
 constexpr f32 max_convex_radius = 0.05f;
 
-bool positive_finite(f32 v) { return std::isfinite(v) && v > 0.0f; }
-bool finite(Vec3f v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
+bool positive_finite(f32 v) {
+    return std::isfinite(v) && v > 0.0f;
+}
+bool finite(Vec3f v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
 
 std::shared_ptr<const ShapeData> make_data(const JPH::ShapeSettings::ShapeResult& result, Shape3DKind kind) {
     if (result.HasError() || !result.IsValid()) {
@@ -130,19 +113,26 @@ private:
 bool made_as(Shape3DKind kind, JPH::EShapeSubType type) {
     using T = JPH::EShapeSubType;
     switch (kind) {
-    case Shape3DKind::Box: return type == T::Box;
-    case Shape3DKind::Sphere: return type == T::Sphere;
-    case Shape3DKind::Capsule: return type == T::Capsule;
-    case Shape3DKind::Cylinder: return type == T::Cylinder;
-    case Shape3DKind::ConvexHull: return type == T::ConvexHull;
-    case Shape3DKind::TriangleMesh: return type == T::Mesh;
-    case Shape3DKind::HeightField: return type == T::HeightField;
+    case Shape3DKind::Box:
+        return type == T::Box;
+    case Shape3DKind::Sphere:
+        return type == T::Sphere;
+    case Shape3DKind::Capsule:
+        return type == T::Capsule;
+    case Shape3DKind::Cylinder:
+        return type == T::Cylinder;
+    case Shape3DKind::ConvexHull:
+        return type == T::ConvexHull;
+    case Shape3DKind::TriangleMesh:
+        return type == T::Mesh;
+    case Shape3DKind::HeightField:
+        return type == T::HeightField;
     case Shape3DKind::Compound:
         // Jolt collapses an identity one-child compound to its child. The saved
         // header already checks the authored kind, so retain that logical kind.
-        return type==T::StaticCompound || type==T::MutableCompound || type==T::RotatedTranslated || type==T::Scaled ||
-               type==T::Box || type==T::Sphere || type==T::Capsule || type==T::Cylinder || type==T::ConvexHull ||
-               type==T::Mesh || type==T::HeightField;
+        return type == T::StaticCompound || type == T::MutableCompound || type == T::RotatedTranslated ||
+               type == T::Scaled || type == T::Box || type == T::Sphere || type == T::Capsule || type == T::Cylinder ||
+               type == T::ConvexHull || type == T::Mesh || type == T::HeightField;
     }
     return false;
 }
@@ -192,9 +182,10 @@ Shape3D Shape3D::restore_binary(std::span<const u8> bytes, Shape3DKind kind) {
     header.value(stored_kind);
     header.value(length);
     header.value(checksum);
-    // Jolt trusts the lengths in its state (it sizes arrays by them), so it reads nothing that the checksum has not passed.
-    if (!header.done() || magic != binary_magic || layout != binary_layout || version != binary_version() || stored_kind != static_cast<u8>(kind) ||
-        length != bytes.size() - binary_header) {
+    // Jolt trusts the lengths in its state (it sizes arrays by them), so it reads nothing that the checksum has not
+    // passed.
+    if (!header.done() || magic != binary_magic || layout != binary_layout || version != binary_version() ||
+        stored_kind != static_cast<u8>(kind) || length != bytes.size() - binary_header) {
         return out;
     }
     const std::span<const u8> payload = bytes.subspan(binary_header);
@@ -206,7 +197,8 @@ Shape3D Shape3D::restore_binary(std::span<const u8> bytes, Shape3DKind kind) {
     JPH::Shape::IDToShapeMap shapes;
     JPH::Shape::IDToMaterialMap materials;
     const JPH::Shape::ShapeResult result = JPH::Shape::sRestoreWithChildren(stream, shapes, materials);
-    if (!stream.whole() || result.HasError() || !result.IsValid() || result.Get() == nullptr || !made_as(kind, result.Get()->GetSubType())) {
+    if (!stream.whole() || result.HasError() || !result.IsValid() || result.Get() == nullptr ||
+        !made_as(kind, result.Get()->GetSubType())) {
         return out;
     }
     auto data = std::make_shared<ShapeData>();
@@ -218,8 +210,8 @@ Shape3D Shape3D::restore_binary(std::span<const u8> bytes, Shape3DKind kind) {
 
 Shape3D Shape3D::box(Vec3f half_extents) {
     Shape3D out;
-    if (!finite(half_extents) || !positive_finite(half_extents.x) || !positive_finite(half_extents.y)
-        || !positive_finite(half_extents.z)) {
+    if (!finite(half_extents) || !positive_finite(half_extents.x) || !positive_finite(half_extents.y) ||
+        !positive_finite(half_extents.z)) {
         return out;
     }
     physics3d_detail::ensure_jolt_runtime();
@@ -320,9 +312,9 @@ Shape3D Shape3D::triangle_mesh(std::span<const Vec3f> vertices, std::span<const 
 
 Shape3D Shape3D::height_field(std::span<const f32> heights, i32 sample_count, Vec3f offset, Vec3f scale) {
     Shape3D out;
-    if (sample_count < 4 || sample_count % 2 != 0
-        || heights.size() != static_cast<std::size_t>(sample_count) * static_cast<std::size_t>(sample_count)
-        || !finite(offset) || !finite(scale)) {
+    if (sample_count < 4 || sample_count % 2 != 0 ||
+        heights.size() != static_cast<std::size_t>(sample_count) * static_cast<std::size_t>(sample_count) ||
+        !finite(offset) || !finite(scale)) {
         return out;
     }
     physics3d_detail::ensure_jolt_runtime();
@@ -345,7 +337,8 @@ Shape3D Shape3D::compound(std::span<const ShapeChild3D> children) {
         if (!child.shape.valid() || !finite(child.position)) {
             return out;
         }
-        settings.AddShape(to_jolt(child.position), to_jolt(child.rotation.normalized()), child.shape._data->shape, index++);
+        settings.AddShape(to_jolt(child.position), to_jolt(child.rotation.normalized()), child.shape._data->shape,
+                          index++);
     }
     out._data = make_data(settings.Create(), Shape3DKind::Compound);
     return out;
@@ -364,11 +357,13 @@ Vec3f Shape3D::centre_of_mass() const {
 }
 
 Vec3f Shape3D::bounds_min() const {
-    return _data ? physics3d_detail::from_jolt(_data->shape->GetLocalBounds().mMin + _data->shape->GetCenterOfMass()) : Vec3f{};
+    return _data ? physics3d_detail::from_jolt(_data->shape->GetLocalBounds().mMin + _data->shape->GetCenterOfMass())
+                 : Vec3f{};
 }
 
 Vec3f Shape3D::bounds_max() const {
-    return _data ? physics3d_detail::from_jolt(_data->shape->GetLocalBounds().mMax + _data->shape->GetCenterOfMass()) : Vec3f{};
+    return _data ? physics3d_detail::from_jolt(_data->shape->GetLocalBounds().mMax + _data->shape->GetCenterOfMass())
+                 : Vec3f{};
 }
 
 } // namespace kin

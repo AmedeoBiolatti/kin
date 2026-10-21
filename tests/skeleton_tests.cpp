@@ -837,9 +837,9 @@ void test_loader_skins_and_clips() {
     w = weights_of(read(skin_fixtures::make_gltf(o)));
     assert(close(w[5][0], 1.0f) && close(w[5][1], 0.0f)); // the index 200 influence is dropped, the rest renormalised
 
-    // Morph target weights channels are ignored (logged); the joints' clip is kept. A node that is no joint, moved by
-    // the same animation, is the node skeleton's (after the skin), and its channel a second clip of the same name after
-    // the skin's.
+    // CPU inspection retains the joint clip while recording the unsupported morph channels. A node that is no joint,
+    // moved by the same animation, is the node skeleton's (after the skin), and its channel a second clip of the same
+    // name after the skin's.
     o = {};
     o.morph_channel = true;
     o.node_animation = true;
@@ -1031,9 +1031,11 @@ void test_loader_refuses_unreadable_geometry() {
     assert(ok);
     assert(data.parts.size() == 1 && data.parts[0].name == "plain" && data.parts[0].mesh.vertices.size() == 3);
     assert(close(data.parts[0].mesh.bounds().max, {1, 1, 0}));
-    const char* left_out = "3D: a mesh primitive is left out (its geometry cannot be read)";
-    assert(logged(events, left_out, "sparse: a sparse accessor is not read"));
-    assert(logged(events, left_out, "flat: an attribute has the wrong number of components"));
+    const char* rejected = "model profile violation: primitive geometry cannot be read";
+    assert(logged(events, rejected, "sparse: a sparse accessor is not read"));
+    assert(logged(events, rejected, "flat: an attribute has the wrong number of components"));
+    assert(data.asset_diagnostics.size() == 2);
+    assert(diagnostics3d_text(data.asset_diagnostics).find("sparse accessor") != std::string::npos);
 }
 
 void test_loader_keeps_nodes_between_joints() {
@@ -1525,7 +1527,7 @@ void test_loader_node_animation() {
         set_logger_config(before);
         assert(ok && deep.parts.size() == 1 && deep.parts[0].node == -1 && deep.skeletons.empty() &&
                deep.clips.empty());
-        assert(logged(events, "3D: animations move more nodes than a skeleton can have: those nodes are not animated",
+        assert(logged(events, "model rejected: animated node hierarchy exceeds the joint limit; split the model",
                       "300 nodes"));
     }
 }

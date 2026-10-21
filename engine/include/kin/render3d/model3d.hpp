@@ -148,13 +148,12 @@ public:
     // A failed result reports invalid size/bounds or non-finite transforms.
     Result3D<Mat4f> placement(const ModelPlacement3D& options = {}) const;
 
-    bool valid() const { return !parts.empty() && asset_diagnostics.empty(); }
+    bool valid() const { return !parts.empty(); }
     explicit operator bool() const { return valid(); }
 
     // Loader provenance for explicit reload/diagnostics; no source bytes or
     // CPU geometry retained. Empty for programmatically constructed models.
     std::vector<std::filesystem::path> source_files;
-    std::vector<std::string> asset_diagnostics;
 
     // The skeleton (index into skeletons) of the plain nodes the file's animations move, or -1 for none. Its joints are
     // those nodes and every node above them (parents first; names and rest poses are the nodes', inverse binds

@@ -5,16 +5,15 @@
 
 #include "skin_fixtures.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/mesh3d.hpp>
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstdio>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,18 +24,22 @@ using namespace kin;
 
 int failures = 0;
 
-#define CHECK(cond)                                                                           \
-    do {                                                                                      \
-        if (!(cond)) {                                                                        \
-            ++failures;                                                                       \
-            std::fprintf(stderr, "physics3d_ecs_tests:%d: CHECK failed: %s\n", __LINE__, #cond); \
-        }                                                                                     \
+#define CHECK(cond)                                                                                                    \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            ++failures;                                                                                                \
+            std::fprintf(stderr, "physics3d_ecs_tests:%d: CHECK failed: %s\n", __LINE__, #cond);                       \
+        }                                                                                                              \
     } while (0)
 
 constexpr f32 dt = 1.0f / 60.0f;
 
-bool near(f32 a, f32 b, f32 eps) { return std::fabs(a - b) <= eps; }
-bool near(Vec3f a, Vec3f b, f32 eps) { return near(a.x, b.x, eps) && near(a.y, b.y, eps) && near(a.z, b.z, eps); }
+bool near(f32 a, f32 b, f32 eps) {
+    return std::fabs(a - b) <= eps;
+}
+bool near(Vec3f a, Vec3f b, f32 eps) {
+    return near(a.x, b.x, eps) && near(a.y, b.y, eps) && near(a.z, b.z, eps);
+}
 
 World3DConfig serial() {
     World3DConfig c;
@@ -58,7 +61,10 @@ flecs::entity add_floor(flecs::world& world) {
 }
 
 flecs::entity add_crate(flecs::world& world, Vec3f at, f32 half = 0.5f) {
-    return world.entity().set(Transform3D{.position = at}).set(box_collider({half, half, half})).set(RigidBody3D{.density = 500.0f});
+    return world.entity()
+        .set(Transform3D{.position = at})
+        .set(box_collider({half, half, half}))
+        .set(RigidBody3D{.density = 500.0f});
 }
 
 void test_disabled_contacts_readable() {
@@ -184,10 +190,11 @@ void test_dynamic_writes_back() {
     CHECK(near(t->position.y, 0.5f, 0.03f) && near(t->position.x, 0.0f, 0.02f));
     CHECK(near(t->position, physics.position(bodies.body_of(crate)), 1e-6f));
     // A body that tumbled: the rotation is written.
-    const flecs::entity tipped = world.entity()
-                                     .set(Transform3D{.position = {5, 3, 0}, .rotation = Quatf::axis_angle({0, 0, 1}, 30.0f)})
-                                     .set(box_collider({0.5f, 0.5f, 0.5f}))
-                                     .set(RigidBody3D{});
+    const flecs::entity tipped =
+        world.entity()
+            .set(Transform3D{.position = {5, 3, 0}, .rotation = Quatf::axis_angle({0, 0, 1}, 30.0f)})
+            .set(box_collider({0.5f, 0.5f, 0.5f}))
+            .set(RigidBody3D{});
     bodies.step(dt);
     f32 changed = 0.0f;
     for (int i = 0; i < 120; ++i) {
@@ -205,7 +212,8 @@ void test_dynamic_writes_back() {
     for (int i = 0; i < 60; ++i) {
         bodies.step(dt);
     }
-    CHECK(near(floater.get<Transform3D>()->position.x, 3.0f, 0.1f) && near(floater.get<Transform3D>()->position.y, 10.0f, 0.01f));
+    CHECK(near(floater.get<Transform3D>()->position.x, 3.0f, 0.1f) &&
+          near(floater.get<Transform3D>()->position.y, 10.0f, 0.01f));
 }
 
 void test_read_only_render_snapshots() {
@@ -218,8 +226,10 @@ void test_read_only_render_snapshots() {
     const auto moving = add_crate(world, {});
     moving.get_mut<RigidBody3D>()->linear_velocity = {6, 0, 0};
     moving.get_mut<RigidBody3D>()->linear_damping = 0;
-    const auto platform = world.entity().set(Transform3D{.position = {10, 0, 0}})
-        .set(box_collider({1, .2f, 1})).set(RigidBody3D{.motion = Body3DMotion::Kinematic});
+    const auto platform = world.entity()
+                              .set(Transform3D{.position = {10, 0, 0}})
+                              .set(box_collider({1, .2f, 1}))
+                              .set(RigidBody3D{.motion = Body3DMotion::Kinematic});
     const auto child = world.entity().child_of(moving).set(Transform3D{.position = {2, 0, 0}});
     bodies.sync_bodies();
     platform.get_mut<Transform3D>()->position.x = 12;
@@ -246,7 +256,8 @@ void test_parented_bodies() {
     WorldPhysicsState3D bodies{ecs, physics};
     add_floor(world);
     // A parent at (10, 0, 0) turned 90 degrees about y; the child's local (2, 4, 0) is the world's (10, 4, -2).
-    const flecs::entity parent = world.entity().set(Transform3D{.position = {10, 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 90.0f)});
+    const flecs::entity parent =
+        world.entity().set(Transform3D{.position = {10, 0, 0}, .rotation = Quatf::axis_angle({0, 1, 0}, 90.0f)});
     const flecs::entity child = world.entity()
                                     .child_of(parent)
                                     .set(Transform3D{.position = {2, 4, 0}})
@@ -258,9 +269,7 @@ void test_parented_bodies() {
         bodies.step(dt);
     }
     // The world pose of the child is what the body says: local = parent^-1 * body.
-    const auto world_of = [&] {
-        return parent.get<Transform3D>()->matrix().apply(child.get<Transform3D>()->position);
-    };
+    const auto world_of = [&] { return parent.get<Transform3D>()->matrix().apply(child.get<Transform3D>()->position); };
     CHECK(near(world_of(), physics.position(bodies.body_of(child)), 1e-3f));
     // Move the parent away: the body is left where it is (bodies are world level), the local transform follows.
     const Vec3f before = physics.position(bodies.body_of(child));
@@ -297,8 +306,8 @@ void test_kinematic_follows_and_pushes() {
     const Body3D pb = bodies.body_of(platform);
     CHECK(near(physics.position(pb).x, 4.0f, 0.02f));
     CHECK(near(platform.get<Transform3D>()->position.x, 4.0f, 1e-5f)); // not written back
-    CHECK(crate.get<Transform3D>()->position.x > 2.5f); // carried by friction
-    CHECK(crate.get<Transform3D>()->position.y > 0.6f);   // on it
+    CHECK(crate.get<Transform3D>()->position.x > 2.5f);                // carried by friction
+    CHECK(crate.get<Transform3D>()->position.y > 0.6f);                // on it
     // A kinematic child follows its parent.
     const flecs::entity holder = world.entity().set(Transform3D{.position = {20, 0, 0}});
     const flecs::entity hand = world.entity()
@@ -335,7 +344,8 @@ void test_game_moves_entities() {
     CHECK(physics.raycast({0, 1, 10}, {0, 1, 0}) && near(physics.raycast({0, 1, 10}, {0, 1, 0})->point.z, 5.1f, 1e-3f));
     wall.get_mut<Transform3D>()->position = {0, 1, -5};
     bodies.step(dt);
-    CHECK(!physics.raycast({0, 1, 10}, {0, 1, 0}) || near(physics.raycast({0, 1, 10}, {0, 1, 0})->point.z, -4.9f, 1e-3f));
+    CHECK(!physics.raycast({0, 1, 10}, {0, 1, 0}) ||
+          near(physics.raycast({0, 1, 10}, {0, 1, 0})->point.z, -4.9f, 1e-3f));
     // rebuild() and a changed motion: re-made at the next sync.
     const Body3D old = bodies.body_of(wall);
     wall.set(RigidBody3D{.motion = Body3DMotion::Kinematic});
@@ -401,9 +411,13 @@ std::vector<u64> scene_hashes(const World3DConfig& cfg, int frames) {
         const f32 z = static_cast<f32>((i / 6) % 5) * 1.1f - 2.0f;
         const f32 y = 1.0f + 0.9f * static_cast<f32>(i / 30);
         if (i % 3 == 0) {
-            world.entity().set(Transform3D{.position = {x, y, z}}).set(Collider3D{.kind = Collider3D::Kind::Sphere, .radius = 0.4f}).set(RigidBody3D{});
+            world.entity()
+                .set(Transform3D{.position = {x, y, z}})
+                .set(Collider3D{.kind = Collider3D::Kind::Sphere, .radius = 0.4f})
+                .set(RigidBody3D{});
         } else {
-            world.entity().set(Transform3D{.position = {x, y, z}, .rotation = Quatf::axis_angle({1, 1, 0}, static_cast<f32>(i))})
+            world.entity()
+                .set(Transform3D{.position = {x, y, z}, .rotation = Quatf::axis_angle({1, 1, 0}, static_cast<f32>(i))})
                 .set(box_collider({0.4f, 0.3f, 0.35f}))
                 .set(RigidBody3D{});
         }
@@ -451,7 +465,8 @@ void test_interpolation() {
     const Vec3f at = physics.position(bodies.body_of(crate));
     bodies.step(dt);
     CHECK(physics.position(bodies.body_of(crate)).y < at.y);
-    CHECK(near(physics.position(bodies.body_of(crate)).y, at.y + physics.linear_velocity(bodies.body_of(crate)).y * dt, 0.01f));
+    CHECK(near(physics.position(bodies.body_of(crate)).y, at.y + physics.linear_velocity(bodies.body_of(crate)).y * dt,
+               0.01f));
 }
 
 // Game code moving a dynamic entity is a teleport: the interpolation starts again from there (no lerp across the jump).
@@ -477,7 +492,8 @@ void test_teleported_entity_interpolates_from_there() {
     CHECK(near(crate.get<Transform3D>()->position, after, 1e-6f));
     // The interpolated pose is not read as a move: the body goes on falling from where it is.
     bodies.step(dt);
-    CHECK(physics.position(bodies.body_of(crate)).y < after.y && near(physics.position(bodies.body_of(crate)).x, 8.0f, 1e-5f));
+    CHECK(physics.position(bodies.body_of(crate)).y < after.y &&
+          near(physics.position(bodies.body_of(crate)).x, 8.0f, 1e-5f));
 }
 
 // --- debug lines ---
@@ -485,13 +501,19 @@ void test_teleported_entity_interpolates_from_there() {
 void test_debug_lines() {
     World3D physics(serial());
     // A sleeping box, an awake sphere, a kinematic capsule, a trigger, and a hinge.
-    physics.create_body({.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
+    physics.create_body(
+        {.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
     const Body3D resting = physics.create_body({.shape = Shape3D::box({0.5f, 0.5f, 0.5f}), .position = {-3, 0.5f, 0}});
     physics.create_body({.shape = Shape3D::sphere(0.5f), .position = {0, 40, 0}});
-    physics.create_body({.shape = Shape3D::capsule(0.5f, 0.25f), .motion = Body3DMotion::Kinematic, .position = {3, 1, 0},
+    physics.create_body({.shape = Shape3D::capsule(0.5f, 0.25f),
+                         .motion = Body3DMotion::Kinematic,
+                         .position = {3, 1, 0},
                          .linear_velocity = {0, 0.5f, 0}}); // moving: a kinematic body at rest sleeps too
-    physics.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static, .position = {6, 1, 0},
-                         .layer = layers3d::Sensor, .sensor = true});
+    physics.create_body({.shape = Shape3D::box({1, 1, 1}),
+                         .motion = Body3DMotion::Static,
+                         .position = {6, 1, 0},
+                         .layer = layers3d::Sensor,
+                         .sensor = true});
     for (int i = 0; i < 120; ++i) {
         (void)physics.step(dt);
     }
@@ -543,7 +565,8 @@ void test_debug_lines() {
     World3DConfig cfg = serial();
     cfg.persist_events = true;
     World3D resting_world(cfg);
-    resting_world.create_body({.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
+    resting_world.create_body(
+        {.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
     resting_world.create_body({.shape = Shape3D::box({0.5f, 0.5f, 0.5f}), .position = {0, 0.55f, 0}});
     for (int i = 0; i < 20; ++i) {
         (void)resting_world.step(dt);
@@ -584,8 +607,17 @@ void test_debug_lines() {
     weak.break_force = 1.0f;
     weak.collide_connected = true;
     joints.create_constraint(weak);
-    (void)joints.step(dt);
-    (void)joints.step(dt);
+    kin::EcsWorld constraint_ecs;
+    WorldPhysicsState3D bridge{constraint_ecs, joints};
+    bridge.step(dt);
+    const auto first_breaks = bridge.constraint_events().size();
+    bridge.step(dt);
+    CHECK(first_breaks + bridge.constraint_events().size() == 1);
+    CHECK(joints.drain_constraint_events().empty());
+    bridge.step(dt);
+    CHECK(bridge.constraint_events().empty());
+    CHECK(constraint_ecs.raw().get<ConstraintEvents3D>() &&
+          constraint_ecs.raw().get<ConstraintEvents3D>()->events.empty());
     jd.clear();
     jd.world(joints);
     CHECK(!jd.lines().empty() && jd.lines().front().color == jd.options().broken_constraint);
@@ -616,7 +648,8 @@ void test_debug_mesh_and_height_field_caps() {
     for (std::size_t i = 0; i < heights.size(); ++i) {
         heights[i] = static_cast<f32>(i % 7) * 0.1f;
     }
-    physics.create_body({.shape = Shape3D::height_field(heights, 64), .motion = Body3DMotion::Static, .position = {300, 0, 0}});
+    physics.create_body(
+        {.shape = Shape3D::height_field(heights, 64), .motion = Body3DMotion::Static, .position = {300, 0, 0}});
     DebugDraw3D draw;
     draw.world(physics);
     // Two shapes, each at most 600 triangles of three edges, a little over for the stride's rounding.
@@ -632,10 +665,10 @@ void test_foot_placement_over_physics() {
     // A physics floor with its top at y = -0.2 and a step (top at y = 0) under the left foot: the planted feet land on
     // what the raycast says, and the pelvis comes down by the lower foot's drop.
     World3D physics(serial());
-    const Body3D floor = physics.create_body({.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static,
-                                              .position = {0, -0.7f, 0}});
-    const Body3D step = physics.create_body({.shape = Shape3D::box({0.5f, 0.1f, 1.0f}), .motion = Body3DMotion::Static,
-                                             .position = {0.55f, -0.1f, 0}});
+    const Body3D floor = physics.create_body(
+        {.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static, .position = {0, -0.7f, 0}});
+    const Body3D step = physics.create_body(
+        {.shape = Shape3D::box({0.5f, 0.1f, 1.0f}), .motion = Body3DMotion::Static, .position = {0.55f, -0.1f, 0}});
     physics.optimize_broad_phase();
 
     auto model = std::make_shared<Model3D>();
@@ -649,7 +682,11 @@ void test_foot_placement_over_physics() {
 
     kin::EcsWorld ecs;
     WorldRenderState3D state{ecs};
-    const flecs::entity e = ecs.raw().entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model = model}).set(Animator3D{.clip = "idle"});
+    const flecs::entity e = ecs.raw()
+                                .entity()
+                                .set(Transform3D{})
+                                .set(SkinnedMeshRenderer3D{.model = model})
+                                .set(Animator3D{.clip = "idle"});
     int casts = 0;
     IKConstraint3D feet;
     feet.name = "feet";
@@ -693,8 +730,8 @@ void test_foot_placement_over_physics() {
     CHECK(near(joint(B::ankle_l).x, 0.1f, 0.02f) && near(joint(B::ankle_r).x, -0.1f, 0.02f));
 
     // The character's own body is ignored by the query: a capsule round the pelvis would otherwise be "ground".
-    const Body3D self = physics.create_body({.shape = Shape3D::capsule(0.6f, 0.3f), .motion = Body3DMotion::Kinematic,
-                                             .position = {0, 0.5f, 0}});
+    const Body3D self = physics.create_body(
+        {.shape = Shape3D::capsule(0.6f, 0.3f), .motion = Body3DMotion::Kinematic, .position = {0, 0.5f, 0}});
     const GroundQuery3D with_self = ground_query_from_world(physics, all_layers3d);
     const GroundQuery3D without_self = ground_query_from_world(physics, all_layers3d, self);
     const auto blocked = with_self({0, 2, 0}, {0, -1, 0});
@@ -712,9 +749,12 @@ void test_colliders_from_meshes() {
     const Bounds3D bounds{{-1, 0, -2}, {1, 3, 2}};
     kin::EcsWorld ecs;
     flecs::world& world = ecs.raw();
-    const flecs::entity e = world.entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, bounds}});
+    const flecs::entity e = world.entity()
+                                .set(Transform3D{})
+                                .set(MeshRenderer3D{.mesh = Mesh3D{std::make_shared<FakeMesh>(), 3, 3, bounds}});
     const auto c = collider_from_mesh(e);
-    CHECK(c && c->kind == Collider3D::Kind::Box && near(c->half_extents, {1, 1.5f, 2}, 1e-6f) && near(c->offset, {0, 1.5f, 0}, 1e-6f));
+    CHECK(c && c->kind == Collider3D::Kind::Box && near(c->half_extents, {1, 1.5f, 2}, 1e-6f) &&
+          near(c->offset, {0, 1.5f, 0}, 1e-6f));
     CHECK(!collider_from_mesh(world.entity()));
     // Through the system: the box covers the mesh's bounds.
     World3D physics(serial());
@@ -733,8 +773,16 @@ void test_colliders_from_meshes() {
     World3D other(serial());
     kin::EcsWorld ecs2;
     WorldPhysicsState3D bodies2{ecs2, other};
-    ecs2.raw().entity().set(Transform3D{.position = {0, 1, 0}}).set(hull).set(RigidBody3D{.motion = Body3DMotion::Static});
-    ecs2.raw().entity().set(Transform3D{.position = {10, 1, 0}}).set(tris).set(RigidBody3D{.motion = Body3DMotion::Static});
+    ecs2.raw()
+        .entity()
+        .set(Transform3D{.position = {0, 1, 0}})
+        .set(hull)
+        .set(RigidBody3D{.motion = Body3DMotion::Static});
+    ecs2.raw()
+        .entity()
+        .set(Transform3D{.position = {10, 1, 0}})
+        .set(tris)
+        .set(RigidBody3D{.motion = Body3DMotion::Static});
     bodies2.sync_bodies();
     CHECK(other.body_count() == 2);
     const auto h = other.raycast({0.2f, 10, 0.2f}, {0.2f, -5, 0.2f});
@@ -747,8 +795,8 @@ void test_colliders_from_meshes() {
     CHECK(other.body_count() == 2 && bodies2.body_count() == 2);
 }
 
-
-// --- characters ---------------------------------------------------------------------------------------------------------
+// --- characters
+// ---------------------------------------------------------------------------------------------------------
 
 flecs::entity add_character(flecs::world& world, Vec3f at, CharacterDesc3D desc = {}) {
     CharacterController3D c;
@@ -778,7 +826,8 @@ void test_character_entity() {
     CHECK(bodies.body_count() == 2);
     CHECK(physics.body_count() == 3 && physics.character_count() == 1 && bodies.character_count() == 1);
     const Character3D handle = bodies.character_of(hero);
-    CHECK(handle.valid() && hero.get<PhysicsCharacter3D>() != nullptr && hero.get<PhysicsCharacter3D>()->character == handle);
+    CHECK(handle.valid() && hero.get<PhysicsCharacter3D>() != nullptr &&
+          hero.get<PhysicsCharacter3D>()->character == handle);
     CHECK(physics.character(handle).body.index == 2);
     CHECK(physics.user_id(physics.character(handle).body) == hero.id());
 
@@ -812,7 +861,8 @@ void test_character_entity() {
     for (int i = 0; i < 90; ++i) {
         bodies.step(dt);
     }
-    CHECK(near(hero.get<Transform3D>()->position.x, -10.0f, 0.1f) && near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
+    CHECK(near(hero.get<Transform3D>()->position.x, -10.0f, 0.1f) &&
+          near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
 
     // Events with entity ids: a jump and a landing; the singleton carries them too.
     std::vector<CharacterEvent3D> seen;
@@ -889,7 +939,8 @@ void test_character_parented_and_interpolated() {
         bodies.step(dt);
     }
     CHECK(near(physics.character(handle).position.x, 12.0f, 1e-3f));
-    CHECK(near(hero.get<Transform3D>()->position.x, 2.0f, 1e-3f) && near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
+    CHECK(near(hero.get<Transform3D>()->position.x, 2.0f, 1e-3f) &&
+          near(hero.get<Transform3D>()->position.y, 0.0f, 0.03f));
     press(hero, {0, 1});
     for (int i = 0; i < 30; ++i) {
         bodies.step(dt);
@@ -931,7 +982,8 @@ void test_character_animation_link() {
     CHECK(near(params().get_float("speed"), 0.0f, 0.01f));
     CHECK(!params().get_bool("airborne"));
     // Its foot placer is given the physics floor as the ground, weight 1, and the capsule is not part of it.
-    const IKConstraint3D* placer = hero.get<Animator3D>()->ik_constraints.empty() ? nullptr : &hero.get<Animator3D>()->ik_constraints[0];
+    const IKConstraint3D* placer =
+        hero.get<Animator3D>()->ik_constraints.empty() ? nullptr : &hero.get<Animator3D>()->ik_constraints[0];
     CHECK(placer != nullptr && placer->ground && near(placer->weight, 1.0f, 1e-6f));
     if (placer != nullptr && placer->ground) {
         const auto hit = placer->ground({0.0f, 1.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
@@ -966,10 +1018,9 @@ void test_character_animation_link() {
     CHECK(made.blend_spaces.at("ground").entries.size() == 3 && made.blend_spaces.at("ground").parameter == "speed");
 }
 
-
-// The foot placer on a character's own capsule: the biped of the P1b fixture stands on a floor (y = 0) with a 10 cm step in a
-// layer the character walks through but the foot rays hit, under its left foot. The ground the system hands the placer is the
-// physics world with the capsule left out; the ankles land on what it says.
+// The foot placer on a character's own capsule: the biped of the P1b fixture stands on a floor (y = 0) with a 10 cm
+// step in a layer the character walks through but the foot rays hit, under its left foot. The ground the system hands
+// the placer is the physics world with the capsule left out; the ankles land on what it says.
 void test_character_feet_on_physics_ground() {
     kin::EcsWorld ecs;
     flecs::world& world = ecs.raw();
@@ -1027,8 +1078,8 @@ void test_character_feet_on_physics_ground() {
         return Vec3f{m.m[12], m.m[13], m.m[14]};
     };
     namespace B = skin_fixtures::biped;
-    // Left foot (x = +0.1) on the step (top y = 0.1), right (x = -0.1) on the floor (y = 0): the ankle 0.05 above each sole,
-    // and the capsule round the pelvis was not taken for ground.
+    // Left foot (x = +0.1) on the step (top y = 0.1), right (x = -0.1) on the floor (y = 0): the ankle 0.05 above each
+    // sole, and the capsule round the pelvis was not taken for ground.
     CHECK(near(joint(B::ankle_l).y, 0.1f + 0.05f, 4e-3f));
     CHECK(near(joint(B::ankle_r).y, 0.0f + 0.05f, 4e-3f));
     CHECK(near(joint(B::ankle_l).x, 0.1f, 0.02f) && near(joint(B::ankle_r).x, -0.1f, 0.02f));
@@ -1042,7 +1093,8 @@ std::vector<u64> character_scene_hashes(World3DConfig cfg, int frames) {
     WorldPhysicsState3D bodies{ecs, physics};
     add_floor(world);
     for (int i = 0; i < 12; ++i) {
-        add_crate(world, {static_cast<f32>(i % 4) * 1.2f + 2.0f, 0.5f + static_cast<f32>(i / 4) * 1.1f, static_cast<f32>(i % 3) - 1.0f});
+        add_crate(world, {static_cast<f32>(i % 4) * 1.2f + 2.0f, 0.5f + static_cast<f32>(i / 4) * 1.1f,
+                          static_cast<f32>(i % 3) - 1.0f});
     }
     std::vector<flecs::entity> heroes;
     for (int i = 0; i < 4; ++i) {
@@ -1073,8 +1125,8 @@ void test_character_scene_determinism() {
     CHECK(a.front() != a.back());
 }
 
-
-// --- grab and climb ---------------------------------------------------------------------------------------------------
+// --- grab and climb
+// ---------------------------------------------------------------------------------------------------
 
 // A wall (z from -1.5 to 0, 4 m tall) with a hand-sized hold on its face, a crate and a character in front of it.
 struct ClimbScene {
@@ -1111,7 +1163,8 @@ void test_traversal_entities() {
     // What a hand finds is read from the components when the body is made.
     const Body3D wall_body = scene.bodies.body_of(scene.wall);
     CHECK(scene.physics.surface_material(wall_body).tag == 42);
-    CHECK(near(scene.physics.surface_material(wall_body).grip, 0.9f, 1e-6f) && near(scene.physics.surface_material(wall_body).drain, 1.5f, 1e-6f));
+    CHECK(near(scene.physics.surface_material(wall_body).grip, 0.9f, 1e-6f) &&
+          near(scene.physics.surface_material(wall_body).drain, 1.5f, 1e-6f));
     const Body3D hold_body = scene.bodies.body_of(scene.hold);
     CHECK(scene.physics.is_hold(hold_body) && near(scene.physics.hold(hold_body).quality, 0.7f, 1e-6f));
     CHECK(!scene.physics.is_hold(wall_body));
@@ -1200,7 +1253,8 @@ void test_traversal_entities_events() {
         for (const CharacterEvent3D& e : scene.bodies.character_events()) {
             if (e.kind == CharacterEventKind3D::Gripped) {
                 ++gripped;
-                CHECK(e.user_id == scene.hero.id() && e.body_user_id == scene.wall.id() && e.hand == static_cast<u8>(gripped - 1));
+                CHECK(e.user_id == scene.hero.id() && e.body_user_id == scene.wall.id() &&
+                      e.hand == static_cast<u8>(gripped - 1));
                 CHECK(near(e.point.z, 0.0f, 1e-3f));
             }
         }
@@ -1213,8 +1267,8 @@ void test_traversal_entities_events() {
 }
 
 void test_traversal_hands_ik() {
-    // The biped's two hands go to the two anchors by IK (limb 0 the left hand), from the animation link, while it hangs; and
-    // the hands go free (weight 0) when it lets go.
+    // The biped's two hands go to the two anchors by IK (limb 0 the left hand), from the animation link, while it
+    // hangs; and the hands go free (weight 0) when it lets go.
     auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(skin_fixtures::make_biped());
     const Skeleton3D& sk = model->skeletons[0];
@@ -1264,9 +1318,11 @@ void test_traversal_hands_ik() {
     CHECK(a.params.get_bool("hanging"));
     CHECK(near(a.ik_constraints[0].weight, 1.0f, 1e-6f) && near(a.ik_constraints[1].weight, 1.0f, 1e-6f));
     const Mat4f world = scene.hero.get<Transform3D>()->matrix();
-    const auto hand_world = [&](int joint) { return world.apply(Vec3f{a.ik_world[static_cast<std::size_t>(joint)].m[12],
-                                                                       a.ik_world[static_cast<std::size_t>(joint)].m[13],
-                                                                       a.ik_world[static_cast<std::size_t>(joint)].m[14]}); };
+    const auto hand_world = [&](int joint) {
+        return world.apply(Vec3f{a.ik_world[static_cast<std::size_t>(joint)].m[12],
+                                 a.ik_world[static_cast<std::size_t>(joint)].m[13],
+                                 a.ik_world[static_cast<std::size_t>(joint)].m[14]});
+    };
     namespace B = skin_fixtures::biped;
     const TraversalState3D t = scene.bodies.traversal_of(scene.hero);
     // Each hand within 2 cm of its anchor (the left model hand is the character's left: limb 0).
@@ -1281,7 +1337,8 @@ void test_traversal_hands_ik() {
     CHECK(!a.params.get_bool("hanging"));
 }
 
-// --- refusals and rollback ---------------------------------------------------------------------------------------------------
+// --- refusals and rollback
+// ---------------------------------------------------------------------------------------------------
 
 // The warnings that the bridge logs (category physics3d) while it lives, counted by a piece of their text.
 struct Warnings {
@@ -1303,8 +1360,10 @@ void test_refused_bodies_are_tried_once() {
     WorldPhysicsState3D bodies{ecs, physics};
     Warnings warnings;
 
-    // A dynamic triangle mesh is refused by the world. Ten steps ask it once, not ten times (each ask cooks the mesh and warns).
-    const Collider3D triangles = collider_triangles_from_mesh_data(std::make_shared<MeshData3D>(meshes::box({2, 2, 2})));
+    // A dynamic triangle mesh is refused by the world. Ten steps ask it once, not ten times (each ask cooks the mesh
+    // and warns).
+    const Collider3D triangles =
+        collider_triangles_from_mesh_data(std::make_shared<MeshData3D>(meshes::box({2, 2, 2})));
     flecs::entity wall = world.entity().set(Transform3D{.position = {0, 3, 0}}).set(triangles).set(RigidBody3D{});
     for (int i = 0; i < 10; ++i) {
         bodies.step(dt);
@@ -1390,8 +1449,9 @@ void test_rotated_collider_under_skewed_scale() {
     WorldPhysicsState3D bodies{ecs, physics};
     Warnings warnings;
 
-    // A beam 2 m long along X, turned to Z, on an entity stretched along Z: the scale would have to be applied after the turn
-    // (6 m), which a shape scaled in its own axes and then turned cannot be. It is refused (as the asset cooker refuses it).
+    // A beam 2 m long along X, turned to Z, on an entity stretched along Z: the scale would have to be applied after
+    // the turn (6 m), which a shape scaled in its own axes and then turned cannot be. It is refused (as the asset
+    // cooker refuses it).
     Collider3D beam = box_collider({1.0f, 0.1f, 0.1f});
     beam.rotation = Quatf::axis_angle({0, 1, 0}, 90.0f);
     world.entity().set(Transform3D{.position = {0, 10, 0}, .scale = {1, 1, 3}}).set(beam);
@@ -1457,7 +1517,8 @@ void test_resync_after_restore() {
     CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f) && near(hero.get<Transform3D>()->position, stood, 1e-6f));
     // And the step goes on from there: the entities are not read as a move by game code.
     bodies.step(dt);
-    CHECK(physics.position(body).y < at.y && near(physics.position(body).y, at.y + physics.linear_velocity(body).y * dt, 0.01f));
+    CHECK(physics.position(body).y < at.y &&
+          near(physics.position(body).y, at.y + physics.linear_velocity(body).y * dt, 0.01f));
     CHECK(near(crate.get<Transform3D>()->position, physics.position(body), 1e-6f));
 }
 
@@ -1492,10 +1553,10 @@ void test_resync_of_a_sleeping_body() {
     CHECK(!physics.is_active(body) && near(box.get<Transform3D>()->position, rest, 1e-6f));
 }
 
-// Which entities have bodies is read again only when it can have changed, so every way it can change is checked after a run of quiet
-// steps (the frames that read nothing again): a new entity, a removed component, a destroyed entity, a raw write to a motion (no
-// modified()), disabling, a character component, a body the world lost, rebuild(), and a static entity moved or given a parent long
-// after its pose was last taken.
+// Which entities have bodies is read again only when it can have changed, so every way it can change is checked after a
+// run of quiet steps (the frames that read nothing again): a new entity, a removed component, a destroyed entity, a raw
+// write to a motion (no modified()), disabling, a character component, a body the world lost, rebuild(), and a static
+// entity moved or given a parent long after its pose was last taken.
 void test_bound_set_follows_changes_after_quiet_steps() {
     kin::EcsWorld ecs;
     flecs::world& world = ecs.raw();
@@ -1503,7 +1564,8 @@ void test_bound_set_follows_changes_after_quiet_steps() {
     WorldPhysicsState3D bodies{ecs, physics};
     add_floor(world);
     const flecs::entity crate = add_crate(world, {0, 40, 0});
-    const flecs::entity wall = world.entity().set(Transform3D{.position = {5, 1, 0}}).set(box_collider({0.5f, 1, 0.5f}));
+    const flecs::entity wall =
+        world.entity().set(Transform3D{.position = {5, 1, 0}}).set(box_collider({0.5f, 1, 0.5f}));
     const auto quiet = [&](int n) {
         for (int i = 0; i < n; ++i) {
             bodies.step(dt);
@@ -1596,8 +1658,8 @@ void test_inherited_body_settings_follow_source_changes() {
     flecs::world& world = ecs.raw();
     world.component<RigidBody3D>().add(flecs::OnInstantiate, flecs::Inherit);
     const auto prefab = world.prefab().set(RigidBody3D{.motion = Body3DMotion::Kinematic});
-    const auto child = world.entity().is_a(prefab).set(Transform3D{.position = {0, 5, 0}})
-                           .set(box_collider({0.5f, 0.5f, 0.5f}));
+    const auto child =
+        world.entity().is_a(prefab).set(Transform3D{.position = {0, 5, 0}}).set(box_collider({0.5f, 0.5f, 0.5f}));
     World3D physics(serial());
     WorldPhysicsState3D bodies{ecs, physics};
     for (int i = 0; i < 3; ++i)
@@ -1620,7 +1682,8 @@ void test_inherited_body_settings_follow_source_changes() {
     CHECK(physics.motion(bodies.body_of(child)) == Body3DMotion::Kinematic);
 }
 
-// Events reach the singletons, in the order of events(), in step and in advance, the same bits as the vector game code reads.
+// Events reach the singletons, in the order of events(), in step and in advance, the same bits as the vector game code
+// reads.
 void test_event_singletons_match_events() {
     kin::EcsWorld ecs;
     flecs::world& world = ecs.raw();
@@ -1637,7 +1700,8 @@ void test_event_singletons_match_events() {
         CHECK(singleton != nullptr && singleton->events.size() == bodies.events().size());
         if (singleton != nullptr && singleton->events.size() == bodies.events().size()) {
             for (std::size_t k = 0; k < singleton->events.size(); ++k) {
-                CHECK(singleton->events[k].a == bodies.events()[k].a && singleton->events[k].b == bodies.events()[k].b &&
+                CHECK(singleton->events[k].a == bodies.events()[k].a &&
+                      singleton->events[k].b == bodies.events()[k].b &&
                       singleton->events[k].kind == bodies.events()[k].kind);
             }
         }

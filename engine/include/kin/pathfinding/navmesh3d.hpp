@@ -4,8 +4,8 @@
 // Navigation meshes for 3D levels: the walkable triangles of a triangle soup,
 // joined where they share an edge, and the queries an agent needs to move over
 // them (docs/hex_grids.md, "Navigation meshes"). Plain data, built and searched
-// on the CPU, with the same result on every run. It needs nothing but kin/core,
-// so it is in every build, with or without KIN_EXPERIMENTAL_3D.
+// on the CPU, with the same result on every run. It has no GPU or physics dependency
+// and is in every build, with or without KIN_EXPERIMENTAL_3D.
 //
 // Distances are in the units of the vertices (metres in kin's 3D). "Seen from
 // above" means looking down `up`, the direction the mesh was built with.
@@ -40,13 +40,15 @@ struct NavMeshBuildOptions3D {
     // Nonzero height removes triangles whose vertical headroom intersects any
     // input geometry (including ceilings/walls). Radius then removes triangles
     // within that horizontal distance of a walkable boundary, including the
-    // newly blocked areas. Both zero preserve point-agent construction.
+    // newly blocked areas. With max_step_height zero, both zero disable clearance.
     // Conservative: a triangle is removed whole if any part is unsafe. Tessellate
-    // the walk surface to control extra margin; this does not split triangles.
+    // the walk surface to control extra margin. Step seams may be subdivided.
     f32 agent_radius = 0.0f;
     f32 agent_height = 0.0f;
-    // Join vertically separated, oppositely facing boundary edges whose horizontal
-    // endpoints coincide within weld_distance. Zero keeps exact-edge topology.
+    // Join oppositely facing step boundaries up to this rise. Matching edge
+    // subdivisions are constructed, including upper-tread nosings overlapping
+    // by at most this distance. Empty horizontal gaps are not bridged.
+    // Zero keeps exact-edge topology.
     f32 max_step_height = 0.0f;
 };
 
@@ -55,7 +57,8 @@ struct NavTriangle3D {
     // Indices into NavMesh3D::vertices, counter-clockwise seen from above.
     std::array<u32, 3> vertices{};
     // neighbors[i] is the triangle across the edge from vertices[i] to
-    // vertices[(i + 1) % 3], or nav_none where that edge is a border.
+    // vertices[(i + 1) % 3], or nav_none where that edge is a border. A step
+    // neighbor has a corresponding edge at a different height (see steps).
     std::array<u32, 3> neighbors{nav_none, nav_none, nav_none};
     // The connected part of the mesh it belongs to, 0 to region_count() - 1.
     u32 region = 0;
@@ -103,10 +106,14 @@ struct NavMesh3D {
 // when `indices` is empty, the vertices three by three. It welds vertices
 // (`weld_distance`), keeps the triangles that face up and are no steeper than
 // `max_slope_degrees` (and drops degenerate and repeated ones), joins two of
-// them across an edge when exactly two walkable triangles share it, one on each
-// side (touching at a vertex does not join them), and labels connected regions.
+// them across shared edges, and labels connected regions. At a ramp ending on
+// a continuous floor the upper support joins the exterior floor; ambiguous
+// nonmanifold overlaps stay separate. Touching at a vertex does not join faces.
 // Agent clearance can remove further triangles and split/discard connected regions.
-// The triangles are kept as they are, in input order, not merged into polygons.
+// Step construction subdivides mismatched boundary seams (also same-height
+// T junctions), including shared interior edges. Other faces retain input order.
+// A floor hidden below a climbable tread is filtered even for zero-height agents;
+// newly exposed step seams are joined and checked against blocking geometry.
 // Invalid input (an index out of range, a vertex or option that is not finite or
 // out of range, a count that is not a whole number of triangles) returns a failed
 // result with diagnostics. Valid empty input returns a successful empty mesh.
@@ -141,12 +148,13 @@ struct NavPathOptions3D {
 
 // A short way from `from` to `to` over the mesh, as its corners: `from` and
 // `to` moved onto the mesh (nearest()), with the border vertices where the
-// path turns between them. An A* search over the triangles' edges finds the
+// path turns between them. Each step crossing also includes both support heights.
+// An A* search over the triangles' edges finds the
 // corridor, the funnel algorithm (string pulling) straightens it, and the
 // corridor is moved past any vertex the string turns at that is not on a
 // border. The path is taut seen from above, and the shortest there is round
 // the obstacles on the sides it takes; a corridor round the other side of an
-// obstacle can be shorter, by about 1 % at most in kin's tests. Its corners
+// obstacle can be shorter. Step crossings are constrained to the chosen corridor. Its corners
 // are on the mesh, but a straight segment between two of them can pass under
 // a crest or over a dip that it crosses. Empty when an end is not on the mesh,
 // or the two are in different regions. Ties are broken the same way on every

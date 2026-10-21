@@ -45,8 +45,8 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
                           indices = part.mesh.indices.empty() ? vertices : part.mesh.indices.size();
         if (!part.mesh.validate() || vertices > std::numeric_limits<u32>::max() / sizeof(MeshVertex3D) ||
             indices > std::numeric_limits<u32>::max() / 4) {
-            model.asset_diagnostics.push_back("model mesh could not be uploaded: " + part.name);
-            continue;
+            why = "model mesh could not be uploaded: " + part.name;
+            return {};
         }
         const Bounds3D b = part.mesh.bounds();
         bounds.add(b, part.transform);
@@ -61,10 +61,6 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
     model.node_skeleton = data.node_skeleton;
     if (model.parts.empty()) {
         why = path.string() + ": no triangles";
-        return {};
-    }
-    if (!model.asset_diagnostics.empty()) {
-        why = diagnostics3d_text(model.asset_diagnostics);
         return {};
     }
     return model;

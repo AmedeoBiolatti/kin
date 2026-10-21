@@ -376,9 +376,7 @@ void gpu_session(Renderer2D& renderer) {
     check(session.generation() == generation + 1 && session.view()->backend() == target &&
               session.entity("prop").get<ModelRenderer3D>()->model == model,
           "unchanged reload duplicated art/view or failed to advance generation");
-    check(session.changed_sources().empty() &&
-              session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                  SceneSession3DReload::Unchanged,
+    check(session.changed_sources().empty() && session.reload_if_changed().value == SceneSession3DReload::Unchanged,
           "unchanged sources reloaded");
 
     const auto preserved = [&] {
@@ -390,8 +388,7 @@ void gpu_session(Renderer2D& renderer) {
     initial_world = session.world();
     generation = session.generation();
     write(scratch.path / "test.kinscene", "broken");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
-          "broken scene reloaded");
+    check(!session.reload_if_changed(), "broken scene reloaded");
     preserved();
     write(scratch.path / "test.kinscene", scene);
     std::filesystem::remove(scratch.path / "prop.kinprefab");
@@ -422,11 +419,9 @@ void gpu_session(Renderer2D& renderer) {
     write(scratch.path / "custom.txt", "updated");
     check(session.changed_sources() == std::vector<std::filesystem::path>{scratch.path / "custom.txt"},
           "custom dependency missing");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "custom dependency reload failed");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "custom dependency reload failed");
     write(scratch.path / "prop.kinprefab", prefab);
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "prefab edit reload failed");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "prefab edit reload failed");
     check(initialized >= 8, "initialization not rerun on replacement");
     ok(session.resize({192, 128}), "valid viewport resize failed");
     check(session.view()->size() == Vec2i{192, 128}, "view resize ignored");
@@ -440,19 +435,17 @@ void gpu_session(Renderer2D& renderer) {
           "decoded external image dependency absent");
     const auto png = read(scratch.path / "shared pixel.png");
     write(scratch.path / "shared pixel.png", "bad png");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-              session.entity("quad").get<ModelRenderer3D>()->model == textured_model,
+    check(!session.reload_if_changed() && session.entity("quad").get<ModelRenderer3D>()->model == textured_model,
           "corrupt external texture replaced active model");
     renderer.clear();
     ok(session.render(), "last good textured scene stopped rendering");
     renderer.present();
     write(scratch.path / "shared pixel.png", png);
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated &&
               session.entity("quad").get<ModelRenderer3D>()->model != textured_model,
           "external image reload reused stale model");
     write(scratch.path / "shared-a.gltf", read(scratch.path / "shared-a.gltf") + "\n");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "model source edit not reloaded");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "model source edit not reloaded");
 
     // Turn the tiny quad's embedded buffer into an external buffer without
     // another checked-in fixture. The layout is 12 position floats, 8 UV floats,
@@ -469,18 +462,14 @@ void gpu_session(Renderer2D& renderer) {
         bin.write(reinterpret_cast<const char*>(indices), sizeof(indices));
     }
     write(scratch.path / "shared-a.gltf", external);
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "external buffer scene failed");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "external buffer scene failed");
     write(scratch.path / "quad.bin", read(scratch.path / "quad.bin") + std::string(1, '\0'));
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "external buffer edit not reloaded");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "external buffer edit not reloaded");
     std::filesystem::remove(scratch.path / "quad.bin");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
-          "missing external buffer accepted");
+    check(!session.reload_if_changed(), "missing external buffer accepted");
     // Restore the original embedded buffer before archive checks.
     write(scratch.path / "shared-a.gltf", read(std::filesystem::path(KIN_TEST_MODELS) / "shared-a.gltf"));
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "buffer failure did not recover");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "buffer failure did not recover");
 
     std::weak_ptr<IMeshBackend3D> weak = session.entity("quad").get<ModelRenderer3D>()->model->parts[0].mesh.backend();
     assert(session.unload());
@@ -527,8 +516,7 @@ void gpu_session(Renderer2D& renderer) {
         check(packed_session.load("textured.kinscene"), "packed scene load failed");
         mount_content_pack(mount, ContentPack::open(archive));
         check(!packed_session.changed_sources().empty() &&
-                  packed_session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                      SceneSession3DReload::Activated,
+                  packed_session.reload_if_changed().value == SceneSession3DReload::Activated,
               "content pack remount not reloaded");
     }
     unmount_content_pack(mount);
@@ -548,13 +536,12 @@ void gpu_session(Renderer2D& renderer) {
         auto* active = nested.world();
         const auto generation = nested.generation();
         write(scratch.path / "leaf.kinprefab", "broken");
-        check(nested.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-                  nested.world() == active && nested.generation() == generation && nested.step(1.f / 60),
+        check(!nested.reload_if_changed() && nested.world() == active && nested.generation() == generation &&
+                  nested.step(1.f / 60),
               "bad nested edit discarded active simulation");
         write(scratch.path / "leaf.kinprefab", std::string(leaf) + "\n");
-        check(nested.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                      SceneSession3DReload::Activated &&
-                  nested.entity("nested.child") && nested.physics()->body_count() == 1,
+        check(nested.reload_if_changed().value == SceneSession3DReload::Activated && nested.entity("nested.child") &&
+                  nested.physics()->body_count() == 1,
               "nested edit did not recover");
     }
 
@@ -576,15 +563,11 @@ void gpu_session(Renderer2D& renderer) {
         write(scratch.path / "parts.glb", source_model);
         write(scratch.path / "solid.kincollider",
               R"({"schema":"kin.collider3d/1","shape":{"kind":"box","scale":[0,1,1]}})");
-        check(collision.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                      SceneSession3DReload::Failed &&
-                  collision.world() == active && collision.entity("solid").get<Collider3D>()->asset_binding == shape &&
-                  collision.step(1.f / 60),
+        check(!collision.reload_if_changed() && collision.world() == active &&
+                  collision.entity("solid").get<Collider3D>()->asset_binding == shape && collision.step(1.f / 60),
               "bad collision edit replaced running world");
         write(scratch.path / "solid.kincollider", R"({"schema":"kin.collider3d/1","shape":{"kind":"box"}})");
-        check(collision.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                      SceneSession3DReload::Activated &&
-                  collision.world() != active,
+        check(collision.reload_if_changed().value == SceneSession3DReload::Activated && collision.world() != active,
               "collision reload did not recover");
     }
 
@@ -631,23 +614,16 @@ void gpu_session(Renderer2D& renderer) {
                   scratch.path / "animations/survivor.kinanim",
               "machine dependency path absent");
         write(scratch.path / "animations/survivor.kinanim", read(scratch.path / "animations/survivor.kinanim") + "\n");
-        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                  SceneSession3DReload::Activated,
-              "machine edit not reloaded");
+        check(session.reload_if_changed().value == SceneSession3DReload::Activated, "machine edit not reloaded");
         const auto config = read(scratch.path / "animations/survivor.kinanimator");
         write(scratch.path / "animations/survivor.kinanimator", config + "\n");
-        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                  SceneSession3DReload::Activated,
+        check(session.reload_if_changed().value == SceneSession3DReload::Activated,
               "animator config edit not reloaded");
         auto* running = session.world();
         write(scratch.path / "animations/survivor.kinanimator", "broken");
-        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-                  session.world() == running,
-              "broken animator replaced scene");
+        check(!session.reload_if_changed() && session.world() == running, "broken animator replaced scene");
         write(scratch.path / "animations/survivor.kinanimator", config);
-        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
-                  SceneSession3DReload::Activated,
-              "animator failure did not recover");
+        check(session.reload_if_changed().value == SceneSession3DReload::Activated, "animator failure did not recover");
     }
 }
 
@@ -898,6 +874,8 @@ void gpu_pick(Renderer2D& renderer) {
         check(result, message);
     };
     ok(session.load("pick.kinscene"), "pick scene failed");
+    const auto unrendered = session.pick({80, 60});
+    check(!unrendered && !unrendered.diagnostics.empty(), "renderer pick failure became a successful miss");
     renderer.clear();
     ok(session.render(), "pick render failed");
     const auto box = session.entity("box");

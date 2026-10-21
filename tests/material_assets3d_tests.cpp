@@ -300,15 +300,11 @@ void material_gpu(Renderer2D& renderer) {
     auto* old_world = session.world();
     const auto old_model = session.entity("left").get<ModelRenderer3D>()->model;
     write(scratch.path / "colors.kinmaterials", "broken");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-              session.world() == old_world,
-          "broken material replaced active scene");
+    check(!session.reload_if_changed() && session.world() == old_world, "broken material replaced active scene");
     std::filesystem::remove(scratch.path / "colors.kinmaterials");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-              session.world() == old_world,
-          "deleted material replaced active scene");
+    check(!session.reload_if_changed() && session.world() == old_world, "deleted material replaced active scene");
     write(scratch.path / "colors.kinmaterials", std::string(materials) + "\n");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated &&
               session.entity("left").get<ModelRenderer3D>()->model == old_model,
           "material edit reuploaded model or failed recovery");
 
@@ -316,16 +312,13 @@ void material_gpu(Renderer2D& renderer) {
     const auto png = read(scratch.path / "override.png");
     write(scratch.path / "colors.kinmaterials",
           R"({"schema":"kin.materials3d/1","material":{"texture":"override.png"},"variants":{"green":{}}})");
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
-          "map dependency load failed");
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated, "map dependency load failed");
     auto previous = session.entity("left").get<ModelMaterials3D>()->binding;
     write(scratch.path / "override.png", "corrupt");
     old_world = session.world();
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
-              session.world() == old_world,
-          "corrupt material texture replaced scene");
+    check(!session.reload_if_changed() && session.world() == old_world, "corrupt material texture replaced scene");
     write(scratch.path / "override.png", png);
-    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
+    check(session.reload_if_changed().value == SceneSession3DReload::Activated &&
               session.entity("left").get<ModelRenderer3D>()->model == old_model &&
               session.entity("left").get<ModelMaterials3D>()->binding->materials[0].texture !=
                   previous->materials[0].texture,

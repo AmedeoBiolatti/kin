@@ -1,5 +1,5 @@
-#include <cassert>
 #pragma once
+#include <cassert>
 
 // Ordinary game code using the existing scene, command-buffer, controller and
 // system APIs. No device reads, editor schema, alternate world or task scheduler.

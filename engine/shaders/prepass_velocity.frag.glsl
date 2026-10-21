@@ -12,10 +12,16 @@ layout(location = 3) in vec3 vCurrent;
 layout(location = 4) in vec3 vPrevious;
 layout(location = 5) flat in float vFresh;
 layout(location = 6) in vec3 vWorld;
+layout(location = 7) in float vIndependent;
 layout(location = 0) out vec4 FragNormalVelocity;
 
 #include "kin_prepass.inc.glsl"
 
 void main() {
-    FragNormalVelocity = vec4(octahedral(kin_prepass_normal()), kin_velocity(vCurrent, vPrevious, vFresh));
+    vec2 normal = octahedral(kin_prepass_normal());
+    // Carry independent geometry motion in the normal's unused range. AO
+    // decodes the offset; transparent coverage preserves G for the resolve.
+    if (vIndependent > 1e-5)
+        normal.y += 4.0;
+    FragNormalVelocity = vec4(normal, kin_velocity(vCurrent, vPrevious, vFresh));
 }

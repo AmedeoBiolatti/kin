@@ -368,7 +368,7 @@ public:
                 .end_object();
         }
         json.end_array().key("diagnostics").begin_array();
-        for (const auto& diagnostic : _model->asset_diagnostics)
+        for (const auto& diagnostic : _assets->diagnostics())
             json.value(diagnostic);
         json.end_array();
     }

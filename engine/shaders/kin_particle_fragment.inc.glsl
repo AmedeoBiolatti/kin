@@ -4,8 +4,9 @@ layout(location = 10) in vec3 vCurrent;
 layout(location = 11) in vec3 vPrevious;
 layout(location = 12) flat in float vFresh;
 #endif
-// kin's 3D particle fragment shader (P3c), shared by particle.frag and particle_soft.frag (which defines KIN_SOFT first): the soft one also reads the view's depth
-// (the pre-pass's, one sample a pixel) and fades the particle where it is near the surface behind it.
+// kin's 3D particle fragment shader (P3c), shared by particle.frag and particle_soft.frag (which defines KIN_SOFT
+// first): the soft one also reads the view's depth (the pre-pass's, one sample a pixel) and fades the particle where it
+// is near the surface behind it.
 //
 // The output is premultiplied, as kin's targets are: Alpha mixes the (fogged) colour by its alpha, Additive adds colour
 // times alpha and is dimmed, not mixed, by the fog, Premultiplied takes a texture that already holds colour times alpha
@@ -23,7 +24,7 @@ layout(location = 7) in vec3 vLocalLight;
 
 layout(set = 2, binding = 0) uniform sampler2D uTexture; // white without one
 #ifdef KIN_SOFT
-layout(set = 2, binding = 1) uniform sampler2D uDepth;   // the pre-pass's depth (reverse Z), read by texel
+layout(set = 2, binding = 1) uniform sampler2D uDepth; // the pre-pass's depth (reverse Z), read by texel
 #endif
 
 #include "kin_particle_frag_uniforms.inc.glsl"
@@ -53,7 +54,8 @@ void main() {
     float fade = 1.0;
 #ifdef KIN_SOFT
     if (frag.disc.z > 0.0) {
-        // The surface behind, along the camera's forward, against this fragment's: 0 where they meet. Far (depth 0): nothing.
+        // The surface behind, along the camera's forward, against this fragment's: 0 where they meet. Far (depth 0):
+        // nothing.
         const float d = texelFetch(uDepth, ivec2(gl_FragCoord.xy), 0).r;
         if (d > 0.0) {
             const float scene = -(frag.unproject.x * d + frag.unproject.y) / (frag.unproject.z * d + frag.unproject.w);
@@ -82,8 +84,9 @@ void main() {
         alpha = tex.a * k;
         colour *= alpha;
     }
-    // The fog: a surface's colour mixed toward the fog's by its opacity (the fog's colour is itself premultiplied by this
-    // particle's alpha: a faint particle adds a faint fog); an additive one is dimmed (what is behind has the fog already).
+    // The fog: a surface's colour mixed toward the fog's by its opacity (the fog's colour is itself premultiplied by
+    // this particle's alpha: a faint particle adds a faint fog); an additive one is dimmed (what is behind has the fog
+    // already).
     if (vFog.a > 0.0) {
         if (frag.flags.z > 0.5 && frag.flags.z < 1.5) {
             colour *= 1.0 - vFog.a;
@@ -92,7 +95,8 @@ void main() {
         }
     }
     if (frag.flags.x > 0.5) {
-        // Encoded straight, as the meshes are: encode(colour) times alpha. Premultiplied colour is taken back to straight.
+        // Encoded straight, as the meshes are: encode(colour) times alpha. Premultiplied colour is taken back to
+        // straight.
         if (alpha > 1e-4) {
             colour = encode(colour / alpha) * alpha;
         } else {
@@ -106,14 +110,19 @@ void main() {
     // corners must not erase another sprite's rejection mark.
     if (all(equal(FragColor, vec4(0.0))))
         discard;
-    float coverage = vFresh > .5 ? 3.0 : 2.0;
+    float coverage = vFresh > .5 ? 6.0 : 4.0;
     float signature = 0.0;
 #ifdef KIN_PARTICLE_SHADOWS
     if (vFresh < .5)
-        coverage += frag.tint.w > .5 ? .25 : .125;
+        coverage = frag.tint.w > .5 ? 8.0 : 4.0;
     const float energy = dot(shadow_tint, vec3(.2126, .7152, .0722));
     signature = energy / (1.0 + energy);
+#elif defined(KIN_PARTICLE_LIGHTS)
+    if (vFresh < .5)
+        coverage = frag.tint.w > .5 ? 8.0 : 4.0;
+    const float energy = dot(frag.tint.rgb + vLocalLight, vec3(.2126, .7152, .0722));
+    signature = energy / (1.0 + energy);
 #endif
-    FragColor = vec4(coverage, signature, kin_velocity(vCurrent, vPrevious, vFresh));
+    FragColor = vec4(coverage + signature, 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
 #endif
 }

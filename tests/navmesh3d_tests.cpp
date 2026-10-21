@@ -118,6 +118,8 @@ std::vector<unsigned char> bytes_of(const kin::NavMesh3D& mesh) {
         put(t.vertices.data(), sizeof(t.vertices));
         put(t.neighbors.data(), sizeof(t.neighbors));
         put(&t.region, sizeof(t.region));
+        for (bool step : t.steps)
+            put(&step, sizeof(step));
         put_vec3(t.centroid);
     }
     put_vec3(mesh.bounds_min);
@@ -128,6 +130,7 @@ std::vector<unsigned char> bytes_of(const kin::NavMesh3D& mesh) {
     put(&mesh.options.weld_distance, sizeof(f32));
     put(&mesh.options.agent_radius, sizeof(f32));
     put(&mesh.options.agent_height, sizeof(f32));
+    put(&mesh.options.max_step_height, sizeof(f32));
     for (const kin::NavMeshNode3D& n : mesh.nodes) {
         put_vec3(n.min);
         put_vec3(n.max);
@@ -460,12 +463,12 @@ void test_agent_clearance() {
     assert(kin::find_path(build(wall, {.agent_radius = .04f, .agent_height = 1.2f}), {.5f, 0, .5f}, {2.5f, 0, .5f})
                .empty());
 
-    // A 1.2 m doorway remains usable by an 0.8 m-wide agent. Vertex-only
+    // A 1.0 m doorway remains usable by an 0.8 m-wide agent. Vertex-only
     // jamb contacts must not consume another pair of cells on either side.
     Soup door = grid(40, 40, .1f);
-    for (const auto z : {std::pair{0.f, 1.4f}, std::pair{2.6f, 4.f}})
+    for (const auto z : {std::pair{0.f, 1.5f}, std::pair{2.5f, 4.f}})
         door.append({{{2, 0, z.first}, {2, 2.3f, z.first}, {2, 2.3f, z.second}, {2, 0, z.second}}, {0, 1, 2, 0, 2, 3}});
-    door.append({{{2, 2, 1.4f}, {2, 2.3f, 1.4f}, {2, 2.3f, 2.6f}, {2, 2, 2.6f}}, {0, 1, 2, 0, 2, 3}});
+    door.append({{{2, 2, 1.5f}, {2, 2.3f, 1.5f}, {2, 2.3f, 2.5f}, {2, 2, 2.5f}}, {0, 1, 2, 0, 2, 3}});
     auto distant_ramp = grid(20, 10, .1f, 0, {4, 0, 0});
     for (auto& p : distant_ramp.vertices)
         p.y = (p.x - 4) * .5f;
@@ -478,6 +481,17 @@ void test_agent_clearance() {
         room.append({{{0, 0, z}, {0, 2, z}, {2, 2, z}, {2, 0, z}}, {0, 1, 2, 0, 2, 3}});
     assert(build(room, {.agent_height = 1.8f}).region_count() == 1);
 
+    // Interior wall lines preserve the two corner fan triangles' links.
+    Soup interior = grid(40, 40, .1f);
+    for (const f32 x : {1.f, 3.f})
+        interior.append({{{x, 0, 1}, {x, 2, 1}, {x, 2, 3}, {x, 0, 3}}, {0, 1, 2, 0, 2, 3}});
+    interior.append({{{1, 0, 3}, {1, 2, 3}, {3, 2, 3}, {3, 0, 3}}, {0, 1, 2, 0, 2, 3}});
+    for (const auto span : {std::pair{1.f, 1.5f}, std::pair{2.5f, 3.f}})
+        interior.append(
+            {{{span.first, 0, 1}, {span.first, 2, 1}, {span.second, 2, 1}, {span.second, 0, 1}}, {0, 1, 2, 0, 2, 3}});
+    const auto no_islands = build(interior, {.agent_height = 1.8f});
+    assert(no_islands.region_count() == 1);
+    assert(!kin::find_path(no_islands, {1.01f, 0, 2.99f}, {2, 0, .5f}).empty());
     // Other layers' borders cannot erode this floor merely because they project onto it.
     Soup layers = grid(20, 20, .1f);
     layers.append(grid(8, 8, .1f, 3, {.6f, 0, .6f}));
@@ -509,6 +523,8 @@ void test_agent_clearance() {
     uncut.append(ramp);
     const auto ramp_walk = build(uncut, {.agent_radius = .1f, .agent_height = 1.8f});
     assert(!kin::find_path(ramp_walk, {8.5f, 0, 1.5f}, {3, 2, 1.5f}).empty());
+    for (f32 radius : {0.f, .1f})
+        assert(!kin::find_path(build(uncut, {.agent_radius = radius}), {8.5f, 0, 1.5f}, {3, 2, 1.5f}).empty());
 
     // Vertical risers touch tread boundaries without occupying their interiors.
     Soup stairs;
@@ -572,6 +588,113 @@ void test_agent_clearance() {
     const auto kerb_walk = build(kerb, {.agent_radius = .3f, .agent_height = 1.8f, .max_step_height = .21f});
     assert(kin::nearest(kerb_walk, {.5f, 0, 1.5f}, {.01f, .01f, .01f}));
     assert(!kin::find_path(kerb_walk, {1.4f, 0, 1.5f}, {3.5f, .95f, 1.5f}).empty());
+    // A straight shortcut across a raised rectangle must retain its vertical
+    // step points, even if the search initially chose a corridor around it.
+    Soup kerb_map;
+    const std::array<std::array<int, 4>, 6> patches{
+        {{21, 14, 3, 3}, {9, 7, 5, 6}, {5, 11, 2, 5}, {7, 0, 6, 6}, {21, 23, 1, 3}, {20, 11, 4, 6}}};
+    for (int x = 0; x < 24; ++x)
+        for (int z = 0; z < 24; ++z) {
+            bool raised = false;
+            for (const auto& patch : patches)
+                raised |= x >= patch[0] && x < patch[0] + patch[2] && z >= patch[1] && z < patch[1] + patch[3];
+            kerb_map.append(grid(1, 1, .25f, raised ? .15f : 0.f, {x * .25f, 0, z * .25f}));
+        }
+    const auto kerbs = build(kerb_map, {.max_step_height = .25f});
+    const auto kerb_route = kin::find_path(kerbs, {3.882f, 0, .981f}, {.969f, 0, 2.608f});
+    assert(!kerb_route.empty());
+    for (std::size_t i = 1; i < kerb_route.size(); ++i) {
+        const auto delta = kerb_route[i] - kerb_route[i - 1];
+        const auto horizontal = std::sqrt(delta.x * delta.x + delta.z * delta.z);
+        if (horizontal < 1e-4f)
+            continue;
+        const int samples = std::max(2, int(horizontal / .01f));
+        for (int k = 1; k < samples; ++k) {
+            const auto at = kerb_route[i - 1] + delta * (f32(k) / samples);
+            const auto surface = kin::nearest(kerbs, at, {.002f, .2f, .002f});
+            assert(surface && std::abs(surface->position.y - at.y) < .01f);
+        }
+    }
+    // Exported stair noses overlap the lower tread by 3 cm and use a
+    // coarse strip beside a finely tessellated tread (different edge splits).
+    Soup noses = grid(20, 20, .1f, 0, {-2, 0, 0});
+    for (int k = 0; k < 4; ++k) {
+        const f32 x = f32(k), y = (k + 1) * .2f;
+        noses.append(grid(10, 20, .1f, y, {x, 0, 0}));
+        noses.append({{{x - .03f, y, 0}, {x - .03f, y, 2}, {x, y, 2}, {x, y, 0}}, {0, 1, 2, 0, 2, 3}});
+        noses.append({{{x, y - .2f, 0}, {x, y - .02f, 0}, {x, y - .02f, 2}, {x, y - .2f, 2}}, {0, 1, 2, 0, 2, 3}});
+        noses.append({{{x - .03f, y - .02f, 0}, {x - .03f, y, 0}, {x - .03f, y, 2}, {x - .03f, y - .02f, 2}},
+                      {0, 1, 2, 0, 2, 3}});
+    }
+    noses.append(grid(20, 20, .1f, .8f, {4, 0, 0}));
+    for (f32 radius : {0.f, .1f, .3f, .4f}) {
+        const auto mesh = build(noses, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f});
+        const auto up = kin::find_path(mesh, {-1, 0, 1}, {5, .8f, 1});
+        assert(!up.empty());
+        assert(!kin::find_path(mesh, {5, .8f, 1}, {-1, 0, 1}).empty());
+        int steps = 0;
+        for (std::size_t i = 1; i < up.size(); ++i)
+            if (up[i].y - up[i - 1].y > .15f)
+                ++steps;
+        assert(steps == 4);
+        assert(bytes_of(mesh) ==
+               bytes_of(build(noses, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f})));
+    }
+    // Grid triangles with cuts along a short leg used to lose every cut.
+    // Exercise alternating tessellations, nosings, both clearance modes and
+    // exact-position welding. A continuous supporting floor is normal authoring.
+    for (const f32 cell : {.05f, .25f, .5f})
+        for (const bool continuous : {false, true})
+            for (const f32 nose : {0.f, .03f}) {
+                Soup mixed = grid(continuous ? 80 : 20, 20, .1f, 0, {-2, 0, 0});
+                for (int k = 0; k < 4; ++k) {
+                    const f32 x = f32(k), y = (k + 1) * .2f;
+                    const f32 density = k % 2 ? .1f : cell;
+                    mixed.append(
+                        grid(int(std::round(1 / density)), int(std::round(2 / density)), density, y, {x, 0, 0}));
+                    if (nose > 0) {
+                        mixed.append({{{x - nose, y, 0}, {x - nose, y, 2}, {x, y, 2}, {x, y, 0}}, {0, 1, 2, 0, 2, 3}});
+                        mixed.append(
+                            {{{x - nose, y - .02f, 0}, {x - nose, y, 0}, {x - nose, y, 2}, {x - nose, y - .02f, 2}},
+                             {0, 1, 2, 0, 2, 3}});
+                    }
+                    mixed.append({{{x, y - .2f, 0},
+                                   {x, y - (nose > 0 ? .02f : 0.f), 0},
+                                   {x, y - (nose > 0 ? .02f : 0.f), 2},
+                                   {x, y - .2f, 2}},
+                                  {0, 1, 2, 0, 2, 3}});
+                }
+                mixed.append(grid(20, 20, .1f, .8f, {4, 0, 0}));
+                for (const f32 height : {0.f, 1.8f})
+                    for (const f32 radius : {0.f, .1f, .3f, .4f}) {
+                        const auto options = kin::NavMeshBuildOptions3D{.weld_distance = 0,
+                                                                        .agent_radius = radius,
+                                                                        .agent_height = height,
+                                                                        .max_step_height = .25f};
+                        const auto mesh = build(mixed, options);
+                        if (kin::find_path(mesh, {-1, 0, 1}, {5, .8f, 1}).empty())
+                            std::fprintf(stderr, "mixed stair cell=%g continuous=%d nose=%g height=%g radius=%g\n",
+                                         cell, continuous, nose, height, radius);
+                        assert(!kin::find_path(mesh, {-1, 0, 1}, {5, .8f, 1}).empty());
+                        assert(!kin::find_path(mesh, {5, .8f, 1}, {-1, 0, 1}).empty());
+                    }
+                mixed.append({{{2, .6f, 0}, {2, 3, 0}, {2, 3, 2}, {2, .6f, 2}}, {0, 1, 2, 0, 2, 3}});
+                assert(
+                    kin::find_path(build(mixed, {.agent_radius = .3f, .agent_height = 1.8f, .max_step_height = .25f}),
+                                   {-1, 0, 1}, {5, .8f, 1})
+                        .empty());
+            }
+    // A low roof must use nearby ramp clearance, while distant floor keeps
+    // its own headroom. This fails if propagation is simply removed.
+    Soup margin = grid(60, 40, .1f);
+    auto slope = grid(20, 40, .1f, 0, {6, 0, 0});
+    for (auto& point : slope.vertices)
+        point.y = (point.x - 6) * .577f;
+    margin.append(slope);
+    margin.append({{{0, 1.9f, 0}, {5.8f, 1.9f, 0}, {5.8f, 1.9f, 4}, {0, 1.9f, 4}}, {0, 1, 2, 0, 2, 3}});
+    const auto low_margin = build(margin, {.agent_radius = .4f, .agent_height = 1.8f});
+    assert(!kin::nearest(low_margin, {5.5f, 0, 2}, {.01f, .01f, .01f}));
+    assert(kin::nearest(low_margin, {2, 0, 2}, {.01f, .01f, .01f}));
     for (auto& point : wide_stairs.vertices)
         point = {point.x, -point.z, point.y};
     for (const f32 radius : {.1f, .3f, .4f})

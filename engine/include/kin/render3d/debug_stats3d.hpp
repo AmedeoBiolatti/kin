@@ -119,7 +119,9 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 particle_shadow_batches = 0; // batches sampling shadow maps; excludes TAA coverage replays
     u32 particle_shadow_submitted = 0, particle_shadow_dropped = 0; // caster upload, independently capped
     u32 particle_shadow_draws = 0, particle_shadow_instances = 0;   // shadow passes; repeated per light/cascade
-    u64 particle_shadow_bytes = 0; // caster GPU buffer, released after the ordinary idle interval
+    u32 particle_shadow_map_dropped = 0;    // sum of visible casters beyond each map's 16,384 budget
+    u64 particle_shadow_uploaded_bytes = 0; // packed caster bytes sent this frame; zero for cached maps
+    u64 particle_shadow_bytes = 0;          // caster GPU buffer, released after the ordinary idle interval
     u32 weather_particles = 0;
     f64 particle_cpu_ms = 0.0;
     // With Scene3D::lod: the copies the camera sees, by the level of detail they are drawn at (all in 0 when it is

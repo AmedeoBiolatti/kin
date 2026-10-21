@@ -7,6 +7,8 @@ float noise(vec2 p) {
 
 // The pre-pass's octahedral normal (see octahedral in kin_prepass.inc.glsl).
 vec3 decode_normal(vec2 e) {
+    if (e.y > 2.0)
+        e.y -= 4.0; // independent-motion marker, before transparent coverage
     vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
     if (n.z < 0.0) {
         n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
@@ -20,6 +22,8 @@ vec3 decode_normal(vec2 e) {
 vec3 view_position(ivec2 p, float depth) {
     const vec2 ndc = vec2(p.x + 0.5, params.sizes.w - p.y - 0.5) * (2.0 / params.sizes.zw) - 1.0;
     const float w = params.unproject_zw.z * depth + params.unproject_zw.w;
-    return vec3(params.unproject_xy.x * ndc.x + params.unproject_xy.z, params.unproject_xy.y * ndc.y + params.unproject_xy.w,
-                params.unproject_zw.x * depth + params.unproject_zw.y) / w;
+    return vec3(params.unproject_xy.x * ndc.x + params.unproject_xy.z,
+                params.unproject_xy.y * ndc.y + params.unproject_xy.w,
+                params.unproject_zw.x * depth + params.unproject_zw.y) /
+           w;
 }

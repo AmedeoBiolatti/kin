@@ -19,7 +19,7 @@ void fields(sol::table options, std::initializer_list<std::string_view> names) {
     for (const auto& [key, value] : options) {
         if (!key.is<std::string>())
             throw std::runtime_error("3D option keys must be strings");
-        const auto name = checked<std::string>(key, "key");
+        const auto name = checked<std::string>(key, "option name");
         if (std::ranges::find(names, name) == names.end())
             throw std::runtime_error("unknown 3D option: " + name);
     }
@@ -181,7 +181,7 @@ SceneSpawn3D spawn_options(const sol::optional<sol::table>& options) {
     const auto read_vector = [&](const char* name, std::optional<Vec3f>& destination) {
         sol::object value = (*options)[name];
         if (value != sol::nil)
-            destination = vector(checked<sol::table>(value, "value"));
+            destination = vector(checked<sol::table>(value, name));
     };
     read_vector("position", out.position);
     read_vector("scale", out.scale);
@@ -242,14 +242,17 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
             return sol::nil;
         sol::state_view lua{state};
         sol::protected_function factory = lua.registry()["kin.entity"];
-        const auto result = factory(entity);
+        const auto result = factory(entity, [api, handle] { return bool(resolve(*api, handle)); });
         if (!result.valid())
             throw sol::error(result);
         return result.get<sol::object>();
     };
     scene["available"] = [api] { return api->active(); };
     scene["physics_available"] = [api] { return bool(api->queries); };
-    scene["entity"] = [api](std::string_view id) { return api->active() ? api->entity(id) : SceneEntity3D{}; };
+    scene["entity"] = [api](std::string_view id) -> sol::optional<SceneEntity3D> {
+        const auto handle = api->active() ? api->entity(id) : SceneEntity3D{};
+        return handle ? sol::optional<SceneEntity3D>{handle} : sol::nullopt;
+    };
     scene["character_input"] = [api](SceneEntity3D handle, sol::object options_argument) {
         const auto options = checked<sol::table>(options_argument, "options");
 
@@ -557,13 +560,15 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
             throw std::runtime_error("3D physics queries require an active physics scene");
         SceneQueryFilter3D filter;
         if (options) {
+            fields(*options, {"mask", "sensors", "ignore"});
             filter.mask = option(*options, "mask", all_layers3d);
             filter.sensors = option(*options, "sensors", false);
             sol::object ignore = (*options)["ignore"];
-            if (ignore != sol::nil)
+            if (ignore != sol::nil) {
                 filter.ignore = checked<SceneEntity3D>(ignore, "ignore");
-            if (filter.ignore.session && !resolve(*api, filter.ignore))
-                throw std::runtime_error("3D query ignore entity is stale");
+                if (!resolve(*api, filter.ignore))
+                    throw std::runtime_error("3D query ignore entity is stale");
+            }
         }
         const auto hit = api->queries.raycast(vector(from), vector(to), filter);
         if (!hit)

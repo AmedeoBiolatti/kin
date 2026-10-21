@@ -70,10 +70,23 @@ void test_load_update_actions_and_spawn(Fixture& fixture) {
     std::string source = R"lua(
 function on_load(scene)
     scene:set_clear_color(1, 2, 3)
-    scene:entity("script-rect"):set_transform(4, 5):set_rect(6, 7, 8, 9, 10, 2, 3)
+    local e = scene:entity("script-rect"):set_transform(4, 5):set_rect(6, 7, 8, 9, 10, 2, 3)
+    assert(e:alive())
+    for _, name in ipairs({"id", "name", "valid", "alive", "destroy", "get_transform"}) do
+        assert(not pcall(e[name]))
+        assert(not pcall(e[name], {}))
+        assert(not pcall(e[name], scene))
+    end
+    local ok, message = pcall(scene.count)
+    assert(not ok and message:find("scene.lua") and message:find("invalid method receiver"))
+    ok, message = pcall(function() return KinContext.dt end)
+    assert(not ok and message:find("invalid property receiver"))
 end
 
 function update(ctx)
+    assert(ctx.dt > 0)
+    assert(not pcall(ctx.input.pressed))
+    assert(not pcall(ctx.app.quit))
 end
 
 function collect_actions(actions)

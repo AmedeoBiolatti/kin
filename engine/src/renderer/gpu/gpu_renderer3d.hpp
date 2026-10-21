@@ -189,7 +189,6 @@ private:
     // (an HDR view draws into _scene), the history (this frame's resolve and the
     // one before, swapped each frame) and the sharpened result.
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
-    GpuTexture _taa_opaque_motion; // preserved only for blended-mesh coverage
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
     u32 _taa_read = 0;       // which of the two holds the last frame
@@ -210,7 +209,7 @@ private:
         f32 alpha = 0, frame = 0;
     };
     std::vector<ParticleHistory> _taa_particles;
-    std::vector<u64> _taa_mesh_effects;
+    std::unordered_map<u64, u64> _taa_mesh_effects;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
     // With Lod3D::occlusion (made by the first render that asks): the depth pyramid (level 0 a quarter of the view's
     // size, each next half of the one before; `_hiz_levels` of them), the depth it is built from when no pre-pass makes
@@ -233,8 +232,7 @@ private:
     bool _occ_reset = true; // View3D::reset_history(), a resize: the history is dropped
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
-    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
-        _idle_taa_opaque = 0;
+    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -376,7 +374,7 @@ private:
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
                                   const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive, bool reject,
-                                  RenderDebugStats3D& stats);
+                                  bool fixed_jitter, RenderDebugStats3D& stats);
 
     // render()'s stages, in the order they run, over a FrameCtx (defined in the .cpp)
     // that holds what they share. Each records into the frame's command buffer; any
@@ -446,9 +444,11 @@ private:
         };
         std::vector<Range> ranges;
         u64 key = 0;
-        bool unstable = false;
+        bool unstable = false, packed = false;
     };
-    const ParticleCastView& particle_cast_view(FrameCtx&, const Mat4f&);
+    const ParticleCastView* particle_cast_view(const Mat4f&) const;
+    const ParticleCastView& build_particle_cast_view(FrameCtx&, const Mat4f&, bool pack);
+    void upload_particle_casts(FrameCtx&);
     std::vector<ParticleCastView> _particle_cast_views;
     bool draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass, const Mat4f& light_view, bool local,
                                u32 cascade = 0);

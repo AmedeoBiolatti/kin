@@ -62,8 +62,8 @@ Preview a real export with the same asset loader used by a game:
 
 ```sh
 cmake --preset 3d
-cmake --build build --target kin_asset_preview
-KIN_RENDER_BACKEND=gpu build/bin/kin_asset_preview --root path/to/content --model models/hero.glb \
+cmake --build build-3d --target kin_asset_preview
+KIN_RENDER_BACKEND=gpu build-3d/bin/kin_asset_preview --root path/to/content --model models/hero.glb \
   --clip Walk --time=0.5 --headless --frames=2 --screenshot=hero.png --report=hero.json
 ```
 
@@ -88,15 +88,17 @@ materials and image rendering. All run against local generated/checked-in fixtur
 there are no downloads during tests. The lavapipe CI job includes both profile cases.
 
 ```sh
-cmake --build build --target kin_model_profile3d_tests kin_skeleton_tests kin_navmesh3d_tests
-ctest --test-dir build -R '^kin-(model-profile3d(-gpu)?|skeleton|navmesh3d)$' --output-on-failure
+cmake --build build-3d --target kin_model_profile3d_tests kin_skeleton_tests kin_navmesh3d_tests
+ctest --test-dir build-3d -R '^kin-(model-profile3d(-gpu)?|skeleton|navmesh3d)$' --output-on-failure
 ```
 
 `read_model_data` is deliberately useful for inspection of unsupported content.
 It can return true and retain multiple skeletons or repaired data. Check its
 `asset_diagnostics` before treating that data as a supported asset. `Assets3D`
 checks these diagnostics on CPU and GPU; failed assets are never cached.
-CPU-only models do not decode images or upload resources. Geometry/skin/UV checks
+GPU loading stages the complete decoded geometry before creating meshes, so
+large models temporarily retain that geometry alongside source and texture
+buffers. CPU-only models do not decode images or upload resources. Geometry/skin/UV checks
 apply there; texture decoding and device-format/upload checks require a GPU load.
 
 ## Navigation geometry
@@ -111,12 +113,16 @@ the resulting boundaries, including regions blocked by headroom. Radius tests
 follow nearby floor connectivity, so distant ramps do not project a balcony's
 border onto lower floors. Boundary-only contact with a stair riser does not
 block a tread's headroom. Uphill rise
-across the radius adds a conservative headroom margin based on the steepest
-actual slope in the original region. Both dimensions zero request point-agent
+across the radius adds a conservative margin from nearby connected slopes,
+without propagating it across steps or to distant doors. Both dimensions zero request point-agent
 navigation; changing either dimension requires rebuilding.
 
-Clearance removes whole triangles, without clipping, merging or subdivision.
-Use a tessellated walk surface: the regression fixtures use **0.1 m cells**. Coarse
+Clearance removes whole triangles. With a positive `max_step_height`, construction
+first conforms mismatched step edges and narrow tread strips; an upper tread may
+overlap the lower one by up to that distance (for example a 3 cm nosing). Empty
+horizontal gaps remain disconnected, and paths preserve their step points.
+Use a tessellated walk surface: the regression fixtures use **0.1 m cells**.
+A grid-aligned door can require two cells beyond the agent diameter. Coarse
 triangles can remove excess area or the whole mesh; check `valid()` and preview
 the resulting surface, rather than assuming a wide polygon will be inset. Vertices,
 nearest points, raycasts, random samples and paths all use the filtered mesh.

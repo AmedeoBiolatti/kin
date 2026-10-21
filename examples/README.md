@@ -1,7 +1,7 @@
 # Interactive performance examples
 
 For a new 3D game, start from `camp_walk` or `projectile_range`: both use `SceneSession3D` for loading, frame stages,
-physics and rendering. Configure with `cmake --preset 3d`. The renderer viewers and timing workloads in this directory
+physics and rendering. Configure with `cmake --preset 3d`, build in `build-3d`, and run binaries from `build-3d/bin`. The renderer viewers and timing workloads in this directory
 use the direct APIs so that they can isolate rendering costs; Summit integrates its existing simulation with the frame
 stages. See [the 3D guide](../docs/rendering_3d.md#owning-a-3d-scene-session) for the normal session lifecycle.
 For Lua gameplay, start from [Lua 3D range](#lua-3d-range), which uses the same session and frame stages.
@@ -272,8 +272,8 @@ and optional saved world edits. It uses original procedural geometry and texture
 does not implement survival, crafting, mobs, water simulation or multiplayer.
 
 ```sh
-KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --world /tmp/blockfield.world
-KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --benchmark --headless --frames 1200 --distance 3 \
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/blockfield --world /tmp/blockfield.world
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/blockfield --benchmark --headless --frames 1200 --distance 3 \
     --report /tmp/blockfield-report.json --metrics /tmp/blockfield.csv --screenshot=/tmp/blockfield.png
 ```
 
@@ -313,8 +313,8 @@ The input-driven GPU smoke test also exercises jumping/landing, mining, placemen
 F5 save/reload and streaming eviction. It uses a fresh save file and writes screenshots and its final state to the supplied directory:
 
 ```sh
-ctest --test-dir build -R '^kin-blockfield$' --output-on-failure -j1
-python3 examples/blockfield/smoke.py build/bin/blockfield /tmp/blockfield-smoke
+ctest --test-dir build-3d -R '^kin-blockfield$' --output-on-failure -j1
+python3 examples/blockfield/smoke.py build-3d/bin/blockfield /tmp/blockfield-smoke
 ```
 
 Without explicit `--frames`, a benchmark chooses at least 900 measured frames beyond warm-up. For explicit frame limits, warm-up
@@ -322,7 +322,7 @@ is `max(180, (2*distance+1)^2+60)` frames: distance 32 needs at least 5,185 tota
 For a bounded wide-view run:
 
 ```sh
-KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --benchmark --headless --distance 24 --fov 110 --mesh-budget-mib 256 \
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/blockfield --benchmark --headless --distance 24 --fov 110 --mesh-budget-mib 256 \
     --report /tmp/blockfield-wide.json --metrics /tmp/blockfield-wide.csv --screenshot=/tmp/blockfield-wide.png
 ```
 
@@ -354,9 +354,9 @@ template, and hard-links identical executable copies to save disk space. Generat
 The tested editor/template pair is from the [official builds](https://github.com/godotengine/godot-builds/releases/tag/4.7.2-stable).
 
 ```sh
-cmake --build build --target blockfield_render_compare --parallel 1
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --smoke
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare"
+cmake --build build-3d --target blockfield_render_compare --parallel 1
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare"
 ```
 
 The Linux runner uses only the Python standard library and `/usr/bin/time`. It runs one process at a time, refuses to start below
@@ -394,8 +394,8 @@ broader conclusions about engine capacity. Full local measurements and machine/b
 To stress triangle throughput while keeping geometry storage bounded, use a multiplier sweep:
 
 ```sh
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --triangles --smoke
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --triangles
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --triangles --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --triangles
 ```
 
 This reuses the distance-32 snapshot after validating its SHA-256. A new top-down view frames the entire field at vertical FOV
@@ -465,8 +465,8 @@ shared vertex/index data and the 36/128-byte vertex/instance layouts are preserv
 Blockfield now has playable quality presets:
 
 ```sh
-KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --quality pbr
-KIN_RENDER_BACKEND=gpu ./build/bin/blockfield --quality high --distance 8 --mesh-budget-mib 64
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/blockfield --quality pbr
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/blockfield --quality high --distance 8 --mesh-budget-mib 64
 ```
 
 `basic` retains the existing daylight/sky/fog rendering. `pbr` adds shared albedo/ORM/normal textures, four point lights, one spot,
@@ -478,8 +478,8 @@ and actual light, shadow and AA work. `smoke.py --quality pbr|high` exercises ga
 For separately measured Kin/Godot workloads:
 
 ```sh
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --lighting --smoke
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --lighting --frames 180 --repeats 3
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --lighting --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --lighting --frames 180 --repeats 3
 ```
 
 The default uses the existing distance-32 snapshot, 3.20 million main-pass triangles, 3,504 draws and one tiled copy. Steps add
@@ -545,8 +545,8 @@ The recipe streams requested prefixes rather than loading the maximum population
 Generate the recipe and preview the tour (60 FPS cap, Escape or window close exits):
 
 ```sh
-./build/bin/blockfield_render_compare --generate-dressing "$HOME/kin-bench/blockfield-grove.bfd"
-KIN_RENDER_BACKEND=gpu ./build/bin/blockfield_render_compare --preset grove --preview \
+./build-3d/bin/blockfield_render_compare --generate-dressing "$HOME/kin-bench/blockfield-grove.bfd"
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/blockfield_render_compare --preset grove --preview \
   --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
   --metrics "$HOME/kin-bench/grove/preview.csv"
 ```
@@ -558,8 +558,8 @@ The route follows a clear lane and is baked above existing terrain/tree bounds. 
 transparent cards; animation/crowds, physics, streaming and destruction remain separate workloads.
 
 ```sh
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --grove --smoke
-python3 examples/blockfield/run_render_compare.py --kin "$PWD/build/bin/blockfield_render_compare" --grove --frames 300 --repeats 3
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --grove --smoke
+python3 examples/blockfield/run_render_compare.py --kin "$PWD/build-3d/bin/blockfield_render_compare" --grove --frames 300 --repeats 3
 ```
 
 The full sweep tests the bare route, 10k/50k/100k plants, 512/5k transparent cards, the default combination and a 100k/5k
@@ -580,7 +580,7 @@ Nsight Systems already installed (output/scratch on disk, not a RAM filesystem):
 KIN_RENDER_BACKEND=gpu TMPDIR="$HOME/kin-bench/tmp" \
 nsys profile --trace=vulkan-annotations --sample=none --cpuctxsw=none --backtrace=none \
   --vulkan-gpu-workload=individual --output="$HOME/kin-bench/grove-capture" \
-  ./build/bin/blockfield_render_compare --gpu-pass-markers --visible --preset grove --workers 4 \
+  ./build-3d/bin/blockfield_render_compare --gpu-pass-markers --visible --preset grove --workers 4 \
   --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
   --foliage 100000 --transparent 0 --measured 1440 --profile-cpu \
   --metrics "$HOME/kin-bench/grove-capture.csv" --report "$HOME/kin-bench/grove-capture.json"
@@ -612,7 +612,7 @@ GPU texture/storage staging adapts over 120-batch windows, with a 1 MiB floor. `
 capacity excludes SDL cycle backings and driver pools. The retired environment A/B variables no longer affect runs.
 
 ```sh
-KIN_RENDER_BACKEND=gpu taskset -c 0-15 ./build/bin/blockfield_render_compare --preset grove \
+KIN_RENDER_BACKEND=gpu taskset -c 0-15 ./build-3d/bin/blockfield_render_compare --preset grove \
   --snapshot "$HOME/kin-bench/blockfield-d32.bfc" --dressing "$HOME/kin-bench/blockfield-grove.bfd" \
   --foliage 100000 --transparent 0 --copies 1 --measured 180 --profile-cpu --workers 2 \
   --metrics "$HOME/kin-bench/grove-profile/manual.csv" --report "$HOME/kin-bench/grove-profile/manual.json"
@@ -633,9 +633,9 @@ same physics step, and hit objects disappear before animation/collection.
 The host only steps/renders and draws counters. R restarts; Escape exits.
 
 ```sh
-cmake --build build --target projectile_range -j1
-build/bin/projectile_range
-build/bin/projectile_range --headless --frames=900 --report=range.json --screenshot=range.png
+cmake --build build-3d --target projectile_range -j1
+build-3d/bin/projectile_range
+build-3d/bin/projectile_range --headless --frames=900 --report=range.json --screenshot=range.png
 ```
 
 The example reuses Summit's free models/textures, explicitly preloads both object
@@ -674,9 +674,9 @@ the level and controller settings live in `summit/content/scenes/camp-play.kinsc
 and its referenced prefabs/recipes.
 
 ```sh
-cmake --build build --target camp_walk -j1
-build/bin/camp_walk
-build/bin/camp_walk --headless --demo --frames=240 --report=camp.json --screenshot=camp.png
+cmake --build build-3d --target camp_walk -j1
+build-3d/bin/camp_walk
+build-3d/bin/camp_walk --headless --demo --frames=240 --report=camp.json --screenshot=camp.png
 ```
 
 Find and collect three supplies to stock the camp. WASD moves, Space jumps, Shift
@@ -751,10 +751,10 @@ Esc opens the existing pause menu. The HUD shows the current objective, directio
 interaction progress. Interact uses the configured bindings, including gamepad controls.
 
 ```sh
-KIN_RENDER_BACKEND=gpu ./build/bin/summit
-./build/bin/summit --script expedition --seed 1   # CPU: direct branch, beacon, extraction
-./build/bin/summit --script shelter --seed 1      # CPU: cave branch, beacon, extraction
-KIN_RENDER_BACKEND=gpu ./build/bin/summit --headless --script shelter --width 960 --height 540 --screenshot /tmp/summit/cave
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/summit
+./build-3d/bin/summit --script expedition --seed 1   # CPU: direct branch, beacon, extraction
+./build-3d/bin/summit --script shelter --seed 1      # CPU: cave branch, beacon, extraction
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/summit --headless --script shelter --width 960 --height 540 --screenshot /tmp/summit/cave
 ```
 
 The expedition simulation is selected with `GameConfig::expedition`; its layout lives in `expedition.cpp`. Its phase, interaction
@@ -772,7 +772,7 @@ For full-frame performance measurements, use the native uncapped window loop rat
 ```sh
 python3 examples/summit/run_benchmark.py --output /disk/backed/scratch/summit-profile --pairs 3
 # One run, with streamed CSV timing and metadata:
-KIN_RENDER_BACKEND=gpu ./build/bin/summit --benchmark /disk/backed/scratch/dense.csv --script shelter --scenery dense --width 2560 --height 1440 --samples 4
+KIN_RENDER_BACKEND=gpu ./build-3d/bin/summit --benchmark /disk/backed/scratch/dense.csv --script shelter --scenery dense --width 2560 --height 1440 --samples 4
 ```
 
 The harness alternates compact/dense runs, verifies the CPU replay hash and route completion, watches for competing GPU/build
@@ -979,8 +979,8 @@ then acquires and returns leases without reloading the prefab. The report includ
 pool acquisition, reuse and exhaustion counts.
 
 ```sh
-cmake --build build --target lua_range
-build/bin/lua_range --headless --frames=240 --seed=7 --mute --report=/tmp/lua-range.json
+cmake --build build-3d --target lua_range
+build-3d/bin/lua_range --headless --frames=240 --seed=7 --mute --report=/tmp/lua-range.json
 ```
 
 For a rendered headless capture, set `KIN_RENDER_BACKEND=gpu` and add
