@@ -578,7 +578,7 @@ void CharacterSet::set_enabled(Character3D c, bool enabled) {
         return;
     }
     s->disabled = !enabled;
-    _env.world->set_no_collisions(s->inner, s->disabled);
+    _env.world->owner_set_no_collisions(s->inner, s->disabled);
     // Whatever it was doing is over: no speed, nothing held, no ground, until it is moved and updated again.
     s->velocity = {};
     s->control = {};
@@ -1238,7 +1238,7 @@ bool CharacterSet::restore(Parsed& parsed, JPH::StateRecorder& in) {
         }
         if (s.disabled != o.disabled) {
             s.disabled = o.disabled;
-            _env.world->set_no_collisions(s.inner, s.disabled);
+            _env.world->owner_set_no_collisions(s.inner, s.disabled);
         }
         s.input = o.input;
         s.prev_jump = o.prev_jump;

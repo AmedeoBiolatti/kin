@@ -3196,6 +3196,10 @@ void test_ecs_ik_entity_target_and_fades() {
                  world_position_of(hero, matrices_of(e.get<Animator3D>()->player.pose(), *hero.skeleton), biped::hand_l,
                                    Mat4f{}),
                  1e-4f));
+    // An explicit null entity target is a missing target, including in Debug.
+    b.ik("hand").target = {IKTarget3D::Kind::Entity, {}, 0};
+    (void)ik_frame(state, dt);
+    assert(!b.ik("hand").target_valid);
 }
 
 // Constraints run in list order, each on the pose the one before left; an animator with none is exactly what it was

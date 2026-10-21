@@ -322,7 +322,7 @@ f64 dot64(Vec3f a, Vec3f b) {
 // the entire footprint, not a few upward samples (a small/slanted ceiling can
 // fall between those). Obstacle winding does not matter.
 bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 3>& obstacle, Vec3f up, f32 height,
-                     const std::array<u32, 3>& neighbors, const std::array<bool, 3>& steps) {
+                     const std::array<u32, 3>& neighbors, const std::array<f32, 3>& step_tops) {
     // Relative coordinates avoid cancellation of large world-space plane offsets.
     std::vector<Vec3f> polygon, clipped;
     for (const auto point : obstacle)
@@ -347,11 +347,21 @@ bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 
     };
     for (u32 edge = 0; edge < 3 && !polygon.empty(); ++edge) {
         const auto inward = normalize(cross(up, floor[(edge + 1) % 3] - floor[edge]));
-        // Boundary-only contact (a stair riser or an adjacent uphill face)
-        // does not occupy the floor interior. Keep a world-space tolerance.
-        // Across an interior floor portal, a wall still blocks crossing.
-        // Exposed tread edges have no portal to obstruct.
-        clip(inward, -dot64(inward, floor[edge] - floor[0]) - (neighbors[edge] == nav_none || steps[edge] ? 1e-5 : 0));
+        // The riser below a joined tread is support, but a wall extending above
+        // that tread still blocks the portal. Exposed boundaries stay open.
+        f64 edge_top = -std::numeric_limits<f64>::infinity();
+        if (std::isfinite(step_tops[edge])) {
+            for (u32 i = 0; i < 3; ++i) {
+                const auto a = obstacle[i], b = obstacle[(i + 1) % 3];
+                const auto da = dot64(inward, a - floor[edge]), db = dot64(inward, b - floor[edge]);
+                if (std::abs(da) <= 1e-6)
+                    edge_top = std::max(edge_top, dot64(a, up));
+                if ((da < 0 && db > 0) || (da > 0 && db < 0))
+                    edge_top = std::max(edge_top, dot64(a + (b - a) * f32(da / (da - db)), up));
+            }
+        }
+        const bool support = std::isfinite(edge_top) && edge_top <= step_tops[edge] + 1e-5;
+        clip(inward, -dot64(inward, floor[edge] - floor[0]) - (neighbors[edge] == nav_none || support ? 1e-5 : 0));
     }
     const auto normal = normalize(cross(floor[1] - floor[0], floor[2] - floor[0]));
     const auto vertical = dot64(normal, up);
@@ -359,7 +369,12 @@ bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 
     // world units; the upper bound is conservative about touching the head.
     clip(normal, -1e-5 * vertical);
     clip(-normal, (height + 1e-5) * vertical);
-    return !polygon.empty();
+    // A vertical line at just one triangle vertex does not occupy its footprint.
+    // Keep edge-spanning vertical walls, including walls on interior portals.
+    for (std::size_t i = 1; i < polygon.size(); ++i)
+        if (length_squared(flat(polygon[i] - polygon[0], up)) > 1e-10f)
+            return true;
+    return false;
 }
 
 f64 segment_distance_squared(Vec3f a, Vec3f b, Vec3f c, Vec3f d) {
@@ -400,25 +415,63 @@ f64 boundary_distance_squared(const std::array<Vec3f, 3>& triangle, Vec3f a, Vec
     return distance;
 }
 
-std::vector<u32> clear_triangles(const NavMesh3D& mesh, std::span<const Vec3f> vertices, std::span<const u32> indices) {
+std::vector<u32> clear_triangles(const NavMesh3D& mesh, std::span<const Vec3f> vertices, std::span<const u32> indices,
+                                 bool erode = true) {
     const auto up = mesh.options.up;
     std::vector<bool> keep(mesh.triangles.size(), true);
     std::vector<u32> stack;
     stack.reserve(64);
     if (mesh.options.agent_height > 0) {
-        // An uphill centre needs extra headroom above the downhill side of its
-        // footprint. Bound that rise by the steepest actual slope per region.
-        std::vector<f32> rise_margin(mesh.regions, 0);
-        if (mesh.options.agent_radius > 0)
-            for (const auto& triangle : mesh.triangles) {
-                const auto& v = triangle.vertices;
+        // A footprint needs slope clearance only near that support surface.
+        // Propagate higher margins from slope transitions within the radius,
+        // never across a step or through an unrelated storey.
+        std::vector<f32> rise_margin(mesh.triangles.size(), 0);
+        if (mesh.options.agent_radius > 0) {
+            std::vector<Vec3f> projected;
+            for (const auto vertex : mesh.vertices)
+                projected.push_back(flat(vertex, up));
+            for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+                const auto& v = mesh.triangles[t].vertices;
                 const auto normal = normalize(
                     cross(mesh.vertices[v[1]] - mesh.vertices[v[0]], mesh.vertices[v[2]] - mesh.vertices[v[0]]));
                 const auto vertical = dot64(normal, up);
-                const f64 slope = std::sqrt(std::max(0.0, dot64(normal, normal) - vertical * vertical)) / vertical;
-                rise_margin[triangle.region] =
-                    std::max(rise_margin[triangle.region], f32(slope * mesh.options.agent_radius));
+                const auto slope = std::sqrt(std::max(0.0, dot64(normal, normal) - vertical * vertical)) / vertical;
+                rise_margin[t] = f32(slope * mesh.options.agent_radius);
             }
+            const auto own_margin = rise_margin;
+            std::vector<u64> visited(mesh.triangles.size(), 0);
+            u64 stamp = 0;
+            const f64 radius_squared = f64(mesh.options.agent_radius) * mesh.options.agent_radius;
+            for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+                const auto& source = mesh.triangles[t];
+                for (u32 edge = 0; edge < 3; ++edge) {
+                    const auto next = source.neighbors[edge];
+                    if (next == nav_none || source.steps[edge] || own_margin[t] <= own_margin[next])
+                        continue;
+                    const auto a = projected[source.vertices[edge]], b = projected[source.vertices[(edge + 1) % 3]];
+                    ++stamp;
+                    stack.assign(1, next);
+                    visited[next] = stamp;
+                    while (!stack.empty()) {
+                        const auto current = stack.back();
+                        stack.pop_back();
+                        const auto& tri = mesh.triangles[current];
+                        const std::array<Vec3f, 3> floor{projected[tri.vertices[0]], projected[tri.vertices[1]],
+                                                         projected[tri.vertices[2]]};
+                        if (boundary_distance_squared(floor, a, b, up) > radius_squared)
+                            continue;
+                        rise_margin[current] = std::max(rise_margin[current], own_margin[t]);
+                        for (u32 e = 0; e < 3; ++e) {
+                            const auto neighbor = tri.neighbors[e];
+                            if (neighbor != nav_none && !tri.steps[e] && visited[neighbor] != stamp) {
+                                visited[neighbor] = stamp;
+                                stack.push_back(neighbor);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         NavMesh3D obstacles;
         const auto welded = weld(vertices, mesh.options.weld_distance);
         obstacles.vertices.reserve(vertices.size());
@@ -443,19 +496,33 @@ std::vector<u32> clear_triangles(const NavMesh3D& mesh, std::span<const Vec3f> v
             const std::array<Vec3f, 3> floor{mesh.vertices[ids[0]], mesh.vertices[ids[1]], mesh.vertices[ids[2]]};
             auto low = min3(floor[0], min3(floor[1], floor[2]));
             auto high = max3(floor[0], max3(floor[1], floor[2]));
-            const auto height = mesh.options.agent_height + rise_margin[mesh.triangles[t].region];
+            const auto height = mesh.options.agent_height + rise_margin[t];
             const auto rise = up * (height + 1e-5f);
             low = min3(low, low + rise);
             high = max3(high, high + rise);
+            std::array<f32, 3> step_tops;
+            step_tops.fill(-inf);
+            for (u32 edge = 0; edge < 3; ++edge) {
+                const auto& triangle = mesh.triangles[t];
+                if (!triangle.steps[edge])
+                    continue;
+                const auto& other = mesh.triangles[triangle.neighbors[edge]];
+                f32 top = std::max(dot(floor[edge], up), dot(floor[(edge + 1) % 3], up));
+                for (u32 k = 0; k < 3; ++k)
+                    if (other.neighbors[k] == t)
+                        top = std::max({top, dot(mesh.vertices[other.vertices[k]], up),
+                                        dot(mesh.vertices[other.vertices[(k + 1) % 3]], up)});
+                step_tops[edge] = top;
+            }
             keep[t] = !any_overlap(obstacles, low, high, stack, [&](u32 other) {
                 const auto& v = obstacles.triangles[other].vertices;
                 return blocks_headroom(floor,
                                        {obstacles.vertices[v[0]], obstacles.vertices[v[1]], obstacles.vertices[v[2]]},
-                                       up, height, mesh.triangles[t].neighbors, mesh.triangles[t].steps);
+                                       up, height, mesh.triangles[t].neighbors, step_tops);
             });
         }
     }
-    if (mesh.options.agent_radius > 0) {
+    if (erode && mesh.options.agent_radius > 0) {
         // Propagate from actual borders, inside their radius and through local
         // floor topology. Interior triangles do no distance work, and a distant
         // ramp cannot bring a balcony border onto the floor underneath it.
@@ -1301,13 +1368,26 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
     }
 
     if (options.agent_height > 0 || options.agent_radius > 0) {
-        const auto cleared = clear_triangles(mesh, vertices, indices);
-        auto point_options = mesh.options;
+        // Removing ceilings can resolve a folded/nonmanifold ramp-floor seam.
+        // Rebuild that support topology before interpreting edges as radius walls.
+        const auto original = mesh.options;
+        const auto cleared = clear_triangles(mesh, vertices, indices, false);
+        auto point_options = original;
         point_options.agent_height = point_options.agent_radius = 0;
         NavMesh3D result;
         if (!cleared.empty())
             result = build_navmesh3d_impl(mesh.vertices, cleared, point_options, error);
-        result.options = mesh.options;
+        if (original.agent_radius > 0 && !result.triangles.empty()) {
+            result.options.agent_radius = original.agent_radius;
+            const auto eroded = clear_triangles(result, {}, {});
+            if (eroded.size() != result.triangles.size() * 3) {
+                if (eroded.empty())
+                    result = {};
+                else
+                    result = build_navmesh3d_impl(result.vertices, eroded, point_options, error);
+            }
+        }
+        result.options = original;
         return result;
     }
 

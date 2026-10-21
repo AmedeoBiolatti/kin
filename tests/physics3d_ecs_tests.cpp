@@ -105,6 +105,7 @@ void test_bodies_in_entity_order() {
     made[2].destruct();
     made[4].remove<Collider3D>();
     bodies.sync_bodies();
+    CHECK(!made[4].has<PhysicsBody3D>());
     CHECK(physics.body_count() == 3 && bodies.body_count() == 3);
     CHECK(!physics.contains(gone1) && !physics.contains(gone2));
     CHECK(bodies.body_of(made[4]) == Body3D{});
@@ -352,6 +353,7 @@ void test_events_routed() {
     World3DConfig cfg = serial();
     World3D physics(cfg);
     WorldPhysicsState3D bodies{ecs, physics};
+    CHECK(!bodies.entity_of(0).is_valid());
     const flecs::entity floor = add_floor(world);
     const flecs::entity crate = add_crate(world, {0, 1.5f, 0});
     int begins = 0;
@@ -491,7 +493,7 @@ void test_debug_lines() {
     physics.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static, .position = {6, 1, 0},
                          .layer = layers3d::Sensor, .sensor = true});
     for (int i = 0; i < 120; ++i) {
-        physics.step(dt);
+        (void)physics.step(dt);
     }
     CHECK(!physics.is_active(resting));
     DebugDraw3D draw;
@@ -544,7 +546,7 @@ void test_debug_lines() {
     resting_world.create_body({.shape = Shape3D::box({10, 0.5f, 10}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
     resting_world.create_body({.shape = Shape3D::box({0.5f, 0.5f, 0.5f}), .position = {0, 0.55f, 0}});
     for (int i = 0; i < 20; ++i) {
-        resting_world.step(dt);
+        (void)resting_world.step(dt);
     }
     draw.clear();
     draw.contacts(resting_world.events());
@@ -582,8 +584,8 @@ void test_debug_lines() {
     weak.break_force = 1.0f;
     weak.collide_connected = true;
     joints.create_constraint(weak);
-    joints.step(dt);
-    joints.step(dt);
+    (void)joints.step(dt);
+    (void)joints.step(dt);
     jd.clear();
     jd.world(joints);
     CHECK(!jd.lines().empty() && jd.lines().front().color == jd.options().broken_constraint);
@@ -1563,6 +1565,7 @@ void test_bound_set_follows_changes_after_quiet_steps() {
     CHECK(bodies.character_count() == 1 && bodies.body_count() == 3);
     late.remove<CharacterController3D>();
     quiet(1);
+    CHECK(!late.has<PhysicsCharacter3D>());
     CHECK(bodies.character_count() == 0 && bodies.body_of(late).valid() && bodies.body_count() == 4);
     quiet(5);
 
@@ -1670,7 +1673,7 @@ void test_shape_of_a_body_is_its_handle() {
     const Character3D hero = physics.create_character(desc);
     // A character's own body has no handle of the game's: Jolt's shape, wrapped.
     CHECK(physics.shape(physics.character(hero).body).valid());
-    physics.destroy_body(body);
+    (void)physics.destroy_body(body);
     CHECK(!physics.shape(body).valid());
     // The slot is used again: it has the new body's shape, not the old one's.
     const Body3D again = physics.create_body({.shape = box, .position = {0, 5, 0}});

@@ -113,7 +113,7 @@ inline Level build(World3D& world, Quatf frame = {}, Vec3f origin = {}) {
     for (const Vec3f& h : hold_places) {
         // A box standing 0.15 m out of the wall: a jug of 0.3 x 0.12 m.
         Piece& p = add(Kind::Hold, {x_holds + h.x, h.y, 0.075f}, {0.15f, 0.06f, 0.075f});
-        world.set_hold(p.body, {.quality = 1.0f});
+        (void)world.set_hold(p.body, {.quality = 1.0f});
         level.holds.push_back(p.body);
     }
 
@@ -123,7 +123,7 @@ inline Level build(World3D& world, Quatf frame = {}, Vec3f origin = {}) {
         Piece& p = add(Kind::Platform, start, {1.0f, 0.4f, 0.3f}, Body3DMotion::Kinematic, 0.0f, 0.9f);
         level.platform = p.body;
         level.platform_centre = p.centre;
-        world.set_hold(p.body, {.quality = 1.0f, .slide = true});
+        (void)world.set_hold(p.body, {.quality = 1.0f, .slide = true});
     }
 
     // x = 40: a pedestal and a crate with a third of it over the edge.

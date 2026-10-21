@@ -306,7 +306,7 @@ Behaviour behaviour(const Shape3D& shape, bool dynamic_too) {
         out.rays.push_back(world.raycast({x, 4, z}, {x * .3f, -4, z + .5f}));
     }
     for (int i = 0; i < 60; ++i)
-        world.step(1.f / 60);
+        (void)world.step(1.f / 60);
     out.hash = world.state_hash();
     return out;
 }
@@ -453,6 +453,29 @@ void bake_cache() {
               Shape3D::restore_binary(bytes, Shape3DKind::HeightField).volume() == field.volume(),
           "height field round trip failed");
 }
+void identity_compound_bake() {
+    Scratch scratch;
+    scratch.write("one.kincollider",
+                  recipe(R"({"kind":"compound","children":[{"kind":"convex_hull","points":[[0,0,0],[1,0,0],[0,1,0],[0,0,1]]}]})"));
+    const auto directory = scratch.path / "bake";
+    {
+        BakeCache bake{directory};
+        PhysicsAssets3D assets(scratch.path);
+        assets.set_bake_cache(&bake);
+        const auto loaded = assets.load_collider("one.kincollider");
+        check(loaded && assets.stats().cooks == 1, "identity compound did not cook");
+    }
+    {
+        BakeCache bake{directory};
+        PhysicsAssets3D assets(scratch.path);
+        assets.set_bake_cache(&bake);
+        const auto loaded = assets.load_collider("one.kincollider");
+        check(loaded && assets.stats().baked == 1 && assets.stats().cooks == 0,
+              "identity compound bake was not restored");
+        check((*loaded)->shape.kind() == Shape3DKind::Compound, "identity compound lost its authored kind");
+    }
+}
+
 } // namespace
 int main() {
     try {
@@ -461,6 +484,7 @@ int main() {
         external_geometry_and_packs();
         prefab_character_isolation();
         bake_cache();
+        identity_compound_bake();
         std::cout << "physics3d assets: passed\n";
         return 0;
     } catch (const std::exception& e) {

@@ -639,7 +639,7 @@ struct World3D::Impl {
             const char* what = s.owner == BodyOwner3D::Character ? "a character's own body (destroy_character)"
                              : s.owner == BodyOwner3D::Ragdoll  ? "a ragdoll's bone (destroy_ragdoll)"
                                                                 : "a rope's segment (destroy_rope, set_rope_length)";
-            KIN_LOG_WARN("physics", std::string("3D: ") + call + " refused: the body is " + what +
+            KIN_LOG_WARN("physics3d", std::string("3D: ") + call + " refused: the body is " + what +
                                         "; said once a world");
         }
         return true;
@@ -656,7 +656,7 @@ struct World3D::Impl {
     bool bad_value(const char* call) {
         if (!value_warned) {
             value_warned = true;
-            KIN_LOG_WARN("physics", std::string("3D: ") + call + " refused a number that is not finite or out of range; "
+            KIN_LOG_WARN("physics3d", std::string("3D: ") + call + " refused a number that is not finite or out of range; "
                                     "said once a world");
         }
         return false;
@@ -800,6 +800,7 @@ struct World3D::Impl {
     u32 owner_warned = 0;
     bool value_warned = false;
     std::vector<ConstraintEvent3D> constraint_events;
+    std::vector<JPH::BodyID> wake_scratch;
     std::vector<ConstraintSlot> constraint_slots;
     std::vector<u32> free_constraint_slots;
     i32 constraints_live = 0;
@@ -937,15 +938,15 @@ StepReport3D World3D::step(f32 dt) {
         const u32 fresh = errors & ~m.overflow_warned;
         m.overflow_warned |= errors;
         if ((fresh & static_cast<u32>(JPH::EPhysicsUpdateError::ManifoldCacheFull)) != 0) {
-            KIN_LOG_WARN("physics", "3D: contacts dropped in a step: the contact cache is full (raise "
+            KIN_LOG_WARN("physics3d", "3D: contacts dropped in a step: the contact cache is full (raise "
                                     "World3DConfig::max_contact_constraints); said once a world");
         }
         if ((fresh & static_cast<u32>(JPH::EPhysicsUpdateError::BodyPairCacheFull)) != 0) {
-            KIN_LOG_WARN("physics", "3D: contacts dropped in a step: too many body pairs (raise "
+            KIN_LOG_WARN("physics3d", "3D: contacts dropped in a step: too many body pairs (raise "
                                     "World3DConfig::max_body_pairs); said once a world");
         }
         if ((fresh & static_cast<u32>(JPH::EPhysicsUpdateError::ContactConstraintsFull)) != 0) {
-            KIN_LOG_WARN("physics", "3D: contacts dropped in a step: too many contact constraints (raise "
+            KIN_LOG_WARN("physics3d", "3D: contacts dropped in a step: too many contact constraints (raise "
                                     "World3DConfig::max_contact_constraints); said once a world");
         }
     }
@@ -976,6 +977,11 @@ StepReport3D World3D::step(f32 dt) {
     if (m.ragdolls->count() > 0) {
         m.ragdolls->post_step(dt);
         m.dropped += m.ragdolls->cap_events(m.config.max_events);
+    }
+    m.dropped += m.ropes->cap_events(m.config.max_events);
+    if (m.constraint_events.size()>m.config.max_events) {
+        m.dropped += m.constraint_events.size()-m.config.max_events;
+        m.constraint_events.resize(m.config.max_events);
     }
     return m.last_step;
 }
@@ -1216,6 +1222,14 @@ Body3D World3D::create_body(const Body3DDesc& d) {
         }
     }
 
+    if (d.motion == Body3DMotion::Kinematic && mass == 0.0f) {
+        // Jolt requires finite positive motion properties even for a mesh that
+        // stays kinematic. Its solver ignores these placeholders; Kin retains
+        // mass 0 and refuses promotion to Dynamic for a non-volumetric shape.
+        settings.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;
+        settings.mMassPropertiesOverride.mMass = 1.0f;
+        settings.mMassPropertiesOverride.mInertia = JPH::Mat44::sIdentity();
+    }
     JPH::Body* body = m.bi().CreateBody(settings);
     if (body == nullptr) {
         return {};
@@ -1288,18 +1302,31 @@ void World3D::set_owner(Body3D body, BodyOwner3D owner) {
 }
 
 void World3D::Impl::wake_touching(const JPH::BodyID& id) {
-    JPH::AABox bounds = bi().GetTransformedShape(id).GetWorldSpaceBounds();
-    bounds.ExpandBy(JPH::Vec3::sReplicate(0.1f));
-    struct Touching final : JPH::CollideShapeBodyCollector {
-        void AddHit(const JPH::BodyID& hit) override { ids.push_back(hit); }
-        std::vector<JPH::BodyID> ids;
-    } touching;
-    system.GetBroadPhaseQuery().CollideAABox(bounds, touching);
-    std::erase_if(touching.ids, [&](const JPH::BodyID& hit) { return hit == id; });
-    std::ranges::sort(touching.ids, [](const JPH::BodyID& a, const JPH::BodyID& b) { return a.GetIndex() < b.GetIndex(); });
-    if (!touching.ids.empty()) {
-        bi().ActivateBodies(touching.ids.data(), static_cast<int>(touching.ids.size()));
-    }
+    // A level mesh's AABB can contain the whole world. Wake actual nearby
+    // contacts, not every sleeper inside that box; retain candidate storage.
+    struct Touching final : JPH::CollideShapeCollector {
+        explicit Touching(std::vector<JPH::BodyID>& buffer) : ids(buffer) {}
+        void AddHit(const JPH::CollideShapeResult& hit) override { ids.push_back(hit.mBodyID2); }
+        std::vector<JPH::BodyID>& ids;
+    } touching{wake_scratch};
+    struct Others final : JPH::BodyFilter {
+        explicit Others(JPH::BodyID own) : own(own) {}
+        bool ShouldCollide(const JPH::BodyID& body) const override { return body != own; }
+        bool ShouldCollideLocked(const JPH::Body& body) const override { return body.IsDynamic(); }
+        JPH::BodyID own;
+    } others{id};
+    wake_scratch.clear();
+    const auto shape = bi().GetTransformedShape(id);
+    JPH::CollideShapeSettings settings;
+    settings.mMaxSeparationDistance = .1f;
+    settings.mBackFaceMode = JPH::EBackFaceMode::CollideWithBackFaces;
+    system.GetNarrowPhaseQuery().CollideShape(shape.mShape.GetPtr(), shape.GetShapeScale(),
+                                              shape.GetCenterOfMassTransform(), settings, shape.mShapePositionCOM,
+                                              touching, {}, {}, others);
+    std::ranges::sort(wake_scratch, [](const auto& a, const auto& b) { return a.GetIndex() < b.GetIndex(); });
+    wake_scratch.erase(std::unique(wake_scratch.begin(), wake_scratch.end()), wake_scratch.end());
+    if (!wake_scratch.empty())
+        bi().ActivateBodies(wake_scratch.data(), static_cast<int>(wake_scratch.size()));
 }
 
 // Takes a body out of the world: what it touched wakes, its constraints and pairs end, its slot is freed. `jolt` says
@@ -1385,7 +1412,7 @@ void World3D::set_position(Body3D body, Vec3f position) {
         const bool supported = _impl->bi().GetMotionType(s->id) != JPH::EMotionType::Dynamic;
         if (supported) _impl->wake_touching(s->id);
         _impl->bi().SetPosition(s->id, to_jolt(position), JPH::EActivation::Activate);
-        if (supported) _impl->wake_touching(s->id);
+        if (_impl->bi().GetMotionType(s->id)==JPH::EMotionType::Static) _impl->wake_touching(s->id);
     }
 }
 
@@ -1396,7 +1423,7 @@ void World3D::set_rotation(Body3D body, Quatf rotation) {
         const bool supported = _impl->bi().GetMotionType(s->id) != JPH::EMotionType::Dynamic;
         if (supported) _impl->wake_touching(s->id);
         _impl->bi().SetRotation(s->id, target, JPH::EActivation::Activate);
-        if (supported) _impl->wake_touching(s->id);
+        if (_impl->bi().GetMotionType(s->id)==JPH::EMotionType::Static) _impl->wake_touching(s->id);
     }
 }
 
@@ -1729,7 +1756,6 @@ void World3D::set_layers_collide(u8 a, u8 b, bool collide) {
             continue;
         const auto layer = _impl->bi().GetObjectLayer(slot.id);
         if (layer == a || layer == b) {
-            _impl->wake_touching(slot.id);
             _impl->bi().InvalidateContactCache(slot.id);
             _impl->bi().ActivateBody(slot.id);
         }
@@ -1762,7 +1788,7 @@ void World3D::teleport(Body3D body, Vec3f position, Quatf rotation) {
         if (supported) _impl->wake_touching(s->id);
         _impl->bi().SetPositionAndRotation(s->id, to_jolt(position), to_jolt(rotation.normalized()),
                                            JPH::EActivation::Activate);
-        if (supported) _impl->wake_touching(s->id);
+        if (_impl->bi().GetMotionType(s->id)==JPH::EMotionType::Static) _impl->wake_touching(s->id);
         _impl->bi().SetLinearAndAngularVelocity(s->id, JPH::Vec3::sZero(), JPH::Vec3::sZero());
     }
 }
@@ -1805,7 +1831,7 @@ void World3D::follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 
 
 bool World3D::set_layer(Body3D body, u8 layer) {
     Impl& m = *_impl;
-    const auto* s = m.find_free(body);
+    const auto* s = m.settable(body,"set_layer");
     if (s == nullptr) {
         return false;
     }
@@ -1821,7 +1847,6 @@ bool World3D::set_layer(Body3D body, u8 layer) {
         return true;
     m.wake_touching(s->id);
     m.bi().SetObjectLayer(s->id, JPH::ObjectLayer(layer));
-    m.wake_touching(s->id);
     m.bi().InvalidateContactCache(s->id);
     m.bi().ActivateBody(s->id);
     return true;
@@ -1833,7 +1858,7 @@ bool World3D::is_sensor(Body3D body) const {
 }
 
 void World3D::set_sensor(Body3D body, bool sensor) {
-    if (const auto* s = _impl->find_free(body)) {
+    if (const auto* s = _impl->settable(body,"set_sensor")) {
         if (_impl->bi().IsSensor(s->id) == sensor) return;
         _impl->wake_touching(s->id);
         _impl->bi().SetIsSensor(s->id, sensor);
@@ -1862,9 +1887,9 @@ bool World3D::owner_set_shape(Body3D body, const Shape3D& shape) {
     if (dynamic && surface) {
         return false;
     }
-    if (!dynamic) m.wake_touching(s->id);
+    m.wake_touching(s->id);
     m.bi().SetShape(s->id, shape._data->shape.GetPtr(), false, JPH::EActivation::Activate);
-    if (!dynamic) m.wake_touching(s->id);
+    if (m.bi().GetMotionType(s->id)==JPH::EMotionType::Static) m.wake_touching(s->id);
     s->shape = shape;
     // A kinematic body with a mass keeps it for set_motion too (a mesh or height field cannot be made dynamic).
     if (dynamic || (s->mass > 0.0f && !surface)) {
@@ -2834,6 +2859,13 @@ f32 World3D::added_mass(Body3D body) const {
 }
 
 void World3D::set_group(Body3D body, u32 group) {
+    // Characters may join their ragdoll's group so their capsule and movement
+    // queries ignore its bones. Other owners manage their own group membership.
+    if (const auto* s = _impl->find(body);
+        s && (s->owner == BodyOwner3D::Character || !_impl->refused(*s, "set_group")))
+        owner_set_group(body, group);
+}
+void World3D::owner_set_group(Body3D body,u32 group) {
     Impl& m = *_impl;
     if (const auto* s = m.find(body)) {
         const u32 slot = static_cast<u32>(s - m.slots.data());
@@ -2858,6 +2890,10 @@ u32 World3D::group(Body3D body) const {
 }
 
 void World3D::set_no_collisions(Body3D body, bool no_collisions) {
+    if (_impl->settable(body,"set_no_collisions")) owner_set_no_collisions(body,no_collisions);
+}
+
+void World3D::owner_set_no_collisions(Body3D body, bool no_collisions) {
     Impl& m = *_impl;
     if (const auto* s = m.find(body)) {
         const u32 slot = static_cast<u32>(s - m.slots.data());
@@ -2942,6 +2978,8 @@ bool World3D::contains(RopeHandle3D r) const { return _impl->ropes->contains(r);
 i32 World3D::rope_count() const { return _impl->ropes->count(); }
 std::vector<RopeHandle3D> World3D::ropes() const { return _impl->ropes->list(); }
 std::vector<RopePoint3D> World3D::rope_points(RopeHandle3D r) const { return _impl->ropes->points(r); }
+void World3D::rope_points(RopeHandle3D r,std::vector<RopePoint3D>& output)const { _impl->ropes->points(r,output); }
+bool World3D::constraint_broken(Constraint3D c)const { const auto* slot=_impl->find(c);return slot && slot->broken; }
 std::vector<RopeSegment3D> World3D::rope_segments(RopeHandle3D r) const { return _impl->ropes->segments(r); }
 RopeState3D World3D::rope_state(RopeHandle3D r) const { return _impl->ropes->state(r); }
 std::optional<RopeClosest3D> World3D::rope_closest_point(RopeHandle3D r, Vec3f point) const { return _impl->ropes->closest(r, point); }
@@ -2973,9 +3011,8 @@ u64 World3D::state_hash() const {
         h.u32v(slot.generation);
         h.u64v(slot.user_id);
         h.byte(static_cast<u8>(bi.GetMotionType(id)));
-        // Keep existing trajectories' hashes when no temporary mass is pending.
-        if (slot.extra_mass != 0.0f)
-            h.f32v(slot.extra_mass);
+        // Fixed-width body records include an explicit zero temporary mass.
+        h.f32v(slot.extra_mass);
         h.byte(static_cast<u8>(bi.GetObjectLayer(id)));
         h.byte(bi.IsActive(id) ? 1 : 0);
         h.vec(from_jolt(bi.GetPosition(id)));

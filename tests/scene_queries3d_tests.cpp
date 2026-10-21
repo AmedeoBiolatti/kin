@@ -102,7 +102,7 @@ void queries(Renderer2D& renderer) {
     const auto unmapped = query.raycast(from, to);
     check(unmapped && unmapped->physics.body == native && !unmapped->entity && !query.resolve(*unmapped),
           "unmapped/spoofed native body did not remain an obstruction");
-    session.physics()->destroy_body(native);
+    (void)session.physics()->destroy_body(native);
     // Stale native hits fail even if their scene entity and user id remain live.
     check(session.reconfigure<Collider3D>(target.entity,
                                           [](auto& collider) { collider.half_extents = {.25f, .25f, .25f}; }),

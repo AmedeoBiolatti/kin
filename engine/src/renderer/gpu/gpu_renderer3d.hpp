@@ -189,6 +189,7 @@ private:
     // (an HDR view draws into _scene), the history (this frame's resolve and the
     // one before, swapped each frame) and the sharpened result.
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
+    GpuTexture _taa_opaque_motion; // preserved only for blended-mesh coverage
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
     u32 _taa_read = 0;       // which of the two holds the last frame
@@ -232,7 +233,8 @@ private:
     bool _occ_reset = true; // View3D::reset_history(), a resize: the history is dropped
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
-    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0;
+    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
+        _idle_taa_opaque = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -253,7 +255,7 @@ public:
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
-    PickResult3D pick(IViewBackend3D& view, Vec2i pixel) override;
+    Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
     bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
 
     // The format of views' depth buffers: D32_FLOAT, else D24_UNORM, else

@@ -188,7 +188,7 @@ public:
             _physics.set_character_enabled(_character, collision_ready());
         }
         const auto physics = Clock::now();
-        _physics.step(dt);
+        (void)_physics.step(dt);
         _physics.drain_character_events();
         _physics_ms = milliseconds(physics);
         if (!_fly) {
@@ -445,7 +445,7 @@ private:
         for (auto it = _chunks.begin(); it != _chunks.end();) {
             if (distance(it->first, camera) > _options.radius) {
                 if (it->second.body.valid())
-                    _physics.destroy_body(it->second.body);
+                    (void)_physics.destroy_body(it->second.body);
                 _mesh_bytes -= it->second.bytes;
                 _dirty.erase(it->first);
                 it = _chunks.erase(it);
@@ -453,7 +453,7 @@ private:
                 _budget_blocked.clear();
             } else {
                 if (distance(it->first, camera) > 1 && it->second.body.valid()) {
-                    _physics.destroy_body(it->second.body);
+                    (void)_physics.destroy_body(it->second.body);
                     it->second.body = {};
                 }
                 ++it;
@@ -493,7 +493,7 @@ private:
                         _mesh_bytes = _mesh_bytes - previous + bytes;
                     }
                     if (chunk.body.valid())
-                        _physics.destroy_body(chunk.body);
+                        (void)_physics.destroy_body(chunk.body);
                     chunk.body = {};
                     if (distance(result.key, camera) <= 1 && !result.mesh.indices.empty()) {
                         std::vector<Vec3f> vertices;

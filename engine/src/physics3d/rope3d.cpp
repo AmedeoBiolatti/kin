@@ -294,43 +294,43 @@ std::vector<RopeHandle3D> RopeSet::list() const {
 }
 
 void RopeSet::joint_points(const Slot& s, std::vector<Vec3f>& out) const {
-    const u32 n = s.n;
-    out.assign(n + 1, Vec3f{});
-    const f32 half = 0.5f * s.segment_length;
-    std::vector<Vec3f> start(n), end(n);
-    for (u32 k = 0; k < n; ++k) {
-        const Body3D b = s.segs[k];
-        const Vec3f p = _world->position(b);
-        const Quatf r = _world->rotation(b);
-        start[k] = p + r.rotate({0.0f, -half, 0.0f});
-        end[k] = p + r.rotate({0.0f, half, 0.0f});
+    out.resize(s.n + 1);
+    const f32 half = .5f * s.segment_length;
+    Vec3f previous_end{};
+    for (u32 k = 0; k < s.n; ++k) {
+        const auto p = _world->position(s.segs[k]);
+        const auto r = _world->rotation(s.segs[k]);
+        const auto start = p + r.rotate({0, -half, 0});
+        out[k] = k ? (previous_end + start) * .5f : start;
+        previous_end = p + r.rotate({0, half, 0});
     }
-    out[0] = start[0];
-    for (u32 k = 1; k < n; ++k) {
-        out[k] = (end[k - 1] + start[k]) * 0.5f;
-    }
-    out[n] = end[n - 1];
+    out[s.n] = previous_end;
 }
 
 std::vector<RopePoint3D> RopeSet::points(RopeHandle3D h) const {
     std::vector<RopePoint3D> out;
-    const Slot* s = find(h);
-    if (s == nullptr) {
-        return out;
-    }
-    std::vector<Vec3f> j;
-    joint_points(*s, j);
-    out.resize(j.size());
-    std::vector<Vec3f> axis(s->n);
-    for (u32 k = 0; k < s->n; ++k) {
-        axis[k] = _world->rotation(s->segs[k]).rotate({0.0f, 1.0f, 0.0f});
-    }
-    for (u32 k = 0; k <= s->n; ++k) {
-        out[k].position = j[k];
-        Vec3f t = k == 0 ? axis[0] : k == s->n ? axis[s->n - 1] : axis[k - 1] + axis[k];
-        out[k].tangent = length(t) > 1.0e-6f ? normalize(t) : Vec3f{0.0f, -1.0f, 0.0f};
-    }
+    points(h, out);
     return out;
+}
+void RopeSet::points(RopeHandle3D h, std::vector<RopePoint3D>& out) const {
+    const auto* s = find(h);
+    if (!s) {
+        out.clear();
+        return;
+    }
+    out.resize(s->n + 1);
+    const f32 half = .5f * s->segment_length;
+    Vec3f previous_end{}, previous_axis{};
+    const auto tangent = [](Vec3f t) { return length(t) > 1e-6f ? normalize(t) : Vec3f{0, -1, 0}; };
+    for (u32 k = 0; k < s->n; ++k) {
+        const auto p = _world->position(s->segs[k]);
+        const auto r = _world->rotation(s->segs[k]);
+        const auto start = p + r.rotate({0, -half, 0}), axis = r.rotate({0, 1, 0});
+        out[k] = {k ? (previous_end + start) * .5f : start, tangent(k ? previous_axis + axis : axis)};
+        previous_end = p + r.rotate({0, half, 0});
+        previous_axis = axis;
+    }
+    out[s->n] = {previous_end, tangent(previous_axis)};
 }
 
 std::vector<RopeSegment3D> RopeSet::segments(RopeHandle3D h) const {
@@ -371,13 +371,21 @@ RopeState3D RopeSet::state(RopeHandle3D h) const {
     out.segments = s->n;
     out.rest_length = s->rest;
     out.target_length = s->target;
-    std::vector<Vec3f> j;
-    joint_points(*s, j);
-    for (std::size_t k = 1; k < j.size(); ++k) {
-        out.current_length += length(j[k] - j[k - 1]);
+    Vec3f previous_end{}, previous_joint{};
+    const f32 half = .5f * s->segment_length;
+    for (u32 k = 0; k < s->n; ++k) {
+        const auto p = _world->position(s->segs[k]);
+        const auto r = _world->rotation(s->segs[k]);
+        const auto start = p + r.rotate({0, -half, 0});
+        const auto joint = k ? (previous_end + start) * .5f : start;
+        if (k)
+            out.current_length += length(joint - previous_joint);
+        previous_joint = joint;
+        previous_end = p + r.rotate({0, half, 0});
     }
+    out.current_length += length(previous_end - previous_joint);
     for (const Constraint3D c : s->joints) {
-        if (c.valid() && _world->contains(c) && _world->constraint_info(c).broken) {
+        if (c.valid() && _world->contains(c) && _world->constraint_broken(c)) {
             out.broken = true;
         }
     }
@@ -517,12 +525,12 @@ void RopeSet::fit(Slot& s, f32 new_length, bool relay) {
             continue;
         }
         if (k == 0) {
-            _world->set_constraint_anchor(c, 1, {0.0f, -e, 0.0f});
+            (void)_world->set_constraint_anchor(c, 1, {0.0f, -e, 0.0f});
         } else if (k == n) {
-            _world->set_constraint_anchor(c, 1, {0.0f, e, 0.0f});
+            (void)_world->set_constraint_anchor(c, 1, {0.0f, e, 0.0f});
         } else {
-            _world->set_constraint_anchor(c, 0, {0.0f, e, 0.0f});
-            _world->set_constraint_anchor(c, 1, {0.0f, -e, 0.0f});
+            (void)_world->set_constraint_anchor(c, 0, {0.0f, e, 0.0f});
+            (void)_world->set_constraint_anchor(c, 1, {0.0f, -e, 0.0f});
         }
     }
     // The anchored ends' own sides: a point of the world, or the body's offset (they do not change with the length).
@@ -530,7 +538,7 @@ void RopeSet::fit(Slot& s, f32 new_length, bool relay) {
         const RopeAnchor3D& a = joint == 0 ? s.desc.start : s.desc.end;
         const Constraint3D c = s.joints[joint];
         if (c.valid() && _world->contains(c) && a.kind != RopeAnchor3D::Kind::Free) {
-            _world->set_constraint_anchor(c, 0, a.point);
+            (void)_world->set_constraint_anchor(c, 0, a.point);
         }
     }
     s.segment_length = seg;
@@ -576,7 +584,7 @@ void RopeSet::pre_step(f32 dt) {
             // The reel stopped, or turned to pay out, or the load went: the body is its own again.
             s.hoisting = false;
             if (load && _world->motion(anchor.body) == Body3DMotion::Kinematic) {
-                _world->set_motion(anchor.body, Body3DMotion::Dynamic);
+                (void)_world->set_motion(anchor.body, Body3DMotion::Dynamic);
                 _world->set_linear_velocity(anchor.body, {});
                 _world->set_angular_velocity(anchor.body, {});
             }
@@ -608,7 +616,7 @@ void RopeSet::pre_step(f32 dt) {
                 continue;
             }
             s.hoisting = true;
-            _world->set_motion(anchor.body, Body3DMotion::Kinematic);
+            (void)_world->set_motion(anchor.body, Body3DMotion::Kinematic);
         }
         // Put there, not driven there: the chain's end was put there too, and a velocity the rigid chain cannot have would be
         // answered by impulses of thousands of newtons.
@@ -726,7 +734,7 @@ void RopeSet::apply(const Parsed& parsed) {
             // The anchored body's motion type is not in Jolt's state: put it as it was.
             const RopeAnchor3D& anchor = s.from_end ? s.desc.start : s.desc.end;
             if (anchor.kind == RopeAnchor3D::Kind::Body && _world->contains(anchor.body)) {
-                _world->set_motion(anchor.body, o.hoisting ? Body3DMotion::Kinematic : Body3DMotion::Dynamic);
+                (void)_world->set_motion(anchor.body, o.hoisting ? Body3DMotion::Kinematic : Body3DMotion::Dynamic);
             }
             s.hoisting = o.hoisting;
         }

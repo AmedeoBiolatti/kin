@@ -43,6 +43,7 @@
 namespace kin {
 class SceneQueries3D;
 namespace physics3d_detail {
+class CharacterSet;
 class RagdollSet;
 class RopeSet;
 }
@@ -364,15 +365,16 @@ struct World3DConfig {
     // is recorded (under a lock while a step runs). A character's own capsule never sleeps and is not reported.
     bool activation_events = false;
     // The events kept between drains: past it the newest are dropped (the earlier ones are kept) and counted by
-    // dropped_events(). The same for the character and ragdoll events, each list on its own.
+    // dropped_events(). Applies independently to contact, activation, character,
+    // ragdoll, rope and constraint events. Internal break handling still sees all breaks.
     u32 max_events = 1u << 16;
 };
 
 // What a step had to leave out because a capacity of World3DConfig was reached: Jolt dropped the contacts that did not fit
 // for that step (bodies may sink into each other or through the floor). All false in a step that fitted. Which contacts
-// are dropped depends on the order of the worker threads, so such a step is not deterministic across worker counts: size
+// are dropped depends on worker arrival order, even at the same worker count: size
 // the capacities for the busiest scene (Jolt does not say how many pairs or constraints a step used).
-struct StepReport3D {
+struct [[nodiscard]] StepReport3D {
     bool manifold_cache_full = false;      // the contact cache: raise max_contact_constraints
     bool body_pair_cache_full = false;     // raise max_body_pairs
     bool contact_constraints_full = false; // raise max_contact_constraints
@@ -412,10 +414,10 @@ public:
     Body3D create_body(const Body3DDesc& desc);
     // False, doing nothing, for a handle that is not (or no longer) a body, or a body that belongs to a character,
     // ragdoll or rope (BodyOwner3D: destroy that instead).
-    bool destroy_body(Body3D body);
+    [[nodiscard]] bool destroy_body(Body3D body);
     // What the body belongs to (None for a dead handle).
     BodyOwner3D owner_of(Body3D body) const;
-    bool contains(Body3D body) const;
+    [[nodiscard]] bool contains(Body3D body) const;
     i32 body_count() const;
     // Bodies awake now.
     i32 active_body_count() const;
@@ -466,12 +468,12 @@ public:
     //  * set_friction and set_restitution (0 or more): every body, a static one too (a floor that freezes over). Friction
     //    wakes the body, and for a static or kinematic one what touches it (a crate asleep on a slope that turns to ice
     //    slides); restitution only matters at the next impact.
-    bool set_mass(Body3D body, f32 mass);
-    bool set_gravity_factor(Body3D body, f32 factor);
-    bool set_linear_damping(Body3D body, f32 damping);
-    bool set_angular_damping(Body3D body, f32 damping);
-    bool set_friction(Body3D body, f32 friction);
-    bool set_restitution(Body3D body, f32 restitution);
+    [[nodiscard]] bool set_mass(Body3D body, f32 mass);
+    [[nodiscard]] bool set_gravity_factor(Body3D body, f32 factor);
+    [[nodiscard]] bool set_linear_damping(Body3D body, f32 damping);
+    [[nodiscard]] bool set_angular_damping(Body3D body, f32 damping);
+    [[nodiscard]] bool set_friction(Body3D body, f32 friction);
+    [[nodiscard]] bool set_restitution(Body3D body, f32 restitution);
     // As they are now (0 for a dead handle; the gravity factor and dampings are 0 for a static body, which has none).
     f32 gravity_factor(Body3D body) const;
     f32 linear_damping(Body3D body) const;
@@ -492,22 +494,22 @@ public:
     void follow_transform(Body3D body, Vec3f position, Quatf rotation, f32 dt);
     // A body's layer (the rules of create_body: only static bodies may be in layer 0). Contacts it has keep
     // going until the pair is tested again.
-    bool set_layer(Body3D body, u8 layer);
-    bool is_sensor(Body3D body) const;
+    [[nodiscard]] bool set_layer(Body3D body, u8 layer);
+    [[nodiscard]] bool is_sensor(Body3D body) const;
     // A sensor is not pushed by or pushing anything but reports overlaps. Bodies already inside get a Begin
     // event at the next step when they start to count as overlapping.
     void set_sensor(Body3D body, bool sensor);
     // Swaps a body's shape (a crouch, a different scale: build a shape of the new size). A dynamic body keeps
     // its mass and gets the new shape's inertia; a mesh or height field is refused for a dynamic body. The
     // body is woken. Returns false when refused, also for a body that belongs to a character, ragdoll or rope.
-    bool set_shape(Body3D body, const Shape3D& shape);
+    [[nodiscard]] bool set_shape(Body3D body, const Shape3D& shape);
     // The live bodies, by body number.
     std::vector<Body3D> bodies() const;
     // A dynamic body becomes kinematic (a ragdoll animated by a clip: the body follows and pushes) or a kinematic one
     // dynamic, with the mass it was made with. Velocities are kept. Returns false for a static body, a motion of Static,
     // a kinematic body without a mass (a mesh or height field, a shape of no volume) made dynamic, or a body that belongs
     // to a character, ragdoll or rope.
-    bool set_motion(Body3D body, Body3DMotion motion);
+    [[nodiscard]] bool set_motion(Body3D body, Body3DMotion motion);
     // A mass (kg) added to a dynamic body at its centre for the next step only, like a force (set it every step it should
     // count; the step clears it): the inertia of something that hangs from the body (a climber on a rope; the weight comes
     // with gravity acting on the whole). The body's own mass is what it was made with. 0 takes it off.
@@ -522,7 +524,7 @@ public:
     // Moves a Point constraint's anchor on one side (0: body a, 1: body b) to `local_point`, in that body's own frame (origin and
     // rotation; the world's for a side that is fixed to the world), without making a new constraint: a rope that changes length.
     // False for another kind of constraint, a stale handle or a side that is not 0 or 1.
-    bool set_constraint_anchor(Constraint3D constraint, i32 side, Vec3f local_point);
+    [[nodiscard]] bool set_constraint_anchor(Constraint3D constraint, i32 side, Vec3f local_point);
 
     // --- queries ---
     // The first body along the segment from `from` to `to`.
@@ -589,7 +591,7 @@ public:
     // destroyed with either of their bodies.
     Constraint3D create_constraint(const Constraint3DDesc& desc);
     void destroy_constraint(Constraint3D constraint);
-    bool contains(Constraint3D constraint) const;
+    [[nodiscard]] bool contains(Constraint3D constraint) const;
     i32 constraint_count() const;
     Constraint3DInfo constraint_info(Constraint3D constraint) const;
     // The linear impulse (N s) a Point constraint applied to its second body (b) in the last collision step: divide by the
@@ -610,7 +612,7 @@ public:
     Character3D create_character(const CharacterDesc3D& desc);
     // Does nothing for a handle that is not (or no longer) a character; the body goes with it.
     void destroy_character(Character3D character);
-    bool contains(Character3D character) const;
+    [[nodiscard]] bool contains(Character3D character) const;
     i32 character_count() const;
     // The live characters, by number: the order step() updates them in.
     std::vector<Character3D> characters() const;
@@ -638,12 +640,12 @@ public:
     void set_character_up(Character3D character, Vec3f up, bool instant = false);
     // Crouches or stands at once. Standing is refused (false, and it stays crouched) when the standing capsule
     // would hit something above. The next step's input.crouch decides again.
-    bool set_character_crouch(Character3D character, bool crouch);
+    [[nodiscard]] bool set_character_crouch(Character3D character, bool crouch);
     // Hands the place over to something else (a ragdoll): a disabled character is not updated (no input, no events), its
     // body collides with nothing, and anything it held is let go. Re-enable it with teleport_character first or after: it
     // starts from rest, in the air, at the place it was left. A handle that is not a character does nothing.
     void set_character_enabled(Character3D character, bool enabled);
-    bool character_enabled(Character3D character) const;
+    [[nodiscard]] bool character_enabled(Character3D character) const;
     // Changes how it is simulated while it lives: the numbers of the descriptor but the shape, layer and position
     // (radius, heights, layer and mask are fixed at creation).
     void set_character_desc(Character3D character, const CharacterDesc3D& desc);
@@ -661,9 +663,9 @@ public:
     SurfaceMaterial3D surface_material(Body3D body) const;
     // Marks a body as an authored hold (an own grip quality; a fixed grip point if asked). Returns false for a body that
     // is not one.
-    bool set_hold(Body3D body, const HoldDesc3D& hold);
+    [[nodiscard]] bool set_hold(Body3D body, const HoldDesc3D& hold);
     void clear_hold(Body3D body);
-    bool is_hold(Body3D body) const;
+    [[nodiscard]] bool is_hold(Body3D body) const;
     HoldDesc3D hold(Body3D body) const;
     // What a hand could take hold of from `probe.origin` along `probe.direction`, best first (score, then body number and
     // place): a fan of sphere sweeps and rays against the layers of `probe.mask`, each hit made a candidate by the hold,
@@ -686,12 +688,12 @@ public:
     RagdollHandle3D create_ragdoll(const RagdollDesc& desc, std::span<const Mat4f> bone_world, f32 scale = 1.0f);
     // Destroys its bodies and joints.
     void destroy_ragdoll(RagdollHandle3D ragdoll);
-    bool contains(RagdollHandle3D ragdoll) const;
+    [[nodiscard]] bool contains(RagdollHandle3D ragdoll) const;
     i32 ragdoll_count() const;
     std::vector<RagdollHandle3D> ragdolls() const;
     // The bodies, by bone (invalid for a bone that was left out).
     std::vector<Body3D> ragdoll_bodies(RagdollHandle3D ragdoll) const;
-    bool ragdoll_has_body(RagdollHandle3D ragdoll, Body3D body) const;
+    [[nodiscard]] bool ragdoll_has_body(RagdollHandle3D ragdoll, Body3D body) const;
     const RagdollDesc* ragdoll_desc(RagdollHandle3D ragdoll) const;
     // Where the clip puts the bones, in the world (a matrix a bone): what the kinematic bodies follow in the next step.
     void set_ragdoll_targets(RagdollHandle3D ragdoll, std::span<const Mat4f> bone_world);
@@ -728,17 +730,18 @@ public:
     RopeHandle3D create_rope(const RopeDesc3D& desc);
     // Destroys its bodies and joints.
     void destroy_rope(RopeHandle3D rope);
-    bool contains(RopeHandle3D rope) const;
+    [[nodiscard]] bool contains(RopeHandle3D rope) const;
     i32 rope_count() const;
     std::vector<RopeHandle3D> ropes() const;
     // The polyline: segments + 1 joints with the direction there.
     std::vector<RopePoint3D> rope_points(RopeHandle3D rope) const;
+    void rope_points(RopeHandle3D rope,std::vector<RopePoint3D>& output)const;
     std::vector<RopeSegment3D> rope_segments(RopeHandle3D rope) const;
     RopeState3D rope_state(RopeHandle3D rope) const;
     // The closest point of the rope to `point`, by segment and parameter.
     std::optional<RopeClosest3D> rope_closest_point(RopeHandle3D rope, Vec3f point) const;
     // The point at `fraction` (-0.5 to 0.5 of the segment's length from its middle) of a segment, and the segment's direction.
-    bool rope_point_at(RopeHandle3D rope, u32 segment, f32 fraction, Vec3f& point, Vec3f& tangent) const;
+    [[nodiscard]] bool rope_point_at(RopeHandle3D rope, u32 segment, f32 fraction, Vec3f& point, Vec3f& tangent) const;
     // Which rope and segment a body is.
     std::optional<RopeSegmentRef3D> rope_segment_of(Body3D body) const;
     // The body of segment `segment` (invalid when out of range) and the rope's radius.
@@ -757,14 +760,14 @@ public:
 
     // Sleeping. activate() wakes a body (its island with it, at the next step);
     // deactivate() puts it to sleep at once.
-    bool is_active(Body3D body) const;
+    [[nodiscard]] bool is_active(Body3D body) const;
     void activate(Body3D body);
     void deactivate(Body3D body);
 
     // Which layer pairs collide (symmetric; all do at first except sensor with
     // sensor). Bodies already touching keep their contacts until they part.
     void set_layers_collide(u8 a, u8 b, bool collide);
-    bool layers_collide(u8 a, u8 b) const;
+    [[nodiscard]] bool layers_collide(u8 a, u8 b) const;
     // The layers that layer `layer` collides with, as a mask.
     Layer3DMask collision_mask(u8 layer) const;
 
@@ -791,16 +794,21 @@ public:
     // is touched). Pending events are dropped by a restore. A restored world steps to the same bits as the saved
     // one did.
     std::vector<u8> save_state() const;
-    bool restore_state(std::span<const u8> state);
+    [[nodiscard]] bool restore_state(std::span<const u8> state);
 
 private:
     friend class SceneQueries3D;
+    friend class WorldPhysicsState3D;
+    friend class physics3d_detail::CharacterSet;
     // The ragdoll and rope sets make their bodies with create_body, mark them as theirs, and then destroy, reshape and
     // switch them by these, which the public calls refuse for a body that belongs to something (BodyOwner3D).
     friend class physics3d_detail::RagdollSet;
     friend class physics3d_detail::RopeSet;
     void set_owner(Body3D body, BodyOwner3D owner);
     void owner_destroy_body(Body3D body);
+    bool constraint_broken(Constraint3D constraint)const;
+    void owner_set_group(Body3D body,u32 group);
+    void owner_set_no_collisions(Body3D body,bool disabled);
     bool owner_set_shape(Body3D body, const Shape3D& shape);
     bool owner_set_motion(Body3D body, Body3DMotion motion);
     BoundedQueryResult3D raycast_into(Vec3f from,Vec3f to,detail::QueryOutput3D<RayHit3D> output,const QueryFilter3D& filter)const;

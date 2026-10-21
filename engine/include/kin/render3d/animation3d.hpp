@@ -183,7 +183,8 @@ struct BlendPoint3D {
 // the Model3D is copied or changed).
 class AnimationPlayer3D {
 public:
-    explicit AnimationPlayer3D(const Skeleton3D* skeleton = nullptr);
+    AnimationPlayer3D() : AnimationPlayer3D(nullptr) {}
+    explicit AnimationPlayer3D(const Skeleton3D* skeleton);
 
     void set_skeleton(const Skeleton3D* skeleton);
     const Skeleton3D* skeleton() const { return _skeleton; }

@@ -317,7 +317,7 @@ void RagdollSet::apply_motion(Slot& s, bool keep_velocity) {
             if (!body.valid() || !_world->contains(body)) {
                 continue;
             }
-            _world->set_no_collisions(body, park);
+            _world->owner_set_no_collisions(body, park);
             if (park) {
                 _world->deactivate(body);
             } else if (s.has_targets) {

@@ -154,12 +154,10 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         WorldRenderState3D::Presentation3D presentation;
         WorldRenderState3D::PosePresentation3D poses;
         WorldRenderState3D::IKPresentation3D ik;
-        if (_options.bodies) {
+        if (_options.bodies && alpha < 1) {
             _options.bodies->prepare_presentation(alpha);
-            if (alpha < 1) {
-                presentation = [&](flecs::entity e) { return _options.bodies->presentation_transform(e); };
-                poses = [&](flecs::entity e) { return _options.bodies->presentation_pose(e); };
-            }
+            presentation = [&](flecs::entity e) { return _options.bodies->presentation_transform(e); };
+            poses = [&](flecs::entity e) { return _options.bodies->presentation_pose(e); };
             ik = [&](const IKConstraint3D& k) { return _options.bodies->presentation_ik_target(k); };
         }
         _errors = apply_scene3d_settings(_world, scene, view, {}, presentation).diagnostics;

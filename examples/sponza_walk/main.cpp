@@ -1562,7 +1562,7 @@ private:
         }
         _rag_people.clear();
         if (_rag_ball.valid() && _physics)
-            _physics->destroy_body(_rag_ball);
+            (void)_physics->destroy_body(_rag_ball);
         _rag_ball = {};
     }
 
@@ -1605,7 +1605,7 @@ private:
         if (!_physics)
             return;
         if (_rag_ball.valid())
-            _physics->destroy_body(_rag_ball);
+            (void)_physics->destroy_body(_rag_ball);
         const Camera3D c = camera();
         _rag_ball = _physics->create_body({.shape = Shape3D::sphere(0.2f),
                                            .motion = Body3DMotion::Dynamic,
@@ -1673,7 +1673,7 @@ private:
         if (!_physics || _rag_people.empty())
             return;
         if (_rag_ball.valid())
-            _physics->destroy_body(_rag_ball);
+            (void)_physics->destroy_body(_rag_ball);
         const Transform3D* first = _rag_people.front().get<Transform3D>();
         const Transform3D* last = _rag_people.back().get<Transform3D>();
         const float left = std::min(first->position.x, last->position.x) - 6.0f;
@@ -1849,7 +1849,7 @@ private:
         _ctrl_hero = {};
         if (_ctrl_built && _physics) {
             for (const character_level::Piece& p : _ctrl_level.pieces)
-                _physics->destroy_body(p.body);
+                (void)_physics->destroy_body(p.body);
         }
         _ctrl_level = {};
         _ctrl_built = false;
@@ -1981,7 +1981,7 @@ private:
         _climb_hero = {};
         if (_climb_built && _physics) {
             for (const climb_level::Piece& p : _climb_level.pieces)
-                _physics->destroy_body(p.body);
+                (void)_physics->destroy_body(p.body);
         }
         _climb_level = {};
         _climb_built = false;

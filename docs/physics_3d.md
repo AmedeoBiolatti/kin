@@ -55,17 +55,20 @@ automatic static/dynamic choice; explicit layers are 0–31. Character layers ar
 ```cpp
 #include <kin/physics3d/assets3d.hpp>
 #include <kin/ecs/physics3d.hpp>
+#include <stdexcept>
 
 kin::PhysicsAssets3D collisions{content_root}; // CPU only, independent of Renderer3D
-auto diagnostics = kin::resolve_physics3d_assets(world, collisions);
-// Only create/rebuild bodies after diagnostics is empty.
+auto bound = kin::resolve_physics3d_assets(world, collisions); // Status3D
+if (!bound)
+    throw std::runtime_error(kin::diagnostics3d_text(bound.diagnostics));
 bodies.sync_bodies();
 ```
 
 An asset reference takes precedence over the component's primitive/programmatic shape.
-`PhysicsAssets3D::load_collider(path, scale)` returns an existing-style
-`AssetHandle<CookedCollider3D>`. A failed load returns an empty handle and contextual
-`diagnostics()` on the library; success (including a cache hit) clears prior errors.
+`PhysicsAssets3D::load_collider(path, scale)` returns
+`Result3D<AssetHandle<CookedCollider3D>>`. Check success before dereferencing;
+a failed result owns contextual diagnostics. The library's `diagnostics()` is an
+inspection snapshot; success (including a cache hit) clears that snapshot.
 The cache shares immutable cooked shapes by normalized
 path and effective world scale. It owns only bounded weak lookup metadata (128 entries
 by default); scene bindings and bodies own live resources. Temporary geometry is
@@ -221,8 +224,10 @@ world.set_mass(crate, world.mass(crate) * 2);   // the same push moves it half a
   (`BodyOwner3D::None`, `Character`, `Ragdoll`, `Rope`), so a game can tell what a ray hit. `destroy_body`, `set_shape`,
   `set_motion` and the live settings above refuse them (false, and a line in the log once a world for each kind of owner):
   destroying a rope's segment would leave the rope reading a dead body (its tube collapsing to the origin), switching a bone
-  would fight the ragdoll's own modes. Destroy the rope or ragdoll instead. Queries, events, forces and the other calls take a
-  ragdoll's or rope's bodies as any body; a character's capsule refuses every call that changes it (the character moves it).
+  would fight the ragdoll's own modes. Layer, sensor, collision-group and collision-enable setters also refuse ragdoll
+  bones and rope segments. Destroy the rope or ragdoll instead. Queries, events and forces still accept their bodies.
+  A character's capsule permits `set_group` so its movement can ignore its own ragdoll; structural and material changes
+  remain controlled by the character.
 
 ## Shapes
 
@@ -265,7 +270,7 @@ platform). Keep the order of the calls that change the world the same between ru
 numbered in creation order with freed numbers reused last in, first out.
 
 * `state_hash()`: FNV-1a 64 over each body, in number order: number, generation, user id, motion,
-  pending temporary mass when nonzero, layer, awake, position, rotation, velocities; floats bit for bit (NaNs as one NaN, -0 apart from
+  pending temporary mass (including zero), layer, awake, position, rotation, velocities; floats bit for bit (NaNs as one NaN, -0 apart from
   +0). The same on every platform. Feed it to a lockstep check, or per frame to a test.
 * `save_state()` / `restore_state(bytes)`: the dynamic state, contacts included, for a rollback; the
   restored world steps to the same bits, including motion types and pending temporary masses. It needs the same set of bodies (none created or destroyed
@@ -365,7 +370,9 @@ constraint is disabled and reported (the force is the last collision step's impu
 constraint joins do **not** collide with each other unless `collide_connected` is set (a door and its post, links of a chain),
 with contact events on or off.
 `constraint_info` gives the anchors and axis as they are now and the hinge angle, slider position or distance. Constraints go with
-their bodies when one is destroyed. They are in `state_hash()`, `save_state()` and `restore_state()` (which needs the same set).
+their bodies when one is destroyed. Constraint and rope events share the per-list
+`World3DConfig::max_events` bound; excess events are counted by `dropped_events()`
+after internal break handling. They are in `state_hash()`, `save_state()` and `restore_state()` (which needs the same set).
 
 ## Debug draw
 
@@ -645,6 +652,22 @@ Releasing or replacing a grip resets its history; `resync_from_world()` resets
 hand sampling together with bodies after rollback. Low-level collectors can
 pass `presentation_ik_target` as the fourth `WorldRenderState3D::collect`
 callback after `prepare_presentation(alpha)`.
+
+Use `session.collect(alpha)`/`render(alpha)` for read-only presentation between
+fixed steps. Alpha 1 uses the authoritative step without preparing interpolation
+caches. Low-level `bodies.advance()` uses its configured fixed step; session
+`step(dt)` uses the host's supplied dt. Pause the app clock with
+`App::set_time_scale(0)`, or render alpha 1 when a host deliberately skips physics
+while continuing to run its display clock. Runtime `PhysicsBody3D`,
+`PhysicsCharacter3D`, `PhysicsRagdoll3D` and `PhysicsRope3D` components disappear
+when their native binding is retired. Event singletons exist from bridge creation;
+`PhysicsContacts3D` stays empty unless contact collection is enabled.
+
+`rope_points(handle, output_vector)` reuses caller storage. The by-value overload
+remains available. Native physics results and step-capacity reports are
+`[[nodiscard]]`; inspect them or explicitly discard a result where refusal is
+already handled. State hashes include zero temporary mass fields and are a
+same-build contract, not a cross-release golden value.
 
 ### The climb level and the harness
 

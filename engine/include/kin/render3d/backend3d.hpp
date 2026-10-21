@@ -145,7 +145,7 @@ public:
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
     // What `pixel` of the view's last render shows; waits for the GPU.
-    virtual PickResult3D pick(IViewBackend3D& view, Vec2i pixel) = 0;
+    virtual Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) = 0;
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False
     // where there is nothing to make.
     virtual bool warm_up(IViewBackend3D& view, const Scene3D& scene) {

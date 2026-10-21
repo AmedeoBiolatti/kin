@@ -107,7 +107,7 @@ struct Rig {
     void set_targets(Vec3f at) { world.set_ragdoll_targets(ragdoll, bone_world(at)); }
     void step(int n = 1) {
         for (int i = 0; i < n; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
         }
     }
     // The lowest point of any bone's capsule (its axis's ends less the radius), and of any axis end alone.
@@ -404,7 +404,7 @@ void test_no_tunnelling_at_speed() {
     f32 lowest = 1e9f, furthest = -1e9f;
     const std::vector<Body3D> bodies = world.ragdoll_bodies(r);
     for (int i = 0; i < 180; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         for (const Body3D b : bodies) {
             lowest = std::min(lowest, world.position(b).y);
             furthest = std::max(furthest, world.position(b).x);
@@ -463,24 +463,24 @@ void test_disabled_character_is_left_alone() {
     in.forward = {0.0f, 0.0f, -1.0f};
     in.move = {0.0f, 1.0f};
     world.set_character_input(c, in);
-    world.step(dt);
+    (void)world.step(dt);
     world.set_character_enabled(c, false);
     CHECK(!world.character_enabled(c));
     const Vec3f at = world.character(c).position;
     for (int i = 0; i < 60; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(near(world.character(c).position, at, 1e-5f));
     // Its body is in no one's way: a ball dropped on it falls through to the floor.
     const Body3D ball = world.create_body({.shape = Shape3D::sphere(0.2f), .motion = Body3DMotion::Dynamic,
                                            .position = at + Vec3f{0.0f, 3.0f, 0.0f}, .mass = 2.0f});
     for (int i = 0; i < 120; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(world.position(ball).y < 0.3f);
     world.set_character_enabled(c, true);
     for (int i = 0; i < 60; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(world.character(c).position.z < at.z - 2.0f);
 }
@@ -781,7 +781,7 @@ std::vector<u64> run_scene(World3DConfig cfg, int steps) {
         if (i == 150) {
             rig.world.ragdoll_get_up(rig.ragdoll, 0.5f);
         }
-        rig.world.step(dt);
+        (void)rig.world.step(dt);
         hashes.push_back(rig.world.state_hash());
     }
     return hashes;
@@ -948,6 +948,7 @@ void test_ecs_ragdoll_made_in_order() {
     // Destroyed with the component.
     rig.hero.remove<Ragdoll3D>();
     rig.bodies.sync_bodies();
+    CHECK(!rig.hero.has<PhysicsRagdoll3D>());
     CHECK(!rig.bodies.ragdoll_of(rig.hero).valid() && rig.physics.ragdoll_count() == 1);
     CHECK(rig.physics.body_count() == 1 + 17);
 }
@@ -1349,7 +1350,8 @@ void test_hands_on_a_rope_by_ik() {
             const auto centre = lerp(point(segment), point(segment + 1), along - static_cast<f32>(segment));
             const auto normal = normalize(lerp(previous.normal, current.normal, alpha));
             const auto* hand = rig.animator().find_ik("hand_L");
-            CHECK(near(hand->last_target, centre + normal * 0.06f, 2e-5f));
+            const auto expected = alpha == 1 ? current.point + current.normal * .06f : centre + normal * .06f;
+            CHECK(near(hand->last_target, expected, 2e-5f));
             CHECK(hand->target.position == target && hand->target_rotation == rotation);
             CHECK(rig.physics.state_hash() == hash);
             CHECK(rig.hero.get<CharacterController3D>()->traversal_state.grips[0].point == current.point);
@@ -1377,10 +1379,13 @@ void test_hands_on_a_rope_by_ik() {
     CHECK(rig.physics.restore_state(saved));
     rig.bodies.resync_from_world();
     CHECK(rig.animator().find_ik("hand_R")->target.position == Vec3f(-2, 4, 1));
-    CHECK(frame.collect(scene, nullptr, 0));
-    const auto reset = rig.animator().find_ik("hand_L")->last_target;
+    rig.bodies.prepare_presentation(0);
+    const auto reset = rig.bodies.presentation_ik_target(*rig.animator().find_ik("hand_L"));
+    rig.bodies.prepare_presentation(1);
+    const auto latest = rig.bodies.presentation_ik_target(*rig.animator().find_ik("hand_L"));
+    CHECK(reset && latest && near(reset->position, latest->position, 1e-6f));
     CHECK(frame.collect(scene, nullptr, 1));
-    CHECK(near(reset, rig.animator().find_ik("hand_L")->last_target, 1e-6f));
+    CHECK(rig.animator().find_ik("hand_L")->last_target == rig.animator().find_ik("hand_L")->target.position);
     rig.hero.get_mut<CharacterController3D>()->traversal.drop = true;
     rig.frame();
     rig.bodies.prepare_presentation(.5f);
@@ -1425,14 +1430,18 @@ void test_hand_presentation_on_a_rotating_hold() {
             continue;
         for (const float alpha : {0.f, .5f, 1.f}) {
             CHECK(frame.collect(scene, nullptr, alpha));
-            const auto place = rig.bodies.presentation_transform(hold);
+            const auto place = alpha < 1 ? rig.bodies.presentation_transform(hold)
+                                         : std::optional{hold.get<WorldTransform3D>()->matrix};
             CHECK(place);
             if (!place)
                 continue;
             const auto* hand = rig.animator().find_ik("hand_L");
-            CHECK(near(hand->last_target, place->apply(grip.local_point + grip.local_normal * .06f), 2e-5f));
+            const auto expected = alpha == 1 ? grip.point + grip.normal * .06f
+                                             : place->apply(grip.local_point + grip.local_normal * .06f);
+            CHECK(near(hand->last_target, expected, 2e-5f));
             const auto root =
-                rig.bodies.presentation_transform(rig.hero).value_or(rig.hero.get<WorldTransform3D>()->matrix);
+                alpha < 1 ? rig.bodies.presentation_transform(rig.hero).value_or(rig.hero.get<WorldTransform3D>()->matrix)
+                          : rig.hero.get<WorldTransform3D>()->matrix;
             const auto joint = root * rig.animator().ik_world[B::hand_l];
             // Undo the authored hand offset: +Z points into the hold's surface.
             const auto palm = joint * Mat4f::rotation(Quatf::axis_angle({1, 0, 0}, -15));
@@ -1454,6 +1463,11 @@ void test_bones_belong_to_the_ragdoll() {
     const Vec3f at = rig.world.position(bone);
     CHECK(!rig.world.destroy_body(bone));
     CHECK(rig.world.contains(bone) && rig.world.body_count() == 18);
+    const auto layer=rig.world.layer(bone);const auto group=rig.world.group(bone);
+    CHECK(!rig.world.set_layer(bone,layers3d::Sensor));
+    rig.world.set_sensor(bone,true);rig.world.set_group(bone,123);
+    rig.world.set_no_collisions(bone,true);
+    CHECK(!rig.world.is_sensor(bone) && rig.world.layer(bone)==layer && rig.world.group(bone)==group);
     CHECK(!rig.world.set_shape(bone, Shape3D::sphere(0.1f)));
     CHECK(!rig.world.set_motion(bone, Body3DMotion::Dynamic));
     CHECK(rig.world.motion(bone) == Body3DMotion::Kinematic); // still Animated

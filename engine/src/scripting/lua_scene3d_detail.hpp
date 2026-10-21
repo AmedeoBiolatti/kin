@@ -2,7 +2,9 @@
 
 #include "lua_scene3d.hpp"
 
+#include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <sol/sol.hpp>
 #include <stdexcept>
 #include <type_traits>
@@ -18,11 +20,37 @@ template <class T> T checked(const sol::object& value, const char* name) {
         matches = type == sol::type::string;
     else if constexpr (std::is_same_v<T, bool>)
         matches = type == sol::type::boolean;
-    else if constexpr (std::is_arithmetic_v<T>)
-        matches = type == sol::type::number && matches;
+    else if constexpr (std::is_integral_v<T>) {
+        // Lua arithmetic can produce an integral float (2^3). Accept that in
+        // every build, but never round fractions or overflow native integers.
+        if (type != sol::type::number)
+            throw std::runtime_error(std::string("invalid 3D integer: ") + name);
+        value.push();
+        auto* state = value.lua_state();
+        const bool integer = lua_isinteger(state, -1);
+        const auto whole = lua_tointeger(state, -1);
+        const auto number = lua_tonumber(state, -1);
+        lua_pop(state, 1);
+        if (integer) {
+            if (!std::in_range<T>(whole))
+                throw std::runtime_error(std::string("3D integer out of range: ") + name);
+            return static_cast<T>(whole);
+        }
+        const auto upper = std::ldexp(1.0, std::numeric_limits<T>::digits);
+        const auto lower = std::is_signed_v<T> ? -upper : 0.0;
+        if (!std::isfinite(number) || std::trunc(number) != number || number < lower || number >= upper)
+            throw std::runtime_error(std::string("invalid 3D integer: ") + name);
+        return static_cast<T>(number);
+    } else if constexpr (std::is_floating_point_v<T>)
+        matches = type == sol::type::number;
     if (!matches)
         throw std::runtime_error(std::string("invalid 3D option type: ") + name);
     return value.as<T>();
+}
+// Property getters have no explicit self parameter in sol2. Read the actual
+// receiver from the Lua stack so wrong receivers cannot bypass Release checks.
+template <class T> T property_self(sol::this_state state) {
+    return checked<T>(sol::stack::get<sol::object>(state, 1), "self");
 }
 // Optional Lua parameters must distinguish nil/absent from a wrong type.
 // sol::optional<T> as a function parameter intentionally erases that distinction.

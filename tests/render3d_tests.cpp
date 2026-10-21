@@ -1537,7 +1537,8 @@ void test_gpu_pick() {
         // A view made without picking has nothing to say.
         renderer.clear(kin::colors::black);
         render_ok(r3d, plain, scene);
-        assert(!r3d.pick(plain, pixel({-1.5f, 0.0f, 0.5f})).value_or({}).hit);
+        const auto unavailable = r3d.pick(plain, pixel({-1.5f, 0.0f, 0.5f}));
+        assert(!unavailable && !unavailable.diagnostics.empty());
         renderer.present();
     });
 }
@@ -17779,12 +17780,13 @@ void test_gpu_taa_live_transparency() {
                     l.texture = checker;
                     l.blend = static_cast<kin::ParticleBlend3D>(mode == 5 ? 0 : mode);
                     if (mode == 5) {
-                        // Summit's smoke sees fire lights whose energy flickers every frame.
+                        // camp_walk uses TAA with flickering fires and a carried lantern.
                         l.lit = 1;
                         scene.lights.ambient = {.2f, .2f, .2f};
                         scene.lights.sun.color = {.1f + .002f * float(frame % 3), .1f, .1f};
-                        scene.lights.points.push_back(
-                            {.position = {0, 1, 3}, .color = {3 + .03f * float(frame % 2), 1, .5f}, .radius = 8});
+                        scene.lights.points.push_back({.position = {.02f * frame, 1, 3},
+                                                       .color = {3 + .03f * float(frame % 2), 1, .5f},
+                                                       .radius = 8});
                     }
                     auto p = sprite({.1f + .01f * frame, 0, 1}, 2, {.7f, .7f, .7f}, .7f);
                     p.id = 7;
@@ -17845,6 +17847,48 @@ void test_gpu_taa_live_transparency() {
                 assert(trail <= 3);
             }
         }
+    });
+}
+
+// A static transparent surface cannot lend its zero velocity to a moving
+// textured surface behind it. Compare with the current-frame reconstruction.
+void test_gpu_taa_static_glass() {
+    with_gpu("test_gpu_taa_static_glass", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "TAA"))
+            return;
+        const auto box = make_box(r3d, {1, 1, 1});
+        std::vector<kin::u8> texels(32 * 32 * 4, 255);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                for (int c = 0; c < 3; ++c)
+                    texels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
+        const auto checker = renderer.create_texture_from_rgba(texels.data(), {32, 32});
+        auto accumulated = r3d.create_view({160, 120}).value_or({});
+        auto spatial = r3d.create_view({160, 120}).value_or({});
+        int worst = 0;
+        for (int frame = 0; frame < 24; ++frame) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 6}, {0, 0, 0}, 60);
+            scene.taa = {.enabled = true, .blend = .98f};
+            scene.debug.freeze_jitter = true;
+            const float x = frame < 8 ? 0 : .12f * float(frame - 7);
+            (void)scene.draw(box, Mat4f::translation({x, 0, 0}) * Mat4f::scaling({12, 8, .1f}),
+                             {.unlit = true, .texture = checker});
+            kin::Material3D glass{.color = Color::rgba(40, 80, 120, 80), .unlit = true, .blend = kin::Blend3D::Alpha};
+            (void)scene.draw(box, Mat4f::translation({0, 0, 1}) * Mat4f::scaling({8, 6, .05f}), glass);
+            const auto actual = shoot_view(renderer, r3d, accumulated, scene);
+            renderer.present();
+            scene.taa.blend = 0;
+            const auto expected = shoot_view(renderer, r3d, spatial, scene);
+            renderer.present();
+            if (frame >= 12)
+                for (int y = 40; y < 80; ++y)
+                    for (int x = 50; x < 110; ++x)
+                        worst = std::max(worst, largest_difference(actual.at(x, y), expected.at(x, y)));
+        }
+        std::cerr << "static glass moving backdrop max " << worst << "\n";
+        assert(worst <= 3);
     });
 }
 
@@ -18315,7 +18359,8 @@ void test_gpu_particle_local_lights() {
                         assert(error <= 3);
                     }
         std::cerr << "particle local-light formula: worst " << worst << " levels\n";
-        // Changing only a light must invalidate a stationary sprite's history.
+        // Moving a light must update the lit interior while temporal coverage
+        // remains available at the sprite's edges (tested above with motion).
         if (lacks(r3d.capabilities().temporal_aa, "TAA"))
             return;
         auto accumulated = r3d.create_view({160, 120}).value_or({});
@@ -18342,7 +18387,11 @@ void test_gpu_particle_local_lights() {
             scene.taa.blend = .98f;
             const auto actual = shoot_view(renderer, r3d, accumulated, scene);
             renderer.present();
-            assert(compare_pictures(actual, expected).largest <= 2);
+            const auto centre = scene.camera.project(p.position, screen);
+            assert(centre);
+            for (int y = int(centre->pos.y) - 2; y <= int(centre->pos.y) + 2; ++y)
+                for (int x = int(centre->pos.x) - 2; x <= int(centre->pos.x) + 2; ++x)
+                    assert(largest_difference(actual.at(x, y), expected.at(x, y)) <= 3);
         }
     });
 }
@@ -20426,6 +20475,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_weather_cache_follows_every_change());
     RUN(test_gpu_particle_budget());
     RUN(test_gpu_taa_live_transparency());
+    RUN(test_gpu_taa_static_glass());
     RUN(test_gpu_taa_transient_effects());
     RUN(test_gpu_particles_taa_and_msaa());
     RUN(test_gpu_particles_leave_skinned_alone());

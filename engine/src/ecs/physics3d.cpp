@@ -380,6 +380,9 @@ WorldPhysicsState3D::WorldPhysicsState3D(flecs::world& world, World3D& physics, 
     // This readable empty singleton exists even when collection is disabled.
     // No contacts are collected or copied on the disabled path.
     _ecs.set<PhysicsContacts3D>({});
+    _ecs.set<CharacterEvents3D>({});
+    _ecs.set<RagdollEvents3D>({});
+    _ecs.set<RopeEvents3D>({});
 }
 
 void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out, u64 user_id) {
@@ -435,7 +438,7 @@ void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out, u64 user
             hold.anchor = h->anchor;
             hold.anchor_normal = h->anchor_normal;
             hold.slide = h->slide;
-            _physics.set_hold(out.body, hold);
+            (void)_physics.set_hold(out.body, hold);
         }
     }
     const Transform3D* local = entity.get<Transform3D>();
@@ -647,7 +650,7 @@ void WorldPhysicsState3D::reconcile_bodies() {
     };
     if(_selective_sync)for(auto id:_sync_entities) {
         flecs::entity e{_ecs,id};
-        if(e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<Collider3D>())consider(e);
+        if(e.is_valid()&&e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<Collider3D>())consider(e);
     } else _query.each([&](flecs::entity e){consider(e);});
     sort_by_id(wanted);
     prune_refused(Made::Body, wanted);
@@ -661,7 +664,9 @@ void WorldPhysicsState3D::reconcile_bodies() {
             const Body3DMotion motion = rb != nullptr ? rb->motion : Body3DMotion::Static;
             return b.rebuild || motion != b.motion || !_physics.contains(b.body);
         },
-        [&](const Bound& b) { _physics.destroy_body(b.body); });
+        [&](const Bound& b) { (void)_physics.destroy_body(b.body); const flecs::entity entity{_ecs,b.entity};
+            if (entity.is_valid() && entity.is_alive()) entity.remove<PhysicsBody3D>();
+            _body_components_dirty=true; });
     // The new ones go after the ones that stayed, each run ascending: merge them into order. Refused ones are left out.
     for (const flecs::entity e : to_create) {
         // Refused before and nothing changed since: the same answer, without cooking the shape and warning at every step.
@@ -694,9 +699,46 @@ void WorldPhysicsState3D::reconcile_bodies() {
 }
 
 // As bodies_stand, for characters: they have no motion to differ in.
+bool WorldPhysicsState3D::changed_refusal(Made what) const {
+    for (const auto& r : _refused) {
+        if (r.what != what)
+            continue;
+        const flecs::entity e{_ecs, r.entity};
+        if (!e.is_valid() || !e.is_alive() || !e.enabled() || (r.spare >= 0 && spare_bodies() > r.spare))
+            return true;
+        u64 stamp = 0;
+        if (what == Made::Character) {
+            const auto* c = e.get<CharacterController3D>();
+            if (!c || !e.has<Transform3D>())
+                return true;
+            stamp = character_stamp(c->desc, decompose(world_matrix(e)));
+        } else if (what == Made::Ragdoll) {
+            const auto* c = e.get<Ragdoll3D>();
+            const auto* m = e.get<SkinnedMeshRenderer3D>();
+            if (!c || !m || !m->model || m->model->skeletons.empty() || !e.has<Transform3D>())
+                return true;
+            stamp = ragdoll_stamp(*c, *m->model, decompose(world_matrix(e)));
+        } else if (what == Made::Rope) {
+            const auto* c = e.get<Rope3D>();
+            if (!c)
+                return true;
+            const auto anchored = [&](const RopeAttach3D& a) {
+                if (a.kind != RopeAttach3D::Kind::Entity)
+                    return Body3D{};
+                const flecs::entity entity{_ecs, a.entity};
+                return entity.is_valid() && entity.is_alive() ? body_of(entity) : Body3D{};
+            };
+            stamp = rope_stamp(*c, decompose(world_matrix(e)), anchored(c->start), anchored(c->end));
+        }
+        if (stamp != r.stamp)
+            return true;
+    }
+    return false;
+}
+
 bool WorldPhysicsState3D::characters_stand() {
     const bool moved = _character_query.changed();
-    if (_selective_sync || _force_sync || moved || has_refused(Made::Character)) {
+    if (_selective_sync || _force_sync || moved || changed_refusal(Made::Character)) {
         return false;
     }
     return std::ranges::none_of(_characters, [&](const BoundCharacter& c) { return c.rebuild || !_physics.contains(c.character); });
@@ -710,7 +752,7 @@ void WorldPhysicsState3D::sync_characters() {
     wanted.clear();
     if(_selective_sync)for(auto id:_sync_entities) {
         flecs::entity e{_ecs,id};
-        if(e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<CharacterController3D>())wanted.push_back(e);
+        if(e.is_valid()&&e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<CharacterController3D>())wanted.push_back(e);
     } else _character_query.each([&](flecs::entity e) { wanted.push_back(e); });
     sort_by_id(wanted);
     prune_refused(Made::Character, wanted);
@@ -719,7 +761,9 @@ void WorldPhysicsState3D::sync_characters() {
     auto [to_create, w] = reconcile_entities<true>(
         _characters, wanted, [&](EcsId id) { return sync_selected(id); },
         [&](const BoundCharacter& c, flecs::entity) { return c.rebuild || !_physics.contains(c.character); },
-        [&](const BoundCharacter& c) { _physics.destroy_character(c.character); });
+        [&](const BoundCharacter& c) { _physics.destroy_character(c.character); const flecs::entity entity{_ecs,c.entity};
+            if (entity.is_valid() && entity.is_alive()) entity.remove<PhysicsCharacter3D>();
+            _body_components_dirty=true; });
     for (const flecs::entity e : to_create) {
         if (refused_before(e.id(), Made::Character, _refused.empty() ? 0 : character_stamp(e.get<CharacterController3D>()->desc, decompose(world_matrix(e))))) {
             continue;
@@ -903,6 +947,7 @@ void WorldPhysicsState3D::sample_hands(BoundCharacter& c, const TraversalState3D
 void WorldPhysicsState3D::prepare_hand_presentation(f32 alpha) {
     _presentation_hands.clear();
     for (const auto& c : _characters) {
+        if (c.hands.empty()) continue;
         const flecs::entity actor{_ecs, c.entity};
         const auto* animator = actor.is_alive() ? actor.get<Animator3D>() : nullptr;
         const auto* link = actor.is_alive() ? actor.get<CharacterAnimationLink3D>() : nullptr;
@@ -1077,7 +1122,7 @@ void WorldPhysicsState3D::step(f32 dt) {
     ragdolls_to_world();
     ropes_to_world();
     characters_to_world(dt);
-    _physics.step(dt);
+    (void)_physics.step(dt);
 
     // Bodies to entities (the awake dynamic ones: a sleeping body has not moved).
     for (Bound& b : _bound) {
@@ -1336,7 +1381,7 @@ bool WorldPhysicsState3D::replace_bodies_impl(std::span<const BodyEdit> edits,
                                         const std::function<void()>& commit, std::string* error) {
     std::vector<Bound> replacements;
     replacements.reserve(edits.size());
-    const auto cleanup = [&] { for (const auto& b : replacements) _physics.destroy_body(b.body); };
+    const auto cleanup = [&] { for (const auto& b : replacements) (void)_physics.destroy_body(b.body); };
     const auto fail = [&](const char* why) { cleanup(); if (error) *error = why; return false; };
     try {
         for (const auto& edit : edits) {
@@ -1375,9 +1420,13 @@ bool WorldPhysicsState3D::replace_bodies_impl(std::span<const BodyEdit> edits,
         commit();
         for (const auto& b : replacements) {
             auto old = std::ranges::lower_bound(_bound, b.entity, {}, &Bound::entity);
-            _physics.destroy_body(old->body);
+            (void)_physics.destroy_body(old->body);
             *old = b;
-            _ecs.entity(b.entity).set<PhysicsBody3D>({b.body});
+            const auto entity=_ecs.entity(b.entity);
+            entity.set<PhysicsBody3D>({b.body});
+            old->local=entity.owns<Transform3D>()?entity.get<Transform3D>():nullptr;
+            old->rigid=entity.owns<RigidBody3D>()?entity.get<RigidBody3D>():nullptr;
+            old->inherited_rigid=!entity.owns<RigidBody3D>() && entity.has(flecs::IsA,flecs::Wildcard);
         }
         _body_components_dirty = true;
         if (error) error->clear();
@@ -1407,7 +1456,7 @@ void WorldPhysicsState3D::rebuild(flecs::entity entity) {
 
 flecs::entity WorldPhysicsState3D::entity_of(u64 user_id) const {
     const flecs::entity e(_ecs, static_cast<flecs::entity_t>(user_id));
-    return e.is_alive() ? e : flecs::entity{};
+    return e.is_valid() && e.is_alive() ? e : flecs::entity{};
 }
 
 flecs::entity WorldPhysicsState3D::entity_of_body(Body3D body)const {
@@ -1466,7 +1515,26 @@ RagdollHandle3D WorldPhysicsState3D::ragdoll_of(flecs::entity entity) const {
 // Ragdolls are the entities of a query that also asks for a model with a skeleton, which a component write can change without
 // any entity moving: they are read again at every sync unless there is no entity that could have one.
 bool WorldPhysicsState3D::ragdolls_stand() {
-    return !_selective_sync && !_force_sync && _ragdolls.empty() && !has_refused(Made::Ragdoll) && !_ragdoll_query.is_true();
+    const bool moved = _ragdoll_query.changed();
+    if (_selective_sync || _force_sync || moved || changed_refusal(Made::Ragdoll))
+        return false;
+    for (const auto& r : _ragdolls)
+        if (r.rebuild || !_physics.contains(r.ragdoll))
+            return false;
+    bool stands = true;
+    // Models can change without a table move. Only candidates with the ragdoll
+    // component need inspection; unchanged bindings never sort/reconcile again.
+    _ragdoll_query.each([&](flecs::entity e, const Transform3D&, const SkinnedMeshRenderer3D& model, const Ragdoll3D&) {
+        const bool wanted = model.model && !model.model->skeletons.empty();
+        if (wanted && !bound_ragdoll(e)) {
+            const bool refused = std::ranges::any_of(
+                _refused, [&](const Refused& r) { return r.entity == e.id() && r.what == Made::Ragdoll; });
+            if (!refused)
+                stands = false;
+        } else if (!wanted && bound_ragdoll(e))
+            stands = false;
+    });
+    return stands;
 }
 
 void WorldPhysicsState3D::sync_ragdolls() {
@@ -1482,7 +1550,7 @@ void WorldPhysicsState3D::sync_ragdolls() {
     };
     if(_selective_sync)for(auto id:_sync_entities) {
         flecs::entity e{_ecs,id};
-        if(e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<Ragdoll3D>())
+        if(e.is_valid()&&e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Transform3D>()&&e.has<Ragdoll3D>())
             if(const auto* renderer=e.get<SkinnedMeshRenderer3D>())consider(e,*renderer);
     } else _ragdoll_query.each([&](flecs::entity e,const Transform3D&,const SkinnedMeshRenderer3D& renderer,const Ragdoll3D&){consider(e,renderer);});
     sort_by_id(wanted);
@@ -1491,7 +1559,9 @@ void WorldPhysicsState3D::sync_ragdolls() {
     auto [to_create, w] = reconcile_entities<true>(
         _ragdolls, wanted, [&](EcsId id) { return sync_selected(id); },
         [&](const BoundRagdoll& r, flecs::entity) { return r.rebuild || !_physics.contains(r.ragdoll); },
-        [&](const BoundRagdoll& r) { _physics.destroy_ragdoll(r.ragdoll); });
+        [&](const BoundRagdoll& r) { _physics.destroy_ragdoll(r.ragdoll); const flecs::entity entity{_ecs,r.entity};
+            if (entity.is_valid() && entity.is_alive()) entity.remove<PhysicsRagdoll3D>();
+            _body_components_dirty=true; });
     for (const flecs::entity e : to_create) {
         const Ragdoll3D& component = *e.get<Ragdoll3D>();
         const Model3D& model = *e.get<SkinnedMeshRenderer3D>()->model;
@@ -1538,7 +1608,7 @@ void WorldPhysicsState3D::sync_ragdolls() {
             if (const PhysicsCharacter3D* pc = e.get<PhysicsCharacter3D>(); pc != nullptr && _physics.contains(pc->character)) {
                 const std::vector<Body3D> bodies = _physics.ragdoll_bodies(b.ragdoll);
                 if (!bodies.empty() && bodies[0].valid()) {
-                    _physics.set_group(_physics.character(pc->character).body, _physics.group(bodies[0]));
+                    _physics.owner_set_group(_physics.character(pc->character).body, _physics.group(bodies[0]));
                 }
             }
             // The pose is written into the animator: an entity with a ragdoll has one.
@@ -1842,7 +1912,7 @@ std::optional<RopeClosest3D> Rope3D::closest_point(Vec3f point) const {
 // As bodies_stand, for ropes; one that waits for the body of an entity it is fixed to is tried again at every sync.
 bool WorldPhysicsState3D::ropes_stand() {
     const bool moved = _rope_query.changed();
-    if (_selective_sync || _force_sync || moved || _ropes_waiting || has_refused(Made::Rope)) {
+    if (_selective_sync || _force_sync || moved || _ropes_waiting || changed_refusal(Made::Rope)) {
         return false;
     }
     return std::ranges::none_of(_ropes, [&](const BoundRope& r) { return r.rebuild || !_physics.contains(r.rope); });
@@ -1857,7 +1927,7 @@ void WorldPhysicsState3D::sync_ropes() {
     wanted.clear();
     if(_selective_sync)for(auto id:_sync_entities) {
         flecs::entity e{_ecs,id};
-        if(e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Rope3D>())wanted.push_back(e);
+        if(e.is_valid()&&e.is_alive()&&e.enabled()&&!e.has(flecs::Prefab)&&e.has<Rope3D>())wanted.push_back(e);
     } else _rope_query.each([&](flecs::entity e) { wanted.push_back(e); });
     sort_by_id(wanted);
     prune_refused(Made::Rope, wanted);
@@ -1865,7 +1935,9 @@ void WorldPhysicsState3D::sync_ropes() {
     auto [to_create, w] = reconcile_entities(
         _ropes, wanted, [&](EcsId id) { return sync_selected(id); },
         [&](const BoundRope& r, flecs::entity) { return r.rebuild || !_physics.contains(r.rope); },
-        [&](const BoundRope& r) { _physics.destroy_rope(r.rope); });
+        [&](const BoundRope& r) { _physics.destroy_rope(r.rope); const flecs::entity entity{_ecs,r.entity};
+            if (entity.is_valid() && entity.is_alive()) entity.remove<PhysicsRope3D>();
+            _body_components_dirty=true; });
     for (const flecs::entity e : to_create) {
         const Rope3D& c = *e.get<Rope3D>();
         const Mat4f entity_matrix = world_matrix(e);
@@ -1879,7 +1951,7 @@ void WorldPhysicsState3D::sync_ropes() {
                 return true;
             case RopeAttach3D::Kind::Entity: {
                 const flecs::entity target(_ecs, a.entity);
-                const Body3D body = target.is_alive() ? body_of(target) : Body3D{};
+                const Body3D body = target.is_valid() && target.is_alive() ? body_of(target) : Body3D{};
                 if (!body.valid()) {
                     return false; // not made yet: tried again at the next sync
                 }
@@ -1972,7 +2044,7 @@ void WorldPhysicsState3D::ropes_from_world() {
         if (r.sampled) r.previous = c->sampled;
         else r.previous.clear();
         r.sampled = true;
-        c->sampled = _physics.rope_points(r.rope);
+        _physics.rope_points(r.rope,c->sampled);
         c->tension_start = _physics.rope_tension(r.rope, RopeEnd3D::Start);
         c->tension_end = _physics.rope_tension(r.rope, RopeEnd3D::End);
     }

@@ -24,6 +24,7 @@ public:
     std::vector<RopeHandle3D> list() const;
 
     std::vector<RopePoint3D> points(RopeHandle3D h) const;
+    void points(RopeHandle3D h,std::vector<RopePoint3D>& output)const;
     std::vector<RopeSegment3D> segments(RopeHandle3D h) const;
     RopeState3D state(RopeHandle3D h) const;
     std::optional<RopeClosest3D> closest(RopeHandle3D h, Vec3f p) const;
@@ -47,6 +48,10 @@ public:
         clear_events();
     }
     void clear_events() { _events.clear(); }
+    std::size_t cap_events(std::size_t limit) {
+        if (_events.size()<=limit) return 0;
+        const auto dropped=_events.size()-limit;_events.resize(limit);return dropped;
+    }
 
     void save_header(std::vector<u8>& out) const;
     struct Parsed {

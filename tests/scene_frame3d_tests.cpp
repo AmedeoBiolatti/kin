@@ -110,7 +110,7 @@ void external_frame() {
     int native_steps = 0;
     SceneFrame3D raw{world, rendering, {.physics_step = [&](f32 dt) {
                          ++native_steps;
-                         physics.step(dt);
+                         (void)physics.step(dt);
                      }}};
     assert(raw.step(1.f / 60) && native_steps == 1);
     SystemPhaseHooks stop;
@@ -226,7 +226,7 @@ void light_fields() {
 
 struct RuntimeState {
     Renderer3D* renderer = nullptr;
-    int enters = 0, updates = 0, exits = 0;
+    int enters = 0, updates = 0, exits = 0, renders = 0;
     bool enabled = false;
 };
 class RuntimeScene final : public Scene {
@@ -243,6 +243,7 @@ public:
     }
     void render(SceneContext& context) override {
         assert(context.alpha == 1); // headless renders the completed fixed step
+        ++_state.renders;
     }
     void on_exit(SceneContext& context) override {
         assert(context.renderer3d == _state.renderer);
@@ -261,9 +262,10 @@ void runtime() {
         scenes.push(std::make_unique<RuntimeScene>(state));
         assert(run_scene_app({.window = {.title = "frame3d-runtime", .width = 64, .height = 64},
                               .headless = {.enabled = true, .frames = 2},
+                              .render_headless = true,
                               .rendering_3d = enabled},
                              scenes) == 0);
-        assert(state.enters == 1 && state.updates == 1 && state.exits == 1);
+        assert(state.enters == 1 && state.updates == 1 && state.exits == 1 && state.renders == 2);
         RuntimeState server_state;
         server_state.enabled = enabled;
         SceneManager server_scenes;

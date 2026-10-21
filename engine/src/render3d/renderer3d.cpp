@@ -234,7 +234,15 @@ PickResult3D Renderer3D::pick_operation(View3D& view, Vec2i pixel) {
         fail3d(_errors, "Renderer3D::pick", "picking requires a valid 3D view");
         return {};
     }
-    return _backend->pick(*view.backend(), pixel);
+    auto picked = _backend->pick(*view.backend(), pixel);
+    const bool success = picked.ok();
+    _errors = std::move(picked.diagnostics);
+    if (!success) {
+        if (_errors.empty())
+            fail3d(_errors, "Renderer3D::pick", "backend picking failed");
+        return {};
+    }
+    return *picked.value;
 }
 
 Result3D<bool> Renderer3D::read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& out) {

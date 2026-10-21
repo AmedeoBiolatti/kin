@@ -9,6 +9,27 @@ releases may change APIs.
 
 ### Fixed
 
+- Restore Clang aggregate animator construction; make headless `App::run_for`
+  render the completed step and exercise that callback in runtime tests.
+- Preserve traversable stair joins for nonzero agent radii, distinguish risers
+  from portal walls, and compute slope clearance locally. Rebuild support
+  topology before eroding ramps on continuous floors.
+- Check Lua 3D usertype receivers in Release and use the same exact integer
+  conversion rules in every build, including integral arithmetic results.
+- Retain lit-particle history under moving lights; remove the unused history
+  sort. Reject divergent opaque/transparent motion locally under static glass.
+  Skip presentation preparation at alpha 1 and reject entity-zero targets safely.
+- Wake loads after dynamic support reshaping, narrow support wake queries to
+  actual contacts, and avoid redundant kinematic/layer wake queries. Bound rope
+  and constraint events, restore identity one-child compound bakes, remove stale
+  ECS physics handle components, and reuse rope readback storage. Report Jolt
+  capacity exhaustion through `StepReport3D` in Debug as well as Release, and
+  provide valid internal motion properties for kinematic surface shapes.
+- Keep the required lavapipe CI check name, enable 3D branch pushes, install glslc
+  across the compiler matrix, cover example GPU workflows, and compare Summit
+  replay hashes and exact step counts within each build rather than against one
+  machine's result.
+
 - Sample traversal hand IK with moving holds and rendered rope polylines,
   including rotation and clearance. Preserve manual targets and reset grip
   history after release, replacement and rollback.
@@ -44,6 +65,12 @@ releases may change APIs.
   breaking changes in [the migration guide](3d_api_migration.md).
 
 ### Changed
+
+- Native physics result predicates/mutations and `StepReport3D` are
+  `[[nodiscard]]`. Physics state hashing now always includes temporary mass,
+  including zero; hashes must be regenerated with this engine build.
+- Backend picking returns `Result3D<PickResult3D>` so readback failures remain
+  failures through `Renderer3D::pick`; an empty successful result is a miss.
 
 - `Status3D` is `[[nodiscard]]`; explicitly handle or deliberately discard results.
   `Result3D<bool>` has no bool conversion: check `.ok()` for success and inspect

@@ -36,7 +36,7 @@ void spring_arm() {
     auto short_arm = arm.frame(world, {0, 1, 0}, {}, .1f);
     check(short_arm && short_arm->obstructed && short_arm->length > 1.4f && short_arm->length < 1.7f,
           "arm did not compress immediately to swept-sphere clearance");
-    world.destroy_body(wall);
+    (void)world.destroy_body(wall);
     auto recovering = arm.frame(world, {0, 1, 0}, {}, .1f);
     check(recovering && close(recovering->length, short_arm->length + .2f), "arm did not recover at configured rate");
     arm.reset();
@@ -48,11 +48,11 @@ void spring_arm() {
         {.shape = Shape3D::box({.1f, 2, 2}), .motion = Body3DMotion::Static, .position = {.7f, 1, 0}});
     auto side = arm.frame(world, {0, 1, 0}, {}, 0);
     check(side && side->shoulder_obstructed && side->pivot.x < .45f, "shoulder sweep missed wall");
-    world.destroy_body(wall);
+    (void)world.destroy_body(wall);
     wall = world.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static, .position = {0, 1, 0}});
     auto inside = arm.frame(world, {0, 1, 0}, {}, 0);
     check(inside && inside->initial_overlap && inside->length == 0, "initial overlap not reported/collapsed");
-    world.destroy_body(wall);
+    (void)world.destroy_body(wall);
     settings.distance = -1;
     check(!arm.configure(settings) && arm.settings().distance == 4, "invalid configuration changed arm");
     const auto nan = std::numeric_limits<float>::quiet_NaN();
@@ -166,7 +166,7 @@ void scene_camera(Renderer3D& renderer) {
           "fixed camera collision failed");
     for (int i = 0; i < 10; ++i)
         rig.frame(query, .5f, .01f);
-    session.physics()->destroy_body(wall);
+    (void)session.physics()->destroy_body(wall);
     check(close(rig.fixed_frame(query, .1f)->arm.length, sparse.fixed_frame(query, .1f)->arm.length),
           "render frequency changed gameplay arm");
     target.get_mut<Transform3D>()->position.x = 40;
@@ -269,9 +269,14 @@ void render_placement(Renderer3D& renderer) {
 }
 } // namespace
 int main() {
-    bool ready = false;
     try {
         spring_arm();
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+    bool ready = false;
+    try {
         App app;
         auto& window = app.create_window({.title = "camera-tests", .width = 160, .height = 120, .hidden = true});
         auto backend = make_render_backend(window, false, true);

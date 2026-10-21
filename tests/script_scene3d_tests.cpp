@@ -73,6 +73,12 @@ function on_enter(ctx)
     assert(scene3d.handle(world:authored("crate")).id == scene3d.entity("crate").id)
     assert(scene3d.resolve(scene3d.entity("crate")):id() == world:authored("crate"):id())
     assert(not pcall(scene3d.handle, 17))
+    local h = scene3d.entity("crate")
+    assert(h:alive() and not pcall(h.alive) and not pcall(h.alive, 17))
+    assert(pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {mask=2^3}))
+    for _, bad in ipairs({8.5, -1, 2^64, math.huge, 0/0}) do
+        assert(not pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {mask=bad}))
+    end
     assert(hit and hit.entity.id == scene3d.entity("crate").id and hit.normal.z > 0.9)
     assert(scene3d.raycast({x=0,y=0,z=4}, {x=0,y=0,z=-4}, {ignore=hit.entity}) == nil)
     assert(scene3d.impulse(hit.entity, {x=1,y=0,z=0}))

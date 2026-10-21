@@ -178,7 +178,7 @@ void Game::build() {
         m.tag = p.tag;
         _world->set_surface_material(b, m);
         if (p.hold) {
-            _world->set_hold(b, {.quality = p.hold_quality});
+            (void)_world->set_hold(b, {.quality = p.hold_quality});
         }
     }
 
@@ -376,7 +376,7 @@ void Game::step(std::span<const PlayerCommand> commands) {
         const PlayerCommand c = i < commands.size() ? commands[i] : PlayerCommand{};
         step_player(i32(i), c);
     }
-    _world->step(fixed_step);
+    (void)_world->step(fixed_step);
     _world->drain_constraint_events();
     for (std::size_t i = 0; i < _players.size(); ++i) {
         after_player(i32(i));

@@ -81,6 +81,11 @@ void test_create_and_sample() {
     // Hangs straight down from the point, in order from the top.
     const std::vector<RopePoint3D> pts = world.rope_points(rope);
     CHECK(pts.size() == 17);
+    std::vector<RopePoint3D> retained;world.rope_points(rope,retained);
+    const auto* storage=retained.data();world.rope_points(rope,retained);
+    CHECK(retained.data()==storage && retained.size()==pts.size());
+    for (std::size_t i=0;i<pts.size();++i) CHECK(retained[i].position==pts[i].position && retained[i].tangent==pts[i].tangent);
+
     for (std::size_t i = 0; i < pts.size(); ++i) {
         CHECK_NEAR(pts[i].position.y, 6.0f - 0.25f * static_cast<f32>(i), 1e-3f);
         CHECK_NEAR(length(pts[i].tangent), 1.0f, 1e-4f);
@@ -122,7 +127,7 @@ void test_hanging_rope_settles() {
     CHECK_NEAR(world.rope_points(rope).back().position.x, 1.0f + 4.0f * 0.70711f, 0.01f);
     f32 stretch = 0.0f;
     for (int i = 0; i < 1800; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         stretch = std::max(stretch, world.rope_state(rope).current_length / 4.0f - 1.0f);
     }
     CHECK(stretch < 0.05f);
@@ -143,12 +148,12 @@ void test_tension_equals_weight_and_length_bound() {
         d.end = RopeAnchor3D::on(box, {0.0f, 0.3f, 0.0f});
         const RopeHandle3D rope = world.create_rope(d);
         CHECK(rope.valid());
-        world.step(dt);
+        (void)world.step(dt);
         const f32 length0 = world.rope_state(rope).rest_length;
         CHECK_NEAR(length0, 4.0f, 0.02f);
         f32 stretch = 0.0f;
         for (int i = 0; i < 600; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             stretch = std::max(stretch, world.rope_state(rope).current_length / length0 - 1.0f);
         }
         // The rope's own mass: 1 kg a metre.
@@ -185,7 +190,7 @@ void test_anchor_on_a_moving_body() {
         const f32 t = static_cast<f32>(i) * dt;
         const Quatf turn = Quatf::axis_angle({0.0f, 1.0f, 0.0f}, 20.0f * t);
         world.move_kinematic(carriage, {t, 6.0f, 0.0f}, turn, dt);
-        world.step(dt);
+        (void)world.step(dt);
     }
     const Vec3f carriage_at = world.position(carriage);
     const Vec3f want = carriage_at + world.rotation(carriage).rotate({0.0f, -0.2f, 0.3f});
@@ -221,7 +226,7 @@ void test_bridge_carries_a_box() {
         CHECK(rails[k].valid());
     }
     for (int i = 0; i < 240; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const auto mid = [&](int k) {
         const RopeHandle3D r = rails[k];
@@ -235,7 +240,7 @@ void test_bridge_carries_a_box() {
     // Five seconds: the ropes are free to roll under it (no twist stiffness), which lets a box walk off in time; that is
     // documented, and not what is being checked here.
     for (int i = 0; i < 300; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         if (verbose && i % 20 == 0) {
             const Quatf q = world.rotation(box);
             std::printf("    %d box %.2f %.2f %.2f rot %.2f %.2f %.2f %.2f mid %.2f %.2f\n", i, world.position(box).x, world.position(box).y,
@@ -270,7 +275,7 @@ void test_reel_and_pay_out() {
     d.linear_damping = 0.5f;
     const RopeHandle3D rope = world.create_rope(d);
     for (int i = 0; i < 240; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const f32 l0 = world.rope_state(rope).rest_length;
     CHECK_NEAR(l0, 3.8f, 0.05f);
@@ -278,15 +283,15 @@ void test_reel_and_pay_out() {
     // Reel in at 1 m/s by 1 m: it takes 1 s (60 steps), the box rises 1 m, its segments are shorter.
     world.reel_rope(rope, l0 - 1.0f, 1.0f);
     for (int i = 0; i < 30; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.rope_state(rope).rest_length, l0 - 0.5f, 0.02f);
     for (int i = 0; i < 40; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.rope_state(rope).rest_length, l0 - 1.0f, 1e-4f);
     for (int i = 0; i < 180; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.position(box).y, top0 + 1.0f, 0.1f);
     const std::vector<RopeSegment3D> segs = world.rope_segments(rope);
@@ -294,11 +299,11 @@ void test_reel_and_pay_out() {
     // Pay out 2 m at 2 m/s: the box goes down, and the rope's measured length follows its rest length.
     world.reel_rope(rope, l0 + 1.0f, 2.0f);
     for (int i = 0; i < 70; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.rope_state(rope).rest_length, l0 + 1.0f, 1e-4f);
     for (int i = 0; i < 240; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.rope_state(rope).current_length, l0 + 1.0f, 0.15f);
     CHECK_NEAR(world.position(box).y, top0 - 1.0f, 0.15f);
@@ -318,7 +323,7 @@ void test_reel_in_a_heavy_load() {
     d.end = RopeAnchor3D::on(crate, {0.0f, 0.25f, 0.0f});
     const RopeHandle3D rope = world.create_rope(d);
     for (int i = 0; i < 240; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const f32 y0 = world.position(crate).y;
     world.reel_rope(rope, world.rope_state(rope).rest_length - 1.5f, 1.0f);
@@ -329,7 +334,7 @@ void test_reel_in_a_heavy_load() {
             saved = world.save_state();
             CHECK(world.motion(crate) == Body3DMotion::Kinematic);
         }
-        world.step(dt);
+        (void)world.step(dt);
         if (i >= 40) {
             first.push_back(world.state_hash());
         }
@@ -341,7 +346,7 @@ void test_reel_in_a_heavy_load() {
     CHECK(world.restore_state(saved));
     CHECK(world.motion(crate) == Body3DMotion::Kinematic);
     for (int i = 40; i < 150; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         second.push_back(world.state_hash());
     }
     CHECK(first == second);
@@ -361,7 +366,7 @@ void test_breaks_over_threshold() {
         d.user_id = 77;
         const RopeHandle3D rope = world.create_rope(d);
         for (int i = 0; i < 240; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
         }
         const std::vector<RopeEvent3D> events = world.drain_rope_events();
         broke[heavy] = static_cast<int>(events.size());
@@ -375,6 +380,17 @@ void test_breaks_over_threshold() {
     CHECK(broke[0] == 0);  // 20 kg: about 240 N
     CHECK(broke[1] >= 1);  // 90 kg: about 880 N
     CHECK(joint[1] <= 16);
+    for (const u32 limit:{0u,1u}) {
+        auto config=serial();config.max_events=limit;World3D world(config);
+        auto desc=hanging({0,6,0},4);desc.break_tension=.001f;
+        const auto rope=world.create_rope(desc);
+        for (int i=0;i<120;++i) (void)world.step(dt);
+        CHECK(world.rope_state(rope).broken); // internal handling survives a zero event budget
+        CHECK(world.drain_rope_events().size()<=limit);
+        CHECK(world.drain_constraint_events().size()<=limit);
+        CHECK(world.dropped_events()>0);
+    }
+
 }
 
 void test_collide_world_off() {
@@ -391,7 +407,7 @@ void test_collide_world_off() {
         d.collide_world = off == 0;
         const RopeHandle3D rope = world.create_rope(d);
         for (int i = 0; i < 300; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
         }
         y[off] = world.rope_points(rope).back().position.y;
     }
@@ -432,7 +448,7 @@ std::vector<u64> run_ropes(World3DConfig cfg, int steps) {
         if (i == 120) {
             world.set_rope_length(ra, 3.0f);
         }
-        world.step(dt);
+        (void)world.step(dt);
         hashes.push_back(world.state_hash());
     }
     return hashes;
@@ -462,7 +478,7 @@ void test_determinism_and_restore() {
         if (i == 60) {
             world.reel_rope(rope, 2.0f, 1.0f);
         }
-        world.step(dt);
+        (void)world.step(dt);
     }
     const std::vector<u8> saved = world.save_state();
     const f32 length_at_save = world.rope_state(rope).rest_length;
@@ -471,7 +487,7 @@ void test_determinism_and_restore() {
         if (i == 50) {
             world.set_rope_length(rope, 4.0f);
         }
-        world.step(dt);
+        (void)world.step(dt);
         first.push_back(world.state_hash());
     }
     CHECK(world.rope_state(rope).rest_length != length_at_save);
@@ -481,7 +497,7 @@ void test_determinism_and_restore() {
         if (i == 50) {
             world.set_rope_length(rope, 4.0f);
         }
-        world.step(dt);
+        (void)world.step(dt);
         second.push_back(world.state_hash());
     }
     CHECK(first == second);
@@ -491,8 +507,8 @@ void test_determinism_and_restore() {
     y.create_rope(hanging({0.0f, 5.0f, 0.0f}, 3.0f));
     CHECK(x.state_hash() == y.state_hash());
     x.reel_rope(rx, 2.0f, 0.1f);
-    x.step(dt);
-    y.step(dt);
+    (void)x.step(dt);
+    (void)y.step(dt);
     CHECK(x.state_hash() != y.state_hash());
 }
 
@@ -506,7 +522,7 @@ void test_redirected_gravity() {
     d.length = 4.0f;
     const RopeHandle3D rope = world.create_rope(d); // the free end hangs along gravity by default
     for (int i = 0; i < 300; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const Vec3f end = world.rope_points(rope).back().position;
     CHECK_NEAR(end.x, 2.0f, 0.05f);
@@ -550,13 +566,13 @@ struct Rig {
         input.forward = {0.0f, 0.0f, -1.0f};
         tin.reach = {0.0f, 0.45f, -1.0f};
         // The rope settles first (it is made hanging straight: it only has to take up its slack).
-        world.step(dt);
+        (void)world.step(dt);
     }
     void step(int n = 1) {
         for (int i = 0; i < n; ++i) {
             world.set_character_input(hero, input);
             world.set_traversal_input(hero, tin);
-            world.step(dt);
+            (void)world.step(dt);
             for (const CharacterEvent3D& e : world.drain_character_events()) {
                 events.push_back(e);
             }
@@ -713,7 +729,7 @@ void test_swing_period() {
     for (int i = 0; i < 60 * 30; ++i) {
         world.set_character_input(hero, in);
         world.set_traversal_input(hero, tin);
-        world.step(dt);
+        (void)world.step(dt);
         const TraversalState3D t = world.traversal(hero);
         if (t.held >= 1) {
             xs.push_back(t.anchor_centre.x);
@@ -830,7 +846,7 @@ void test_end_on_a_moving_body_carries_the_climber() {
     for (int i = 0; i < 90; ++i) {
         world.set_character_input(hero, in);
         world.set_traversal_input(hero, tin);
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(world.traversal(hero).held == 2);
     const f32 x0 = world.character(hero).position.x;
@@ -839,7 +855,7 @@ void test_end_on_a_moving_body_carries_the_climber() {
         world.move_kinematic(carriage, {static_cast<f32>(i) * dt, 6.2f, 0.0f}, {}, dt);
         world.set_character_input(hero, in);
         world.set_traversal_input(hero, tin);
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(world.traversal(hero).held == 2);
     const f32 dx = world.character(hero).position.x - x0;
@@ -874,7 +890,7 @@ void test_character_on_a_rope_redirected_gravity() {
     for (int i = 0; i < 200; ++i) {
         world.set_character_input(hero, in);
         world.set_traversal_input(hero, tin);
-        world.step(dt);
+        (void)world.step(dt);
     }
     const TraversalState3D t = world.traversal(hero);
     CHECK(t.mode == TraversalMode3D::Hanging && t.held >= 1);
@@ -1010,6 +1026,7 @@ void test_ecs_rope() {
     // Destroyed with the component; made again with it.
     holder.remove<Rope3D>();
     bodies.sync_bodies();
+    CHECK(!holder.has<PhysicsRope3D>());
     CHECK(physics.rope_count() == 0 && physics.body_count() == 1);
 }
 
@@ -1064,7 +1081,7 @@ void test_segments_belong_to_the_rope() {
     const Body3D floor = add_floor(world);
     const RopeHandle3D rope = world.create_rope(hanging({0.0f, 6.0f, 0.0f}, 4.0f));
     for (int i = 0; i < 10; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const Body3D seg = world.rope_segment_body(rope, 5);
     CHECK(world.owner_of(seg) == BodyOwner3D::Rope);
@@ -1084,7 +1101,7 @@ void test_segments_belong_to_the_rope() {
     const auto hit = world.raycast({1.0f, 4.625f, 0.0f}, {-1.0f, 4.625f, 0.0f});
     CHECK(hit.has_value() && hit->body == seg && world.owner_of(hit->body) == BodyOwner3D::Rope);
     world.add_impulse(seg, {0.5f, 0.0f, 0.0f});
-    world.step(dt);
+    (void)world.step(dt);
     CHECK(world.linear_velocity(seg).x > 0.0f);
     // The rope's own calls are not refused: a new length reshapes every segment, and destroy_rope takes them.
     world.set_rope_length(rope, 3.0f);

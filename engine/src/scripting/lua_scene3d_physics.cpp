@@ -468,8 +468,9 @@ void bind_physics(sol::state& lua, sol::table table, std::shared_ptr<LuaScene3DB
                                                       value->along, "position", vector(lua, value->point), "tangent",
                                                       vector(lua, value->tangent), "distance", value->distance));
     };
-    scene["rope_point_at"] = [api](sol::this_state state, SceneEntity3D handle, u32 segment,
+    scene["rope_point_at"] = [api](sol::this_state state, SceneEntity3D handle, sol::object segment_argument,
                                    f32 fraction) -> sol::object {
+        const auto segment = checked<u32>(segment_argument, "segment");
         script_component_access("Rope3D", false);
         if (!std::isfinite(fraction) || fraction < 0 || fraction > 1 || !segment)
             throw std::runtime_error("rope point requires a one-based segment and fraction in 0..1");

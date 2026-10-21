@@ -102,16 +102,16 @@ void visibility(Renderer3D& renderer,Assets3D& assets) {
     auto wall=session.physics()->create_body({.shape=wall_shape,.motion=Body3DMotion::Static,.position={1.3f,.5f,1.2f}});
     camp::submit(*session.world(),{.interact=true});check(session.step(1.f/60),"hand occlusion step failed");
     check(camp::state(*session.world()).nearby<0&&camp::state(*session.world()).collected==0&&session.alive(owned[0])&&session.resolve(owned[0].root).get<PointLight3D>()->color.r<1,"unmapped wall did not block collection/clear highlight");
-    session.physics()->destroy_body(wall);check(session.step(1.f/60)&&camp::state(*session.world()).nearby==0,"cleared hand occlusion did not restore selection");
+    (void)session.physics()->destroy_body(wall);check(session.step(1.f/60)&&camp::state(*session.world()).nearby==0,"cleared hand occlusion did not restore selection");
     const auto camera_position=session.entity("camera").get<Transform3D>()->position;
     const auto supply_position=session.resolve(owned[0].root).get<Transform3D>()->position+Vec3f{0,.3f,0};
     wall=session.physics()->create_body({.shape=Shape3D::box({.08f,.08f,.08f}),.motion=Body3DMotion::Static,.position=lerp(camera_position,supply_position,.65f)});
     camp::submit(*session.world(),{.interact=true});check(session.step(1.f/60)&&camp::state(*session.world()).nearby<0&&camp::state(*session.world()).collected==0,"camera-only occlusion allowed collection");
-    session.physics()->destroy_body(wall);
+    (void)session.physics()->destroy_body(wall);
     std::array<Body3D,9> triggers;const auto small=Shape3D::sphere(.03f);
     for(size_t i=0;i<triggers.size();++i)triggers[i]=session.physics()->create_body({.shape=small,.motion=Body3DMotion::Static,.position={1+.03f*float(i),.3f,1},.layer=layers3d::Sensor,.sensor=true});
     camp::submit(*session.world(),{.interact=true});check(session.step(1.f/60)&&camp::state(*session.world()).query_overflow&&camp::state(*session.world()).query_overflows>0&&camp::state(*session.world()).nearby<0&&camp::state(*session.world()).collected==0,"query saturation did not fail closed");
-    for(auto body:triggers)session.physics()->destroy_body(body);
+    for(auto body:triggers)(void)session.physics()->destroy_body(body);
     camp::submit(*session.world(),{.interact=true});check(session.step(1.f/60)&&!camp::state(*session.world()).query_overflow&&camp::state(*session.world()).collected==0&&session.alive(owned[0]),"unblocked pickup did not start with delayed award");
     for(int i=0;i<12;++i)check(session.step(1.f/60),"unblocked pickup contact failed");
     check(camp::state(*session.world()).collected==1&&!session.alive(owned[0]),"unblocked collection did not recover");
@@ -128,7 +128,7 @@ void pushing(Renderer3D& renderer,Assets3D& assets) {
     const auto wall=session.physics()->create_body({.shape=Shape3D::box({.08f,.5f,.08f}),.motion=Body3DMotion::Static,.position={1.15f,.4f,0}});
     camp::submit(*session.world(),{.push=true});check(session.step(1.f/60),"occluded push step failed");
     check(!camp::state(*session.world()).push_focus&&camp::state(*session.world()).progress.pushes==0,"occluded crate could be pushed");
-    session.physics()->destroy_body(wall);
+    (void)session.physics()->destroy_body(wall);
     camp::submit(*session.world(),{.push=true});check(session.step(1.f/60),"clear push step failed");
     check(camp::state(*session.world()).push_focus.verb==camp::Push&&camp::state(*session.world()).progress.pushes==1,"clear push did not apply exactly once");
     check(session.step(1.f/60)&&camp::state(*session.world()).progress.pushes==1,"push repeated without a command");
@@ -173,8 +173,8 @@ void interruption(Renderer3D& renderer,Assets3D& assets,int mode) {
     if(mode==6)check(state.query_overflows>0,"contact overflow fixture did not saturate");
     if(mode==7)check(state.progress.animation_events_dropped>=4,"animation event overflow fixture did not saturate");
     if(mode!=1&&mode!=5)check(session.alive(target),"cancelled pickup destroyed target");
-    if(wall)session.physics()->destroy_body(wall);
-    for(auto body:triggers)if(body)session.physics()->destroy_body(body);
+    if(wall)(void)session.physics()->destroy_body(wall);
+    for(auto body:triggers)if(body)(void)session.physics()->destroy_body(body);
 }
 
 }

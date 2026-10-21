@@ -360,8 +360,8 @@ void WorldRenderState3D::animate(f32 dt) {
                     const auto target = _ecs ? k.target.scene_entity.resolve(*_ecs) : EcsEntity{};
                     k.target_valid = target && target.has<WorldTransform3D>();
                 } else if (k.target.kind == IKTarget3D::Kind::Entity) {
-                    k.target_valid =
-                        ecs.is_alive(k.target.entity) && ecs.entity(k.target.entity).get<WorldTransform3D>() != nullptr;
+                    k.target_valid = (k.target.entity != 0 && ecs.is_alive(k.target.entity)) &&
+                                     ecs.entity(k.target.entity).get<WorldTransform3D>() != nullptr;
                 }
                 // A target that is gone (or was never given) lets go: the goal is 0, and the fade runs from where it
                 // was.
@@ -432,7 +432,8 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pos
                     target_world = pose.apply(k.target.position);
                     has_target = true;
                 }
-            } else if (k.target.kind == IKTarget3D::Kind::Entity && ecs.is_alive(k.target.entity)) {
+            } else if (k.target.kind == IKTarget3D::Kind::Entity &&
+                       (k.target.entity != 0 && ecs.is_alive(k.target.entity))) {
                 if (const WorldTransform3D* t = ecs.entity(k.target.entity).get<WorldTransform3D>()) {
                     const auto entity = ecs.entity(k.target.entity);
                     const auto* explicit_pose = entity.get<RenderTransform3D>();

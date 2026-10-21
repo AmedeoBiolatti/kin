@@ -6,6 +6,7 @@
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/Memory.h>
+#include <Jolt/Core/IssueReporting.h>
 #include <Jolt/Core/StreamIn.h>
 #include <Jolt/Core/StreamOut.h>
 #include <Jolt/Geometry/IndexedTriangle.h>
@@ -25,15 +26,35 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <string_view>
 
 namespace kin {
 
 namespace physics3d_detail {
 
+#ifdef JPH_ENABLE_ASSERTS
+namespace {
+JPH::AssertFailedFunction previous_assert = nullptr;
+bool jolt_assert(const char* expression, const char* message, const char* file, JPH::uint line) {
+    // Jolt reports recoverable capacity exhaustion twice: this assertion and
+    // Update's return value. World3D consumes the latter as StepReport3D and
+    // logs it once per world, including in Debug. Preserve every other assert.
+    if (std::strcmp(expression, "errors == EPhysicsUpdateError::None") == 0 &&
+        std::string_view{file}.ends_with("PhysicsSystem.cpp"))
+        return false;
+    return previous_assert ? previous_assert(expression, message, file, line) : true;
+}
+} // namespace
+#endif
+
 void ensure_jolt_runtime() {
     static std::once_flag once;
     std::call_once(once, [] {
         JPH::RegisterDefaultAllocator();
+#ifdef JPH_ENABLE_ASSERTS
+        previous_assert = JPH::AssertFailed;
+        JPH::AssertFailed = jolt_assert;
+#endif
         JPH::Factory::sInstance = new JPH::Factory();
         JPH::RegisterTypes();
     });
@@ -116,7 +137,12 @@ bool made_as(Shape3DKind kind, JPH::EShapeSubType type) {
     case Shape3DKind::ConvexHull: return type == T::ConvexHull;
     case Shape3DKind::TriangleMesh: return type == T::Mesh;
     case Shape3DKind::HeightField: return type == T::HeightField;
-    case Shape3DKind::Compound: return type == T::StaticCompound || type == T::MutableCompound || type == T::RotatedTranslated;
+    case Shape3DKind::Compound:
+        // Jolt collapses an identity one-child compound to its child. The saved
+        // header already checks the authored kind, so retain that logical kind.
+        return type==T::StaticCompound || type==T::MutableCompound || type==T::RotatedTranslated || type==T::Scaled ||
+               type==T::Box || type==T::Sphere || type==T::Capsule || type==T::Cylinder || type==T::ConvexHull ||
+               type==T::Mesh || type==T::HeightField;
     }
     return false;
 }

@@ -460,6 +460,24 @@ void test_agent_clearance() {
     assert(kin::find_path(build(wall, {.agent_radius = .04f, .agent_height = 1.2f}), {.5f, 0, .5f}, {2.5f, 0, .5f})
                .empty());
 
+    // A 1.2 m doorway remains usable by an 0.8 m-wide agent. Vertex-only
+    // jamb contacts must not consume another pair of cells on either side.
+    Soup door = grid(40, 40, .1f);
+    for (const auto z : {std::pair{0.f, 1.4f}, std::pair{2.6f, 4.f}})
+        door.append({{{2, 0, z.first}, {2, 2.3f, z.first}, {2, 2.3f, z.second}, {2, 0, z.second}}, {0, 1, 2, 0, 2, 3}});
+    door.append({{{2, 2, 1.4f}, {2, 2.3f, 1.4f}, {2, 2.3f, 2.6f}, {2, 2, 2.6f}}, {0, 1, 2, 0, 2, 3}});
+    auto distant_ramp = grid(20, 10, .1f, 0, {4, 0, 0});
+    for (auto& p : distant_ramp.vertices)
+        p.y = (p.x - 4) * .5f;
+    door.append(distant_ramp);
+    assert(!kin::find_path(build(door, {.agent_radius = .4f, .agent_height = 1.8f}), {1, 0, 2}, {3, 0, 2}).empty());
+    Soup room = grid(20, 20, .1f);
+    for (const auto x : {0.f, 2.f})
+        room.append({{{x, 0, 0}, {x, 2, 0}, {x, 2, 2}, {x, 0, 2}}, {0, 1, 2, 0, 2, 3}});
+    for (const auto z : {0.f, 2.f})
+        room.append({{{0, 0, z}, {0, 2, z}, {2, 2, z}, {2, 0, z}}, {0, 1, 2, 0, 2, 3}});
+    assert(build(room, {.agent_height = 1.8f}).region_count() == 1);
+
     // Other layers' borders cannot erode this floor merely because they project onto it.
     Soup layers = grid(20, 20, .1f);
     layers.append(grid(8, 8, .1f, 3, {.6f, 0, .6f}));
@@ -483,6 +501,14 @@ void test_agent_clearance() {
     const auto balcony = build(connected, {.agent_radius = .1f, .agent_height = 1.8f});
     assert(kin::nearest(balcony, {2, 0, 1.5f}, {.01f, .01f, .01f}));
     assert(!kin::nearest(balcony, {2, 2, 1.5f}, {.01f, .01f, .01f}));
+
+    // The same ramp on uncut continuous floor: headroom removal resolves the
+    // three-face seam before erosion, so the foot is not treated as a wall.
+    Soup uncut = grid(90, 30, .1f);
+    uncut.append(grid(20, 10, .1f, 2, {2, 0, 1}));
+    uncut.append(ramp);
+    const auto ramp_walk = build(uncut, {.agent_radius = .1f, .agent_height = 1.8f});
+    assert(!kin::find_path(ramp_walk, {8.5f, 0, 1.5f}, {3, 2, 1.5f}).empty());
 
     // Vertical risers touch tread boundaries without occupying their interiors.
     Soup stairs;
@@ -515,6 +541,45 @@ void test_agent_clearance() {
     assert(!kin::find_path(joined, {3.75f, .6f, .5f}, {.25f, 0, .5f}).empty());
     const auto too_high = build(stairs, {.agent_height = 1.8f, .max_step_height = .19f});
     assert(kin::find_path(too_high, {.25f, 0, .5f}, {3.75f, .6f, .5f}).empty());
+
+    // Tessellated stairs need clearance through every join, not just a point path.
+    Soup wide_stairs;
+    for (int step = 0; step < 4; ++step) {
+        const f32 x = f32(step), y = f32(step) * .2f;
+        wide_stairs.append(grid(10, 30, .1f, y, {x, 0, 0}));
+        wide_stairs.append(
+            {{{x + 1, y, 0}, {x + 1, y + .2f, 0}, {x + 1, y + .2f, 3}, {x + 1, y, 3}}, {0, 1, 2, 0, 2, 3}});
+    }
+    for (const f32 radius : {0.f, .1f, .3f, .4f}) {
+        const auto walk = build(wide_stairs, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .21f});
+        assert(!kin::find_path(walk, {.5f, 0, 1.5f}, {3.5f, .6f, 1.5f}).empty());
+        assert(!kin::find_path(walk, {3.5f, .6f, 1.5f}, {.5f, 0, 1.5f}).empty());
+    }
+    Soup blocked_steps = wide_stairs;
+    blocked_steps.append({{{2, .4f, 0}, {2, 2.5f, 0}, {2, 2.5f, 3}, {2, .4f, 3}}, {0, 1, 2, 0, 2, 3}});
+    for (const f32 radius : {0.f, .3f})
+        assert(kin::find_path(
+                   build(blocked_steps, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .21f}),
+                   {.5f, 0, 1.5f}, {3.5f, .6f, 1.5f})
+                   .empty());
+
+    Soup kerb = grid(20, 30, .1f);
+    auto raised_ramp = grid(20, 30, .1f, .2f, {2, 0, 0});
+    for (auto& point : raised_ramp.vertices)
+        point.y += (point.x - 2) * .5f;
+    kerb.append(raised_ramp);
+    kerb.append(grid(8, 30, .1f, 1.85f));
+    const auto kerb_walk = build(kerb, {.agent_radius = .3f, .agent_height = 1.8f, .max_step_height = .21f});
+    assert(kin::nearest(kerb_walk, {.5f, 0, 1.5f}, {.01f, .01f, .01f}));
+    assert(!kin::find_path(kerb_walk, {1.4f, 0, 1.5f}, {3.5f, .95f, 1.5f}).empty());
+    for (auto& point : wide_stairs.vertices)
+        point = {point.x, -point.z, point.y};
+    for (const f32 radius : {.1f, .3f, .4f})
+        assert(!kin::find_path(
+                    build(wide_stairs,
+                          {.up = {0, 0, 1}, .agent_radius = radius, .agent_height = 1.8f, .max_step_height = .21f}),
+                    {.5f, -1.5f, 0}, {3.5f, -1.5f, .6f})
+                    .empty());
 
     for (auto& vertex : stairs.vertices)
         vertex = {vertex.x, -vertex.z, vertex.y};

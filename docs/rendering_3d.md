@@ -3634,6 +3634,10 @@ an emitter `history_id` on `draw_particles`. Zero IDs use submission order.
 History retains at most 65,536 visible sprites per view; additional sprites use
 spatial reconstruction. Overlapping independently moving translucent layers
 share the foremost contributing velocity, so history confidence is capped.
+Blended mesh coverage rejects history locally when opaque motion behind it differs
+by more than one pixel, including the following frame's old coverage. The opaque
+motion snapshot is allocated only for blended mesh coverage and released after
+120 unused renders. Light motion does not change particle geometry identities.
 
 Particle casters are culled individually against each light map and capped at
 16,384 per map in stable submission order, including each point-light face.

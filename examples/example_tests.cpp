@@ -422,6 +422,8 @@ int main(int argc, char** argv) {
     input.bind("grid_buy",Key::Enter);
     for (float scale : {1.0f,1.25f,2.0f}) {
         window.set_size({int(640*scale),int(480*scale)});
+        // X11 resize requests are asynchronous; hit tests need the new pixel size.
+        assert(SDL_SyncWindow(SDL_GetWindowFromID(window.id())));
         Arena grid_model(1,7); PowerGridState grid;
         const auto grid_draw=[&] {return render_power_grid(grid_model,input,renderer,grid,scale);};
         input.begin_frame(); input.set_mouse_pos({117*scale,187*scale});

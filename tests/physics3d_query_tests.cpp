@@ -73,11 +73,11 @@ void event_storage_reuse() {
     world.create_body({.shape=box, .motion=Body3DMotion::Static, .sensor=true});
     world.create_body({.shape=box, .allow_sleeping=false});
     std::vector<ContactEvent3D> events;
-    for (int i=0; i<8; ++i) { world.step(1.f/60); world.drain_events(events); }
+    for (int i=0; i<8; ++i) { (void)world.step(1.f/60); world.drain_events(events); }
     assert(!events.empty());
     AllocationScope allocation;
     for (int i=0; i<32; ++i) {
-        world.step(1.f/60);
+        (void)world.step(1.f/60);
         world.drain_events(events);
         assert(events.size()==1 && events[0].kind==ContactKind3D::Persist && world.events().empty());
     }

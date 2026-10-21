@@ -113,7 +113,7 @@ Window time_steps(World3D& world, int frames) {
     Window w;
     for (int i = 0; i < frames; ++i) {
         const auto t0 = std::chrono::steady_clock::now();
-        world.step(1.0f / 60.0f);
+        (void)world.step(1.0f / 60.0f);
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         w.mean += ms;
         w.worst = std::max(w.worst, ms);
@@ -181,7 +181,7 @@ int queries() {
         World3D pile(cfg);
         make_pile(pile, 2000);
         for (int i = 0; i < 200; ++i) {
-            pile.step(1.0f / 60.0f);
+            (void)pile.step(1.0f / 60.0f);
         }
         Lcg rng;
         std::vector<Vec3f> starts;
@@ -257,7 +257,7 @@ int queries() {
             const int n = phase == 0 ? 120 : 240;
             for (int i = 0; i < n; ++i) {
                 const auto t0 = std::chrono::steady_clock::now();
-                world.step(1.0f / 60.0f);
+                (void)world.step(1.0f / 60.0f);
                 const double ms = since_ms(t0);
                 w.mean += ms;
                 w.worst = std::max(w.worst, ms);
@@ -399,7 +399,7 @@ int ecs_overhead(const std::string& only) {
             World3D raw2(cfg);
             make_pile(raw2, 500);
             for (int i = 0; i < 360; ++i) {
-                raw2.step(dt);
+                (void)raw2.step(dt);
                 bodies.step(dt);
                 if (i % 30 == 29) {
                     std::printf("step %3d: awake raw %d, system %d\n", i + 1, raw2.active_body_count(), world.active_body_count());
@@ -546,7 +546,7 @@ int characters() {
                         world.set_character_input(walkers[i], in);
                     }
                     const auto t0 = std::chrono::steady_clock::now();
-                    world.step(1.0f / 60.0f);
+                    (void)world.step(1.0f / 60.0f);
                     const double ms = since_ms(t0);
                     if (step >= 240) {
                         w.mean += ms;
@@ -593,7 +593,7 @@ int climbing() {
         heap(world, boxes, {-4.0f, 0.0f, 3.0f}, {14.0f, 0.0f, 10.0f});
         world.optimize_broad_phase();
         for (int i = 0; i < 120; ++i) {
-            world.step(1.0f / 60.0f);
+            (void)world.step(1.0f / 60.0f);
         }
         struct Case {
             const char* name;
@@ -662,7 +662,7 @@ int climbing() {
                         world.set_traversal_input(hands[i], t);
                     }
                     const auto t0 = std::chrono::steady_clock::now();
-                    world.step(1.0f / 60.0f);
+                    (void)world.step(1.0f / 60.0f);
                     const double ms = since_ms(t0);
                     if (step >= 120) {
                         w.mean += ms;
@@ -755,7 +755,7 @@ int ragdolls() {
                             world.set_ragdoll_targets(made[i], rig.bone_world({-28.0f + 2.4f * static_cast<f32>(i % 10) + x, 0.0f, -3.0f - 2.6f * static_cast<f32>(i / 10)}));
                         }
                         const auto t0 = std::chrono::steady_clock::now();
-                        world.step(1.0f / 60.0f);
+                        (void)world.step(1.0f / 60.0f);
                         if (step >= 30) {
                             animated += since_ms(t0) / 60.0;
                         }
@@ -876,7 +876,7 @@ int ropes() {
             world.set_character_input(hero, in);
             world.set_traversal_input(hero, t);
             const auto t0 = std::chrono::steady_clock::now();
-            world.step(1.0f / 60.0f);
+            (void)world.step(1.0f / 60.0f);
             const double ms = since_ms(t0);
             if (step >= 90 && step < 150) {
                 idle_ms += ms / 60.0;

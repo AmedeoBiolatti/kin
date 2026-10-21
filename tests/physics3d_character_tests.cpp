@@ -53,7 +53,7 @@ World3DConfig serial() {
 
 void run(World3D& world, int frames) {
     for (int i = 0; i < frames; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
 }
 
@@ -238,7 +238,7 @@ void test_stairs_and_ledges() {
         world.set_character_input(c, forward_x());
         Range vy;
         for (int i = 0; i < 180; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             vy.add(world.character(c).position.y);
         }
         const CharacterState3D s = world.character(c);
@@ -288,7 +288,7 @@ void test_stick_to_ground() {
         int air = 0;
         f32 worst = 0.0f;
         for (int i = 0; i < 150; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             const CharacterState3D s = world.character(c);
             if (s.position.x > 0.2f && s.position.x < 8.0f) {
                 if (s.ground != CharacterGround3D::OnGround) {
@@ -324,7 +324,7 @@ void test_stick_to_ground() {
     int air = 0;
     f32 top = 0.0f;
     for (int i = 0; i < 180; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         const CharacterState3D s = world.character(c);
         if (s.position.x > 11.0f && s.position.x < 29.0f && s.ground != CharacterGround3D::OnGround) {
             ++air;
@@ -351,7 +351,7 @@ void test_jump() {
         Range y;
         int air_steps = 0;
         for (int i = 0; i < 180; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             const CharacterState3D s = world.character(c);
             y.add(s.position.y);
             if (s.ground != CharacterGround3D::OnGround) {
@@ -383,7 +383,7 @@ void test_jump() {
     int jumps = 0;
     Range y;
     for (int i = 0; i < 300; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         y.add(world.character(c).position.y);
         jumps += world.character(c).jumped ? 1 : 0;
     }
@@ -411,7 +411,7 @@ void test_tunnelling() {
     world.set_character_input(c, forward_x(1.0f, true));
     f32 furthest = 0.0f;
     for (int i = 0; i < 120; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         furthest = std::max(furthest, world.character(c).position.x);
     }
     if (verbose) std::printf("60 m/s at a 2 cm wall at x = 5: furthest x %.3f\n", furthest);
@@ -440,7 +440,7 @@ void test_moving_platforms() {
             for (int i = 0; i < steps; ++i) {
                 centre.x += 2.0f * dt;
                 world.move_kinematic(platform, centre, {}, dt);
-                world.step(dt);
+                (void)world.step(dt);
             }
         };
         run(world, 30);
@@ -479,7 +479,7 @@ void test_moving_platforms() {
         run(world, 30);
         for (int i = 0; i < 360; ++i) {
             world.move_kinematic(platform, {0, 0.25f, 0}, Quatf::axis_angle({0, 1, 0}, static_cast<f32>(i + 1) * dt * 57.29578f), dt);
-            world.step(dt);
+            (void)world.step(dt);
         }
         const CharacterState3D s = world.character(c);
         const f32 radius = std::sqrt(s.position.x * s.position.x + s.position.z * s.position.z);
@@ -556,7 +556,7 @@ void test_ceiling_bump() {
     f32 hit_speed = 0.0f;
     int turned_step = -1;
     for (int i = 0; i < 90; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         in.jump = false;
         world.set_character_input(c, in);
         for (const CharacterEvent3D& e : world.drain_character_events()) {
@@ -594,7 +594,7 @@ void test_sensors() {
     world.set_character_input(c, forward_x());
     std::vector<CharacterEvent3D> seen;
     for (int i = 0; i < 180; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         for (const CharacterEvent3D& e : world.drain_character_events()) {
             if (e.body_user_id == 321) {
                 seen.push_back(e);
@@ -647,7 +647,7 @@ void test_gravity_direction() {
         f32 largest_turn = 0.0f;
         int settled_step = -1;
         for (int i = 0; i < 180; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             const f32 angle = std::acos(std::clamp(-world.character(c).up.y, -1.0f, 1.0f)); // away from the target (0, -1, 0)
             // The angle to the new up (0, -1, 0): pi at first, then 0.
             const f32 to_target = std::acos(std::clamp(-world.character(c).up.y, -1.0f, 1.0f));
@@ -703,7 +703,7 @@ void test_gravity_direction() {
         w.set_character_input(c, in);
         f32 away = 0.0f;
         for (int i = 0; i < 60; ++i) {
-            w.step(dt);
+            (void)w.step(dt);
             in.jump = false;
             w.set_character_input(c, in);
             away = std::max(away, 10.0f - w.character(c).position.x);
@@ -919,7 +919,7 @@ void test_coyote_and_buffer() {
         bool pressed = false;
         f32 best_up = -100.0f;
         for (int i = 0; i < 240; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             const CharacterState3D s = world.character(c);
             if (off_at < 0 && s.ground != CharacterGround3D::OnGround) {
                 off_at = i;
@@ -955,7 +955,7 @@ void test_coyote_and_buffer() {
                 in.jump = true;
                 world.set_character_input(c, in);
             }
-            world.step(dt);
+            (void)world.step(dt);
             if (i >= 15) {
                 best_up = std::max(best_up, world.character(c).vertical_speed);
             }
@@ -978,7 +978,7 @@ void test_coyote_and_buffer() {
                 in.jump = true;
                 world.set_character_input(c, in);
             }
-            world.step(dt);
+            (void)world.step(dt);
             if (i >= 15) {
                 best_up = std::max(best_up, world.character(c).vertical_speed);
             }
@@ -1011,9 +1011,15 @@ void test_handles_and_bodies() {
     CHECK(a.index == 0 && b.index == 1);
     const Body3D inner = world.character(a).body;
     CHECK(world.contains(inner));
+    // Group membership is the documented exception: a character can ignore its
+    // own ragdoll while structural and material setters remain owner-controlled.
+    world.set_group(inner, 37);
+    CHECK(world.group(inner) == 37);
+    world.set_group(inner, 0);
+    CHECK(world.group(inner) == 0);
     // Its body is its own: the body calls refuse it.
     world.set_position(inner, {50, 50, 50});
-    world.destroy_body(inner);
+    (void)world.destroy_body(inner);
     CHECK(world.contains(inner));
     run(world, 5);
     CHECK_NEAR(world.character(a).position.y, 0.0, 0.03);
@@ -1070,7 +1076,7 @@ void test_impulse_and_velocity() {
         int air_steps = 0;
         bool left = false, by_jump = true, landed = false;
         for (int i = 0; i < 180; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             const CharacterState3D s = world.character(c);
             y.add(s.position.y);
             air = std::max(air, s.air_time);
@@ -1106,12 +1112,12 @@ void test_impulse_and_velocity() {
         run(world, 30);
         const f32 x0 = world.character(c).position.x;
         world.add_character_impulse(c, {70.0f * 5.0f, 0.0f, 0.0f});
-        world.step(dt);
+        (void)world.step(dt);
         const f32 braking = 40.0f * friction;
         CHECK_NEAR(world.character(c).velocity.x, 5.0f - braking * dt, 0.02);
         bool grounded = true;
         for (int i = 0; i < 300; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             grounded = grounded && world.character(c).ground == CharacterGround3D::OnGround;
         }
         const CharacterState3D s = world.character(c);
@@ -1128,9 +1134,9 @@ void test_impulse_and_velocity() {
         const Character3D c = make(world, {0, 0, 0});
         run(world, 30);
         world.add_character_impulse(c, {70.0f * 3.0f, 70.0f * 4.0f, 0.0f});
-        world.step(dt);
+        (void)world.step(dt);
         for (int i = 0; i < 20; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
             CHECK(world.character(c).ground == CharacterGround3D::InAir);
             CHECK_NEAR(world.character(c).velocity.x, 3.0, 1e-3);
         }
@@ -1153,9 +1159,9 @@ void test_impulse_and_velocity() {
         b.set_character_velocity(cb, v);
         c.set_character_velocity(cc, v);
         c.add_character_impulse(cc, {0.0f, 0.0f, 140.0f});
-        a.step(dt);
-        b.step(dt);
-        c.step(dt);
+        (void)a.step(dt);
+        (void)b.step(dt);
+        (void)c.step(dt);
         const CharacterState3D sa = a.character(ca);
         CHECK_NEAR(sa.velocity.x, 1.0, 1e-4);
         CHECK_NEAR(sa.velocity.y, 4.0 - g * dt, 1e-3);
@@ -1171,7 +1177,7 @@ void test_impulse_and_velocity() {
         pad.set_character_input(p, forward_x()); // walking: the set velocity replaces the walk too
         run(pad, 30);
         pad.set_character_velocity(p, {0.0f, 8.0f, 6.0f});
-        pad.step(dt);
+        (void)pad.step(dt);
         const CharacterState3D sp = pad.character(p);
         CHECK(sp.ground == CharacterGround3D::InAir);
         CHECK_NEAR(sp.vertical_speed, 8.0 - g * dt, 0.01);
@@ -1185,7 +1191,7 @@ void test_impulse_and_velocity() {
             for (int f = 0; f < 120; ++f) {
                 if (f % 7 == 3) world.add_character_impulse(c, {35.0f * static_cast<f32>(f % 3), 20.0f, -12.0f});
                 if (f == 50) world.set_character_velocity(c, {0.0f, 6.0f, 2.0f});
-                world.step(dt);
+                (void)world.step(dt);
                 hashes.push_back(world.state_hash());
             }
         };
@@ -1205,14 +1211,14 @@ void test_impulse_and_velocity() {
         const u64 at_save = w.state_hash();
         std::vector<u64> first;
         for (int f = 0; f < 60; ++f) {
-            w.step(dt);
+            (void)w.step(dt);
             first.push_back(w.state_hash());
         }
         CHECK(w.restore_state(saved));
         CHECK(w.state_hash() == at_save);
         std::vector<u64> second;
         for (int f = 0; f < 60; ++f) {
-            w.step(dt);
+            (void)w.step(dt);
             second.push_back(w.state_hash());
         }
         CHECK(first == second);
@@ -1320,7 +1326,7 @@ void dump_route(const std::string& path, int every) {
     for (int n = 0; n < route.frames; ++n) {
         character_level::apply_keys(world, hero, route, n);
         level.drive(world, n, dt);
-        world.step(dt);
+        (void)world.step(dt);
         if (n % every == 0) {
             const CharacterState3D s = world.character(hero);
             std::printf("%4d  pos (%7.3f %6.3f %7.3f)  v (%5.2f %5.2f %5.2f) ground %d speed %.2f crouch %d  ground body %llu\n", n, s.position.x,
@@ -1353,7 +1359,7 @@ struct RouteRun {
     void step() {
         character_level::apply_keys(world, hero, route, frame);
         level.drive(world, frame, dt);
-        world.step(dt);
+        (void)world.step(dt);
         ++frame;
     }
 };
@@ -1453,7 +1459,7 @@ std::vector<u64> scene_hashes(const World3DConfig& cfg, int frames) {
             world.set_character_input(heroes[i], in);
         }
         level.drive(world, f, dt);
-        world.step(dt);
+        (void)world.step(dt);
         out.push_back(world.state_hash());
     }
     return out;
@@ -1508,7 +1514,7 @@ void test_save_restore_characters() {
     build(world, heroes);
     for (int f = 0; f < 80; ++f) {
         command(world, heroes, f);
-        world.step(dt);
+        (void)world.step(dt);
     }
     const std::vector<u8> saved = world.save_state();
     const u64 at_save = world.state_hash();
@@ -1517,7 +1523,7 @@ void test_save_restore_characters() {
     std::vector<u64> first;
     for (int f = 80; f < 200; ++f) {
         command(world, heroes, f);
-        world.step(dt);
+        (void)world.step(dt);
         first.push_back(world.state_hash());
     }
     CHECK(!world.character(heroes[1]).crouching);
@@ -1527,7 +1533,7 @@ void test_save_restore_characters() {
     std::vector<u64> second;
     for (int f = 80; f < 200; ++f) {
         command(world, heroes, f);
-        world.step(dt);
+        (void)world.step(dt);
         second.push_back(world.state_hash());
     }
     CHECK(first == second);
@@ -1536,14 +1542,14 @@ void test_save_restore_characters() {
     std::vector<Character3D> other_heroes;
     build(other, other_heroes);
     for (int f = 0; f < 5; ++f) {
-        other.step(dt); // somewhere else entirely
+        (void)other.step(dt); // somewhere else entirely
     }
     CHECK(other.restore_state(saved));
     CHECK(other.state_hash() == at_save);
     std::vector<u64> third;
     for (int f = 80; f < 200; ++f) {
         command(other, other_heroes, f);
-        other.step(dt);
+        (void)other.step(dt);
         third.push_back(other.state_hash());
     }
     CHECK(third == first);
@@ -1567,7 +1573,7 @@ void test_hash_sees_characters() {
         d.coyote_seconds = 0.2f;
         const Character3D c = world.create_character(d);
         for (int i = 0; i < 30; ++i) {
-            world.step(dt);
+            (void)world.step(dt);
         }
         return c;
     };

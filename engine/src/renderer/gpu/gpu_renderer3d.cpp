@@ -1024,7 +1024,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _particle_temporal_vertex =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_VERTEX, "particle_temporal.vert.spv", 4, 0, 2);
             _reactive_shader =
-                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "taa_reactive.frag.spv", 1, 1);
+                GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "taa_reactive.frag.spv", 1, 2);
             _taa_available = true;
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: temporal anti-aliasing not available",
@@ -2570,7 +2570,7 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     for (const GpuTexture* t :
          {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw,
           &view._contact_across, &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion,
-          &view._taa_history[0], &view._taa_history[1], &view._occ_depth}) {
+          &view._taa_opaque_motion, &view._taa_history[0], &view._taa_history[1], &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
@@ -2597,6 +2597,7 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
     view._taa_in = {};
     view._taa_sharp = {};
     view._taa_motion = {};
+    view._taa_opaque_motion = {};
     view._taa_history = {};
     view._taa_valid = false;
     view._taa_coverage_key = 0;
@@ -2990,6 +2991,7 @@ struct GpuRenderer3D::FrameCtx {
     bool taa = false;
     bool taa_reset = false;
     bool taa_reactive = false;
+    bool mesh_coverage = false;
     u64 coverage_key = 1469598103934665603ull;
     u64 shadow_revision = 0;
     bool shadow_changed = false;
@@ -3091,8 +3093,11 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
     // The normals are also the main pass's velocity, and the TAA's last velocity swaps with them while it runs.
     age(v._idle_normals, ctx.prepass_ran || ctx.main_velocity, static_cast<bool>(v._ao_normals),
         [&] { v._ao_normals = {}; });
+    age(v._idle_taa_opaque, ctx.mesh_coverage, static_cast<bool>(v._taa_opaque_motion),
+        [&] { v._taa_opaque_motion = {}; });
     age(v._idle_taa, ctx.taa,
-        v._taa_depth || v._taa_history[0] || v._taa_history[1] || v._taa_in || v._taa_sharp || v._taa_motion,
+        v._taa_depth || v._taa_history[0] || v._taa_history[1] || v._taa_in || v._taa_sharp || v._taa_motion ||
+            v._taa_opaque_motion,
         [&] { release_taa(v); });
     age(v._idle_occlusion, ctx.occlusion, v._hiz_levels > 0 || v._occ_depth || v._occ_history[0] || v._occ_history[1],
         [&] {
@@ -3426,24 +3431,8 @@ u32 GpuRenderer3D::select_particles(FrameCtx& ctx, std::span<const ParticleSourc
         taa_hash(look_key, l.fogged);
         taa_hash(look_key, l.soft);
         taa_hash(look_key, l.soft_distance);
-        if (l.lit > 0) {
-            // Light movement changes the sampled spatial lighting. Colour/intensity
-            // flicker is handled by the resolve's colour clipping, so it does
-            // not discard every lit particle's geometric history each frame.
-            for (const auto& light : scene.lights.points) {
-                taa_hash(look_key, light.position);
-                taa_hash(look_key, light.radius);
-                taa_hash(look_key, light.size);
-            }
-            for (const auto& light : scene.lights.spots) {
-                taa_hash(look_key, light.position);
-                taa_hash(look_key, light.direction);
-                taa_hash(look_key, light.radius);
-                taa_hash(look_key, light.size);
-                taa_hash(look_key, light.inner_angle);
-                taa_hash(look_key, light.outer_angle);
-            }
-        }
+        // Lighting changes are resolved by colour/shadow rejection per pixel;
+        // they never change a sprite's geometric history identity.
         batch.unstable = taa_texture_hash(look_key, l.texture.backend().get());
         batch.look_key = look_key;
         if (ctx.taa) {
@@ -3570,9 +3559,6 @@ void GpuRenderer3D::match_particles(FrameCtx& ctx, u32 total) {
         }
     };
     _device->upload_storage_buffer(_particle_previous->handle(), 0, total * 64u, nullptr, true, &previous);
-    std::ranges::sort(_particle_history_now, [](const auto& a, const auto& b) {
-        return std::pair{a.source, a.id} < std::pair{b.source, b.id};
-    });
 }
 
 void GpuRenderer3D::upload_particles(FrameCtx& ctx, u32 total) {
@@ -8014,7 +8000,8 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
 // AO/contact shading has consumed the normals. Reuse their RG for local
 // coverage/irradiance and BA for the contributing layer's reprojection motion.
 // Replaying coverage also works with a velocity pre-pass and arbitrary custom
-// fragment shaders, without changing their ABI or allocating another target.
+// fragment shaders without changing their ABI. Preserve opaque motion only when
+// blended mesh coverage needs to detect independently moving layers.
 bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     auto* view = ctx.view;
     taa_hash(ctx.coverage_key, ctx.view_projections);
@@ -8046,6 +8033,26 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     }
     ctx.shadow_revision = revision;
     ctx.shadow_changed = revision != view->_taa_shadow_revision;
+    if (ctx.mesh_coverage) {
+        const auto w = static_cast<u32>(view->_size.x), h = static_cast<u32>(view->_size.y);
+        try {
+            if (!view->_taa_opaque_motion || view->_taa_opaque_motion.width() != w ||
+                view->_taa_opaque_motion.height() != h)
+                view->_taa_opaque_motion = _device->create_target(
+                    w, h, hdr_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        } catch (const std::exception& error) {
+            KIN_LOG_WARN_F("render", "3D: transparent motion target not made",
+                           (LogFields{{.name = "reason", .value = error.what()}}));
+            return false;
+        }
+        auto* copy = SDL_BeginGPUCopyPass(ctx.commands);
+        if (!copy)
+            return false;
+        const SDL_GPUTextureLocation from{.texture = view->_ao_normals.handle()};
+        const SDL_GPUTextureLocation to{.texture = view->_taa_opaque_motion.handle()};
+        SDL_CopyGPUTextureToTexture(copy, &from, &to, w, h, 1, true);
+        SDL_EndGPUCopyPass(copy);
+    }
     SDL_GPUColorTargetInfo target{};
     target.texture = view->_ao_normals.handle();
     target.load_op = SDL_GPU_LOADOP_LOAD;
@@ -8104,8 +8111,10 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
             binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index_buffer() : nullptr);
             if (ref.skinned)
                 binder.bind_skin(ref.mesh);
-            const auto picture = texture_binding(material.texture, material.wrap_u, material.wrap_v);
-            SDL_BindGPUFragmentSamplers(pass, 0, &picture, 1);
+            const std::array<SDL_GPUTextureSamplerBinding, 2> pictures{
+                texture_binding(material.texture, material.wrap_u, material.wrap_v),
+                SDL_GPUTextureSamplerBinding{view->_taa_opaque_motion.handle(), _point_sampler}};
+            SDL_BindGPUFragmentSamplers(pass, 0, pictures.data(), pictures.size());
             u64 key = 1469598103934665603ull;
             taa_hash(key, ref.mesh->serial);
             taa_hash(key, material.color);
@@ -8372,11 +8381,10 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         colour.texture = resolved;
         colour.store_op = SDL_GPU_STOREOP_STORE;
     }
-    ctx.taa_reactive =
-        ctx.taa && (!_particle_batches.empty() || std::any_of(_order.begin(), _order.end(), [&](u32 index) {
-            const auto& material = _refs[index].draw->material;
-            return pass_of(material) != Pass::Opaque;
-        }));
+    ctx.mesh_coverage = ctx.taa && std::any_of(_order.begin(), _order.end(), [&](u32 index) {
+                            return pass_of(_refs[index].draw->material) != Pass::Opaque;
+                        });
+    ctx.taa_reactive = ctx.taa && (!_particle_batches.empty() || ctx.mesh_coverage);
     // Reverse Z: the far plane.
     SDL_GPUDepthStencilTargetInfo depth =
         depth_target(ctx.taa ? view->_taa_depth.handle() : view->_depth.handle(),
@@ -9158,12 +9166,12 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
     return true;
 }
 
-PickResult3D GpuRenderer3D::pick(IViewBackend3D& base, Vec2i pixel) {
+Result3D<PickResult3D> GpuRenderer3D::pick(IViewBackend3D& base, Vec2i pixel) {
     auto* view = dynamic_cast<GpuView3D*>(&base);
-    if (!view || !view->_pick || !view->_pick_valid || pixel.x < 0 || pixel.y < 0 || pixel.x >= view->_size.x ||
-        pixel.y >= view->_size.y) {
-        return {};
-    }
+    if (!view || !view->_pick || !view->_pick_valid)
+        return {std::nullopt, {"GPU picking requires a rendered view with picking enabled"}};
+    if (pixel.x < 0 || pixel.y < 0 || pixel.x >= view->_size.x || pixel.y >= view->_size.y)
+        return result3d(PickResult3D{});
     // What is recorded so far goes to the GPU first (2D carries on in a new
     // command buffer, as after a read-back).
     if (_owner->_frame) {
@@ -9175,16 +9183,16 @@ PickResult3D GpuRenderer3D::pick(IViewBackend3D& base, Vec2i pixel) {
     if (!_device->read_texture_region(view->_pick, static_cast<u32>(pixel.x), static_cast<u32>(pixel.y), 1, 1, 16,
                                       texel) ||
         texel.size() < 16) {
-        return {};
+        return {std::nullopt, {"GPU picking readback failed"}};
     }
     f32 values[4];
     std::memcpy(values, texel.data(), sizeof(values));
     u32 id = 0;
     std::memcpy(&id, &values[3], sizeof(id));
     if (id == 0) {
-        return {};
+        return result3d(PickResult3D{});
     }
-    return {.hit = true, .id = id - 1, .position = {values[0], values[1], values[2]}};
+    return result3d(PickResult3D{.hit = true, .id = id - 1, .position = {values[0], values[1], values[2]}});
 }
 
 } // namespace kin::gpu

@@ -803,7 +803,7 @@ struct PhysicsPile {
             reset();
         }
         while (stepped < steps) {
-            world->step(1.0f / 60.0f);
+            (void)world->step(1.0f / 60.0f);
             last_events = world->drain_events();
             ++stepped;
         }

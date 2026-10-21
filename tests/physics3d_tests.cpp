@@ -41,7 +41,7 @@ bool near(Vec3f a, Vec3f b, f32 eps) { return near(a.x, b.x, eps) && near(a.y, b
 
 void run(World3D& world, int frames) {
     for (int i = 0; i < frames; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
 }
 
@@ -100,7 +100,7 @@ std::vector<u64> pile_hashes(World3DConfig config, int count, int frames) {
     build_pile(world, count);
     std::vector<u64> hashes;
     for (int i = 0; i < frames; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         hashes.push_back(world.state_hash());
     }
     return hashes;
@@ -136,7 +136,7 @@ void test_free_fall_dt() {
     // A bigger step covers the same time with the same law.
     World3D big(serial());
     const Body3D c = big.create_body({.shape = Shape3D::sphere(0.25f), .position = {0.0f, 100.0f, 0.0f}});
-    big.step(0.5f);
+    (void)big.step(0.5f);
     CHECK(near(big.linear_velocity(c).y, -4.905f, 0.01f));
 }
 
@@ -208,7 +208,7 @@ void test_restitution() {
         f32 peak = 0.0f;
         for (int i = 0; i < 240; ++i) {
             const f32 before = world.linear_velocity(ball).y;
-            world.step(dt);
+            (void)world.step(dt);
             const f32 after = world.linear_velocity(ball).y;
             if (before < -1.0f && after > 0.0f) {
                 bounced = true;
@@ -302,6 +302,13 @@ void test_compound() {
     CHECK(near(compound.centre_of_mass(), {2.0f, 0.0f, 0.0f}, 0.01f));
     CHECK(near(compound.bounds_min().x, -0.5f, 0.01f) && near(compound.bounds_max().x, 4.0f, 0.01f));
 
+    const std::array<ShapeChild3D,1> identity_child{{{unit,{},{}}}};
+    const auto identity=Shape3D::compound(identity_child);
+    std::vector<u8> binary;
+    CHECK(identity.save_binary(binary));
+    const auto restored=Shape3D::restore_binary(binary,Shape3DKind::Compound);
+    CHECK(restored.valid() && restored.kind()==Shape3DKind::Compound && restored.volume()==identity.volume());
+
     World3DConfig cfg = serial();
     cfg.gravity = {};
     World3D world(cfg);
@@ -338,7 +345,7 @@ void test_kinematic_pushes() {
     for (int i = 0; i < 240; ++i) {
         x += 2.0f * dt;
         world.move_kinematic(pusher, {x, 0.5f, 0.0f}, {}, dt);
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(near(world.position(pusher).x, x, 0.02f));
     // The pusher went from -5 to -1; its face (+0.5) met the crate's (-0.5) at x = -1, so the crate went on.
@@ -362,7 +369,7 @@ void test_handles_and_user_ids() {
     CHECK(world.user_id(b) == 99);
     CHECK(world.user_id(a) == 11);
 
-    world.destroy_body(b);
+    (void)world.destroy_body(b);
     CHECK(!world.contains(b));
     CHECK(world.body_count() == 2);
     CHECK(world.user_id(b) == 0);
@@ -373,7 +380,7 @@ void test_handles_and_user_ids() {
     CHECK(!world.contains(b));
     CHECK(world.contains(d));
     CHECK(world.user_id(d) == 44);
-    world.destroy_body(b); // stale: must not destroy d
+    (void)world.destroy_body(b); // stale: must not destroy d
     CHECK(world.contains(d));
     CHECK(!world.contains(Body3D{}));
 
@@ -469,7 +476,7 @@ void test_layers() {
         w.create_body({.shape = box, .position = {0, 0.5f, 0}, .layer = layers3d::User0});
         const Body3D top = w.create_body({.shape = box, .position = {0, 3.0f, 0}, .layer = layers3d::User0 + 1});
         for (int i = 0; i < 180; ++i) {
-            w.step(dt);
+            (void)w.step(dt);
         }
         return w.position(top).y;
     };
@@ -495,14 +502,14 @@ void test_destroy_stacked() {
     }
     run(world, 120);
     CHECK(near(world.position(tower[4]).y, 4.5f, 0.15f));
-    world.destroy_body(tower[0]);
+    (void)world.destroy_body(tower[0]);
     CHECK(world.body_count() == 5); // floor and four boxes
     run(world, 120);
     // The rest came down onto the floor: the top box is now 3.5 up.
     CHECK(near(world.position(tower[1]).y, 0.5f, 0.1f));
     CHECK(near(world.position(tower[4]).y, 3.5f, 0.2f));
     for (const Body3D b : tower) {
-        world.destroy_body(b);
+        (void)world.destroy_body(b);
     }
     CHECK(world.body_count() == 1);
     run(world, 10);
@@ -568,7 +575,7 @@ void test_hash_sensitivity() {
         const Shape3D s = Shape3D::sphere(0.5f);
         a.create_body({.shape = s, .position = {1, 0, 0}});
         const Body3D gone = a.create_body({.shape = s, .position = {9, 0, 0}});
-        a.destroy_body(gone);
+        (void)a.destroy_body(gone);
         const Body3D kept = a.create_body({.shape = s, .position = {2, 0, 0}});
         b.create_body({.shape = s, .position = {1, 0, 0}});
         b.create_body({.shape = s, .position = {2, 0, 0}});
@@ -629,7 +636,7 @@ void test_save_restore() {
     const u64 at_save = world.state_hash();
     std::vector<u64> first;
     for (int i = 0; i < 90; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         first.push_back(world.state_hash());
     }
     CHECK(world.state_hash() != at_save);
@@ -637,7 +644,7 @@ void test_save_restore() {
     CHECK(world.state_hash() == at_save);
     std::vector<u64> second;
     for (int i = 0; i < 90; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         second.push_back(world.state_hash());
     }
     CHECK(first == second);
@@ -917,7 +924,7 @@ void test_events_begin_end_once() {
     EventLog log;
     int sleeping_at = -1;
     for (int i = 0; i < 400; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         log.take(world);
         if (sleeping_at < 0 && !world.is_active(box)) {
             sleeping_at = i;
@@ -937,8 +944,8 @@ void test_events_begin_end_once() {
         CHECK(e.point_count >= 1);
     }
     // Destroying the resting box ends the contact (once), reported by the next step.
-    world.destroy_body(box);
-    world.step(dt);
+    (void)world.destroy_body(box);
+    (void)world.step(dt);
     log.take(world);
     CHECK(log.count(floor, box, ContactKind3D::End) == 1);
     CHECK(log.all.size() == 2);
@@ -954,7 +961,7 @@ void test_events_bounce() {
     int begins_seen_from_state = 0;
     bool was_touching = false;
     for (int i = 0; i < 600; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         log.take(world);
         const bool touching = world.position(ball).y < 0.3f + 0.03f && std::fabs(world.linear_velocity(ball).y) < 0.5f;
         was_touching = touching;
@@ -995,7 +1002,7 @@ void test_events_sensor() {
     EventLog log;
     f32 lowest = 10.0f;
     for (int i = 0; i < 120; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         log.take(world);
         lowest = std::min(lowest, world.position(ball).y);
     }
@@ -1030,7 +1037,7 @@ std::vector<u64> pile_event_hashes(World3DConfig config, int count, int frames, 
     std::vector<u64> hashes;
     std::size_t n = 0;
     for (int i = 0; i < frames; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         const std::span<const ContactEvent3D> events = world.events();
         // Each batch is sorted by (a, b, kind).
         for (std::size_t k = 1; k < events.size(); ++k) {
@@ -1138,7 +1145,7 @@ std::vector<u64> compound_event_hashes(World3DConfig config, int frames, std::si
     std::vector<u64> hashes;
     std::size_t b = 0;
     for (int i = 0; i < frames; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         for (const ContactEvent3D& e : world.events()) {
             b += e.kind == ContactKind3D::Begin ? 1 : 0;
         }
@@ -1176,10 +1183,10 @@ void test_events_destroy_order() {
     run(world, 150);
     world.drain_events();
     // A new body lands in the same step in which two others are destroyed, the higher one first.
-    world.destroy_body(boxes[3]);
-    world.destroy_body(boxes[1]);
+    (void)world.destroy_body(boxes[3]);
+    (void)world.destroy_body(boxes[1]);
     const Body3D fresh = world.create_body({.shape = Shape3D::box({0.4f, 0.4f, 0.4f}), .position = {1.0f, 0.41f, 3.0f}});
-    world.step(dt);
+    (void)world.step(dt);
     const std::span<const ContactEvent3D> events = world.events();
     CHECK(events.size() >= 3);
     for (std::size_t k = 1; k < events.size(); ++k) {
@@ -1203,7 +1210,7 @@ void test_events_persist_and_drain() {
     int persists = 0;
     EventLog log;
     for (int i = 0; i < 20; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         // events() is what is waiting, drain_events() takes it.
         const std::size_t waiting = world.events().size();
         const std::vector<ContactEvent3D> got = world.drain_events();
@@ -1252,7 +1259,7 @@ void test_hinge_limits_and_motor() {
     f32 peak = 0.0f;
     for (int i = 0; i < 180; ++i) {
         world.add_torque(door, {0, 20.0f, 0});
-        world.step(dt);
+        (void)world.step(dt);
         peak = std::max(peak, world.constraint_info(hinge).value);
     }
     f32 angle = world.constraint_info(hinge).value;
@@ -1265,7 +1272,7 @@ void test_hinge_limits_and_motor() {
     f32 trough = 0.0f;
     for (int i = 0; i < 240; ++i) {
         world.add_torque(door, {0, -20.0f, 0});
-        world.step(dt);
+        (void)world.step(dt);
         trough = std::min(trough, world.constraint_info(hinge).value);
     }
     CHECK(near(world.constraint_info(hinge).value, -30.0f, 1.5f) && trough > -31.5f);
@@ -1305,7 +1312,7 @@ void test_distance_point_slider_cone() {
     f32 lo = 1e9f, hi = 0.0f;
     f32 lowest_y = 1e9f;
     for (int i = 0; i < 240; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         const f32 length = world.position(bob).x * 0 + std::sqrt(world.position(bob).x * world.position(bob).x
                                                                  + (world.position(bob).y - 5.0f) * (world.position(bob).y - 5.0f));
         lo = std::min(lo, length);
@@ -1342,7 +1349,7 @@ void test_distance_point_slider_cone() {
     springy.create_constraint(r3);
     f32 deepest = 5.0f;
     for (int i = 0; i < 120; ++i) {
-        springy.step(dt);
+        (void)springy.step(dt);
         deepest = std::min(deepest, springy.position(b3).y);
     }
     CHECK(deepest < 3.6f && deepest > 1.0f); // a rigid rod of 1 m holds it at y = 4: this one gives
@@ -1357,7 +1364,7 @@ void test_distance_point_slider_cone() {
     pt.create_constraint(p);
     f32 far = 0.0f;
     for (int i = 0; i < 180; ++i) {
-        pt.step(dt);
+        (void)pt.step(dt);
         // The anchor on the body is (-1, 0, 0) in its own frame: it stays at the world point.
         const Vec3f anchor = pt.position(b4) + pt.rotation(b4).rotate({-1, 0, 0});
         far = std::max(far, length(anchor - Vec3f{0, 5, 0}));
@@ -1382,13 +1389,13 @@ void test_distance_point_slider_cone() {
     const Constraint3D slide = sl.create_constraint(s);
     for (int i = 0; i < 120; ++i) {
         sl.add_force(cart, {200, 30, 0}); // the sideways part is taken by the rail
-        sl.step(dt);
+        (void)sl.step(dt);
     }
     CHECK(near(sl.constraint_info(slide).value, 1.0f, 0.03f));
     CHECK(near(sl.position(cart).y, 1.0f, 0.02f));
     for (int i = 0; i < 240; ++i) {
         sl.add_force(cart, {-200, 0, 0});
-        sl.step(dt);
+        (void)sl.step(dt);
     }
     CHECK(near(sl.constraint_info(slide).value, -0.5f, 0.03f));
 
@@ -1410,7 +1417,7 @@ void test_distance_point_slider_cone() {
     f32 widest = 0.0f;
     for (int i = 0; i < 180; ++i) {
         cone.add_force_at(arm, {60, 0, 0}, cone.position(arm) + Vec3f{0, -0.4f, 0});
-        cone.step(dt);
+        (void)cone.step(dt);
         const Vec3f along = cone.rotation(arm).rotate({0, -1, 0});
         widest = std::max(widest, std::acos(std::clamp(along.y * -1.0f * -1.0f, -1.0f, 1.0f)) * 180.0f / 3.14159f);
     }
@@ -1469,7 +1476,7 @@ void test_fixed_and_breakable() {
     const Constraint3D weak = hang.create_constraint(h);
     std::vector<ConstraintEvent3D> broke;
     for (int i = 0; i < 120; ++i) {
-        hang.step(dt);
+        (void)hang.step(dt);
         for (const ConstraintEvent3D& e : hang.drain_constraint_events()) {
             broke.push_back(e);
         }
@@ -1519,7 +1526,7 @@ void test_constraints_save_restore_hash() {
     const u64 at_save = world.state_hash();
     std::vector<u64> first;
     for (int i = 0; i < 90; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         first.push_back(world.state_hash());
     }
     // The weak joint broke somewhere in there.
@@ -1535,7 +1542,7 @@ void test_constraints_save_restore_hash() {
     }
     std::vector<u64> second;
     for (int i = 0; i < 90; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         second.push_back(world.state_hash());
     }
     CHECK(first == second);
@@ -1554,7 +1561,7 @@ void test_constraints_save_restore_hash() {
     make(threaded);
     std::vector<u64> third;
     for (int i = 0; i < 90; ++i) {
-        threaded.step(dt);
+        (void)threaded.step(dt);
         third.push_back(threaded.state_hash());
     }
     CHECK(third == first);
@@ -1567,7 +1574,7 @@ void test_events_sleep_and_wake() {
     const Body3D box = world.create_body({.shape = Shape3D::box({0.5f, 0.5f, 0.5f}), .position = {0, 0.55f, 0}});
     EventLog log;
     for (int i = 0; i < 200; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         log.take(world);
     }
     CHECK(!world.is_active(box));
@@ -1575,14 +1582,14 @@ void test_events_sleep_and_wake() {
     // Woken in place: still touching, so neither an End nor a second Begin.
     world.activate(box);
     for (int i = 0; i < 60; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         log.take(world);
     }
     CHECK(log.count(floor, box, ContactKind3D::Begin) == 1 && log.count(floor, box, ContactKind3D::End) == 0);
     // Thrown up: an End once it leaves, a Begin again when it lands, and the End does not repeat.
     world.add_impulse(box, {0, 5000.0f, 0}); // 1000 kg: 5 m/s up
     for (int i = 0; i < 240; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         log.take(world);
     }
     CHECK(log.count(floor, box, ContactKind3D::End) == 1);
@@ -1597,7 +1604,7 @@ void test_events_sleep_and_wake() {
     second.take(stack);
     const Body3D top = stack.create_body({.shape = Shape3D::box({0.3f, 0.3f, 0.3f}), .position = {0, 3, 0}});
     for (int i = 0; i < 180; ++i) {
-        stack.step(dt);
+        (void)stack.step(dt);
         second.take(stack);
     }
     CHECK(second.count(ground, low, ContactKind3D::End) == 0);
@@ -1660,7 +1667,7 @@ void test_body_helpers() {
     const Quatf target_rot = Quatf::axis_angle({0, 1, 0}, 30.0f);
     free_world.follow_transform(kin_body, {1, 0, 0}, target_rot, dt);
     free_world.follow_transform(dyn_body, {1, 3, 0}, target_rot, dt);
-    free_world.step(dt);
+    (void)free_world.step(dt);
     CHECK(near(free_world.position(kin_body), {1, 0, 0}, 1e-3f));
     CHECK(near(free_world.position(dyn_body), {1, 3, 0}, 2e-3f));
     const Quatf q = free_world.rotation(dyn_body);
@@ -1866,7 +1873,7 @@ void test_live_body_settings() {
             bool bounced = false;
             for (int i = 0; i < 240; ++i) {
                 const f32 before = world.linear_velocity(ball).y;
-                world.step(dt);
+                (void)world.step(dt);
                 const f32 after = world.linear_velocity(ball).y;
                 bounced = bounced || (before < -1.0f && after > 0.0f);
                 if (bounced) {
@@ -1929,7 +1936,7 @@ void test_live_body_settings() {
         // Not in the hash (the body's setup, as its shape is): an awake body's damping changes nothing the hash reads until a
         // step has used it.
         const Body3D moving = world.create_body({.shape = box, .position = {20, 3, 0}, .linear_velocity = {1, 0, 0}});
-        world.step(dt);
+        (void)world.step(dt);
         const u64 before = world.state_hash();
         CHECK(world.set_linear_damping(moving, 5.0f) && world.state_hash() == before);
     }
@@ -1966,7 +1973,7 @@ void test_activation_events() {
     world.drain_activation_events();
     bool woke = false;
     for (int i = 0; i < 120 && !woke; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         for (const ActivationEvent3D& e : world.drain_activation_events()) {
             woke = woke || (e.body == b && e.active);
         }
@@ -1986,7 +1993,7 @@ void test_activation_events() {
         build_pile(w, 120);
         std::vector<std::pair<u32, bool>> out;
         for (int i = 0; i < 400; ++i) {
-            w.step(dt);
+            (void)w.step(dt);
             for (const ActivationEvent3D& e : w.drain_activation_events()) {
                 out.push_back({e.body.index, e.active});
             }
@@ -2026,6 +2033,24 @@ void test_changed_static_wakes() {
         run(world, 60);
         return world.position(crate).y < 2.5f;
     };
+    {
+        auto config=serial();config.gravity={};World3D world(config);
+        const auto support=world.create_body({.shape=Shape3D::box({2,.25f,2}),.position={1.75f,0,0}});
+        const auto crate=world.create_body({.shape=Shape3D::box({.5f,.5f,.5f}),.position={0,.75f,0}});
+        (void)world.step(dt);world.deactivate(support);world.deactivate(crate);
+        CHECK(!world.is_active(crate));
+        CHECK(world.set_shape(support,Shape3D::box({.5f,.25f,2})));
+        CHECK(world.is_active(crate)); // shrinking a sleeping dynamic support wakes its load
+    }
+    {
+        auto config=serial();config.gravity={};World3D world(config);
+        const auto unit=Shape3D::box({1,1,1});
+        const std::array<ShapeChild3D,2> walls{{{unit,{-10,0,0},{}},{unit,{10,0,0},{}}}};
+        const auto level=world.create_body({.shape=Shape3D::compound(walls),.motion=Body3DMotion::Static});
+        const auto free=world.create_body({.shape=Shape3D::sphere(.25f)});
+        world.deactivate(free);world.set_sensor(level,true);
+        CHECK(!world.is_active(free)); // inside the level AABB, touching no geometry
+    }
     const Quatf upright = Quatf::axis_angle({0, 0, 1}, 90.0f); // the slab on its side: x in [1.5, 2], under nothing
     {
         World3D world(serial());
@@ -2104,7 +2129,7 @@ void test_changed_static_wakes() {
         const u64 before = world.state_hash();
         const Body3D far = world.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static, .position = {30, 1, 0}});
         world.set_position(far, {40, 1, 0});
-        world.destroy_body(far);
+        (void)world.destroy_body(far);
         run(world, 1);
         CHECK(!world.is_active(crate));
         CHECK(world.state_hash() == before);
@@ -2124,7 +2149,7 @@ void test_restore_motion_and_added_mass() {
         std::vector<u64> out;
         for (int i = 0; i < frames; ++i) {
             world.add_force(other, {400.0f, 0.0f, 0.0f});
-            world.step(dt);
+            (void)world.step(dt);
             out.push_back(world.state_hash());
         }
         return out;

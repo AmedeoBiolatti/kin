@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     # ci/** branches run CI on push, so workflow changes can be tried before a PR.
-    branches: [main, 'ci/**']
+    branches: [main, 'ci/**', 'exp/3d-*']
   pull_request:
   workflow_dispatch:
 
@@ -71,7 +71,7 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-deps.sh
+        run: .github/scripts/install-linux-deps.sh glslc
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
@@ -80,9 +80,13 @@ jobs:
           CXX: ${{ matrix.cxx }}
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_EXPERIMENTAL_3D=ON
 
+      - name: Install glslc (Windows)
+        if: runner.os == 'Windows'
+        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-shaderc && /ucrt64/bin/glslc --version"
+
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKIN_EXPERIMENTAL_3D=ON
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKIN_EXPERIMENTAL_3D=ON -DKIN_GLSLC=C:/msys64/ucrt64/bin/glslc.exe
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
@@ -186,15 +190,19 @@ jobs:
   # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
   # virtual X display, and requires them to run.
   gpu:
-    name: Linux GPU (lavapipe, ${{ matrix.build_type }})
+    name: ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - build_type: Release
-            tests: '^kin-(renderer|render3d|script-scene3d(-gpu)?|model-profile3d(-gpu)?|particle-shadows3d|scene-pipeline3d|scene-session3d|scene3d-assets|particle-assets3d)$'
-          - build_type: Debug
-            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|physics3d-ecs|physics3d-ragdoll)$'
+          - name: Linux GPU (lavapipe)
+            build_type: Release
+            examples: 'ON'
+            tests: '.'
+          - name: Linux GPU (lavapipe, Debug)
+            build_type: Debug
+            examples: 'OFF'
+            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton)$'
     runs-on: ubuntu-24.04
     env:
       SDL_VIDEO_DRIVER: x11
@@ -211,14 +219,14 @@ jobs:
         env:
           CC: gcc-13
           CXX: g++-13
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF
 
       - name: Build
         run: cmake --build build --parallel 4
 
       - name: Test
-        # Include session/frame and authored-asset GPU paths: their CPU phases
-        # cannot exercise draw interpolation, view settings or GPU rebinding.
+        # Release runs every suite with a GPU and the examples enabled, so
+        # new GPU workflows cannot silently fall outside a hand-maintained list.
         # Renderer and particle-shadow suites set longer TIMEOUT properties
         # in tests/CMakeLists.txt, which take precedence over this default.
         run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' --output-on-failure --timeout 300

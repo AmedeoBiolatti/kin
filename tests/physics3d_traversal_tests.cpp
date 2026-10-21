@@ -84,7 +84,7 @@ struct Rig {
             world.set_character_input(hero, input);
             world.set_traversal_input(hero, tin);
             level.drive(world, frame, dt);
-            world.step(dt);
+            (void)world.step(dt);
             for (const CharacterEvent3D& e : world.drain_character_events()) {
                 events.push_back(e);
             }
@@ -621,7 +621,7 @@ void test_sprint_spends_resource() {
     std::vector<f32> speeds;
     int exhausted_at = -1;
     for (int i = 0; i < 100; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
         speeds.push_back(world.character(c).ground_speed);
         if (exhausted_at < 0 && world.traversal(c).resource.exhausted) {
             exhausted_at = i;
@@ -641,18 +641,18 @@ void test_sprint_spends_resource() {
     in.move = {};
     world.set_character_input(c, in);
     for (int i = 0; i < 15; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.traversal(c).resource.value, 0.0, 1e-3); // inside the delay (a second since the last spend)
     for (int i = 0; i < 100; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK(!world.traversal(c).resource.exhausted && world.traversal(c).resource.value > 10.0f);
     in.sprint = true;
     in.move = {0.0f, 1.0f};
     world.set_character_input(c, in);
     for (int i = 0; i < 30; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.character(c).ground_speed, 7.0, 0.1);
     // A character with traversal off sprints for ever, as it always did.
@@ -661,7 +661,7 @@ void test_sprint_spends_resource() {
     const Character3D p = world.create_character(plain);
     world.set_character_input(p, in);
     for (int i = 0; i < 300; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.character(p).ground_speed, 7.0, 0.1);
     CHECK(!world.traversal(p).enabled);
@@ -823,7 +823,7 @@ void test_mantle_blocked_and_clear() {
     // Take the roof away: the same press now works.
     r.tin.pull_up = false;
     r.step(2);
-    r.world.destroy_body(r.level.low_roof);
+    (void)r.world.destroy_body(r.level.low_roof);
     r.tin.pull_up = true;
     r.step(2);
     CHECK(r.count(CharacterEventKind3D::MantleStarted) == 1);
@@ -999,7 +999,7 @@ void test_crate_load() {
     CHECK(t.mode != TraversalMode3D::Walking);
     // A heavy crate (pinned: static pedestal) is just a hold: a 10 t crate does not move.
     Rig h(serial(), climber(), {40.0f, 0.0f, 1.7f});
-    h.world.destroy_body(h.level.crate);
+    (void)h.world.destroy_body(h.level.crate);
     const Body3D heavy = h.world.create_body({.shape = Shape3D::box({0.4f, 0.4f, 0.4f}), .position = {40.0f, 2.4f, 0.9f},
                                               .mass = 10000.0f, .friction = 0.5f, .user_id = 999});
     h.tin.grab = {true, true};
@@ -1059,7 +1059,7 @@ void test_lost_body_and_handles() {
     r.tin.reach = {0.0f, 0.8f, -0.6f};
     r.step(25);
     CHECK(r.trav().held >= 1);
-    r.world.destroy_body(r.level.crate);
+    (void)r.world.destroy_body(r.level.crate);
     r.step(3);
     CHECK(r.trav().held == 0 && r.trav().mode == TraversalMode3D::Walking);
     CHECK(r.count(CharacterEventKind3D::Fell) == 1);
@@ -1120,7 +1120,7 @@ void test_lost_body_and_handles() {
     world.clear_hold(b);
     CHECK(!world.is_hold(b));
     // A slot reused by another body has the default material.
-    world.destroy_body(b);
+    (void)world.destroy_body(b);
     const Body3D b2 = world.create_body({.shape = Shape3D::box({1, 1, 1}), .motion = Body3DMotion::Static});
     CHECK(world.surface_material(b2).grippable && world.surface_material(b2).tag == 0);
 }
@@ -1147,7 +1147,7 @@ void test_authored_hold_snaps() {
     in.reach = {0.0f, 0.8f, -0.6f};
     world.set_traversal_input(c, in);
     for (int i = 0; i < 40; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const TraversalState3D t = world.traversal(c);
     CHECK(t.grips[1].phase == GripPhase3D::Held);
@@ -1158,7 +1158,7 @@ void test_authored_hold_snaps() {
     // A fixed grip does not shimmy.
     world.set_character_input(c, {.move = {1.0f, 0.0f}, .forward = {0, 0, -1}});
     for (int i = 0; i < 30; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     CHECK_NEAR(world.traversal(c).grips[1].point.x, 0.0, 1e-4);
     // Both hands for the one point: the second is not taken (a hand is never put within 0.2 m of the other's anchor), and the
@@ -1166,7 +1166,7 @@ void test_authored_hold_snaps() {
     in.grab = {true, true};
     world.set_traversal_input(c, in);
     for (int i = 0; i < 40; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const TraversalState3D both = world.traversal(c);
     CHECK(both.held == 1);
@@ -1177,7 +1177,7 @@ void test_authored_hold_snaps() {
     other.anchor = {0.0f, 0.0f, 0.0f};
     CHECK(world.set_hold(second, other));
     for (int i = 0; i < 40; ++i) {
-        world.step(dt);
+        (void)world.step(dt);
     }
     const TraversalState3D two = world.traversal(c);
     CHECK(two.held == 2);
@@ -1248,7 +1248,7 @@ void test_walking_is_unchanged() {
             in.jump = i % 70 == 10;
             in.crouch = i > 250 && i < 300;
             world.set_character_input(c, in);
-            world.step(dt);
+            (void)world.step(dt);
             feet.push_back(world.character(c).position);
             speed.push_back(world.character(c).ground_speed);
         }
@@ -1269,8 +1269,8 @@ void test_walking_is_unchanged() {
     w1.create_character(d1);
     w2.create_character(d2);
     for (int i = 0; i < 10; ++i) {
-        w1.step(dt);
-        w2.step(dt);
+        (void)w1.step(dt);
+        (void)w2.step(dt);
     }
     CHECK(w1.state_hash() == w2.state_hash());
 }
@@ -1297,7 +1297,7 @@ void test_redirected_gravity() {
             for (int i = 0; i < n; ++i) {
                 world.set_character_input(c, in);
                 world.set_traversal_input(c, tin);
-                world.step(dt);
+                (void)world.step(dt);
                 ++frames;
             }
         };
@@ -1401,7 +1401,7 @@ struct Scene {
     void step() {
         command();
         level.drive(world, frame, dt);
-        world.step(dt);
+        (void)world.step(dt);
         ++frame;
     }
 };
@@ -1646,7 +1646,7 @@ struct RouteRun {
         world.set_character_input(hero, applied.input);
         world.set_traversal_input(hero, applied.traversal);
         level.drive(world, frame, dt);
-        world.step(dt);
+        (void)world.step(dt);
         for (const CharacterEvent3D& e : world.drain_character_events()) {
             events.push_back(e);
         }

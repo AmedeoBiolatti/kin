@@ -129,7 +129,7 @@ void interactions(Renderer2D& renderer) {
           "unmapped obstruction did not block");
     InteractionQuery3D proximity{{.reach = 2.5f, .candidate_sensors = true, .require_sight = false}};
     check(bool(proximity.revalidate(queries, observer, locked, describe)), "optional sight policy ignored");
-    session.physics()->destroy_body(wall);
+    (void)session.physics()->destroy_body(wall);
     auto camera = observer;
     camera.view = Vec3f{0, 3, 0};
     check(bool(interaction.revalidate(queries, camera, locked, describe)), "unobstructed view rejected");
@@ -138,7 +138,7 @@ void interactions(Renderer2D& renderer) {
     check(!interaction.revalidate(queries, camera, locked, describe) &&
               bool(interaction.revalidate(queries, observer, locked, describe)),
           "second sight line did not independently block");
-    session.physics()->destroy_body(wall);
+    (void)session.physics()->destroy_body(wall);
     // Moving the observer close to B must not silently switch an action from A.
     auto closer = observer;
     closer.origin = {0, 1, .5f};

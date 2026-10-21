@@ -86,7 +86,7 @@ int main() {
     CHECK(terrain.valid());
     CHECK(physics.raycast({15.5f, 55, 0.5f}, {15.5f, 49, 0.5f}).has_value());
     CHECK(world.set({15, 50, 0}, Block::Air));
-    physics.destroy_body(terrain);
+    (void)physics.destroy_body(terrain);
     terrain = body(build_chunk(world, {0, 0}));
     CHECK(terrain.valid());
     CHECK(!physics.raycast({15.5f, 55, 0.5f}, {15.5f, 49, 0.5f}).has_value());

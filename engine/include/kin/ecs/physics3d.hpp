@@ -590,6 +590,7 @@ private:
     bool ropes_stand();
     void reconcile_bodies();
     bool has_refused(Made what) const;
+    bool changed_refusal(Made what) const;
 
     flecs::world _ecs;
     World3D& _physics;

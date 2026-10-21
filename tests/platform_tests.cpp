@@ -254,6 +254,11 @@ void test_mouse_motion_reaches_one_step() {
 }
 
 int main() {
+    // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
+    // resets hints between them, so retain the headless driver in the process
+    // environment even when GPU CI exports X11 for the separate 3D tests.
+    const auto driver_set = SDL_setenv_unsafe("SDL_VIDEO_DRIVER", "dummy", 1);
+    assert(driver_set == 0);
     test_logging();
     test_frame_time_snapper();
     // Its own App, before the one below: each App inits and quits SDL.
@@ -419,11 +424,16 @@ int main() {
     assert(!app.input().frame_pressed("copy"));                             // cleared next frame
     assert(!app.input().mouse_frame_pressed(kin::MouseButton::Left));        // cleared next frame
 
+    int completed_renders = 0;
     app.run_for(2, [&app](kin::f32 dt, kin::i32 frame) {
         assert(dt > 0.0f);
         assert(frame >= 0);
         assert(app.frame_stats().update_steps == 1);
+    }, [&](kin::f32 alpha) {
+        assert(alpha == 1 && app.frame_stats().alpha == 1);
+        ++completed_renders;
     });
+    assert(completed_renders == 2);
 
     return 0;
 }

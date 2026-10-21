@@ -200,25 +200,28 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
     using namespace lua_scene3d_detail;
     const auto api = std::make_shared<LuaScene3DBindings>(std::move(bindings));
     lua.new_usertype<LuaAction3D>("KinAction3D", sol::no_constructor);
-    lua.new_usertype<SceneEntity3D>("KinSceneEntity3D", sol::no_constructor, "id",
-                                    sol::property([](SceneEntity3D h) { return h.entity.id; }), "alive",
-                                    [api](SceneEntity3D h) { return bool(resolve(*api, h)); });
-    lua.new_usertype<ScenePrefab3D>("KinScenePrefab3D", sol::no_constructor, "root",
-                                    sol::property([](const ScenePrefab3D& p) { return p.root; }));
+    lua.new_usertype<SceneEntity3D>(
+        "KinSceneEntity3D", sol::no_constructor, "id",
+        sol::property([](sol::this_state self) { return property_self<SceneEntity3D>(self).entity.id; }), "alive",
+        sol::protect([api](SceneEntity3D h) { return bool(resolve(*api, h)); }));
+    lua.new_usertype<ScenePrefab3D>(
+        "KinScenePrefab3D", sol::no_constructor, "root",
+        sol::property([](sol::this_state self) { return property_self<ScenePrefab3D>(self).root; }));
     lua.new_usertype<ScenePreparedPrefab3D>("KinScenePreparedPrefab3D", sol::no_constructor);
     lua.new_usertype<ScenePrefabPool3D>("KinScenePrefabPool3D", sol::no_constructor);
     lua.new_usertype<SceneRequest3D>(
         "KinSceneRequest3D", sol::no_constructor, "status",
-        sol::property([](const SceneRequest3D& r) { return status(r.status()); }), "error",
-        sol::property(&SceneRequest3D::error), "prefab", sol::property(&SceneRequest3D::prefab), "prepared",
-        sol::property([](const SceneRequest3D& r) -> sol::optional<ScenePreparedPrefab3D> {
-            const auto h = r.prepared();
+        sol::property([](sol::this_state self) { return status(property_self<SceneRequest3D>(self).status()); }),
+        "error", sol::property([](sol::this_state self) { return property_self<SceneRequest3D>(self).error(); }),
+        "prefab", sol::property([](sol::this_state self) { return property_self<SceneRequest3D>(self).prefab(); }),
+        "prepared", sol::property([](sol::this_state self) -> sol::optional<ScenePreparedPrefab3D> {
+            const auto h = property_self<SceneRequest3D>(self).prepared();
             if (h)
                 return h;
             return sol::nullopt;
         }),
-        "pool", sol::property([](const SceneRequest3D& r) -> sol::optional<ScenePrefabPool3D> {
-            const auto h = r.pool();
+        "pool", sol::property([](sol::this_state self) -> sol::optional<ScenePrefabPool3D> {
+            const auto h = property_self<SceneRequest3D>(self).pool();
             if (h)
                 return h;
             return sol::nullopt;

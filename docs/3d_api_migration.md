@@ -61,6 +61,14 @@ movement controller. Radius erosion remains conservative at whole-triangle
 resolution and now propagates only from nearby boundaries. Recompile consumers of
 `NavMeshBuildOptions3D`/`NavTriangle3D`; their layout now includes step metadata.
 
+Native `World3D` result predicates/mutations and `StepReport3D` now warn when
+ignored. `rope_points(handle, output_vector)` provides reusable readback storage.
+Physics hashes include temporary mass even when zero; regenerate stored expected
+hashes with this build. Summit checks replay hashes and exact simulation step
+counts against a bare run from the same toolchain; cross-toolchain checks retain
+gameplay outcomes and duration bounds. `IRendererBackend3D::pick` returns a result, preserving
+readback errors instead of converting them into successful misses.
+
 ## Gameplay and content changes
 
 - `World3DConfig::contact_events` defaults to `false`. Enable it explicitly for
