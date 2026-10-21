@@ -69,7 +69,7 @@ InstanceBatch3D make_batch(Lcg& rng, u32 count, u32 per, u32 gap) {
         copies[i] = random_instance(rng, i + 1);
     for (u32 first = 0; first + per <= count; first += per + gap)
         groups.push_back({first, per});
-    return InstanceBatch3D(test_mesh(), std::move(copies), std::move(groups));
+    return InstanceBatch3D::create(test_mesh(), std::move(copies), std::move(groups)).value_or({});
 }
 
 void test_bounds_follow_edits() {
@@ -119,7 +119,7 @@ void test_bounds_follow_edits() {
     std::vector<MeshInstance3D> line(10);
     for (u32 i = 0; i < 10; ++i)
         line[i] = {Mat4f::translation({static_cast<f32>(i), 0.0f, 0.0f}), colors::white, i + 1};
-    InstanceBatch3D row(test_mesh(), line, {{0, 10}});
+    auto row = InstanceBatch3D::create(test_mesh(), line, {{0, 10}}).value_or({});
     const Bounds3D before = row.groups()[0].world_bounds;
     const MeshInstance3D inside{Mat4f::translation({4.5f, 0.0f, 0.0f}), colors::white, 5};
     row.update(4, {&inside, 1});

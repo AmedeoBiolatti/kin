@@ -124,10 +124,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -149,10 +147,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -174,10 +170,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -199,10 +193,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -224,10 +216,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -249,10 +239,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -274,10 +262,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -299,10 +285,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -324,10 +308,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -349,10 +331,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -374,10 +354,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    },
    {
     "position": [
@@ -399,10 +377,8 @@
     "size": 0.15,
     "inner": 14.0,
     "outer": 28.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 512
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 512
    }
   ]
  },

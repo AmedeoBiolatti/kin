@@ -29,7 +29,10 @@ void submissions() {
     assert(scene.diagnostics().size() == 1 && scene.draws().size() == 1 && scene.draw_revision() == revision);
     assert(!scene.draw_skinned(model, {}, {}, colors::white, 0, wrong));
     assert(scene.joint_matrices().empty());
+    const auto refused = scene.draw(model, {}, colors::white, 0, wrong);
+    const auto saved = refused.diagnostics;
     scene.clear();
+    assert(!refused && !saved.empty() && refused.diagnostics == saved);
     const Mat4f pose[2]{};
     assert(!scene.draw_skinned(mesh(3), pose, {}));
     assert(scene.joint_matrices().empty() && scene.draws().empty());
@@ -43,13 +46,16 @@ void submissions() {
     assert(scene.update_joint_matrices(0, pose) && scene.diagnostics().empty());
     scene.clear();
     const auto empty_revision = scene.draw_revision();
-    assert(scene.add_instances(mesh(), std::numeric_limits<std::size_t>::max()).empty());
+    assert(scene.add_instances(mesh(), std::numeric_limits<std::size_t>::max()).value_or({}).empty());
     assert(scene.draw_revision() == empty_revision && scene.instances().empty() && !scene.diagnostics().empty());
     scene.clear();
-    InstanceBatch3D invalid{mesh(), std::vector<MeshInstance3D>(1), {{1, 1}}};
-    assert(!invalid && !invalid.diagnostics().empty());
-    assert(!scene.draw_instanced(invalid) && scene.draws().empty());
-    InstanceBatch3D batch{mesh(), std::vector<MeshInstance3D>(1)};
+    auto invalid_result = InstanceBatch3D::create(mesh(), std::vector<MeshInstance3D>(1), {{1, 1}});
+    assert(!invalid_result && !invalid_result.diagnostics.empty());
+    InstanceBatch3D invalid;
+    assert(!invalid);
+    // A rejected factory produces no malformed batch; a default batch is an empty draw.
+    assert(scene.draw_instanced(invalid) && scene.draws().empty());
+    auto batch = InstanceBatch3D::create(mesh(), std::vector<MeshInstance3D>(1)).value_or({});
     const auto batch_revision = batch.revision();
     MeshInstance3D record;
     assert(!batch.update(1, {&record, 1}));
@@ -58,8 +64,8 @@ void submissions() {
     InstanceBatch3D empty;
     assert(!empty.update(0, {}) && !empty && !empty.diagnostics().empty());
     const MeshInstance3D copies[1]{};
-    ModelBatch3D bad{model, copies, {.cell_size = -1}};
-    assert(!bad && bad.parts().empty() && !bad.diagnostics().empty());
+    auto bad = ModelBatch3D::create(model, copies, {.cell_size = -1});
+    assert(!bad && !bad.value && !bad.diagnostics.empty());
 }
 
 void resources() {
@@ -79,36 +85,52 @@ void resources() {
     } cleanup{root};
     std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", root / "parts.glb");
     Assets3D assets{renderer, root};
-    assert(!assets.load_model("missing.glb") &&
-           diagnostics3d_text(assets.diagnostics()).find("missing.glb") != std::string::npos);
+    ModelFile3D watcher{renderer, root / "missing.glb"};
+    assert(!watcher.model() && watcher.diagnostics().empty()); // construction does no I/O
+    const auto first_poll = watcher.poll();
+    assert(!first_poll && !first_poll.value && !first_poll.diagnostics.empty());
+    const auto missing_model = assets.load_model("missing.glb");
+    assert(!missing_model && !missing_model.value &&
+           diagnostics3d_text(missing_model.diagnostics).find("missing.glb") != std::string::npos);
+    const auto saved_failure = missing_model.diagnostics;
     PhysicsAssets3D collisions{root};
-    assert(!collisions.load_collider("missing.kincollider") && !collisions.diagnostics().empty());
+    assert(!collisions.load_collider("missing.kincollider").value_or({}) && !collisions.diagnostics().empty());
     const auto collision_error = collisions.diagnostics();
     collisions.stats();
     collisions.trim();
     assert(collisions.diagnostics() == collision_error);
     std::ofstream(root / "box.kincollider") << R"({"schema":"kin.collider3d/1","shape":{"kind":"box"}})";
-    auto collision = collisions.load_collider("box.kincollider");
+    auto collision = collisions.load_collider("box.kincollider").value_or({});
     assert(collision && collisions.diagnostics().empty());
-    assert(!collisions.load_collider("missing.kincollider"));
-    assert(collisions.load_collider("box.kincollider") && collisions.diagnostics().empty()); // cache hit resets too
-    auto valid = assets.load_model("parts.glb");
+    assert(!collisions.load_collider("missing.kincollider").value_or({}));
+    assert(collisions.load_collider("box.kincollider").value_or({}) &&
+           collisions.diagnostics().empty()); // cache hit resets too
+    auto valid = assets.load_model("parts.glb").value_or({});
     assert(valid && assets.diagnostics().empty());
-    assert(!assets.load_texture("missing.png") && !assets.diagnostics().empty());
+    assert(missing_model.diagnostics == saved_failure); // result owns its failure
+    const auto missing_mesh = renderer.create_mesh(MeshData3D{});
+    assert(!missing_mesh && !missing_mesh.value && !missing_mesh.diagnostics.empty());
+    View3D invalid_view;
+    const auto resized_missing_view = renderer.resize(invalid_view, {32, 32});
+    assert(!resized_missing_view && !resized_missing_view.diagnostics.empty());
+    assert(result3d(false).ok() && !*result3d(false)); // false payload is success
+    assert(result3d(std::vector<int>{}).ok());         // empty payload is success
+    assert(!assets.load_texture("missing.png").value_or({}) && !assets.diagnostics().empty());
     std::ofstream(root / "corrupt.png") << "not an image";
-    assert(!assets.load_texture("corrupt.png", false, true) &&
+    assert(!assets.load_texture("corrupt.png", false, true).value_or({}) &&
            diagnostics3d_text(assets.diagnostics()).find("corrupt.png") != std::string::npos);
-    assert(assets.load_model("parts.glb") && assets.diagnostics().empty()); // cache hit resets errors too
-    assert(!assets.load_material_shader("missing.spv") && !assets.diagnostics().empty());
-    assert(!assets.load_materials("missing.kinmaterials", valid.shared()) && !assets.diagnostics().empty());
-    assert(!renderer.create_mesh(MeshData3D{}) && !renderer.diagnostics().empty());
+    assert(assets.load_model("parts.glb").value_or({}) && assets.diagnostics().empty()); // cache hit resets errors too
+    assert(!assets.load_material_shader("missing.spv").value_or({}) && !assets.diagnostics().empty());
+    assert(!assets.load_materials("missing.kinmaterials", valid.shared()).value_or({}) &&
+           !assets.diagnostics().empty());
+    assert(!renderer.create_mesh(MeshData3D{}).value_or({}) && !renderer.diagnostics().empty());
     const auto error = renderer.diagnostics();
     renderer.capabilities();
     renderer.stats();
     assert(renderer.diagnostics() == error); // observation does not clear failures
     View3D absent;
     assert(!renderer.render(absent, {}) && !renderer.diagnostics().empty());
-    auto view = renderer.create_view({32, 32});
+    auto view = renderer.create_view({32, 32}).value_or({});
     assert(view && renderer.diagnostics().empty());
     Scene3D invalid;
     Material3D wrong[1];
@@ -118,9 +140,9 @@ void resources() {
     invalid.clear();
     invalid.overlay().draw(model, {}, colors::white, 0, wrong);
     assert(!renderer.render(view, invalid) && renderer.diagnostics() == invalid.overlay().diagnostics());
-    assert(!renderer.load_environment(root / "missing.hdr") && !renderer.diagnostics().empty());
-    assert(!renderer.compile_material_shader(root / "missing.frag") && !renderer.diagnostics().empty());
-    assert(!renderer.load_model(root / "missing.glb") &&
+    assert(!renderer.load_environment(root / "missing.hdr").value_or({}) && !renderer.diagnostics().empty());
+    assert(!renderer.compile_material_shader(root / "missing.frag").value_or({}) && !renderer.diagnostics().empty());
+    assert(!renderer.load_model(root / "missing.glb").value_or({}) &&
            diagnostics3d_text(renderer.diagnostics()).find("missing.glb") != std::string::npos);
     std::ofstream(root / "bad.kinscene")
         << R"({"entities":[{"id":"bad","components":{"Transform3D":{},"ModelRenderer3D":{"asset":"missing.glb"}}}]})";

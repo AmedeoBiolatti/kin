@@ -58,6 +58,15 @@ layout(location = 9) flat out vec3 vCentre;
 layout(location = 7) out vec3 vLocalLight;
 #endif
 
+#ifdef KIN_PARTICLE_TEMPORAL
+struct PreviousQuad { vec4 corners[4]; };
+layout(std430, set = 0, binding = 1) readonly buffer PreviousParticles { PreviousQuad quads[]; };
+layout(set = 1, binding = 3) uniform Temporal { mat4 current; mat4 prior; } temporal;
+layout(location = 10) out vec3 vCurrent;
+layout(location = 11) out vec3 vPrevious;
+layout(location = 12) flat out float vFresh;
+#endif
+
 const vec2 CORNERS[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0), vec2(-1.0, 1.0));
 const int CORNER_OF[6] = int[6](0, 1, 2, 0, 2, 3);
 
@@ -109,6 +118,12 @@ void main() {
                 (draw.right.xyz * -sn + draw.up.xyz * cs) * (c.y * half_size);
     }
     gl_Position = draw.view_projection * vec4(world, 1.0);
+#ifdef KIN_PARTICLE_TEMPORAL
+    const vec4 previous = quads[draw.first.x + uint(gl_InstanceIndex)].corners[CORNER_OF[gl_VertexIndex]];
+    vCurrent = (temporal.current * vec4(world, 1.0)).xyw;
+    vPrevious = (temporal.prior * vec4(previous.xyz, 1.0)).xyw;
+    vFresh = previous.w;
+#endif
 #ifdef KIN_PARTICLE_SHADOWS
     vWorld = world;
     vCentre = centre;

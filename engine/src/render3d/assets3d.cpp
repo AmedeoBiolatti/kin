@@ -26,9 +26,12 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
         why = "cannot read " + path.string();
         return {};
     }
-    ModelData3D data;
-    if (!read_model_data(*bytes, path, data, &why))
+    auto parsed = read_model_data(*bytes, path);
+    if (!parsed) {
+        why = diagnostics3d_text(parsed.diagnostics);
         return {};
+    }
+    ModelData3D data = std::move(*parsed);
     if (!data.asset_diagnostics.empty()) {
         why = diagnostics3d_text(data.asset_diagnostics);
         return {};
@@ -167,15 +170,25 @@ Assets3D::Stats Assets3D::stats() const {
     return s;
 }
 
-AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path) {
-    return load_model(path, MeshOptions3D{});
+Result3D<AssetHandle<Model3D>> Assets3D::load_model(const std::filesystem::path& path) {
+    auto value = load_model_operation(path);
+    return result3d(std::move(value), _data->errors);
+}
+
+AssetHandle<Model3D> Assets3D::load_model_operation(const std::filesystem::path& path) {
+    return load_model_operation(path, MeshOptions3D{});
 }
 
 const Diagnostics3D& Assets3D::diagnostics() const {
     return _data->errors;
 }
 
-AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options) {
+Result3D<AssetHandle<Model3D>> Assets3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options) {
+    auto value = load_model_operation(path, options);
+    return result3d(std::move(value), _data->errors);
+}
+
+AssetHandle<Model3D> Assets3D::load_model_operation(const std::filesystem::path& path, const MeshOptions3D& options) {
     _data->errors.clear();
     std::string why;
     auto result = load_model_impl(path, options, &why);
@@ -183,7 +196,12 @@ AssetHandle<Model3D> Assets3D::load_model(const std::filesystem::path& path, con
         fail3d(_data->errors, "Assets3D::load_model(" + path.string() + ")", why.empty() ? "model load failed" : why);
     return result;
 }
-Texture Assets3D::load_texture(const std::filesystem::path& path, bool nearest, bool srgb) {
+Result3D<Texture> Assets3D::load_texture(const std::filesystem::path& path, bool nearest, bool srgb) {
+    auto value = load_texture_operation(path, nearest, srgb);
+    return result3d(std::move(value), _data->errors);
+}
+
+Texture Assets3D::load_texture_operation(const std::filesystem::path& path, bool nearest, bool srgb) {
     _data->errors.clear();
     std::string why;
     auto result = load_texture_impl(path, nearest, srgb, &why);
@@ -192,7 +210,12 @@ Texture Assets3D::load_texture(const std::filesystem::path& path, bool nearest, 
                why.empty() ? "texture load failed" : why);
     return result;
 }
-MaterialShader3D Assets3D::load_material_shader(const std::filesystem::path& path) {
+Result3D<MaterialShader3D> Assets3D::load_material_shader(const std::filesystem::path& path) {
+    auto value = load_material_shader_operation(path);
+    return result3d(std::move(value), _data->errors);
+}
+
+MaterialShader3D Assets3D::load_material_shader_operation(const std::filesystem::path& path) {
     _data->errors.clear();
     std::string why;
     auto result = load_material_shader_impl(path, &why);
@@ -201,9 +224,16 @@ MaterialShader3D Assets3D::load_material_shader(const std::filesystem::path& pat
                why.empty() ? "shader load failed" : why);
     return result;
 }
-AssetHandle<MaterialBinding3D> Assets3D::load_materials(const std::filesystem::path& path,
-                                                        const std::shared_ptr<const Model3D>& model,
-                                                        std::string_view variant) {
+Result3D<AssetHandle<MaterialBinding3D>> Assets3D::load_materials(const std::filesystem::path& path,
+                                                                  const std::shared_ptr<const Model3D>& model,
+                                                                  std::string_view variant) {
+    auto value = load_materials_operation(path, model, variant);
+    return result3d(std::move(value), _data->errors);
+}
+
+AssetHandle<MaterialBinding3D> Assets3D::load_materials_operation(const std::filesystem::path& path,
+                                                                  const std::shared_ptr<const Model3D>& model,
+                                                                  std::string_view variant) {
     _data->errors.clear();
     std::string why;
     auto result = load_materials_impl(path, model, variant, &why);
@@ -336,6 +366,7 @@ MaterialShader3D Assets3D::load_material_shader_impl(const std::filesystem::path
     }
     auto shader = d.renderer->available()
                       ? d.renderer->create_material_shader({reinterpret_cast<const u8*>(bytes->data()), bytes->size()})
+                            .value_or({})
                       : MaterialShader3D{std::make_shared<CpuMaterialShader>()};
     if (!shader) {
         if (error)
@@ -379,7 +410,7 @@ AssetHandle<MaterialBinding3D> Assets3D::load_materials_impl(const std::filesyst
             return {};
         }
         auto storage = std::make_shared<AssetStorage<MaterialBinding3D>>();
-        storage->data = build_materials3d_binding(*loaded.asset, model, variant, *this);
+        storage->data = build_materials3d_binding(*loaded.value, model, variant, *this);
         storage->is_loaded = true;
         if (d.limits.materials) {
             while (d.materials.size() >= d.limits.materials)

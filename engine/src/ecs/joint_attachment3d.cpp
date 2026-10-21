@@ -118,8 +118,11 @@ void WorldRenderState3D::prepare_joint_attachments() {
             return;
         }
         const auto* presentation = target.get<RenderTransform3D>();
-        const auto placement = (presentation && presentation->enabled ? presentation->matrix : world->matrix) * *joint *
-                               attachment._offset * local->matrix();
+        const auto root_placement = presentation && presentation->enabled ? presentation->matrix
+                                    : _presentation && *_presentation
+                                        ? (*_presentation)(target.raw()).value_or(world->matrix)
+                                        : world->matrix;
+        const auto placement = root_placement * *joint * attachment._offset * local->matrix();
         if (!finite_matrix(placement)) {
             attachment._status = Status::InvalidTransform;
             return;
@@ -151,6 +154,8 @@ std::optional<Mat4f> WorldRenderState3D::draw_placement(flecs::entity entity, co
             return finite_matrix(result) ? std::optional<Mat4f>{result} : std::nullopt;
         }
     }
-    return presentation && presentation->enabled ? presentation->matrix : world.matrix;
+    if (presentation && presentation->enabled)
+        return presentation->matrix;
+    return _presentation && *_presentation ? (*_presentation)(entity).value_or(world.matrix) : world.matrix;
 }
 } // namespace kin

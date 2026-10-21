@@ -97,7 +97,7 @@ Vec3f world_scale(EcsEntity entity) {
     return scale;
 }
 } // namespace
-std::vector<std::string> resolve_physics3d_assets(EcsWorld& world, PhysicsAssets3D& assets,
+std::vector<std::string> resolve_physics3d_assets_impl(EcsWorld& world, PhysicsAssets3D& assets,
                                                   std::span<const EcsId> selected) {
     std::vector<std::string> errors;
     std::vector<EcsEntity> colliders, characters;
@@ -127,7 +127,7 @@ std::vector<std::string> resolve_physics3d_assets(EcsWorld& world, PhysicsAssets
                     "collider asset needs a Transform3D and cannot share a capsule controller entity");
             const auto scale = world_scale(entity) * collider.scale;
             std::string error;
-            auto cooked = assets.load_collider(collider.asset.id, scale).shared();
+            auto cooked = assets.load_collider(collider.asset.id, scale).value_or({}).shared();
             error = kin::diagnostics3d_text(assets.diagnostics());
             if (!cooked)
                 throw std::runtime_error(error);
@@ -170,5 +170,11 @@ std::vector<std::string> resolve_physics3d_assets(EcsWorld& world, PhysicsAssets
             errors.push_back("entity '" + entity.name() + "', CharacterController3D: " + error.what());
         }
     return errors;
+}
+Status3D resolve_physics3d_assets(EcsWorld& world, PhysicsAssets3D& assets,
+                                                  std::span<const EcsId> selected) {
+    auto errors = resolve_physics3d_assets_impl(world, assets, selected);
+    const bool accepted = errors.empty();
+    return status3d(accepted, std::move(errors));
 }
 } // namespace kin

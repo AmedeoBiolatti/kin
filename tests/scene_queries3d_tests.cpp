@@ -11,7 +11,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* why) {
+void check(const auto& value, const char* why) {
     if (!value)
         throw std::runtime_error(why);
 }
@@ -108,14 +108,14 @@ void queries(Renderer2D& renderer) {
           "query body rebuild failed");
     check(target.entity.resolve(*session.world()) && !query.resolve(target),
           "old native hit resolved after body rebuild");
-    auto prepared = session.preload("box.kinprefab");
-    auto pool = session.create_pool(prepared, {.capacity = 1});
+    auto prepared = session.preload("box.kinprefab").value_or({});
+    auto pool = session.create_pool(prepared, {.capacity = 1}).value_or({});
     check(bool(pool), "query pool creation failed");
-    auto lease = session.spawn(pool, {.position = Vec3f{0, 3, 0}});
+    auto lease = session.spawn(pool, {.position = Vec3f{0, 3, 0}}).value_or({});
     check(bool(lease), "query pool acquisition failed");
     const auto pooled = query.raycast({-1, 3, 0}, {1, 3, 0});
     check(pooled && pooled->entity == lease.root && session.despawn(lease), "query pool hit/release failed");
-    auto renewed = session.spawn(pool, {.position = Vec3f{0, 3, 0}});
+    auto renewed = session.spawn(pool, {.position = Vec3f{0, 3, 0}}).value_or({});
     check(renewed.root.entity == lease.root.entity && renewed.root != lease.root && !query.resolve(*pooled),
           "pooled hit aliasing a renewed lease");
     const auto fresh = query.raycast({-1, 3, 0}, {1, 3, 0});

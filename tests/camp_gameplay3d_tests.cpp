@@ -7,7 +7,7 @@
 namespace {
 using namespace kin;
 namespace camp=camp_walk;
-void check(bool value,const char* why){if(!value)throw std::runtime_error(why);}
+void check(const auto& value,const char* why){if(!value)throw std::runtime_error(why);}
 SceneSession3DOptions options() {
     SceneSession3DOptions options;options.viewport={160,120};options.view.samples=1;options.warm_up=false;
     options.physics=World3DConfig{.max_bodies=128,.max_body_pairs=512,.max_contact_constraints=512,.temp_memory_bytes=2u*1024u*1024u,.single_threaded=true,.max_events=256};

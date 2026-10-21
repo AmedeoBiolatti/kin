@@ -85,15 +85,15 @@ std::uint32_t hash(int x, int y) {
 
 void ArenaPainter3D::init(Renderer2D& renderer) {
     _r3d = std::make_unique<Renderer3D>(renderer);
-    _tile = _r3d->create_mesh(meshes::box({tile - 0.08f, 0.1f, tile - 0.08f}));
-    _wall = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
-    _ship = _r3d->create_mesh(make_ship());
-    _star = _r3d->create_mesh(meshes::star_prism(5, 0.26f, 0.12f, 0.14f));
-    _plate = _r3d->create_mesh(make_plate());
-    _ring = _r3d->create_mesh(meshes::torus(0.2f, 0.06f, 20, 8));
-    _shot = _r3d->create_mesh(meshes::sphere(0.07f, 10, 6));
-    _core = _r3d->create_mesh(meshes::octahedron(0.16f));
-    _spark = _r3d->create_mesh(meshes::box({0.06f, 0.06f, 0.06f}));
+    _tile = _r3d->create_mesh(meshes::box({tile - 0.08f, 0.1f, tile - 0.08f})).value_or({});
+    _wall = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+    _ship = _r3d->create_mesh(make_ship()).value_or({});
+    _star = _r3d->create_mesh(meshes::star_prism(5, 0.26f, 0.12f, 0.14f)).value_or({});
+    _plate = _r3d->create_mesh(make_plate()).value_or({});
+    _ring = _r3d->create_mesh(meshes::torus(0.2f, 0.06f, 20, 8)).value_or({});
+    _shot = _r3d->create_mesh(meshes::sphere(0.07f, 10, 6)).value_or({});
+    _core = _r3d->create_mesh(meshes::octahedron(0.16f)).value_or({});
+    _spark = _r3d->create_mesh(meshes::box({0.06f, 0.06f, 0.06f})).value_or({});
 
     // The deck: tiles with seams between them, a shade each from a hash; walls round it.
     for (int z = 0; z < static_cast<int>(arena_d / tile); ++z) {
@@ -173,15 +173,18 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
         friendly += s.hostile ? 0 : 1;
     }
     auto ours =
-        _scene.add_instances(_shot, friendly, {.color = Color::rgb(150, 245, 255), .emissive = 1.5f, .unlit = true});
+        _scene.add_instances(_shot, friendly, {.color = Color::rgb(150, 245, 255), .emissive = 1.5f, .unlit = true})
+            .value_or({});
     std::size_t i = 0;
     for (const Shot& s : arena.shots) {
         if (!s.hostile) {
             ours[i++] = {Mat4f::translation(ground(s.pos, fly_height)), kin::colors::white};
         }
     }
-    auto theirs = _scene.add_instances(_shot, arena.shots.size() - friendly,
-                                       {.color = Color::rgb(255, 110, 190), .emissive = 1.5f, .unlit = true});
+    auto theirs = _scene
+                      .add_instances(_shot, arena.shots.size() - friendly,
+                                     {.color = Color::rgb(255, 110, 190), .emissive = 1.5f, .unlit = true})
+                      .value_or({});
     i = 0;
     for (const Shot& s : arena.shots) {
         if (s.hostile) {
@@ -191,15 +194,18 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
     }
     // Cores to pick up, spinning; sparks and impacts as glowing bits.
     auto cores =
-        _scene.add_instances(_core, arena.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 0.8f});
+        _scene.add_instances(_core, arena.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 0.8f})
+            .value_or({});
     for (std::size_t k = 0; k < arena.pickups.size(); ++k) {
         const Pickup& p = arena.pickups[k];
         cores[k] = {Mat4f::translation(ground(p.pos, 0.35f + 0.08f * std::sin(t * 3.0f + static_cast<float>(k)))) *
                         Mat4f::rotation_y(t * 90.0f + static_cast<float>(k) * 40.0f),
                     kin::colors::white};
     }
-    auto sparks = _scene.add_instances(_spark, arena.sparks.size(),
-                                       {.color = Color::rgb(255, 200, 120), .emissive = 1.2f, .unlit = true});
+    auto sparks = _scene
+                      .add_instances(_spark, arena.sparks.size(),
+                                     {.color = Color::rgb(255, 200, 120), .emissive = 1.2f, .unlit = true})
+                      .value_or({});
     for (std::size_t k = 0; k < arena.sparks.size(); ++k) {
         const Spark& s = arena.sparks[k];
         const float size = std::clamp(s.life * 3.0f, 0.2f, 1.0f);
@@ -207,8 +213,10 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
                      kin::colors::white};
     }
     const auto& impacts = arena.impacts();
-    auto flashes = _scene.add_instances(_shot, impacts.size(),
-                                        {.color = Color::rgb(255, 230, 200), .emissive = 2.0f, .unlit = true});
+    auto flashes =
+        _scene
+            .add_instances(_shot, impacts.size(), {.color = Color::rgb(255, 230, 200), .emissive = 2.0f, .unlit = true})
+            .value_or({});
     for (std::size_t k = 0; k < impacts.size(); ++k) {
         const float grow = 1.0f + (0.3f - impacts[k].life) * 12.0f;
         flashes[k] = {Mat4f::translation(ground(impacts[k].pos, fly_height)) * Mat4f::scaling({grow, grow, grow}),
@@ -225,7 +233,7 @@ void ArenaPainter3D::draw(Renderer2D& renderer, const Arena& arena, Rectf playfi
     const Vec2i pixels{std::max(1, static_cast<int>(std::lround(playfield.w * fit))),
                        std::max(1, static_cast<int>(std::lround(playfield.h * fit)))};
     if (!_view.valid()) {
-        _view = _r3d->create_view(pixels, {.samples = 4, .background = Color::rgb(12, 20, 28)});
+        _view = _r3d->create_view(pixels, {.samples = 4, .background = Color::rgb(12, 20, 28)}).value_or({});
     } else if (_view.size() != pixels) {
         _r3d->resize(_view, pixels);
     }

@@ -1105,7 +1105,7 @@ public:
                                  model.source_files.end());
         GltfReader reader{_data, _path.string(), &_issues};
         ModelData3D read = reader.read([&](ModelPartData3D&& part, const cgltf_material* material) {
-            Mesh3D mesh = _r3d.create_mesh(part.mesh, _options);
+            Mesh3D mesh = _r3d.create_mesh(part.mesh, _options).value_or({});
             if (!mesh.valid()) {
                 _issues.push_back("model mesh could not be uploaded: " + part.name);
                 return;
@@ -1313,8 +1313,8 @@ private:
 
 } // namespace
 
-bool read_model_geometry3d(const std::filesystem::path& path, ModelGeometry3D& out, ModelGeometryLimits3D limits,
-                           std::string* error) {
+static bool read_model_geometry3d_impl(const std::filesystem::path& path, ModelGeometry3D& out,
+                                       ModelGeometryLimits3D limits, std::string* error) {
     const auto check = [](bool ok, const char* why) {
         if (!ok)
             throw std::runtime_error(why);
@@ -1451,8 +1451,16 @@ bool read_model_geometry3d(const std::filesystem::path& path, ModelGeometry3D& o
         return false;
     }
 }
+Result3D<ModelGeometry3D> read_model_geometry3d(const std::filesystem::path& path, ModelGeometryLimits3D limits) {
+    ModelGeometry3D value;
+    std::string why;
+    if (!read_model_geometry3d_impl(path, value, limits, &why))
+        return {std::nullopt, {"read_model_geometry3d: " + why}};
+    return result3d(std::move(value));
+}
 
-bool read_model_data(std::string_view bytes, const std::filesystem::path& path, ModelData3D& out, std::string* error) {
+static bool read_model_data_impl(std::string_view bytes, const std::filesystem::path& path, ModelData3D& out,
+                                 std::string* error) {
     std::string why;
     const auto owned = parse_gltf(bytes, path, why);
     if (!owned) {
@@ -1467,6 +1475,13 @@ bool read_model_data(std::string_view bytes, const std::filesystem::path& path, 
     if (error)
         error->clear();
     return true;
+}
+Result3D<ModelData3D> read_model_data(std::string_view bytes, const std::filesystem::path& path) {
+    ModelData3D value;
+    std::string why;
+    if (!read_model_data_impl(bytes, path, value, &why))
+        return {std::nullopt, {"read_model_data: " + why}};
+    return result3d(std::move(value));
 }
 
 const AnimClip3D* Model3D::find_clip(std::string_view name, u32 skeleton) const {
@@ -1489,11 +1504,21 @@ Mat4f Model3D::part_transform(std::size_t part, std::span<const Mat4f> node_matr
     return node_matrices[static_cast<std::size_t>(p.node)] * p.node_offset;
 }
 
-Model3D Renderer3D::load_model(const std::filesystem::path& path) {
-    return load_model(path, MeshOptions3D{});
+Result3D<Model3D> Renderer3D::load_model(const std::filesystem::path& path) {
+    auto value = load_model_operation(path);
+    return result3d(std::move(value), _errors);
 }
 
-Model3D Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options) {
+Model3D Renderer3D::load_model_operation(const std::filesystem::path& path) {
+    return load_model_operation(path, MeshOptions3D{});
+}
+
+Result3D<Model3D> Renderer3D::load_model(const std::filesystem::path& path, const MeshOptions3D& options) {
+    auto value = load_model_operation(path, options);
+    return result3d(std::move(value), _errors);
+}
+
+Model3D Renderer3D::load_model_operation(const std::filesystem::path& path, const MeshOptions3D& options) {
     _errors.clear();
     std::string why;
     auto result = load_model_shared(path, options, &why, nullptr);
@@ -1535,14 +1560,25 @@ Model3D Renderer3D::load_model_shared(const std::filesystem::path& path, const M
     return model;
 }
 
-bool Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id) {
+Status3D Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id) {
+    const bool accepted = draw_operation(model, transform, tint, id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id) {
     if (!_errors.empty())
         return false;
-    draw(model, transform, tint, id, {});
+    draw_operation(model, transform, tint, id, {});
     return _errors.empty();
 }
-bool Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
-                   std::span<const Material3D> materials) {
+Status3D Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
+                       std::span<const Material3D> materials) {
+    const bool accepted = draw_operation(model, transform, tint, id, materials);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
+                             std::span<const Material3D> materials) {
     if (!_errors.empty())
         return false;
     if (!materials.empty() && materials.size() != model.parts.size())
@@ -1552,20 +1588,19 @@ bool Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32
         return fail_submission("model submission exceeds the draw index range");
     for (size_t i = 0; i < model.parts.size(); ++i) {
         const auto& part = model.parts[i];
-        draw(part.mesh, transform * part.transform, materials.empty() ? part.material : materials[i], tint, id);
+        draw_operation(part.mesh, transform * part.transform, materials.empty() ? part.material : materials[i], tint,
+                       id);
     }
     return _errors.empty();
 }
 
 ModelFile3D::ModelFile3D(Renderer3D& renderer, std::filesystem::path path, const MeshOptions3D& options)
-    : _renderer(&renderer), _path(std::move(path)), _options(options) {
-    load();
-}
+    : _renderer(&renderer), _path(std::move(path)), _options(options) {}
 
 bool ModelFile3D::load() {
     std::error_code ec;
     _time = std::filesystem::last_write_time(_path, ec);
-    Model3D model = _renderer->load_model(_path, _options);
+    Model3D model = _renderer->load_model(_path, _options).value_or({});
     if (!model.valid()) {
         _errors = _renderer->diagnostics();
         return false;
@@ -1575,18 +1610,26 @@ bool ModelFile3D::load() {
     return true;
 }
 
-bool ModelFile3D::poll() {
+Result3D<bool> ModelFile3D::poll() {
     std::error_code ec;
     const auto time = std::filesystem::last_write_time(_path, ec);
     if (ec) {
         // Packed content is immutable and has no filesystem modification time.
-        if (content_file_exists(_path))
-            return false;
-        return fail3d(_errors, "ModelFile3D::poll(" + _path.string() + ")", ec.message());
+        if (content_file_exists(_path)) {
+            if (_model.valid())
+                return result3d(false);
+            if (!load())
+                return {std::nullopt, _errors};
+            return result3d(true);
+        }
+        fail3d(_errors, "ModelFile3D::poll(" + _path.string() + ")", ec.message());
+        return {std::nullopt, _errors};
     }
-    if (time == _time)
-        return false; // no new load attempted; keep the last load's diagnostic
-    return load();
+    if (time == _time && _model.valid())
+        return result3d(false); // no new load attempted; keep the last load's diagnostic
+    if (!load())
+        return {std::nullopt, _errors};
+    return result3d(true);
 }
 
 } // namespace kin

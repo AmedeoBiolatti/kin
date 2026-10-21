@@ -222,13 +222,13 @@ public:
                 _materials.values[0].emissive =
                     0; // Terrain reflects light; the benchmark's emissive stripes are its own stress case.
             }
-            _target_box = _renderer->create_mesh(meshes::box({1, 1, 1}));
+            _target_box = _renderer->create_mesh(meshes::box({1, 1, 1})).value_or({});
         }
         if (!_options.benchmark)
             controls(ctx);
         const auto size = ctx.renderer.output_size();
         if (!_view.valid())
-            _view = _renderer->create_view(size, {.samples = _features.samples, .hdr = _features.hdr});
+            _view = _renderer->create_view(size, {.samples = _features.samples, .hdr = _features.hdr}).value_or({});
         else if (size != _size)
             _renderer->resize(_view, size);
         _size = size;
@@ -483,7 +483,7 @@ private:
                 if (_mesh_bytes - previous + bytes <= _options.mesh_budget) {
                     Resident& chunk = _chunks[result.key];
                     if (!chunk.mesh.valid() || _dirty.contains(result.key)) {
-                        chunk.mesh = _renderer->create_mesh(result.mesh);
+                        chunk.mesh = _renderer->create_mesh(result.mesh).value_or({});
                         if (!chunk.mesh.valid())
                             throw std::runtime_error("chunk mesh upload failed");
                         chunk.bytes = bytes;

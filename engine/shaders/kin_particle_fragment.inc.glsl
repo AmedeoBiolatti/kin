@@ -1,3 +1,9 @@
+#ifdef KIN_REACTIVE
+#include "kin_velocity.inc.glsl"
+layout(location = 10) in vec3 vCurrent;
+layout(location = 11) in vec3 vPrevious;
+layout(location = 12) flat in float vFresh;
+#endif
 // kin's 3D particle fragment shader (P3c), shared by particle.frag and particle_soft.frag (which defines KIN_SOFT first): the soft one also reads the view's depth
 // (the pre-pass's, one sample a pixel) and fades the particle where it is near the surface behind it.
 //
@@ -57,7 +63,8 @@ void main() {
 #endif
     const float k = vColour.a * shape * fade;
 #ifdef KIN_PARTICLE_SHADOWS
-    vec3 colour = tex.rgb * vColour.rgb * particle_shadow_tint();
+    const vec3 shadow_tint = particle_shadow_tint();
+    vec3 colour = tex.rgb * vColour.rgb * shadow_tint;
 #elif defined(KIN_PARTICLE_LIGHTS)
     vec3 colour = tex.rgb * vColour.rgb * (frag.tint.rgb + vLocalLight);
 #else
@@ -99,6 +106,14 @@ void main() {
     // corners must not erase another sprite's rejection mark.
     if (all(equal(FragColor, vec4(0.0))))
         discard;
-    FragColor = vec4(2.0, 0.0, 0.0, 0.0);
+    float coverage = vFresh > .5 ? 3.0 : 2.0;
+    float signature = 0.0;
+#ifdef KIN_PARTICLE_SHADOWS
+    if (vFresh < .5)
+        coverage += frag.tint.w > .5 ? .25 : .125;
+    const float energy = dot(shadow_tint, vec3(.2126, .7152, .0722));
+    signature = energy / (1.0 + energy);
+#endif
+    FragColor = vec4(coverage, signature, kin_velocity(vCurrent, vPrevious, vFresh));
 #endif
 }

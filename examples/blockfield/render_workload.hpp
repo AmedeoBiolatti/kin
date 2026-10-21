@@ -52,7 +52,7 @@ inline Environment3D make_environment(Renderer3D& renderer) {
             rgb[at + 1] = 0.5f * (1 - t) + 0.04f * t + bright;
             rgb[at + 2] = 0.8f * (1 - t) + 0.03f * t + bright;
         }
-    auto environment = renderer.create_environment({width, height}, rgb);
+    auto environment = renderer.create_environment({width, height}, rgb).value_or({});
     if (!environment)
         throw std::runtime_error("image-based environment creation failed");
     return environment;
@@ -142,8 +142,8 @@ inline void configure(Scene3D& scene, const Features& f, f32 time, f32 extent) {
                                  .color = colours[i % 4],
                                  .radius = extent * 2,
                                  .size = 1};
-        light.shadow.enabled = f.local_shadows && f.point_shadows && i == 0;
-        light.shadow.near_plane = f.shadow_near;
+        light.shadow_enabled = f.local_shadows && f.point_shadows && i == 0;
+        light.shadow_near_plane = f.shadow_near;
         light.id = i + 1;
         scene.lights.points.push_back(light);
     }
@@ -157,8 +157,8 @@ inline void configure(Scene3D& scene, const Features& f, f32 time, f32 extent) {
                                 .size = 1,
                                 .inner_angle = 30,
                                 .outer_angle = 45};
-        light.shadow.enabled = f.local_shadows && i < 2;
-        light.shadow.near_plane = f.shadow_near;
+        light.shadow_enabled = f.local_shadows && i < 2;
+        light.shadow_near_plane = f.shadow_near;
         light.id = i + 1;
         scene.lights.spots.push_back(light);
     }

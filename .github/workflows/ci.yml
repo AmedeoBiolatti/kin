@@ -209,6 +209,8 @@ jobs:
         run: cmake --build build --parallel 4
 
       - name: Test
+        # Include session/frame and authored-asset GPU paths: their CPU phases
+        # cannot exercise draw interpolation, view settings or GPU rebinding.
         # Renderer and particle-shadow suites set longer TIMEOUT properties
         # in tests/CMakeLists.txt, which take precedence over this default.
-        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-(renderer|render3d|script-scene3d(-gpu)?|model-profile3d(-gpu)?|particle-shadows3d)$' --output-on-failure --timeout 300
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-(renderer|render3d|script-scene3d(-gpu)?|model-profile3d(-gpu)?|particle-shadows3d|scene-pipeline3d|scene-session3d|scene3d-assets|particle-assets3d)$' --output-on-failure --timeout 300

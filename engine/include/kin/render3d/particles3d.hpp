@@ -134,6 +134,7 @@ struct ParticleSprite3D {
     f32 alpha = 1.0f;
     Vec3f velocity{}; // world units per second (Stretched only)
     f32 frame = 0.0f; // flipbook frame, fractional between two
+    u64 id = 0;       // stable within a submitted emitter; 0 matches by submission index for TAA
 };
 
 // ---- A simulated particle system ----

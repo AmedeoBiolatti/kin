@@ -2,6 +2,7 @@
 
 #include <array>
 #include <kin/core/math3d.hpp>
+#include <kin/render3d/errors3d.hpp>
 #include <kin/scene/scene_entity3d.hpp>
 #include <memory>
 #include <optional>
@@ -31,7 +32,7 @@ class JointAttachment3D {
 public:
     JointAttachment3D() = default;
     JointAttachment3D(SceneEntity3D target, std::string_view joint, Mat4f offset = {});
-    bool configure(SceneEntity3D target, std::string_view joint, Mat4f offset = {});
+    Status3D configure(SceneEntity3D target, std::string_view joint, Mat4f offset = {});
     SceneEntity3D target() const { return _target; }
     std::string_view joint() const { return {_joint.data(), _joint_length}; }
     const Mat4f& offset() const { return _offset; }

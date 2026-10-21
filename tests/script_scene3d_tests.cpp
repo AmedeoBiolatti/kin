@@ -20,7 +20,7 @@ using namespace kin;
 struct Stats {
     i32 ticks = 0;
 };
-void check(bool value, const char* message) {
+void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
 }
@@ -69,9 +69,25 @@ end
 function on_enter(ctx)
     assert(ctx.dt == 0 and scene3d.physics_available())
     local hit = scene3d.raycast({x=0,y=0,z=4}, {x=0,y=0,z=-4})
+    assert(scene3d.handle(world:authored("crate")).id == scene3d.entity("crate").id)
+    assert(scene3d.resolve(scene3d.entity("crate")):id() == world:authored("crate"):id())
+    assert(not pcall(scene3d.handle, 17))
     assert(hit and hit.entity.id == scene3d.entity("crate").id and hit.normal.z > 0.9)
     assert(scene3d.raycast({x=0,y=0,z=4}, {x=0,y=0,z=-4}, {ignore=hit.entity}) == nil)
     assert(scene3d.impulse(hit.entity, {x=1,y=0,z=0}))
+    -- Each wrong-typed option/argument is a Lua error, never a native dereference.
+    for _, bad in ipairs({17, true, "wrong", {}}) do
+        assert(not pcall(scene3d.spawn, "prop.kinprefab", {parent=bad}))
+        assert(not pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {ignore=bad}))
+        assert(not pcall(scene3d.impulse, bad, {x=1,y=0,z=0}))
+    end
+    assert(not pcall(scene3d.character_input, hit.entity, {move=17}))
+    assert(not pcall(scene3d.character_input, hit.entity, {forward=true}))
+    assert(not pcall(scene3d.spawn, "prop.kinprefab", {rotation=17}))
+    assert(not pcall(scene3d.shape, {kind="box", half_extents=17}))
+    assert(not pcall(scene3d.shape, {kind="sphere", radius="wide"}))
+    assert(not pcall(scene3d.traversal_input, hit.entity, {grab=17}))
+    assert(not pcall(scene3d.start_ragdoll, hit.entity, {velocity=true}))
 end
 function update(ctx)
     ticks = ticks + 1
@@ -91,6 +107,7 @@ function update(ctx)
     elseif ticks == 3 then
         assert(removed.status == "succeeded" and not saved_root:alive())
         assert(not scene3d.impulse(saved_root, {x=1,y=0,z=0}))
+        assert(scene3d.resolve(saved_root) == nil)
         local ok = pcall(scene3d.raycast, {x=0/0,y=0,z=4}, {x=0,y=0,z=-4})
         assert(not ok)
     end
@@ -112,7 +129,7 @@ std::string report(SceneSession3D& session) {
     json.end_object();
     return out.str();
 }
-void ok(SceneSession3D& session, bool result, const char* message) {
+void ok(SceneSession3D& session, const auto& result, const char* message) {
     if (!result)
         for (const auto& error : session.diagnostics())
             std::cerr << error << '\n';
@@ -166,6 +183,28 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     ok(session, session.step(.1f), "script first step failed");
     app.input().begin_frame();
     check(std::fabs(session.physics()->position(body).x - .3f) < .001f, "input/impulse or exactly-once physics failed");
+    const auto transform = session.entity("crate").get<Transform3D>()->position;
+    const auto hash_before_collect = session.physics()->state_hash();
+    const auto pose0 = session.bodies()->render_transform(session.entity("crate").raw(), 0);
+    const auto pose1 = session.bodies()->render_transform(session.entity("crate").raw(), 1);
+    check(pose0 && pose1 && std::abs(pose0->m[12]) < .001f && std::abs(pose1->m[12] - .3f) < .001f,
+          "fixed-step render snapshots missing");
+    ok(session, session.collect(.5f), "interpolated collection failed");
+    check(session.entity("crate").get<Transform3D>()->position == transform &&
+              session.physics()->state_hash() == hash_before_collect,
+          "render interpolation changed gameplay");
+    if (gpu) {
+        ok(session, session.collect(0), "previous-pose collection failed");
+        const auto previous = std::vector(session.scene()->instances().begin(), session.scene()->instances().end());
+        ok(session, session.collect(.5f), "interpolated GPU collection failed");
+        bool found_lerp = false;
+        const auto current = session.scene()->instances();
+        check(previous.size() == current.size(), "interpolation changed draw count");
+        for (size_t i = 0; i < current.size(); ++i)
+            if (std::abs(current[i].transform.m[12] - previous[i].transform.m[12] - .15f) < .001f)
+                found_lerp = true;
+        check(found_lerp, "session collect did not use interpolation alpha");
+    }
     check(session.runtime_prefabs() == 1 && session.physics()->body_count() == 2,
           "Lua prefab did not bind before physics");
     if (gpu) {
@@ -197,7 +236,8 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     // Syntax, initialization and enter failures preserve the live world/VM.
     const auto hash = session.physics()->state_hash();
     write(source.path / "logic.lua", "not valid lua");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed, "bad Lua reload accepted");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
+          "bad Lua reload accepted");
     check(session.world() == initial && session.generation() == generation && session.physics()->state_hash() == hash,
           "failed Lua reload modified the active world");
     ok(session, session.step(.1f), "last good Lua VM did not survive reload failure");

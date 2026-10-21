@@ -9,7 +9,7 @@
 
 namespace {
 using namespace kin;
-void check(bool condition,const char* why) {if(!condition)throw std::runtime_error(why);}
+void check(const auto& condition,const char* why) {if(!condition)throw std::runtime_error(why);}
 Skeleton3D skeleton() {Skeleton3D s;s.names={"root"};s.parents={-1};s.rest.resize(1);s.inverse_bind.resize(1);return s;}
 AnimClip3D clip(std::string name,float duration=1) {return {.name=std::move(name),.duration=duration};}
 AnimationMarker3D marker(float phase,std::string name) {return {phase,{.channel="game",.name=std::move(name)}};}
@@ -69,7 +69,7 @@ void ecs_assets() {
     auto actor=world.entity().set(Transform3D{}).set(SkinnedMeshRenderer3D{.model=model}).set(Animator3D{.clip="a"})
         .set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
     auto other=world.entity().set(SkinnedMeshRenderer3D{.model=model}).set(AnimatorAsset3D{.asset={"actor.kinanimator"}});
-    check(resolve_animator3d_assets(world,temp.path).empty(),"valid event asset rejected");
+    check(resolve_animator3d_assets(world,temp.path).diagnostics.empty(),"valid event asset rejected");
     check(actor.get<Animator3D>()->event_tracks==other.get<Animator3D>()->event_tracks,"marker data copied per instance");
     rendering.animate(.25f);check(actor.get<Animator3D>()->events.count==1,"ECS animation omitted markers");
     AnimationEventDispatch dispatch;int hits=0;
@@ -82,17 +82,17 @@ void ecs_assets() {
     check(actor.get<Animator3D>()->events.count==0,"paused animator retained events");
     actor.get_mut<Animator3D>()->playing=true;rendering.animate(1);
     auto current=actor.get<Animator3D>()->event_tracks;const auto time=actor.get<Animator3D>()->player.time();
-    check(resolve_animator3d_assets(world,temp.path).empty()&&actor.get<Animator3D>()->player.time()==time,"unchanged config restarted player");
+    check(resolve_animator3d_assets(world,temp.path).diagnostics.empty()&&actor.get<Animator3D>()->player.time()==time,"unchanged config restarted player");
     for(const auto* bad:{R"([{"clip":"a","markers":[{"phase":1,"channel":"game","name":"bad"}]}])",
                          R"([{"clip":"missing","markers":[]}])",R"([{"clip":"a","markers":[{"channel":"game","name":"bad"}]}])",
                          R"([{"clip":"a","markers":[{"phase":0.3,"channel":"","name":"bad"}]}])",
                          R"([{"clip":"a","markers":[],"bogus":true}])"}) {
-        write(bad);check(!resolve_animator3d_assets(world,temp.path).empty()&&actor.get<Animator3D>()->event_tracks==current,"invalid config replaced good markers");
+        write(bad);check(!resolve_animator3d_assets(world,temp.path).diagnostics.empty()&&actor.get<Animator3D>()->event_tracks==current,"invalid config replaced good markers");
     }
     std::string large="[{\"clip\":\"a\",\"markers\":[";
     for(int i=0;i<257;++i){if(i)large+=',';large+=R"({"phase":0.5,"channel":"game","name":"x"})";}large+="]}]";
-    write(large);check(!resolve_animator3d_assets(world,temp.path).empty(),"oversized markers accepted");
-    write("[]");check(resolve_animator3d_assets(world,temp.path).empty()&&!actor.get<Animator3D>()->event_tracks&&actor.get<Animator3D>()->events.count==0,"reload retained stale event references");
+    write(large);check(!resolve_animator3d_assets(world,temp.path).diagnostics.empty(),"oversized markers accepted");
+    write("[]");check(resolve_animator3d_assets(world,temp.path).diagnostics.empty()&&!actor.get<Animator3D>()->event_tracks&&actor.get<Animator3D>()->events.count==0,"reload retained stale event references");
     auto native=std::make_shared<AnimationEventTracks3D>(AnimationEventTracks3D{{"a",{marker(.25f,"hit")}}});
     std::weak_ptr<const AnimationEventTracks3D> retained=native;
     actor.get_mut<Animator3D>()->event_tracks=native;native.reset();

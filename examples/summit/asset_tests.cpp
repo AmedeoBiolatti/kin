@@ -1,3 +1,4 @@
+#include "../../tests/result3d_helpers.hpp"
 #include "../sponza_walk/character.hpp"
 #include "props.hpp"
 
@@ -24,7 +25,7 @@ ModelData3D read(const std::filesystem::path& path) {
     CHECK(bytes.has_value());
     if (bytes) {
         std::string error;
-        CHECK(read_model_data(*bytes, path, data, &error));
+        CHECK(kin::test::read_value3d(kin::read_model_data(*bytes, path), data, error));
     }
     return data;
 }

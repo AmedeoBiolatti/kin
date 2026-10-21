@@ -1,3 +1,4 @@
+#include "result3d_helpers.hpp"
 // Skeletons, clips, poses and the glTF skin reader (kin/render3d/skeleton3d.hpp, animation3d.hpp, model.hpp), without a
 // GPU: keyframe sampling against hand-computed glTF values, blends, additive clips, masks, joint matrices of a known
 // chain, root motion, the player's crossfade, bounds that no posed vertex leaves, and the loader on glTF files made in
@@ -300,7 +301,7 @@ void test_joint_matrices() {
     const auto tube = skin_fixtures::make_tube(25, 12, 3.0f);
     const Skeleton3D& sk = tube.skeleton;
     std::string why;
-    assert(sk.validate(&why));
+    assert(kin::test::valid3d(sk.validate(), why));
     // At rest every matrix is the identity: a skinned mesh draws as modelled.
     std::vector<Mat4f> m;
     compute_joint_matrices(sk, sk.rest_pose(), m);
@@ -345,13 +346,13 @@ void test_joint_matrices() {
     // Validation: a parent must come first; too many joints are refused.
     Skeleton3D bad = sk;
     bad.parents = {1, 0, 1};
-    assert(!bad.validate(&why) && !why.empty());
+    assert(!kin::test::valid3d(bad.validate(), why) && !why.empty());
     Skeleton3D big;
     big.parents.assign(257, -1);
     big.rest.resize(257);
     big.inverse_bind.resize(257);
-    assert(!big.validate(&why));
-    assert(!Skeleton3D{}.validate(&why));
+    assert(!kin::test::valid3d(big.validate(), why));
+    assert(!kin::test::valid3d(Skeleton3D{}.validate(), why));
     // depth, find, subtree
     assert(sk.find("top") == 2 && sk.find("nope") == -1 && sk.depth(2) == 2 && sk.depth(0) == 0 &&
            sk.root_joint() == 0);
@@ -676,23 +677,23 @@ void test_mesh_skin_data() {
     assert(!mesh.skinned() && mesh.skin_joint_count() == 0);
     mesh.skin.assign(mesh.vertices.size(), {});
     std::string why;
-    assert(mesh.validate(&why) && mesh.skinned() && mesh.skin_joint_count() == 1);
+    assert(kin::test::valid3d(mesh.validate(), why) && mesh.skinned() && mesh.skin_joint_count() == 1);
     mesh.skin[3].joints = {5, 0, 0, 0};
     assert(mesh.skin_joint_count() == 6);
     mesh.skin[3].joints = {5, 7, 0, 0};
     mesh.skin[3].weights = {0.5f, 0.0f, 0, 0}; // a joint with no weight does not count
     assert(mesh.skin_joint_count() == 6);
     mesh.skin.pop_back();
-    assert(!mesh.validate(&why) && why.find("skin") != std::string::npos);
+    assert(!kin::test::valid3d(mesh.validate(), why) && why.find("skin") != std::string::npos);
     mesh.skin.push_back({});
     mesh.skin[0].weights = {0, 0, 0, 0};
-    assert(!mesh.validate(&why));
+    assert(!kin::test::valid3d(mesh.validate(), why));
     mesh.skin[0].weights = {-1, 1, 0, 0};
-    assert(!mesh.validate(&why));
+    assert(!kin::test::valid3d(mesh.validate(), why));
     mesh.skin[0].weights = {std::nanf(""), 1, 0, 0};
-    assert(!mesh.validate(&why));
+    assert(!kin::test::valid3d(mesh.validate(), why));
     mesh.skin[0] = {};
-    assert(mesh.validate(&why));
+    assert(kin::test::valid3d(mesh.validate(), why));
     // append keeps the skin parallel, binding what has none to joint 0.
     MeshData3D a = meshes::box({1, 1, 1});
     MeshData3D b = meshes::box({1, 1, 1});
@@ -700,11 +701,11 @@ void test_mesh_skin_data() {
     const std::size_t av = a.vertices.size();
     a.append(b, Mat4f::translation({5, 0, 0}));
     assert(a.skin.size() == a.vertices.size() && a.skin[0].joints[0] == 0 && a.skin[av].joints[0] == 3 &&
-           a.validate(&why));
+           kin::test::valid3d(a.validate(), why));
     MeshData3D c = b;
     c.append(meshes::box({1, 1, 1}));
     assert(c.skin.size() == c.vertices.size() && c.skin.front().joints[0] == 3 && c.skin.back().joints[0] == 0 &&
-           c.validate(&why));
+           kin::test::valid3d(c.validate(), why));
     MeshData3D plain = meshes::box({1, 1, 1});
     plain.append(meshes::box({2, 2, 2}));
     assert(!plain.skinned());
@@ -732,7 +733,7 @@ void test_mesh_skin_data() {
 ModelData3D read(const skin_fixtures::Gltf& gltf) {
     ModelData3D data;
     std::string error;
-    const bool ok = read_model_data(gltf.json, "memory.gltf", data, &error);
+    const bool ok = kin::test::read_value3d(kin::read_model_data(gltf.json, "memory.gltf"), data, error);
     if (!ok) {
         std::cerr << "read_model_data: " << error << '\n' << gltf.json << '\n';
     }
@@ -885,13 +886,14 @@ void test_loader_skins_and_clips() {
         json.erase(skins, json.find("}],", skins) + 3 - skins);
         const std::size_t anims = json.find("\"animations\":");
         json.erase(anims, json.find("}],\"buffers\"", anims) + 3 - anims);
-        assert(read_model_data(json, "plain.gltf", plain, &error));
+        assert(kin::test::read_value3d(kin::read_model_data(json, "plain.gltf"), plain, error));
         assert(plain.skeletons.empty() && plain.clips.empty() && plain.parts.size() == 1 && plain.parts[0].skin == -1 &&
                !plain.parts[0].mesh.skinned());
     }
     // Not glTF at all: refused, with why.
     ModelData3D none;
-    assert(!read_model_data("this is not a model", "x.gltf", none, &error) && !error.empty());
+    assert(!kin::test::read_value3d(kin::read_model_data("this is not a model", "x.gltf"), none, error) &&
+           !error.empty());
 }
 
 // Exporters may give two skins the same joints in a different order. Both skeletons must receive every shared
@@ -939,7 +941,7 @@ void test_loader_texture_transform() {
                              skin_fixtures::base64(bytes) + "\"}]}";
     ModelData3D data;
     std::string error;
-    assert(read_model_data(json, "texture-transform.gltf", data, &error));
+    assert(kin::test::read_value3d(kin::read_model_data(json, "texture-transform.gltf"), data, error));
     assert(data.parts.size() == 1 && data.parts[0].mesh.vertices.size() == 3);
     const auto& vertices = data.parts[0].mesh.vertices;
     assert(close(vertices[0].uv.x, .25f) && close(vertices[0].uv.y, .5f));
@@ -1024,7 +1026,7 @@ void test_loader_refuses_unreadable_geometry() {
     set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
     ModelData3D data;
     std::string error;
-    const bool ok = read_model_data(json, "refusals.gltf", data, &error);
+    const bool ok = kin::test::read_value3d(kin::read_model_data(json, "refusals.gltf"), data, error);
     set_logger_config(before);
     assert(ok);
     assert(data.parts.size() == 1 && data.parts[0].name == "plain" && data.parts[0].mesh.vertices.size() == 3);
@@ -1078,7 +1080,7 @@ void test_loader_keeps_nodes_between_joints() {
                   "{\"bufferView\":5,\"componentType\":5126,\"count\":2,\"type\":\"VEC4\"}]");
     ModelData3D data;
     std::string error;
-    assert(read_model_data(json, "between.gltf", data, &error));
+    assert(kin::test::read_value3d(kin::read_model_data(json, "between.gltf"), data, error));
     assert(data.skeletons.size() == 1 && data.parts.size() == 1 && data.parts[0].skin == 0);
     const Skeleton3D& sk = data.skeletons[0];
     const i32 hips = sk.find("Hips"), offset = sk.find("SpineOffset"), spine = sk.find("Spine");
@@ -1119,8 +1121,9 @@ void test_loader_refuses_hostile_files() {
     };
     ModelData3D data;
     std::string error;
-    assert(read_model_data(nested(512), "nested.gltf", data, &error) && data.parts.size() == 1);
-    assert(!read_model_data(nested(520), "nested.gltf", data, &error) &&
+    assert(kin::test::read_value3d(kin::read_model_data(nested(512), "nested.gltf"), data, error) &&
+           data.parts.size() == 1);
+    assert(!kin::test::read_value3d(kin::read_model_data(nested(520), "nested.gltf"), data, error) &&
            error.find("nest more than 512 deep") != std::string::npos);
 
     // A model under the content root may name a buffer up a folder ("../"), but not one that ".." takes out of the
@@ -1143,7 +1146,7 @@ void test_loader_refuses_hostile_files() {
         return json;
     };
     const auto reads = [&](const std::string& uri, const std::filesystem::path& model) {
-        return read_model_data(naming(uri), model, data, &error) && data.parts.size() == 1;
+        return kin::test::read_value3d(kin::read_model_data(naming(uri), model), data, error) && data.parts.size() == 1;
     };
     char program[] = "skeleton-tests";
     std::string root_arg = "--content=" + (folder / "content").string(),
@@ -1248,7 +1251,7 @@ void bench_animation() {
     const std::string bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     ModelData3D data;
     std::string error;
-    if (!read_model_data(bytes, fox, data, &error)) {
+    if (!kin::test::read_value3d(kin::read_model_data(bytes, fox), data, error)) {
         std::cerr << "animation: " << error << "\n";
         return;
     }
@@ -1413,9 +1416,11 @@ void test_loader_node_animation() {
     set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
     ModelData3D data, plain, meshless;
     std::string error;
-    const bool read_crane = read_model_data(crane_gltf(), "crane.gltf", data, &error);
-    const bool read_plain = read_model_data(crane_gltf(false), "plain.gltf", plain, &error);
-    const bool read_meshless = read_model_data(crane_gltf(true, true), "meshless.gltf", meshless, &error);
+    const bool read_crane = kin::test::read_value3d(kin::read_model_data(crane_gltf(), "crane.gltf"), data, error);
+    const bool read_plain =
+        kin::test::read_value3d(kin::read_model_data(crane_gltf(false), "plain.gltf"), plain, error);
+    const bool read_meshless =
+        kin::test::read_value3d(kin::read_model_data(crane_gltf(true, true), "meshless.gltf"), meshless, error);
     set_logger_config(before);
     assert(read_crane && read_plain && read_meshless);
 
@@ -1516,7 +1521,7 @@ void test_loader_node_animation() {
         events.clear();
         set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
         ModelData3D deep;
-        const bool ok = read_model_data(json, "deep.gltf", deep, &error);
+        const bool ok = kin::test::read_value3d(kin::read_model_data(json, "deep.gltf"), deep, error);
         set_logger_config(before);
         assert(ok && deep.parts.size() == 1 && deep.parts[0].node == -1 && deep.skeletons.empty() &&
                deep.clips.empty());
@@ -1533,7 +1538,7 @@ void test_loader_node_animation() {
 void test_node_animation_draws() {
     ModelData3D data;
     std::string error;
-    assert(read_model_data(crane_gltf(), "crane.gltf", data, &error));
+    assert(kin::test::read_value3d(kin::read_model_data(crane_gltf(), "crane.gltf"), data, error));
     const std::shared_ptr<Model3D> crane = crane_model(data);
     const Skeleton3D& sk = crane->skeletons[static_cast<std::size_t>(crane->node_skeleton)];
     Pose3D pose;
@@ -4658,7 +4663,7 @@ void test_ik_cesium_man() {
     const std::string bytes{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     ModelData3D data;
     std::string error;
-    if (!read_model_data(bytes, path, data, &error)) {
+    if (!kin::test::read_value3d(kin::read_model_data(bytes, path), data, error)) {
         std::cerr << "ik: " << error << "" << std::endl;
         assert(false);
     }

@@ -8,15 +8,15 @@ JointAttachment3D::JointAttachment3D(SceneEntity3D target, std::string_view join
     if (!configure(target, joint, offset))
         throw std::invalid_argument("invalid joint attachment binding");
 }
-bool JointAttachment3D::configure(SceneEntity3D target, std::string_view joint, Mat4f offset) {
+Status3D JointAttachment3D::configure(SceneEntity3D target, std::string_view joint, Mat4f offset) {
     if (!target || joint.empty() || joint.size() > max_attachment_joint_name3d ||
         joint.find('\0') != std::string_view::npos)
-        return false;
+        return status3d(false, {"JointAttachment3D::configure: live target and bounded nonempty joint name required"});
     for (auto value : offset.m)
         if (!std::isfinite(value))
-            return false;
+            return status3d(false, {"JointAttachment3D::configure: offset must be finite"});
     if (offset.m[3] != 0 || offset.m[7] != 0 || offset.m[11] != 0 || offset.m[15] != 1)
-        return false;
+        return status3d(false, {"JointAttachment3D::configure: offset must be affine"});
     _target = target;
     _joint.fill(0);
     std::copy(joint.begin(), joint.end(), _joint.begin());
@@ -26,6 +26,6 @@ bool JointAttachment3D::configure(SceneEntity3D target, std::string_view joint, 
     _index = -1;
     _frame = 0;
     _status = JointAttachmentStatus3D::Unbound;
-    return true;
+    return {};
 }
 } // namespace kin

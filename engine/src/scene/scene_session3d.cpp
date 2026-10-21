@@ -386,7 +386,7 @@ bool runtime_script_field(std::string_view component, std::string_view field) {
     if (component == "Transform3D" && (field == "position" || field == "rotation"))
         return true;
     constexpr std::string_view configuration[] = {
-        "Transform3D", "ModelRenderer3D", "SkinnedMeshRenderer3D", "ModelMaterials3D",         "AnimatorAsset3D",
+        "Transform3D", "ModelRenderer3D", "SkinnedMeshRenderer",   "ModelMaterials3D",         "AnimatorAsset3D",
         "Collider3D",  "RigidBody3D",     "CharacterController3D", "CharacterAnimationLink3D", "ParticleEmitter3D"};
     return std::ranges::find(configuration, component) == std::end(configuration);
 }
@@ -839,7 +839,8 @@ struct SceneSession3D::Data {
                               return found == target->asset.instance().by_authored_id.end()
                                          ? SceneEntity3D{}
                                          : checked_scene_entity(target->world, found->second);
-                          }});
+                          },
+                      .handle = [target](EcsEntity e) { return checked_scene_entity(target->world, e); }});
             if (options.scripts.bind)
                 options.scripts.bind(lua);
         });
@@ -867,11 +868,11 @@ struct SceneSession3D::Data {
     bool bind_world(State& state, bool preserve_watches = false) {
         if (options.limits.max_entities && state.world.entities().all().size() > options.limits.max_entities)
             throw std::runtime_error("initialization exceeds scene entity limit");
-        append(errors, resolve_render3d_assets(state.world, assets, options.particle_limits));
+        append(errors, resolve_render3d_assets(state.world, assets, options.particle_limits).diagnostics);
         if (!errors.empty())
             return false;
         if (state.bodies)
-            append(errors, resolve_physics3d_assets(state.world, collision_assets));
+            append(errors, resolve_physics3d_assets(state.world, collision_assets).diagnostics);
         if (!errors.empty())
             return false;
         const auto previous = preserve_watches ? state.watches : decltype(state.watches){};
@@ -881,16 +882,16 @@ struct SceneSession3D::Data {
         if (!errors.empty())
             return false;
         verify_physics(state);
-        return errors.empty() && collect(state);
+        return errors.empty() && collect_operation(state);
     }
 
-    bool collect(State& state) {
+    bool collect_operation(State& state, f32 alpha = 1) {
         SceneFrame3D frame{state.world,
                            *state.rendering,
                            {.particles = options.particle_limits, .bodies = state.bodies.get(), .renderer = &renderer}};
         // An authored SceneEnvironment3D replaces the game's view options except `pick`, which collect keeps.
         auto view_options = options.view;
-        if (!frame.collect(state.scene, &view_options)) {
+        if (!frame.collect(state.scene, &view_options, alpha)) {
             append(errors, frame.diagnostics());
             return false;
         }
@@ -919,7 +920,7 @@ struct SceneSession3D::Data {
                 same_options(current->options, view_options))
                 replacement = current->view;
             else {
-                replacement = renderer.create_view(options.viewport, view_options);
+                replacement = renderer.create_view(options.viewport, view_options).value_or({});
                 if (!replacement) {
                     errors.push_back("scene view creation failed");
                     return false;
@@ -1005,7 +1006,12 @@ SceneSession3D::~SceneSession3D() {
     unload();
 }
 
-bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all_assets) {
+Status3D SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all_assets) {
+    auto value = prepare_operation(path, refresh_all_assets);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::prepare_operation(const std::filesystem::path& path, bool refresh_all_assets) {
     if (_data->editing || _data->in_frame)
         return configuration_error("scene preparation cannot run inside a lifecycle/configuration/frame callback");
     BoolScope busy(_data->editing);
@@ -1057,7 +1063,7 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
             append(d.errors, candidate->asset.diagnostics());
             return false;
         }
-        append(d.errors, resolve_render3d_assets(candidate->world, d.assets, d.options.particle_limits));
+        append(d.errors, resolve_render3d_assets(candidate->world, d.assets, d.options.particle_limits).diagnostics);
         if (!d.errors.empty())
             return false;
         if (d.options.physics) {
@@ -1081,7 +1087,12 @@ bool SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all
     return false;
 }
 
-bool SceneSession3D::activate() {
+Status3D SceneSession3D::activate() {
+    auto value = activate_operation();
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::activate_operation() {
     if (_data->editing || _data->in_frame)
         return configuration_error("scene activation cannot run inside a callback");
     auto& d = *_data;
@@ -1140,7 +1151,7 @@ bool SceneSession3D::activate() {
             if (_data->in_frame && runtime_script_field(component, field))
                 return std::nullopt;
             const SceneFieldEdit3D change{entity, std::string(component), std::string(field), value};
-            if (edit(std::span(&change, 1)))
+            if (edit_operation(std::span(&change, 1)))
                 return true;
             for (const auto& message : diagnostics()) {
                 if (!error.empty())
@@ -1154,24 +1165,31 @@ bool SceneSession3D::activate() {
     d.collision_assets.trim();
     return true;
 }
-bool SceneSession3D::load(const std::filesystem::path& path, bool refresh) {
-    return prepare(path, refresh) && activate();
+Status3D SceneSession3D::load(const std::filesystem::path& path, bool refresh) {
+    auto value = load_operation(path, refresh);
+    return status3d(std::move(value), _data->errors);
 }
-void SceneSession3D::cancel() {
+
+bool SceneSession3D::load_operation(const std::filesystem::path& path, bool refresh) {
+    return prepare_operation(path, refresh) && activate_operation();
+}
+Status3D SceneSession3D::cancel() {
     if (_data->editing || _data->in_frame) {
         configuration_error("scene cancellation cannot run inside a callback");
-        return;
+        return status3d(false, _data->errors);
     }
     _data->pending.reset();
     _data->assets.trim();
     _data->collision_assets.trim();
+    _data->errors.clear();
+    return {};
 }
-void SceneSession3D::unload() {
+Status3D SceneSession3D::unload() {
     if (!_data)
-        return;
+        return {};
     if (_data->editing || _data->in_frame) {
         configuration_error("scene unload cannot run inside a callback");
-        return;
+        return status3d(false, _data->errors);
     }
     auto& d = *_data;
     if (d.current || d.pending)
@@ -1184,14 +1202,20 @@ void SceneSession3D::unload() {
     d.assets.trim();
     d.collision_assets.trim();
     d.errors.clear();
+    return {};
 }
-bool SceneSession3D::reload(bool refresh) {
+Status3D SceneSession3D::reload(bool refresh) {
+    auto value = reload_operation(refresh);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::reload_operation(bool refresh) {
     if (!_data->current) {
         _data->errors = {"no active scene to reload"};
         return false;
     }
     const auto path = _data->current->asset.scene_path();
-    return load(path, refresh);
+    return load_operation(path, refresh);
 }
 std::vector<std::filesystem::path> SceneSession3D::changed_sources() const {
     std::vector<std::filesystem::path> changed;
@@ -1201,12 +1225,21 @@ std::vector<std::filesystem::path> SceneSession3D::changed_sources() const {
                 changed.push_back(file);
     return changed;
 }
-SceneSession3DReload SceneSession3D::reload_if_changed() {
-    if (changed_sources().empty())
-        return SceneSession3DReload::Unchanged;
-    return reload() ? SceneSession3DReload::Activated : SceneSession3DReload::Failed;
+Result3D<SceneSession3DReload> SceneSession3D::reload_if_changed() {
+    if (changed_sources().empty()) {
+        _data->errors.clear();
+        return result3d(SceneSession3DReload::Unchanged);
+    }
+    if (!reload_operation())
+        return {std::nullopt, _data->errors};
+    return result3d(SceneSession3DReload::Activated);
 }
-bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
+Status3D SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
+    auto value = edit_operation(edits);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
     auto& d = *_data;
     if (d.editing)
         return false;
@@ -1344,19 +1377,20 @@ bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
             }
         }
         if (models)
-            append(d.errors, resolve_render3d_assets(staging.world, d.assets, d.options.particle_limits));
+            append(d.errors, resolve_render3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
         else {
             if (materials)
-                append(d.errors, resolve_materials3d_assets(staging.world, d.assets));
+                append(d.errors, resolve_materials3d_assets(staging.world, d.assets).diagnostics);
             if (animation)
-                append(d.errors, resolve_animator3d_assets(staging.world, d.assets.root()));
+                append(d.errors, resolve_animator3d_assets(staging.world, d.assets.root()).diagnostics);
             if (particles)
-                append(d.errors, resolve_particles3d_assets(staging.world, d.assets, d.options.particle_limits));
+                append(d.errors,
+                       resolve_particles3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
         }
         // Combine staged capacities with untouched live emitters without copying
         // their particle arrays or retaining a second world-sized snapshot.
         if (particles || models) {
-            append(d.errors, validate_particles3d(staging.world, d.options.particle_limits));
+            append(d.errors, validate_particles3d(staging.world, d.options.particle_limits).diagnostics);
             u64 capacity = 0;
             size_t emitters = 0;
             active.world.raw().each([&](flecs::entity e, const ParticleEmitter3D& original) {
@@ -1371,13 +1405,13 @@ bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
                     "edited scene exceeds total particle/emitter budget");
         }
         if (physics)
-            append(d.errors, resolve_physics3d_assets(staging.world, d.collision_assets));
+            append(d.errors, resolve_physics3d_assets(staging.world, d.collision_assets).diagnostics);
         WorldRenderState3D validation(staging.world);
         validation.propagate_transforms();
         for (auto& [id, entry] : entries)
             if (entry.full) {
                 Scene3D settings;
-                append(d.errors, apply_scene3d_settings(staging.world, settings, nullptr, entry.copy));
+                append(d.errors, apply_scene3d_settings(staging.world, settings, nullptr, entry.copy).diagnostics);
                 d.gather_entity(staging.watches, entry.copy);
                 if (models)
                     for (const auto* name : {"ModelRenderer3D", "SkinnedMeshRenderer", "ModelMaterials3D", "Animator3D",
@@ -1414,7 +1448,7 @@ bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
             }
         });
         if (d.renderer.available() && !same_options(new_options, active.options)) {
-            new_view = d.renderer.create_view(d.options.viewport, new_options);
+            new_view = d.renderer.create_view(d.options.viewport, new_options).value_or({});
             require(bool(new_view), "edited scene view creation failed");
         }
         std::vector<WorldPhysicsState3D::BodyEdit> bodies;
@@ -1447,10 +1481,10 @@ bool SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
                 active.options = new_options;
             }
         };
-        std::string error;
-        if (active.bodies)
-            require(active.bodies->replace_bodies(bodies, commit, &error), error);
-        else
+        if (active.bodies) {
+            const auto replacement = active.bodies->replace_bodies(bodies, commit);
+            require(replacement.ok(), diagnostics3d_text(replacement.diagnostics));
+        } else
             commit();
         for (const auto& [id, entry] : entries)
             for (const auto& name : entry.changed) {
@@ -1567,13 +1601,18 @@ bool SceneSession3D::reconfigure_native(SceneEntity3D handle, ComponentId compon
                 if (after->fields[i].value != before->fields[i].value)
                     edits.push_back({original, descriptor->name, after->fields[i].name, after->fields[i].value});
         }
-        return edits.empty() || edit(edits);
+        return edits.empty() || edit_operation(edits);
     } catch (const std::exception& error) {
         return configuration_error("typed configuration: " + std::string(error.what()));
     }
 }
 
-ScenePrefab3D SceneSession3D::spawn(const std::filesystem::path& path, SceneSpawn3D options) {
+Result3D<ScenePrefab3D> SceneSession3D::spawn(const std::filesystem::path& path, SceneSpawn3D options) {
+    auto value = spawn_operation(path, options);
+    return result3d(std::move(value), _data->errors);
+}
+
+ScenePrefab3D SceneSession3D::spawn_operation(const std::filesystem::path& path, SceneSpawn3D options) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -1707,15 +1746,16 @@ ScenePrefab3D SceneSession3D::spawn_now(const std::filesystem::path& path, Scene
                         "spawn has invalid rigid-body settings");
             }
         }
-        append(d.errors, validate_particles3d(state.world, d.options.particle_limits));
+        append(d.errors, validate_particles3d(state.world, d.options.particle_limits).diagnostics);
         if (!d.errors.empty()) {
             rollback();
             return {};
         }
         if (!prepared) {
-            append(d.errors, resolve_render3d_assets(state.world, d.assets, d.options.particle_limits, ids));
+            append(d.errors,
+                   resolve_render3d_assets(state.world, d.assets, d.options.particle_limits, ids).diagnostics);
             if (state.bodies)
-                append(d.errors, resolve_physics3d_assets(state.world, d.collision_assets, ids));
+                append(d.errors, resolve_physics3d_assets(state.world, d.collision_assets, ids).diagnostics);
         }
         std::map<std::filesystem::path, SourceStamp> dependencies;
         if (!prepared) {
@@ -1770,7 +1810,12 @@ ScenePrefab3D SceneSession3D::spawn_now(const std::filesystem::path& path, Scene
     }
 }
 
-ScenePreparedPrefab3D SceneSession3D::preload(const std::filesystem::path& path) {
+Result3D<ScenePreparedPrefab3D> SceneSession3D::preload(const std::filesystem::path& path) {
+    auto value = preload_operation(path);
+    return result3d(std::move(value), _data->errors);
+}
+
+ScenePreparedPrefab3D SceneSession3D::preload_operation(const std::filesystem::path& path) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -1818,7 +1863,12 @@ ScenePreparedPrefab3D SceneSession3D::preload_now(const std::filesystem::path& p
         return {};
     }
 }
-ScenePrefab3D SceneSession3D::spawn(ScenePreparedPrefab3D prefab, SceneSpawn3D options) {
+Result3D<ScenePrefab3D> SceneSession3D::spawn(ScenePreparedPrefab3D prefab, SceneSpawn3D options) {
+    auto value = spawn_operation(prefab, options);
+    return result3d(std::move(value), _data->errors);
+}
+
+ScenePrefab3D SceneSession3D::spawn_operation(ScenePreparedPrefab3D prefab, SceneSpawn3D options) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -1834,7 +1884,12 @@ ScenePrefab3D SceneSession3D::spawn_prepared(ScenePreparedPrefab3D prefab, Scene
     }
     return spawn_now({}, std::move(options), &d.current->prepared.at(prefab.id).recipe, prefab.id);
 }
-bool SceneSession3D::release(ScenePreparedPrefab3D prefab) {
+Status3D SceneSession3D::release(ScenePreparedPrefab3D prefab) {
+    auto value = release_operation(prefab);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::release_operation(ScenePreparedPrefab3D prefab) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -1861,7 +1916,14 @@ bool SceneSession3D::release_now(ScenePreparedPrefab3D prefab) {
     state.prepared.erase(prefab.id);
     return true;
 }
-ScenePrefabPool3D SceneSession3D::create_pool(ScenePreparedPrefab3D prefab, ScenePrefabPoolOptions3D options) {
+Result3D<ScenePrefabPool3D> SceneSession3D::create_pool(ScenePreparedPrefab3D prefab,
+                                                        ScenePrefabPoolOptions3D options) {
+    auto value = create_pool_operation(prefab, options);
+    return result3d(std::move(value), _data->errors);
+}
+
+ScenePrefabPool3D SceneSession3D::create_pool_operation(ScenePreparedPrefab3D prefab,
+                                                        ScenePrefabPoolOptions3D options) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -1928,7 +1990,12 @@ ScenePrefabPoolStats3D SceneSession3D::pool_stats(ScenePrefabPool3D handle) cons
             ++active;
     return {pool.slots.size(), active, pool.slots.size() - active, pool.acquired, pool.reused, pool.exhausted};
 }
-ScenePrefab3D SceneSession3D::spawn(ScenePrefabPool3D pool, SceneSpawn3D options) {
+Result3D<ScenePrefab3D> SceneSession3D::spawn(ScenePrefabPool3D pool, SceneSpawn3D options) {
+    auto value = spawn_operation(pool, options);
+    return result3d(std::move(value), _data->errors);
+}
+
+ScenePrefab3D SceneSession3D::spawn_operation(ScenePrefabPool3D pool, SceneSpawn3D options) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -1988,8 +2055,8 @@ ScenePrefab3D SceneSession3D::acquire_pool(ScenePrefabPool3D handle, SceneSpawn3
         const auto& reference = state.spawned.at(prepared.reference);
         for (const auto& [name, e] : local)
             d.fixed_assets(state.world.entities().resolve(reference.local.at(name)), e);
-        append(d.errors, validate_particles3d(state.world, d.options.particle_limits, ids));
-        append(d.errors, validate_particles3d(state.world, d.options.particle_limits));
+        append(d.errors, validate_particles3d(state.world, d.options.particle_limits, ids).diagnostics);
+        append(d.errors, validate_particles3d(state.world, d.options.particle_limits).diagnostics);
         if (!d.errors.empty())
             throw std::runtime_error("invalid pooled particles");
         for (auto h : record.members)
@@ -2049,7 +2116,12 @@ bool SceneSession3D::recycle_pool(ScenePrefab3D prefab) {
         return configuration_error("pool return: " + std::string(error.what()));
     }
 }
-bool SceneSession3D::release(ScenePrefabPool3D handle) {
+Status3D SceneSession3D::release(ScenePrefabPool3D handle) {
+    auto value = release_operation(handle);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::release_operation(ScenePrefabPool3D handle) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -2101,7 +2173,12 @@ bool SceneSession3D::release_now(ScenePrefabPool3D handle) {
     return true;
 }
 
-bool SceneSession3D::despawn(ScenePrefab3D prefab) {
+Status3D SceneSession3D::despawn(ScenePrefab3D prefab) {
+    auto value = despawn_operation(prefab);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::despawn_operation(ScenePrefab3D prefab) {
     auto& d = *_data;
     d.errors.clear();
     if (!d.gameplay_boundary())
@@ -2249,7 +2326,12 @@ void SceneSession3D::drain_commands(bool systems_succeeded) {
     }
 }
 
-bool SceneSession3D::step(f32 dt) {
+Status3D SceneSession3D::step(f32 dt) {
+    auto value = step_operation(dt);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::step_operation(f32 dt) {
     if (_data->editing || _data->in_frame)
         return configuration_error("recursive scene step during a callback");
     BoolScope frame(_data->in_frame);
@@ -2339,8 +2421,14 @@ bool SceneSession3D::step(f32 dt) {
         return false;
     }
 }
-bool SceneSession3D::collect_actions(InputActionContext& actions) const {
+Status3D SceneSession3D::collect_actions(InputActionContext& actions) const {
+    const bool accepted = collect_actions_operation(actions);
+    return status3d(accepted, _data->errors);
+}
+
+bool SceneSession3D::collect_actions_operation(InputActionContext& actions) const {
     auto& d = *_data;
+    d.errors.clear();
     if (d.editing || d.in_frame) {
         d.errors = {"script action collection requires a scene between frames"};
         return false;
@@ -2360,8 +2448,14 @@ bool SceneSession3D::collect_actions(InputActionContext& actions) const {
     }
     return false;
 }
-bool SceneSession3D::write_report(JsonWriter& report) const {
+Status3D SceneSession3D::write_report(JsonWriter& report) const {
+    const bool accepted = write_report_operation(report);
+    return status3d(accepted, _data->errors);
+}
+
+bool SceneSession3D::write_report_operation(JsonWriter& report) const {
     auto& d = *_data;
+    d.errors.clear();
     if (d.editing || d.in_frame) {
         d.errors = {"script reporting requires a scene between frames"};
         return false;
@@ -2382,7 +2476,12 @@ bool SceneSession3D::write_report(JsonWriter& report) const {
     return false;
 }
 
-bool SceneSession3D::collect() {
+Status3D SceneSession3D::collect(f32 alpha) {
+    auto value = collect_operation(alpha);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::collect_operation(f32 alpha) {
     if (_data->editing || _data->in_frame)
         return configuration_error("recursive scene collection during a callback");
     BoolScope frame(_data->in_frame);
@@ -2393,16 +2492,21 @@ bool SceneSession3D::collect() {
         return false;
     }
     try {
-        return d.collect(*d.current);
+        return d.collect_operation(*d.current, alpha);
     } catch (const std::exception& error) {
         d.errors.push_back("scene collection: " + std::string(error.what()));
         return false;
     }
 }
-bool SceneSession3D::render() {
+Status3D SceneSession3D::render(f32 alpha) {
+    auto value = render_operation(alpha);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::render_operation(f32 alpha) {
     if (!_data->renderer.available())
         return configuration_error("no renderer");
-    if (!collect())
+    if (!collect_operation(alpha))
         return false;
     if (_data->renderer.render(_data->current->view, _data->current->scene))
         return true;
@@ -2411,7 +2515,12 @@ bool SceneSession3D::render() {
         _data->errors = {"scene render failed"};
     return false;
 }
-bool SceneSession3D::resize(Vec2i viewport) {
+Status3D SceneSession3D::resize(Vec2i viewport) {
+    auto value = resize_operation(viewport);
+    return status3d(std::move(value), _data->errors);
+}
+
+bool SceneSession3D::resize_operation(Vec2i viewport) {
     if (_data->editing || _data->in_frame)
         return configuration_error("scene resize cannot run inside a callback");
     auto& d = *_data;
@@ -2426,13 +2535,18 @@ bool SceneSession3D::resize(Vec2i viewport) {
     }
     const auto previous = d.options.viewport;
     d.options.viewport = viewport;
-    if (d.current && !collect()) {
+    if (d.current && !collect_operation()) {
         d.options.viewport = previous;
         return false;
     }
     return true;
 }
-std::optional<ScenePick3D> SceneSession3D::pick(Vec2i pixel) {
+Result3D<std::optional<ScenePick3D>> SceneSession3D::pick(Vec2i pixel) {
+    auto value = pick_operation(pixel);
+    return result3d(std::move(value), _data->errors);
+}
+
+std::optional<ScenePick3D> SceneSession3D::pick_operation(Vec2i pixel) {
     if (_data->editing || _data->in_frame) {
         configuration_error("scene picking cannot run inside a callback");
         return {};
@@ -2452,7 +2566,7 @@ std::optional<ScenePick3D> SceneSession3D::pick(Vec2i pixel) {
         configuration_error("picking requires SceneSession3DOptions::view.pick");
         return {};
     }
-    const auto hit = d.renderer.pick(state.view, pixel);
+    const auto hit = d.renderer.pick(state.view, pixel).value_or({});
     if (!hit.hit)
         return {};
     return ScenePick3D{d.pick_entity(state, hit.id), hit.id, hit.position};

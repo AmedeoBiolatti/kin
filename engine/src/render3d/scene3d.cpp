@@ -53,9 +53,9 @@ template <class Transform> Bounds3D instance_bounds_of(const Bounds3D& mesh, std
     return b;
 }
 
-// draw_skinned(Model3D) is given the pose of the first skeleton only, so a part on another skin has nothing to move it.
-// Said once for each model (by address: it is only a log, so a reused address costs a missed line, and the list stops
-// growing at 64).
+// draw_skinned(Model3D) is given the pose of the first skeleton only, so a part on another skin has nothing
+// to move it. Said once for each model (by address: it is only a log, so a reused address costs a missed line, and the
+// list stops growing at 64).
 void warn_unposed_skin(const Model3D& model, const ModelPart3D& part) {
     static std::mutex mutex;
     static std::vector<const Model3D*> said;
@@ -149,6 +149,14 @@ void InstanceBatch3D::resolve_bounds() const {
     }
     d.stale_groups.clear();
     d.any_stale.store(false, std::memory_order_release);
+}
+
+Result3D<InstanceBatch3D> InstanceBatch3D::create(Mesh3D mesh, std::vector<MeshInstance3D> instances,
+                                                  std::vector<InstanceGroup3D> groups) {
+    InstanceBatch3D value(std::move(mesh), std::move(instances), std::move(groups));
+    if (!value.diagnostics().empty())
+        return {std::nullopt, value.diagnostics()};
+    return result3d(std::move(value));
 }
 
 InstanceBatch3D::InstanceBatch3D(Mesh3D mesh, std::vector<MeshInstance3D> instances,
@@ -287,7 +295,12 @@ void InstanceBatch3D::changed_ranges_since(u64 revision, std::vector<ChangedRang
                 out.push_back({first, end - first});
         }
 }
-bool InstanceBatch3D::update(u32 first, std::span<const MeshInstance3D> instances) {
+Status3D InstanceBatch3D::update(u32 first, std::span<const MeshInstance3D> instances) {
+    const bool accepted = update_operation(first, instances);
+    return status3d(accepted, diagnostics());
+}
+
+bool InstanceBatch3D::update_operation(u32 first, std::span<const MeshInstance3D> instances) {
     if (!_data)
         _data = std::make_shared<Data>();
     _data->errors.clear();
@@ -404,7 +417,12 @@ Scene3D::DrawStamp& Scene3D::DrawStamp::operator=(DrawStamp&& other) noexcept {
     return *this;
 }
 
-bool Scene3D::draw_instanced(const InstanceBatch3D& batch, const Material3D& material) {
+Status3D Scene3D::draw_instanced(const InstanceBatch3D& batch, const Material3D& material) {
+    const bool accepted = draw_instanced_operation(batch, material);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_instanced_operation(const InstanceBatch3D& batch, const Material3D& material) {
     if (!_errors.empty())
         return false;
     if (!batch) {
@@ -421,7 +439,14 @@ bool Scene3D::draw_instanced(const InstanceBatch3D& batch, const Material3D& mat
     return _errors.empty();
 }
 
-std::span<MeshInstance3D> Scene3D::add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material) {
+Result3D<std::span<MeshInstance3D>> Scene3D::add_instances(const Mesh3D& mesh, std::size_t count,
+                                                           const Material3D& material) {
+    auto value = add_instances_operation(mesh, count, material);
+    return result3d(value, _errors);
+}
+
+std::span<MeshInstance3D> Scene3D::add_instances_operation(const Mesh3D& mesh, std::size_t count,
+                                                           const Material3D& material) {
     return add_instances(mesh, count, material, false, 0);
 }
 
@@ -459,12 +484,18 @@ void Scene3D::add_skinned_copy(const Mesh3D& mesh, u32 first_joint, const Mat4f&
     add_instances(mesh, 1, material, true, first_copy)[0] = {transform, tint, id};
 }
 
-bool Scene3D::draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                           const Material3D& material, Color tint, u32 id) {
+Status3D Scene3D::draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                               const Material3D& material, Color tint, u32 id) {
+    const bool accepted = draw_skinned_operation(mesh, joint_matrices, transform, material, tint, id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_skinned_operation(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                                     const Material3D& material, Color tint, u32 id) {
     if (!_errors.empty())
         return false;
     if (!mesh.skinned()) {
-        return draw(mesh, transform, material, tint, id);
+        return draw_operation(mesh, transform, material, tint, id);
     }
     if (joint_matrices.size() < mesh.skin_joint_count()) {
         return fail_submission("draw_skinned needs at least the mesh's joint matrix count");
@@ -481,33 +512,59 @@ bool Scene3D::draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matr
     return _errors.empty();
 }
 
-bool Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                           Color tint, u32 id) {
+Status3D Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                               Color tint, u32 id) {
+    const bool accepted = draw_skinned_operation(model, joint_matrices, transform, tint, id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices,
+                                     const Mat4f& transform, Color tint, u32 id) {
     if (!_errors.empty())
         return false;
-    draw_skinned(model, joint_matrices, transform, tint, id, {});
+    draw_skinned_operation(model, joint_matrices, transform, tint, id, {});
     return _errors.empty();
 }
-bool Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                           Color tint, u32 id, std::span<const Material3D> materials) {
+Status3D Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                               Color tint, u32 id, std::span<const Material3D> materials) {
+    const bool accepted = draw_skinned_operation(model, joint_matrices, transform, tint, id, materials);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices,
+                                     const Mat4f& transform, Color tint, u32 id,
+                                     std::span<const Material3D> materials) {
     if (!_errors.empty())
         return false;
-    draw_skinned(model, joint_matrices, transform, tint, id, materials, {});
+    draw_skinned_operation(model, joint_matrices, transform, tint, id, materials, {});
     return _errors.empty();
 }
-bool Scene3D::draw(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices, Color tint,
-                   u32 id) {
+Status3D Scene3D::draw(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices, Color tint,
+                       u32 id) {
+    const bool accepted = draw_operation(model, transform, node_matrices, tint, id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices,
+                             Color tint, u32 id) {
     if (!_errors.empty())
         return false;
     for (std::size_t i = 0; i < model.parts.size(); ++i) {
         const ModelPart3D& part = model.parts[i];
-        draw(part.mesh, transform * node_posed(model, i, node_matrices), part.material, tint, id);
+        draw_operation(part.mesh, transform * node_posed(model, i, node_matrices), part.material, tint, id);
     }
     return _errors.empty();
 }
-bool Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                           Color tint, u32 id, std::span<const Material3D> materials,
-                           std::span<const Mat4f> node_matrices) {
+Status3D Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                               Color tint, u32 id, std::span<const Material3D> materials,
+                               std::span<const Mat4f> node_matrices) {
+    const bool accepted = draw_skinned_operation(model, joint_matrices, transform, tint, id, materials, node_matrices);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices,
+                                     const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials,
+                                     std::span<const Mat4f> node_matrices) {
     if (!_errors.empty())
         return false;
     if (!materials.empty() && materials.size() != model.parts.size())
@@ -545,45 +602,64 @@ bool Scene3D::draw_skinned(const Model3D& model, std::span<const Mat4f> joint_ma
             }
             add_skinned_copy(part.mesh, first_joint, transform, material, tint, id);
         } else {
-            draw(part.mesh,
-                 transform * (node_matrices.empty() ? part.transform : node_posed(model, part_index, node_matrices)),
-                 material, tint, id);
+            draw_operation(part.mesh,
+                           transform *
+                               (node_matrices.empty() ? part.transform : node_posed(model, part_index, node_matrices)),
+                           material, tint, id);
         }
     }
     return _errors.empty();
 }
 
-bool Scene3D::draw(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material, Color tint, u32 id) {
+Status3D Scene3D::draw(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material, Color tint, u32 id) {
+    const bool accepted = draw_operation(mesh, transform, material, tint, id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_operation(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material, Color tint,
+                             u32 id) {
     if (!_errors.empty())
         return false;
-    const auto room = add_instances(mesh, 1, material);
+    const auto room = add_instances_operation(mesh, 1, material);
     if (room.empty())
         return false;
     room[0] = {transform, tint, id};
     return _errors.empty();
 }
 
-bool Scene3D::draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
-                             const Material3D& material) {
+Status3D Scene3D::draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                 const Material3D& material) {
+    const bool accepted = draw_instanced_operation(mesh, instances, material);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_instanced_operation(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                       const Material3D& material) {
     if (!_errors.empty())
         return false;
     if (instances.empty()) {
         return true;
     }
-    const std::span<MeshInstance3D> room = add_instances(mesh, instances.size(), material);
+    const std::span<MeshInstance3D> room = add_instances_operation(mesh, instances.size(), material);
     if (room.size() != instances.size())
         return false;
     std::copy(instances.begin(), instances.end(), room.begin());
     return _errors.empty();
 }
 
-bool Scene3D::draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material) {
+Status3D Scene3D::draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material) {
+    const bool accepted = draw_instanced_operation(mesh, transforms, material);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_instanced_operation(const Mesh3D& mesh, std::span<const Mat4f> transforms,
+                                       const Material3D& material) {
     if (!_errors.empty())
         return false;
     if (transforms.empty()) {
         return true;
     }
-    const std::span<MeshInstance3D> room = add_instances(mesh, transforms.size(), material);
+    const std::span<MeshInstance3D> room = add_instances_operation(mesh, transforms.size(), material);
     if (room.size() != transforms.size())
         return false;
     for (std::size_t i = 0; i < transforms.size(); ++i) {
@@ -608,28 +684,47 @@ void Scene3D::add_group(u32 first, u32 count, const Bounds3D& bounds) {
     _instance_groups.push_back({first - draw.first, count, bounds});
     ++draw.group_count;
 }
-bool Scene3D::draw_instanced_group(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Bounds3D& bounds,
-                                   const Material3D& material) {
+Status3D Scene3D::draw_instanced_group(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Bounds3D& bounds,
+                                       const Material3D& material) {
+    const bool accepted = draw_instanced_group_operation(mesh, transforms, bounds, material);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_instanced_group_operation(const Mesh3D& mesh, std::span<const Mat4f> transforms,
+                                             const Bounds3D& bounds, const Material3D& material) {
     if (!_errors.empty())
         return false;
     const u32 first = static_cast<u32>(_instances.size());
-    if (!draw_instanced(mesh, transforms, material))
+    if (!draw_instanced_operation(mesh, transforms, material))
         return false;
     add_group(first, static_cast<u32>(transforms.size()), bounds);
     return _errors.empty();
 }
-bool Scene3D::draw_instanced_group(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
-                                   const Bounds3D& bounds, const Material3D& material) {
+Status3D Scene3D::draw_instanced_group(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                       const Bounds3D& bounds, const Material3D& material) {
+    const bool accepted = draw_instanced_group_operation(mesh, instances, bounds, material);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_instanced_group_operation(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                             const Bounds3D& bounds, const Material3D& material) {
     if (!_errors.empty())
         return false;
     const u32 first = static_cast<u32>(_instances.size());
-    if (!draw_instanced(mesh, instances, material))
+    if (!draw_instanced_operation(mesh, instances, material))
         return false;
     add_group(first, static_cast<u32>(instances.size()), bounds);
     return _errors.empty();
 }
 
-bool Scene3D::draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites) {
+Status3D Scene3D::draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites,
+                                 u64 history_id) {
+    const bool accepted = draw_particles_operation(look, sprites, history_id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_particles_operation(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites,
+                                       u64 history_id) {
     if (!_errors.empty())
         return false;
     if (sprites.empty()) {
@@ -640,23 +735,33 @@ bool Scene3D::draw_particles(const ParticleLook3D& look, std::span<const Particl
         return fail_submission("particle count exceeds the draw index range");
     const u32 first = static_cast<u32>(_particle_sprites.size());
     _particle_sprites.insert(_particle_sprites.end(), sprites.begin(), sprites.end());
-    _particle_draws.push_back({look, first, static_cast<u32>(sprites.size())});
+    _particle_draws.push_back({look, first, static_cast<u32>(sprites.size()), history_id});
     return _errors.empty();
 }
 
-bool Scene3D::draw_particles(const ParticleSystem3D& system) {
+Status3D Scene3D::draw_particles(const ParticleSystem3D& system, u64 history_id) {
+    const bool accepted = draw_particles_operation(system, history_id);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_particles_operation(const ParticleSystem3D& system, u64 history_id) {
     if (!_errors.empty())
         return false;
     const u32 first = static_cast<u32>(_particle_sprites.size());
     system.sprites(_particle_sprites);
     const u32 count = static_cast<u32>(_particle_sprites.size()) - first;
     if (count > 0) {
-        _particle_draws.push_back({system.desc.look, first, count});
+        _particle_draws.push_back({system.desc.look, first, count, history_id});
     }
     return _errors.empty();
 }
 
-bool Scene3D::update_joint_matrices(u32 first, std::span<const Mat4f> matrices) {
+Status3D Scene3D::update_joint_matrices(u32 first, std::span<const Mat4f> matrices) {
+    const bool accepted = update_joint_matrices_operation(first, matrices);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::update_joint_matrices_operation(u32 first, std::span<const Mat4f> matrices) {
     if (!_errors.empty())
         return false;
     if (first > _joints.size() || matrices.size() > _joints.size() - first)

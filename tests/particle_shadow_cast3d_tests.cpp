@@ -12,7 +12,7 @@
 using namespace kin;
 namespace {
 constexpr Rectf screen{0, 0, 160, 120};
-void check(bool ok, const char* what) {
+void check(const auto& ok, const char* what) {
     if (!ok)
         throw std::runtime_error(what);
 }
@@ -29,7 +29,7 @@ struct Fixture {
     Mesh3D wall;
     Texture white, transparent, split;
     explicit Fixture(Renderer2D& r) : renderer(r), r3d(r) {
-        wall = r3d.create_mesh(meshes::box({12, 10, .1f}));
+        wall = r3d.create_mesh(meshes::box({12, 10, .1f})).value_or({});
         const u8 w[]{255, 255, 255, 255}, t[]{255, 255, 255, 0}, s[]{255, 255, 255, 0, 255, 255, 255, 255};
         white = renderer.create_texture_from_rgba(w, {1, 1});
         transparent = renderer.create_texture_from_rgba(t, {1, 1});
@@ -60,14 +60,14 @@ struct Fixture {
             l.radius = offscreen ? 20 : 12;
             l.inner_angle = 35;
             l.outer_angle = 60;
-            l.shadow.enabled = true;
+            l.shadow_enabled = true;
             s.lights.spots.push_back(l);
         } else {
             PointLightSource3D l;
             l.position = {offscreen ? -10.0f : -2.0f, 0, 0};
             l.color = offscreen ? LinearRgb{150, 150, 150} : LinearRgb{30, 30, 30};
             l.radius = offscreen ? 20 : 12;
-            l.shadow.enabled = true;
+            l.shadow_enabled = true;
             s.lights.points.push_back(l);
         }
         Material3D surface;
@@ -114,6 +114,48 @@ ParticleLook3D look(const Texture& t) {
     l.casts_shadow = true;
     return l;
 }
+void selection_and_cache(Fixture& f) {
+    auto view = f.r3d.create_view({160, 120}).value_or({});
+    auto l = look(f.white);
+    l.facing = ParticleFacing3D::Flat;
+    l.axis = {0, 0, 1};
+    auto s = f.scene(3, l, sprite(), false, false);
+    std::vector<ParticleSprite3D> particles(257, sprite());
+    for (size_t i = 0; i + 1 < particles.size(); ++i)
+        particles[i].position.x = 1000 + f32(i);
+    s.draw_particles(l, particles);
+    f.shoot(view, s);
+    check(f.r3d.debug_stats().particle_shadow_instances == 1,
+          "per-map culling submitted a wide batch's distant particles");
+    s.camera = Camera3D::look_at({0, 0, 0}, {.02f, 0, -1}, 60);
+    f.shoot(view, s);
+    check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws,
+          "camera turn invalidated a camera-independent particle map");
+    // Axis/stretched quads depend on the eye position, not a turn at a fixed
+    // perspective eye. Only a billboard whose actual quad turns needs redraw.
+    for (const auto facing : {ParticleFacing3D::Axis, ParticleFacing3D::Stretched}) {
+        l.facing = facing;
+        l.axis = {0, 1, 0};
+        auto p = sprite();
+        p.velocity = {0, 1, 0};
+        s = f.scene(3, l, p);
+        f.shoot(view, s);
+        s.camera = Camera3D::look_at({0, 0, 0}, {.02f, 0, -1}, 60);
+        f.shoot(view, s);
+        check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws,
+              "camera turn invalidated unchanged axis/stretched caster quads");
+    }
+    l.facing = ParticleFacing3D::Flat;
+    l.axis = {0, 0, 1};
+    s = f.scene(3, l, sprite(), false, false);
+    particles.assign(16384 + 1024, sprite());
+    s.draw_particles(l, particles);
+    s.lights.cache_shadows = false;
+    f.shoot(view, s);
+    check(f.r3d.debug_stats().particle_shadow_instances == 16384,
+          "particle shadow map exceeded its independent budget");
+}
+
 void interactions(Fixture& f) {
     // Separate renderers keep the oracle from resetting the cache under test.
     Fixture oracle(f.renderer);
@@ -122,8 +164,8 @@ void interactions(Fixture& f) {
     for (int kind = 0; kind < 5; ++kind)
         for (bool hdr : {false, true})
             for (u32 samples : {1u, 4u}) {
-                auto cached = f.r3d.create_view({160, 120}, {.samples = samples, .hdr = hdr});
-                auto fresh = oracle.r3d.create_view({160, 120}, {.samples = samples, .hdr = hdr});
+                auto cached = f.r3d.create_view({160, 120}, {.samples = samples, .hdr = hdr}).value_or({});
+                auto fresh = oracle.r3d.create_view({160, 120}, {.samples = samples, .hdr = hdr}).value_or({});
                 int worst = 0;
                 for (int frame = 0; frame < 24; ++frame) {
                     auto p = sprite();
@@ -156,7 +198,7 @@ void interactions(Fixture& f) {
                 check(worst <= 1, "cached moving particle shadow differs from fresh maps");
             }
     // Receiving and casting on the same billboard must not darken its own face.
-    auto view = f.r3d.create_view({160, 120});
+    auto view = f.r3d.create_view({160, 120}).value_or({});
     for (int kind = 0; kind < 5; ++kind) {
         auto p = sprite();
         p.colour = {1, 1, 1};
@@ -172,8 +214,8 @@ void interactions(Fixture& f) {
     }
     // Weather uses the same caster stream, including particles culled from
     // colour rendering. Advancing its clock must update the cached shadow map.
-    auto cached = f.r3d.create_view({160, 120});
-    auto fresh = oracle.r3d.create_view({160, 120});
+    auto cached = f.r3d.create_view({160, 120}).value_or({});
+    auto fresh = oracle.r3d.create_view({160, 120}).value_or({});
     std::size_t affected = 0;
     for (int frame = 0; frame < 8; ++frame) {
         auto scene = f.scene(0, look(f.white), sprite(), false, false);
@@ -212,8 +254,8 @@ void receivers(Fixture& f) {
     // A moving particle can shade a different, stationary lit particle. Its
     // temporal output must follow a spatial reference, including removal.
     for (int kind = 0; kind < 5; ++kind) {
-        auto temporal = f.r3d.create_view({160, 120}, {.hdr = true});
-        auto spatial = f.r3d.create_view({160, 120}, {.hdr = true});
+        auto temporal = f.r3d.create_view({160, 120}, {.hdr = true}).value_or({});
+        auto spatial = f.r3d.create_view({160, 120}, {.hdr = true}).value_or({});
         int worst = 0;
         for (int frame = 0; frame < 24; ++frame) {
             auto caster = sprite();
@@ -233,6 +275,14 @@ void receivers(Fixture& f) {
             receive.soft = true;
             receive.soft_distance = .3f;
             scene.draw_particles(receive, std::span{&receiver, 1});
+            if (frame == 20 || frame == 21) {
+                scene.lights.shadow_area = {};
+                scene.lights.fill_shadow.enabled = false;
+                for (auto& light : scene.lights.points)
+                    light.shadow_enabled = false;
+                for (auto& light : scene.lights.spots)
+                    light.shadow_enabled = false;
+            }
             scene.fog = {.enabled = true, .density = .02f, .colour = {.2f, .3f, .4f}};
             scene.taa = {.enabled = true, .blend = 0};
             const auto expected = f.shoot(spatial, scene);
@@ -244,8 +294,11 @@ void receivers(Fixture& f) {
                     frame_error =
                         std::max(frame_error, diff(actual.at({f32(x), f32(y)}), expected.at({f32(x), f32(y)})));
             // Once motion stops, stable edges intentionally accumulate history.
-            if (frame <= 12 || frame == 18)
+            if (frame <= 12 || frame == 18 || frame == 20 || frame == 22) {
                 worst = std::max(worst, frame_error);
+                if (frame_error > 2)
+                    std::cerr << "receiver frame " << frame << " kind " << kind << ": " << frame_error << "\n";
+            }
         }
         std::cerr << "particle on particle TAA kind " << kind << ": max " << worst << "\n";
         check(worst <= 2, "moving particle shadow trails on particle receiver");
@@ -253,7 +306,7 @@ void receivers(Fixture& f) {
 }
 
 void run(Fixture& f) {
-    auto view = f.r3d.create_view({160, 120});
+    auto view = f.r3d.create_view({160, 120}).value_or({});
     check(!ParticleLook3D{}.casts_shadow, "casting is not opt-in");
     auto p = sprite();
     auto l = look(f.white);
@@ -379,6 +432,7 @@ int main() {
             return required && std::string_view(required) != "0" ? 1 : 77;
         }
         run(f);
+        selection_and_cache(f);
         interactions(f);
         receivers(f);
         std::cout << "Particle casting, silhouettes, cache invalidation, off-camera casters, budgets and idle release "

@@ -19,8 +19,8 @@ struct SceneBindingOptions3D {
 // its new entities; existing entities/bindings stay intact. The caller owns the
 // runtime and explicitly calls runtime.clear(world) to remove the instance.
 // Rejects scripted scenes; SceneSession3D owns their Lua lifecycle. Renderer thread.
-// False reports the failure through source.diagnostics(), like load/instantiate.
-bool instantiate_scene3d(SceneAssetRuntime& source, EcsWorld& world, Assets3D& assets,
-                         const SceneBindingOptions3D& options = {});
+// Failure is returned with its contextual diagnostics.
+Status3D instantiate_scene3d(SceneAssetRuntime& source, EcsWorld& world, Assets3D& assets,
+                             const SceneBindingOptions3D& options = {});
 
 } // namespace kin

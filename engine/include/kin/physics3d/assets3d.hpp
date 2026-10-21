@@ -24,12 +24,8 @@ struct ColliderAssetLimits3D {
     ModelGeometryLimits3D geometry;
     std::size_t nodes = 64, depth = 4, hull_points = 256, cache_entries = 128;
 };
-struct ColliderRecipeLoad3D {
-    std::optional<ColliderRecipe3D> recipe;
-    std::vector<std::string> diagnostics;
-    bool ok() const { return recipe.has_value() && diagnostics.empty(); }
-};
-ColliderRecipeLoad3D parse_collider3d_asset(std::string_view text, ColliderAssetLimits3D limits = {});
+
+Result3D<ColliderRecipe3D> parse_collider3d_asset(std::string_view text, ColliderAssetLimits3D limits = {});
 struct CookedCollider3D {
     Shape3D shape;
     Vec3f scale{1, 1, 1};
@@ -51,7 +47,7 @@ public:
     ~PhysicsAssets3D();
     PhysicsAssets3D(const PhysicsAssets3D&) = delete;
     PhysicsAssets3D& operator=(const PhysicsAssets3D&) = delete;
-    AssetHandle<CookedCollider3D> load_collider(const std::filesystem::path& path, Vec3f scale = {1, 1, 1});
+    Result3D<AssetHandle<CookedCollider3D>> load_collider(const std::filesystem::path& path, Vec3f scale = {1, 1, 1});
     // Opt-in bake cache (kin/assets/bake_cache.hpp): a recipe with a convex hull or a triangle mesh keeps its cooked
     // shape there (Shape3D::save_binary) and a later run restores it instead of cooking. The recipe and its geometry
     // are still read and checked on every load; the key is what cooking reads (each node's kind, sizes, placement
@@ -69,6 +65,7 @@ public:
     const Diagnostics3D& diagnostics() const;
 
 private:
+    AssetHandle<CookedCollider3D> load_collider_operation(const std::filesystem::path& path, Vec3f scale = {1, 1, 1});
     struct Data;
     std::unique_ptr<Data> _data;
 };

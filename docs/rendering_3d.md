@@ -27,8 +27,9 @@ kin::Assets3D assets{renderer3d, content_root};
 kin::SceneSession3DOptions options;
 options.viewport = {960, 540};
 kin::SceneSession3D session{renderer3d, assets, options};
-if (!session.load("scenes/camp.kinscene")) {
-    // Display session.diagnostics().
+auto loaded = session.load("scenes/camp.kinscene");
+if (!loaded) {
+    // Display diagnostics3d_text(loaded.diagnostics).
 }
 // Each fixed step: check session.step(dt).
 // Each rendered frame, composite after a successful render:
@@ -39,6 +40,12 @@ if (session.render())
 `SceneFrame3D` integrates the same stages with a game-owned ECS world. The direct `Scene3D::draw` and
 `Renderer3D::render` APIs support embedded views, renderer tools and the benchmark examples below.
 Configure with `cmake --preset 3d` to include the experimental engine; ordinary and shipping builds leave it out.
+
+Fallible native 3D operations return `Result3D<T>` or `Status3D`. Check the result
+before reading `*result`; `result.diagnostics` owns the failure messages. Empty
+query payloads are ordinary absence, independent of result success. The
+[migration guide](3d_api_migration.md) lists the breaking signatures and fields.
+
 
 ## Conventions
 
@@ -72,7 +79,7 @@ are `sky_mode` (`procedural`/`image`), `sky_sun_size`, `sky_sun_disc`,
 An image sky still needs a runtime environment-map handle, set on the active
 `SceneEnvironment3D::lights.environment` during host initialization. `PointLight3D` and
 `SpotLight3D` expose `shadow_resolution`, `shadow_bias`, `shadow_normal_offset`,
-`shadow_near`, `shadow_distance` and `shadow_softness` alongside `shadows`.
+`shadow_near_plane`, `shadow_distance` and `shadow_softness` alongside `shadow_enabled`.
 These values survive save/load, inspection, patches and collection. RGB file
 fields stay linear triples; HDR colours are never encoded as byte tints.
 
@@ -212,7 +219,7 @@ planes. `camera_group_rejected` counts copies rejected for the camera; `local_gr
 across wanted shadow views. Group metadata introduces no additional GPU draws or instance buffers. Blockfield's grove caches
 64 foliage-cell bounds and eight mist-cell bounds when loading its shared recipe.
 
-`InstanceBatch3D(mesh, std::vector<MeshInstance3D>, std::vector<InstanceGroup3D>)` owns a fixed-size collection and optional
+`InstanceBatch3D::create(mesh, std::vector<MeshInstance3D>, std::vector<InstanceGroup3D>)` owns a fixed-size collection and optional
 ordered, disjoint cell ranges. Move the vectors in to avoid another CPU copy. Cell bounds are computed from the records.
 `scene.draw_instanced(batch, material)` retains a cheap shared handle; these records are in `Draw::batch.instances()`,
 rather than `Scene3D::instances()`. A batch stays a separate draw even beside equal materials. `clear()` releases the scene's
@@ -221,7 +228,7 @@ handle; the caller can reuse its own handle next frame. Meshes, materials, trans
 `batch.update(first, records)` edits a fixed range, increments the shared revision, and refreshes affected cell bounds at the cost
 of the edit's size, not the cell's: a copy strictly inside its cell's bounds that moves only widens them, and a cell an edit may
 have shrunk (a copy on one of its faces moved in from it) is measured again once, when `groups()` is next read (2,000 one-copy edits
-of a 100,000-copy batch: 0.2 ms, not 350 ms; `kin_render3d_bench batch`). Out-of-range edits return false with `diagnostics()`; changing the count requires a new batch. Copies share edits, including handles already submitted
+of a 100,000-copy batch: 0.2 ms, not 350 ms; `kin_render3d_bench batch`). Out-of-range edits return a failed `Status3D` with diagnostics; changing the count requires a new batch. Copies share edits, including handles already submitted
 into a scene. Edit between renders, never concurrently with rendering. The latest records are read when rendering starts.
 `changed_since(revision)` returns the enclosing changed range for an independent reader, or an empty range at the current
 revision. Each batch keeps the last 16 edit ranges (exact) and, from its first edit, the revision of the last edit of every
@@ -458,7 +465,7 @@ surface of albedo a shows a times `color`; a glossy surface adds its highlight),
 shadow, black by default), `scene.lights.ambient` (with
 `ground_ambient.enabled`, using `ground_ambient.color` for light from below: faces between take
 a mix by how far they face up), and point lights
-(`scene.add_light({position, color, radius, size})`: muzzle flashes, explosions,
+(`scene.add_point_light({position, color, radius, size})`: muzzle flashes, explosions,
 lamps). A point light falls off with the square of the distance, as light
 does: its `color` is what a white surface facing it shows one unit away
 (twice as far, a quarter), and the light is windowed to nothing at `radius`
@@ -697,24 +704,23 @@ draws one sample a pixel whatever `ViewOptions3D::samples` asks
   own, resolved, then clipped at white and encoded (`view_output.frag` mode 3);
   what it loses is MSAA's resolve in encoded values (edges are averaged in linear light,
   as an HDR view's are), and the extra RGBA16F targets.
-- **Particles and transparency:** changing particles/weather, blended/additive
-  and wireframe meshes, and custom materials reject incompatible history in
-  their current and previous footprints. These layers have several contributing
-  surfaces, so the renderer keeps the opaque motion and reconstructs the current
-  jittered samples where a single velocity would be wrong. A disappeared or
-  wrapped particle leaves no history trail. Unchanged inputs retain normal
-  temporal smoothing; camera/geometry/skin motion, colour and material changes,
-  flipbooks and uploaded texture revisions trigger rejection. Render-target
-  textures stay conservative because their writes are not versioned.
-  Coverage respects opaque/overlay depth, texture alpha, procedural sprite
-  edges, alpha-zero premultiplied emission, fog and soft intersections. Custom
-  materials use a conservative triangle footprint, since arbitrary fragment
-  code can generate its own alpha. The extra coverage pass reuses the normals
-  target after AO/contact shading, preserves motion, and allocates no new
-  texture. It runs each frame containing these effects, including paused frames,
-  so a later removal still has its previous footprint. History rejection is
-  disabled when inputs are unchanged. The pass is absent with TAA off;
-  `debug_stats().taa_reactive_draws` counts its draws separately.
+- **Particles and transparency:** particles/weather and blended/additive meshes
+  write their own reprojection motion and local coverage after AO/contact shading.
+  Opaque custom materials retain opaque velocities. New sprites, discontinuous
+  appearance changes and unversioned render-target textures reject their affected
+  footprints; motion elsewhere does not reject the entire transparent scene.
+  Receiving particles record shadowed irradiance, so a redrawn moving shadow
+  rejects changed pixels while the rest of the receiver keeps its history.
+  Stationary coverage uses the normal history weight; moving composites cap it
+  at 0.6 because independently moving overlapping layers have several velocities.
+  Coverage respects depth, texture alpha, procedural edges, alpha-zero emission,
+  fog and soft intersections. Blended custom materials use their triangle
+  footprint because arbitrary fragment code owns its coverage. The extra pass
+  reuses the normals target after AO/contact shading; it adds no texture. Particle
+  quad history uses a separate 64-byte GPU record per visible sprite (up to
+  64 MiB at the colour cap), plus at most 65,536 CPU history records per view.
+  Its GPU buffer is allocated only with particle TAA and released after 120 idle
+  renders. `debug_stats().taa_reactive_draws` counts coverage draws separately.
 - **Not covered:** a camera cut needs `reset_history()`; a pan of exactly half pixels a
   frame lines the jitter up with the motion and leaves part of each pixel
   unvisited (rates that don't repeat are fine); thin detail in a pan
@@ -819,18 +825,18 @@ whether or not the sky is drawn. Without it the hemisphere ambient is used as be
 
 Off by default; off, the picture and the cost are those without them (the old shaders are not touched: the stock fragment shader has four
 more variants, used only when a scene has a spot light, a local shadow or a moon shadow). `kin/render3d/scene3d.hpp` (`SpotLightSource3D`,
-`LightShadow3D`, `DirectionalShadow3D`, `Lights3D::spots`), `kin/render3d/local_lights3d.hpp` (the maths); docs/3d_plan.md "P3b" has the models
+`DirectionalShadow3D`, `Lights3D::spots`), `kin/render3d/local_lights3d.hpp` (the maths); docs/3d_plan.md "P3b" has the models
 and the numbers.
 
 ```cpp
 kin::SpotLightSource3D torch{.position = camera.position, .direction = camera.forward(), .color = {40, 38, 30}, .radius = 30.0f,
                      .inner_angle = 8.0f, .outer_angle = 18.0f};      // degrees from the axis
-torch.shadow = {.enabled = true, .resolution = 1024};                  // a shadow map, if it is among the most important
+torch.shadow_enabled = true; torch.shadow_resolution = 1024;                  // a shadow map, if it is among the most important
 scene.add_spot_light(torch);
 
 kin::PointLightSource3D lamp{.position = {0, 3.5f, 0}, .color = {30, 27, 22}, .radius = 20.0f};
-lamp.shadow.enabled = true;                                            // a cube of six maps (the faces the view can use)
-scene.add_light(lamp);
+lamp.shadow_enabled = true;                                            // a cube of six maps (the faces the view can use)
+scene.add_point_light(lamp);
 
 scene.lights.max_shadowed_spots = 4;       // up to 8; of the lights that ask, the most important this many a frame get a map
 scene.lights.max_shadowed_points = 2;      // up to 2 cubes
@@ -872,7 +878,7 @@ or a point light (it is for the moon's cascades). `debug_stats()` has `spots`, `
 and `points[i]`, -1 none), `local_shadow_maps`, `local_shadow_drawn`, `local_shadow_cached`, `local_shadow_draws`, `local_shadow_casters`,
 `moon_cascades`, `local_shadow_bytes` and `lights_variant`.
 
-Harness: `kin_reference` JSON `lights.spots` (`attach` carries one with the camera), `lights.points[].shadow`, `lights.fill_shadow`,
+Harness: `kin_reference` JSON `lights.spots` (`attach` carries one with the camera), `lights.points[].shadow_enabled`, `lights.fill_shadow`,
 `time_of_day.shadows`, `procedural: "stage"`, options `--spots`, `--spot-shadows`, `--point-lights`, `--point-shadows`, `--moon-shadow`, `--local-res`;
 scenes `spot_shadows`, `spot_night`, `spot_budget`, `moon_shadow`, `point_shadow`. Sponza Walk's "Spot lights and shadows" section and `--preset
 spots|flashlight|moon|lamps`. `warm_up()` makes the light variants' pipelines and the maps the configured lights will want.
@@ -953,7 +959,7 @@ fragment's world position, so a shadow can cross a large sprite. Bias, cascade
 transitions, directional strengths and local shadow distance fading use the
 same sampling helpers and settings as mesh materials. Configure the light's
 normal shadow settings as well (`shadow_area` for sun/moon;
-`light.shadow.enabled` for point/spot); a request without active maps uses the
+`light.shadow_enabled` for point/spot); a request without active maps uses the
 ordinary particle path.
 
 ```cpp
@@ -1013,8 +1019,9 @@ weather: the same wind.
 depth-hit splashes (the ground is one height), collisions with anything,
 GPU-simulated particles (the CPU writes the instance buffer each frame), a sort across
 batches, and rain that stops under a roof (it falls through Sponza's nave).
-Moving particles and weather work with TAA through the transient-history rejection
-described above; this does not require per-particle identifiers or a second velocity.
+Moving particles and weather use the temporal reprojection described above.
+Native emitters supply stable birth IDs; immediate callers can supply sprite IDs
+and an emitter history ID, or retain stable submission order.
 
 Harness: `kin_reference` JSON `weather` and `particles`, options `--rain`, `--snow`, `--wind`, `--no-weather`, `--no-particles`, `--soft`,
 `--particles N`; scenes `rain_street`, `snow_valley`, `particles_soft`, `particles_blend`, `particles_budget`. Sponza Walk's "Particles and
@@ -1078,22 +1085,23 @@ ownership interface; `.shared()` also supplies the `shared_ptr<const Model3D>` e
 
 ```cpp
 kin::Assets3D art{r3d, kin::content_root()}; // r3d/Renderer2D outlive the art
-auto tree = art.load_model("props/tree.glb");
-if (!tree) { /* show art.diagnostics() and choose a fallback */ }
+auto loaded = art.load_model("props/tree.glb");
+if (!loaded) { /* report loaded.diagnostics and choose a fallback */ }
 else {
-    const auto transform = tree->placement({
+    auto tree = std::move(*loaded); // AssetHandle<Model3D>
+    auto transform = tree->placement({
         .position = {4, 0, -8},
         .rotation = kin::Quatf::axis_angle({0, 1, 0}, 45),
         .pivot = kin::ModelPivot3D::BottomCenter,
-        .size = 6, // longest model-bounds dimension in world units
+        .size = 6, // longest model-bounds dimension in metres
     });
-    scene.draw(*tree, transform, kin::colors::white, 42); // same ID for every part
+    if (transform) scene.draw(*tree, *transform, kin::colors::white, 42);
 }
 ```
 
 `Model3D::placement()` defaults to the authored origin and units. `Center` or `BottomCenter` positions that bounds-based pivot
 at `position`; positive `size` fits the whole model before the optional nonuniform/mirrored `scale`. Node transforms remain
-part of the model. Invalid sizes, unusable fitting bounds and non-finite resulting transforms throw `invalid_argument`.
+part of the model. Invalid sizes, unusable fitting bounds and non-finite resulting transforms return failed results.
 
 Repeated models with the same normalized path and `MeshOptions3D` reuse the same handle while it is alive. External texture
 dependencies are shared across models, keyed by resolved file, sRGB/data interpretation and nearest/mipmapped filtering.
@@ -1118,7 +1126,7 @@ For many static copies, build a complete model batch once rather than expanding 
 ```cpp
 std::vector<kin::MeshInstance3D> trees;
 // Fill trees with model-to-world matrices, tints and stable object IDs.
-kin::ModelBatch3D forest{*tree, trees, {.cell_size = 16}};
+auto forest = kin::ModelBatch3D::create(*tree, trees, {.cell_size = 16}).value_or({});
 // Each frame, after scene.clear():
 scene.draw_instanced(forest);
 ```
@@ -1190,7 +1198,7 @@ everything that draws a model at rest is unchanged. A part is drawn at its node'
 matrix times its offset (`Model3D::part_transform(part, node_matrices)`).
 
 ```cpp
-kin::Model3D door = r3d.load_model("models/door.glb");
+kin::Model3D door = r3d.load_model("models/door.glb").value_or({});
 const kin::u32 nodes = static_cast<kin::u32>(door.node_skeleton);   // -1: nothing in it moves
 kin::AnimationPlayer3D player{&door.skeletons[nodes]};
 player.play(door.find_clip("Open", nodes), /*loop=*/false);
@@ -1232,7 +1240,7 @@ animation of registered properties): that one's state machines can choose the
 clips and weights fed to this.
 
 ```cpp
-kin::Model3D hero = r3d.load_model("models/hero.glb");          // skeletons, clips, skinned parts
+kin::Model3D hero = r3d.load_model("models/hero.glb").value_or({});          // skeletons, clips, skinned parts
 kin::AnimationPlayer3D player{&hero.skeletons[0]};
 player.play(hero.find_clip("Walk"));
 std::vector<kin::Mat4f> joints;
@@ -1315,7 +1323,7 @@ report submitted copies/draws; `debug_stats().skin_matrices` counts uploaded mat
 
 To animate submitted commands, call `scene.update_joint_matrices(first, matrices)` between renders. `first` is an index
 in the scene's existing `joint_matrices()` array; record its size before `draw_skinned`, or use the copy's entry in
-`skin_offsets()`. The replacement range must fit or the call throws `std::out_of_range`; it never resizes the palette or
+`skin_offsets()`. The replacement range must fit or the call returns a failed `Status3D`; it never resizes the palette or
 changes `draw_revision()`. Empty ranges at the end are allowed and overlapping source spans are supported. Indices are
 local to the scene's current submissions: obtain them again after `clear()`. Parts sharing a model pose see one update.
 This edits existing storage without another palette or per-character cache. Transforms/materials still require ordinary
@@ -1508,7 +1516,7 @@ state.propagate_transforms();
 state.collect(scene);
 ```
 
-**Lights.** `PointLight3D` and `SpotLight3D` (colour, radius, size, for a spot the cone's angles, a `LightShadow3D`, `enabled`) on an entity
+**Lights.** `PointLight3D` and `SpotLight3D` (colour, radius, size, for a spot the cone's angles, the `shadow_*` fields, `enabled`) on an entity
 with a `Transform3D` put a light at its place in `collect(scene)` (a spot shines down the entity's own -Z, the way a camera looks; parent it to a
 camera or a hand to carry it); the entity's id names the light for the choice of which has a shadow map.
 
@@ -1521,7 +1529,7 @@ its entity's model whenever that `shared_ptr` is replaced by another, even a mod
 door or a fan placed as a static model plays its clips; a `SkinnedMeshRenderer3D` keeps posing its model's first skin.
 
 ```cpp
-auto hero = std::make_shared<const kin::Model3D>(r3d.load_model("models/hero.glb"));
+auto hero = std::make_shared<const kin::Model3D>(r3d.load_model("models/hero.glb").value_or({}));
 auto machine = std::make_shared<kin::AnimationStateMachine>();              // kin/anim's, unchanged
 machine->initial = "idle";
 machine->states = {{"idle", "Idle"}, {"move", ""}, {"jump", "Jump"}};      // state -> clip name
@@ -1583,8 +1591,8 @@ else {
     overrides.entities["root"] = {{"Transform3D", {{"position", kin::Vec3f{3, 0, -2}}}}};
     auto instance = kin::instantiate_prefab(world, *loaded.prefab, {}, world.components(), overrides);
     // Check instance.ok()/diagnostics, then bind authored assets on the render thread:
-    auto errors = kin::resolve_render3d_assets(world, assets); // Assets3D{renderer3d, content_root}
-    // Display errors; failed replacements preserve their last good runtime model.
+    auto bound = kin::resolve_render3d_assets(world, assets); // Assets3D{renderer3d, content_root}
+    // Check bound; report bound.diagnostics. Failed replacements preserve their last good model.
 }
 // WorldRenderState3D: animate(dt), propagate_transforms(), collect(scene) as usual.
 ```
@@ -1603,7 +1611,7 @@ Initial registered authored fields:
 | Component | Fields |
 |---|---|
 | `Transform3D` | position, quaternion rotation, scale |
-| `ModelRenderer3D`, `SkinnedMeshRenderer3D` | asset, tint, visible, object id |
+| `ModelRenderer3D`, `SkinnedMeshRenderer` (C++ `SkinnedMeshRenderer3D`) | asset, tint, visible, object id |
 | `ModelMaterials3D` | material override asset, named variant (static/skinned) |
 | `Animator3D` | clip, speed, loop, playing, fade seconds, apply/remove root motion |
 | `AnimatorAsset3D` | referenced animation/IK configuration |
@@ -1684,7 +1692,7 @@ This subset authors procedural sky settings; HDR panorama asset binding remains 
 ### Authored animation configuration
 
 `AnimatorAsset3D{"asset": "animations/hero.kinanimator"}` accompanies the usual
-`Animator3D` and `SkinnedMeshRenderer3D`. Its `kin.animator3d/1` JSON resource references
+`Animator3D` and authored `SkinnedMeshRenderer` (C++ `SkinnedMeshRenderer3D`). Its `kin.animator3d/1` JSON resource references
 the existing `.kinanim` machine format instead of introducing a second graph parser:
 
 ```json
@@ -2372,7 +2380,7 @@ auto supply = session.spawn("prefabs/camp-supply.kinprefab", {
         context.root.set(Pickup{2});
         // context.entity("local-child-id") resolves a member of this instance.
     }
-});
+}).value_or({});
 if (!supply) { /* display session.diagnostics() */ }
 
 // Retain value handles; resolve when needed. Native runtime state stays native.
@@ -2621,7 +2629,7 @@ its gameplay steps:
 
 ```cpp
 struct Projectile { float remaining = 2; int damage = 1; };
-auto projectile = session.preload("prefabs/range-projectile.kinprefab");
+auto projectile = session.preload("prefabs/range-projectile.kinprefab").value_or({});
 auto pool = session.create_pool(projectile, {
     .capacity = 16,
     .reset = [](kin::SceneSpawnContext3D& context) {
@@ -2630,10 +2638,10 @@ auto pool = session.create_pool(projectile, {
     .release = [](kin::SceneSpawnContext3D& context) {
         context.root.set(Projectile{}); // optionally drop per-lease game resources
     }
-});
+}).value_or({});
 if (!projectile || !pool) { /* inspect session.diagnostics() */ }
 
-auto shot = session.spawn(pool, {.position = kin::Vec3f{-2.2f, .5f, 0}});
+auto shot = session.spawn(pool, {.position = kin::Vec3f{-2.2f, .5f, 0}}).value_or({});
 if (shot) session.despawn(shot); // returns this lease to its pool
 auto stats = session.pool_stats(pool); // capacity/active/available/acquired/reused/exhausted
 
@@ -3032,7 +3040,7 @@ auto lantern=session.spawn("prefabs/camp-lantern.kinprefab",{
     .configure=[player](SceneSpawnContext3D& spawned) {
         spawned.root.set(JointAttachment3D{player,"hand_R",
             Mat4f::translation({0,0.02f,0})});
-    }});
+    }}).value_or({});
 // The next session.collect()/render() updates placement and status.
 ```
 
@@ -3346,7 +3354,7 @@ reason in `diagnostics()`). Like `Renderer3D::pick` it waits for the GPU: ask on
 or when the pointer moves, not every frame.
 
 ```cpp
-if (input.pressed("select")) if (auto hit = session.pick(pointer_in_view)) {
+if (input.pressed("select")) if (auto hit = session.pick(pointer_in_view).value_or({})) {
     if (hit->entity) select(hit->entity);  // hit->position: the point clicked, in the world
 }
 ```
@@ -3451,7 +3459,7 @@ it for a log, HUD or run report. No diagnostic strings or history are allocated
 on the successful draw path.
 
 ```cpp
-auto model = assets.load_model("models/prop.glb");
+auto model = assets.load_model("models/prop.glb").value_or({});
 if (!model) {
     show_error(kin::diagnostics3d_text(assets.diagnostics()));
     return;
@@ -3587,3 +3595,36 @@ supported CSV/report counters remain available; retired experiment columns have 
 ## API names, colour inputs and 2D builds
 
 See [the 3D API migration guide](3d_api_migration.md) for `LinearRgb` light inputs, the suffixed type/header names, the 2D-only preset and the formatting check.
+
+
+### Fixed-step presentation and temporal effects
+
+Call `session.step(fixed_dt)` from the fixed update and
+`session.render(accumulator / fixed_dt)` once per displayed frame. The session
+interpolates dynamic/kinematic bodies, characters and their child draw placements without
+writing gameplay transforms or advancing physics. Joint attachments use the
+same root placement. Explicit `RenderTransform3D` remains the host's override;
+pass the same alpha to a game-owned `CameraRig3D`.
+
+Transparent TAA uses reprojected particle quads and blended-mesh velocities,
+with bounded history confidence for the composite. New/discontinuous coverage
+is rejected locally; unrelated instance motion does not reject every effect.
+Opaque custom materials use the opaque velocity path. Simulated particles have
+stable birth identities; immediate callers may set `ParticleSprite3D::id` and
+an emitter `history_id` on `draw_particles`. Zero IDs use submission order.
+History retains at most 65,536 visible sprites per view; additional sprites use
+spatial reconstruction. Overlapping independently moving translucent layers
+share the foremost contributing velocity, so history confidence is capped.
+
+Particle casters are culled individually against each light map and capped at
+16,384 per map in stable submission order, including each point-light face.
+The global caster upload cap remains 1,048,576. Local shadow caches depend only
+on their selected particle casters. Flat sprites do not depend on the camera;
+billboard maps update when their actual camera-dependent quads change.
+
+Lua bridges reflected ECS entities and session handles with
+`scene3d.handle(entity)` and `scene3d.resolve(handle)` (nil for stale handles).
+The authored skinned-renderer name is `SkinnedMeshRenderer`, while C++ uses
+`SkinnedMeshRenderer3D`. Camera rig angles are degrees and distances are metres;
+spring-arm `ease_out` is metres per second and `shoulder_radius_scale` is
+unitless.

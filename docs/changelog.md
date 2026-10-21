@@ -7,6 +7,47 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Fixed
+
+- Correct local navmesh erosion on vertically overlapping floors connected by a
+  ramp, and boundary-only stair risers in headroom clipping.
+- Restore sleeping-body wakeups after collision-layer/group/filter changes,
+  keep disabled contacts readable, and avoid full body reconciliation for an
+  unchanged refused body. Preserve native particle emission controls.
+- Check Lua option and userdata types, enable sol2 safety checks, and bridge
+  reflected entities/session handles with `scene3d.handle` and `scene3d.resolve`.
+- Add read-only fixed-step presentation through session/frame collection alpha,
+  including body/character descendants and joint-attachment roots.
+- Use local transparent temporal coverage and particle/blended-mesh reprojection;
+  retain opaque custom-material velocities. Bound particle shadow work per map,
+  cull individual casters, and scope local cache invalidation to selected sprites.
+- Require GPU session/frame and authored-asset regressions in the lavapipe job,
+  including collected interpolation and view/binding behavior.
+- Document units, authored skinned component spelling and the accumulated 3D
+  breaking changes in [the migration guide](3d_api_migration.md).
+
+### Changed
+
+- **Breaking 3D:** Fallible rendering/loading/binding/session/frame operations use `Result3D<T>`
+  and `Status3D`, carrying diagnostics by value. CPU model/navmesh builders
+  return their payload; mesh/skeleton validators no longer take error pointers.
+- Construct retained batches with `InstanceBatch3D::create` /
+  `ModelBatch3D::create`. Model-file polling returns `Result3D<bool>` and performs
+  the initial load explicitly; watcher construction does no I/O.
+- Local lights share flat `shadow_*` fields in native code, Lua and authored
+  data. Replace `shadows` with `shadow_enabled`, `shadow_near` with
+  `shadow_near_plane`, and C++ `light.shadow.*` with `light.shadow_*`.
+  Immediate point submission is named `add_point_light`, matching
+  `add_spot_light`. Reference fixture JSON follows the same fields.
+
+
+- 3D is disabled by default and explicitly enabled by the `3d` preset and 3D CI.
+  Contact collection defaults off. RGB lighting/sky/fog/weather/particle APIs use
+  `LinearRgb`; ground ambient uses an enabled/color record. Resource load failures
+  travel in returned results instead of output strings. See the migration guide for
+  C++ type/header renames, shader bindings, supported-model acceptance and the
+  navigation clearance behavior change.
+
 ### Added
 
 - Tested `kin-gltf/1` export profile with CPU/GPU asset acceptance regressions.

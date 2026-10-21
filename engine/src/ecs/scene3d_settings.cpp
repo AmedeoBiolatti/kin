@@ -190,7 +190,8 @@ void register_scene3d_settings(EcsWorld& world) {
             .field("shadows", &TimeOfDay3D::shadows);
 }
 
-std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view, EcsEntity only) {
+static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Scene3D& scene, ViewOptions3D* view,
+                                                            EcsEntity only) {
     std::vector<std::string> errors;
     const auto choose = [&]<class T>() {
         if (only)
@@ -295,6 +296,11 @@ std::vector<std::string> apply_scene3d_settings(EcsWorld& world, Scene3D& scene,
         }
     }
     return errors;
+}
+Status3D apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view, EcsEntity only) {
+    auto diagnostics = apply_scene3d_settings_impl(world, scene, view, only);
+    const bool accepted = diagnostics.empty();
+    return status3d(accepted, std::move(diagnostics));
 }
 
 } // namespace kin

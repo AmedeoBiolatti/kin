@@ -18,11 +18,16 @@ SceneFrame3D::SceneFrame3D(EcsWorld& world, WorldRenderState3D& rendering, Scene
 }
 
 bool SceneFrame3D::validate() {
-    _errors = validate_particles3d(_world, _options.particles);
+    _errors = validate_particles3d(_world, _options.particles).diagnostics;
     return _errors.empty();
 }
 
-bool SceneFrame3D::after_phase(SystemPhase phase, f32 dt) {
+Status3D SceneFrame3D::after_phase(SystemPhase phase, f32 dt) {
+    const bool accepted = after_phase_operation(phase, dt);
+    return status3d(accepted, _errors);
+}
+
+bool SceneFrame3D::after_phase_operation(SystemPhase phase, f32 dt) {
     _errors.clear();
     if (!std::isfinite(dt) || dt <= 0) {
         _errors = {"scene frame requires finite positive dt"};
@@ -70,7 +75,12 @@ bool SceneFrame3D::after_phase(SystemPhase phase, f32 dt) {
     }
 }
 
-bool SceneFrame3D::step(f32 dt, const SystemPhaseHooks& hooks) {
+Status3D SceneFrame3D::step(f32 dt, const SystemPhaseHooks& hooks) {
+    const bool accepted = step_operation(dt, hooks);
+    return status3d(accepted, _errors);
+}
+
+bool SceneFrame3D::step_operation(f32 dt, const SystemPhaseHooks& hooks) {
     if (_running) {
         _errors = {"recursive scene frame step"};
         return false;
@@ -90,7 +100,7 @@ bool SceneFrame3D::step(f32 dt, const SystemPhaseHooks& hooks) {
     stages.after = [&](SystemPhase phase, std::string& error) {
         if (hooks.after && !hooks.after(phase, error))
             return false;
-        if (after_phase(phase, dt))
+        if (after_phase_operation(phase, dt))
             return true;
         for (const auto& message : _errors) {
             if (!error.empty())
@@ -105,7 +115,12 @@ bool SceneFrame3D::step(f32 dt, const SystemPhaseHooks& hooks) {
     return false;
 }
 
-bool SceneFrame3D::collect(Scene3D& scene, ViewOptions3D* view) {
+Status3D SceneFrame3D::collect(Scene3D& scene, ViewOptions3D* view, f32 alpha) {
+    const bool accepted = collect_operation(scene, view, alpha);
+    return status3d(accepted, _errors);
+}
+
+bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 alpha) {
     if (_running) {
         _errors = {"recursive scene frame collection"};
         return false;
@@ -117,6 +132,10 @@ bool SceneFrame3D::collect(Scene3D& scene, ViewOptions3D* view) {
     _running = true;
     _errors.clear();
     try {
+        if (!std::isfinite(alpha) || alpha < 0 || alpha > 1) {
+            _errors = {"render interpolation alpha must be finite and in [0,1]"};
+            return false;
+        }
         if (!validate())
             return false;
         scene.clear();
@@ -132,13 +151,17 @@ bool SceneFrame3D::collect(Scene3D& scene, ViewOptions3D* view) {
         scene.lod = {};
         scene.cull = true;
         _rendering.propagate_transforms();
-        _errors = apply_scene3d_settings(_world, scene, view);
+        _errors = apply_scene3d_settings(_world, scene, view).diagnostics;
         if (!_errors.empty())
             return false;
         _rendering.apply_time_of_day(scene);
         const auto fog = scene.fog;
         _rendering.apply_weather(scene, fog);
-        _rendering.collect(scene);
+        _rendering.collect(scene, _options.bodies && alpha < 1
+                                      ? WorldRenderState3D::Presentation3D{[&](flecs::entity e) {
+                                            return _options.bodies->render_transform(e, alpha);
+                                        }}
+                                      : WorldRenderState3D::Presentation3D{});
         if (_options.bodies && _options.renderer && _options.renderer->available())
             _options.bodies->collect_ropes(*_options.renderer, scene);
         _errors = scene.diagnostics();

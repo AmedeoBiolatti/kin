@@ -653,7 +653,8 @@ public:
         const Vec2i out = renderer.output_size();
         if (!_view.valid()) {
             _view = _r3d->create_view({std::max(1, out.x), std::max(1, out.y)},
-                                      _summit_view->view_options(u32(_options.samples)));
+                                      _summit_view->view_options(u32(_options.samples)))
+                        .value_or({});
             _view_size = out;
         } else if (out != _view_size) {
             _r3d->resize(_view, {std::max(1, out.x), std::max(1, out.y)});

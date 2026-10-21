@@ -1,4 +1,5 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 // Navigation meshes for 3D levels: the walkable triangles of a triangle soup,
 // joined where they share an edge, and the queries an agent needs to move over
@@ -102,17 +103,17 @@ struct NavMesh3D {
 // Agent clearance can remove further triangles and split/discard connected regions.
 // The triangles are kept as they are, in input order, not merged into polygons.
 // Invalid input (an index out of range, a vertex or option that is not finite or
-// out of range, a count that is not a whole number of triangles) gives an empty
-// mesh, with why in `error`, or logged as a warning when `error` is null.
-NavMesh3D build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> indices,
-                          const NavMeshBuildOptions3D& options = {}, std::string* error = nullptr);
+// out of range, a count that is not a whole number of triangles) returns a failed
+// result with diagnostics. Valid empty input returns a successful empty mesh.
+Result3D<NavMesh3D> build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> indices,
+                                    const NavMeshBuildOptions3D& options = {});
 
 #ifdef KIN_EXPERIMENTAL_3D
 struct MeshData3D;
 // The same from a level's mesh (kin/render3d/mesh3d.hpp), its positions moved by
 // `transform` (a mirroring transform keeps the triangles facing up).
-NavMesh3D build_navmesh3d(const MeshData3D& mesh, const Mat4f& transform = Mat4f::identity(),
-                          const NavMeshBuildOptions3D& options = {}, std::string* error = nullptr);
+Result3D<NavMesh3D> build_navmesh3d(const MeshData3D& mesh, const Mat4f& transform = Mat4f::identity(),
+                                    const NavMeshBuildOptions3D& options = {});
 #endif
 
 // A point on a navigation mesh, and the triangle it is on.

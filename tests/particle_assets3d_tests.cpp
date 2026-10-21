@@ -13,7 +13,7 @@
 
 namespace {
 using namespace kin;
-void check(bool ok, const std::string& message) {
+void check(const auto& ok, const std::string& message) {
     if (!ok)
         throw std::runtime_error(message);
 }
@@ -81,14 +81,15 @@ void cpu() {
         "nonfinite shadow cutoff accepted");
     for (f32 bad : {-1.f, 1.01f}) {
         a.get_mut<ParticleEmitter3D>()->system.desc.look.shadow_cutoff = bad;
-        check(!validate_particles3d(world).empty(), "out of range shadow cutoff accepted");
+        check(!validate_particles3d(world).diagnostics.empty(), "out of range shadow cutoff accepted");
     }
     a.get_mut<ParticleEmitter3D>()->system.desc.look.shadow_cutoff = .7f;
     const auto descriptor_count = world.components().descriptors().size();
     register_builtin_editor_components(world);
     check(world.components().descriptors().size() == descriptor_count, "particle registration not idempotent");
-    check(validate_particles3d(world, {2, 16, 32}).empty(), "valid particle scene rejected");
-    check(!validate_particles3d(world, {2, 16, 31}).empty() && !validate_particles3d(world, {1, 16, 32}).empty(),
+    check(validate_particles3d(world, {2, 16, 32}).diagnostics.empty(), "valid particle scene rejected");
+    check(!validate_particles3d(world, {2, 16, 31}).diagnostics.empty() &&
+              !validate_particles3d(world, {1, 16, 32}).diagnostics.empty(),
           "scene capacity/emitter limits ignored");
     check(!world.components().patch_field(a, "ParticleEmitter3D", "shape", std::string("unknown")),
           "unknown enum accepted");
@@ -116,6 +117,14 @@ void cpu() {
         rendering.simulate_particles(1. / 60);
     check(a.get<ParticleEmitter3D>()->system.count() == 0 && b.get<ParticleEmitter3D>()->system.count() > 0,
           "stop-emitting did not drain independently");
+    b.get_mut<ParticleEmitter3D>()->system.emitting = false;
+    for (int i = 0; i < 60; ++i)
+        rendering.simulate_particles(1. / 60);
+    check(!b.get<ParticleEmitter3D>()->system.emitting && b.get<ParticleEmitter3D>()->system.count() == 0,
+          "bridge overwrote native emission stop");
+    b.get_mut<ParticleEmitter3D>()->system.emitting = true;
+    for (int i = 0; i < 10; ++i)
+        rendering.simulate_particles(1. / 60);
     a.get_mut<ParticleEmitter3D>()->system.burst(1000);
     check(a.get<ParticleEmitter3D>()->system.count() == 16, "burst exceeded authored capacity");
     Scene3D draws;
@@ -124,11 +133,11 @@ void cpu() {
     a.get_mut<ParticleEmitter3D>()->enabled = false;
     draws.clear();
     rendering.collect(draws);
-    check(draws.particle_draws().size() == 1 && !validate_particles3d(world, {2, 16, 31}).empty(),
+    check(draws.particle_draws().size() == 1 && !validate_particles3d(world, {2, 16, 31}).diagnostics.empty(),
           "disabled emitter bypasses capacity budget");
     a.get_mut<ParticleEmitter3D>()->system.clear();
     check(world.components().patch_field(a, "ParticleEmitter3D", "atlas_columns", u32(0)), "atlas edit failed");
-    check(!validate_particles3d(world).empty(), "invalid atlas accepted");
+    check(!validate_particles3d(world).diagnostics.empty(), "invalid atlas accepted");
     check(world.components().patch_field(a, "ParticleEmitter3D", "atlas_columns", u32(1)), "atlas restore failed");
     auto saved = build_scene_asset(world);
     check(saved.ok(), "particle scene save failed");
@@ -152,14 +161,14 @@ void cpu() {
           "casting settings lost on save/load");
     auto& desc = b.get_mut<ParticleEmitter3D>()->system.desc;
     desc.max_particles = UINT32_MAX;
-    check(!validate_particles3d(world).empty(), "huge capacity accepted");
+    check(!validate_particles3d(world).diagnostics.empty(), "huge capacity accepted");
     desc.max_particles = 16;
     desc.lifetime = {0, 1};
-    check(!validate_particles3d(world).empty(), "zero lifetime accepted");
+    check(!validate_particles3d(world).diagnostics.empty(), "zero lifetime accepted");
     desc.lifetime = {.2f, .3f};
     desc.look.facing = ParticleFacing3D::Axis;
     desc.look.axis = {};
-    check(!validate_particles3d(world).empty(), "zero axis accepted");
+    check(!validate_particles3d(world).diagnostics.empty(), "zero axis accepted");
 }
 
 void particle_gpu(Renderer2D& renderer) {
@@ -181,7 +190,7 @@ void particle_gpu(Renderer2D& renderer) {
     options.view.samples = 1;
     options.particle_limits = {2, 16, 32};
     SceneSession3D session(r3d, assets, options);
-    const auto ok = [&](bool value, const char* message) {
+    const auto ok = [&](const auto& value, const char* message) {
         if (!value)
             for (const auto& e : session.diagnostics())
                 std::cerr << e << '\n';
@@ -190,14 +199,14 @@ void particle_gpu(Renderer2D& renderer) {
     ok(session.load("scene.kinscene"), "particle scene binding failed");
     auto a = emitter(*session.instance(), "left"), b = emitter(*session.instance(), "right");
     auto texture = a.get<ParticleEmitter3D>()->system.desc.look.texture;
-    auto model = assets.load_model("shared-a.gltf").shared();
+    auto model = assets.load_model("shared-a.gltf").value_or({}).shared();
     check(texture && texture == b.get<ParticleEmitter3D>()->system.desc.look.texture &&
               texture == model->parts[0].material.texture && texture != model->parts[0].material.normal,
           "particle/glTF texture sharing ignored role/filter");
     for (int i = 0; i < 60; ++i)
         ok(session.step(1.f / 60), "particle stepping failed");
     const auto time = a.get<ParticleEmitter3D>()->system.time();
-    check(resolve_particles3d_assets(*session.world(), assets).empty() &&
+    check(resolve_particles3d_assets(*session.world(), assets).diagnostics.empty() &&
               a.get<ParticleEmitter3D>()->system.time() == time,
           "rebinding reset simulation");
     renderer.clear();
@@ -215,31 +224,32 @@ void particle_gpu(Renderer2D& renderer) {
             ++coloured;
     check(coloured > 8, "rendered particle sprites invisible");
     b.get_mut<ParticleEmitter3D>()->texture_nearest = false;
-    check(resolve_particles3d_assets(*session.world(), assets).empty() &&
+    check(resolve_particles3d_assets(*session.world(), assets).diagnostics.empty() &&
               b.get<ParticleEmitter3D>()->system.desc.look.texture != texture,
           "particle filter aliases texture");
     b.get_mut<ParticleEmitter3D>()->texture_asset.id = "missing.png";
     auto last = b.get<ParticleEmitter3D>()->system.desc.look.texture;
-    check(!resolve_particles3d_assets(*session.world(), assets).empty() &&
+    check(!resolve_particles3d_assets(*session.world(), assets).diagnostics.empty() &&
               b.get<ParticleEmitter3D>()->system.desc.look.texture == last,
           "bad binding discarded previous texture");
     b.get_mut<ParticleEmitter3D>()->texture_asset.id.clear();
-    check(resolve_particles3d_assets(*session.world(), assets).empty() &&
+    check(resolve_particles3d_assets(*session.world(), assets).diagnostics.empty() &&
               !b.get<ParticleEmitter3D>()->system.desc.look.texture,
           "empty texture did not restore procedural particles");
     b.get_mut<ParticleEmitter3D>()->system.desc.look.texture = texture;
-    check(resolve_particles3d_assets(*session.world(), assets).empty() &&
+    check(resolve_particles3d_assets(*session.world(), assets).diagnostics.empty() &&
               b.get<ParticleEmitter3D>()->system.desc.look.texture == texture,
           "empty authored ref cleared a C++ texture");
     auto* active = session.world();
     const auto hash = a.get<ParticleEmitter3D>()->system.state_hash();
     write(scratch.path / "shared pixel.png", "broken");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed && session.world() == active &&
-              a.get<ParticleEmitter3D>()->system.state_hash() == hash,
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
+              session.world() == active && a.get<ParticleEmitter3D>()->system.state_hash() == hash,
           "bad texture reload replaced simulation");
     ok(session.step(1.f / 60), "last good effect cannot continue");
     write(scratch.path / "shared pixel.png", png);
-    check(session.reload_if_changed() == SceneSession3DReload::Activated && session.world() != active,
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
+              session.world() != active,
           "particle texture reload failed to recover");
     a = emitter(*session.instance(), "left");
     check(a.get<ParticleEmitter3D>()->system.time() == 0 &&
@@ -254,9 +264,11 @@ void particle_gpu(Renderer2D& renderer) {
     write(
         scratch.path / "effect.kinprefab",
         std::string(config).replace(config.find(capacity_field), capacity_field.size(), "\"max_particles\":999999999"));
-    check(session.reload_if_changed() == SceneSession3DReload::Failed, "oversized prefab capacities accepted");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
+          "oversized prefab capacities accepted");
     write(scratch.path / "effect.kinprefab", config);
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "valid prefab edit did not recover");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "valid prefab edit did not recover");
     Scratch archive;
     check(write_content_pack(scratch.path, archive.path / "effects.kinpak").ok, "effect pack failed");
     const auto mount = archive.path / "virtual";

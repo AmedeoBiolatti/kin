@@ -1328,6 +1328,13 @@ struct ScriptDialoguePlayerApi {
 
 } // namespace
 
+EcsEntity scripting_detail::script_entity(const sol::object& object) {
+    if (!object.is<ScriptEntityApi>())
+        throw std::runtime_error("expected a KinEntity");
+    const auto& value = object.as<const ScriptEntityApi&>();
+    return value.scene && !value.scene->closing && value.entity.alive() ? value.entity : EcsEntity{};
+}
+
 void scripting_detail::script_component_access(std::string_view component, bool write) {
     warn_undeclared_script_access(write ? "write" : "read", component);
 }
@@ -1552,6 +1559,11 @@ bool ScriptEngine::call_optional_const(std::string_view name, Args&&... args) co
 }
 
 void ScriptEngine::register_bindings() {
+    _impl->lua.registry()["kin.entity"] = [this](EcsEntity e) {
+        if (!_impl->host || _impl->host->closing || !e || e.raw().world().c_ptr() != _impl->host->world->raw().c_ptr())
+            throw std::runtime_error("entity does not belong to this Lua scene");
+        return ScriptEntityApi{_impl->host.get(), e};
+    };
     scripting_detail::bind_l10n(_impl->lua, true);
     _impl->lua.new_usertype<ScriptEntityApi>("KinEntity",
         sol::no_constructor,

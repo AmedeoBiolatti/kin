@@ -319,7 +319,8 @@ f64 dot64(Vec3f a, Vec3f b) {
 // Clip an obstacle against the vertical prism over a floor triangle. This tests
 // the entire footprint, not a few upward samples (a small/slanted ceiling can
 // fall between those). Obstacle winding does not matter.
-bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 3>& obstacle, Vec3f up, f32 height) {
+bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 3>& obstacle, Vec3f up, f32 height,
+                     const std::array<u32, 3>& neighbors) {
     // Relative coordinates avoid cancellation of large world-space plane offsets.
     std::vector<Vec3f> polygon, clipped;
     for (const auto point : obstacle)
@@ -344,7 +345,11 @@ bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 
     };
     for (u32 edge = 0; edge < 3 && !polygon.empty(); ++edge) {
         const auto inward = normalize(cross(up, floor[(edge + 1) % 3] - floor[edge]));
-        clip(inward, -dot64(inward, floor[edge] - floor[0]));
+        // Boundary-only contact (a stair riser or an adjacent uphill face)
+        // does not occupy the floor interior. Keep a world-space tolerance.
+        // Across an interior floor portal, a wall still blocks crossing.
+        // Exposed tread edges have no portal to obstruct.
+        clip(inward, -dot64(inward, floor[edge] - floor[0]) - (neighbors[edge] == nav_none ? 1e-5 : 0));
     }
     const auto normal = normalize(cross(floor[1] - floor[0], floor[2] - floor[0]));
     const auto vertical = dot64(normal, up);
@@ -442,48 +447,52 @@ std::vector<u32> clear_triangles(const NavMesh3D& mesh, std::span<const Vec3f> v
             high = max3(high, high + rise);
             keep[t] = !any_overlap(obstacles, low, high, stack, [&](u32 other) {
                 const auto& v = obstacles.triangles[other].vertices;
-                return blocks_headroom(
-                    floor, {obstacles.vertices[v[0]], obstacles.vertices[v[1]], obstacles.vertices[v[2]]}, up, height);
+                return blocks_headroom(floor,
+                                       {obstacles.vertices[v[0]], obstacles.vertices[v[1]], obstacles.vertices[v[2]]},
+                                       up, height, mesh.triangles[t].neighbors);
             });
         }
     }
     if (mesh.options.agent_radius > 0) {
-        NavMesh3D borders;
-        borders.vertices.reserve(mesh.vertices.size());
+        // Follow the local floor topology, rather than every border in a region:
+        // a ramp can connect vertically overlapping floors in the same region.
+        // Only traverse triangles within radius of this footprint. A distant
+        // connection cannot bring a balcony's projected border down to the ground.
+        const auto walkable = keep;
+        std::vector<Vec3f> projected;
+        projected.reserve(mesh.vertices.size());
         for (const auto vertex : mesh.vertices)
-            borders.vertices.push_back(flat(vertex, up));
-        for (u32 t = 0; t < mesh.triangles.size(); ++t)
-            if (keep[t]) {
-                const auto& triangle = mesh.triangles[t];
-                for (u32 i = 0; i < 3; ++i)
-                    if (triangle.neighbors[i] == nav_none || !keep[triangle.neighbors[i]]) {
-                        const auto a = triangle.vertices[i], b = triangle.vertices[(i + 1) % 3];
-                        NavTriangle3D edge;
-                        edge.vertices = {a, b, b};
-                        edge.region = triangle.region;
-                        edge.centroid = (borders.vertices[a] + borders.vertices[b]) * .5f;
-                        borders.triangles.push_back(edge);
-                    }
-            }
-        if (!borders.triangles.empty())
-            build_tree(borders);
-        const Vec3f margin{mesh.options.agent_radius, mesh.options.agent_radius, mesh.options.agent_radius};
+            projected.push_back(flat(vertex, up));
+        std::vector<u32> visited(mesh.triangles.size(), nav_none);
         const f64 radius_squared = f64(mesh.options.agent_radius) * mesh.options.agent_radius;
-        for (u32 t = 0; t < mesh.triangles.size(); ++t)
-            if (keep[t]) {
-                const auto& ids = mesh.triangles[t].vertices;
-                const std::array<Vec3f, 3> floor{borders.vertices[ids[0]], borders.vertices[ids[1]],
-                                                 borders.vertices[ids[2]]};
-                const auto low = min3(floor[0], min3(floor[1], floor[2])) - margin;
-                const auto high = max3(floor[0], max3(floor[1], floor[2])) + margin;
-                if (any_overlap(borders, low, high, stack, [&](u32 other) {
-                        const auto& edge = borders.triangles[other];
-                        return edge.region == mesh.triangles[t].region &&
-                               boundary_distance_squared(floor, borders.vertices[edge.vertices[0]],
-                                                         borders.vertices[edge.vertices[1]], up) <= radius_squared;
-                    }))
-                    keep[t] = false;
+        for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+            if (!walkable[t])
+                continue;
+            const auto& ids = mesh.triangles[t].vertices;
+            const std::array<Vec3f, 3> floor{projected[ids[0]], projected[ids[1]], projected[ids[2]]};
+            stack.clear();
+            stack.push_back(t);
+            visited[t] = t;
+            while (!stack.empty() && keep[t]) {
+                const auto current = stack.back();
+                stack.pop_back();
+                const auto& triangle = mesh.triangles[current];
+                for (u32 i = 0; i < 3; ++i) {
+                    const auto a = projected[triangle.vertices[i]], b = projected[triangle.vertices[(i + 1) % 3]];
+                    if (boundary_distance_squared(floor, a, b, up) > radius_squared)
+                        continue;
+                    const auto next = triangle.neighbors[i];
+                    if (next == nav_none || !walkable[next]) {
+                        keep[t] = false;
+                        break;
+                    }
+                    if (visited[next] != t) {
+                        visited[next] = t;
+                        stack.push_back(next);
+                    }
+                }
             }
+        }
     }
     std::vector<u32> result;
     for (u32 t = 0; t < mesh.triangles.size(); ++t)
@@ -1042,8 +1051,8 @@ std::size_t NavMesh3D::memory_bytes() const {
            nodes.capacity() * sizeof(NavMeshNode3D) + node_triangles.capacity() * sizeof(u32);
 }
 
-NavMesh3D build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> indices,
-                          const NavMeshBuildOptions3D& options, std::string* error) {
+static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span<const u32> indices,
+                                      const NavMeshBuildOptions3D& options, std::string* error) {
     if (const std::string why = check_input(vertices, indices, options); !why.empty()) {
         return rejected(why, error);
     }
@@ -1200,7 +1209,7 @@ NavMesh3D build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> 
         point_options.agent_height = point_options.agent_radius = 0;
         NavMesh3D result;
         if (!cleared.empty())
-            result = build_navmesh3d(mesh.vertices, cleared, point_options, error);
+            result = build_navmesh3d_impl(mesh.vertices, cleared, point_options, error);
         result.options = mesh.options;
         return result;
     }
@@ -1214,17 +1223,25 @@ NavMesh3D build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> 
     build_tree(mesh);
     return mesh;
 }
+Result3D<NavMesh3D> build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> indices,
+                                    const NavMeshBuildOptions3D& options) {
+    std::string why;
+    auto value = build_navmesh3d_impl(vertices, indices, options, &why);
+    if (!why.empty())
+        return {std::nullopt, {"build_navmesh3d: " + why}};
+    return result3d(std::move(value));
+}
 
 #ifdef KIN_EXPERIMENTAL_3D
-NavMesh3D build_navmesh3d(const MeshData3D& mesh, const Mat4f& transform, const NavMeshBuildOptions3D& options,
-                          std::string* error) {
+static NavMesh3D build_navmesh3d_impl(const MeshData3D& mesh, const Mat4f& transform,
+                                      const NavMeshBuildOptions3D& options, std::string* error) {
     std::vector<Vec3f> positions;
     positions.reserve(mesh.vertices.size());
     for (const MeshVertex3D& v : mesh.vertices) {
         positions.push_back(transform.apply(v.position));
     }
     if (transform.determinant() >= 0.0f || (mesh.indices.empty() && positions.size() % 3 != 0)) {
-        return build_navmesh3d(positions, mesh.indices, options, error);
+        return build_navmesh3d_impl(positions, mesh.indices, options, error);
     }
     // A mirroring transform turns the triangles over: wind them back.
     std::vector<u32> indices = mesh.indices;
@@ -1235,7 +1252,15 @@ NavMesh3D build_navmesh3d(const MeshData3D& mesh, const Mat4f& transform, const 
     for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
         std::swap(indices[i + 1], indices[i + 2]);
     }
-    return build_navmesh3d(positions, indices, options, error);
+    return build_navmesh3d_impl(positions, indices, options, error);
+}
+Result3D<NavMesh3D> build_navmesh3d(const MeshData3D& mesh, const Mat4f& transform,
+                                    const NavMeshBuildOptions3D& options) {
+    std::string why;
+    auto value = build_navmesh3d_impl(mesh, transform, options, &why);
+    if (!why.empty())
+        return {std::nullopt, {"build_navmesh3d: " + why}};
+    return result3d(std::move(value));
 }
 #endif
 

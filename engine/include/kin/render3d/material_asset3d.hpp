@@ -1,6 +1,6 @@
 #pragma once
-
 #include <filesystem>
+#include <kin/render3d/errors3d.hpp>
 #include <kin/render3d/scene3d.hpp>
 #include <map>
 #include <string>
@@ -40,14 +40,10 @@ struct MaterialsAsset3D {
     MaterialVariant3D base;
     std::map<std::string, MaterialVariant3D> variants;
 };
-struct MaterialsLoadResult3D {
-    std::optional<MaterialsAsset3D> asset;
-    std::vector<std::string> diagnostics;
-    bool ok() const { return asset.has_value() && diagnostics.empty(); }
-};
+
 // CPU-only; 1 MiB per source, 128 variants, 256 part rules per layer.
-MaterialsLoadResult3D parse_materials3d_asset(std::string_view text, const std::filesystem::path& source = {});
-MaterialsLoadResult3D load_materials3d_asset(const std::filesystem::path& source);
+Result3D<MaterialsAsset3D> parse_materials3d_asset(std::string_view text, const std::filesystem::path& source = {});
+Result3D<MaterialsAsset3D> load_materials3d_asset(const std::filesystem::path& source);
 
 // Only materials/textures are owned; meshes and models are never copied or
 // pinned. Binding identity prevents stale overrides after a model replacement.

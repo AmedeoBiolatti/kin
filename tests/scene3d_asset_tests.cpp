@@ -20,7 +20,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* message) {
+void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
 }
@@ -47,7 +47,7 @@ constexpr auto prefab_text = R"json({
       "RigidBody3D":{"motion":"kinematic"}}},
     {"id":"lamp","parent":"root","components":{
       "Transform3D":{"position":{"x":0,"y":2,"z":0}},
-      "PointLight3D":{"color":[2,1,0.5],"shadows":true}}}
+      "PointLight3D":{"color":[2,1,0.5],"shadow_enabled":true}}}
   ]})json";
 constexpr auto scene_text = R"json({
   "schema":"kin.scene/1", "name":"Authored 3D", "entities":[], "prefabs":[
@@ -108,7 +108,7 @@ void codecs_and_shared_tools() {
     check(!world.components().patch_field(first.root, "Collider3D", "kind", std::string("convex")),
           "enum adapter accepted unsupported shape");
     check(first.root.get<Collider3D>()->kind == Collider3D::Kind::Box, "failed enum patch mutated collider");
-    check(first.by_authored_id.at("lamp").get<PointLight3D>()->shadow.enabled, "nested property not authored");
+    check(first.by_authored_id.at("lamp").get<PointLight3D>()->shadow_enabled, "nested property not authored");
 
     const auto document = scene_document_from_prefab_asset(*loaded.prefab);
     auto rebuilt =
@@ -175,11 +175,11 @@ void authorable_api_settings() {
         "sky_light_threshold":0.02,"sky_light_interval":3,"fog_color":[2,3,4],
         "lod_enabled":true,"lod_error_pixels":2,"lod_bias":1.5,"lod_max_cluster_triangles":12345}}},
       {"id":"lamp","components":{"Transform3D":{},"PointLight3D":{
-        "color":[6,3,1],"shadows":true,"shadow_resolution":512,"shadow_bias":0.7,
-        "shadow_normal_offset":0.8,"shadow_near":0.1,"shadow_distance":4,"shadow_softness":1.2}}},
+        "color":[6,3,1],"shadow_enabled":true,"shadow_resolution":512,"shadow_bias":0.7,
+        "shadow_normal_offset":0.8,"shadow_near_plane":0.1,"shadow_distance":4,"shadow_softness":1.2}}},
       {"id":"cone","components":{"Transform3D":{},"SpotLight3D":{
-        "shadows":true,"shadow_resolution":256,"shadow_bias":0.4,"shadow_normal_offset":0.9,
-        "shadow_near":0.2,"shadow_distance":5,"shadow_softness":1.3}}}
+        "shadow_enabled":true,"shadow_resolution":256,"shadow_bias":0.4,"shadow_normal_offset":0.9,
+        "shadow_near_plane":0.2,"shadow_distance":5,"shadow_softness":1.3}}}
     ]})",
                                    world.components());
     check(asset.ok(), "extended light/sky settings rejected");
@@ -192,7 +192,7 @@ void authorable_api_settings() {
     view.pick = true;
     for (int frame = 0; frame < 2; ++frame) {
         scene.clear();
-        check(apply_scene3d_settings(world, scene, &view).empty(), "settings failed to apply");
+        check(apply_scene3d_settings(world, scene, &view).diagnostics.empty(), "settings failed to apply");
         state.collect(scene);
         check(scene.lights.sun.color.r == 4 && scene.lights.ground_ambient.enabled &&
                   scene.lights.ground_ambient.color.b == .3f,
@@ -202,13 +202,22 @@ void authorable_api_settings() {
               "typed sky/fog settings lost");
         check(scene.lod.enabled && scene.lod.max_cluster_triangles == 12345 && scene.lod.bias == 1.5f && view.pick,
               "authored quality or game-owned picking lost");
-        check(scene.lights.points.size() == 1 && scene.lights.points[0].shadow.resolution == 512 &&
-                  scene.lights.points[0].shadow.bias == .7f && scene.lights.points[0].shadow.near_plane == .1f,
+        check(scene.lights.points.size() == 1 && scene.lights.points[0].shadow_resolution == 512 &&
+                  scene.lights.points[0].shadow_bias == .7f && scene.lights.points[0].shadow_near_plane == .1f,
               "point shadow settings lost");
-        check(scene.lights.spots.size() == 1 && scene.lights.spots[0].shadow.resolution == 256 &&
-                  scene.lights.spots[0].shadow.softness == 1.3f,
+        check(scene.lights.spots.size() == 1 && scene.lights.spots[0].shadow_resolution == 256 &&
+                  scene.lights.spots[0].shadow_softness == 1.3f,
               "spot shadow settings lost");
     }
+    const auto legacy = parse_scene_asset(
+        R"({"entities":[{"id":"legacy","components":{"PointLight3D":{"shadows":true,"shadow_near":0.1}}}]})",
+        world.components());
+    check(!legacy.ok(), "removed local-light schema was silently accepted");
+    const auto lamp_entity = instance.by_authored_id.at("lamp");
+    check(!world.components().patch_field(lamp_entity, "PointLight3D", "shadows", true),
+          "removed light field remained writable");
+    check(!world.components().patch_field(lamp_entity, "PointLight3D", "shadow_near", f32{.1f}),
+          "removed near-plane field remained writable");
     auto saved = build_scene_asset(world);
     check(saved.ok(), "extended settings save failed");
     std::ostringstream text;
@@ -239,11 +248,11 @@ void authorable_api_settings() {
     const auto& ground = inactive_instance.by_authored_id.at("env").get<SceneEnvironment3D>()->lights.ground_ambient;
     check(!ground.enabled && ground.color.b == .6f, "inactive RGB value or enable flag changed on reload");
 
-    check(!world.components().patch_field(instance.by_authored_id.at("lamp"), "PointLight3D", "shadow_near", f32{0}),
+    check(!world.components().patch_field(instance.by_authored_id.at("lamp"), "PointLight3D", "shadow_near_plane", f32{0}),
           "invalid shadow near plane accepted");
     const auto old = scene.sky;
     environment.get_mut<SceneEnvironment3D>()->sky.moon_color.r = std::numeric_limits<f32>::quiet_NaN();
-    check(!apply_scene3d_settings(world, scene).empty() && scene.sky.moon_color == old.moon_color,
+    check(!apply_scene3d_settings(world, scene).diagnostics.empty() && scene.sky.moon_color == old.moon_color,
           "invalid direct RGB edit partially applied");
 }
 
@@ -274,7 +283,7 @@ void authored_settings_and_animation() {
     state.propagate_transforms();
     Scene3D scene;
     ViewOptions3D view;
-    check(apply_scene3d_settings(world, scene, &view).empty(), "camera/environment application failed");
+    check(apply_scene3d_settings(world, scene, &view).diagnostics.empty(), "camera/environment application failed");
     check(near(scene.camera.position, {14, 2, 0}) && near(scene.camera.forward(), {-1, 0, 0}) &&
               scene.camera.fov == 75 && std::isinf(scene.camera.z_far),
           "authored parented camera pose/projection lost");
@@ -289,16 +298,16 @@ void authored_settings_and_animation() {
     auto camera = instance.by_authored_id.at("camera");
     check(world.components().patch_field(camera, "SceneCamera3D", "far", f32{.01f}), "far edit rejected prematurely");
     const auto previous = scene.camera;
-    check(apply_scene3d_settings(world, scene).size() == 1 && near(scene.camera.position, previous.position) &&
+    check(apply_scene3d_settings(world, scene).diagnostics.size() == 1 && near(scene.camera.position, previous.position) &&
               scene.camera.z_far == previous.z_far,
           "invalid projection partially applied");
     auto environment = instance.by_authored_id.at("environment");
     check(world.components().patch_field(environment, "SceneEnvironment3D", "samples", u32{64}), "sample edit failed");
-    check(apply_scene3d_settings(world, scene, &view).size() == 2 && view.samples == 4,
+    check(apply_scene3d_settings(world, scene, &view).diagnostics.size() == 2 && view.samples == 4,
           "invalid environment partially applied");
     camera.get_mut<SceneCamera3D>()->enabled = false;
     environment.get_mut<SceneEnvironment3D>()->enabled = false;
-    check(apply_scene3d_settings(world, scene).empty(), "disabled settings still applied");
+    check(apply_scene3d_settings(world, scene).diagnostics.empty(), "disabled settings still applied");
 
     kin::EcsWorld animation;
     register_builtin_editor_components(animation);
@@ -306,7 +315,7 @@ void authored_settings_and_animation() {
     auto prefab = load_prefab_asset(root / "prefabs/survivor.kinprefab", animation.components());
     check(prefab.ok(), "authored animator prefab rejected");
     auto actor = instantiate_prefab(animation, *prefab.prefab, {}, animation.components());
-    check(actor.ok() && resolve_animator3d_assets(animation, root).empty(), "CPU-only animator asset binding failed");
+    check(actor.ok() && resolve_animator3d_assets(animation, root).diagnostics.empty(), "CPU-only animator asset binding failed");
     const auto config = actor.root.get<AnimatorAsset3D>()->configuration;
     auto* animator = actor.root.get_mut<Animator3D>();
     check(config && animator->machine && animator->blend_spaces.at("ground").entries.size() == 3 &&
@@ -316,13 +325,13 @@ void authored_settings_and_animation() {
     const auto* transition = evaluate(*animator->machine, "ground", animator->params);
     check(transition && transition->to == "air", "shared kinanim machine transition failed");
     animator->state = "air";
-    check(resolve_animator3d_assets(animation, root).empty() && actor.root.get<Animator3D>()->state == "air" &&
+    check(resolve_animator3d_assets(animation, root).diagnostics.empty() && actor.root.get<Animator3D>()->state == "air" &&
               actor.root.get<AnimatorAsset3D>()->configuration == config,
           "unchanged explicit resolution reset animation");
     check(animation.components().patch_field(actor.root, "AnimatorAsset3D", "asset",
                                              ComponentAssetRef{"missing.kinanimator"}),
           "animator ref patch failed");
-    auto errors = resolve_animator3d_assets(animation, root);
+    auto errors = resolve_animator3d_assets(animation, root).diagnostics;
     check(errors.size() == 1 && errors[0].find("missing.kinanimator") != std::string::npos &&
               actor.root.get<AnimatorAsset3D>()->configuration == config,
           "invalid animator replacement discarded last good data");
@@ -332,14 +341,14 @@ void authored_settings_and_animation() {
         << R"({"schema":"kin.animator3d/1","layers":[{"clip":"Idle","mask_joint":"spine","weight":0.4,"additive":true}],"fades":[{"seconds":0.3}]})";
     check(animation.components().patch_field(actor.root, "AnimatorAsset3D", "asset", ComponentAssetRef{path.string()}),
           "layer config ref failed");
-    check(resolve_animator3d_assets(animation, root).empty(), "layer/fade asset rejected");
+    check(resolve_animator3d_assets(animation, root).diagnostics.empty(), "layer/fade asset rejected");
     animator = actor.root.get_mut<Animator3D>();
     check(!animator->machine && animator->layers.size() == 1 && animator->layers[0].mask_joint == "spine" &&
               animator->layers[0].additive && animator->fades.size() == 1,
           "layer/fade configuration lost");
     const auto last_good = actor.root.get<AnimatorAsset3D>()->configuration;
     std::ofstream(path) << R"({"schema":"kin.animator3d/1","layers":[{"clip":"Idle","weght":0.4}]})";
-    const auto malformed = resolve_animator3d_assets(animation, root);
+    const auto malformed = resolve_animator3d_assets(animation, root).diagnostics;
     check(malformed.size() == 1 && malformed[0].find("weght") != std::string::npos &&
               actor.root.get<AnimatorAsset3D>()->configuration == last_good,
           "malformed config did not preserve last good data or diagnose typo");
@@ -361,14 +370,14 @@ void gpu_scene(Renderer2D& renderer) {
     auto left = runtime.instance().prefab_instances.at("left").root;
     auto right = runtime.instance().prefab_instances.at("right").root;
     check(!left.get<ModelRenderer3D>()->model, "instantiation did hidden GPU loading");
-    check(resolve_render3d_assets(world, assets).empty(), "3D asset binding failed");
+    check(resolve_render3d_assets(world, assets).diagnostics.empty(), "3D asset binding failed");
     auto model = left.get<ModelRenderer3D>()->model;
     check(model && model == right.get<ModelRenderer3D>()->model, "prefab instances did not share Assets3D models");
     check(assets.stats().model_loads == 1, "prefab prototypes loaded or duplicate models uploaded");
     const auto base = world.raw().prefab().set(ModelRenderer3D{.asset = {"parts.glb"}});
     auto inherited_a = kin::EcsEntity{world.raw().entity().is_a(base)};
     auto inherited_b = kin::EcsEntity{world.raw().entity().is_a(base)};
-    check(resolve_render3d_assets(world, assets).empty(), "inherited renderer binding failed");
+    check(resolve_render3d_assets(world, assets).diagnostics.empty(), "inherited renderer binding failed");
     check(inherited_a.raw().owns<ModelRenderer3D>() && inherited_b.raw().owns<ModelRenderer3D>() &&
               !base.get<ModelRenderer3D>()->model,
           "binding mutated shared prefab base");
@@ -384,7 +393,7 @@ void gpu_scene(Renderer2D& renderer) {
     scene.camera = Camera3D::look_at({0, 2, 12}, {0, 1, 0}, 60);
     scene.draw(*model, Mat4f::translation({-4, 0, 0}), colors::white, 71);
     scene.draw(*model, Mat4f::translation({3, 0, 0}), colors::white, 82);
-    auto view = r3d.create_view({160, 120}, {.samples = 1});
+    auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
     const auto reference = image(renderer, r3d, view, scene);
     scene.clear();
     state.collect(scene);
@@ -421,14 +430,14 @@ void gpu_scene(Renderer2D& renderer) {
           "authored primitive physics bodies absent");
     check(world.components().patch_field(left, "ModelRenderer3D", "asset", ComponentAssetRef{"late.glb"}),
           "asset ref edit failed");
-    const auto errors = resolve_render3d_assets(world, assets);
+    const auto errors = resolve_render3d_assets(world, assets).diagnostics;
     check(errors.size() == 1 && errors[0].find("late.glb") != std::string::npos &&
               errors[0].find("ModelRenderer3D") != std::string::npos,
           "asset failure diagnostic lacks context");
     check(left.get<ModelRenderer3D>()->model == model && right.get<ModelRenderer3D>()->asset.id == "parts.glb",
           "failed replacement destroyed previous model or sibling");
     std::filesystem::copy_file(scratch.path / "parts.glb", scratch.path / "late.glb");
-    check(resolve_render3d_assets(world, assets).empty() && left.get<ModelRenderer3D>()->model != model,
+    check(resolve_render3d_assets(world, assets).diagnostics.empty() && left.get<ModelRenderer3D>()->model != model,
           "explicit failed-asset retry did not work");
 
     std::weak_ptr<const Model3D> weak = model;
@@ -453,7 +462,7 @@ void gpu_scene(Renderer2D& renderer) {
     check(loaded.ok(), "packed scene load failed");
     auto packed_instance = instantiate_scene_asset(packed_world, *loaded.scene, mount, packed_world.components());
     Assets3D packed_assets{r3d, mount};
-    check(packed_instance.ok() && resolve_render3d_assets(packed_world, packed_assets).empty(),
+    check(packed_instance.ok() && resolve_render3d_assets(packed_world, packed_assets).diagnostics.empty(),
           "packed prefab/model dependencies failed");
     unmount_content_pack(mount);
 
@@ -465,7 +474,7 @@ void gpu_scene(Renderer2D& renderer) {
             std::filesystem::path(KIN_TEST_SUMMIT) / "prefabs/survivor.kinprefab", skin_world.components());
         check(skin_prefab.ok(), "Summit survivor prefab invalid");
         auto survivor = instantiate_prefab(skin_world, *skin_prefab.prefab, {}, skin_world.components());
-        const auto binding_errors = resolve_render3d_assets(skin_world, skin_assets);
+        const auto binding_errors = resolve_render3d_assets(skin_world, skin_assets).diagnostics;
         for (const auto& error : binding_errors)
             std::cerr << error << '\n';
         check(survivor.ok() && binding_errors.empty(), "authored skinned binding failed");
@@ -480,16 +489,16 @@ void gpu_scene(Renderer2D& renderer) {
         check(skin_world.components().patch_field(survivor.root, "AnimatorAsset3D", "asset",
                                                   ComponentAssetRef{invalid_path.string()}),
               "bad clip ref edit failed");
-        const auto invalid_clip = resolve_render3d_assets(skin_world, skin_assets);
+        const auto invalid_clip = resolve_render3d_assets(skin_world, skin_assets).diagnostics;
         check(invalid_clip.size() == 1 && invalid_clip[0].find("AbsentClip") != std::string::npos &&
                   survivor.root.get<AnimatorAsset3D>()->configuration == good_config,
               "bad clip accepted or discarded last good config");
         check(skin_world.components().patch_field(survivor.root, "AnimatorAsset3D", "asset",
                                                   ComponentAssetRef{"animations/survivor.kinanimator"}),
               "restore animator ref failed");
-        check(resolve_render3d_assets(skin_world, skin_assets).empty(), "restore animator binding failed");
+        check(resolve_render3d_assets(skin_world, skin_assets).diagnostics.empty(), "restore animator binding failed");
         skin_assets.clear();
-        check(resolve_render3d_assets(skin_world, skin_assets).empty(), "skinned explicit refresh failed");
+        check(resolve_render3d_assets(skin_world, skin_assets).diagnostics.empty(), "skinned explicit refresh failed");
         check(!animator->bound && animator->clip == "Idle", "skinned refresh failed to reset runtime or erased config");
         skin_state.animate(.1f);
         check(animator->bound != old.get(), "skinned animator kept stale model pointers");
@@ -498,14 +507,14 @@ void gpu_scene(Renderer2D& renderer) {
                                   .set(SkinnedMeshRenderer3D{.asset = {"kenney-character/survivor.glb"}})
                                   .set(Animator3D{.clip = "Idle"});
         auto inherited = kin::EcsEntity{skin_world.raw().entity().is_a(inherited_base)};
-        check(resolve_render3d_assets(skin_world, skin_assets).empty() &&
+        check(resolve_render3d_assets(skin_world, skin_assets).diagnostics.empty() &&
                   inherited.get<SkinnedMeshRenderer3D>()->model && inherited.raw().owns<Animator3D>() &&
                   !inherited_base.get<SkinnedMeshRenderer3D>()->model,
               "skinned binding failed inherited copy-on-write");
         skin_world.entity("bad-static").set(ModelRenderer3D{.asset = {"kenney-character/survivor.glb"}});
         skin_world.entity("bad-skin")
             .set(SkinnedMeshRenderer3D{.asset = {(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb").string()}});
-        const auto incompatible = resolve_render3d_assets(skin_world, skin_assets);
+        const auto incompatible = resolve_render3d_assets(skin_world, skin_assets).diagnostics;
         check(incompatible.size() == 2 && incompatible[0].find("requires") != std::string::npos &&
                   incompatible[1].find("requires") != std::string::npos,
               "incompatible static/skinned asset was accepted");

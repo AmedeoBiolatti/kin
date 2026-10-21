@@ -11,7 +11,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* why) {
+void check(const auto& value, const char* why) {
     if (!value)
         throw std::runtime_error(why);
 }
@@ -156,9 +156,9 @@ void interactions(Renderer2D& renderer) {
             check(bool(interaction.revalidate(queries, observer, locked, describe)), "warmed revalidation failed");
         }
     }
-    auto prepared = session.preload("box.kinprefab");
-    auto pool = session.create_pool(prepared, {.capacity = 1});
-    auto lease = session.spawn(pool, {.position = Vec3f{0, 2, 0}});
+    auto prepared = session.preload("box.kinprefab").value_or({});
+    auto pool = session.create_pool(prepared, {.capacity = 1}).value_or({});
+    auto lease = session.spawn(pool, {.position = Vec3f{0, 2, 0}}).value_or({});
     check(bool(lease), "interaction pool failed");
     const InteractionFocus3D pooled{lease.root, 3};
     auto any = [](kin::EcsEntity e) -> std::optional<InteractionOffer3D> {
@@ -166,7 +166,7 @@ void interactions(Renderer2D& renderer) {
     };
     check(bool(proximity.revalidate(queries, observer, pooled, any)), "live pool target rejected");
     check(session.despawn(lease), "pool return failed");
-    auto renewed = session.spawn(pool, {.position = Vec3f{0, 2, 0}});
+    auto renewed = session.spawn(pool, {.position = Vec3f{0, 2, 0}}).value_or({});
     check(renewed.root.entity == lease.root.entity && renewed.root != lease.root &&
               !proximity.revalidate(queries, observer, pooled, any),
           "old interaction selected recycled lease");

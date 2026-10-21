@@ -73,7 +73,7 @@ public:
         ++_steps;
     }
     void render(SceneContext& context) override {
-        if (!_session->render())
+        if (!_session->render(context.app.headless() ? 1.f : context.alpha))
             throw std::runtime_error(errors());
         context.renderer.clear();
         context.renderer.draw_texture(_session->view()->texture(), {0, 0, 960, 540});

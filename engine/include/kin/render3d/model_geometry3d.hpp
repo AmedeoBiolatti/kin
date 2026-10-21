@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <kin/core/math3d.hpp>
+#include <kin/render3d/errors3d.hpp>
 #include <string>
 #include <vector>
 namespace kin {
@@ -15,7 +16,6 @@ struct ModelGeometry3D {
 };
 // CPU-only static geometry using the existing glTF parser and node transforms.
 // Checks buffer/accessor budgets before allocating geometry. No textures,
-// normals, animation, skinning or GPU copies; failure retains the old output.
-bool read_model_geometry3d(const std::filesystem::path& path, ModelGeometry3D& out, ModelGeometryLimits3D limits = {},
-                           std::string* error = nullptr);
+// normals, animation, skinning or GPU copies; a failed result has no geometry payload.
+Result3D<ModelGeometry3D> read_model_geometry3d(const std::filesystem::path& path, ModelGeometryLimits3D limits = {});
 } // namespace kin

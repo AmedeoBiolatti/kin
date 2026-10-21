@@ -15,8 +15,8 @@ namespace kin {
 // them. Renderer3D and its Renderer2D must outlive this library and its handles.
 //
 //   Assets3D art{r3d, content_root()};
-//   auto tree = art.load_model("trees/pine.glb");
-//   if (tree) scene.draw(*tree, tree->placement({.position = {2, 0, 0}}));
+//   auto tree = art.load_model("trees/pine.glb").value_or({});
+//   if (tree) scene.draw(*tree, tree->placement({.position = {2, 0, 0}}).value_or(Mat4f::identity()));
 //
 // Paths are relative to the fixed root (absolute paths are accepted). Lexical
 // aliases share a key; symlink aliases do not. Mounted content packs work as
@@ -55,18 +55,18 @@ public:
     // transforms and skins, each with an empty mesh handle that keeps its vertex/index counts, bounds and joint count,
     // and the model's skeletons, clips and bounds. No GPU memory; parts keep the default material, and only the model's
     // own file is a source (its images are not decoded).
-    AssetHandle<Model3D> load_model(const std::filesystem::path& path);
-    AssetHandle<Model3D> load_model(const std::filesystem::path& path, const MeshOptions3D& options);
+    Result3D<AssetHandle<Model3D>> load_model(const std::filesystem::path& path);
+    Result3D<AssetHandle<Model3D>> load_model(const std::filesystem::path& path, const MeshOptions3D& options);
     // Shares the same role/filter-aware texture cache as imported glTF maps.
-    Texture load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true);
+    Result3D<Texture> load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true);
     // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials
     // naming a shader still bind.
-    MaterialShader3D load_material_shader(const std::filesystem::path& path);
+    Result3D<MaterialShader3D> load_material_shader(const std::filesystem::path& path);
     // Patches imported materials without cloning any model/mesh. Empty variant
     // selects the base layer. Invalidate changed sources explicitly before rebinding.
-    AssetHandle<MaterialBinding3D> load_materials(const std::filesystem::path& path,
-                                                  const std::shared_ptr<const Model3D>& model,
-                                                  std::string_view variant = {});
+    Result3D<AssetHandle<MaterialBinding3D>> load_materials(const std::filesystem::path& path,
+                                                            const std::shared_ptr<const Model3D>& model,
+                                                            std::string_view variant = {});
     // Forget expired weak entries; no live resource is unloaded.
     void trim();
     // Forget all model/texture lookups. Existing handles, batches and scenes
@@ -81,6 +81,13 @@ public:
     const Diagnostics3D& diagnostics() const;
 
 private:
+    AssetHandle<Model3D> load_model_operation(const std::filesystem::path& path, const MeshOptions3D& options);
+    AssetHandle<Model3D> load_model_operation(const std::filesystem::path& path);
+    Texture load_texture_operation(const std::filesystem::path& path, bool nearest = false, bool srgb = true);
+    MaterialShader3D load_material_shader_operation(const std::filesystem::path& path);
+    AssetHandle<MaterialBinding3D> load_materials_operation(const std::filesystem::path& path,
+                                                            const std::shared_ptr<const Model3D>& model,
+                                                            std::string_view variant = {});
     friend class Renderer3D;
     Texture share_texture(const std::filesystem::path& source, u32 embedded_image, bool nearest, bool srgb,
                           const std::function<Texture()>& load);

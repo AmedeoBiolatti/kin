@@ -11,7 +11,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* why) {
+void check(const auto& value, const char* why) {
     if (!value)
         throw std::runtime_error(why);
 }
@@ -67,7 +67,7 @@ void attachments(Renderer3D& renderer) {
     auto tube = skin_fixtures::make_tube(4, 3, 2, .1f);
     auto model = std::make_shared<Model3D>();
     model->skeletons.push_back(tube.skeleton);
-    model->parts.push_back({.mesh = renderer.create_mesh(tube.mesh), .skin = 0});
+    model->parts.push_back({.mesh = renderer.create_mesh(tube.mesh).value_or({}), .skin = 0});
     AnimClip3D clip;
     clip.name = "bend";
     clip.duration = 1;
@@ -76,7 +76,7 @@ void attachments(Renderer3D& renderer) {
     clip.channels[1].rotation.values = {{}, Quatf::axis_angle({0, 0, 1}, 60)};
     model->clips.push_back(std::move(clip));
     auto box = std::make_shared<Model3D>();
-    box->parts.push_back({.mesh = renderer.create_mesh(meshes::box({.1f, .1f, .1f}))});
+    box->parts.push_back({.mesh = renderer.create_mesh(meshes::box({.1f, .1f, .1f})).value_or({})});
     Assets3D assets{renderer, scratch.path};
     SceneSession3DOptions options;
     options.viewport = {160, 120};
@@ -88,20 +88,26 @@ void attachments(Renderer3D& renderer) {
                                     .single_threaded = true};
     SceneSession3D session{renderer, assets, options};
     check(session.load("level.kinscene"), "attachment level failed");
-    auto character =
-        session.spawn("actor.kinprefab", {.position = Vec3f{2, 1, 0}, .configure = [&](SceneSpawnContext3D& created) {
-                                              created.root.set(SkinnedMeshRenderer3D{.model = model});
-                                              Animator3D animator;
-                                              animator.clip = "bend";
-                                              created.root.set(std::move(animator));
-                                          }});
+    auto character = session
+                         .spawn("actor.kinprefab", {.position = Vec3f{2, 1, 0},
+                                                    .configure =
+                                                        [&](SceneSpawnContext3D& created) {
+                                                            created.root.set(SkinnedMeshRenderer3D{.model = model});
+                                                            Animator3D animator;
+                                                            animator.clip = "bend";
+                                                            created.root.set(std::move(animator));
+                                                        }})
+                         .value_or({});
     check(bool(character), "actor spawn failed");
     const auto offset = Mat4f::translation({.1f, 0, 0}) * Mat4f::rotation(Quatf::axis_angle({0, 1, 0}, 25));
-    auto item = session.spawn(
-        "item.kinprefab", {.configure = [&](SceneSpawnContext3D& created) {
-            created.root.set(ModelRenderer3D{.model = box}).set(JointAttachment3D{character.root, "top", offset});
-            created.entity("light").set(ModelRenderer3D{.model = box});
-        }});
+    auto item = session
+                    .spawn("item.kinprefab", {.configure =
+                                                  [&](SceneSpawnContext3D& created) {
+                                                      created.root.set(ModelRenderer3D{.model = box})
+                                                          .set(JointAttachment3D{character.root, "top", offset});
+                                                      created.entity("light").set(ModelRenderer3D{.model = box});
+                                                  }})
+                    .value_or({});
     check(bool(item), "item spawn failed");
     auto actor = session.resolve(character.root), root = session.resolve(item.root);
     flecs::entity child;
@@ -209,16 +215,16 @@ void attachments(Renderer3D& renderer) {
     check(session.despawn(character) && session.collect() &&
               attachment->status() == JointAttachmentStatus3D::MissingTarget && !has_draw(*session.scene(), root.id()),
           "despawned actor left an attachment draw");
-    auto prepared = session.preload("actor.kinprefab");
-    auto pool = session.create_pool(prepared, {.capacity = 1});
-    auto lease = session.spawn(pool);
+    auto prepared = session.preload("actor.kinprefab").value_or({});
+    auto pool = session.create_pool(prepared, {.capacity = 1}).value_or({});
+    auto lease = session.spawn(pool).value_or({});
     check(bool(lease), "target pool failed");
     auto pooled = session.resolve(lease.root);
     pooled.set(SkinnedMeshRenderer3D{.model = replaced});
     check(attachment->configure(lease.root, "top") && session.collect() && attachment->placement(),
           "rest-pose target failed");
     check(session.despawn(lease), "target pool release failed");
-    auto renewed = session.spawn(pool);
+    auto renewed = session.spawn(pool).value_or({});
     session.resolve(renewed.root).set(SkinnedMeshRenderer3D{.model = replaced});
     check(renewed.root.entity == lease.root.entity && session.collect() &&
               attachment->status() == JointAttachmentStatus3D::MissingTarget,
@@ -226,18 +232,21 @@ void attachments(Renderer3D& renderer) {
     check(attachment->configure(renewed.root, "top") && session.collect() && attachment->placement(),
           "renewed target explicit binding failed");
     // Returned attachment slots must discard their runtime binding/cache.
-    auto item_prepared = session.preload("item.kinprefab");
-    auto item_pool = session.create_pool(item_prepared, {.capacity = 1});
-    auto slot = session.spawn(item_pool);
+    auto item_prepared = session.preload("item.kinprefab").value_or({});
+    auto item_pool = session.create_pool(item_prepared, {.capacity = 1}).value_or({});
+    auto slot = session.spawn(item_pool).value_or({});
     session.resolve(slot.root).set(JointAttachment3D{renewed.root, "top"});
     check(session.despawn(slot), "attachment pool release failed");
-    auto next = session.spawn(item_pool);
+    auto next = session.spawn(item_pool).value_or({});
     check(!session.resolve(next.root).has<JointAttachment3D>(), "pooled attachment inherited old binding");
     std::vector<ScenePrefab3D> extras;
     for (std::size_t i = 0; i < max_joint_attachments3d; ++i) {
-        auto extra = session.spawn("item.kinprefab", {.configure = [&](SceneSpawnContext3D& created) {
-                                       created.root.set(JointAttachment3D{renewed.root, "top"});
-                                   }});
+        auto extra = session
+                         .spawn("item.kinprefab", {.configure =
+                                                       [&](SceneSpawnContext3D& created) {
+                                                           created.root.set(JointAttachment3D{renewed.root, "top"});
+                                                       }})
+                         .value_or({});
         check(bool(extra), "attachment budget fixture spawn failed");
         extras.push_back(extra);
     }
@@ -250,9 +259,12 @@ void attachments(Renderer3D& renderer) {
     check(ready == max_joint_attachments3d && limited == 1, "attachment budget did not fail closed at fixed capacity");
     const auto stale = *attachment;
     check(session.reload(), "attachment scene reload failed");
-    auto fresh = session.spawn("item.kinprefab", {.configure = [&](SceneSpawnContext3D& created) {
-                                   created.root.set(ModelRenderer3D{.model = box}).set(stale);
-                               }});
+    auto fresh = session
+                     .spawn("item.kinprefab", {.configure =
+                                                   [&](SceneSpawnContext3D& created) {
+                                                       created.root.set(ModelRenderer3D{.model = box}).set(stale);
+                                                   }})
+                     .value_or({});
     check(session.collect() && !has_draw(*session.scene(), session.resolve(fresh.root).id()) &&
               session.resolve(fresh.root).get<JointAttachment3D>()->status() == JointAttachmentStatus3D::MissingTarget,
           "reload copied attachment followed stale target");

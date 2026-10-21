@@ -1,3 +1,5 @@
+#include "result3d_helpers.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -18,7 +20,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* message) {
+void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
 }
@@ -116,7 +118,7 @@ void gpu_live_edits(Renderer2D& renderer) {
     options.max_edit_entities = 16;
     options.max_edit_fields = 8;
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool result, const char* why) {
+    const auto ok = [&](const auto& result, const char* why) {
         if (!result)
             for (const auto& e : session.diagnostics())
                 std::cerr << e << '\n';
@@ -322,7 +324,7 @@ void gpu_session(Renderer2D& renderer) {
             prepared_mesh = entity.get<ModelRenderer3D>()->model->parts[0].mesh.backend();
     };
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool result, const char* message) {
+    const auto ok = [&](const auto& result, const char* message) {
         if (!result)
             for (const auto& error : session.diagnostics())
                 std::cerr << error << '\n';
@@ -373,7 +375,9 @@ void gpu_session(Renderer2D& renderer) {
     check(session.generation() == generation + 1 && session.view()->backend() == target &&
               session.entity("prop").get<ModelRenderer3D>()->model == model,
           "unchanged reload duplicated art/view or failed to advance generation");
-    check(session.changed_sources().empty() && session.reload_if_changed() == SceneSession3DReload::Unchanged,
+    check(session.changed_sources().empty() &&
+              session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                  SceneSession3DReload::Unchanged,
           "unchanged sources reloaded");
 
     const auto preserved = [&] {
@@ -385,7 +389,8 @@ void gpu_session(Renderer2D& renderer) {
     initial_world = session.world();
     generation = session.generation();
     write(scratch.path / "test.kinscene", "broken");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed, "broken scene reloaded");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
+          "broken scene reloaded");
     preserved();
     write(scratch.path / "test.kinscene", scene);
     std::filesystem::remove(scratch.path / "prop.kinprefab");
@@ -416,9 +421,11 @@ void gpu_session(Renderer2D& renderer) {
     write(scratch.path / "custom.txt", "updated");
     check(session.changed_sources() == std::vector<std::filesystem::path>{scratch.path / "custom.txt"},
           "custom dependency missing");
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "custom dependency reload failed");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "custom dependency reload failed");
     write(scratch.path / "prop.kinprefab", prefab);
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "prefab edit reload failed");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "prefab edit reload failed");
     check(initialized >= 8, "initialization not rerun on replacement");
     ok(session.resize({192, 128}), "valid viewport resize failed");
     check(session.view()->size() == Vec2i{192, 128}, "view resize ignored");
@@ -432,18 +439,19 @@ void gpu_session(Renderer2D& renderer) {
           "decoded external image dependency absent");
     const auto png = read(scratch.path / "shared pixel.png");
     write(scratch.path / "shared pixel.png", "bad png");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed &&
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
               session.entity("quad").get<ModelRenderer3D>()->model == textured_model,
           "corrupt external texture replaced active model");
     renderer.clear();
     ok(session.render(), "last good textured scene stopped rendering");
     renderer.present();
     write(scratch.path / "shared pixel.png", png);
-    check(session.reload_if_changed() == SceneSession3DReload::Activated &&
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
               session.entity("quad").get<ModelRenderer3D>()->model != textured_model,
           "external image reload reused stale model");
     write(scratch.path / "shared-a.gltf", read(scratch.path / "shared-a.gltf") + "\n");
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "model source edit not reloaded");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "model source edit not reloaded");
 
     // Turn the tiny quad's embedded buffer into an external buffer without
     // another checked-in fixture. The layout is 12 position floats, 8 UV floats,
@@ -460,14 +468,18 @@ void gpu_session(Renderer2D& renderer) {
         bin.write(reinterpret_cast<const char*>(indices), sizeof(indices));
     }
     write(scratch.path / "shared-a.gltf", external);
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "external buffer scene failed");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "external buffer scene failed");
     write(scratch.path / "quad.bin", read(scratch.path / "quad.bin") + std::string(1, '\0'));
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "external buffer edit not reloaded");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "external buffer edit not reloaded");
     std::filesystem::remove(scratch.path / "quad.bin");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed, "missing external buffer accepted");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed,
+          "missing external buffer accepted");
     // Restore the original embedded buffer before archive checks.
     write(scratch.path / "shared-a.gltf", read(std::filesystem::path(KIN_TEST_MODELS) / "shared-a.gltf"));
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "buffer failure did not recover");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "buffer failure did not recover");
 
     std::weak_ptr<IMeshBackend3D> weak = session.entity("quad").get<ModelRenderer3D>()->model->parts[0].mesh.backend();
     session.unload();
@@ -514,7 +526,8 @@ void gpu_session(Renderer2D& renderer) {
         check(packed_session.load("textured.kinscene"), "packed scene load failed");
         mount_content_pack(mount, ContentPack::open(archive));
         check(!packed_session.changed_sources().empty() &&
-                  packed_session.reload_if_changed() == SceneSession3DReload::Activated,
+                  packed_session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                      SceneSession3DReload::Activated,
               "content pack remount not reloaded");
     }
     unmount_content_pack(mount);
@@ -534,12 +547,13 @@ void gpu_session(Renderer2D& renderer) {
         auto* active = nested.world();
         const auto generation = nested.generation();
         write(scratch.path / "leaf.kinprefab", "broken");
-        check(nested.reload_if_changed() == SceneSession3DReload::Failed && nested.world() == active &&
-                  nested.generation() == generation && nested.step(1.f / 60),
+        check(nested.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
+                  nested.world() == active && nested.generation() == generation && nested.step(1.f / 60),
               "bad nested edit discarded active simulation");
         write(scratch.path / "leaf.kinprefab", std::string(leaf) + "\n");
-        check(nested.reload_if_changed() == SceneSession3DReload::Activated && nested.entity("nested.child") &&
-                  nested.physics()->body_count() == 1,
+        check(nested.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                      SceneSession3DReload::Activated &&
+                  nested.entity("nested.child") && nested.physics()->body_count() == 1,
               "nested edit did not recover");
     }
 
@@ -561,11 +575,15 @@ void gpu_session(Renderer2D& renderer) {
         write(scratch.path / "parts.glb", source_model);
         write(scratch.path / "solid.kincollider",
               R"({"schema":"kin.collider3d/1","shape":{"kind":"box","scale":[0,1,1]}})");
-        check(collision.reload_if_changed() == SceneSession3DReload::Failed && collision.world() == active &&
-                  collision.entity("solid").get<Collider3D>()->asset_binding == shape && collision.step(1.f / 60),
+        check(collision.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                      SceneSession3DReload::Failed &&
+                  collision.world() == active && collision.entity("solid").get<Collider3D>()->asset_binding == shape &&
+                  collision.step(1.f / 60),
               "bad collision edit replaced running world");
         write(scratch.path / "solid.kincollider", R"({"schema":"kin.collider3d/1","shape":{"kind":"box"}})");
-        check(collision.reload_if_changed() == SceneSession3DReload::Activated && collision.world() != active,
+        check(collision.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                      SceneSession3DReload::Activated &&
+                  collision.world() != active,
               "collision reload did not recover");
     }
 
@@ -612,16 +630,23 @@ void gpu_session(Renderer2D& renderer) {
                   scratch.path / "animations/survivor.kinanim",
               "machine dependency path absent");
         write(scratch.path / "animations/survivor.kinanim", read(scratch.path / "animations/survivor.kinanim") + "\n");
-        check(session.reload_if_changed() == SceneSession3DReload::Activated, "machine edit not reloaded");
+        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                  SceneSession3DReload::Activated,
+              "machine edit not reloaded");
         const auto config = read(scratch.path / "animations/survivor.kinanimator");
         write(scratch.path / "animations/survivor.kinanimator", config + "\n");
-        check(session.reload_if_changed() == SceneSession3DReload::Activated, "animator config edit not reloaded");
+        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                  SceneSession3DReload::Activated,
+              "animator config edit not reloaded");
         auto* running = session.world();
         write(scratch.path / "animations/survivor.kinanimator", "broken");
-        check(session.reload_if_changed() == SceneSession3DReload::Failed && session.world() == running,
+        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
+                  session.world() == running,
               "broken animator replaced scene");
         write(scratch.path / "animations/survivor.kinanimator", config);
-        check(session.reload_if_changed() == SceneSession3DReload::Activated, "animator failure did not recover");
+        check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) ==
+                  SceneSession3DReload::Activated,
+              "animator failure did not recover");
     }
 }
 
@@ -643,7 +668,7 @@ void gpu_prepared_requests(Renderer2D& renderer) {
                                     .temp_memory_bytes = 1024 * 1024,
                                     .single_threaded = true};
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool result, const char* message) {
+    const auto ok = [&](const auto& result, const char* message) {
         if (!result)
             for (const auto& error : session.diagnostics())
                 std::cerr << error << '\n';
@@ -711,12 +736,14 @@ void headless() {
     {
         const auto path = content / "kenney-character/survivor.glb";
         std::string error;
-        const auto model = assets.load_model("kenney-character/survivor.glb").shared();
+        const auto model = assets.load_model("kenney-character/survivor.glb").value_or({}).shared();
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(model && error.empty() && !model->skeletons.empty() && !model->clips.empty(),
               "CPU model lost its skeleton or clips");
         ModelData3D data;
-        check(read_model_data(*read_content_file(path), path, data), "reference model read failed");
+        std::string _fixture_error;
+        check(kin::test::read_value3d(kin::read_model_data(*read_content_file(path), path), data, _fixture_error),
+              "reference model read failed");
         check(model->parts.size() == data.parts.size() && model->node_skeleton == data.node_skeleton &&
                   model->source_files == std::vector<std::filesystem::path>{path.lexically_normal()},
               "CPU model parts/sources differ");
@@ -733,9 +760,9 @@ void headless() {
                   "CPU model part differs from its data");
         }
         check(model->bounds.max.y > model->bounds.min.y &&
-                  assets.load_model("kenney-character/survivor.glb").shared() == model,
+                  assets.load_model("kenney-character/survivor.glb").value_or({}).shared() == model,
               "CPU model bounds/sharing");
-        check(!assets.load_model("kenney-character/absent.glb") &&
+        check(!assets.load_model("kenney-character/absent.glb").value_or({}) &&
                   !kin::diagnostics3d_text(assets.diagnostics()).empty(),
               "missing CPU model accepted");
     }
@@ -772,7 +799,7 @@ void headless() {
         context.world.entities().find_by_authored_id("blue-barrel").set(AudioEmitter{.cue = "hum"});
     };
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool result, const char* message) {
+    const auto ok = [&](const auto& result, const char* message) {
         if (!result)
             for (const auto& e : session.diagnostics())
                 std::cerr << e << '\n';
@@ -794,14 +821,14 @@ void headless() {
     };
 
     // Spawn, pool, commands, physics, queries and edits, all without a GPU.
-    const auto crate = session.spawn("prefabs/camp-crate.kinprefab", {.position = Vec3f{0, 3, 3}});
+    const auto crate = session.spawn("prefabs/camp-crate.kinprefab", {.position = Vec3f{0, 3, 3}}).value_or({});
     ok(bool(crate), "headless spawn failed");
     const auto crate_entity = session.resolve(crate.root);
-    const auto prepared = session.preload("prefabs/camp-crate.kinprefab");
+    const auto prepared = session.preload("prefabs/camp-crate.kinprefab").value_or({});
     ok(bool(prepared), "headless preload failed");
-    const auto pool = session.create_pool(prepared, {.capacity = 2});
+    const auto pool = session.create_pool(prepared, {.capacity = 2}).value_or({});
     ok(bool(pool), "headless pool failed");
-    const auto pooled = session.spawn(pool, {.position = Vec3f{-3, 2, 3}});
+    const auto pooled = session.spawn(pool, {.position = Vec3f{-3, 2, 3}}).value_or({});
     ok(bool(pooled) && session.pool_stats(pool).active == 1, "headless pool spawn failed");
     auto commands = session.commands();
     EcsCommandBuffer buffer;
@@ -837,7 +864,7 @@ void headless() {
     check(session.scene()->camera.position == Vec3f{0, 3, 8}, "headless collection lost the camera");
     check(!session.render() && session.diagnostics() == std::vector<std::string>{"no renderer"},
           "headless render did not fail with its reason");
-    check(!session.pick({80, 60}) && session.diagnostics() == std::vector<std::string>{"no renderer"},
+    check(!session.pick({80, 60}).value_or({}) && session.diagnostics() == std::vector<std::string>{"no renderer"},
           "headless pick did not fail with its reason");
     const auto generation = session.generation();
     ok(session.reload() && session.generation() == generation + 1 && !session.view(), "headless reload failed");
@@ -863,7 +890,7 @@ void gpu_pick(Renderer2D& renderer) {
     options.warm_up = false;
     options.view.pick = true;
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool result, const char* message) {
+    const auto ok = [&](const auto& result, const char* message) {
         if (!result)
             for (const auto& e : session.diagnostics())
                 std::cerr << e << '\n';
@@ -874,7 +901,7 @@ void gpu_pick(Renderer2D& renderer) {
     ok(session.render(), "pick render failed");
     const auto box = session.entity("box");
     auto tagged = session.entity("tagged");
-    const auto centre = session.pick({80, 60});
+    const auto centre = session.pick({80, 60}).value_or({});
     ok(centre && centre->entity.id() == box.id() && centre->id == u32(box.id() & 0xffffffffu),
        "centre pick did not name the box");
     // The pixel's centre is half a pixel (about 0.04 m there) off the view's.
@@ -884,13 +911,13 @@ void gpu_pick(Renderer2D& renderer) {
     const auto at = session.scene()->camera.project({-3, -2, .5f}, {0, 0, 160, 120});
     check(bool(at), "tagged box off screen");
     const Vec2i tagged_pixel{int(at->pos.x), int(at->pos.y)};
-    const auto custom = session.pick(tagged_pixel);
+    const auto custom = session.pick(tagged_pixel).value_or({});
     ok(custom && custom->entity.id() == tagged.id() && custom->id == 77,
        "pick did not find the renderer with an id of its own");
-    check(!session.pick({2, 2}) && session.diagnostics().empty(), "background pick named something");
+    check(!session.pick({2, 2}).value_or({}) && session.diagnostics().empty(), "background pick named something");
     // The frame keeps its ids; one whose renderer no longer draws names no entity.
     tagged.get_mut<ModelRenderer3D>()->visible = false;
-    const auto hidden = session.pick(tagged_pixel);
+    const auto hidden = session.pick(tagged_pixel).value_or({});
     check(hidden && !hidden->entity && hidden->id == 77, "pick named a hidden renderer");
     renderer.present();
 
@@ -899,7 +926,7 @@ void gpu_pick(Renderer2D& renderer) {
     check(plain.load("pick.kinscene"), "plain pick scene failed");
     renderer.clear();
     check(plain.render(), "plain render failed");
-    check(!plain.pick({80, 60}) && !plain.diagnostics().empty() &&
+    check(!plain.pick({80, 60}).value_or({}) && !plain.diagnostics().empty() &&
               plain.diagnostics()[0].find("view.pick") != std::string::npos,
           "pick without a pick pass did not say why");
     renderer.present();
@@ -924,7 +951,7 @@ void gpu_frame_pick(Renderer2D& renderer) {
     SceneFrame3D frame{world, rendering};
     Scene3D scene;
     ViewOptions3D options{.samples = 4, .pick = true};
-    const auto ok = [&](bool result, const char* message) {
+    const auto ok = [&](const auto& result, const char* message) {
         if (!result)
             for (const auto& e : frame.diagnostics())
                 std::cerr << e << '\n';
@@ -932,14 +959,14 @@ void gpu_frame_pick(Renderer2D& renderer) {
     };
     ok(frame.collect(scene, &options), "frame pick collection failed");
     check(options.samples == 1 && options.pick, "the environment did not set the picture or took the game's pick");
-    auto view = r3d.create_view({160, 120}, options);
+    auto view = r3d.create_view({160, 120}, options).value_or({});
     check(bool(view), "frame pick view creation failed");
     renderer.clear();
     check(r3d.render(view, scene), "frame pick render failed");
     const auto box = level.instance().by_authored_id.at("box");
-    const auto centre = r3d.pick(view, {80, 60});
+    const auto centre = r3d.pick(view, {80, 60}).value_or({});
     check(centre.hit && centre.id == u32(box.id() & 0xffffffffu), "frame pick did not name the box");
-    check(!r3d.pick(view, {2, 2}).hit, "frame background pick named something");
+    check(!r3d.pick(view, {2, 2}).value_or({}).hit, "frame background pick named something");
     renderer.present();
 }
 // The CPU cost of a frame of a session with about 500 entities, printed (no assertion: a machine's speed is not a
@@ -993,7 +1020,7 @@ void gpu_frame_cost(Renderer2D& renderer) {
                                     .single_threaded = true};
     options.particle_limits = {16, 64, 1024};
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool result, const char* why) {
+    const auto ok = [&](const auto& result, const char* why) {
         if (!result)
             for (const auto& e : session.diagnostics())
                 std::cerr << e << '\n';
@@ -1046,7 +1073,7 @@ void gpu_frame_cost(Renderer2D& renderer) {
     t = Clock::now();
     std::size_t errors = 0;
     for (int i = 0; i < 2000; ++i)
-        errors += validate_particles3d(*session.world(), options.particle_limits).size();
+        errors += validate_particles3d(*session.world(), options.particle_limits).diagnostics.size();
     const double validate_us = ms(t) * 1000 / 2000;
     std::cerr << "  propagate_transforms " << propagate_us << " us a call, validate_particles3d " << validate_us
               << " us a call (" << errors << " errors)\n";

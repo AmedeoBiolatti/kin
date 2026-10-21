@@ -1,3 +1,4 @@
+#include "../../tests/result3d_helpers.hpp"
 // Summit's presentation, on the CPU (docs/3d_plan.md, P4b): the HUD model and its layout, the menu, the sound cues and
 // curves, the environment curves, the settings file, and the one thing that matters most: none of it changes the
 // simulation. No window, no GPU, no sound card (audio mixes into the engine's null backend).
@@ -1191,7 +1192,7 @@ void test_look_pass_meshes() {
         for (const auto* set : {&rock, &decor, &terrain}) {
             for (const RenderMeshData& m : *set) {
                 std::string why;
-                valid = valid && m.mesh.validate(&why);
+                valid = valid && kin::test::valid3d(m.mesh.validate(), why);
                 triangles += m.mesh.triangle_count();
                 for (const MeshVertex3D& v : m.mesh.vertices) {
                     finite = finite && std::isfinite(v.position.x) && std::isfinite(v.position.y) &&

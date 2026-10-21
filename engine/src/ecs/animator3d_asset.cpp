@@ -286,8 +286,9 @@ void validate_model(const AnimatorConfiguration3D& config, const Model3D& model)
 
 } // namespace
 
-std::vector<std::string> resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path& content_root,
-                                                   std::span<const EcsId> selected) {
+static std::vector<std::string> resolve_animator3d_assets_impl(EcsWorld& world,
+                                                               const std::filesystem::path& content_root,
+                                                               std::span<const EcsId> selected) {
     std::vector<EcsEntity> entities;
     if (selected.empty())
         world.raw().each([&](flecs::entity entity, const AnimatorAsset3D&) { entities.emplace_back(entity); });
@@ -347,6 +348,12 @@ std::vector<std::string> resolve_animator3d_assets(EcsWorld& world, const std::f
         }
     }
     return errors;
+}
+Status3D resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path& content_root,
+                                   std::span<const EcsId> selected) {
+    auto diagnostics = resolve_animator3d_assets_impl(world, content_root, selected);
+    const bool accepted = diagnostics.empty();
+    return status3d(accepted, std::move(diagnostics));
 }
 
 } // namespace kin

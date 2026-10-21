@@ -34,20 +34,23 @@ public:
     // at the same phase boundaries as SceneSession3D. hooks.after runs AFTER
     // systems/command buffers but BEFORE the native stage (e.g. lifecycle work).
     // Failure stops later phases; completed gameplay work is not rolled back.
-    bool step(f32 dt, const SystemPhaseHooks& hooks = {});
+    Status3D step(f32 dt, const SystemPhaseHooks& hooks = {});
     // For hosts with their own run_frame hooks. Call once after each phase;
     // do not also call step(). Editor validates and propagates late changes.
-    bool after_phase(SystemPhase phase, f32 dt);
+    Status3D after_phase(SystemPhase phase, f32 dt);
     // Clears draws/settings, applies authored settings and collects the world.
     // Caller owns the destination and view options; add custom draws afterwards
     // and submit with its own Renderer3D/View3D. No view is allocated here.
     // An authored SceneEnvironment3D sets the picture in `view` (samples,
     // background, hdr, exposure, bloom); `view->pick` is the caller's and
     // survives it (scene3d_view_options), the same as SceneSession3DOptions::view.pick.
-    bool collect(Scene3D& scene, ViewOptions3D* view = nullptr);
+    Status3D collect(Scene3D& scene, ViewOptions3D* view = nullptr, f32 alpha = 1);
     const std::vector<std::string>& diagnostics() const { return _errors; }
 
 private:
+    bool step_operation(f32 dt, const SystemPhaseHooks& hooks = {});
+    bool after_phase_operation(SystemPhase phase, f32 dt);
+    bool collect_operation(Scene3D& scene, ViewOptions3D* view = nullptr, f32 alpha = 1);
     bool validate();
     EcsWorld& _world;
     WorldRenderState3D& _rendering;

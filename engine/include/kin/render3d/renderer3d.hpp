@@ -6,8 +6,8 @@
 // with KIN_EXPERIMENTAL_3D (a CMake option).
 //
 //     kin::Renderer3D r3d{renderer};
-//     kin::Mesh3D cube = r3d.create_mesh(kin::meshes::box({1, 1, 1}));
-//     kin::View3D view = r3d.create_view({640, 360});
+//     kin::Mesh3D cube = r3d.create_mesh(kin::meshes::box({1, 1, 1})).value_or({});
+//     kin::View3D view = r3d.create_view({640, 360}).value_or({});
 //     ...each frame:
 //     kin::Scene3D scene;
 //     scene.camera = kin::Camera3D::orbit({}, angle, 30.0f, 4.0f);
@@ -84,13 +84,13 @@ public:
     Renderer2D& renderer() const { return *_renderer; }
 
     // `data` kept on the GPU. Empty when 3D isn't available or the data is
-    // not valid (MeshData3D::validate); diagnostics() explains the failure.
-    Mesh3D create_mesh(const MeshData3D& data);
+    // not valid (MeshData3D::validate); the result carries the failure diagnostics.
+    Result3D<Mesh3D> create_mesh(const MeshData3D& data);
     // The same with levels of detail (MeshOptions3D::levels): simpler versions of
     // the mesh that Scene3D::lod draws copies far from the camera with. Level 0
     // is `data` itself, so the picture without Scene3D::lod is the same. Takes
     // time to build (about a second for a million triangles).
-    Mesh3D create_mesh(const MeshData3D& data, const MeshOptions3D& options);
+    Result3D<Mesh3D> create_mesh(const MeshData3D& data, const MeshOptions3D& options);
     // Where create_mesh keeps what it builds for levels of detail and clusters (kin/assets/bake_cache.hpp), and
     // reads it back on a later run instead of building again: the same bytes, so the same mesh and pictures. Keyed by
     // the mesh's bytes and the options the build reads (mesh_clusters_bake_key, mesh_levels_bake_key); meshes too
@@ -100,34 +100,34 @@ public:
     BakeCache* bake_cache() const { return _bake_cache; }
     // A view `size` pixels (at least 1 x 1). Where 3D isn't available, a
     // render target that render() fills with the background.
-    View3D create_view(Vec2i size, const ViewOptions3D& options = {});
+    Result3D<View3D> create_view(Vec2i size, const ViewOptions3D& options = {});
     // A glTF 2.0 model (.glb or .gltf, read through the content folder or
-    // pack): its meshes, materials and textures (mipmapped). Empty with diagnostics()
+    // pack): its meshes, materials and textures (mipmapped). A failed result explains why
     // when it can't be read or 3D isn't available.
-    Model3D load_model(const std::filesystem::path& path);
+    Result3D<Model3D> load_model(const std::filesystem::path& path);
     // The same, each of its meshes made with `options` (levels of detail).
-    Model3D load_model(const std::filesystem::path& path, const MeshOptions3D& options);
+    Result3D<Model3D> load_model(const std::filesystem::path& path, const MeshOptions3D& options);
     // An environment (render3d/environment3d.hpp) from a picture: `size` pixels
     // of linear RGB floats, rows top to bottom, 2:1 equirectangular. Filtered
     // on the GPU (with compute) the first time a render uses it; empty where
     // 3D or compute isn't available.
-    Environment3D create_environment(Vec2i size, std::span<const f32> rgb);
+    Result3D<Environment3D> create_environment(Vec2i size, std::span<const f32> rgb);
     // One from a Radiance .hdr file, read through the content folder or pack.
-    // Empty with diagnostics() when it can't be read.
-    Environment3D load_environment(const std::filesystem::path& path);
+    // A failed result explains why it could not be read.
+    Result3D<Environment3D> load_environment(const std::filesystem::path& path);
     // A fragment shader for materials (Material3D::shader), from SPIR-V
     // compiled against kin_material.inc.glsl (docs/rendering_3d.md, Custom
     // shaders). Empty where 3D isn't available or the shader is refused.
-    MaterialShader3D create_material_shader(std::span<const u8> spirv);
+    Result3D<MaterialShader3D> create_material_shader(std::span<const u8> spirv);
     // The same from GLSL source, compiled now by glslc (development: see
     // kin/renderer/shader_compiler.hpp; shipped games load SPIR-V). Empty,
-    // with glslc's messages in diagnostics() when it doesn't compile.
-    MaterialShader3D compile_material_shader(const std::filesystem::path& source);
+    // with glslc's messages in the result when it doesn't compile.
+    Result3D<MaterialShader3D> compile_material_shader(const std::filesystem::path& source);
     // Gives `view` a new size (its texture changes); false when it can't.
-    bool resize(View3D& view, Vec2i size);
+    Status3D resize(View3D& view, Vec2i size);
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
-    bool render(View3D& view, const Scene3D& scene);
+    Status3D render(View3D& view, const Scene3D& scene);
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
     // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a
@@ -136,20 +136,20 @@ public:
     // after it). Nothing is made at start-up: call it for the scenes and settings you will use. False where there is
     // nothing to make (no 3D). Cost: the same as the first render's, in memory too, and the targets are given back
     // after 120 unused renders as ever.
-    bool warm_up(View3D& view, const Scene3D& scene);
+    Status3D warm_up(View3D& view, const Scene3D& scene);
     // What `pixel` (the view's own pixels, from its top left) showed when
     // `view` was last rendered: the copy there and the point of it. Needs a
     // view made with ViewOptions3D::pick. It waits for the GPU to finish
     // what is recorded so far (submitting it): ask when something calls for
     // it (a click, the pointer moving), not every frame.
-    PickResult3D pick(View3D& view, Vec2i pixel);
+    Result3D<PickResult3D> pick(View3D& view, Vec2i pixel);
     // The clusters the last render's GPU cut chose (Scene3D::lod, Scene3D::debug.gpu_culling), for tests and tools;
     // waits for the GPU like pick(). False when that render cut on the CPU or drew no clusters. With Lod3D::occlusion
     // the second pass's clusters (view 0, the camera's) follow the first pass's.
-    bool read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& out);
+    Result3D<bool> read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& out);
     // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the
     // second pass's (the camera's view only) follow.
-    bool read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out);
+    Result3D<bool> read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out);
     // Compact, nonblocking summary of the last render().
     const RenderStats3D& stats() const { return _stats; }
     // Detailed implementation counters for profilers/tools. Reading this never
@@ -160,6 +160,21 @@ public:
     const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:
+    Mesh3D create_mesh_operation(const MeshData3D& data, const MeshOptions3D& options);
+    Mesh3D create_mesh_operation(const MeshData3D& data);
+    View3D create_view_operation(Vec2i size, const ViewOptions3D& options = {});
+    Model3D load_model_operation(const std::filesystem::path& path, const MeshOptions3D& options);
+    Model3D load_model_operation(const std::filesystem::path& path);
+    Environment3D create_environment_operation(Vec2i size, std::span<const f32> rgb);
+    Environment3D load_environment_operation(const std::filesystem::path& path);
+    MaterialShader3D create_material_shader_operation(std::span<const u8> spirv);
+    MaterialShader3D compile_material_shader_operation(const std::filesystem::path& source);
+    bool resize_operation(View3D& view, Vec2i size);
+    bool render_operation(View3D& view, const Scene3D& scene);
+    bool warm_up_operation(View3D& view, const Scene3D& scene);
+    PickResult3D pick_operation(View3D& view, Vec2i pixel);
+    bool read_cluster_picks_operation(View3D& view, std::vector<ClusterPick3D>& out);
+    bool read_cluster_draws_operation(View3D& view, std::vector<ClusterDraw3D>& out);
     friend class Assets3D;
     Model3D load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error,
                               Assets3D* assets);

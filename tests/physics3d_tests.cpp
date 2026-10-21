@@ -2076,6 +2076,26 @@ void test_changed_static_wakes() {
         CHECK(world.set_shape(slab, Shape3D::box({0.5f, 0.25f, 2.0f})));
         CHECK(fallen(world, crate));
     }
+    for (int change = 0; change < 4; ++change) {
+        World3D world(serial());
+        Body3D slab, crate;
+        asleep_on_slab(world, Body3DMotion::Static, slab, crate);
+        if (change == 0) {
+            world.set_layers_collide(layers3d::Kinematic, layers3d::Dynamic, false);
+            CHECK(world.set_layer(slab, layers3d::Kinematic));
+        } else if (change == 1)
+            world.set_no_collisions(slab, true);
+        else if (change == 2)
+            world.set_layers_collide(layers3d::Static, layers3d::Dynamic, false);
+        else {
+            world.set_group(crate, 42);
+            run(world, 180);
+            CHECK(!world.is_active(crate));
+            world.set_group(slab, 42);
+        }
+        CHECK(world.is_active(crate));
+        CHECK(fallen(world, crate));
+    }
     // A static body nothing rests on is moved for the cost of a broad phase query: the hash is as without the move elsewhere.
     {
         World3D world(serial());

@@ -1,6 +1,7 @@
 #include "../engine/src/renderer/gpu/gpu_shadow_cull.hpp"
 #include "../engine/src/renderer/gpu/gpu_shadow_reach.hpp"
 #include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"
+#include "result3d_helpers.hpp"
 #include "skin_fixtures.hpp"
 #include "texture_file_fixtures.hpp"
 
@@ -73,7 +74,7 @@ void skip_or_require_gpu_test(std::string_view test_name, const std::string& rea
 
 // Renders and checks that it did, the call kept even if asserts are compiled out.
 void render_ok(kin::Renderer3D& r3d, kin::View3D& view, const kin::Scene3D& scene) {
-    const bool rendered = r3d.render(view, scene);
+    const bool rendered = r3d.render(view, scene).ok();
     assert(rendered);
     static_cast<void>(rendered);
 }
@@ -270,7 +271,7 @@ Vec3f centroid(const MeshData3D& m, std::size_t t) {
 // (for convex shapes) facing away from `inside`, a point within.
 void check_winding(const MeshData3D& m, std::string_view name, bool outward, Vec3f inside = {}) {
     std::string error;
-    if (!m.validate(&error)) {
+    if (!kin::test::valid3d(m.validate(), error)) {
         std::cerr << name << ": " << error << '\n';
         assert(false);
     }
@@ -327,15 +328,15 @@ void test_meshes_face_out() {
 void test_mesh_validation_and_append() {
     MeshData3D m;
     std::string error;
-    assert(!m.validate(&error) && !error.empty());
+    assert(!kin::test::valid3d(m.validate(), error) && !error.empty());
     m.vertices.resize(4);
-    assert(!m.validate(&error)); // four vertices, no indices: not whole triangles
+    assert(!kin::test::valid3d(m.validate(), error)); // four vertices, no indices: not whole triangles
     m.indices = {0, 1, 2, 0, 2, 4};
-    assert(!m.validate(&error) && error.find("past") != std::string::npos);
+    assert(!kin::test::valid3d(m.validate(), error) && error.find("past") != std::string::npos);
     m.indices = {0, 1, 2, 0, 2, 3};
     assert(m.validate());
     m.vertices[3].position.x = std::nanf("");
-    assert(!m.validate(&error));
+    assert(!kin::test::valid3d(m.validate(), error));
 
     // Appending moves the shape and turns its normals; a mirror keeps it facing out.
     MeshData3D both;
@@ -378,9 +379,9 @@ void test_scene_merges_draws() {
     assert(scene.draws()[1].count == 1 && scene.draws()[1].first == 2);
     assert(scene.draws()[2].count == 6 && scene.draws()[2].first == 3);
     assert(scene.instances().size() == 9 && scene.instances()[1].tint == Color::rgb(255, 0, 0));
-    const auto room = scene.add_instances(a, 4);
+    const auto room = scene.add_instances(a, 4).value_or({});
     assert(room.size() == 4 && scene.draws().size() == 4 && scene.instances().size() == 13);
-    assert(scene.add_instances(a, 0).empty() && scene.draws().size() == 4);
+    assert(scene.add_instances(a, 0).value_or({}).empty() && scene.draws().size() == 4);
     scene.clear();
     assert(scene.draws().empty() && scene.instances().empty());
 }
@@ -518,14 +519,14 @@ void test_sdl_renderer_has_no_3d() {
     assert(&r3d.renderer() == &renderer);
     const kin::RendererCapabilities3D caps = r3d.capabilities();
     assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1);
-    assert(!r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).valid());
+    assert(!r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({}).valid());
 
-    kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)});
+    kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)}).value_or({});
     assert(view.valid() && view.size() == (kin::Vec2i{40, 30}) && view.samples() == 1);
     kin::Scene3D scene;
     scene.draw(kin::Mesh3D{}, Mat4f::identity());
     renderer.clear(kin::colors::black);
-    const bool drew = r3d.render(view, scene);
+    const bool drew = r3d.render(view, scene).ok();
     assert(!drew); // nothing drawn, but the background is there
     renderer.draw_texture(view.texture(), {0.0f, 0.0f, 40.0f, 30.0f});
     std::vector<kin::u8> rgba;
@@ -545,7 +546,7 @@ constexpr kin::Rectf screen{0.0f, 0.0f, 160.0f, 120.0f};
 
 // A box mesh of `size`, made on `r3d`.
 kin::Mesh3D make_box(kin::Renderer3D& r3d, Vec3f size) {
-    return r3d.create_mesh(kin::meshes::box(size));
+    return r3d.create_mesh(kin::meshes::box(size)).value_or({});
 }
 
 // The room the occlusion and contact-shadow tests stand things in: a floor (its top at y = 0), a wall behind
@@ -636,7 +637,7 @@ void test_gpu_depth_and_colour() {
         const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
         const kin::Material3D blue{.color = Color::rgb(40, 40, 200), .unlit = true};
         for (const kin::u32 samples : {1u, 4u}) {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples}).value_or({});
             assert(view.valid() && view.size() == (kin::Vec2i{160, 120}) && view.samples() <= samples);
             for (const bool red_first : {true, false}) {
                 kin::Scene3D scene;
@@ -672,7 +673,7 @@ void test_gpu_lighting() {
     with_gpu("test_gpu_lighting", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({3.0f, 1.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun = {.direction = {1.0f, 0.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
@@ -704,8 +705,8 @@ void test_gpu_instances() {
     with_gpu("test_gpu_instances", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {0.8f, 0.8f, 0.8f});
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f));
-        kin::View3D view = r3d.create_view({160, 120});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         const std::vector<kin::MeshInstance3D> boxes{
@@ -714,7 +715,7 @@ void test_gpu_instances() {
             {Mat4f::translation({2.0f, 1.0f, 0.0f}), Color::rgb(0, 0, 255)},
         };
         scene.draw_instanced(box, boxes, {.unlit = true});
-        const auto balls = scene.add_instances(ball, 2, {.color = Color::rgb(255, 255, 0), .unlit = true});
+        const auto balls = scene.add_instances(ball, 2, {.color = Color::rgb(255, 255, 0), .unlit = true}).value_or({});
         balls[0] = {Mat4f::translation({-1.0f, -1.2f, 0.0f}), kin::colors::white};
         balls[1] = {Mat4f::translation({1.0f, -1.2f, 0.0f}) * Mat4f::scaling({1.4f, 1.4f, 1.4f}),
                     Color::rgb(255, 128, 255)};
@@ -741,8 +742,8 @@ void test_gpu_instances_on_workers() {
         renderer.set_job_system(&jobs);
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {0.8f, 0.8f, 0.8f});
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f));
-        kin::View3D view = r3d.create_view({160, 120});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.cull = false; // all of them written (test_gpu_frustum_culling culls)
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
@@ -751,10 +752,10 @@ void test_gpu_instances_on_workers() {
         for (int i = 0; i < 300; ++i) {
             scene.draw(i % 2 == 0 ? box : ball, hidden);
         }
-        auto boxes = scene.add_instances(box, 7000, {.unlit = true});
+        auto boxes = scene.add_instances(box, 7000, {.unlit = true}).value_or({});
         std::fill(boxes.begin(), boxes.end(), kin::MeshInstance3D{hidden, kin::colors::white});
         boxes[6999] = {Mat4f::translation({-1.5f, 0.0f, 0.0f}), Color::rgb(0, 255, 0)};
-        auto balls = scene.add_instances(ball, 5000, {.color = Color::rgb(255, 0, 0), .unlit = true});
+        auto balls = scene.add_instances(ball, 5000, {.color = Color::rgb(255, 0, 0), .unlit = true}).value_or({});
         std::fill(balls.begin(), balls.end(), kin::MeshInstance3D{hidden, kin::colors::white});
         balls[4321] = {Mat4f::translation({1.5f, 0.0f, 0.0f}), kin::colors::white};
         const Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -774,14 +775,14 @@ void test_gpu_frustum_culling() {
         kin::JobSystem jobs;
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {0.8f, 0.8f, 0.8f});
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         for (const bool workers : {false, true}) {
             renderer.set_job_system(workers ? &jobs : nullptr);
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
             // 12,000 copies: three in view, the rest off to the sides, behind, or
             // too far up; a big one whose centre is out of view but whose edge is in.
-            auto copies = scene.add_instances(box, 12000, {.unlit = true});
+            auto copies = scene.add_instances(box, 12000, {.unlit = true}).value_or({});
             for (std::size_t i = 0; i < copies.size(); ++i) {
                 const float side = (i % 3 == 0) ? -40.0f : (i % 3 == 1) ? 40.0f : 0.0f;
                 const float z = (i % 3 == 2) ? 30.0f : 0.0f; // behind the camera
@@ -823,7 +824,7 @@ void test_gpu_overlay() {
     with_gpu("test_gpu_overlay", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         // A wall right in front of the camera, filling the view.
@@ -857,13 +858,13 @@ void test_gpu_point_lights() {
     with_gpu("test_gpu_point_lights", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D wall = make_box(r3d, {20.0f, 20.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 8.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
         scene.draw(wall, Mat4f::identity(), {.color = Color::rgb(200, 200, 200)});
-        scene.add_light({.position = {-2.0f, 0.0f, 1.0f}, .color = {2.0f, 1.0f, 0.5f}, .radius = 3.0f});
+        scene.add_point_light({.position = {-2.0f, 0.0f, 1.0f}, .color = {2.0f, 1.0f, 0.5f}, .radius = 3.0f});
         Pixels p = shoot_view(renderer, r3d, view, scene);
         assert(r3d.debug_stats().lights == 1);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -875,11 +876,11 @@ void test_gpu_point_lights() {
         // Twenty lights all over: sixteen used.
         scene.lights.points.clear();
         for (int i = 0; i < 20; ++i) {
-            scene.add_light({.position = {float(i % 5) - 2.0f, float(i / 5) - 1.5f, 1.0f},
-                             .color = {0.3f, 0.3f, 0.3f},
-                             .radius = 2.0f});
+            scene.add_point_light({.position = {float(i % 5) - 2.0f, float(i / 5) - 1.5f, 1.0f},
+                                   .color = {0.3f, 0.3f, 0.3f},
+                                   .radius = 2.0f});
         }
-        scene.add_light({.position = {0.0f, 0.0f, 40.0f}, .radius = 2.0f}); // behind the camera: none of the view
+        scene.add_point_light({.position = {0.0f, 0.0f, 40.0f}, .radius = 2.0f}); // behind the camera: none of the view
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
         assert(r3d.debug_stats().lights == 16);
@@ -891,7 +892,7 @@ void test_gpu_point_light_zero_attenuation() {
     with_gpu("test_gpu_point_light_zero_attenuation", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D wall = make_box(r3d, {20.0f, 20.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         for (const bool local : {false, true}) {
             if (local && !r3d.capabilities().local_shadows)
                 continue;
@@ -910,14 +911,14 @@ void test_gpu_point_light_zero_attenuation() {
                 renderer.present();
                 return p;
             };
-            scene.add_light({.position = {-2, 0, 1}, .color = {2, 1, 0.5f}, .radius = 3});
+            scene.add_point_light({.position = {-2, 0, 1}, .color = {2, 1, 0.5f}, .radius = 3});
             const Pixels one = shoot();
             assert(r3d.debug_stats().lights == 1);
             for (int i = 0; i < 15; ++i) {
                 // Bright enough to sort before the active point, inside the view but out of range of the wall.
-                scene.add_light({.position = {float(i % 5) - 2, float(i / 5) - 1, 1},
-                                 .color = {1000, 1000, 1000},
-                                 .radius = 0.25f});
+                scene.add_point_light({.position = {float(i % 5) - 2, float(i / 5) - 1, 1},
+                                       .color = {1000, 1000, 1000},
+                                       .radius = 0.25f});
             }
             const Pixels sixteen = shoot();
             assert(r3d.debug_stats().lights == 16 && one.rgba == sixteen.rgba);
@@ -928,7 +929,7 @@ void test_gpu_point_light_zero_attenuation() {
             const Vec3f at = ray.origin + ray.direction * (-ray.origin.z / ray.direction.z);
             const Vec3f position = at + Vec3f{0, 0, 1};
             scene.lights.points.clear();
-            scene.add_light({.position = position, .color = {10000, 10000, 10000}, .radius = 1.001f});
+            scene.add_point_light({.position = position, .color = {10000, 10000, 10000}, .radius = 1.001f});
             const float k = kin::point_attenuation(position, 1.001f, 0.05f, at);
             assert(k > 0 && k < 1e-4f);
             assert(brightness(shoot().at(80, 60)) > 30);
@@ -946,7 +947,7 @@ void test_gpu_shadows() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         const kin::Mesh3D box = make_box(r3d, {1.5f, 1.5f, 1.5f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f); // looking down
         scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};      // from up and +x
@@ -980,7 +981,7 @@ void test_gpu_blending() {
     with_gpu("test_gpu_blending", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D quad = make_box(r3d, {2.0f, 2.0f, 0.01f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         const kin::Material3D glow{.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive};
@@ -1017,7 +1018,7 @@ void test_gpu_additive_over_transparent() {
         const kin::Material3D glow{.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive};
         const kin::Material3D black{.color = Color::rgb(0, 0, 0), .unlit = true};
         const auto shot = [&](const kin::ViewOptions3D& options, bool backed) {
-            kin::View3D view = r3d.create_view({160, 120}, options);
+            kin::View3D view = r3d.create_view({160, 120}, options).value_or({});
             scene.clear();
             if (backed) {
                 scene.draw(quad, Mat4f::translation({0.0f, 0.0f, -1.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}), black);
@@ -1051,7 +1052,7 @@ void test_gpu_hdr_bloom() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
         const auto shot = [&](const kin::ViewOptions3D& options) {
-            kin::View3D view = r3d.create_view({160, 120}, options);
+            kin::View3D view = r3d.create_view({160, 120}, options).value_or({});
             return shoot_view(renderer, r3d, view, scene);
         };
         const Pixels plain = shot({.samples = 1, .hdr = true});
@@ -1067,7 +1068,8 @@ void test_gpu_hdr_bloom() {
         // The background is not lifted by the HDR path: tonemapped (ACES darkens
         // the darkest tones a little), its hue kept.
         kin::View3D dark =
-            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(18, 26, 36), .bloom = 1.0f});
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(18, 26, 36), .bloom = 1.0f})
+                .value_or({});
         renderer.clear(kin::colors::black);
         render_ok(r3d, dark, scene);
         renderer.draw_texture(dark.texture(), screen);
@@ -1076,7 +1078,8 @@ void test_gpu_hdr_bloom() {
         renderer.present();
         // Over a transparent background the glow still shows on what is under it.
         kin::View3D clear_view =
-            r3d.create_view({160, 120}, {.samples = 1, .background = kin::colors::transparent, .bloom = 1.0f});
+            r3d.create_view({160, 120}, {.samples = 1, .background = kin::colors::transparent, .bloom = 1.0f})
+                .value_or({});
         renderer.clear(Color::rgb(0, 0, 120));
         render_ok(r3d, clear_view, scene);
         renderer.draw_texture(clear_view.texture(), screen);
@@ -1099,7 +1102,7 @@ void test_gpu_unlit_specialization() {
                              {{1, 1, 0}, {0, 0, 1}, {1, 0}, Color::rgba(250, 180, 70, 230)},
                              {{-1, 1, 0}, {0, 0, 1}, {0, 0}, Color::rgb(100, 170, 250)}};
             data.indices = {0, 1, 2, 0, 2, 3};
-            const auto mesh = r3d.create_mesh(data);
+            const auto mesh = r3d.create_mesh(data).value_or({});
             const std::vector<kin::u8> texels{200, 100, 50,  40,  50,  200, 100, 240,
                                               100, 50,  200, 120, 220, 220, 220, 255};
             const auto texture = renderer.create_texture_from_rgba(texels.data(), {2, 2});
@@ -1130,7 +1133,7 @@ void test_gpu_unlit_specialization() {
                 if (output == 2 && !renderer.set_color_space(kin::ColorSpace::Linear, true))
                     continue;
                 for (kin::u32 samples : {1u, 4u}) {
-                    auto view = r3d.create_view({160, 120}, {.samples = samples, .hdr = output == 1});
+                    auto view = r3d.create_view({160, 120}, {.samples = samples, .hdr = output == 1}).value_or({});
                     for (int variant = 0; variant < 10; ++variant) {
                         kin::Scene3D scene;
                         scene.camera = kin::Camera3D::look_at({0, 0, 4}, {0, 0, 0});
@@ -1176,7 +1179,7 @@ void test_gpu_unlit_specialization() {
                     }
                 }
             }
-            auto view = r3d.create_view({160, 120}, {.samples = 1});
+            auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0, 0, 4}, {0, 0, 0});
             scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture});
@@ -1206,8 +1209,8 @@ void test_gpu_texture() {
                            {{1, 1, 0}, {0, 0, 1}, {1, 0}},
                            {{-1, 1, 0}, {0, 0, 1}, {0, 0}}};
         square.indices = {0, 1, 2, 0, 2, 3};
-        const kin::Mesh3D mesh = r3d.create_mesh(square);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D mesh = r3d.create_mesh(square).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = checker});
@@ -1228,7 +1231,7 @@ void test_gpu_model() {
         kin::Renderer3D r3d{renderer};
         const std::filesystem::path path = std::filesystem::path{KIN_TEST_MODELS} / "parts.glb";
         std::string error;
-        const kin::Model3D model = r3d.load_model(path);
+        const kin::Model3D model = r3d.load_model(path).value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model.valid()) {
             std::cerr << "load_model: " << error << '\n';
@@ -1260,7 +1263,7 @@ void test_gpu_model() {
         // The quad came without normals: flat ones, facing +z, six vertices.
         assert(panel.mesh.vertex_count() == 6);
 
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
         scene.draw(model, Mat4f::identity());
@@ -1275,12 +1278,14 @@ void test_gpu_model() {
         const std::filesystem::path copy = std::filesystem::temp_directory_path() / "kin_render3d_parts.glb";
         std::filesystem::copy_file(path, copy, std::filesystem::copy_options::overwrite_existing);
         kin::ModelFile3D file{r3d, copy};
-        assert(file.model().parts.size() == 3 && !file.poll());
+        assert(file.poll().value_or(false));
+        assert(file.model().parts.size() == 3 && !file.poll().value_or(false));
         std::filesystem::last_write_time(copy, std::filesystem::last_write_time(copy) + std::chrono::seconds(2));
-        assert(file.poll() && file.model().parts.size() == 3);
+        assert(file.poll().value_or(false) && file.model().parts.size() == 3);
         std::filesystem::remove(copy);
         // Nothing to read: empty, and why.
-        assert(!r3d.load_model("no/such/model.glb").valid() && !kin::diagnostics3d_text(r3d.diagnostics()).empty());
+        assert(!r3d.load_model("no/such/model.glb").value_or({}).valid() &&
+               !kin::diagnostics3d_text(r3d.diagnostics()).empty());
     });
 }
 
@@ -1288,8 +1293,8 @@ void test_gpu_model() {
 void test_gpu_culling() {
     with_gpu("test_gpu_culling", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        const kin::Mesh3D floor = r3d.create_mesh(kin::meshes::plane({4.0f, 4.0f}));
-        kin::View3D view = r3d.create_view({160, 120});
+        const kin::Mesh3D floor = r3d.create_mesh(kin::meshes::plane({4.0f, 4.0f})).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         for (const bool double_sided : {false, true}) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, -3.0f, 0.01f}, {0.0f, 0.0f, 0.0f}); // from below
@@ -1309,7 +1314,7 @@ void test_gpu_interleaves_with_2d() {
     with_gpu("test_gpu_interleaves_with_2d", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {10.0f, 10.0f, 1.0f});
-        kin::View3D view = r3d.create_view({40, 40}, {.samples = 4});
+        kin::View3D view = r3d.create_view({40, 40}, {.samples = 4}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f});
         renderer.clear(kin::colors::black);
@@ -1330,7 +1335,7 @@ void test_gpu_interleaves_with_2d() {
         renderer.present();
 
         // A transparent background lets the 2D under it show.
-        kin::View3D clear_view = r3d.create_view({40, 40}, {.samples = 1});
+        kin::View3D clear_view = r3d.create_view({40, 40}, {.samples = 1}).value_or({});
         renderer.clear(Color::rgb(70, 70, 70));
         scene.clear();
         scene.draw(box, Mat4f::translation({0.0f, 0.0f, -100.0f}), {.unlit = true}); // too small to cover it
@@ -1351,7 +1356,7 @@ void test_gpu_interleaves_with_2d() {
 void test_gpu_shared_mesh_buffers() {
     with_gpu("test_gpu_shared_mesh_buffers", [&](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        auto view = r3d.create_view({160, 120});
+        auto view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0, 0, 7}, {0, 0, 0});
         std::vector<kin::Mesh3D> meshes;
@@ -1369,7 +1374,7 @@ void test_gpu_shared_mesh_buffers() {
                                             : Color::rgb(30, 30, 220);
             for (auto& v : data.vertices)
                 v.color = colour;
-            meshes.push_back(r3d.create_mesh(data));
+            meshes.push_back(r3d.create_mesh(data).value_or({}));
             assert(meshes.back().valid());
         }
         scene.draw(meshes[0], Mat4f::translation({-2, 0, 0}), {.unlit = true});
@@ -1397,7 +1402,7 @@ void test_gpu_shared_mesh_buffers() {
         renderer.draw_texture(view.texture(), screen);
         scene.clear();
         meshes[0] = {};
-        auto replacement = r3d.create_mesh(kin::meshes::box({0.4f, 0.4f, 0.4f}));
+        auto replacement = r3d.create_mesh(kin::meshes::box({0.4f, 0.4f, 0.4f})).value_or({});
         assert(replacement.valid());
         expect(read(renderer).at(80, 60), Color::rgb(220, 30, 30), "retired range still drawn before replacement");
         renderer.present();
@@ -1411,7 +1416,7 @@ void test_gpu_shared_mesh_buffers() {
             renderer.present();
             scene.clear();
             for (int i = 2; i < 400; i += 2)
-                meshes[i] = r3d.create_mesh(kin::meshes::box({1, 1, 1}));
+                meshes[i] = r3d.create_mesh(kin::meshes::box({1, 1, 1})).value_or({});
             scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
             expect(shoot_view(renderer, r3d, view, scene).at(80, 60), Color::rgb(30, 220, 30),
                    "live range survived reuse");
@@ -1446,8 +1451,8 @@ void test_gpu_meshes_outlive_renderer() {
     kin::View3D view;
     {
         kin::Renderer3D r3d{*renderer};
-        mesh = r3d.create_mesh(kin::meshes::sphere(1.0f));
-        view = r3d.create_view({64, 64});
+        mesh = r3d.create_mesh(kin::meshes::sphere(1.0f)).value_or({});
+        view = r3d.create_view({64, 64}).value_or({});
         kin::Scene3D scene;
         scene.draw(mesh, Mat4f::identity());
         renderer->clear(kin::colors::black);
@@ -1467,7 +1472,7 @@ void test_gpu_linear_hdr() {
     with_gpu("test_gpu_linear_hdr", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         if (!renderer.set_color_space(kin::ColorSpace::Linear, true)) {
             std::cerr << "[SKIP] test_gpu_linear_hdr: no linear HDR pipeline\n";
             return;
@@ -1487,8 +1492,8 @@ void test_gpu_pick() {
     with_gpu("test_gpu_pick", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.pick = true});
-        kin::View3D plain = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+        kin::View3D plain = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(box, Mat4f::translation({-1.5f, 0.0f, 0.0f}), {.color = Color::rgb(200, 60, 60)}, kin::colors::white,
@@ -1506,15 +1511,15 @@ void test_gpu_pick() {
             const kin::Vec2f p = scene.camera.project(w, screen)->pos;
             return kin::Vec2i{static_cast<int>(p.x), static_cast<int>(p.y)};
         };
-        const kin::PickResult3D left = r3d.pick(view, pixel({-1.5f, 0.0f, 0.5f}));
+        const kin::PickResult3D left = r3d.pick(view, pixel({-1.5f, 0.0f, 0.5f})).value_or({});
         assert(left.hit && left.id == 7);
         assert(kin::length(left.position - Vec3f{-1.5f, 0.0f, 0.5f}) < 0.05f); // the front face
-        const kin::PickResult3D right = r3d.pick(view, pixel({1.3f, 0.2f, 0.5f}));
+        const kin::PickResult3D right = r3d.pick(view, pixel({1.3f, 0.2f, 0.5f})).value_or({});
         assert(right.hit && right.id == 0 && std::abs(right.position.z - 0.5f) < 0.02f);
-        assert(!r3d.pick(view, {2, 2}).hit);                     // background
-        assert(!r3d.pick(view, pixel({0.1f, 2.0f, 0.5f})).hit);  // a wireframe's face
-        assert(!r3d.pick(view, pixel({0.0f, -2.0f, 0.5f})).hit); // the overlay
-        assert(!r3d.pick(view, {-1, 0}).hit && !r3d.pick(view, {160, 0}).hit);
+        assert(!r3d.pick(view, {2, 2}).value_or({}).hit);                     // background
+        assert(!r3d.pick(view, pixel({0.1f, 2.0f, 0.5f})).value_or({}).hit);  // a wireframe's face
+        assert(!r3d.pick(view, pixel({0.0f, -2.0f, 0.5f})).value_or({}).hit); // the overlay
+        assert(!r3d.pick(view, {-1, 0}).value_or({}).hit && !r3d.pick(view, {160, 0}).value_or({}).hit);
         // The frame goes on after the pick.
         renderer.draw_texture(view.texture(), screen);
         renderer.fill_rect({0.0f, 0.0f, 10.0f, 10.0f}, Color::rgb(10, 220, 240));
@@ -1527,7 +1532,7 @@ void test_gpu_pick() {
         // A view made without picking has nothing to say.
         renderer.clear(kin::colors::black);
         render_ok(r3d, plain, scene);
-        assert(!r3d.pick(plain, pixel({-1.5f, 0.0f, 0.5f})).hit);
+        assert(!r3d.pick(plain, pixel({-1.5f, 0.0f, 0.5f})).value_or({}).hit);
         renderer.present();
     });
 }
@@ -1544,9 +1549,9 @@ void test_gpu_wireframe() {
             line_data.vertices.push_back({.position = v, .normal = {0.0f, 0.0f, 1.0f}});
         }
         line_data.indices = {0, 1, 1};
-        const kin::Mesh3D line = r3d.create_mesh(line_data);
+        const kin::Mesh3D line = r3d.create_mesh(line_data).value_or({});
         assert(line.valid());
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
@@ -1585,7 +1590,7 @@ void test_gpu_fill_and_ambient() {
     with_gpu("test_gpu_fill_and_ambient", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
@@ -1623,13 +1628,14 @@ void test_gpu_fill_and_ambient() {
 void test_gpu_sun_receiver_plane_bias() {
     with_gpu("test_gpu_sun_receiver_plane_bias", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        auto view = r3d.create_view({160, 120}, {.samples = 1});
+        auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         auto data = kin::meshes::plane({40, 40});
         for (auto& v : data.vertices) {
             v.position.y = .15f * v.position.x + .10f * v.position.z;
             v.normal = kin::normalize(Vec3f{-.15f, 1, -.10f});
         }
-        auto plane = r3d.create_mesh(data), sphere = r3d.create_mesh(kin::meshes::sphere(.35f, 48, 24));
+        auto plane = r3d.create_mesh(data).value_or({}),
+             sphere = r3d.create_mesh(kin::meshes::sphere(.35f, 48, 24)).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({-4, 30, -3}, {-4, 0, -3}, 60, {0, 0, -1});
         scene.camera.projection = kin::Projection3D::Orthographic;
@@ -1700,7 +1706,7 @@ void test_gpu_sun_receiver_plane_bias() {
         // A vertical foundation face nearly parallel to the sun must remain
         // uniformly lit. Bilinear comparison taps can be almost a full texel
         // from the receiver, depending on its subtexel phase.
-        const auto wall = r3d.create_mesh(kin::meshes::plane({40, 40}));
+        const auto wall = r3d.create_mesh(kin::meshes::plane({40, 40})).value_or({});
         scene.clear();
         scene.camera = kin::Camera3D::look_at({0, 0, 30}, {});
         scene.camera.projection = kin::Projection3D::Orthographic;
@@ -1728,7 +1734,7 @@ void test_gpu_sun_receiver_plane_bias() {
 
         // Changing a normal map may change brightness, but not move the
         // shadow of an unchanged caster across its unchanged receiver.
-        const auto floor = r3d.create_mesh(kin::meshes::plane({40, 40}));
+        const auto floor = r3d.create_mesh(kin::meshes::plane({40, 40})).value_or({});
         scene.camera = kin::Camera3D::look_at({0, 30, 0}, {}, 60, {0, 0, -1});
         scene.camera.projection = kin::Projection3D::Orthographic;
         scene.camera.height = 16;
@@ -1780,7 +1786,7 @@ void test_gpu_receives_no_shadow() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         const kin::Mesh3D box = make_box(r3d, {1.5f, 1.5f, 1.5f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
@@ -1803,7 +1809,7 @@ void test_gpu_receives_no_shadow() {
 void test_gpu_large_mesh() {
     with_gpu("test_gpu_large_mesh", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         MeshData3D data;
@@ -1820,7 +1826,7 @@ void test_gpu_large_mesh() {
             data.vertices.push_back({.position = v, .normal = {0.0f, 0.0f, 1.0f}, .color = Color::rgb(220, 30, 30)});
         }
         const auto shows_last = [&](const MeshData3D& mesh_data, std::string_view what) {
-            const kin::Mesh3D mesh = r3d.create_mesh(mesh_data);
+            const kin::Mesh3D mesh = r3d.create_mesh(mesh_data).value_or({});
             assert(mesh.valid());
             scene.clear();
             scene.draw(mesh, Mat4f::identity(), {.unlit = true});
@@ -1846,8 +1852,8 @@ void test_gpu_shadow_faces() {
     with_gpu("test_gpu_shadow_faces", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
-        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({2.0f, 2.0f})); // faces +Y
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({2.0f, 2.0f})).value_or({}); // faces +Y
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}}; // from up and +x
@@ -1880,7 +1886,7 @@ void test_gpu_shadows_into_view() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f},
                                               30.0f); // the floor within about 4 m of the middle
@@ -1918,7 +1924,7 @@ void test_gpu_cascades() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {300.0f, 0.2f, 300.0f});
         const kin::Mesh3D block = make_box(r3d, {4.0f, 4.0f, 4.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({-6.0f, 40.0f, 0.0f}, {-6.0f, 0.0f, -45.0f}, 12.0f);
         scene.camera.z_near = 1.0f;
@@ -1991,7 +1997,7 @@ void test_gpu_cascade_casters() {
         const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
         const kin::Mesh3D post = make_box(r3d, {0.3f, 1.0f, 0.3f});
         const kin::Mesh3D tall = make_box(r3d, {1.0f, 20.0f, 12.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 10.0f, 20.0f}, {0.0f, 0.0f, -40.0f}, 60.0f);
         scene.camera.z_near = 1.0f;
@@ -2122,8 +2128,8 @@ void test_gpu_ambient_occlusion() {
         const AoRoom room{r3d};
         const kin::Mesh3D pane = make_box(r3d, {1.0f, 1.0f, 0.01f});
         const kin::Mesh3D block = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D view_msaa = r3d.create_view({160, 120}, {.samples = 4});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D view_msaa = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, 6.0f}, {0.0f, 0.3f, -2.0f}, 50.0f);
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
@@ -2230,8 +2236,8 @@ void test_gpu_contact_shadows() {
         const AoRoom room{r3d};
         const kin::Mesh3D plate = make_box(r3d, {0.24f, 0.02f, 0.24f});
         const kin::Mesh3D block = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D view_msaa = r3d.create_view({160, 120}, {.samples = 4});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D view_msaa = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({-2.0f, 4.0f, 5.0f}, {0.0f, 0.3f, 0.0f}, 40.0f);
         // Low sun from the right and behind the pole: its shadow falls left and toward the camera.
@@ -2400,7 +2406,7 @@ void test_gpu_occlusion_speedups() {
             return;
         }
         const kin::Mesh3D block = make_box(r3d, {0.3f, 1.0f, 0.1f});
-        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1});
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
         scene.lights.ambient = {0.6f, 0.6f, 0.6f};
@@ -2468,7 +2474,7 @@ void test_gpu_occlusion_speedups() {
                 }
             }
             const auto before = render(perspective, ao);
-            auto fresh = r3d.create_view(size, {.samples = 1});
+            auto fresh = r3d.create_view(size, {.samples = 1}).value_or({});
             assert(before.rgba == render(perspective, ao, Draw::Room, &fresh).rgba);
             assert(r3d.resize(view, {512, 384}));
             render(perspective, ao);
@@ -2507,8 +2513,8 @@ float linear_level(Color c) {
 void test_gpu_metal_and_roughness() {
     with_gpu("test_gpu_metal_and_roughness", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
         // The sun at the camera: the highlight is at the sphere's centre.
@@ -2556,8 +2562,8 @@ void test_gpu_metal_and_roughness() {
 void test_gpu_normal_map() {
     with_gpu("test_gpu_normal_map", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        const kin::Mesh3D square = r3d.create_mesh(uv_square(0.9f));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D square = r3d.create_mesh(uv_square(0.9f)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto map = [&](kin::u8 r, kin::u8 g, kin::u8 b) {
             const kin::u8 texel[4] = {r, g, b, 255};
             const kin::Texture texture = renderer.create_texture({1, 1}, kin::TextureFormat::Rgba8, texel);
@@ -2602,11 +2608,11 @@ void test_gpu_alpha_mask() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         // A square lying flat (facing +y), a leaf: left half clear, right half green.
-        const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.5f));
+        const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.5f)).value_or({});
         const kin::u8 texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
         const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {2, 1});
         renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
@@ -2638,8 +2644,9 @@ void test_gpu_alpha_mask() {
         const Color shadow = where(cut, {-1.75f, 0.0f, 0.0f}), lit = where(cut, {-3.25f, 0.0f, 0.0f});
         assert(brightness(lit) > 2 * brightness(shadow) && brightness(shadow) > 0);
         // Picked where drawn.
-        assert(r3d.pick(view, pixel({0.75f, 2.5f, 0.0f})).id == 9 && r3d.pick(view, pixel({0.75f, 2.5f, 0.0f})).hit);
-        const kin::PickResult3D through = r3d.pick(view, pixel({-0.75f, 2.5f, 0.0f}));
+        assert(r3d.pick(view, pixel({0.75f, 2.5f, 0.0f})).value_or({}).id == 9 &&
+               r3d.pick(view, pixel({0.75f, 2.5f, 0.0f})).value_or({}).hit);
+        const kin::PickResult3D through = r3d.pick(view, pixel({-0.75f, 2.5f, 0.0f})).value_or({});
         assert(!through.hit || through.id != 9);
 
         // As Opaque the alpha is ignored by the depth tests: the whole square
@@ -2656,14 +2663,14 @@ void test_gpu_inverse_square() {
     with_gpu("test_gpu_inverse_square", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D wall = make_box(r3d, {40.0f, 40.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto level = [&](float distance, float radius) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 30.0f}, {0.0f, 0.0f, 0.0f}, 20.0f);
             scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
             scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(200, 200, 200)});
-            scene.add_light({.position = {0.0f, 0.0f, distance}, .color = {3.0f, 3.0f, 3.0f}, .radius = radius});
+            scene.add_point_light({.position = {0.0f, 0.0f, distance}, .color = {3.0f, 3.0f, 3.0f}, .radius = radius});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return linear_level(p.at(80, 60));
@@ -2684,7 +2691,7 @@ void test_gpu_model_materials() {
     with_gpu("test_gpu_model_materials", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         std::string error;
-        const kin::Model3D model = r3d.load_model(std::filesystem::path{KIN_TEST_MODELS} / "pbr.glb");
+        const kin::Model3D model = r3d.load_model(std::filesystem::path{KIN_TEST_MODELS} / "pbr.glb").value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         assert(model.valid() && model.parts.size() == 3);
         const auto part = [&](std::string_view name) -> const kin::ModelPart3D& {
@@ -2704,7 +2711,7 @@ void test_gpu_model_materials() {
         assert(all.wrap_u == kin::Wrap3D::Repeat && all.wrap_v == kin::Wrap3D::Repeat); // glTF's default
         assert(part("plain").material.roughness == 1.0f && !part("plain").material.normal.valid());
 
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
         scene.lights.sun = {.direction = {0.0f, 0.0f, 1.0f}, .color = {0.8f, 0.8f, 0.8f}};
@@ -2732,11 +2739,11 @@ void test_gpu_wrap_modes() {
                          {{1, 1, 0}, {0, 0, 1}, {2, 0}},
                          {{-1, 1, 0}, {0, 0, 1}, {0, 0}}};
         wide.indices = {0, 1, 2, 0, 2, 3};
-        const kin::Mesh3D mesh = r3d.create_mesh(wide);
+        const kin::Mesh3D mesh = r3d.create_mesh(wide).value_or({});
         const kin::u8 texels[8] = {255, 0, 0, 255, 0, 255, 0, 255};
         const kin::Texture texture = renderer.create_texture_from_rgba(texels, {2, 1});
         renderer.set_scale_mode(texture, kin::ScaleMode::Nearest);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Color red = Color::rgb(255, 0, 0), green = Color::rgb(0, 255, 0);
         const auto shoot = [&](kin::Wrap3D wrap) {
             kin::Scene3D scene;
@@ -2798,14 +2805,14 @@ void test_gpu_environment() {
         kin::Renderer3D r3d{renderer};
         const kin::Vec2i size{256, 128};
         const std::vector<float> sky = six_colour_sky(size);
-        kin::Environment3D environment = r3d.create_environment(size, sky);
+        kin::Environment3D environment = r3d.create_environment(size, sky).value_or({});
         if (!environment.valid()) {
             std::cerr << "no compute: environment not made\n";
             assert(!r3d.available() || false);
         }
         assert(environment.size() == size);
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
@@ -2877,15 +2884,15 @@ void test_gpu_environment_levels_written() {
         kin::Renderer3D r3d{renderer};
         const kin::Vec2i size{512, 256}; // wide enough for the widest lobes to reach the last level
         const std::vector<float> flat(static_cast<std::size_t>(size.x * size.y) * 3, 0.25f);
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
         const auto picture = [&](bool poisoned, float roughness) {
             if (poisoned) {
                 setenv("KIN_POISON_TEXTURES", "1", 1);
             }
-            kin::Environment3D environment = r3d.create_environment(size, flat);
+            kin::Environment3D environment = r3d.create_environment(size, flat).value_or({});
             unsetenv("KIN_POISON_TEXTURES");
             assert(environment.valid());
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
             scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
@@ -2943,28 +2950,29 @@ void test_gpu_material_shader() {
         }
         const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
         std::string error;
-        const kin::MaterialShader3D lit = r3d.compile_material_shader(dir / "custom_lit.frag.glsl");
+        const kin::MaterialShader3D lit = r3d.compile_material_shader(dir / "custom_lit.frag.glsl").value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!lit.valid()) {
             std::cerr << error << '\n';
             assert(false);
         }
-        const kin::MaterialShader3D flat = r3d.compile_material_shader(dir / "custom_flat.frag.glsl");
+        const kin::MaterialShader3D flat = r3d.compile_material_shader(dir / "custom_flat.frag.glsl").value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         assert(flat.valid() && !(flat == lit));
         const std::filesystem::path broken = std::filesystem::temp_directory_path() / "kin_broken_material.frag.glsl";
         std::ofstream{broken} << "#version 450 core\n#include \"kin_material.inc.glsl\"\nvoid main() { nonsense; }\n";
-        assert(!r3d.compile_material_shader(broken).valid() && !kin::diagnostics3d_text(r3d.diagnostics()).empty());
+        assert(!r3d.compile_material_shader(broken).value_or({}).valid() &&
+               !kin::diagnostics3d_text(r3d.diagnostics()).empty());
         std::filesystem::remove(broken);
 
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto shoot = [&](const kin::Material3D& material) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
             scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
             scene.lights.ambient = {0.1f, 0.12f, 0.2f};
-            scene.add_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
+            scene.add_point_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
             scene.draw(sphere, Mat4f::identity(), material);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -3084,7 +3092,7 @@ PatternSurface make_pattern_surface(kin::Renderer3D& r3d, kin::Renderer2D& rende
                       {{40, 6, 0}, {0, 0, 1}, {5, 0}},
                       {{-40, 6, 0}, {0, 0, 1}, {0, 0}}};
     plane.indices = {0, 1, 2, 0, 2, 3};
-    return {r3d.create_mesh(plane), renderer.create_texture_from_rgba(texels.data(), {640, 480})};
+    return {r3d.create_mesh(plane).value_or({}), renderer.create_texture_from_rgba(texels.data(), {640, 480})};
 }
 
 // Temporal anti-aliasing: off is the old picture and runs nothing; on, a still
@@ -3103,7 +3111,7 @@ void test_gpu_taa() {
         const kin::Mesh3D other = make_box(r3d, {2.0f, 2.0f, 0.2f});
         const Color black = Color::rgb(0, 0, 0);
         const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = black});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = black}).value_or({});
         kin::Scene3D scene;
         scene.camera = flat_camera();
         const auto shoot = [&](kin::View3D& target, const kin::Scene3D& s) {
@@ -3288,7 +3296,7 @@ void test_gpu_taa() {
         }
 
         // A view asked for 4x MSAA draws one sample with it on, and four off.
-        kin::View3D multisampled = r3d.create_view({160, 120}, {.samples = 4, .background = black});
+        kin::View3D multisampled = r3d.create_view({160, 120}, {.samples = 4, .background = black}).value_or({});
         still(flat_camera());
         scene.taa = {};
         shoot(multisampled, scene);
@@ -3399,7 +3407,7 @@ void test_gpu_taa_over_detail() {
         const kin::Material3D light{.color = Color::rgb(220, 220, 220), .unlit = true};
         const kin::Material3D dark{.color = Color::rgb(30, 30, 30), .unlit = true};
         const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         kin::Scene3D scene;
         std::vector<kin::MeshInstance3D> small_cells, large_cells;
         for (int y = 0; y < 120; ++y) {
@@ -3446,7 +3454,8 @@ void test_gpu_taa_over_detail() {
         };
         // A 16-sample reference (the camera shifted by sub-pixel steps), in linear light, drawn on a view of its own
         // so that the temporal view keeps its history.
-        kin::View3D plain_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D plain_view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         const auto supersample = [&](float cam_x, bool large, bool with_block = false, float block_x = 0.0f,
                                      bool use_texture = false) {
             std::vector<float> sum(160 * 120, 0.0f);
@@ -3492,7 +3501,8 @@ void test_gpu_taa_over_detail() {
         // The block crosses, 3 pixels a frame. Where it has been, the picture is as bright as the checker alone
         // drawn the same way (a ghost of the white block would lift the zone's mean; the 1-pixel pattern is softened
         // by the reconstruction filter, so what is compared is the same softened picture, and by its mean).
-        kin::View3D alone_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D alone_view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         Pixels alone;
         for (int f = 0; f < 30; ++f) {
             scene.taa = {.enabled = true};
@@ -3574,8 +3584,9 @@ void test_gpu_taa_crowd() {
         kin::Renderer3D r3d{renderer};
         const PatternSurface world = make_pattern_surface(r3d, renderer);
         const kin::Mesh3D block = make_box(r3d, {1.6f, 1.6f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
-        kin::View3D alone_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        kin::View3D alone_view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         kin::Scene3D scene;
         scene.camera = flat_camera(-5.03f, 0.0f);
         const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
@@ -3697,8 +3708,9 @@ void test_gpu_taa_overlay() {
         kin::Renderer3D r3d{renderer};
         const PatternSurface world = make_pattern_surface(r3d, renderer);
         const kin::Mesh3D gun = make_box(r3d, {3.0f, 2.0f, 0.5f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
-        kin::View3D plain_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        kin::View3D plain_view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         kin::Scene3D scene;
         const kin::Material3D hands{.color = Color::rgb(200, 40, 40), .unlit = true};
         const auto build = [&](float cam_x, float gun_x, float dx, float dy) {
@@ -3816,7 +3828,7 @@ void test_gpu_taa_main_velocity() {
         }
         const PatternSurface world = make_pattern_surface(r3d, renderer);
         const kin::Mesh3D box = make_box(r3d, {1.5f, 1.5f, 0.5f});
-        const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.2f));
+        const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.2f)).value_or({});
         const kin::u8 texels[16] = {20, 200, 20, 0, 20, 200, 20, 255, 200, 20, 20, 255, 20, 20, 200, 0};
         const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {4, 1});
         renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
@@ -3825,11 +3837,14 @@ void test_gpu_taa_main_velocity() {
         std::string error;
         if (kin::shader_compiler_available()) {
             flat =
-                r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl");
+                r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
+                    .value_or({});
             assert(flat.valid());
         }
-        kin::View3D with_main = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 10, 20)});
-        kin::View3D with_pre = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 10, 20)});
+        kin::View3D with_main =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 10, 20)}).value_or({});
+        kin::View3D with_pre =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 10, 20)}).value_or({});
         enum class Extra { None, CustomOpaque, CustomBlended, Occlusion };
         const auto build = [&](kin::Scene3D& scene, int f, Extra extra) {
             const float t = static_cast<float>(f);
@@ -3936,13 +3951,13 @@ void test_gpu_shadow_cache() {
         const kin::Mesh3D other = make_box(r3d, {1.2f, 1.2f, 1.2f});
         kin::MeshOptions3D levels;
         levels.levels = 3;
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16), levels);
-        const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.5f));
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16), levels).value_or({});
+        const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.5f)).value_or({});
         const kin::u8 leaf_texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
         const kin::Texture leaf = renderer.create_texture_from_rgba(leaf_texels, {2, 1});
         renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         enum class What {
             Plain,
@@ -4156,7 +4171,7 @@ void test_gpu_taa_with_occlusion() {
     with_gpu("test_gpu_taa_with_occlusion", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const AoRoom room{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({-2.0f, 3.0f, 6.0f}, {0.0f, 0.3f, -2.0f}, 50.0f);
         scene.lights.sun = {.direction = {1.0f, 0.7f, 0.3f}, .color = {1.0f, 1.0f, 1.0f}};
@@ -4227,7 +4242,7 @@ void test_gpu_taa_pick() {
     with_gpu("test_gpu_taa_pick", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {2.0f, 2.0f, 2.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         // An edge pixel of the box: where the jitter would change what is under it.
@@ -4242,7 +4257,7 @@ void test_gpu_taa_pick() {
                 scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 4);
                 renderer.clear(kin::colors::black);
                 render_ok(r3d, view, scene);
-                const kin::PickResult3D p = r3d.pick(view, pixel);
+                const kin::PickResult3D p = r3d.pick(view, pixel).value_or({});
                 if (taa && lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
                     return;
                 }
@@ -4270,7 +4285,7 @@ void test_gpu_taa_hdr() {
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .bloom = 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .bloom = 1.0f}).value_or({});
         const auto side = scene.camera.project({0.55f, 0.0f, 0.3f}, screen);
         assert(side);
         Pixels p;
@@ -4299,8 +4314,8 @@ void test_gpu_taa_ids_after_reset() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D block = make_box(r3d, {3.0f, 3.0f, 0.2f});
         std::array<kin::View3D, 2> views{
-            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}),
-            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)})};
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({}),
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({})};
         kin::Scene3D scene;
         scene.camera = flat_camera();
         scene.taa = {.enabled = true};
@@ -4371,7 +4386,8 @@ void test_gpu_taa_match_on_workers() {
         bool capable = true;
         for (const bool workers : {false, true}) {
             renderer.set_job_system(workers ? &jobs : nullptr);
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
             kin::Scene3D scene;
             scene.cull = false;
             scene.camera = flat_camera();
@@ -4431,7 +4447,7 @@ void test_gpu_sun_off_no_shadow_pass() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         const kin::Mesh3D box = make_box(r3d, {1.5f, 1.5f, 1.5f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.ambient = {0.3f, 0.3f, 0.3f};
@@ -4753,8 +4769,8 @@ void test_gpu_lod_selection() {
         kin::MeshOptions3D options;
         options.levels = 4;
         const MeshData3D data = kin::meshes::sphere(1.0f, 64, 32);
-        const kin::Mesh3D mesh = r3d.create_mesh(data, options);
-        const kin::Mesh3D plain = r3d.create_mesh(data);
+        const kin::Mesh3D mesh = r3d.create_mesh(data, options).value_or({});
+        const kin::Mesh3D plain = r3d.create_mesh(data).value_or({});
         assert(plain.level_count() == 1 && plain.level_triangles(0) == data.triangle_count() &&
                plain.level_error(0) == 0.0f);
         const kin::MeshLodChain3D chain = kin::build_mesh_levels(data, options);
@@ -4767,9 +4783,9 @@ void test_gpu_lod_selection() {
                               mesh.level_error(l) > mesh.level_error(l - 1)));
         }
         // The same data with the options of one level is a mesh as before.
-        assert(r3d.create_mesh(data, kin::MeshOptions3D{}).level_count() == 1);
+        assert(r3d.create_mesh(data, kin::MeshOptions3D{}).value_or({}).level_count() == 1);
 
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.lights.sun.color = {};
         scene.lights.ambient = {1.0f, 1.0f, 1.0f};
@@ -4926,9 +4942,10 @@ void test_gpu_lod_off_is_unchanged() {
         kin::MeshOptions3D options;
         options.levels = 4;
         const MeshData3D data = kin::meshes::torus(1.0f, 0.35f, 40, 16);
-        const kin::Mesh3D with = r3d.create_mesh(data, options), without = r3d.create_mesh(data);
+        const kin::Mesh3D with = r3d.create_mesh(data, options).value_or({}),
+                          without = r3d.create_mesh(data).value_or({});
         const kin::Mesh3D floor = make_box(r3d, {30.0f, 0.2f, 30.0f});
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 18.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.shadow_area = {{-15.0f, -0.2f, -15.0f}, {15.0f, 6.0f, 15.0f}};
@@ -4986,13 +5003,13 @@ void test_gpu_lod_same_level_everywhere() {
         const MeshData3D data = kin::meshes::sphere(1.0f, 48, 24);
         const kin::MeshLodChain3D chain = kin::build_mesh_levels(data, options);
         assert(chain.count() >= 3);
-        const kin::Mesh3D lod = r3d.create_mesh(data, options);
+        const kin::Mesh3D lod = r3d.create_mesh(data, options).value_or({});
         std::vector<kin::Mesh3D> stand_in;
         for (std::size_t l = 0; l < chain.count(); ++l) {
-            stand_in.push_back(r3d.create_mesh(level_as_mesh(data, chain, l)));
+            stand_in.push_back(r3d.create_mesh(level_as_mesh(data, chain, l)).value_or({}));
         }
         const kin::Mesh3D floor = make_box(r3d, {60.0f, 0.2f, 60.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 5.0f, 24.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
         scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
@@ -5085,9 +5102,9 @@ void test_gpu_lod_flat_levels() {
         }
         const kin::MeshLodChain3D chain = kin::build_mesh_levels(flat, options);
         assert(chain.count() >= 3 && !chain.extra_vertices.empty());
-        const kin::Mesh3D lod = r3d.create_mesh(flat, options);
+        const kin::Mesh3D lod = r3d.create_mesh(flat, options).value_or({});
         assert(lod.level_count() == chain.count());
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 2.2f, 3.4f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
@@ -5116,8 +5133,8 @@ void test_gpu_lod_flat_levels() {
             }
             const Pixels drawn = shoot(lod, static_cast<int>(l));
             assert(level_drawn(r3d.debug_stats()) == l);
-            const Pixels same = shoot(r3d.create_mesh(shared), -1);
-            const Pixels before = shoot(r3d.create_mesh(baked), -1);
+            const Pixels same = shoot(r3d.create_mesh(shared).value_or({}), -1);
+            const Pixels before = shoot(r3d.create_mesh(baked).value_or({}), -1);
             int worst = 0, different = 0, covered = 0;
             for (int y = 0; y < 120; ++y) {
                 for (int x = 0; x < 160; ++x) {
@@ -5147,8 +5164,8 @@ void test_gpu_lod_picture_bound() {
         kin::MeshOptions3D options;
         options.levels = 4;
         const MeshData3D data = kin::meshes::sphere(1.0f, 64, 32);
-        const kin::Mesh3D lod = r3d.create_mesh(data, options);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+        const kin::Mesh3D lod = r3d.create_mesh(data, options).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 16.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun.direction = {-0.5f, 0.8f, 0.6f};
@@ -5204,9 +5221,9 @@ void test_gpu_lod_pick() {
         const MeshData3D data = kin::meshes::sphere(1.0f, 32, 16);
         const kin::MeshLodChain3D chain = kin::build_mesh_levels(data, options);
         assert(chain.count() >= 3);
-        const kin::Mesh3D lod = r3d.create_mesh(data, options);
-        const kin::Mesh3D coarse = r3d.create_mesh(level_as_mesh(data, chain, chain.count() - 1));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        const kin::Mesh3D lod = r3d.create_mesh(data, options).value_or({});
+        const kin::Mesh3D coarse = r3d.create_mesh(level_as_mesh(data, chain, chain.count() - 1)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
         scene.lod = {.enabled = true};
@@ -5220,7 +5237,7 @@ void test_gpu_lod_pick() {
             const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
             const kin::Vec2i pixel{80 + static_cast<int>(std::lround(std::cos(a) * 34.0f)),
                                    60 + static_cast<int>(std::lround(std::sin(a) * 34.0f))};
-            hits.push_back(r3d.pick(view, pixel).hit);
+            hits.push_back(r3d.pick(view, pixel).value_or({}).hit);
         }
         // The same pixels against the stand-in, and against the finest level, which they must differ from somewhere on
         // the ring.
@@ -5233,18 +5250,20 @@ void test_gpu_lod_pick() {
             const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
             const kin::Vec2i pixel{80 + static_cast<int>(std::lround(std::cos(a) * 34.0f)),
                                    60 + static_cast<int>(std::lround(std::sin(a) * 34.0f))};
-            stand_in_hits.push_back(r3d.pick(view, pixel).hit);
+            stand_in_hits.push_back(r3d.pick(view, pixel).value_or({}).hit);
             different_from_stand_in += stand_in_hits.back() != hits[static_cast<std::size_t>(step)] ? 1 : 0;
         }
         scene.clear();
-        scene.draw(r3d.create_mesh(data), Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
+        scene.draw(r3d.create_mesh(data).value_or({}), Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white,
+                   7);
         render_ok(r3d, view, scene);
         int different_from_finest = 0;
         for (int step = 0; step < 72; ++step) {
             const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
             const kin::Vec2i pixel{80 + static_cast<int>(std::lround(std::cos(a) * 34.0f)),
                                    60 + static_cast<int>(std::lround(std::sin(a) * 34.0f))};
-            different_from_finest += r3d.pick(view, pixel).hit != hits[static_cast<std::size_t>(step)] ? 1 : 0;
+            different_from_finest +=
+                r3d.pick(view, pixel).value_or({}).hit != hits[static_cast<std::size_t>(step)] ? 1 : 0;
         }
         std::cerr << "lod: pick ring of 72 pixels: " << different_from_stand_in << " differ from the stand-in's level, "
                   << different_from_finest << " from the finest\n";
@@ -5260,10 +5279,10 @@ void test_gpu_lod_on_workers() {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions3D options;
         options.levels = 4;
-        const kin::Mesh3D ring = r3d.create_mesh(kin::meshes::torus(0.5f, 0.15f, 32, 12), options);
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f, 32, 16), options);
+        const kin::Mesh3D ring = r3d.create_mesh(kin::meshes::torus(0.5f, 0.15f, 32, 12), options).value_or({});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f, 32, 16), options).value_or({});
         const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 30.0f}, {0.0f, 0.0f, -40.0f}, 60.0f);
         scene.lights.shadow_area = {{-200.0f, -0.2f, -200.0f}, {200.0f, 8.0f, 200.0f}};
@@ -5281,7 +5300,7 @@ void test_gpu_lod_on_workers() {
                 return static_cast<float>(seed >> 8) / 16777216.0f;
             };
             // Two big draws, in a mix of distances (some behind the camera), and some small ones between.
-            auto rings = scene.add_instances(ring, 5000, {.color = Color::rgb(220, 120, 60)});
+            auto rings = scene.add_instances(ring, 5000, {.color = Color::rgb(220, 120, 60)}).value_or({});
             for (auto& r : rings) {
                 r = {Mat4f::translation({(next() - 0.5f) * 120.0f, 0.5f + next() * 2.0f, 25.0f - next() * 85.0f}),
                      Color::rgb(255, 255, 255)};
@@ -5291,7 +5310,7 @@ void test_gpu_lod_on_workers() {
                            Mat4f::translation({(next() - 0.5f) * 40.0f, 1.0f, 15.0f - next() * 40.0f}),
                            {.color = Color::rgb(60, 160, 220)});
             }
-            auto balls = scene.add_instances(ball, 3000, {.color = Color::rgb(100, 220, 100)});
+            auto balls = scene.add_instances(ball, 3000, {.color = Color::rgb(100, 220, 100)}).value_or({});
             for (auto& b : balls) {
                 b = {Mat4f::translation({(next() - 0.5f) * 120.0f, 0.5f, 25.0f - next() * 85.0f}) *
                          Mat4f::scaling({1.0f + next(), 1.0f + next(), 1.0f + next()}),
@@ -5336,8 +5355,8 @@ void test_gpu_lod_taa() {
         kin::Renderer3D r3d{renderer};
         kin::MeshOptions3D options;
         options.levels = 4;
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16), options);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16), options).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
         scene.lod = {.enabled = true, .error_pixels = 0.5f};
@@ -5349,7 +5368,8 @@ void test_gpu_lod_taa() {
                                     .texture = pattern.texture,
                                     .wrap_u = kin::Wrap3D::Repeat,
                                     .wrap_v = kin::Wrap3D::Repeat};
-        kin::View3D truth_view = r3d.create_view({160, 120}, {.samples = 8, .background = Color::rgb(0, 0, 0)});
+        kin::View3D truth_view =
+            r3d.create_view({160, 120}, {.samples = 8, .background = Color::rgb(0, 0, 0)}).value_or({});
         double error_sum = 0.0;
         int error_frames = 0;
         const float focal = 0.5f * 120.0f / std::tan(30.0f * 3.14159265f / 180.0f);
@@ -5563,7 +5583,8 @@ void test_gpu_clusters_off_is_unchanged(bool gpu) {
             const kin::MeshData3D flat_data = kin::meshes::plane({6.0f, 6.0f}, 40);
             for (const bool flat : {false, true}) {
                 const MeshData3D& data = flat ? flat_data : smooth_data;
-                const kin::Mesh3D plain = r3d.create_mesh(data), clustered = r3d.create_mesh(data, options);
+                const kin::Mesh3D plain = r3d.create_mesh(data).value_or({}),
+                                  clustered = r3d.create_mesh(data, options).value_or({});
                 assert(plain.cluster_count() == 0 && !plain.has_clusters() && plain.cluster_levels() == 0 &&
                        plain.cluster_triangles() == 0 && plain.leaf_triangles() == plain.triangle_count() &&
                        !plain.flat_shaded());
@@ -5577,9 +5598,9 @@ void test_gpu_clusters_off_is_unchanged(bool gpu) {
                 // Levels are ignored for a mesh with clusters.
                 kin::MeshOptions3D both = options;
                 both.levels = 4;
-                assert(r3d.create_mesh(data, both).level_count() == 1);
+                assert(r3d.create_mesh(data, both).value_or({}).level_count() == 1);
                 const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
-                kin::View3D view = r3d.create_view({160, 120});
+                kin::View3D view = r3d.create_view({160, 120}).value_or({});
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0.0f, 5.0f, 9.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
                 scene.lights.shadow_area = {{-10.0f, -0.2f, -10.0f}, {10.0f, 6.0f, 10.0f}};
@@ -5652,10 +5673,11 @@ void test_gpu_clusters_cut(bool gpu) {
             kin::MeshOptions3D options;
             options.clusters = true;
             const MeshData3D data = big_hill(110);
-            const kin::Mesh3D plain = r3d.create_mesh(data), hill = r3d.create_mesh(data, options);
+            const kin::Mesh3D plain = r3d.create_mesh(data).value_or({}),
+                              hill = r3d.create_mesh(data, options).value_or({});
             const kin::MeshClusterBuild3D hierarchy = kin::build_mesh_clusters(data, options);
             assert(hill.cluster_count() == hierarchy.clusters.size() && hill.cluster_levels() == hierarchy.levels);
-            kin::View3D view = r3d.create_view({320, 240}, {.samples = 4});
+            kin::View3D view = r3d.create_view({320, 240}, {.samples = 4}).value_or({});
             kin::Scene3D scene;
             scene.cull = false;
             // Standing low at one end of the hill, looking along it: the end under the camera is near, the other 150
@@ -5765,13 +5787,14 @@ void test_gpu_clusters_same_cut_everywhere(bool gpu) {
             const MeshData3D hill_data = big_hill(80);
             const MeshData3D ball_data = kin::meshes::sphere(1.0f, 64, 32);
             const MeshData3D slab_data = kin::meshes::plane({30.0f, 30.0f}, 50);
-            const kin::Mesh3D hill = r3d.create_mesh(hill_data, options), ball = r3d.create_mesh(ball_data, options),
-                              slab = r3d.create_mesh(slab_data, options);
+            const kin::Mesh3D hill = r3d.create_mesh(hill_data, options).value_or({}),
+                              ball = r3d.create_mesh(ball_data, options).value_or({}),
+                              slab = r3d.create_mesh(slab_data, options).value_or({});
             const kin::MeshClusterBuild3D hill_h = kin::build_mesh_clusters(hill_data, options),
                                           ball_h = kin::build_mesh_clusters(ball_data, options),
                                           slab_h = kin::build_mesh_clusters(slab_data, options);
             const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-            kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+            kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 40.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
             scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
@@ -5819,7 +5842,8 @@ void test_gpu_clusters_same_cut_everywhere(bool gpu) {
                                                                   cluster_cut_view(scene.camera, 150.0f, c.place, 0.7f),
                                                                   kin::NoClusterCull3D{});
                             triangles += cut_triangles(*c.hierarchy, cut);
-                            scene.draw(r3d.create_mesh(cut_as_mesh(*c.hierarchy, cut)), c.place, {.color = c.color});
+                            scene.draw(r3d.create_mesh(cut_as_mesh(*c.hierarchy, cut)).value_or({}), c.place,
+                                       {.color = c.color});
                         }
                         const Pixels stand_in = shoot_view(renderer, r3d, view, scene);
                         renderer.present();
@@ -5859,12 +5883,12 @@ void test_gpu_clusters_pick(bool gpu) {
             kin::MeshOptions3D options;
             options.clusters = true;
             const MeshData3D data = kin::meshes::sphere(1.0f, 40, 20);
-            const kin::Mesh3D clustered = r3d.create_mesh(data, options);
+            const kin::Mesh3D clustered = r3d.create_mesh(data, options).value_or({});
             const kin::MeshClusterBuild3D hierarchy = kin::build_mesh_clusters(data, options);
             const int depth = static_cast<int>(hierarchy.levels) - 3;
             assert(depth >= 1);
             const Mat4f place = Mat4f::translation({0.0f, 0.0f, -3.0f});
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
             const auto ring = [&](const std::function<void()>& set) {
@@ -5876,7 +5900,8 @@ void test_gpu_clusters_pick(bool gpu) {
                     const float a = static_cast<float>(step) * 3.14159265f / 36.0f;
                     for (const float radius : {30.0f, 34.0f}) {
                         results.push_back(r3d.pick(view, {80 + static_cast<int>(std::lround(std::cos(a) * radius)),
-                                                          60 + static_cast<int>(std::lround(std::sin(a) * radius))}));
+                                                          60 + static_cast<int>(std::lround(std::sin(a) * radius))})
+                                              .value_or({}));
                     }
                 }
                 return results;
@@ -5887,9 +5912,10 @@ void test_gpu_clusters_pick(bool gpu) {
             set_cut(scene, cut_on(gpu, kin::Lod3D{}));
             const auto cut = kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 120.0f, place, 1.0f, depth),
                                                   kin::NoClusterCull3D{});
-            const kin::Mesh3D stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut));
+            const kin::Mesh3D stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut)).value_or({});
             const auto stand_in_hits = ring([&] { scene.draw(stand_in, place, {}, kin::colors::white, 7); });
-            const auto full_hits = ring([&] { scene.draw(r3d.create_mesh(data), place, {}, kin::colors::white, 7); });
+            const auto full_hits =
+                ring([&] { scene.draw(r3d.create_mesh(data).value_or({}), place, {}, kin::colors::white, 7); });
             int different_from_stand_in = 0, different_from_full = 0, hits = 0;
             for (std::size_t i = 0; i < cut_hits.size(); ++i) {
                 different_from_stand_in += cut_hits[i].hit != stand_in_hits[i].hit ||
@@ -5917,11 +5943,11 @@ void test_gpu_clusters_on_workers(bool gpu) {
                  kin::Renderer3D r3d{renderer};
                  kin::MeshOptions3D options;
                  options.clusters = true;
-                 const kin::Mesh3D hill = r3d.create_mesh(big_hill(70), options);
-                 const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24), options);
-                 const kin::Mesh3D ring = r3d.create_mesh(kin::meshes::torus(1.0f, 0.3f, 48, 16), options);
+                 const kin::Mesh3D hill = r3d.create_mesh(big_hill(70), options).value_or({});
+                 const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24), options).value_or({});
+                 const kin::Mesh3D ring = r3d.create_mesh(kin::meshes::torus(1.0f, 0.3f, 48, 16), options).value_or({});
                  const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-                 kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+                 kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
                  kin::Scene3D scene;
                  scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 40.0f}, {0.0f, 1.0f, -40.0f}, 60.0f);
                  scene.lights.shadow_area = {{-100.0f, -0.2f, -100.0f}, {100.0f, 12.0f, 100.0f}};
@@ -5982,12 +6008,15 @@ void test_gpu_clusters_taa(bool gpu) {
             kin::MeshOptions3D options;
             options.clusters = true;
             const MeshData3D data = big_hill(70);
-            const kin::Mesh3D hill = r3d.create_mesh(data, options);
+            const kin::Mesh3D hill = r3d.create_mesh(data, options).value_or({});
             const kin::MeshClusterBuild3D hierarchy = kin::build_mesh_clusters(data, options);
             const Mat4f place = Mat4f::translation({0.0f, 0.0f, 0.0f});
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
-            kin::View3D stand_view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
-            kin::View3D truth_view = r3d.create_view({160, 120}, {.samples = 8, .background = Color::rgb(0, 0, 0)});
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+            kin::View3D stand_view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+            kin::View3D truth_view =
+                r3d.create_view({160, 120}, {.samples = 8, .background = Color::rgb(0, 0, 0)}).value_or({});
             kin::Scene3D scene;
             scene.lights.sun.direction = {-0.5f, 0.8f, 0.6f};
             double error_sum = 0.0;
@@ -6019,7 +6048,7 @@ void test_gpu_clusters_taa(bool gpu) {
                     if (f == 0) {
                         const auto cut = kin::select_clusters(
                             hierarchy, cluster_cut_view(scene.camera, 120.0f, place, 0.7f), kin::NoClusterCull3D{});
-                        stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut));
+                        stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut)).value_or({});
                     }
                     set_cut(scene, cut_on(gpu, kin::Lod3D{}));
                     scene.clear();
@@ -6107,7 +6136,7 @@ std::size_t open_edges_of(const kin::MeshClusterBuild3D& hierarchy, const std::v
 std::map<kin::u32, std::set<kin::u32>> camera_picks(kin::Renderer3D& r3d, kin::View3D& view, const kin::Scene3D& scene,
                                                     std::size_t* shadow_picks = nullptr, bool may_be_none = false) {
     std::vector<kin::ClusterPick3D> picks;
-    const bool ok = r3d.read_cluster_picks(view, picks);
+    const bool ok = r3d.read_cluster_picks(view, picks).value_or(false);
     assert(ok || may_be_none); // false: no copy was cut at all
     static_cast<void>(ok);
     std::map<kin::u32, std::set<kin::u32>> by_copy;
@@ -6147,11 +6176,11 @@ void test_gpu_cut_equals_cpu_selection() {
         subjects.push_back({"flat sphere", kin::meshes::sphere(1.0f, 160, 80)});
         subjects.push_back({"torus", kin::meshes::torus(1.0f, 0.3f, 140, 60)});
         subjects.push_back({"flat plane", kin::meshes::plane({20.0f, 20.0f}, 150)});
-        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1}).value_or({});
         Lcg rng;
         std::size_t checked = 0, clusters_compared = 0, different = 0, worst_case = 0;
         for (const Subject& subject : subjects) {
-            const kin::Mesh3D mesh = r3d.create_mesh(subject.data, options);
+            const kin::Mesh3D mesh = r3d.create_mesh(subject.data, options).value_or({});
             const kin::MeshClusterBuild3D hierarchy = kin::build_mesh_clusters(subject.data, options);
             const std::size_t own_open = open_edges_of(hierarchy, [&] {
                 std::vector<kin::u32> leaves;
@@ -6254,11 +6283,11 @@ void test_gpu_cut_picture_equals_cpu() {
         }
         kin::MeshOptions3D options;
         options.clusters = true;
-        const kin::Mesh3D hill = r3d.create_mesh(big_hill(80), options),
-                          ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options),
-                          slab = r3d.create_mesh(kin::meshes::plane({30.0f, 30.0f}, 50), options);
+        const kin::Mesh3D hill = r3d.create_mesh(big_hill(80), options).value_or({}),
+                          ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options).value_or({}),
+                          slab = r3d.create_mesh(kin::meshes::plane({30.0f, 30.0f}, 50), options).value_or({});
         const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1, .pick = true});
+        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 40.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
         scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
@@ -6316,7 +6345,7 @@ void test_gpu_cut_picture_equals_cpu() {
             render_ok(r3d, view, scene);
             for (int y = 5; y < 150; y += 9) {
                 for (int x = 5; x < 200; x += 9) {
-                    hits[on_gpu].push_back(r3d.pick(view, {x, y}));
+                    hits[on_gpu].push_back(r3d.pick(view, {x, y}).value_or({}));
                 }
             }
         }
@@ -6331,8 +6360,8 @@ void test_gpu_cut_picture_equals_cpu() {
 
         // Temporal anti-aliasing with a camera that walks: each frame equal.
         if (!lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
-            kin::View3D taa_cpu = r3d.create_view({200, 150}, {.samples = 1}),
-                        taa_gpu = r3d.create_view({200, 150}, {.samples = 1});
+            kin::View3D taa_cpu = r3d.create_view({200, 150}, {.samples = 1}).value_or({}),
+                        taa_gpu = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
             int equal = 0;
             for (int f = 0; f < 14; ++f) {
                 scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 40.0f - 1.5f * static_cast<float>(f)},
@@ -6409,9 +6438,9 @@ void test_gpu_cut_is_deterministic() {
             }
             kin::MeshOptions3D options;
             options.clusters = true;
-            const kin::Mesh3D hill = r3d.create_mesh(big_hill(100), options);
-            const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options);
-            kin::View3D view = r3d.create_view({200, 150}, {.samples = 4});
+            const kin::Mesh3D hill = r3d.create_mesh(big_hill(100), options).value_or({});
+            const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options).value_or({});
+            kin::View3D view = r3d.create_view({200, 150}, {.samples = 4}).value_or({});
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 60.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
             scene.lights.sun.direction = {-0.5f, 1.0f, 0.3f};
@@ -6447,9 +6476,9 @@ void test_gpu_cut_culls_by_pass() {
         }
         kin::MeshOptions3D options;
         options.clusters = true;
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options);
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32), options).value_or({});
         const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 20.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         // The sun is low, to the left: a ball left of the view throws its shadow toward the view.
@@ -6473,7 +6502,7 @@ void test_gpu_cut_culls_by_pass() {
             // copy's slot is.
             const auto check_draws = [&] {
                 std::vector<kin::ClusterDraw3D> draws;
-                const bool ok = r3d.read_cluster_draws(view, draws);
+                const bool ok = r3d.read_cluster_draws(view, draws).value_or(false);
                 assert(ok);
                 static_cast<void>(ok);
                 kin::u64 triangles = 0;
@@ -6521,8 +6550,8 @@ void test_gpu_cut_overflow_clamps() {
         }
         kin::MeshOptions3D options;
         options.clusters = true;
-        const kin::Mesh3D hill = r3d.create_mesh(big_hill(100), options);
-        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+        const kin::Mesh3D hill = r3d.create_mesh(big_hill(100), options).value_or({});
+        kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 60.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
         scene.lights.shadow_cascades = 3;
@@ -6582,8 +6611,8 @@ void test_gpu_cut_falls_back() {
             assert(r3d.capabilities().gpu_driven_clusters);
             kin::MeshOptions3D options;
             options.clusters = true;
-            const kin::Mesh3D hill = r3d.create_mesh(big_hill(80), options);
-            kin::View3D view = r3d.create_view({200, 150}, {.samples = 1});
+            const kin::Mesh3D hill = r3d.create_mesh(big_hill(80), options).value_or({});
+            kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
             kin::Scene3D scene;
             scene.debug.gpu_culling = !disabled;
             scene.debug.gpu_pass_markers = disabled;
@@ -6619,9 +6648,9 @@ void test_gpu_cut_many_copies() {
         kin::MeshOptions3D options;
         options.clusters = true;
         const MeshData3D data = kin::meshes::sphere(1.0f, 224, 224);
-        const kin::Mesh3D ball = r3d.create_mesh(data, options);
+        const kin::Mesh3D ball = r3d.create_mesh(data, options).value_or({});
         const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 14.0f, 50.0f}, {0.0f, 0.0f, -20.0f}, 60.0f);
         scene.lights.shadow_cascades = 3;
@@ -6684,10 +6713,10 @@ void test_gpu_cut_chunks() {
         options.clusters = true;
         std::vector<kin::Mesh3D> meshes;
         for (int i = 0; i < 12; ++i) {
-            meshes.push_back(
-                r3d.create_mesh(kin::meshes::sphere(1.0f, 173 + i, 173), options)); // about 60 thousand triangles
+            meshes.push_back(r3d.create_mesh(kin::meshes::sphere(1.0f, 173 + i, 173), options)
+                                 .value_or({})); // about 60 thousand triangles
         }
-        kin::View3D view = r3d.create_view({240, 180}, {.samples = 1, .pick = true});
+        kin::View3D view = r3d.create_view({240, 180}, {.samples = 1, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 9.0f, 30.0f}, {0.0f, 0.0f, -10.0f}, 60.0f);
         scene.lights.shadow_cascades = 3;
@@ -6725,14 +6754,14 @@ void test_gpu_cut_chunks() {
         std::vector<kin::PickResult3D> a, b;
         for (int y = 5; y < 180; y += 11) {
             for (int x = 5; x < 240; x += 11) {
-                a.push_back(r3d.pick(view, {x, y}));
+                a.push_back(r3d.pick(view, {x, y}).value_or({}));
             }
         }
         set_cut(scene, cut_on(true, {.enabled = true, .error_pixels = 1.0f}));
         render_ok(r3d, view, scene);
         for (int y = 5; y < 180; y += 11) {
             for (int x = 5; x < 240; x += 11) {
-                b.push_back(r3d.pick(view, {x, y}));
+                b.push_back(r3d.pick(view, {x, y}).value_or({}));
             }
         }
         int hits = 0;
@@ -6755,7 +6784,7 @@ struct OcclusionRoom {
         options.clusters = true;
         floor = make_box(r3d, {60.0f, 0.2f, 60.0f});
         unit = make_box(r3d, {1.0f, 3.0f, 0.4f});
-        ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 96, 96), options);
+        ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 96, 96), options).value_or({});
     }
 
     // `gap`: a slit of that width in the middle of the wall (0: none); `wall_x` moves the wall sideways. Balls at `at`,
@@ -6804,8 +6833,10 @@ kin::Camera3D room_camera(float x = 0.0f) {
 struct Twin {
     Twin(kin::Renderer2D& r, kin::Renderer3D& r3, kin::u32 samples)
         : renderer(r), r3d(r3),
-          off(r3.create_view({160, 120}, {.samples = samples, .background = Color::rgb(20, 24, 30), .pick = true})),
-          on(r3.create_view({160, 120}, {.samples = samples, .background = Color::rgb(20, 24, 30), .pick = true})) {}
+          off(r3.create_view({160, 120}, {.samples = samples, .background = Color::rgb(20, 24, 30), .pick = true})
+                  .value_or({})),
+          on(r3.create_view({160, 120}, {.samples = samples, .background = Color::rgb(20, 24, 30), .pick = true})
+                 .value_or({})) {}
 
     // Renders `scene` into both. Returns the bytes that differ.
     int frame(kin::Scene3D& scene) {
@@ -6830,7 +6861,7 @@ struct Twin {
         int different = 0;
         for (int y = 3; y < 120; y += 9) {
             for (int x = 3; x < 160; x += 9) {
-                const kin::PickResult3D a = r3d.pick(off, {x, y}), b = r3d.pick(on, {x, y});
+                const kin::PickResult3D a = r3d.pick(off, {x, y}).value_or({}), b = r3d.pick(on, {x, y}).value_or({});
                 different += a.hit != b.hit || a.id != b.id ? 1 : 0;
             }
         }
@@ -6964,7 +6995,8 @@ void test_gpu_occlusion_picture_and_stats() {
             Twin twin{renderer, r3d, 4};
             kin::MeshOptions3D options;
             options.clusters = true;
-            const kin::Mesh3D sheet = r3d.create_mesh(big_hill(120), options); // gently wavy: its slopes are under 0.25
+            const kin::Mesh3D sheet =
+                r3d.create_mesh(big_hill(120), options).value_or({}); // gently wavy: its slopes are under 0.25
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 36.0f, 48.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
             for (int f = 0; f < 3; ++f) {
@@ -7304,7 +7336,7 @@ void test_gpu_occlusion_is_ignored() {
                      assert(r3d.capabilities().occlusion_culling == r3d.capabilities().gpu_driven_clusters);
                      const OcclusionRoom room{r3d};
                      kin::View3D view =
-                         r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+                         r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
                      kin::Scene3D scene;
                      scene.debug.gpu_culling = !disabled;
                      scene.debug.gpu_pass_markers = disabled;
@@ -7351,7 +7383,8 @@ void test_gpu_occlusion_with_overflow() {
             return;
         }
         const OcclusionRoom room{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
         kin::Scene3D scene;
         scene.camera = room_camera();
         std::vector<Vec3f> balls = hidden_balls;
@@ -7397,7 +7430,7 @@ void test_gpu_feature_release() {
         const AoRoom room{r3d};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         const auto make_view = [&] {
-            return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
         };
         kin::View3D view = make_view();
         kin::Scene3D scene;
@@ -7532,7 +7565,7 @@ void test_gpu_occlusion_release() {
         }
         const OcclusionRoom room{r3d};
         const auto make_view = [&] {
-            return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+            return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
         };
         kin::View3D view = make_view();
         kin::Scene3D scene;
@@ -7616,16 +7649,18 @@ void test_gpu_warm_up() {
                 kin::MaterialShader3D flat;
                 if (config.custom && kin::shader_compiler_available()) {
                     flat = r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} /
-                                                       "custom_flat.frag.glsl");
+                                                       "custom_flat.frag.glsl")
+                               .value_or({});
                 }
                 const AoRoom room{r3d};
                 const OcclusionRoom clustered{r3d};
                 const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-                const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.0f));
+                const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.0f)).value_or({});
                 const kin::u8 texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
                 const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {2, 1});
                 kin::View3D view =
-                    r3d.create_view({160, 120}, {.samples = config.samples, .hdr = config.hdr, .pick = config.pick});
+                    r3d.create_view({160, 120}, {.samples = config.samples, .hdr = config.hdr, .pick = config.pick})
+                        .value_or({});
                 kin::Scene3D scene;
                 if (config.occlusion) {
                     clustered.fill(scene, hidden_balls);
@@ -7754,7 +7789,8 @@ void dump(const Pixels& p, const std::string& name) {
 // The bent tube of skin_fixtures as a skinned mesh, and the same posed on the CPU as a plain one.
 struct SkinRig {
     explicit SkinRig(kin::Renderer3D& r3d, int rings = 25, int segments = 12, float length = 3.0f, float radius = 0.35f)
-        : tube(skin_fixtures::make_tube(rings, segments, length, radius)), mesh(r3d.create_mesh(tube.mesh)) {
+        : tube(skin_fixtures::make_tube(rings, segments, length, radius)),
+          mesh(r3d.create_mesh(tube.mesh).value_or({})) {
         assert(mesh.valid() && mesh.skinned() && mesh.skin_joint_count() == 3);
     }
 
@@ -7765,7 +7801,7 @@ struct SkinRig {
     }
     // The tube posed by `m` on the CPU, as a plain mesh.
     kin::Mesh3D baked(kin::Renderer3D& r3d, std::span<const Mat4f> m) const {
-        return r3d.create_mesh(kin::skin_mesh(tube.mesh, m));
+        return r3d.create_mesh(kin::skin_mesh(tube.mesh, m)).value_or({});
     }
 
     skin_fixtures::Tube tube;
@@ -7800,7 +7836,7 @@ void test_gpu_skinned_matches_cpu() {
         }
         const kin::Mesh3D floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
         SkinRig rig{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const kin::Material3D grey{.color = Color::rgb(200, 200, 200)};
         const kin::Material3D red{.color = Color::rgb(210, 70, 60)};
         int worst = 0;
@@ -7882,7 +7918,7 @@ void test_gpu_skinned_shadow_out_of_view() {
         }
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         SkinRig rig{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         for (const kin::u32 cascades : {1u, 3u}) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f},
@@ -7956,7 +7992,7 @@ void test_gpu_skinned_cutout_shadow() {
         const kin::u8 texels[16] = {40, 200, 40, 255, 40, 200, 40, 0, 40, 200, 40, 255, 40, 200, 40, 0};
         const kin::Texture stripes = renderer.create_texture_from_rgba(texels, {4, 1});
         renderer.set_scale_mode(stripes, kin::ScaleMode::Nearest);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = skin_camera(false);
         skin_lights(scene, 1);
@@ -8005,7 +8041,7 @@ void test_gpu_skinned_poses_and_mix() {
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         const kin::Mesh3D box = make_box(r3d, {0.8f, 0.8f, 0.8f});
         SkinRig rig{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 2.5f, 11.0f}, {0.0f, 1.2f, 0.0f}, 50.0f);
         skin_lights(scene, 1);
@@ -8077,7 +8113,7 @@ void test_gpu_skinned_pose_updates() {
             for (kin::u32 i = 0; i < 2100; ++i)
                 copies.push_back({Mat4f::translation({float(i % 50) * 0.12f - 3, 0.2f, float(i / 50) * 0.12f - 3}),
                                   kin::colors::white, 1000 + i});
-            kin::InstanceBatch3D batch(box, std::move(copies));
+            auto batch = kin::InstanceBatch3D::create(box, std::move(copies)).value_or({});
             kin::Model3D model;
             model.skeletons.push_back(rig.tube.skeleton);
             for (int i = 0; i < 2; ++i) {
@@ -8087,9 +8123,9 @@ void test_gpu_skinned_pose_updates() {
                 part.material = {.color = i ? Color::rgb(80, 190, 120) : Color::rgb(210, 70, 60)};
                 model.parts.push_back(part);
             }
-            auto view = r3d.create_view({160, 120}, {.pick = true});
-            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true});
-            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+            auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true}).value_or({});
+            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
             kin::Scene3D scene;
             for (int frame = 0; frame < 14; ++frame) {
                 const auto pose =
@@ -8148,7 +8184,7 @@ void test_gpu_skinned_pose_updates() {
                 scene.lights.spots.clear();
                 kin::SpotLightSource3D spot{
                     .position = {0, 7, 1}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 20};
-                spot.shadow.enabled = true;
+                spot.shadow_enabled = true;
                 spot.id = 1;
                 scene.add_spot_light(spot);
                 scene.taa.enabled = frame >= 4 && frame <= 9 && r3d.capabilities().temporal_aa;
@@ -8164,7 +8200,7 @@ void test_gpu_skinned_pose_updates() {
                 std::vector<kin::u32> ids;
                 for (int y = 20; y < 110; y += 15)
                     for (int x = 15; x < 150; x += 15) {
-                        const auto hit = r3d.pick(target, {x, y});
+                        const auto hit = r3d.pick(target, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 assert(st.skin_matrices == kin::u32(frame >= 8 && frame < 10 ? 12 : 9));
@@ -8204,7 +8240,7 @@ void test_gpu_skinned_culling() {
             return;
         }
         SkinRig arm{r3d, 25, 12, 6.0f};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 10.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.ambient = {0.6f, 0.6f, 0.6f};
@@ -8298,7 +8334,7 @@ void test_gpu_skinned_off_path() {
         const kin::Mesh3D floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
         const kin::Mesh3D box = make_box(r3d, {1.0f, 2.0f, 1.0f});
         SkinRig rig{r3d};
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = skin_camera(false);
         skin_lights(scene, 1);
@@ -8324,7 +8360,7 @@ void test_gpu_skinned_off_path() {
                after.shadow_draws == before.shadow_draws);
         // A mesh made with a skin and drawn plain is an ordinary mesh: its levels and clusters are refused (logged),
         // and it still draws.
-        const kin::Mesh3D refused = r3d.create_mesh(rig.tube.mesh, {.levels = 3, .clusters = true});
+        const kin::Mesh3D refused = r3d.create_mesh(rig.tube.mesh, {.levels = 3, .clusters = true}).value_or({});
         assert(refused.valid() && refused.skinned() && refused.level_count() == 1 && !refused.has_clusters());
         // draw_skinned with too few matrices draws nothing; with a mesh that has no skin it is draw().
         scene.clear();
@@ -8362,7 +8398,7 @@ void test_gpu_skinned_on_workers() {
         }
         const kin::Mesh3D floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
         SkinRig rig{r3d, 9, 8};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto build = [&](kin::Scene3D& scene, int count) {
             scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
             skin_lights(scene, 1);
@@ -8417,7 +8453,7 @@ void test_gpu_skinned_with_features() {
         }
         const kin::Mesh3D floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
         SkinRig rig{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = skin_camera(false);
         skin_lights(scene, 1);
@@ -8437,7 +8473,7 @@ void test_gpu_skinned_with_features() {
             return kin::Vec2i{static_cast<int>(p.x), static_cast<int>(p.y)};
         };
         // Pick: the tube's own pixel names the tube.
-        const kin::PickResult3D over = r3d.pick(view, kin::Vec2i{80, 60});
+        const kin::PickResult3D over = r3d.pick(view, kin::Vec2i{80, 60}).value_or({});
         assert(over.hit && over.id == 8);
         if (r3d.capabilities().ambient_occlusion) {
             scene.ambient_occlusion.enabled = true;
@@ -8493,7 +8529,7 @@ void test_gpu_skinned_overlay() {
         }
         SkinRig rig{r3d};
         const kin::Mesh3D wall = make_box(r3d, {12.0f, 12.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 1.5f, 9.0f}, {0.0f, 1.5f, 0.0f}, 50.0f);
         scene.lights.ambient = {0.7f, 0.7f, 0.7f};
@@ -8541,7 +8577,7 @@ void test_gpu_skinned_many_copies() {
         const kin::Mesh3D floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
         SkinRig rig{r3d, 60, 24}; // 1,416 vertices a ring set: about 2,800 triangles
         std::cerr << "many copies: the mesh has " << rig.mesh.triangle_count() << " triangles\n";
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 36.0f, 48.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         skin_lights(scene, 1);
@@ -8672,8 +8708,9 @@ void test_gpu_skinned_velocity() {
         int worst_of_all = 0;
         for (const Case& c : cases) {
             kin::View3D view_skinned =
-                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
-            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
+            kin::View3D view_plain =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
             const kin::Material3D material = c.cutout ? kin::Material3D{.color = Color::rgb(255, 255, 255),
                                                                         .double_sided = true,
                                                                         .blend = kin::Blend3D::Mask,
@@ -8780,8 +8817,9 @@ void test_gpu_skinned_velocity_new_and_reordered() {
         const kin::Mesh3D baked = rig.baked(r3d, rest);
         for (const bool reorder : {false, true}) {
             kin::View3D view_skinned =
-                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
-            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
+            kin::View3D view_plain =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
             int worst = 0, new_frame = 0;
             for (int f = 0; f < 16; ++f) {
                 // Two characters, passing each other; a third from frame 8 on.
@@ -8853,7 +8891,7 @@ void test_gpu_skinned_prepass_features() {
         const kin::Texture cut = half_cut_texture(renderer);
         const std::vector<Mat4f> pose = rig.matrices(50.0f, -35.0f, {0.0f, 0.0f, 0.0f});
         const kin::Mesh3D baked = rig.baked(r3d, pose);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
         int worst = 0, shown = 1 << 30;
         for (const bool cutout : {false, true}) {
             for (const kin::u32 cascades : {1u, 3u}) {
@@ -8920,7 +8958,7 @@ void test_gpu_skinned_occluder() {
         // The wall as a skinned mesh of one joint (weight 1): the box 1 x 3 x 0.4 of the room, scaled 8 times along x.
         kin::MeshData3D wall_data = kin::meshes::box({1.0f, 3.0f, 0.4f});
         wall_data.skin.assign(wall_data.vertices.size(), kin::MeshSkinVertex3D{{0, 0, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
-        const kin::Mesh3D wall = r3d.create_mesh(wall_data);
+        const kin::Mesh3D wall = r3d.create_mesh(wall_data).value_or({});
         assert(wall.skinned() && wall.skin_joint_count() == 1);
         const kin::u8 solid[4] = {200, 190, 170, 255};
         const kin::Texture solid_texture = renderer.create_texture_from_rgba(solid, {1, 1});
@@ -9018,8 +9056,8 @@ void test_gpu_skinned_pick() {
                                                                       .blend = kin::Blend3D::Mask,
                                                                       .texture = cut}
                                                     : kin::Material3D{.color = Color::rgb(210, 70, 60)};
-            kin::View3D view_skinned = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
-            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            kin::View3D view_skinned = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+            kin::View3D view_plain = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
             kin::Scene3D scene_skinned, scene_plain;
             std::vector<kin::MeshData3D> posed;
             for (kin::Scene3D* scene : {&scene_skinned, &scene_plain}) {
@@ -9045,7 +9083,8 @@ void test_gpu_skinned_pick() {
             int floors = 0, empty = 0;
             for (int y = 3; y < 120; y += 6) {
                 for (int x = 3; x < 160; x += 6) {
-                    const kin::PickResult3D a = r3d.pick(view_skinned, {x, y}), b = r3d.pick(view_plain, {x, y});
+                    const kin::PickResult3D a = r3d.pick(view_skinned, {x, y}).value_or({}),
+                                            b = r3d.pick(view_plain, {x, y}).value_or({});
                     ++compared;
                     differ += (a.hit != b.hit || (a.hit && a.id != b.id)) ? 1 : 0;
                     if (a.hit) {
@@ -9086,7 +9125,8 @@ void test_gpu_skinned_pick() {
                             continue;
                         }
                         const kin::PickResult3D r = r3d.pick(view_skinned, {static_cast<int>(screen_point->pos.x),
-                                                                            static_cast<int>(screen_point->pos.y)});
+                                                                            static_cast<int>(screen_point->pos.y)})
+                                                        .value_or({});
                         ++checked;
                         right += r.hit && r.id == poses[k].id ? 1 : 0;
                     }
@@ -9097,13 +9137,13 @@ void test_gpu_skinned_pick() {
             }
         }
         // Without a pick pass nothing is made (the view has none): pick answers nothing.
-        kin::View3D no_pick = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D no_pick = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = skin_camera(false);
         scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), Mat4f::identity(), {}, kin::colors::white, 5);
         shoot_view(renderer, r3d, no_pick, scene);
         renderer.present();
-        assert(!r3d.pick(no_pick, {80, 60}).hit);
+        assert(!r3d.pick(no_pick, {80, 60}).value_or({}).hit);
     });
 }
 
@@ -9120,8 +9160,8 @@ void test_gpu_skinned_shadow_cache() {
         SkinRig rig{r3d};
         SkinRig other{r3d, 25, 12, 2.0f};
         SkinRig fat{r3d, 25, 12, 3.0f, 0.7f}; // the same skeleton and so the same matrices, another mesh
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Setup {
             float a = 40.0f, b = -30.0f;
             float one_copy = 0.0f; // copy 7's bend, in a draw of forty
@@ -9247,8 +9287,8 @@ void test_gpu_skinned_shared_range() {
             Pixels shared, separate;
             kin::u32 shared_matrices = 0, separate_matrices = 0;
             for (const bool use_model : {true, false}) {
-                kin::View3D view =
-                    r3d.create_view({160, 120}, {.samples = 4}); // a view each: the jitter's sequence starts alike
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 4})
+                                       .value_or({}); // a view each: the jitter's sequence starts alike
                 for (int frame = 0; frame < (features ? 4 : 1); ++frame) {
                     kin::Scene3D scene;
                     scene.camera = skin_camera(false);
@@ -9346,7 +9386,7 @@ void test_gpu_ecs_character() {
                                        .set(kin::SkinnedMeshRenderer3D{.model = model})
                                        .set(a));
             }
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             renderer.set_job_system(jobs);
             kin::Scene3D scene;
             for (int step = 0; step < steps; ++step) {
@@ -9426,8 +9466,8 @@ Biped make_biped(kin::Renderer3D& r3d) {
     b.model = std::make_shared<kin::Model3D>();
     b.model->skeletons.push_back(skin_fixtures::make_biped());
     const kin::Skeleton3D& sk = b.model->skeletons[0];
-    b.body = r3d.create_mesh(skin_fixtures::make_biped_body(sk));
-    b.hand = r3d.create_mesh(skin_fixtures::make_joint_cube(sk, skin_fixtures::biped::hand_l));
+    b.body = r3d.create_mesh(skin_fixtures::make_biped_body(sk)).value_or({});
+    b.hand = r3d.create_mesh(skin_fixtures::make_joint_cube(sk, skin_fixtures::biped::hand_l)).value_or({});
     assert(b.body.valid() && b.body.skinned() && b.hand.skinned());
     kin::ModelPart3D body;
     body.name = "body";
@@ -9494,7 +9534,8 @@ void test_gpu_ik_hand_at_target() {
             return;
         }
         const ik_scene::Biped biped = ik_scene::make_biped(r3d);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
         struct Case {
             const char* what;
             kin::Transform3D transform;
@@ -9564,7 +9605,7 @@ void test_gpu_ik_not_culled() {
             return;
         }
         const ik_scene::Biped biped = ik_scene::make_biped(r3d);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::EcsWorld world;
         kin::WorldRenderState3D state{world};
         kin::Animator3D animator;
@@ -9634,7 +9675,8 @@ void test_gpu_ik_taa_matches_clip() {
             return p;
         };
         {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
             kin::EcsWorld world;
             kin::WorldRenderState3D state{world};
             kin::Animator3D animator;
@@ -9677,7 +9719,8 @@ void test_gpu_ik_taa_matches_clip() {
             model->clips.push_back(std::move(clip));
         }
         {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
             kin::EcsWorld world;
             kin::WorldRenderState3D state{world};
             world.raw()
@@ -9715,8 +9758,8 @@ void test_gpu_ik_shadow_cache() {
         }
         const ik_scene::Biped biped = ik_scene::make_biped(r3d);
         const kin::Mesh3D floor = make_box(r3d, {10.0f, 0.2f, 10.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::EcsWorld world;
         kin::WorldRenderState3D state{world};
         kin::Animator3D animator;
@@ -9782,7 +9825,7 @@ void test_gpu_ik_on_workers() {
         }
         const ik_scene::Biped biped = ik_scene::make_biped(r3d);
         const kin::Mesh3D floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto run = [&](kin::JobSystem* workers, int count) {
             kin::EcsWorld world;
             kin::WorldRenderState3D state{world};
@@ -9851,7 +9894,7 @@ Marked make_marked(kin::Renderer3D& r3d, int joint, Vec3f offset = {}) {
     b.model = std::make_shared<kin::Model3D>();
     b.model->skeletons.push_back(skin_fixtures::make_biped_toes());
     const kin::Skeleton3D& sk = b.model->skeletons[0];
-    b.body = r3d.create_mesh(skin_fixtures::make_biped_body(sk));
+    b.body = r3d.create_mesh(skin_fixtures::make_biped_body(sk)).value_or({});
     std::vector<Mat4f> world;
     kin::compute_world_matrices(sk, sk.rest_pose(), world);
     const Mat4f& w = world[static_cast<std::size_t>(joint)];
@@ -9859,7 +9902,7 @@ Marked make_marked(kin::Renderer3D& r3d, int joint, Vec3f offset = {}) {
     kin::MeshData3D cube;
     const float r = 0.06f;
     skin_fixtures::append_box(cube, at - Vec3f{0, 0, r}, at + Vec3f{0, 0, r}, r, joint, joint);
-    b.marker = r3d.create_mesh(cube);
+    b.marker = r3d.create_mesh(cube).value_or({});
     assert(b.body.valid() && b.marker.valid());
     kin::ModelPart3D body;
     body.name = "body";
@@ -9928,7 +9971,8 @@ void test_gpu_ik_limits_fabrik_locking_toes() {
             return;
         }
         namespace B = skin_fixtures::biped;
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
 
         // FABRIK: the head on the end of the spine chain goes to the target, and stays there as the pole turns the
         // chain's bulge.
@@ -10139,8 +10183,8 @@ void test_gpu_skinned_everything() {
         }
         const kin::Mesh3D floor = make_box(r3d, {80.0f, 0.2f, 80.0f});
         SkinRig rig{r3d, 9, 8};
-        kin::View3D serial_view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
-        kin::View3D worker_view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::View3D serial_view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+        kin::View3D worker_view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         for (const int count : {400, 2600}) {
             serial_view.reset_history();
             worker_view.reset_history();
@@ -10186,7 +10230,7 @@ void test_gpu_skinned_everything() {
             assert(pixels_lit(last) > 2000);
             dump(last, "skinned_everything_" + std::to_string(count));
             // A copy's pixel names its id.
-            const kin::PickResult3D r = r3d.pick(worker_view, {80, 60});
+            const kin::PickResult3D r = r3d.pick(worker_view, {80, 60}).value_or({});
             assert(r.hit);
         }
         std::cerr
@@ -10203,7 +10247,7 @@ void test_gpu_physics_debug_lines() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D slab = make_box(r3d, {6.0f, 0.2f, 6.0f});
         const kin::Mesh3D crate = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         kin::EcsWorld ecs;
         flecs::world& world = ecs.raw();
         kin::World3DConfig cfg;
@@ -10306,7 +10350,8 @@ void test_gpu_ragdoll_pose_reaches_render() {
             return;
         }
         const ik_scene::Biped biped = ik_scene::make_biped(r3d);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
         struct Case {
             const char* what;
             kin::Transform3D transform;
@@ -10478,7 +10523,8 @@ void test_gpu_ragdoll_taa_matches_clip() {
             return p;
         };
         {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
             kin::EcsWorld ecs;
             kin::World3DConfig cfg;
             cfg.single_threaded = true;
@@ -10527,7 +10573,8 @@ void test_gpu_ragdoll_taa_matches_clip() {
             model->clips.push_back(std::move(clip));
         }
         {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)});
+            kin::View3D view =
+                r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 34, 40)}).value_or({});
             kin::EcsWorld ecs;
             kin::WorldRenderState3D state{ecs};
             // The entity at the same place: the poses are model-space, so the entity's transform is the ragdoll
@@ -10561,7 +10608,8 @@ void test_gpu_rope_tube() {
     with_gpu("test_gpu_rope_tube", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D floor = make_box(r3d, {8.0f, 0.2f, 8.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 12, 16)});
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(10, 12, 16)}).value_or({});
         kin::EcsWorld ecs;
         kin::World3DConfig cfg;
         cfg.single_threaded = true;
@@ -11061,7 +11109,7 @@ Vec3f pixel_direction(const kin::Camera3D& camera, int x, int y) {
 void test_gpu_sky_matches_cpu() {
     with_gpu("test_gpu_sky_matches_cpu", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Vec3f eye{0.0f, 1.0f, 0.0f};
         int worst = 0, count = 0;
         const std::array<std::pair<Vec3f, float>, 4> views{std::pair<Vec3f, float>{{0.0f, 1.0f, -10.0f}, 60.0f},
@@ -11108,7 +11156,7 @@ void test_gpu_sky_matches_cpu() {
 void test_gpu_sky_horizon_is_smooth() {
     with_gpu("test_gpu_sky_horizon_is_smooth", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         for (const Vec3f sun : {Vec3f{0.45f, 0.30f, -0.84f}, normalize(Vec3f{-0.5f, 0.04f, 0.8f}),
                                 normalize(Vec3f{0.0f, -0.12f, -1.0f})}) {
             // Looking level from the ground (a fov of 70: the horizon is the picture's middle row, ground below, sky
@@ -11156,7 +11204,7 @@ void test_gpu_sky_horizon_is_smooth() {
 void test_gpu_sky_sun_position() {
     with_gpu("test_gpu_sky_sun_position", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Vec3f sun = normalize(Vec3f{0.45f, 0.30f, -0.84f});
         struct Config {
             Vec3f offset;
@@ -11212,7 +11260,7 @@ void test_gpu_sky_stays_behind_geometry() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         for (const kin::u32 samples : {1u, 4u}) {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples}).value_or({});
             kin::Scene3D scene = clear_sky_scene({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -10.0f}, 60.0f);
             const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
             const kin::Material3D green{.color = Color::rgb(40, 200, 40), .unlit = true};
@@ -11257,7 +11305,8 @@ void test_gpu_sky_and_fog_off_are_unchanged() {
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         for (const bool hdr : {false, true}) {
             kin::View3D view =
-                r3d.create_view({160, 120}, {.samples = 4, .background = Color::rgb(20, 50, 90), .hdr = hdr});
+                r3d.create_view({160, 120}, {.samples = 4, .background = Color::rgb(20, 50, 90), .hdr = hdr})
+                    .value_or({});
             const auto make_plain = [&] {
                 kin::Scene3D plain;
                 plain.camera = kin::Camera3D::look_at({0.0f, 1.0f, 5.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
@@ -11329,7 +11378,7 @@ void test_gpu_fog_matches_formula() {
     with_gpu("test_gpu_fog_matches_formula", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Case {
             const char* name;
             Vec3f eye;
@@ -11432,7 +11481,7 @@ void test_gpu_fog_blended_and_custom() {
     with_gpu("test_gpu_fog_blended_and_custom", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -1.0f}, 60.0f);
         scene.lights.sun.color = {};
@@ -11492,7 +11541,7 @@ void test_gpu_fog_blended_and_custom() {
         if (kin::shader_compiler_available()) {
             const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
             std::string error;
-            const kin::MaterialShader3D flat = r3d.compile_material_shader(dir / "custom_flat.frag.glsl");
+            const kin::MaterialShader3D flat = r3d.compile_material_shader(dir / "custom_flat.frag.glsl").value_or({});
             error = kin::diagnostics3d_text(r3d.diagnostics());
             assert(flat.valid());
             kin::Material3D custom{.shader = flat};
@@ -11524,7 +11573,7 @@ void test_gpu_fog_melts_into_the_sky() {
     with_gpu("test_gpu_fog_melts_into_the_sky", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene = clear_sky_scene({0.0f, 2.0f, 0.0f}, {0.0f, 2.0f, -10.0f}, 60.0f);
         scene.lights.sun.direction = normalize(Vec3f{-0.6f, 0.35f, -0.7f});
         scene.draw(box, Mat4f::translation({0.0f, -0.5f, -9000.0f}) * Mat4f::scaling({40000.0f, 1.0f, 20000.0f}),
@@ -11601,8 +11650,8 @@ void test_gpu_sky_under_taa() {
             if (ao && lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
                 continue;
             }
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
-            kin::View3D reference = r3d.create_view({160, 120}, {.samples = 1});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
+            kin::View3D reference = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             // Still: let it settle, then compare consecutive frames.
             const kin::Scene3D still = make_scene(0.0f, true, ao);
             Pixels last;
@@ -11683,9 +11732,9 @@ void test_gpu_sky_lights_the_scene() {
         if (lacks(r3d.capabilities().ambient_occlusion, "compute (the environment's filter)")) {
             return;
         }
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
         const kin::Mesh3D slab = make_box(r3d, {30.0f, 0.2f, 30.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Result {
             Vec3f mean;
             Vec3f estimate;
@@ -11786,7 +11835,7 @@ void test_gpu_sky_environment_regeneration() {
             return;
         }
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 4.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun = {.direction = normalize(Vec3f{0.4f, 0.8f, 0.3f}), .color = {1.0f, 1.0f, 1.0f}};
@@ -11869,12 +11918,12 @@ void test_gpu_sky_image_mode() {
     with_gpu("test_gpu_sky_image_mode", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Vec2i size{256, 128};
-        const kin::Environment3D environment = r3d.create_environment(size, six_colour_sky(size));
+        const kin::Environment3D environment = r3d.create_environment(size, six_colour_sky(size)).value_or({});
         if (!environment.valid()) {
             std::cerr << "no compute: environment not made, skipped\n";
             return;
         }
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto look = [&](Vec3f toward, float intensity = 1.0f, float rotation = 0.0f) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, toward, 40.0f);
@@ -11903,7 +11952,8 @@ void test_gpu_sky_image_mode() {
         kin::Scene3D bare;
         bare.sky.enabled = true;
         bare.sky.mode = kin::SkyMode3D::Image;
-        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 60, 90)});
+        kin::View3D plain =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(30, 60, 90)}).value_or({});
         expect(shoot_view(renderer, r3d, plain, bare).at(80, 60), Color::rgb(30, 60, 90), "no panorama: the background",
                1);
         assert(!r3d.debug_stats().sky_drawn);
@@ -11917,7 +11967,7 @@ void test_gpu_sky_image_mode() {
 void test_gpu_sky_stars_and_moon() {
     with_gpu("test_gpu_sky_stars_and_moon", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto stars_at = [&](float sun_elevation_degrees) {
             const float e = sun_elevation_degrees * 3.14159265f / 180.0f;
             kin::Scene3D scene;
@@ -12001,7 +12051,7 @@ void test_gpu_sky_overlay_and_warm_up() {
     with_gpu("test_gpu_sky_overlay_and_warm_up", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .hdr = true, .bloom = 0.2f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .hdr = true, .bloom = 0.2f}).value_or({});
         kin::Scene3D scene = clear_sky_scene({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -10.0f}, 60.0f);
         scene.fog = {
             .enabled = true, .density = 0.3f, .colour = {1.0f, 1.0f, 1.0f}}; // 99.99% at 30 m; 36% at the gun's 1.5 m
@@ -12071,8 +12121,8 @@ void test_gpu_sky_sun_under_taa() {
                 continue;
             }
             for (const float step : {0.0f, 1.2f}) {
-                kin::View3D view = r3d.create_view({160, 120}, {.samples = 4});
-                kin::View3D reference = r3d.create_view({160, 120}, {.samples = 1});
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
+                kin::View3D reference = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
                 const auto make_scene = [&](float yaw_degrees, bool taa) {
                     const float yaw = yaw_degrees * 3.14159265f / 180.0f;
                     const Vec3f eye{0.0f, 1.0f, 0.0f};
@@ -12217,7 +12267,7 @@ void test_spot_light_maths() {
 void test_local_shadow_views() {
     kin::SpotLightSource3D s{
         .position = {0.5f, 4.0f, 1.0f}, .direction = {0.2f, -1.0f, 0.1f}, .radius = 12.0f, .outer_angle = 35.0f};
-    s.shadow.near_plane = 0.1f;
+    s.shadow_near_plane = 0.1f;
     const kin::u32 res = 512;
     const kin::LocalShadowView3D v = kin::spot_shadow_view(s, res);
     const kin::SpotCone3D c = kin::spot_cone(s);
@@ -12242,7 +12292,7 @@ void test_local_shadow_views() {
 
     // The cube.
     kin::PointLightSource3D p{.position = {-1.0f, 2.0f, 3.0f}, .radius = 9.0f};
-    p.shadow.near_plane = 0.05f;
+    p.shadow_near_plane = 0.05f;
     std::array<kin::LocalShadowView3D, 6> faces;
     for (kin::u32 f = 0; f < 6; ++f) {
         faces[f] = kin::cube_face_view(p, f, 256);
@@ -12344,7 +12394,7 @@ void test_gpu_spot_cone_matches_cpu() {
             return;
         }
         const kin::Mesh3D wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun.color = {};
@@ -12442,7 +12492,7 @@ void test_gpu_spot_cone_edges() {
             return;
         }
         const kin::Mesh3D wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
-        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1});
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1}).value_or({});
         const kin::Rectf rect{0.0f, 0.0f, 640.0f, 480.0f};
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
@@ -12461,7 +12511,7 @@ void test_gpu_spot_cone_edges() {
                                       .inner_angle = inner,
                                       .outer_angle = outer});
             } else {
-                scene.add_light(
+                scene.add_point_light(
                     {.position = {0.0f, 0.0f, d}, .color = {1.0f, 1.0f, 1.0f}, .radius = 20.0f, .size = 0.05f});
             }
             return shoot_large(renderer, r3d, view, scene);
@@ -12517,7 +12567,7 @@ void test_gpu_spot_radius_fade() {
             return;
         }
         const kin::Mesh3D wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun.color = {};
@@ -12637,7 +12687,7 @@ void test_gpu_spot_shadow_position() {
         const TopDown stage{r3d};
         const kin::Mesh3D pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
         const Vec3f lo{1.8f, 0.0f, -0.2f}, hi{2.2f, 3.0f, 0.2f};
-        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1});
+        kin::View3D view = r3d.create_view({640, 480}, {.samples = 1}).value_or({});
         const kin::Rectf rect{0.0f, 0.0f, 640.0f, 480.0f};
         // 1024 first: the 512 light then draws into a corner of the 1024 array, kept (a smaller side shrinks it only
         // after 120 renders).
@@ -12657,8 +12707,8 @@ void test_gpu_spot_shadow_position() {
                                             .size = 0.1f,
                                             .inner_angle = 45.0f,
                                             .outer_angle = 60.0f};
-                spot.shadow.enabled = shadow;
-                spot.shadow.resolution = resolution;
+                spot.shadow_enabled = shadow;
+                spot.shadow_resolution = resolution;
                 scene.add_spot_light(spot);
                 // A light that asks for a bigger map, out of the picture: it has no map, so it does not size the array
                 // (it made it 2048 a side).
@@ -12666,8 +12716,8 @@ void test_gpu_spot_shadow_position() {
                                               .direction = {0.0f, 1.0f, 0.0f},
                                               .color = {1.0f, 1.0f, 1.0f},
                                               .radius = 1.0f};
-                bigger.shadow.enabled = shadow;
-                bigger.shadow.resolution = 2048;
+                bigger.shadow_enabled = shadow;
+                bigger.shadow_resolution = 2048;
                 scene.add_spot_light(bigger);
                 const Pixels p = shoot_large(renderer, r3d, view, scene);
                 renderer.present();
@@ -12740,8 +12790,8 @@ void test_gpu_spot_shadow_position() {
                                     .size = 0.1f,
                                     .inner_angle = 40.0f,
                                     .outer_angle = 55.0f};
-        spot.shadow.enabled = true;
-        spot.shadow.resolution = 1024;
+        spot.shadow_enabled = true;
+        spot.shadow_resolution = 1024;
         scene.add_spot_light(spot);
         const Pixels p = shoot_large(renderer, r3d, view, scene);
         renderer.present();
@@ -12786,7 +12836,7 @@ void test_gpu_spot_shadow_casters() {
             return;
         }
         const TopDown stage{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto spot_for = [](float height, float x = 0.0f, Vec3f aim = {0.0f, -1.0f, 0.0f}) {
             kin::SpotLightSource3D spot{.position = {x, height, 0.0f},
                                         .direction = aim,
@@ -12795,8 +12845,8 @@ void test_gpu_spot_shadow_casters() {
                                         .size = 0.1f,
                                         .inner_angle = 50.0f,
                                         .outer_angle = 65.0f};
-            spot.shadow.enabled = true;
-            spot.shadow.resolution = 1024;
+            spot.shadow_enabled = true;
+            spot.shadow_resolution = 1024;
             return spot;
         };
         const auto base_scene = [&](kin::Scene3D& scene) {
@@ -12808,7 +12858,7 @@ void test_gpu_spot_shadow_casters() {
         };
         // Cut-out: a 2 x 2 quad lying flat 1.5 m up, half its texture clear (the left), half opaque (the right).
         {
-            const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.0f));
+            const kin::Mesh3D leaf_mesh = r3d.create_mesh(uv_square(1.0f)).value_or({});
             const kin::u8 texels[8] = {20, 200, 20, 0, 20, 200, 20, 255};
             const kin::Texture leaf = renderer.create_texture_from_rgba(texels, {2, 1});
             renderer.set_scale_mode(leaf, kin::ScaleMode::Nearest);
@@ -12883,7 +12933,7 @@ void test_gpu_spot_shadow_casters() {
             for (int i = 0; i < 5; ++i) {
                 copies.push_back({.transform = Mat4f::translation({-3.0f + 1.5f * static_cast<float>(i), 1.0f, 1.0f})});
             }
-            kin::View3D large = r3d.create_view({640, 480}, {.samples = 1});
+            kin::View3D large = r3d.create_view({640, 480}, {.samples = 1}).value_or({});
             const auto shoot_poles = [&](bool poles) {
                 kin::Scene3D scene;
                 base_scene(scene);
@@ -12977,9 +13027,10 @@ void test_gpu_spot_shadow_casters() {
 void test_scene_retained_instances() {
     struct Fake final : kin::IMeshBackend3D {};
     const kin::Mesh3D mesh{std::make_shared<Fake>(), 3, 3, {{-1, -2, -0.5f}, {1, 2, 0.5f}}};
-    kin::InstanceBatch3D batch(
-        mesh, {{Mat4f::identity(), Color::rgb(100, 200, 30), 19}, {Mat4f::translation({5, 0, 0}), {}, 20}},
-        {{0, 1}, {1, 1}});
+    auto batch = kin::InstanceBatch3D::create(
+                     mesh, {{Mat4f::identity(), Color::rgb(100, 200, 30), 19}, {Mat4f::translation({5, 0, 0}), {}, 20}},
+                     {{0, 1}, {1, 1}})
+                     .value_or({});
     const auto copy = batch;
     kin::Scene3D scene;
     scene.draw_instanced(batch);
@@ -13004,8 +13055,8 @@ void test_scene_retained_instances() {
     assert(caught);
     caught = false;
     {
-        kin::InstanceBatch3D invalid(mesh, std::vector<kin::MeshInstance3D>(2), {{1, 2}});
-        caught = !invalid && !invalid.diagnostics().empty();
+        const auto invalid = kin::InstanceBatch3D::create(mesh, std::vector<kin::MeshInstance3D>(2), {{1, 2}});
+        caught = !invalid && !invalid.value && !invalid.diagnostics.empty();
     }
     assert(caught);
     scene.clear();
@@ -13062,9 +13113,9 @@ void test_gpu_retained_instances() {
                 continue;
             const auto shoot = [&](bool retained, bool parallel) {
                 renderer.set_job_system(parallel ? &jobs : nullptr);
-                kin::InstanceBatch3D batch(box, original, groups);
+                auto batch = kin::InstanceBatch3D::create(box, original, groups).value_or({});
                 const bool fallback = mode == 3 || mode == 4;
-                auto view = r3d.create_view({160, 120}, {.samples = mode == 8 ? 4u : 1u, .pick = true});
+                auto view = r3d.create_view({160, 120}, {.samples = mode == 8 ? 4u : 1u, .pick = true}).value_or({});
                 std::vector<Pixels> images;
                 std::vector<kin::RenderDebugStats3D> counts;
                 std::vector<kin::u32> ids;
@@ -13084,11 +13135,11 @@ void test_gpu_retained_instances() {
                     scene.lights.shadow_cascades = mode == 5 ? 4 : 1;
                     scene.lights.local_shadow_resolution = 256;
                     kin::PointLightSource3D light{.position = {0, 8, 8}, .color = {10, 10, 10}, .radius = 30};
-                    light.shadow.enabled = true;
-                    scene.add_light(light);
+                    light.shadow_enabled = true;
+                    scene.add_point_light(light);
                     kin::SpotLightSource3D spot{
                         .position = {0, 15, 0}, .direction = {0, -1, 0}, .color = {10, 10, 10}, .radius = 35};
-                    spot.shadow.enabled = true;
+                    spot.shadow_enabled = true;
                     scene.add_spot_light(spot);
                     scene.taa.enabled = mode == 4;
                     scene.ambient_occlusion.enabled = mode == 6;
@@ -13148,7 +13199,7 @@ void test_gpu_retained_instances() {
                     }
                     for (int y = 20; y < 110; y += 25)
                         for (int x = 20; x < 150; x += 25) {
-                            const auto hit = r3d.pick(view, {x, y});
+                            const auto hit = r3d.pick(view, {x, y}).value_or({});
                             ids.push_back(hit.hit ? hit.id : 0);
                         }
                     renderer.present();
@@ -13191,10 +13242,12 @@ void test_gpu_retained_bindings() {
                                                           float(i / 10) * 0.15f - 1.5f}),
                                       Color::rgb(kin::u8(90 + cell * 70), kin::u8(220 - cell * 50), 160),
                                       cell * 200 + i + 1});
-                batches.emplace_back(mesh, std::move(copies), std::vector<kin::InstanceGroup3D>{{0, 200}});
+                batches.push_back(
+                    kin::InstanceBatch3D::create(mesh, std::move(copies), std::vector<kin::InstanceGroup3D>{{0, 200}})
+                        .value_or({}));
             }
-            auto view = r3d.create_view({160, 120}, {.pick = true});
-            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+            auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
             std::vector<Pixels> images;
             std::vector<kin::u32> picks;
             for (int frame = 0; frame < 5; ++frame) {
@@ -13210,11 +13263,11 @@ void test_gpu_retained_bindings() {
                 scene.lights.shadow_cascades = 4;
                 scene.lights.local_shadow_resolution = 128;
                 kin::PointLightSource3D point{.position = {2, 6, 1}, .color = {20, 20, 20}, .radius = 20};
-                point.shadow.enabled = true;
-                scene.add_light(point);
+                point.shadow_enabled = true;
+                scene.add_point_light(point);
                 kin::SpotLightSource3D spot{
                     .position = {-2, 7, 0}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 20};
-                spot.shadow.enabled = true;
+                spot.shadow_enabled = true;
                 scene.add_spot_light(spot);
                 scene.ambient_occlusion.enabled = frame == 2 && r3d.capabilities().ambient_occlusion;
                 scene.contact_shadows.enabled = frame == 2 && r3d.capabilities().contact_shadows;
@@ -13232,7 +13285,7 @@ void test_gpu_retained_bindings() {
                 images.push_back(shoot_view(renderer, r3d, target, scene));
                 for (int y = 20; y < 100; y += 15)
                     for (int x = 20; x < 145; x += 15) {
-                        const auto hit = r3d.pick(target, {x, y});
+                        const auto hit = r3d.pick(target, {x, y}).value_or({});
                         picks.push_back(hit.hit ? hit.id : 0);
                     }
                 renderer.present();
@@ -13251,15 +13304,15 @@ void test_gpu_retained_limits() {
     with_gpu("test_gpu_retained_limits", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const auto mesh = make_box(r3d, {1, 1, 1});
-        auto first = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
-        auto second = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
-        auto reference = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        auto first = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+        auto second = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+        auto reference = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0, 0, 6}, {}, 60);
         const kin::Material3D material{.unlit = true};
         const kin::MeshInstance3D old{Mat4f::translation({-1, 0, 0}), Color::rgb(250, 80, 30), 501};
         const kin::MeshInstance3D changed{Mat4f::translation({1, 0, 0}), Color::rgb(30, 200, 100), 502};
-        kin::InstanceBatch3D batch(mesh, {old});
+        auto batch = kin::InstanceBatch3D::create(mesh, {old}).value_or({});
         scene.draw_instanced(batch, material);
         renderer.clear(kin::colors::black);
         render_ok(r3d, first, scene);
@@ -13290,7 +13343,7 @@ void test_gpu_retained_limits() {
         batch = {};
         std::vector<kin::InstanceBatch3D> tiny;
         for (int i = 0; i < 129; ++i) {
-            tiny.emplace_back(mesh, std::vector<kin::MeshInstance3D>{old});
+            tiny.push_back(kin::InstanceBatch3D::create(mesh, std::vector<kin::MeshInstance3D>{old}).value_or({}));
             scene.draw_instanced(tiny.back(), material);
         }
         shoot_view(renderer, r3d, first, scene);
@@ -13301,7 +13354,8 @@ void test_gpu_retained_limits() {
         // Two 17.1 MiB tables exceed the 32 MiB live budget; the second takes the immediate path.
         std::vector<kin::MeshInstance3D> far(140000, {Mat4f::translation({100000, 0, 0}), kin::colors::white, 0});
         far[0] = old;
-        kin::InstanceBatch3D large_a(mesh, far), large_b(mesh, std::move(far));
+        auto large_a = kin::InstanceBatch3D::create(mesh, far).value_or({});
+        auto large_b = kin::InstanceBatch3D::create(mesh, std::move(far)).value_or({});
         scene.draw_instanced(large_a, material);
         scene.draw_instanced(large_b, material);
         shoot_view(renderer, r3d, first, scene);
@@ -13347,8 +13401,8 @@ void test_gpu_cached_instance_bounds() {
         kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
         const auto shoot = [&](bool retained, bool parallel) {
             renderer.set_job_system(parallel ? &jobs : nullptr);
-            kin::InstanceBatch3D batch(mesh, original, groups);
-            auto view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            auto batch = kin::InstanceBatch3D::create(mesh, original, groups).value_or({});
+            auto view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
             std::vector<Pixels> images;
             std::vector<kin::RenderDebugStats3D> counts;
             std::vector<kin::u32> ids;
@@ -13385,11 +13439,11 @@ void test_gpu_cached_instance_bounds() {
                 scene.lights.local_shadow_resolution = 256;
                 if (frame != 5) {
                     kin::PointLightSource3D point{.position = {10, 8, 8}, .color = {10, 10, 10}, .radius = 35};
-                    point.shadow.enabled = true;
-                    scene.add_light(point);
+                    point.shadow_enabled = true;
+                    scene.add_point_light(point);
                     kin::SpotLightSource3D spot{
                         .position = {0, 15, 0}, .direction = {0, -1, 0}, .color = {10, 10, 10}, .radius = 35};
-                    spot.shadow.enabled = true;
+                    spot.shadow_enabled = true;
                     scene.add_spot_light(spot);
                     scene.lights.fill = {.direction = {-0.4f, 1, -0.5f}, .color = {0.2f, 0.3f, 0.4f}};
                     scene.lights.fill_shadow.enabled = true;
@@ -13438,7 +13492,7 @@ void test_gpu_cached_instance_bounds() {
                 }
                 for (int y = 20; y < 110; y += 25)
                     for (int x = 20; x < 150; x += 25) {
-                        const auto hit = r3d.pick(view, {x, y});
+                        const auto hit = r3d.pick(view, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 renderer.present();
@@ -13735,13 +13789,13 @@ void test_gpu_local_shadow_cell_ranges() {
                                       Mat4f::scaling({i % 2 ? -0.8f : 1.2f, 0.8f + float(i % 3) * 0.1f, 0.9f}),
                                   kin::colors::white, kin::u32(copies.size() + 1)});
         }
-        kin::InstanceBatch3D batch(mesh, copies, groups);
+        auto batch = kin::InstanceBatch3D::create(mesh, copies, groups).value_or({});
         kin::JobSystem jobs{kin::JobSystemConfig{.workers = 2}};
         const bool fast = true;
         const bool spatial = true;
         const auto shoot = [&](int grouped, bool parallel) {
             renderer.set_job_system(parallel ? &jobs : nullptr);
-            auto view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+            auto view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
             std::vector<Pixels> images;
             std::vector<kin::RenderDebugStats3D> counts;
             std::vector<kin::u32> ids;
@@ -13760,13 +13814,13 @@ void test_gpu_local_shadow_cell_ranges() {
                 scene.lights.fill_shadow.cascades = frame == 0 ? 1 : 3;
                 scene.lights.fill_shadow.resolution = 256;
                 kin::PointLightSource3D point{.position = {0, 10, 0}, .color = {10, 10, 10}, .radius = 30};
-                point.shadow.enabled = true;
-                scene.add_light(point);
+                point.shadow_enabled = true;
+                scene.add_point_light(point);
                 kin::SpotLightSource3D spot{.position = {float(frame) * 0.2f, 10, 0},
                                             .direction = {0, -1, 0},
                                             .color = {10, 10, 10},
                                             .radius = 40};
-                spot.shadow.enabled = true;
+                spot.shadow_enabled = true;
                 scene.add_spot_light(spot);
                 scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
                 const kin::Material3D material{.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture};
@@ -13794,7 +13848,7 @@ void test_gpu_local_shadow_cell_ranges() {
                     assert(stats.camera_range_accepted == 0);
                 for (int y = 20; y < 110; y += 25)
                     for (int x = 20; x < 150; x += 25) {
-                        const auto hit = r3d.pick(view, {x, y});
+                        const auto hit = r3d.pick(view, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 renderer.present();
@@ -13836,15 +13890,16 @@ void test_gpu_local_shadow_packing() {
             renderer.set_job_system(mode == 1 ? &jobs : nullptr);
             const auto mesh = make_box(r3d, {0.15f, 1, 0.15f});
             const auto floor = make_box(r3d, {100, 0.2f, 100});
-            const auto lod = r3d.create_mesh(kin::meshes::sphere(0.5f, 24, 12), {.levels = 3});
-            const auto clustered = r3d.create_mesh(kin::meshes::torus(0.8f, 0.3f, 32, 16), {.clusters = true});
+            const auto lod = r3d.create_mesh(kin::meshes::sphere(0.5f, 24, 12), {.levels = 3}).value_or({});
+            const auto clustered =
+                r3d.create_mesh(kin::meshes::torus(0.8f, 0.3f, 32, 16), {.clusters = true}).value_or({});
             assert(lod.level_count() > 1 && clustered.has_clusters());
             std::vector<kin::MeshInstance3D> copies;
             for (int i = 0; i < 9000; ++i)
                 copies.push_back({Mat4f::translation({float(i % 100) * 0.12f - 6, 0.5f, float(i / 100) * 0.12f - 5}),
                                   kin::colors::white, kin::u32(i + 1)});
-            kin::InstanceBatch3D batch(mesh, std::move(copies), {{0, 9000}});
-            auto view = r3d.create_view({160, 120}, {.samples = 1});
+            auto batch = kin::InstanceBatch3D::create(mesh, std::move(copies), {{0, 9000}}).value_or({});
+            auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             for (int frame = 0; frame < 7; ++frame) {
                 if (frame == 4) {
                     const kin::MeshInstance3D moved{Mat4f::translation({8, 2, 0}), kin::colors::white, 9000};
@@ -13865,13 +13920,13 @@ void test_gpu_local_shadow_packing() {
                 scene.lights.fill_shadow.cascades = 2;
                 scene.lights.fill_shadow.resolution = 256;
                 kin::PointLightSource3D point{.position = {0, 10, 0}, .color = {10, 10, 10}, .radius = 30};
-                point.shadow.enabled = true;
-                scene.add_light(point);
+                point.shadow_enabled = true;
+                scene.add_point_light(point);
                 kin::SpotLightSource3D spot{.position = {frame >= 2 ? 1.0f : 0.0f, 10, 0},
                                             .direction = {0, -1, 0},
                                             .color = {10, 10, 10},
                                             .radius = 40};
-                spot.shadow.enabled = true;
+                spot.shadow_enabled = true;
                 scene.add_spot_light(spot);
                 scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
                 scene.draw(lod, Mat4f::translation({-8, 1, 2}));
@@ -13957,7 +14012,7 @@ void test_gpu_instance_groups() {
                 continue;
             const auto shoot = [&](bool grouped, bool parallel) {
                 renderer.set_job_system(parallel ? &jobs : nullptr);
-                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
                 Pixels pixels;
                 kin::RenderDebugStats3D stats;
                 for (int frame = 0; frame < (mode == 3 ? 4 : 1); ++frame) {
@@ -13975,11 +14030,11 @@ void test_gpu_instance_groups() {
                     scene.lights.local_shadow_resolution = 256;
                     kin::SpotLightSource3D spot{
                         .position = {0, 15, 0}, .direction = {0, -1, 0}, .color = {10, 10, 10}, .radius = 35};
-                    spot.shadow.enabled = mode != 5;
+                    spot.shadow_enabled = mode != 5;
                     scene.add_spot_light(spot);
                     kin::PointLightSource3D point{.position = {10, 8, 8}, .color = {10, 10, 10}, .radius = 26};
-                    point.shadow.enabled = mode != 5;
-                    scene.add_light(point);
+                    point.shadow_enabled = mode != 5;
+                    scene.add_point_light(point);
                     if (mode == 2) {
                         scene.lights.fill = {.direction = {-0.4f, 1, -0.5f}, .color = {0.2f, 0.3f, 0.4f}};
                         scene.lights.fill_shadow.enabled = true;
@@ -14009,7 +14064,7 @@ void test_gpu_instance_groups() {
                 std::vector<kin::u32> ids;
                 for (int y = 20; y < 110; y += 25)
                     for (int x = 20; x < 150; x += 25) {
-                        const auto hit = r3d.pick(view, {x, y});
+                        const auto hit = r3d.pick(view, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 renderer.set_job_system(nullptr);
@@ -14060,7 +14115,9 @@ void test_gpu_prepared_scenes() {
                 copies.push_back({Mat4f::translation({float(i % 50) * 0.12f - 3, 0.2f, float(i / 50) * 0.12f - 3}) *
                                       Mat4f::scaling({i % 2 ? -1.0f : 1.0f, 1, 1}),
                                   kin::colors::white, i + 1});
-            kin::InstanceBatch3D batch(box, std::move(copies), {{0, 625}, {625, 625}, {1250, 625}, {1875, 625}});
+            auto batch =
+                kin::InstanceBatch3D::create(box, std::move(copies), {{0, 625}, {625, 625}, {1250, 625}, {1875, 625}})
+                    .value_or({});
             kin::Scene3D scene, other, moved;
             const auto populate = [&](kin::Scene3D& s, Color color) {
                 s.draw(floor, Mat4f::translation({0, -0.15f, 0}), {.color = color});
@@ -14069,9 +14126,9 @@ void test_gpu_prepared_scenes() {
                        5000);
             };
             populate(scene, Color::rgb(90, 110, 140));
-            auto view = r3d.create_view({160, 120}, {.pick = true});
-            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true});
-            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+            auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true}).value_or({});
+            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
             std::span<kin::MeshInstance3D> writable;
             std::optional<kin::Scene3D> recycled;
             for (int frame = 0; frame < 26; ++frame) {
@@ -14084,7 +14141,7 @@ void test_gpu_prepared_scenes() {
                     batch.update(0, {&edit, 1});
                 }
                 if (frame == 6) {
-                    writable = scene.add_instances(box, 1);
+                    writable = scene.add_instances(box, 1).value_or({});
                     writable[0] = {Mat4f::translation({-1, 1, 2}), kin::colors::white, 6000};
                 }
                 if (frame == 7)
@@ -14137,11 +14194,11 @@ void test_gpu_prepared_scenes() {
                 selected.lights.spots.clear();
                 kin::PointLightSource3D point{
                     .position = {float(frame) * 0.03f, 5, 1}, .color = {20, 20, 20}, .radius = 20};
-                point.shadow.enabled = frame != 2;
-                selected.add_light(point);
+                point.shadow_enabled = frame != 2;
+                selected.add_point_light(point);
                 kin::SpotLightSource3D spot{
                     .position = {0, 7, 0}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 20};
-                spot.shadow.enabled = frame != 2;
+                spot.shadow_enabled = frame != 2;
                 selected.add_spot_light(spot);
                 selected.taa.enabled = frame == 20 && r3d.capabilities().temporal_aa;
                 if (auto* overlay = selected.overlay_if_any()) {
@@ -14160,7 +14217,7 @@ void test_gpu_prepared_scenes() {
                 std::vector<kin::u32> ids;
                 for (int y = 20; y < 90; y += 20)
                     for (int x = 20; x < 120; x += 20) {
-                        const auto hit = r3d.pick(target, {x, y});
+                        const auto hit = r3d.pick(target, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 if (!mode) {
@@ -14187,7 +14244,8 @@ void test_gpu_prepared_scenes() {
             many.camera = scene.camera;
             for (kin::u32 i = 0; i < 129; ++i)
                 many.draw_instanced(
-                    kin::InstanceBatch3D(box, {{Mat4f::translation({0, 0, 0}), kin::colors::white, i + 1}}));
+                    kin::InstanceBatch3D::create(box, {{Mat4f::translation({0, 0, 0}), kin::colors::white, i + 1}})
+                        .value_or({}));
             for (int i = 0; i < 2; ++i) {
                 const auto image = shoot_view(renderer, r3d, view, many);
                 const auto st = r3d.debug_stats();
@@ -14220,15 +14278,17 @@ void test_gpu_prepared_batch_edits() {
             for (kin::u32 i = 0; i < 2500; ++i)
                 copies.push_back({Mat4f::translation({float(i % 50) * 0.12f - 3, 0.4f, float(i / 50) * 0.12f - 3}),
                                   kin::colors::white, i + 1});
-            kin::InstanceBatch3D a(mesh, std::move(copies), {{0, 1250}, {1250, 1250}});
-            kin::InstanceBatch3D b(
-                mesh,
-                {{Mat4f::translation({-2, 1, 2}), Color::rgb(80, 180, 250), 6001},
-                 {Mat4f::translation({1, 1.5f, 3}) * Mat4f::scaling({3, 2, 3}), Color::rgb(250, 70, 40), 6002},
-                 {Mat4f::translation({1000, 1, 1000}), kin::colors::white, 6004}},
-                {{0, 1}, {1, 2}});
-            kin::InstanceBatch3D outside(mesh, {{Mat4f::translation({1000, 0, -1000}), kin::colors::white, 6003}},
-                                         {{0, 1}});
+            auto a = kin::InstanceBatch3D::create(mesh, std::move(copies), {{0, 1250}, {1250, 1250}}).value_or({});
+            auto b = kin::InstanceBatch3D::create(
+                         mesh,
+                         {{Mat4f::translation({-2, 1, 2}), Color::rgb(80, 180, 250), 6001},
+                          {Mat4f::translation({1, 1.5f, 3}) * Mat4f::scaling({3, 2, 3}), Color::rgb(250, 70, 40), 6002},
+                          {Mat4f::translation({1000, 1, 1000}), kin::colors::white, 6004}},
+                         {{0, 1}, {1, 2}})
+                         .value_or({});
+            auto outside = kin::InstanceBatch3D::create(
+                               mesh, {{Mat4f::translation({1000, 0, -1000}), kin::colors::white, 6003}}, {{0, 1}})
+                               .value_or({});
             kin::Scene3D scene;
             scene.lights.sun.color = {};
             scene.lights.local_shadow_resolution = 128;
@@ -14236,9 +14296,9 @@ void test_gpu_prepared_batch_edits() {
             const kin::Material3D material{.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture};
             for (const auto& batch : {a, b, outside})
                 scene.draw_instanced(batch, material);
-            auto view = r3d.create_view({160, 120}, {.pick = true});
-            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true});
-            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+            auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true}).value_or({});
+            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
             for (int frame = 0; frame < 8; ++frame) {
                 // Content changes through shared handles must refresh bounds,
                 // visibility and uploads even when the piece layout is reused.
@@ -14268,7 +14328,7 @@ void test_gpu_prepared_batch_edits() {
                 scene.lights.spots.clear();
                 kin::SpotLightSource3D light{
                     .position = {0.03f * frame, 7, 0}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 20};
-                light.shadow.enabled = true;
+                light.shadow_enabled = true;
                 scene.add_spot_light(light);
                 scene.taa.enabled = frame == 6 && r3d.capabilities().temporal_aa;
                 auto& target = frame == 2 ? hdr : frame == 4 ? msaa : view;
@@ -14282,7 +14342,7 @@ void test_gpu_prepared_batch_edits() {
                 std::vector<kin::u32> ids;
                 for (int y = 20; y < 100; y += 15)
                     for (int x = 20; x < 145; x += 15) {
-                        const auto hit = r3d.pick(target, {x, y});
+                        const auto hit = r3d.pick(target, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 if (!mode) {
@@ -14327,7 +14387,8 @@ void test_gpu_cached_camera_cull() {
                 copies.push_back({Mat4f::translation({float(i % 77) * 0.5f - 19, 0.5f, float(i / 77) * 0.4f - 8}) *
                                       Mat4f::scaling({i % 2 ? -1.0f : 1.0f, 0.8f + float(i % 3) * 0.2f, 1}),
                                   kin::colors::white, i + 1});
-            kin::InstanceBatch3D batch(mesh, std::move(copies), {{7, 1001}, {1008, 1003}, {2011, 1001}});
+            auto batch = kin::InstanceBatch3D::create(mesh, std::move(copies), {{7, 1001}, {1008, 1003}, {2011, 1001}})
+                             .value_or({});
             kin::Scene3D scene;
             scene.lights.local_shadow_resolution = 128;
             scene.lights.shadow_resolution = 128;
@@ -14335,11 +14396,11 @@ void test_gpu_cached_camera_cull() {
             scene.draw_instanced(batch, {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture});
             kin::SpotLightSource3D light{
                 .position = {0, 10, 0}, .direction = {0, -1, 0}, .color = {15, 15, 15}, .radius = 40};
-            light.shadow.enabled = true;
+            light.shadow_enabled = true;
             scene.add_spot_light(light);
-            auto view = r3d.create_view({160, 120}, {.pick = true});
-            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true});
-            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true});
+            auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+            auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true}).value_or({});
+            auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
             for (int frame = 0; frame < 8; ++frame) {
                 scene.camera =
                     kin::Camera3D::look_at({0.1f * frame, 8, 16}, frame == 3 ? Vec3f{0, 8, 100} : Vec3f{}, 50);
@@ -14360,7 +14421,7 @@ void test_gpu_cached_camera_cull() {
                 std::vector<kin::u32> ids;
                 for (int y = 15; y < 110; y += 13)
                     for (int x = 10; x < 150; x += 13) {
-                        const auto hit = r3d.pick(target, {x, y});
+                        const auto hit = r3d.pick(target, {x, y}).value_or({});
                         ids.push_back(hit.hit ? hit.id : 0);
                     }
                 if (!mode) {
@@ -14438,9 +14499,9 @@ void test_gpu_spot_shadow_acne() {
             return;
         }
         const TopDown stage{r3d};
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.5f, 48, 24));
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.5f, 48, 24)).value_or({});
         const kin::Mesh3D wall = make_box(r3d, {12.0f, 4.0f, 0.2f});
-        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1}).value_or({});
         const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
         enum class Surface { Floor, Sphere, Wall };
         struct Config {
@@ -14480,10 +14541,10 @@ void test_gpu_spot_shadow_acne() {
                                             .size = 0.1f,
                                             .inner_angle = 40.0f,
                                             .outer_angle = 55.0f};
-                spot.shadow.enabled = shadow;
-                spot.shadow.resolution = 1024;
-                spot.shadow.bias = c.bias;
-                spot.shadow.normal_offset = c.normal_offset;
+                spot.shadow_enabled = shadow;
+                spot.shadow_resolution = 1024;
+                spot.shadow_bias = c.bias;
+                spot.shadow_normal_offset = c.normal_offset;
                 scene.add_spot_light(spot);
                 const Pixels p = shoot_large(renderer, r3d, view, scene);
                 renderer.present();
@@ -14545,7 +14606,7 @@ void test_gpu_spot_shadow_distance() {
         }
         const TopDown stage{r3d};
         const kin::Mesh3D pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
-        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1}).value_or({});
         // A pole 5 m from the light's foot, a light 3 m up and aimed down the floor toward +x: the shadow lies at 6 to
         // 9 m from the light.
         const auto shoot = [&](float distance, bool shadow) {
@@ -14562,9 +14623,9 @@ void test_gpu_spot_shadow_distance() {
                                         .size = 0.1f,
                                         .inner_angle = 40.0f,
                                         .outer_angle = 60.0f};
-            spot.shadow.enabled = shadow;
-            spot.shadow.distance = distance;
-            spot.shadow.resolution = 1024;
+            spot.shadow_enabled = shadow;
+            spot.shadow_distance = distance;
+            spot.shadow_resolution = 1024;
             scene.add_spot_light(spot);
             const Pixels p = shoot_large(renderer, r3d, view, scene);
             renderer.present();
@@ -14623,7 +14684,7 @@ void test_gpu_spot_receives_shadow_flag() {
         }
         const kin::Mesh3D floor = make_box(r3d, {20.0f, 0.2f, 20.0f});
         const kin::Mesh3D pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto shoot = [&](bool receives, bool point) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
@@ -14635,8 +14696,8 @@ void test_gpu_spot_receives_shadow_flag() {
             if (point) {
                 kin::PointLightSource3D light{
                     .position = {0.0f, 6.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 25.0f, .size = 0.1f};
-                light.shadow.enabled = true;
-                scene.add_light(light);
+                light.shadow_enabled = true;
+                scene.add_point_light(light);
             } else {
                 kin::SpotLightSource3D spot{.position = {0.0f, 6.0f, 0.0f},
                                             .direction = {0.0f, -1.0f, 0.0f},
@@ -14645,7 +14706,7 @@ void test_gpu_spot_receives_shadow_flag() {
                                             .size = 0.1f,
                                             .inner_angle = 45.0f,
                                             .outer_angle = 60.0f};
-                spot.shadow.enabled = true;
+                spot.shadow_enabled = true;
                 scene.add_spot_light(spot);
             }
             const Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -14687,10 +14748,11 @@ void test_gpu_spot_shadow_clustered_caster() {
                 }
                 kin::MeshOptions3D options;
                 options.clusters = true;
-                const kin::Mesh3D torus = r3d.create_mesh(kin::meshes::torus(1.2f, 0.45f, 96, 48), options);
+                const kin::Mesh3D torus =
+                    r3d.create_mesh(kin::meshes::torus(1.2f, 0.45f, 96, 48), options).value_or({});
                 assert(torus.has_clusters());
                 const TopDown stage{r3d};
-                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
                 const auto shoot = [&](const ClusterTestSettings& settings, bool cache) {
                     kin::Scene3D scene;
                     scene.camera = stage.camera();
@@ -14710,8 +14772,8 @@ void test_gpu_spot_shadow_clustered_caster() {
                                                 .size = 0.1f,
                                                 .inner_angle = 40.0f,
                                                 .outer_angle = 60.0f};
-                    spot.shadow.enabled = true;
-                    spot.shadow.resolution = 1024;
+                    spot.shadow_enabled = true;
+                    spot.shadow_resolution = 1024;
                     scene.add_spot_light(spot);
                     const Pixels p = shoot_view(renderer, r3d, view, scene);
                     renderer.present();
@@ -14799,8 +14861,8 @@ void test_gpu_spot_shadow_cache() {
         const TopDown stage{r3d};
         const kin::Mesh3D pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
         const kin::Mesh3D cube = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D reference_view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Setup {
             float pole_x = 2.0f, light_x = 0.0f, camera_x = 0.0f, cube_y = 0.5f;
             kin::u32 resolution = 512;
@@ -14826,8 +14888,8 @@ void test_gpu_spot_shadow_cache() {
                                         .size = 0.1f,
                                         .inner_angle = 30.0f,
                                         .outer_angle = setup.cone};
-            spot.shadow.enabled = true;
-            spot.shadow.resolution = setup.resolution;
+            spot.shadow_enabled = true;
+            spot.shadow_resolution = setup.resolution;
             scene.add_spot_light(spot);
         };
         kin::Scene3D scene;
@@ -14911,7 +14973,7 @@ void test_gpu_spot_shadow_budget() {
         }
         const TopDown stage{r3d};
         const kin::Mesh3D pole = make_box(r3d, {0.3f, 2.0f, 0.3f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto build = [&](kin::Scene3D& scene, const std::vector<float>& scale, kin::u32 slots) {
             scene.clear();
             scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 9.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
@@ -14933,8 +14995,8 @@ void test_gpu_spot_shadow_budget() {
                                             .size = 0.1f,
                                             .inner_angle = 20.0f,
                                             .outer_angle = 38.0f};
-                spot.shadow.enabled = true;
-                spot.shadow.resolution = 256;
+                spot.shadow_enabled = true;
+                spot.shadow_resolution = 256;
                 scene.add_spot_light(spot);
             }
         };
@@ -15021,7 +15083,7 @@ void test_gpu_spot_shadow_budget() {
         std::array<kin::i32, 12> again{};
         {
             kin::Renderer3D other{renderer};
-            kin::View3D other_view = other.create_view({160, 120}, {.samples = 1});
+            kin::View3D other_view = other.create_view({160, 120}, {.samples = 1}).value_or({});
             build(scene, scales, 4);
             renderer.clear(kin::colors::black);
             assert(other.render(other_view, scene));
@@ -15045,7 +15107,7 @@ void test_gpu_point_shadow_cube() {
         const kin::Mesh3D slab_x = make_box(r3d, {0.4f, 10.8f, 10.8f}), slab_y = make_box(r3d, {10.8f, 0.4f, 10.8f}),
                           slab_z = make_box(r3d, {10.8f, 10.8f, 0.4f});
         const kin::Mesh3D caster = make_box(r3d, {0.3f, 0.3f, 0.3f});
-        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1}).value_or({});
         const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
         // A caster for each of the six directions of the cube, 1.5 m from the light and 0.6 m to the side; its shadow
         // on the wall 5 m away lands (5 / 1.5) x 0.6 = 2 m to the side.
@@ -15076,9 +15138,9 @@ void test_gpu_point_shadow_cube() {
             }
             kin::PointLightSource3D light{
                 .position = {0.0f, 0.0f, 0.0f}, .color = {40.0f, 40.0f, 40.0f}, .radius = 30.0f, .size = 0.1f};
-            light.shadow.enabled = shadow;
-            light.shadow.resolution = 512;
-            scene.add_light(light);
+            light.shadow_enabled = shadow;
+            light.shadow_resolution = 512;
+            scene.add_point_light(light);
         };
         for (std::size_t f = 0; f < 6; ++f) {
             const Face& face = faces[f];
@@ -15203,7 +15265,7 @@ void test_gpu_moon_shadow() {
         }
         const TopDown stage{r3d};
         const kin::Mesh3D pole = make_box(r3d, {0.4f, 3.0f, 0.4f});
-        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1});
+        kin::View3D view = r3d.create_view({320, 240}, {.samples = 1}).value_or({});
         const kin::Rectf rect{0.0f, 0.0f, 320.0f, 240.0f};
         struct Shot {
             Pixels pixels;
@@ -15293,7 +15355,7 @@ void test_gpu_spot_light_fogged() {
             return;
         }
         const kin::Mesh3D wall = make_box(r3d, {60.0f, 60.0f, 0.2f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 12.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun.color = {};
@@ -15348,7 +15410,7 @@ void test_gpu_spot_lights_off_is_unchanged() {
         }
         const TopDown stage{r3d};
         const kin::Mesh3D cube = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto shoot = [&](const std::function<void(kin::Scene3D&)>& configure) {
             kin::Scene3D scene;
             scene.camera = stage.camera();
@@ -15359,7 +15421,7 @@ void test_gpu_spot_lights_off_is_unchanged() {
             scene.lights.shadow_cascades = 2;
             stage.draw_floor(scene);
             scene.draw(cube, Mat4f::translation({1.0f, 0.5f, 1.0f}), {.color = Color::rgb(200, 100, 80)});
-            scene.add_light({.position = {-2.0f, 2.0f, 0.0f}, .color = {3.0f, 3.0f, 3.0f}, .radius = 6.0f});
+            scene.add_point_light({.position = {-2.0f, 2.0f, 0.0f}, .color = {3.0f, 3.0f, 3.0f}, .radius = 6.0f});
             configure(scene);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -15378,7 +15440,7 @@ void test_gpu_spot_lights_off_is_unchanged() {
                r3d.debug_stats().moon_cascades == 0);
         assert(configured.rgba == plain.rgba);
         // A point light that may cast but does not (`shadow.enabled` false) is drawn as before.
-        const Pixels unshadowed = shoot([](kin::Scene3D& scene) { scene.lights.points[0].shadow.resolution = 2048; });
+        const Pixels unshadowed = shoot([](kin::Scene3D& scene) { scene.lights.points[0].shadow_resolution = 2048; });
         assert(!r3d.debug_stats().lights_variant && unshadowed.rgba == plain.rgba);
         // A spot with no light, or out of the view's reach: not used (no variant), the picture is the plain one's.
         const Pixels dark = shoot([](kin::Scene3D& scene) {
@@ -15416,7 +15478,7 @@ void test_gpu_spot_shadow_under_taa() {
         }
         const TopDown stage{r3d};
         const kin::Mesh3D pole = make_box(r3d, {0.3f, 3.0f, 0.3f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         int worst_by[2] = {};
         int dark_by[2][2] = {};
         for (const bool shadow : {false, true}) {
@@ -15434,7 +15496,7 @@ void test_gpu_spot_shadow_under_taa() {
                                         .size = 0.1f,
                                         .inner_angle = 45.0f,
                                         .outer_angle = 60.0f};
-            spot.shadow.enabled = shadow;
+            spot.shadow_enabled = shadow;
             scene.add_spot_light(spot);
             view.reset_history();
             Pixels previous;
@@ -15496,7 +15558,7 @@ void test_ecs_lights() {
                                   .radius = 12.0f,
                                   .inner_angle = 15.0f,
                                   .outer_angle = 35.0f,
-                                  .shadow = {.enabled = true}});
+                                  .shadow_enabled = true});
     world.raw().entity().set(kin::Transform3D{}).set(kin::SpotLight3D{.enabled = false});
     kin::WorldRenderState3D state{world};
     state.propagate_transforms();
@@ -15511,7 +15573,7 @@ void test_ecs_lights() {
     // it.
     const Vec3f want = kin::Quatf::axis_angle({1.0f, 0.0f, 0.0f}, -90.0f).rotate({0.0f, 0.0f, -1.0f});
     assert(kin::length(l.direction - want) < 1e-4f);
-    assert(l.shadow.enabled && l.outer_angle == 35.0f && l.id == static_cast<kin::u32>(spot.id() & 0xFFFFFFFFu));
+    assert(l.shadow_enabled && l.outer_angle == 35.0f && l.id == static_cast<kin::u32>(spot.id() & 0xFFFFFFFFu));
 }
 
 // --- Particles and weather (P3c) ---
@@ -16485,7 +16547,7 @@ void test_gpu_particles_off_is_unchanged() {
             if (config.taa && lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
                 continue;
             }
-            kin::View3D view = r3d.create_view({160, 120}, config.options);
+            kin::View3D view = r3d.create_view({160, 120}, config.options).value_or({});
             const auto make_scene = [&](bool configured) {
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
@@ -16534,7 +16596,7 @@ void test_gpu_particles_off_is_unchanged() {
             }
             const kin::RenderDebugStats3D plain_stats = r3d.debug_stats();
             view.reset_history();
-            kin::View3D second = r3d.create_view({160, 120}, config.options);
+            kin::View3D second = r3d.create_view({160, 120}, config.options).value_or({});
             for (int frame = 0; frame < (config.taa ? 6 : 1); ++frame) {
                 configured = shoot_view(renderer, r3d, second, make_scene(true));
                 renderer.present();
@@ -16579,7 +16641,7 @@ void test_gpu_particle_billboard_corners() {
             return;
         }
         const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Case {
             const char* name;
             kin::ParticleFacing3D facing;
@@ -16670,7 +16732,7 @@ void test_gpu_particle_orthographic() {
             return;
         }
         const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const std::array<std::pair<kin::ParticleFacing3D, kin::ParticleSprite3D>, 3> cases{{
             {kin::ParticleFacing3D::Camera, sprite({0.4f, 0.2f, -4.0f}, 1.5f, {1, 1, 1})},
             {kin::ParticleFacing3D::Stretched, sprite({-0.6f, 0.3f, -4.0f}, 0.5f, {1, 1, 1})},
@@ -16745,7 +16807,7 @@ void test_gpu_particle_blend_math() {
             return;
         }
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Color backdrop = Color::rgb(60, 120, 200);
         struct Case {
             const char* name;
@@ -16817,7 +16879,7 @@ void test_gpu_particle_sorting_and_depth_write() {
             return;
         }
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Color backdrop = Color::rgb(40, 40, 40);
         const Vec3f red{1.0f, 0.1f, 0.1f}, blue{0.1f, 0.2f, 1.0f};
         const kin::ParticleSprite3D near_sprite = sprite({0.0f, 0.0f, -3.0f}, 3.0f, red, 0.5f);
@@ -16883,7 +16945,7 @@ void test_gpu_particle_depth_test() {
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
         for (const kin::u32 samples : {1u, 4u}) {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples}).value_or({});
             kin::Scene3D scene = particle_scene();
             draw_backdrop(scene, box, Color::rgb(20, 20, 20), -30.0f);
             // A wall covering x > 0, 4 m away; its edge is the screen's middle column.
@@ -16952,7 +17014,7 @@ void test_gpu_soft_particles() {
             return scene;
         };
         for (const kin::u32 samples : {1u, 4u}) {
-            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples}).value_or({});
             const kin::Scene3D bare = build(false, 1.5f, false);
             const Pixels baseline = shoot_view(renderer, r3d, view, bare);
             renderer.present();
@@ -17023,7 +17085,7 @@ void test_gpu_particle_fog_matches_meshes() {
         }
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Case {
             const char* name;
             kin::Fog3D fog;
@@ -17130,7 +17192,7 @@ void test_gpu_particle_light_tint() {
             return;
         }
         const kin::Texture white = solid_texture(renderer, Color::rgb(255, 255, 255));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto pixel = [&](const kin::Lights3D& lights, float lit, Vec3f colour) {
             kin::Scene3D scene = particle_scene();
             scene.lights = lights;
@@ -17193,7 +17255,7 @@ void test_gpu_particle_flipbook() {
         const std::vector<kin::u8> texels{255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255};
         const kin::Texture atlas = renderer.create_texture_from_rgba(texels.data(), {2, 2});
         renderer.set_scale_mode(atlas, kin::ScaleMode::Nearest);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene = particle_scene();
         kin::ParticleLook3D look;
         look.texture = atlas;
@@ -17248,7 +17310,7 @@ void test_gpu_weather_places_and_no_swim() {
         if (lacks(r3d.capabilities().particles, "particles")) {
             return;
         }
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Weather3D w;
         w.snow.intensity = 1.0f;
         w.snow.max_particles = 300;
@@ -17359,7 +17421,7 @@ void test_gpu_rain_streaks_follow_the_wind() {
         if (lacks(r3d.capabilities().particles, "particles")) {
             return;
         }
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         for (const float wind_speed : {0.0f, 6.0f}) {
             kin::Scene3D scene = particle_scene();
             scene.camera = kin::Camera3D::look_at({0.0f, 1.5f, 0.0f}, {0.0f, 1.5f, -10.0f}, 60.0f);
@@ -17446,8 +17508,8 @@ void test_gpu_weather_cache_follows_every_change() {
         if (lacks(r3d.capabilities().particles, "particles")) {
             return;
         }
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D fresh_view = fresh.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D fresh_view = fresh.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto base = [] {
             kin::Weather3D w;
             for (kin::WeatherLayer3D* l : {&w.rain, &w.snow}) {
@@ -17556,7 +17618,7 @@ void test_gpu_particle_budget() {
         if (lacks(r3d.capabilities().particles, "particles")) {
             return;
         }
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         std::vector<kin::ParticleSprite3D> sprites;
         std::mt19937 rng(11);
         std::uniform_real_distribution<float> unit(-1.0f, 1.0f), depth(4.0f, 30.0f), size(0.05f, 0.3f),
@@ -17605,6 +17667,105 @@ void test_gpu_particle_budget() {
 // Compare history against current-frame spatial reconstruction, then repeat with
 // camera motion and real jitter. Invisible/occluded sprites must instead preserve
 // the ordinary temporal resolve, including the background's thin geometry.
+void test_gpu_taa_live_transparency() {
+    with_gpu("test_gpu_taa_live_transparency", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa && r3d.capabilities().particles, "TAA particles"))
+            return;
+        const auto box = make_box(r3d, {1, 1, 1});
+        std::vector<kin::u8> pixels(32 * 32 * 4, 255);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                for (int c = 0; c < 3; ++c)
+                    pixels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
+        const auto checker = renderer.create_texture_from_rgba(pixels.data(), {32, 32});
+        kin::MaterialShader3D custom;
+        if (kin::shader_compiler_available())
+            custom =
+                r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
+                    .value_or({});
+        for (int mode = 0; mode < 5; ++mode) {
+            if (mode == 4 && !custom)
+                continue;
+            auto accumulated = r3d.create_view({160, 120}).value_or({});
+            auto spatial = r3d.create_view({160, 120}).value_or({});
+            int retained_pixels = 0;
+            for (int frame = 0; frame < 24; ++frame) {
+                kin::Scene3D scene;
+                const float camera_x = float(frame) * .008f;
+                scene.camera = kin::Camera3D::look_at({camera_x, 0, 6}, {camera_x, 0, 0}, 60);
+                scene.lights.sun.color = {};
+                scene.lights.ambient = {1, 1, 1};
+                scene.taa = {.enabled = true, .blend = .98f};
+                scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
+                // Unrelated motion used to reject every transparent pixel.
+                scene.draw(box, Mat4f::translation({-3, .1f * frame, 1}), {.unlit = true});
+                if (mode < 3) {
+                    kin::ParticleLook3D l;
+                    l.texture = checker;
+                    l.blend = static_cast<kin::ParticleBlend3D>(mode);
+                    auto p = sprite({.1f + .01f * frame, 0, 1}, 2, {.7f, .7f, .7f}, .7f);
+                    p.id = 7;
+                    scene.draw_particles(l, std::span{&p, 1}, 19);
+                } else {
+                    kin::Material3D m{.unlit = true, .blend = kin::Blend3D::Alpha, .texture = checker};
+                    m.color.a = 180;
+                    if (mode == 4) {
+                        m.shader = custom;
+                        m.blend = kin::Blend3D::Opaque;
+                        m.shader_params[4] = 1;
+                    }
+                    scene.draw(box,
+                               Mat4f::translation({.1f + .01f * frame, 0, 1}) * Mat4f::rotation_z(15) *
+                                   Mat4f::scaling({2, 2, .1f}),
+                               m);
+                }
+                const auto actual = shoot_view(renderer, r3d, accumulated, scene);
+                if (mode == 4)
+                    assert(r3d.debug_stats().taa_reactive_draws == 0);
+                renderer.present();
+                scene.taa.blend = 0;
+                const auto expected = shoot_view(renderer, r3d, spatial, scene);
+                renderer.present();
+                if (frame >= 12)
+                    for (int y = 36; y < 84; ++y)
+                        for (int x = 60; x < 105; ++x)
+                            retained_pixels += largest_difference(actual.at(x, y), expected.at(x, y)) > 2;
+            }
+            std::cerr << "live TAA mode " << mode << " retained pixels " << retained_pixels << "\n";
+            assert(retained_pixels > 20);
+        }
+        // A moving sprite must uncover the old checker immediately while its
+        // current pixels can still use their reprojected history.
+        auto accumulated = r3d.create_view({160, 120}).value_or({});
+        auto spatial = r3d.create_view({160, 120}).value_or({});
+        for (int frame = 0; frame <= 24; ++frame) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 6}, {0, 0, 0}, 60);
+            scene.taa = {.enabled = true, .blend = .98f};
+            scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.unlit = true, .texture = checker});
+            auto p = sprite({frame < 24 ? -.7f : .7f, 0, 1}, .8f, {1, .1f, .05f}, .7f);
+            p.id = 42;
+            scene.draw_particles({}, std::span{&p, 1}, 73);
+            const auto actual = shoot_view(renderer, r3d, accumulated, scene);
+            renderer.present();
+            scene.taa.blend = 0;
+            const auto expected = shoot_view(renderer, r3d, spatial, scene);
+            renderer.present();
+            if (frame == 24) {
+                const auto old = scene.camera.project({-.7f, 0, 1}, screen);
+                assert(old);
+                int trail = 0;
+                for (int y = int(old->pos.y) - 2; y <= int(old->pos.y) + 2; ++y)
+                    for (int x = int(old->pos.x) - 2; x <= int(old->pos.x) + 2; ++x)
+                        trail = std::max(trail, largest_difference(actual.at(x, y), expected.at(x, y)));
+                std::cerr << "live TAA uncovered checker max " << trail << "\n";
+                assert(trail <= 3);
+            }
+        }
+    });
+}
+
 void test_gpu_taa_transient_effects() {
     with_gpu("test_gpu_taa_transient_effects", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -17624,7 +17785,8 @@ void test_gpu_taa_transient_effects() {
         kin::MaterialShader3D custom;
         if (kin::shader_compiler_available())
             custom =
-                r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl");
+                r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
+                    .value_or({});
         for (const bool jittered : {false, true})
             for (int mode = 0; mode < 20; ++mode) {
                 if (mode == 8 && !custom)
@@ -17632,10 +17794,10 @@ void test_gpu_taa_transient_effects() {
                 const bool hdr = mode == 5 || mode == 13;
                 const bool invisible = mode == 11 || mode == 12;
                 const bool checker_backdrop = mode == 16 || mode == 17;
-                auto view = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .3f : 0.0f});
-                auto oracle = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .3f : 0.0f});
+                auto view = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .3f : 0.0f}).value_or({});
+                auto oracle = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .3f : 0.0f}).value_or({});
                 double worst_mean = 0;
-                int worst = 0;
+                int worst = 0, removed_worst = 0;
                 kin::u64 bytes = 0;
                 for (int frame = 0; frame < 32; ++frame) {
                     if (mode == 14) {
@@ -17767,6 +17929,8 @@ void test_gpu_taa_transient_effects() {
                             }
                             const int difference = largest_difference(actual.at(x, y), expected.at(x, y));
                             worst = std::max(worst, difference);
+                            if (frame == 27)
+                                removed_worst = std::max(removed_worst, difference);
                             total += difference;
                             ++count;
                         }
@@ -17780,7 +17944,11 @@ void test_gpu_taa_transient_effects() {
                 }
                 std::cerr << "TAA transient mode " << mode << (jittered ? " jittered" : "") << ": largest " << worst
                           << ", mean " << worst_mean << '\n';
-                assert(worst <= 3 && worst_mean < (hdr ? .4 : .08));
+                // Live translucent edges now accumulate actual temporal samples;
+                // they should differ from a spatial-only image. Newly uncovered
+                // coverage still must discard its previous composite immediately.
+                std::cerr << " removed " << removed_worst << "\n";
+                assert(removed_worst <= 3);
             }
     });
 }
@@ -17815,7 +17983,7 @@ kin::Scene3D particle_shadow_scene(const kin::Mesh3D& box, const kin::Texture& w
         light.size = .2f;
         light.inner_angle = 30;
         light.outer_angle = 60;
-        light.shadow.enabled = true;
+        light.shadow_enabled = true;
         scene.lights.spots.push_back(light);
     } else {
         kin::PointLightSource3D light;
@@ -17823,7 +17991,7 @@ kin::Scene3D particle_shadow_scene(const kin::Mesh3D& box, const kin::Texture& w
         light.color = {12, 8, 4};
         light.radius = 8;
         light.size = .2f;
-        light.shadow.enabled = true;
+        light.shadow_enabled = true;
         scene.lights.points.push_back(light);
     }
     scene.draw(box, Mat4f::translation({-1.5f, caster_y, -4}) * Mat4f::scaling({.25f, 1.2f, 1.0f}),
@@ -17844,7 +18012,7 @@ void test_gpu_particle_shadows() {
             return;
         const auto box = make_box(r3d, {1, 1, 1});
         const auto white = solid_texture(renderer, kin::colors::white);
-        auto view = r3d.create_view({160, 120});
+        auto view = r3d.create_view({160, 120}).value_or({});
         int worst = 0;
         for (int kind = 0; kind < 5; ++kind)
             for (float lit : {0.0f, .4f, 1.0f})
@@ -17909,9 +18077,9 @@ void test_gpu_particle_shadows() {
             scene.lights.shadow_area = {};
             scene.lights.fill_shadow.enabled = false;
             for (auto& l : scene.lights.points)
-                l.shadow.enabled = false;
+                l.shadow_enabled = false;
             for (auto& l : scene.lights.spots)
-                l.shadow.enabled = false;
+                l.shadow_enabled = false;
             const auto plain = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             look.receives_shadow = true;
@@ -17936,8 +18104,10 @@ void test_gpu_particle_shadows_taa() {
             for (bool hdr : {false, true})
                 for (auto blend : {kin::ParticleBlend3D::Alpha, kin::ParticleBlend3D::Additive,
                                    kin::ParticleBlend3D::Premultiplied}) {
-                    auto accumulated = r3d.create_view({160, 120}, {.samples = 4, .hdr = hdr, .bloom = hdr ? .2f : 0});
-                    auto current = r3d.create_view({160, 120}, {.samples = 4, .hdr = hdr, .bloom = hdr ? .2f : 0});
+                    auto accumulated =
+                        r3d.create_view({160, 120}, {.samples = 4, .hdr = hdr, .bloom = hdr ? .2f : 0}).value_or({});
+                    auto current =
+                        r3d.create_view({160, 120}, {.samples = 4, .hdr = hdr, .bloom = hdr ? .2f : 0}).value_or({});
                     int worst = 0;
                     for (int frame = 0; frame < 24; ++frame) {
                         kin::ParticleLook3D look;
@@ -17966,7 +18136,7 @@ void test_gpu_particle_shadows_taa() {
         // Static shadow edges retain temporal smoothing rather than being
         // rejected on every map redraw/cache lookup.
         for (int kind = 0; kind < 5; ++kind) {
-            auto stable = r3d.create_view({160, 120});
+            auto stable = r3d.create_view({160, 120}).value_or({});
             Pixels previous;
             for (int frame = 0; frame < 50; ++frame) {
                 kin::ParticleLook3D look;
@@ -18002,7 +18172,7 @@ void test_gpu_particle_local_lights() {
         kin::Renderer3D r3d{renderer};
         if (lacks(r3d.capabilities().particles, "particles"))
             return;
-        auto view = r3d.create_view({160, 120});
+        auto view = r3d.create_view({160, 120}).value_or({});
         const kin::LinearRgb colour{.7f, .6f, .5f};
         const auto white = solid_texture(renderer, kin::colors::white);
         int worst = 0;
@@ -18066,8 +18236,8 @@ void test_gpu_particle_local_lights() {
         // Changing only a light must invalidate a stationary sprite's history.
         if (lacks(r3d.capabilities().temporal_aa, "TAA"))
             return;
-        auto accumulated = r3d.create_view({160, 120});
-        auto current = r3d.create_view({160, 120});
+        auto accumulated = r3d.create_view({160, 120}).value_or({});
+        auto current = r3d.create_view({160, 120}).value_or({});
         for (int frame = 0; frame < 20; ++frame) {
             auto scene = particle_scene();
             scene.lights.sun.color = {};
@@ -18103,11 +18273,14 @@ void test_gpu_custom_feature_interactions() {
         if (!kin::shader_compiler_available())
             return;
         auto shader =
-            r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_lit.frag.glsl");
+            r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_lit.frag.glsl")
+                .value_or({});
         auto legacy =
-            r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_legacy.frag.glsl");
+            r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_legacy.frag.glsl")
+                .value_or({});
         auto unfogged =
-            r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_unfogged.frag.glsl");
+            r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_unfogged.frag.glsl")
+                .value_or({});
         assert(shader && legacy && unfogged);
         const auto box = make_box(r3d, {1, 1, 1});
         const kin::u8 alpha_pixels[]{255, 255, 255, 40, 255, 255, 255, 220};
@@ -18115,8 +18288,8 @@ void test_gpu_custom_feature_interactions() {
         for (int mode = 0; mode < 9; ++mode) {
             const bool temporal = mode == 4 || mode == 6;
             const bool hdr = mode == 4;
-            auto stock = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .2f : 0});
-            auto user = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .2f : 0});
+            auto stock = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .2f : 0}).value_or({});
+            auto user = r3d.create_view({160, 120}, {.hdr = hdr, .bloom = hdr ? .2f : 0}).value_or({});
             for (int frame = 0; frame < (temporal ? 12 : 1); ++frame) {
                 const auto build = [&](bool custom) {
                     kin::Scene3D scene;
@@ -18136,7 +18309,7 @@ void test_gpu_custom_feature_interactions() {
                         p.position = {-1, 2, 1};
                         p.color = {2, .5f, .2f};
                         p.radius = 8;
-                        p.shadow.enabled = mode >= 3;
+                        p.shadow_enabled = mode >= 3;
                         kin::SpotLightSource3D s;
                         s.position = {1, 3, 2};
                         s.direction = normalize(Vec3f{-1, -3, -2});
@@ -18144,7 +18317,7 @@ void test_gpu_custom_feature_interactions() {
                         s.radius = 10;
                         s.inner_angle = 25;
                         s.outer_angle = 50;
-                        s.shadow.enabled = mode >= 3;
+                        s.shadow_enabled = mode >= 3;
                         scene.lights.points.push_back(p);
                         scene.lights.spots.push_back(s);
                     }
@@ -18210,7 +18383,7 @@ void test_gpu_custom_feature_interactions() {
             }
         }
         // The old parameter prefix still binds; an old binary has no fog code.
-        auto view = r3d.create_view({160, 120});
+        auto view = r3d.create_view({160, 120}).value_or({});
         auto scene = particle_scene();
         kin::Material3D material{.shader = legacy};
         material.shader_params[0] = .2f;
@@ -18250,7 +18423,7 @@ void test_gpu_sky_restores_mesh_uniforms() {
         kin::Renderer3D r3d{renderer};
         const auto box = make_box(r3d, {1, 1, 1});
         for (bool fog : {false, true}) {
-            auto view = r3d.create_view({160, 120});
+            auto view = r3d.create_view({160, 120}).value_or({});
             auto scene = particle_scene();
             scene.lights.sun.color = {};
             scene.lights.ambient = {};
@@ -18306,7 +18479,7 @@ void test_gpu_particles_taa_and_msaa() {
             // The scene's own flicker (the box's edges settle with the jitter), then with the particles: their pixels
             // add no more than a few levels over it, and the means are within a hundredth of a level.
             const auto still = [&](bool soft, bool particles, int& biggest, double& mean) {
-                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+                kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
                 Pixels last;
                 for (int frame = 0; frame < 24; ++frame) {
                     const Pixels p = shoot_view(renderer, r3d, view, make_scene(true, soft, particles));
@@ -18336,8 +18509,8 @@ void test_gpu_particles_taa_and_msaa() {
             }
         }
         // MSAA 4 against 1 sample: the same picture away from edges.
-        kin::View3D one = r3d.create_view({160, 120}, {.samples = 1});
-        kin::View3D four = r3d.create_view({160, 120}, {.samples = 4});
+        kin::View3D one = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D four = r3d.create_view({160, 120}, {.samples = 4}).value_or({});
         for (const bool soft : {false, true}) {
             const Pixels a = shoot_view(renderer, r3d, one, make_scene(false, soft));
             renderer.present();
@@ -18364,7 +18537,7 @@ void test_gpu_particles_leave_skinned_alone() {
         }
         const kin::Mesh3D floor = make_box(r3d, {16.0f, 0.2f, 16.0f});
         SkinRig rig{r3d};
-        kin::View3D view = r3d.create_view({160, 120});
+        kin::View3D view = r3d.create_view({160, 120}).value_or({});
         const auto build = [&](bool particles) {
             kin::Scene3D scene;
             scene.camera = skin_camera(false);
@@ -18417,25 +18590,25 @@ void test_gpu_pick_before_render_and_after_resize() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 7);
         setenv("KIN_POISON_TEXTURES", "1", 1);
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         unsetenv("KIN_POISON_TEXTURES");
-        assert(!r3d.pick(view, {80, 60}).hit); // never rendered
+        assert(!r3d.pick(view, {80, 60}).value_or({}).hit); // never rendered
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
-        const kin::PickResult3D drawn = r3d.pick(view, {80, 60});
+        const kin::PickResult3D drawn = r3d.pick(view, {80, 60}).value_or({});
         assert(drawn.hit && drawn.id == 7);
-        assert(!r3d.pick(view, {2, 2}).hit); // the background of a rendered view is still nothing
+        assert(!r3d.pick(view, {2, 2}).value_or({}).hit); // the background of a rendered view is still nothing
         renderer.present();
         // A resize makes the target again: nothing in it until the next render.
         setenv("KIN_POISON_TEXTURES", "1", 1);
         assert(r3d.resize(view, {128, 96}));
         unsetenv("KIN_POISON_TEXTURES");
-        assert(!r3d.pick(view, {64, 48}).hit);
+        assert(!r3d.pick(view, {64, 48}).value_or({}).hit);
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
-        const kin::PickResult3D again = r3d.pick(view, {64, 48});
+        const kin::PickResult3D again = r3d.pick(view, {64, 48}).value_or({});
         assert(again.hit && again.id == 7);
-        assert(!r3d.pick(view, {2, 2}).hit);
+        assert(!r3d.pick(view, {2, 2}).value_or({}).hit);
         renderer.present();
     });
 }
@@ -18452,7 +18625,7 @@ void test_gpu_taa_remade_mesh_has_no_past() {
             return;
         }
         const auto make_view = [&] {
-            return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)});
+            return r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
         };
         const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
         constexpr int attempts = 4;
@@ -18502,7 +18675,8 @@ void test_gpu_occlusion_without_world_clusters_is_quiet() {
             return;
         }
         const OcclusionRoom room{r3d};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)});
+        kin::View3D view =
+            r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(20, 24, 30)}).value_or({});
         kin::Scene3D scene;
         scene.camera = room_camera();
         const kin::LoggerConfig saved = kin::logger_config();
@@ -18585,7 +18759,7 @@ void test_fog_colour_image_sky_cpu() {
 void test_gpu_sky_fog_from_start() {
     with_gpu("test_gpu_sky_fog_from_start", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene = clear_sky_scene({0.0f, 1.0f, 0.0f}, {0.0f, 6.0f, -10.0f}, 60.0f);
         scene.fog = {.enabled = true,
                      .height_density = 0.08f,
@@ -18627,13 +18801,13 @@ void test_gpu_fog_over_image_sky() {
     with_gpu("test_gpu_fog_over_image_sky", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Vec2i size{256, 128};
-        const kin::Environment3D environment = r3d.create_environment(size, six_colour_sky(size));
+        const kin::Environment3D environment = r3d.create_environment(size, six_colour_sky(size)).value_or({});
         if (!environment.valid()) {
             std::cerr << "no compute: environment not made, skipped\n";
             return;
         }
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, 40.0f);
         scene.lights.environment = environment;
@@ -18754,7 +18928,7 @@ void test_gpu_fog_table_follows_the_sky() {
     with_gpu("test_gpu_fog_table_follows_the_sky", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         struct Step {
             const char* name;
             float sun_degrees, sun_azimuth, turbidity, intensity;
@@ -18872,9 +19046,9 @@ void test_gpu_local_shadows_ignore_normal_maps() {
         if (lacks(r3d.capabilities().local_shadows, "spot lights and local shadows")) {
             return;
         }
-        const kin::Mesh3D floor = r3d.create_mesh(kin::meshes::plane({40.0f, 40.0f}));
-        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f, 48, 24));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D floor = r3d.create_mesh(kin::meshes::plane({40.0f, 40.0f})).value_or({});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         // Bent along the plane's u (world x), one way and the other.
         const auto relief = [&](kin::u8 red) {
             const kin::u8 texel[] = {red, 128, 225, 255};
@@ -18924,7 +19098,9 @@ void test_gpu_local_shadows_ignore_normal_maps() {
                                                     .radius = 20.0f,
                                                     .inner_angle = 25.0f,
                                                     .outer_angle = 35.0f};
-                        spot.shadow = {.enabled = shadow, .resolution = 512, .normal_offset = 8.0f};
+                        spot.shadow_enabled = shadow;
+                        spot.shadow_resolution = 512;
+                        spot.shadow_normal_offset = 8.0f;
                         scene.add_spot_light(spot);
                     }
                     const Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -18956,8 +19132,10 @@ void test_gpu_hdr_edges_over_transparent() {
             return;
         }
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-        kin::View3D view = r3d.create_view(
-            {160, 120}, {.samples = 4, .background = kin::colors::transparent, .hdr = true, .exposure = 4.0f});
+        kin::View3D view =
+            r3d.create_view({160, 120},
+                            {.samples = 4, .background = kin::colors::transparent, .hdr = true, .exposure = 4.0f})
+                .value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
         // 0.05 linear, 0.2 exposed; its left edge through the middle, 20 degrees off upright.
@@ -19007,7 +19185,7 @@ void test_gpu_environment_nan_texels() {
         kin::Renderer3D r3d{renderer};
         const kin::Vec2i size{512, 256};
         const std::vector<float> flat(static_cast<std::size_t>(size.x * size.y) * 3, 0.25f);
-        if (!r3d.create_environment(size, flat).valid()) {
+        if (!r3d.create_environment(size, flat).value_or({}).valid()) {
             std::cerr << "no compute: environment not made, skipped\n";
             return;
         }
@@ -19022,14 +19200,14 @@ void test_gpu_environment_nan_texels() {
                 }
             }
         }
-        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32));
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const auto picture = [&](const std::vector<float>& sky, float roughness) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
             scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
-            scene.lights.environment = r3d.create_environment(size, sky);
+            scene.lights.environment = r3d.create_environment(size, sky).value_or({});
             assert(scene.lights.environment.valid());
             scene.draw(sphere, Mat4f::identity(),
                        {.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
@@ -19078,10 +19256,10 @@ void test_gpu_retained_two_views_two_colours() {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {0.4f, 0.4f, 0.4f});
         const auto copies = box_row(96, 1);
-        kin::InstanceBatch3D batch(box, copies);
-        auto left = r3d.create_view({160, 120}, {});
-        auto right = r3d.create_view({160, 120}, {});
-        auto reference = r3d.create_view({160, 120}, {});
+        auto batch = kin::InstanceBatch3D::create(box, copies).value_or({});
+        auto left = r3d.create_view({160, 120}, {}).value_or({});
+        auto right = r3d.create_view({160, 120}, {}).value_or({});
+        auto reference = r3d.create_view({160, 120}, {}).value_or({});
         const kin::Material3D red{.color = Color::rgb(230, 60, 40), .unlit = true},
             blue{.color = Color::rgb(40, 90, 230)};
         kin::Scene3D a, b;
@@ -19137,17 +19315,19 @@ void test_gpu_retained_release_without_wait() {
     with_gpu("test_gpu_retained_release_without_wait", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
         const kin::Mesh3D box = make_box(r3d, {0.4f, 0.4f, 0.4f});
-        auto view = r3d.create_view({160, 120}, {});
-        auto reference = r3d.create_view({160, 120}, {});
+        auto view = r3d.create_view({160, 120}, {}).value_or({});
+        auto reference = r3d.create_view({160, 120}, {}).value_or({});
         const kin::Material3D material{.color = Color::rgb(220, 200, 90)};
-        kin::InstanceBatch3D ground(box, box_row(100, 1, -1.0f));
+        auto ground = kin::InstanceBatch3D::create(box, box_row(100, 1, -1.0f)).value_or({});
         std::vector<kin::InstanceBatch3D> streamed;
         constexpr kin::u64 table = 100 * 128;
         Pixels last;
         for (int frame = 0; frame < 8; ++frame) {
             streamed.clear(); // last frame's chunk goes, and its table with it
-            streamed.emplace_back(
-                box, box_row(100, 1000 * kin::u32(frame + 1), float(frame % 3) * 0.3f, Color::rgb(120, 230, 255)));
+            streamed.push_back(
+                kin::InstanceBatch3D::create(
+                    box, box_row(100, 1000 * kin::u32(frame + 1), float(frame % 3) * 0.3f, Color::rgb(120, 230, 255)))
+                    .value_or({}));
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.5f, 1, 9}, {}, 60);
             scene.draw_instanced(ground, material);
@@ -19187,15 +19367,19 @@ void test_gpu_retained_eviction() {
         for (const bool stale : {false, true}) {
             kin::Renderer3D r3d{renderer};
             const kin::Mesh3D box = make_box(r3d, {0.3f, 0.3f, 0.3f});
-            auto view = r3d.create_view({160, 120}, {});
-            auto reference = r3d.create_view({160, 120}, {});
+            auto view = r3d.create_view({160, 120}, {}).value_or({});
+            auto reference = r3d.create_view({160, 120}, {}).value_or({});
             const kin::Material3D material{.unlit = true};
             std::vector<kin::InstanceBatch3D> small, fresh;
             for (kin::u32 i = 0; i < 129; ++i)
-                small.emplace_back(box, std::vector<kin::MeshInstance3D>{box_row(129, 1)[i]});
+                small.push_back(kin::InstanceBatch3D::create(box, std::vector<kin::MeshInstance3D>{box_row(129, 1)[i]})
+                                    .value_or({}));
             for (kin::u32 i = 0; i < 10; ++i)
-                fresh.emplace_back(box, std::vector<kin::MeshInstance3D>{box_row(10, 500, 1)[i]});
-            kin::InstanceBatch3D big(box, box_row(1000, 2000, -2.0f, Color::rgb(250, 120, 60)));
+                fresh.push_back(
+                    kin::InstanceBatch3D::create(box, std::vector<kin::MeshInstance3D>{box_row(10, 500, 1)[i]})
+                        .value_or({}));
+            auto big =
+                kin::InstanceBatch3D::create(box, box_row(1000, 2000, -2.0f, Color::rgb(250, 120, 60))).value_or({});
             const auto shoot = [&](bool smalls, bool news, bool large) {
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0, 0, 9}, {}, 60);
@@ -19303,7 +19487,7 @@ void test_gpu_local_array_sized_by_mapped_lights() {
             return;
         const kin::Mesh3D box = make_box(r3d, {1, 1, 1});
         const kin::Mesh3D floor = make_box(r3d, {20, 0.2f, 20});
-        auto view = r3d.create_view({160, 120}, {});
+        auto view = r3d.create_view({160, 120}, {}).value_or({});
         const auto shoot = [&](bool far_in_view) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0, 6, 12}, {0, 0, 0}, 60);
@@ -19313,14 +19497,14 @@ void test_gpu_local_array_sized_by_mapped_lights() {
             scene.draw(box, Mat4f::translation({0, 0.5f, 0}));
             kin::SpotLightSource3D near{
                 .position = {0, 6, 0}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 15};
-            near.shadow.enabled = true;
+            near.shadow_enabled = true;
             scene.add_spot_light(near);
             kin::SpotLightSource3D far{.position = far_in_view ? Vec3f{3, 6, 0} : Vec3f{0, 6, -500},
                                        .direction = {0, -1, 0},
                                        .color = {20, 20, 20},
                                        .radius = 15};
-            far.shadow.enabled = true;
-            far.shadow.resolution = 1024;
+            far.shadow_enabled = true;
+            far.shadow_resolution = 1024;
             scene.add_spot_light(far);
             render_ok(r3d, view, scene);
             const kin::u64 bytes = r3d.debug_stats().local_shadow_bytes;
@@ -19358,7 +19542,7 @@ void test_gpu_collected_snapshots_reuse_uploads() {
                     .set(kin::MeshRenderer3D{.mesh = box}));
         kin::Scene3D a, b;
         a.camera = b.camera = kin::Camera3D::look_at({0, 0, 10}, {}, 60);
-        auto view = r3d.create_view({160, 120}, {});
+        auto view = r3d.create_view({160, 120}, {}).value_or({});
         const auto collect = [&](kin::Scene3D& scene) {
             scene.clear();
             rendering.propagate_transforms();
@@ -19397,11 +19581,11 @@ void test_gpu_retained_partial_uploads() {
         for (kin::u32 i = 0; i < 4096; ++i)
             current.push_back({Mat4f::translation({float(i % 64) * 0.2f - 6.3f, float(i / 64) * 0.13f - 4.1f, 0}),
                                Color::rgb(200, 210, 220), i + 1});
-        kin::InstanceBatch3D batch(box, current);
+        auto batch = kin::InstanceBatch3D::create(box, current).value_or({});
         constexpr kin::u64 table = 4096 * 128;
-        auto first = r3d.create_view({160, 120}, {});
-        auto second = r3d.create_view({160, 120}, {});
-        auto reference = r3d.create_view({160, 120}, {});
+        auto first = r3d.create_view({160, 120}, {}).value_or({});
+        auto second = r3d.create_view({160, 120}, {}).value_or({});
+        auto reference = r3d.create_view({160, 120}, {}).value_or({});
         const kin::Material3D material{.color = Color::rgb(250, 240, 200)};
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.3f, 0.2f, 9}, {}, 60);
@@ -19496,10 +19680,10 @@ void test_gpu_compressed_texture() {
             return square;
         };
         kin::Renderer3D r3d{renderer};
-        const kin::Mesh3D near_quad = r3d.create_mesh(quad(1.0f));
+        const kin::Mesh3D near_quad = r3d.create_mesh(quad(1.0f)).value_or({});
         const kin::Mesh3D speck =
-            r3d.create_mesh(quad(0.03f)); // about 2 pixels across: level 1 (and past it, clamped there)
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+            r3d.create_mesh(quad(0.03f)).value_or({}); // about 2 pixels across: level 1 (and past it, clamped there)
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         for (const bool linear : {false, true}) {
             if (linear && !renderer.set_color_space(kin::ColorSpace::Linear)) {
                 std::cerr << "compressed textures: no linear colour space, its half skipped\n";
@@ -19593,23 +19777,23 @@ void test_gpu_compressed_texture_files() {
         kin::Renderer3D r3d{renderer};
         kin::Assets3D assets{r3d, root};
         std::string error = "stale";
-        const kin::Texture texture = assets.load_texture("olive.ktx2", false, true);
+        const kin::Texture texture = assets.load_texture("olive.ktx2", false, true).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         assert(texture.valid() && error.empty() && texture.format() == kin::TextureFormat::Bc1RgbaSrgb);
         const auto loads = assets.stats().texture_loads, hits = assets.stats().texture_hits;
-        assert(assets.load_texture("olive.ktx2", false, true) == texture &&
+        assert(assets.load_texture("olive.ktx2", false, true).value_or({}) == texture &&
                kin::diagnostics3d_text(assets.diagnostics()).empty());
         assert(assets.stats().texture_hits == hits + 1 && assets.stats().texture_loads == loads);
-        const kin::Texture data = assets.load_texture("data.dds", true, false);
+        const kin::Texture data = assets.load_texture("data.dds", true, false).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         assert(data.valid() && error.empty() && data.format() == kin::TextureFormat::Bc5RgUnorm);
 
         const kin::LoggerConfig saved = kin::logger_config();
         std::vector<kin::LogEvent> events;
         kin::set_logger_config({.min_level = kin::LogLevel::Debug, .sdl_sink = false, .memory_events = &events});
-        const kin::Texture as_colour = assets.load_texture("data.dds", false, true);
+        const kin::Texture as_colour = assets.load_texture("data.dds", false, true).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
-        const kin::Texture basis = assets.load_texture("basis.ktx2", false, true);
+        const kin::Texture basis = assets.load_texture("basis.ktx2", false, true).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         kin::set_logger_config(saved);
         int said = 0;
@@ -19653,7 +19837,7 @@ void test_gpu_compressed_texture_files() {
             std::to_string(buffer.size()) + ",\"uri\":\"data:application/octet-stream;base64," +
             skin_fixtures::base64(buffer) + "\"}]}";
         std::ofstream{root / "quad.gltf", std::ios::binary} << json;
-        const auto model = assets.load_model("quad.gltf");
+        const auto model = assets.load_model("quad.gltf").value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         if (!model) {
             std::cerr << "quad.gltf: " << error << '\n';
@@ -19661,7 +19845,7 @@ void test_gpu_compressed_texture_files() {
         }
         assert(model->parts.size() == 1 && model->parts[0].material.texture == texture &&
                model->asset_diagnostics.empty());
-        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.draw(*model, Mat4f::identity());
@@ -19680,8 +19864,8 @@ void test_gpu_public_stats_and_debug_readback() {
             return;
         kin::MeshOptions3D options;
         options.clusters = true;
-        const auto mesh = r3d.create_mesh(kin::meshes::torus(1.0f, 0.35f, 48, 24), options);
-        auto view = r3d.create_view({160, 120}, {.samples = 1});
+        const auto mesh = r3d.create_mesh(kin::meshes::torus(1.0f, 0.35f, 48, 24), options).value_or({});
+        auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0, 3, 6}, {}, 60);
         scene.lod = {.enabled = true, .error_pixels = 1};
@@ -19802,8 +19986,8 @@ void test_gpu_default_ecs_path() {
                     .entity()
                     .set(kin::Transform3D{.position = {float(i % 64) * 0.12f - 4, 0, float(i / 64) * 0.12f - 2}})
                     .set(kin::MeshRenderer3D{.mesh = mesh, .material = material, .id = i + 1}));
-        auto view = r3d.create_view({160, 120}, {.pick = true});
-        auto truth = reference.create_view({160, 120}, {.pick = true});
+        auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+        auto truth = reference.create_view({160, 120}, {.pick = true}).value_or({});
         kin::Scene3D scene;
         kin::u64 identity = 0, revision = 0;
         for (int frame = 0; frame < 7; ++frame) {
@@ -19847,7 +20031,7 @@ void test_gpu_default_ecs_path() {
             assert(image.rgba == want.rgba);
             for (int y = 30; y < 100; y += 17)
                 for (int x = 20; x < 145; x += 19) {
-                    const auto a = r3d.pick(view, {x, y}), b = reference.pick(truth, {x, y});
+                    const auto a = r3d.pick(view, {x, y}).value_or({}), b = reference.pick(truth, {x, y}).value_or({});
                     assert(a.hit == b.hit && (!a.hit || a.id == b.id));
                 }
             assert(stats.retained_instances == batch.instances().size());
@@ -19883,8 +20067,8 @@ void test_gpu_resubmitted_layout() {
     with_gpu("test_gpu_resubmitted_layout", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer}, reference{renderer};
         const auto box = make_box(r3d, {1, 1, 1}), other = make_box(r3d, {1.3f, 0.7f, 1});
-        auto view = r3d.create_view({160, 120}, {.pick = true});
-        auto truth = reference.create_view({160, 120}, {.pick = true});
+        auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+        auto truth = reference.create_view({160, 120}, {.pick = true}).value_or({});
         kin::Scene3D scene;
         for (int frame = 0; frame < 8; ++frame) {
             scene.clear();
@@ -19903,7 +20087,7 @@ void test_gpu_resubmitted_layout() {
             const auto image = shoot_view(renderer, r3d, view, scene);
             const auto stats = r3d.debug_stats();
             assert(image.rgba == shoot_view(renderer, reference, truth, fresh).rgba);
-            assert(r3d.pick(view, {80, 60}).id == kin::u32(10 + frame));
+            assert(r3d.pick(view, {80, 60}).value_or({}).id == kin::u32(10 + frame));
             if (frame >= 1 && frame <= 3)
                 assert(stats.prepared_reused == 1);
             if (frame == 4 || frame == 5 || frame == 6 || frame == 7)
@@ -20156,6 +20340,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_rain_streaks_follow_the_wind());
     RUN(test_gpu_weather_cache_follows_every_change());
     RUN(test_gpu_particle_budget());
+    RUN(test_gpu_taa_live_transparency());
     RUN(test_gpu_taa_transient_effects());
     RUN(test_gpu_particles_taa_and_msaa());
     RUN(test_gpu_particles_leave_skinned_alone());

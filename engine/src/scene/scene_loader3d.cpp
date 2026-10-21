@@ -6,12 +6,18 @@
 
 namespace kin {
 
-bool instantiate_scene3d(SceneAssetRuntime& source, EcsWorld& world, Assets3D& assets,
-                         const SceneBindingOptions3D& options) {
+Status3D instantiate_scene3d(SceneAssetRuntime& source, EcsWorld& world, Assets3D& assets,
+                             const SceneBindingOptions3D& options) {
     return source.instantiate3d(world, assets, options);
 }
 
-bool SceneAssetRuntime::instantiate3d(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options) {
+Status3D SceneAssetRuntime::instantiate3d(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options) {
+    const bool success = instantiate3d_operation(world, assets, options);
+    return status3d(success, _diagnostics);
+}
+
+bool SceneAssetRuntime::instantiate3d_operation(EcsWorld& world, Assets3D& assets,
+                                                const SceneBindingOptions3D& options) {
     _diagnostics.clear();
     if (!loaded())
         return fail3d(_diagnostics, "instantiate_scene3d", "scene asset runtime is not loaded");
@@ -39,11 +45,11 @@ bool SceneAssetRuntime::instantiate3d(EcsWorld& world, Assets3D& assets, const S
             return commit();
         // Enforce the world's aggregate capacity before creating any particle
         // storage for this instance; scoped binding alone checks only its share.
-        auto errors = validate_particles3d(world, options.particles);
+        auto errors = validate_particles3d(world, options.particles).diagnostics;
         if (errors.empty())
-            errors = resolve_render3d_assets(world, assets, options.particles, ids);
+            errors = resolve_render3d_assets(world, assets, options.particles, ids).diagnostics;
         if (errors.empty() && options.physics_assets)
-            errors = resolve_physics3d_assets(world, *options.physics_assets, ids);
+            errors = resolve_physics3d_assets(world, *options.physics_assets, ids).diagnostics;
         if (errors.empty())
             return commit();
         clear(world);

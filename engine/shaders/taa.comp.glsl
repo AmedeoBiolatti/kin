@@ -18,13 +18,13 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D uCurrent; // this frame, or in sharpen mode the result so far; linear, premultiplied
 layout(set = 0, binding = 1) uniform sampler2D uHistory;
-layout(set = 0, binding = 2) uniform sampler2D uMotion;  // BA: opaque velocity; R > 1: transient coverage after shading
+layout(set = 0, binding = 2) uniform sampler2D uMotion;  // BA: contributing-layer motion; R > 1: coverage; G: receiving irradiance
 layout(set = 0, binding = 3) uniform sampler2D uPastMotion; // the same, of the last frame
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uResult;
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // the picture's width and height, and 1 over them
     vec4 params; // x: history weight, y: 1 when there is no history, z: 1 to sharpen instead, w: sharpness
-    vec4 jitter; // xy: jitter in pixels, z: changed inputs require rejecting transient coverage
+    vec4 jitter; // xy: jitter, z: coverage present, w: physical coverage changed (excluding jitter)
 } params;
 
 vec3 compress(vec3 c) {
@@ -88,6 +88,17 @@ void sharpen(ivec2 p) {
     imageStore(uResult, p, vec4(expand(sharp), centre.a));
 }
 
+// G records shadowed irradiance only for receiving particle coverage. Compare
+// it only when a map was redrawn, so jitter on a stationary shadow can converge.
+// Moving shadows reject their changed pixels rather than the whole receiver.
+bool changed_shadow(ivec2 pixel, vec4 motion) {
+    if (motion.r < 2.2 || motion.r > 2.5)
+        return false;
+    const vec2 past = (vec2(pixel) + .5) * params.sizes.zw - motion.ba;
+    const vec4 before = textureLod(uPastMotion, past, 0.0);
+    return before.r > 2.1 && abs(before.g - motion.g) > .0001;
+}
+
 void main() {
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(params.sizes.x) || p.y >= int(params.sizes.y)) {
@@ -124,7 +135,8 @@ void main() {
             const vec4 c = fetch(p + ivec2(x, y));
             if (params.jitter.z > 0.5) {
                 const ivec2 pixel = clamp(p + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
-                transient = transient || texelFetch(uMotion, pixel, 0).r > 1.5;
+                const vec4 motion = texelFetch(uMotion, pixel, 0);
+                transient = transient || motion.r > 2.5 || changed_shadow(pixel, motion);
             }
             const vec3 compressed = compress(c.rgb);
             const vec2 away = vec2(x, y) - params.jitter.xy;
@@ -141,6 +153,16 @@ void main() {
             alpha_high = max(alpha_high, c.a);
         }
     }
+    const float coverage = texelFetch(uMotion, p, 0).r;
+    if (params.jitter.z > .5 && coverage > 2.2 && coverage < 2.5) {
+        // Reconstruction and Catmull-Rom can carry a shadow change from just
+        // beyond the 3x3 colour box. Cover both filters' complete footprint.
+        for (int y = -2; y <= 2 && !transient; ++y)
+            for (int x = -2; x <= 2; ++x) {
+                const ivec2 pixel = clamp(p + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
+                transient = transient || changed_shadow(pixel, texelFetch(uMotion, pixel, 0));
+            }
+    }
     if (params.jitter.z > 0.5) {
         // Catmull-Rom history reads a 4x4 footprint, not just its nearest pixel.
         // Reject the old footprint as well: this is what removes the trail when
@@ -149,7 +171,9 @@ void main() {
         for (int y = -1; y <= 2 && !transient; ++y) {
             for (int x = -1; x <= 2; ++x) {
                 const ivec2 pixel = clamp(base + ivec2(x, y), ivec2(0), ivec2(params.sizes.xy) - 1);
-                transient = transient || texelFetch(uPastMotion, pixel, 0).r > 1.5;
+                const float old_coverage = texelFetch(uPastMotion, pixel, 0).r;
+                transient = transient || old_coverage > 2.5 ||
+                    (params.jitter.w > .5 && texelFetch(uMotion, p, 0).r < 1.5 && old_coverage > 1.5);
             }
         }
         if (transient) {
@@ -190,6 +214,11 @@ void main() {
     const float mismatch_px = length((texelFetch(uPastMotion, nearest, 0).ba - velocity) * params.sizes.xy);
     const float speed = length(velocity * params.sizes.xy);
     float weight = params.params.x;
+    // A composite has several depths. Use the foremost contributing layer's
+    // reprojection with bounded confidence, rather than disabling temporal AA
+    // for every transparent whenever anything moves elsewhere in the scene.
+    if (texelFetch(uMotion, p, 0).r > 1.5 && speed > .1)
+        weight = min(weight, 0.6);
     weight *= 1.0 - clamp((mismatch_px - (0.35 + 0.05 * speed)) / 0.4, 0.0, 1.0);
     // A moving picture is read less exactly (every sub-pixel shift blurs it a
     // little), and a history that had to be pulled far into the box was

@@ -11,7 +11,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* why) {
+void check(const auto& value, const char* why) {
     if (!value)
         throw std::runtime_error(why);
 }
@@ -178,15 +178,15 @@ void scene_camera(Renderer3D& renderer) {
     matrix->matrix.m[2] = 0;
     check(!rig.observe(*session.world()) && !rig.frame(query), "degenerate target accepted");
     session.rendering()->propagate_transforms();
-    auto prepared = session.preload("box.kinprefab");
-    auto pool = session.create_pool(prepared, {.capacity = 1});
-    auto lease = session.spawn(pool);
+    auto prepared = session.preload("box.kinprefab").value_or({});
+    auto pool = session.create_pool(prepared, {.capacity = 1}).value_or({});
+    auto lease = session.spawn(pool).value_or({});
     check(bool(lease), "camera pool failed");
     rig.follow(lease.root);
     check(rig.observe(*session.world()), "pooled target observe failed");
     session.resolve(lease.root).set(RenderTransform3D{Mat4f::translation({99, 0, 0}), true});
     check(session.despawn(lease) && !rig.frame(query), "released target retained frame");
-    auto renewed = session.spawn(pool);
+    auto renewed = session.spawn(pool).value_or({});
     check(bool(renewed) && !session.resolve(renewed.root).has<RenderTransform3D>() && !rig.observe(*session.world()),
           "new pool lease inherited camera/override");
     rig.follow(renewed.root);
@@ -207,7 +207,7 @@ void scene_camera(Renderer3D& renderer) {
 }
 void render_placement(Renderer3D& renderer) {
     Assets3D assets{renderer, KIN_TEST_MODELS};
-    auto model = assets.load_model("parts.glb");
+    auto model = assets.load_model("parts.glb").value_or({});
     check(bool(model) && !model->parts.empty(), "placement fixture failed");
     kin::EcsWorld world;
     WorldRenderState3D rendering{world};
@@ -246,7 +246,7 @@ void render_placement(Renderer3D& renderer) {
     auto data = meshes::box({1, 1, 1});
     data.skin.resize(data.vertices.size());
     auto skinned = std::make_shared<Model3D>();
-    skinned->parts.push_back({.mesh = renderer.create_mesh(data), .skin = 0});
+    skinned->parts.push_back({.mesh = renderer.create_mesh(data).value_or({}), .skin = 0});
     Skeleton3D skeleton;
     skeleton.names = {"root"};
     skeleton.parents = {-1};

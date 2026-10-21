@@ -45,11 +45,21 @@ void Renderer3D::warn_refused_bake(bool restored) {
     }
 }
 
-Mesh3D Renderer3D::create_mesh(const MeshData3D& data) {
-    return create_mesh(data, MeshOptions3D{});
+Result3D<Mesh3D> Renderer3D::create_mesh(const MeshData3D& data) {
+    auto value = create_mesh_operation(data);
+    return result3d(std::move(value), _errors);
 }
 
-Mesh3D Renderer3D::create_mesh(const MeshData3D& data, const MeshOptions3D& requested) {
+Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data) {
+    return create_mesh_operation(data, MeshOptions3D{});
+}
+
+Result3D<Mesh3D> Renderer3D::create_mesh(const MeshData3D& data, const MeshOptions3D& requested) {
+    auto value = create_mesh_operation(data, requested);
+    return result3d(std::move(value), _errors);
+}
+
+Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data, const MeshOptions3D& requested) {
     _errors.clear();
     MeshOptions3D options = requested;
     if (data.skinned() && (options.clusters || options.levels > 1)) {
@@ -59,8 +69,9 @@ Mesh3D Renderer3D::create_mesh(const MeshData3D& data, const MeshOptions3D& requ
         options.clusters = false;
         options.levels = 1;
     }
-    std::string error;
-    if (!data.validate(&error)) {
+    const auto validation = data.validate();
+    if (!validation) {
+        const auto error = diagnostics3d_text(validation.diagnostics);
         fail3d(_errors, "Renderer3D::create_mesh", error);
         KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = error}}));
         return {};
@@ -163,7 +174,12 @@ Mesh3D Renderer3D::create_mesh(const MeshData3D& data, const MeshOptions3D& requ
                   std::move(levels),  std::move(cluster_info),    data.skin_joint_count()};
 }
 
-View3D Renderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
+Result3D<View3D> Renderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
+    auto value = create_view_operation(size, options);
+    return result3d(std::move(value), _errors);
+}
+
+View3D Renderer3D::create_view_operation(Vec2i size, const ViewOptions3D& options) {
     _errors.clear();
     size = at_least_one(size);
     if (_backend) {
@@ -180,7 +196,12 @@ View3D Renderer3D::create_view(Vec2i size, const ViewOptions3D& options) {
     return View3D{std::make_shared<FallbackView>(std::move(target), options)};
 }
 
-bool Renderer3D::resize(View3D& view, Vec2i size) {
+Status3D Renderer3D::resize(View3D& view, Vec2i size) {
+    auto value = resize_operation(view, size);
+    return status3d(std::move(value), _errors);
+}
+
+bool Renderer3D::resize_operation(View3D& view, Vec2i size) {
     _errors.clear();
     size = at_least_one(size);
     if (!view.valid()) {
@@ -202,7 +223,12 @@ bool Renderer3D::resize(View3D& view, Vec2i size) {
     return fail3d(_errors, "Renderer3D::resize", "device refused view resize");
 }
 
-PickResult3D Renderer3D::pick(View3D& view, Vec2i pixel) {
+Result3D<PickResult3D> Renderer3D::pick(View3D& view, Vec2i pixel) {
+    auto value = pick_operation(view, pixel);
+    return result3d(std::move(value), _errors);
+}
+
+PickResult3D Renderer3D::pick_operation(View3D& view, Vec2i pixel) {
     _errors.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
         fail3d(_errors, "Renderer3D::pick", "picking requires a valid 3D view");
@@ -211,7 +237,12 @@ PickResult3D Renderer3D::pick(View3D& view, Vec2i pixel) {
     return _backend->pick(*view.backend(), pixel);
 }
 
-bool Renderer3D::read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& out) {
+Result3D<bool> Renderer3D::read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& out) {
+    auto value = read_cluster_picks_operation(view, out);
+    return result3d(std::move(value), _errors);
+}
+
+bool Renderer3D::read_cluster_picks_operation(View3D& view, std::vector<ClusterPick3D>& out) {
     _errors.clear();
     out.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
@@ -220,7 +251,12 @@ bool Renderer3D::read_cluster_picks(View3D& view, std::vector<ClusterPick3D>& ou
     return _backend->read_cluster_picks(*view.backend(), out);
 }
 
-bool Renderer3D::read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out) {
+Result3D<bool> Renderer3D::read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out) {
+    auto value = read_cluster_draws_operation(view, out);
+    return result3d(std::move(value), _errors);
+}
+
+bool Renderer3D::read_cluster_draws_operation(View3D& view, std::vector<ClusterDraw3D>& out) {
     _errors.clear();
     out.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
@@ -229,7 +265,12 @@ bool Renderer3D::read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& ou
     return _backend->read_cluster_draws(*view.backend(), out);
 }
 
-bool Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
+Status3D Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
+    auto value = warm_up_operation(view, scene);
+    return status3d(std::move(value), _errors);
+}
+
+bool Renderer3D::warm_up_operation(View3D& view, const Scene3D& scene) {
     _errors.clear();
     if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
         return fail3d(_errors, "Renderer3D::warm_up", "operation requires a valid 3D view");
@@ -247,7 +288,12 @@ bool Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
     return fail3d(_errors, "Renderer3D::warm_up", "GPU warm-up failed");
 }
 
-bool Renderer3D::render(View3D& view, const Scene3D& scene) {
+Status3D Renderer3D::render(View3D& view, const Scene3D& scene) {
+    auto value = render_operation(view, scene);
+    return status3d(std::move(value), _errors);
+}
+
+bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
     _errors.clear();
     _stats = {};
     if (!view.valid()) {

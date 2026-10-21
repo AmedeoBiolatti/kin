@@ -230,7 +230,7 @@ public:
             in.read(reinterpret_cast<char*>(pixels.data()), std::streamsize(pixels.size()));
             if (!in)
                 throw std::runtime_error("truncated grove texture");
-            meshes[kind] = renderer.create_mesh(mesh);
+            meshes[kind] = renderer.create_mesh(mesh).value_or({});
             textures[kind] = r2d.create_texture_from_rgba(pixels.data(), {i32(side), i32(side)});
             if (!meshes[kind] || !textures[kind])
                 throw std::runtime_error("grove resource creation failed");
@@ -253,7 +253,8 @@ public:
                         records.push_back({t, colors::white, 0});
                     std::vector<Mat4f>().swap(b.copies);
                 }
-            foliage_batches.emplace_back(meshes[0], std::move(records), std::move(groups));
+            foliage_batches.push_back(
+                kin::InstanceBatch3D::create(meshes[0], std::move(records), std::move(groups)).value_or({}));
             std::vector<Batch>().swap(plants);
         }
         foliage_count = foliage;

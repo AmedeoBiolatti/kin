@@ -12,7 +12,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* message) {
+void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
 }
@@ -55,8 +55,8 @@ constexpr auto scene = R"({"schema":"kin.scene/1","entities":[
 
 void cpu() {
     const auto parsed = parse_materials3d_asset(materials);
-    check(parsed.ok() && parsed.asset->variants.size() == 4, "valid material variants rejected");
-    check(parsed.asset->base.material.texture && parsed.asset->base.material.texture->asset.empty(),
+    check(parsed.ok() && parsed.value->variants.size() == 4, "valid material variants rejected");
+    check(parsed.value->base.material.texture && parsed.value->base.material.texture->asset.empty(),
           "explicit texture clearing lost");
     for (const auto* text :
          {R"({"schema":"kin.materials3d/1","material":{"shader":12}})",
@@ -78,9 +78,9 @@ void cpu() {
     check(!parse_materials3d_asset(std::string(1024 * 1024 + 1, ' ')).ok(), "material source budget ignored");
     const auto shader = parse_materials3d_asset(
         R"({"schema":"kin.materials3d/1","material":{"shader":"glass.spv","shader_params":[1.45,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]},"variants":{"plain":{"material":{"shader":null}}}})");
-    check(shader.ok() && shader.asset->base.material.shader == std::filesystem::path{"glass.spv"} &&
-              (*shader.asset->base.material.shader_params)[0] == 1.45f &&
-              shader.asset->variants.at("plain").material.shader->empty(),
+    check(shader.ok() && shader.value->base.material.shader == std::filesystem::path{"glass.spv"} &&
+              (*shader.value->base.material.shader_params)[0] == 1.45f &&
+              shader.value->variants.at("plain").material.shader->empty(),
           "shader parameters or explicit clearing lost");
     Scratch scratch;
     write(scratch.path / "colors.kinmaterials", materials);
@@ -120,7 +120,7 @@ void material_gpu(Renderer2D& renderer) {
     options.viewport = {160, 120};
     options.view.samples = 1;
     SceneSession3D session{r3d, assets, options};
-    const auto ok = [&](bool value, const char* message) {
+    const auto ok = [&](const auto& value, const char* message) {
         if (!value)
             for (const auto& error : session.diagnostics())
                 std::cerr << error << '\n';
@@ -147,7 +147,8 @@ void material_gpu(Renderer2D& renderer) {
     check(model->parts[0].material.texture && !red->materials[0].texture && red->materials[0].roughness == .75f &&
               green->materials[0].metallic == .6f,
           "patch changed imported material or lost inheritance");
-    check(assets.load_materials("colors.kinmaterials", model).shared() == red, "identical bindings not shared");
+    check(assets.load_materials("colors.kinmaterials", model).value_or({}).shared() == red,
+          "identical bindings not shared");
     check(!left.raw().target(flecs::IsA).get<ModelMaterials3D>()->binding, "binding mutated prefab prototype");
     renderer.clear();
     ok(session.render(), "variant render failed");
@@ -160,11 +161,11 @@ void material_gpu(Renderer2D& renderer) {
           "per-instance material colors not rendered");
     renderer.present();
     std::string error;
-    const auto ghost = assets.load_materials("colors.kinmaterials", model, "ghost");
+    const auto ghost = assets.load_materials("colors.kinmaterials", model, "ghost").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
-    const auto glow = assets.load_materials("colors.kinmaterials", model, "glow");
+    const auto glow = assets.load_materials("colors.kinmaterials", model, "glow").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
-    const auto mask = assets.load_materials("colors.kinmaterials", model, "mask");
+    const auto mask = assets.load_materials("colors.kinmaterials", model, "mask").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(ghost && glow && mask && ghost->materials[0].blend == Blend3D::Alpha && !ghost->materials[0].casts_shadow &&
               mask->materials[0].alpha_cutoff == .4f && mask->materials[0].blend == Blend3D::Mask &&
@@ -177,18 +178,19 @@ void material_gpu(Renderer2D& renderer) {
         write(
             scratch.path / "shader.kinmaterials",
             R"({"schema":"kin.materials3d/1","material":{"shader":"custom.spv","shader_params":[0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0]},"variants":{"plain":{"material":{"shader":null}}}})");
-        auto shaded = assets.load_materials("shader.kinmaterials", model, {});
+        auto shaded = assets.load_materials("shader.kinmaterials", model, {}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(shaded && shaded->materials[0].shader && shaded->materials[0].shader_params[5] == 1,
               "shader material did not bind");
-        auto shared = assets.load_material_shader("custom.spv");
+        auto shared = assets.load_material_shader("custom.spv").value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
-        check(shared == shaded->materials[0].shader && assets.load_material_shader("./custom.spv") == shared,
+        check(shared == shaded->materials[0].shader &&
+                  assets.load_material_shader("./custom.spv").value_or({}) == shared,
               "shader source aliases not shared");
-        const auto plain = assets.load_materials("shader.kinmaterials", model, "plain");
+        const auto plain = assets.load_materials("shader.kinmaterials", model, "plain").value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(plain && !plain->materials[0].shader, "plain variant did not clear custom shader");
-        auto view = r3d.create_view({64, 64});
+        auto view = r3d.create_view({64, 64}).value_or({});
         Scene3D probe;
         probe.camera = Camera3D::look_at({0, 0, 3}, {0, 0, 0});
         probe.draw(*model, Mat4f::identity(), colors::white, 0, shaded->materials);
@@ -206,19 +208,19 @@ void material_gpu(Renderer2D& renderer) {
         }
         const auto old = shaded->materials[0].shader;
         assets.invalidate("custom.spv");
-        auto rebound = assets.load_materials("shader.kinmaterials", model, {});
+        auto rebound = assets.load_materials("shader.kinmaterials", model, {}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(rebound && rebound.shared() != shaded.shared() && rebound->materials[0].shader != old && old,
               "shader dependency invalidation lost retained handles");
         write(scratch.path / "broken.spv", "bad");
         write(scratch.path / "header.spv", std::string(20, 'x'));
         const auto entries = assets.stats().shader_entries;
-        check(!assets.load_material_shader("broken.spv") && !assets.diagnostics().empty() &&
-                  !assets.load_material_shader("missing.spv") && !assets.load_material_shader("header.spv") &&
-                  assets.stats().shader_entries == entries,
+        check(!assets.load_material_shader("broken.spv").value_or({}) && !assets.diagnostics().empty() &&
+                  !assets.load_material_shader("missing.spv").value_or({}) &&
+                  !assets.load_material_shader("header.spv").value_or({}) && assets.stats().shader_entries == entries,
               "failed shader cached or missing error");
         Assets3D uncached{r3d, scratch.path, {.shaders = 0}};
-        const auto one = uncached.load_materials("shader.kinmaterials", model, {});
+        const auto one = uncached.load_materials("shader.kinmaterials", model, {}).value_or({});
         error = kin::diagnostics3d_text(uncached.diagnostics());
         check(one && uncached.stats().shader_entries == 0 && uncached.stats().shader_loads == 1,
               "disabled shader cache duplicated one binding's shader");
@@ -229,22 +231,22 @@ void material_gpu(Renderer2D& renderer) {
         "texture":{"asset":"shared pixel.png","filter":"nearest"},
         "normal":{"asset":"shared pixel.png","filter":"nearest"},
         "occlusion":{"asset":"shared pixel.png","filter":"nearest"}}})");
-    auto maps = assets.load_materials("maps.kinmaterials", model, {});
+    auto maps = assets.load_materials("maps.kinmaterials", model, {}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(maps && maps->materials[0].texture == model->parts[0].material.texture &&
               maps->materials[0].normal == model->parts[0].material.normal &&
               maps->materials[0].normal == maps->materials[0].occlusion &&
               maps->materials[0].texture != maps->materials[0].normal,
           "texture sharing lost role/filter semantics");
-    auto filtered = assets.load_texture("shared pixel.png", false, true);
+    auto filtered = assets.load_texture("shared pixel.png", false, true).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(filtered && filtered != maps->materials[0].texture, "different filters incorrectly shared");
 
-    auto parts = assets.load_model("parts.glb").shared();
+    auto parts = assets.load_model("parts.glb").value_or({}).shared();
     write(scratch.path / "parts.kinmaterials", R"({"schema":"kin.materials3d/1","material":{"roughness":0.9},
       "parts":[{"part":0,"material":{"metallic":0.4}}],"variants":{"wet":{"material":{"roughness":0.2},
       "parts":[{"part":1,"material":{"emissive":3}}]}}})");
-    auto layered = assets.load_materials("parts.kinmaterials", parts, "wet");
+    auto layered = assets.load_materials("parts.kinmaterials", parts, "wet").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(layered && layered->materials.size() == parts->parts.size() && layered->materials[0].metallic == .4f &&
               layered->materials[0].roughness == .2f && layered->materials[1].emissive == 3 &&
@@ -263,23 +265,23 @@ void material_gpu(Renderer2D& renderer) {
     named_model->parts[0].name = "unique";
     write(scratch.path / "names.kinmaterials",
           R"({"schema":"kin.materials3d/1","parts":[{"part":"unique","material":{"metallic":0.8}}]})");
-    auto named = assets.load_materials("names.kinmaterials", named_model, {});
+    auto named = assets.load_materials("names.kinmaterials", named_model, {}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(named && named->materials[0].metallic == .8f, "unique name selector failed");
     named_model->parts[1].name = "unique";
     assets.invalidate("names.kinmaterials");
-    check(!assets.load_materials("names.kinmaterials", named_model, {}) &&
+    check(!assets.load_materials("names.kinmaterials", named_model, {}).value_or({}) &&
               kin::diagnostics3d_text(assets.diagnostics()).find("ambiguous") != std::string::npos,
           "ambiguous part name accepted");
     for (const auto* rules : {R"({"schema":"kin.materials3d/1","parts":[{"part":99,"material":{}}]})",
                               R"({"schema":"kin.materials3d/1","parts":[{"part":"missing","material":{}}]})"}) {
         write(scratch.path / "bad.kinmaterials", rules);
         assets.invalidate("bad.kinmaterials");
-        check(!assets.load_materials("bad.kinmaterials", parts, {}) &&
+        check(!assets.load_materials("bad.kinmaterials", parts, {}).value_or({}) &&
                   !kin::diagnostics3d_text(assets.diagnostics()).empty(),
               "bad selector accepted");
     }
-    check(!assets.load_materials("colors.kinmaterials", model, "unknown"), "unknown variant accepted");
+    check(!assets.load_materials("colors.kinmaterials", model, "unknown").value_or({}), "unknown variant accepted");
 
     // Activated session registry edits validate/bind transactionally. Standalone
     // registry worlds retain their explicit binding contract above.
@@ -291,19 +293,21 @@ void material_gpu(Renderer2D& renderer) {
     check(session.world()->components().patch_field(left, "ModelMaterials3D", "asset", ComponentAssetRef{}),
           "clear material edit failed");
     check(!left.get<ModelMaterials3D>()->binding && right.get<ModelMaterials3D>()->binding == green &&
-              resolve_materials3d_assets(*session.world(), assets).empty(),
+              resolve_materials3d_assets(*session.world(), assets).diagnostics.empty(),
           "clearing overrides mutated sibling");
     ok(session.reload(), "material reload failed");
     auto* old_world = session.world();
     const auto old_model = session.entity("left").get<ModelRenderer3D>()->model;
     write(scratch.path / "colors.kinmaterials", "broken");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed && session.world() == old_world,
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
+              session.world() == old_world,
           "broken material replaced active scene");
     std::filesystem::remove(scratch.path / "colors.kinmaterials");
-    check(session.reload_if_changed() == SceneSession3DReload::Failed && session.world() == old_world,
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
+              session.world() == old_world,
           "deleted material replaced active scene");
     write(scratch.path / "colors.kinmaterials", std::string(materials) + "\n");
-    check(session.reload_if_changed() == SceneSession3DReload::Activated &&
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
               session.entity("left").get<ModelRenderer3D>()->model == old_model,
           "material edit reuploaded model or failed recovery");
 
@@ -311,14 +315,16 @@ void material_gpu(Renderer2D& renderer) {
     const auto png = read(scratch.path / "override.png");
     write(scratch.path / "colors.kinmaterials",
           R"({"schema":"kin.materials3d/1","material":{"texture":"override.png"},"variants":{"green":{}}})");
-    check(session.reload_if_changed() == SceneSession3DReload::Activated, "map dependency load failed");
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated,
+          "map dependency load failed");
     auto previous = session.entity("left").get<ModelMaterials3D>()->binding;
     write(scratch.path / "override.png", "corrupt");
     old_world = session.world();
-    check(session.reload_if_changed() == SceneSession3DReload::Failed && session.world() == old_world,
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Failed &&
+              session.world() == old_world,
           "corrupt material texture replaced scene");
     write(scratch.path / "override.png", png);
-    check(session.reload_if_changed() == SceneSession3DReload::Activated &&
+    check(session.reload_if_changed().value_or(kin::SceneSession3DReload::Failed) == SceneSession3DReload::Activated &&
               session.entity("left").get<ModelRenderer3D>()->model == old_model &&
               session.entity("left").get<ModelMaterials3D>()->binding->materials[0].texture !=
                   previous->materials[0].texture,
@@ -332,7 +338,7 @@ void material_gpu(Renderer2D& renderer) {
                   [&](const auto& draw) { return draw.mesh == part.mesh && draw.material == part.material; }),
               "model replacement used stale material indices");
     }
-    check(resolve_materials3d_assets(*session.world(), assets).empty() &&
+    check(resolve_materials3d_assets(*session.world(), assets).diagnostics.empty() &&
               session.entity("left").get<ModelMaterials3D>()->binding->materials.size() == parts->parts.size(),
           "material binding did not follow replacement model");
 
@@ -340,8 +346,8 @@ void material_gpu(Renderer2D& renderer) {
     // cannot accidentally apply a stale per-part array to the new model.
     std::filesystem::copy_file(scratch.path / "parts.glb", scratch.path / "release.glb");
     {
-        auto isolated = assets.load_model("release.glb").shared();
-        auto binding = assets.load_materials("parts.kinmaterials", isolated, "wet").shared();
+        auto isolated = assets.load_model("release.glb").value_or({}).shared();
+        auto binding = assets.load_materials("parts.kinmaterials", isolated, "wet").value_or({}).shared();
         std::weak_ptr<IMeshBackend3D> mesh_weak = isolated->parts[0].mesh.backend();
         isolated.reset();
         check(binding && binding->model.expired() && mesh_weak.expired(),
@@ -354,8 +360,8 @@ void material_gpu(Renderer2D& renderer) {
     assets.trim();
     {
         Assets3D small{r3d, scratch.path, {.materials = 1}};
-        auto one = small.load_materials("colors.kinmaterials", model).shared();
-        auto two = small.load_materials("colors.kinmaterials", model, "green").shared();
+        auto one = small.load_materials("colors.kinmaterials", model).value_or({}).shared();
+        auto two = small.load_materials("colors.kinmaterials", model, "green").value_or({}).shared();
         std::weak_ptr<const MaterialBinding3D> weak = two;
         check(one && two && small.stats().material_entries == 1, "material cache exceeded metadata budget");
         one.reset();
@@ -375,7 +381,7 @@ void material_gpu(Renderer2D& renderer) {
         SceneSession3D packed_session{r3d, packed_assets, options};
         check(packed_session.load("test.kinscene"), "packed material references failed");
 #ifdef KIN_TEST_MATERIAL_SHADER
-        const auto packed_shader = packed_assets.load_materials("shader.kinmaterials", model, {});
+        const auto packed_shader = packed_assets.load_materials("shader.kinmaterials", model, {}).value_or({});
         error = kin::diagnostics3d_text(packed_assets.diagnostics());
         check(packed_shader && packed_shader->materials[0].shader, "packed shader reference failed");
 #endif
@@ -397,7 +403,7 @@ void material_gpu(Renderer2D& renderer) {
         renderer.present();
         auto survivor = camp.entity("survivor");
         survivor.set(ModelMaterials3D{.asset = {(scratch.path / "colors.kinmaterials").string()}, .variant = "green"});
-        check(resolve_materials3d_assets(*camp.world(), real_assets).empty() && camp.collect(),
+        check(resolve_materials3d_assets(*camp.world(), real_assets).diagnostics.empty() && camp.collect(),
               "skinned material binding failed");
         bool green_skin = false;
         for (const auto& draw : camp.scene()->draws())

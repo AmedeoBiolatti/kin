@@ -8,8 +8,10 @@
 #include <kin/render3d/stats3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #ifdef KIN_EXPERIMENTAL_3D
+#include <kin/ecs/render3d.hpp>
 #include <kin/physics3d/assets3d.hpp>
 #include <kin/render3d/assets3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
 #endif
 #include <type_traits>
 
@@ -53,10 +55,36 @@ static_assert(std::is_same_v<decltype(kin::sky_radiance({}, {}, {})), kin::Linea
 static_assert(!std::is_assignable_v<decltype(kin::Sky3D::ground_color)&, kin::Vec3f>);
 #ifdef KIN_EXPERIMENTAL_3D
 template <class T>
-concept LegacyModelError = requires(T& owner, std::string* error) { owner.load_model("a", error); };
+concept LocalLightFields = requires(T light) {
+    light.color;
+    light.radius;
+    light.size;
+    light.shadow_enabled;
+    light.shadow_resolution;
+    light.shadow_bias;
+    light.shadow_normal_offset;
+    light.shadow_near_plane;
+    light.shadow_distance;
+    light.shadow_softness;
+};
+static_assert(LocalLightFields<kin::PointLight3D> && LocalLightFields<kin::PointLightSource3D>);
+static_assert(LocalLightFields<kin::SpotLight3D> && LocalLightFields<kin::SpotLightSource3D>);
+static_assert(std::is_same_v<decltype(std::declval<kin::Renderer3D&>().create_mesh(kin::MeshData3D{})),
+                             kin::Result3D<kin::Mesh3D>>);
+static_assert(std::is_same_v<decltype(std::declval<kin::Assets3D&>().load_model("a")),
+                             kin::Result3D<kin::AssetHandle<kin::Model3D>>>);
+static_assert(std::is_same_v<decltype(std::declval<kin::PhysicsAssets3D&>().load_collider("a")),
+                             kin::Result3D<kin::AssetHandle<kin::CookedCollider3D>>>);
+static_assert(std::is_same_v<decltype(kin::MeshData3D{}.validate()), kin::Status3D>);
+static_assert(!std::is_convertible_v<kin::Status3D, bool>);
+static_assert(std::is_same_v<decltype(kin::parse_materials3d_asset("")), kin::Result3D<kin::MaterialsAsset3D>>);
+static_assert(std::is_same_v<decltype(kin::parse_collider3d_asset("")), kin::Result3D<kin::ColliderRecipe3D>>);
+
+template <class T>
+concept LegacyModelError = requires(T& owner, std::string* error) { owner.load_model("a", error).value_or({}); };
 template <class T>
 concept LegacyColliderError =
-    requires(T& owner, std::string* error) { owner.load_collider("a", kin::Vec3f{1, 1, 1}, error); };
+    requires(T& owner, std::string* error) { owner.load_collider("a", kin::Vec3f{1, 1, 1}, error).value_or({}); };
 static_assert(!LegacyModelError<kin::Assets3D> && !LegacyModelError<kin::Renderer3D>);
 static_assert(!LegacyColliderError<kin::PhysicsAssets3D>);
 template <class T>

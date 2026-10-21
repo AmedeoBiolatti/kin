@@ -26,21 +26,21 @@ CameraRig3D::CameraRig3D(CameraRig3DSettings settings) {
         throw std::invalid_argument("invalid camera rig settings");
     set_angles(settings.initial_yaw, settings.initial_pitch);
 }
-bool CameraRig3D::configure(CameraRig3DSettings settings) {
+Status3D CameraRig3D::configure(CameraRig3DSettings settings) {
     if (!finite(settings.target_offset) || !std::isfinite(settings.fov) || settings.fov <= 0 || settings.fov >= 179 ||
         !std::isfinite(settings.z_near) || settings.z_near <= 0 || std::isnan(settings.z_far) ||
         settings.z_far <= settings.z_near || !std::isfinite(settings.pitch_min) || !std::isfinite(settings.pitch_max) ||
         settings.pitch_min < -89 || settings.pitch_max > 89 || settings.pitch_min > settings.pitch_max ||
         !std::isfinite(settings.initial_yaw) || !std::isfinite(settings.initial_pitch) ||
         !std::isfinite(settings.teleport_distance) || settings.teleport_distance <= 0)
-        return false;
+        return status3d(false, {"CameraRig3D::configure: invalid settings"});
     if (!_arm.configure(settings.arm))
-        return false;
+        return status3d(false, {"CameraRig3D::configure: invalid settings"});
     _fixed_arm = _arm;
     _settings = settings;
     _pitch = std::clamp(_pitch, settings.pitch_min, settings.pitch_max);
     reset();
-    return true;
+    return {};
 }
 void CameraRig3D::follow(SceneEntity3D target) {
     if (target != _target) {
@@ -53,16 +53,16 @@ void CameraRig3D::reset() {
     _arm.reset();
     _fixed_arm.reset();
 }
-bool CameraRig3D::set_angles(f32 yaw, f32 pitch) {
+Status3D CameraRig3D::set_angles(f32 yaw, f32 pitch) {
     if (!std::isfinite(yaw) || !std::isfinite(pitch))
-        return false;
+        return status3d(false, {"CameraRig3D::set_angles: invalid settings"});
     _yaw = wrapped(yaw);
     _pitch = std::clamp(pitch, _settings.pitch_min, _settings.pitch_max);
-    return true;
+    return {};
 }
-bool CameraRig3D::orbit(Vec2f degrees) {
+Status3D CameraRig3D::orbit(Vec2f degrees) {
     if (!std::isfinite(degrees.x) || !std::isfinite(degrees.y))
-        return false;
+        return status3d(false, {"CameraRig3D::orbit: non-finite angle"});
     return set_angles(wrapped(_yaw - wrapped(degrees.x)),
                       std::clamp(_pitch + degrees.y, _settings.pitch_min, _settings.pitch_max));
 }

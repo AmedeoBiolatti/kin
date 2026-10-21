@@ -81,7 +81,7 @@ inline std::shared_ptr<const Model3D> make_character(Renderer3D& r3d, float leng
                     swing("Wave", 0.6f, 25.0f, 60.0f)};
     ModelPart3D part;
     part.name = "tube";
-    part.mesh = r3d.create_mesh(mesh);
+    part.mesh = r3d.create_mesh(mesh).value_or({});
     part.material = {.color = Color::rgb(215, 130, 90), .roughness = 0.6f};
     part.skin = 0;
     model->parts.push_back(part);
@@ -379,7 +379,7 @@ inline std::shared_ptr<const Model3D> make_person(Renderer3D& r3d) {
     model->clips = rig.clips;
     ModelPart3D part;
     part.name = "person";
-    part.mesh = r3d.create_mesh(mesh);
+    part.mesh = r3d.create_mesh(mesh).value_or({});
     part.material = {.color = Color::rgb(215, 150, 110), .roughness = 0.65f};
     part.skin = 0;
     model->parts.push_back(part);

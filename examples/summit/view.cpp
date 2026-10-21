@@ -138,7 +138,7 @@ std::shared_ptr<const Model3D> make_climber(Renderer3D& r3d, const ClimberStyle&
     for (const ClimberPart& p : build_climber_meshes(style)) {
         ModelPart3D part;
         part.name = p.name;
-        part.mesh = r3d.create_mesh(p.mesh);
+        part.mesh = r3d.create_mesh(p.mesh).value_or({});
         part.material = {.color = p.colour, .roughness = p.roughness};
         part.material.metallic = p.metallic;
         part.skin = 0;
@@ -387,18 +387,18 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
                 grass      ? rock_material(m, _grass_albedo, _grass_normal, _grass_orm ? 0.65f : 0.8f, _grass_orm)
                 : textured ? rock_material(m, _rock_albedo, _rock_normal, _rock_orm ? 0.75f : normal_scale, _rock_orm)
                            : m.material;
-            into.push_back({r3d.create_mesh(m.mesh), mat});
+            into.push_back({r3d.create_mesh(m.mesh).value_or({}), mat});
             _static_triangles += m.mesh.triangle_count();
         }
     };
     upload(build_render_meshes(level), _rock, true, 1.4f);
     upload(build_decor_meshes(level), _decor, true, 1.0f);
     upload(build_terrain_meshes(level), _terrain, false, 1.0f);
-    _cylinder = r3d.create_mesh(meshes::cylinder(1.0f, 1.0f, 10));
-    _cone = r3d.create_mesh(meshes::cone(1.0f, 1.0f, 10));
-    _cone4 = r3d.create_mesh(meshes::cone(1.0f, 1.0f, 4));
-    _box = r3d.create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
-    _sphere = r3d.create_mesh(meshes::sphere(1.0f, 12, 8));
+    _cylinder = r3d.create_mesh(meshes::cylinder(1.0f, 1.0f, 10)).value_or({});
+    _cone = r3d.create_mesh(meshes::cone(1.0f, 1.0f, 10)).value_or({});
+    _cone4 = r3d.create_mesh(meshes::cone(1.0f, 1.0f, 4)).value_or({});
+    _box = r3d.create_mesh(meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+    _sphere = r3d.create_mesh(meshes::sphere(1.0f, 12, 8)).value_or({});
     _camps = level.camps;
     _summit = level.summit;
     for (const Piece& p : level.pieces)
@@ -520,7 +520,7 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
                 auto instance = instantiate_prefab(*_ecs, *prefab.prefab, {}, _ecs->components());
                 for (const auto& error : instance.diagnostics)
                     std::fprintf(stderr, "summit: %s\n", error.c_str());
-                const auto errors = resolve_render3d_assets(*_ecs, _assets);
+                const auto errors = resolve_render3d_assets(*_ecs, _assets).diagnostics;
                 for (const auto& error : errors)
                     std::fprintf(stderr, "summit: %s\n", error.c_str());
                 const auto* renderer = instance.root.get<SkinnedMeshRenderer3D>();
@@ -785,7 +785,7 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
     cave_light.radius = 12;
     cave_light.size = 0.2f;
     cave_light.id = 3000;
-    scene.add_light(cave_light);
+    scene.add_point_light(cave_light);
     const Vec3f signal = e.beacon + e.rotation.rotate({1.9f, 5.6f, 0});
     const Color signal_colour = online ? Color::rgb(93, 237, 158) : gold;
     scene.draw(_sphere, Mat4f::trs(signal, {}, {0.22f, 0.22f, 0.22f}),
@@ -964,7 +964,7 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             pl.radius = 16.0f;
             pl.size = 0.3f;
             pl.id = u32(1000 + i);
-            scene.add_light(pl);
+            scene.add_point_light(pl);
             SpotLightSource3D sl;
             sl.position = c + Vec3f{-1.7f, 1.7f, -0.12f};
             sl.direction = {0.55f, -0.8f, 0.1f};

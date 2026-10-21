@@ -67,13 +67,8 @@ i32 Skeleton3D::find(std::string_view name) const {
     return -1;
 }
 
-bool Skeleton3D::validate(std::string* error) const {
-    const auto fail = [&](std::string why) {
-        if (error) {
-            *error = std::move(why);
-        }
-        return false;
-    };
+Status3D Skeleton3D::validate() const {
+    const auto fail = [](std::string why) { return status3d(false, {"Skeleton3D::validate: " + why}); };
     const std::size_t n = parents.size();
     if (n == 0) {
         return fail("no joints");
@@ -90,7 +85,7 @@ bool Skeleton3D::validate(std::string* error) const {
             return fail("joint " + std::to_string(i) + " has a parent that does not come before it");
         }
     }
-    return true;
+    return {};
 }
 
 Pose3D Skeleton3D::rest_pose() const {

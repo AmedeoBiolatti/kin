@@ -61,6 +61,21 @@ flecs::entity add_crate(flecs::world& world, Vec3f at, f32 half = 0.5f) {
     return world.entity().set(Transform3D{.position = at}).set(box_collider({half, half, half})).set(RigidBody3D{.density = 500.0f});
 }
 
+void test_disabled_contacts_readable() {
+    kin::EcsWorld ecs;
+    World3DConfig config;
+    config.single_threaded = true;
+    CHECK(!config.contact_events);
+    World3D physics(config);
+    WorldPhysicsState3D bodies{ecs, physics};
+    CHECK(ecs.raw().get<PhysicsContacts3D>() != nullptr);
+    add_floor(ecs.raw());
+    add_crate(ecs.raw(), {0, .5f, 0});
+    for (int i = 0; i < 3; ++i)
+        bodies.step(dt);
+    CHECK(ecs.raw().get<PhysicsContacts3D>()->events.empty());
+}
+
 void test_bodies_in_entity_order() {
     kin::EcsWorld ecs;
     flecs::world& world = ecs.raw();
@@ -71,6 +86,7 @@ void test_bodies_in_entity_order() {
     for (int i = 0; i < 4; ++i) {
         made.push_back(add_crate(world, {static_cast<f32>(i) * 2.0f, 1.0f, 0}));
     }
+    CHECK(world.get<PhysicsContacts3D>() != nullptr);
     CHECK(physics.body_count() == 0);
     bodies.sync_bodies();
     CHECK(physics.body_count() == 5 && bodies.body_count() == 5);
@@ -189,6 +205,37 @@ void test_dynamic_writes_back() {
         bodies.step(dt);
     }
     CHECK(near(floater.get<Transform3D>()->position.x, 3.0f, 0.1f) && near(floater.get<Transform3D>()->position.y, 10.0f, 0.01f));
+}
+
+void test_read_only_render_snapshots() {
+    kin::EcsWorld ecs;
+    auto& world = ecs.raw();
+    auto config = serial();
+    config.gravity = {};
+    World3D physics(config);
+    WorldPhysicsState3D bodies{ecs, physics};
+    const auto moving = add_crate(world, {});
+    moving.get_mut<RigidBody3D>()->linear_velocity = {6, 0, 0};
+    moving.get_mut<RigidBody3D>()->linear_damping = 0;
+    const auto platform = world.entity().set(Transform3D{.position = {10, 0, 0}})
+        .set(box_collider({1, .2f, 1})).set(RigidBody3D{.motion = Body3DMotion::Kinematic});
+    const auto child = world.entity().child_of(moving).set(Transform3D{.position = {2, 0, 0}});
+    bodies.sync_bodies();
+    platform.get_mut<Transform3D>()->position.x = 12;
+    bodies.step(dt);
+    const auto hash = physics.state_hash();
+    const auto midpoint = bodies.render_transform(moving, .5f);
+    const auto child_midpoint = bodies.render_transform(child, .5f);
+    const auto platform_midpoint = bodies.render_transform(platform, .5f);
+    CHECK(midpoint && near(midpoint->m[12], .05f, .001f));
+    CHECK(child_midpoint && near(child_midpoint->m[12], 2.05f, .001f));
+    CHECK(platform_midpoint && near(platform_midpoint->m[12], 11, .001f));
+    CHECK(near(moving.get<Transform3D>()->position.x, .1f, .001f));
+    CHECK(platform.get<Transform3D>()->position.x == 12 && physics.state_hash() == hash);
+    // Late edits (including an ancestor edit) snap without moving the body.
+    moving.get_mut<Transform3D>()->position.x = 5;
+    CHECK(near(bodies.render_transform(child, 0)->m[12], 7, .001f));
+    CHECK(physics.state_hash() == hash);
 }
 
 void test_parented_bodies() {
@@ -1630,9 +1677,11 @@ void test_shape_of_a_body_is_its_handle() {
 } // namespace
 
 int main() {
+    test_disabled_contacts_readable();
     test_bodies_in_entity_order();
     test_scale_offset_and_compound();
     test_dynamic_writes_back();
+    test_read_only_render_snapshots();
     test_parented_bodies();
     test_kinematic_follows_and_pushes();
     test_game_moves_entities();

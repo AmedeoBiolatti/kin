@@ -1,14 +1,15 @@
 #pragma once
-
 #include <kin/physics3d/spring_arm3d.hpp>
+#include <kin/render3d/errors3d.hpp>
 #include <kin/scene/scene_session3d.hpp>
 
 namespace kin {
 struct CameraRig3DSettings {
-    Vec3f target_offset{0, 1.2f, 0}; // world-space offset from the target's origin
+    Vec3f target_offset{0, 1.2f, 0}; // metres in world space from the target's origin
     SpringArm3DSettings arm;
     Layer3DMask mask = all_layers3d;
     bool sensors = false;
+    // fov/pitch/yaw: degrees; clip planes and teleport distance: metres.
     f32 fov = 60, z_near = .1f, z_far = 1000;
     f32 pitch_min = -75, pitch_max = 35;
     f32 initial_yaw = 0, initial_pitch = -15;
@@ -27,12 +28,12 @@ struct CameraRig3DFrame {
 class CameraRig3D {
 public:
     explicit CameraRig3D(CameraRig3DSettings settings = {});
-    bool configure(CameraRig3DSettings settings); // failure retains current settings/history
+    Status3D configure(CameraRig3DSettings settings); // failure retains current settings/history
     const CameraRig3DSettings& settings() const { return _settings; }
     void follow(SceneEntity3D target);
     SceneEntity3D target() const { return _target; }
-    bool orbit(Vec2f degrees); // right/up input; finite values only
-    bool set_angles(f32 yaw, f32 pitch);
+    Status3D orbit(Vec2f degrees); // right/up input; finite values only
+    Status3D set_angles(f32 yaw, f32 pitch);
     f32 yaw() const { return _yaw; }
     f32 pitch() const { return _pitch; }
     bool observe(EcsWorld& world);

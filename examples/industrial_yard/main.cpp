@@ -146,7 +146,7 @@ public:
             .field("receive_shadows", _o.receives)
             .field("spot_lights", _data.spot_count)
             .field("shadow_resolution", 1024)
-            .field("shadow_near", .025)
+            .field("shadow_near_plane", .025)
             .field("shadow_depth_bits", 32)
             .field("render_width", 1280 * _o.scale)
             .field("render_height", 720 * _o.scale)
@@ -205,12 +205,12 @@ private:
                                     .radius = d.radius,
                                     .inner_angle = 30,
                                     .outer_angle = d.angle};
-                s.shadow.enabled = _o.shadows;
-                s.shadow.near_plane = .025f;
+                s.shadow_enabled = _o.shadows;
+                s.shadow_near_plane = .025f;
                 s.id = i + 1;
                 _scene.add_spot_light(s);
             } else if (point++ < u32(_o.points))
-                _scene.add_light({.position = d.position, .color = d.colour, .radius = d.radius});
+                _scene.add_point_light({.position = d.position, .color = d.colour, .radius = d.radius});
         }
         _scene.taa.enabled = _o.taa;
         _scene.ambient_occlusion.enabled = _o.ao;
@@ -236,9 +236,9 @@ private:
             throw std::runtime_error("yard skinning unavailable");
         if (_o.shadows && !_r->capabilities().local_shadows)
             throw std::runtime_error("yard local shadows unavailable");
-        _view = _r->create_view({1280 * _o.scale, 720 * _o.scale}, {.hdr = true});
+        _view = _r->create_view({1280 * _o.scale, 720 * _o.scale}, {.hdr = true}).value_or({});
         for (const auto& data : _data.meshes) {
-            auto mesh = _r->create_mesh(data);
+            auto mesh = _r->create_mesh(data).value_or({});
             if (!mesh)
                 throw std::runtime_error("yard mesh upload failed");
             _meshes.push_back(mesh);
@@ -283,7 +283,7 @@ private:
             }
             _materials.push_back(m);
         }
-        _environment = _r->create_environment({128, 64}, _data.sky);
+        _environment = _r->create_environment({128, 64}, _data.sky).value_or({});
         if (!_environment)
             throw std::runtime_error("yard environment failed");
         std::vector<f32>().swap(_data.sky);
@@ -303,7 +303,7 @@ private:
                 continue;
             if (_o.motion)
                 _moving += d.records.size();
-            d.batch = InstanceBatch3D(_meshes[mesh], d.records, {{0, u32(d.records.size())}});
+            d.batch = InstanceBatch3D::create(_meshes[mesh], d.records, {{0, u32(d.records.size())}}).value_or({});
             _dynamic.push_back(std::move(d));
         }
         if (_o.structures)

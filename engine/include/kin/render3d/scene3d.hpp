@@ -148,32 +148,6 @@ struct DirectionalLight3D {
     LinearRgb color{1.0f, 1.0f, 1.0f};  // linear; above 1 is brighter
 };
 
-// What a shadow-casting light that is not the sun is asked to do (P3b). Every number is a default that suits a lamp or
-// a torch at a few metres: the resolution decides the sharpness, `bias` and `normal_offset` the acne against the
-// detaching of a shadow from its caster (both in texels of the map at the distance of the surface, so they scale with
-// the map).
-struct LightShadow3D {
-    bool enabled = false;
-    // The map's side, in texels; 0: Lights3D::local_shadow_resolution. A map is drawn into a corner of the shared array
-    // (whose side is the largest any light asks for), so a small one costs less to draw, not less memory.
-    u32 resolution = 0;
-    // A depth bias away from the light, in texels, times (1 + the surface's slope to the light): 1 is enough for most
-    // surfaces; more hides acne on grazing ones and shows as a shadow that starts later than its caster.
-    f32 bias = 1.0f;
-    // The surface's point is pushed this many texels along its normal before the map is read (removes the acne on
-    // curved surfaces that the bias would need a large number for).
-    f32 normal_offset = 1.5f;
-    // The map's near plane (units; a caster nearer the light than this casts nothing). Raise it to spend the depth
-    // range on the scene; a small near plane costs depth precision far away.
-    f32 near_plane = 0.05f;
-    // Past this distance from the light its shadow fades to nothing (units; 0: the light's radius, where the light is
-    // nothing anyway). The map reaches as far.
-    f32 distance = 0.0f;
-    // The filter's width in texels (the taps lie this far apart): 1 is the sun's, up to about 1.5 is smooth, more
-    // shows the nine taps as bands.
-    f32 softness = 1.0f;
-};
-
 // Light from a point: a muzzle flash, a lamp. It falls off with the square of
 // the distance, as light does, and is faded to nothing at `radius` (smoothly,
 // over its outer part) so that few lights reach a pixel.
@@ -190,7 +164,13 @@ struct PointLightSource3D {
     f32 size = 0.01f;
     // A shadow (P3b): drawn into a cube of six faces, at most Lights3D::max_shadowed_points a frame, chosen by
     // importance.
-    LightShadow3D shadow{};
+    bool shadow_enabled = false;
+    u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
+    f32 shadow_bias = 1.0f;          // map texels
+    f32 shadow_normal_offset = 1.5f; // map texels
+    f32 shadow_near_plane = 0.05f;   // metres
+    f32 shadow_distance = 0.0f;      // metres; 0 uses radius
+    f32 shadow_softness = 1.0f;      // map texels
     // Names the light across frames, for the choice of which light has a shadow map (hysteresis) and for its place in a
     // cache; 0: its index in Lights3D::points.
     u32 id = 0;
@@ -211,8 +191,14 @@ struct SpotLightSource3D {
     f32 inner_angle = 20.0f; // degrees from the axis (at least 0)
     f32 outer_angle = 30.0f; // degrees; below 90, above `inner_angle` (clamped to 0.1 degrees beyond it)
     // A perspective shadow map over the cone, at most Lights3D::max_shadowed_spots a frame (the most important ones).
-    LightShadow3D shadow{};
-    u32 id = 0; // as PointLightSource3D::id, over Lights3D::spots
+    bool shadow_enabled = false;
+    u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
+    f32 shadow_bias = 1.0f;          // map texels
+    f32 shadow_normal_offset = 1.5f; // map texels
+    f32 shadow_near_plane = 0.05f;   // metres
+    f32 shadow_distance = 0.0f;      // metres; 0 uses radius
+    f32 shadow_softness = 1.0f;      // map texels
+    u32 id = 0;                      // as PointLightSource3D::id, over Lights3D::spots
 };
 
 // A second directional light's shadow: the moon's, when the fill light is the moon (P3b). Its own cascade set, drawn
@@ -422,7 +408,8 @@ struct InstanceGroup3D {
 class InstanceBatch3D {
 public:
     InstanceBatch3D() = default;
-    InstanceBatch3D(Mesh3D mesh, std::vector<MeshInstance3D> instances, std::vector<InstanceGroup3D> groups = {});
+    static Result3D<InstanceBatch3D> create(Mesh3D mesh, std::vector<MeshInstance3D> instances,
+                                            std::vector<InstanceGroup3D> groups = {});
     explicit operator bool() const;
     const Mesh3D& mesh() const;
     std::span<const MeshInstance3D> instances() const;
@@ -447,10 +434,12 @@ public:
     std::weak_ptr<const void> lifetime() const { return _data; }
     // Fixed size: an out-of-range edit returns false with diagnostics(). Existing scene handles see the edit on their
     // next render.
-    bool update(u32 first, std::span<const MeshInstance3D> instances);
+    Status3D update(u32 first, std::span<const MeshInstance3D> instances);
     const Diagnostics3D& diagnostics() const;
 
 private:
+    InstanceBatch3D(Mesh3D mesh, std::vector<MeshInstance3D> instances, std::vector<InstanceGroup3D> groups = {});
+    bool update_operation(u32 first, std::span<const MeshInstance3D> instances);
     struct Data;
     void resolve_bounds() const;
     std::shared_ptr<Data> _data;
@@ -494,21 +483,22 @@ public:
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
     // after another are drawn as one (instanced).
-    bool draw(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material = {}, Color tint = colors::white,
-              u32 id = 0);
+    Status3D draw(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material = {},
+                  Color tint = colors::white, u32 id = 0);
     // Each part of `model` (model.hpp), placed by `transform`.
-    bool draw(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
+    Status3D draw(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
     // Optional per-part materials, indexed as model.parts. Empty uses imported
     // materials; a nonempty span must match the part count (else rejects the submission).
-    bool draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id, std::span<const Material3D> materials);
+    Status3D draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
+                  std::span<const Material3D> materials);
     // `model` with its animated nodes in a pose (Model3D::node_skeleton: a door, a fan, a crane's arm): `node_matrices`
     // are that skeleton's world matrices in the model's space, one a joint (AnimationPlayer3D::joint_matrices, or
     // compute_world_matrices of a pose). A part that hangs from a node is placed by `transform` times
     // Model3D::part_transform, the others as draw(model, transform) places them; the rest pose's matrices draw what
     // that draws (to float rounding). A part whose node has no matrix here, or one that is not finite, is drawn at rest
     // (said once). A model with skins too: draw_skinned with node matrices, below.
-    bool draw(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices,
-              Color tint = colors::white, u32 id = 0);
+    Status3D draw(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices,
+                  Color tint = colors::white, u32 id = 0);
     // A skinned mesh (made from MeshData3D with a skin) in a pose: `joint_matrices` are the matrices of
     // compute_joint_matrices (kin/render3d/skeleton3d.hpp), at least Mesh3D::skin_joint_count() of them, copied into
     // the scene (they need not outlive the call; clear() takes them away). `transform` places the posed mesh: the
@@ -518,49 +508,53 @@ public:
     // occluders), the temporal anti-aliasing's velocity (from last frame's matrices of the same copy, matched as its
     // model matrix is: by `id`, else by order) and pick. A mesh without a skin is drawn as by draw(); too few matrices
     // return false with diagnostics().
-    bool draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                      const Material3D& material = {}, Color tint = colors::white, u32 id = 0);
+    Status3D draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                          const Material3D& material = {}, Color tint = colors::white, u32 id = 0);
     // Every part of `model`: its skinned parts in the pose `joint_matrices` (of Model3D::skeletons[0]) placed by
     // `transform` alone, the others (not skinned) by `transform` times their node's placing, as draw(model, ...) does.
     // The pose is copied into the scene once and every skinned part points at that range (BrainStem's 59 parts keep one
     // set of 18 matrices, not 59). `id` is what pick says of each part; it is also how a copy is matched across frames
     // for the velocity. Only that first skeleton is posed: a part on a later skin of a model with several has no pose
     // here and is not drawn (said once a model).
-    bool draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                      Color tint = colors::white, u32 id = 0);
-    bool draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint,
-                      u32 id, std::span<const Material3D> materials);
+    Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                          Color tint = colors::white, u32 id = 0);
+    Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                          Color tint, u32 id, std::span<const Material3D> materials);
     // Both poses of a model with skins and animated nodes: its skinned parts by `joint_matrices` (of skeletons[0]), the
     // parts that hang from an animated node by `node_matrices` (of skeletons[node_skeleton], as draw(model, transform,
     // node_matrices) takes them). Empty node matrices: the call above.
-    bool draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform, Color tint,
-                      u32 id, std::span<const Material3D> materials, std::span<const Mat4f> node_matrices);
+    Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                          Color tint, u32 id, std::span<const Material3D> materials,
+                          std::span<const Mat4f> node_matrices);
     // Many copies of `mesh`, in one draw.
-    bool draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances, const Material3D& material = {});
-    bool draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
+    Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                            const Material3D& material = {});
+    Status3D draw_instanced(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Material3D& material = {});
     // Retain a handle; batch records need not be copied into instances(). The batch's groups
     // are read at render time, including bounds refreshed by update().
-    bool draw_instanced(const InstanceBatch3D& batch, const Material3D& material = {});
+    Status3D draw_instanced(const InstanceBatch3D& batch, const Material3D& material = {});
     // Every part/material of a persistent static-model batch (model.hpp).
-    bool draw_instanced(const ModelBatch3D& batch);
+    Status3D draw_instanced(const ModelBatch3D& batch);
     // A spatial cell of plain instances. `world_bounds` must enclose every copy's culling sphere
     // (instance_bounds() computes it). Equal mesh/material cells still merge into one GPU draw;
     // their bounds stay separate for camera and shadow culling. Invalid bounds fall back to
     // per-copy culling. Bounds are copied; transforms/tints/IDs are copied as by draw_instanced().
-    bool draw_instanced_group(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Bounds3D& world_bounds,
-                              const Material3D& material = {});
-    bool draw_instanced_group(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
-                              const Bounds3D& world_bounds, const Material3D& material = {});
+    Status3D draw_instanced_group(const Mesh3D& mesh, std::span<const Mat4f> transforms, const Bounds3D& world_bounds,
+                                  const Material3D& material = {});
+    Status3D draw_instanced_group(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                  const Bounds3D& world_bounds, const Material3D& material = {});
     // Room for `count` copies of `mesh`, for the caller to fill (from worker
     // threads, say). Valid until the next draw is added.
-    std::span<MeshInstance3D> add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material = {});
+    Result3D<std::span<MeshInstance3D>> add_instances(const Mesh3D& mesh, std::size_t count,
+                                                      const Material3D& material = {});
     // Particles (P3c): a batch of sprites drawn after the scene's blended meshes, depth-tested and not written, in the
     // order of their depth (`look.sort`: the sprites within it back to front too). The sprites are copied (they need
     // not outlive the call); clear() takes them away. The overlay's are not drawn.
-    bool draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites);
+    // Optional stable emitter identity for TAA; zero matches submission order.
+    Status3D draw_particles(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites, u64 history_id = 0);
     // The system's live particles with its desc's look.
-    bool draw_particles(const ParticleSystem3D& system);
-    void add_light(const PointLightSource3D& light) { lights.points.push_back(light); }
+    Status3D draw_particles(const ParticleSystem3D& system, u64 history_id = 0);
+    void add_point_light(const PointLightSource3D& light) { lights.points.push_back(light); }
     void add_spot_light(const SpotLightSource3D& light) { lights.spots.push_back(light); }
     // Takes the draws and point and spot lights and particles away, the overlay's too (cameras, the
     // sun and the ambient light and the weather stay), keeping their room.
@@ -584,6 +578,7 @@ public:
         ParticleLook3D look;
         u32 first = 0;
         u32 count = 0;
+        u64 history_id = 0; // stable emitter ID for temporal matching, zero: submission order
     };
     std::span<const ParticleDraw> particle_draws() const { return _particle_draws; }
     std::span<const ParticleSprite3D> particle_sprites() const { return _particle_sprites; }
@@ -602,10 +597,42 @@ public:
     // The range must fit; indices belong to this scene's current submissions and
     // must be obtained again after clear(). Shared model parts see the same edit.
     // Fixed-size edits preserve draw_revision(); no extra pose storage is kept.
-    bool update_joint_matrices(u32 first, std::span<const Mat4f> matrices);
+    Status3D update_joint_matrices(u32 first, std::span<const Mat4f> matrices);
     std::span<const u32> skin_offsets() const { return _skin_offsets; }
 
 private:
+    bool draw_operation(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices,
+                        Color tint = colors::white, u32 id = 0);
+    bool draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
+                        std::span<const Material3D> materials);
+    bool draw_operation(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
+    bool draw_operation(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material = {},
+                        Color tint = colors::white, u32 id = 0);
+    bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                                Color tint, u32 id, std::span<const Material3D> materials,
+                                std::span<const Mat4f> node_matrices);
+    bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                                Color tint, u32 id, std::span<const Material3D> materials);
+    bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                                Color tint = colors::white, u32 id = 0);
+    bool draw_skinned_operation(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
+                                const Material3D& material = {}, Color tint = colors::white, u32 id = 0);
+    bool draw_instanced_operation(const ModelBatch3D& batch);
+    bool draw_instanced_operation(const InstanceBatch3D& batch, const Material3D& material = {});
+    bool draw_instanced_operation(const Mesh3D& mesh, std::span<const Mat4f> transforms,
+                                  const Material3D& material = {});
+    bool draw_instanced_operation(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                  const Material3D& material = {});
+    bool draw_instanced_group_operation(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
+                                        const Bounds3D& world_bounds, const Material3D& material = {});
+    bool draw_instanced_group_operation(const Mesh3D& mesh, std::span<const Mat4f> transforms,
+                                        const Bounds3D& world_bounds, const Material3D& material = {});
+    bool draw_particles_operation(const ParticleSystem3D& system, u64 history_id = 0);
+    bool draw_particles_operation(const ParticleLook3D& look, std::span<const ParticleSprite3D> sprites,
+                                  u64 history_id = 0);
+    bool update_joint_matrices_operation(u32 first, std::span<const Mat4f> matrices);
+    std::span<MeshInstance3D> add_instances_operation(const Mesh3D& mesh, std::size_t count,
+                                                      const Material3D& material = {});
     std::span<MeshInstance3D> add_instances(const Mesh3D& mesh, std::size_t count, const Material3D& material,
                                             bool skinned, u32 skin_first);
     // One skinned copy whose matrices start at `first_joint` of _joints (already there).

@@ -54,10 +54,10 @@ struct LocalShadowView3D {
     f32 far_plane = 10.0f;
 };
 // The view a spot light's map (`resolution` texels a side) is drawn from: from its position along its axis, a cone
-// of the outer angle and the guard band. `far` and `near` come from LightShadow3D (see spot_shadow_far).
+// of the outer angle and the guard band. Distances are metres; see the light's shadow_distance and shadow_near_plane.
 LocalShadowView3D spot_shadow_view(const SpotLightSource3D& light, u32 resolution);
 // The far plane of a spot's or point light's map: its shadow distance, or the radius (never beyond it).
-f32 local_shadow_far(const LightShadow3D& shadow, f32 radius);
+f32 local_shadow_far(f32 shadow_distance, f32 radius);
 // One face (0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z) of a point light's cube map.
 LocalShadowView3D cube_face_view(const PointLightSource3D& light, u32 face, u32 resolution);
 // The face a direction from the light falls in: the axis it is longest along, 2 * axis + (1 if negative).

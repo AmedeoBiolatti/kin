@@ -1,3 +1,4 @@
+#include "result3d_helpers.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -14,7 +15,7 @@
 
 namespace {
 using namespace kin;
-void check(bool ok, const std::string& message) {
+void check(const auto& ok, const std::string& message) {
     if (!ok)
         throw std::runtime_error(message);
 }
@@ -57,19 +58,19 @@ void parser_and_cache() {
     scratch.write("box.kincollider", recipe(R"({"kind":"box","half_extents":[1,2,3]})"));
     PhysicsAssets3D assets(scratch.path);
     std::string error;
-    auto a = assets.load_collider("box.kincollider", {1, 1, 1});
+    auto a = assets.load_collider("box.kincollider", {1, 1, 1}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(bool(a), error);
-    auto b = assets.load_collider("./box.kincollider");
+    auto b = assets.load_collider("./box.kincollider").value_or({});
     check(a.shared() == b.shared() && assets.stats().cooks == 1 && assets.stats().hits == 1,
           "shape cache does not share path aliases");
-    auto scaled = assets.load_collider("box.kincollider", {2, 1, 3});
+    auto scaled = assets.load_collider("box.kincollider", {2, 1, 3}).value_or({});
     check(bool(scaled), "scaled box failed");
     check(scaled.shared() != a.shared() && length(scaled->shape.bounds_max() - Vec3f{2, 2, 9}) < .001f,
           "scale not baked once");
     scratch.write("box.kincollider", recipe(R"({"kind":"box","scale":[-1,1,1]})"));
     assets.invalidate("box.kincollider");
-    check(!assets.load_collider("box.kincollider", {1, 1, 1}) && !kin::diagnostics3d_text(assets.diagnostics()).empty(),
+    check(!assets.load_collider("box.kincollider", {1, 1, 1}).value_or({}) && !kin::diagnostics3d_text(assets.diagnostics()).empty(),
           "bad recook accepted");
     check(a->shape.valid(), "invalidation destroyed live shape");
     std::weak_ptr<const CookedCollider3D> weak = a.shared();
@@ -81,21 +82,21 @@ void parser_and_cache() {
     check(weak.expired() && assets.stats().entries == 0 && retained.valid(),
           "cache retains collision assets or shape died");
     scratch.write("hull.kincollider", recipe(R"({"kind":"convex_hull","points":[[0,0,0],[1,0,0],[0,1,0],[0,0,1]]})"));
-    auto hull = assets.load_collider("hull.kincollider", {1, 1, 1});
+    auto hull = assets.load_collider("hull.kincollider", {1, 1, 1}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(bool(hull), error);
     check(hull->shape.volume() > .1f && !hull->contains_surface, "convex hull is not volumetric");
     scratch.write("plane.kincollider",
                   recipe(R"({"kind":"triangle_mesh","points":[[0,0,0],[1,0,0],[0,0,1]],"indices":[0,1,2]})"));
-    auto plane = assets.load_collider("plane.kincollider", {1, 1, 1});
+    auto plane = assets.load_collider("plane.kincollider", {1, 1, 1}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(bool(plane) && plane->contains_surface, error);
     scratch.write("flat.kincollider", recipe(R"({"kind":"convex_hull","points":[[0,0,0],[1,0,0],[0,0,1],[1,0,1]]})"));
-    check(!assets.load_collider("flat.kincollider", {1, 1, 1}) &&
+    check(!assets.load_collider("flat.kincollider", {1, 1, 1}).value_or({}) &&
               !kin::diagnostics3d_text(assets.diagnostics()).empty(),
           "degenerate hull accepted");
     scratch.write("missing.kincollider", recipe(R"({"kind":"convex_hull","mesh":"missing.glb"})"));
-    check(!assets.load_collider("missing.kincollider", {1, 1, 1}) &&
+    check(!assets.load_collider("missing.kincollider", {1, 1, 1}).value_or({}) &&
               kin::diagnostics3d_text(assets.diagnostics()).find("missing.glb") != std::string::npos,
           "geometry diagnostic lost");
     kin::EcsWorld ecs;
@@ -105,29 +106,29 @@ void parser_and_cache() {
                       .set(Transform3D{})
                       .set(Collider3D{.asset = {"plane.kincollider"}})
                       .set(RigidBody3D{});
-    check(!resolve_physics3d_assets(ecs, assets).empty() && !entity.get<Collider3D>()->asset_binding,
+    check(!resolve_physics3d_assets(ecs, assets).diagnostics.empty() && !entity.get<Collider3D>()->asset_binding,
           "dynamic mesh accepted");
     entity.get_mut<RigidBody3D>()->motion = Body3DMotion::Static;
-    check(resolve_physics3d_assets(ecs, assets).empty(), "static surface rejected");
+    check(resolve_physics3d_assets(ecs, assets).diagnostics.empty(), "static surface rejected");
     const auto bound = entity.get<Collider3D>()->asset_binding;
     entity.get_mut<Transform3D>()->scale = {-1, 1, 1};
-    check(!resolve_physics3d_assets(ecs, assets).empty() && entity.get<Collider3D>()->asset_binding == bound,
+    check(!resolve_physics3d_assets(ecs, assets).diagnostics.empty() && entity.get<Collider3D>()->asset_binding == bound,
           "failed binding lost last good shape");
 }
 void geometry_and_camp() {
     const std::filesystem::path root = KIN_TEST_SUMMIT;
     ModelGeometry3D geometry;
     std::string error;
-    check(read_model_geometry3d(root / "kenney-survival/barrel.glb", geometry, {}, &error), error);
+    check(kin::test::read_value3d(kin::read_model_geometry3d(root / "kenney-survival/barrel.glb", {}), geometry, error), error);
     check(!geometry.vertices.empty() && !geometry.indices.empty() && geometry.source_files.size() == 1,
           "CPU geometry missing");
     const auto count = geometry.vertices.size();
     auto tiny = ModelGeometryLimits3D{};
     tiny.vertices = 1;
-    check(!read_model_geometry3d(root / "kenney-survival/barrel.glb", geometry, tiny, &error) &&
+    check(!kin::test::read_value3d(kin::read_model_geometry3d(root / "kenney-survival/barrel.glb", tiny), geometry, error) &&
               geometry.vertices.size() == count,
           "geometry budget or last good output lost");
-    check(!read_model_geometry3d(root / "kenney-character/survivor.glb", geometry, {}, &error) &&
+    check(!kin::test::read_value3d(kin::read_model_geometry3d(root / "kenney-character/survivor.glb", {}), geometry, error) &&
               error.find("skinned") != std::string::npos,
           "animated visual accepted as static collision");
     PhysicsAssets3D assets(root);
@@ -137,7 +138,7 @@ void geometry_and_camp() {
     const bool loaded = source.load(root / "scenes/camp-play.kinscene", root, ecs.components());
     check(loaded, source.diagnostics().empty() ? "camp scene parse failed" : source.diagnostics().front());
     check(source.instantiate(ecs), "camp scene instantiate failed");
-    const auto errors = resolve_physics3d_assets(ecs, assets);
+    const auto errors = resolve_physics3d_assets(ecs, assets).diagnostics;
     check(errors.empty(), errors.empty() ? "" : errors.front());
     auto player = source.instance().by_authored_id.at("player");
     auto brass = source.instance().by_authored_id.at("brass-barrel");
@@ -178,7 +179,7 @@ void geometry_and_camp() {
     check(text.str().find("asset_binding") == std::string::npos && text.str().find("ground_speed") == std::string::npos,
           "runtime state serialized");
     player.get_mut<CharacterController3D>()->desc.height = .1f;
-    check(!resolve_physics3d_assets(ecs, assets).empty(), "invalid capsule dimensions accepted");
+    check(!resolve_physics3d_assets(ecs, assets).diagnostics.empty(), "invalid capsule dimensions accepted");
 }
 void external_geometry_and_packs() {
     Scratch scratch;
@@ -192,23 +193,23 @@ void external_geometry_and_packs() {
     scratch.write("mesh.gltf", gltf);
     ModelGeometry3D geometry;
     std::string error;
-    check(read_model_geometry3d(scratch.path / "mesh.gltf", geometry, {}, &error), error);
+    check(kin::test::read_value3d(kin::read_model_geometry3d(scratch.path / "mesh.gltf", {}), geometry, error), error);
     check(geometry.vertices[0] == Vec3f{2, 3, 4} && geometry.vertices[1] == Vec3f{3, 3, 4} &&
               geometry.source_files.size() == 2,
           "node transform or external buffer dependency missing");
     auto limits = ModelGeometryLimits3D{};
     limits.buffer_bytes = 35;
-    check(!read_model_geometry3d(scratch.path / "mesh.gltf", geometry, limits, &error) &&
+    check(!kin::test::read_value3d(kin::read_model_geometry3d(scratch.path / "mesh.gltf", limits), geometry, error) &&
               error.find("budget") != std::string::npos,
           "buffer budget ignored");
     scratch.write("mesh.kincollider", recipe(R"({"kind":"triangle_mesh","mesh":"mesh.gltf"})"));
     ColliderAssetLimits3D bounded;
     bounded.cache_entries = 1;
     PhysicsAssets3D assets(scratch.path, bounded);
-    auto a = assets.load_collider("mesh.kincollider", {1, 1, 1});
+    auto a = assets.load_collider("mesh.kincollider", {1, 1, 1}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(bool(a), error);
-    auto b = assets.load_collider("mesh.kincollider", {2, 2, 2});
+    auto b = assets.load_collider("mesh.kincollider", {2, 2, 2}).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(bool(b) && assets.stats().entries == 1 && a->shape.valid(), "cache bound evicted live asset");
     assets.invalidate("mesh.bin");
@@ -219,7 +220,7 @@ void external_geometry_and_packs() {
     mount_content_pack(mount, ContentPack::open(archive.path / "collision.kinpak"));
     {
         PhysicsAssets3D packed(mount);
-        auto shape = packed.load_collider("mesh.kincollider", {1, 1, 1});
+        auto shape = packed.load_collider("mesh.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(packed.diagnostics());
         check(bool(shape) && shape->source_files.size() == 3, error);
     }
@@ -342,18 +343,18 @@ void bake_cache() {
         assets.set_bake_cache(&bake);
         check(assets.bake_cache() == &bake, "bake cache not kept");
         const auto started = std::chrono::steady_clock::now();
-        auto ground = assets.load_collider("ground.kincollider", {1, 1, 1});
+        auto ground = assets.load_collider("ground.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(ground), error);
         cook_ms = ms(started);
-        auto rock = assets.load_collider("rock.kincollider", {1, 1, 1});
+        auto rock = assets.load_collider("rock.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(rock), error);
-        auto box = assets.load_collider("box.kincollider", {1, 1, 1});
+        auto box = assets.load_collider("box.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(!box, "missing recipe loaded");
         scratch.write("box.kincollider", recipe(R"({"kind":"box","half_extents":[1,2,3]})"));
-        box = assets.load_collider("box.kincollider", {1, 1, 1});
+        box = assets.load_collider("box.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(box), error);
         const auto s = bake.stats();
@@ -368,11 +369,11 @@ void bake_cache() {
         PhysicsAssets3D assets(scratch.path);
         assets.set_bake_cache(&bake);
         const auto started = std::chrono::steady_clock::now();
-        auto ground = assets.load_collider("ground.kincollider", {1, 1, 1});
+        auto ground = assets.load_collider("ground.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(ground), error);
         const double restore_ms = ms(started);
-        auto rock = assets.load_collider("rock.kincollider", {1, 1, 1});
+        auto rock = assets.load_collider("rock.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(rock), error);
         const auto s = bake.stats();
@@ -396,12 +397,12 @@ void bake_cache() {
         check_same(behaviour(cooked_ground, false), behaviour(ground->shape, false), "triangle mesh");
         check_same(behaviour(cooked_rock, true), behaviour(rock->shape, true), "convex hull");
         // Another scale or an edited recipe is another key: cooked, never a stale shape.
-        auto big = assets.load_collider("rock.kincollider", {2, 2, 2});
+        auto big = assets.load_collider("rock.kincollider", {2, 2, 2}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(big) && assets.stats().cooks == 1 && bake.stats().misses == 1, "scale not in the key");
         scratch.write("rock.kincollider", hull_recipe(.2f));
         assets.invalidate("rock.kincollider");
-        auto edited = assets.load_collider("rock.kincollider", {1, 1, 1});
+        auto edited = assets.load_collider("rock.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(edited) && assets.stats().cooks == 2 && bake.stats().misses == 2 &&
                   edited->shape.volume() != cooked_rock.volume(),
@@ -422,7 +423,7 @@ void bake_cache() {
         check(corrupted == 4, "expected four bakes on disk");
         PhysicsAssets3D assets(scratch.path);
         assets.set_bake_cache(&bake);
-        auto ground = assets.load_collider("ground.kincollider", {1, 1, 1});
+        auto ground = assets.load_collider("ground.kincollider", {1, 1, 1}).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(bool(ground), error);
         check(bake.stats().refused == 1 && bake.stats().writes == 1 && assets.stats().cooks == 1 &&

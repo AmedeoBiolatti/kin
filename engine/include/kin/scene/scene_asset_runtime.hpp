@@ -1,4 +1,7 @@
 #pragma once
+#ifdef KIN_EXPERIMENTAL_3D
+#include <kin/render3d/errors3d.hpp>
+#endif
 
 #include <kin/scene/scene_asset.hpp>
 
@@ -36,7 +39,7 @@ public:
 
     bool instantiate(EcsWorld& world, SceneInstantiateOptions options = {});
 #ifdef KIN_EXPERIMENTAL_3D
-    bool instantiate3d(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options);
+    Status3D instantiate3d(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options);
 #endif
     void clear(EcsWorld& world);
 
@@ -54,6 +57,9 @@ public:
     const std::vector<std::filesystem::path>& prefab_sources()const{return _prefab_sources;}
 
 private:
+#ifdef KIN_EXPERIMENTAL_3D
+    bool instantiate3d_operation(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options);
+#endif
     std::filesystem::path resolve_asset(const std::filesystem::path& relative) const;
     void refresh_watches();
     bool prefab_assets_valid(const SceneAsset& scene, const EcsComponentRegistry& components,

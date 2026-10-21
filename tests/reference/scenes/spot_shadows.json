@@ -97,10 +97,8 @@
     "size": 0.15,
     "inner": 17.0,
     "outer": 33.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 1024
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
    }
   ]
  },

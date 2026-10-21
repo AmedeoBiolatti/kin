@@ -88,10 +88,8 @@
     ],
     "radius": 22.0,
     "size": 0.25,
-    "shadow": {
-     "enabled": true,
-     "resolution": 1024
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
    }
   ]
  },

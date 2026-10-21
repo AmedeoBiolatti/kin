@@ -711,9 +711,9 @@ int meshes(int frames, int count) {
     auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
     renderer->set_gpu_timing_enabled(true);
     kin::Renderer3D r3d{*renderer};
-    const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f}));
-    const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.35f, 24, 12));
-    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)});
+    const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f})).value_or({});
+    const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.35f, 24, 12)).value_or({});
+    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)}).value_or({});
     kin::JobSystem jobs;
     // A grid on the ground, square, seen from above at an angle.
     const int side = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count)))));
@@ -741,7 +741,7 @@ int meshes(int frames, int count) {
                     }
                 } else {
                     const auto room = scene.add_instances(c.kind == 0 ? box : ball, static_cast<std::size_t>(count),
-                                                          {.color = kin::Color::rgb(200, 120, 80)});
+                                                          {.color = kin::Color::rgb(200, 120, 80)}).value_or({});
                     for (int i = 0; i < count; ++i) {
                         room[static_cast<std::size_t>(i)] = {place(i, turn), kin::Color::rgb(255, 255, static_cast<kin::u8>(i % 256))};
                     }
@@ -811,11 +811,11 @@ int shadows(int frames, int count) {
     kin::JobSystem jobs;
     renderer->set_job_system(&jobs);
     kin::Renderer3D r3d{*renderer};
-    const kin::Mesh3D tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
-    const std::array<kin::Mesh3D, 3> enemy{r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f)),
-                                         r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6)),
-                                         r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8))};
-    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)});
+    const kin::Mesh3D tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+    const std::array<kin::Mesh3D, 3> enemy{r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f)).value_or({}),
+                                         r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6)).value_or({}),
+                                         r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8)).value_or({})};
+    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)}).value_or({});
     constexpr int width = 48, depth = 32;
     std::vector<kin::MeshInstance3D> tiles;
     for (int z = 0; z < depth; ++z) {
@@ -865,7 +865,7 @@ int shadows(int frames, int count) {
             scene.draw_instanced(tile, tiles, {.receives_shadow = receive});
             for (int k = 0; k < 3; ++k) {
                 const auto room = scene.add_instances(enemy[static_cast<std::size_t>(k)], static_cast<std::size_t>((count + 2 - k) / 3),
-                                                      {.color = kin::Color::rgb(200, 120, 80), .receives_shadow = receive});
+                                                      {.color = kin::Color::rgb(200, 120, 80), .receives_shadow = receive}).value_or({});
                 for (std::size_t i = 0; i < room.size(); ++i) {
                     const float turn = static_cast<float>(f) * 2.0f + static_cast<float>(i);
                     room[i] = {kin::Mat4f::translation(at[i * 3 + static_cast<std::size_t>(k)]) * kin::Mat4f::rotation_y(turn)};

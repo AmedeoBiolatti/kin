@@ -15,7 +15,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+void check(const auto& value,const char* message){if(!value)throw std::runtime_error(message);}
 struct Scratch {
     std::filesystem::path path=std::filesystem::temp_directory_path()/(
         "kin-runtime3d-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -48,7 +48,7 @@ void runtime(Renderer2D& renderer) {
         world.systems().register_native<Gameplay>({.id="game.tick",.run=[](kin::EcsEntity,Gameplay& game,SystemContext&){++game.ticks;}});
     };
     SceneSession3D session{r3d,assets,options};
-    const auto ok=[&](bool result,const char* why){if(!result)for(const auto& e:session.diagnostics())std::cerr<<e<<'\n';check(result,why);};
+    const auto ok=[&](const auto& result,const char* why){if(!result)for(const auto& e:session.diagnostics())std::cerr<<e<<'\n';check(result,why);};
     ok(session.load("level.kinscene"),"runtime level failed");
     check(!session.world()->components().find("Gameplay"),"gameplay unexpectedly required inspector metadata");
     const auto anchor=session.handle(session.entity("anchor"));
@@ -63,7 +63,7 @@ void runtime(Renderer2D& renderer) {
         ctx.root.set(Gameplay{12,0,token});
         check(bool(ctx.entity("lamp")),"local prefab lookup missing");
     };
-    const auto first=session.spawn("object.kinprefab",spawn);
+    const auto first=session.spawn("object.kinprefab",spawn).value_or({});
     ok(bool(first),"runtime spawn failed");
     check(constructions==1&&session.runtime_prefabs()==1&&session.runtime_entities()==2,"constructor count/ownership incorrect");
     check(session.resolve(first.root).get<Transform3D>()->position==Vec3f{-3,3,0}&&session.resolve(first.root).get<Transform3D>()->scale==Vec3f{2,2,2},"spawn placement lost prefab defaults");
@@ -72,7 +72,7 @@ void runtime(Renderer2D& renderer) {
     session.bodies()->sync_bodies();
     check(session.bodies()->body_of(session.resolve(anchor).raw())!=anchor_body,"unrelated rebuild request was dropped");
     anchor_body=session.bodies()->body_of(session.resolve(anchor).raw());
-    const auto second=session.spawn("object.kinprefab",{.position=Vec3f{3,3,0}});
+    const auto second=session.spawn("object.kinprefab",{.position=Vec3f{3,3,0}}).value_or({});
     ok(bool(second),"second spawn failed");
     check(session.resolve(first.root).get<ModelRenderer3D>()->model==session.resolve(second.root).get<ModelRenderer3D>()->model,"spawns duplicated model geometry");
     check(session.physics()->body_count()==initial_bodies+2,"spawn did not create physics immediately");
@@ -91,16 +91,16 @@ void runtime(Renderer2D& renderer) {
     // Failed constructors/uploads/native physics must remove partial objects.
     const auto count=session.world()->entities().all().size();const auto bodies=session.physics()->body_count();
     write(scratch.path/"bad.kinprefab",R"({"id":"bad","root":"root","entities":[{"id":"root","components":{"Transform3D":{},"ModelRenderer3D":{"asset":"absent.glb"}}}]})");
-    check(!session.spawn("bad.kinprefab")&&session.world()->entities().all().size()==count&&session.physics()->body_count()==bodies,"failed upload leaked objects");
-    check(!session.spawn("object.kinprefab",{.configure=[](auto&){throw std::runtime_error("constructor failed");}})&&session.runtime_prefabs()==2,"throwing constructor leaked ownership");
-    check(!session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<Collider3D>()->asset={};ctx.root.template get_mut<Collider3D>()->half_extents={-1,1,1};}})&&session.physics()->body_count()==bodies,"invalid shape leaked native bodies");
+    check(!session.spawn("bad.kinprefab").value_or({})&&session.world()->entities().all().size()==count&&session.physics()->body_count()==bodies,"failed upload leaked objects");
+    check(!session.spawn("object.kinprefab",{.configure=[](auto&){throw std::runtime_error("constructor failed");}}).value_or({})&&session.runtime_prefabs()==2,"throwing constructor leaked ownership");
+    check(!session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<Collider3D>()->asset={};ctx.root.template get_mut<Collider3D>()->half_extents={-1,1,1};}}).value_or({})&&session.physics()->body_count()==bodies,"invalid shape leaked native bodies");
     std::weak_ptr<int> failed_lifetime;
     check(!session.spawn("object.kinprefab",{.configure=[&](SceneSpawnContext3D& ctx) {
         auto token=std::make_shared<int>(1);failed_lifetime=token;ctx.root.set(Gameplay{1,0,token});
         ctx.entity("lamp").set(Collider3D{.half_extents={-1,1,1}});
-    }})&&failed_lifetime.expired()&&session.physics()->body_count()==bodies,"partial native creation leaked bodies/gameplay state");
+    }}).value_or({})&&failed_lifetime.expired()&&session.physics()->body_count()==bodies,"partial native creation leaked bodies/gameplay state");
     check(session.bodies()->body_of(session.resolve(anchor).raw())==anchor_body,"failed spawn rebuilt an unrelated body");
-    const auto child=session.spawn("object.kinprefab",{.parent=first.root,.position=Vec3f{0,2,0}});
+    const auto child=session.spawn("object.kinprefab",{.parent=first.root,.position=Vec3f{0,2,0}}).value_or({});
     ok(bool(child),"nested runtime spawn failed");
     auto forged=first;forged.root=anchor;
     check(!session.alive(forged)&&!session.despawn(forged),"forged prefab handle accepted");
@@ -116,14 +116,14 @@ void runtime(Renderer2D& renderer) {
     check(session.physics()->body_count()==initial_bodies&&session.runtime_entities()==0,"despawn retained native bodies");
     check(!session.despawn(second),"stale instance despawn accepted");
     std::filesystem::copy_file(scratch.path/"parts.glb",scratch.path/"unique.glb");
-    const auto unique=session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<ModelRenderer3D>()->asset.id="unique.glb";}});
+    const auto unique=session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<ModelRenderer3D>()->asset.id="unique.glb";}}).value_or({});
     ok(bool(unique),"unique mesh fixture failed");
     std::weak_ptr<const Model3D> model_weak=session.resolve(unique.root).get<ModelRenderer3D>()->model;
     std::weak_ptr<IMeshBackend3D> mesh_weak=session.resolve(unique.root).get<ModelRenderer3D>()->model->parts[0].mesh.backend();
     renderer.clear();ok(session.render(),"unique mesh render failed");renderer.present();
     ok(session.despawn(unique),"unique mesh despawn failed");
     check(model_weak.expired()&&mesh_weak.expired(),"despawn retained model/mesh through collection buckets");
-    auto raw_removed=session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<ModelRenderer3D>()->asset.id="unique.glb";}});
+    auto raw_removed=session.spawn("object.kinprefab",{.configure=[](auto& ctx){ctx.root.template get_mut<ModelRenderer3D>()->asset.id="unique.glb";}}).value_or({});
     ok(bool(raw_removed),"raw removal fixture failed");
     mesh_weak=session.resolve(raw_removed.root).get<ModelRenderer3D>()->model->parts[0].mesh.backend();
     renderer.clear();ok(session.render(),"raw removal render failed");renderer.present();
@@ -131,20 +131,20 @@ void runtime(Renderer2D& renderer) {
     renderer.clear();ok(session.render(),"collect after raw removal failed");renderer.present();
     check(mesh_weak.expired(),"empty collection buckets pinned removed meshes");
     ok(session.despawn(raw_removed),"dead-root ownership cleanup failed");
-    for(int i=0;i<24;++i){auto p=session.spawn("object.kinprefab");ok(bool(p),"repeated spawn failed");ok(session.despawn(p),"repeated despawn failed");}
+    for(int i=0;i<24;++i){auto p=session.spawn("object.kinprefab").value_or({});ok(bool(p),"repeated spawn failed");ok(session.despawn(p),"repeated despawn failed");}
     check(session.world()->entities().all().size()==2&&session.physics()->body_count()==initial_bodies,"repeated spawn/despawn accumulated live objects");
     auto saved=build_scene_asset(*session.world());check(saved.ok()&&saved.scene->entities.size()==2,"runtime objects polluted authored saving");
-    auto old=session.spawn("object.kinprefab");ok(bool(old),"reload handle fixture failed");
+    auto old=session.spawn("object.kinprefab").value_or({});ok(bool(old),"reload handle fixture failed");
     ok(session.reload(),"runtime level reset failed");
     check(!session.resolve(old.root)&&!session.resolve(anchor)&&session.runtime_prefabs()==0&&session.physics()->body_count()==initial_bodies,"reload retained stale handles/ownership");
     // Controllers and native-only rope components use the same lifecycle.
     write(scratch.path/"character.kinprefab",R"({"id":"character","root":"root","entities":[{"id":"root","components":{"Transform3D":{},"CharacterController3D":{}}}]})");
-    auto character=session.spawn("character.kinprefab",{.position=Vec3f{0,2,0}});ok(bool(character),"runtime character failed");
+    auto character=session.spawn("character.kinprefab",{.position=Vec3f{0,2,0}}).value_or({});ok(bool(character),"runtime character failed");
     const auto capsule=session.bodies()->character_of(session.resolve(character.root).raw());
     check(capsule.valid(),"runtime character not initialized");ok(session.despawn(character),"character despawn failed");
     check(!session.physics()->contains(capsule)&&session.bodies()->character_count()==0,"character retained native capsule");
     write(scratch.path/"rope.kinprefab",R"({"id":"rope","root":"root","entities":[{"id":"root","components":{"Transform3D":{}}}]})");
-    auto rope=session.spawn("rope.kinprefab",{.configure=[](auto& ctx){Rope3D rope;rope.length=2;rope.segments=2;rope.start.kind=RopeAttach3D::Kind::World;rope.start.point={0,3,0};rope.end.point={0,1,0};ctx.root.set(rope);}});
+    auto rope=session.spawn("rope.kinprefab",{.configure=[](auto& ctx){Rope3D rope;rope.length=2;rope.segments=2;rope.start.kind=RopeAttach3D::Kind::World;rope.start.point={0,3,0};rope.end.point={0,1,0};ctx.root.set(rope);}}).value_or({});
     ok(bool(rope),"native runtime rope failed");const auto rope_handle=session.bodies()->rope_of(session.resolve(rope.root).raw());
     const auto segment=session.physics()->rope_segment_body(rope_handle,0);
     check(session.bodies()->entity_of_body(segment).id()==session.resolve(rope.root).id(),"rope query body ownership failed");
@@ -152,36 +152,36 @@ void runtime(Renderer2D& renderer) {
     // Explicit limits and scene/session identities.
     auto small_options=options;small_options.max_runtime_entities=3;small_options.limits.max_source_bytes=1024;
     SceneSession3D small{r3d,assets,small_options};check(small.load("level.kinscene"),"small level failed");
-    auto one=small.spawn("object.kinprefab");check(bool(one)&&!small.spawn("object.kinprefab"),"runtime capacity ignored");
+    auto one=small.spawn("object.kinprefab").value_or({});check(bool(one)&&!small.spawn("object.kinprefab").value_or({}),"runtime capacity ignored");
     write(scratch.path/"oversized.kinprefab",std::string(1025,' '));
-    check(!small.spawn("oversized.kinprefab")&&small.runtime_entities()==2,"source budget ignored or existing population changed");
+    check(!small.spawn("oversized.kinprefab").value_or({})&&small.runtime_entities()==2,"source budget ignored or existing population changed");
     write(scratch.path/"wide.kinprefab",R"({"id":"wide","root":"a","entities":[{"id":"a"},{"id":"b"},{"id":"c"},{"id":"d"},{"id":"e"}]})");
-    check(!session.spawn("wide.kinprefab")&&session.runtime_entities()==0,"per-spawn expanded entity cap ignored");
+    check(!session.spawn("wide.kinprefab").value_or({})&&session.runtime_entities()==0,"per-spawn expanded entity cap ignored");
     std::array<ScenePrefab3D,4> limited;
-    for(auto& instance:limited){instance=session.spawn("object.kinprefab");ok(bool(instance),"instance budget fixture failed");}
-    check(!session.spawn("object.kinprefab")&&session.runtime_prefabs()==4,"runtime instance cap ignored");
+    for(auto& instance:limited){instance=session.spawn("object.kinprefab").value_or({});ok(bool(instance),"instance budget fixture failed");}
+    check(!session.spawn("object.kinprefab").value_or({})&&session.runtime_prefabs()==4,"runtime instance cap ignored");
     for(auto instance:limited)ok(session.despawn(instance),"instance budget cleanup failed");
     check(!session.resolve(one.root)&&!session.despawn(one),"foreign session handles accepted");
-    check(small.despawn(one)&&!small.spawn("object.kinprefab",{.parent=old.root}),"foreign/stale parent accepted");
+    check(small.despawn(one)&&!small.spawn("object.kinprefab",{.parent=old.root}).value_or({}),"foreign/stale parent accepted");
     small_options.physics->max_bodies=2;SceneSession3D full{r3d,assets,small_options};
-    check(full.load("level.kinscene")&&!full.spawn("object.kinprefab")&&full.runtime_entities()==0&&full.physics()->body_count()==2,"full physics capacity damaged level");
-    session.world()->raw().defer_begin();check(!session.spawn("object.kinprefab"),"deferred spawn accepted");session.world()->raw().defer_end();
-    ok(session.prepare("level.kinscene"),"prepared lifecycle fixture failed");check(!session.spawn("object.kinprefab"),"spawn accepted during prepared replacement");session.cancel();
-    session.unload();check(!session.resolve(old.root)&&!session.spawn("object.kinprefab"),"unloaded session accepted handles/spawn");
+    check(full.load("level.kinscene")&&!full.spawn("object.kinprefab").value_or({})&&full.runtime_entities()==0&&full.physics()->body_count()==2,"full physics capacity damaged level");
+    session.world()->raw().defer_begin();check(!session.spawn("object.kinprefab").value_or({}),"deferred spawn accepted");session.world()->raw().defer_end();
+    ok(session.prepare("level.kinscene"),"prepared lifecycle fixture failed");check(!session.spawn("object.kinprefab").value_or({}),"spawn accepted during prepared replacement");session.cancel();
+    session.unload();check(!session.resolve(old.root)&&!session.spawn("object.kinprefab").value_or({}),"unloaded session accepted handles/spawn");
     {
         Scratch storage;const auto archive=storage.path/"game.kinpak";
         check(write_content_pack(scratch.path,archive).ok,"runtime content pack creation failed");
         const auto mount=storage.path/"mounted";mount_content_pack(mount,ContentPack::open(archive));
         {Assets3D packed_assets{r3d,mount};SceneSession3D packed{r3d,packed_assets,options};
          check(packed.load("level.kinscene"),"packed runtime level failed");
-         auto instance=packed.spawn("object.kinprefab");
+         auto instance=packed.spawn("object.kinprefab").value_or({});
          check(bool(instance)&&packed.physics()->body_count()==initial_bodies+1&&packed.despawn(instance)&&packed.physics()->body_count()==initial_bodies,"packed spawn/despawn failed");}
         unmount_content_pack(mount);
     }
     if(r3d.capabilities().skinning) {
         Assets3D art{r3d,KIN_TEST_SUMMIT};SceneSession3D game{r3d,art,options};
         check(game.load("scenes/camp.kinscene"),"real runtime camp failed");
-        auto hero=game.spawn("prefabs/survivor.kinprefab",{.position=Vec3f{4,0,0},.configure=[](auto& ctx){ctx.root.set(Ragdoll3D{});}});
+        auto hero=game.spawn("prefabs/survivor.kinprefab",{.position=Vec3f{4,0,0},.configure=[](auto& ctx){ctx.root.set(Ragdoll3D{});}}).value_or({});
         check(bool(hero)&&game.bodies()->ragdoll_of(game.resolve(hero.root).raw()).valid(),"native runtime ragdoll failed");
         auto ragdoll=game.bodies()->ragdoll_of(game.resolve(hero.root).raw());
         for(auto body:game.physics()->ragdoll_bodies(ragdoll))if(body)
@@ -265,7 +265,7 @@ void deferred(Renderer2D& renderer) {
     session.world()->systems().register_task({.id="request.submit"},[&](SystemContext& ctx){system_birth=commands.spawn(*ctx.commands,"object.kinprefab");});
     session.world()->systems().register_task({.id="request.observe",.order=1},[&](SystemContext&){
         check(system_birth.status()==Status::Pending&&session.runtime_prefabs()==0,"lifecycle ran before final system");
-        check(!session.spawn("object.kinprefab"),"direct recursive spawn was accepted");
+        check(!session.spawn("object.kinprefab").value_or({}),"direct recursive spawn was accepted");
     });
     check(session.step(1.f/60)&&system_birth.status()==Status::Succeeded,"system request did not complete");
     check(session.reload(),"system fixture reset failed");commands=session.commands();

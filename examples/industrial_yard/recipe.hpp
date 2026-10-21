@@ -136,8 +136,8 @@ struct Recipe {
                         w = f();
             }
             std::string error;
-            if (!m.validate(&error))
-                throw std::runtime_error(error);
+            if (const auto validation = m.validate(); !validation)
+                throw std::runtime_error(kin::diagnostics3d_text(validation.diagnostics));
             triangles[k] = ni / 3;
             source_triangles += ni / 3;
         }

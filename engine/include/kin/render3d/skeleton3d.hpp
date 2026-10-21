@@ -1,4 +1,5 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 // Skeletons and poses for kin's experimental 3D (docs/3d_plan.md, P1a): the joints a skinned mesh is bound to, a pose
 // (the local placing of each joint), and the matrices the vertex shader applies. Plain data and maths, no GPU. Clips
@@ -74,8 +75,9 @@ public:
     u32 joint_count() const { return static_cast<u32>(parents.size()); }
     // The joint called `name`, or -1.
     i32 find(std::string_view name) const;
-    // Whether the arrays agree, parents come first, and there are at most max_skin_joints joints; why not in `error`.
-    bool validate(std::string* error = nullptr) const;
+    // Whether the arrays agree, parents come first, and there are at most max_skin_joints joints; failure carries
+    // contextual diagnostics.
+    Status3D validate() const;
     Pose3D rest_pose() const;
     // The first root joint (the one root motion is taken from), or -1 when empty.
     i32 root_joint() const;

@@ -202,9 +202,9 @@ struct Cook {
                 auto budget = limits.geometry;
                 budget.vertices -= vertices;
                 budget.triangles -= triangles;
-                std::string error;
-                const bool loaded = read_model_geometry3d(assets.root() / recipe.mesh, geometry, budget, &error);
-                require(loaded, error);
+                auto loaded = read_model_geometry3d(assets.root() / recipe.mesh, budget);
+                require(loaded.ok(), diagnostics3d_text(loaded.diagnostics));
+                geometry = std::move(*loaded);
                 output.source_files.insert(output.source_files.end(), geometry.source_files.begin(),
                                            geometry.source_files.end());
             } else {
@@ -291,8 +291,8 @@ std::vector<u8> baked_bytes(const Shape3D& shape) {
     return bytes;
 }
 } // namespace
-ColliderRecipeLoad3D parse_collider3d_asset(std::string_view text, ColliderAssetLimits3D limits) {
-    ColliderRecipeLoad3D result;
+Result3D<ColliderRecipe3D> parse_collider3d_asset(std::string_view text, ColliderAssetLimits3D limits) {
+    Result3D<ColliderRecipe3D> result;
     try {
         require(text.size() <= limits.source_bytes, "collider source exceeds byte budget");
         auto json = parse_json(text);
@@ -301,7 +301,7 @@ ColliderRecipeLoad3D parse_collider3d_asset(std::string_view text, ColliderAsset
         require(json.value->string_at("schema") == "kin.collider3d/1" && json.value->find("shape"),
                 "invalid collider schema/shape");
         size_t nodes = 0, vertices = 0, triangles = 0;
-        result.recipe = parse(*json.value->find("shape"), limits, 0, nodes, vertices, triangles);
+        result.value = parse(*json.value->find("shape"), limits, 0, nodes, vertices, triangles);
     } catch (const std::exception& error) {
         result.diagnostics.push_back(error.what());
     }
@@ -360,7 +360,12 @@ void PhysicsAssets3D::invalidate(const std::filesystem::path& source) {
                std::ranges::find(live->data.source_files, path) != live->data.source_files.end();
     });
 }
-AssetHandle<CookedCollider3D> PhysicsAssets3D::load_collider(const std::filesystem::path& source, Vec3f scale) {
+Result3D<AssetHandle<CookedCollider3D>> PhysicsAssets3D::load_collider(const std::filesystem::path& source, Vec3f scale) {
+    auto value = load_collider_operation(source, scale);
+    return result3d(std::move(value), _data->errors);
+}
+
+AssetHandle<CookedCollider3D> PhysicsAssets3D::load_collider_operation(const std::filesystem::path& source, Vec3f scale) {
     auto& d = *_data;
     d.errors.clear();
     const auto path = (d.root / source).lexically_normal();
@@ -384,7 +389,7 @@ AssetHandle<CookedCollider3D> PhysicsAssets3D::load_collider(const std::filesyst
         cook.output.scale = scale;
         cook.output.source_files.push_back(path);
         {
-            const auto description = cook.collider(*parsed.recipe, scale);
+            const auto description = cook.collider(*parsed.value, scale);
             // A bake of the same description restores the shape Jolt cooked for it; a missing or refused one cooks (and
             // replaces it).
             BakeCache* bake = d.bake && d.bake->enabled() && has_geometry(description) ? d.bake : nullptr;

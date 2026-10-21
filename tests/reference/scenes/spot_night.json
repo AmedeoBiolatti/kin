@@ -103,10 +103,8 @@
     "size": 0.2,
     "inner": 25.0,
     "outer": 52.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 1024
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
    },
    {
     "position": [
@@ -128,10 +126,8 @@
     "size": 0.2,
     "inner": 25.0,
     "outer": 52.0,
-    "shadow": {
-     "enabled": true,
-     "resolution": 1024
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
    },
    {
     "position": [
@@ -160,10 +156,8 @@
       0.4
      ]
     },
-    "shadow": {
-     "enabled": true,
-     "resolution": 1024
-    }
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
    }
   ]
  },

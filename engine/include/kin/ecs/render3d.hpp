@@ -13,7 +13,7 @@
 //
 // A character: a skinned model and an animator, which a system steps and draws (docs/rendering_3d.md, Skinned meshes):
 //
-//     auto hero = std::make_shared<const kin::Model3D>(r3d.load_model("models/hero.glb"));
+//     auto hero = std::make_shared<const kin::Model3D>(r3d.load_model("models/hero.glb").value_or({}));
 //     world.entity().set(kin::Transform3D{}).set(kin::SkinnedMeshRenderer3D{.model = hero})
 //                   .set(kin::Animator3D{.clip = "Walk"});
 //     ...each fixed step (or frame):  state.animate(dt);   // clips, state machine, crossfades, blends
@@ -119,7 +119,13 @@ struct PointLight3D {
     LinearRgb color{1.0f, 1.0f, 1.0f}; // linear; as PointLightSource3D::color
     f32 radius = 5.0f;
     f32 size = 0.01f;
-    LightShadow3D shadow{};
+    bool shadow_enabled = false;
+    u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
+    f32 shadow_bias = 1.0f;          // map texels
+    f32 shadow_normal_offset = 1.5f; // map texels
+    f32 shadow_near_plane = 0.05f;   // metres
+    f32 shadow_distance = 0.0f;      // metres; 0 uses radius
+    f32 shadow_softness = 1.0f;      // map texels
     bool enabled = true;
 };
 
@@ -131,7 +137,13 @@ struct SpotLight3D {
     f32 size = 0.01f;
     f32 inner_angle = 20.0f; // degrees; see SpotLightSource3D
     f32 outer_angle = 30.0f;
-    LightShadow3D shadow{};
+    bool shadow_enabled = false;
+    u32 shadow_resolution = 0;       // texels; 0 uses Lights3D::local_shadow_resolution
+    f32 shadow_bias = 1.0f;          // map texels
+    f32 shadow_normal_offset = 1.5f; // map texels
+    f32 shadow_near_plane = 0.05f;   // metres
+    f32 shadow_distance = 0.0f;      // metres; 0 uses radius
+    f32 shadow_softness = 1.0f;      // map texels
     bool enabled = true;
 };
 
@@ -467,7 +479,8 @@ public:
     // their entities instances of it (in the order the world keeps them); and each SkinnedMeshRenderer3D's model in its
     // animator's pose (draw_skinned, one range of matrices for all its parts). A ModelRenderer3D's parts join the
     // MeshRenderers' draws, those that hang from an animated node placed by its animator's pose of them.
-    void collect(Scene3D& scene);
+    using Presentation3D = std::function<std::optional<Mat4f>(flecs::entity)>;
+    void collect(Scene3D& scene, const Presentation3D& presentation = {});
     // Release reusable mesh/material buckets after bulk removal. ECS-owned
     // handles remain intact; the next collect rebuilds active buckets.
     void clear_collection_cache();
@@ -499,6 +512,7 @@ public:
     bool apply_weather(Scene3D& scene, const Fog3D& base_fog) const;
 
 private:
+    const Presentation3D* _presentation = nullptr; // borrowed only during collect
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
     void solve_ik(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
                   const flecs::world& ecs, u64 epoch);

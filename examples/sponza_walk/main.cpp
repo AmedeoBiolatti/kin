@@ -858,7 +858,7 @@ public:
         // while a slider is held, so dragging stays smooth).
         const ViewKey key = view_key(out);
         if (!_view.valid()) {
-            _view = _r3d->create_view(key.size, view_options(key));
+            _view = _r3d->create_view(key.size, view_options(key)).value_or({});
             _key = key;
         } else if (key != _key && !(input.mouse_held(MouseButton::Left) && key.size == _key.size)) {
             if (key.size != _key.size && key.samples == _key.samples && key.background == _key.background &&
@@ -866,7 +866,7 @@ public:
                 key.threshold == _key.threshold) {
                 _r3d->resize(_view, key.size);
             } else {
-                _view = _r3d->create_view(key.size, view_options(key));
+                _view = _r3d->create_view(key.size, view_options(key)).value_or({});
             }
             _key = key;
         }
@@ -957,7 +957,7 @@ private:
         MeshOptions3D mesh_options;
         mesh_options.levels = static_cast<u32>(_options.lod_levels);
         mesh_options.clusters = _options.lod_clusters;
-        _model = _r3d->load_model(_model_path, mesh_options);
+        _model = _r3d->load_model(_model_path, mesh_options).value_or({});
         error = kin::diagnostics3d_text(_r3d->diagnostics());
         if (!_model) {
             fail(ctx, "could not load " + _model_path.string() + ": " + error);
@@ -977,8 +977,8 @@ private:
                         _model_path.string().c_str(), _model.parts.size(),
                         std::chrono::duration<double>(Clock::now() - start).count(), _options.lod_levels);
         }
-        _marker = _r3d->create_mesh(meshes::sphere(1.0f, 14, 8));
-        _step_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
+        _marker = _r3d->create_mesh(meshes::sphere(1.0f, 14, 8)).value_or({});
+        _step_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
         _wire_material.color = Color::rgb(20, 255, 120);
         _wire_material.unlit = true;
         _wire_material.wireframe = true;
@@ -1101,7 +1101,7 @@ private:
         l.size = 0.1f;
         l.inner_angle = _s.spot_inner;
         l.outer_angle = std::max(_s.spot_outer, _s.spot_inner + 0.5f);
-        l.shadow.enabled = _s.spot_shadows;
+        l.shadow_enabled = _s.spot_shadows;
         l.id = 0x7C000000u + static_cast<unsigned>(_spot_serial++);
         if (_s.spots.size() >= 16)
             _s.spots.erase(_s.spots.begin());
@@ -1236,7 +1236,7 @@ private:
         if (!_env_tried[i]) {
             _env_tried[i] = true;
             std::string error;
-            _environments[i] = _r3d->load_environment(_hdri_files[i]);
+            _environments[i] = _r3d->load_environment(_hdri_files[i]).value_or({});
             error = kin::diagnostics3d_text(_r3d->diagnostics());
             if (!_environments[i])
                 std::cerr << "sponza_walk: " << _hdri_files[i].string() << ": " << error << '\n';
@@ -1400,7 +1400,7 @@ private:
             _floor = _ecs->raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor);
         }
         if (!_box_mesh)
-            _box_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
+            _box_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
     }
 
     void throw_boxes() {
@@ -1530,7 +1530,7 @@ private:
         if (!_person_model)
             _person_model = make_person(*_r3d);
         if (!_ball_mesh)
-            _ball_mesh = _r3d->create_mesh(meshes::sphere(1.0f, 32, 16));
+            _ball_mesh = _r3d->create_mesh(meshes::sphere(1.0f, 32, 16)).value_or({});
         const int n = std::clamp(_s.rag_count, 1, 6);
         const Vec3f origin{_pos.x, 0.0f, _pos.z - 3.5f};
         for (int i = 0; i < n; ++i) {
@@ -1690,7 +1690,7 @@ private:
         if (!_person_model)
             _person_model = make_person(*_r3d);
         if (!_box_mesh)
-            _box_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
+            _box_mesh = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
         const Vec3f beam{_pos.x + 1.0f, 0.0f, _pos.z - 3.5f};
         const float a = 25.0f * pi / 180.0f;
         const float length = _s.rope_length;
@@ -1815,7 +1815,7 @@ private:
         if (!_person_model)
             _person_model = make_person(*_r3d);
         if (!_ball_mesh)
-            _ball_mesh = _r3d->create_mesh(meshes::sphere(1.0f, 32, 16));
+            _ball_mesh = _r3d->create_mesh(meshes::sphere(1.0f, 32, 16)).value_or({});
         _ctrl_origin = {_pos.x - 1.0f, 0.0f, _pos.z};
         _ctrl_level = character_level::build(*_physics, true, _ctrl_origin);
         _physics->optimize_broad_phase();
@@ -2223,11 +2223,11 @@ private:
             if (_s.fire_light) {
                 const float flicker = 0.8f + 0.2f * std::sin(float(_s.weather_time) * 17.0f + float(i) * 2.1f) *
                                                  std::sin(float(_s.weather_time) * 5.3f);
-                _scene.add_light({.position = f.position + Vec3f{0.0f, 0.6f, 0.0f},
-                                  .color = kin::LinearRgb{7.0f, 3.4f, 1.0f} * flicker,
-                                  .radius = 9.0f,
-                                  .size = 0.25f,
-                                  .id = 0x7B000000u + static_cast<unsigned>(i)});
+                _scene.add_point_light({.position = f.position + Vec3f{0.0f, 0.6f, 0.0f},
+                                        .color = kin::LinearRgb{7.0f, 3.4f, 1.0f} * flicker,
+                                        .radius = 9.0f,
+                                        .size = 0.25f,
+                                        .id = 0x7B000000u + static_cast<unsigned>(i)});
             }
         }
         if (_ecs_state && (!_characters.empty() || !_boxes.empty() || _ctrl_hero.is_valid() || _climb_hero.is_valid() ||

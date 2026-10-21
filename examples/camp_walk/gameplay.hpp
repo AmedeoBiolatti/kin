@@ -352,22 +352,28 @@ inline bool prepare(SceneSession3D& session, Progress progress = {}) {
     game->progress = progress;
     constexpr std::array<Vec3f, 3> positions{{{1.6f, .05f, 1.4f}, {-.8f, .05f, .8f}, {.8f, .05f, .2f}}};
     for (size_t i = 0; i < game->supplies.size(); ++i) {
-        game->supplies[i] = session.spawn("prefabs/camp-supply.kinprefab",
-                                          {.position = positions[i], .configure = [i](SceneSpawnContext3D& created) {
-                                               created.root.set(Supply{1, float(i) * 120});
-                                           }});
+        game->supplies[i] =
+            session
+                .spawn(
+                    "prefabs/camp-supply.kinprefab",
+                    {.position = positions[i],
+                     .configure = [i](SceneSpawnContext3D& created) { created.root.set(Supply{1, float(i) * 120}); }})
+                .value_or({});
         if (!game->supplies[i])
             return false;
     }
-    game->crate = session.spawn("prefabs/camp-crate.kinprefab", {.position = Vec3f{1.15f, .12f, -.5f}});
+    game->crate = session.spawn("prefabs/camp-crate.kinprefab", {.position = Vec3f{1.15f, .12f, -.5f}}).value_or({});
     if (!game->crate)
         return false;
     game->crate_start = session.physics()->position(session.bodies()->body_of(session.resolve(game->crate.root).raw()));
     const auto player = session.handle(session.entity("player"));
     game->lantern =
-        session.spawn("prefabs/camp-lantern.kinprefab", {.configure = [player](SceneSpawnContext3D& created) {
-                          created.root.set(JointAttachment3D{player, "hand_R"});
-                      }});
+        session
+            .spawn("prefabs/camp-lantern.kinprefab", {.configure =
+                                                          [player](SceneSpawnContext3D& created) {
+                                                              created.root.set(JointAttachment3D{player, "hand_R"});
+                                                          }})
+            .value_or({});
     if (!game->lantern)
         return false;
     game->camera.follow(player);

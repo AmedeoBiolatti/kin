@@ -110,7 +110,7 @@ struct Collider3D {
 Shape3D cook_collider3d(const Collider3D& collider,Vec3f entity_scale={1,1,1});
 // Explicit binding/validation; use before sync_bodies, or rebuild changed live
 // bodies afterwards. Failures preserve last good bindings. No per-frame I/O.
-std::vector<std::string> resolve_physics3d_assets(EcsWorld& world,PhysicsAssets3D& assets,std::span<const EcsId> entities={});
+Status3D resolve_physics3d_assets(EcsWorld& world,PhysicsAssets3D& assets,std::span<const EcsId> entities={});
 
 // An authored hold on an entity with a collider (the physics type's data, HoldDesc3D, as a component): the body is
 // grippable by itself, with its own quality; `snap` puts the hand on `anchor` (in the entity's space) whatever was aimed at.
@@ -369,6 +369,9 @@ public:
     // (0: the one before, 1: the last: what step() leaves). For drawing between fixed steps; opt-in, call it
     // after advance() with alpha().
     void interpolate(f32 alpha);
+    // Read-only fixed-step presentation for a body/character or its descendants.
+    // Does not write ECS transforms, physics poses or interpolation history.
+    std::optional<Mat4f> render_transform(flecs::entity entity, f32 alpha) const;
     // Writes the Transform3D of every dynamic and kinematic body, the feet of every character, and the pose override and
     // state of every ragdoll and rope from the world as it is now, awake or asleep, and makes that the pose that
     // interpolate() lerps from. Call it right after World3D::restore_state (a rollback), whose restored bodies the step
@@ -388,8 +391,7 @@ public:
     // commit callback is not run and old handles remain valid. On success call
     // the non-throwing component commit, then exchange bodies. Needs spare body
     // capacity; constrained bodies and characters/ragdolls/ropes are refused.
-    bool replace_bodies(std::span<const BodyEdit> edits, const std::function<void()>& commit,
-                        std::string* error = nullptr);
+    Status3D replace_bodies(std::span<const BodyEdit> edits, const std::function<void()>& commit);
 
     // The contact events of the last step() (all the steps of one advance()), in the world's order, with the
     // entity ids in user_a and user_b.
@@ -447,6 +449,7 @@ public:
     std::size_t body_count() const { return _bound.size(); }
 
 private:
+    bool replace_bodies_impl(std::span<const BodyEdit> edits, const std::function<void()>& commit, std::string* error);
     bool sync_selected(EcsId id) const;
     bool _selective_sync = false;
     std::span<const EcsId> _sync_entities;

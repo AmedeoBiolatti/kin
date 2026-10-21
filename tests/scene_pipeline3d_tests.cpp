@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -12,7 +13,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* why) {
+void check(const auto& value, const char* why) {
     if (!value)
         throw std::runtime_error(why);
 }
@@ -56,7 +57,7 @@ void pipeline(Renderer2D& renderer) {
     Renderer3D r3d{renderer};
     Assets3D assets{r3d, scratch.path};
     SceneSession3D session{r3d, assets, options()};
-    const auto ok = [&](bool value, const char* why) {
+    const auto ok = [&](const auto& value, const char* why) {
         if (!value)
             for (const auto& error : session.diagnostics())
                 std::cerr << error << '\n';
@@ -172,6 +173,39 @@ void pipeline(Renderer2D& renderer) {
           "full-frame diagnostic snapshot was lost");
     ok(session.collect(), "phased collection failed");
     check(session.scene()->particle_sprites().size() == 2, "post/late lifecycle changes missed collection");
+    // The recommended session path interpolates actual draw records while
+    // preserving the authoritative body, transform and simulation hash.
+    auto moving = session.entity("mover");
+    auto mesh = r3d.create_mesh(meshes::box({1, 1, 1}));
+    check(mesh.ok(), "interpolation fixture mesh failed");
+    moving.set(MeshRenderer3D{.mesh = *mesh});
+    const auto child = session.world()
+                           ->raw()
+                           .entity("render-child")
+                           .child_of(moving.raw())
+                           .set(Transform3D{.position = {2, 0, 0}})
+                           .set(MeshRenderer3D{.mesh = *mesh});
+    const auto state_hash = session.physics()->state_hash();
+    const auto authoritative = moving.get<Transform3D>()->position;
+    const auto draw_x = [&](u64 entity) {
+        const auto instances = session.scene()->instances();
+        const auto found =
+            std::find_if(instances.begin(), instances.end(), [&](const auto& copy) { return copy.id == u32(entity); });
+        check(found != instances.end(), "interpolated entity missing from collected draws");
+        return found->transform.m[12];
+    };
+    for (const float alpha : {0.f, .5f, 1.f}) {
+        ok(session.collect(alpha), "interpolated collection failed");
+        const float expected = -10 + 3 * dt * (2 + alpha);
+        check(close(draw_x(moving.id()), expected) && close(draw_x(child.id()), expected + 2),
+              "session omitted fixed-step interpolation or child placement");
+        check(moving.get<Transform3D>()->position == authoritative && session.physics()->state_hash() == state_hash,
+              "collection changed authoritative simulation state");
+    }
+    moving.set(RenderTransform3D{.matrix = Mat4f::translation({77, 3, 0}), .enabled = true});
+    ok(session.collect(.5f), "explicit presentation collection failed");
+    check(close(draw_x(moving.id()), 77) && session.physics()->state_hash() == state_hash,
+          "explicit render placement lost precedence or changed physics");
     // A later graph error must be detected before any phase/native simulation.
     ok(session.reload(), "invalid graph reset failed");
     commands = session.commands();

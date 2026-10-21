@@ -146,8 +146,10 @@ void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
     _emitters.each([&](flecs::entity entity, const WorldTransform3D& world, const ParticleEmitter3D&) {
         auto* emitter = entity.get_mut<ParticleEmitter3D>(); // all owned now, no structural change
         emitter->system.transform = world.matrix;
-        emitter->system.emitting = emitter->enabled && emitter->emitting;
+        const bool native_emitting = emitter->system.emitting;
+        emitter->system.emitting = native_emitting && emitter->enabled && emitter->emitting;
         emitter->system.update(dt, wind);
+        emitter->system.emitting = native_emitting;
     });
 }
 
@@ -662,7 +664,12 @@ void WorldRenderState3D::clear_collection_cache() {
     _bucket_lookup_dirty = false;
 }
 
-void WorldRenderState3D::collect(Scene3D& scene) {
+void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentation) {
+    struct Guard {
+        const Presentation3D*& value;
+        ~Guard() { value = nullptr; }
+    } guard{_presentation};
+    _presentation = &presentation;
     prepare_joint_attachments();
     auto& by_mesh = _bucket_lookup;
     if (_bucket_lookup_dirty) {
@@ -785,7 +792,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                     groups.push_back({static_cast<u32>(first),
                                       static_cast<u32>(std::min(group_size, bucket.instances.size() - first))});
             }
-            bucket.batch = InstanceBatch3D(bucket.mesh, bucket.instances, std::move(groups));
+            bucket.batch = InstanceBatch3D::create(bucket.mesh, bucket.instances, std::move(groups)).value_or({});
         };
         const bool spare_usable = bucket.spare && bucket.spare.instances().size() == bucket.instances.size() &&
                                   bucket.spare.lifetime().use_count() == 1;
@@ -842,12 +849,18 @@ void WorldRenderState3D::collect(Scene3D& scene) {
             return;
         const WorldTransform3D placement{*matrix};
         if (light.enabled) {
-            scene.add_light({.position = placement.position(),
-                             .color = light.color,
-                             .radius = light.radius,
-                             .size = light.size,
-                             .shadow = light.shadow,
-                             .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
+            scene.add_point_light({.position = placement.position(),
+                                   .color = light.color,
+                                   .radius = light.radius,
+                                   .size = light.size,
+                                   .shadow_enabled = light.shadow_enabled,
+                                   .shadow_resolution = light.shadow_resolution,
+                                   .shadow_bias = light.shadow_bias,
+                                   .shadow_normal_offset = light.shadow_normal_offset,
+                                   .shadow_near_plane = light.shadow_near_plane,
+                                   .shadow_distance = light.shadow_distance,
+                                   .shadow_softness = light.shadow_softness,
+                                   .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
         }
     });
     _spot_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const SpotLight3D& light,
@@ -865,7 +878,13 @@ void WorldRenderState3D::collect(Scene3D& scene) {
                                   .size = light.size,
                                   .inner_angle = light.inner_angle,
                                   .outer_angle = light.outer_angle,
-                                  .shadow = light.shadow,
+                                  .shadow_enabled = light.shadow_enabled,
+                                  .shadow_resolution = light.shadow_resolution,
+                                  .shadow_bias = light.shadow_bias,
+                                  .shadow_normal_offset = light.shadow_normal_offset,
+                                  .shadow_near_plane = light.shadow_near_plane,
+                                  .shadow_distance = light.shadow_distance,
+                                  .shadow_softness = light.shadow_softness,
                                   .id = static_cast<u32>(entity.id() & 0xFFFFFFFFu)});
         }
     });
@@ -874,7 +893,7 @@ void WorldRenderState3D::collect(Scene3D& scene) {
         if (!draw_placement(entity, world, nullptr))
             return;
         if (emitter.enabled && emitter.system.count() > 0) {
-            scene.draw_particles(emitter.system);
+            scene.draw_particles(emitter.system, entity.id());
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).

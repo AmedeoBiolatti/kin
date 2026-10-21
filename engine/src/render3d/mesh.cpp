@@ -87,13 +87,8 @@ std::vector<Vec2f> circle(f32 radius, i32 count) {
 
 } // namespace
 
-bool MeshData3D::validate(std::string* error) const {
-    const auto fail = [&](std::string why) {
-        if (error) {
-            *error = std::move(why);
-        }
-        return false;
-    };
+Status3D MeshData3D::validate() const {
+    const auto fail = [](std::string why) { return status3d(false, {"MeshData3D::validate: " + why}); };
     if (vertices.empty()) {
         return fail("no vertices");
     }
@@ -130,7 +125,7 @@ bool MeshData3D::validate(std::string* error) const {
             }
         }
     }
-    return true;
+    return {};
 }
 
 u32 MeshData3D::skin_joint_count() const {

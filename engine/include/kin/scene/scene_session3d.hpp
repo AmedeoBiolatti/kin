@@ -260,17 +260,17 @@ public:
     // prepare keeps the active scene intact; only one candidate is retained.
     // activate is the explicit frame-boundary swap. load does both. Failure
     // discards the candidate and retains the active world's state and view.
-    bool prepare(const std::filesystem::path& scene, bool refresh_all_assets = false);
-    bool activate();
-    bool load(const std::filesystem::path& scene, bool refresh_all_assets = false);
-    void cancel();
-    void unload();
-    bool reload(bool refresh_all_assets = false);
+    Status3D prepare(const std::filesystem::path& scene, bool refresh_all_assets = false);
+    Status3D activate();
+    Status3D load(const std::filesystem::path& scene, bool refresh_all_assets = false);
+    Status3D cancel();
+    Status3D unload();
+    Status3D reload(bool refresh_all_assets = false);
     // Poll only when desired (e.g. a development timer). Tracks scene/prefab,
     // models/external images/buffers, animator/machine files and custom sources.
     // Includes deletions, creations and content-pack remount identity.
     std::vector<std::filesystem::path> changed_sources() const;
-    SceneSession3DReload reload_if_changed();
+    Result3D<SceneSession3DReload> reload_if_changed();
 
     // Renderer thread, between steps/collection. Existing reflected fields only;
     // one batch either commits or leaves authored fields/bindings/bodies intact.
@@ -280,25 +280,25 @@ public:
     // Batch edits allow cross-field invariants.
     // Keeps compatible animation/particle state and rigid-body velocity.
     // Controller/ragdoll/rope physics edits and constrained bodies require reload.
-    bool edit(std::span<const SceneFieldEdit3D> edits);
+    Status3D edit(std::span<const SceneFieldEdit3D> edits);
 
     // Synchronous C++ gameplay construction, between frames. Reuses the shared
     // prefab loader and binds only new entities. Failure removes partial objects
     // and native physics bindings. Runtime instances are excluded from normal
     // authored saves and are owned until despawn/reload/unload.
-    ScenePrefab3D spawn(const std::filesystem::path& prefab, SceneSpawn3D options = {});
+    Result3D<ScenePrefab3D> spawn(const std::filesystem::path& prefab, SceneSpawn3D options = {});
     // Explicit renderer-thread loading. Retains one inactive bound reference;
     // prepared spawning and pool reuse do no source/asset loading. Snapshot
     // stays fixed until released/reloaded. No custom engine asset changes or scale changes.
-    ScenePreparedPrefab3D preload(const std::filesystem::path& prefab);
-    bool release(ScenePreparedPrefab3D); // refuses while a pool references it
-    ScenePrefab3D spawn(ScenePreparedPrefab3D, SceneSpawn3D options = {});
-    ScenePrefabPool3D create_pool(ScenePreparedPrefab3D, ScenePrefabPoolOptions3D options = {});
-    bool release(ScenePrefabPool3D); // destroys active and inactive slots
+    Result3D<ScenePreparedPrefab3D> preload(const std::filesystem::path& prefab);
+    Status3D release(ScenePreparedPrefab3D); // refuses while a pool references it
+    Result3D<ScenePrefab3D> spawn(ScenePreparedPrefab3D, SceneSpawn3D options = {});
+    Result3D<ScenePrefabPool3D> create_pool(ScenePreparedPrefab3D, ScenePrefabPoolOptions3D options = {});
+    Status3D release(ScenePrefabPool3D); // destroys active and inactive slots
     ScenePrefabPoolStats3D pool_stats(ScenePrefabPool3D) const;
-    ScenePrefab3D spawn(ScenePrefabPool3D, SceneSpawn3D options = {});
+    Result3D<ScenePrefab3D> spawn(ScenePrefabPool3D, SceneSpawn3D options = {});
     // despawn returns a pooled lease to its pool. Old lease handles become stale.
-    bool despawn(ScenePrefab3D prefab); // includes nested runtime spawns; refuses foreign children
+    Status3D despawn(ScenePrefab3D prefab); // includes nested runtime spawns; refuses foreign children
     SceneEntity3D entity(ScenePrefab3D prefab, std::string_view local_id);
     SceneEntity3D handle(EcsEntity entity);
     EcsEntity resolve(SceneEntity3D entity);
@@ -312,11 +312,15 @@ public:
     // Typed reflected configuration changes, using the same validated binding
     // transaction as edit(). Runtime input/state still uses native components
     // directly. Only reflected fields are applied; the callback edits a copy.
-    template <class T, class Fn> bool reconfigure(SceneEntity3D entity, Fn change) {
-        if (!resolve(entity))
-            return configuration_error("configuration requires a live session entity");
-        return reconfigure_native(entity, world()->component<T>().id(),
-                                  [change = std::move(change)](EcsEntity copy) mutable { change(*copy.get_mut<T>()); });
+    template <class T, class Fn> Status3D reconfigure(SceneEntity3D entity, Fn change) {
+        if (!resolve(entity)) {
+            configuration_error("configuration requires a live session entity");
+            return status3d(false, diagnostics());
+        }
+        const bool success =
+            reconfigure_native(entity, world()->component<T>().id(),
+                               [change = std::move(change)](EcsEntity copy) mutable { change(*copy.get_mut<T>()); });
+        return status3d(success, diagnostics());
     }
 
     // One fixed step: Input..Physics systems, queued lifecycle work and native
@@ -326,20 +330,22 @@ public:
     // when their named ECS phases contain no systems. Failed phases stop later
     // stages; earlier committed work is not rolled back. Custom stepping can
     // instead use the accessors.
-    bool step(f32 dt);
-    bool collect_actions(InputActionContext&) const;
-    bool write_report(JsonWriter&) const;
+    Status3D step(f32 dt);
+    Status3D collect_actions(InputActionContext&) const;
+    Status3D write_report(JsonWriter&) const;
     // Clears internal draws, propagates transforms, applies authored settings,
     // clocks/weather, collects meshes/lights/ropes and calls compose. Recreates
     // the view only if its options changed; render also submits the frame.
-    bool collect();
-    bool render();
-    bool resize(Vec2i viewport);
+    // alpha is the host's fixed-step accumulator / fixed_dt, in [0,1].
+    // Interpolates draw placement only; gameplay transforms remain authoritative.
+    Status3D collect(f32 alpha = 1);
+    Status3D render(f32 alpha = 1);
+    Status3D resize(Vec2i viewport);
     // What `pixel` (the view's own, from its top left) showed in the last render(): the entity drawn there and the
     // point of it. Draws nothing. Needs options.view.pick; waits for the GPU like Renderer3D::pick, so ask on a click,
     // not every frame. Nullopt over the background or outside the view, and (with why in diagnostics()) without picking
     // or a renderer.
-    std::optional<ScenePick3D> pick(Vec2i pixel);
+    Result3D<std::optional<ScenePick3D>> pick(Vec2i pixel);
 
     bool active() const;
     bool prepared() const;
@@ -356,6 +362,26 @@ public:
     const std::vector<std::string>& diagnostics() const;
 
 private:
+    bool collect_actions_operation(InputActionContext&) const;
+    bool write_report_operation(JsonWriter&) const;
+    bool prepare_operation(const std::filesystem::path& scene, bool refresh_all_assets = false);
+    bool activate_operation();
+    bool load_operation(const std::filesystem::path& scene, bool refresh_all_assets = false);
+    bool reload_operation(bool refresh_all_assets = false);
+    bool edit_operation(std::span<const SceneFieldEdit3D> edits);
+    bool release_operation(ScenePrefabPool3D);
+    bool release_operation(ScenePreparedPrefab3D);
+    bool despawn_operation(ScenePrefab3D prefab);
+    bool step_operation(f32 dt);
+    bool collect_operation(f32 alpha = 1);
+    bool render_operation(f32 alpha = 1);
+    bool resize_operation(Vec2i viewport);
+    ScenePrefab3D spawn_operation(ScenePrefabPool3D, SceneSpawn3D options = {});
+    ScenePrefab3D spawn_operation(ScenePreparedPrefab3D, SceneSpawn3D options = {});
+    ScenePrefab3D spawn_operation(const std::filesystem::path& prefab, SceneSpawn3D options = {});
+    ScenePreparedPrefab3D preload_operation(const std::filesystem::path& prefab);
+    ScenePrefabPool3D create_pool_operation(ScenePreparedPrefab3D, ScenePrefabPoolOptions3D options = {});
+    std::optional<ScenePick3D> pick_operation(Vec2i pixel);
     ScenePreparedPrefab3D preload_now(const std::filesystem::path&);
     ScenePrefabPool3D create_pool_now(ScenePreparedPrefab3D, ScenePrefabPoolOptions3D);
     bool release_now(ScenePreparedPrefab3D);

@@ -1,3 +1,5 @@
+#include "result3d_helpers.hpp"
+
 #include <kin/pathfinding/navmesh3d.hpp>
 #include <kin/platform/log.hpp>
 
@@ -70,7 +72,7 @@ bool middle_hole(int x, int z) {
 
 kin::NavMesh3D build(const Soup& s, const kin::NavMeshBuildOptions3D& options = {}) {
     std::string error = "unset";
-    kin::NavMesh3D mesh = kin::build_navmesh3d(s.vertices, s.indices, options, &error);
+    kin::NavMesh3D mesh = kin::test::value3d(kin::build_navmesh3d(s.vertices, s.indices, options), error);
     assert(error.empty());
     return mesh;
 }
@@ -389,30 +391,30 @@ void test_invalid_input() {
     const std::vector<Vec3f> triangle{{0, 0, 0}, {0, 0, 1}, {1, 0, 0}};
     const std::vector<u32> indices{0, 1, 2};
     std::string error;
-    assert(!kin::build_navmesh3d(triangle, std::vector<u32>{0, 1, 3}, {}, &error).valid());
+    assert(!kin::test::value3d(kin::build_navmesh3d(triangle, std::vector<u32>{0, 1, 3}, {}), error).valid());
     assert(error.find("out of range") != std::string::npos);
-    assert(!kin::build_navmesh3d(triangle, std::vector<u32>{0, 1, 2, 0}, {}, &error).valid() && !error.empty());
+    assert(!kin::test::value3d(kin::build_navmesh3d(triangle, std::vector<u32>{0, 1, 2, 0}, {}), error).valid() &&
+           !error.empty());
     const std::vector<Vec3f> bad{{0, 0, 0}, {0, std::nanf(""), 1}, {1, 0, 0}};
-    assert(!kin::build_navmesh3d(bad, indices, {}, &error).valid());
+    assert(!kin::test::value3d(kin::build_navmesh3d(bad, indices, {}), error).valid());
     assert(error.find("not finite") != std::string::npos);
-    assert(!kin::build_navmesh3d(triangle, indices, {.up = {}}, &error).valid() && !error.empty());
-    assert(!kin::build_navmesh3d(triangle, indices, {.max_slope_degrees = 120.0f}, &error).valid());
-    assert(!kin::build_navmesh3d(triangle, indices, {.weld_distance = -1.0f}, &error).valid());
-    assert(!kin::build_navmesh3d(triangle, indices, {.agent_radius = std::nanf("")}, &error).valid());
+    assert(!kin::test::value3d(kin::build_navmesh3d(triangle, indices, {.up = {}}), error).valid() && !error.empty());
+    assert(!kin::test::value3d(kin::build_navmesh3d(triangle, indices, {.max_slope_degrees = 120.0f}), error).valid());
+    assert(!kin::test::value3d(kin::build_navmesh3d(triangle, indices, {.weld_distance = -1.0f}), error).valid());
+    assert(
+        !kin::test::value3d(kin::build_navmesh3d(triangle, indices, {.agent_radius = std::nanf("")}), error).valid());
     // Nothing to build is not an error.
-    assert(!kin::build_navmesh3d(std::span<const Vec3f>{}, {}, {}, &error).valid() && error.empty());
-    const kin::NavMesh3D one =
-        kin::build_navmesh3d(triangle, indices, {.agent_radius = 0.4f, .agent_height = 1.8f}, &error);
+    assert(!kin::test::value3d(kin::build_navmesh3d(std::span<const Vec3f>{}, {}, {}), error).valid() && error.empty());
+    const kin::NavMesh3D one = kin::test::value3d(
+        kin::build_navmesh3d(triangle, indices, {.agent_radius = 0.4f, .agent_height = 1.8f}), error);
     assert(!one.valid() && error.empty()); // the whole coarse triangle touches an unsafe border
     assert(one.options.agent_radius == 0.4f && one.options.agent_height == 1.8f);
 
-    // Without `error`, a warning says why.
-    std::vector<kin::LogEvent> events;
-    const kin::LoggerConfig before = kin::logger_config();
-    kin::set_logger_config({.min_level = kin::LogLevel::Debug, .sdl_sink = false, .memory_events = &events});
-    assert(!kin::build_navmesh3d(triangle, std::vector<u32>{0, 1, 9}).valid());
-    kin::set_logger_config(before);
-    assert(events.size() == 1 && events[0].level == kin::LogLevel::Warn && events[0].category == "pathfinding");
+    // Failures carry their diagnostics without requiring logging or an owner.
+    const auto rejected = kin::build_navmesh3d(triangle, std::vector<u32>{0, 1, 9});
+    assert(!rejected && !rejected.value && rejected.diagnostics.size() == 1);
+    const auto empty = kin::build_navmesh3d(std::span<const Vec3f>{}, {});
+    assert(empty && !empty->valid() && empty.diagnostics.empty());
 }
 
 // Clearance changes every query's geometry, rather than only blocking A* portals.
@@ -464,6 +466,34 @@ void test_agent_clearance() {
     const auto layered = build(layers, {.agent_radius = .1f, .agent_height = 1.8f});
     assert(kin::nearest(layered, {.6f, 0, 1}, {.01f, .1f, .01f}));
     assert(kin::nearest(layered, {1, 3, 1}, {.01f, .1f, .01f}));
+
+    // A ramp joins the two storeys into ONE region, away from the balcony edge.
+    // Local clearance must still leave the ground directly below that edge.
+    Soup connected = grid(90, 30, .1f, 0, [](int x, int z) {
+        // The ramp meets ground on its far side; avoid a folded/nonmanifold
+        // seam with a ground triangle directly below its final triangle.
+        return x == 79 && z >= 10 && z < 20;
+    });
+    connected.append(grid(20, 10, .1f, 2, {2, 0, 1}));
+    Soup ramp = grid(40, 10, .1f, 0, {4, 0, 1});
+    for (auto& p : ramp.vertices)
+        p.y = (8 - p.x) * .5f;
+    connected.append(ramp);
+    assert(build(connected).region_count() == 1);
+    const auto balcony = build(connected, {.agent_radius = .1f, .agent_height = 1.8f});
+    assert(kin::nearest(balcony, {2, 0, 1.5f}, {.01f, .01f, .01f}));
+    assert(!kin::nearest(balcony, {2, 2, 1.5f}, {.01f, .01f, .01f}));
+
+    // Vertical risers touch tread boundaries without occupying their interiors.
+    Soup stairs;
+    for (int step = 0; step < 4; ++step) {
+        const f32 x = f32(step), y = f32(step) * .2f;
+        stairs.append(grid(1, 1, 1, y, {x, 0, 0}));
+        stairs.append({{{x + 1, y, 0}, {x + 1, y + .2f, 0}, {x + 1, y + .2f, 1}, {x + 1, y, 1}}, {0, 1, 2, 0, 2, 3}});
+    }
+    const auto treads = build(stairs, {.agent_height = 1.8f});
+    for (int step = 0; step < 4; ++step)
+        assert(kin::nearest(treads, {f32(step) + .5f, f32(step) * .2f, .5f}, {.01f, .01f, .01f}));
 
     // A vertical character's uphill centre is higher than its downhill footprint.
     Soup sloped = grid(30, 20, .1f);
@@ -608,11 +638,11 @@ void test_against_shortest_paths() {
 #ifdef KIN_EXPERIMENTAL_3D
 void test_mesh_data() {
     const kin::MeshData3D plane = kin::meshes::plane({10.0f, 10.0f}, 10);
-    const kin::NavMesh3D mesh = kin::build_navmesh3d(plane, kin::Mat4f::translation({5.0f, 1.0f, 5.0f}));
+    const kin::NavMesh3D mesh = kin::build_navmesh3d(plane, kin::Mat4f::translation({5.0f, 1.0f, 5.0f})).value_or({});
     assert(mesh.triangle_count() == 200 && mesh.region_count() == 1);
     assert(near(mesh.bounds_min, {0.0f, 1.0f, 0.0f}) && near(mesh.bounds_max, {10.0f, 1.0f, 10.0f}));
     // Mirrored, it still faces up.
-    const kin::NavMesh3D mirrored = kin::build_navmesh3d(plane, kin::Mat4f::scaling({-1.0f, 1.0f, 1.0f}));
+    const kin::NavMesh3D mirrored = kin::build_navmesh3d(plane, kin::Mat4f::scaling({-1.0f, 1.0f, 1.0f})).value_or({});
     assert(mirrored.triangle_count() == 200 && mirrored.region_count() == 1);
     assert(kin::find_path(mirrored, {-4.5f, 0.0f, -4.5f}, {4.5f, 0.0f, 4.5f}).size() == 2);
 }

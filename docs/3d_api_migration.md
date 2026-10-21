@@ -19,7 +19,107 @@ scene.lights.ground_ambient = {.enabled=true, .color={0.1f, 0.08f, 0.06f}};
 scene.lights.ground_ambient.enabled = false; // retain the configured colour
 ```
 
-Resource loads on `Renderer3D`, `Assets3D` and `PhysicsAssets3D` no longer take an error-output string. Check the returned handle, then copy `diagnostics3d_text(owner.diagnostics())` when needed. Successful calls, including cache hits, clear earlier diagnostics; observation does not. `ModelFile3D::error()` has also been removed in favour of `diagnostics()`. Constructor/precondition errors and stateless CPU validators retain their documented contracts.
+Fallible 3D operations now return `Result3D<T>`; operations with no payload return
+`Status3D` (`Result3D<void>`). Check `result.ok()` or `if (result)`, read the
+payload with `*result`/`result->`, and report `diagnostics3d_text(result.diagnostics)`.
+Use `.ok()` when supplying a bool parameter; the bool conversion is explicit.
+Each result owns its diagnostics, so later calls cannot overwrite an earlier
+failure. A successful `false` or empty payload is still success. Failed results
+have no value. `value_or(fallback)` explicitly chooses a fallback.
+
+```cpp
+auto loaded = assets.load_model("character.glb");
+if (!loaded) return report(kin::diagnostics3d_text(loaded.diagnostics));
+auto character = std::move(*loaded); // AssetHandle<Model3D>
+auto rendered = session.render(alpha);
+if (!rendered) report(kin::diagnostics3d_text(rendered.diagnostics));
+```
+
+This replaces handle-plus-owner-error, bool-plus-owner-error, raw diagnostic
+vectors, parser-specific result structs and public error-output pointers on the
+3D loading/rendering/authoring boundaries. CPU builders return their value:
+`read_model_data(bytes,path)`, `read_model_geometry3d(path,limits)` and
+`build_navmesh3d(...)`. `Model3D::placement()` now returns `Result3D<Mat4f>`, including invalid placement options as a failed result. Mesh/skeleton validation and asset binding return
+`Status3D`. `ModelFile3D` construction now only configures the watcher: call `poll()` for the initial load, so its failure is returned explicitly. `ModelFile3D::poll()` returns `Result3D<bool>`: `false` means unchanged,
+an absent payload means failure. `reload_if_changed()` returns
+`Result3D<SceneSession3DReload>`; readback methods return `Result3D<bool>` where
+a successful false means no GPU cut. Use `InstanceBatch3D::create(...)` and
+`ModelBatch3D::create(...)` instead of fallible constructors. Existing owner
+`diagnostics()` queries remain inspection snapshots; use the returned result to
+retain a particular operation's failure. Scene submissions still latch a refusal
+until `clear()`/`clear_diagnostics()`, so rendering also rejects an unchecked bad
+submission.
+
+## Gameplay and content changes
+
+- `World3DConfig::contact_events` defaults to `false`. Enable it explicitly for
+  rigid-body Lua contacts or native contact callbacks. `PhysicsContacts3D` still
+  exists as an empty readable singleton when collection is disabled.
+- `SceneSession3D::step(dt)` remains one authoritative fixed step. Pass the host's
+  accumulator fraction to `collect(alpha)` or `render(alpha)` for interpolated
+  body/character draw placement, including descendants and attached props. The
+  default `alpha=1` preserves existing callers. Explicit `RenderTransform3D`
+  overrides take precedence. ECS and native physics poses are never changed by
+  collection. Camera rigs retain their own matching alpha.
+- Lua `scene3d.handle(ecs_entity)` converts a reflected `KinEntity` to a checked
+  session handle; `scene3d.resolve(handle)` returns a reflected entity or nil if
+  stale. Use these around physics hits, prefab roots and ordinary ECS queries.
+  Malformed supplied options and wrong userdata raise a Lua error.
+- Authored component names are schema identifiers, independent of C++ spelling:
+  write **`SkinnedMeshRenderer`** in scene/prefab JSON and reflected Lua calls;
+  the C++ type is `SkinnedMeshRenderer3D`. Existing asset names are unchanged.
+- `ParticleEmitter3D::emitting` gates automatic births alongside the native
+  `ParticleSystem3D::emitting` flag. The bridge preserves both controls. Bursts
+  remain explicit and existing particles finish their lifetimes.
+- Particle TAA matches stable `ParticleSprite3D::id` values within an emitter.
+  `draw_particles(..., history_id)` optionally identifies the emitter across
+  reordered submissions; zero uses submission order. ECS emitters and simulated
+  particles supply these identities automatically. Update binary consumers for
+  the appended fields/defaulted arguments. Recompile custom particle vertex
+  shaders against the current shared includes.
+- Particle shadow casting and reception are independent opt-ins on
+  `ParticleLook3D`. Casting uses `shadow_cutoff` and a separate bounded stream;
+  each map selects at most 16,384 sprites after light-frustum culling.
+- Models must satisfy the tested [kin-gltf/1 profile](gltf_profile3d.md).
+  Distinct skin palettes, morph targets and unsupported pose/UV combinations now
+  fail whole-asset acceptance instead of producing partially usable models.
+  Navmesh agent height/radius now filter triangles during construction. Rebuild
+  navmeshes with the controller's dimensions and sufficiently tessellated floors.
+- 3D is now opt-in at configure time: use the `3d` preset or explicitly enable
+  `KIN_EXPERIMENTAL_3D`. The default and shipping presets exclude it.
+
+For runtime lights in a session, create/patch `PointLight3D` or `SpotLight3D`
+entities with `Transform3D`; collection owns their positioned renderer records.
+Immediate draws use `Scene3D::add_point_light` / `add_spot_light`. Position and
+spot direction come from the entity transform in ECS. All paths now share the
+following flat field names, including reflected Lua and scene/prefab JSON:
+
+| Field | Units |
+| --- | --- |
+| `color` | linear RGB, HDR allowed |
+| `radius`, `size` | metres |
+| `inner_angle`, `outer_angle` (spot) | half-angle degrees |
+| `shadow_enabled` | boolean |
+| `shadow_resolution` | texels; zero uses the scene default |
+| `shadow_bias`, `shadow_normal_offset`, `shadow_softness` | shadow-map texels |
+| `shadow_near_plane`, `shadow_distance` | metres; zero distance uses radius |
+
+Replace C++ `light.shadow.enabled` with `light.shadow_enabled`, and similarly
+flatten the other former `LightShadow3D` members. Replace authored `shadows` with
+`shadow_enabled` and `shadow_near` with `shadow_near_plane`; old field names are
+rejected. Reference-harness light JSON uses the same fields and rejects its old
+nested `shadow` object. Directional sun/moon and `TimeOfDay3D::shadows` retain
+their distinct settings. Entity light `enabled` controls collection separately
+from `shadow_enabled`.
+
+Queries use optional hits for ordinary absence; e.g. session picking returns
+`Result3D<std::optional<ScenePick3D>>` to distinguish failure from background.
+Native physics handles, predicates and bounded query counts remain lightweight
+simulation values, not diagnostic owners. Deferred lifecycle requests retain
+their pending/cancelled state; Lua programming errors remain catchable Lua
+errors. Invalid C++ constructor setup keeps normal `std::invalid_argument`
+semantics. Lengths are metres, times seconds and rig angles degrees; spring-arm
+`ease_out` is metres per second and `shoulder_radius_scale` is unitless.
 
 ## Custom material shaders
 
@@ -37,7 +137,7 @@ shading behavior. No scene/prefab or C++ material layout change is required.
 
 ## Type names
 
-Update C++ callers using the following names. The experimental API has no legacy aliases; authored scene/prefab component names and schemas stay unchanged.
+Update C++ callers using the following names. The experimental API has no legacy aliases; authored component type identifiers remain unchanged; local-light field changes are listed above.
 
 | Previous | Current |
 | --- | --- |
@@ -71,7 +171,8 @@ Update C++ callers using the following names. The experimental API has no legacy
 | `LookAtResult` | `LookAtResult3D` |
 | `LookAtState` | `LookAtState3D` |
 | `Materials3DAsset` | `MaterialsAsset3D` |
-| `Materials3DLoadResult` | `MaterialsLoadResult3D` |
+| `Materials3DLoadResult`, `MaterialsLoadResult3D` | `Result3D<MaterialsAsset3D>` |
+| `ColliderRecipeLoad3D` | `Result3D<ColliderRecipe3D>` |
 | `Mesh` | `Mesh3D` |
 | `MeshCluster` | `MeshCluster3D` |
 | `MeshClusterBuild` | `MeshClusterBuild3D` |

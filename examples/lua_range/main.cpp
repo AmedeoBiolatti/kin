@@ -14,11 +14,11 @@ class LuaRange final : public Scene {
     Renderer3D* _renderer = nullptr;
     std::unique_ptr<Assets3D> _assets;
     std::unique_ptr<SceneSession3D> _session;
-    void require(bool result) const {
+    void require(const Status3D& result) const {
         if (result)
             return;
         std::string errors;
-        for (const auto& message : _session->diagnostics())
+        for (const auto& message : result.diagnostics)
             errors += message + "\n";
         throw std::runtime_error(errors);
     }
@@ -74,7 +74,7 @@ public:
     void render(SceneContext& ctx) override {
         if (!_renderer->available())
             return;
-        require(_session->render());
+        require(_session->render(ctx.app.headless() ? 1.f : ctx.alpha));
         ctx.renderer.clear();
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, 960, 540});
         ctx.renderer.fill_rect({0, 0, 960, 60}, Color::rgba(15, 20, 30, 230));

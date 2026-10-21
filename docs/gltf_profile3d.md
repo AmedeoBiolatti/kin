@@ -107,7 +107,10 @@ as well as floor triangles. Winding identifies walkable floors; obstruction test
 are two-sided. Configure `up` and slope limits to agree with the character.
 
 Height tests the whole floor footprint against source triangles. Radius erodes
-the resulting boundaries, including regions blocked by headroom. Uphill rise
+the resulting boundaries, including regions blocked by headroom. Radius tests
+follow nearby floor connectivity, so distant ramps do not project a balcony's
+border onto lower floors. Boundary-only contact with a stair riser does not
+block a tread's headroom. Uphill rise
 across the radius adds a conservative headroom margin based on the steepest
 actual slope in the original region. Both dimensions zero request point-agent
 navigation; changing either dimension requires rebuilding.
@@ -123,5 +126,5 @@ the surface, handle slopes/steps and stop on dynamic obstacles.
 
 `kin-navmesh3d` checks small/large agents at a doorway, short/tall agents under a
 ceiling, partial sloping ceilings, embedded walls, slopes with headroom, stacked
-layers, alternate up axes and repeatable builds. See
+layers joined by ramps, tread/riser stairs, alternate up axes and repeatable builds. See
 [navigation queries and limits](hex_grids.md#navigation-meshes).

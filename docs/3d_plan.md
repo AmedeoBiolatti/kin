@@ -395,7 +395,7 @@ What was built:
 - **Lighting**: `mesh.frag` lights in linear light with a sun (through its
   shadow map), ambient light and up to 16 point lights, plus emissive light;
   frame-wide uniforms pushed once a pass, a small block a draw. Point lights
-  (`Scene3D::add_light`) are chosen each frame: those whose reach is in view,
+  (`Scene3D::add_point_light`) are chosen each frame: those whose reach is in view,
   by strength over distance.
 - **Shadows**: `Lights3D::shadow_area` (a box) and `shadow_resolution`: an
   orthographic depth map from the sun over the box (reverse Z), drawn by

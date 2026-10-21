@@ -158,7 +158,7 @@ public:
     void render(SceneContext& ctx) override {
         ctx.renderer.clear();
         camp_walk::present(*_session, ctx.app.headless() ? 1.f : ctx.alpha, ctx.app.frame_stats().raw_frame_time);
-        if (!_session->render()) {
+        if (!_session->render(ctx.app.headless() ? 1.f : ctx.alpha)) {
             diagnostic();
             if (ctx.report)
                 ctx.report->fail(_error);

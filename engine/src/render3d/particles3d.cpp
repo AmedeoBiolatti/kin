@@ -649,6 +649,7 @@ void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
     for (const Particle3D& p : _particles) {
         const f32 t = std::clamp(p.age / p.lifetime, 0.0f, 1.0f);
         ParticleSprite3D s;
+        s.id = u64(p.index) + 1;
         s.position = p.position + p.velocity * acc;
         s.size = p.size * size_over_life(desc, t);
         s.rotation = p.rotation + p.spin * acc;
@@ -1065,9 +1066,11 @@ void weather_sprites(const Weather3D& weather, const Camera3D& camera, std::vect
                     weather_one(weather, layer, kind, i, camera.position, box, wind, &drop,
                                 want_splash ? &splash : nullptr, nullptr, in_view ? &in_view : nullptr);
                 if (r.drop) {
+                    drop.id = u64(i) + 1;
                     piece.drops.push_back(drop);
                 }
                 if (r.splash) {
+                    splash.id = u64(i) + 1;
                     piece.splashes.push_back(splash);
                 }
             }

@@ -12,7 +12,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value,const char* why){if(!value)throw std::runtime_error(why);}
+void check(const auto& value,const char* why){if(!value)throw std::runtime_error(why);}
 struct Scratch {
     std::filesystem::path path=std::filesystem::temp_directory_path()/("kin-pool3d-"+
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -46,22 +46,22 @@ void pooling(Renderer2D& renderer,bool benchmark) {
     write(scratch.path/"colors.kinmaterials",R"({"schema":"kin.materials3d/1","material":{"color":[220,110,90,255],"texture":{"asset":"pixel.png"}}})");
     write(scratch.path/"box.kincollider",R"({"schema":"kin.collider3d/1","shape":{"kind":"box","half_extents":[0.2,0.2,0.2]}})");
     Renderer3D r3d{renderer};Assets3D assets{r3d,scratch.path};SceneSession3D session{r3d,assets,settings()};
-    const auto ok=[&](bool value,const char* why){if(!value)for(const auto& error:session.diagnostics())std::cerr<<error<<'\n';check(value,why);};
+    const auto ok=[&](const auto& value,const char* why){if(!value)for(const auto& error:session.diagnostics())std::cerr<<error<<'\n';check(value,why);};
     ok(session.load("level.kinscene"),"pool level failed");const auto baseline=session.physics()->body_count();
-    check(!session.preload("absent.kinprefab")&&session.reserved_entities()==0,"failed preload leaked");
-    auto ready=session.preload("object.kinprefab");ok(bool(ready),"preload failed");
+    check(!session.preload("absent.kinprefab").value_or({})&&session.reserved_entities()==0,"failed preload leaked");
+    auto ready=session.preload("object.kinprefab").value_or({});ok(bool(ready),"preload failed");
     check(session.runtime_prefabs()==0&&session.reserved_entities()==2&&session.physics()->body_count()==baseline,"preload entered simulation");
     bool reject=false;int resets=0,returns=0;
     ScenePrefabPoolOptions3D options{.capacity=2,
         .reset=[&](auto& context){++resets;context.root.set(Game{});if(reject)throw std::runtime_error("reset rejected");},
         .release=[&](auto& context){++returns;context.root.set(Game{});}};
-    auto pool=session.create_pool(ready,options);ok(bool(pool),"pool warm-up failed");
+    auto pool=session.create_pool(ready,options).value_or({});ok(bool(pool),"pool warm-up failed");
     check(resets==2&&session.pool_stats(pool).available==2&&session.reserved_entities()==6&&session.runtime_entities()==0,"pool warm-up counts wrong");
     check(!session.release(ready),"prepared reference released beneath pool");
-    auto one=session.spawn(pool,{.position=Vec3f{-3,5,0}}),two=session.spawn(pool,{.position=Vec3f{3,5,0}});
+    auto one=session.spawn(pool,{.position=Vec3f{-3,5,0}}).value_or({}),two=session.spawn(pool,{.position=Vec3f{3,5,0}}).value_or({});
     ok(bool(one)&&bool(two),"pool acquisition failed");
     const auto stable=session.world()->entities().all().size();
-    check(!session.spawn(pool)&&session.pool_stats(pool).exhausted==1&&session.world()->entities().all().size()==stable,"pool grew at capacity");
+    check(!session.spawn(pool).value_or({})&&session.pool_stats(pool).exhausted==1&&session.world()->entities().all().size()==stable,"pool grew at capacity");
     auto entity=session.resolve(one.root);auto child=session.entity(one,"fx");const auto raw_id=entity.id();
     check(std::get<ComponentEntityRef>(session.world()->components().snapshot(entity,"PoolLink")->fields[0].value).id==child.entity.id,"prepared copy retained reference prototype IDs");
     const auto original_body=session.bodies()->body_of(entity.raw());
@@ -77,7 +77,7 @@ void pooling(Renderer2D& renderer,bool benchmark) {
     check(session.physics()->body_count()==baseline+1&&!session.physics()->contains(original_body)&&session.pool_stats(pool).active==1,"idle slot retained contacts/body");
     ok(session.step(1.f/60),"idle pool step failed");
     check(session.world()->entities().resolve(one.root.entity).get<Game>()->timer==0,"idle pool entity ran gameplay systems");
-    auto again=session.spawn(pool,{.position=Vec3f{-3,5,0}});ok(bool(again),"pool reuse failed");
+    auto again=session.spawn(pool,{.position=Vec3f{-3,5,0}}).value_or({});ok(bool(again),"pool reuse failed");
     ok(session.collect(),"reused pool collection failed");
     check(session.scene()->instances().size()>=2,"reacquired pool slot disappeared from rendering");
     entity=again.root.resolve(*session.world());const auto next_body=session.bodies()->body_of(entity.raw());
@@ -88,16 +88,16 @@ void pooling(Renderer2D& renderer,bool benchmark) {
     check(entity.get<ModelRenderer3D>()->tint==colors::white&&entity.get<ModelMaterials3D>()->binding==session.resolve(two.root).get<ModelMaterials3D>()->binding,"material/render state did not reset/share");
     check(!session.despawn(one),"old lease returned a new occupant");
     ok(session.despawn(again)&&session.despawn(two),"reuse cleanup failed");
-    reject=true;check(!session.spawn(pool)&&session.pool_stats(pool).available==2&&session.physics()->body_count()==baseline,"failed reset leaked an active slot");reject=false;
-    check(!session.spawn(pool,{.scale=Vec3f{2,2,2}})&&session.pool_stats(pool).available==2,"pool accepted changed collision scale");
-    check(!session.spawn(pool,{.configure=[](auto& context){context.root.template get_mut<ModelRenderer3D>()->asset.id="missing.glb";}}),"pool accepted an unprepared asset change");
-    check(!session.spawn(pool,{.configure=[](auto& context){context.entity("fx").template get_mut<ParticleEmitter3D>()->system.desc.max_particles=1000000;}})&&session.step(1.f/60),"failed reset left invalid particle configuration");
-    auto attached=session.spawn(pool);auto foreign_child=session.world()->entity();foreign_child.child_of(session.resolve(attached.root));
+    reject=true;check(!session.spawn(pool).value_or({})&&session.pool_stats(pool).available==2&&session.physics()->body_count()==baseline,"failed reset leaked an active slot");reject=false;
+    check(!session.spawn(pool,{.scale=Vec3f{2,2,2}}).value_or({})&&session.pool_stats(pool).available==2,"pool accepted changed collision scale");
+    check(!session.spawn(pool,{.configure=[](auto& context){context.root.template get_mut<ModelRenderer3D>()->asset.id="missing.glb";}}).value_or({}),"pool accepted an unprepared asset change");
+    check(!session.spawn(pool,{.configure=[](auto& context){context.entity("fx").template get_mut<ParticleEmitter3D>()->system.desc.max_particles=1000000;}}).value_or({})&&session.step(1.f/60),"failed reset left invalid particle configuration");
+    auto attached=session.spawn(pool).value_or({});auto foreign_child=session.world()->entity();foreign_child.child_of(session.resolve(attached.root));
     check(!session.despawn(attached)&&session.alive(attached)&&!session.release(pool),"pool destroyed a foreign child");
     session.world()->entities().detach_parent(foreign_child);session.world()->entities().destroy(foreign_child);ok(session.despawn(attached),"foreign-child fixture cleanup failed");
-    auto foreign=pool;++foreign.session;check(!session.spawn(foreign)&&!session.release(foreign),"foreign pool accepted");
-    auto foreign_ready=ready;++foreign_ready.session;check(!session.spawn(foreign_ready)&&!session.release(foreign_ready),"foreign preload accepted");
-    check(!session.create_pool(ready,{.capacity=0})&&!session.create_pool(ready,{.capacity=1000000}),"pool budget ignored");
+    auto foreign=pool;++foreign.session;check(!session.spawn(foreign).value_or({})&&!session.release(foreign),"foreign pool accepted");
+    auto foreign_ready=ready;++foreign_ready.session;check(!session.spawn(foreign_ready).value_or({})&&!session.release(foreign_ready),"foreign preload accepted");
+    check(!session.create_pool(ready,{.capacity=0}).value_or({})&&!session.create_pool(ready,{.capacity=1000000}).value_or({}),"pool budget ignored");
     EcsCommandBuffer commands;std::string error;
     auto request=session.commands().spawn(commands,pool,{.position=Vec3f{0,5,0}});
     check(commands.flush(*session.world(),error)&&request.status()==SceneRequestStatus3D::Pending,"pool request executed at flush");
@@ -117,7 +117,7 @@ void pooling(Renderer2D& renderer,bool benchmark) {
             session.world()->events().begin_frame();
             SceneSpawn3D spawn{.position=Vec3f{0,5,0}};if(mode!=2)spawn.configure=[](auto& context){context.root.set(Game{});};
             const auto start=Clock::now();
-            auto instance=mode==0?session.spawn("object.kinprefab",spawn):mode==1?session.spawn(ready,spawn):session.spawn(pool,spawn);
+            auto instance=mode==0?session.spawn("object.kinprefab",spawn).value_or({}):mode==1?session.spawn(ready,spawn).value_or({}):session.spawn(pool,spawn).value_or({});
             const auto born=Clock::now();ok(bool(instance),"profile acquisition failed");
             ok(session.despawn(instance),"profile return failed");const auto done=Clock::now();
             check(session.world()->entities().all().size()==stable&&session.physics()->body_count()==baseline&&session.runtime_prefabs()==0,"repeated pool lifecycle grew entity/native counts");
@@ -133,44 +133,44 @@ void pooling(Renderer2D& renderer,bool benchmark) {
     check(assets.stats().model_loads==loads.model_loads&&assets.stats().texture_loads==loads.texture_loads&&assets.stats().material_loads==loads.material_loads,"warm lifecycle reloaded model/material/texture assets");
     // A true frozen preload/pool must remain usable without any source files.
     for(const auto* file:{"object.kinprefab","parts.glb","box.kincollider","colors.kinmaterials","pixel.png"})std::filesystem::rename(scratch.path/file,scratch.path/(std::string(file)+".away"));
-    for(int i=0;i<1000;++i){auto instance=session.spawn(pool);ok(bool(instance)&&session.despawn(instance),"pool touched missing source files");}
-    auto frozen=session.spawn(ready);ok(bool(frozen)&&session.despawn(frozen),"prepared spawn touched missing source files");
+    for(int i=0;i<1000;++i){auto instance=session.spawn(pool).value_or({});ok(bool(instance)&&session.despawn(instance),"pool touched missing source files");}
+    auto frozen=session.spawn(ready).value_or({});ok(bool(frozen)&&session.despawn(frozen),"prepared spawn touched missing source files");
     for(const auto* file:{"object.kinprefab","parts.glb","box.kincollider","colors.kinmaterials","pixel.png"})std::filesystem::rename(scratch.path/(std::string(file)+".away"),scratch.path/file);
     check(session.world()->entities().all().size()==stable&&session.pool_stats(pool).reused>=2000,"reuse stress failed");
     auto pending=session.commands().spawn(commands,pool);check(session.reload(),"pool reload failed");
-    check(pending.status()==SceneRequestStatus3D::Cancelled&&!session.spawn(pool)&&!session.spawn(ready)&&session.reserved_entities()==0,"reload retained pool/preload ownership");commands.clear();
-    ready=session.preload("object.kinprefab");pool=session.create_pool(ready,options);ok(bool(pool),"release fixture failed");
-    auto active=session.spawn(pool);std::weak_ptr<const Model3D> model=session.resolve(active.root).get<ModelRenderer3D>()->model;
+    check(pending.status()==SceneRequestStatus3D::Cancelled&&!session.spawn(pool).value_or({})&&!session.spawn(ready).value_or({})&&session.reserved_entities()==0,"reload retained pool/preload ownership");commands.clear();
+    ready=session.preload("object.kinprefab").value_or({});pool=session.create_pool(ready,options).value_or({});ok(bool(pool),"release fixture failed");
+    auto active=session.spawn(pool).value_or({});std::weak_ptr<const Model3D> model=session.resolve(active.root).get<ModelRenderer3D>()->model;
     ok(session.release(pool),"explicit pool release failed");check(!session.resolve(active.root)&&session.reserved_entities()==2&&!model.expired(),"pool release left slots or dropped prepared art");
-    pool=session.create_pool(ready,options);active=session.spawn(pool);ok(bool(active),"damaged pool fixture failed");
+    pool=session.create_pool(ready,options).value_or({});active=session.spawn(pool).value_or({});ok(bool(active),"damaged pool fixture failed");
     session.world()->entities().destroy(session.resolve(active.root));
     ok(session.release(pool),"pool could not clean remaining ownership after direct native destruction");
     ok(session.release(ready),"explicit preload release failed");check(model.expired()&&session.reserved_entities()==0&&session.physics()->body_count()==baseline,"last prepared owner pinned model/native objects");
     // Disabled retained emitters count toward memory budgets too.
     auto limited=settings();limited.particle_limits.total_particles=16;
     SceneSession3D small{r3d,assets,limited};check(small.load("level.kinscene"),"small pool level failed");
-    auto small_ready=small.preload("object.kinprefab");check(bool(small_ready)&&!small.create_pool(small_ready,{.capacity=2})&&small.reserved_entities()==2,"inactive particle budget or warm-up rollback failed");
+    auto small_ready=small.preload("object.kinprefab").value_or({});check(bool(small_ready)&&!small.create_pool(small_ready,{.capacity=2}).value_or({})&&small.reserved_entities()==2,"inactive particle budget or warm-up rollback failed");
     auto constrained=settings();constrained.physics->max_bodies=2;
     SceneSession3D full{r3d,assets,constrained};check(full.load("level.kinscene"),"full physics level failed");
-    auto full_ready=full.preload("object.kinprefab");auto full_pool=full.create_pool(full_ready,{.capacity=1});auto occupying=full.spawn(full_ready);
-    check(bool(occupying)&&!full.spawn(full_pool)&&full.pool_stats(full_pool).available==1&&full.physics()->body_count()==2,"native capacity failure damaged pool/live bodies");
-    check(full.despawn(occupying)&&bool(full.spawn(full_pool)),"pool did not recover after native capacity refusal");
+    auto full_ready=full.preload("object.kinprefab").value_or({});auto full_pool=full.create_pool(full_ready,{.capacity=1}).value_or({});auto occupying=full.spawn(full_ready).value_or({});
+    check(bool(occupying)&&!full.spawn(full_pool).value_or({})&&full.pool_stats(full_pool).available==1&&full.physics()->body_count()==2,"native capacity failure damaged pool/live bodies");
+    check(full.despawn(occupying)&&bool(full.spawn(full_pool).value_or({})),"pool did not recover after native capacity refusal");
     // Shared content-pack loader follows the same frozen preload/pool path.
     Scratch storage;
     check(write_content_pack(scratch.path,storage.path/"game.kinpak").ok,"pool pack creation failed");
     const auto mount=storage.path/"mounted";mount_content_pack(mount,ContentPack::open(storage.path/"game.kinpak"));
     {Assets3D packed_assets{r3d,mount};SceneSession3D packed{r3d,packed_assets,settings()};
-     check(packed.load("level.kinscene"),"packed pool level failed");auto p=packed.preload("object.kinprefab");auto pool=packed.create_pool(p,{.capacity=1});auto lease=packed.spawn(pool);
+     check(packed.load("level.kinscene"),"packed pool level failed");auto p=packed.preload("object.kinprefab").value_or({});auto pool=packed.create_pool(p,{.capacity=1}).value_or({});auto lease=packed.spawn(pool).value_or({});
      check(bool(lease)&&packed.despawn(lease)&&packed.release(pool)&&packed.release(p)&&packed.reserved_entities()==0,"packed pool lifecycle failed");}
     unmount_content_pack(mount);
     if(r3d.capabilities().skinning) {
         Assets3D art{r3d,KIN_TEST_SUMMIT};SceneSession3D animated{r3d,art,settings()};
         check(animated.load("scenes/projectile-range.kinscene"),"animated pool level failed");
-        auto p=animated.preload("prefabs/survivor.kinprefab");auto pool=animated.create_pool(p,{.capacity=1});auto lease=animated.spawn(pool);
+        auto p=animated.preload("prefabs/survivor.kinprefab").value_or({});auto pool=animated.create_pool(p,{.capacity=1}).value_or({});auto lease=animated.spawn(pool).value_or({});
         check(bool(lease)&&animated.step(.1f),"animated pool failed");auto actor=animated.resolve(lease.root);
         check(actor.get<Animator3D>()->player.time()>0,"pooled animation did not advance");
         actor.get_mut<Animator3D>()->params.set_float("pool-test",7.f);actor.get_mut<Animator3D>()->state="old-state";
-        check(animated.despawn(lease),"animated pool return failed");lease=animated.spawn(pool);actor=animated.resolve(lease.root);
+        check(animated.despawn(lease),"animated pool return failed");lease=animated.spawn(pool).value_or({});actor=animated.resolve(lease.root);
         check(actor&&actor.get<Animator3D>()->player.time()==0&&actor.get<Animator3D>()->state!="old-state"&&actor.get<Animator3D>()->params.get_float("pool-test")==0,"animation state leaked across leases");
     }
 }

@@ -70,20 +70,20 @@
 // and --time H set or remove them for every scene. Spot lights and local shadows (P3b): `lights.spots: [{position,
 // direction | target, color, radius, size, inner, outer, shadow, attach}]`
 // (`shadow: true` or `{enabled, resolution, bias, normal_offset, near, distance, softness}`; `attach: {offset: [right,
-// up, forward], yaw, pitch}` carries the light with each camera: a flashlight), `lights.points[].shadow` and `.size`,
-// `lights.max_shadowed_spots`, `max_shadowed_points`, `local_shadow_resolution`, `fill_shadow: {enabled, strength,
-// cascades, resolution, distance}`, `sun_shadow_strength`, `time_of_day.shadows`. `procedural: "stage"` builds a floor,
-// walls (or a closed `room`), and the scene's `stage: {pillars, poles, lamps, trees, benches}` as [[x, z], ...] ([x, z,
-// height] for lamps). --spots N / --spot-shadows M / --point-lights N / --point-shadows M put lights in front of every
-// scene's camera (the cost tables), --moon-shadow and --moon-cascades N make the fill light cast, --local-res N sets
-// their maps' side. Particles and weather (P3c): `weather: {rain, snow, dust, mist: intensity or {intensity, max, box,
-// above, fall_speed, wind_influence, flutter, size: [a, b], alpha, color, splash, splash_size, soft, soft_distance,
-// lit}, wind: {direction, speed, gust, gust_period, gust_length, turbulence, turbulence_length}, ground: y, time, seed,
-// apply}` (`apply`: the weather dims the sun and ambient light and thickens the fog) and `particles: [{name, seed,
-// simulate, position, rotation, shape, extent, cone_angle, spread, rate, max, burst, lifetime, speed, size, gravity,
-// drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance, lit, receives_shadow,
-// casts_shadow, shadow_cutoff, softness, ring, sort, fog}}]` (each system is stepped `simulate` seconds at load: the
-// pictures show that moment). --rain I, --snow I,
+// up, forward], yaw, pitch}` carries the light with each camera: a flashlight), `lights.points[].shadow_enabled` and
+// `.size`, `lights.max_shadowed_spots`, `max_shadowed_points`, `local_shadow_resolution`, `fill_shadow: {enabled,
+// strength, cascades, resolution, distance}`, `sun_shadow_strength`, `time_of_day.shadows`. `procedural: "stage"`
+// builds a floor, walls (or a closed `room`), and the scene's `stage: {pillars, poles, lamps, trees, benches}` as [[x,
+// z], ...] ([x, z, height] for lamps). --spots N / --spot-shadows M / --point-lights N / --point-shadows M put lights
+// in front of every scene's camera (the cost tables), --moon-shadow and --moon-cascades N make the fill light cast,
+// --local-res N sets their maps' side. Particles and weather (P3c): `weather: {rain, snow, dust, mist: intensity or
+// {intensity, max, box, above, fall_speed, wind_influence, flutter, size: [a, b], alpha, color, splash, splash_size,
+// soft, soft_distance, lit}, wind: {direction, speed, gust, gust_period, gust_length, turbulence, turbulence_length},
+// ground: y, time, seed, apply}` (`apply`: the weather dims the sun and ambient light and thickens the fog) and
+// `particles: [{name, seed, simulate, position, rotation, shape, extent, cone_angle, spread, rate, max, burst,
+// lifetime, speed, size, gravity, drag, wind, colors, alpha, look: {blend, facing, axis, stretch, soft, soft_distance,
+// lit, receives_shadow, casts_shadow, shadow_cutoff, softness, ring, sort, fog}}]` (each system is stepped `simulate`
+// seconds at load: the pictures show that moment). --rain I, --snow I,
 // --wind S (m/s), --no-weather,
 // --no-particles, --soft 0|1, --particles N (a system of N live particles in the middle of the scene: the cost tables).
 
@@ -449,10 +449,10 @@ struct Crowd {
     std::array<std::vector<kin::MeshInstance3D>, 3> enemies;
 
     void make(kin::Renderer3D& r3d, int count, const kin::MeshOptions3D& options) {
-        tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}), options);
-        enemy = {r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f), options),
-                 r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6), options),
-                 r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8), options)};
+        tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}), options).value_or({});
+        enemy = {r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f), options).value_or({}),
+                 r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6), options).value_or({}),
+                 r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8), options).value_or({})};
         for (int z = 0; z < 32; ++z) {
             for (int x = 0; x < 48; ++x) {
                 tiles.push_back({Mat4f::translation({x + 0.5f, -0.5f, z + 0.5f}), kin::Color::rgb(90, 96, 110)});
@@ -501,16 +501,16 @@ struct Motion {
     kin::Mesh3D floor, wall, post, rail, wire, pole, block, bar, cross_bar, ball;
 
     void make(kin::Renderer3D& r3d, const kin::MeshOptions3D& options) {
-        floor = r3d.create_mesh(kin::meshes::box({16.0f, 0.2f, 12.0f}), options);
-        wall = r3d.create_mesh(kin::meshes::box({16.0f, 4.0f, 0.2f}), options);
-        post = r3d.create_mesh(kin::meshes::box({0.035f, 1.2f, 0.035f}), options);
-        rail = r3d.create_mesh(kin::meshes::box({4.0f, 0.03f, 0.03f}), options);
-        wire = r3d.create_mesh(kin::meshes::box({6.0f, 0.012f, 0.012f}), options);
-        pole = r3d.create_mesh(kin::meshes::box({0.02f, 2.4f, 0.02f}), options);
-        block = r3d.create_mesh(kin::meshes::box({0.5f, 0.5f, 0.5f}), options);
-        bar = r3d.create_mesh(kin::meshes::box({0.9f, 0.05f, 0.05f}), options);
-        cross_bar = r3d.create_mesh(kin::meshes::box({1.0f, 0.03f, 0.03f}), options);
-        ball = r3d.create_mesh(kin::meshes::sphere(0.18f, 24, 12), options);
+        floor = r3d.create_mesh(kin::meshes::box({16.0f, 0.2f, 12.0f}), options).value_or({});
+        wall = r3d.create_mesh(kin::meshes::box({16.0f, 4.0f, 0.2f}), options).value_or({});
+        post = r3d.create_mesh(kin::meshes::box({0.035f, 1.2f, 0.035f}), options).value_or({});
+        rail = r3d.create_mesh(kin::meshes::box({4.0f, 0.03f, 0.03f}), options).value_or({});
+        wire = r3d.create_mesh(kin::meshes::box({6.0f, 0.012f, 0.012f}), options).value_or({});
+        pole = r3d.create_mesh(kin::meshes::box({0.02f, 2.4f, 0.02f}), options).value_or({});
+        block = r3d.create_mesh(kin::meshes::box({0.5f, 0.5f, 0.5f}), options).value_or({});
+        bar = r3d.create_mesh(kin::meshes::box({0.9f, 0.05f, 0.05f}), options).value_or({});
+        cross_bar = r3d.create_mesh(kin::meshes::box({1.0f, 0.03f, 0.03f}), options).value_or({});
+        ball = r3d.create_mesh(kin::meshes::sphere(0.18f, 24, 12), options).value_or({});
     }
 
     void draw(kin::Scene3D& scene, int t) const {
@@ -619,9 +619,9 @@ struct Landscape {
                 grid.indices.insert(grid.indices.end(), {a, b, c, b, d, c});
             }
         }
-        terrain = r3d.create_mesh(grid);
-        tree = r3d.create_mesh(kin::meshes::cone(3.0f, 12.0f, 10));
-        pillar = r3d.create_mesh(kin::meshes::box({8.0f, 40.0f, 8.0f}));
+        terrain = r3d.create_mesh(grid).value_or({});
+        tree = r3d.create_mesh(kin::meshes::cone(3.0f, 12.0f, 10)).value_or({});
+        pillar = r3d.create_mesh(kin::meshes::box({8.0f, 40.0f, 8.0f})).value_or({});
         // The trees: a fixed hash puts each (no random numbers to differ between runs), on the valley's floor and
         // lower slopes, not on rock or snow.
         const int count = static_cast<int>(doc.number_at("trees", 2500));
@@ -686,10 +686,11 @@ struct Hidden {
         const float wall_width = std::max(20.0f, 2.0f * half);
         extent = {wall_width * 0.6f + 2.0f, 8.0f, 3.5f + dz * static_cast<float>(nz) + 2.0f};
         floor = r3d.create_mesh(kin::meshes::box({extent.x * 2.0f + 40.0f, 0.2f, extent.z + 60.0f}),
-                                kin::MeshOptions3D{.levels = options.levels});
-        wall =
-            r3d.create_mesh(kin::meshes::box({wall_width, 8.0f, 0.4f}), kin::MeshOptions3D{.levels = options.levels});
-        torus = r3d.create_mesh(kin::meshes::torus(0.8f, 0.3f, segments, segments), options);
+                                kin::MeshOptions3D{.levels = options.levels})
+                    .value_or({});
+        wall = r3d.create_mesh(kin::meshes::box({wall_width, 8.0f, 0.4f}), kin::MeshOptions3D{.levels = options.levels})
+                   .value_or({});
+        torus = r3d.create_mesh(kin::meshes::torus(0.8f, 0.3f, segments, segments), options).value_or({});
         for (int j = 0; j < nz; ++j) {
             for (int i = 0; i < nx; ++i) {
                 const Vec3f at{-half + 0.5f * dx + dx * static_cast<float>(i), 1.1f, 3.5f + dz * static_cast<float>(j)};
@@ -790,8 +791,8 @@ struct PhysicsPile {
     void make(kin::Renderer3D& r3d, const kin::JsonValue& doc) {
         count = static_cast<int>(doc.number_at("count", 60));
         debug = doc.find("debug") == nullptr || doc.bool_at("debug");
-        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
-        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12)).value_or({});
         reset();
     }
 
@@ -906,10 +907,10 @@ struct PhysicsCharacter {
         if (const kin::JsonValue* c = doc.find("character")) {
             route = character_level::load_route(*c);
         }
-        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
-        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 32, 16)).value_or({});
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}).value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
@@ -1137,9 +1138,9 @@ struct PhysicsClimb {
         if (const kin::JsonValue* c = doc.find("character")) {
             route = climb_level::load_route(*c);
         }
-        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}).value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
@@ -1364,10 +1365,10 @@ struct PhysicsRagdoll {
     void make(kin::Renderer3D& r3d, const kin::JsonValue& doc, const fs::path& cache) {
         debug = doc.find("debug") == nullptr || doc.bool_at("debug");
         lead = static_cast<int>(doc.number_at("lead", 0));
-        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
-        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+        ball_mesh = r3d.create_mesh(kin::meshes::sphere(1.0f, 24, 12)).value_or({});
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}).value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
@@ -1628,9 +1629,9 @@ struct PhysicsRope {
     void make(kin::Renderer3D& r3d, const kin::JsonValue& doc, const fs::path& cache) {
         debug = doc.find("debug") != nullptr && doc.bool_at("debug");
         lead = static_cast<int>(doc.number_at("lead", 0));
-        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f}));
+        box_mesh = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
         std::string error;
-        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {});
+        kin::Model3D model = r3d.load_model(cache / "made" / "skinned_biped_walk.glb", {}).value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             std::fprintf(stderr, "  skinned_biped_walk.glb: %s (python3 tools/reference/make_scenes.py <cache>/made)\n",
@@ -1742,16 +1743,16 @@ struct Stage {
                 }
             }
         }
-        floor = r3d.create_mesh(kin::meshes::box({ground_w, 0.2f, ground_d}));
-        wall_back = r3d.create_mesh(kin::meshes::box({24.0f, 6.0f, 0.3f}));
-        wall_side = r3d.create_mesh(kin::meshes::box({0.3f, 6.0f, 22.0f}));
-        pillar = r3d.create_mesh(kin::meshes::box({0.6f, 4.0f, 0.6f}));
-        pole = r3d.create_mesh(kin::meshes::box({0.08f, 3.0f, 0.08f}));
-        post = r3d.create_mesh(kin::meshes::cylinder(0.06f, 1.0f, 10));
-        bulb = r3d.create_mesh(kin::meshes::sphere(0.18f, 16, 8));
-        quad = r3d.create_mesh(square(1.6f));
-        slab = r3d.create_mesh(kin::meshes::box({2.0f, 0.12f, 0.6f}));
-        block = r3d.create_mesh(kin::meshes::box({0.3f, 0.45f, 0.5f}));
+        floor = r3d.create_mesh(kin::meshes::box({ground_w, 0.2f, ground_d})).value_or({});
+        wall_back = r3d.create_mesh(kin::meshes::box({24.0f, 6.0f, 0.3f})).value_or({});
+        wall_side = r3d.create_mesh(kin::meshes::box({0.3f, 6.0f, 22.0f})).value_or({});
+        pillar = r3d.create_mesh(kin::meshes::box({0.6f, 4.0f, 0.6f})).value_or({});
+        pole = r3d.create_mesh(kin::meshes::box({0.08f, 3.0f, 0.08f})).value_or({});
+        post = r3d.create_mesh(kin::meshes::cylinder(0.06f, 1.0f, 10)).value_or({});
+        bulb = r3d.create_mesh(kin::meshes::sphere(0.18f, 16, 8)).value_or({});
+        quad = r3d.create_mesh(square(1.6f)).value_or({});
+        slab = r3d.create_mesh(kin::meshes::box({2.0f, 0.12f, 0.6f})).value_or({});
+        block = r3d.create_mesh(kin::meshes::box({0.3f, 0.45f, 0.5f})).value_or({});
         // The leaf texture: green discs in a grid on a transparent ground, a trunk in the lower middle (nearest, so the
         // holes are hard).
         constexpr int n = 64;
@@ -2090,28 +2091,19 @@ void merge_fog(kin::Fog3D& fog, const kin::JsonValue* doc, const Overrides& over
     }
 }
 
-// A light's shadow (`shadow: true`, or `{enabled, resolution, bias, normal_offset, near, distance, softness}`);
-// `resolution` overrides (--local-res).
-kin::LightShadow3D shadow_of(const kin::JsonValue* doc, int resolution) {
-    kin::LightShadow3D s;
-    if (!doc) {
-        return s;
-    }
-    if (doc->is_bool()) {
-        s.enabled = doc->as_bool();
-    } else {
-        s.enabled = doc->bool_at("enabled", true);
-        s.resolution = static_cast<kin::u32>(doc->number_at("resolution", 0));
-        s.bias = static_cast<float>(doc->number_at("bias", s.bias));
-        s.normal_offset = static_cast<float>(doc->number_at("normal_offset", s.normal_offset));
-        s.near_plane = static_cast<float>(doc->number_at("near", s.near_plane));
-        s.distance = static_cast<float>(doc->number_at("distance", 0.0));
-        s.softness = static_cast<float>(doc->number_at("softness", s.softness));
-    }
-    if (resolution > 0 && s.enabled) {
-        s.resolution = static_cast<kin::u32>(resolution);
-    }
-    return s;
+// Reference fixtures use the same local-light fields as native and ECS data.
+void configure_shadow(auto& light, const kin::JsonValue& doc, int resolution) {
+    if (doc.find("shadow"))
+        throw std::runtime_error("local-light shadow object removed; use shadow_enabled and shadow_* fields");
+    light.shadow_enabled = doc.bool_at("shadow_enabled", false);
+    light.shadow_resolution = static_cast<kin::u32>(doc.number_at("shadow_resolution", 0));
+    light.shadow_bias = static_cast<float>(doc.number_at("shadow_bias", light.shadow_bias));
+    light.shadow_normal_offset = static_cast<float>(doc.number_at("shadow_normal_offset", light.shadow_normal_offset));
+    light.shadow_near_plane = static_cast<float>(doc.number_at("shadow_near_plane", light.shadow_near_plane));
+    light.shadow_distance = static_cast<float>(doc.number_at("shadow_distance", light.shadow_distance));
+    light.shadow_softness = static_cast<float>(doc.number_at("shadow_softness", light.shadow_softness));
+    if (resolution > 0 && light.shadow_enabled)
+        light.shadow_resolution = static_cast<kin::u32>(resolution);
 }
 
 // `hours` of 0 or more replaces the scene's time of day (a camera's own, tod_sweep, or --time).
@@ -2682,7 +2674,7 @@ int main(int argc, char** argv) {
                     break;
                 }
                 std::string error;
-                kin::Model3D model = r3d.load_model(path, model_options_of(m));
+                kin::Model3D model = r3d.load_model(path, model_options_of(m)).value_or({});
                 error = kin::diagnostics3d_text(r3d.diagnostics());
                 if (!model) {
                     std::fprintf(stderr, "  %s: %s\n", path.string().c_str(), error.c_str());
@@ -2977,11 +2969,13 @@ int main(int argc, char** argv) {
         const kin::JsonValue none{};
         const kin::JsonValue& view_doc = v ? *v : none;
         const auto make_view = [&](kin::Vec2i size, kin::u32 samples) {
-            return r3d.create_view(size, {.samples = samples,
-                                          .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
-                                          .hdr = view_doc.bool_at("hdr"),
-                                          .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
-                                          .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))});
+            return r3d
+                .create_view(size, {.samples = samples,
+                                    .background = colour(view_doc.find("background"), kin::Color::rgb(0, 0, 0)),
+                                    .hdr = view_doc.bool_at("hdr"),
+                                    .exposure = static_cast<float>(view_doc.number_at("exposure", 1.0)),
+                                    .bloom = static_cast<float>(view_doc.number_at("bloom", 0.0))})
+                .value_or({});
         };
         kin::View3D view =
             make_view({width, height}, static_cast<kin::u32>(samples_override > 0 ? samples_override
@@ -2992,7 +2986,7 @@ int main(int argc, char** argv) {
         if (const kin::JsonValue* l = doc.find("lights")) {
             if (const kin::JsonValue* env = l->find("environment")) {
                 std::string error;
-                environment = r3d.load_environment(cache / env->string_at("file"));
+                environment = r3d.load_environment(cache / env->string_at("file")).value_or({});
                 error = kin::diagnostics3d_text(r3d.diagnostics());
                 if (!environment) {
                     std::fprintf(stderr, "  environment: %s\n", error.c_str());
@@ -3064,12 +3058,12 @@ int main(int argc, char** argv) {
             attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
-                    scene.add_light({.position = vec3(p.find("position")),
-                                     .color = light_color(p.find("color")),
-                                     .radius = static_cast<float>(p.number_at("radius", 1.0)),
-                                     .size = static_cast<float>(p.number_at("size", 0.01)),
-                                     .shadow = shadow_of(p.find("shadow"), over.local_res),
-                                     .id = static_cast<kin::u32>(scene.lights.points.size() + 1)});
+                    scene.add_point_light({.position = vec3(p.find("position")),
+                                           .color = light_color(p.find("color")),
+                                           .radius = static_cast<float>(p.number_at("radius", 1.0)),
+                                           .size = static_cast<float>(p.number_at("size", 0.01)),
+                                           .id = static_cast<kin::u32>(scene.lights.points.size() + 1)});
+                    configure_shadow(scene.lights.points.back(), p, over.local_res);
                     if (const kin::JsonValue* a = p.find("attach")) {
                         attached.push_back(
                             {false, scene.lights.points.size() - 1, vec3(a->find("offset")), 0.0f, 0.0f});
@@ -3090,7 +3084,7 @@ int main(int argc, char** argv) {
                     l.size = static_cast<float>(sp.number_at("size", 0.01));
                     l.inner_angle = static_cast<float>(sp.number_at("inner", 20.0));
                     l.outer_angle = static_cast<float>(sp.number_at("outer", 30.0));
-                    l.shadow = shadow_of(sp.find("shadow"), over.local_res);
+                    configure_shadow(l, sp, over.local_res);
                     l.id = static_cast<kin::u32>(scene.lights.spots.size() + 1);
                     scene.add_spot_light(l);
                     if (const kin::JsonValue* a = sp.find("attach")) {
@@ -3131,7 +3125,7 @@ int main(int argc, char** argv) {
                 l.radius = std::clamp(static_cast<float>(bounds.radius()) * 0.6f, 8.0f, 60.0f);
                 l.inner_angle = 18.0f;
                 l.outer_angle = 32.0f;
-                l.shadow.enabled = i < over.spot_shadows;
+                l.shadow_enabled = i < over.spot_shadows;
                 l.id = static_cast<kin::u32>(1000 + i);
                 scene.add_spot_light(l);
                 const float across = static_cast<float>(i) - 0.5f * static_cast<float>(over.spots - 1);
@@ -3142,9 +3136,9 @@ int main(int argc, char** argv) {
                 kin::PointLightSource3D l;
                 l.color = {3.0f, 2.8f, 2.4f};
                 l.radius = std::clamp(static_cast<float>(bounds.radius()) * 0.5f, 8.0f, 40.0f);
-                l.shadow.enabled = i < over.point_shadows;
+                l.shadow_enabled = i < over.point_shadows;
                 l.id = static_cast<kin::u32>(2000 + i);
-                scene.add_light(l);
+                scene.add_point_light(l);
                 attached.push_back({false,
                                     scene.lights.points.size() - 1,
                                     {(static_cast<float>(i) - 0.5f * static_cast<float>(over.point_lights - 1)) * 6.0f,

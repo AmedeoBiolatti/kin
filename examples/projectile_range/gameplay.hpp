@@ -27,16 +27,18 @@ struct Resources {
 // the game stores generation-scoped values, never a second owning asset cache.
 inline bool prepare(SceneSession3D& session) {
     Resources resources;
-    resources.target = session.preload("prefabs/range-target.kinprefab");
+    resources.target = session.preload("prefabs/range-target.kinprefab").value_or({});
     if (!resources.target)
         return false;
-    resources.projectile = session.preload("prefabs/range-projectile.kinprefab");
+    resources.projectile = session.preload("prefabs/range-projectile.kinprefab").value_or({});
     if (!resources.projectile)
         return false;
     resources.pool =
-        session.create_pool(resources.projectile, {.capacity = 16,
-                                                   .reset = [](auto& context) { context.root.set(Projectile{}); },
-                                                   .release = [](auto& context) { context.root.set(Projectile{}); }});
+        session
+            .create_pool(resources.projectile, {.capacity = 16,
+                                                .reset = [](auto& context) { context.root.set(Projectile{}); },
+                                                .release = [](auto& context) { context.root.set(Projectile{}); }})
+            .value_or({});
     if (!resources.pool)
         return false;
     session.world()->raw().set(resources);

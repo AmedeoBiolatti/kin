@@ -1,3 +1,4 @@
+#include "result3d_helpers.hpp"
 #include "skin_fixtures.hpp"
 
 #include <chrono>
@@ -13,7 +14,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* why) {
+void check(const auto& value, const char* why) {
     if (!value)
         throw std::runtime_error(why);
 }
@@ -60,7 +61,7 @@ void profile(Renderer3D& renderer, bool gpu) {
     Assets3D assets{renderer, source.root};
     std::string error;
     for (const auto* name : {"parts.glb", "pbr.glb", "shared-a.gltf"})
-        check(bool(assets.load_model(name)), "static glTF/GLB profile fixture rejected");
+        check(bool(assets.load_model(name).value_or({})), "static glTF/GLB profile fixture rejected");
     for (const auto joints : {skin_fixtures::GltfOptions::Joints::U8, skin_fixtures::GltfOptions::Joints::U16})
         for (const auto weights : {skin_fixtures::GltfOptions::Weights::Float, skin_fixtures::GltfOptions::Weights::U8,
                                    skin_fixtures::GltfOptions::Weights::U16}) {
@@ -69,12 +70,12 @@ void profile(Renderer3D& renderer, bool gpu) {
             options.weights = weights;
             source.write("attributes.gltf", skin_fixtures::make_gltf(options).json);
             assets.invalidate("attributes.gltf");
-            auto model = assets.load_model("attributes.gltf");
+            auto model = assets.load_model("attributes.gltf").value_or({});
             error = kin::diagnostics3d_text(assets.diagnostics());
             check(model && model->skeletons.size() == 1 && model->find_clip("bend"), "skin attribute profile rejected");
         }
     source.write("equivalent.gltf", two_skins(false));
-    auto equivalent = assets.load_model("equivalent.gltf");
+    auto equivalent = assets.load_model("equivalent.gltf").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(equivalent && equivalent->parts.size() == 2 && equivalent->skeletons.size() == 1,
           "identical skin palettes did not share a whole-model pose");
@@ -89,12 +90,12 @@ void profile(Renderer3D& renderer, bool gpu) {
     }
     const auto rejected = [&](std::string_view name, const std::string& json, std::string_view diagnostic) {
         source.write(name, json);
-        auto model = assets.load_model(name);
+        auto model = assets.load_model(name).value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(!model && error.find(diagnostic) != std::string::npos && !assets.diagnostics().empty(),
               "unsupported asset accepted or missing actionable diagnostic");
         if (gpu) {
-            const auto direct = renderer.load_model(source.root / name, {});
+            const auto direct = renderer.load_model(source.root / name, {}).value_or({});
             check(!direct && direct.parts.empty() &&
                       diagnostics3d_text(renderer.diagnostics()).find(diagnostic) != std::string::npos,
                   "direct loader retained drawable fragments of a rejected model");
@@ -102,9 +103,10 @@ void profile(Renderer3D& renderer, bool gpu) {
     };
     rejected("multi.gltf", two_skins(true), "multiple distinct skin palettes");
     ModelData3D inspected;
-    check(read_model_data(two_skins(true), source.root / "multi.gltf", inspected, &error) &&
-              inspected.skeletons.size() == 2 && !inspected.asset_diagnostics.empty(),
-          "tooling parse lost unsupported-content diagnostics");
+    check(
+        kin::test::read_value3d(kin::read_model_data(two_skins(true), source.root / "multi.gltf"), inspected, error) &&
+            inspected.skeletons.size() == 2 && !inspected.asset_diagnostics.empty(),
+        "tooling parse lost unsupported-content diagnostics");
     skin_fixtures::GltfOptions options;
     options.joint_count = 257;
     rejected("large.gltf", skin_fixtures::make_gltf(options).json, "257 joints");
@@ -128,7 +130,7 @@ void profile(Renderer3D& renderer, bool gpu) {
             "wAARCAACAAIDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAf/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/"
             "8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/EABQRAQAAAAAAAAAAAAAAAAAAAAD/2gAMAwEAAhEDEQA/AL+AD//Z");
     source.write("jpeg.gltf", jpeg);
-    auto jpeg_model = assets.load_model("jpeg.gltf");
+    auto jpeg_model = assets.load_model("jpeg.gltf").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(jpeg_model && (!gpu || bool(jpeg_model->parts[0].material.texture)), "JPEG material profile rejected");
     auto transformed = quad;
@@ -137,7 +139,7 @@ void profile(Renderer3D& renderer, bool gpu) {
     for (std::size_t at = 0; (at = transformed.find("\"index\": 0", at)) != std::string::npos; at += placement.size())
         transformed.replace(at, 10, placement);
     source.write("transformed.gltf", transformed);
-    check(bool(assets.load_model("transformed.gltf")), "shared texture placement rejected");
+    check(bool(assets.load_model("transformed.gltf").value_or({})), "shared texture placement rejected");
     auto different = quad;
     replace(different, "\"index\": 0", placement);
     rejected("uv-conflict.gltf", different, "textures place themselves differently");
@@ -146,12 +148,14 @@ void profile(Renderer3D& renderer, bool gpu) {
     rejected("uv-missing.gltf", missing, "TEXCOORD");
     // A failed lookup must be repairable without clearing a cached partial model.
     source.write("multi.gltf", skin_fixtures::make_gltf().json);
-    check(bool(assets.load_model("multi.gltf")), "repaired model remained rejected in cache");
+    check(bool(assets.load_model("multi.gltf").value_or({})), "repaired model remained rejected in cache");
     if (gpu) {
         ModelFile3D file{renderer, source.root / "multi.gltf"};
-        check(file.model().valid(), "good polling model rejected");
+        const auto initial = file.poll();
+        check(initial && *initial && file.model().valid(), "good polling model rejected");
         source.write("multi.gltf", two_skins(true));
-        check(!file.poll() && file.model().valid() && !file.diagnostics().empty(),
+        const auto reloaded = file.poll();
+        check(!reloaded && !reloaded.value && file.model().valid() && !reloaded.diagnostics.empty(),
               "unsupported model reload replaced the last good asset");
     }
 }

@@ -49,21 +49,23 @@ void BreachView::init(Renderer2D& renderer, Breach& breach, const BreachViewOpti
     if (_r3d->available() && !content_root().empty()) {
         _gun = std::make_unique<ModelFile3D>(*_r3d, content_root() / "models" / "gun.glb");
         _crate = std::make_unique<ModelFile3D>(*_r3d, content_root() / "models" / "crate.glb");
+        _gun->poll().value_or(false);
+        _crate->poll().value_or(false);
     }
-    _box = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f}));
-    _wedge = _r3d->create_mesh(meshes::wedge({1.0f, 1.0f, 1.0f}));
-    _shot = _r3d->create_mesh(meshes::sphere(0.08f, 10, 6));
-    _core = _r3d->create_mesh(meshes::octahedron(0.18f));
-    _spark = _r3d->create_mesh(meshes::box({0.05f, 0.05f, 0.05f}));
-    _barrel = _r3d->create_mesh(make_gun());
-    _flash = _r3d->create_mesh(meshes::sphere(1.0f, 10, 6));
-    _shell = _r3d->create_mesh(meshes::sphere(1.0f, 20, 12));
+    _box = _r3d->create_mesh(meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+    _wedge = _r3d->create_mesh(meshes::wedge({1.0f, 1.0f, 1.0f})).value_or({});
+    _shot = _r3d->create_mesh(meshes::sphere(0.08f, 10, 6)).value_or({});
+    _core = _r3d->create_mesh(meshes::octahedron(0.18f)).value_or({});
+    _spark = _r3d->create_mesh(meshes::box({0.05f, 0.05f, 0.05f})).value_or({});
+    _barrel = _r3d->create_mesh(make_gun()).value_or({});
+    _flash = _r3d->create_mesh(meshes::sphere(1.0f, 10, 6)).value_or({});
+    _shell = _r3d->create_mesh(meshes::sphere(1.0f, 20, 12)).value_or({});
     if (const auto spirv = breach_shader("shield.frag.spv"); !spirv.empty()) {
-        _shield = _r3d->create_material_shader(spirv);
+        _shield = _r3d->create_material_shader(spirv).value_or({});
     }
-    breach.use_enemy_meshes({_r3d->create_mesh(meshes::star_prism(5, 0.32f, 0.14f, 0.16f)),
-                             _r3d->create_mesh(meshes::cylinder(0.4f, 0.16f, 6)),
-                             _r3d->create_mesh(meshes::torus(0.26f, 0.07f, 20, 8))},
+    breach.use_enemy_meshes({_r3d->create_mesh(meshes::star_prism(5, 0.32f, 0.14f, 0.16f)).value_or({}),
+                             _r3d->create_mesh(meshes::cylinder(0.4f, 0.16f, 6)).value_or({}),
+                             _r3d->create_mesh(meshes::torus(0.26f, 0.07f, 20, 8)).value_or({})},
                             {Material3D{.color = enemy_colors[0], .emissive = 0.2f},
                              Material3D{.color = enemy_colors[1], .emissive = 0.15f},
                              Material3D{.color = enemy_colors[2], .emissive = 0.2f}});
@@ -210,7 +212,7 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
                          : Bounds3D{};
     if (_options.lights) {
         for (const Flash& f : _flashes) {
-            _scene.add_light(
+            _scene.add_point_light(
                 {.position = f.pos, .color = f.color * (f.life / f.length), .radius = f.radius, .size = f.size});
         }
     }
@@ -232,15 +234,18 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
         breach.render_state().propagate_transforms();
         breach.render_state().collect(_scene);
     }
-    auto shots = _scene.add_instances(
-        _shot, breach.shots.size(),
-        {.color = Color::rgb(255, 110, 190), .emissive = 2.5f, .unlit = true, .casts_shadow = false});
+    auto shots =
+        _scene
+            .add_instances(_shot, breach.shots.size(),
+                           {.color = Color::rgb(255, 110, 190), .emissive = 2.5f, .unlit = true, .casts_shadow = false})
+            .value_or({});
     for (std::size_t i = 0; i < breach.shots.size(); ++i) {
         shots[i] = {Mat4f::translation(breach.shots[i].pos), kin::colors::white};
     }
     const float t = breach.elapsed;
     auto cores =
-        _scene.add_instances(_core, breach.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 1.2f});
+        _scene.add_instances(_core, breach.pickups.size(), {.color = Color::rgb(120, 255, 170), .emissive = 1.2f})
+            .value_or({});
     for (std::size_t i = 0; i < breach.pickups.size(); ++i) {
         cores[i] = {Mat4f::translation(breach.pickups[i].pos + Vec3f{0.0f, 0.1f * std::sin(t * 3 + float(i)), 0.0f}) *
                         Mat4f::rotation_y(t * 90.0f + float(i) * 40.0f),
@@ -248,7 +253,8 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     }
     // Sparks and tracers add light: additive, in any order, never hiding anything.
     auto sparks =
-        _scene.add_instances(_spark, _sparks.size(), {.emissive = 2.0f, .unlit = true, .blend = Blend3D::Additive});
+        _scene.add_instances(_spark, _sparks.size(), {.emissive = 2.0f, .unlit = true, .blend = Blend3D::Additive})
+            .value_or({});
     for (std::size_t i = 0; i < _sparks.size(); ++i) {
         const float size = std::clamp(_sparks[i].life * 4.0f, 0.3f, 1.0f);
         sparks[i] = {Mat4f::translation(_sparks[i].pos) * Mat4f::scaling({size, size, size}), _sparks[i].color};
@@ -265,9 +271,12 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
         _scene.draw(_shell, Mat4f::translation(shell.pos) * Mat4f::scaling({0.62f, 0.62f, 0.62f}), material);
     }
     // Tracers: thin boxes from the muzzle to where the shot hit, thinning out.
-    auto tracers = _scene.add_instances(
-        _box, _tracers.size(),
-        {.color = Color::rgb(170, 250, 255), .emissive = 3.0f, .unlit = true, .blend = Blend3D::Additive});
+    auto tracers =
+        _scene
+            .add_instances(
+                _box, _tracers.size(),
+                {.color = Color::rgb(170, 250, 255), .emissive = 3.0f, .unlit = true, .blend = Blend3D::Additive})
+            .value_or({});
     for (std::size_t i = 0; i < _tracers.size(); ++i) {
         const Vec3f d = _tracers[i].to - _tracers[i].from;
         const float len = std::max(0.01f, length(d));
@@ -310,14 +319,15 @@ void BreachView::draw(Renderer2D& renderer, Breach& breach, Input& input, const 
                                            .background = Color::rgb(18, 26, 36),
                                            .hdr = _options.bloom,
                                            .bloom = _options.bloom ? 0.5f : 0.0f,
-                                           .bloom_threshold = 1.0f});
+                                           .bloom_threshold = 1.0f})
+                    .value_or({});
     } else if (_view.size() != pixels) {
         _r3d->resize(_view, pixels);
     }
     if (_gun)
-        _gun->poll();
+        _gun->poll().value_or(false);
     if (_crate)
-        _crate->poll();
+        _crate->poll().value_or(false);
     {
         KIN_PROFILE_SCOPE("example.breach.scene");
         fill_scene(breach, state);

@@ -1721,6 +1721,19 @@ void World3D::set_layers_collide(u8 a, u8 b, bool collide) {
     if (a >= 32 || b >= 32) {
         return;
     }
+    if (layers_collide(a, b) == collide)
+        return;
+    // Cached sleeping contacts must be reconsidered when a layer pair changes.
+    for (const auto& slot : _impl->slots) {
+        if (!slot.alive)
+            continue;
+        const auto layer = _impl->bi().GetObjectLayer(slot.id);
+        if (layer == a || layer == b) {
+            _impl->wake_touching(slot.id);
+            _impl->bi().InvalidateContactCache(slot.id);
+            _impl->bi().ActivateBody(slot.id);
+        }
+    }
     auto& table = _impl->table;
     if (collide) {
         table[a] |= layer_bit(b);
@@ -1804,7 +1817,13 @@ bool World3D::set_layer(Body3D body, u8 layer) {
     if (layer >= layers3d::Count || (layer == layers3d::Static && !is_static)) {
         return false;
     }
+    if (m.bi().GetObjectLayer(s->id) == layer)
+        return true;
+    m.wake_touching(s->id);
     m.bi().SetObjectLayer(s->id, JPH::ObjectLayer(layer));
+    m.wake_touching(s->id);
+    m.bi().InvalidateContactCache(s->id);
+    m.bi().ActivateBody(s->id);
     return true;
 }
 
@@ -2819,8 +2838,13 @@ void World3D::set_group(Body3D body, u32 group) {
     if (const auto* s = m.find(body)) {
         const u32 slot = static_cast<u32>(s - m.slots.data());
         CollisionRule rule = slot < m.rules.size() ? m.rules[slot] : CollisionRule{};
+        if (rule.group == group)
+            return;
+        m.wake_touching(s->id);
         rule.group = group;
         m.set_rule(slot, rule);
+        m.bi().InvalidateContactCache(s->id);
+        m.bi().ActivateBody(s->id);
     }
 }
 
@@ -2838,8 +2862,13 @@ void World3D::set_no_collisions(Body3D body, bool no_collisions) {
     if (const auto* s = m.find(body)) {
         const u32 slot = static_cast<u32>(s - m.slots.data());
         CollisionRule rule = slot < m.rules.size() ? m.rules[slot] : CollisionRule{};
+        if (bool(rule.flags & 2u) == no_collisions)
+            return;
+        m.wake_touching(s->id);
         rule.flags = static_cast<u8>(no_collisions ? (rule.flags | 2u) : (rule.flags & ~2u));
         m.set_rule(slot, rule);
+        m.bi().InvalidateContactCache(s->id);
+        m.bi().ActivateBody(s->id);
     }
 }
 

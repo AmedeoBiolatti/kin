@@ -341,7 +341,11 @@ WorldPhysicsState3D::WorldPhysicsState3D(flecs::world& world, World3D& physics, 
     , _character_query(world.query_builder().with<Transform3D>().inout_none().with<CharacterController3D>().inout_none().cached().build())
     , _ragdoll_query(world.query_builder<const Transform3D, const SkinnedMeshRenderer3D, const Ragdoll3D>().cached().build())
     , _rope_query(world.query_builder().with<Rope3D>().inout_none().cached().build())
-    , _debug(config.debug) {}
+    , _debug(config.debug) {
+    // This readable empty singleton exists even when collection is disabled.
+    // No contacts are collected or copied on the disabled path.
+    _ecs.set<PhysicsContacts3D>({});
+}
 
 void WorldPhysicsState3D::create_body(flecs::entity entity, Bound& out, u64 user_id) {
     const Collider3D& collider = *entity.get<Collider3D>();
@@ -490,8 +494,16 @@ void sort_by_id(std::vector<flecs::entity>& v) {
 bool WorldPhysicsState3D::bodies_stand() {
     // Asked every time: it is also what starts the query's monitors.
     const bool moved = _query.changed();
-    if (_selective_sync || _force_sync || _body_components_dirty || moved || has_refused(Made::Body)) {
+    if (_selective_sync || _force_sync || _body_components_dirty || moved) {
         return false;
+    }
+    for (const auto& refused : _refused) {
+        if (refused.what != Made::Body)
+            continue;
+        flecs::entity e{_ecs, refused.entity};
+        if (!e.is_alive() || !e.enabled() || !e.has<Transform3D>() || !e.has<Collider3D>() ||
+            body_stamp(e) != refused.stamp || (refused.spare >= 0 && spare_bodies() > refused.spare))
+            return false;
     }
     for (const Bound& b : _bound) {
         if (b.rebuild || !_physics.contains(b.body)) {
@@ -906,7 +918,11 @@ void WorldPhysicsState3D::step(f32 dt) {
     for (Bound& b : _bound) {
         b.previous_position = b.position;
         b.previous_rotation = b.rotation;
-        if (b.motion != Body3DMotion::Dynamic) {
+        if (b.motion == Body3DMotion::Static)
+            continue;
+        if (b.motion == Body3DMotion::Kinematic) {
+            b.position = _physics.position(b.body);
+            b.rotation = _physics.rotation(b.body);
             continue;
         }
         if (!_physics.is_active(b.body)) {
@@ -986,6 +1002,39 @@ i32 WorldPhysicsState3D::advance(f32 frame_seconds) {
     return steps;
 }
 
+std::optional<Mat4f> WorldPhysicsState3D::render_transform(flecs::entity entity, f32 alpha) const {
+    if (!std::isfinite(alpha) || entity.world().c_ptr() != _ecs.c_ptr())
+        return {};
+    alpha = std::clamp(alpha, 0.0f, 1.0f);
+    Mat4f relative;
+    for (u32 depth = 0; entity.is_alive() && depth < 64; ++depth, entity = entity.parent()) {
+        const auto* local = entity.get<Transform3D>();
+        if (!local)
+            break;
+        const auto b = std::ranges::lower_bound(_bound, entity.id(), {}, &Bound::entity);
+        if (b != _bound.end() && b->entity == entity.id() && b->motion != Body3DMotion::Static) {
+            // A gameplay edit since the last step is a teleport, not a render lerp.
+            const auto authoritative = world_matrix(entity);
+            const auto simulated = Mat4f::trs(b->position, b->rotation, b->scale);
+            for (u32 i = 0; i < 16; ++i)
+                if (std::abs(authoritative.m[i] - simulated.m[i]) > 1e-4f)
+                    return authoritative * relative;
+            return Mat4f::trs(lerp(b->previous_position, b->position, alpha),
+                              slerp(b->previous_rotation, b->rotation, alpha), b->scale) *
+                   relative;
+        }
+        const auto c = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
+        if (c != _characters.end() && c->entity == entity.id()) {
+            auto pose = decompose(world_matrix(entity));
+            if (length_squared(pose.position - c->position) < 1e-8f)
+                pose.position = lerp(c->previous_position, c->position, alpha);
+            return Mat4f::trs(pose.position, pose.rotation, pose.scale) * relative;
+        }
+        relative = local->matrix() * relative;
+    }
+    return {};
+}
+
 void WorldPhysicsState3D::interpolate(f32 alpha) {
     alpha = std::clamp(alpha, 0.0f, 1.0f);
     for (Bound& b : _bound) {
@@ -1047,7 +1096,14 @@ void WorldPhysicsState3D::resync_from_world() {
     ropes_from_world();
 }
 
-bool WorldPhysicsState3D::replace_bodies(std::span<const BodyEdit> edits,
+Status3D WorldPhysicsState3D::replace_bodies(std::span<const BodyEdit> edits, const std::function<void()>& commit) {
+    std::string why;
+    const bool success = replace_bodies_impl(edits, commit, &why);
+    if (success) return {};
+    return {false, {"replace_bodies: " + why}};
+}
+
+bool WorldPhysicsState3D::replace_bodies_impl(std::span<const BodyEdit> edits,
                                         const std::function<void()>& commit, std::string* error) {
     std::vector<Bound> replacements;
     replacements.reserve(edits.size());
@@ -1823,7 +1879,7 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
         if (g.data.vertices.empty()) {
             continue;
         }
-        Mesh3D mesh = renderer.create_mesh(g.data);
+        Mesh3D mesh = renderer.create_mesh(g.data).value_or({});
         if (mesh.valid()) {
             scene.draw(mesh, Mat4f{}, g.material);
             _rope_meshes.push_back(std::move(mesh));
@@ -2030,7 +2086,7 @@ Mesh3D draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const De
         data.indices.push_back(first + 1);
         data.indices.push_back(first + 2);
     }
-    Mesh3D mesh = renderer.create_mesh(data);
+    Mesh3D mesh = renderer.create_mesh(data).value_or({});
     if (mesh.valid()) {
         Material3D material;
         material.unlit = true;

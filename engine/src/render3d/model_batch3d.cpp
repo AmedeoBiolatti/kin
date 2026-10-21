@@ -14,18 +14,18 @@ bool finite(const Mat4f& m) {
 }
 } // namespace
 
-Mat4f Model3D::placement(const ModelPlacement3D& options) const {
+Result3D<Mat4f> Model3D::placement(const ModelPlacement3D& options) const {
     if (!std::isfinite(options.size) || options.size < 0)
-        throw std::invalid_argument("Model3D placement size must be finite and non-negative");
+        return {std::nullopt, {"Model3D::placement: Model3D placement size must be finite and non-negative"}};
     if (options.pivot != ModelPivot3D::Origin && options.pivot != ModelPivot3D::Center &&
         options.pivot != ModelPivot3D::BottomCenter)
-        throw std::invalid_argument("Unknown model placement pivot");
+        return {std::nullopt, {"Model3D::placement: Unknown model placement pivot"}};
     if (options.size > 0 || options.pivot != ModelPivot3D::Origin) {
         for (const auto v : {bounds.min.x, bounds.min.y, bounds.min.z, bounds.max.x, bounds.max.y, bounds.max.z})
             if (!std::isfinite(v))
-                throw std::invalid_argument("Model3D bounds must be finite");
+                return {std::nullopt, {"Model3D::placement: Model3D bounds must be finite"}};
         if (bounds.max.x < bounds.min.x || bounds.max.y < bounds.min.y || bounds.max.z < bounds.min.z)
-            throw std::invalid_argument("Model3D bounds must be ordered");
+            return {std::nullopt, {"Model3D::placement: Model3D bounds must be ordered"}};
     }
     Vec3f pivot{};
     if (options.pivot == ModelPivot3D::Center)
@@ -37,14 +37,22 @@ Mat4f Model3D::placement(const ModelPlacement3D& options) const {
         const Vec3f size = bounds.size();
         const f32 extent = std::max({size.x, size.y, size.z});
         if (!std::isfinite(extent) || extent <= 0)
-            throw std::invalid_argument("Cannot fit a model with non-finite or degenerate bounds");
+            return {std::nullopt, {"Model3D::placement: Cannot fit a model with non-finite or degenerate bounds"}};
         fit = options.size / extent;
     }
     const Mat4f result =
         Mat4f::trs(options.position, options.rotation, options.scale * fit) * Mat4f::translation(-pivot);
     if (!finite(result))
-        throw std::invalid_argument("Model3D placement must produce a finite transform");
-    return result;
+        return {std::nullopt, {"Model3D::placement: Model3D placement must produce a finite transform"}};
+    return result3d(result);
+}
+
+Result3D<ModelBatch3D> ModelBatch3D::create(const Model3D& model, std::span<const MeshInstance3D> instances,
+                                            const ModelBatchOptions3D& options) {
+    ModelBatch3D value(model, instances, options);
+    if (!value.diagnostics().empty())
+        return {std::nullopt, value.diagnostics()};
+    return result3d(std::move(value));
 }
 
 ModelBatch3D::ModelBatch3D(const Model3D& model, std::span<const MeshInstance3D> instances,
@@ -119,20 +127,25 @@ ModelBatch3D::ModelBatch3D(const Model3D& model, std::span<const MeshInstance3D>
         }
         _triangles += u64(records.size()) * part.mesh.triangle_count();
         _record_bytes += records.size() * sizeof(MeshInstance3D);
-        _parts.push_back(
-            {InstanceBatch3D(part.mesh, std::move(records), groups), options.material.value_or(part.material)});
+        _parts.push_back({InstanceBatch3D::create(part.mesh, std::move(records), groups).value_or({}),
+                          options.material.value_or(part.material)});
     }
     if (!_parts.empty())
         _instances = u32(instances.size());
 }
 
-bool Scene3D::draw_instanced(const ModelBatch3D& batch) {
+Status3D Scene3D::draw_instanced(const ModelBatch3D& batch) {
+    const bool accepted = draw_instanced_operation(batch);
+    return status3d(accepted, _errors);
+}
+
+bool Scene3D::draw_instanced_operation(const ModelBatch3D& batch) {
     if (!_errors.empty())
         return false;
     if (!batch.diagnostics().empty())
         return fail_submission(batch.diagnostics().front());
     for (const auto& part : batch.parts())
-        draw_instanced(part.instances, part.material);
+        draw_instanced_operation(part.instances, part.material);
     return _errors.empty();
 }
 

@@ -11,11 +11,11 @@ constexpr f32 infinity = std::numeric_limits<f32>::max();
 SceneQueryFilter3D filter(const LuaScene3DBindings& api, const sol::optional<sol::table>& options) {
     SceneQueryFilter3D out;
     if (options) {
-        out.mask = options->get_or("mask", all_layers3d);
-        out.sensors = options->get_or("sensors", false);
-        out.initial_overlap = options->get_or("initial_overlap", false);
+        out.mask = option(*options, "mask", all_layers3d);
+        out.sensors = option(*options, "sensors", false);
+        out.initial_overlap = option(*options, "initial_overlap", false);
         if (sol::object ignore = (*options)["ignore"]; ignore != sol::nil) {
-            out.ignore = ignore.as<SceneEntity3D>();
+            out.ignore = checked<SceneEntity3D>(ignore, "ignore");
             if (!resolve(api, out.ignore))
                 throw std::runtime_error("3D query ignore entity is stale");
         }
@@ -31,7 +31,7 @@ size_t capacity(const sol::optional<sol::table>& options) {
 Quatf orientation(const sol::optional<sol::table>& options) {
     if (options)
         if (sol::object value = (*options)["rotation"]; value != sol::nil)
-            return rotation(value.as<sol::table>());
+            return rotation(checked<sol::table>(value, "value"));
     return {};
 }
 template <class Hit> sol::table hit_table(sol::state_view lua, const SceneQueryHit3D<Hit>& hit) {
@@ -114,17 +114,17 @@ RagdollStart3D start_options(const sol::optional<sol::table>& options) {
     out.blend_seconds = number(*options, "blend_seconds", 0, 0, infinity);
     if (sol::object value = (*options)["velocity"]; value != sol::nil) {
         out.set_velocity = true;
-        out.velocity = vector(value.as<sol::table>());
+        out.velocity = vector(checked<sol::table>(value, "value"));
     }
     const auto bone = number(*options, "impulse_bone", -1, -1, 65535);
     if (std::trunc(bone) != bone)
         throw std::runtime_error("impulse_bone must be a zero-based integer");
     out.impulse_bone = static_cast<i32>(bone);
     if (sol::object value = (*options)["impulse"]; value != sol::nil)
-        out.impulse = vector(value.as<sol::table>());
+        out.impulse = vector(checked<sol::table>(value, "value"));
     if (sol::object value = (*options)["impulse_point"]; value != sol::nil) {
         out.point_given = true;
-        out.impulse_point = vector(value.as<sol::table>());
+        out.impulse_point = vector(checked<sol::table>(value, "value"));
     }
     return out;
 }
@@ -216,19 +216,19 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         fields(options, {"grab", "reach", "pull_up", "jump_off", "drop"});
         TraversalInput3D input;
         if (sol::object value = options["grab"]; value != sol::nil) {
-            const auto limbs = value.as<sol::table>();
+            const auto limbs = checked<sol::table>(value, "value");
             for (const auto& [key, held] : limbs) {
-                if (!key.is<int>() || key.as<int>() < 1 || key.as<int>() > static_cast<int>(max_grip_limbs3d) ||
-                    !held.is<bool>())
+                if (!key.is<int>() || checked<int>(key, "key") < 1 ||
+                    checked<int>(key, "key") > static_cast<int>(max_grip_limbs3d) || !held.is<bool>())
                     throw std::runtime_error("grab requires boolean limb entries indexed 1..4");
-                input.grab[static_cast<size_t>(key.as<int>() - 1)] = held.as<bool>();
+                input.grab[static_cast<size_t>(checked<int>(key, "key") - 1)] = checked<bool>(held, "held");
             }
         }
         if (sol::object value = options["reach"]; value != sol::nil)
-            input.reach = vector(value.as<sol::table>());
-        input.pull_up = options.get_or("pull_up", false);
-        input.jump_off = options.get_or("jump_off", false);
-        input.drop = options.get_or("drop", false);
+            input.reach = vector(checked<sol::table>(value, "value"));
+        input.pull_up = option(options, "pull_up", false);
+        input.jump_off = option(options, "jump_off", false);
+        input.drop = option(options, "drop", false);
         script_component_access("CharacterController3D", true);
         auto entity = resolve(*api, handle);
         if (!native_character(*api, entity))
@@ -318,7 +318,7 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         const auto start = start_options(options);
         RagdollHandOver3D out;
         out.blend_seconds = options ? number(*options, "blend_seconds", .1f, 0, infinity) : .1f;
-        out.inherit_velocity = options ? options->get_or("inherit_velocity", true) : true;
+        out.inherit_velocity = options ? option(*options, "inherit_velocity", true) : true;
         out.impulse_bone = start.impulse_bone;
         out.impulse = start.impulse;
         out.impulse_point = start.impulse_point;
@@ -368,7 +368,7 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
                 number(*options, "max_ground_distance", config.max_ground_distance, 0, infinity);
             config.allowed_penetration =
                 number(*options, "allowed_penetration", config.allowed_penetration, 0, infinity);
-            config.mask = options->get_or("mask", config.mask);
+            config.mask = option(*options, "mask", config.mask);
         }
         if (!ragdoll(*api, handle))
             return sol::nil;

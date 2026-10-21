@@ -20,19 +20,15 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* message) {
+void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
 }
 template <class F> void invalid(F f) {
-    bool caught = false;
-    try {
-        f();
-    } catch (const std::invalid_argument&) {
-        caught = true;
-    }
-    check(caught, "invalid model placement/batch accepted");
+    const auto result = f();
+    check(!result && !result.value && !result.diagnostics.empty(), "invalid model placement accepted");
 }
+
 bool near(Vec3f a, Vec3f b) {
     return length(a - b) < .0001f;
 }
@@ -44,25 +40,30 @@ void placement_and_batches() {
     model.bounds = {{1, 2, 3}, {3, 6, 5}};
     model.parts.push_back({"first", mesh, {.color = Color::rgb(255, 0, 0)}, Mat4f::translation({1, 0, 0})});
     model.parts.push_back({"second", mesh, {.color = Color::rgb(0, 255, 0)}, Mat4f::translation({0, 3, 0})});
-    const auto matrix = model.placement({.position = {7, 2, -4},
-                                         .rotation = Quatf::axis_angle({0, 1, 0}, 90),
-                                         .pivot = ModelPivot3D::BottomCenter,
-                                         .size = 8});
+    const auto matrix = model
+                            .placement({.position = {7, 2, -4},
+                                        .rotation = Quatf::axis_angle({0, 1, 0}, 90),
+                                        .pivot = ModelPivot3D::BottomCenter,
+                                        .size = 8})
+                            .value_or(Mat4f::identity());
     check(near(matrix.apply({2, 2, 4}), {7, 2, -4}), "bottom pivot does not land at position");
     check(std::abs(length(matrix.apply({2, 6, 4}) - matrix.apply({2, 2, 4})) - 8) < .0001f, "fit uses wrong extent");
-    check(near(model.placement({.pivot = ModelPivot3D::Center}).apply(model.bounds.center()), {}), "center pivot");
-    invalid([&] { model.placement({.size = -1}); });
-    invalid([&] { model.placement({.size = std::numeric_limits<f32>::infinity()}); });
-    invalid([&] { model.placement({.position = {std::numeric_limits<f32>::quiet_NaN(), 0, 0}}); });
-    invalid([&] { Model3D{}.placement({.size = 1}); });
+    check(
+        near(model.placement({.pivot = ModelPivot3D::Center}).value_or(Mat4f::identity()).apply(model.bounds.center()),
+             {}),
+        "center pivot");
+    invalid([&] { return model.placement({.size = -1}); });
+    invalid([&] { return model.placement({.size = std::numeric_limits<f32>::infinity()}); });
+    invalid([&] { return model.placement({.position = {std::numeric_limits<f32>::quiet_NaN(), 0, 0}}); });
+    invalid([&] { return Model3D{}.placement({.size = 1}); });
     auto bad = model;
     bad.bounds.min.y = std::numeric_limits<f32>::quiet_NaN();
-    invalid([&] { bad.placement({.size = 1}); });
+    invalid([&] { return bad.placement({.size = 1}); });
 
     std::array<MeshInstance3D, 3> copies{{{Mat4f::translation({16, 0, 0}), colors::white, 101},
                                           {Mat4f::translation({-.1f, 0, 0}), Color::rgb(0, 0, 255), 202},
                                           {Mat4f::translation({.1f, 0, 0}), Color::rgb(255, 0, 0), 303}}};
-    ModelBatch3D batch{model, copies};
+    auto batch = ModelBatch3D::create(model, copies).value_or({});
     check(batch.instance_count() == 3 && batch.parts().size() == 2 && batch.triangle_count() == 6,
           "whole model batch accounting");
     check(batch.record_bytes() == 6 * sizeof(MeshInstance3D), "batch CPU storage accounting");
@@ -79,7 +80,9 @@ void placement_and_batches() {
                   "hierarchical part transform lost");
         }
     }
-    ModelBatch3D replacement{model, copies, {.cell_size = 0, .material = Material3D{.color = Color::rgb(0, 0, 255)}}};
+    auto replacement =
+        ModelBatch3D::create(model, copies, {.cell_size = 0, .material = Material3D{.color = Color::rgb(0, 0, 255)}})
+            .value_or({});
     check(replacement.parts()[0].material.color == Color::rgb(0, 0, 255) &&
               replacement.parts()[1].material.color == Color::rgb(0, 0, 255),
           "material replacement not applied to all parts");
@@ -88,20 +91,20 @@ void placement_and_batches() {
     batch = {}; // Scene must retain the data, not borrow the source object's storage.
     check(scene.draws().size() == 2, "scene did not retain full model");
     {
-        ModelBatch3D b{model, copies, {.cell_size = -1}};
-        check(!b && !b.diagnostics().empty(), "bad cell size accepted");
+        auto b = ModelBatch3D::create(model, copies, {.cell_size = -1});
+        check(!b && !b.diagnostics.empty(), "bad cell size accepted");
     }
     bad = model;
     bad.parts[1].skin = 0;
     {
-        ModelBatch3D b{bad, copies};
-        check(!b && !b.diagnostics().empty(), "skinned batch accepted");
+        auto b = ModelBatch3D::create(bad, copies);
+        check(!b && !b.diagnostics.empty(), "skinned batch accepted");
     }
     auto bad_copies = copies;
     bad_copies[1].transform.m[3] = std::numeric_limits<f32>::quiet_NaN();
     {
-        ModelBatch3D b{model, bad_copies};
-        check(!b && !b.diagnostics().empty(), "nonfinite batch accepted");
+        auto b = ModelBatch3D::create(model, bad_copies);
+        check(!b && !b.diagnostics.empty(), "nonfinite batch accepted");
     }
 }
 
@@ -150,13 +153,13 @@ void embedded_and_outside_images(Renderer3D& r3d) {
     write_model("embedded.gltf",
                 "data:image/png;base64," + skin_fixtures::base64(std::vector<std::uint8_t>(png.begin(), png.end())));
     std::string error;
-    const Model3D embedded = r3d.load_model(scratch.path / "embedded.gltf");
+    const Model3D embedded = r3d.load_model(scratch.path / "embedded.gltf").value_or({});
     error = kin::diagnostics3d_text(r3d.diagnostics());
     check(embedded && embedded.parts[0].material.texture && embedded.parts[0].material.normal &&
               embedded.asset_diagnostics.empty(),
           "data: URI image not decoded");
     Assets3D library{r3d, scratch.path};
-    const auto shared = library.load_model("embedded.gltf");
+    const auto shared = library.load_model("embedded.gltf").value_or({});
     error = kin::diagnostics3d_text(library.diagnostics());
     check(shared && shared->parts[0].material.texture, "data: URI image not decoded through the library");
 
@@ -182,7 +185,7 @@ void embedded_and_outside_images(Renderer3D& r3d) {
     check(!find_content_root({}, 2, root_argv).empty(), "test content root not found");
     // Whether the model's image was read; when it was not, it is not listed as a dependency and a diagnostic says so.
     const auto texture_of = [&](const std::filesystem::path& file) {
-        const Model3D model = r3d.load_model(scratch.path / file);
+        const Model3D model = r3d.load_model(scratch.path / file).value_or({});
         error = kin::diagnostics3d_text(r3d.diagnostics());
         if (!model) {
             check(!r3d.diagnostics().empty(), "missing model diagnostic");
@@ -196,7 +199,7 @@ void embedded_and_outside_images(Renderer3D& r3d) {
         return read;
     };
     Assets3D rooted{r3d, scratch.path / "content"};
-    const auto escapes_shared = rooted.load_model("models/escapes.gltf");
+    const auto escapes_shared = rooted.load_model("models/escapes.gltf").value_or({});
     error = kin::diagnostics3d_text(rooted.diagnostics());
     const bool textured = texture_of("content/models/textured.gltf"),
                packed_textured = texture_of("virtual/models/textured.gltf");
@@ -262,7 +265,7 @@ void node_pose(Renderer2D& renderer, Renderer3D& r3d) {
     Scratch scratch;
     std::ofstream{scratch.path / "arm.gltf", std::ios::binary} << json;
     std::string error;
-    const Model3D model = r3d.load_model(scratch.path / "arm.gltf");
+    const Model3D model = r3d.load_model(scratch.path / "arm.gltf").value_or({});
     error = kin::diagnostics3d_text(r3d.diagnostics());
     check(model && model.parts.size() == 2 && model.node_skeleton == 0 && model.skeletons.size() == 1,
           "node-animated model not loaded");
@@ -274,7 +277,7 @@ void node_pose(Renderer2D& renderer, Renderer3D& r3d) {
     Pose3D pose;
     Scene3D scene;
     scene.camera = Camera3D::look_at({0, .5f, 5}, {0, .5f, 0}, 60);
-    auto view = r3d.create_view({160, 120}, {.samples = 1});
+    auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
     scene.draw(model, Mat4f{});
     const auto still = image(renderer, r3d, view, scene);
     sample_clip(*clip, skeleton, 0, false, pose);
@@ -316,14 +319,14 @@ void gpu_assets(Renderer2D& renderer) {
     const std::filesystem::path fixtures{KIN_TEST_MODELS};
     Assets3D assets{r3d, fixtures};
     std::string error = "stale";
-    auto a = assets.load_model("shared-a.gltf");
+    auto a = assets.load_model("shared-a.gltf").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(a && error.empty(), "shared model A failed");
-    auto alias = assets.load_model("./shared-a.gltf");
+    auto alias = assets.load_model("./shared-a.gltf").value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
     check(a.shared() == alias.shared() && assets.stats().model_hits == 1, "path alias not reused");
-    auto b = assets.load_model("shared-b.gltf");
-    auto filtered = assets.load_model("shared-filtered.gltf");
+    auto b = assets.load_model("shared-b.gltf").value_or({});
+    auto filtered = assets.load_model("shared-filtered.gltf").value_or({});
     check(b && filtered, "shared model B/filter failed");
     const auto& mat = a->parts[0].material;
     check(mat.texture && mat.normal && mat.texture == b->parts[0].material.texture,
@@ -333,16 +336,16 @@ void gpu_assets(Renderer2D& renderer) {
     check(mat.texture != filtered->parts[0].material.texture, "different filtering modes aliased");
     check(assets.stats().texture_loads == 3, "unnecessary dependent texture uploads");
 
-    auto parts = assets.load_model("parts.glb");
-    auto changed_options = assets.load_model("parts.glb", {.levels = 2});
-    auto other_embedded = assets.load_model("pbr.glb");
+    auto parts = assets.load_model("parts.glb").value_or({});
+    auto changed_options = assets.load_model("parts.glb", {.levels = 2}).value_or({});
+    auto other_embedded = assets.load_model("pbr.glb").value_or({});
     check(parts && changed_options && other_embedded && parts.shared() != changed_options.shared(),
           "mesh options missing from model key");
     const auto texture = parts->parts[1].material.texture;
     check(texture == changed_options->parts[1].material.texture, "same embedded image duplicated across mesh options");
     check(texture != other_embedded->parts[0].material.texture, "embedded image identities collided across files");
     Assets3D separate{r3d, fixtures};
-    auto independent = separate.load_model("parts.glb");
+    auto independent = separate.load_model("parts.glb").value_or({});
     check(independent && independent->parts[1].material.texture != texture,
           "separate library unexpectedly shared resources");
 
@@ -352,10 +355,10 @@ void gpu_assets(Renderer2D& renderer) {
     scene.camera = Camera3D::look_at({0, 2, 12}, {0, 1, 0}, 60);
     for (const auto& copy : copies)
         scene.draw(*parts, copy.transform, copy.tint, copy.id);
-    auto view = r3d.create_view({160, 120}, {.samples = 1});
+    auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
     const auto reference = image(renderer, r3d, view, scene);
     scene.clear();
-    scene.draw_instanced(ModelBatch3D{*parts, copies});
+    scene.draw_instanced(ModelBatch3D::create(*parts, copies).value_or({}));
     const auto batched = image(renderer, r3d, view, scene);
     check(reference.size() == batched.size(), "image size mismatch");
     int colored = 0;
@@ -367,24 +370,24 @@ void gpu_assets(Renderer2D& renderer) {
     check(colored > 1000 && r3d.stats().instances == 6, "blank or incomplete batch parity check");
 
     Assets3D limited{r3d, fixtures, {.models = 1, .textures = 1}};
-    auto first = limited.load_model("parts.glb");
-    auto second = limited.load_model("shared-a.gltf");
+    auto first = limited.load_model("parts.glb").value_or({});
+    auto second = limited.load_model("shared-a.gltf").value_or({});
     check(first && second && limited.stats().model_entries == 1 && limited.stats().texture_entries <= 1,
           "cache metadata limits exceeded");
-    auto again = limited.load_model("parts.glb");
+    auto again = limited.load_model("parts.glb").value_or({});
     check(again && again.shared() != first.shared() && first->parts.size() == 3,
           "lookup eviction damaged live handles");
     limited.clear();
     check(first && second && limited.stats().model_entries == 0 && limited.stats().texture_entries == 0,
           "clear invalidated consumers");
     Assets3D no_cache{r3d, fixtures, {.models = 0, .textures = 0}};
-    auto uncached = no_cache.load_model("parts.glb");
+    auto uncached = no_cache.load_model("parts.glb").value_or({});
     check(uncached && no_cache.stats().model_entries == 0 && no_cache.stats().texture_entries == 0,
           "disabled lookup cache retained metadata");
     Assets3D lifetime{r3d, fixtures};
     std::weak_ptr<const Model3D> weak;
     {
-        auto temporary = lifetime.load_model("parts.glb");
+        auto temporary = lifetime.load_model("parts.glb").value_or({});
         weak = temporary.shared();
     }
     lifetime.trim();
@@ -393,16 +396,16 @@ void gpu_assets(Renderer2D& renderer) {
 
     Scratch scratch;
     Assets3D retry{r3d, scratch.path};
-    check(!retry.load_model("late.glb") && !kin::diagnostics3d_text(retry.diagnostics()).empty(),
+    check(!retry.load_model("late.glb").value_or({}) && !kin::diagnostics3d_text(retry.diagnostics()).empty(),
           "missing asset not diagnosed");
     std::filesystem::copy_file(fixtures / "parts.glb", scratch.path / "late.glb");
-    auto repaired = retry.load_model("late.glb");
+    auto repaired = retry.load_model("late.glb").value_or({});
     error = kin::diagnostics3d_text(retry.diagnostics());
     check(repaired && error.empty(), "failed load was cached or error stayed stale");
     // Existing consumers keep their old version after explicit invalidation.
     auto before_clear = repaired.shared();
     retry.clear();
-    auto after_clear = retry.load_model("late.glb");
+    auto after_clear = retry.load_model("late.glb").value_or({});
     check(after_clear && after_clear.shared() != before_clear && before_clear->valid(),
           "explicit invalidation broke handle lifetime");
     const auto packed = write_content_pack(fixtures, scratch.path / "models.kinpak");
@@ -412,13 +415,14 @@ void gpu_assets(Renderer2D& renderer) {
     const auto mount = scratch.path / "virtual";
     mount_content_pack(mount, pack);
     Assets3D packed_assets{r3d, mount};
-    auto pa = packed_assets.load_model("shared-a.gltf");
-    auto pb = packed_assets.load_model("shared-b.gltf");
+    auto pa = packed_assets.load_model("shared-a.gltf").value_or({});
+    auto pb = packed_assets.load_model("shared-b.gltf").value_or({});
     ModelFile3D packed_file{r3d, mount / "shared-a.gltf"};
-    check(packed_file.model().valid() && !packed_file.poll() && packed_file.diagnostics().empty(),
+    check(packed_file.poll().value_or(false), "initial packed model load failed");
+    check(packed_file.model().valid() && !packed_file.poll().value_or(false) && packed_file.diagnostics().empty(),
           "polling immutable packed content reported a filesystem error");
     unmount_content_pack(mount);
-    check(!packed_file.poll() && !packed_file.diagnostics().empty() && packed_file.model().valid(),
+    check(!packed_file.poll().value_or(false) && !packed_file.diagnostics().empty() && packed_file.model().valid(),
           "missing model poll did not retain the last good model and diagnose failure");
     check(pa && pb && pa->parts[0].material.texture == pb->parts[0].material.texture,
           "pack dependencies not loaded/shared");

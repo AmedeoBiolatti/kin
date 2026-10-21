@@ -264,8 +264,8 @@ void validate(const ParticleEmitter3D& e) {
 }
 } // namespace
 
-std::vector<std::string> validate_particles3d(EcsWorld& world, ParticleLimits3D limits,
-                                              std::span<const EcsId> selected) {
+static std::vector<std::string> validate_particles3d_impl(EcsWorld& world, ParticleLimits3D limits,
+                                                          std::span<const EcsId> selected) {
     std::vector<std::string> errors;
     u64 capacity = 0;
     size_t count = 0;
@@ -298,10 +298,16 @@ std::vector<std::string> validate_particles3d(EcsWorld& world, ParticleLimits3D 
         errors.push_back("particle scene exceeds total configured particle capacity");
     return errors;
 }
+Status3D validate_particles3d(EcsWorld& world, ParticleLimits3D limits, std::span<const EcsId> selected) {
+    auto diagnostics = validate_particles3d_impl(world, limits, selected);
+    const bool accepted = diagnostics.empty();
+    return status3d(accepted, std::move(diagnostics));
+}
 
-std::vector<std::string> resolve_particles3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D limits,
-                                                    std::span<const EcsId> selected) {
-    auto errors = validate_particles3d(world, limits, selected);
+static std::vector<std::string> resolve_particles3d_assets_impl(EcsWorld& world, Assets3D& assets,
+                                                                ParticleLimits3D limits,
+                                                                std::span<const EcsId> selected) {
+    auto errors = validate_particles3d(world, limits, selected).diagnostics;
     if (!errors.empty())
         return errors;
     std::vector<EcsEntity> entities;
@@ -319,7 +325,8 @@ std::vector<std::string> resolve_particles3d_assets(EcsWorld& world, Assets3D& a
         if (!path.empty()) {
             std::string error;
             try {
-                texture = assets.load_texture(path, entity.get<ParticleEmitter3D>()->texture_nearest, true);
+                texture =
+                    assets.load_texture(path, entity.get<ParticleEmitter3D>()->texture_nearest, true).value_or({});
                 error = kin::diagnostics3d_text(assets.diagnostics());
             } catch (const std::exception& failure) {
                 error = failure.what();
@@ -335,5 +342,11 @@ std::vector<std::string> resolve_particles3d_assets(EcsWorld& world, Assets3D& a
         e->bound_texture = path;
     }
     return errors;
+}
+Status3D resolve_particles3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D limits,
+                                    std::span<const EcsId> selected) {
+    auto diagnostics = resolve_particles3d_assets_impl(world, assets, limits, selected);
+    const bool accepted = diagnostics.empty();
+    return status3d(accepted, std::move(diagnostics));
 }
 } // namespace kin

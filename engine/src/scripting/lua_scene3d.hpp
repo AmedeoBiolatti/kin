@@ -17,6 +17,7 @@ struct LuaScene3DBindings {
     std::function<bool()> active;
     std::function<std::optional<ScenePrefabPoolStats3D>(ScenePrefabPool3D)> pool_stats;
     std::function<SceneEntity3D(std::string_view)> entity;
+    std::function<SceneEntity3D(EcsEntity)> handle;
 };
 void bind_lua_scene3d(sol::state&, LuaScene3DBindings);
 } // namespace kin::scripting_detail

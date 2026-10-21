@@ -347,14 +347,12 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     // Spot lights and local shadows (P3b), none unless asked for.
     {
         const unsigned local_res = local_resolutions[std::clamp(s.spot_shadow_resolution, 0, 3)];
-        const auto shadow_of = [&](bool wanted) {
-            LightShadow3D sh;
-            sh.enabled = wanted;
-            sh.resolution = local_res;
-            sh.bias = s.spot_bias;
-            sh.normal_offset = s.spot_normal_offset;
-            sh.softness = s.spot_softness;
-            return sh;
+        const auto configure_shadow = [&](auto& light, bool wanted) {
+            light.shadow_enabled = wanted;
+            light.shadow_resolution = local_res;
+            light.shadow_bias = s.spot_bias;
+            light.shadow_normal_offset = s.spot_normal_offset;
+            light.shadow_softness = s.spot_softness;
         };
         l.spots = s.spots;
         if (s.flashlight) {
@@ -367,7 +365,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
             torch.size = 0.04f;
             torch.inner_angle = s.flash_inner;
             torch.outer_angle = std::max(s.flash_outer, s.flash_inner + 0.5f);
-            torch.shadow = shadow_of(s.flash_shadow);
+            configure_shadow(torch, s.flash_shadow);
             torch.id = 0x7F000001u;
             l.spots.push_back(torch);
         }
@@ -383,7 +381,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
             lamp.size = 0.15f;
             lamp.inner_angle = s.spot_inner;
             lamp.outer_angle = std::max(s.spot_outer, s.spot_inner + 0.5f);
-            lamp.shadow = shadow_of(s.spot_shadows);
+            configure_shadow(lamp, s.spot_shadows);
             lamp.id = 0x7E000000u + static_cast<unsigned>(i);
             l.spots.push_back(lamp);
         }
@@ -395,7 +393,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
             lamp.color = kin::LinearRgb{0.9f, 0.95f, 1.0f} * (s.spot_ring_intensity * 0.5f);
             lamp.radius = s.spot_radius;
             lamp.size = 0.2f;
-            lamp.shadow = shadow_of(s.point_shadows);
+            configure_shadow(lamp, s.point_shadows);
             lamp.id = 0x7D000000u + static_cast<unsigned>(i);
             l.points.push_back(lamp);
         }

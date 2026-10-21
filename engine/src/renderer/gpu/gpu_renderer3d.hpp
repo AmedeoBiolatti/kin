@@ -194,12 +194,22 @@ private:
     u32 _taa_read = 0;       // which of the two holds the last frame
     u32 _taa_frame = 0;      // frames drawn with it, for the jitter
     bool _taa_valid = false; // the history holds a picture to blend
-    u64 _taa_effect_key = 0;
+    u64 _taa_coverage_key = 0;
+    u64 _taa_shadow_revision = 0;
     bool _taa_reactive = false;        // the last motion buffer includes transient coverage
     bool _taa_reset_asked = false;     // View3D::reset_history()
     bool _taa_ortho = false;           // the camera's kind when it was made
     std::array<Mat4f, 2> _taa_prior{}; // the scene's and the overlay's view-projections last frame (no jitter)
     GpuCopyHistory _taa_last, _taa_now;
+    struct ParticleHistory {
+        u64 source = 0, id = 0, look = 0;
+        ParticleQuad3D quad;
+        Vec3f centre;
+        LinearRgb colour;
+        f32 alpha = 0, frame = 0;
+    };
+    std::vector<ParticleHistory> _taa_particles;
+    std::vector<u64> _taa_mesh_effects;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
     // With Lod3D::occlusion (made by the first render that asks): the depth pyramid (level 0 a quarter of the view's
     // size, each next half of the one before; `_hiz_levels` of them), the depth it is built from when no pre-pass makes
@@ -396,6 +406,17 @@ private:
     void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false);
     bool reactive_pass(FrameCtx& ctx);
     SDL_GPUGraphicsPipeline* particle_cast_pipeline() const;
+    struct ParticleCastView {
+        Mat4f matrix;
+        struct Range {
+            u32 batch, first, count;
+        };
+        std::vector<Range> ranges;
+        u64 key = 0;
+        bool unstable = false;
+    };
+    const ParticleCastView& particle_cast_view(FrameCtx&, const Mat4f&);
+    std::vector<ParticleCastView> _particle_cast_views;
     bool draw_particle_shadows(FrameCtx& ctx, SDL_GPURenderPass* pass, const Mat4f& light_view, bool local,
                                u32 cascade = 0);
     void resume_2d();
@@ -457,6 +478,7 @@ private:
     GpuShader _particle_vertex_shader; // particle.vert
     GpuShader _particle_shader;        // particle.frag
     GpuShader _particle_soft_shader;   // particle_soft.frag
+    GpuShader _particle_temporal_vertex;
     GpuShader _reactive_shader, _particle_reactive_shader, _particle_soft_reactive_shader;
     GpuShader _particle_light_vertex, _particle_light_shader, _particle_soft_light_shader;
     GpuShader _particle_reactive_light_shader, _particle_soft_reactive_light_shader;
@@ -476,6 +498,9 @@ private:
         u32 count = 0;
         f32 depth = 0.0f;  // the batch's mean depth along the camera's forward (batches are drawn far to near)
         bool soft = false; // reads the depth
+        u64 source = 0;
+        u64 look_key = 0;
+        bool unstable = false;
     };
     std::vector<ParticleBatch> _particle_batches;
     struct ParticleCastBatch {
@@ -487,7 +512,9 @@ private:
     std::vector<ParticleCastBatch> _particle_cast_batches;
     std::vector<ParticleSprite3D> _particle_cast_sprites;
     std::shared_ptr<GpuBuffer> _particle_cast_buffer;
-    u32 _particle_cast_idle = 0;
+    std::shared_ptr<GpuBuffer> _particle_previous;
+    std::vector<GpuView3D::ParticleHistory> _particle_history_now;
+    u32 _particle_cast_idle = 0, _particle_taa_idle = 0;
     std::vector<ParticleSprite3D> _weather_sprites; // the weather's, made each render
     std::vector<WeatherBatch3D> _weather_batches;
     std::vector<f32> _weather_key, _weather_key_now; // what _weather_sprites were made from (and this render's)
@@ -576,6 +603,7 @@ private:
         bool eligible = false; // this render's pass can be cached on
         u32 backoff = 0;       // renders to wait before copying again after a snapshot that did not hold
     } _shadow_cache;
+    u64 _shadow_revision = 0;
     u64 _shadow_generation = 0; // changes whenever _shadow_map is made again
     u64 _next_mesh_serial = 1;
     bool shadow_unchanged(FrameCtx& ctx);
@@ -610,7 +638,7 @@ private:
     // bytes are the same does not draw it again.
     struct LocalCache {
         std::vector<u8> payload;
-        u64 generation = 0;
+        u64 revision = 0;
         bool valid = false;
     };
     std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades> _local_cache;

@@ -225,8 +225,8 @@ void apply_layer(std::vector<MaterialPatch3D>& patches, const MaterialVariant3D&
 }
 } // namespace
 
-MaterialsLoadResult3D parse_materials3d_asset(std::string_view text, const std::filesystem::path& source) {
-    MaterialsLoadResult3D result;
+Result3D<MaterialsAsset3D> parse_materials3d_asset(std::string_view text, const std::filesystem::path& source) {
+    Result3D<MaterialsAsset3D> result;
     try {
         require(text.size() <= 1024 * 1024, "material source exceeds 1 MiB");
         const auto parsed = parse_json(text);
@@ -245,13 +245,13 @@ MaterialsLoadResult3D parse_materials3d_asset(std::string_view text, const std::
                 asset.variants.emplace(name, layer(value, false));
             }
         }
-        result.asset = std::move(asset);
+        result.value = std::move(asset);
     } catch (const std::exception& error) {
         result.diagnostics.push_back(source.string() + ": " + error.what());
     }
     return result;
 }
-MaterialsLoadResult3D load_materials3d_asset(const std::filesystem::path& source) {
+Result3D<MaterialsAsset3D> load_materials3d_asset(const std::filesystem::path& source) {
     const auto bytes = content_file_size(source);
     if (!bytes || *bytes > 1024 * 1024)
         return {{}, {source.string() + ": source missing or exceeds 1 MiB"}};
@@ -284,7 +284,7 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         auto [entry, added] = textures.try_emplace(std::tuple{path, reference.nearest, srgb});
         if (added) {
             std::string error;
-            entry->second = assets.load_texture(path, reference.nearest, srgb);
+            entry->second = assets.load_texture(path, reference.nearest, srgb).value_or({});
             error = kin::diagnostics3d_text(assets.diagnostics());
             require(bool(entry->second), "texture '" + path.string() + "': " + error);
             result.source_files.push_back(path);
@@ -297,7 +297,7 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         auto [entry, added] = shaders.try_emplace(path);
         if (added) {
             std::string error;
-            entry->second = assets.load_material_shader(path);
+            entry->second = assets.load_material_shader(path).value_or({});
             error = kin::diagnostics3d_text(assets.diagnostics());
             require(bool(entry->second), error);
             result.source_files.push_back(path);

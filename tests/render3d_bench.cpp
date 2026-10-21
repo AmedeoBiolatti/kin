@@ -52,7 +52,7 @@ struct Field {
                 copies[g * per + i] = {Mat4f::translation({x, rng.unit() * 5.0f, z}), colors::white, g * per + i + 1};
             }
         }
-        batch = InstanceBatch3D(mesh, std::move(copies), std::move(groups));
+        batch = InstanceBatch3D::create(mesh, std::move(copies), std::move(groups)).value_or({});
     }
 };
 

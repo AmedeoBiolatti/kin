@@ -65,34 +65,34 @@ void register_render3d_components(EcsWorld& world) {
             .units("m")
             .field("enabled", &T::enabled);
         b.template property<bool>(
-            "shadows", [](const T& v) { return v.shadow.enabled; },
+            "shadow_enabled", [](const T& v) { return v.shadow_enabled; },
             [](T& v, const bool& value) {
-                v.shadow.enabled = value;
+                v.shadow_enabled = value;
                 return true;
             });
         b.template property<u32>(
-            "shadow_resolution", [](const T& v) { return v.shadow.resolution; },
+            "shadow_resolution", [](const T& v) { return v.shadow_resolution; },
             [](T& v, const u32& value) {
                 if (value && (value < 64 || value > 8192))
                     return false;
-                v.shadow.resolution = value;
+                v.shadow_resolution = value;
                 return true;
             });
-        const auto scalar = [&](const char* field, f32 LightShadow3D::*member, bool positive = false) {
+        const auto scalar = [&](const char* field, f32 T::*member, bool positive = false) {
             b.template property<f32>(
-                field, [member](const T& v) { return v.shadow.*member; },
+                field, [member](const T& v) { return v.*member; },
                 [member, positive](T& v, const f32& value) {
                     if (!std::isfinite(value) || value < 0 || (positive && value == 0))
                         return false;
-                    v.shadow.*member = value;
+                    v.*member = value;
                     return true;
                 });
         };
-        scalar("shadow_bias", &LightShadow3D::bias);
-        scalar("shadow_normal_offset", &LightShadow3D::normal_offset);
-        scalar("shadow_near", &LightShadow3D::near_plane, true);
-        scalar("shadow_distance", &LightShadow3D::distance);
-        scalar("shadow_softness", &LightShadow3D::softness);
+        scalar("shadow_bias", &T::shadow_bias);
+        scalar("shadow_normal_offset", &T::shadow_normal_offset);
+        scalar("shadow_near_plane", &T::shadow_near_plane, true);
+        scalar("shadow_distance", &T::shadow_distance);
+        scalar("shadow_softness", &T::shadow_softness);
         if constexpr (std::is_same_v<T, SpotLight3D>) {
             b.field("inner_angle", &T::inner_angle)
                 .units("degrees")
@@ -191,8 +191,9 @@ void register_physics3d_components(EcsWorld& world) {
                 });
 }
 
-std::vector<std::string> resolve_render3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D particles,
-                                                 std::span<const EcsId> selected) {
+static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, Assets3D& assets,
+                                                             ParticleLimits3D particles,
+                                                             std::span<const EcsId> selected) {
     std::vector<std::string> diagnostics;
     // Gather before structural copy-on-write changes, so inherited prefab data
     // is never mutated while iterating a query or shared with another instance.
@@ -211,7 +212,7 @@ std::vector<std::string> resolve_render3d_assets(EcsWorld& world, Assets3D& asse
                 continue;
             const std::string path = original->asset.id;
             std::string error;
-            auto model = assets.load_model(path).shared();
+            auto model = assets.load_model(path).value_or({}).shared();
             error = diagnostics3d_text(assets.diagnostics());
             if (model) {
                 const bool has_skin = std::any_of(model->parts.begin(), model->parts.end(), [](const auto& part) {
@@ -261,17 +262,23 @@ std::vector<std::string> resolve_render3d_assets(EcsWorld& world, Assets3D& asse
     };
     bind.operator()<ModelRenderer3D>(false);
     bind.operator()<SkinnedMeshRenderer3D>(true);
-    auto material_errors = resolve_materials3d_assets(world, assets, selected);
+    auto material_errors = resolve_materials3d_assets(world, assets, selected).diagnostics;
     diagnostics.insert(diagnostics.end(), material_errors.begin(), material_errors.end());
-    auto animation_errors = resolve_animator3d_assets(world, assets.root(), selected);
+    auto animation_errors = resolve_animator3d_assets(world, assets.root(), selected).diagnostics;
     diagnostics.insert(diagnostics.end(), animation_errors.begin(), animation_errors.end());
-    auto effects = resolve_particles3d_assets(world, assets, particles, selected);
+    auto effects = resolve_particles3d_assets(world, assets, particles, selected).diagnostics;
     diagnostics.insert(diagnostics.end(), effects.begin(), effects.end());
     return diagnostics;
 }
+Status3D resolve_render3d_assets(EcsWorld& world, Assets3D& assets, ParticleLimits3D particles,
+                                 std::span<const EcsId> selected) {
+    auto diagnostics = resolve_render3d_assets_impl(world, assets, particles, selected);
+    const bool accepted = diagnostics.empty();
+    return status3d(accepted, std::move(diagnostics));
+}
 
-std::vector<std::string> resolve_materials3d_assets(EcsWorld& world, Assets3D& assets,
-                                                    std::span<const EcsId> selected) {
+static std::vector<std::string> resolve_materials3d_assets_impl(EcsWorld& world, Assets3D& assets,
+                                                                std::span<const EcsId> selected) {
     std::vector<std::string> diagnostics;
     std::vector<EcsEntity> entities;
     if (selected.empty())
@@ -297,6 +304,7 @@ std::vector<std::string> resolve_materials3d_assets(EcsWorld& world, Assets3D& a
         else {
             binding =
                 assets.load_materials(reference.asset.id, statics ? statics->model : skinned->model, reference.variant)
+                    .value_or({})
                     .shared();
             error = diagnostics3d_text(assets.diagnostics());
         }
@@ -307,6 +315,11 @@ std::vector<std::string> resolve_materials3d_assets(EcsWorld& world, Assets3D& a
             entity.get_mut<ModelMaterials3D>()->binding = std::move(binding);
     }
     return diagnostics;
+}
+Status3D resolve_materials3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> selected) {
+    auto diagnostics = resolve_materials3d_assets_impl(world, assets, selected);
+    const bool accepted = diagnostics.empty();
+    return status3d(accepted, std::move(diagnostics));
 }
 
 } // namespace kin

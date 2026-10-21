@@ -46,7 +46,7 @@ class Preview final : public Scene {
             if (!size || *size > 32u * 1024u * 1024u)
                 throw std::runtime_error("model missing or exceeds the preview's 32 MiB source limit");
             _assets->clear(); // old handles remain live until the candidate is valid
-            auto candidate = _assets->load_model(_options.model);
+            auto candidate = _assets->load_model(_options.model).value_or({});
             if (!candidate)
                 throw std::runtime_error(diagnostics3d_text(_assets->diagnostics()));
             if (candidate->parts.size() > 256 || candidate->skeletons.size() > 16)
@@ -70,7 +70,7 @@ class Preview final : public Scene {
             }
             std::shared_ptr<const MaterialBinding3D> binding;
             if (!sidecar.empty()) {
-                auto loaded = _assets->load_materials(sidecar, candidate.shared(), _options.variant);
+                auto loaded = _assets->load_materials(sidecar, candidate.shared(), _options.variant).value_or({});
                 if (!loaded)
                     throw std::runtime_error(diagnostics3d_text(_assets->diagnostics()));
                 binding = loaded.shared();
@@ -169,13 +169,13 @@ public:
             throw std::runtime_error("asset preview requires the GPU backend");
         _assets = std::make_unique<Assets3D>(
             *_renderer, _options.root, Assets3D::Limits{.models = 2, .textures = 128, .materials = 16, .shaders = 16});
-        _view = _renderer->create_view(pixels(ctx.renderer), {.samples = 2});
+        _view = _renderer->create_view(pixels(ctx.renderer), {.samples = 2}).value_or({});
         if (!_view)
             throw std::runtime_error("preview render target could not be created");
         const auto shader = asset_preview_shader("inspect.frag.spv");
         if (!shader.empty())
-            _inspect = _renderer->create_material_shader(shader);
-        _box = _renderer->create_mesh(meshes::box({1, 1, 1}));
+            _inspect = _renderer->create_material_shader(shader).value_or({});
+        _box = _renderer->create_mesh(meshes::box({1, 1, 1})).value_or({});
         if (!reload())
             throw std::runtime_error(_error);
         if (_options.inspect) {

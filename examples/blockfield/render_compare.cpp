@@ -323,7 +323,7 @@ public:
             json.field("spot_shadow_projection", "perspective")
                 .field("spot_shadow_fov", f64(spot.outer_angle * 2))
                 .field("spot_shadow_far", f64(spot.radius))
-                .field("spot_shadow_resolution", spot.shadow.enabled ? _options.features.shadow_resolution : 0);
+                .field("spot_shadow_resolution", spot.shadow_enabled ? _options.features.shadow_resolution : 0);
         }
         json.field("dressing", _options.dressing)
             .field("foliage_instances", _dressing.foliage_count)
@@ -425,9 +425,11 @@ private:
             throw std::runtime_error("occlusion features unsupported");
         if (_options.features.local_shadows && !caps.local_shadows)
             throw std::runtime_error("local shadows unsupported");
-        _view = _renderer->create_view(
-            {i32(1280 * _options.features.resolution_scale), i32(720 * _options.features.resolution_scale)},
-            {.samples = _options.features.samples, .hdr = _options.features.hdr});
+        _view = _renderer
+                    ->create_view(
+                        {i32(1280 * _options.features.resolution_scale), i32(720 * _options.features.resolution_scale)},
+                        {.samples = _options.features.samples, .hdr = _options.features.hdr})
+                    .value_or({});
         if (_view.samples() != _options.features.samples)
             throw std::runtime_error("requested MSAA unsupported");
         ctx.renderer.set_scale_mode(_view.texture(), ScaleMode::Linear);
@@ -473,7 +475,7 @@ private:
                 if (n >= nv)
                     throw std::runtime_error("invalid index");
             }
-            auto uploaded = _renderer->create_mesh(mesh);
+            auto uploaded = _renderer->create_mesh(mesh).value_or({});
             if (!uploaded.valid())
                 throw std::runtime_error("mesh upload failed");
             Chunk chunk{std::move(uploaded),

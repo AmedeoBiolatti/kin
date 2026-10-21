@@ -18,8 +18,8 @@ ExternalAssets::ExternalAssets(Assets3D& assets, const SummitLevel& level, bool 
         if (!content_file_exists(path))
             continue;
         std::string error;
-        _models[i] =
-            assets.load_model(std::filesystem::path("kenney-survival") / (std::string(prop_names[i]) + ".glb"));
+        _models[i] = assets.load_model(std::filesystem::path("kenney-survival") / (std::string(prop_names[i]) + ".glb"))
+                         .value_or({});
         error = kin::diagnostics3d_text(assets.diagnostics());
         if (!_models[i]) {
             std::fprintf(stderr, "summit: asset %s: %s\n", prop_names[i], error.c_str());
@@ -51,7 +51,8 @@ ExternalAssets::ExternalAssets(Assets3D& assets, const SummitLevel& level, bool 
         if (!_models[kind])
             continue;
         const Model3D& model = *_models[kind];
-        const Mat4f normalise = model.placement({.pivot = ModelPivot3D::BottomCenter, .size = 1});
+        const Mat4f normalise =
+            model.placement({.pivot = ModelPivot3D::BottomCenter, .size = 1}).value_or(Mat4f::identity());
         std::vector<MeshInstance3D> instances;
         for (std::size_t i = 0; i < scenery.size(); ++i) {
             const auto& p = scenery[i];
@@ -70,7 +71,7 @@ ExternalAssets::ExternalAssets(Assets3D& assets, const SummitLevel& level, bool 
         }
         if (instances.empty())
             continue;
-        ModelBatch3D batch{model, instances};
+        auto batch = ModelBatch3D::create(model, instances).value_or({});
         _scenery_triangles += batch.triangle_count();
         _instance_record_bytes += batch.record_bytes();
         mesh_batches += batch.parts().size();
@@ -92,10 +93,12 @@ bool ExternalAssets::draw(Scene3D& scene, Kind kind, Vec3f feet, float span, flo
     const float extent = std::max({size.x, size.y, size.z});
     if (extent < 1e-5f)
         return false;
-    const Mat4f transform = model.placement({.position = feet,
-                                             .rotation = Quatf::axis_angle({0, 1, 0}, yaw),
-                                             .pivot = ModelPivot3D::BottomCenter,
-                                             .size = span});
+    const Mat4f transform = model
+                                .placement({.position = feet,
+                                            .rotation = Quatf::axis_angle({0, 1, 0}, yaw),
+                                            .pivot = ModelPivot3D::BottomCenter,
+                                            .size = span})
+                                .value_or(Mat4f::identity());
     scene.draw(model, transform);
     return true;
 }

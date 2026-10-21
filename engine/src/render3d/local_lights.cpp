@@ -68,8 +68,8 @@ void spot_bounding_sphere(const SpotLightSource3D& light, Vec3f& centre, f32& ra
     radius = r;
 }
 
-f32 local_shadow_far(const LightShadow3D& shadow, f32 radius) {
-    return shadow.distance > 0.0f ? std::min(shadow.distance, radius) : radius;
+f32 local_shadow_far(f32 shadow_distance, f32 radius) {
+    return shadow_distance > 0.0f ? std::min(shadow_distance, radius) : radius;
 }
 
 LocalShadowView3D spot_shadow_view(const SpotLightSource3D& light, u32 resolution) {
@@ -78,8 +78,8 @@ LocalShadowView3D spot_shadow_view(const SpotLightSource3D& light, u32 resolutio
     const f32 res = static_cast<f32>(std::max(resolution, 16u));
     const f32 outer = std::acos(cone.cos_outer);
     v.tan_half = std::tan(outer) * (res + 2.0f * shadow_guard_texels) / res;
-    v.near_plane = std::max(light.shadow.near_plane, 1e-3f);
-    v.far_plane = std::max(local_shadow_far(light.shadow, light.radius), v.near_plane * 2.0f);
+    v.near_plane = std::max(light.shadow_near_plane, 1e-3f);
+    v.far_plane = std::max(local_shadow_far(light.shadow_distance, light.radius), v.near_plane * 2.0f);
     const f32 fov = 2.0f * std::atan(v.tan_half) / degrees_to_radians;
     const Mat4f view = Mat4f::look_at(light.position, light.position + cone.axis, up_for(cone.axis));
     v.view_projection = Mat4f::perspective(fov, 1.0f, v.near_plane, v.far_plane) * view;
@@ -102,8 +102,8 @@ LocalShadowView3D cube_face_view(const PointLightSource3D& light, u32 face, u32 
     LocalShadowView3D v;
     const f32 res = static_cast<f32>(std::max(resolution, 16u));
     v.tan_half = (res + 2.0f * shadow_guard_texels) / res; // a right angle's half (tan 45 = 1) and the guard band
-    v.near_plane = std::max(light.shadow.near_plane, 1e-3f);
-    v.far_plane = std::max(local_shadow_far(light.shadow, light.radius), v.near_plane * 2.0f);
+    v.near_plane = std::max(light.shadow_near_plane, 1e-3f);
+    v.far_plane = std::max(local_shadow_far(light.shadow_distance, light.radius), v.near_plane * 2.0f);
     const Vec3f axis = axes[std::min(face, 5u)];
     const f32 fov = 2.0f * std::atan(v.tan_half) / degrees_to_radians;
     const Mat4f view = Mat4f::look_at(light.position, light.position + axis, up_for(axis));

@@ -1,4 +1,5 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 // Meshes for kin's experimental 3D (docs/3d_plan.md): triangles as data
 // (MeshData3D), and the same kept on the GPU (Mesh3D, from Renderer3D::create_mesh).
@@ -61,8 +62,8 @@ struct MeshData3D {
     u32 skin_joint_count() const;
     std::size_t triangle_count() const { return (indices.empty() ? vertices.size() : indices.size()) / 3; }
     // Whether it can be drawn: whole triangles, indices in range, finite
-    // positions. False, with why in `error`, when not.
-    bool validate(std::string* error = nullptr) const;
+    // positions. Failure carries contextual diagnostics.
+    Status3D validate() const;
     Bounds3D bounds() const;
     // Appends `other`, moved by `transform` (normals turned with it). The
     // result is indexed. If either has a skin, the result has one: vertices of a mesh without it are bound to

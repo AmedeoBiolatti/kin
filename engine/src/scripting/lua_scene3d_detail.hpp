@@ -4,8 +4,18 @@
 
 #include <initializer_list>
 #include <sol/sol.hpp>
+#include <stdexcept>
 
 namespace kin::scripting_detail::lua_scene3d_detail {
+template <class T> T checked(const sol::object& value, const char* name) {
+    if (!value.is<T>())
+        throw std::runtime_error(std::string("invalid 3D option type: ") + name);
+    return value.as<T>();
+}
+template <class T> T option(sol::table options, const char* name, T fallback) {
+    sol::object value = options[name];
+    return value == sol::nil ? fallback : checked<T>(value, name);
+}
 void fields(sol::table, std::initializer_list<std::string_view>);
 Vec3f vector(sol::table);
 sol::table vector(sol::state_view, Vec3f);

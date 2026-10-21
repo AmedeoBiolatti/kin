@@ -1,4 +1,5 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 #include <kin/physics3d/world3d.hpp>
 #include <algorithm>
@@ -7,6 +8,8 @@
 
 namespace kin {
 struct SpringArm3DSettings {
+    // Distances/radii/margin: metres. ease_out: metres per second.
+    // shoulder_radius_scale: dimensionless multiplier of probe_radius.
     f32 distance=4.2f,shoulder=.35f,probe_radius=.22f,margin=.12f,ease_out=5;
     f32 shoulder_radius_scale=1;
 };
@@ -22,18 +25,18 @@ public:
     explicit SpringArm3D(SpringArm3DSettings settings={}) {
         if(!configure(settings))throw std::invalid_argument("invalid spring arm settings");
     }
-    bool configure(SpringArm3DSettings settings) {
+    Status3D configure(SpringArm3DSettings settings) {
         if(!std::isfinite(settings.distance)||settings.distance<0||!std::isfinite(settings.shoulder)||
             !std::isfinite(settings.probe_radius)||settings.probe_radius<=0||!std::isfinite(settings.margin)||settings.margin<0||
             !std::isfinite(settings.ease_out)||settings.ease_out<0||!std::isfinite(settings.shoulder_radius_scale)||
-            settings.shoulder_radius_scale<=0||!std::isfinite(settings.probe_radius*settings.shoulder_radius_scale)||settings.probe_radius*settings.shoulder_radius_scale<=0)return false;
+            settings.shoulder_radius_scale<=0||!std::isfinite(settings.probe_radius*settings.shoulder_radius_scale)||settings.probe_radius*settings.shoulder_radius_scale<=0)return status3d(false, {"SpringArm3D::configure: invalid settings or probe shape"});
         auto probe=_probe,side=_side;
         if(!probe||settings.probe_radius!=_settings.probe_radius)probe=Shape3D::sphere(settings.probe_radius);
         if(settings.shoulder_radius_scale==1)side=probe;
         else if(!side||settings.probe_radius*settings.shoulder_radius_scale!=_settings.probe_radius*_settings.shoulder_radius_scale)
             side=Shape3D::sphere(settings.probe_radius*settings.shoulder_radius_scale);
-        if(!probe||!side)return false;
-        _probe=std::move(probe);_side=std::move(side);_settings=settings;return true;
+        if(!probe||!side)return status3d(false, {"SpringArm3D::configure: invalid settings or probe shape"});
+        _probe=std::move(probe);_side=std::move(side);_settings=settings;return {};
     }
     const SpringArm3DSettings& settings()const{return _settings;}
     void reset(){_length=-1;}

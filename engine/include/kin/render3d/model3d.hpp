@@ -1,11 +1,12 @@
 #pragma once
+#include <kin/render3d/errors3d.hpp>
 
 // Models from glTF 2.0 files (.glb, .gltf) for kin's experimental 3D
 // (docs/3d_plan.md): meshes, their materials (base colour and its texture,
 // emissive light, alpha blending, double-sided, unlit) and where the file's
 // nodes put them.
 //
-//     kin::Model3D gun = r3d.load_model("models/gun.glb");
+//     kin::Model3D gun = r3d.load_model("models/gun.glb").value_or({});
 //     scene.draw(gun, transform);
 //
 //     kin::ModelFile3D crate{r3d, "models/crate.glb"};   // reloaded when saved
@@ -15,7 +16,7 @@
 // A skinned model (a character): its skeletons and clips come with it, and a pose is turned into joint matrices
 // (kin/render3d/skeleton3d.hpp, animation3d.hpp):
 //
-//     kin::Model3D hero = r3d.load_model("models/hero.glb");
+//     kin::Model3D hero = r3d.load_model("models/hero.glb").value_or({});
 //     kin::AnimationPlayer3D player{&hero.skeletons[0]};
 //     player.play(hero.find_clip("Walk"));
 //     player.update(dt);
@@ -25,7 +26,7 @@
 // A model whose animations move plain nodes (a door, a fan, a crane's arm): those nodes are a skeleton of the model
 // too, its node skeleton, posed as a skin's is and drawn rigidly (each part follows the node it hangs from):
 //
-//     kin::Model3D door = r3d.load_model("models/door.glb");
+//     kin::Model3D door = r3d.load_model("models/door.glb").value_or({});
 //     kin::AnimationPlayer3D player{&door.skeletons[door.node_skeleton]};
 //     player.play(door.find_clip("Open", door.node_skeleton), false);
 //     player.update(dt);
@@ -126,8 +127,8 @@ public:
 
     // Place the chosen model-space pivot at position, retaining all glTF part
     // transforms. A positive size requires finite, non-degenerate bounds.
-    // Throws invalid_argument for invalid size/bounds or non-finite transforms.
-    Mat4f placement(const ModelPlacement3D& options = {}) const;
+    // A failed result reports invalid size/bounds or non-finite transforms.
+    Result3D<Mat4f> placement(const ModelPlacement3D& options = {}) const;
 
     bool valid() const { return !parts.empty() && asset_diagnostics.empty(); }
     explicit operator bool() const { return valid(); }
@@ -167,8 +168,8 @@ public:
         Material3D material;
     };
     ModelBatch3D() = default;
-    ModelBatch3D(const Model3D& model, std::span<const MeshInstance3D> instances,
-                 const ModelBatchOptions3D& options = {});
+    static Result3D<ModelBatch3D> create(const Model3D& model, std::span<const MeshInstance3D> instances,
+                                         const ModelBatchOptions3D& options = {});
     explicit operator bool() const { return !_parts.empty(); }
     std::span<const Part> parts() const { return _parts; }
     u32 instance_count() const { return _instances; }
@@ -177,6 +178,8 @@ public:
     const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:
+    ModelBatch3D(const Model3D& model, std::span<const MeshInstance3D> instances,
+                 const ModelBatchOptions3D& options = {});
     Diagnostics3D _errors;
     std::vector<Part> _parts;
     u32 _instances = 0;
@@ -185,22 +188,23 @@ private:
 
 // Reads the geometry, skins and animations of a glTF (.gltf with embedded buffers, or .glb) held in `bytes`; the files
 // its buffers name are looked for beside `path` through kin's content folder or pack. No GPU, no materials or textures.
-// False, with why in `error`, when it does not read. A successful parse can retain unsupported content for tools:
-// check out.asset_diagnostics before using it as drawable content. Asset loaders reject these diagnostics as a whole.
-bool read_model_data(std::string_view bytes, const std::filesystem::path& path, ModelData3D& out,
-                     std::string* error = nullptr);
+// A failed result explains why it could not read. A successful parse can retain unsupported content for tools:
+// check result->asset_diagnostics before using it as drawable content. Asset loaders reject these diagnostics as a
+// whole.
+Result3D<ModelData3D> read_model_data(std::string_view bytes, const std::filesystem::path& path);
 
-// A model kept loaded from its file, loaded again when the file changes.
+// A model watcher. Construction does no I/O; poll() loads initially and when the file changes.
 class ModelFile3D {
 public:
     // `options`: the levels of detail each mesh is made with (Renderer3D::create_mesh).
     ModelFile3D(Renderer3D& renderer, std::filesystem::path path, const MeshOptions3D& options = {});
 
     const Model3D& model() const { return _model; }
-    // Loads it again when the file changed since the last look; true when a
-    // new version is in use (failure reports diagnostics() and keeps the last good model). The model is replaced in
-    // place, so rebind players and anything else that points into it (a skeleton, a clip) after poll() returns true.
-    bool poll();
+    // Loads it again when the file changed. A successful true payload means a
+    // new version is in use; false means unchanged. Failure retains the last good
+    // model and returns diagnostics. Rebind players and references into the model
+    // (skeletons/clips) after a true payload, before using those references again.
+    Result3D<bool> poll();
     const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:

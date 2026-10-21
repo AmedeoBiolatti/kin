@@ -14,7 +14,7 @@
 
 namespace {
 using namespace kin;
-void check(bool value, const char* message) {
+void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
 }
@@ -31,7 +31,7 @@ struct Scratch {
 void write(const std::filesystem::path& path, std::string_view text) {
     std::ofstream(path) << text;
 }
-void ok(SceneSession3D& session, bool value) {
+void ok(SceneSession3D& session, const auto& value) {
     if (!value) {
         std::string error = "advanced Lua scene failed";
         for (const auto& message : session.diagnostics())
@@ -86,6 +86,7 @@ function on_load(world)
 end
 function on_enter(ctx)
     actor=scene3d.entity('actor')
+    assert(not pcall(function() scene3d.resolve(actor):patch('SkinnedMeshRenderer',{visible=false}) end))
     prepare=scene3d.preload('prop.kinprefab')
     assert(prepare.status=='pending' and prepare.prepared==nil and prepare.pool==nil)
     if not scene3d.physics_available() then return end
