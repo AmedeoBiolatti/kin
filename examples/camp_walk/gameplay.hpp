@@ -1,3 +1,4 @@
+#include <cassert>
 #pragma once
 
 // Ordinary game code using the existing scene, command-buffer, controller and
@@ -135,7 +136,8 @@ inline void install(SceneSession3DContext& scene) {
             if (!game->prepared)
                 throw std::runtime_error("camp population must be prepared before stepping");
             const auto command = world.raw().get<CommandState>()->current;
-            game->camera.orbit(command.look);
+            if (auto result = game->camera.orbit(command.look); !result)
+                throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
             const auto yaw = Quatf::axis_angle({0, 1, 0}, game->camera.yaw());
             const Vec3f forward = yaw.rotate({0, 0, -1}), right = yaw.rotate({1, 0, 0});
             auto* controller = player.get_mut<CharacterController3D>();

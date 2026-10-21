@@ -1556,8 +1556,8 @@ void test_node_animation_draws() {
     };
     {
         Scene3D scene, still;
-        scene.draw(*crane, placed, nodes, colors::white, 9);
-        still.draw(*crane, placed, colors::white, 9);
+        (void)scene.draw(*crane, placed, nodes, colors::white, 9);
+        (void)still.draw(*crane, placed, colors::white, 9);
         assert(scene.draws().size() == 3 && scene.instances().size() == 3 && scene.instances()[0].id == 9);
         assert(close(transform_of(scene, part_called(*crane, "tip").mesh), placed * crane_tip_at(0.5f)));
         assert(same(transform_of(scene, part_called(*crane, "ground").mesh),
@@ -1567,8 +1567,8 @@ void test_node_animation_draws() {
         const LoggerConfig before = logger_config();
         set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
         Scene3D short_pose;
-        short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
-        short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
+        (void)short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
+        (void)short_pose.draw(*crane, placed, std::span<const Mat4f>{nodes}.first(1));
         set_logger_config(before);
         assert(same(short_pose.instances()[index_of(*crane, "tip")].transform,
                     placed * part_called(*crane, "tip").transform));
@@ -1603,8 +1603,8 @@ void test_node_animation_draws() {
         sample_clip(*model.find_clip("bend", 1), model.skeletons[1], 1.0f, false, moved);
         compute_world_matrices(model.skeletons[1], moved, loose);
         Scene3D scene, rest;
-        scene.draw_skinned(model, joints, Mat4f{}, colors::white, 3, {}, loose);
-        rest.draw_skinned(model, joints, Mat4f{}, colors::white, 3);
+        (void)scene.draw_skinned(model, joints, Mat4f{}, colors::white, 3, {}, loose);
+        (void)rest.draw_skinned(model, joints, Mat4f{}, colors::white, 3);
         assert(scene.draws().size() == 2 && scene.draws()[0].skinned && !scene.draws()[1].skinned);
         assert(close(scene.instances()[1].transform.apply({0, 0, 0}), {0, 2, 0})); // the stepped key of 1 s: 2 up
         assert(same(rest.instances()[1].transform, model.parts[1].transform));
@@ -4950,14 +4950,14 @@ void test_draw_skinned_poses_the_first_skin_only() {
     const auto a = make(), b = make(); // both alive: two addresses
     const std::vector<Mat4f> joints(3);
     Scene3D scene;
-    scene.draw_skinned(*a, joints, Mat4f{}, colors::white, 5);
+    (void)scene.draw_skinned(*a, joints, Mat4f{}, colors::white, 5);
     assert(scene.draws().size() == 2); // the first skin's part and the one that is not skinned
     assert(scene.draws()[0].mesh == a->parts[0].mesh && scene.draws()[0].skinned);
     assert(scene.draws()[1].mesh == a->parts[2].mesh && !scene.draws()[1].skinned);
     assert(lines() == 1);
-    scene.draw_skinned(*a, joints, Mat4f{}, colors::white, 5);
+    (void)scene.draw_skinned(*a, joints, Mat4f{}, colors::white, 5);
     assert(lines() == 1); // not said again for the same model
-    scene.draw_skinned(*b, joints, Mat4f{}, colors::white, 6);
+    (void)scene.draw_skinned(*b, joints, Mat4f{}, colors::white, 6);
     assert(lines() == 2); // but for another
     reset_logger_config_from_environment();
 }

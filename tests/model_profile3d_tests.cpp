@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iterator>
 #include <kin/platform/app.hpp>
+#include <kin/platform/log.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -149,13 +150,43 @@ void profile(Renderer3D& renderer, bool gpu) {
     // A failed lookup must be repairable without clearing a cached partial model.
     source.write("multi.gltf", skin_fixtures::make_gltf().json);
     check(bool(assets.load_model("multi.gltf").value_or({})), "repaired model remained rejected in cache");
+    {
+        const auto saved_logger = logger_config();
+        std::vector<LogEvent> events;
+        struct Restore {
+            LoggerConfig saved;
+            ~Restore() { set_logger_config(saved); }
+        } restore{saved_logger};
+        set_logger_config({.min_level = LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+        source.write("failed-watch.gltf", two_skins(true));
+        ModelFile3D failed{renderer, source.root / "failed-watch.gltf"};
+        const auto first = failed.poll();
+        check(!first.ok() && !events.empty(), "initial unsupported model did not fail/log");
+        const auto warnings = events.size();
+        for (int i = 0; i < 8; ++i) {
+            const auto unchanged = failed.poll();
+            check(!unchanged.ok() && unchanged.diagnostics == first.diagnostics && events.size() == warnings,
+                  "unchanged failed source was loaded again");
+        }
+        source.write("failed-watch.gltf", skin_fixtures::make_gltf().json);
+        const auto repaired = failed.poll();
+        if (gpu) {
+            check(repaired.ok() && *repaired && failed.model().valid(), "edited failed model did not retry");
+            const auto unchanged = failed.poll();
+            check(unchanged.ok() && !*unchanged, "successful unchanged model reported a reload");
+        } else {
+            check(!repaired.ok() && events.size() > warnings, "edited source did not retry on unavailable renderer");
+            const auto retried = events.size();
+            check(!failed.poll().ok() && events.size() == retried, "unavailable renderer retried unchanged source");
+        }
+    }
     if (gpu) {
         ModelFile3D file{renderer, source.root / "multi.gltf"};
         const auto initial = file.poll();
-        check(initial && *initial && file.model().valid(), "good polling model rejected");
+        check(initial.ok() && *initial && file.model().valid(), "good polling model rejected");
         source.write("multi.gltf", two_skins(true));
         const auto reloaded = file.poll();
-        check(!reloaded && !reloaded.value && file.model().valid() && !reloaded.diagnostics.empty(),
+        check(!reloaded.ok() && !reloaded.value && file.model().valid() && !reloaded.diagnostics.empty(),
               "unsupported model reload replaced the last good asset");
     }
 }

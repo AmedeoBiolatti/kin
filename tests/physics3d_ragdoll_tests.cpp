@@ -11,6 +11,7 @@
 #include <kin/physics3d/world3d.hpp>
 #include <kin/render3d/ik3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
+#include <kin/scene/scene_frame3d.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -1226,6 +1227,16 @@ void test_interpolation_of_the_pose() {
     const std::vector<Vec3f> before_last = rig.animator().pose_override.position;
     rig.run(1);
     const std::vector<Vec3f> latest = rig.animator().pose_override.position;
+    const auto hash = rig.physics.state_hash();
+    for (const float alpha : {0.f, .5f, 1.f}) {
+        rig.bodies.prepare_presentation(alpha);
+        const auto* pose = rig.bodies.presentation_pose(rig.hero);
+        CHECK(pose && pose->position.size() == latest.size());
+        if (pose)
+            for (std::size_t j=0; j<latest.size(); ++j)
+                CHECK(near(pose->position[j], lerp(before_last[j], latest[j], alpha), 1e-5f));
+        CHECK(rig.animator().pose_override.position == latest && rig.physics.state_hash() == hash);
+    }
     rig.bodies.interpolate(0.0f);
     const std::vector<Vec3f> at_zero = rig.animator().pose_override.position;
     rig.bodies.interpolate(0.5f);
@@ -1244,15 +1255,8 @@ void test_interpolation_of_the_pose() {
     CHECK(rig.animator().pose_override.position == latest);
 }
 
-// A person on a rope through the ECS: the hands' IK constraints are on the two anchors on the rope (the grips are at different
-// places of it), and the character hangs from them.
-void test_hands_on_a_rope_by_ik() {
-    EcsRig rig({0.0f, 0.0f, 0.0f}, serial(), false, false);
-    kin::Rope3D rope;
-    rope.start = kin::RopeAttach3D::at({0.0f, 7.0f, 0.0f});
-    rope.end = kin::RopeAttach3D::free();
-    rope.length = 3.6f;
-    rig.ecs.raw().entity().set(Transform3D{}).set(rope);
+// Shared hanging character; collection uses a CPU-only skinned mesh.
+void link_hand_ik(EcsRig& rig) {
     kin::CharacterController3D controller;
     controller.desc.traversal.enabled = true;
     controller.desc.traversal.resource.max = 1000.0f;
@@ -1281,14 +1285,163 @@ void test_hands_on_a_rope_by_ik() {
     c->traversal.grab = {true, true};
     c->traversal.reach = {0.0f, 0.5f, -1.0f};
     rig.run(150);
+}
+
+void add_test_skin(EcsRig& rig) {
+    struct Mesh final : IMeshBackend3D {};
+    rig.model->parts.push_back(
+        {.mesh = Mesh3D{std::make_shared<Mesh>(), 3, 3, {}, {}, {}, rig.model->skeletons[0].joint_count()}, .skin = 0});
+}
+
+// A person on a rope through the ECS: the hands' IK constraints are on the two anchors on the rope (the grips are at
+// different places of it), and the character hangs from them.
+void test_hands_on_a_rope_by_ik() {
+    EcsRig rig({0.0f, 0.0f, 0.0f}, serial(), false, false);
+    kin::Rope3D rope;
+    rope.start = kin::RopeAttach3D::at({0.0f, 7.0f, 0.0f});
+    rope.end = kin::RopeAttach3D::free();
+    rope.length = 3.6f;
+    const auto rope_entity = rig.ecs.raw().entity().set(Transform3D{}).set(rope);
+    link_hand_ik(rig);
     const TraversalState3D t = rig.bodies.traversal_of(rig.hero);
     CHECK(t.mode == TraversalMode3D::Hanging && t.held == 2);
     CHECK(t.grips[0].kind == GripKind3D::Rope && t.grips[1].kind == GripKind3D::Rope);
     // The hand joints (in the world) are on the anchors.
     const f32 left = length(rig.joint(B::hand_l) - t.grips[0].point);
     const f32 right = length(rig.joint(B::hand_r) - t.grips[1].point);
-    if (verbose) std::printf("  hands on the rope: left %.3f m, right %.3f m from their anchors\n", left, right);
+    if (verbose)
+        std::printf("  hands on the rope: left %.3f m, right %.3f m from their anchors\n", left, right);
     CHECK(left < 0.05f && right < 0.05f);
+    add_test_skin(rig);
+    auto* link = rig.hero.get_mut<CharacterAnimationLink3D>();
+    link->hand_clearance = 0.06f;
+    link->hand_offset = Quatf::axis_angle({0, 1, 0}, 20);
+    rig.frame();
+    SceneFrame3D frame{rig.ecs, rig.render, {.bodies = &rig.bodies}};
+    Scene3D scene;
+    const auto segments = rig.physics.rope_segments(rig.bodies.rope_of(rope_entity));
+    rig.physics.add_impulse(segments.back().body, {10, 0, 0});
+    f32 largest_step = 0;
+    int samples = 0;
+    for (int f = 0; f < 30; ++f) {
+        const auto previous = rig.bodies.traversal_of(rig.hero).grips[0];
+        const auto old_points = rope_entity.get<Rope3D>()->sampled;
+        rig.frame();
+        const auto current = rig.bodies.traversal_of(rig.hero).grips[0];
+        if (current.phase != GripPhase3D::Held)
+            continue;
+        const auto prior_segment = rig.physics.rope_segment_of(previous.body);
+        const auto current_segment = rig.physics.rope_segment_of(current.body);
+        CHECK(prior_segment && current_segment);
+        if (!prior_segment || !current_segment)
+            continue;
+        const auto points = rope_entity.get<Rope3D>()->sampled;
+        const auto hash = rig.physics.state_hash();
+        const auto target = rig.animator().find_ik("hand_L")->target.position;
+        const auto rotation = rig.animator().find_ik("hand_L")->target_rotation;
+        const f32 before = static_cast<f32>(prior_segment->segment) + previous.local_point.y + 0.5f;
+        const f32 after = static_cast<f32>(current_segment->segment) + current.local_point.y + 0.5f;
+        for (const float alpha : {0.f, .5f, 1.f, .25f}) {
+            CHECK(frame.collect(scene, nullptr, alpha));
+            const f32 along = std::lerp(before, after, alpha);
+            const u32 segment = std::min(static_cast<u32>(along), current_segment->segments - 1);
+            const auto point = [&](u32 i) { return lerp(old_points[i].position, points[i].position, alpha); };
+            const auto centre = lerp(point(segment), point(segment + 1), along - static_cast<f32>(segment));
+            const auto normal = normalize(lerp(previous.normal, current.normal, alpha));
+            const auto* hand = rig.animator().find_ik("hand_L");
+            CHECK(near(hand->last_target, centre + normal * 0.06f, 2e-5f));
+            CHECK(hand->target.position == target && hand->target_rotation == rotation);
+            CHECK(rig.physics.state_hash() == hash);
+            CHECK(rig.hero.get<CharacterController3D>()->traversal_state.grips[0].point == current.point);
+        }
+        largest_step = std::max(largest_step, length(current.point - previous.point));
+        ++samples;
+    }
+    CHECK(samples == 30 && largest_step > 0.1f); // the old target was identical for every alpha
+
+    // Collection must not override a gameplay-authored target, nor retain its
+    // presentation callback during an authoritative apply_ik().
+    auto* hand = rig.hero.get_mut<Animator3D>()->find_ik("hand_L");
+    const auto driven = hand->target.position;
+    hand->set_target({1, 4, 2});
+    CHECK(frame.collect(scene, nullptr, 0));
+    CHECK(hand->last_target == Vec3f(1, 4, 2));
+    hand->set_target(driven);
+    CHECK(frame.collect(scene, nullptr, 0));
+    rig.render.apply_ik();
+    CHECK(hand->last_target == driven);
+
+    const auto saved = rig.physics.save_state();
+    rig.run(5);
+    rig.hero.get_mut<Animator3D>()->find_ik("hand_R")->set_target({-2, 4, 1});
+    CHECK(rig.physics.restore_state(saved));
+    rig.bodies.resync_from_world();
+    CHECK(rig.animator().find_ik("hand_R")->target.position == Vec3f(-2, 4, 1));
+    CHECK(frame.collect(scene, nullptr, 0));
+    const auto reset = rig.animator().find_ik("hand_L")->last_target;
+    CHECK(frame.collect(scene, nullptr, 1));
+    CHECK(near(reset, rig.animator().find_ik("hand_L")->last_target, 1e-6f));
+    rig.hero.get_mut<CharacterController3D>()->traversal.drop = true;
+    rig.frame();
+    rig.bodies.prepare_presentation(.5f);
+    CHECK(!rig.bodies.presentation_ik_target(*rig.animator().find_ik("hand_L")));
+    auto* command = rig.hero.get_mut<CharacterController3D>();
+    command->traversal.grab = {false, false};
+    command->traversal.drop = false;
+    rig.frame();
+    command = rig.hero.get_mut<CharacterController3D>();
+    command->traversal.grab = {true, true};
+    rig.run(20);
+    CHECK(rig.bodies.traversal_of(rig.hero).held > 0);
+    CHECK(frame.collect(scene, nullptr, .5f));
+    CHECK(rig.bodies.presentation_ik_target(*rig.animator().find_ik("hand_L")));
+}
+
+// A hold's off-centre anchor must follow the body's rotational arc, including
+// hand clearance and orientation; linearly interpolating world targets is wrong.
+void test_hand_presentation_on_a_rotating_hold() {
+    EcsRig rig({}, serial(), false, false);
+    const auto hold = rig.ecs.raw()
+                          .entity()
+                          .set(Transform3D{.position = {1, 3.4f, -.3f}})
+                          .set(Collider3D{.half_extents = {2, 2, .3f}})
+                          .set(RigidBody3D{.motion = Body3DMotion::Kinematic})
+                          .set(Hold3D{});
+    link_hand_ik(rig);
+    CHECK(rig.bodies.traversal_of(rig.hero).held == 2);
+    add_test_skin(rig);
+    rig.hero.get_mut<CharacterAnimationLink3D>()->hand_clearance = .06f;
+    rig.hero.get_mut<CharacterAnimationLink3D>()->hand_offset = Quatf::axis_angle({1, 0, 0}, 15);
+    SceneFrame3D frame{rig.ecs, rig.render, {.bodies = &rig.bodies}};
+    Scene3D scene;
+    int sampled = 0;
+    for (int f = 0; f < 20; ++f) {
+        hold.get_mut<Transform3D>()->position.x += .005f;
+        hold.get_mut<Transform3D>()->rotation = Quatf::axis_angle({0, 1, 0}, static_cast<f32>(f + 1));
+        rig.frame();
+        const auto grip = rig.bodies.traversal_of(rig.hero).grips[0];
+        CHECK(grip.phase == GripPhase3D::Held && grip.kind == GripKind3D::Hold);
+        if (grip.phase != GripPhase3D::Held)
+            continue;
+        for (const float alpha : {0.f, .5f, 1.f}) {
+            CHECK(frame.collect(scene, nullptr, alpha));
+            const auto place = rig.bodies.presentation_transform(hold);
+            CHECK(place);
+            if (!place)
+                continue;
+            const auto* hand = rig.animator().find_ik("hand_L");
+            CHECK(near(hand->last_target, place->apply(grip.local_point + grip.local_normal * .06f), 2e-5f));
+            const auto root =
+                rig.bodies.presentation_transform(rig.hero).value_or(rig.hero.get<WorldTransform3D>()->matrix);
+            const auto joint = root * rig.animator().ik_world[B::hand_l];
+            // Undo the authored hand offset: +Z points into the hold's surface.
+            const auto palm = joint * Mat4f::rotation(Quatf::axis_angle({1, 0, 0}, -15));
+            CHECK(near(normalize(palm.apply_vector({0, 0, 1})), -normalize(place->apply_vector(grip.local_normal)),
+                       2e-4f));
+            ++sampled;
+        }
+    }
+    CHECK(sampled == 60);
 }
 
 // A bone is the ragdoll's: destroying, reshaping or switching it from outside is refused (the ragdoll would go on driving a
@@ -1371,6 +1524,7 @@ int main(int argc, char** argv) {
     test_ecs_determinism();
     test_interpolation_of_the_pose();
     test_hands_on_a_rope_by_ik();
+    test_hand_presentation_on_a_rotating_hold();
     test_bones_belong_to_the_ragdoll();
     test_events_cap_keeps_the_first();
     if (failures != 0) {

@@ -1,4 +1,5 @@
 #include "material_asset3d_impl.hpp"
+#include "model_bounds3d.hpp"
 
 #include <algorithm>
 #include <kin/assets/content.hpp>
@@ -38,7 +39,7 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
     }
     Model3D model;
     model.source_files.push_back(path.lexically_normal());
-    bool first = true;
+    detail::ModelBounds3D bounds;
     for (ModelPartData3D& part : data.parts) {
         const std::size_t vertices = part.mesh.vertices.size(),
                           indices = part.mesh.indices.empty() ? vertices : part.mesh.indices.size();
@@ -48,22 +49,13 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
             continue;
         }
         const Bounds3D b = part.mesh.bounds();
-        for (int i = 0; i < 8; ++i) {
-            const Vec3f p = part.transform.apply(
-                {(i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z});
-            model.bounds.min = first ? p
-                                     : Vec3f{std::min(model.bounds.min.x, p.x), std::min(model.bounds.min.y, p.y),
-                                             std::min(model.bounds.min.z, p.z)};
-            model.bounds.max = first ? p
-                                     : Vec3f{std::max(model.bounds.max.x, p.x), std::max(model.bounds.max.y, p.y),
-                                             std::max(model.bounds.max.z, p.z)};
-            first = false;
-        }
+        bounds.add(b, part.transform);
         Mesh3D mesh{nullptr, static_cast<u32>(vertices),  static_cast<u32>(indices), b, {},
                     {},      part.mesh.skin_joint_count()};
         model.parts.push_back({std::move(part.name), std::move(mesh), Material3D{}, part.transform, part.skin,
                                part.node, part.node_offset});
     }
+    model.bounds = bounds.bounds;
     model.skeletons = std::move(data.skeletons);
     model.clips = std::move(data.clips);
     model.node_skeleton = data.node_skeleton;

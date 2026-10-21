@@ -6,32 +6,49 @@
 // emissive light, alpha blending, double-sided, unlit) and where the file's
 // nodes put them.
 //
-//     kin::Model3D gun = r3d.load_model("models/gun.glb").value_or({});
-//     scene.draw(gun, transform);
+//     auto loaded = r3d.load_model("models/gun.glb");
+//     if (!loaded) return report(diagnostics3d_text(loaded.diagnostics));
+//     auto drawn = scene.draw(*loaded, transform);
+//     if (!drawn) report(diagnostics3d_text(drawn.diagnostics));
 //
-//     kin::ModelFile3D crate{r3d, "models/crate.glb"};   // reloaded when saved
-//     crate.poll();                                     // each frame
-//     scene.draw(crate.model(), transform);
+//     kin::ModelFile3D crate{r3d, "models/crate.glb"}; // construction does no I/O
+//     auto changed = crate.poll();                  // initial load, then on edits
+//     if (!changed.ok()) report(diagnostics3d_text(changed.diagnostics));
+//     else if (*changed) rebind(crate.model());
 //
-// A skinned model (a character): its skeletons and clips come with it, and a pose is turned into joint matrices
-// (kin/render3d/skeleton3d.hpp, animation3d.hpp):
+// Skinned characters use a checked skeleton and clip (animation3d.hpp):
 //
-//     kin::Model3D hero = r3d.load_model("models/hero.glb").value_or({});
+//     auto loaded = r3d.load_model("models/hero.glb");
+//     if (!loaded) return report(diagnostics3d_text(loaded.diagnostics));
+//     kin::Model3D hero = std::move(*loaded);
+//     if (hero.skeletons.empty()) return report("hero has no skeleton");
+//     const auto* walk = hero.find_clip("Walk");
+//     if (!walk) return report("hero has no Walk clip");
 //     kin::AnimationPlayer3D player{&hero.skeletons[0]};
-//     player.play(hero.find_clip("Walk"));
+//     player.play(walk);
 //     player.update(dt);
 //     player.joint_matrices(matrices);
-//     scene.draw_skinned(hero, matrices, transform);
+//     auto drawn = scene.draw_skinned(hero, matrices, transform);
+//     if (!drawn) report(diagnostics3d_text(drawn.diagnostics));
 //
-// A model whose animations move plain nodes (a door, a fan, a crane's arm): those nodes are a skeleton of the model
-// too, its node skeleton, posed as a skin's is and drawn rigidly (each part follows the node it hangs from):
+// Plain-node animation (doors, fans) uses node_skeleton instead. Check it before
+// indexing: -1 means no animated node skeleton. Keep the model alive and unmoved
+// while an AnimationPlayer3D borrows its skeleton and clips.
 //
-//     kin::Model3D door = r3d.load_model("models/door.glb").value_or({});
-//     kin::AnimationPlayer3D player{&door.skeletons[door.node_skeleton]};
-//     player.play(door.find_clip("Open", door.node_skeleton), false);
+//     auto loaded_door = r3d.load_model("models/door.glb");
+//     if (!loaded_door) return report(diagnostics3d_text(loaded_door.diagnostics));
+//     kin::Model3D door = std::move(*loaded_door);
+//     if (door.node_skeleton < 0 || std::size_t(door.node_skeleton) >= door.skeletons.size())
+//         return report("door has no node animation");
+//     auto nodes = static_cast<kin::u32>(door.node_skeleton);
+//     const auto* open = door.find_clip("Open", nodes);
+//     if (!open) return report("door has no Open clip");
+//     kin::AnimationPlayer3D player{&door.skeletons[nodes]};
+//     player.play(open, false);
 //     player.update(dt);
 //     player.joint_matrices(matrices);
-//     scene.draw(door, transform, matrices);
+//     auto drawn = scene.draw(door, transform, matrices);
+//     if (!drawn) report(diagnostics3d_text(drawn.diagnostics));
 
 #include <filesystem>
 #include <kin/core/math3d.hpp>
@@ -48,6 +65,7 @@
 namespace kin {
 
 class Renderer3D;
+class ContentPack;
 
 enum class ModelPivot3D { Origin, Center, BottomCenter };
 struct ModelPlacement3D {
@@ -202,7 +220,8 @@ public:
     const Model3D& model() const { return _model; }
     // Loads it again when the file changed. A successful true payload means a
     // new version is in use; false means unchanged. Failure retains the last good
-    // model and returns diagnostics. Rebind players and references into the model
+    // model and returns diagnostics. Unchanged failed sources reuse their cached
+    // diagnostics until an edit or pack remount. Rebind players and references into the model
     // (skeletons/clips) after a true payload, before using those references again.
     Result3D<bool> poll();
     const Diagnostics3D& diagnostics() const { return _errors; }
@@ -214,6 +233,9 @@ private:
     std::filesystem::path _path;
     MeshOptions3D _options;
     std::filesystem::file_time_type _time{};
+    std::optional<u64> _source_size;
+    std::weak_ptr<const ContentPack> _source_pack;
+    bool _attempted = false;
     Model3D _model;
     Diagnostics3D _errors;
 };

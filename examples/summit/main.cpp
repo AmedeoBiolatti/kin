@@ -657,7 +657,8 @@ public:
                         .value_or({});
             _view_size = out;
         } else if (out != _view_size) {
-            _r3d->resize(_view, {std::max(1, out.x), std::max(1, out.y)});
+            if (auto result = _r3d->resize(_view, {std::max(1, out.x), std::max(1, out.y)}); !result)
+                throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
             _view_size = out;
         }
         const f32 alpha = headless ? 1.0f : std::clamp(ctx.alpha, 0.0f, 1.0f);
@@ -706,7 +707,8 @@ public:
             return;
         const auto t0 = Clock::now();
         const f64 scene_ms = std::chrono::duration<f64, std::milli>(t0 - now).count();
-        _r3d->render(_view, _scene);
+        if (auto result = _r3d->render(_view, _scene); !result)
+            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
         _render_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
         renderer.clear(Color::rgb(0, 0, 0));
         renderer.draw_texture(_view.texture(), {0.0f, 0.0f, float(out.x), float(out.y)});

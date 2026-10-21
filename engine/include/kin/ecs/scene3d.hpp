@@ -48,7 +48,8 @@ inline ViewOptions3D scene3d_view_options(ViewOptions3D environment, const ViewO
 // environment replaces them except `pick`, which stays as passed
 // (scene3d_view_options).
 // With `only`, validate/apply that entity even when disabled (editor preflight).
-Status3D apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view = nullptr, EcsEntity only = {});
+Status3D apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view = nullptr, EcsEntity only = {},
+                                const WorldRenderState3D::Presentation3D& presentation = {});
 
 struct AnimatorConfiguration3D {
     std::shared_ptr<const AnimationStateMachine> machine;

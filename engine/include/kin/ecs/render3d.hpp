@@ -196,6 +196,12 @@ enum class IKKind3D : u8 {
             // bulge.
 };
 
+// A collection-only world-space target pose.
+struct IKTargetPose3D {
+    Vec3f position{};
+    Quatf rotation{};
+};
+
 // One constraint of an Animator3D. Joint names are looked up in the model's skeleton when the animator binds to it (and
 // again when the model changes); one that is not found makes the constraint do nothing. Everything is plain data, so a
 // constraint can be built in a prefab-like table and changed per frame through the setters.
@@ -480,7 +486,11 @@ public:
     // animator's pose (draw_skinned, one range of matrices for all its parts). A ModelRenderer3D's parts join the
     // MeshRenderers' draws, those that hang from an animated node placed by its animator's pose of them.
     using Presentation3D = std::function<std::optional<Mat4f>(flecs::entity)>;
-    void collect(Scene3D& scene, const Presentation3D& presentation = {});
+    using PosePresentation3D = std::function<const PoseOverride3D*(flecs::entity)>;
+    // Optional collection-only hand target sampling; does not replace authored targets.
+    using IKPresentation3D = std::function<std::optional<IKTargetPose3D>(const IKConstraint3D&)>;
+    void collect(Scene3D& scene, const Presentation3D& presentation = {}, const PosePresentation3D& poses = {},
+                 const IKPresentation3D& ik = {});
     // Release reusable mesh/material buckets after bulk removal. ECS-owned
     // handles remain intact; the next collect rebuilds active buckets.
     void clear_collection_cache();
@@ -512,13 +522,16 @@ public:
     bool apply_weather(Scene3D& scene, const Fog3D& base_fog) const;
 
 private:
+    const PosePresentation3D* _pose_presentation = nullptr;
+    const IKPresentation3D* _ik_presentation = nullptr;
+    const PoseOverride3D& pose_override_for(flecs::entity entity, const Animator3D& animator) const;
     const Presentation3D* _presentation = nullptr; // borrowed only during collect
     // One animator's constraints over `base` (the clips' pose); `world` is its entity's matrix.
     void solve_ik(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
                   const flecs::world& ecs, u64 epoch);
     // The clips' pose with the constraints solved and the override applied, in animator.ik_pose / ik_world.
     void solve_pose(Animator3D& animator, const Skeleton3D& skeleton, const Pose3D& base, const Mat4f& world,
-                    const flecs::world& ecs, u64 epoch);
+                    const flecs::world& ecs, u64 epoch, const PoseOverride3D* presented = nullptr);
     void prepare_joint_attachments();
     std::optional<Mat4f> draw_placement(flecs::entity entity, const WorldTransform3D& world,
                                         const RenderTransform3D* presentation) const;
@@ -544,12 +557,16 @@ private:
     flecs::query<Weather3D> _weather;
     std::vector<Mat4f> _pose_scratch; // collect()'s matrices of one entity, reused
     Pose3D _rest_pose;                // a skeleton's rest pose for a model with no animator, reused
+    struct RetainedBudget;
     struct Bucket {
         Mesh3D mesh;
         Material3D material;
         std::vector<MeshInstance3D> instances;
         InstanceBatch3D batch; // bounded automatic retention for substantial opaque/masked buckets
         InstanceBatch3D spare; // another live collected scene, or the previous count
+        bool eligible(const RetainedBudget& budget) const;
+        void rebuild();
+        void retain(RetainedBudget& budget);
     };
     std::vector<Bucket> _buckets; // kept between frames, emptied each collect
     std::unordered_map<const IMeshBackend3D*, std::vector<std::size_t>> _bucket_lookup;

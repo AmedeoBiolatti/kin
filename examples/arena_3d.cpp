@@ -1,5 +1,7 @@
 #include "arena_3d.hpp"
 
+#include <stdexcept>
+
 #if defined(KIN_EXPERIMENTAL_3D)
 #include <algorithm>
 #include <cmath>
@@ -134,8 +136,8 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
     _scene.lights.sun = {.direction = {-0.45f, 1.0f, 0.35f}, .color = {1.05f, 1.0f, 0.95f}};
     _scene.lights.ambient = {0.22f, 0.25f, 0.32f};
 
-    _scene.draw_instanced(_tile, _tiles);
-    _scene.draw_instanced(_wall, _walls);
+    (void)_scene.draw_instanced(_tile, _tiles);
+    (void)_scene.draw_instanced(_wall, _walls);
 
     // Enemies by kind, floating and turning; the time is the simulation's, so
     // a paused run holds still.
@@ -155,17 +157,17 @@ void ArenaPainter3D::fill_scene(const Arena& arena) {
         }
         _enemies[static_cast<std::size_t>(kind)].push_back({m, kin::colors::white});
     });
-    _scene.draw_instanced(_star, _enemies[0], {.color = enemy_colors[0], .emissive = 0.15f});
-    _scene.draw_instanced(_plate, _enemies[1], {.color = enemy_colors[1], .emissive = 0.1f});
-    _scene.draw_instanced(_ring, _enemies[2], {.color = enemy_colors[2], .emissive = 0.15f});
+    (void)_scene.draw_instanced(_star, _enemies[0], {.color = enemy_colors[0], .emissive = 0.15f});
+    (void)_scene.draw_instanced(_plate, _enemies[1], {.color = enemy_colors[1], .emissive = 0.1f});
+    (void)_scene.draw_instanced(_ring, _enemies[2], {.color = enemy_colors[2], .emissive = 0.15f});
 
     // The player's ship, turned to face where it aims.
     const Vec2f f = arena.facing();
     const Color body = arena.hurt()      ? Color::rgb(255, 150, 140)
                        : arena.dashing() ? Color::rgb(220, 255, 255)
                                          : Color::rgb(90, 220, 235);
-    _scene.draw(_ship, Mat4f::translation(player) * Mat4f::rotation(Quatf::look_rotation({f.x, 0.0f, f.y})),
-                {.emissive = 0.2f}, body);
+    (void)_scene.draw(_ship, Mat4f::translation(player) * Mat4f::rotation(Quatf::look_rotation({f.x, 0.0f, f.y})),
+                      {.emissive = 0.2f}, body);
 
     // Shots glow: the player's cyan, the enemies' pink.
     std::size_t friendly = 0;
@@ -235,7 +237,8 @@ void ArenaPainter3D::draw(Renderer2D& renderer, const Arena& arena, Rectf playfi
     if (!_view.valid()) {
         _view = _r3d->create_view(pixels, {.samples = 4, .background = Color::rgb(12, 20, 28)}).value_or({});
     } else if (_view.size() != pixels) {
-        _r3d->resize(_view, pixels);
+        if (auto result = _r3d->resize(_view, pixels); !result)
+            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
     }
     {
         KIN_PROFILE_SCOPE("example.3d.scene");
@@ -243,7 +246,8 @@ void ArenaPainter3D::draw(Renderer2D& renderer, const Arena& arena, Rectf playfi
     }
     {
         KIN_PROFILE_SCOPE("example.3d.render");
-        _r3d->render(_view, _scene);
+        if (auto result = _r3d->render(_view, _scene); !result)
+            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
     }
     renderer.draw_texture(_view.texture(), playfield);
 }

@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -295,7 +296,7 @@ void particle_gpu(Renderer2D& renderer) {
     texture = {};
     last = {};
     model.reset();
-    session.unload();
+    assert(session.unload());
     assets.trim();
     check(assets.stats().texture_entries == 0, "particle texture retained after unload");
 }

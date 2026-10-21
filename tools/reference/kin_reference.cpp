@@ -1,3 +1,4 @@
+#include <stdexcept>
 // Renders the reference scenes (docs/3d_plan.md, G0): each camera of each
 // scene to a PNG, timed, with what was drawn, into a folder a later run (or
 // Cycles' pictures) is compared with (tools/reference/run.py).
@@ -472,15 +473,15 @@ struct Crowd {
     }
 
     void draw(kin::Scene3D& scene) const {
-        scene.draw_instanced(tile, tiles);
+        (void)scene.draw_instanced(tile, tiles);
         for (std::size_t k = 0; k < 3; ++k) {
-            scene.draw_instanced(enemy[k], enemies[k], {.color = kin::Color::rgb(200, 120, 80)});
+            (void)scene.draw_instanced(enemy[k], enemies[k], {.color = kin::Color::rgb(200, 120, 80)});
         }
     }
     // The enemies drifting (`--crowd-move`): each a little from where it was, a pure function of `time` (frames), as a
     // game's moves them.
     void draw_moving(kin::Scene3D& scene, int time, std::array<std::vector<kin::MeshInstance3D>, 3>& moved) const {
-        scene.draw_instanced(tile, tiles);
+        (void)scene.draw_instanced(tile, tiles);
         for (std::size_t k = 0; k < 3; ++k) {
             moved[k] = enemies[k];
             for (std::size_t i = 0; i < moved[k].size(); ++i) {
@@ -488,7 +489,7 @@ struct Crowd {
                 moved[k][i].transform.m[12] += std::sin(phase) * 0.15f;
                 moved[k][i].transform.m[14] += std::cos(phase) * 0.15f;
             }
-            scene.draw_instanced(enemy[k], moved[k], {.color = kin::Color::rgb(200, 120, 80)});
+            (void)scene.draw_instanced(enemy[k], moved[k], {.color = kin::Color::rgb(200, 120, 80)});
         }
     }
 };
@@ -519,19 +520,19 @@ struct Motion {
         const kin::Material3D bright{.color = kin::Color::rgb(245, 245, 240), .roughness = 0.6f};
         const kin::Material3D warm{.color = kin::Color::rgb(255, 150, 60), .roughness = 0.5f};
         const kin::Material3D unlit_white{.color = kin::Color::rgb(255, 255, 255), .unlit = true};
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
-                   {.color = kin::Color::rgb(70, 74, 82), .roughness = 0.9f});
-        scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.0f}), dark);
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                         {.color = kin::Color::rgb(70, 74, 82), .roughness = 0.9f});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.0f}), dark);
         // A fence: 60 posts every 6.5 cm, two rails (white against the dark wall).
         for (int i = 0; i < 60; ++i) {
-            scene.draw(post, Mat4f::translation({-1.95f + 0.065f * static_cast<float>(i), 0.6f, -1.0f}), bright);
+            (void)scene.draw(post, Mat4f::translation({-1.95f + 0.065f * static_cast<float>(i), 0.6f, -1.0f}), bright);
         }
-        scene.draw(rail, Mat4f::translation({0.0f, 0.35f, -1.0f}), bright);
-        scene.draw(rail, Mat4f::translation({0.0f, 1.0f, -1.0f}), bright);
+        (void)scene.draw(rail, Mat4f::translation({0.0f, 0.35f, -1.0f}), bright);
+        (void)scene.draw(rail, Mat4f::translation({0.0f, 1.0f, -1.0f}), bright);
         // A wire across, and poles at three depths.
-        scene.draw(wire, Mat4f::translation({0.0f, 1.9f, -2.0f}) * Mat4f::rotation_z(4.0f), unlit_white);
+        (void)scene.draw(wire, Mat4f::translation({0.0f, 1.9f, -2.0f}) * Mat4f::rotation_z(4.0f), unlit_white);
         for (int i = 0; i < 3; ++i) {
-            scene.draw(
+            (void)scene.draw(
                 pole,
                 Mat4f::translation({2.2f + 0.5f * static_cast<float>(i), 1.2f, -2.5f + 1.2f * static_cast<float>(i)}),
                 bright);
@@ -539,17 +540,18 @@ struct Motion {
         // Moving: a bar orbiting on a circle at 3 degrees a frame, a cross turning at 4, a block going to and fro, a
         // pole sliding.
         const float orbit = time * 3.0f * 3.14159265f / 180.0f;
-        scene.draw(bar,
-                   Mat4f::translation({-2.6f + 0.6f * std::cos(orbit), 1.0f + 0.6f * std::sin(orbit), -0.4f}) *
-                       Mat4f::rotation_z(time * 3.0f + 90.0f),
-                   warm);
+        (void)scene.draw(bar,
+                         Mat4f::translation({-2.6f + 0.6f * std::cos(orbit), 1.0f + 0.6f * std::sin(orbit), -0.4f}) *
+                             Mat4f::rotation_z(time * 3.0f + 90.0f),
+                         warm);
         const Mat4f turn = Mat4f::translation({-3.6f, 0.9f, -0.4f}) * Mat4f::rotation_y(time * 4.0f);
-        scene.draw(cross_bar, turn, warm);
-        scene.draw(cross_bar, turn * Mat4f::rotation_y(90.0f), warm);
+        (void)scene.draw(cross_bar, turn, warm);
+        (void)scene.draw(cross_bar, turn * Mat4f::rotation_y(90.0f), warm);
         const float to_and_fro = 1.5f * std::sin(time * 0.05f);
-        scene.draw(block, Mat4f::translation({3.5f + to_and_fro, 0.25f, -0.2f}) * Mat4f::rotation_y(time * 2.0f), warm);
-        scene.draw(ball, Mat4f::translation({-0.8f + 1.2f * std::sin(time * 0.04f), 0.5f, 0.6f}), warm);
-        scene.draw(pole, Mat4f::translation({0.6f * std::sin(time * 0.06f), 1.2f, 0.2f}), warm);
+        (void)scene.draw(block, Mat4f::translation({3.5f + to_and_fro, 0.25f, -0.2f}) * Mat4f::rotation_y(time * 2.0f),
+                         warm);
+        (void)scene.draw(ball, Mat4f::translation({-0.8f + 1.2f * std::sin(time * 0.04f), 0.5f, 0.6f}), warm);
+        (void)scene.draw(pole, Mat4f::translation({0.6f * std::sin(time * 0.06f), 1.2f, 0.2f}), warm);
     }
 };
 
@@ -650,11 +652,11 @@ struct Landscape {
     }
 
     void draw(kin::Scene3D& scene) const {
-        scene.draw(terrain, Mat4f::identity(), {.color = kin::colors::white, .roughness = 1.0f});
-        scene.draw_instanced(tree, trees, {.color = kin::colors::white, .roughness = 0.9f});
+        (void)scene.draw(terrain, Mat4f::identity(), {.color = kin::colors::white, .roughness = 1.0f});
+        (void)scene.draw_instanced(tree, trees, {.color = kin::colors::white, .roughness = 0.9f});
         const kin::Material3D red{.color = kin::Color::rgb(200, 30, 30), .roughness = 0.8f};
         for (const float z : {-50.0f, -200.0f, -500.0f, -1000.0f, -2000.0f, -4000.0f}) {
-            scene.draw(pillar, Mat4f::translation({12.0f, height(12.0f, z) + 20.0f, z}), red);
+            (void)scene.draw(pillar, Mat4f::translation({12.0f, height(12.0f, z) + 20.0f, z}), red);
         }
     }
 };
@@ -709,12 +711,12 @@ struct Hidden {
     }
 
     void draw(kin::Scene3D& scene) const {
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
-                   {.color = kin::Color::rgb(96, 100, 108), .roughness = 0.9f});
-        scene.draw(wall, Mat4f::translation({0.0f, 4.0f, 0.0f}),
-                   {.color = kin::Color::rgb(190, 186, 176), .roughness = 0.8f});
-        scene.draw_instanced(torus, behind, {.roughness = 0.45f});
-        scene.draw_instanced(torus, front, {.roughness = 0.45f});
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                         {.color = kin::Color::rgb(96, 100, 108), .roughness = 0.9f});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 4.0f, 0.0f}),
+                         {.color = kin::Color::rgb(190, 186, 176), .roughness = 0.8f});
+        (void)scene.draw_instanced(torus, behind, {.roughness = 0.45f});
+        (void)scene.draw_instanced(torus, front, {.roughness = 0.45f});
     }
 };
 
@@ -810,22 +812,22 @@ struct PhysicsPile {
     void draw(kin::Renderer3D& r3d, kin::Scene3D& scene, int time) {
         advance_to(lead + std::max(0, time));
         const kin::Material3D stone{.color = kin::Color::rgb(150, 146, 140), .roughness = 0.9f};
-        scene.draw(box_mesh,
-                   Mat4f::translation({0.0f, -0.25f, 0.0f}) * Mat4f::scaling({2 * yard + 0.6f, 0.5f, 2 * yard + 0.6f}),
-                   stone);
-        scene.draw(box_mesh,
-                   Mat4f::translation({-yard - 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}),
-                   stone);
-        scene.draw(box_mesh,
-                   Mat4f::translation({yard + 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}),
-                   stone);
-        scene.draw(box_mesh,
-                   Mat4f::translation({0.0f, 0.75f, -yard - 0.15f}) * Mat4f::scaling({2 * yard + 0.6f, 1.5f, 0.3f}),
-                   stone);
+        (void)scene.draw(
+            box_mesh,
+            Mat4f::translation({0.0f, -0.25f, 0.0f}) * Mat4f::scaling({2 * yard + 0.6f, 0.5f, 2 * yard + 0.6f}), stone);
+        (void)scene.draw(
+            box_mesh, Mat4f::translation({-yard - 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}),
+            stone);
+        (void)scene.draw(
+            box_mesh, Mat4f::translation({yard + 0.15f, 0.75f, 0.0f}) * Mat4f::scaling({0.3f, 1.5f, 2 * yard + 0.6f}),
+            stone);
+        (void)scene.draw(
+            box_mesh, Mat4f::translation({0.0f, 0.75f, -yard - 0.15f}) * Mat4f::scaling({2 * yard + 0.6f, 1.5f, 0.3f}),
+            stone);
         for (const Item& item : items) {
             const Mat4f m = Mat4f::trs(world->position(item.body), world->rotation(item.body),
                                        item.half * (item.ball ? 1.0f : 2.0f));
-            scene.draw(item.ball ? ball_mesh : box_mesh, m, {.color = item.colour, .roughness = 0.5f});
+            (void)scene.draw(item.ball ? ball_mesh : box_mesh, m, {.color = item.colour, .roughness = 0.5f});
         }
         if (debug) {
             kin::DebugDraw3DOptions look;
@@ -1017,9 +1019,9 @@ struct PhysicsCharacter {
             }
             const kin::Material3D material{.color = colour_of(p.kind), .roughness = 0.85f};
             if (p.shape == kin::Shape3DKind::Sphere) {
-                scene.draw(ball_mesh, Mat4f::trs(centre, rotation, p.half), material);
+                (void)scene.draw(ball_mesh, Mat4f::trs(centre, rotation, p.half), material);
             } else {
-                scene.draw(box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), material);
+                (void)scene.draw(box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), material);
             }
         }
         render->propagate_transforms();
@@ -1229,7 +1231,7 @@ struct PhysicsClimb {
                 rotation = world->rotation(p.body);
             }
             const kin::Material3D material{.color = colour_of(p.kind), .roughness = 0.85f};
-            scene.draw(box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), material);
+            (void)scene.draw(box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), material);
         }
         render->propagate_transforms();
         render->collect(scene);
@@ -1462,12 +1464,12 @@ struct PhysicsRagdoll {
         }
         advance_to(base + std::max(0, time));
         for (const Block& b : blocks) {
-            scene.draw(box_mesh, Mat4f::trs(b.centre, b.rotation, b.half * 2.0f),
-                       {.color = b.colour, .roughness = 0.85f});
+            (void)scene.draw(box_mesh, Mat4f::trs(b.centre, b.rotation, b.half * 2.0f),
+                             {.color = b.colour, .roughness = 0.85f});
         }
         if (ball.valid()) {
-            scene.draw(ball_mesh, Mat4f::trs(world->position(ball), world->rotation(ball), {0.2f, 0.2f, 0.2f}),
-                       {.color = kin::Color::rgb(230, 80, 60), .roughness = 0.4f});
+            (void)scene.draw(ball_mesh, Mat4f::trs(world->position(ball), world->rotation(ball), {0.2f, 0.2f, 0.2f}),
+                             {.color = kin::Color::rgb(230, 80, 60), .roughness = 0.4f});
         }
         render->propagate_transforms();
         render->collect(scene);
@@ -1694,7 +1696,7 @@ struct PhysicsRope {
                 const kin::Transform3D* t = b.entity.get<kin::Transform3D>();
                 m = Mat4f::trs(t->position, t->rotation);
             }
-            scene.draw(box_mesh, m * Mat4f::scaling(b.half * 2.0f), {.color = b.colour, .roughness = 0.85f});
+            (void)scene.draw(box_mesh, m * Mat4f::scaling(b.half * 2.0f), {.color = b.colour, .roughness = 0.85f});
         }
         render->propagate_transforms();
         render->collect(scene);
@@ -1809,36 +1811,36 @@ struct Stage {
         const kin::Material3D stone{.color = kin::Color::rgb(190, 180, 170), .roughness = 0.8f};
         const kin::Material3D white{.color = kin::Color::rgb(235, 235, 235), .roughness = 0.7f};
         if (floor_on) {
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, -3.0f}), grey);
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, -3.0f}), grey);
         }
         if (walls) {
-            scene.draw(wall_back, Mat4f::translation({0.0f, 3.0f, -13.85f}), plaster);
-            scene.draw(wall_side, Mat4f::translation({-12.15f, 3.0f, -3.0f}), plaster);
+            (void)scene.draw(wall_back, Mat4f::translation({0.0f, 3.0f, -13.85f}), plaster);
+            (void)scene.draw(wall_side, Mat4f::translation({-12.15f, 3.0f, -3.0f}), plaster);
         }
         if (room) {
-            scene.draw(wall_side, Mat4f::translation({12.15f, 3.0f, -3.0f}), plaster);
-            scene.draw(wall_back, Mat4f::translation({0.0f, 3.0f, 8.15f}), plaster);
-            scene.draw(floor, Mat4f::translation({0.0f, 6.1f, -3.0f}), plaster);
+            (void)scene.draw(wall_side, Mat4f::translation({12.15f, 3.0f, -3.0f}), plaster);
+            (void)scene.draw(wall_back, Mat4f::translation({0.0f, 3.0f, 8.15f}), plaster);
+            (void)scene.draw(floor, Mat4f::translation({0.0f, 6.1f, -3.0f}), plaster);
         }
         for (const Vec3f& p : pillars) {
-            scene.draw(pillar, Mat4f::translation({p.x, 2.0f, p.z}), stone);
+            (void)scene.draw(pillar, Mat4f::translation({p.x, 2.0f, p.z}), stone);
         }
         for (const Vec3f& p : poles) {
-            scene.draw(pole, Mat4f::translation({p.x, 1.5f, p.z}), white);
+            (void)scene.draw(pole, Mat4f::translation({p.x, 1.5f, p.z}), white);
         }
         for (const Vec3f& p : lamps) {
             // The post stops a quarter metre under the bulb: a light right at a post's top would sit in a shadow of the
             // post's own cap.
             const float h = p.y > 0.0f ? p.y : 4.0f;
             const float post_h = h - 0.25f;
-            scene.draw(post, Mat4f::trs({p.x, post_h * 0.5f, p.z}, kin::Quatf{}, {0.7f, post_h, 0.7f}),
-                       {.color = kin::Color::rgb(60, 62, 66), .metallic = 0.6f, .roughness = 0.5f});
-            scene.draw(bulb, Mat4f::translation({p.x, h + 0.1f, p.z}),
-                       {.color = kin::Color::rgb(255, 236, 190),
-                        .emissive = 3.0f,
-                        .unlit = true,
-                        .casts_shadow = false,
-                        .receives_shadow = false});
+            (void)scene.draw(post, Mat4f::trs({p.x, post_h * 0.5f, p.z}, kin::Quatf{}, {0.7f, post_h, 0.7f}),
+                             {.color = kin::Color::rgb(60, 62, 66), .metallic = 0.6f, .roughness = 0.5f});
+            (void)scene.draw(bulb, Mat4f::translation({p.x, h + 0.1f, p.z}),
+                             {.color = kin::Color::rgb(255, 236, 190),
+                              .emissive = 3.0f,
+                              .unlit = true,
+                              .casts_shadow = false,
+                              .receives_shadow = false});
         }
         const kin::Material3D leaf_material{.color = kin::Color::rgb(255, 255, 255),
                                             .double_sided = true,
@@ -1846,14 +1848,14 @@ struct Stage {
                                             .texture = leaf,
                                             .alpha_cutoff = 0.5f};
         for (const Vec3f& p : trees) {
-            scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}), leaf_material);
-            scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}) * Mat4f::rotation_y(90.0f), leaf_material);
+            (void)scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}), leaf_material);
+            (void)scene.draw(quad, Mat4f::translation({p.x, 0.0f, p.z}) * Mat4f::rotation_y(90.0f), leaf_material);
         }
         for (const Vec3f& p : benches) {
-            scene.draw(slab, Mat4f::translation({p.x, 0.51f, p.z}),
-                       {.color = kin::Color::rgb(150, 100, 60), .roughness = 0.7f});
-            scene.draw(block, Mat4f::translation({p.x - 0.7f, 0.225f, p.z}), stone);
-            scene.draw(block, Mat4f::translation({p.x + 0.7f, 0.225f, p.z}), stone);
+            (void)scene.draw(slab, Mat4f::translation({p.x, 0.51f, p.z}),
+                             {.color = kin::Color::rgb(150, 100, 60), .roughness = 0.7f});
+            (void)scene.draw(block, Mat4f::translation({p.x - 0.7f, 0.225f, p.z}), stone);
+            (void)scene.draw(block, Mat4f::translation({p.x + 0.7f, 0.225f, p.z}), stone);
         }
     }
 };
@@ -2355,7 +2357,7 @@ struct SceneParticles {
             scene.weather.apply(scene.lights, scene.fog, base);
         }
         for (const Emitter& e : emitters) {
-            scene.draw_particles(e.system);
+            (void)scene.draw_particles(e.system);
         }
     }
 };
@@ -3203,44 +3205,44 @@ int main(int argc, char** argv) {
                     }
                     std::vector<Mat4f> matrices;
                     kin::compute_joint_matrices(skeleton, pose, matrices);
-                    scene.draw_skinned(p.model, matrices, p.transform);
+                    (void)scene.draw_skinned(p.model, matrices, p.transform);
                 } else {
-                    scene.draw(p.model, p.transform);
+                    (void)scene.draw(p.model, p.transform);
                 }
             }
             if (is_crowd) {
                 if (over.crowd_move) {
                     crowd.draw_moving(scene, time, crowd_moved);
                 } else {
-                    crowd.draw(scene);
+                    (void)crowd.draw(scene);
                 }
             }
             if (is_motion) {
-                motion.draw(scene, time);
+                (void)motion.draw(scene, time);
             }
             if (is_pile) {
-                pile.draw(r3d, scene, time);
+                (void)pile.draw(r3d, scene, time);
             }
             if (is_walker) {
-                walker.draw(r3d, scene, walker_frame, time);
+                (void)walker.draw(r3d, scene, walker_frame, time);
             }
             if (is_climber) {
-                climber.draw(r3d, scene, climber_frame, time);
+                (void)climber.draw(r3d, scene, climber_frame, time);
             }
             if (is_ragdoll) {
-                ragdolls.draw(r3d, scene, physics_frame, time);
+                (void)ragdolls.draw(r3d, scene, physics_frame, time);
             }
             if (is_ropes) {
-                ropes.draw(r3d, scene, physics_frame, time);
+                (void)ropes.draw(r3d, scene, physics_frame, time);
             }
             if (is_hidden) {
-                hidden.draw(scene);
+                (void)hidden.draw(scene);
             }
             if (is_landscape) {
-                landscape.draw(scene);
+                (void)landscape.draw(scene);
             }
             if (is_stage) {
-                stage.draw(scene);
+                (void)stage.draw(scene);
             }
             // The sky, fog and time of day last, so that a time of day's sun and ambient replace the scene's own
             // lights.
@@ -3254,7 +3256,7 @@ int main(int argc, char** argv) {
                 kin::apply(day, scene.lights, scene.sky, scene.fog);
             }
             // Particles and weather (P3c): the weather's clock is the frame's (0 at the picture, 60 frames a second).
-            scene_particles.draw(scene, static_cast<double>(time) / 60.0);
+            (void)scene_particles.draw(scene, static_cast<double>(time) / 60.0);
         };
 
         fs::create_directories(out / name);
@@ -3377,7 +3379,8 @@ int main(int argc, char** argv) {
                     apply(on);
                     renderer.clear(kin::Color::rgb(0, 0, 0));
                     const auto start = std::chrono::steady_clock::now();
-                    r3d.render(view, scene);
+                    if (auto result = r3d.render(view, scene); !result)
+                        throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
                     renderer.draw_texture(view.texture(), full);
                     renderer.present();
                     const double cpu_wall = ms_since(start);
@@ -3388,7 +3391,8 @@ int main(int argc, char** argv) {
                 if (over.warm_up) {
                     pose(0);
                     apply(true);
-                    r3d.warm_up(view, scene);
+                    if (auto result = r3d.warm_up(view, scene); !result)
+                        throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
                     pose(0);
                     apply(false);
                 }
@@ -3425,7 +3429,8 @@ int main(int argc, char** argv) {
             const auto first_start = std::chrono::steady_clock::now();
             pose(-run - 1);
             renderer.clear(kin::Color::rgb(0, 0, 0));
-            r3d.render(view, scene);
+            if (auto rendered = r3d.render(view, scene); !rendered)
+                throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
             renderer.draw_texture(view.texture(), full);
             wait_for_gpu();
             const double first_ms = ms_since(first_start);
@@ -3437,7 +3442,8 @@ int main(int argc, char** argv) {
                 pose(f - run);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 for (int k = 0; k < each; ++k) {
-                    r3d.render(view, scene);
+                    if (auto rendered = r3d.render(view, scene); !rendered)
+                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                 }
                 renderer.draw_texture(view.texture(), full);
                 renderer.present();
@@ -3454,7 +3460,8 @@ int main(int argc, char** argv) {
             pose(0);
             renderer.clear(kin::Color::rgb(0, 0, 0));
             scene.debug.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
-            r3d.render(view, scene);
+            if (auto rendered = r3d.render(view, scene); !rendered)
+                throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
             scene.debug.stats_readback = false;
             const kin::RenderDebugStats3D stats = r3d.debug_stats();
             renderer.draw_texture(view.texture(), full);
@@ -3477,7 +3484,8 @@ int main(int argc, char** argv) {
                 for (int k = 1; k <= over.flicker; ++k) {
                     pose(k);
                     renderer.clear(kin::Color::rgb(0, 0, 0));
-                    r3d.render(view, scene);
+                    if (auto rendered = r3d.render(view, scene); !rendered)
+                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                     renderer.draw_texture(view.texture(), full);
                     kin::Image next_image;
                     renderer.read_rgba(full, next_image.rgba, next_image.size);
@@ -3513,7 +3521,8 @@ int main(int argc, char** argv) {
                 kin::u64 released = 0;
                 for (int f = 0; f < 130; ++f) {
                     renderer.clear(kin::Color::rgb(0, 0, 0));
-                    r3d.render(view, scene);
+                    if (auto rendered = r3d.render(view, scene); !rendered)
+                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                     renderer.draw_texture(view.texture(), full);
                     renderer.present();
                     released += r3d.debug_stats().targets_released;
@@ -3526,7 +3535,8 @@ int main(int argc, char** argv) {
                             static_cast<unsigned long long>(released));
                 pose(0);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
-                r3d.render(view, scene);
+                if (auto rendered = r3d.render(view, scene); !rendered)
+                    throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                 renderer.present();
             }
             // The same moment drawn large and averaged down, with temporal anti-aliasing off.
@@ -3540,7 +3550,8 @@ int main(int argc, char** argv) {
                 if (big && target.valid()) {
                     renderer.push_render_target(target);
                     renderer.clear(kin::Color::rgb(0, 0, 0));
-                    r3d.render(big, scene);
+                    if (auto result = r3d.render(big, scene); !result)
+                        throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
                     const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x),
                                               static_cast<float>(big_size.y)};
                     renderer.draw_texture(big.texture(), big_rect);

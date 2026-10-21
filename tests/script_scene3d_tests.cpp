@@ -1,3 +1,4 @@
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -81,6 +82,18 @@ function on_enter(ctx)
         assert(not pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, {ignore=bad}))
         assert(not pcall(scene3d.impulse, bad, {x=1,y=0,z=0}))
     end
+    for _, bad in ipairs({world:authored("crate"), 17, true, "wrong", {}}) do
+        for _, query in ipairs({scene3d.contact_events, scene3d.character_events, scene3d.ragdoll_events, scene3d.rope_events}) do
+            assert(not pcall(query, bad))
+        end
+        assert(not pcall(scene3d.raycast, bad, {x=0,y=0,z=-4}))
+        if type(bad) ~= "table" then
+            assert(not pcall(scene3d.character_input, hit.entity, bad))
+            assert(not pcall(scene3d.raycast, {x=0,y=0,z=4}, {x=0,y=0,z=-4}, bad))
+            assert(not pcall(scene3d.spawn, "prop.kinprefab", bad))
+        end
+    end
+    assert(scene3d.raycast({x=0,y=0,z=4}, {x=0,y=0,z=-4}, nil))
     assert(not pcall(scene3d.character_input, hit.entity, {move=17}))
     assert(not pcall(scene3d.character_input, hit.entity, {forward=true}))
     assert(not pcall(scene3d.spawn, "prop.kinprefab", {rotation=17}))
@@ -275,7 +288,7 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
     const auto reloaded = session.bodies()->body_of(session.entity("crate").raw());
     check(std::fabs(session.physics()->position(reloaded).x - .5f) < .001f,
           "prepared Lua module snapshot was not retained");
-    session.unload();
+    assert(session.unload());
     check(exits == 2, "on_exit did not run on unload");
 
     // Callback and ECS-system failures cancel their respective command buffers.
@@ -300,7 +313,7 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
               "failed callback executed queued lifecycle work");
         check(report(session).find("cancelled") != std::string::npos, "failed callback request stayed pending");
     }
-    session.unload();
+    assert(session.unload());
 
     // A script host needs neither a physics world nor application/input pointers.
     write(source.path / "logic.lua", R"lua(

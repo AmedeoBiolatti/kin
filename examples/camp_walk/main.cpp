@@ -30,11 +30,9 @@ class Camp final : public Scene {
     bool _edited = false, _edit_collision = false, _edit_particles = false;
     int _live_edits = 0;
     std::string _error;
-    void diagnostic() {
-        _error.clear();
-        for (const auto& error : _session->diagnostics())
-            _error += error + "\n";
-        std::cerr << _error;
+    void diagnostic(const Diagnostics3D& errors) {
+        _error = diagnostics3d_text(errors);
+        std::cerr << _error << '\n';
     }
     bool edit_camp() {
         auto barrel = _session->entity("brass-barrel"), smoke = _session->entity("campfire.low-smoke");
@@ -43,13 +41,18 @@ class Camp final : public Scene {
         const auto alive = smoke.get<ParticleEmitter3D>()->system.count();
         const float scale = _edited ? 2.62f : 3.5f;
         // Typed configuration; per-frame gameplay state uses native APIs below.
-        if (!_session->reconfigure<Transform3D>(_session->handle(barrel),
-                                                [&](auto& t) { t.scale = {scale, scale, scale}; }) ||
-            !_session->reconfigure<ModelMaterials3D>(
-                _session->handle(barrel), [&](auto& material) { material.variant = _edited ? "brass" : "blue"; }) ||
-            !_session->reconfigure<ParticleEmitter3D>(
-                _session->handle(smoke), [&](auto& emitter) { emitter.system.desc.rate = _edited ? 6 : 12; })) {
-            diagnostic();
+        const auto refused = [&](const Status3D& result) {
+            if (result)
+                return false;
+            diagnostic(result.diagnostics);
+            return true;
+        };
+        if (refused(_session->reconfigure<Transform3D>(_session->handle(barrel),
+                                                       [&](auto& t) { t.scale = {scale, scale, scale}; })) ||
+            refused(_session->reconfigure<ModelMaterials3D>(
+                _session->handle(barrel), [&](auto& material) { material.variant = _edited ? "brass" : "blue"; })) ||
+            refused(_session->reconfigure<ParticleEmitter3D>(
+                _session->handle(smoke), [&](auto& emitter) { emitter.system.desc.rate = _edited ? 6 : 12; }))) {
             return false;
         }
         const auto new_body = _session->bodies()->body_of(barrel.raw());
@@ -87,8 +90,8 @@ public:
         options.initialize = camp_walk::install;
         options.compose = camp_walk::compose;
         _session = std::make_unique<SceneSession3D>(*_renderer, *_assets, options);
-        if (!_session->load("scenes/camp-play.kinscene")) {
-            diagnostic();
+        if (auto loaded = _session->load("scenes/camp-play.kinscene"); !loaded) {
+            diagnostic(loaded.diagnostics);
             throw std::runtime_error("camp could not load");
         }
         if (!camp_walk::prepare(*_session))
@@ -117,7 +120,7 @@ public:
             _script ? camp_walk::demo_commands(camp_walk::state(*_session->world()).progress.steps) : live;
         if (commands.restart || commands.refresh || camp_walk::state(*_session->world()).restart_requested) {
             if (!camp_walk::restart(*_session, commands.refresh)) {
-                diagnostic();
+                diagnostic(_session->diagnostics());
                 if (ctx.report) {
                     ctx.report->fail("camp restart failed");
                     ctx.app.quit();
@@ -135,8 +138,8 @@ public:
         if (commands.edit && !edit_camp() && ctx.report)
             ctx.report->fail("live camp editing/collision/particle preservation check failed");
         camp_walk::submit(*_session->world(), commands.player);
-        if (!_session->step(ctx.dt)) {
-            diagnostic();
+        if (auto stepped = _session->step(ctx.dt); !stepped) {
+            diagnostic(stepped.diagnostics);
             if (ctx.report)
                 ctx.report->fail(_error);
             ctx.app.quit();
@@ -157,9 +160,9 @@ public:
     }
     void render(SceneContext& ctx) override {
         ctx.renderer.clear();
-        camp_walk::present(*_session, ctx.app.headless() ? 1.f : ctx.alpha, ctx.app.frame_stats().raw_frame_time);
-        if (!_session->render(ctx.app.headless() ? 1.f : ctx.alpha)) {
-            diagnostic();
+        camp_walk::present(*_session, ctx.alpha, ctx.app.frame_stats().raw_frame_time);
+        if (auto rendered = _session->render(ctx.alpha); !rendered) {
+            diagnostic(rendered.diagnostics);
             if (ctx.report)
                 ctx.report->fail(_error);
             return;

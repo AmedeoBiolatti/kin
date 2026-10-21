@@ -191,7 +191,8 @@ void register_scene3d_settings(EcsWorld& world) {
 }
 
 static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Scene3D& scene, ViewOptions3D* view,
-                                                            EcsEntity only) {
+                                                            EcsEntity only,
+                                                            const WorldRenderState3D::Presentation3D& presentation) {
     std::vector<std::string> errors;
     const auto choose = [&]<class T>() {
         if (only)
@@ -210,6 +211,14 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
     if (auto entity = choose.operator()<SceneCamera3D>()) {
         auto camera = entity.get<SceneCamera3D>()->camera;
         const auto* transform = entity.get<WorldTransform3D>();
+        WorldTransform3D drawn;
+        if (transform) {
+            const auto* explicit_pose = entity.get<RenderTransform3D>();
+            drawn.matrix = explicit_pose && explicit_pose->enabled ? explicit_pose->matrix
+                           : presentation ? presentation(entity.raw()).value_or(transform->matrix)
+                                          : transform->matrix;
+            transform = &drawn;
+        }
         const bool finite_transform =
             transform && std::ranges::all_of(transform->matrix.m, [](f32 value) { return std::isfinite(value); });
         if (!finite_transform || !std::isfinite(camera.fov) || camera.fov <= 0 || camera.fov >= 180 ||
@@ -297,8 +306,9 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
     }
     return errors;
 }
-Status3D apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view, EcsEntity only) {
-    auto diagnostics = apply_scene3d_settings_impl(world, scene, view, only);
+Status3D apply_scene3d_settings(EcsWorld& world, Scene3D& scene, ViewOptions3D* view, EcsEntity only,
+                                const WorldRenderState3D::Presentation3D& presentation) {
+    auto diagnostics = apply_scene3d_settings_impl(world, scene, view, only, presentation);
     const bool accepted = diagnostics.empty();
     return status3d(accepted, std::move(diagnostics));
 }

@@ -337,14 +337,14 @@ public:
     // clocks/weather, collects meshes/lights/ropes and calls compose. Recreates
     // the view only if its options changed; render also submits the frame.
     // alpha is the host's fixed-step accumulator / fixed_dt, in [0,1].
-    // Interpolates draw placement only; gameplay transforms remain authoritative.
+    // Interpolates draw/camera/bone/rope placement; gameplay transforms remain authoritative.
     Status3D collect(f32 alpha = 1);
     Status3D render(f32 alpha = 1);
     Status3D resize(Vec2i viewport);
     // What `pixel` (the view's own, from its top left) showed in the last render(): the entity drawn there and the
     // point of it. Draws nothing. Needs options.view.pick; waits for the GPU like Renderer3D::pick, so ask on a click,
-    // not every frame. Nullopt over the background or outside the view, and (with why in diagnostics()) without picking
-    // or a renderer.
+    // not every frame. A successful nullopt over the background or outside the view; a failed result
+    // without picking or a renderer.
     Result3D<std::optional<ScenePick3D>> pick(Vec2i pixel);
 
     bool active() const;

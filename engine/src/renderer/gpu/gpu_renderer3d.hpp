@@ -279,6 +279,23 @@ private:
                                       SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false,
                                       bool fog = false, bool lights = false, Unlit unlit = Unlit::Off,
                                       bool indexed = false) const;
+    // Pure requests shared by actual draws and conservative warm-up variants.
+    struct MaterialPipeline {
+        const GpuMaterialShader3D* custom;
+        Unlit unlit;
+        bool cull, mask;
+        Pass pass;
+    };
+    struct MeshPipelineRequest {
+        SDL_GPUTextureFormat format;
+        u32 samples;
+        MaterialPipeline material;
+        bool velocity, skinned;
+        bool fog = false, lights = false, indexed = false;
+    };
+    MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
+                                       bool fog) const;
+    SDL_GPUGraphicsPipeline* pipeline(const MeshPipelineRequest& request) const;
     // The sky pass (sky.frag): a full-screen triangle at the far plane in the main pass's colour target (`velocity`:
     // the second target too, as the main pass with temporal anti-aliasing and no pre-pass has), only where the depth is
     // far.
@@ -402,6 +419,20 @@ private:
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to
     // the instance buffer; draw_particles() then records them into the main pass.
+    struct ParticleSource {
+        const ParticleLook3D* look;
+        const ParticleSprite3D* sprites;
+        u32 count;
+        bool weather;
+        u64 history;
+    };
+    void prepare_weather(FrameCtx& ctx);
+    std::vector<ParticleSource> particle_sources(const Scene3D& scene) const;
+    void prepare_particle_casts(FrameCtx& ctx, std::span<const ParticleSource> sources);
+    u32 select_particles(FrameCtx& ctx, std::span<const ParticleSource> sources);
+    void match_particles(FrameCtx& ctx, u32 total);
+    void upload_particles(FrameCtx& ctx, u32 total);
+    void order_particle_batches();
     void prepare_particles(FrameCtx& ctx);
     void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false);
     bool reactive_pass(FrameCtx& ctx);
@@ -511,6 +542,8 @@ private:
     };
     std::vector<ParticleCastBatch> _particle_cast_batches;
     std::vector<ParticleSprite3D> _particle_cast_sprites;
+    std::vector<u32> _particle_cast_order;     // compact per-map source indices
+    std::vector<u32> _particle_history_lookup; // bounded previous-history lookup scratch
     std::shared_ptr<GpuBuffer> _particle_cast_buffer;
     std::shared_ptr<GpuBuffer> _particle_previous;
     std::vector<GpuView3D::ParticleHistory> _particle_history_now;
@@ -606,6 +639,7 @@ private:
     u64 _shadow_revision = 0;
     u64 _shadow_generation = 0; // changes whenever _shadow_map is made again
     u64 _next_mesh_serial = 1;
+    template <class Consume> bool visit_shadow_copy_bytes(Consume&& consume) const;
     bool shadow_unchanged(FrameCtx& ctx);
     void shadow_drawn(FrameCtx& ctx, bool complete);
     bool _chain_ready = false; // the occlusion built the linear depth chain this render: the blurs read it

@@ -1,3 +1,4 @@
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -107,11 +108,11 @@ void scene_camera(Renderer3D& renderer) {
     auto first = rig.frame(query, 0, 0);
     check(first && close(first->camera.position.x, 12) && close(first->camera.position.z, 4) && !first->arm.obstructed,
           "parent world pose/self ignore incorrect");
-    rig.set_angles(179, 0);
+    assert(rig.set_angles(179, 0));
     rig.observe(*session.world());
     target.get_mut<Transform3D>()->position.x = 4;
     session.rendering()->propagate_transforms();
-    rig.set_angles(-179, 0);
+    assert(rig.set_angles(-179, 0));
     rig.observe(*session.world());
     const auto previous = rig.frame(query, 0, 0), middle = rig.frame(query, .5f, 0), latest = rig.frame(query, 1, 0);
     check(previous && middle && latest && close(position(previous->target_transform).x, 12) &&
@@ -155,7 +156,7 @@ void scene_camera(Renderer3D& renderer) {
     target.get_mut<Transform3D>()->scale = {1, 1, 1};
     target.get_mut<Transform3D>()->rotation = {};
     session.rendering()->propagate_transforms();
-    rig.set_angles(0, 0);
+    assert(rig.set_angles(0, 0));
     rig.reset();
     rig.observe(*session.world());
     CameraRig3D sparse = rig;
@@ -195,7 +196,7 @@ void scene_camera(Renderer3D& renderer) {
     ++foreign.session;
     check(!query.resolve(foreign), "foreign checked target resolved");
     check(!rig.orbit({std::numeric_limits<float>::infinity(), 0}), "nonfinite orbit accepted");
-    rig.set_angles(720, 500);
+    assert(rig.set_angles(720, 500));
     check(rig.yaw() == 0 && rig.pitch() == settings.pitch_max, "angle wrapping/pitch clamp failed");
     rig.reset();
     check(!rig.frame(query) && rig.observe(*session.world()), "explicit reset retained interpolation state");

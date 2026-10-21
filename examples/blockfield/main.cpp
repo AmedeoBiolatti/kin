@@ -18,6 +18,7 @@
 #include <kin/ui2/widgets.hpp>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <string>
 
 namespace blockfield {
@@ -230,7 +231,8 @@ public:
         if (!_view.valid())
             _view = _renderer->create_view(size, {.samples = _features.samples, .hdr = _features.hdr}).value_or({});
         else if (size != _size)
-            _renderer->resize(_view, size);
+            if (auto result = _renderer->resize(_view, size); !result)
+                throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
         _size = size;
         const auto prepare = Clock::now();
         _scene.clear();
@@ -261,13 +263,13 @@ public:
         if (_options.quality != "basic")
             material = _materials.values[0];
         for (const auto& [key, chunk] : _chunks)
-            _scene.draw(chunk.mesh, Mat4f::translation({f32(key.x * chunk_size), 0, f32(key.z * chunk_size)}),
-                        material);
+            (void)_scene.draw(chunk.mesh, Mat4f::translation({f32(key.x * chunk_size), 0, f32(key.z * chunk_size)}),
+                              material);
         const auto hit = raycast(_voxels, _eye, look());
         if (hit && !_options.benchmark) {
             Material3D outline{
                 .color = Color::rgb(250, 220, 106), .unlit = true, .casts_shadow = false, .wireframe = true};
-            _scene.draw(
+            (void)_scene.draw(
                 _target_box,
                 Mat4f::trs({hit->cell.x + 0.5f, hit->cell.y + 0.5f, hit->cell.z + 0.5f}, {}, {1.008f, 1.008f, 1.008f}),
                 outline);

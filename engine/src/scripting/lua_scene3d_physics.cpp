@@ -137,14 +137,17 @@ void validate_impulse(const LuaScene3DBindings& api, RagdollHandle3D native, con
 }
 } // namespace
 
-void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DBindings> api) {
+void bind_physics(sol::state& lua, sol::table table, std::shared_ptr<LuaScene3DBindings> api) {
+    CheckedBindings scene{table};
     lua.new_usertype<Shape3D>("KinQueryShape3D", sol::no_constructor);
-    scene["shape"] = [](sol::table options) {
-        const auto kind = options.get<std::string>("kind");
+    scene["shape"] = [](sol::object options_argument) {
+        const auto options = checked<sol::table>(options_argument, "options");
+
+        const auto kind = checked<std::string>(options["kind"], "kind");
         Shape3D out;
         if (kind == "box") {
             fields(options, {"kind", "half_extents"});
-            out = Shape3D::box(vector(options.get<sol::table>("half_extents")));
+            out = Shape3D::box(vector(checked<sol::table>(options["half_extents"], "half_extents")));
         } else if (kind == "sphere") {
             fields(options, {"kind", "radius"});
             out = Shape3D::sphere(number(options, "radius", 0, 0, infinity));
@@ -155,13 +158,13 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
             out = kind == "capsule" ? Shape3D::capsule(height, radius) : Shape3D::cylinder(height, radius);
         } else if (kind == "convex_hull") {
             fields(options, {"kind", "points"});
-            const auto points = options.get<sol::table>("points");
+            const auto points = checked<sol::table>(options["points"], "points");
             if (points.size() < 4 || points.size() > 256)
                 throw std::runtime_error("convex query shapes require 4..256 points");
             std::vector<Vec3f> vertices;
             vertices.reserve(points.size());
             for (size_t i = 1; i <= points.size(); ++i)
-                vertices.push_back(vector(points.get<sol::table>(i)));
+                vertices.push_back(vector(checked<sol::table>(points[i], "point")));
             out = Shape3D::convex_hull(vertices);
         } else
             throw std::runtime_error("unsupported 3D query shape kind");
@@ -169,8 +172,12 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
             throw std::runtime_error("invalid 3D query shape dimensions or geometry");
         return out;
     };
-    scene["raycast_all"] = [api](sol::this_state state, sol::table from, sol::table to,
-                                 sol::optional<sol::table> options) {
+    scene["raycast_all"] = [api](sol::this_state state, sol::object from_argument, sol::object to_argument,
+                                 sol::object options_argument) {
+        const auto from = checked<sol::table>(from_argument, "from");
+        const auto to = checked<sol::table>(to_argument, "to");
+
+        const auto options = optional_argument<sol::table>(options_argument, "options");
         physics(*api);
         if (options)
             fields(*options, {"mask", "sensors", "ignore", "capacity"});
@@ -184,8 +191,12 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
             rows[i + 1] = hit_table(lua, hits[i]);
         return std::make_tuple(rows, result.overflow);
     };
-    scene["shape_cast"] = [api](sol::this_state state, const Shape3D& shape, sol::table position,
-                                sol::table displacement, sol::optional<sol::table> options) -> sol::object {
+    scene["shape_cast"] = [api](sol::this_state state, const Shape3D& shape, sol::object position_argument,
+                                sol::object displacement_argument, sol::object options_argument) -> sol::object {
+        const auto position = checked<sol::table>(position_argument, "position");
+        const auto displacement = checked<sol::table>(displacement_argument, "displacement");
+
+        const auto options = optional_argument<sol::table>(options_argument, "options");
         physics(*api);
         if (options)
             fields(*options, {"mask", "sensors", "ignore", "initial_overlap", "rotation"});
@@ -195,8 +206,11 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
             return sol::nil;
         return sol::make_object(state, hit_table(sol::state_view{state}, *hit));
     };
-    scene["overlap"] = [api](sol::this_state state, const Shape3D& shape, sol::table position,
-                             sol::optional<sol::table> options) {
+    scene["overlap"] = [api](sol::this_state state, const Shape3D& shape, sol::object position_argument,
+                             sol::object options_argument) {
+        const auto position = checked<sol::table>(position_argument, "position");
+
+        const auto options = optional_argument<sol::table>(options_argument, "options");
         physics(*api);
         if (options)
             fields(*options, {"mask", "sensors", "ignore", "rotation", "capacity"});
@@ -211,7 +225,9 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
             rows[i + 1] = hit_table(lua, hits[i]);
         return std::make_tuple(rows, result.overflow);
     };
-    scene["traversal_input"] = [api](SceneEntity3D handle, sol::table options) {
+    scene["traversal_input"] = [api](SceneEntity3D handle, sol::object options_argument) {
+        const auto options = checked<sol::table>(options_argument, "options");
+
         command_buffer(*api);
         fields(options, {"grab", "reach", "pull_up", "jump_off", "drop"});
         TraversalInput3D input;
@@ -297,7 +313,8 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
                                                       "awake_bodies", value.awake_bodies, "max_speed", value.max_speed,
                                                       "settled", value.settled, "frozen", value.frozen));
     };
-    scene["start_ragdoll"] = [api](SceneEntity3D handle, sol::optional<sol::table> options) {
+    scene["start_ragdoll"] = [api](SceneEntity3D handle, sol::object options_argument) {
+        const auto options = optional_argument<sol::table>(options_argument, "options");
         command_buffer(*api);
         script_component_access("Ragdoll3D", true);
         if (options)
@@ -309,7 +326,8 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         validate_impulse(*api, native, start);
         return api->bodies->start_ragdoll(resolve(*api, handle).raw(), start);
     };
-    scene["hand_over_to_ragdoll"] = [api](SceneEntity3D handle, sol::optional<sol::table> options) {
+    scene["hand_over_to_ragdoll"] = [api](SceneEntity3D handle, sol::object options_argument) {
+        const auto options = optional_argument<sol::table>(options_argument, "options");
         command_buffer(*api);
         script_component_access("Ragdoll3D", true);
         script_component_access("CharacterController3D", true);
@@ -356,7 +374,8 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         return ragdoll(*api, handle) && api->bodies->set_ragdoll_subtree(resolve(*api, handle).raw(), joint, weight);
     };
     scene["recover_from_ragdoll"] = [api](sol::this_state state, SceneEntity3D handle,
-                                          sol::optional<sol::table> options) -> sol::object {
+                                          sol::object options_argument) -> sol::object {
+        const auto options = optional_argument<sol::table>(options_argument, "options");
         command_buffer(*api);
         script_component_access("Ragdoll3D", true);
         script_component_access("CharacterController3D", true);
@@ -377,7 +396,8 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         return sol::make_object(state, lua.create_table_with("recovered", value.recovered, "blocked", value.blocked,
                                                              "place", place(lua, value.place)));
     };
-    scene["ragdoll_events"] = [api](sol::this_state state, sol::optional<SceneEntity3D> filter) {
+    scene["ragdoll_events"] = [api](sol::this_state state, sol::object filter_argument) {
+        const auto filter = optional_argument<SceneEntity3D>(filter_argument, "filter");
         physics(*api);
         if (filter && !resolve(*api, *filter))
             throw std::runtime_error("ragdoll event filter is stale");
@@ -431,7 +451,9 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         return sol::make_object(state, rows);
     };
     scene["rope_closest_point"] = [api](sol::this_state state, SceneEntity3D handle,
-                                        sol::table position) -> sol::object {
+                                        sol::object position_argument) -> sol::object {
+        const auto position = checked<sol::table>(position_argument, "position");
+
         script_component_access("Rope3D", false);
         const auto point = vector(position);
         const auto native = rope(*api, handle);
@@ -481,7 +503,8 @@ void bind_physics(sol::state& lua, sol::table scene, std::shared_ptr<LuaScene3DB
         return length_command(handle, target, 0);
     };
     scene["reel_rope"] = length_command;
-    scene["rope_events"] = [api](sol::this_state state, sol::optional<SceneEntity3D> filter) {
+    scene["rope_events"] = [api](sol::this_state state, sol::object filter_argument) {
+        const auto filter = optional_argument<SceneEntity3D>(filter_argument, "filter");
         physics(*api);
         if (filter && !resolve(*api, *filter))
             throw std::runtime_error("rope event filter is stale");

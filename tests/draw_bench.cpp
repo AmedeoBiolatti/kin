@@ -1,3 +1,4 @@
+#include <cassert>
 // Times drawing many quads a frame on the SDL_GPU backend, three ways:
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
 #include <kin/core/jobs.hpp>
@@ -737,7 +738,7 @@ int meshes(int frames, int count) {
                 const float turn = static_cast<float>(f);
                 if (c.kind == 2) {
                     for (int i = 0; i < count; ++i) {
-                        scene.draw(i % 2 == 0 ? box : ball, place(i, turn), {.color = kin::Color::rgb(200, 120, 80)});
+                        (void)scene.draw(i % 2 == 0 ? box : ball, place(i, turn), {.color = kin::Color::rgb(200, 120, 80)});
                     }
                 } else {
                     const auto room = scene.add_instances(c.kind == 0 ? box : ball, static_cast<std::size_t>(count),
@@ -748,7 +749,7 @@ int meshes(int frames, int count) {
                 }
                 const auto t1 = clock::now();
                 renderer->clear(kin::Color::rgb(0, 0, 0));
-                r3d.render(view, scene);
+                assert(r3d.render(view, scene));
                 renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
                 renderer->present();
                 fill.push_back(ms(t0, t1));
@@ -862,7 +863,7 @@ int shadows(int frames, int count) {
                 scene.lights.shadow_resolution = static_cast<kin::u32>(std::atoi(res));
             }
             const bool receive = std::getenv("KIN_BENCH_NO_RECEIVE") == nullptr;
-            scene.draw_instanced(tile, tiles, {.receives_shadow = receive});
+            (void)scene.draw_instanced(tile, tiles, {.receives_shadow = receive});
             for (int k = 0; k < 3; ++k) {
                 const auto room = scene.add_instances(enemy[static_cast<std::size_t>(k)], static_cast<std::size_t>((count + 2 - k) / 3),
                                                       {.color = kin::Color::rgb(200, 120, 80), .receives_shadow = receive}).value_or({});
@@ -873,7 +874,7 @@ int shadows(int frames, int count) {
             }
             renderer->clear(kin::Color::rgb(0, 0, 0));
             for (int k = 0; k < repeat; ++k) {
-                r3d.render(view, scene);
+                assert(r3d.render(view, scene));
             }
             renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
             renderer->present();

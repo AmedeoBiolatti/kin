@@ -323,5 +323,9 @@ target_link_libraries(kin_scripting_tests PRIVATE
     kin::engine
 )
 
+# sol2's legacy numeric policy is checked in Release; Debug defaults to strict checks.
+target_compile_definitions(kin_scripting_tests PRIVATE
+    KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)
+
 add_test(NAME kin-scripting COMMAND kin_scripting_tests)
 

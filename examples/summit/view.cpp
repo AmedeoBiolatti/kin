@@ -740,7 +740,7 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
                                              : Color::rgb(72, 83, 96),
                        .roughness = p.tag == 2 ? 0.35f : 0.8f};
         mat.metallic = p.tag == 2 ? 0.7f : 0.0f;
-        scene.draw(_box, Mat4f::trs(p.centre, p.rotation, p.half * 2.0f), mat);
+        (void)scene.draw(_box, Mat4f::trs(p.centre, p.rotation, p.half * 2.0f), mat);
     }
     const auto trail = [&](const std::vector<Vec3f>& points, Color colour) {
         for (std::size_t i = 1; i < points.size(); ++i) {
@@ -751,8 +751,8 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
             const int n = std::max(1, int(length(d) / 2.5f));
             for (int j = 0; j <= n; ++j) {
                 const Vec3f point = points[i - 1] + d * (f32(j) / f32(n));
-                scene.draw(_cylinder, Mat4f::trs(point + Vec3f{0, 0.10f, 0}, {}, {0.22f, 0.03f, 0.22f}),
-                           Material3D{.color = colour, .emissive = 0.25f, .roughness = 0.8f});
+                (void)scene.draw(_cylinder, Mat4f::trs(point + Vec3f{0, 0.10f, 0}, {}, {0.22f, 0.03f, 0.22f}),
+                                 Material3D{.color = colour, .emissive = 0.25f, .roughness = 0.8f});
             }
         }
     };
@@ -771,14 +771,14 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
          std::vector<std::pair<Vec3f, Color>>{{e.fork + e.rotation.rotate({-2, 0, 0}), orange},
                                               {e.sheltered_trail[1] + e.rotation.rotate({3, 0, 0}), blue},
                                               {e.sheltered_trail[4] + e.rotation.rotate({3, 0, 0}), blue}}) {
-        scene.draw(_box, Mat4f::trs(point + Vec3f{0, 1.4f, 0}, e.rotation, {1.4f, 0.24f, 0.05f}),
-                   Material3D{.color = colour, .emissive = 0.15f, .roughness = 0.75f});
-        scene.draw(_cylinder, Mat4f::trs(point + Vec3f{0, 0.7f, 0}, {}, {0.035f, 1.4f, 0.035f}),
-                   Material3D{.color = Color::rgb(105, 85, 64), .roughness = 0.9f});
+        (void)scene.draw(_box, Mat4f::trs(point + Vec3f{0, 1.4f, 0}, e.rotation, {1.4f, 0.24f, 0.05f}),
+                         Material3D{.color = colour, .emissive = 0.15f, .roughness = 0.75f});
+        (void)scene.draw(_cylinder, Mat4f::trs(point + Vec3f{0, 0.7f, 0}, {}, {0.035f, 1.4f, 0.035f}),
+                         Material3D{.color = Color::rgb(105, 85, 64), .roughness = 0.9f});
     }
     const Vec3f lamp = e.shelter_centre + e.rotation.rotate({-3.2f, 0.3f, 0});
-    scene.draw(_sphere, Mat4f::trs(lamp, {}, {0.12f, 0.18f, 0.12f}),
-               Material3D{.color = Color::rgb(250, 205, 121), .emissive = 3.0f, .roughness = 0.4f});
+    (void)scene.draw(_sphere, Mat4f::trs(lamp, {}, {0.12f, 0.18f, 0.12f}),
+                     Material3D{.color = Color::rgb(250, 205, 121), .emissive = 3.0f, .roughness = 0.4f});
     PointLightSource3D cave_light;
     cave_light.position = lamp;
     cave_light.color = {8.0f, 5.0f, 2.5f};
@@ -788,20 +788,20 @@ void SummitView::draw_expedition(Scene3D& scene, const Game& game) {
     scene.add_point_light(cave_light);
     const Vec3f signal = e.beacon + e.rotation.rotate({1.9f, 5.6f, 0});
     const Color signal_colour = online ? Color::rgb(93, 237, 158) : gold;
-    scene.draw(_sphere, Mat4f::trs(signal, {}, {0.22f, 0.22f, 0.22f}),
-               Material3D{.color = signal_colour, .emissive = online ? 4.0f : 1.0f, .roughness = 0.4f});
+    (void)scene.draw(_sphere, Mat4f::trs(signal, {}, {0.22f, 0.22f, 0.22f}),
+                     Material3D{.color = signal_colour, .emissive = online ? 4.0f : 1.0f, .roughness = 0.4f});
     // The extraction pad's cross and perimeter switch on only after the beacon is restored.
     const Material3D pad{.color = online ? Color::rgb(93, 237, 158) : Color::rgb(130, 144, 152),
                          .emissive = online ? 0.8f : 0.0f,
                          .roughness = 0.8f};
     for (Vec3f size : {Vec3f{3.0f, 0.025f, 0.4f}, Vec3f{0.4f, 0.025f, 3.0f}})
-        scene.draw(_box, Mat4f::trs(e.extraction + Vec3f{0, 0.09f, 0}, e.rotation, size), pad);
+        (void)scene.draw(_box, Mat4f::trs(e.extraction + Vec3f{0, 0.09f, 0}, e.rotation, size), pad);
     for (int x : {-1, 1})
         for (int z : {-1, 1})
-            scene.draw(_sphere,
-                       Mat4f::trs(e.extraction + e.rotation.rotate({f32(x) * 2.6f, 0.12f, f32(z) * 2.6f}), {},
-                                  {0.08f, 0.08f, 0.08f}),
-                       pad);
+            (void)scene.draw(_sphere,
+                             Mat4f::trs(e.extraction + e.rotation.rotate({f32(x) * 2.6f, 0.12f, f32(z) * 2.6f}), {},
+                                        {0.08f, 0.08f, 0.08f}),
+                             pad);
     ++_lights_added;
 }
 
@@ -873,11 +873,11 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     }
 
     for (const Part& p : _terrain)
-        scene.draw(p.mesh, Mat4f::identity(), p.material);
+        (void)scene.draw(p.mesh, Mat4f::identity(), p.material);
     for (const Part& p : _rock)
-        scene.draw(p.mesh, Mat4f::identity(), p.material);
+        (void)scene.draw(p.mesh, Mat4f::identity(), p.material);
     for (const Part& p : _decor)
-        scene.draw(p.mesh, Mat4f::identity(), p.material);
+        (void)scene.draw(p.mesh, Mat4f::identity(), p.material);
     _external_assets.draw_scenery(scene);
 
     // Camps: a tent, a groundsheet, a flag, a fire ring with logs; the fire's light, a lantern, flames and smoke.
@@ -899,42 +899,42 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         const Quatf q = Quatf::axis_angle({0, 1, 0}, yaw);
         // Authored camp props, with the original primitive tent as a missing-content fallback.
         if (!_external_assets.draw(scene, ExternalAssets::Tent, c, 2.3f, yaw)) {
-            scene.draw(_cone4,
-                       Mat4f::trs(c + Vec3f{0.0f, 0.62f, 0.0f}, q * Quatf::axis_angle({0, 1, 0}, 45.0f),
-                                  {1.55f, 1.25f, 1.55f}),
-                       tent);
-            scene.draw(_box, Mat4f::trs(c + Vec3f{0.0f, 0.03f, 0.0f}, q, {2.3f, 0.06f, 2.3f}), tent_dark);
+            (void)scene.draw(_cone4,
+                             Mat4f::trs(c + Vec3f{0.0f, 0.62f, 0.0f}, q * Quatf::axis_angle({0, 1, 0}, 45.0f),
+                                        {1.55f, 1.25f, 1.55f}),
+                             tent);
+            (void)scene.draw(_box, Mat4f::trs(c + Vec3f{0.0f, 0.03f, 0.0f}, q, {2.3f, 0.06f, 2.3f}), tent_dark);
         }
         for (const PropPlacement& prop : camp_props(_camps[i], i)) {
             if (prop.kind == Tent || prop.kind == Firepit)
                 continue;
-            _external_assets.draw(scene, prop.kind, prop.feet, prop.span, prop.yaw);
+            (void)_external_assets.draw(scene, prop.kind, prop.feet, prop.span, prop.yaw);
         }
-        scene.draw(_cylinder, Mat4f::trs(c + Vec3f{-1.7f, 1.3f, 0.0f}, {}, {0.035f, 2.6f, 0.035f}), pole);
-        scene.draw(_box, Mat4f::trs(c + Vec3f{-1.7f, 2.2f, 0.34f}, {}, {0.02f, 0.42f, 0.68f}), flag);
+        (void)scene.draw(_cylinder, Mat4f::trs(c + Vec3f{-1.7f, 1.3f, 0.0f}, {}, {0.035f, 2.6f, 0.035f}), pole);
+        (void)scene.draw(_box, Mat4f::trs(c + Vec3f{-1.7f, 2.2f, 0.34f}, {}, {0.02f, 0.42f, 0.68f}), flag);
         // The fire ring: stones round a hearth, two logs across, embers at the middle.
         const bool imported_fire = _external_assets.draw(scene, ExternalAssets::Firepit, fire, 0.95f, yaw);
         if (!imported_fire) {
             for (i32 s = 0; s < 8; ++s) {
                 const f32 ang = f32(s) * 0.7853982f + 0.2f * f32(i);
-                scene.draw(_sphere,
-                           Mat4f::trs(fire + Vec3f{std::cos(ang) * 0.42f, 0.06f, std::sin(ang) * 0.42f}, {},
-                                      {0.13f, 0.09f, 0.12f}),
-                           stone);
+                (void)scene.draw(_sphere,
+                                 Mat4f::trs(fire + Vec3f{std::cos(ang) * 0.42f, 0.06f, std::sin(ang) * 0.42f}, {},
+                                            {0.13f, 0.09f, 0.12f}),
+                                 stone);
             }
-            scene.draw(_cylinder,
-                       Mat4f::trs(fire + Vec3f{0.0f, 0.1f, 0.0f}, q * Quatf::axis_angle({0, 0, 1}, 80.0f),
-                                  {0.06f, 0.8f, 0.06f}),
-                       log_mat);
-            scene.draw(_cylinder,
-                       Mat4f::trs(fire + Vec3f{0.0f, 0.13f, 0.0f},
-                                  q * Quatf::axis_angle({0, 1, 0}, 70.0f) * Quatf::axis_angle({0, 0, 1}, 84.0f),
-                                  {0.055f, 0.7f, 0.055f}),
-                       log_mat);
+            (void)scene.draw(_cylinder,
+                             Mat4f::trs(fire + Vec3f{0.0f, 0.1f, 0.0f}, q * Quatf::axis_angle({0, 0, 1}, 80.0f),
+                                        {0.06f, 0.8f, 0.06f}),
+                             log_mat);
+            (void)scene.draw(_cylinder,
+                             Mat4f::trs(fire + Vec3f{0.0f, 0.13f, 0.0f},
+                                        q * Quatf::axis_angle({0, 1, 0}, 70.0f) * Quatf::axis_angle({0, 0, 1}, 84.0f),
+                                        {0.055f, 0.7f, 0.055f}),
+                             log_mat);
         }
-        scene.draw(_sphere, Mat4f::trs(fire + Vec3f{0.0f, 0.06f, 0.0f}, {}, {0.18f, 0.05f, 0.18f}), ember);
+        (void)scene.draw(_sphere, Mat4f::trs(fire + Vec3f{0.0f, 0.06f, 0.0f}, {}, {0.18f, 0.05f, 0.18f}), ember);
         // A lantern on the flag's pole.
-        scene.draw(_sphere, Mat4f::trs(c + Vec3f{-1.7f, 1.75f, -0.12f}, {}, {0.07f, 0.1f, 0.07f}), lantern);
+        (void)scene.draw(_sphere, Mat4f::trs(c + Vec3f{-1.7f, 1.75f, -0.12f}, {}, {0.07f, 0.1f, 0.07f}), lantern);
 
         const f32 dist = length(fire - cam);
         Fire& f = _fires[i];
@@ -948,9 +948,9 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             f.flames.update(f64(dt), &air);
             f.smoke.update(f64(dt), &air);
             f.sparks.update(f64(dt), &air);
-            scene.draw_particles(f.smoke);
-            scene.draw_particles(f.flames);
-            scene.draw_particles(f.sparks);
+            (void)scene.draw_particles(f.smoke);
+            (void)scene.draw_particles(f.flames);
+            (void)scene.draw_particles(f.sparks);
         }
         if (fire_strength > 0.0f && dist < 90.0f) {
             // A flicker from a few sines, so that no two fires beat together.
@@ -981,14 +981,14 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     if (game.config().expedition)
         draw_expedition(scene, game);
     else {
-        scene.draw(_cylinder, Mat4f::trs(_summit + Vec3f{0.0f, 2.0f, 0.0f}, {}, {0.06f, 4.0f, 0.06f}), pole);
-        scene.draw(_box, Mat4f::trs(_summit + Vec3f{0.0f, 3.4f, 0.55f}, {}, {0.03f, 0.7f, 1.1f}),
-                   Material3D{.color = Color::rgb(220, 40, 40), .double_sided = true, .roughness = 0.7f});
+        (void)scene.draw(_cylinder, Mat4f::trs(_summit + Vec3f{0.0f, 2.0f, 0.0f}, {}, {0.06f, 4.0f, 0.06f}), pole);
+        (void)scene.draw(_box, Mat4f::trs(_summit + Vec3f{0.0f, 3.4f, 0.55f}, {}, {0.03f, 0.7f, 1.1f}),
+                         Material3D{.color = Color::rgb(220, 40, 40), .double_sided = true, .roughness = 0.7f});
         // A cairn of stones under the pole.
         for (i32 s = 0; s < 5; ++s) {
             const f32 ang = f32(s) * 1.2566f;
             const f32 r = s == 0 ? 0.0f : 0.5f;
-            scene.draw(
+            (void)scene.draw(
                 _sphere,
                 Mat4f::trs(_summit + Vec3f{std::cos(ang) * r, 0.18f + (s == 0 ? 0.25f : 0.0f), std::sin(ang) * r}, {},
                            {0.4f, 0.28f, 0.38f}),
@@ -1005,10 +1005,10 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             const f32 len = length(d);
             if (len < 1e-4f)
                 continue;
-            scene.draw(_cylinder,
-                       Mat4f::trs((s.a + s.b) * 0.5f, from_up_to(d * (1.0f / len)),
-                                  {radius * 1.3f, len + radius * 2.0f, radius * 1.3f}),
-                       rope);
+            (void)scene.draw(_cylinder,
+                             Mat4f::trs((s.a + s.b) * 0.5f, from_up_to(d * (1.0f / len)),
+                                        {radius * 1.3f, len + radius * 2.0f, radius * 1.3f}),
+                             rope);
         }
     }
 
@@ -1023,7 +1023,7 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
         _dust.update(f64(dt), &air);
         // The ground's colour: snow's white above the line.
         _dust.desc.colour_start = e.snow_share > 0.5f ? LinearRgb{0.85f, 0.88f, 0.94f} : LinearRgb{0.62f, 0.55f, 0.45f};
-        scene.draw_particles(_dust);
+        (void)scene.draw_particles(_dust);
         // Breath: a puff each few seconds above a third of the way up (cold air), faster when sprinting or tired.
         const Player& pl = game.player(player);
         const f32 cold = smooth(0.25f, 0.5f, e.altitude_fraction);
@@ -1039,7 +1039,7 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             }
         }
         _breath.update(f64(dt), &air);
-        scene.draw_particles(_breath);
+        (void)scene.draw_particles(_breath);
     }
 
     // The person.
@@ -1050,8 +1050,8 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     } else {
         // Without skinning: a capsule's worth of box where it stands.
         const Vec3f f = game.feet(player);
-        scene.draw(_box, Mat4f::trs(f + Vec3f{0.0f, 0.95f, 0.0f}, {}, {0.5f, 1.9f, 0.4f}),
-                   Material3D{.color = Color::rgb(215, 150, 110)});
+        (void)scene.draw(_box, Mat4f::trs(f + Vec3f{0.0f, 0.95f, 0.0f}, {}, {0.5f, 1.9f, 0.4f}),
+                         Material3D{.color = Color::rgb(215, 150, 110)});
     }
 
     // Colliders, when asked for: the static bodies near the camera as wireframes (the same bodies the physics uses).

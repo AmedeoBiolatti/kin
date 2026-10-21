@@ -16,11 +16,9 @@ class Range final : public Scene {
     std::unique_ptr<SceneSession3D> _session;
     const projectile_range::Stats& stats() const { return *_session->world()->raw().get<projectile_range::Stats>(); }
     int _steps = 0;
-    std::string errors() const {
-        std::string result;
-        for (const auto& error : _session->diagnostics())
-            result += error + "\n";
-        return result;
+    void require(const Status3D& result) const {
+        if (!result)
+            throw std::runtime_error(diagnostics3d_text(result.diagnostics));
     }
 
 public:
@@ -47,10 +45,8 @@ public:
         options.max_pending_commands = 24;
         options.initialize = [](auto& scene) { projectile_range::install(scene); };
         _session = std::make_unique<SceneSession3D>(*_renderer, *_assets, options);
-        if (!_session->load("scenes/projectile-range.kinscene"))
-            throw std::runtime_error(errors());
-        if (!projectile_range::prepare(*_session))
-            throw std::runtime_error(errors());
+        require(_session->load("scenes/projectile-range.kinscene"));
+        require(projectile_range::prepare(*_session));
     }
     void on_exit(SceneContext&) override {
         _session.reset();
@@ -63,18 +59,18 @@ public:
             context.app.quit();
             return;
         }
-        if (context.input.pressed(Key::R) && (!_session->reload() || !projectile_range::prepare(*_session)))
-            throw std::runtime_error(errors());
-        if (!_session->step(context.dt)) {
-            if (context.report)
-                context.report->fail(errors());
-            throw std::runtime_error(errors());
+        if (context.input.pressed(Key::R)) {
+            require(_session->reload());
+            require(projectile_range::prepare(*_session));
         }
+        const auto stepped = _session->step(context.dt);
+        if (!stepped && context.report)
+            context.report->fail(diagnostics3d_text(stepped.diagnostics));
+        require(stepped);
         ++_steps;
     }
     void render(SceneContext& context) override {
-        if (!_session->render(context.app.headless() ? 1.f : context.alpha))
-            throw std::runtime_error(errors());
+        require(_session->render(context.alpha));
         context.renderer.clear();
         context.renderer.draw_texture(_session->view()->texture(), {0, 0, 960, 540});
         context.renderer.fill_rect({0, 0, 960, 85}, Color::rgba(15, 20, 30, 230));

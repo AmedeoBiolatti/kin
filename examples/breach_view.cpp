@@ -9,6 +9,7 @@
 #include <kin/core/profile.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/ui2/widgets.hpp>
+#include <stdexcept>
 
 namespace examples {
 namespace {
@@ -217,16 +218,16 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
         }
     }
 
-    _scene.draw_instanced(_box, _tiles);
-    _scene.draw_instanced(_box, _raised);
-    _scene.draw_instanced(_box, _walls);
-    _scene.draw_instanced(_wedge, _ramps);
+    (void)_scene.draw_instanced(_box, _tiles);
+    (void)_scene.draw_instanced(_box, _raised);
+    (void)_scene.draw_instanced(_box, _walls);
+    (void)_scene.draw_instanced(_wedge, _ramps);
     for (const Vec3f& at : _crates) {
         if (_crate && _crate->model()) {
-            _scene.draw(_crate->model(), Mat4f::translation(at));
+            (void)_scene.draw(_crate->model(), Mat4f::translation(at));
         } else {
-            _scene.draw(_box, Mat4f::translation(at + Vec3f{0.0f, BreachLevel::crate_height / 2, 0.0f}),
-                        {.color = Color::rgb(150, 110, 70)});
+            (void)_scene.draw(_box, Mat4f::translation(at + Vec3f{0.0f, BreachLevel::crate_height / 2, 0.0f}),
+                              {.color = Color::rgb(150, 110, 70)});
         }
     }
     {
@@ -268,7 +269,7 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
                             .casts_shadow = false,
                             .shader = _shield};
         material.shader_params = {breach.elapsed, strength * strength, 6.0f, 0.8f};
-        _scene.draw(_shell, Mat4f::translation(shell.pos) * Mat4f::scaling({0.62f, 0.62f, 0.62f}), material);
+        (void)_scene.draw(_shell, Mat4f::translation(shell.pos) * Mat4f::scaling({0.62f, 0.62f, 0.62f}), material);
     }
     // Tracers: thin boxes from the muzzle to where the shot hit, thinning out.
     auto tracers =
@@ -297,14 +298,15 @@ void BreachView::fill_scene(Breach& breach, const BreachHudState& state) {
     const Mat4f gun = Mat4f::translation({0.2f, -0.17f + bob - _recoil * 0.01f, -0.5f + _recoil * 0.05f}) *
                       Mat4f::rotation_x(_recoil * 6.0f) * Mat4f::rotation_y(3.0f) * Mat4f::scaling({0.6f, 0.6f, 0.6f});
     if (_gun && _gun->model()) {
-        overlay.draw(_gun->model(), gun);
+        (void)overlay.draw(_gun->model(), gun);
     } else {
-        overlay.draw(_barrel, gun, {.color = Color::rgb(70, 82, 96), .emissive = 0.05f});
+        (void)overlay.draw(_barrel, gun, {.color = Color::rgb(70, 82, 96), .emissive = 0.05f});
     }
     if (_flash_time > 0) {
         const float s = 0.035f + 0.02f * (_flash_time / 0.05f);
-        overlay.draw(_flash, gun * Mat4f::translation({0.0f, 0.02f, -0.5f}) * Mat4f::scaling({s, s, s * 1.6f}),
-                     {.color = Color::rgb(255, 230, 160), .emissive = 6.0f, .unlit = true, .blend = Blend3D::Additive});
+        (void)overlay.draw(
+            _flash, gun * Mat4f::translation({0.0f, 0.02f, -0.5f}) * Mat4f::scaling({s, s, s * 1.6f}),
+            {.color = Color::rgb(255, 230, 160), .emissive = 6.0f, .unlit = true, .blend = Blend3D::Additive});
     }
 }
 
@@ -322,7 +324,8 @@ void BreachView::draw(Renderer2D& renderer, Breach& breach, Input& input, const 
                                            .bloom_threshold = 1.0f})
                     .value_or({});
     } else if (_view.size() != pixels) {
-        _r3d->resize(_view, pixels);
+        if (auto result = _r3d->resize(_view, pixels); !result)
+            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
     }
     if (_gun)
         _gun->poll().value_or(false);
@@ -334,7 +337,8 @@ void BreachView::draw(Renderer2D& renderer, Breach& breach, Input& input, const 
     }
     {
         KIN_PROFILE_SCOPE("example.breach.render");
-        _r3d->render(_view, _scene);
+        if (auto result = _r3d->render(_view, _scene); !result)
+            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
     }
     renderer.draw_texture(_view.texture(), _playfield);
     draw_hud(renderer, breach, input, state, dt);

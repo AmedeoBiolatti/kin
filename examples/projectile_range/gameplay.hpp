@@ -25,24 +25,25 @@ struct Resources {
 };
 // Explicit level-loading work, between frames. Keep ownership in the session;
 // the game stores generation-scoped values, never a second owning asset cache.
-inline bool prepare(SceneSession3D& session) {
+inline Status3D prepare(SceneSession3D& session) {
     Resources resources;
-    resources.target = session.preload("prefabs/range-target.kinprefab").value_or({});
-    if (!resources.target)
-        return false;
-    resources.projectile = session.preload("prefabs/range-projectile.kinprefab").value_or({});
-    if (!resources.projectile)
-        return false;
-    resources.pool =
-        session
-            .create_pool(resources.projectile, {.capacity = 16,
-                                                .reset = [](auto& context) { context.root.set(Projectile{}); },
-                                                .release = [](auto& context) { context.root.set(Projectile{}); }})
-            .value_or({});
-    if (!resources.pool)
-        return false;
+    auto target = session.preload("prefabs/range-target.kinprefab");
+    if (!target)
+        return status3d(false, std::move(target.diagnostics));
+    resources.target = *target;
+    auto projectile = session.preload("prefabs/range-projectile.kinprefab");
+    if (!projectile)
+        return status3d(false, std::move(projectile.diagnostics));
+    resources.projectile = *projectile;
+    auto pool =
+        session.create_pool(resources.projectile, {.capacity = 16,
+                                                   .reset = [](auto& context) { context.root.set(Projectile{}); },
+                                                   .release = [](auto& context) { context.root.set(Projectile{}); }});
+    if (!pool)
+        return status3d(false, std::move(pool.diagnostics));
+    resources.pool = *pool;
     session.world()->raw().set(resources);
-    return true;
+    return status3d(true);
 }
 
 inline void install(SceneSession3DContext& scene) {

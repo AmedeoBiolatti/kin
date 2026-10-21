@@ -1,3 +1,4 @@
+#include <stdexcept>
 // A bounded, shared yard workload: independent props, distributed edits and real skinning.
 #include "recipe.hpp"
 
@@ -66,7 +67,8 @@ public:
                     _sums[k] += batch.records[i].transform.m[k + 12];
             }
             if (_o.motion)
-                batch.batch.update(0, batch.records);
+                if (auto result = batch.batch.update(0, batch.records); !result)
+                    throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
         }
         if (!_ready || (_o.rebuild && _o.actors && _o.animation)) {
             _scene.clear();
@@ -79,13 +81,13 @@ public:
                 if (!_data.props[i].moving)
                     draw(_data.props[i]);
             for (const auto& b : _dynamic)
-                _scene.draw_instanced(b.batch, _materials[b.material]);
+                (void)_scene.draw_instanced(b.batch, _materials[b.material]);
             for (int i = 0; i < _o.actors; ++i) {
                 const auto& o = _data.actors[i];
                 const auto pose = ((_o.animation ? _route : 0) + u32(i) * 13) % yard::pose_count;
                 _actor_joints.push_back(u32(_scene.joint_matrices().size()));
-                _scene.draw_skinned(_meshes[o.mesh], {_data.palettes.data() + pose * yard::joints, yard::joints},
-                                    o.transform, _materials[o.material], colors::white, 30000 + i);
+                (void)_scene.draw_skinned(_meshes[o.mesh], {_data.palettes.data() + pose * yard::joints, yard::joints},
+                                          o.transform, _materials[o.material], colors::white, 30000 + i);
             }
             for (int i = 0; i < _o.smoke; ++i)
                 draw(_data.smoke[i]);
@@ -93,8 +95,8 @@ public:
         } else if (_o.animation) {
             for (int i = 0; i < _o.actors; ++i) {
                 const auto pose = (_route + u32(i) * 13) % yard::pose_count;
-                _scene.update_joint_matrices(_actor_joints[i],
-                                             {_data.palettes.data() + pose * yard::joints, yard::joints});
+                (void)_scene.update_joint_matrices(_actor_joints[i],
+                                                   {_data.palettes.data() + pose * yard::joints, yard::joints});
             }
         }
         configure();
@@ -181,7 +183,7 @@ public:
     }
 
 private:
-    void draw(const yard::Object& o) { _scene.draw(_meshes[o.mesh], o.transform, _materials[o.material]); }
+    void draw(const yard::Object& o) { (void)_scene.draw(_meshes[o.mesh], o.transform, _materials[o.material]); }
     void configure() {
         _scene.debug.gpu_pass_markers = _o.gpu_pass_markers;
         auto& l = _scene.lights;

@@ -1,5 +1,6 @@
 #include "skin_fixtures.hpp"
 
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -232,7 +233,7 @@ end
     ok(session, session.step(.01f));
     check(pending.status() == SceneRequestStatus3D::Cancelled,
           "prepared replacement did not cancel resource preparation");
-    session.cancel();
+    assert(session.cancel());
     write(source.path / "failed.lua",
           "function on_enter(c) capture(scene3d.preload('prop.kinprefab')); error('reject') end");
     write(source.path / "failed.kinscene", R"({"script":"failed.lua","entities":[]})");
@@ -396,7 +397,7 @@ end
     check(session.physics()->ragdoll_count() == 1 && session.physics()->rope_count() == 2,
           "Lua controls changed native ownership");
     report(session);
-    session.unload();
+    assert(session.unload());
     check(!session.active(), "advanced Lua unload failed");
     write(source.path / "none.kinscene",
           R"({"script":"none.lua","entities":[{"id":"actor","components":{"Transform3D":{}}}]})");

@@ -23,6 +23,11 @@ Fallible 3D operations now return `Result3D<T>`; operations with no payload retu
 `Status3D` (`Result3D<void>`). Check `result.ok()` or `if (result)`, read the
 payload with `*result`/`result->`, and report `diagnostics3d_text(result.diagnostics)`.
 Use `.ok()` when supplying a bool parameter; the bool conversion is explicit.
+`Status3D` is now `[[nodiscard]]` too. `Result3D<bool>` has no bool conversion:
+check `.ok()` for success and `*result` (after checking) or `.value_or(false)`
+for the payload. Replace `if (file.poll())` with a checked result then `if (*changed)`.
+Unchanged failed model sources return cached diagnostics; only source edits or
+pack remounts retry. Owner `diagnostics()` accessors remain inspection snapshots.
 Each result owns its diagnostics, so later calls cannot overwrite an earlier
 failure. A successful `false` or empty payload is still success. Failed results
 have no value. `value_or(fallback)` explicitly chooses a fallback.
@@ -50,6 +55,12 @@ retain a particular operation's failure. Scene submissions still latch a refusal
 until `clear()`/`clear_diagnostics()`, so rendering also rejects an unchecked bad
 submission.
 
+Navmesh builders accept `max_step_height` (metres, default zero). Enable it to
+connect matching stair-tread boundaries; paths retain both portal heights for the
+movement controller. Radius erosion remains conservative at whole-triangle
+resolution and now propagates only from nearby boundaries. Recompile consumers of
+`NavMeshBuildOptions3D`/`NavTriangle3D`; their layout now includes step metadata.
+
 ## Gameplay and content changes
 
 - `World3DConfig::contact_events` defaults to `false`. Enable it explicitly for
@@ -60,11 +71,18 @@ submission.
   body/character draw placement, including descendants and attached props. The
   default `alpha=1` preserves existing callers. Explicit `RenderTransform3D`
   overrides take precedence. ECS and native physics poses are never changed by
-  collection. Camera rigs retain their own matching alpha.
+  collection. Body-parented cameras, ragdoll poses, ropes and IK targets now use
+  the same sampled pose. Linked traversal hands include hold rotation, clearance
+  and rope-polyline motion; manually edited targets retain gameplay control.
+  Camera rigs retain their own matching alpha. Headless
+  `SceneApp` supplies `alpha=1`; remove per-host `headless() ? 1 : alpha` workarounds.
 - Lua `scene3d.handle(ecs_entity)` converts a reflected `KinEntity` to a checked
   session handle; `scene3d.resolve(handle)` returns a reflected entity or nil if
   stale. Use these around physics hits, prefab roots and ordinary ECS queries.
-  Malformed supplied options and wrong userdata raise a Lua error.
+  Malformed supplied options, wrong userdata and wrong-typed optional arguments
+  raise a Lua error. Nil/omitted optional arguments retain their defaults. Checks
+  are local to the 3D bindings; the public engine-wide `SOL_ALL_SAFETIES_ON`
+  definition is removed, preserving existing 2D Lua numeric conversions.
 - Authored component names are schema identifiers, independent of C++ spelling:
   write **`SkinnedMeshRenderer`** in scene/prefab JSON and reflected Lua calls;
   the C++ type is `SkinnedMeshRenderer3D`. Existing asset names are unchanged.

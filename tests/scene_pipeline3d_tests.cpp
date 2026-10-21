@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -185,6 +186,13 @@ void pipeline(Renderer2D& renderer) {
                            .child_of(moving.raw())
                            .set(Transform3D{.position = {2, 0, 0}})
                            .set(MeshRenderer3D{.mesh = *mesh});
+    session.world()
+        ->raw()
+        .entity("body-camera")
+        .child_of(moving.raw())
+        .set(Transform3D{.position = {0, 2, 4}})
+        .set(SceneCamera3D{.priority = 100});
+    session.world()->raw().entity("static-root").set(Transform3D{}).set(MeshRenderer3D{.mesh = *mesh});
     const auto state_hash = session.physics()->state_hash();
     const auto authoritative = moving.get<Transform3D>()->position;
     const auto draw_x = [&](u64 entity) {
@@ -199,6 +207,8 @@ void pipeline(Renderer2D& renderer) {
         const float expected = -10 + 3 * dt * (2 + alpha);
         check(close(draw_x(moving.id()), expected) && close(draw_x(child.id()), expected + 2),
               "session omitted fixed-step interpolation or child placement");
+        check(close(session.scene()->camera.position.x, expected) && close(session.scene()->camera.position.y, 5),
+              "body-parented camera used a different presentation pose");
         check(moving.get<Transform3D>()->position == authoritative && session.physics()->state_hash() == state_hash,
               "collection changed authoritative simulation state");
     }
@@ -249,7 +259,7 @@ void pipeline(Renderer2D& renderer) {
               session.entity("fx").get<ParticleEmitter3D>()->system.time() == 0,
           "post failure replayed/rolled back physics, leaked work or advanced animation");
     ok(session.reload(), "no-physics reset failed");
-    session.unload();
+    assert(session.unload());
     auto no_physics = options();
     no_physics.physics.reset();
     SceneSession3D visual{r3d, assets, no_physics};

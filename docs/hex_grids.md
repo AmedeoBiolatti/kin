@@ -91,9 +91,11 @@ joins those that share an edge, and numbers the connected regions. The result,
 the build without 3D too.
 
 ```cpp
-kin::NavMeshBuildOptions3D options{.max_slope_degrees = 40.0f, .agent_radius = 0.4f, .agent_height = 1.8f};
-std::string error;
-kin::NavMesh3D nav = kin::build_navmesh3d(level.vertices, level.indices, options, &error);
+kin::NavMeshBuildOptions3D options{.max_slope_degrees = 40.0f, .agent_radius = 0.4f,
+                                    .agent_height = 1.8f, .max_step_height = 0.25f};
+auto built = kin::build_navmesh3d(level.vertices, level.indices, options);
+if (!built) return report(kin::diagnostics3d_text(built.diagnostics));
+kin::NavMesh3D nav = std::move(*built);
 
 std::vector<kin::Vec3f> path = kin::find_path(nav, bot_position, goal); // the corners, both ends included
 if (auto hit = kin::raycast(nav, bot_position, bot_position + heading * 2.0f)) {
@@ -102,6 +104,15 @@ if (auto hit = kin::raycast(nav, bot_position, bot_position + heading * 2.0f)) {
 std::optional<kin::NavPoint3D> on = kin::nearest(nav, click, {1.0f, 2.0f, 1.0f});
 std::optional<kin::NavPoint3D> wander = kin::random_point(nav, key);
 ```
+
+`max_step_height` joins oppositely oriented tread edges whose projected endpoints
+match within `weld_distance` and whose vertical gap is within the setting. Zero
+keeps the original shared-edge topology. Stair paths include both heights at each
+step so a movement controller can perform the ascent/descent. This joins matching
+edges; it does not bridge horizontal gaps or manufacture ramps. Height clearance
+still applies. Use tessellated walk surfaces for radius erosion, which removes
+whole unsafe triangles conservatively. Border clearance propagates locally along
+connected walk surfaces, so an upper floor does not erode the floor below it.
 
 - `find_path` snaps both ends onto the mesh (within `NavPathOptions3D::extents`
   on each axis) and returns the path's corners: an A* search over the triangles'

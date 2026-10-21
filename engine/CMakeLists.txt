@@ -270,7 +270,7 @@ target_link_libraries(kin_engine PUBLIC
     Lua::Lua
     sol2::sol2
 )
-target_compile_definitions(kin_engine PUBLIC SOL_ALL_SAFETIES_ON=1)
+# 3D Lua argument checks are local to its bindings; retain sol2 defaults for 2D games.
 
 target_link_libraries(kin_engine PRIVATE earcut_hpp::earcut_hpp) # used only inside the engine
 

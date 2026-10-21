@@ -24,7 +24,8 @@ f32 blend_angle(f32 a, f32 b, f32 t) {
 CameraRig3D::CameraRig3D(CameraRig3DSettings settings) {
     if (!configure(settings))
         throw std::invalid_argument("invalid camera rig settings");
-    set_angles(settings.initial_yaw, settings.initial_pitch);
+    if (!set_angles(settings.initial_yaw, settings.initial_pitch))
+        throw std::invalid_argument("invalid camera rig initial angles");
 }
 Status3D CameraRig3D::configure(CameraRig3DSettings settings) {
     if (!finite(settings.target_offset) || !std::isfinite(settings.fov) || settings.fov <= 0 || settings.fov >= 179 ||

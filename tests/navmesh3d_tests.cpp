@@ -508,6 +508,19 @@ void test_agent_clearance() {
     assert(kin::nearest(build(sloped, {.agent_radius = .2f, .agent_height = 1.0f}), {1, .5f, 1}, {.01f, .01f, .01f}));
     assert(!kin::nearest(build(sloped, {.agent_radius = .2f, .agent_height = 1.2f}), {1, .5f, 1}, {.01f, .01f, .01f}));
 
+    const auto joined = build(stairs, {.agent_height = 1.8f, .max_step_height = .21f});
+    const auto route = kin::find_path(joined, {.25f, 0, .5f}, {3.75f, .6f, .5f});
+    assert(joined.region_count() == 1 && route.size() >= 8);
+    assert(near(route.front(), {.25f, 0, .5f}) && near(route.back(), {3.75f, .6f, .5f}));
+    assert(!kin::find_path(joined, {3.75f, .6f, .5f}, {.25f, 0, .5f}).empty());
+    const auto too_high = build(stairs, {.agent_height = 1.8f, .max_step_height = .19f});
+    assert(kin::find_path(too_high, {.25f, 0, .5f}, {3.75f, .6f, .5f}).empty());
+
+    for (auto& vertex : stairs.vertices)
+        vertex = {vertex.x, -vertex.z, vertex.y};
+    const auto rotated_steps = build(stairs, {.up = {0, 0, 1}, .agent_height = 1.8f, .max_step_height = .21f});
+    assert(!kin::find_path(rotated_steps, {.25f, -.5f, 0}, {3.75f, -.5f, .6f}).empty());
+
     // Neither clearance dimension assumes Y-up.
     for (auto& vertex : low.vertices)
         vertex = {vertex.x, -vertex.z, vertex.y};

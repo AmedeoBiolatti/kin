@@ -372,6 +372,12 @@ public:
     // Read-only fixed-step presentation for a body/character or its descendants.
     // Does not write ECS transforms, physics poses or interpolation history.
     std::optional<Mat4f> render_transform(flecs::entity entity, f32 alpha) const;
+    // Build one read-only presentation snapshot for this collection. Only moving
+    // bodies/characters and their descendants enter the transform cache.
+    void prepare_presentation(f32 alpha);
+    std::optional<Mat4f> presentation_transform(flecs::entity entity) const;
+    const PoseOverride3D* presentation_pose(flecs::entity entity) const;
+    std::optional<IKTargetPose3D> presentation_ik_target(const IKConstraint3D& constraint) const;
     // Writes the Transform3D of every dynamic and kinematic body, the feet of every character, and the pose override and
     // state of every ragdoll and rope from the world as it is now, awake or asleep, and makes that the pose that
     // interpolate() lerps from. Call it right after World3D::restore_state (a rollback), whose restored bodies the step
@@ -427,7 +433,7 @@ public:
     RopeHandle3D rope_of(flecs::entity entity) const;
     // Draws every rope with `render` set as a tube of its own material (one mesh a material, remade each call and kept until the
     // next, so that the GPU is done with it). Call it with the frame's scene after step() or advance().
-    void collect_ropes(Renderer3D& renderer, Scene3D& scene);
+    void collect_ropes(Renderer3D& renderer, Scene3D& scene, f32 alpha = 1);
     std::span<const RopeEvent3D> rope_events() const { return _rope_events; }
 
     // The entity a user id of an event is (invalid when it is gone).
@@ -507,6 +513,23 @@ private:
     // Drops the refusals of entities no longer wanted (components gone) so that a return is tried afresh.
     void prune_refused(Made what, const std::vector<flecs::entity>& wanted);
 
+    struct GripSample {
+        Body3D body{};
+        EcsId entity = 0;
+        Vec3f position{}, local_point{}, local_normal{};
+        Quatf rotation{}, local_rotation{};
+        RopeHandle3D rope{};
+        f32 along = 0;
+        u32 segments = 0;
+    };
+    struct HandHistory {
+        std::string constraint;
+        GripSample previous, current;
+        IKTargetPose3D target;
+        Quatf offset{};
+        f32 clearance = 0;
+        bool active = false, align = false;
+    };
     struct BoundCharacter {
         flecs::entity_t entity = 0;
         Character3D character{};
@@ -515,12 +538,16 @@ private:
         // The feet after the last step and before it (interpolation).
         Vec3f position{}, previous_position{};
         Vec3f scale{1.0f, 1.0f, 1.0f};
+        std::vector<HandHistory> hands; // allocated only for traversal-linked animators
         bool rebuild = false;
     };
     void sync_characters();
     void characters_to_world(f32 dt);
     void characters_from_world();
     void write_character(BoundCharacter& c, Vec3f feet);
+    void sample_hands(BoundCharacter& c, const TraversalState3D& traversal, const CharacterAnimationLink3D& link,
+                      const Animator3D& animator);
+    void prepare_hand_presentation(f32 alpha);
 
     struct BoundRagdoll {
         flecs::entity_t entity = 0;
@@ -536,12 +563,15 @@ private:
     void ragdolls_to_world();
     void ragdolls_from_world();
     void write_pose_override(BoundRagdoll& r, f32 alpha);
+    void fill_pose_override(const BoundRagdoll& r, f32 alpha, PoseOverride3D& out) const;
     BoundRagdoll* bound_ragdoll(flecs::entity entity);
     const BoundRagdoll* bound_ragdoll(flecs::entity entity) const;
 
     struct BoundRope {
         flecs::entity_t entity = 0;
         RopeHandle3D rope{};
+        std::vector<RopePoint3D> previous;
+        bool sampled = false;
         f32 applied_target = -1.0f;
         f32 applied_speed = 0.0f;
         bool rebuild = false;
@@ -584,6 +614,10 @@ private:
     std::vector<RopeEvent3D> _rope_events;
     std::vector<RagdollEvent3D> _native_ragdoll_events;
     std::vector<RopeEvent3D> _native_rope_events;
+    std::vector<std::pair<EcsId, Mat4f>> _presentation_roots, _presentation_transforms;
+    std::vector<std::pair<EcsId, PoseOverride3D>> _presentation_poses;
+    std::vector<std::pair<const IKConstraint3D*, IKTargetPose3D>> _presentation_hands;
+    std::vector<RopePoint3D> _rope_render_points;
     std::vector<Mesh3D> _rope_meshes;      // the tubes of the last collect_ropes
     std::vector<Mat4f> _pose_scratch;
     Pose3D _rest_scratch; // a skeleton's rest pose for a ragdoll with no clip to follow, reused

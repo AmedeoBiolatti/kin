@@ -74,9 +74,9 @@ struct Fixture {
         surface.color = colors::white;
         surface.roughness = 1;
         surface.casts_shadow = false;
-        s.draw(wall, Mat4f::translation({0, 0, -6}), surface);
+        (void)s.draw(wall, Mat4f::translation({0, 0, -6}), surface);
         if (submit)
-            s.draw_particles(look, std::span{&sprite, 1});
+            (void)s.draw_particles(look, std::span{&sprite, 1});
         return s;
     }
     Picture shoot(View3D& view, const Scene3D& scene) {
@@ -123,7 +123,7 @@ void selection_and_cache(Fixture& f) {
     std::vector<ParticleSprite3D> particles(257, sprite());
     for (size_t i = 0; i + 1 < particles.size(); ++i)
         particles[i].position.x = 1000 + f32(i);
-    s.draw_particles(l, particles);
+    (void)s.draw_particles(l, particles);
     f.shoot(view, s);
     check(f.r3d.debug_stats().particle_shadow_instances == 1,
           "per-map culling submitted a wide batch's distant particles");
@@ -131,6 +131,16 @@ void selection_and_cache(Fixture& f) {
     f.shoot(view, s);
     check(f.r3d.debug_stats().local_shadow_cached > 0 && !f.r3d.debug_stats().particle_shadow_draws,
           "camera turn invalidated a camera-independent particle map");
+    // Alternating selected/rejected sprites must still use a single compact draw.
+    particles.assign(32768, sprite());
+    for (size_t i = 0; i < particles.size(); ++i)
+        if (i % 2)
+            particles[i].position.x = 1000 + f32(i);
+    s = f.scene(3, l, sprite(), false, false);
+    (void)s.draw_particles(l, particles);
+    f.shoot(view, s);
+    check(f.r3d.debug_stats().particle_shadow_instances == 16384 && f.r3d.debug_stats().particle_shadow_draws == 1,
+          "scattered selected sprites fragmented into per-sprite shadow draws");
     // Axis/stretched quads depend on the eye position, not a turn at a fixed
     // perspective eye. Only a billboard whose actual quad turns needs redraw.
     for (const auto facing : {ParticleFacing3D::Axis, ParticleFacing3D::Stretched}) {
@@ -149,7 +159,7 @@ void selection_and_cache(Fixture& f) {
     l.axis = {0, 0, 1};
     s = f.scene(3, l, sprite(), false, false);
     particles.assign(16384 + 1024, sprite());
-    s.draw_particles(l, particles);
+    (void)s.draw_particles(l, particles);
     s.lights.cache_shadows = false;
     f.shoot(view, s);
     check(f.r3d.debug_stats().particle_shadow_instances == 16384,
@@ -274,7 +284,7 @@ void receivers(Fixture& f) {
             receive.blend = ParticleBlend3D::Alpha;
             receive.soft = true;
             receive.soft_distance = .3f;
-            scene.draw_particles(receive, std::span{&receiver, 1});
+            (void)scene.draw_particles(receive, std::span{&receiver, 1});
             if (frame == 20 || frame == 21) {
                 scene.lights.shadow_area = {};
                 scene.lights.fill_shadow.enabled = false;
@@ -404,7 +414,7 @@ void run(Fixture& f) {
     for (auto& q : many)
         q.position = {100, 100, 100};
     auto scene = f.scene(0, off, p, false, false);
-    scene.draw_particles(l, many);
+    (void)scene.draw_particles(l, many);
     f.shoot(view, scene);
     check(f.r3d.debug_stats().particle_shadow_submitted == (1u << 20) &&
               f.r3d.debug_stats().particle_shadow_dropped == 3,

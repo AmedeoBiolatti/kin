@@ -74,7 +74,7 @@ public:
     void render(SceneContext& ctx) override {
         if (!_renderer->available())
             return;
-        require(_session->render(ctx.app.headless() ? 1.f : ctx.alpha));
+        require(_session->render(ctx.alpha));
         ctx.renderer.clear();
         ctx.renderer.draw_texture(_session->view()->texture(), {0, 0, 960, 540});
         ctx.renderer.fill_rect({0, 0, 960, 60}, Color::rgba(15, 20, 30, 230));

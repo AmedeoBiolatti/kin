@@ -12,6 +12,7 @@
 #include <kin/runtime/scene_app.hpp>
 #include <kin/ui2/context.hpp>
 #include <memory>
+#include <stdexcept>
 
 namespace kin::asset_preview {
 namespace {
@@ -292,19 +293,20 @@ public:
             const auto& part = _model->parts[i];
             const auto transform = placement * part.transform;
             if (part.skin >= 0)
-                _scene.draw_skinned(part.mesh, _joints.at(size_t(part.skin)), transform, _materials[i]);
+                (void)_scene.draw_skinned(part.mesh, _joints.at(size_t(part.skin)), transform, _materials[i]);
             else
-                _scene.draw(part.mesh, transform, _materials[i]);
+                (void)_scene.draw(part.mesh, transform, _materials[i]);
         }
         if (_options.ground)
-            _scene.draw(_box,
-                        Mat4f::translation({0, -_radius * .012f, 0}) *
-                            Mat4f::scaling({_radius * 4, _radius * .02f, _radius * 4}),
-                        {.color = Color::rgb(95, 101, 109), .roughness = .85f});
+            (void)_scene.draw(_box,
+                              Mat4f::translation({0, -_radius * .012f, 0}) *
+                                  Mat4f::scaling({_radius * 4, _radius * .02f, _radius * 4}),
+                              {.color = Color::rgb(95, 101, 109), .roughness = .85f});
         if (_options.bounds) {
             const auto bounds = _model->bounds;
-            _scene.draw(_box, Mat4f::translation(bounds.center() + _offset) * Mat4f::scaling(bounds.size()),
-                        {.color = Color::rgb(100, 240, 170), .unlit = true, .casts_shadow = false, .wireframe = true});
+            (void)_scene.draw(
+                _box, Mat4f::translation(bounds.center() + _offset) * Mat4f::scaling(bounds.size()),
+                {.color = Color::rgb(100, 240, 170), .unlit = true, .casts_shadow = false, .wireframe = true});
         }
         if (!_renderer->render(_view, _scene))
             throw std::runtime_error("asset preview render failed");

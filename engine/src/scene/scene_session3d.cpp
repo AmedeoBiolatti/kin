@@ -427,6 +427,7 @@ size_t text_bytes(const ComponentFieldValue& value) {
 } // namespace
 
 struct SceneSession3D::Data {
+    struct EditTransaction;
     struct State {
         struct Spawned {
             ScenePrefab3D handle;
@@ -1003,7 +1004,7 @@ SceneSession3D::SceneSession3D(Renderer3D& renderer, Assets3D& assets, SceneSess
         throw std::invalid_argument("scene session audio requires both an engine and a catalog");
 }
 SceneSession3D::~SceneSession3D() {
-    unload();
+    (void)unload(); // teardown cannot report to a caller
 }
 
 Status3D SceneSession3D::prepare(const std::filesystem::path& path, bool refresh_all_assets) {
@@ -1239,83 +1240,74 @@ Status3D SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
     return status3d(std::move(value), _data->errors);
 }
 
-bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
-    auto& d = *_data;
-    if (d.editing)
-        return false;
-    d.errors.clear();
-    if (!d.current || d.pending || edits.empty() || edits.size() > d.options.max_edit_fields) {
-        d.errors = {"live edit requires an active scene, no prepared replacement and a bounded nonempty field batch"};
-        return false;
-    }
-    auto& active = *d.current;
-    if (ecs_is_deferred(active.world.raw().c_ptr()) || ecs_stage_is_readonly(active.world.raw().c_ptr())) {
-        d.errors = {"live edits must run between ECS steps, outside deferred/readonly iteration"};
-        return false;
-    }
-    struct Guard {
-        bool& busy;
-        Guard(bool& busy) : busy(busy) { busy = true; }
-        ~Guard() { busy = false; }
-    } guard(d.editing);
-    try {
-        size_t text = 0;
-        for (const auto& edit : edits)
-            for (const auto size : {edit.component.size(), edit.field.size(), text_bytes(edit.value)}) {
-                if (size > max_edit_text - text)
-                    throw std::runtime_error("live edit exceeds 64 KiB text budget");
-                text += size;
-            }
-        Data::State staging;
+// Own only one edit's staging state. Phase order is deliberate: no live fields
+// or ordinary field events are published until all validation/resources succeed.
+struct SceneSession3D::Data::EditTransaction {
+    Data& d;
+    State& active;
+    std::span<const SceneFieldEdit3D> edits;
+    State staging;
+    struct Entry {
+        EcsEntity source, copy;
+        std::set<std::string> changed;
+        bool full = false, pose = false, move = false, body = false;
+    };
+    std::map<EcsId, Entry> entries;
+    bool models = false, materials = false, animation = false, particles = false, physics = false;
+
+    EditTransaction(Data& data, std::span<const SceneFieldEdit3D> changes)
+        : d(data), active(*data.current), edits(changes) {
         register_builtin_editor_components(staging.world);
         if (d.options.register_components)
             d.options.register_components(staging.world);
-        struct Entry {
-            EcsEntity source, copy;
-            std::set<std::string> changed;
-            bool full = false, pose = false, move = false, body = false;
-        };
-        std::map<EcsId, Entry> entries;
-        const auto require = [](bool valid, const std::string& why) {
-            if (!valid)
-                throw std::runtime_error(why);
-        };
-        // Copy ancestors as transforms only. Descendants are discovered through
-        // ChildOf, never by copying/scanning the complete scene.
-        std::function<Entry&(EcsEntity, bool)> stage = [&](EcsEntity entity, bool full) -> Entry& {
-            require(entity.raw().world().c_ptr() == active.world.raw().c_ptr() && entity,
-                    "edit entity is stale or belongs to another world");
-            require(!entity.raw().has(flecs::Prefab), "live edits cannot target prefab definitions");
-            auto found = entries.find(entity.id());
-            if (found == entries.end()) {
-                require(entries.size() < d.options.max_edit_entities,
-                        "live edit exceeds affected entity/ancestor budget");
-                Entry entry{entity, staging.world.entity()};
-                entry.copy.raw().set_name((entity.name() + "#" + std::to_string(entity.id())).c_str());
-                found = entries.emplace(entity.id(), std::move(entry)).first;
-                if (auto parent = entity.parent())
-                    found->second.copy.child_of(stage(parent, false).copy);
-                if (entity.has<Transform3D>())
-                    require(active.world.components().copy_component(entity, "Transform3D", staging.world.components(),
-                                                                     found->second.copy),
+    }
+    static void require(bool valid, const std::string& why) {
+        if (!valid)
+            throw std::runtime_error(why);
+    }
+
+    // Copy only affected entities/descendants and transform-only ancestors.
+    Entry& stage(EcsEntity entity, bool full) {
+        require(entity.raw().world().c_ptr() == active.world.raw().c_ptr() && entity,
+                "edit entity is stale or belongs to another world");
+        require(!entity.raw().has(flecs::Prefab), "live edits cannot target prefab definitions");
+        auto found = entries.find(entity.id());
+        if (found == entries.end()) {
+            require(entries.size() < d.options.max_edit_entities, "live edit exceeds affected entity/ancestor budget");
+            Entry entry{entity, staging.world.entity()};
+            entry.copy.raw().set_name((entity.name() + "#" + std::to_string(entity.id())).c_str());
+            found = entries.emplace(entity.id(), std::move(entry)).first;
+            if (auto parent = entity.parent())
+                found->second.copy.child_of(stage(parent, false).copy);
+            if (entity.has<Transform3D>())
+                require(active.world.components().copy_component(entity, "Transform3D", staging.world.components(),
+                                                                 found->second.copy),
+                        staging.world.components().last_error());
+        }
+        auto& entry = found->second;
+        if (full && !entry.full) {
+            for (const auto& descriptor : active.world.components().descriptors())
+                if (active.world.components().has(entity, descriptor.id))
+                    require(active.world.components().copy_component(entity, descriptor.name,
+                                                                     staging.world.components(), entry.copy),
                             staging.world.components().last_error());
-            }
-            auto& entry = found->second;
-            if (full && !entry.full) {
-                for (const auto& descriptor : active.world.components().descriptors())
-                    if (active.world.components().has(entity, descriptor.id))
-                        require(active.world.components().copy_component(entity, descriptor.name,
-                                                                         staging.world.components(), entry.copy),
-                                staging.world.components().last_error());
-                entry.full = true;
-                // These native body annotations are intentionally unreflected.
-                if (const auto* value = entity.get<SurfaceMaterial3D>())
-                    entry.copy.set(*value);
-                if (const auto* value = entity.get<Hold3D>())
-                    entry.copy.set(*value);
-            }
-            return entry;
-        };
+            entry.full = true;
+            // These native body annotations are intentionally unreflected.
+            if (const auto* value = entity.get<SurfaceMaterial3D>())
+                entry.copy.set(*value);
+            if (const auto* value = entity.get<Hold3D>())
+                entry.copy.set(*value);
+        }
+        return entry;
+    }
+    void descendants(EcsEntity entity, bool move) {
+        auto& entry = stage(entity, true);
+        entry.pose = true;
+        entry.move |= move;
+        entity.raw().children([&](flecs::entity child) { descendants(EcsEntity{child}, true); });
+    }
+
+    void stage_edits() {
         for (const auto& edit : edits) {
             auto& entry = stage(edit.entity, true);
             require(entry.source.raw().enabled(), "editing disabled entities requires scene reload");
@@ -1323,16 +1315,11 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
                     staging.world.components().last_error());
             entry.changed.insert(edit.component);
         }
-        std::function<void(EcsEntity, bool)> descendants = [&](EcsEntity entity, bool move) {
-            auto& entry = stage(entity, true);
-            entry.pose = true;
-            entry.move |= move;
-            entity.raw().children([&](flecs::entity child) { descendants(EcsEntity{child}, true); });
-        };
         for (const auto& edit : edits)
             if (edit.component == "Transform3D")
                 descendants(edit.entity, edit.field != "scale");
-        bool models = false, materials = false, animation = false, particles = false, physics = false;
+    }
+    void classify_changes() {
         for (auto& [id, entry] : entries) {
             if (!entry.full)
                 continue;
@@ -1376,6 +1363,8 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
                     require(positive(c->scale), "live colliders require positive finite scale");
             }
         }
+    }
+    void resolve_assets() {
         if (models)
             append(d.errors, resolve_render3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
         else {
@@ -1387,6 +1376,8 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
                 append(d.errors,
                        resolve_particles3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
         }
+    }
+    void validate_capacity() {
         // Combine staged capacities with untouched live emitters without copying
         // their particle arrays or retaining a second world-sized snapshot.
         if (particles || models) {
@@ -1406,8 +1397,8 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
         }
         if (physics)
             append(d.errors, resolve_physics3d_assets(staging.world, d.collision_assets).diagnostics);
-        WorldRenderState3D validation(staging.world);
-        validation.propagate_transforms();
+    }
+    bool validate_configuration() {
         for (auto& [id, entry] : entries)
             if (entry.full) {
                 Scene3D settings;
@@ -1429,11 +1420,9 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
                 ++dependencies;
         require(dependencies <= d.options.max_dependencies,
                 "live edit exceeds dependency limit; reload to prune old dependencies");
-        if (!d.errors.empty())
-            return false;
-
-        View3D new_view;
-        auto new_options = d.options.view;
+        return d.errors.empty();
+    }
+    void prepare_view(View3D& new_view, ViewOptions3D& new_options) {
         i32 priority = std::numeric_limits<i32>::min();
         EcsId selected = 0;
         active.world.raw().each([&](flecs::entity entity, const SceneEnvironment3D& original) {
@@ -1451,6 +1440,8 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
             new_view = d.renderer.create_view(d.options.viewport, new_options).value_or({});
             require(bool(new_view), "edited scene view creation failed");
         }
+    }
+    std::vector<WorldPhysicsState3D::BodyEdit> prepare_bodies() {
         std::vector<WorldPhysicsState3D::BodyEdit> bodies;
         for (auto& [id, entry] : entries)
             if (entry.body && entry.copy.has<Collider3D>()) {
@@ -1462,30 +1453,26 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
                     }
                 bodies.push_back({entry.source.raw(), entry.copy.raw(), !entry.move, linear, angular});
             }
-        const auto commit = [&] {
-            // Suppress the bulk native copy's observer; publish the ordinary
-            // field events after all data and bindings have been committed.
-            for (auto& [id, entry] : entries)
-                for (const auto& name : entry.changed) {
-                    const auto* descriptor = active.world.components().find(name);
-                    const auto* info = ecs_get_type_info(active.world.raw().c_ptr(), descriptor->id);
-                    if (descriptor->kind == ComponentKind::Native && info && info->size)
-                        active.world.events().suppress_next_observer(EcsEventKind::ComponentChanged, id,
-                                                                     descriptor->id);
-                    staging.world.components().copy_component(entry.copy, name, active.world.components(),
-                                                              entry.source);
-                }
-            active.watches.merge(staging.watches);
-            if (new_view) {
-                active.view = std::move(new_view);
-                active.options = new_options;
+        return bodies;
+    }
+    void commit_fields(View3D& new_view, const ViewOptions3D& new_options) {
+        // Suppress the bulk native copy's observer; publish the ordinary
+        // field events after all data and bindings have been committed.
+        for (auto& [id, entry] : entries)
+            for (const auto& name : entry.changed) {
+                const auto* descriptor = active.world.components().find(name);
+                const auto* info = ecs_get_type_info(active.world.raw().c_ptr(), descriptor->id);
+                if (descriptor->kind == ComponentKind::Native && info && info->size)
+                    active.world.events().suppress_next_observer(EcsEventKind::ComponentChanged, id, descriptor->id);
+                staging.world.components().copy_component(entry.copy, name, active.world.components(), entry.source);
             }
-        };
-        if (active.bodies) {
-            const auto replacement = active.bodies->replace_bodies(bodies, commit);
-            require(replacement.ok(), diagnostics3d_text(replacement.diagnostics));
-        } else
-            commit();
+        active.watches.merge(staging.watches);
+        if (new_view) {
+            active.view = std::move(new_view);
+            active.options = new_options;
+        }
+    }
+    void publish_events() {
         for (const auto& [id, entry] : entries)
             for (const auto& name : entry.changed) {
                 const bool patched = std::ranges::any_of(
@@ -1501,7 +1488,60 @@ bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
             active.world.events().emit_component(EcsEventKind::ComponentChanged, EcsEventSource::KinApi, edit.entity,
                                                  descriptor->id, descriptor->name, edit.field);
         }
+    }
+    bool run() {
+        stage_edits();
+        classify_changes();
+        resolve_assets();
+        validate_capacity();
+        WorldRenderState3D validation(staging.world);
+        validation.propagate_transforms();
+        if (!validate_configuration())
+            return false;
+        View3D new_view;
+        auto new_options = d.options.view;
+        prepare_view(new_view, new_options);
+        auto bodies = prepare_bodies();
+        const auto commit = [&] { commit_fields(new_view, new_options); };
+        if (active.bodies) {
+            const auto replacement = active.bodies->replace_bodies(bodies, commit);
+            require(replacement.ok(), diagnostics3d_text(replacement.diagnostics));
+        } else
+            commit();
+        publish_events();
         return true;
+    }
+};
+
+bool SceneSession3D::edit_operation(std::span<const SceneFieldEdit3D> edits) {
+    auto& d = *_data;
+    if (d.editing)
+        return false;
+    d.errors.clear();
+    if (!d.current || d.pending || edits.empty() || edits.size() > d.options.max_edit_fields) {
+        d.errors = {"live edit requires an active scene, no prepared replacement and a bounded nonempty field batch"};
+        return false;
+    }
+    auto& active = *d.current;
+    if (ecs_is_deferred(active.world.raw().c_ptr()) || ecs_stage_is_readonly(active.world.raw().c_ptr())) {
+        d.errors = {"live edits must run between ECS steps, outside deferred/readonly iteration"};
+        return false;
+    }
+    struct Guard {
+        bool& busy;
+        Guard(bool& busy) : busy(busy) { busy = true; }
+        ~Guard() { busy = false; }
+    } guard(d.editing);
+    try {
+        size_t text = 0;
+        for (const auto& edit : edits)
+            for (const auto size : {edit.component.size(), edit.field.size(), text_bytes(edit.value)}) {
+                if (size > max_edit_text - text)
+                    throw std::runtime_error("live edit exceeds 64 KiB text budget");
+                text += size;
+            }
+        Data::EditTransaction transaction{d, edits};
+        return transaction.run();
     } catch (const std::exception& error) {
         d.errors.push_back("live scene edit: " + std::string(error.what()));
     }

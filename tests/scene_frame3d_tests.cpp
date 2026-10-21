@@ -241,6 +241,9 @@ public:
         assert(context.renderer3d == _state.renderer);
         ++_state.updates;
     }
+    void render(SceneContext& context) override {
+        assert(context.alpha == 1); // headless renders the completed fixed step
+    }
     void on_exit(SceneContext& context) override {
         assert(context.renderer3d == _state.renderer);
         ++_state.exits;

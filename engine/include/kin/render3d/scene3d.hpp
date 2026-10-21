@@ -432,8 +432,8 @@ public:
     // 16-instance blocks.
     void changed_ranges_since(u64 revision, std::vector<ChangedRange>& out) const;
     std::weak_ptr<const void> lifetime() const { return _data; }
-    // Fixed size: an out-of-range edit returns false with diagnostics(). Existing scene handles see the edit on their
-    // next render.
+    // Fixed size: an out-of-range edit returns a failed Status3D with owned diagnostics. Existing scene handles see the
+    // edit on their next render.
     Status3D update(u32 first, std::span<const MeshInstance3D> instances);
     const Diagnostics3D& diagnostics() const;
 
@@ -507,7 +507,7 @@ public:
     // main pass, the sun's shadow, the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's
     // occluders), the temporal anti-aliasing's velocity (from last frame's matrices of the same copy, matched as its
     // model matrix is: by `id`, else by order) and pick. A mesh without a skin is drawn as by draw(); too few matrices
-    // return false with diagnostics().
+    // return a failed Status3D with owned diagnostics.
     Status3D draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                           const Material3D& material = {}, Color tint = colors::white, u32 id = 0);
     // Every part of `model`: its skinned parts in the pose `joint_matrices` (of Model3D::skeletons[0]) placed by

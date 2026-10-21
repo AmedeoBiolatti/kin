@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -13,11 +14,17 @@ using Diagnostics3D = std::vector<std::string>;
 // Fallible 3D loading, rendering and authoring operations share these results. Successful
 // results have no diagnostics. A valid empty query/value is still success.
 // Inspect before dereferencing; values/diagnostics survive later owner calls.
+// Boolean payloads require explicit .ok() / payload checks to distinguish success
+// from a successful false value (for example an unchanged ModelFile3D).
 template <class T> struct [[nodiscard]] Result3D {
     std::optional<T> value;
     Diagnostics3D diagnostics;
     bool ok() const { return value.has_value() && diagnostics.empty(); }
-    explicit operator bool() const { return ok(); }
+    explicit operator bool() const
+        requires(!std::is_same_v<T, bool>)
+    {
+        return ok();
+    }
     T& operator*() { return value.value(); }
     const T& operator*() const { return value.value(); }
     T* operator->() { return &value.value(); }
@@ -25,7 +32,7 @@ template <class T> struct [[nodiscard]] Result3D {
     T value_or(T fallback) const& { return ok() ? *value : std::move(fallback); }
     T value_or(T fallback) && { return ok() ? std::move(*value) : std::move(fallback); }
 };
-template <> struct Result3D<void> {
+template <> struct [[nodiscard]] Result3D<void> {
     bool succeeded = true;
     Diagnostics3D diagnostics;
     bool ok() const { return succeeded && diagnostics.empty(); }

@@ -367,13 +367,13 @@ void test_scene_merges_draws() {
     const kin::Mesh3D a{std::make_shared<Fake>(), 3, 3, {}};
     const kin::Mesh3D b{std::make_shared<Fake>(), 3, 3, {}};
     kin::Scene3D scene;
-    scene.draw(a, Mat4f::translation({1.0f, 0.0f, 0.0f}));
-    scene.draw(a, Mat4f::translation({2.0f, 0.0f, 0.0f}), {}, Color::rgb(255, 0, 0));
-    scene.draw(a, Mat4f::identity(), {.emissive = 1.0f}); // another material: another draw
-    scene.draw(b, Mat4f::identity(), {.emissive = 1.0f});
+    (void)scene.draw(a, Mat4f::translation({1.0f, 0.0f, 0.0f}));
+    (void)scene.draw(a, Mat4f::translation({2.0f, 0.0f, 0.0f}), {}, Color::rgb(255, 0, 0));
+    (void)scene.draw(a, Mat4f::identity(), {.emissive = 1.0f}); // another material: another draw
+    (void)scene.draw(b, Mat4f::identity(), {.emissive = 1.0f});
     const std::vector<Mat4f> transforms(5);
-    scene.draw_instanced(b, transforms, {.emissive = 1.0f}); // joins the last
-    scene.draw_instanced(a, std::span<const kin::MeshInstance3D>{});
+    (void)scene.draw_instanced(b, transforms, {.emissive = 1.0f}); // joins the last
+    (void)scene.draw_instanced(a, std::span<const kin::MeshInstance3D>{});
     assert(scene.draws().size() == 3);
     assert(scene.draws()[0].count == 2 && scene.draws()[0].first == 0);
     assert(scene.draws()[1].count == 1 && scene.draws()[1].first == 2);
@@ -402,15 +402,15 @@ void test_scene_instance_groups() {
     const kin::Bounds3D other = kin::instance_bounds(mesh, copies);
     assert(bounds.min == other.min && bounds.max == other.max);
     kin::Scene3D scene;
-    scene.draw(mesh, Mat4f{});
-    scene.draw_instanced_group(mesh, transforms, bounds);
-    scene.draw(mesh, Mat4f::translation({1, 0, 0})); // unbounded gap within the merged draw
-    scene.draw_instanced_group(mesh, copies, bounds);
+    (void)scene.draw(mesh, Mat4f{});
+    (void)scene.draw_instanced_group(mesh, transforms, bounds);
+    (void)scene.draw(mesh, Mat4f::translation({1, 0, 0})); // unbounded gap within the merged draw
+    (void)scene.draw_instanced_group(mesh, copies, bounds);
     assert(scene.draws().size() == 1 && scene.draws()[0].count == 6 && scene.draws()[0].group_count == 2);
     assert(scene.instance_groups().size() == 2 && scene.instance_groups()[0].first == 1 &&
            scene.instance_groups()[1].first == 4);
-    scene.draw_instanced_group(mesh, transforms, {{1, 1, 1}, {-1, -1, -1}}); // invalid bounds fall back
-    scene.draw_instanced_group(mesh, std::span<const Mat4f>{}, bounds);
+    (void)scene.draw_instanced_group(mesh, transforms, {{1, 1, 1}, {-1, -1, -1}}); // invalid bounds fall back
+    (void)scene.draw_instanced_group(mesh, std::span<const Mat4f>{}, bounds);
     assert(scene.draws()[0].count == 8 && scene.instance_groups().size() == 2);
     scene.clear();
     assert(scene.draws().empty() && scene.instance_groups().empty());
@@ -524,10 +524,10 @@ void test_sdl_renderer_has_no_3d() {
     kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)}).value_or({});
     assert(view.valid() && view.size() == (kin::Vec2i{40, 30}) && view.samples() == 1);
     kin::Scene3D scene;
-    scene.draw(kin::Mesh3D{}, Mat4f::identity());
+    (void)scene.draw(kin::Mesh3D{}, Mat4f::identity());
     renderer.clear(kin::colors::black);
     const bool drew = r3d.render(view, scene).ok();
-    assert(!drew); // nothing drawn, but the background is there
+    assert(drew); // fallback rendering succeeds after drawing the view background
     renderer.draw_texture(view.texture(), {0.0f, 0.0f, 40.0f, 30.0f});
     std::vector<kin::u8> rgba;
     kin::Vec2i size{};
@@ -556,10 +556,12 @@ struct AoRoom {
         : floor(make_box(r3d, {20.0f, 0.2f, 20.0f})), wall(make_box(r3d, {20.0f, 4.0f, 0.2f})),
           pole(make_box(r3d, {0.2f, 1.0f, 0.2f})) {}
 
-    void draw_floor(kin::Scene3D& scene) const { scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), grey); }
-    void draw_wall(kin::Scene3D& scene) const { scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -2.1f}), grey); }
+    void draw_floor(kin::Scene3D& scene) const {
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), grey);
+    }
+    void draw_wall(kin::Scene3D& scene) const { (void)scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -2.1f}), grey); }
     void draw_pole(kin::Scene3D& scene, float x, float z) const {
-        scene.draw(pole, Mat4f::translation({x, 0.5f, z}), grey);
+        (void)scene.draw(pole, Mat4f::translation({x, 0.5f, z}), grey);
     }
 
     kin::Mesh3D floor, wall, pole;
@@ -642,9 +644,10 @@ void test_gpu_depth_and_colour() {
             for (const bool red_first : {true, false}) {
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-                const auto add_red = [&] { scene.draw(box, Mat4f::identity(), red); };
+                const auto add_red = [&] { (void)scene.draw(box, Mat4f::identity(), red); };
                 const auto add_blue = [&] {
-                    scene.draw(box, Mat4f::translation({0.0f, 0.0f, -3.0f}) * Mat4f::scaling({3.0f, 3.0f, 3.0f}), blue);
+                    (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, -3.0f}) * Mat4f::scaling({3.0f, 3.0f, 3.0f}),
+                                     blue);
                 };
                 if (red_first) {
                     add_red();
@@ -678,7 +681,7 @@ void test_gpu_lighting() {
         scene.camera = kin::Camera3D::look_at({3.0f, 1.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun = {.direction = {1.0f, 0.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(180, 180, 180)});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(180, 180, 180)});
         Pixels p = shoot_view(renderer, r3d, view, scene);
         const auto lit = scene.camera.project({0.5f, 0.0f, 0.0f}, screen);
         const auto dark = scene.camera.project({0.0f, 0.0f, 0.5f}, screen);
@@ -690,7 +693,7 @@ void test_gpu_lighting() {
         // The sun behind it, but half its own light: half its colour in linear light.
         scene.clear();
         scene.lights.sun.direction = {-1.0f, 0.0f, 0.0f};
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(180, 180, 180), .emissive = 0.5f});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(180, 180, 180), .emissive = 0.5f});
         p = shoot_view(renderer, r3d, view, scene);
         const kin::u8 half = static_cast<kin::u8>(
             std::lround(255.0f * kin::linear_to_srgb(0.5f * kin::srgb_to_linear(180.0f / 255.0f))));
@@ -714,7 +717,7 @@ void test_gpu_instances() {
             {Mat4f::translation({0.0f, 1.0f, 0.0f}), Color::rgb(0, 255, 0)},
             {Mat4f::translation({2.0f, 1.0f, 0.0f}), Color::rgb(0, 0, 255)},
         };
-        scene.draw_instanced(box, boxes, {.unlit = true});
+        (void)scene.draw_instanced(box, boxes, {.unlit = true});
         const auto balls = scene.add_instances(ball, 2, {.color = Color::rgb(255, 255, 0), .unlit = true}).value_or({});
         balls[0] = {Mat4f::translation({-1.0f, -1.2f, 0.0f}), kin::colors::white};
         balls[1] = {Mat4f::translation({1.0f, -1.2f, 0.0f}) * Mat4f::scaling({1.4f, 1.4f, 1.4f}),
@@ -750,7 +753,7 @@ void test_gpu_instances_on_workers() {
         const Mat4f hidden = Mat4f::translation({0.0f, 0.0f, 50.0f}); // behind the camera
         // Small draws first (taken together), then two big ones (split).
         for (int i = 0; i < 300; ++i) {
-            scene.draw(i % 2 == 0 ? box : ball, hidden);
+            (void)scene.draw(i % 2 == 0 ? box : ball, hidden);
         }
         auto boxes = scene.add_instances(box, 7000, {.unlit = true}).value_or({});
         std::fill(boxes.begin(), boxes.end(), kin::MeshInstance3D{hidden, kin::colors::white});
@@ -793,7 +796,7 @@ void test_gpu_frustum_culling() {
             copies[11999] = {Mat4f::translation({0.0f, 1.5f, 0.0f}), Color::rgb(0, 255, 0)};
             copies[17] = {Mat4f::translation({0.0f, -7.0f, 0.0f}) * Mat4f::scaling({12.0f, 12.0f, 1.0f}),
                           Color::rgb(255, 255, 0)};
-            scene.draw(box, Mat4f::translation({0.0f, 0.0f, 80.0f})); // a draw with nothing in view
+            (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, 80.0f})); // a draw with nothing in view
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             assert(r3d.debug_stats().instances == 4 && r3d.debug_stats().culled == 11997 &&
                    r3d.debug_stats().draws == 1);
@@ -810,7 +813,7 @@ void test_gpu_frustum_culling() {
         kin::Scene3D all;
         all.cull = false;
         all.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f});
-        all.draw(box, Mat4f::translation({0.0f, 0.0f, 30.0f}));
+        (void)all.draw(box, Mat4f::translation({0.0f, 0.0f, 30.0f}));
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, all);
         assert(r3d.debug_stats().instances == 1 && r3d.debug_stats().culled == 0);
@@ -828,12 +831,13 @@ void test_gpu_overlay() {
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         // A wall right in front of the camera, filling the view.
-        scene.draw(box, Mat4f::translation({0.0f, 0.0f, 5.5f}) * Mat4f::scaling({4.0f, 4.0f, 0.1f}),
-                   {.color = Color::rgb(90, 90, 90), .unlit = true});
+        (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, 5.5f}) * Mat4f::scaling({4.0f, 4.0f, 0.1f}),
+                         {.color = Color::rgb(90, 90, 90), .unlit = true});
         kin::Scene3D& gun = scene.overlay();
         gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
         // Seen by its own camera, 3 m in front of it: further than the wall is from the scene's.
-        gun.draw(box, Mat4f::translation({0.6f, -0.4f, -3.0f}), {.color = Color::rgb(250, 120, 20), .unlit = true});
+        (void)gun.draw(box, Mat4f::translation({0.6f, -0.4f, -3.0f}),
+                       {.color = Color::rgb(250, 120, 20), .unlit = true});
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         assert(r3d.debug_stats().draws == 2 && r3d.debug_stats().instances == 2);
         const auto spot = gun.camera.project({0.6f, -0.4f, -2.5f}, screen);
@@ -863,7 +867,7 @@ void test_gpu_point_lights() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 8.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
-        scene.draw(wall, Mat4f::identity(), {.color = Color::rgb(200, 200, 200)});
+        (void)scene.draw(wall, Mat4f::identity(), {.color = Color::rgb(200, 200, 200)});
         scene.add_point_light({.position = {-2.0f, 0.0f, 1.0f}, .color = {2.0f, 1.0f, 0.5f}, .radius = 3.0f});
         Pixels p = shoot_view(renderer, r3d, view, scene);
         assert(r3d.debug_stats().lights == 1);
@@ -899,8 +903,8 @@ void test_gpu_point_light_zero_attenuation() {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0, 0, 8}, {0, 0, 0}, 60.0f);
             scene.lights.sun.color = scene.lights.ambient = {0, 0, 0};
-            scene.draw(wall, Mat4f::translation({0, 0, -0.1f}),
-                       {.color = Color::rgb(200, 200, 200), .metallic = 0.3f, .roughness = 0.4f});
+            (void)scene.draw(wall, Mat4f::translation({0, 0, -0.1f}),
+                             {.color = Color::rgb(200, 200, 200), .metallic = 0.3f, .roughness = 0.4f});
             if (local) {
                 // The cone faces away from the wall; it selects the local-light shader without lighting it.
                 scene.add_spot_light({.position = {0, 0, 1}, .direction = {0, 0, 1}, .color = {1, 1, 1}, .radius = 4});
@@ -956,8 +960,8 @@ void test_gpu_shadows() {
             scene.clear();
             scene.lights.shadow_area =
                 area ? kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}} : kin::Bounds3D{};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
             return shoot_view(renderer, r3d, view, scene);
         };
         Pixels p = draw(true);
@@ -988,12 +992,12 @@ void test_gpu_blending() {
         const kin::Material3D wall{.color = Color::rgb(200, 0, 0), .unlit = true};
         const kin::Material3D veil{.color = Color::rgba(0, 0, 255, 128), .unlit = true, .blend = kin::Blend3D::Alpha};
         // Additive quads overlapping at the centre, drawn before the wall they are in front of.
-        scene.draw(quad, Mat4f::translation({-0.6f, 0.0f, 1.0f}), glow);
-        scene.draw(quad, Mat4f::translation({0.6f, 0.0f, 1.2f}), glow);
-        scene.draw(quad, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}), wall);
+        (void)scene.draw(quad, Mat4f::translation({-0.6f, 0.0f, 1.0f}), glow);
+        (void)scene.draw(quad, Mat4f::translation({0.6f, 0.0f, 1.2f}), glow);
+        (void)scene.draw(quad, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}), wall);
         // An alpha veil in front, at the top; another behind the wall (hidden).
-        scene.draw(quad, Mat4f::translation({0.0f, 2.0f, 1.0f}), veil);
-        scene.draw(quad, Mat4f::translation({0.0f, -2.5f, -1.0f}) * Mat4f::scaling({2.0f, 1.0f, 1.0f}), veil);
+        (void)scene.draw(quad, Mat4f::translation({0.0f, 2.0f, 1.0f}), veil);
+        (void)scene.draw(quad, Mat4f::translation({0.0f, -2.5f, -1.0f}) * Mat4f::scaling({2.0f, 1.0f, 1.0f}), veil);
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
         const Color one = at({-1.4f, 0.0f, 1.0f}), both = at({0.0f, 0.0f, 1.2f}), none = at({0.0f, -1.5f, 0.0f});
@@ -1021,9 +1025,10 @@ void test_gpu_additive_over_transparent() {
             kin::View3D view = r3d.create_view({160, 120}, options).value_or({});
             scene.clear();
             if (backed) {
-                scene.draw(quad, Mat4f::translation({0.0f, 0.0f, -1.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}), black);
+                (void)scene.draw(quad, Mat4f::translation({0.0f, 0.0f, -1.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}),
+                                 black);
             }
-            scene.draw(quad, Mat4f::translation({0.0f, 0.0f, 1.0f}), glow);
+            (void)scene.draw(quad, Mat4f::translation({0.0f, 0.0f, 1.0f}), glow);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -1050,7 +1055,7 @@ void test_gpu_hdr_bloom() {
         const kin::Mesh3D cube = make_box(r3d, {0.6f, 0.6f, 0.6f});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-        scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
+        (void)scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
         const auto shot = [&](const kin::ViewOptions3D& options) {
             kin::View3D view = r3d.create_view({160, 120}, options).value_or({});
             return shoot_view(renderer, r3d, view, scene);
@@ -1150,16 +1155,16 @@ void test_gpu_unlit_specialization() {
                         material.wireframe = variant == 8;
                         material.wrap_u = kin::Wrap3D::Mirror;
                         material.wrap_v = kin::Wrap3D::Repeat;
-                        scene.draw(mesh, Mat4f::identity(), material, Color::rgb(190, 230, 200));
+                        (void)scene.draw(mesh, Mat4f::identity(), material, Color::rgb(190, 230, 200));
                         if (variant == 9) {
                             // Interleave textured -> generic lit -> colour-only -> textured in one pass.
                             auto lit = material;
                             lit.unlit = false;
-                            scene.draw(mesh, Mat4f::translation({-0.7f, 0, 0.1f}), lit);
+                            (void)scene.draw(mesh, Mat4f::translation({-0.7f, 0, 0.1f}), lit);
                             auto colour = material;
                             colour.texture = {};
-                            scene.draw(mesh, Mat4f::translation({0.7f, 0, 0.2f}), colour);
-                            scene.draw(mesh, Mat4f::translation({0, 0.5f, 0.3f}), material);
+                            (void)scene.draw(mesh, Mat4f::translation({0.7f, 0, 0.2f}), colour);
+                            (void)scene.draw(mesh, Mat4f::translation({0, 0.5f, 0.3f}), material);
                         }
                         // Mixed draws have two textured commands (same material, separated by other draws).
                         if (variant == 9) {
@@ -1182,7 +1187,7 @@ void test_gpu_unlit_specialization() {
             auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0, 0, 4}, {0, 0, 0});
-            scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture});
+            (void)scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture});
             scene.fog = {.enabled = true, .density = 0.1f};
             check(view, scene, false, false);
             scene.fog.enabled = false;
@@ -1213,7 +1218,7 @@ void test_gpu_texture() {
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-        scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = checker});
+        (void)scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = checker});
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
         expect(at({-0.5f, 0.5f, 0.0f}), Color::rgb(255, 0, 0), "top left texel");
@@ -1266,7 +1271,7 @@ void test_gpu_model() {
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 4.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
-        scene.draw(model, Mat4f::identity());
+        (void)scene.draw(model, Mat4f::identity());
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
         expect(at({-0.5f, 1.5f, 0.0f}), Color::rgb(255, 0, 0), "the panel's top left texel");
@@ -1298,8 +1303,8 @@ void test_gpu_culling() {
         for (const bool double_sided : {false, true}) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, -3.0f, 0.01f}, {0.0f, 0.0f, 0.0f}); // from below
-            scene.draw(floor, Mat4f::identity(),
-                       {.color = Color::rgb(90, 200, 90), .unlit = true, .double_sided = double_sided});
+            (void)scene.draw(floor, Mat4f::identity(),
+                             {.color = Color::rgb(90, 200, 90), .unlit = true, .double_sided = double_sided});
             expect(shoot_view(renderer, r3d, view, scene).at(80, 60),
                    double_sided ? Color::rgb(90, 200, 90) : kin::colors::black,
                    double_sided ? "a double-sided plane from below" : "a plane from below");
@@ -1319,11 +1324,11 @@ void test_gpu_interleaves_with_2d() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f});
         renderer.clear(kin::colors::black);
         renderer.fill_rect({0.0f, 0.0f, 160.0f, 120.0f}, Color::rgb(10, 20, 30)); // 2D first
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(220, 30, 30), .unlit = true});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(220, 30, 30), .unlit = true});
         render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), {0.0f, 0.0f, 40.0f, 40.0f});
         scene.clear();
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(30, 220, 30), .unlit = true});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(30, 220, 30), .unlit = true});
         render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), {60.0f, 0.0f, 40.0f, 40.0f});
         renderer.fill_rect({120.0f, 0.0f, 20.0f, 20.0f}, Color::rgb(250, 250, 250)); // 2D after
@@ -1338,7 +1343,7 @@ void test_gpu_interleaves_with_2d() {
         kin::View3D clear_view = r3d.create_view({40, 40}, {.samples = 1}).value_or({});
         renderer.clear(Color::rgb(70, 70, 70));
         scene.clear();
-        scene.draw(box, Mat4f::translation({0.0f, 0.0f, -100.0f}), {.unlit = true}); // too small to cover it
+        (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, -100.0f}), {.unlit = true}); // too small to cover it
         render_ok(r3d, clear_view, scene);
         renderer.draw_texture(clear_view.texture(), {0.0f, 0.0f, 40.0f, 40.0f});
         expect(read(renderer).at(5, 5), Color::rgb(70, 70, 70), "under a transparent background");
@@ -1377,9 +1382,9 @@ void test_gpu_shared_mesh_buffers() {
             meshes.push_back(r3d.create_mesh(data).value_or({}));
             assert(meshes.back().valid());
         }
-        scene.draw(meshes[0], Mat4f::translation({-2, 0, 0}), {.unlit = true});
-        scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
-        scene.draw(meshes.back(), Mat4f::translation({2, 0, 0}), {.unlit = true});
+        (void)scene.draw(meshes[0], Mat4f::translation({-2, 0, 0}), {.unlit = true});
+        (void)scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
+        (void)scene.draw(meshes.back(), Mat4f::translation({2, 0, 0}), {.unlit = true});
         const Pixels picture = shoot_view(renderer, r3d, view, scene);
         for (const auto [world, colour] :
              {std::pair{Vec3f{-2, 0, 0}, Color::rgb(220, 30, 30)}, std::pair{Vec3f{0, 0, 0}, Color::rgb(30, 220, 30)},
@@ -1396,7 +1401,7 @@ void test_gpu_shared_mesh_buffers() {
         // Destroy geometry with its draws still recorded, then upload a replacement before submitting again.
         // Reuse without submission/fence protection would overwrite the old draw's vertices or indices.
         scene.clear();
-        scene.draw(meshes[0], Mat4f::identity(), {.unlit = true});
+        (void)scene.draw(meshes[0], Mat4f::identity(), {.unlit = true});
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
         renderer.draw_texture(view.texture(), screen);
@@ -1411,13 +1416,13 @@ void test_gpu_shared_mesh_buffers() {
         for (int round = 0; round < 8; ++round) {
             for (int i = 2; i < 400; i += 2)
                 meshes[i] = {};
-            scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
+            (void)scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
             shoot_view(renderer, r3d, view, scene);
             renderer.present();
             scene.clear();
             for (int i = 2; i < 400; i += 2)
                 meshes[i] = r3d.create_mesh(kin::meshes::box({1, 1, 1})).value_or({});
-            scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
+            (void)scene.draw(meshes[501], Mat4f::identity(), {.unlit = true});
             expect(shoot_view(renderer, r3d, view, scene).at(80, 60), Color::rgb(30, 220, 30),
                    "live range survived reuse");
             assert(r3d.debug_stats().shared_mesh_pages < 8);
@@ -1454,7 +1459,7 @@ void test_gpu_meshes_outlive_renderer() {
         mesh = r3d.create_mesh(kin::meshes::sphere(1.0f)).value_or({});
         view = r3d.create_view({64, 64}).value_or({});
         kin::Scene3D scene;
-        scene.draw(mesh, Mat4f::identity());
+        (void)scene.draw(mesh, Mat4f::identity());
         renderer->clear(kin::colors::black);
         render_ok(r3d, view, scene);
         renderer->draw_texture(view.texture(), {0.0f, 0.0f, 64.0f, 64.0f});
@@ -1479,7 +1484,7 @@ void test_gpu_linear_hdr() {
         }
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f});
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 40, 40), .unlit = true});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 40, 40), .unlit = true});
         expect(shoot_view(renderer, r3d, view, scene).at(80, 60), Color::rgb(200, 40, 40), "a linear HDR scene", 4);
         renderer.present();
     });
@@ -1496,15 +1501,15 @@ void test_gpu_pick() {
         kin::View3D plain = r3d.create_view({160, 120}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-        scene.draw(box, Mat4f::translation({-1.5f, 0.0f, 0.0f}), {.color = Color::rgb(200, 60, 60)}, kin::colors::white,
-                   7);
-        scene.draw(box, Mat4f::translation({1.5f, 0.0f, 0.0f}), {.color = Color::rgb(60, 200, 60)}, kin::colors::white,
-                   0);
-        scene.draw(box, Mat4f::translation({0.0f, 2.0f, 0.0f}), {.color = Color::rgb(60, 60, 200), .wireframe = true},
-                   kin::colors::white, 3);
+        (void)scene.draw(box, Mat4f::translation({-1.5f, 0.0f, 0.0f}), {.color = Color::rgb(200, 60, 60)},
+                         kin::colors::white, 7);
+        (void)scene.draw(box, Mat4f::translation({1.5f, 0.0f, 0.0f}), {.color = Color::rgb(60, 200, 60)},
+                         kin::colors::white, 0);
+        (void)scene.draw(box, Mat4f::translation({0.0f, 2.0f, 0.0f}),
+                         {.color = Color::rgb(60, 60, 200), .wireframe = true}, kin::colors::white, 3);
         scene.overlay().camera = scene.camera;
-        scene.overlay().draw(box, Mat4f::translation({0.0f, -2.0f, 0.0f}), {.color = Color::rgb(200, 200, 60)},
-                             kin::colors::white, 5);
+        (void)scene.overlay().draw(box, Mat4f::translation({0.0f, -2.0f, 0.0f}), {.color = Color::rgb(200, 200, 60)},
+                                   kin::colors::white, 5);
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
         const auto pixel = [&](Vec3f w) {
@@ -1557,9 +1562,9 @@ void test_gpu_wireframe() {
         scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
         const Color wire = Color::rgb(250, 40, 40);
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(90, 90, 90), .unlit = true});
-        scene.draw(box, Mat4f::identity(), {.color = wire, .wireframe = true});
-        scene.draw(line, Mat4f::identity(), {.color = Color::rgb(40, 250, 40), .wireframe = true});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(90, 90, 90), .unlit = true});
+        (void)scene.draw(box, Mat4f::identity(), {.color = wire, .wireframe = true});
+        (void)scene.draw(line, Mat4f::identity(), {.color = Color::rgb(40, 250, 40), .wireframe = true});
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         const auto any_near = [&](Vec3f w, Color want) {
             const kin::Vec2f c = scene.camera.project(w, screen)->pos;
@@ -1597,7 +1602,7 @@ void test_gpu_fill_and_ambient() {
         const auto shot = [&](Vec3f eye) {
             scene.clear();
             scene.camera = kin::Camera3D::look_at(eye, {0.0f, 0.0f, 0.0f}, 50.0f);
-            scene.draw(box, Mat4f::identity(), {.color = kin::colors::white});
+            (void)scene.draw(box, Mat4f::identity(), {.color = kin::colors::white});
             const Color c = shoot_view(renderer, r3d, view, scene).at(80, 60);
             renderer.present();
             return c;
@@ -1648,8 +1653,8 @@ void test_gpu_sun_receiver_plane_bias() {
         scene.lights.shadow_area = {{-20, -6, -20}, {20, 6, 20}};
         scene.lights.shadow_resolution = 1024;
         scene.lights.cache_shadows = true;
-        scene.draw(plane, Mat4f{}, {.color = kin::colors::white, .roughness = 1});
-        scene.draw(sphere, Mat4f::translation({0, 1, 0}), {.color = kin::colors::black, .unlit = true});
+        (void)scene.draw(plane, Mat4f{}, {.color = kin::colors::white, .roughness = 1});
+        (void)scene.draw(sphere, Mat4f::translation({0, 1, 0}), {.color = kin::colors::black, .unlit = true});
         scene.lights.sun_shadow_strength = 0;
         const auto baseline = shoot_view(renderer, r3d, view, scene);
         renderer.present();
@@ -1716,7 +1721,7 @@ void test_gpu_sun_receiver_plane_bias() {
         scene.lights.sun.color = {5, 5, 5};
         scene.lights.shadow_area = {{-24, -24, -24}, {24, 24, 24}};
         scene.lights.cache_shadows = false;
-        scene.draw(wall, Mat4f::rotation_x(90), {.color = kin::colors::white, .roughness = 1});
+        (void)scene.draw(wall, Mat4f::rotation_x(90), {.color = kin::colors::white, .roughness = 1});
         scene.lights.sun_shadow_strength = 0;
         const auto lit_wall = shoot_view(renderer, r3d, view, scene);
         renderer.present();
@@ -1749,8 +1754,8 @@ void test_gpu_sun_receiver_plane_bias() {
             const kin::u8 texel[] = {kin::u8(i ? 45 : 210), 128, 225, 255};
             const auto relief = renderer.create_texture({1, 1}, kin::TextureFormat::Rgba8, texel);
             scene.clear();
-            scene.draw(floor, Mat4f{}, {.color = kin::colors::white, .roughness = 1, .normal = relief});
-            scene.draw(sphere, Mat4f::translation({0, 1, 0}), {.color = kin::colors::black, .unlit = true});
+            (void)scene.draw(floor, Mat4f{}, {.color = kin::colors::white, .roughness = 1, .normal = relief});
+            (void)scene.draw(sphere, Mat4f::translation({0, 1, 0}), {.color = kin::colors::black, .unlit = true});
             scene.lights.sun_shadow_strength = 0;
             const auto lit = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -1792,9 +1797,9 @@ void test_gpu_receives_no_shadow() {
         scene.lights.sun = {.direction = {1.0f, 1.0f, 0.0f}, .color = {1.0f, 1.0f, 1.0f}};
         scene.lights.ambient = {0.15f, 0.15f, 0.15f};
         scene.lights.shadow_area = kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
-                   {.color = Color::rgb(180, 180, 180), .receives_shadow = false});
-        scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                         {.color = Color::rgb(180, 180, 180), .receives_shadow = false});
+        (void)scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         assert(r3d.debug_stats().shadow_draws == 2);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
@@ -1829,7 +1834,7 @@ void test_gpu_large_mesh() {
             const kin::Mesh3D mesh = r3d.create_mesh(mesh_data).value_or({});
             assert(mesh.valid());
             scene.clear();
-            scene.draw(mesh, Mat4f::identity(), {.unlit = true});
+            (void)scene.draw(mesh, Mat4f::identity(), {.unlit = true});
             expect(shoot_view(renderer, r3d, view, scene).at(scene.camera.project({0.0f, -0.3f, 0.0f}, screen)->pos),
                    Color::rgb(220, 30, 30), what);
             renderer.present();
@@ -1861,9 +1866,10 @@ void test_gpu_shadow_faces() {
         const auto shade_under = [&](const Mat4f& placed, bool double_sided) {
             scene.clear();
             scene.lights.shadow_area = kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(plane, placed,
-                       {.color = Color::rgb(180, 60, 60), .double_sided = double_sided, .receives_shadow = false});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(
+                plane, placed,
+                {.color = Color::rgb(180, 60, 60), .double_sided = double_sided, .receives_shadow = false});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             const Color under = p.at(scene.camera.project({1.0f, 0.0f, 0.0f}, screen)->pos);
             const Color open = p.at(scene.camera.project({-4.0f, 0.0f, 0.0f}, screen)->pos);
@@ -1894,13 +1900,13 @@ void test_gpu_shadows_into_view() {
                             .color = {1.0f, 1.0f, 1.0f}}; // from up and +x: shadows fall toward -x
         scene.lights.ambient = {0.15f, 0.15f, 0.15f};
         scene.lights.shadow_area = kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-        scene.draw(box, Mat4f::translation({6.5f, 3.0f, 0.0f}),
-                   {.color = Color::rgb(180, 60, 60)}); // out of view, its shadow at x = 3.5: in it
-        scene.draw(box, Mat4f::translation({-7.0f, 2.0f, 0.0f}),
-                   {.color = Color::rgb(180, 60, 60)}); // its shadow at x = -9: out of view
-        scene.draw(box, Mat4f::translation({8.0f, 1.0f, 7.0f}),
-                   {.color = Color::rgb(180, 60, 60)}); // its shadow at (7, 0, 7): out of view
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+        (void)scene.draw(box, Mat4f::translation({6.5f, 3.0f, 0.0f}),
+                         {.color = Color::rgb(180, 60, 60)}); // out of view, its shadow at x = 3.5: in it
+        (void)scene.draw(box, Mat4f::translation({-7.0f, 2.0f, 0.0f}),
+                         {.color = Color::rgb(180, 60, 60)}); // its shadow at x = -9: out of view
+        (void)scene.draw(box, Mat4f::translation({8.0f, 1.0f, 7.0f}),
+                         {.color = Color::rgb(180, 60, 60)}); // its shadow at (7, 0, 7): out of view
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
         assert(r3d.debug_stats().culled == 3);
@@ -1934,10 +1940,10 @@ void test_gpu_cascades() {
         const auto render = [&](kin::u32 cascades) {
             scene.lights.shadow_cascades = cascades;
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(block, Mat4f::translation({0.0f, 2.0f, -45.0f}), {.color = Color::rgb(180, 60, 60)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(block, Mat4f::translation({0.0f, 2.0f, -45.0f}), {.color = Color::rgb(180, 60, 60)});
             // Out of every cascade but the farthest: far to the side and behind.
-            scene.draw(block, Mat4f::translation({-100.0f, 2.0f, -140.0f}), {.color = Color::rgb(180, 60, 60)});
+            (void)scene.draw(block, Mat4f::translation({-100.0f, 2.0f, -140.0f}), {.color = Color::rgb(180, 60, 60)});
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -2041,11 +2047,11 @@ void test_gpu_cascade_casters() {
         }
         const auto render = [&](bool with_tall) {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw_instanced(post, posts, {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw_instanced(post, posts, {.color = Color::rgb(200, 200, 200)});
             if (with_tall) {
                 for (const Band& b : bands) {
-                    scene.draw(tall, Mat4f::translation(b.tall_at), {.color = Color::rgb(200, 60, 60)});
+                    (void)scene.draw(tall, Mat4f::translation(b.tall_at), {.color = Color::rgb(200, 60, 60)});
                 }
             }
             return shoot_view(renderer, r3d, view, scene);
@@ -2142,13 +2148,13 @@ void test_gpu_ambient_occlusion() {
             room.draw_floor(scene);
             room.draw_wall(scene);
             if (pane_in_front) {
-                scene.draw(pane, Mat4f::translation({0.0f, 0.5f, 0.5f}),
-                           {.color = Color::rgba(255, 255, 255, 128), .blend = kin::Blend3D::Alpha});
+                (void)scene.draw(pane, Mat4f::translation({0.0f, 0.5f, 0.5f}),
+                                 {.color = Color::rgba(255, 255, 255, 128), .blend = kin::Blend3D::Alpha});
             }
             if (gun) {
                 kin::Scene3D& hands = scene.overlay();
                 hands.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
-                hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
+                (void)hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
             }
             Pixels p = shoot_view(renderer, r3d, target ? *target : view, scene);
             renderer.present();
@@ -2263,12 +2269,12 @@ void test_gpu_contact_shadows() {
             room.draw_floor(scene);
             room.draw_pole(scene, 0.0f, 0.0f);
             if (with_plate) {
-                scene.draw(plate, Mat4f::translation(plate_at), {.color = Color::rgb(200, 200, 200)});
+                (void)scene.draw(plate, Mat4f::translation(plate_at), {.color = Color::rgb(200, 200, 200)});
             }
             if (gun) {
                 kin::Scene3D& hands = scene.overlay();
                 hands.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 70.0f);
-                hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
+                (void)hands.draw(block, Mat4f::translation({0.5f, -0.3f, -2.0f}), {.color = Color::rgb(200, 120, 60)});
             }
             Pixels p = shoot_view(renderer, r3d, target ? *target : view, scene);
             renderer.present();
@@ -2430,7 +2436,7 @@ void test_gpu_occlusion_speedups() {
             if (what == Draw::Blocks) {
                 // Thin things at several distances: where a coarse level of the chain is most likely to be wrong.
                 for (int i = 0; i < 6; ++i) {
-                    scene.draw(
+                    (void)scene.draw(
                         block,
                         Mat4f::translation({-2.5f + static_cast<float>(i), 0.5f, -1.5f + 0.7f * static_cast<float>(i)}),
                         {.color = Color::rgb(200, 120, 60)});
@@ -2522,7 +2528,7 @@ void test_gpu_metal_and_roughness() {
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
         const auto shoot = [&](const kin::Material3D& material) {
             scene.clear();
-            scene.draw(sphere, Mat4f::identity(), material);
+            (void)scene.draw(sphere, Mat4f::identity(), material);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -2578,8 +2584,8 @@ void test_gpu_normal_map() {
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
             scene.lights.sun = {.direction = sun, .color = {1.0f, 1.0f, 1.0f}};
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
-            scene.draw(square, Mat4f::identity(),
-                       {.color = Color::rgb(200, 200, 200), .normal = normal, .normal_scale = scale});
+            (void)scene.draw(square, Mat4f::identity(),
+                             {.color = Color::rgb(200, 200, 200), .normal = normal, .normal_scale = scale});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return linear_level(p.at(80, 60));
@@ -2620,10 +2626,11 @@ void test_gpu_alpha_mask() {
         scene.lights.shadow_area = kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}};
         const auto shoot = [&](kin::Blend3D blend) {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(leaf_mesh, Mat4f::translation({0.0f, 2.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
-                       {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = blend, .texture = leaf},
-                       kin::colors::white, 9);
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(
+                leaf_mesh, Mat4f::translation({0.0f, 2.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
+                {.color = Color::rgb(255, 255, 255), .double_sided = true, .blend = blend, .texture = leaf},
+                kin::colors::white, 9);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -2669,7 +2676,7 @@ void test_gpu_inverse_square() {
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 30.0f}, {0.0f, 0.0f, 0.0f}, 20.0f);
             scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
-            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(200, 200, 200)});
             scene.add_point_light({.position = {0.0f, 0.0f, distance}, .color = {3.0f, 3.0f, 3.0f}, .radius = radius});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -2716,8 +2723,8 @@ void test_gpu_model_materials() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 7.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
         scene.lights.sun = {.direction = {0.0f, 0.0f, 1.0f}, .color = {0.8f, 0.8f, 0.8f}};
         scene.lights.ambient = {0.0f, 0.0f, 0.0f};
-        scene.draw(part("mapped").mesh, part("mapped").transform, part("mapped").material);
-        scene.draw(part("plain").mesh, part("plain").transform, part("plain").material);
+        (void)scene.draw(part("mapped").mesh, part("mapped").transform, part("mapped").material);
+        (void)scene.draw(part("plain").mesh, part("plain").transform, part("plain").material);
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
         const Color with_map = at({-2.0f, 0.0f, 0.0f}), without = at({2.0f, 0.0f, 0.0f});
@@ -2748,7 +2755,8 @@ void test_gpu_wrap_modes() {
         const auto shoot = [&](kin::Wrap3D wrap) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
-            scene.draw(mesh, Mat4f::identity(), {.unlit = true, .texture = texture, .wrap_u = wrap, .wrap_v = wrap});
+            (void)scene.draw(mesh, Mat4f::identity(),
+                             {.unlit = true, .texture = texture, .wrap_u = wrap, .wrap_v = wrap});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             const auto at = [&](float x) { return p.at(scene.camera.project({x, 0.0f, 0.0f}, screen)->pos); };
@@ -2820,7 +2828,7 @@ void test_gpu_environment() {
         scene.lights.environment = environment;
         const auto shoot = [&](const kin::Material3D& material) {
             scene.clear();
-            scene.draw(sphere, Mat4f::identity(), material);
+            (void)scene.draw(sphere, Mat4f::identity(), material);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -2898,8 +2906,8 @@ void test_gpu_environment_levels_written() {
             scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
             scene.lights.environment = environment;
-            scene.draw(sphere, Mat4f::identity(),
-                       {.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
+            (void)scene.draw(sphere, Mat4f::identity(),
+                             {.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -2973,7 +2981,7 @@ void test_gpu_material_shader() {
             scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
             scene.lights.ambient = {0.1f, 0.12f, 0.2f};
             scene.add_point_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
-            scene.draw(sphere, Mat4f::identity(), material);
+            (void)scene.draw(sphere, Mat4f::identity(), material);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -3122,7 +3130,7 @@ void test_gpu_taa() {
         const auto still = [&](const kin::Camera3D& camera) {
             scene.clear();
             scene.camera = camera;
-            scene.draw(slab, Mat4f::rotation_z(25.0f), white);
+            (void)scene.draw(slab, Mat4f::rotation_z(25.0f), white);
         };
 
         // Off: the old picture, nothing run; the other settings do nothing.
@@ -3283,7 +3291,7 @@ void test_gpu_taa() {
             shoot(view, scene);
         }
         scene.clear();
-        scene.draw(slab, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f), white);
+        (void)scene.draw(slab, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f), white);
         const Pixels before_cut = shoot(view, scene);
         assert(level(before_cut.at(80, 60)) > 240);
         scene.clear(); // an empty scene: the slab is gone
@@ -3334,7 +3342,7 @@ void test_gpu_taa() {
             for (int f = 0; f < 40; ++f) {
                 scene.clear();
                 const float x = -6.0f + 0.3f * static_cast<float>(f); // the centre, in units; 10 pixels a unit
-                scene.draw(block, Mat4f::translation({x, 0.0f, 0.0f}), white, kin::colors::white, id);
+                (void)scene.draw(block, Mat4f::translation({x, 0.0f, 0.0f}), white, kin::colors::white, id);
                 const Pixels p = shoot(view, scene);
                 if (f >= 6) {
                     const float old_x = x - 0.3f * 6.0f; // where it was six frames ago
@@ -3363,11 +3371,11 @@ void test_gpu_taa() {
             int appeared = 0;
             for (int f = 0; f < 12; ++f) {
                 scene.clear();
-                scene.draw(slab, Mat4f::translation({0.0f, 3.0f, -1.0f}),
-                           {.color = Color::rgb(60, 60, 60), .unlit = true});
-                scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
+                (void)scene.draw(slab, Mat4f::translation({0.0f, 3.0f, -1.0f}),
+                                 {.color = Color::rgb(60, 60, 60), .unlit = true});
+                (void)scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
                 if (f >= 8) {
-                    scene.draw(same_mesh ? block : other, Mat4f::translation({4.0f, -2.0f, 0.0f}), white);
+                    (void)scene.draw(same_mesh ? block : other, Mat4f::translation({4.0f, -2.0f, 0.0f}), white);
                 }
                 const Pixels p = shoot(view, scene);
                 if (f == 8) {
@@ -3380,13 +3388,13 @@ void test_gpu_taa() {
         }
         // And one that disappears leaves nothing: gone after a frame or two.
         scene.clear();
-        scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
-        scene.draw(block, Mat4f::translation({4.0f, -2.0f, 0.0f}), white);
+        (void)scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
+        (void)scene.draw(block, Mat4f::translation({4.0f, -2.0f, 0.0f}), white);
         for (int f = 0; f < 6; ++f) {
             shoot(view, scene);
         }
         scene.clear();
-        scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
+        (void)scene.draw(block, Mat4f::translation({-4.0f, -2.0f, 0.0f}), white);
         shoot(view, scene);
         shoot(view, scene);
         assert(level(shoot(view, scene).at(120, 80)) < 12);
@@ -3435,13 +3443,13 @@ void test_gpu_taa_over_detail() {
         const auto checker = [&](float cam_x, bool large, bool with_block, float block_x) {
             scene.clear();
             scene.camera = flat_camera(cam_x, 0.0f);
-            scene.draw(back, Mat4f::translation({cam_x, 0.0f, 0.0f}), light);
-            scene.draw_instanced(large ? big_cell : cell,
-                                 large ? std::span<const kin::MeshInstance3D>{large_cells}
-                                       : std::span<const kin::MeshInstance3D>{small_cells},
-                                 dark);
+            (void)scene.draw(back, Mat4f::translation({cam_x, 0.0f, 0.0f}), light);
+            (void)scene.draw_instanced(large ? big_cell : cell,
+                                       large ? std::span<const kin::MeshInstance3D>{large_cells}
+                                             : std::span<const kin::MeshInstance3D>{small_cells},
+                                       dark);
             if (with_block) {
-                scene.draw(block, Mat4f::translation({block_x, 0.0f, 0.3f}), white);
+                (void)scene.draw(block, Mat4f::translation({block_x, 0.0f, 0.3f}), white);
             }
         };
         const PatternSurface pattern_surface = make_pattern_surface(r3d, renderer);
@@ -3450,7 +3458,8 @@ void test_gpu_taa_over_detail() {
         const auto textured = [&](float cam_x) {
             scene.clear();
             scene.camera = flat_camera(cam_x, 0.0f);
-            scene.draw(surface, Mat4f::identity(), {.unlit = true, .texture = pattern, .wrap_u = kin::Wrap3D::Repeat});
+            (void)scene.draw(surface, Mat4f::identity(),
+                             {.unlit = true, .texture = pattern, .wrap_u = kin::Wrap3D::Repeat});
         };
         // A 16-sample reference (the camera shifted by sub-pixel steps), in linear light, drawn on a view of its own
         // so that the temporal view keeps its history.
@@ -3597,8 +3606,8 @@ void test_gpu_taa_crowd() {
         };
         const auto draw_world = [&] {
             scene.clear();
-            scene.draw(world.mesh, Mat4f::identity(),
-                       {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
+            (void)scene.draw(world.mesh, Mat4f::identity(),
+                             {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
         };
         // The pattern alone, drawn the same way.
         scene.taa = {.enabled = true};
@@ -3630,7 +3639,7 @@ void test_gpu_taa_crowd() {
                 if (churn && f >= 24 && f % 2 == 1) {
                     crowd.insert(crowd.begin(), {Mat4f::translation({-5.0f, 3.5f, 0.3f})});
                 }
-                scene.draw_instanced(block, crowd, white);
+                (void)scene.draw_instanced(block, crowd, white);
                 const Pixels p = shoot(view);
                 if (f >= 40) {
                     // Behind the block that began third (index 2): where it was 5 frames ago, 3 pixels clear of it now.
@@ -3675,7 +3684,7 @@ void test_gpu_taa_crowd() {
                 if (churn && f >= 24 && f % 2 == 1) {
                     crowd.insert(crowd.begin(), {Mat4f::translation({-5.0f, 3.5f, 0.3f})});
                 }
-                scene.draw_instanced(block, crowd, white);
+                (void)scene.draw_instanced(block, crowd, white);
                 const Pixels p = shoot(view);
                 if (f >= 40 && f < 50) {
                     const float x = -12.0f + 3.2f * 2.0f + 0.17f * static_cast<float>(f);
@@ -3716,11 +3725,11 @@ void test_gpu_taa_overlay() {
         const auto build = [&](float cam_x, float gun_x, float dx, float dy) {
             scene.clear();
             scene.camera = flat_camera(cam_x + dx, dy);
-            scene.draw(world.mesh, Mat4f::identity(),
-                       {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
+            (void)scene.draw(world.mesh, Mat4f::identity(),
+                             {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
             kin::Scene3D& overlay = scene.overlay();
             overlay.camera = flat_camera(dx, dy);
-            overlay.draw(gun, Mat4f::translation({gun_x, -1.5f, 0.0f}), hands);
+            (void)overlay.draw(gun, Mat4f::translation({gun_x, -1.5f, 0.0f}), hands);
         };
         const auto shoot = [&](kin::View3D& target) {
             Pixels p = shoot_view(renderer, r3d, target, scene);
@@ -3854,43 +3863,44 @@ void test_gpu_taa_main_velocity() {
                 kin::Camera3D::look_at({-3.0f + 0.21f * t, 0.6f, 9.0f}, {0.4f * t * 0.1f, 0.0f, 0.0f}, 40.0f);
             scene.lights.sun = {.direction = {0.4f, 0.8f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
             scene.lights.ambient = {0.2f, 0.2f, 0.25f};
-            scene.draw(world.mesh, Mat4f::identity(),
-                       {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
+            (void)scene.draw(world.mesh, Mat4f::identity(),
+                             {.unlit = true, .texture = world.texture, .wrap_u = kin::Wrap3D::Repeat});
             // An instanced run (three copies of one mesh and material one after another), each moving its own way.
             for (int i = 0; i < 3; ++i) {
-                scene.draw(box,
-                           Mat4f::translation({-4.0f + 1.8f * static_cast<float>(i),
-                                               -1.5f + 0.1f * t * static_cast<float>(i - 1), 1.0f}) *
-                               Mat4f::rotation_y(7.0f * t),
-                           {.color = Color::rgb(230, 170, 90), .metallic = 0.2f, .roughness = 0.5f});
+                (void)scene.draw(box,
+                                 Mat4f::translation({-4.0f + 1.8f * static_cast<float>(i),
+                                                     -1.5f + 0.1f * t * static_cast<float>(i - 1), 1.0f}) *
+                                     Mat4f::rotation_y(7.0f * t),
+                                 {.color = Color::rgb(230, 170, 90), .metallic = 0.2f, .roughness = 0.5f});
             }
-            scene.draw(leaf_mesh, Mat4f::translation({1.0f - 0.08f * t, 0.5f, 2.0f}) * Mat4f::rotation_x(90.0f),
-                       {.color = Color::rgb(255, 255, 255),
-                        .double_sided = true,
-                        .blend = kin::Blend3D::Mask,
-                        .texture = leaf});
+            (void)scene.draw(leaf_mesh, Mat4f::translation({1.0f - 0.08f * t, 0.5f, 2.0f}) * Mat4f::rotation_x(90.0f),
+                             {.color = Color::rgb(255, 255, 255),
+                              .double_sided = true,
+                              .blend = kin::Blend3D::Mask,
+                              .texture = leaf});
             // In front of the cut-out and the run, moving the other way: what they leave behind is the velocity of what
             // is behind.
-            scene.draw(box, Mat4f::translation({3.0f - 0.2f * t, -0.8f, 3.0f}),
-                       {.color = Color::rgba(60, 200, 255, 140), .unlit = true, .blend = kin::Blend3D::Alpha});
-            scene.draw(box, Mat4f::translation({0.5f + 0.15f * t, 1.8f, 3.5f}),
-                       {.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive});
-            scene.draw(box, Mat4f::translation({-1.0f, 2.2f, 2.0f}) * Mat4f::rotation_y(5.0f * t),
-                       {.color = Color::rgb(80, 255, 80), .wireframe = true});
+            (void)scene.draw(box, Mat4f::translation({3.0f - 0.2f * t, -0.8f, 3.0f}),
+                             {.color = Color::rgba(60, 200, 255, 140), .unlit = true, .blend = kin::Blend3D::Alpha});
+            (void)scene.draw(box, Mat4f::translation({0.5f + 0.15f * t, 1.8f, 3.5f}),
+                             {.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive});
+            (void)scene.draw(box, Mat4f::translation({-1.0f, 2.2f, 2.0f}) * Mat4f::rotation_y(5.0f * t),
+                             {.color = Color::rgb(80, 255, 80), .wireframe = true});
             if (extra == Extra::CustomOpaque) {
                 kin::Material3D custom{.shader = flat};
                 custom.shader_params[4] = 0.9f;
-                scene.draw(box, Mat4f::translation({2.5f + 0.1f * t, 1.0f, 1.5f}), custom);
+                (void)scene.draw(box, Mat4f::translation({2.5f + 0.1f * t, 1.0f, 1.5f}), custom);
             } else if (extra == Extra::CustomBlended) {
                 kin::Material3D custom{.blend = kin::Blend3D::Alpha, .shader = flat};
                 custom.shader_params[4] = 0.9f;
-                scene.draw(box, Mat4f::translation({2.5f - 0.1f * t, 1.0f, 3.2f}), custom);
+                (void)scene.draw(box, Mat4f::translation({2.5f - 0.1f * t, 1.0f, 3.2f}), custom);
             } else if (extra == Extra::Occlusion) {
                 scene.ambient_occlusion = {.enabled = true};
             }
             kin::Scene3D& overlay = scene.overlay();
             overlay.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
-            overlay.draw(gun, Mat4f::translation({2.2f - 0.05f * t, -1.8f, 0.0f}), {.color = Color::rgb(200, 40, 40)});
+            (void)overlay.draw(gun, Mat4f::translation({2.2f - 0.05f * t, -1.8f, 0.0f}),
+                               {.color = Color::rgb(200, 40, 40)});
         };
         const auto shoot = [&](kin::View3D& view, kin::Scene3D& scene, bool pre_pass) {
             const auto ao = scene.ambient_occlusion;
@@ -3999,8 +4009,8 @@ void test_gpu_shadow_cache() {
             scene.lights.shadow_distance = setup.distance;
             scene.lod = {.enabled = setup.lod, .error_pixels = 0.5f};
             scene.debug.force_level = setup.lod_force;
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(
                 setup.other_mesh ? other : box, Mat4f::translation({setup.box_x, 2.5f, 0.0f}),
                 {.color = Color::rgb(180, 60, 60), .double_sided = setup.double_sided, .casts_shadow = !setup.no_cast});
             // Forty copies of one mesh in one draw: the cache's sample looks at the first, the last and every fifth.
@@ -4009,15 +4019,15 @@ void test_gpu_shadow_cache() {
                 copies.push_back({.transform = Mat4f::translation({-8.0f + 0.4f * static_cast<float>(i),
                                                                    1.0f + (i == 7 ? setup.many_x : 0.0f), -6.0f})});
             }
-            scene.draw_instanced(box, copies, {.color = Color::rgb(60, 60, 180)});
-            scene.draw(ball, Mat4f::translation({4.0f, 2.0f, 3.0f}), {.color = Color::rgb(60, 180, 60)});
-            scene.draw(leaf_mesh, Mat4f::translation({-4.0f, 2.5f, 3.0f}) * Mat4f::rotation_x(-90.0f),
-                       {.color = Color::rgb(255, 255, 255),
-                        .double_sided = true,
-                        .blend = kin::Blend3D::Mask,
-                        .texture = setup.leaf_texture});
+            (void)scene.draw_instanced(box, copies, {.color = Color::rgb(60, 60, 180)});
+            (void)scene.draw(ball, Mat4f::translation({4.0f, 2.0f, 3.0f}), {.color = Color::rgb(60, 180, 60)});
+            (void)scene.draw(leaf_mesh, Mat4f::translation({-4.0f, 2.5f, 3.0f}) * Mat4f::rotation_x(-90.0f),
+                             {.color = Color::rgb(255, 255, 255),
+                              .double_sided = true,
+                              .blend = kin::Blend3D::Mask,
+                              .texture = setup.leaf_texture});
             if (setup.extra) {
-                scene.draw(box, Mat4f::translation({2.0f, 1.0f, -2.0f}), {.color = Color::rgb(200, 200, 60)});
+                (void)scene.draw(box, Mat4f::translation({2.0f, 1.0f, -2.0f}), {.color = Color::rgb(200, 200, 60)});
             }
         };
         const auto shoot = [&](kin::View3D& target, bool cache) {
@@ -4139,7 +4149,7 @@ void test_gpu_shadow_cache() {
             shoot(view, true);
         }
         assert(r3d.debug_stats().shadow_cached);
-        r3d.resize(view, {200, 150});
+        assert(r3d.resize(view, {200, 150}));
         {
             build(true);
             renderer.clear(kin::colors::black);
@@ -4147,7 +4157,7 @@ void test_gpu_shadow_cache() {
             renderer.present();
             assert(!r3d.debug_stats().shadow_cached);
         }
-        r3d.resize(view, {160, 120});
+        assert(r3d.resize(view, {160, 120}));
 
         // Two views of two scenes alternating: each render is right (the map is shared, so each draws it again).
         for (int f = 0; f < 6; ++f) {
@@ -4254,7 +4264,7 @@ void test_gpu_taa_pick() {
             scene.taa.enabled = taa;
             for (int f = 0; f < 10; ++f) {
                 scene.clear();
-                scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 4);
+                (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 4);
                 renderer.clear(kin::colors::black);
                 render_ok(r3d, view, scene);
                 const kin::PickResult3D p = r3d.pick(view, pixel).value_or({});
@@ -4284,7 +4294,7 @@ void test_gpu_taa_hdr() {
         const kin::Mesh3D cube = make_box(r3d, {0.6f, 0.6f, 0.6f});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-        scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
+        (void)scene.draw(cube, Mat4f::identity(), {.color = Color::rgb(255, 140, 60), .emissive = 6.0f, .unlit = true});
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 4, .bloom = 1.0f}).value_or({});
         const auto side = scene.camera.project({0.55f, 0.0f, 0.3f}, screen);
         assert(side);
@@ -4328,7 +4338,7 @@ void test_gpu_taa_ids_after_reset() {
                                     kin::colors::white, with_ids ? 7u : 0u},
                 kin::MeshInstance3D{Mat4f::translation({3.0f, 0.5f, 0.0f}) * Mat4f::rotation_z(70.0f),
                                     kin::colors::white, with_ids ? 8u : 0u}};
-            scene.draw_instanced(block, copies, white);
+            (void)scene.draw_instanced(block, copies, white);
             Pixels p = shoot_view(renderer, r3d, views[with_ids ? 0 : 1], scene);
             renderer.present();
             return p;
@@ -4422,8 +4432,8 @@ void test_gpu_taa_match_on_workers() {
                 for (int k = 0; k < 7 && f >= 6 && f < 10; ++k) { // new copies, and a count that changes
                     b.push_back({Mat4f::translation({-5.0f + static_cast<float>(k), 5.5f, 0.0f}), kin::colors::white});
                 }
-                scene.draw_instanced(block, a, plain);
-                scene.draw_instanced(block, b, other);
+                (void)scene.draw_instanced(block, a, plain);
+                (void)scene.draw_instanced(block, b, other);
                 shots[workers ? 1 : 0].push_back(shoot_view(renderer, r3d, view, scene));
                 renderer.present();
                 capable = capable && r3d.capabilities().temporal_aa;
@@ -4457,8 +4467,8 @@ void test_gpu_sun_off_no_shadow_pass() {
             scene.lights.shadow_cascades = cascades;
             scene.lights.shadow_area =
                 area ? kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 4.0f, 10.0f}} : kin::Bounds3D{};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(box, Mat4f::translation({0.0f, 2.5f, 0.0f}), {.color = Color::rgb(180, 60, 60)});
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -4793,7 +4803,8 @@ void test_gpu_lod_selection() {
         const auto shoot_one = [&](const kin::Mesh3D& m, Vec3f at, float copy_scale,
                                    const kin::Material3D& material = {}) {
             scene.clear();
-            scene.draw(m, Mat4f::translation(at) * Mat4f::scaling({copy_scale, copy_scale, copy_scale}), material);
+            (void)scene.draw(m, Mat4f::translation(at) * Mat4f::scaling({copy_scale, copy_scale, copy_scale}),
+                             material);
             render_ok(r3d, view, scene);
             renderer.present();
         };
@@ -4849,7 +4860,8 @@ void test_gpu_lod_selection() {
         const kin::u32 large = level_drawn(r3d.debug_stats());
         // A copy stretched along one axis only counts by its largest.
         scene.clear();
-        scene.draw(mesh, Mat4f::translation({0.0f, 0.0f, -stretched_distance}) * Mat4f::scaling({1.0f, 1.0f, 4.0f}));
+        (void)scene.draw(mesh,
+                         Mat4f::translation({0.0f, 0.0f, -stretched_distance}) * Mat4f::scaling({1.0f, 1.0f, 4.0f}));
         render_ok(r3d, view, scene);
         assert(level_drawn(r3d.debug_stats()) == large);
 
@@ -4916,7 +4928,7 @@ void test_gpu_lod_selection() {
                 {Mat4f::translation({std::sin(static_cast<float>(i)) * distance * 0.2f, 0.0f, -distance})});
             ++by_level[expected_level(mesh, scene.camera, 120.0f, {0.0f, 0.0f, -distance}, 1.0f, 1.0f)];
         }
-        scene.draw_instanced(mesh, copies);
+        (void)scene.draw_instanced(mesh, copies);
         render_ok(r3d, view, scene);
         const kin::RenderDebugStats3D stats = r3d.debug_stats();
         kin::u64 triangles = 0;
@@ -4953,14 +4965,14 @@ void test_gpu_lod_off_is_unchanged() {
         scene.ambient_occlusion.enabled = true;
         const auto picture = [&](const kin::Mesh3D& m) {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             std::vector<kin::MeshInstance3D> copies;
             for (int i = 0; i < 30; ++i) {
                 copies.push_back({Mat4f::translation({static_cast<float>(i % 6) * 4.0f - 10.0f, 1.5f,
                                                       static_cast<float>(i / 6) * -5.0f + 6.0f}) *
                                   Mat4f::rotation_y(static_cast<float>(i) * 20.0f)});
             }
-            scene.draw_instanced(m, copies, {.color = Color::rgb(220, 120, 60)});
+            (void)scene.draw_instanced(m, copies, {.color = Color::rgb(220, 120, 60)});
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -5024,26 +5036,26 @@ void test_gpu_lod_same_level_everywhere() {
                 scene.contact_shadows.enabled = occlusion;
                 scene.lod = {.enabled = true, .error_pixels = 0.5f};
                 scene.clear();
-                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
                 std::vector<kin::MeshInstance3D> copies;
                 for (const Vec3f& at : spots) {
                     copies.push_back({Mat4f::translation(at)});
                 }
-                scene.draw_instanced(lod, copies, {.color = Color::rgb(220, 120, 60)});
+                (void)scene.draw_instanced(lod, copies, {.color = Color::rgb(220, 120, 60)});
                 const Pixels lod_picture = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
                 const kin::RenderDebugStats3D lod_stats = r3d.debug_stats();
                 // The levels each copy should have, and a scene made with their stand-ins.
                 scene.lod = {};
                 scene.clear();
-                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
                 std::array<kin::u32, kin::max_mesh_levels> used{};
                 kin::u64 triangles = 0;
                 for (const Vec3f& at : spots) {
                     const kin::u32 level = expected_level(lod, scene.camera, 120.0f, at, 1.0f, 0.5f);
                     ++used[level];
                     triangles += lod.level_triangles(level);
-                    scene.draw(stand_in[level], Mat4f::translation(at), {.color = Color::rgb(220, 120, 60)});
+                    (void)scene.draw(stand_in[level], Mat4f::translation(at), {.color = Color::rgb(220, 120, 60)});
                 }
                 const Pixels reference = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
@@ -5113,7 +5125,7 @@ void test_gpu_lod_flat_levels() {
             scene.lod = {.enabled = level >= 0};
             scene.debug.force_level = level;
             scene.clear();
-            scene.draw(mesh, Mat4f::rotation_x(30.0f), {.color = Color::rgb(220, 120, 60), .roughness = 0.4f});
+            (void)scene.draw(mesh, Mat4f::rotation_x(30.0f), {.color = Color::rgb(220, 120, 60), .roughness = 0.4f});
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -5179,7 +5191,7 @@ void test_gpu_lod_picture_bound() {
                                                       std::sin(a * 1.3f) * 1.5f, static_cast<float>(i) * -6.0f}),
                                   Color::rgb(220, 120, 60)});
             }
-            scene.draw_instanced(lod, copies);
+            (void)scene.draw_instanced(lod, copies);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -5228,7 +5240,7 @@ void test_gpu_lod_pick() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
         scene.lod = {.enabled = true};
         scene.debug.force_level = static_cast<kin::i32>(chain.count() - 1);
-        scene.draw(lod, Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
+        (void)scene.draw(lod, Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
         render_ok(r3d, view, scene);
         scene.lod = {};
         scene.debug.force_level = -1;
@@ -5242,7 +5254,7 @@ void test_gpu_lod_pick() {
         // The same pixels against the stand-in, and against the finest level, which they must differ from somewhere on
         // the ring.
         scene.clear();
-        scene.draw(coarse, Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
+        (void)scene.draw(coarse, Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white, 7);
         render_ok(r3d, view, scene);
         int different_from_stand_in = 0;
         std::vector<bool> stand_in_hits;
@@ -5254,8 +5266,8 @@ void test_gpu_lod_pick() {
             different_from_stand_in += stand_in_hits.back() != hits[static_cast<std::size_t>(step)] ? 1 : 0;
         }
         scene.clear();
-        scene.draw(r3d.create_mesh(data).value_or({}), Mat4f::translation({0.0f, 0.0f, -3.0f}), {}, kin::colors::white,
-                   7);
+        (void)scene.draw(r3d.create_mesh(data).value_or({}), Mat4f::translation({0.0f, 0.0f, -3.0f}), {},
+                         kin::colors::white, 7);
         render_ok(r3d, view, scene);
         int different_from_finest = 0;
         for (int step = 0; step < 72; ++step) {
@@ -5293,7 +5305,7 @@ void test_gpu_lod_on_workers() {
         scene.lod = {.enabled = true, .error_pixels = 0.4f};
         const auto build = [&] {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             kin::u32 seed = 3;
             const auto next = [&] {
                 seed = seed * 1664525u + 1013904223u;
@@ -5306,9 +5318,9 @@ void test_gpu_lod_on_workers() {
                      Color::rgb(255, 255, 255)};
             }
             for (int i = 0; i < 40; ++i) {
-                scene.draw(i % 2 ? ring : ball,
-                           Mat4f::translation({(next() - 0.5f) * 40.0f, 1.0f, 15.0f - next() * 40.0f}),
-                           {.color = Color::rgb(60, 160, 220)});
+                (void)scene.draw(i % 2 ? ring : ball,
+                                 Mat4f::translation({(next() - 0.5f) * 40.0f, 1.0f, 15.0f - next() * 40.0f}),
+                                 {.color = Color::rgb(60, 160, 220)});
             }
             auto balls = scene.add_instances(ball, 3000, {.color = Color::rgb(100, 220, 100)}).value_or({});
             for (auto& b : balls) {
@@ -5390,8 +5402,9 @@ void test_gpu_lod_taa() {
             pose(f, far_at, near_at);
             scene.clear();
             scene.taa = {.enabled = true};
-            scene.draw(ball, Mat4f::translation(far_at), white);
-            scene.draw(ball, Mat4f::translation(near_at) * Mat4f::scaling({near_scale, near_scale, near_scale}), white);
+            (void)scene.draw(ball, Mat4f::translation(far_at), white);
+            (void)scene.draw(ball, Mat4f::translation(near_at) * Mat4f::scaling({near_scale, near_scale, near_scale}),
+                             white);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
@@ -5608,11 +5621,12 @@ void test_gpu_clusters_off_is_unchanged(bool gpu) {
                 scene.ambient_occlusion.enabled = true;
                 const auto picture = [&](const kin::Mesh3D& m) {
                     scene.clear();
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-                    scene.draw(m,
-                               flat ? Mat4f::translation({0.0f, 0.5f, 0.0f}) * Mat4f::rotation_x(-30.0f)
-                                    : Mat4f::translation({0.0f, 1.2f, 0.0f}),
-                               {.color = Color::rgb(220, 120, 60)});
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                     {.color = Color::rgb(180, 180, 180)});
+                    (void)scene.draw(m,
+                                     flat ? Mat4f::translation({0.0f, 0.5f, 0.0f}) * Mat4f::rotation_x(-30.0f)
+                                          : Mat4f::translation({0.0f, 1.2f, 0.0f}),
+                                     {.color = Color::rgb(220, 120, 60)});
                     const Pixels p = shoot_view(renderer, r3d, view, scene);
                     renderer.present();
                     return p;
@@ -5653,8 +5667,8 @@ void test_gpu_clusters_off_is_unchanged(bool gpu) {
                 // An alpha-blended copy is not cut.
                 set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 30.0f}));
                 scene.clear();
-                scene.draw(clustered, Mat4f::translation({0.0f, 1.0f, 0.0f}),
-                           {.color = Color::rgba(220, 120, 60, 120), .blend = kin::Blend3D::Alpha});
+                (void)scene.draw(clustered, Mat4f::translation({0.0f, 1.0f, 0.0f}),
+                                 {.color = Color::rgba(220, 120, 60, 120), .blend = kin::Blend3D::Alpha});
                 render_ok(r3d, view, scene);
                 assert(r3d.debug_stats().triangles == data.triangle_count() && r3d.debug_stats().cluster_copies == 0);
                 renderer.present();
@@ -5687,7 +5701,7 @@ void test_gpu_clusters_cut(bool gpu) {
             const Mat4f at = Mat4f::translation({0.0f, 0.0f, 0.0f});
             const auto draw = [&](const kin::Mesh3D& m) {
                 scene.clear();
-                scene.draw(m, at, {.color = Color::rgb(150, 190, 120)});
+                (void)scene.draw(m, at, {.color = Color::rgb(150, 190, 120)});
                 const Pixels p = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
                 return p;
@@ -5751,12 +5765,12 @@ void test_gpu_clusters_cut(bool gpu) {
             // The copy's scale counts: twice as large, the same camera, and the error is twice as many pixels.
             set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 1.0f}));
             scene.clear();
-            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}));
+            (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}));
             render_ok(r3d, view, scene);
             const kin::u64 unit_triangles = r3d.debug_stats().triangles;
             scene.clear();
-            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 120.0f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}));
-            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}));
+            (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 120.0f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}));
+            (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}));
             render_ok(r3d, view, scene);
             const kin::Mat4f big = Mat4f::translation({0.0f, 0.0f, 0.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f});
             const kin::Mat4f small = Mat4f::translation({0.0f, 0.0f, 120.0f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f});
@@ -5823,10 +5837,10 @@ void test_gpu_clusters_same_cut_everywhere(bool gpu) {
                         scene.cull = cull;
                         set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.7f}));
                         scene.clear();
-                        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
-                                   {.color = Color::rgb(180, 180, 180)});
+                        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                         {.color = Color::rgb(180, 180, 180)});
                         for (const Copy& c : copies) {
-                            scene.draw(*c.mesh, c.place, {.color = c.color});
+                            (void)scene.draw(*c.mesh, c.place, {.color = c.color});
                         }
                         const Pixels cut_picture = shoot_view(renderer, r3d, view, scene);
                         renderer.present();
@@ -5834,16 +5848,16 @@ void test_gpu_clusters_same_cut_everywhere(bool gpu) {
                         // The same scene from the meshes the cuts are.
                         set_cut(scene, cut_on(gpu, kin::Lod3D{}));
                         scene.clear();
-                        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
-                                   {.color = Color::rgb(180, 180, 180)});
+                        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                         {.color = Color::rgb(180, 180, 180)});
                         kin::u64 triangles = 0;
                         for (const Copy& c : copies) {
                             const auto cut = kin::select_clusters(*c.hierarchy,
                                                                   cluster_cut_view(scene.camera, 150.0f, c.place, 0.7f),
                                                                   kin::NoClusterCull3D{});
                             triangles += cut_triangles(*c.hierarchy, cut);
-                            scene.draw(r3d.create_mesh(cut_as_mesh(*c.hierarchy, cut)).value_or({}), c.place,
-                                       {.color = c.color});
+                            (void)scene.draw(r3d.create_mesh(cut_as_mesh(*c.hierarchy, cut)).value_or({}), c.place,
+                                             {.color = c.color});
                         }
                         const Pixels stand_in = shoot_view(renderer, r3d, view, scene);
                         renderer.present();
@@ -5907,15 +5921,15 @@ void test_gpu_clusters_pick(bool gpu) {
                 return results;
             };
             set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true}, depth));
-            const auto cut_hits = ring([&] { scene.draw(clustered, place, {}, kin::colors::white, 7); });
+            const auto cut_hits = ring([&] { (void)scene.draw(clustered, place, {}, kin::colors::white, 7); });
             assert(r3d.debug_stats().cluster_copies == 1);
             set_cut(scene, cut_on(gpu, kin::Lod3D{}));
             const auto cut = kin::select_clusters(hierarchy, cluster_cut_view(scene.camera, 120.0f, place, 1.0f, depth),
                                                   kin::NoClusterCull3D{});
             const kin::Mesh3D stand_in = r3d.create_mesh(cut_as_mesh(hierarchy, cut)).value_or({});
-            const auto stand_in_hits = ring([&] { scene.draw(stand_in, place, {}, kin::colors::white, 7); });
+            const auto stand_in_hits = ring([&] { (void)scene.draw(stand_in, place, {}, kin::colors::white, 7); });
             const auto full_hits =
-                ring([&] { scene.draw(r3d.create_mesh(data).value_or({}), place, {}, kin::colors::white, 7); });
+                ring([&] { (void)scene.draw(r3d.create_mesh(data).value_or({}), place, {}, kin::colors::white, 7); });
             int different_from_stand_in = 0, different_from_full = 0, hits = 0;
             for (std::size_t i = 0; i < cut_hits.size(); ++i) {
                 different_from_stand_in += cut_hits[i].hit != stand_in_hits[i].hit ||
@@ -5938,64 +5952,65 @@ void test_gpu_clusters_pick(bool gpu) {
 
 // The cut and the compaction on workers give the picture and the numbers the serial ones do, with everything on.
 void test_gpu_clusters_on_workers(bool gpu) {
-    with_gpu(gpu ? "test_gpu_clusters_on_workers (GPU cut)" : "test_gpu_clusters_on_workers (CPU cut)",
-             [&](kin::Renderer2D& renderer) {
-                 kin::Renderer3D r3d{renderer};
-                 kin::MeshOptions3D options;
-                 options.clusters = true;
-                 const kin::Mesh3D hill = r3d.create_mesh(big_hill(70), options).value_or({});
-                 const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24), options).value_or({});
-                 const kin::Mesh3D ring = r3d.create_mesh(kin::meshes::torus(1.0f, 0.3f, 48, 16), options).value_or({});
-                 const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-                 kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
-                 kin::Scene3D scene;
-                 scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 40.0f}, {0.0f, 1.0f, -40.0f}, 60.0f);
-                 scene.lights.shadow_area = {{-100.0f, -0.2f, -100.0f}, {100.0f, 12.0f, 100.0f}};
-                 scene.lights.shadow_cascades = 3;
-                 scene.lights.shadow_distance = 120.0f;
-                 scene.ambient_occlusion.enabled = true;
-                 scene.contact_shadows.enabled = true;
-                 set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.5f}));
-                 const auto build = [&] {
-                     scene.clear();
-                     scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-                     scene.draw(hill, Mat4f::translation({0.0f, 0.0f, -20.0f}), {.color = Color::rgb(150, 190, 120)});
-                     kin::u32 seed = 5;
-                     const auto next = [&] {
-                         seed = seed * 1664525u + 1013904223u;
-                         return static_cast<float>(seed >> 8) / 16777216.0f;
-                     };
-                     for (int i = 0; i < 60; ++i) {
-                         scene.draw(
-                             i % 3 ? ball : ring,
-                             Mat4f::translation({(next() - 0.5f) * 70.0f, 1.0f + next(), 30.0f - next() * 80.0f}) *
-                                 Mat4f::rotation_y(next() * 360.0f) *
-                                 Mat4f::scaling({0.5f + next() * 2.0f, 0.5f + next() * 2.0f, 0.5f + next() * 2.0f}),
-                             {.color = Color::rgb(60, 160, 220)});
-                     }
-                 };
-                 build();
-                 const Pixels serial = shoot_view(renderer, r3d, view, scene);
-                 renderer.present();
-                 const kin::RenderDebugStats3D a = r3d.debug_stats();
-                 kin::JobSystem jobs;
-                 renderer.set_job_system(&jobs);
-                 build();
-                 const Pixels parallel = shoot_view(renderer, r3d, view, scene);
-                 renderer.present();
-                 const kin::RenderDebugStats3D b = r3d.debug_stats();
-                 renderer.set_job_system(nullptr);
-                 std::cerr << "clusters on workers: " << a.cluster_copies << " copies cut, " << a.clusters_tested
-                           << " clusters tested, " << a.clusters_drawn << " drawn, " << a.triangles << " triangles, "
-                           << a.cluster_upload_bytes / 1024 << " KB; cut " << a.cluster_ms << " ms serial, "
-                           << b.cluster_ms << " ms on workers\n";
-                 assert(a.cluster_copies > 20 && a.clusters_drawn > 100);
-                 assert(a.cluster_copies == b.cluster_copies && a.clusters_tested == b.clusters_tested &&
-                        a.clusters_drawn == b.clusters_drawn && a.cluster_upload_bytes == b.cluster_upload_bytes &&
-                        a.triangles == b.triangles && a.draws == b.draws && a.shadow_draws == b.shadow_draws &&
-                        a.shadow_casters == b.shadow_casters && a.ao_draws == b.ao_draws && a.culled == b.culled);
-                 assert(serial.rgba == parallel.rgba);
-             });
+    with_gpu(
+        gpu ? "test_gpu_clusters_on_workers (GPU cut)" : "test_gpu_clusters_on_workers (CPU cut)",
+        [&](kin::Renderer2D& renderer) {
+            kin::Renderer3D r3d{renderer};
+            kin::MeshOptions3D options;
+            options.clusters = true;
+            const kin::Mesh3D hill = r3d.create_mesh(big_hill(70), options).value_or({});
+            const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24), options).value_or({});
+            const kin::Mesh3D ring = r3d.create_mesh(kin::meshes::torus(1.0f, 0.3f, 48, 16), options).value_or({});
+            const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
+            kin::View3D view = r3d.create_view({200, 150}, {.samples = 1}).value_or({});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 6.0f, 40.0f}, {0.0f, 1.0f, -40.0f}, 60.0f);
+            scene.lights.shadow_area = {{-100.0f, -0.2f, -100.0f}, {100.0f, 12.0f, 100.0f}};
+            scene.lights.shadow_cascades = 3;
+            scene.lights.shadow_distance = 120.0f;
+            scene.ambient_occlusion.enabled = true;
+            scene.contact_shadows.enabled = true;
+            set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.5f}));
+            const auto build = [&] {
+                scene.clear();
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, -20.0f}), {.color = Color::rgb(150, 190, 120)});
+                kin::u32 seed = 5;
+                const auto next = [&] {
+                    seed = seed * 1664525u + 1013904223u;
+                    return static_cast<float>(seed >> 8) / 16777216.0f;
+                };
+                for (int i = 0; i < 60; ++i) {
+                    (void)scene.draw(
+                        i % 3 ? ball : ring,
+                        Mat4f::translation({(next() - 0.5f) * 70.0f, 1.0f + next(), 30.0f - next() * 80.0f}) *
+                            Mat4f::rotation_y(next() * 360.0f) *
+                            Mat4f::scaling({0.5f + next() * 2.0f, 0.5f + next() * 2.0f, 0.5f + next() * 2.0f}),
+                        {.color = Color::rgb(60, 160, 220)});
+                }
+            };
+            build();
+            const Pixels serial = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::RenderDebugStats3D a = r3d.debug_stats();
+            kin::JobSystem jobs;
+            renderer.set_job_system(&jobs);
+            build();
+            const Pixels parallel = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const kin::RenderDebugStats3D b = r3d.debug_stats();
+            renderer.set_job_system(nullptr);
+            std::cerr << "clusters on workers: " << a.cluster_copies << " copies cut, " << a.clusters_tested
+                      << " clusters tested, " << a.clusters_drawn << " drawn, " << a.triangles << " triangles, "
+                      << a.cluster_upload_bytes / 1024 << " KB; cut " << a.cluster_ms << " ms serial, " << b.cluster_ms
+                      << " ms on workers\n";
+            assert(a.cluster_copies > 20 && a.clusters_drawn > 100);
+            assert(a.cluster_copies == b.cluster_copies && a.clusters_tested == b.clusters_tested &&
+                   a.clusters_drawn == b.clusters_drawn && a.cluster_upload_bytes == b.cluster_upload_bytes &&
+                   a.triangles == b.triangles && a.draws == b.draws && a.shadow_draws == b.shadow_draws &&
+                   a.shadow_casters == b.shadow_casters && a.ao_draws == b.ao_draws && a.culled == b.culled);
+            assert(serial.rgba == parallel.rgba);
+        });
 }
 
 // Temporal anti-aliasing with clusters: the same pictures, frame after frame, as a scene drawn from stand-in meshes of
@@ -6031,7 +6046,7 @@ void test_gpu_clusters_taa(bool gpu) {
                 scene.taa = {.enabled = true};
                 set_cut(scene, cut_on(gpu, kin::Lod3D{.enabled = true, .error_pixels = 0.7f}));
                 scene.clear();
-                scene.draw(hill, place, {.color = Color::rgb(150, 190, 120)});
+                (void)scene.draw(hill, place, {.color = Color::rgb(150, 190, 120)});
                 const Pixels p = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
                 if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
@@ -6052,7 +6067,7 @@ void test_gpu_clusters_taa(bool gpu) {
                     }
                     set_cut(scene, cut_on(gpu, kin::Lod3D{}));
                     scene.clear();
-                    scene.draw(stand_in, place, {.color = Color::rgb(150, 190, 120)});
+                    (void)scene.draw(stand_in, place, {.color = Color::rgb(150, 190, 120)});
                     const Pixels stand = shoot_view(renderer, r3d, stand_view, scene);
                     renderer.present();
                     equal_frames += p.rgba == stand.rgba ? 1 : 0;
@@ -6216,13 +6231,13 @@ void test_gpu_cut_equals_cpu_selection() {
                 const int copies = 1 + round % 3;
                 for (int c = 0; c < copies; ++c) {
                     const float scale = rng.range(0.3f, 3.0f);
-                    scene.draw(mesh,
-                               Mat4f::translation({rng.range(-0.5f, 0.5f) * size, rng.range(-0.2f, 0.2f) * size,
-                                                   rng.range(-0.5f, 0.5f) * size}) *
-                                   Mat4f::rotation_y(rng.range(0.0f, 360.0f)) *
-                                   Mat4f::rotation_x(rng.range(-40.0f, 40.0f)) *
-                                   Mat4f::scaling({scale, scale * rng.range(0.8f, 1.2f), scale}),
-                               {.color = Color::rgb(150, 190, 120)}, kin::colors::white, static_cast<kin::u32>(c));
+                    (void)scene.draw(
+                        mesh,
+                        Mat4f::translation({rng.range(-0.5f, 0.5f) * size, rng.range(-0.2f, 0.2f) * size,
+                                            rng.range(-0.5f, 0.5f) * size}) *
+                            Mat4f::rotation_y(rng.range(0.0f, 360.0f)) * Mat4f::rotation_x(rng.range(-40.0f, 40.0f)) *
+                            Mat4f::scaling({scale, scale * rng.range(0.8f, 1.2f), scale}),
+                        {.color = Color::rgb(150, 190, 120)}, kin::colors::white, static_cast<kin::u32>(c));
                 }
                 render_ok(r3d, view, scene);
                 const auto picks = camera_picks(r3d, view, scene);
@@ -6295,15 +6310,15 @@ void test_gpu_cut_picture_equals_cpu() {
         scene.lights.shadow_distance = 100.0f;
         const auto build = [&] {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, -10.0f}), {.color = Color::rgb(150, 190, 120)});
-            scene.draw(ball, Mat4f::translation({-3.0f, 2.0f, 26.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}),
-                       {.color = Color::rgb(220, 120, 60)});
-            scene.draw(ball, Mat4f::translation({5.0f, 1.5f, 8.0f}), {.color = Color::rgb(60, 130, 220)});
-            scene.draw(ball, Mat4f::translation({-60.0f, 1.5f, 8.0f}),
-                       {.color = Color::rgb(60, 130, 220)}); // outside the view, its shadow too far
-            scene.draw(slab, Mat4f::translation({-12.0f, 3.0f, 12.0f}) * Mat4f::rotation_x(-20.0f),
-                       {.color = Color::rgb(200, 200, 90)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, -10.0f}), {.color = Color::rgb(150, 190, 120)});
+            (void)scene.draw(ball, Mat4f::translation({-3.0f, 2.0f, 26.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}),
+                             {.color = Color::rgb(220, 120, 60)});
+            (void)scene.draw(ball, Mat4f::translation({5.0f, 1.5f, 8.0f}), {.color = Color::rgb(60, 130, 220)});
+            (void)scene.draw(ball, Mat4f::translation({-60.0f, 1.5f, 8.0f}),
+                             {.color = Color::rgb(60, 130, 220)}); // outside the view, its shadow too far
+            (void)scene.draw(slab, Mat4f::translation({-12.0f, 3.0f, 12.0f}) * Mat4f::rotation_x(-20.0f),
+                             {.color = Color::rgb(200, 200, 90)});
         };
         for (const kin::u32 cascades : {1u, 3u, 4u}) {
             for (const bool passes : {false, true}) {
@@ -6392,7 +6407,7 @@ void test_gpu_cut_picture_equals_cpu() {
                 build();
                 Lcg rng;
                 for (int i = 0; i < 60; ++i) {
-                    scene.draw(
+                    (void)scene.draw(
                         i % 3 ? ball : slab,
                         Mat4f::translation({rng.range(-30.0f, 30.0f), 1.0f + rng.next(), 30.0f - rng.next() * 70.0f}) *
                             Mat4f::rotation_y(rng.next() * 360.0f) *
@@ -6449,9 +6464,9 @@ void test_gpu_cut_is_deterministic() {
             scene.lights.shadow_distance = 100.0f;
             set_cut(scene, cut_on(false, {.enabled = true, .error_pixels = 1.5f}));
             scene.debug.gpu_culling = true;
-            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
-            scene.draw(ball, Mat4f::translation({0.0f, 2.0f, 30.0f}) * Mat4f::scaling({3.0f, 3.0f, 3.0f}),
-                       {.color = Color::rgb(220, 120, 60)});
+            (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
+            (void)scene.draw(ball, Mat4f::translation({0.0f, 2.0f, 30.0f}) * Mat4f::scaling({3.0f, 3.0f, 3.0f}),
+                             {.color = Color::rgb(220, 120, 60)});
             for (int i = 0; i < 6; ++i) {
                 const Pixels p = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
@@ -6490,9 +6505,9 @@ void test_gpu_cut_culls_by_pass() {
             scene.lights.shadow_cascades = cascades;
             const auto render = [&](float ball_x, float ball_y) {
                 scene.clear();
-                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
-                scene.draw(ball, Mat4f::translation({ball_x, ball_y, 0.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}),
-                           {.color = Color::rgb(220, 120, 60)});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+                (void)scene.draw(ball, Mat4f::translation({ball_x, ball_y, 0.0f}) * Mat4f::scaling({2.0f, 2.0f, 2.0f}),
+                                 {.color = Color::rgb(220, 120, 60)});
                 const Pixels p = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
                 return p;
@@ -6528,7 +6543,7 @@ void test_gpu_cut_culls_by_pass() {
             assert(camera.empty() && stats.clusters_drawn == 0 && stats.triangles == 12 && shadow > 3);
             // Its shadow is on the floor: the picture is not the one without the ball.
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             const Pixels without = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(difference_of(with_ball, without).bytes > 100);
@@ -6557,7 +6572,7 @@ void test_gpu_cut_overflow_clamps() {
         scene.lights.shadow_cascades = 3;
         scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
         scene.lights.shadow_distance = 100.0f;
-        scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
+        (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
         set_cut(scene, cut_on(true, {.enabled = true, .error_pixels = 1.0f}));
         const Pixels whole = shoot_view(renderer, r3d, view, scene);
         renderer.present();
@@ -6618,7 +6633,7 @@ void test_gpu_cut_falls_back() {
             scene.debug.gpu_pass_markers = disabled;
             scene.camera = kin::Camera3D::look_at({0.0f, 7.0f, 60.0f}, {0.0f, 1.0f, -30.0f}, 60.0f);
             scene.lights.shadow_area = {{-80.0f, -0.2f, -80.0f}, {80.0f, 12.0f, 80.0f}};
-            scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
+            (void)scene.draw(hill, Mat4f::translation({0.0f, 0.0f, 0.0f}), {.color = Color::rgb(150, 190, 120)});
             scene.lod = {.enabled = true, .error_pixels = 1.0f}; // gpu_culling left on
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -6656,11 +6671,11 @@ void test_gpu_cut_many_copies() {
         scene.lights.shadow_cascades = 3;
         scene.lights.shadow_area = {{-100.0f, -0.2f, -100.0f}, {100.0f, 12.0f, 100.0f}};
         scene.lights.shadow_distance = 150.0f;
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
         for (int i = 0; i < 64; ++i) {
             const float x = static_cast<float>(i % 8) * 14.0f - 49.0f, z = 40.0f - static_cast<float>(i / 8) * 20.0f;
-            scene.draw(ball, Mat4f::translation({x, 2.5f, z}) * Mat4f::scaling({2.5f, 2.5f, 2.5f}),
-                       {.color = Color::rgb(60 + static_cast<kin::u8>(i * 3), 130, 200)});
+            (void)scene.draw(ball, Mat4f::translation({x, 2.5f, z}) * Mat4f::scaling({2.5f, 2.5f, 2.5f}),
+                             {.color = Color::rgb(60 + static_cast<kin::u8>(i * 3), 130, 200)});
         }
         double cpu_ms[2] = {1e9, 1e9};
         kin::RenderDebugStats3D stats[2];
@@ -6723,14 +6738,15 @@ void test_gpu_cut_chunks() {
         scene.lights.shadow_area = {{-60.0f, -0.2f, -60.0f}, {60.0f, 12.0f, 60.0f}};
         scene.lights.shadow_distance = 90.0f;
         const kin::Mesh3D floor = make_box(r3d, {400.0f, 0.2f, 400.0f});
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
         for (int i = 0; i < 30; ++i) {
             const float x = static_cast<float>(i % 6) * 8.0f - 20.0f, z = 12.0f - static_cast<float>(i / 6) * 9.0f,
                         scale = 1.5f + static_cast<float>(i % 3);
-            scene.draw(meshes[static_cast<std::size_t>((i * 5) % 12)],
-                       Mat4f::translation({x, scale, z}) * Mat4f::scaling({scale, scale, scale}),
-                       {.color = Color::rgb(static_cast<kin::u8>(60 + i * 6), 150, static_cast<kin::u8>(220 - i * 5))},
-                       kin::colors::white, static_cast<kin::u32>(i));
+            (void)scene.draw(
+                meshes[static_cast<std::size_t>((i * 5) % 12)],
+                Mat4f::translation({x, scale, z}) * Mat4f::scaling({scale, scale, scale}),
+                {.color = Color::rgb(static_cast<kin::u8>(60 + i * 6), 150, static_cast<kin::u8>(220 - i * 5))},
+                kin::colors::white, static_cast<kin::u32>(i));
         }
         set_cut(scene, cut_on(false, {.enabled = true, .error_pixels = 1.0f}));
         const Pixels cpu = shoot_view(renderer, r3d, view, scene);
@@ -6792,26 +6808,28 @@ struct OcclusionRoom {
     void fill(kin::Scene3D& scene, const std::vector<Vec3f>& at, float gap = 0.0f, float scale = 1.0f,
               float wall_x = 0.0f) const {
         scene.clear();
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(150, 150, 150)});
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(150, 150, 150)});
         const kin::Material3D plaster{.color = Color::rgb(200, 190, 170)};
         if (gap <= 0.0f) {
-            scene.draw(unit, Mat4f::translation({wall_x, 1.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 1.0f}), plaster);
+            (void)scene.draw(unit, Mat4f::translation({wall_x, 1.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 1.0f}),
+                             plaster);
         } else {
             const float side = 4.0f - gap * 0.5f;
-            scene.draw(unit,
-                       Mat4f::translation({wall_x - (gap * 0.5f + side * 0.5f), 1.5f, 0.0f}) *
-                           Mat4f::scaling({side, 1.0f, 1.0f}),
-                       plaster);
-            scene.draw(unit,
-                       Mat4f::translation({wall_x + gap * 0.5f + side * 0.5f, 1.5f, 0.0f}) *
-                           Mat4f::scaling({side, 1.0f, 1.0f}),
-                       plaster);
+            (void)scene.draw(unit,
+                             Mat4f::translation({wall_x - (gap * 0.5f + side * 0.5f), 1.5f, 0.0f}) *
+                                 Mat4f::scaling({side, 1.0f, 1.0f}),
+                             plaster);
+            (void)scene.draw(unit,
+                             Mat4f::translation({wall_x + gap * 0.5f + side * 0.5f, 1.5f, 0.0f}) *
+                                 Mat4f::scaling({side, 1.0f, 1.0f}),
+                             plaster);
         }
         kin::u32 id = 1;
         for (const Vec3f& v : at) {
-            scene.draw(ball, Mat4f::translation(v) * Mat4f::scaling({scale, scale, scale}),
-                       {.color = Color::rgb(70, static_cast<kin::u8>(120 + 14 * (id % 7)), 210), .roughness = 0.5f},
-                       kin::colors::white, id);
+            (void)scene.draw(
+                ball, Mat4f::translation(v) * Mat4f::scaling({scale, scale, scale}),
+                {.color = Color::rgb(70, static_cast<kin::u8>(120 + 14 * (id % 7)), 210), .roughness = 0.5f},
+                kin::colors::white, id);
             ++id;
         }
     }
@@ -7001,7 +7019,7 @@ void test_gpu_occlusion_picture_and_stats() {
             scene.camera = kin::Camera3D::look_at({0.0f, 36.0f, 48.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
             for (int f = 0; f < 3; ++f) {
                 scene.clear();
-                scene.draw(sheet, Mat4f::identity(), {.color = Color::rgb(120, 180, 120)});
+                (void)scene.draw(sheet, Mat4f::identity(), {.color = Color::rgb(120, 180, 120)});
                 assert(twin.frame(scene) == 0);
             }
             std::cerr << "occlusion, a flat sheet: " << twin.on_stats.clusters_drawn << " clusters drawn of "
@@ -7023,8 +7041,9 @@ void test_gpu_occlusion_picture_and_stats() {
                 gun.clear();
                 gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 50.0f);
                 gun.lod = {.enabled = true, .error_pixels = 0.1f};
-                gun.draw(room.ball, Mat4f::translation({0.35f, -0.25f, -1.2f}) * Mat4f::scaling({0.3f, 0.3f, 0.3f}),
-                         {.color = Color::rgb(230, 90, 60)});
+                (void)gun.draw(room.ball,
+                               Mat4f::translation({0.35f, -0.25f, -1.2f}) * Mat4f::scaling({0.3f, 0.3f, 0.3f}),
+                               {.color = Color::rgb(230, 90, 60)});
                 worst = std::max(worst, twin.frame(scene));
                 occluded = twin.on_stats.clusters_occluded;
             }
@@ -7367,7 +7386,7 @@ void test_gpu_occlusion_is_ignored() {
                      bare.camera = room_camera();
                      bare.lod = {.enabled = true, .occlusion = {.enabled = true}};
                      const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
-                     bare.draw(box, Mat4f::translation({0.0f, 1.0f, 0.0f}));
+                     (void)bare.draw(box, Mat4f::translation({0.0f, 1.0f, 0.0f}));
                      render_ok(r3d, view, bare);
                      assert(!r3d.debug_stats().occlusion && r3d.debug_stats().cluster_copies == 0);
                  });
@@ -7447,8 +7466,8 @@ void test_gpu_feature_release() {
             room.draw_floor(scene);
             room.draw_wall(scene);
             room.draw_pole(scene, -0.5f, -1.0f);
-            scene.draw(box, Mat4f::translation({1.0f + 0.1f * static_cast<float>(frame), 0.5f, 0.0f}),
-                       {.color = Color::rgb(200, 80, 80)});
+            (void)scene.draw(box, Mat4f::translation({1.0f + 0.1f * static_cast<float>(frame), 0.5f, 0.0f}),
+                             {.color = Color::rgb(200, 80, 80)});
             Pixels p = shoot_view(renderer, r3d, target, scene);
             renderer.present();
             return p;
@@ -7671,26 +7690,27 @@ void test_gpu_warm_up() {
                     scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 0.5f, -2.0f}, 60.0f);
                     room.draw_floor(scene);
                     room.draw_wall(scene);
-                    scene.draw(box, Mat4f::translation({1.0f, 0.5f, 0.0f}),
-                               {.color = Color::rgb(200, 80, 80), .double_sided = true});
-                    scene.draw(leaf_mesh, Mat4f::translation({-1.0f, 1.0f, 0.5f}),
-                               {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf});
-                    scene.draw(box, Mat4f::translation({0.0f, 1.0f, 1.0f}),
-                               {.color = Color::rgba(60, 200, 255, 140), .unlit = true, .blend = kin::Blend3D::Alpha});
-                    scene.draw(box, Mat4f::translation({2.0f, 1.5f, 1.0f}),
-                               {.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive});
-                    scene.draw(box, Mat4f::translation({-2.0f, 0.5f, 0.0f}),
-                               {.color = Color::rgb(80, 255, 80), .wireframe = true});
+                    (void)scene.draw(box, Mat4f::translation({1.0f, 0.5f, 0.0f}),
+                                     {.color = Color::rgb(200, 80, 80), .double_sided = true});
+                    (void)scene.draw(leaf_mesh, Mat4f::translation({-1.0f, 1.0f, 0.5f}),
+                                     {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = leaf});
+                    (void)scene.draw(
+                        box, Mat4f::translation({0.0f, 1.0f, 1.0f}),
+                        {.color = Color::rgba(60, 200, 255, 140), .unlit = true, .blend = kin::Blend3D::Alpha});
+                    (void)scene.draw(box, Mat4f::translation({2.0f, 1.5f, 1.0f}),
+                                     {.color = Color::rgb(60, 60, 60), .unlit = true, .blend = kin::Blend3D::Additive});
+                    (void)scene.draw(box, Mat4f::translation({-2.0f, 0.5f, 0.0f}),
+                                     {.color = Color::rgb(80, 255, 80), .wireframe = true});
                     if (flat.valid()) {
                         kin::Material3D opaque_custom{.shader = flat};
-                        scene.draw(box, Mat4f::translation({3.0f, 0.5f, 0.0f}), opaque_custom);
+                        (void)scene.draw(box, Mat4f::translation({3.0f, 0.5f, 0.0f}), opaque_custom);
                         kin::Material3D blended_custom{.blend = kin::Blend3D::Alpha, .shader = flat};
-                        scene.draw(box, Mat4f::translation({-3.0f, 0.5f, 1.0f}), blended_custom);
+                        (void)scene.draw(box, Mat4f::translation({-3.0f, 0.5f, 1.0f}), blended_custom);
                     }
                     if (config.overlay) {
                         scene.overlay().camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
-                        scene.overlay().draw(box, Mat4f::translation({1.5f, -1.5f, 0.0f}),
-                                             {.color = Color::rgb(200, 40, 40)});
+                        (void)scene.overlay().draw(box, Mat4f::translation({1.5f, -1.5f, 0.0f}),
+                                                   {.color = Color::rgb(200, 40, 40)});
                     }
                 }
                 scene.lights.sun = {.direction = {-1.0f, 0.5f, 0.1f}, .color = {1.0f, 1.0f, 1.0f}};
@@ -7717,7 +7737,7 @@ void test_gpu_warm_up() {
                         look.lit = config.local_lights ? 1.0f : 0.0f;
                         look.receives_shadow = config.local_lights;
                         look.casts_shadow = config.local_lights;
-                        scene.draw_particles(look, std::span{&p, 1});
+                        (void)scene.draw_particles(look, std::span{&p, 1});
                     }
                     scene.weather.rain.intensity = 1;
                     scene.weather.rain.max_particles = 64;
@@ -7850,11 +7870,11 @@ void test_gpu_skinned_matches_cpu() {
                 const kin::Mesh3D baked = rig.baked(r3d, m);
                 const auto shoot = [&](bool skinned) {
                     scene.clear();
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), grey);
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), grey);
                     if (skinned) {
-                        scene.draw_skinned(rig.mesh, m, place, red);
+                        (void)scene.draw_skinned(rig.mesh, m, place, red);
                     } else {
-                        scene.draw(baked, place, red);
+                        (void)scene.draw(baked, place, red);
                     }
                     Pixels p = shoot_view(renderer, r3d, view, scene);
                     renderer.present();
@@ -7877,7 +7897,7 @@ void test_gpu_skinned_matches_cpu() {
                 assert(pixels_lit(gpu) > 3000);
                 const Pixels lone = [&] {
                     scene.clear();
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), grey);
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), grey);
                     return shoot_view(renderer, r3d, view, scene);
                 }();
                 renderer.present();
@@ -7895,12 +7915,12 @@ void test_gpu_skinned_matches_cpu() {
         kin::Scene3D scene;
         scene.camera = skin_camera(false);
         skin_lights(scene, 1);
-        scene.draw(rig.mesh, Mat4f::identity(), red);
+        (void)scene.draw(rig.mesh, Mat4f::identity(), red);
         const Pixels plain = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         assert(r3d.debug_stats().skinned_copies == 0);
         scene.clear();
-        scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), Mat4f::identity(), red);
+        (void)scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), Mat4f::identity(), red);
         const Pixels rest = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         assert(pixels_differing(plain, rest) <= 12);
@@ -7933,11 +7953,11 @@ void test_gpu_skinned_shadow_out_of_view() {
             const Mat4f high = Mat4f::translation({0.0f, 14.0f, 0.0f});
             const auto shoot = [&](bool skinned) {
                 scene.clear();
-                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
                 if (skinned) {
-                    scene.draw_skinned(rig.mesh, m, high);
+                    (void)scene.draw_skinned(rig.mesh, m, high);
                 } else {
-                    scene.draw(baked, high);
+                    (void)scene.draw(baked, high);
                 }
                 Pixels p = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
@@ -7970,8 +7990,8 @@ void test_gpu_skinned_shadow_out_of_view() {
             assert(dark > 60);
             // And it is the bent tube's shadow, not the straight one's.
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-            scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), high);
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), high);
             const Pixels straight = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(pixels_differing(gpu, straight) > 60);
@@ -8002,11 +8022,11 @@ void test_gpu_skinned_cutout_shadow() {
             .color = Color::rgb(255, 255, 255), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = stripes};
         const auto shoot = [&](bool skinned) {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             if (skinned) {
-                scene.draw_skinned(rig.mesh, m, Mat4f::identity(), leafy);
+                (void)scene.draw_skinned(rig.mesh, m, Mat4f::identity(), leafy);
             } else {
-                scene.draw(baked, Mat4f::identity(), leafy);
+                (void)scene.draw(baked, Mat4f::identity(), leafy);
             }
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -8022,8 +8042,8 @@ void test_gpu_skinned_cutout_shadow() {
         // The cut-outs are cut: the picture is not the solid tube's.
         const kin::Material3D solid{.color = Color::rgb(255, 255, 255), .double_sided = true};
         scene.clear();
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-        scene.draw_skinned(rig.mesh, m, Mat4f::identity(), solid);
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+        (void)scene.draw_skinned(rig.mesh, m, Mat4f::identity(), solid);
         const Pixels full = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         assert(pixels_differing(full, gpu) > 300);
@@ -8057,16 +8077,17 @@ void test_gpu_skinned_poses_and_mix() {
         // 0, 1: a run; a box; 2; the box again; 3, 4.
         const auto build = [&](bool skinned) {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             for (std::size_t i = 0; i < poses.size(); ++i) {
                 if (i == 2 || i == 3) {
-                    scene.draw(box, Mat4f::translation({xs[i] - 1.2f, 0.4f, 1.5f}), {.color = Color::rgb(60, 60, 220)});
+                    (void)scene.draw(box, Mat4f::translation({xs[i] - 1.2f, 0.4f, 1.5f}),
+                                     {.color = Color::rgb(60, 60, 220)});
                 }
                 const Mat4f at = Mat4f::translation({xs[i], 0.0f, 0.0f});
                 if (skinned) {
-                    scene.draw_skinned(rig.mesh, poses[i], at, red);
+                    (void)scene.draw_skinned(rig.mesh, poses[i], at, red);
                 } else {
-                    scene.draw(baked[i], at, red);
+                    (void)scene.draw(baked[i], at, red);
                 }
             }
             Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -8092,7 +8113,7 @@ void test_gpu_skinned_poses_and_mix() {
 // Compare against resubmitting all draws, with independent TAA histories and explicit cache controls.
 void test_gpu_skinned_pose_updates() {
     kin::Scene3D empty;
-    empty.update_joint_matrices(0, {});
+    (void)empty.update_joint_matrices(0, {});
     bool rejected = false;
     rejected = !empty.update_joint_matrices(1, {});
     assert(rejected);
@@ -8135,23 +8156,23 @@ void test_gpu_skinned_pose_updates() {
                 const bool build = !mode || frame == 0 || frame == 10;
                 if (build) {
                     scene.clear();
-                    scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
-                    scene.draw_instanced(batch);
-                    scene.draw_skinned(model, pose, Mat4f::translation({-1.3f, 0, 0}), kin::colors::white, 101);
-                    scene.draw_skinned(rig.mesh, other, Mat4f::translation({1.3f, 0, 0}),
-                                       {.color = Color::rgb(80, 90, 230)}, kin::colors::white, 102);
-                    scene.overlay().draw_skinned(rig.mesh, arm, Mat4f::translation({-2, -0.5f, 2}), {.unlit = true},
-                                                 kin::colors::white, 103);
+                    (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                    (void)scene.draw_instanced(batch);
+                    (void)scene.draw_skinned(model, pose, Mat4f::translation({-1.3f, 0, 0}), kin::colors::white, 101);
+                    (void)scene.draw_skinned(rig.mesh, other, Mat4f::translation({1.3f, 0, 0}),
+                                             {.color = Color::rgb(80, 90, 230)}, kin::colors::white, 102);
+                    (void)scene.overlay().draw_skinned(rig.mesh, arm, Mat4f::translation({-2, -0.5f, 2}),
+                                                       {.unlit = true}, kin::colors::white, 103);
                 } else {
                     const auto revision = scene.draw_revision();
                     const auto* matrices = scene.joint_matrices().data();
-                    scene.update_joint_matrices(0, pose);
-                    scene.update_joint_matrices(3, other);
-                    scene.overlay().update_joint_matrices(0, arm);
+                    (void)scene.update_joint_matrices(0, pose);
+                    (void)scene.update_joint_matrices(3, other);
+                    (void)scene.overlay().update_joint_matrices(0, arm);
                     assert(scene.draw_revision() == revision && scene.joint_matrices().data() == matrices);
                 }
                 if (frame >= 8 && frame < 10 && (build || frame == 8))
-                    scene.draw_skinned(rig.mesh, other, Mat4f::translation({1000, 0, 0}));
+                    (void)scene.draw_skinned(rig.mesh, other, Mat4f::translation({1000, 0, 0}));
                 if (frame == 12) {
                     kin::Scene3D moved{std::move(scene)};
                     scene = std::move(moved);
@@ -8168,11 +8189,11 @@ void test_gpu_skinned_pose_updates() {
                                            old_pose.size() * sizeof(Mat4f)) == 0);
                     }
                     scene.clear_diagnostics();
-                    scene.update_joint_matrices(6, {});
+                    (void)scene.update_joint_matrices(6, {});
                     // An overlapping source span is well-defined and does not allocate a second palette.
-                    scene.update_joint_matrices(1, scene.joint_matrices().first(2));
+                    (void)scene.update_joint_matrices(1, scene.joint_matrices().first(2));
                     assert(std::memcmp(scene.joint_matrices().data() + 1, old_pose.data(), 2 * sizeof(Mat4f)) == 0);
-                    scene.update_joint_matrices(0, old_pose);
+                    (void)scene.update_joint_matrices(0, old_pose);
                     assert(scene.skin_offsets()[0] == scene.skin_offsets()[1]);
                 }
                 scene.camera = skin_camera(false);
@@ -8248,7 +8269,7 @@ void test_gpu_skinned_culling() {
         const Mat4f shoulder = Mat4f::translation({0.0f, 8.0f, 0.0f});
         const auto shoot = [&](const std::vector<Mat4f>& m, const Mat4f& at) {
             scene.clear();
-            scene.draw_skinned(arm.mesh, m, at, red);
+            (void)scene.draw_skinned(arm.mesh, m, at, red);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -8294,7 +8315,7 @@ void test_gpu_skinned_culling() {
         for (int i = 0; i < 40; ++i) {
             const std::vector<Mat4f> pose = tube.matrices(angle(rng), angle(rng), {shift(rng), shift(rng), shift(rng)});
             scene.clear();
-            scene.draw_skinned(tube.mesh, pose, Mat4f::identity(), red);
+            (void)scene.draw_skinned(tube.mesh, pose, Mat4f::identity(), red);
             p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(r3d.debug_stats().skinned_copies == 1 && r3d.debug_stats().culled == 0);
@@ -8312,10 +8333,13 @@ void test_gpu_skinned_culling() {
         lying.joints[0].rotation = kin::Quatf::axis_angle({0.0f, 0.0f, 1.0f}, -90.0f);
         std::vector<Mat4f> lying_m;
         kin::compute_joint_matrices(arm.tube.skeleton, lying, lying_m);
-        scene.draw_skinned(arm.mesh, flat, Mat4f::translation({-12.0f, 0.0f, 0.0f}), red);   // standing, far left: out
-        scene.draw_skinned(arm.mesh, lying_m, Mat4f::translation({-9.5f, 0.0f, 0.0f}), red); // lying toward +x: in
-        scene.draw_skinned(arm.mesh, flat, Mat4f::translation({0.0f, -3.0f, 0.0f}), red); // standing in the middle: in
-        scene.draw_skinned(arm.mesh, flat, Mat4f::translation({12.0f, 0.0f, 0.0f}), red); // far right: out
+        (void)scene.draw_skinned(arm.mesh, flat, Mat4f::translation({-12.0f, 0.0f, 0.0f}),
+                                 red); // standing, far left: out
+        (void)scene.draw_skinned(arm.mesh, lying_m, Mat4f::translation({-9.5f, 0.0f, 0.0f}),
+                                 red); // lying toward +x: in
+        (void)scene.draw_skinned(arm.mesh, flat, Mat4f::translation({0.0f, -3.0f, 0.0f}),
+                                 red); // standing in the middle: in
+        (void)scene.draw_skinned(arm.mesh, flat, Mat4f::translation({12.0f, 0.0f, 0.0f}), red); // far right: out
         render_ok(r3d, view, scene);
         assert(r3d.debug_stats().skinned_copies == 2 && r3d.debug_stats().culled == 2 &&
                r3d.debug_stats().instances == 2);
@@ -8340,10 +8364,11 @@ void test_gpu_skinned_off_path() {
         skin_lights(scene, 1);
         const auto build = [&](bool with_skinned) {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-            scene.draw(box, Mat4f::translation({1.0f, 1.0f, 0.0f}), {.color = Color::rgb(60, 200, 90)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(box, Mat4f::translation({1.0f, 1.0f, 0.0f}), {.color = Color::rgb(60, 200, 90)});
             if (with_skinned) {
-                scene.draw_skinned(rig.mesh, rig.matrices(40.0f, 40.0f), Mat4f::translation({200.0f, 0.0f, 0.0f}));
+                (void)scene.draw_skinned(rig.mesh, rig.matrices(40.0f, 40.0f),
+                                         Mat4f::translation({200.0f, 0.0f, 0.0f}));
             }
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -8369,18 +8394,20 @@ void test_gpu_skinned_off_path() {
         assert(!scene.diagnostics().empty());
         scene.clear_diagnostics();
         assert(scene.draws().empty() && scene.joint_matrices().empty());
-        scene.draw_skinned(box, two, Mat4f::identity());
+        (void)scene.draw_skinned(box, two, Mat4f::identity());
         assert(scene.draws().size() == 1 && !scene.draws()[0].skinned && scene.joint_matrices().empty());
-        scene.draw_skinned(rig.mesh, rig.matrices(0, 0), Mat4f::identity());
+        (void)scene.draw_skinned(rig.mesh, rig.matrices(0, 0), Mat4f::identity());
         assert(scene.draws().size() == 2 && scene.draws()[1].skinned && scene.joint_matrices().size() == 3 &&
                scene.skin_offsets().size() == 1);
         assert(scene.skin_offsets()[scene.draws()[1].skin_first] == 0);
-        scene.draw_skinned(rig.mesh, rig.matrices(10, 10),
-                           Mat4f::identity()); // the next copy of the mesh joins the draw, with its own first matrix
+        (void)scene.draw_skinned(
+            rig.mesh, rig.matrices(10, 10),
+            Mat4f::identity()); // the next copy of the mesh joins the draw, with its own first matrix
         assert(scene.draws().size() == 2 && scene.draws()[1].count == 2 && scene.skin_offsets().size() == 2 &&
                scene.joint_matrices().size() == 6);
         assert(scene.skin_offsets()[scene.draws()[1].skin_first + 1] == 3);
-        scene.draw(rig.mesh, Mat4f::identity()); // the same mesh drawn plain after: not merged into the skinned draw
+        (void)scene.draw(rig.mesh,
+                         Mat4f::identity()); // the same mesh drawn plain after: not merged into the skinned draw
         assert(scene.draws().size() == 3 && !scene.draws()[2].skinned);
         scene.clear();
         assert(scene.joint_matrices().empty() && scene.skin_offsets().empty() && scene.draws().empty());
@@ -8404,7 +8431,7 @@ void test_gpu_skinned_on_workers() {
             skin_lights(scene, 1);
             scene.lights.shadow_area = kin::Bounds3D{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}};
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(count))));
             for (int i = 0; i < count; ++i) {
                 const float a = static_cast<float>((i * 37) % 160) - 80.0f,
@@ -8414,8 +8441,9 @@ void test_gpu_skinned_on_workers() {
                                 (60.0f / static_cast<float>(side));
                 const float z = (static_cast<float>(i / side) - static_cast<float>(side) * 0.5f) *
                                 (60.0f / static_cast<float>(side));
-                scene.draw_skinned(rig.mesh, m, Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}),
-                                   {.color = Color::rgb(200, 90, 70)});
+                (void)scene.draw_skinned(rig.mesh, m,
+                                         Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}),
+                                         {.color = Color::rgb(200, 90, 70)});
             }
         };
         for (const int count : {2600, 40, 3000, 1}) {
@@ -8460,10 +8488,10 @@ void test_gpu_skinned_with_features() {
         const std::vector<Mat4f> m = rig.matrices(60.0f, -40.0f);
         const auto build = [&] {
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)},
-                       kin::colors::white, 3);
-            scene.draw_skinned(rig.mesh, m, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(210, 70, 60)},
-                               kin::colors::white, 8);
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)},
+                             kin::colors::white, 3);
+            (void)scene.draw_skinned(rig.mesh, m, Mat4f::translation({0.0f, 0.5f, 0.0f}),
+                                     {.color = Color::rgb(210, 70, 60)}, kin::colors::white, 8);
         };
         build();
         const Pixels plain = shoot_view(renderer, r3d, view, scene);
@@ -8486,8 +8514,8 @@ void test_gpu_skinned_with_features() {
             assert(pixels_differing(p, plain, 30) < 3000 && pixels_lit(p) > 3000);
             // The tube is drawn all the same.
             scene.clear();
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)},
-                       kin::colors::white, 3);
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)},
+                             kin::colors::white, 3);
             const Pixels lone = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(pixels_differing(p, lone, 20) > 500);
@@ -8541,15 +8569,16 @@ void test_gpu_skinned_overlay() {
         const auto build = [&](bool skinned) {
             scene.clear();
             scene.overlay().camera = scene.camera;
-            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -2.0f}), {.color = Color::rgb(90, 90, 90), .unlit = true});
+            (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -2.0f}),
+                             {.color = Color::rgb(90, 90, 90), .unlit = true});
             const kin::Mesh3D baked_world = rig.baked(r3d, world), baked_arm = rig.baked(r3d, arm);
             const Mat4f at = Mat4f::translation({1.5f, 0.0f, 0.0f}), arm_at = Mat4f::translation({-1.0f, 0.0f, 6.0f});
             if (skinned) {
-                scene.draw_skinned(rig.mesh, world, at, red);
-                scene.overlay().draw_skinned(rig.mesh, arm, arm_at, blue);
+                (void)scene.draw_skinned(rig.mesh, world, at, red);
+                (void)scene.overlay().draw_skinned(rig.mesh, arm, arm_at, blue);
             } else {
-                scene.draw(baked_world, at, red);
-                scene.overlay().draw(baked_arm, arm_at, blue);
+                (void)scene.draw(baked_world, at, red);
+                (void)scene.overlay().draw(baked_arm, arm_at, blue);
             }
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -8591,13 +8620,13 @@ void test_gpu_skinned_many_copies() {
             scene.clear();
             scene.lights.shadow_area =
                 shadows ? kin::Bounds3D{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}} : kin::Bounds3D{};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             for (int i = 0; i < 200; ++i) {
                 const float x = (static_cast<float>(i % 20) - 9.5f) * 3.0f,
                             z = (static_cast<float>(i / 20) - 4.5f) * 4.0f;
-                scene.draw_skinned(rig.mesh, poses[static_cast<std::size_t>(i)],
-                                   Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.8f, 0.8f, 0.8f}),
-                                   {.color = Color::rgb(200, 90, 70)});
+                (void)scene.draw_skinned(rig.mesh, poses[static_cast<std::size_t>(i)],
+                                         Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.8f, 0.8f, 0.8f}),
+                                         {.color = Color::rgb(200, 90, 70)});
             }
         };
         for (const bool shadows : {false, true}) {
@@ -8757,15 +8786,16 @@ void test_gpu_skinned_velocity() {
                     skin_lights(scene, 1);
                     scene.taa = {.enabled = true};
                     scene.ambient_occlusion = {.enabled = c.ao};
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                     {.color = Color::rgb(190, 190, 190)});
                     kin::Scene3D& target = c.overlay ? scene.overlay() : scene;
                     if (c.overlay) {
                         target.camera = scene.camera;
                     }
                     if (skinned) {
-                        target.draw_skinned(rig.mesh, matrices, place, material, kin::colors::white, c.id);
+                        (void)target.draw_skinned(rig.mesh, matrices, place, material, kin::colors::white, c.id);
                     } else {
-                        target.draw(baked, plain_place, material, kin::colors::white, c.id);
+                        (void)target.draw(baked, plain_place, material, kin::colors::white, c.id);
                     }
                 };
                 kin::Scene3D scene_skinned, scene_plain;
@@ -8840,16 +8870,18 @@ void test_gpu_skinned_velocity_new_and_reordered() {
                     scene.camera = skin_camera(false);
                     skin_lights(scene, 1);
                     scene.taa = {.enabled = true};
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                     {.color = Color::rgb(190, 190, 190)});
                     for (const Who& w : who) {
                         std::vector<Mat4f> m = rest;
                         for (Mat4f& x : m) {
                             x = Mat4f::translation(w.at) * x;
                         }
                         if (skinned) {
-                            scene.draw_skinned(rig.mesh, m, Mat4f::identity(), material, kin::colors::white, w.id);
+                            (void)scene.draw_skinned(rig.mesh, m, Mat4f::identity(), material, kin::colors::white,
+                                                     w.id);
                         } else {
-                            scene.draw(baked, Mat4f::translation(w.at), material, kin::colors::white, w.id);
+                            (void)scene.draw(baked, Mat4f::translation(w.at), material, kin::colors::white, w.id);
                         }
                     }
                 };
@@ -8908,13 +8940,15 @@ void test_gpu_skinned_prepass_features() {
                     scene.lights.ambient = {0.7f, 0.7f, 0.75f}; // a bright sky, so that the occlusion of it shows
                     scene.ambient_occlusion = {.enabled = features, .radius = 1.0f, .intensity = 2.0f};
                     scene.contact_shadows = {.enabled = features, .distance = 1.0f};
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-                    scene.draw(wall, Mat4f::translation({-1.0f, 1.5f, -0.5f}), {.color = Color::rgb(200, 190, 170)});
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                     {.color = Color::rgb(200, 200, 200)});
+                    (void)scene.draw(wall, Mat4f::translation({-1.0f, 1.5f, -0.5f}),
+                                     {.color = Color::rgb(200, 190, 170)});
                     const Mat4f place = Mat4f::translation({0.1f, 0.0f, 0.2f}) * Mat4f::rotation_y(20.0f);
                     if (skinned) {
-                        scene.draw_skinned(rig.mesh, pose, place, material);
+                        (void)scene.draw_skinned(rig.mesh, pose, place, material);
                     } else {
-                        scene.draw(baked, place, material);
+                        (void)scene.draw(baked, place, material);
                     }
                     Pixels p = shoot_view(renderer, r3d, view, scene);
                     renderer.present();
@@ -8992,7 +9026,8 @@ void test_gpu_skinned_occluder() {
                     scene.contact_shadows = {.enabled = true};
                 }
                 scene.taa = {.enabled = config.taa};
-                scene.draw(room.floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(150, 150, 150)});
+                (void)scene.draw(room.floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                 {.color = Color::rgb(150, 150, 150)});
                 const Mat4f place = Mat4f::translation({0.0f, 1.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 1.0f});
                 kin::Material3D plaster{.color = Color::rgb(200, 190, 170)};
                 if (config.cutout) {
@@ -9000,14 +9035,14 @@ void test_gpu_skinned_occluder() {
                         .color = Color::rgb(255, 255, 255), .blend = kin::Blend3D::Mask, .texture = solid_texture};
                 }
                 if (config.skinned) {
-                    scene.draw_skinned(wall, one, place, plaster);
+                    (void)scene.draw_skinned(wall, one, place, plaster);
                 } else {
-                    scene.draw(room.unit, place, plaster);
+                    (void)scene.draw(room.unit, place, plaster);
                 }
                 kin::u32 id = 1;
                 for (const Vec3f& v : hidden_balls) {
-                    scene.draw(room.ball, Mat4f::translation(v), {.color = Color::rgb(70, 140, 210), .roughness = 0.5f},
-                               kin::colors::white, id++);
+                    (void)scene.draw(room.ball, Mat4f::translation(v),
+                                     {.color = Color::rgb(70, 140, 210), .roughness = 0.5f}, kin::colors::white, id++);
                 }
                 worst = std::max(worst, twin.frame(scene));
             }
@@ -9063,14 +9098,15 @@ void test_gpu_skinned_pick() {
             for (kin::Scene3D* scene : {&scene_skinned, &scene_plain}) {
                 scene->camera = kin::Camera3D::look_at({0.0f, 2.2f, 9.0f}, {0.0f, 1.2f, 0.0f}, 50.0f);
                 skin_lights(*scene, 1);
-                scene->draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)},
-                            kin::colors::white, 3);
+                assert(scene->draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)},
+                                   kin::colors::white, 3));
             }
             for (const Pose3D& p : poses) {
                 const std::vector<Mat4f> m = rig.matrices(p.a, p.b);
-                scene_skinned.draw_skinned(rig.mesh, m, Mat4f::translation(p.at), material, kin::colors::white, p.id);
+                (void)scene_skinned.draw_skinned(rig.mesh, m, Mat4f::translation(p.at), material, kin::colors::white,
+                                                 p.id);
                 const kin::Mesh3D baked = rig.baked(r3d, m);
-                scene_plain.draw(baked, Mat4f::translation(p.at), material, kin::colors::white, p.id);
+                (void)scene_plain.draw(baked, Mat4f::translation(p.at), material, kin::colors::white, p.id);
                 posed.push_back(kin::skin_mesh(rig.tube.mesh, m));
             }
             shoot_view(renderer, r3d, view_skinned, scene_skinned);
@@ -9140,7 +9176,7 @@ void test_gpu_skinned_pick() {
         kin::View3D no_pick = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = skin_camera(false);
-        scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), Mat4f::identity(), {}, kin::colors::white, 5);
+        (void)scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f), Mat4f::identity(), {}, kin::colors::white, 5);
         shoot_view(renderer, r3d, no_pick, scene);
         renderer.present();
         assert(!r3d.pick(no_pick, {80, 60}).value_or({}).hit);
@@ -9179,15 +9215,15 @@ void test_gpu_skinned_shadow_cache() {
             scene.lights.shadow_resolution = 1024;
             scene.lights.shadow_cascades = setup.cascades ? 3 : 1;
             scene.lights.cache_shadows = cache;
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             const SkinRig& mesh = setup.other_skeleton ? other : setup.fat ? fat : rig;
-            scene.draw_skinned(mesh.mesh, mesh.matrices(setup.a, setup.b), Mat4f::translation({-3.0f, 0.0f, 0.0f}),
-                               {.color = Color::rgb(200, 60, 60)});
+            (void)scene.draw_skinned(mesh.mesh, mesh.matrices(setup.a, setup.b),
+                                     Mat4f::translation({-3.0f, 0.0f, 0.0f}), {.color = Color::rgb(200, 60, 60)});
             for (int i = 0; i < 40; ++i) {
-                scene.draw_skinned(rig.mesh, rig.matrices(20.0f + (i == 7 ? setup.one_copy : 0.0f), -20.0f),
-                                   Mat4f::translation({-8.0f + 0.4f * static_cast<float>(i), 0.0f, -6.0f}) *
-                                       Mat4f::scaling({0.2f, 0.2f, 0.2f}),
-                                   {.color = Color::rgb(60, 60, 200)});
+                (void)scene.draw_skinned(rig.mesh, rig.matrices(20.0f + (i == 7 ? setup.one_copy : 0.0f), -20.0f),
+                                         Mat4f::translation({-8.0f + 0.4f * static_cast<float>(i), 0.0f, -6.0f}) *
+                                             Mat4f::scaling({0.2f, 0.2f, 0.2f}),
+                                         {.color = Color::rgb(60, 60, 200)});
             }
         };
         const auto shoot = [&](kin::View3D& target, bool cache) {
@@ -9295,16 +9331,17 @@ void test_gpu_skinned_shared_range() {
                     skin_lights(scene, 2);
                     scene.ambient_occlusion = {.enabled = features};
                     scene.taa = {.enabled = features};
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                     {.color = Color::rgb(200, 200, 200)});
                     const Mat4f place = Mat4f::translation({0.0f, 0.0f, 0.2f});
                     if (use_model) {
-                        scene.draw_skinned(model, pose, place, kin::colors::white, 4);
+                        (void)scene.draw_skinned(model, pose, place, kin::colors::white, 4);
                         assert(scene.joint_matrices().size() == 3 && scene.skin_offsets().size() == 3);
                         assert(scene.skin_offsets()[0] == scene.skin_offsets()[1] &&
                                scene.skin_offsets()[1] == scene.skin_offsets()[2]);
                     } else {
                         for (const kin::ModelPart3D& part : model.parts) {
-                            scene.draw_skinned(part.mesh, pose, place, part.material, kin::colors::white, 4);
+                            (void)scene.draw_skinned(part.mesh, pose, place, part.material, kin::colors::white, 4);
                         }
                         assert(scene.joint_matrices().size() == 9);
                     }
@@ -9396,7 +9433,8 @@ void test_gpu_ecs_character() {
                     scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
                     skin_lights(scene, 1);
                     scene.lights.shadow_area = kin::Bounds3D{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}};
-                    scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                    (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                                     {.color = Color::rgb(200, 200, 200)});
                     state.propagate_transforms();
                     state.collect(scene);
                     Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -9667,7 +9705,7 @@ void test_gpu_ik_taa_matches_clip() {
             scene.camera = ik_scene::camera();
             skin_lights(scene, 1);
             scene.taa = {.enabled = true};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
             state.propagate_transforms();
             state.collect(scene);
             Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -9780,7 +9818,7 @@ void test_gpu_ik_shadow_cache() {
             scene.lights.shadow_area = kin::Bounds3D{{-5.0f, -0.2f, -5.0f}, {5.0f, 3.0f, 5.0f}};
             scene.lights.shadow_resolution = 1024;
             scene.lights.cache_shadows = cache;
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(180, 180, 180)});
             state.propagate_transforms();
             state.collect(scene);
             Pixels p = shoot_view(renderer, r3d, v, scene);
@@ -9854,7 +9892,7 @@ void test_gpu_ik_on_workers() {
                 scene.camera = kin::Camera3D::look_at({0.0f, 30.0f, 26.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
                 skin_lights(scene, 1);
                 scene.lights.shadow_area = kin::Bounds3D{{-40.0f, -0.3f, -40.0f}, {40.0f, 8.0f, 40.0f}};
-                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
                 state.propagate_transforms();
                 state.collect(scene);
                 p = shoot_view(renderer, r3d, view, scene);
@@ -10198,7 +10236,7 @@ void test_gpu_skinned_everything() {
                 scene.ambient_occlusion = {.enabled = true};
                 scene.contact_shadows = {.enabled = true};
                 scene.taa = {.enabled = true};
-                scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
                 const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(count))));
                 for (int i = 0; i < count; ++i) {
                     const float a = static_cast<float>((i * 37 + f * 11) % 160) - 80.0f,
@@ -10207,10 +10245,10 @@ void test_gpu_skinned_everything() {
                                     (60.0f / static_cast<float>(side));
                     const float z = (static_cast<float>(i / side) - static_cast<float>(side) * 0.5f) *
                                     (60.0f / static_cast<float>(side));
-                    scene.draw_skinned(rig.mesh, rig.matrices(a, b),
-                                       Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}),
-                                       {.color = Color::rgb(200, 90, 70)}, kin::colors::white,
-                                       static_cast<kin::u32>(i + 1));
+                    (void)scene.draw_skinned(rig.mesh, rig.matrices(a, b),
+                                             Mat4f::translation({x, 0.0f, z}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}),
+                                             {.color = Color::rgb(200, 90, 70)}, kin::colors::white,
+                                             static_cast<kin::u32>(i + 1));
                 }
                 renderer.set_job_system(nullptr);
                 const Pixels serial = shoot_view(renderer, r3d, serial_view, scene);
@@ -10515,7 +10553,7 @@ void test_gpu_ragdoll_taa_matches_clip() {
             scene.camera = ik_scene::camera();
             skin_lights(scene, 1);
             scene.taa = {.enabled = true};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(190, 190, 190)});
             state.propagate_transforms();
             state.collect(scene);
             Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -10634,8 +10672,8 @@ void test_gpu_rope_tube() {
             scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
             if (floor_too) {
-                scene.draw(floor, Mat4f::translation({0.0f, -0.2f, 0.0f}),
-                           {.color = Color::rgb(60, 60, 60), .unlit = true});
+                (void)scene.draw(floor, Mat4f::translation({0.0f, -0.2f, 0.0f}),
+                                 {.color = Color::rgb(60, 60, 60), .unlit = true});
             }
             if (with_ropes) {
                 bodies.collect_ropes(r3d, scene);
@@ -10695,7 +10733,7 @@ void test_gpu_rope_tube() {
             scene.lights.ambient = {0.2f, 0.2f, 0.2f};
             scene.lights.shadow_area = kin::Bounds3D{{-6, -1, -6}, {6, 4, 6}};
             scene.lights.shadow_resolution = 1024;
-            scene.draw(floor, Mat4f::translation({0.0f, -0.2f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.2f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             bodies.collect_ropes(r3d, scene);
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -10707,6 +10745,34 @@ void test_gpu_rope_tube() {
         std::cerr << "rope shadow: " << differing << " pixels differ with the rope's shadow on or off\n";
         assert(differing > 40);
         dump(shadowed, "rope_shadow");
+        // A freely falling rope translates uniformly: all three presentation
+        // alphas must interpolate its tube bounds, without writing sampled state.
+        rope.start = kin::RopeAttach3D::free({-1.5f, 3, 0});
+        rope.end = kin::RopeAttach3D::free({1.5f, 3, 0});
+        rope.render = true;
+        holder.set(rope);
+        bodies.rebuild(holder);
+        for (int i = 0; i < 20; ++i)
+            bodies.step(1.f / 60);
+        const auto previous = holder.get<kin::Rope3D>()->sampled;
+        bodies.step(1.f / 60);
+        const auto latest = holder.get<kin::Rope3D>()->sampled;
+        const auto hash = physics.state_hash();
+        std::array<kin::Bounds3D, 3> bounds;
+        for (int i = 0; i < 3; ++i) {
+            kin::Scene3D sampled;
+            bodies.collect_ropes(r3d, sampled, .5f * float(i));
+            assert(sampled.draws().size() == 1);
+            bounds[i] = sampled.draws()[0].mesh.bounds();
+            assert(physics.state_hash() == hash);
+            const auto& unchanged = holder.get<kin::Rope3D>()->sampled;
+            assert(unchanged.size() == latest.size());
+            for (size_t j = 0; j < latest.size(); ++j)
+                assert(unchanged[j].position == latest[j].position);
+        }
+        assert(bounds[0].min.y > bounds[2].min.y + .01f);
+        assert(std::abs(bounds[1].min.y - (bounds[0].min.y + bounds[2].min.y) * .5f) < 1e-4f);
+        assert(std::abs(bounds[0].min.y - (previous.back().position.y - rope.radius)) < .1f);
     });
 }
 
@@ -11264,13 +11330,14 @@ void test_gpu_sky_stays_behind_geometry() {
             kin::Scene3D scene = clear_sky_scene({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -10.0f}, 60.0f);
             const kin::Material3D red{.color = Color::rgb(200, 40, 40), .unlit = true};
             const kin::Material3D green{.color = Color::rgb(40, 200, 40), .unlit = true};
-            scene.draw(box, Mat4f::translation({0.0f, 1.0f, -20.0f}) * Mat4f::scaling({6.0f, 6.0f, 1.0f}), red);
-            scene.draw(box, Mat4f::translation({800.0f, 0.0f, -3000.0f}) * Mat4f::scaling({1200.0f, 1200.0f, 1.0f}),
-                       green);
+            (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -20.0f}) * Mat4f::scaling({6.0f, 6.0f, 1.0f}), red);
+            (void)scene.draw(
+                box, Mat4f::translation({800.0f, 0.0f, -3000.0f}) * Mat4f::scaling({1200.0f, 1200.0f, 1.0f}), green);
             // A blue glass in front of the sky and the box, drawn after: the sky is under it.
             const kin::Material3D glass{
                 .color = Color::rgba(0, 0, 255, 128), .unlit = true, .blend = kin::Blend3D::Alpha};
-            scene.draw(box, Mat4f::translation({-5.0f, 1.0f, -10.0f}) * Mat4f::scaling({3.0f, 8.0f, 0.2f}), glass);
+            (void)scene.draw(box, Mat4f::translation({-5.0f, 1.0f, -10.0f}) * Mat4f::scaling({3.0f, 8.0f, 0.2f}),
+                             glass);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             const auto near_spot = scene.camera.project({0.0f, 1.0f, -19.0f}, screen);
             const auto far_spot = scene.camera.project({800.0f, 0.0f, -2999.0f}, screen);
@@ -11311,11 +11378,11 @@ void test_gpu_sky_and_fog_off_are_unchanged() {
                 kin::Scene3D plain;
                 plain.camera = kin::Camera3D::look_at({0.0f, 1.0f, 5.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
                 plain.lights.sun = {.direction = {0.4f, 1.0f, 0.5f}, .color = {1.0f, 0.95f, 0.9f}};
-                plain.draw(box, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 120, 60)});
-                plain.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({20.0f, 0.2f, 20.0f}),
-                           {.color = Color::rgb(120, 130, 120)});
-                plain.draw(box, Mat4f::translation({1.5f, 0.5f, 1.0f}),
-                           {.color = Color::rgb(60, 120, 220), .blend = kin::Blend3D::Alpha});
+                (void)plain.draw(box, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 120, 60)});
+                (void)plain.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({20.0f, 0.2f, 20.0f}),
+                                 {.color = Color::rgb(120, 130, 120)});
+                (void)plain.draw(box, Mat4f::translation({1.5f, 0.5f, 1.0f}),
+                                 {.color = Color::rgb(60, 120, 220), .blend = kin::Blend3D::Alpha});
                 return plain;
             };
             const kin::Scene3D plain = make_plain();
@@ -11441,9 +11508,9 @@ void test_gpu_fog_matches_formula() {
             scene.lights.sun = {.direction = normalize(Vec3f{0.2f, 0.25f, -1.0f}), .color = {1.2f, 1.0f, 0.8f}};
             scene.sky.turbidity = 3.0f; // not drawn: the fog takes its parameters
             scene.fog = c.fog;
-            scene.draw(box,
-                       Mat4f::translation({0.0f, c.eye.y, c.wall - 0.5f}) * Mat4f::scaling({4000.0f, 4000.0f, 1.0f}),
-                       wall);
+            (void)scene.draw(
+                box, Mat4f::translation({0.0f, c.eye.y, c.wall - 0.5f}) * Mat4f::scaling({4000.0f, 4000.0f, 1.0f}),
+                wall);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             assert(r3d.debug_stats().fog_applied && !r3d.debug_stats().sky_drawn);
             for (int y = 6; y < 120; y += 21) {
@@ -11490,7 +11557,7 @@ void test_gpu_fog_blended_and_custom() {
         // An alpha glass 50 m away (its face at z = -50), over nothing.
         const kin::Material3D glass{
             .color = Color::rgba(255, 60, 20, 128), .unlit = true, .blend = kin::Blend3D::Alpha};
-        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), glass);
+        (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), glass);
         Pixels p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         const Vec3f glass_linear = linear_of(glass.color);
@@ -11508,7 +11575,7 @@ void test_gpu_fog_blended_and_custom() {
         // Additive: the colour dims by (1 - opacity), no fog colour added.
         scene.clear();
         const kin::Material3D glow{.color = Color::rgb(220, 140, 60), .unlit = true, .blend = kin::Blend3D::Additive};
-        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), glow);
+        (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), glow);
         p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         expect(p.at(80, 60), stored_of(linear_of(glow.color) * (1.0f - opacity)), "an additive glow through the fog",
@@ -11516,11 +11583,11 @@ void test_gpu_fog_blended_and_custom() {
         // A cut-out (Blend3D::Mask): where its alpha is under the cutoff nothing is drawn, fogged or not; where over,
         // it is opaque and fogged as any opaque surface.
         scene.clear();
-        scene.draw(
+        (void)scene.draw(
             box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}),
             {.color = Color::rgba(250, 40, 40, 60), .unlit = true, .blend = kin::Blend3D::Mask, .alpha_cutoff = 0.5f});
-        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -60.5f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}),
-                   {.color = Color::rgb(40, 250, 40), .unlit = true});
+        (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -60.5f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}),
+                         {.color = Color::rgb(40, 250, 40), .unlit = true});
         p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         const float far_opacity = 1.0f - std::exp(-0.02f * 60.0f);
@@ -11529,7 +11596,7 @@ void test_gpu_fog_blended_and_custom() {
         expect(p.at(80, 60), stored_of(green + (fog_colour - green) * far_opacity), "behind a cut-away wall, fogged",
                4);
         scene.clear();
-        scene.draw(
+        (void)scene.draw(
             box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}),
             {.color = Color::rgba(250, 40, 40, 220), .unlit = true, .blend = kin::Blend3D::Mask, .alpha_cutoff = 0.5f});
         p = shoot_view(renderer, r3d, view, scene);
@@ -11549,9 +11616,10 @@ void test_gpu_fog_blended_and_custom() {
             custom.shader_params[5] = 0.7f;
             custom.shader_params[6] = 0.2f;
             scene.clear();
-            scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}), custom);
-            scene.draw(box, Mat4f::translation({0.0f, 1.0f, -60.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}),
-                       {.color = Color::rgb(200, 60, 60), .unlit = true});
+            (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -50.5f}) * Mat4f::scaling({60.0f, 60.0f, 1.0f}),
+                             custom);
+            (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -60.0f}) * Mat4f::scaling({4.0f, 4.0f, 1.0f}),
+                             {.color = Color::rgb(200, 60, 60), .unlit = true});
             const Pixels fogged_picture = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             scene.fog.enabled = false;
@@ -11576,8 +11644,8 @@ void test_gpu_fog_melts_into_the_sky() {
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene = clear_sky_scene({0.0f, 2.0f, 0.0f}, {0.0f, 2.0f, -10.0f}, 60.0f);
         scene.lights.sun.direction = normalize(Vec3f{-0.6f, 0.35f, -0.7f});
-        scene.draw(box, Mat4f::translation({0.0f, -0.5f, -9000.0f}) * Mat4f::scaling({40000.0f, 1.0f, 20000.0f}),
-                   {.color = Color::rgb(90, 140, 60), .unlit = true});
+        (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, -9000.0f}) * Mat4f::scaling({40000.0f, 1.0f, 20000.0f}),
+                         {.color = Color::rgb(90, 140, 60), .unlit = true});
         // Without fog: a hard line, the green ground against the sky.
         const Pixels hard = shoot_view(renderer, r3d, view, scene);
         renderer.present();
@@ -11639,9 +11707,9 @@ void test_gpu_sky_under_taa() {
             scene.sky.sun_size = 2.0f;
             scene.sky.sun_disc = 2.0f; // the disc is at about 1.6 (HDR): above white where it counts
             scene.fog = {.enabled = true, .density = 0.004f, .colour_from_sky = true, .sun_scatter = 0.1f};
-            scene.draw(box, Mat4f::translation({-2.0f, 0.0f, -14.0f}), {.color = Color::rgb(200, 120, 60)});
-            scene.draw(box, Mat4f::translation({0.0f, -0.6f, 0.0f}) * Mat4f::scaling({60.0f, 0.2f, 60.0f}),
-                       {.color = Color::rgb(120, 130, 120)});
+            (void)scene.draw(box, Mat4f::translation({-2.0f, 0.0f, -14.0f}), {.color = Color::rgb(200, 120, 60)});
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.6f, 0.0f}) * Mat4f::scaling({60.0f, 0.2f, 60.0f}),
+                             {.color = Color::rgb(120, 130, 120)});
             scene.taa.enabled = taa;
             scene.ambient_occlusion.enabled = ao;
             return scene;
@@ -11755,8 +11823,8 @@ void test_gpu_sky_lights_the_scene() {
             scene.lights.ambient = {1.0f, 0.0f, 1.0f}; // not used with an environment
             scene.lights.sky_lights_scene = true;
             scene.lights.environment_rotation = rotation;
-            scene.draw(sphere, Mat4f::identity(),
-                       {.color = Color::rgb(255, 255, 255), .metallic = 0.0f, .roughness = 1.0f});
+            (void)scene.draw(sphere, Mat4f::identity(),
+                             {.color = Color::rgb(255, 255, 255), .metallic = 0.0f, .roughness = 1.0f});
             // The panorama follows the sky after `light_interval` renders: a few frames of the same time, as a game's
             // are.
             Pixels p;
@@ -11843,7 +11911,7 @@ void test_gpu_sky_environment_regeneration() {
         scene.sky.enabled = false;
         scene.sky.light_threshold = 0.02f;
         scene.sky.light_interval = 3;
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(220, 220, 220)});
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(220, 220, 220)});
         const auto render = [&](const kin::Scene3D& s) {
             const Pixels p = shoot_view(renderer, r3d, view, s);
             renderer.present();
@@ -12056,12 +12124,12 @@ void test_gpu_sky_overlay_and_warm_up() {
         scene.fog = {
             .enabled = true, .density = 0.3f, .colour = {1.0f, 1.0f, 1.0f}}; // 99.99% at 30 m; 36% at the gun's 1.5 m
         scene.taa.enabled = false;
-        scene.draw(box, Mat4f::translation({0.0f, 1.0f, -30.0f}) * Mat4f::scaling({6.0f, 6.0f, 1.0f}),
-                   {.color = Color::rgb(200, 40, 40), .unlit = true});
+        (void)scene.draw(box, Mat4f::translation({0.0f, 1.0f, -30.0f}) * Mat4f::scaling({6.0f, 6.0f, 1.0f}),
+                         {.color = Color::rgb(200, 40, 40), .unlit = true});
         kin::Scene3D& gun = scene.overlay();
         gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 60.0f);
-        gun.draw(box, Mat4f::translation({0.4f, -0.3f, -1.5f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}),
-                 {.color = Color::rgb(40, 200, 40), .unlit = true});
+        (void)gun.draw(box, Mat4f::translation({0.4f, -0.3f, -1.5f}) * Mat4f::scaling({0.5f, 0.5f, 0.5f}),
+                       {.color = Color::rgb(40, 200, 40), .unlit = true});
         assert(r3d.warm_up(view, scene));
         render_ok(r3d, view, scene);
         assert(r3d.debug_stats().pipelines_made == 0);
@@ -12140,7 +12208,8 @@ void test_gpu_sky_sun_under_taa() {
                     scene.sky.sun_size = 0.45f;
                     scene.sky.sun_disc = 1.0f; // under white
                     // Something to draw (a box far below the view), so that the pre-pass has its storage.
-                    scene.draw(box, Mat4f::translation({0.0f, -40.0f, 0.0f}), {.color = Color::rgb(120, 130, 120)});
+                    (void)scene.draw(box, Mat4f::translation({0.0f, -40.0f, 0.0f}),
+                                     {.color = Color::rgb(120, 130, 120)});
                     scene.taa.enabled = taa;
                     scene.ambient_occlusion.enabled = ao;
                     return scene;
@@ -12409,7 +12478,7 @@ void test_gpu_spot_cone_matches_cpu() {
                                         .inner_angle = 8.0f,
                                         .outer_angle = 28.0f};
             scene.clear();
-            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+            (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
             scene.add_spot_light(spot);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -12453,7 +12522,7 @@ void test_gpu_spot_cone_matches_cpu() {
         std::cerr << "spot cone against the CPU twin: worst " << worst << " of 255\n";
         // Nothing past the outer angle: exactly the unlit wall (no ambient, no sun: black).
         scene.clear();
-        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
         scene.add_spot_light({.position = {0.0f, 0.0f, 2.0f},
                               .direction = {0.0f, 0.0f, -1.0f},
                               .color = {1.0f, 1.0f, 1.0f},
@@ -12469,7 +12538,7 @@ void test_gpu_spot_cone_matches_cpu() {
         assert(brightness(at_angle(28.5f)) == 0 && brightness(at_angle(31.0f)) == 0);
         // The direction's sign: the light shines along its axis, not against it.
         scene.clear();
-        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
         scene.add_spot_light({.position = {0.0f, 0.0f, 2.0f},
                               .direction = {0.0f, 0.0f, 1.0f},
                               .color = {1.0f, 1.0f, 1.0f},
@@ -12501,7 +12570,7 @@ void test_gpu_spot_cone_edges() {
         const float d = 1.5f;
         const auto make = [&](float inner, float outer, bool as_spot) {
             scene.clear();
-            scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+            (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
             if (as_spot) {
                 scene.add_spot_light({.position = {0.0f, 0.0f, d},
                                       .direction = {0.0f, 0.0f, -1.0f},
@@ -12579,7 +12648,7 @@ void test_gpu_spot_radius_fade() {
                                           .size = 0.05f,
                                           .inner_angle = 70.0f,
                                           .outer_angle = 85.0f};
-        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
         scene.add_spot_light(spot);
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
@@ -12645,7 +12714,7 @@ struct TopDown {
     explicit TopDown(kin::Renderer3D& r3d) : floor(make_box(r3d, {20.0f, 0.2f, 20.0f})) {}
     kin::Camera3D camera() const { return kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f); }
     void draw_floor(kin::Scene3D& scene) const {
-        scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(220, 220, 220)});
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(220, 220, 220)});
     }
     kin::Mesh3D floor;
 };
@@ -12699,7 +12768,7 @@ void test_gpu_spot_shadow_position() {
             const auto shoot = [&](bool shadow) {
                 scene.clear();
                 stage.draw_floor(scene);
-                scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+                (void)scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
                 kin::SpotLightSource3D spot{.position = {0.0f, 6.0f, 0.0f},
                                             .direction = {0.0f, -1.0f, 0.0f},
                                             .color = {9.0f, 9.0f, 9.0f},
@@ -12782,7 +12851,7 @@ void test_gpu_spot_shadow_position() {
         scene.lights.ambient = {0.004f, 0.004f, 0.004f};
         const kin::Mesh3D cube = make_box(r3d, {1.0f, 1.0f, 1.0f});
         stage.draw_floor(scene);
-        scene.draw(cube, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+        (void)scene.draw(cube, Mat4f::translation({0.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
         kin::SpotLightSource3D spot{.position = {-6.0f, 6.0f, 0.0f},
                                     .direction = {1.0f, -1.0f, 0.0f},
                                     .color = {9.0f, 9.0f, 9.0f},
@@ -12869,16 +12938,16 @@ void test_gpu_spot_shadow_casters() {
             // 4/3 the way), the clear half's light reaches x -0.33 to 1.
             const Vec3f aim = Vec3f{3.0f, -4.5f, 0.0f};
             scene.add_spot_light(spot_for(6.0f, -3.0f, aim));
-            scene.draw(leaf_mesh, Mat4f::translation({0.0f, 1.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
-                       {.color = Color::rgb(255, 255, 255),
-                        .double_sided = true,
-                        .blend = kin::Blend3D::Mask,
-                        .texture = leaf});
+            (void)scene.draw(leaf_mesh, Mat4f::translation({0.0f, 1.5f, 0.0f}) * Mat4f::rotation_x(-90.0f),
+                             {.color = Color::rgb(255, 255, 255),
+                              .double_sided = true,
+                              .blend = kin::Blend3D::Mask,
+                              .texture = leaf});
             // A box behind the light and above it (9 m away, inside its radius but outside its cone), and one beyond
             // its radius (50 m): neither is drawn into the map (only what can cast into the cone is).
             const kin::Mesh3D away = make_box(r3d, {1.0f, 1.0f, 1.0f});
-            scene.draw(away, Mat4f::translation({-8.0f, 14.0f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-            scene.draw(away, Mat4f::translation({0.0f, 1.0f, -60.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(away, Mat4f::translation({-8.0f, 14.0f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(away, Mat4f::translation({0.0f, 1.0f, -60.0f}), {.color = Color::rgb(200, 200, 200)});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(r3d.debug_stats().local_shadow_casters == 2); // the floor casts too, the quad, and no more
@@ -12904,12 +12973,12 @@ void test_gpu_spot_shadow_casters() {
                 base_scene(scene);
                 scene.add_spot_light(spot_for(8.0f, -1.5f));
                 if (mode == 0) {
-                    scene.draw_skinned(rig.mesh, bent, Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
+                    (void)scene.draw_skinned(rig.mesh, bent, Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
                 } else if (mode == 1) {
-                    scene.draw(baked, Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
+                    (void)scene.draw(baked, Mat4f::identity(), {.color = Color::rgb(210, 70, 60)});
                 } else {
-                    scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f, {0.0f, 1.0f, 0.0f}), Mat4f::identity(),
-                                       {.color = Color::rgb(210, 70, 60)});
+                    (void)scene.draw_skinned(rig.mesh, rig.matrices(0.0f, 0.0f, {0.0f, 1.0f, 0.0f}), Mat4f::identity(),
+                                             {.color = Color::rgb(210, 70, 60)});
                 }
                 const Pixels p = shoot_view(renderer, r3d, view, scene);
                 renderer.present();
@@ -12939,7 +13008,7 @@ void test_gpu_spot_shadow_casters() {
                 base_scene(scene);
                 scene.add_spot_light(spot_for(7.0f));
                 if (poles) {
-                    scene.draw_instanced(pole, copies, {.color = Color::rgb(200, 200, 200)});
+                    (void)scene.draw_instanced(pole, copies, {.color = Color::rgb(200, 200, 200)});
                 }
                 const Pixels p = shoot_large(renderer, r3d, large, scene);
                 renderer.present();
@@ -12998,10 +13067,11 @@ void test_gpu_spot_shadow_casters() {
                 scene.add_spot_light(spot_for(7.0f));
                 if (split) {
                     for (std::size_t i = 0; i < copies.size(); ++i) {
-                        scene.draw(i % 2 ? twin : pole, copies[i].transform, {.color = Color::rgb(200, 200, 200)});
+                        (void)scene.draw(i % 2 ? twin : pole, copies[i].transform,
+                                         {.color = Color::rgb(200, 200, 200)});
                     }
                 } else {
-                    scene.draw_instanced(pole, copies, {.color = Color::rgb(200, 200, 200)});
+                    (void)scene.draw_instanced(pole, copies, {.color = Color::rgb(200, 200, 200)});
                 }
                 const Pixels p = shoot_large(renderer, r3d, large, scene);
                 renderer.present();
@@ -13033,15 +13103,15 @@ void test_scene_retained_instances() {
                      .value_or({});
     const auto copy = batch;
     kin::Scene3D scene;
-    scene.draw_instanced(batch);
-    scene.draw(mesh, Mat4f::identity());
-    scene.draw_instanced(batch);
+    (void)scene.draw_instanced(batch);
+    (void)scene.draw(mesh, Mat4f::identity());
+    (void)scene.draw_instanced(batch);
     assert(scene.draws().size() == 3 && scene.instances().size() == 1);
     assert(scene.draws()[0].batch.instances().data() == batch.instances().data());
     const auto revision = batch.revision();
     const auto layout = batch.layout_revision();
     const kin::MeshInstance3D moved{Mat4f::translation({100, 0, 0}), kin::colors::white, 77};
-    batch.update(1, {&moved, 1});
+    assert(batch.update(1, {&moved, 1}));
     assert(copy.revision() == revision + 1 && copy.instances()[1].id == 77);
     assert(copy.layout_revision() == layout);
     assert(copy.changed_since(revision).first == 1 && copy.changed_since(revision).count == 1);
@@ -13062,28 +13132,28 @@ void test_scene_retained_instances() {
     scene.clear();
     assert(copy.instances().size() == 2 && copy.identity() == batch.identity());
     const auto before = batch.revision();
-    batch.update(0, {});
+    assert(batch.update(0, {}));
     assert(batch.revision() == before);
-    batch.update(0, {&moved, 1});
+    assert(batch.update(0, {&moved, 1}));
     assert(batch.changed_since(revision).first == 0 && batch.changed_since(revision).count == 2);
     assert(batch.changed_since(before).count == 1); // another reader still sees its own edits
     for (int i = 0; i < 16; ++i)
-        batch.update(1, {&moved, 1});
+        assert(batch.update(1, {&moved, 1}));
     assert(batch.changed_since(before).first == 0 && batch.changed_since(before).count == 2); // history overflow
     assert(batch.changed_since(batch.revision() - 16).first == 1 &&
            batch.changed_since(batch.revision() - 16).count == 1);
     assert(batch.changed_since(batch.revision() + 1).count == 2);
     auto broken = moved;
     broken.transform.m[0] = std::numeric_limits<float>::infinity();
-    batch.update(1, {&broken, 1});
+    assert(batch.update(1, {&broken, 1}));
     assert(copy.layout_revision() == layout + 1);
-    batch.update(1, {&broken, 1});
+    assert(batch.update(1, {&broken, 1}));
     assert(copy.layout_revision() == layout + 1);
-    batch.update(1, {&moved, 1});
+    assert(batch.update(1, {&moved, 1}));
     assert(copy.layout_revision() == layout + 2);
-    batch.update(0, {&broken, 1});
+    assert(batch.update(0, {&broken, 1}));
     const std::array<kin::MeshInstance3D, 2> swap{moved, broken};
-    batch.update(0, swap); // same valid-group count, different group/range membership
+    assert(batch.update(0, swap)); // same valid-group count, different group/range membership
     assert(copy.layout_revision() == layout + 4);
 }
 
@@ -13123,7 +13193,7 @@ void test_gpu_retained_instances() {
                     if (frame == 2) {
                         const kin::MeshInstance3D moved{Mat4f::translation({0, 2, 7}) * Mat4f::scaling({-2, 2, 1}),
                                                         Color::rgb(255, 80, 40), 99999};
-                        batch.update(9599, {&moved, 1});
+                        assert(batch.update(9599, {&moved, 1}));
                     }
                     kin::Scene3D scene;
                     scene.camera = kin::Camera3D::look_at({float(frame) * 0.2f, 7, 25}, {0, 1, 0}, 65);
@@ -13155,11 +13225,11 @@ void test_gpu_retained_instances() {
                         material.color = Color::rgb(150, 230, 200); // invalidates packed colour
                     const auto add = [&](const kin::Material3D& m) {
                         if (retained)
-                            scene.draw_instanced(batch, m);
+                            (void)scene.draw_instanced(batch, m);
                         else
                             for (const auto& group : batch.groups())
-                                scene.draw_instanced_group(box, batch.instances().subspan(group.first, group.count),
-                                                           group.world_bounds, m);
+                                (void)scene.draw_instanced_group(
+                                    box, batch.instances().subspan(group.first, group.count), group.world_bounds, m);
                     };
                     add(material);
                     if (mode == 7) { // the same batch in a second colour: a table of its own
@@ -13253,7 +13323,7 @@ void test_gpu_retained_bindings() {
             for (int frame = 0; frame < 5; ++frame) {
                 if (frame == 2) {
                     const kin::MeshInstance3D changed{Mat4f::translation({0, 1, 2}), Color::rgb(240, 70, 30), 9001};
-                    batches[2].update(199, {&changed, 1});
+                    assert(batches[2].update(199, {&changed, 1}));
                 }
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0, 5, 9}, {0, 0, 0}, 60);
@@ -13272,14 +13342,15 @@ void test_gpu_retained_bindings() {
                 scene.ambient_occlusion.enabled = frame == 2 && r3d.capabilities().ambient_occlusion;
                 scene.contact_shadows.enabled = frame == 2 && r3d.capabilities().contact_shadows;
                 scene.taa.enabled = frame == 4 && r3d.capabilities().temporal_aa;
-                scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
                 const kin::Material3D material{
                     .unlit = frame == 0, .double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture};
                 for (const auto& batch : batches) {
                     if (retained)
-                        scene.draw_instanced(batch, material);
+                        (void)scene.draw_instanced(batch, material);
                     else
-                        scene.draw_instanced_group(mesh, batch.instances(), batch.groups()[0].world_bounds, material);
+                        (void)scene.draw_instanced_group(mesh, batch.instances(), batch.groups()[0].world_bounds,
+                                                         material);
                 }
                 auto& target = frame == 3 ? msaa : view;
                 images.push_back(shoot_view(renderer, r3d, target, scene));
@@ -13313,13 +13384,13 @@ void test_gpu_retained_limits() {
         const kin::MeshInstance3D old{Mat4f::translation({-1, 0, 0}), Color::rgb(250, 80, 30), 501};
         const kin::MeshInstance3D changed{Mat4f::translation({1, 0, 0}), Color::rgb(30, 200, 100), 502};
         auto batch = kin::InstanceBatch3D::create(mesh, {old}).value_or({});
-        scene.draw_instanced(batch, material);
+        (void)scene.draw_instanced(batch, material);
         renderer.clear(kin::colors::black);
         render_ok(r3d, first, scene);
         assert(r3d.debug_stats().retained_instances == 1 && r3d.debug_stats().retained_upload_bytes == 128);
         render_ok(r3d, second, scene); // second view reuses the same GPU records
         assert(r3d.debug_stats().retained_instances == 1 && r3d.debug_stats().retained_upload_bytes == 0);
-        batch.update(0, {&changed, 1});
+        assert(batch.update(0, {&changed, 1}));
         render_ok(r3d, second, scene); // edit in the same GPU frame must leave the first view's records alone
         assert(r3d.debug_stats().retained_instances == 0);
         assert(r3d.debug_stats().bounds_cache_rebuilt == 1 && r3d.debug_stats().bounds_cache_instances == 1);
@@ -13331,11 +13402,11 @@ void test_gpu_retained_limits() {
         const auto b = read(renderer);
         renderer.present();
         scene.clear();
-        scene.draw_instanced(mesh, {&old, 1}, material);
+        (void)scene.draw_instanced(mesh, {&old, 1}, material);
         const auto ref_a = shoot_view(renderer, r3d, reference, scene);
         renderer.present();
         scene.clear();
-        scene.draw_instanced(mesh, {&changed, 1}, material);
+        (void)scene.draw_instanced(mesh, {&changed, 1}, material);
         const auto ref_b = shoot_view(renderer, r3d, reference, scene);
         renderer.present();
         assert(a.rgba == ref_a.rgba && b.rgba == ref_b.rgba && a.rgba != b.rgba);
@@ -13344,7 +13415,7 @@ void test_gpu_retained_limits() {
         std::vector<kin::InstanceBatch3D> tiny;
         for (int i = 0; i < 129; ++i) {
             tiny.push_back(kin::InstanceBatch3D::create(mesh, std::vector<kin::MeshInstance3D>{old}).value_or({}));
-            scene.draw_instanced(tiny.back(), material);
+            (void)scene.draw_instanced(tiny.back(), material);
         }
         shoot_view(renderer, r3d, first, scene);
         assert(r3d.debug_stats().retained_instances == 128 && r3d.debug_stats().retained_gpu_bytes == 128 * 128);
@@ -13356,8 +13427,8 @@ void test_gpu_retained_limits() {
         far[0] = old;
         auto large_a = kin::InstanceBatch3D::create(mesh, far).value_or({});
         auto large_b = kin::InstanceBatch3D::create(mesh, std::move(far)).value_or({});
-        scene.draw_instanced(large_a, material);
-        scene.draw_instanced(large_b, material);
+        (void)scene.draw_instanced(large_a, material);
+        (void)scene.draw_instanced(large_b, material);
         shoot_view(renderer, r3d, first, scene);
         assert(r3d.debug_stats().retained_instances == 140000 && r3d.debug_stats().retained_gpu_bytes == 140000 * 128);
         assert(r3d.debug_stats().bounds_cache_bytes <= 4 * 1024 * 1024);
@@ -13368,7 +13439,7 @@ void test_gpu_retained_limits() {
         scene.clear();
         large_a = {};
         large_b = {};
-        scene.draw(mesh, Mat4f::identity(), material);
+        (void)scene.draw(mesh, Mat4f::identity(), material);
         shoot_view(renderer, r3d, first, scene);
         assert(r3d.debug_stats().retained_gpu_bytes == 0); // weak cache entries release on the next GPU frame
         assert(r3d.debug_stats().bounds_cache_bytes == 0);
@@ -13411,21 +13482,21 @@ void test_gpu_cached_instance_bounds() {
                     const kin::MeshInstance3D moved{Mat4f::translation({float(frame) - 2, 2, 7}) *
                                                         Mat4f::scaling({-2, 2, 1}),
                                                     Color::rgb(255, 80, 40), 99999};
-                    batch.update(5599, {&moved, 1});
+                    assert(batch.update(5599, {&moved, 1}));
                 }
                 if (frame == 2) {
                     // Two edits through a shared handle, with untouched records
                     // between them. Each reader must see the union independently.
                     auto alias = batch;
                     const kin::MeshInstance3D a{Mat4f::translation({-2, 2, 7}), Color::rgb(80, 120, 255), 99998};
-                    alias.update(0, {&a, 1});
-                    alias.update(5599, {&a, 1});
+                    assert(alias.update(0, {&a, 1}));
+                    assert(alias.update(5599, {&a, 1}));
                 }
                 if (frame == 4) {
                     for (int edit = 0; edit < 17; ++edit) {
                         const kin::MeshInstance3D a{Mat4f::translation({float(edit) * 0.1f - 1, 2, 8}),
                                                     Color::rgb(80, 255, 120), 99997};
-                        batch.update(static_cast<kin::u32>(edit), {&a, 1});
+                        assert(batch.update(static_cast<kin::u32>(edit), {&a, 1}));
                     }
                 }
                 kin::Scene3D scene;
@@ -13452,28 +13523,28 @@ void test_gpu_cached_instance_bounds() {
                 } else
                     scene.lights.sun.color = {};
                 scene.taa.enabled = frame == 3;
-                scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
                 const kin::Material3D dynamic_material{.color = Color::rgb(140, 90, 40), .double_sided = true};
                 for (int i = 0; i < 3; ++i)
-                    scene.draw(mesh, Mat4f::translation({float(i) * 3 - 8, 1, 8}), dynamic_material, kin::colors::white,
-                               20000 + i);
+                    (void)scene.draw(mesh, Mat4f::translation({float(i) * 3 - 8, 1, 8}), dynamic_material,
+                                     kin::colors::white, 20000 + i);
                 kin::Material3D material{.double_sided = true,
                                          .blend = frame == 4 ? kin::Blend3D::Alpha : kin::Blend3D::Mask,
                                          .texture = texture};
                 if (frame >= 2)
                     material.color = Color::rgb(150, 230, 200);
                 if (retained)
-                    scene.draw_instanced(batch, material);
+                    (void)scene.draw_instanced(batch, material);
                 else
                     for (const auto& g : batch.groups())
-                        scene.draw_instanced_group(mesh, batch.instances().subspan(g.first, g.count), g.world_bounds,
-                                                   material);
+                        (void)scene.draw_instanced_group(mesh, batch.instances().subspan(g.first, g.count),
+                                                         g.world_bounds, material);
                 // Uncached ranges on both sides of a cached range, with a noncaster gap:
                 // local gathering must use compact sphere offsets, not _visible's offsets.
-                scene.draw(mesh, Mat4f::translation({1, 1, 10}), {.unlit = true, .casts_shadow = false});
+                (void)scene.draw(mesh, Mat4f::translation({1, 1, 10}), {.unlit = true, .casts_shadow = false});
                 for (int i = 0; i < 3; ++i)
-                    scene.draw(mesh, Mat4f::translation({float(i) * 3 + 5, 1, 8}), dynamic_material, kin::colors::white,
-                               30000 + i);
+                    (void)scene.draw(mesh, Mat4f::translation({float(i) * 3 + 5, 1, 8}), dynamic_material,
+                                     kin::colors::white, 30000 + i);
                 images.push_back(shoot_view(renderer, r3d, view, scene));
                 const auto stats = r3d.debug_stats();
                 counts.push_back(stats);
@@ -13822,16 +13893,16 @@ void test_gpu_local_shadow_cell_ranges() {
                                             .radius = 40};
                 spot.shadow_enabled = true;
                 scene.add_spot_light(spot);
-                scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
                 const kin::Material3D material{.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture};
                 if (grouped == 2)
-                    scene.draw_instanced(batch, material);
+                    (void)scene.draw_instanced(batch, material);
                 else if (grouped == 1)
                     for (const auto& g : batch.groups())
-                        scene.draw_instanced_group(mesh, batch.instances().subspan(g.first, g.count), g.world_bounds,
-                                                   material);
+                        (void)scene.draw_instanced_group(mesh, batch.instances().subspan(g.first, g.count),
+                                                         g.world_bounds, material);
                 else
-                    scene.draw_instanced(mesh, batch.instances(), material);
+                    (void)scene.draw_instanced(mesh, batch.instances(), material);
                 images.push_back(shoot_view(renderer, r3d, view, scene));
                 const auto stats = r3d.debug_stats();
                 counts.push_back(stats);
@@ -13903,7 +13974,7 @@ void test_gpu_local_shadow_packing() {
             for (int frame = 0; frame < 7; ++frame) {
                 if (frame == 4) {
                     const kin::MeshInstance3D moved{Mat4f::translation({8, 2, 0}), kin::colors::white, 9000};
-                    batch.update(8999, {&moved, 1});
+                    assert(batch.update(8999, {&moved, 1}));
                 }
                 kin::Scene3D scene;
                 scene.camera = kin::Camera3D::look_at({0, 12, 22}, {0, 0, 0}, 65);
@@ -13928,14 +13999,14 @@ void test_gpu_local_shadow_packing() {
                                             .radius = 40};
                 spot.shadow_enabled = true;
                 scene.add_spot_light(spot);
-                scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
-                scene.draw(lod, Mat4f::translation({-8, 1, 2}));
+                (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                (void)scene.draw(lod, Mat4f::translation({-8, 1, 2}));
                 if (frame != 6)
-                    scene.draw_instanced(batch, {.double_sided = true});
+                    (void)scene.draw_instanced(batch, {.double_sided = true});
                 std::array<Mat4f, 21> rings;
                 for (kin::u32 i = 0; i < rings.size(); ++i)
                     rings[i] = Mat4f::translation({8 + 0.02f * float(i), 2, -2});
-                scene.draw_instanced(clustered, rings);
+                (void)scene.draw_instanced(clustered, rings);
                 // Multi-copy multi-level buckets and an uncached draw following the retained range.
                 std::array<Mat4f, 21> balls;
                 for (kin::u32 i = 0; i < balls.size(); ++i)
@@ -13943,8 +14014,8 @@ void test_gpu_local_shadow_packing() {
                                                    float(i % 3 == 0   ? -8
                                                          : i % 3 == 1 ? -20
                                                                       : -35)});
-                scene.draw_instanced(lod, balls);
-                scene.draw(mesh, Mat4f::translation({9, 1, 4}));
+                (void)scene.draw_instanced(lod, balls);
+                (void)scene.draw(mesh, Mat4f::translation({9, 1, 4}));
                 const auto image = shoot_view(renderer, r3d, view, scene);
                 const auto st = r3d.debug_stats();
                 assert(st.local_task_bytes && st.local_copy_bytes);
@@ -14042,20 +14113,20 @@ void test_gpu_instance_groups() {
                         scene.lights.fill_shadow.resolution = 256;
                     }
                     scene.taa.enabled = mode == 3;
-                    scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                    (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
                     kin::Material3D mat{.double_sided = true,
                                         .blend = mode == 4 ? kin::Blend3D::Alpha : kin::Blend3D::Mask,
                                         .texture = mask};
-                    scene.draw(pole, Mat4f::translation({0, 2, 1}), mat, kin::colors::white, 10001);
+                    (void)scene.draw(pole, Mat4f::translation({0, 2, 1}), mat, kin::colors::white, 10001);
                     for (std::size_t c = 0; c < cells.size(); ++c) {
                         if (grouped)
-                            scene.draw_instanced_group(pole, cells[c], bounds[c], mat);
+                            (void)scene.draw_instanced_group(pole, cells[c], bounds[c], mat);
                         else
-                            scene.draw_instanced(pole, cells[c], mat);
+                            (void)scene.draw_instanced(pole, cells[c], mat);
                         if (c == 7)
-                            scene.draw(pole, Mat4f::translation({3, 2, 1}), mat, kin::colors::white, 10002);
+                            (void)scene.draw(pole, Mat4f::translation({3, 2, 1}), mat, kin::colors::white, 10002);
                     }
-                    scene.draw(pole, Mat4f::translation({-3, 2, 1}), mat, kin::colors::white, 10003);
+                    (void)scene.draw(pole, Mat4f::translation({-3, 2, 1}), mat, kin::colors::white, 10003);
                     assert(scene.draws().size() == 2); // cells add metadata, not draw calls
                     pixels = shoot_view(renderer, r3d, view, scene);
                     stats = r3d.debug_stats();
@@ -14120,10 +14191,10 @@ void test_gpu_prepared_scenes() {
                     .value_or({});
             kin::Scene3D scene, other, moved;
             const auto populate = [&](kin::Scene3D& s, Color color) {
-                s.draw(floor, Mat4f::translation({0, -0.15f, 0}), {.color = color});
-                s.draw_instanced(batch, mask);
-                s.draw(box, Mat4f::translation({0, 0.5f, 3}), {.color = Color::rgb(200, 80, 100)}, kin::colors::white,
-                       5000);
+                (void)s.draw(floor, Mat4f::translation({0, -0.15f, 0}), {.color = color});
+                (void)s.draw_instanced(batch, mask);
+                (void)s.draw(box, Mat4f::translation({0, 0.5f, 3}), {.color = Color::rgb(200, 80, 100)},
+                             kin::colors::white, 5000);
             };
             populate(scene, Color::rgb(90, 110, 140));
             auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
@@ -14138,7 +14209,7 @@ void test_gpu_prepared_scenes() {
                     expected = true;
                 if (frame == 4) {
                     const kin::MeshInstance3D edit{Mat4f::translation({8, 2, 0}), Color::rgb(70, 250, 120), 9001};
-                    batch.update(0, {&edit, 1});
+                    assert(batch.update(0, {&edit, 1}));
                 }
                 if (frame == 6) {
                     writable = scene.add_instances(box, 1).value_or({});
@@ -14150,15 +14221,15 @@ void test_gpu_prepared_scenes() {
                     // Same counts and vector allocations, different meshes: revision validation
                     // must reject the old mesh/bounds metadata even without a pointer change.
                     scene.clear();
-                    scene.draw(box, Mat4f::translation({0, -0.15f, 0}), {.color = Color::rgb(130, 70, 100)});
-                    scene.draw_instanced(batch, mask);
-                    scene.draw(box, Mat4f::translation({0, 0.5f, 3}), {.color = Color::rgb(200, 80, 100)},
-                               kin::colors::white, 5000);
-                    scene.draw(floor, Mat4f::translation({0, -0.3f, 0}), {.color = Color::rgb(70, 100, 130)});
+                    (void)scene.draw(box, Mat4f::translation({0, -0.15f, 0}), {.color = Color::rgb(130, 70, 100)});
+                    (void)scene.draw_instanced(batch, mask);
+                    (void)scene.draw(box, Mat4f::translation({0, 0.5f, 3}), {.color = Color::rgb(200, 80, 100)},
+                                     kin::colors::white, 5000);
+                    (void)scene.draw(floor, Mat4f::translation({0, -0.3f, 0}), {.color = Color::rgb(70, 100, 130)});
                 }
                 if (frame == 9)
-                    scene.overlay().draw(box, Mat4f::translation({0, 1, 2}), {.color = Color::rgb(250, 160, 60)},
-                                         kin::colors::white, 7000);
+                    (void)scene.overlay().draw(box, Mat4f::translation({0, 1, 2}), {.color = Color::rgb(250, 160, 60)},
+                                               kin::colors::white, 7000);
                 if (frame == 11)
                     populate(other, Color::rgb(30, 140, 90));
                 if (frame == 13)
@@ -14243,7 +14314,7 @@ void test_gpu_prepared_scenes() {
             kin::Scene3D many;
             many.camera = scene.camera;
             for (kin::u32 i = 0; i < 129; ++i)
-                many.draw_instanced(
+                (void)many.draw_instanced(
                     kin::InstanceBatch3D::create(box, {{Mat4f::translation({0, 0, 0}), kin::colors::white, i + 1}})
                         .value_or({}));
             for (int i = 0; i < 2; ++i) {
@@ -14292,10 +14363,10 @@ void test_gpu_prepared_batch_edits() {
             kin::Scene3D scene;
             scene.lights.sun.color = {};
             scene.lights.local_shadow_resolution = 128;
-            scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+            (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
             const kin::Material3D material{.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture};
             for (const auto& batch : {a, b, outside})
-                scene.draw_instanced(batch, material);
+                (void)scene.draw_instanced(batch, material);
             auto view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
             auto hdr = r3d.create_view({160, 120}, {.hdr = true, .pick = true}).value_or({});
             auto msaa = r3d.create_view({160, 120}, {.samples = 4, .pick = true}).value_or({});
@@ -14305,7 +14376,7 @@ void test_gpu_prepared_batch_edits() {
                 auto alias = a;
                 const kin::MeshInstance3D moved{Mat4f::translation({frame % 2 ? -8.0f : 8.0f, 1, 1}),
                                                 Color::rgb(70, 240, 180), 7001};
-                alias.update(0, {&moved, 1});
+                assert(alias.update(0, {&moved, 1}));
                 kin::MeshInstance3D changing{Mat4f::translation({-2 + 0.03f * frame, 1, 2}), Color::rgb(80, 180, 250),
                                              6001};
                 if (frame == 3) {
@@ -14316,13 +14387,13 @@ void test_gpu_prepared_batch_edits() {
                 }
                 if (frame == 4)
                     changing.transform = Mat4f::translation({1000, 1, 1000});
-                b.update(0, {&changing, 1});
+                assert(b.update(0, {&changing, 1}));
                 kin::MeshInstance3D tail{Mat4f::translation({1000, 1, 1000}), kin::colors::white, 6004};
                 if (frame == 4)
                     tail.transform = Mat4f::translation({0, 1, 1000}) * Mat4f::scaling({1e20f, 1, 1});
                 // At frame 4 the valid-group count is unchanged, but its range
                 // changes: the red copy still needs refinement in the invalid group.
-                b.update(2, {&tail, 1});
+                assert(b.update(2, {&tail, 1}));
                 scene.camera = kin::Camera3D::look_at({0.03f * frame, 5, 9}, {0, 0, 0}, 65);
                 scene.camera.z_far = 50;
                 scene.lights.spots.clear();
@@ -14392,8 +14463,8 @@ void test_gpu_cached_camera_cull() {
             kin::Scene3D scene;
             scene.lights.local_shadow_resolution = 128;
             scene.lights.shadow_resolution = 128;
-            scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
-            scene.draw_instanced(batch, {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture});
+            (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+            (void)scene.draw_instanced(batch, {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = texture});
             kin::SpotLightSource3D light{
                 .position = {0, 10, 0}, .direction = {0, -1, 0}, .color = {15, 15, 15}, .radius = 40};
             light.shadow_enabled = true;
@@ -14414,7 +14485,7 @@ void test_gpu_cached_camera_cull() {
                 auto alias = batch;
                 const kin::MeshInstance3D moved{Mat4f::translation({frame % 2 ? -18.0f : 18.0f, 1, 0}),
                                                 kin::colors::white, 5001};
-                alias.update(9, {&moved, 1});
+                assert(alias.update(9, {&moved, 1}));
                 auto& target = frame == 1 ? hdr : frame == 2 ? msaa : view;
                 const auto image = shoot_view(renderer, r3d, target, scene);
                 const auto st = r3d.debug_stats();
@@ -14529,10 +14600,11 @@ void test_gpu_spot_shadow_acne() {
                 scene.clear();
                 stage.draw_floor(scene);
                 if (c.measured == Surface::Sphere) {
-                    scene.draw(sphere, Mat4f::translation(sphere_centre), {.color = Color::rgb(220, 220, 220)});
+                    (void)scene.draw(sphere, Mat4f::translation(sphere_centre), {.color = Color::rgb(220, 220, 220)});
                 }
                 if (c.measured == Surface::Wall) {
-                    scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.1f}), {.color = Color::rgb(220, 220, 220)});
+                    (void)scene.draw(wall, Mat4f::translation({0.0f, 2.0f, -3.1f}),
+                                     {.color = Color::rgb(220, 220, 220)});
                 }
                 kin::SpotLightSource3D spot{.position = c.light,
                                             .direction = c.aim - c.light,
@@ -14615,7 +14687,7 @@ void test_gpu_spot_shadow_distance() {
             scene.lights.sun.color = {};
             scene.lights.ambient = {};
             stage.draw_floor(scene);
-            scene.draw(pole, Mat4f::translation({5.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(pole, Mat4f::translation({5.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             kin::SpotLightSource3D spot{.position = {0.0f, 3.0f, 0.0f},
                                         .direction = {1.0f, -0.35f, 0.0f},
                                         .color = {20.0f, 20.0f, 20.0f},
@@ -14690,9 +14762,9 @@ void test_gpu_spot_receives_shadow_flag() {
             scene.camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 60.0f);
             scene.lights.sun.color = {};
             scene.lights.ambient = {0.02f, 0.02f, 0.02f};
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
-                       {.color = Color::rgb(220, 220, 220), .receives_shadow = receives});
-            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}),
+                             {.color = Color::rgb(220, 220, 220), .receives_shadow = receives});
+            (void)scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             if (point) {
                 kin::PointLightSource3D light{
                     .position = {0.0f, 6.0f, 0.0f}, .color = {9.0f, 9.0f, 9.0f}, .radius = 25.0f, .size = 0.1f};
@@ -14763,8 +14835,8 @@ void test_gpu_spot_shadow_clustered_caster() {
                     stage.draw_floor(scene);
                     // The torus high up, so that its shadow (the camera sees the floor) is a ring on the floor, off its
                     // own picture.
-                    scene.draw(torus, Mat4f::translation({-2.0f, 3.0f, 0.0f}) * Mat4f::rotation_x(60.0f),
-                               {.color = Color::rgb(220, 120, 60)});
+                    (void)scene.draw(torus, Mat4f::translation({-2.0f, 3.0f, 0.0f}) * Mat4f::rotation_x(60.0f),
+                                     {.color = Color::rgb(220, 120, 60)});
                     kin::SpotLightSource3D spot{.position = {-2.0f, 9.0f, 3.0f},
                                                 .direction = {0.0f, -1.0f, -0.4f},
                                                 .color = {14.0f, 14.0f, 14.0f},
@@ -14876,10 +14948,12 @@ void test_gpu_spot_shadow_cache() {
             scene.lights.ambient = {0.02f, 0.02f, 0.02f};
             scene.lights.cache_shadows = cache;
             stage.draw_floor(scene);
-            scene.draw(pole, Mat4f::translation({setup.pole_x, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-            scene.draw(cube, Mat4f::translation({-3.0f, setup.cube_y, 1.0f}), {.color = Color::rgb(200, 100, 100)});
+            (void)scene.draw(pole, Mat4f::translation({setup.pole_x, 1.5f, 0.0f}),
+                             {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(cube, Mat4f::translation({-3.0f, setup.cube_y, 1.0f}),
+                             {.color = Color::rgb(200, 100, 100)});
             if (setup.extra) {
-                scene.draw(cube, Mat4f::translation({0.0f, 0.5f, -3.0f}), {.color = Color::rgb(100, 200, 100)});
+                (void)scene.draw(cube, Mat4f::translation({0.0f, 0.5f, -3.0f}), {.color = Color::rgb(100, 200, 100)});
             }
             kin::SpotLightSource3D spot{.position = {setup.light_x, 6.0f, 0.0f},
                                         .direction = {0.0f, -1.0f, 0.0f},
@@ -14982,8 +15056,8 @@ void test_gpu_spot_shadow_budget() {
             scene.lights.max_shadowed_spots = slots;
             stage.draw_floor(scene);
             for (int i = 0; i < 6; ++i) {
-                scene.draw(pole, Mat4f::translation({-8.0f + 3.2f * static_cast<float>(i), 1.0f, -2.0f}),
-                           {.color = Color::rgb(200, 200, 200)});
+                (void)scene.draw(pole, Mat4f::translation({-8.0f + 3.2f * static_cast<float>(i), 1.0f, -2.0f}),
+                                 {.color = Color::rgb(200, 200, 200)});
             }
             for (std::size_t i = 0; i < scale.size(); ++i) {
                 const float x =
@@ -15126,15 +15200,15 @@ void test_gpu_point_shadow_cube() {
             scene.clear();
             scene.lights.sun.color = {};
             scene.lights.ambient = {};
-            scene.draw(slab_x, Mat4f::translation({5.2f, 0, 0}), {.color = Color::rgb(220, 220, 220)});
-            scene.draw(slab_x, Mat4f::translation({-5.2f, 0, 0}), {.color = Color::rgb(220, 220, 220)});
-            scene.draw(slab_y, Mat4f::translation({0, 5.2f, 0}), {.color = Color::rgb(220, 220, 220)});
-            scene.draw(slab_y, Mat4f::translation({0, -5.2f, 0}), {.color = Color::rgb(220, 220, 220)});
-            scene.draw(slab_z, Mat4f::translation({0, 0, 5.2f}), {.color = Color::rgb(220, 220, 220)});
-            scene.draw(slab_z, Mat4f::translation({0, 0, -5.2f}), {.color = Color::rgb(220, 220, 220)});
+            (void)scene.draw(slab_x, Mat4f::translation({5.2f, 0, 0}), {.color = Color::rgb(220, 220, 220)});
+            (void)scene.draw(slab_x, Mat4f::translation({-5.2f, 0, 0}), {.color = Color::rgb(220, 220, 220)});
+            (void)scene.draw(slab_y, Mat4f::translation({0, 5.2f, 0}), {.color = Color::rgb(220, 220, 220)});
+            (void)scene.draw(slab_y, Mat4f::translation({0, -5.2f, 0}), {.color = Color::rgb(220, 220, 220)});
+            (void)scene.draw(slab_z, Mat4f::translation({0, 0, 5.2f}), {.color = Color::rgb(220, 220, 220)});
+            (void)scene.draw(slab_z, Mat4f::translation({0, 0, -5.2f}), {.color = Color::rgb(220, 220, 220)});
             for (const Face& f : faces) {
-                scene.draw(caster, Mat4f::translation(f.axis * 1.5f + f.side * 0.6f),
-                           {.color = Color::rgb(200, 100, 100)});
+                (void)scene.draw(caster, Mat4f::translation(f.axis * 1.5f + f.side * 0.6f),
+                                 {.color = Color::rgb(200, 100, 100)});
             }
             kin::PointLightSource3D light{
                 .position = {0.0f, 0.0f, 0.0f}, .color = {40.0f, 40.0f, 40.0f}, .radius = 30.0f, .size = 0.1f};
@@ -15291,7 +15365,7 @@ void test_gpu_moon_shadow() {
             // The moon's light is a tenth of the sun's: a brighter one, so the shadow is measurable in 8 bits.
             scene.lights.fill.color = scene.lights.fill.color * 6.0f;
             stage.draw_floor(scene);
-            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             const Pixels p = shoot_large(renderer, r3d, view, scene);
             renderer.present();
             return Shot{p, scene.camera, scene.lights};
@@ -15332,7 +15406,7 @@ void test_gpu_moon_shadow() {
             scene.lights.fill_shadow.strength = i == 0 ? 1.0f : i == 1 ? 0.4f : 0.0f;
             scene.clear();
             stage.draw_floor(scene);
-            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             const Pixels p = shoot_large(renderer, r3d, view, scene);
             renderer.present();
             // A floor point in the pole's shadow (away from the light 0.5, 1, 0.3: toward -x, -z of the foot).
@@ -15360,7 +15434,7 @@ void test_gpu_spot_light_fogged() {
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 12.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
         scene.lights.sun.color = {};
         scene.lights.ambient = {};
-        scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 0.0f, -0.1f}), {.color = Color::rgb(255, 255, 255)});
         scene.add_spot_light({.position = {0.0f, 0.0f, 4.0f},
                               .direction = {0.0f, 0.0f, -1.0f},
                               .color = {8.0f, 7.0f, 6.0f},
@@ -15420,7 +15494,7 @@ void test_gpu_spot_lights_off_is_unchanged() {
             scene.lights.shadow_area = kin::Bounds3D{{-10.0f, -0.2f, -10.0f}, {10.0f, 5.0f, 10.0f}};
             scene.lights.shadow_cascades = 2;
             stage.draw_floor(scene);
-            scene.draw(cube, Mat4f::translation({1.0f, 0.5f, 1.0f}), {.color = Color::rgb(200, 100, 80)});
+            (void)scene.draw(cube, Mat4f::translation({1.0f, 0.5f, 1.0f}), {.color = Color::rgb(200, 100, 80)});
             scene.add_point_light({.position = {-2.0f, 2.0f, 0.0f}, .color = {3.0f, 3.0f, 3.0f}, .radius = 6.0f});
             configure(scene);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -15488,7 +15562,7 @@ void test_gpu_spot_shadow_under_taa() {
             scene.lights.sun.color = {};
             scene.lights.ambient = {0.03f, 0.03f, 0.03f};
             stage.draw_floor(scene);
-            scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(pole, Mat4f::translation({2.0f, 1.5f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
             kin::SpotLightSource3D spot{.position = {0.0f, 6.0f, 0.0f},
                                         .direction = {0.0f, -1.0f, 0.0f},
                                         .color = {9.0f, 9.0f, 9.0f},
@@ -16520,8 +16594,8 @@ Color color_of01(Vec3f v) {
 
 // The wall every blend test draws over: a flat unlit colour filling the view, 6 m away.
 void draw_backdrop(kin::Scene3D& scene, const kin::Mesh3D& box, Color c, float z = -20.0f) {
-    scene.draw(box, Mat4f::translation({0.0f, 0.0f, z}) * Mat4f::scaling({200.0f, 200.0f, 0.1f}),
-               {.color = c, .unlit = true});
+    (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, z}) * Mat4f::scaling({200.0f, 200.0f, 0.1f}),
+                     {.color = c, .unlit = true});
 }
 
 // Every setting of the feature configured and left off gives the plain picture to the byte, in 8-bit, HDR and TAA
@@ -16556,11 +16630,11 @@ void test_gpu_particles_off_is_unchanged() {
                 scene.sky.enabled = true;
                 scene.fog = {.enabled = true, .density = 0.01f, .colour_from_sky = true};
                 scene.taa.enabled = config.taa;
-                scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({12.0f, 0.2f, 12.0f}),
-                           {.color = Color::rgb(180, 170, 150)});
-                scene.draw(box, Mat4f::translation({-1.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 60, 50)});
-                scene.draw(box, Mat4f::translation({1.5f, 0.5f, -1.0f}),
-                           {.color = Color::rgb(50, 160, 70), .blend = kin::Blend3D::Alpha});
+                (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({12.0f, 0.2f, 12.0f}),
+                                 {.color = Color::rgb(180, 170, 150)});
+                (void)scene.draw(box, Mat4f::translation({-1.0f, 0.5f, 0.0f}), {.color = Color::rgb(200, 60, 50)});
+                (void)scene.draw(box, Mat4f::translation({1.5f, 0.5f, -1.0f}),
+                                 {.color = Color::rgb(50, 160, 70), .blend = kin::Blend3D::Alpha});
                 if (configured) {
                     scene.weather.wind = {
                         .direction = {1.0f, 0.0f, 0.2f}, .speed = 12.0f, .gust_strength = 0.8f, .turbulence = 2.0f};
@@ -16581,11 +16655,11 @@ void test_gpu_particles_off_is_unchanged() {
                     look.soft = true;
                     look.lit = 1.0f;
                     look.blend = kin::ParticleBlend3D::Premultiplied;
-                    scene.draw_particles(look, {}); // a batch of nothing
+                    (void)scene.draw_particles(look, {}); // a batch of nothing
                     kin::ParticleSystem3D empty{4};
                     empty.desc.look = look;
                     empty.desc.rate = 1000.0f;
-                    scene.draw_particles(empty); // a system that has made nothing
+                    (void)scene.draw_particles(empty); // a system that has made nothing
                 }
                 return scene;
             };
@@ -16678,7 +16752,7 @@ void test_gpu_particle_billboard_corners() {
             look.axis = c.axis;
             look.stretch = 0.25f;
             look.texture = white;
-            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&c.s, 1});
+            (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&c.s, 1});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(r3d.debug_stats().particle_batches == 1);
@@ -16752,7 +16826,7 @@ void test_gpu_particle_orthographic() {
             kin::ParticleSprite3D s = cases[i].second;
             s.velocity = {2.0f, -3.0f, 0.0f};
             s.rotation = 0.3f;
-            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             const kin::ParticleQuad3D quad = kin::particle_quad(s, look, scene.camera);
@@ -16789,7 +16863,7 @@ void test_gpu_particle_orthographic() {
         look.soft = true;
         const kin::ParticleSprite3D s =
             sprite({0.0f, 0.0f, -7.0f}, 2.0f, {1.0f, 1.0f, 1.0f}, 1.0f); // 10 m from the eye along the view
-        scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+        (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         const float opacity = 1.0f - std::exp(-0.05f * 10.0f);
@@ -16849,7 +16923,7 @@ void test_gpu_particle_blend_math() {
             look.blend = c.mode;
             look.texture = texture;
             const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -4.0f}, 3.0f, c.colour, c.alpha);
-            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             const Vec3f tex_rgb = linear_of(c.texel);
@@ -16901,10 +16975,10 @@ void test_gpu_particle_sorting_and_depth_write() {
                 near_first ? std::array<kin::ParticleSprite3D, 2>{near_sprite, far_sprite}
                            : std::array<kin::ParticleSprite3D, 2>{far_sprite, near_sprite};
             if (one_batch) {
-                scene.draw_particles(look, pair);
+                (void)scene.draw_particles(look, pair);
             } else {
-                scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&pair[0], 1});
-                scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&pair[1], 1});
+                (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&pair[0], 1});
+                (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&pair[1], 1});
             }
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -16950,8 +17024,8 @@ void test_gpu_particle_depth_test() {
             draw_backdrop(scene, box, Color::rgb(20, 20, 20), -30.0f);
             // A wall covering x > 0, 4 m away; its edge is the screen's middle column.
             const Color wall = Color::rgb(30, 160, 60);
-            scene.draw(box, Mat4f::translation({10.0f, 0.0f, -4.0f}) * Mat4f::scaling({20.0f, 20.0f, 0.2f}),
-                       {.color = wall, .unlit = true});
+            (void)scene.draw(box, Mat4f::translation({10.0f, 0.0f, -4.0f}) * Mat4f::scaling({20.0f, 20.0f, 0.2f}),
+                             {.color = wall, .unlit = true});
             kin::ParticleLook3D look;
             look.texture = white;
             const kin::ParticleSprite3D behind =
@@ -16961,7 +17035,7 @@ void test_gpu_particle_depth_test() {
             const kin::ParticleSprite3D hidden =
                 sprite({3.0f, -1.0f, -6.0f}, 1.0f, {0.0f, 0.0f, 1.0f}, 1.0f); // wholly behind the wall
             const std::array<kin::ParticleSprite3D, 3> all{behind, front, hidden};
-            scene.draw_particles(look, all);
+            (void)scene.draw_particles(look, all);
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             // The left of the wall's edge: white; right: the wall's green (the sprite is behind it).
@@ -16999,17 +17073,17 @@ void test_gpu_soft_particles() {
             kin::Scene3D scene = particle_scene();
             // The wall's plane: through (0, 0, -8), its normal turned 40 degrees from +z (toward the camera on its
             // left).
-            scene.draw(box,
-                       Mat4f::translation({0.0f, 0.0f, -8.0f}) * Mat4f::rotation_y(40.0f) *
-                           Mat4f::scaling({60.0f, 40.0f, 0.2f}),
-                       {.color = wall_colour, .unlit = true});
+            (void)scene.draw(box,
+                             Mat4f::translation({0.0f, 0.0f, -8.0f}) * Mat4f::rotation_y(40.0f) *
+                                 Mat4f::scaling({60.0f, 40.0f, 0.2f}),
+                             {.color = wall_colour, .unlit = true});
             if (with_particle) {
                 kin::ParticleLook3D look;
                 look.soft = soft;
                 look.soft_distance = distance;
                 look.softness = 0.0f;
                 const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -6.0f}, 16.0f, {1.0f, 0.5f, 0.2f}, 0.8f);
-                scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+                (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
             }
             return scene;
         };
@@ -17130,12 +17204,12 @@ void test_gpu_particle_fog_matches_meshes() {
                 scene.sky.turbidity = 3.0f;
                 scene.sky.intensity =
                     0.2f; // the sky's colour (the fog's) under white: a sky colour over 1 saturates, and shows nothing
-                scene.draw_particles(l, std::span<const kin::ParticleSprite3D>{&sp, 1});
+                (void)scene.draw_particles(l, std::span<const kin::ParticleSprite3D>{&sp, 1});
                 if (with_mesh) {
                     // The same colour as a mesh, as small, at the same height and distance, on the other side of the
                     // view's middle.
-                    scene.draw(box, Mat4f::translation(mirrored) * Mat4f::scaling({1.0f, 1.0f, 0.01f}),
-                               {.color = wall_colour, .unlit = true});
+                    (void)scene.draw(box, Mat4f::translation(mirrored) * Mat4f::scaling({1.0f, 1.0f, 0.01f}),
+                                     {.color = wall_colour, .unlit = true});
                 }
                 return scene;
             };
@@ -17200,7 +17274,7 @@ void test_gpu_particle_light_tint() {
             look.texture = white;
             look.lit = lit;
             const kin::ParticleSprite3D s = sprite({0.0f, 0.0f, -4.0f}, 3.0f, colour, 1.0f);
-            scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
+            (void)scene.draw_particles(look, std::span<const kin::ParticleSprite3D>{&s, 1});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p.at(80, 60);
@@ -17267,7 +17341,7 @@ void test_gpu_particle_flipbook() {
                 sprite({-1.5f + static_cast<float>(i), 0.0f, -4.0f}, 0.8f, {1, 1, 1}, 1.0f);
             s[static_cast<std::size_t>(i)].frame = static_cast<float>(i);
         }
-        scene.draw_particles(look, s);
+        (void)scene.draw_particles(look, s);
         Pixels p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         const Color want[4] = {Color::rgb(255, 0, 0), Color::rgb(0, 255, 0), Color::rgb(0, 0, 255),
@@ -17288,7 +17362,7 @@ void test_gpu_particle_flipbook() {
             m[static_cast<std::size_t>(i)].frame = 0.25f + 0.25f * static_cast<float>(i);
         }
         scene.clear();
-        scene.draw_particles(mixed, m);
+        (void)scene.draw_particles(mixed, m);
         p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         Color c[3];
@@ -17632,7 +17706,7 @@ void test_gpu_particle_budget() {
         }
         kin::Scene3D scene = particle_scene();
         kin::ParticleLook3D look; // alpha, sorted: the costly kind
-        scene.draw_particles(look, sprites);
+        (void)scene.draw_particles(look, sprites);
         double total = 0.0, worst = 0.0;
         Pixels p;
         for (int frame = 0; frame < 12; ++frame) {
@@ -17684,7 +17758,7 @@ void test_gpu_taa_live_transparency() {
             custom =
                 r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
                     .value_or({});
-        for (int mode = 0; mode < 5; ++mode) {
+        for (int mode = 0; mode < 6; ++mode) {
             if (mode == 4 && !custom)
                 continue;
             auto accumulated = r3d.create_view({160, 120}).value_or({});
@@ -17697,16 +17771,24 @@ void test_gpu_taa_live_transparency() {
                 scene.lights.sun.color = {};
                 scene.lights.ambient = {1, 1, 1};
                 scene.taa = {.enabled = true, .blend = .98f};
-                scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
+                (void)scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
                 // Unrelated motion used to reject every transparent pixel.
-                scene.draw(box, Mat4f::translation({-3, .1f * frame, 1}), {.unlit = true});
-                if (mode < 3) {
+                (void)scene.draw(box, Mat4f::translation({-3, .1f * frame, 1}), {.unlit = true});
+                if (mode < 3 || mode == 5) {
                     kin::ParticleLook3D l;
                     l.texture = checker;
-                    l.blend = static_cast<kin::ParticleBlend3D>(mode);
+                    l.blend = static_cast<kin::ParticleBlend3D>(mode == 5 ? 0 : mode);
+                    if (mode == 5) {
+                        // Summit's smoke sees fire lights whose energy flickers every frame.
+                        l.lit = 1;
+                        scene.lights.ambient = {.2f, .2f, .2f};
+                        scene.lights.sun.color = {.1f + .002f * float(frame % 3), .1f, .1f};
+                        scene.lights.points.push_back(
+                            {.position = {0, 1, 3}, .color = {3 + .03f * float(frame % 2), 1, .5f}, .radius = 8});
+                    }
                     auto p = sprite({.1f + .01f * frame, 0, 1}, 2, {.7f, .7f, .7f}, .7f);
                     p.id = 7;
-                    scene.draw_particles(l, std::span{&p, 1}, 19);
+                    (void)scene.draw_particles(l, std::span{&p, 1}, 19);
                 } else {
                     kin::Material3D m{.unlit = true, .blend = kin::Blend3D::Alpha, .texture = checker};
                     m.color.a = 180;
@@ -17715,10 +17797,10 @@ void test_gpu_taa_live_transparency() {
                         m.blend = kin::Blend3D::Opaque;
                         m.shader_params[4] = 1;
                     }
-                    scene.draw(box,
-                               Mat4f::translation({.1f + .01f * frame, 0, 1}) * Mat4f::rotation_z(15) *
-                                   Mat4f::scaling({2, 2, .1f}),
-                               m);
+                    (void)scene.draw(box,
+                                     Mat4f::translation({.1f + .01f * frame, 0, 1}) * Mat4f::rotation_z(15) *
+                                         Mat4f::scaling({2, 2, .1f}),
+                                     m);
                 }
                 const auto actual = shoot_view(renderer, r3d, accumulated, scene);
                 if (mode == 4)
@@ -17743,10 +17825,10 @@ void test_gpu_taa_live_transparency() {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0, 0, 6}, {0, 0, 0}, 60);
             scene.taa = {.enabled = true, .blend = .98f};
-            scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.unlit = true, .texture = checker});
+            (void)scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.unlit = true, .texture = checker});
             auto p = sprite({frame < 24 ? -.7f : .7f, 0, 1}, .8f, {1, .1f, .05f}, .7f);
             p.id = 42;
-            scene.draw_particles({}, std::span{&p, 1}, 73);
+            (void)scene.draw_particles({}, std::span{&p, 1}, 73);
             const auto actual = shoot_view(renderer, r3d, accumulated, scene);
             renderer.present();
             scene.taa.blend = 0;
@@ -17813,13 +17895,13 @@ void test_gpu_taa_transient_effects() {
                         scene.taa = {
                             .enabled = true, .blend = .98f, .sharpness = 0, .jitter_scale = jittered ? 1.0f : 0.0f};
                         if (mode != 13)
-                            scene.draw(box, Mat4f::translation({0, 0, -1}) * Mat4f::scaling({12, 8, .2f}),
-                                       {.color = checker_backdrop ? kin::colors::white : Color::rgb(60, 80, 100),
-                                        .unlit = true,
-                                        .texture = checker_backdrop ? checker : kin::Texture{}});
+                            (void)scene.draw(box, Mat4f::translation({0, 0, -1}) * Mat4f::scaling({12, 8, .2f}),
+                                             {.color = checker_backdrop ? kin::colors::white : Color::rgb(60, 80, 100),
+                                              .unlit = true,
+                                              .texture = checker_backdrop ? checker : kin::Texture{}});
                         if (invisible)
-                            scene.draw(box, Mat4f::rotation_z(.3f) * Mat4f::scaling({.08f, 4, .1f}),
-                                       {.color = kin::colors::white, .unlit = true});
+                            (void)scene.draw(box, Mat4f::rotation_z(.3f) * Mat4f::scaling({.08f, 4, .1f}),
+                                             {.color = kin::colors::white, .unlit = true});
                         if (mode == 4) {
                             scene.lights.sun.color = {1, 1, 1};
                             scene.ambient_occlusion.enabled = true;
@@ -17832,8 +17914,8 @@ void test_gpu_taa_transient_effects() {
                         if (mode == 15) {
                             auto& overlay = scene.overlay();
                             overlay.camera = scene.camera;
-                            overlay.draw(box, Mat4f::translation({-5, 0, 0}) * Mat4f::scaling({10, 20, .2f}),
-                                         {.color = Color::rgb(20, 100, 160), .unlit = true});
+                            (void)overlay.draw(box, Mat4f::translation({-5, 0, 0}) * Mat4f::scaling({10, 20, .2f}),
+                                               {.color = Color::rgb(20, 100, 160), .unlit = true});
                         }
                         const float x = mode == 14 || mode == 17 ? 0
                                         : mode >= 18             ? -1.1f + .06f * float(frame)
@@ -17863,12 +17945,12 @@ void test_gpu_taa_transient_effects() {
                                 look.texture = changing;
                             if (mode == 3)
                                 look.facing = kin::ParticleFacing3D::Stretched;
-                            scene.draw_particles(look, std::span{&p, 1});
+                            (void)scene.draw_particles(look, std::span{&p, 1});
                             if (mode == 19) {
                                 p.position = {-x, .1f, -.25f};
                                 p.colour = {.1f, .8f, .3f};
                                 look.blend = kin::ParticleBlend3D::Additive;
-                                scene.draw_particles(look, std::span{&p, 1});
+                                (void)scene.draw_particles(look, std::span{&p, 1});
                             }
                         }
                         if (mode == 6) {
@@ -17890,8 +17972,8 @@ void test_gpu_taa_transient_effects() {
                             if (mode == 9)
                                 material.blend = kin::Blend3D::Additive;
                             material.wireframe = mode == 18;
-                            scene.draw(box, Mat4f::translation({x, 0, .2f}) * Mat4f::scaling({.8f, .8f, .1f}),
-                                       material);
+                            (void)scene.draw(box, Mat4f::translation({x, 0, .2f}) * Mat4f::scaling({.8f, .8f, .1f}),
+                                             material);
                         }
                         return scene;
                     };
@@ -17994,14 +18076,14 @@ kin::Scene3D particle_shadow_scene(const kin::Mesh3D& box, const kin::Texture& w
         light.shadow_enabled = true;
         scene.lights.points.push_back(light);
     }
-    scene.draw(box, Mat4f::translation({-1.5f, caster_y, -4}) * Mat4f::scaling({.25f, 1.2f, 1.0f}),
-               {.color = kin::colors::black, .unlit = true, .casts_shadow = casts, .receives_shadow = false});
+    (void)scene.draw(box, Mat4f::translation({-1.5f, caster_y, -4}) * Mat4f::scaling({.25f, 1.2f, 1.0f}),
+                     {.color = kin::colors::black, .unlit = true, .casts_shadow = casts, .receives_shadow = false});
     if (look.soft)
-        scene.draw(box, Mat4f::translation({0, 0, -5}) * Mat4f::scaling({20, 20, .1f}),
-                   {.color = kin::colors::black, .unlit = true, .casts_shadow = false});
+        (void)scene.draw(box, Mat4f::translation({0, 0, -5}) * Mat4f::scaling({20, 20, .1f}),
+                         {.color = kin::colors::black, .unlit = true, .casts_shadow = false});
     look.texture = white;
     auto p = sprite({0, 0, -4}, 1.4f, {.7f, .6f, .5f}, .8f);
-    scene.draw_particles(look, std::span{&p, 1});
+    (void)scene.draw_particles(look, std::span{&p, 1});
     return scene;
 }
 
@@ -18206,7 +18288,7 @@ void test_gpu_particle_local_lights() {
                         kin::ParticleLook3D look;
                         look.lit = lit;
                         look.texture = white;
-                        scene.draw_particles(look, std::span{&p, 1});
+                        (void)scene.draw_particles(look, std::span{&p, 1});
                         const auto actual = shoot_view(renderer, r3d, view, scene);
                         renderer.present();
                         auto tint = kin::particle_light_tint(scene.lights);
@@ -18253,7 +18335,7 @@ void test_gpu_particle_local_lights() {
             auto p = sprite({0, 0, -4}, 1.5f, {.7f, .7f, .7f}, 1);
             kin::ParticleLook3D look;
             look.lit = 1;
-            scene.draw_particles(look, std::span{&p, 1});
+            (void)scene.draw_particles(look, std::span{&p, 1});
             scene.taa = {.enabled = true, .blend = 0};
             const auto expected = shoot_view(renderer, r3d, current, scene);
             renderer.present();
@@ -18328,8 +18410,8 @@ void test_gpu_custom_feature_interactions() {
                     scene.ambient_occlusion.enabled = mode == 4;
                     scene.contact_shadows.enabled = mode == 4;
                     scene.taa.enabled = temporal;
-                    scene.draw(box, Mat4f::translation({0, -.4f, 0}) * Mat4f::scaling({12, .2f, 12}),
-                               {.color = Color::rgb(110, 120, 130), .roughness = .8f});
+                    (void)scene.draw(box, Mat4f::translation({0, -.4f, 0}) * Mat4f::scaling({12, .2f, 12}),
+                                     {.color = Color::rgb(110, 120, 130), .roughness = .8f});
                     for (int i = 0; i < 4; ++i) {
                         kin::Material3D material{.color = Color::rgba(120 + 20 * i, 150, 180, mode == 5 ? 140 : 255),
                                                  .metallic = .15f,
@@ -18345,9 +18427,9 @@ void test_gpu_custom_feature_interactions() {
                             material.shader = shader;
                             material.shader_params[0] = material.shader_params[1] = material.shader_params[2] = 1;
                         }
-                        scene.draw(box,
-                                   Mat4f::translation({-1.5f + i, .4f, .2f * i}) * Mat4f::scaling({.8f, 1.4f, .6f}),
-                                   material);
+                        (void)scene.draw(
+                            box, Mat4f::translation({-1.5f + i, .4f, .2f * i}) * Mat4f::scaling({.8f, 1.4f, .6f}),
+                            material);
                     }
                     if (mode == 6) {
                         auto& overlay = scene.overlay();
@@ -18357,7 +18439,8 @@ void test_gpu_custom_feature_interactions() {
                             material.shader = shader;
                             material.shader_params[0] = material.shader_params[1] = material.shader_params[2] = 1;
                         }
-                        overlay.draw(box, Mat4f::translation({1, -.4f, 3}) * Mat4f::scaling({.3f, .4f, .4f}), material);
+                        (void)overlay.draw(box, Mat4f::translation({1, -.4f, 3}) * Mat4f::scaling({.3f, .4f, .4f}),
+                                           material);
                     }
                     return scene;
                 };
@@ -18389,7 +18472,7 @@ void test_gpu_custom_feature_interactions() {
         material.shader_params[0] = .2f;
         material.shader_params[1] = .6f;
         material.shader_params[2] = .3f;
-        scene.draw(box, Mat4f::translation({0, 0, -4}) * Mat4f::scaling({5, 5, 1}), material);
+        (void)scene.draw(box, Mat4f::translation({0, 0, -4}) * Mat4f::scaling({5, 5, 1}), material);
         const auto clear = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         scene.fog = {.enabled = true, .density = .2f};
@@ -18404,7 +18487,7 @@ void test_gpu_custom_feature_interactions() {
             material.texture = mask ? cutout : kin::Texture{};
             material.blend = mask ? kin::Blend3D::Mask : kin::Blend3D::Opaque;
             material.alpha_cutoff = mask ? .5f : 0;
-            scene.draw(box, Mat4f::translation({0, 0, -4}) * Mat4f::scaling({5, 5, 1}), material);
+            (void)scene.draw(box, Mat4f::translation({0, 0, -4}) * Mat4f::scaling({5, 5, 1}), material);
             scene.fog.enabled = false;
             const auto plain = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -18428,10 +18511,10 @@ void test_gpu_sky_restores_mesh_uniforms() {
             scene.lights.sun.color = {};
             scene.lights.ambient = {};
             scene.fog = {.enabled = fog, .density = .03f};
-            scene.draw(box, Mat4f::translation({0, 0, -8}) * Mat4f::scaling({20, 20, .2f}),
-                       {.color = Color::rgb(30, 40, 50), .unlit = true});
-            scene.draw(box, Mat4f::translation({0, 0, -4}) * Mat4f::scaling({2, 2, .2f}),
-                       {.color = Color::rgba(200, 80, 40, 160), .unlit = true, .blend = kin::Blend3D::Alpha});
+            (void)scene.draw(box, Mat4f::translation({0, 0, -8}) * Mat4f::scaling({20, 20, .2f}),
+                             {.color = Color::rgb(30, 40, 50), .unlit = true});
+            (void)scene.draw(box, Mat4f::translation({0, 0, -4}) * Mat4f::scaling({2, 2, .2f}),
+                             {.color = Color::rgba(200, 80, 40, 160), .unlit = true, .blend = kin::Blend3D::Alpha});
             const auto plain = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             scene.sky.enabled = true;
@@ -18456,9 +18539,9 @@ void test_gpu_particles_taa_and_msaa() {
             scene.camera = kin::Camera3D::look_at({0.0f, 1.5f, 5.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
             scene.lights.sun = {.direction = {0.4f, 1.0f, 0.5f}, .color = {1.0f, 1.0f, 1.0f}};
             scene.lights.ambient = {0.2f, 0.2f, 0.25f};
-            scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({10.0f, 0.2f, 10.0f}),
-                       {.color = Color::rgb(180, 180, 170)});
-            scene.draw(box, Mat4f::translation({-0.8f, 0.5f, 0.0f}), {.color = Color::rgb(200, 70, 60)});
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({10.0f, 0.2f, 10.0f}),
+                             {.color = Color::rgb(180, 180, 170)});
+            (void)scene.draw(box, Mat4f::translation({-0.8f, 0.5f, 0.0f}), {.color = Color::rgb(200, 70, 60)});
             std::vector<kin::ParticleSprite3D> sprites;
             for (int i = 0; i < 40; ++i) {
                 sprites.push_back(
@@ -18470,7 +18553,7 @@ void test_gpu_particles_taa_and_msaa() {
             look.soft = soft;
             look.soft_distance = 0.4f;
             if (with_particles) {
-                scene.draw_particles(look, sprites);
+                (void)scene.draw_particles(look, sprites);
             }
             scene.taa.enabled = taa;
             return scene;
@@ -18542,8 +18625,8 @@ void test_gpu_particles_leave_skinned_alone() {
             kin::Scene3D scene;
             scene.camera = skin_camera(false);
             skin_lights(scene, 1);
-            scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
-            scene.draw_skinned(rig.mesh, rig.matrices(30.0f, 30.0f), Mat4f::translation({-1.0f, 0.0f, 0.0f}));
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw_skinned(rig.mesh, rig.matrices(30.0f, 30.0f), Mat4f::translation({-1.0f, 0.0f, 0.0f}));
             if (particles) {
                 // Sprites at the far right, away from the tube.
                 std::vector<kin::ParticleSprite3D> sprites;
@@ -18552,7 +18635,7 @@ void test_gpu_particles_leave_skinned_alone() {
                         sprite({3.0f + 0.05f * static_cast<float>(i), 1.0f + 0.03f * static_cast<float>(i), 0.0f}, 0.4f,
                                {1.0f, 0.3f, 0.2f}, 0.5f));
                 }
-                scene.draw_particles(kin::ParticleLook3D{}, sprites);
+                (void)scene.draw_particles(kin::ParticleLook3D{}, sprites);
             }
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -18588,7 +18671,7 @@ void test_gpu_pick_before_render_and_after_resize() {
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-        scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 7);
+        (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 7);
         setenv("KIN_POISON_TEXTURES", "1", 1);
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
         unsetenv("KIN_POISON_TEXTURES");
@@ -18640,7 +18723,7 @@ void test_gpu_taa_remade_mesh_has_no_past() {
             // A turned block, so that its edges cross pixels at every fraction.
             const auto shoot = [&](kin::View3D& target, const kin::Mesh3D& mesh, float x) {
                 scene.clear();
-                scene.draw(mesh, Mat4f::translation({x, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f), white);
+                (void)scene.draw(mesh, Mat4f::translation({x, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f), white);
                 Pixels p = shoot_view(renderer, r3d, target, scene);
                 renderer.present();
                 return p;
@@ -18687,8 +18770,8 @@ void test_gpu_occlusion_without_world_clusters_is_quiet() {
             kin::Scene3D& gun = scene.overlay();
             gun.camera = kin::Camera3D::look_at({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, 50.0f);
             gun.lod = {.enabled = true, .error_pixels = 0.1f};
-            gun.draw(room.ball, Mat4f::translation({0.35f, -0.25f, -1.2f}) * Mat4f::scaling({0.3f, 0.3f, 0.3f}),
-                     {.color = Color::rgb(230, 90, 60)});
+            (void)gun.draw(room.ball, Mat4f::translation({0.35f, -0.25f, -1.2f}) * Mat4f::scaling({0.3f, 0.3f, 0.3f}),
+                           {.color = Color::rgb(230, 90, 60)});
             scene.lod = {.enabled = true, .occlusion = {.enabled = true}};
             shoot_view(renderer, r3d, view, scene);
             renderer.present();
@@ -18820,8 +18903,8 @@ void test_gpu_fog_over_image_sky() {
                      .height_falloff = 0.1f,
                      .colour = {0.1f, 0.6f, 0.1f},
                      .colour_from_sky = true};
-        scene.draw(box, Mat4f::translation({-3.0f, 0.0f, 10.0f}) * Mat4f::scaling({4.0f, 8.0f, 1.0f}),
-                   {.color = Color::rgb(200, 30, 30), .unlit = true});
+        (void)scene.draw(box, Mat4f::translation({-3.0f, 0.0f, 10.0f}) * Mat4f::scaling({4.0f, 8.0f, 1.0f}),
+                         {.color = Color::rgb(200, 30, 30), .unlit = true});
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         assert(r3d.debug_stats().sky_drawn && r3d.debug_stats().fog_applied);
@@ -18967,8 +19050,8 @@ void test_gpu_fog_table_follows_the_sky() {
                          .colour_from_sky = true,
                          .sun_scatter = 0.05f,
                          .sun_anisotropy = 0.6f};
-            scene.draw(box, Mat4f::translation({0.0f, 2.0f, -200.5f}) * Mat4f::scaling({8000.0f, 8000.0f, 1.0f}),
-                       {.color = Color::rgb(200, 30, 30), .unlit = true});
+            (void)scene.draw(box, Mat4f::translation({0.0f, 2.0f, -200.5f}) * Mat4f::scaling({8000.0f, 8000.0f, 1.0f}),
+                             {.color = Color::rgb(200, 30, 30), .unlit = true});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             assert(r3d.debug_stats().fog_applied);
@@ -19081,10 +19164,10 @@ void test_gpu_local_shadows_ignore_normal_maps() {
                         kin::Camera3D::look_at({0.0f, 6.0f, 0.7f}, {0.0f, 0.0f, 0.7f}, 40.0f, {0.0f, 0.0f, -1.0f});
                     scene.lights.sun.color = {};
                     scene.lights.ambient = {};
-                    scene.draw(floor, Mat4f{},
-                               {.color = Color::rgb(220, 220, 220), .roughness = 1.0f, .normal = reliefs[i]});
-                    scene.draw(ball, Mat4f::translation({0.0f, 1.0f, 0.0f}),
-                               {.color = kin::colors::black, .unlit = true});
+                    (void)scene.draw(floor, Mat4f{},
+                                     {.color = Color::rgb(220, 220, 220), .roughness = 1.0f, .normal = reliefs[i]});
+                    (void)scene.draw(ball, Mat4f::translation({0.0f, 1.0f, 0.0f}),
+                                     {.color = kin::colors::black, .unlit = true});
                     if (moon) {
                         scene.lights.fill = {.direction = normalize(Vec3f{0.0f, 4.0f, -2.0f}),
                                              .color = {1.2f, 1.2f, 1.2f}};
@@ -19139,7 +19222,7 @@ void test_gpu_hdr_edges_over_transparent() {
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 5.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
         // 0.05 linear, 0.2 exposed; its left edge through the middle, 20 degrees off upright.
-        scene.draw(
+        (void)scene.draw(
             box, Mat4f::rotation_z(20.0f) * Mat4f::translation({1.5f, 0.0f, 0.0f}) * Mat4f::scaling({3.0f, 6.0f, 0.2f}),
             {.color = Color::rgb(63, 63, 63), .unlit = true});
         const auto over = [&](Color under) {
@@ -19209,8 +19292,8 @@ void test_gpu_environment_nan_texels() {
             scene.lights.ambient = {0.0f, 0.0f, 0.0f};
             scene.lights.environment = r3d.create_environment(size, sky).value_or({});
             assert(scene.lights.environment.valid());
-            scene.draw(sphere, Mat4f::identity(),
-                       {.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
+            (void)scene.draw(sphere, Mat4f::identity(),
+                             {.color = Color::rgb(255, 255, 255), .metallic = 1.0f, .roughness = roughness});
             Pixels p = shoot_view(renderer, r3d, view, scene);
             renderer.present();
             return p;
@@ -19266,8 +19349,8 @@ void test_gpu_retained_two_views_two_colours() {
         a.camera = kin::Camera3D::look_at({0, 0, 9}, {}, 60);
         b.camera = kin::Camera3D::look_at({1, 2, 8}, {}, 60);
         b.lights.sun.direction = {0.3f, 1, 0.5f};
-        a.draw_instanced(batch, red);
-        b.draw_instanced(batch, blue);
+        (void)a.draw_instanced(batch, red);
+        (void)b.draw_instanced(batch, blue);
         constexpr kin::u64 table = 96 * 128;
         Pixels left_picture, right_picture;
         for (int frame = 0; frame < 6; ++frame) {
@@ -19298,8 +19381,8 @@ void test_gpu_retained_two_views_two_colours() {
         streamed_a.camera = a.camera;
         streamed_b.camera = b.camera;
         streamed_b.lights = b.lights;
-        streamed_a.draw_instanced(box, copies, red);
-        streamed_b.draw_instanced(box, copies, blue);
+        (void)streamed_a.draw_instanced(box, copies, red);
+        (void)streamed_b.draw_instanced(box, copies, blue);
         const Pixels want_left = shoot_view(renderer, r3d, reference, streamed_a);
         renderer.present();
         const Pixels want_right = shoot_view(renderer, r3d, reference, streamed_b);
@@ -19330,8 +19413,8 @@ void test_gpu_retained_release_without_wait() {
                     .value_or({}));
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.5f, 1, 9}, {}, 60);
-            scene.draw_instanced(ground, material);
-            scene.draw_instanced(streamed.back(), material);
+            (void)scene.draw_instanced(ground, material);
+            (void)scene.draw_instanced(streamed.back(), material);
             last = shoot_view(renderer, r3d, view, scene);
             const auto st = r3d.debug_stats();
             assert(st.device_waits == 0);
@@ -19341,8 +19424,8 @@ void test_gpu_retained_release_without_wait() {
             if (frame == 7) {
                 kin::Scene3D copies;
                 copies.camera = scene.camera;
-                copies.draw_instanced(box, ground.instances(), material);
-                copies.draw_instanced(box, streamed.back().instances(), material);
+                (void)copies.draw_instanced(box, ground.instances(), material);
+                (void)copies.draw_instanced(box, streamed.back().instances(), material);
                 assert(shoot_view(renderer, r3d, reference, copies).rgba == last.rgba);
                 renderer.present();
             }
@@ -19350,7 +19433,7 @@ void test_gpu_retained_release_without_wait() {
         streamed.clear();
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.5f, 1, 9}, {}, 60);
-        scene.draw_instanced(ground, material);
+        (void)scene.draw_instanced(ground, material);
         shoot_view(renderer, r3d, view, scene);
         assert(r3d.debug_stats().device_waits == 0 && r3d.debug_stats().retained_gpu_bytes == table &&
                r3d.debug_stats().retained_upload_bytes == 0);
@@ -19385,12 +19468,12 @@ void test_gpu_retained_eviction() {
                 scene.camera = kin::Camera3D::look_at({0, 0, 9}, {}, 60);
                 if (smalls)
                     for (kin::u32 i = 0; i < (stale ? 128u : 129u); ++i)
-                        scene.draw_instanced(small[i], material);
+                        (void)scene.draw_instanced(small[i], material);
                 if (news)
                     for (const auto& b : fresh)
-                        scene.draw_instanced(b, material);
+                        (void)scene.draw_instanced(b, material);
                 if (large)
-                    scene.draw_instanced(big, material);
+                    (void)scene.draw_instanced(big, material);
                 const Pixels picture = shoot_view(renderer, r3d, view, scene);
                 const auto st = r3d.debug_stats();
                 assert(st.device_waits == 0);
@@ -19412,8 +19495,8 @@ void test_gpu_retained_eviction() {
                 kin::Scene3D copies;
                 copies.camera = kin::Camera3D::look_at({0, 0, 9}, {}, 60);
                 for (const auto& b : small)
-                    copies.draw_instanced(box, b.instances(), material);
-                copies.draw_instanced(box, big.instances(), material);
+                    (void)copies.draw_instanced(box, b.instances(), material);
+                (void)copies.draw_instanced(box, big.instances(), material);
                 assert(shoot_view(renderer, r3d, reference, copies).rgba == picture.rgba);
                 renderer.present();
             } else {
@@ -19493,8 +19576,8 @@ void test_gpu_local_array_sized_by_mapped_lights() {
             scene.camera = kin::Camera3D::look_at({0, 6, 12}, {0, 0, 0}, 60);
             scene.camera.z_far = 60;
             scene.lights.local_shadow_resolution = 256;
-            scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
-            scene.draw(box, Mat4f::translation({0, 0.5f, 0}));
+            (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+            (void)scene.draw(box, Mat4f::translation({0, 0.5f, 0}));
             kin::SpotLightSource3D near{
                 .position = {0, 6, 0}, .direction = {0, -1, 0}, .color = {20, 20, 20}, .radius = 15};
             near.shadow_enabled = true;
@@ -19590,12 +19673,12 @@ void test_gpu_retained_partial_uploads() {
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.3f, 0.2f, 9}, {}, 60);
         scene.lights.sun.direction = {0.3f, 1, 0.6f};
-        scene.draw_instanced(batch, material);
+        (void)scene.draw_instanced(batch, material);
         const auto streamed = [&] {
             kin::Scene3D copies;
             copies.camera = scene.camera;
             copies.lights = scene.lights;
-            copies.draw_instanced(box, current, material);
+            (void)copies.draw_instanced(box, current, material);
             const Pixels p = shoot_view(renderer, r3d, reference, copies);
             renderer.present();
             return p;
@@ -19607,7 +19690,7 @@ void test_gpu_retained_partial_uploads() {
                     Mat4f::translation({current[i].transform.m[12], current[i].transform.m[13], 0.6f}) *
                     Mat4f::rotation_y(float(seed + e));
                 current[i].tint = Color::rgb(kin::u8(40 * seed), 255, kin::u8(5 * e));
-                batch.update(i, {&current[i], 1});
+                assert(batch.update(i, {&current[i], 1}));
             }
         };
         Pixels p = shoot_view(renderer, r3d, first, scene);
@@ -19705,8 +19788,8 @@ void test_gpu_compressed_texture() {
 
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-            scene.draw(near_quad, Mat4f::identity(), {.unlit = true, .texture = texture});
-            scene.draw(speck, Mat4f::translation({1.6f, 0.9f, 0.0f}), {.unlit = true, .texture = texture});
+            (void)scene.draw(near_quad, Mat4f::identity(), {.unlit = true, .texture = texture});
+            (void)scene.draw(speck, Mat4f::translation({1.6f, 0.9f, 0.0f}), {.unlit = true, .texture = texture});
             const Pixels p = shoot_view(renderer, r3d, view, scene);
             const auto at = [&](Vec3f w) { return p.at(scene.camera.project(w, screen)->pos); };
             const char* space = linear ? " (linear)" : " (gamma)";
@@ -19848,7 +19931,7 @@ void test_gpu_compressed_texture_files() {
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
-        scene.draw(*model, Mat4f::identity());
+        (void)scene.draw(*model, Mat4f::identity());
         const Pixels p = shoot_view(renderer, r3d, view, scene);
         expect(p.at(scene.camera.project({0.2f, -0.1f, 0.0f}, screen)->pos),
                Color::rgb(expanded[0], expanded[1], expanded[2]), "the glTF's KTX2 base colour", 2);
@@ -19869,7 +19952,7 @@ void test_gpu_public_stats_and_debug_readback() {
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0, 3, 6}, {}, 60);
         scene.lod = {.enabled = true, .error_pixels = 1};
-        scene.draw(mesh, Mat4f::identity());
+        (void)scene.draw(mesh, Mat4f::identity());
         const Pixels without_readback = shoot_view(renderer, r3d, view, scene);
         assert(r3d.debug_stats().cluster_gpu && !r3d.stats().triangles_complete);
         const auto& summary = r3d.stats();
@@ -20024,7 +20107,7 @@ void test_gpu_default_ecs_path() {
             revision = batch.revision();
             kin::Scene3D plain;
             plain.camera = scene.camera;
-            plain.draw_instanced(mesh, batch.instances(), material);
+            (void)plain.draw_instanced(mesh, batch.instances(), material);
             const auto image = shoot_view(renderer, r3d, view, scene);
             const auto stats = r3d.debug_stats();
             const auto want = shoot_view(renderer, reference, truth, plain);
@@ -20076,14 +20159,16 @@ void test_gpu_resubmitted_layout() {
             const auto& mesh = frame == 4 ? other : box;
             const auto mat =
                 kin::Material3D{.color = frame % 2 ? Color::rgb(240, 70, 30) : Color::rgb(50, 210, 180), .unlit = true};
-            scene.draw(mesh, Mat4f::translation({float(frame) * 0.02f, 0, 0}), mat, kin::colors::white, 10 + frame);
+            (void)scene.draw(mesh, Mat4f::translation({float(frame) * 0.02f, 0, 0}), mat, kin::colors::white,
+                             10 + frame);
             if (frame == 6)
-                scene.draw(box, Mat4f::translation({2, 0, 0}), mat, kin::colors::white, 90);
+                (void)scene.draw(box, Mat4f::translation({2, 0, 0}), mat, kin::colors::white, 90);
             kin::Scene3D fresh;
             fresh.camera = scene.camera;
-            fresh.draw(mesh, Mat4f::translation({float(frame) * 0.02f, 0, 0}), mat, kin::colors::white, 10 + frame);
+            (void)fresh.draw(mesh, Mat4f::translation({float(frame) * 0.02f, 0, 0}), mat, kin::colors::white,
+                             10 + frame);
             if (frame == 6)
-                fresh.draw(box, Mat4f::translation({2, 0, 0}), mat, kin::colors::white, 90);
+                (void)fresh.draw(box, Mat4f::translation({2, 0, 0}), mat, kin::colors::white, 90);
             const auto image = shoot_view(renderer, r3d, view, scene);
             const auto stats = r3d.debug_stats();
             assert(image.rgba == shoot_view(renderer, reference, truth, fresh).rgba);

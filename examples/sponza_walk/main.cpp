@@ -864,7 +864,8 @@ public:
             if (key.size != _key.size && key.samples == _key.samples && key.background == _key.background &&
                 key.hdr == _key.hdr && key.exposure == _key.exposure && key.bloom == _key.bloom &&
                 key.threshold == _key.threshold) {
-                _r3d->resize(_view, key.size);
+                if (auto result = _r3d->resize(_view, key.size); !result)
+                    throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
             } else {
                 _view = _r3d->create_view(key.size, view_options(key)).value_or({});
             }
@@ -877,7 +878,8 @@ public:
         update_physics(dt);
         fill_scene();
         warm_up_features();
-        _r3d->render(_view, _scene);
+        if (auto result = _r3d->render(_view, _scene); !result)
+            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
         renderer.clear(Color::rgb(0, 0, 0));
         renderer.draw_texture(_view.texture(), {0.0f, 0.0f, float(out.x), float(out.y)});
         ++_frames;
@@ -1265,11 +1267,13 @@ private:
             _scene.lights.shadow_cascades = max_shadow_cascades;
             if (_caps.clusters)
                 _scene.lod.enabled = _scene.lod.occlusion.enabled = true;
-            _r3d->warm_up(_view, _scene);
+            if (auto result = _r3d->warm_up(_view, _scene); !result)
+                throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
             fill_scene();
         } else if (key != _warmed_key) {
             _warmed_key = key;
-            _r3d->warm_up(_view, _scene);
+            if (auto warmed = _r3d->warm_up(_view, _scene); !warmed)
+                throw std::runtime_error(kin::diagnostics3d_text(warmed.diagnostics));
         }
     }
 
@@ -2089,8 +2093,8 @@ private:
                 continue; // (Sponza has its own floor)
             const Vec3f centre = p.moving ? _physics->position(p.body) : p.centre;
             const Quatf rotation = p.moving ? _physics->rotation(p.body) : p.rotation;
-            _scene.draw(_box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f),
-                        Material3D{.color = colour_of(p.kind), .roughness = 0.85f});
+            (void)_scene.draw(_box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f),
+                              Material3D{.color = colour_of(p.kind), .roughness = 0.85f});
         }
     }
 
@@ -2200,9 +2204,9 @@ private:
             const Quatf rotation = p.moving ? _physics->rotation(p.body) : p.rotation;
             const Material3D m{.color = colour_of(p.kind), .roughness = 0.85f};
             if (p.shape == Shape3DKind::Sphere) {
-                _scene.draw(_ball_mesh, Mat4f::trs(centre, rotation, p.half), m);
+                (void)_scene.draw(_ball_mesh, Mat4f::trs(centre, rotation, p.half), m);
             } else {
-                _scene.draw(_box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), m);
+                (void)_scene.draw(_box_mesh, Mat4f::trs(centre, rotation, p.half * 2.0f), m);
             }
         }
         // The level's platforms move by the physics step: drive them from its clock, one step ahead of the world's.
@@ -2217,9 +2221,9 @@ private:
         _fire_dt = 0.0f;
         for (std::size_t i = 0; i < _fire_systems.size(); ++i) {
             const FireSystems& f = _fire_systems[i];
-            _scene.draw_particles(f.flame);
+            (void)_scene.draw_particles(f.flame);
             if (_s.fire_sparks)
-                _scene.draw_particles(f.sparks);
+                (void)_scene.draw_particles(f.sparks);
             if (_s.fire_light) {
                 const float flicker = 0.8f + 0.2f * std::sin(float(_s.weather_time) * 17.0f + float(i) * 2.1f) *
                                                  std::sin(float(_s.weather_time) * 5.3f);
@@ -2256,7 +2260,7 @@ private:
             if (_s.rope && _bodies)
                 _bodies->collect_ropes(*_r3d, _scene);
             if (_rag_ball.valid() && _physics && _ball_mesh) {
-                _scene.draw(
+                (void)_scene.draw(
                     _ball_mesh,
                     Mat4f::trs(_physics->position(_rag_ball), _physics->rotation(_rag_ball), {0.2f, 0.2f, 0.2f}),
                     Material3D{.color = Color::rgb(230, 80, 60), .roughness = 0.4f});
@@ -2279,26 +2283,26 @@ private:
                         red.color = Color::rgb(255, 40, 30);
                         red.unlit = true;
                         red.casts_shadow = false;
-                        _scene.draw(_marker,
-                                    Mat4f::translation(m.apply(person_hand_target(ik))) * Mat4f::scaling({r, r, r}),
-                                    red);
+                        (void)_scene.draw(
+                            _marker, Mat4f::translation(m.apply(person_hand_target(ik))) * Mat4f::scaling({r, r, r}),
+                            red);
                         if (ik.tail) {
                             Material3D green;
                             green.color = Color::rgb(40, 220, 60);
                             green.unlit = true;
                             green.casts_shadow = false;
-                            _scene.draw(_marker,
-                                        Mat4f::translation(m.apply(person_tail_target(ik))) * Mat4f::scaling({r, r, r}),
-                                        green);
+                            (void)_scene.draw(
+                                _marker,
+                                Mat4f::translation(m.apply(person_tail_target(ik))) * Mat4f::scaling({r, r, r}), green);
                         }
                     }
                     if (_s.ik_step && _s.ik_step_height > 1e-4f) {
                         const float h = _s.ik_step_height;
                         Material3D stone;
                         stone.color = Color::rgb(120, 122, 130);
-                        _scene.draw(_step_mesh,
-                                    m * Mat4f::translation({0.3f, h * 0.5f, 0.0f}) * Mat4f::scaling({0.6f, h, 0.8f}),
-                                    stone);
+                        (void)_scene.draw(
+                            _step_mesh,
+                            m * Mat4f::translation({0.3f, h * 0.5f, 0.0f}) * Mat4f::scaling({0.6f, h, 0.8f}), stone);
                     }
                 }
             }
@@ -2317,9 +2321,9 @@ private:
                 (part.material.blend == Blend3D::Alpha || part.material.blend == Blend3D::Additive))
                 continue;
             if (wire != WireMode::Only)
-                _scene.draw(part.mesh, part.transform, _materials[i]);
+                (void)_scene.draw(part.mesh, part.transform, _materials[i]);
             if (wire != WireMode::Off)
-                _scene.draw(part.mesh, part.transform, _wire_material);
+                (void)_scene.draw(part.mesh, part.transform, _wire_material);
         }
         if (_s.light_markers) {
             for (const PointLightSource3D& l : _s.points) {
@@ -2331,7 +2335,7 @@ private:
                 marker.casts_shadow = false;
                 marker.receives_shadow = false;
                 const float r = std::max(0.04f, l.size);
-                _scene.draw(_marker, Mat4f::translation(l.position) * Mat4f::scaling({r, r, r}), marker);
+                (void)_scene.draw(_marker, Mat4f::translation(l.position) * Mat4f::scaling({r, r, r}), marker);
             }
             for (const SpotLightSource3D& l : _s.spots) {
                 Material3D marker;
@@ -2340,7 +2344,7 @@ private:
                 marker.casts_shadow = false;
                 marker.receives_shadow = false;
                 const float r = std::max(0.05f, l.size);
-                _scene.draw(_marker, Mat4f::translation(l.position) * Mat4f::scaling({r, r, r}), marker);
+                (void)_scene.draw(_marker, Mat4f::translation(l.position) * Mat4f::scaling({r, r, r}), marker);
             }
         }
     }

@@ -99,13 +99,13 @@ bool ExternalAssets::draw(Scene3D& scene, Kind kind, Vec3f feet, float span, flo
                                             .pivot = ModelPivot3D::BottomCenter,
                                             .size = span})
                                 .value_or(Mat4f::identity());
-    scene.draw(model, transform);
+    (void)scene.draw(model, transform);
     return true;
 }
 
 void ExternalAssets::draw_scenery(Scene3D& scene) const {
     for (const auto& batch : _batches)
-        scene.draw_instanced(batch);
+        (void)scene.draw_instanced(batch);
 }
 
 } // namespace summit

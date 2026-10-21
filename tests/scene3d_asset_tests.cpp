@@ -1,3 +1,4 @@
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -391,8 +392,8 @@ void gpu_scene(Renderer2D& renderer) {
     check(near(lamp.get<WorldTransform3D>()->position(), {-4, 2, 0}), "prefab hierarchy transform wrong");
     Scene3D scene;
     scene.camera = Camera3D::look_at({0, 2, 12}, {0, 1, 0}, 60);
-    scene.draw(*model, Mat4f::translation({-4, 0, 0}), colors::white, 71);
-    scene.draw(*model, Mat4f::translation({3, 0, 0}), colors::white, 82);
+    (void)scene.draw(*model, Mat4f::translation({-4, 0, 0}), colors::white, 71);
+    (void)scene.draw(*model, Mat4f::translation({3, 0, 0}), colors::white, 82);
     auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
     const auto reference = image(renderer, r3d, view, scene);
     scene.clear();

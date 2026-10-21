@@ -199,9 +199,13 @@ public:
                 const u32 end = first + static_cast<u32>(batch.instances().size());
                 const u32 begin_edit = std::max(first, _moving_first),
                           end_edit = std::min(end, _moving_first + _options.moving);
-                if (begin_edit < end_edit)
-                    batch.update(begin_edit - first, std::span<const MeshInstance3D>(_moving_copies)
-                                                         .subspan(begin_edit - _moving_first, end_edit - begin_edit));
+                if (begin_edit < end_edit) {
+                    auto updated = batch.update(begin_edit - first,
+                                                std::span<const MeshInstance3D>(_moving_copies)
+                                                    .subspan(begin_edit - _moving_first, end_edit - begin_edit));
+                    if (!updated)
+                        throw std::runtime_error(kin::diagnostics3d_text(updated.diagnostics));
+                }
                 first = end;
             }
         }
@@ -222,13 +226,13 @@ public:
             for (const auto& chunk : _chunks) {
                 const auto& material = _materials.values[chunk.material];
                 if (_options.triangle_stress)
-                    _scene.draw_instanced(chunk.mesh, chunk.copies, material);
+                    (void)_scene.draw_instanced(chunk.mesh, chunk.copies, material);
                 else
-                    _scene.draw(chunk.mesh, chunk.transform, material);
+                    (void)_scene.draw(chunk.mesh, chunk.transform, material);
             }
             if (_options.features.camera == "ground")
-                _dressing.draw(_scene, _options.features.shadows || _options.features.local_shadows,
-                               _options.features.material == "unlit");
+                (void)_dressing.draw(_scene, _options.features.shadows || _options.features.local_shadows,
+                                     _options.features.material == "unlit");
             _scene_ready = true;
         }
         _scene.debug.gpu_pass_markers = _options.gpu_pass_markers;

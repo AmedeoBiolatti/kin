@@ -13,6 +13,10 @@
 using namespace kin;
 
 namespace {
+template <class T>
+concept ContextualBool = requires(T value) { static_cast<bool>(value); };
+static_assert(!ContextualBool<Result3D<bool>>);
+static_assert(ContextualBool<Status3D>);
 Mesh3D mesh(u32 joints = 0) {
     struct Backend final : IMeshBackend3D {};
     return {std::make_shared<Backend>(), 3, 3, {{0, 0, 0}, {1, 1, 1}}, {}, {}, joints};
@@ -88,7 +92,7 @@ void resources() {
     ModelFile3D watcher{renderer, root / "missing.glb"};
     assert(!watcher.model() && watcher.diagnostics().empty()); // construction does no I/O
     const auto first_poll = watcher.poll();
-    assert(!first_poll && !first_poll.value && !first_poll.diagnostics.empty());
+    assert(!first_poll.ok() && !first_poll.value && !first_poll.diagnostics.empty());
     const auto missing_model = assets.load_model("missing.glb");
     assert(!missing_model && !missing_model.value &&
            diagnostics3d_text(missing_model.diagnostics).find("missing.glb") != std::string::npos);
@@ -132,13 +136,15 @@ void resources() {
     assert(!renderer.render(absent, {}) && !renderer.diagnostics().empty());
     auto view = renderer.create_view({32, 32}).value_or({});
     assert(view && renderer.diagnostics().empty());
+    assert(renderer.warm_up(view, {}) && renderer.render(view, {})); // SDL fallback succeeds too
+
     Scene3D invalid;
     Material3D wrong[1];
     Model3D model;
     assert(!invalid.draw(model, {}, colors::white, 0, wrong));
     assert(!renderer.render(view, invalid) && renderer.diagnostics() == invalid.diagnostics());
     invalid.clear();
-    invalid.overlay().draw(model, {}, colors::white, 0, wrong);
+    assert(!invalid.overlay().draw(model, {}, colors::white, 0, wrong));
     assert(!renderer.render(view, invalid) && renderer.diagnostics() == invalid.overlay().diagnostics());
     assert(!renderer.load_environment(root / "missing.hdr").value_or({}) && !renderer.diagnostics().empty());
     assert(!renderer.compile_material_shader(root / "missing.frag").value_or({}) && !renderer.diagnostics().empty());
@@ -157,7 +163,7 @@ void resources() {
     SceneSession3DOptions options;
     options.compose = [&](auto&, Scene3D& destination) {
         if (reject)
-            destination.draw(model, {}, colors::white, 0, wrong);
+            (void)destination.draw(model, {}, colors::white, 0, wrong);
     };
     SceneSession3D session{renderer, assets, options};
     assert(session.load("empty.kinscene"));

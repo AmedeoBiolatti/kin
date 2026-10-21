@@ -429,6 +429,9 @@ void test_interpolation() {
     flecs::world& world = ecs.raw();
     World3D physics(serial());
     WorldPhysicsState3D bodies{ecs, physics};
+    CHECK(!bodies.render_transform(flecs::entity{}, .5f));
+    const auto scenery = world.entity().set(Transform3D{});
+    CHECK(!bodies.render_transform(scenery, .5f)); // walking past a root must not query entity zero
     add_floor(world);
     const flecs::entity crate = add_crate(world, {0, 10, 0});
     for (int i = 0; i < 6; ++i) {

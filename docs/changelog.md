@@ -9,6 +9,23 @@ releases may change APIs.
 
 ### Fixed
 
+- Sample traversal hand IK with moving holds and rendered rope polylines,
+  including rotation and clearance. Preserve manual targets and reset grip
+  history after release, replacement and rollback.
+- Guard root/invalid Flecs entities during interpolation; sample body-parented
+  cameras, ragdoll bones, ropes and IK targets from the same presentation frame.
+  Cache moving subtrees once per collection. Headless SceneApp now supplies alpha 1.
+- Connect stairs with optional `max_step_height` and preserve vertical step points
+  in paths. Propagate navmesh radius clearance from local boundaries.
+- Keep lit-particle TAA history under light colour/intensity flicker. Use hashed
+  particle history matching and compact selected shadow sprites into one draw per
+  source/map, retaining per-map budgets, culling and cache keys.
+- Reject wrong-typed optional Lua arguments. Scope argument checks to 3D bindings,
+  removing the engine-wide sol2 safety define and restoring legacy 2D conversions.
+- Cache failed model-file loads until their source changes. SDL_Renderer 3D
+  fallback rendering/warm-up now succeed. Fix unsafe animation snippets and stale
+  result/error examples; run GPU CI in Debug as well as Release.
+
 - Correct local navmesh erosion on vertically overlapping floors connected by a
   ramp, and boundary-only stair risers in headroom clipping.
 - Restore sleeping-body wakeups after collision-layer/group/filter changes,
@@ -27,6 +44,10 @@ releases may change APIs.
   breaking changes in [the migration guide](3d_api_migration.md).
 
 ### Changed
+
+- `Status3D` is `[[nodiscard]]`; explicitly handle or deliberately discard results.
+  `Result3D<bool>` has no bool conversion: check `.ok()` for success and inspect
+  its payload for change/readback availability.
 
 - **Breaking 3D:** Fallible rendering/loading/binding/session/frame operations use `Result3D<T>`
   and `Status3D`, carrying diagnostics by value. CPU model/navmesh builders
@@ -71,8 +92,7 @@ releases may change APIs.
 
 - Common 3D runtime diagnostics on renderer, asset loading, scene submission and batches. Invalid draw/pose/material
   submissions and batch edits report failure without throwing; scenes retain only their first submission error and
-  reject rendering before GPU work. Additive 3D binding reports through its scene runtime. Legacy output error
-  strings mirror the same diagnostics, while successful loads/operations clear stale failures.
+  reject rendering before GPU work. Additive 3D binding reports through its scene runtime. Returned results own their diagnostics; owner accessors retain inspection snapshots.
   Keep the throwing material-binding builder internal; public material loading uses `Assets3D::load_materials`.
 
 - Non-owning `SceneFrame3D` over an existing ECS/render state and optional physics bridge or raw simulation callback;

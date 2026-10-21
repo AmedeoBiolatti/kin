@@ -79,6 +79,41 @@ Placed decompose(const Mat4f& m) {
 
 Vec3f abs3(Vec3f v) { return {std::fabs(v.x), std::fabs(v.y), std::fabs(v.z)}; }
 
+bool hand_active(const TraversalState3D& traversal, u32 limb) {
+    const auto phase = traversal.grips[limb].phase;
+    const bool reaching = phase == GripPhase3D::Reaching;
+    const bool holding = phase == GripPhase3D::Held || phase == GripPhase3D::Slipping;
+    return (reaching || holding) && !(traversal.mode == TraversalMode3D::Mantling && traversal.mantle_progress > 0.6f);
+}
+
+Quatf hand_rotation(const GripState3D& grip, const CharacterAnimationLink3D& link) {
+    Mat4f m;
+    const Vec3f x = -grip.right, y = grip.surface_up, z = -grip.normal;
+    m.m[0] = x.x;
+    m.m[1] = x.y;
+    m.m[2] = x.z;
+    m.m[4] = y.x;
+    m.m[5] = y.y;
+    m.m[6] = y.z;
+    m.m[8] = z.x;
+    m.m[9] = z.y;
+    m.m[10] = z.z;
+    return quat_of(m, {1, 1, 1}) * link.hand_offset;
+}
+
+void drive_traversal_hand(IKConstraint3D& hand, const TraversalState3D& traversal, const CharacterAnimationLink3D& link,
+                          u32 limb) {
+    if (hand_active(traversal, limb)) {
+        const auto& grip = traversal.grips[limb];
+        hand.set_target(grip.point + grip.normal * link.hand_clearance);
+        if (link.align_hands)
+            hand.set_target_rotation(hand_rotation(grip, link), 1.f);
+        hand.set_weight(1.f);
+    } else {
+        hand.set_weight(0.f);
+    }
+}
+
 // The singleton `S` (events of one kind) made to hold `events`, in place: its vector keeps its room, and the change is announced
 // as set() announces it.
 template <class S, class E>
@@ -486,6 +521,63 @@ void sort_by_id(std::vector<flecs::entity>& v) {
     }
 }
 
+struct ReconciledEntities {
+    std::vector<flecs::entity> to_create;
+    std::size_t retained = 0;
+};
+
+// Both inputs are in entity-id order. Finish every destruction/compaction before
+// the caller creates replacements, so native handle allocation keeps its order.
+// Characters and ragdolls move their history vectors; other records retain their copy semantics.
+template <bool MoveRetained = false, class Bound, class Selected, class Replace, class Destroy>
+ReconciledEntities reconcile_entities(std::vector<Bound>& bound, const std::vector<flecs::entity>& wanted,
+                                      Selected selected, Replace replace, Destroy destroy) {
+    ReconciledEntities result;
+    std::size_t i = 0, j = 0, w = 0;
+    const auto keep = [&](std::size_t from) {
+        if (w != from) {
+            if constexpr (MoveRetained)
+                bound[w] = std::move(bound[from]);
+            else
+                bound[w] = bound[from];
+        }
+        ++w;
+    };
+    while (i < bound.size() || j < wanted.size()) {
+        const bool have_bound = i < bound.size();
+        const bool have_wanted = j < wanted.size();
+        if (have_bound && !selected(bound[i].entity)) {
+            keep(i++);
+            continue;
+        }
+        if (have_bound && (!have_wanted || bound[i].entity < wanted[j].id())) {
+            destroy(bound[i]);
+            ++i;
+        } else if (have_wanted && (!have_bound || wanted[j].id() < bound[i].entity)) {
+            result.to_create.push_back(wanted[j]);
+            ++j;
+        } else {
+            if (replace(bound[i], wanted[j])) {
+                destroy(bound[i]);
+                result.to_create.push_back(wanted[j]);
+            } else {
+                keep(i);
+            }
+            ++i;
+            ++j;
+        }
+    }
+    bound.erase(bound.begin() + static_cast<std::ptrdiff_t>(w), bound.end());
+    result.retained = w;
+    return result;
+}
+
+template <class Bound> void merge_created_entities(std::vector<Bound>& bound, std::size_t retained) {
+    if (bound.size() > retained)
+        std::inplace_merge(bound.begin(), bound.begin() + static_cast<std::ptrdiff_t>(retained), bound.end(),
+                           [](const Bound& a, const Bound& b) { return a.entity < b.entity; });
+}
+
 } // namespace
 
 // Whether the bodies are the bodies the entities ask for, so that there is nothing to make, destroy or rebuild: no entity with a
@@ -562,39 +654,14 @@ void WorldPhysicsState3D::reconcile_bodies() {
 
     // Destroy first (ascending), then create (ascending): the order is a function of the ids only. The bodies that stay are moved
     // down over the ones that went, in place.
-    std::vector<flecs::entity> to_create;
-    std::size_t i = 0, j = 0, w = 0;
-    const auto keep = [&](std::size_t from) {
-        if (w != from) {
-            _bound[w] = _bound[from];
-        }
-        ++w;
-    };
-    while (i < _bound.size() || j < wanted.size()) {
-        const bool have_bound = i < _bound.size();
-        const bool have_wanted = j < wanted.size();
-        if(have_bound&&!sync_selected(_bound[i].entity)){keep(i++);continue;}
-        if (have_bound && (!have_wanted || _bound[i].entity < wanted[j].id())) {
-            _physics.destroy_body(_bound[i].body);
-            ++i;
-        } else if (have_wanted && (!have_bound || wanted[j].id() < _bound[i].entity)) {
-            to_create.push_back(wanted[j]);
-            ++j;
-        } else {
-            // Both: kept, unless asked to be rebuilt or its motion changed.
-            const RigidBody3D* rb = wanted[j].get<RigidBody3D>();
+    auto [to_create, w] = reconcile_entities(
+        _bound, wanted, [&](EcsId id) { return sync_selected(id); },
+        [&](const Bound& b, flecs::entity e) {
+            const RigidBody3D* rb = e.get<RigidBody3D>();
             const Body3DMotion motion = rb != nullptr ? rb->motion : Body3DMotion::Static;
-            if (_bound[i].rebuild || motion != _bound[i].motion || !_physics.contains(_bound[i].body)) {
-                _physics.destroy_body(_bound[i].body);
-                to_create.push_back(wanted[j]);
-            } else {
-                keep(i);
-            }
-            ++i;
-            ++j;
-        }
-    }
-    _bound.erase(_bound.begin() + static_cast<std::ptrdiff_t>(w), _bound.end());
+            return b.rebuild || motion != b.motion || !_physics.contains(b.body);
+        },
+        [&](const Bound& b) { _physics.destroy_body(b.body); });
     // The new ones go after the ones that stayed, each run ascending: merge them into order. Refused ones are left out.
     for (const flecs::entity e : to_create) {
         // Refused before and nothing changed since: the same answer, without cooking the shape and warning at every step.
@@ -610,10 +677,7 @@ void WorldPhysicsState3D::reconcile_bodies() {
             refuse(e.id(), Made::Body, body_stamp(e));
         }
     }
-    if (_bound.size() > w) {
-        std::inplace_merge(_bound.begin(), _bound.begin() + static_cast<std::ptrdiff_t>(w), _bound.end(),
-                           [](const Bound& a, const Bound& b) { return a.entity < b.entity; });
-    }
+    merge_created_entities(_bound, w);
     // Hand the new bodies to their entities as a component.
     for (const flecs::entity e : to_create) {
         const auto found = std::ranges::lower_bound(_bound, e.id(), {}, &Bound::entity);
@@ -652,36 +716,10 @@ void WorldPhysicsState3D::sync_characters() {
     prune_refused(Made::Character, wanted);
 
     // Destroyed first (ascending), then made (ascending), as bodies are.
-    std::vector<flecs::entity> to_create;
-    std::size_t i = 0, j = 0, w = 0;
-    const auto keep = [&](std::size_t from) {
-        if (w != from) {
-            _characters[w] = _characters[from];
-        }
-        ++w;
-    };
-    while (i < _characters.size() || j < wanted.size()) {
-        const bool have_bound = i < _characters.size();
-        const bool have_wanted = j < wanted.size();
-        if(have_bound&&!sync_selected(_characters[i].entity)){keep(i++);continue;}
-        if (have_bound && (!have_wanted || _characters[i].entity < wanted[j].id())) {
-            _physics.destroy_character(_characters[i].character);
-            ++i;
-        } else if (have_wanted && (!have_bound || wanted[j].id() < _characters[i].entity)) {
-            to_create.push_back(wanted[j]);
-            ++j;
-        } else {
-            if (_characters[i].rebuild || !_physics.contains(_characters[i].character)) {
-                _physics.destroy_character(_characters[i].character);
-                to_create.push_back(wanted[j]);
-            } else {
-                keep(i);
-            }
-            ++i;
-            ++j;
-        }
-    }
-    _characters.erase(_characters.begin() + static_cast<std::ptrdiff_t>(w), _characters.end());
+    auto [to_create, w] = reconcile_entities<true>(
+        _characters, wanted, [&](EcsId id) { return sync_selected(id); },
+        [&](const BoundCharacter& c, flecs::entity) { return c.rebuild || !_physics.contains(c.character); },
+        [&](const BoundCharacter& c) { _physics.destroy_character(c.character); });
     for (const flecs::entity e : to_create) {
         if (refused_before(e.id(), Made::Character, _refused.empty() ? 0 : character_stamp(e.get<CharacterController3D>()->desc, decompose(world_matrix(e))))) {
             continue;
@@ -711,10 +749,7 @@ void WorldPhysicsState3D::sync_characters() {
             refuse(e.id(), Made::Character, character_stamp(controller.desc, pose));
         }
     }
-    if (_characters.size() > w) {
-        std::inplace_merge(_characters.begin(), _characters.begin() + static_cast<std::ptrdiff_t>(w), _characters.end(),
-                           [](const BoundCharacter& a, const BoundCharacter& b) { return a.entity < b.entity; });
-    }
+    merge_created_entities(_characters, w);
     for (const flecs::entity e : to_create) {
         const auto found = std::ranges::lower_bound(_characters, e.id(), {}, &BoundCharacter::entity);
         if (found != _characters.end() && found->entity == e.id()) {
@@ -758,6 +793,7 @@ void WorldPhysicsState3D::characters_to_world(f32) {
             _physics.teleport_character(c.character, p.position);
             c.position = c.previous_position = p.position;
             c.last_position = t->position;
+            c.hands.clear();
         }
         _physics.set_character_input(c.character, controller->input);
         if (controller->desc.traversal.enabled) {
@@ -800,16 +836,145 @@ void WorldPhysicsState3D::characters_from_world() {
             }
         }
         // The animator, when the entity has the link.
+        bool sampled_hands = false;
         const CharacterAnimationLink3D* link = e.get<CharacterAnimationLink3D>();
         if (link != nullptr) {
             if (Animator3D* animator = e.get_mut<Animator3D>()) {
                 drive_character_animator(*animator, state, _physics, *link);
                 if (traversal.enabled) {
                     drive_traversal_animator(*animator, traversal, *link, state.up);
+                    sample_hands(c, traversal, *link, *animator);
+                    sampled_hands = true;
                 }
             }
         }
+        if (!sampled_hands) c.hands.clear();
     }
+}
+
+void WorldPhysicsState3D::sample_hands(BoundCharacter& c, const TraversalState3D& traversal,
+                                       const CharacterAnimationLink3D& link, const Animator3D& animator) {
+    c.hands.resize(std::min<std::size_t>(link.hands.size(), max_grip_limbs3d));
+    for (u32 h = 0; h < c.hands.size(); ++h) {
+        auto& history = c.hands[h];
+        const auto* hand = animator.find_ik(link.hands[h]);
+        const auto& grip = traversal.grips[h];
+        const bool retained = history.active && history.constraint == link.hands[h] &&
+                              history.clearance == link.hand_clearance && history.align == link.align_hands &&
+                              history.offset == link.hand_offset;
+        history.active = hand && hand_active(traversal, h) && _physics.contains(grip.body) &&
+                         hand->target.kind == IKTarget3D::Kind::World &&
+                         hand->target.position == grip.point + grip.normal * link.hand_clearance &&
+                         (!link.align_hands || hand->target_rotation == hand_rotation(grip, link));
+        history.constraint = link.hands[h];
+        if (!history.active)
+            continue;
+        history.previous = history.current;
+        auto& sample = history.current;
+        sample = {};
+        sample.body = grip.body;
+        sample.entity = grip.body_user_id;
+        sample.position = _physics.position(grip.body);
+        sample.rotation = _physics.rotation(grip.body);
+        const auto inverse = sample.rotation.conjugate();
+        sample.local_point = inverse.rotate(grip.point - sample.position);
+        sample.local_normal = inverse.rotate(grip.normal);
+        sample.local_rotation = inverse * hand->target_rotation;
+        if (grip.kind == GripKind3D::Rope) {
+            if (const auto segment = _physics.rope_segment_of(grip.body)) {
+                sample.rope = segment->rope;
+                sample.along = static_cast<f32>(segment->segment) + grip.local_point.y + 0.5f;
+                sample.segments = segment->segments;
+            }
+        }
+        // A new/replaced grip has no trajectory from the previous object. Moving
+        // along one rope may change capsule, while retaining the same grip.
+        const bool same_rope =
+            sample.rope.valid() && sample.rope == history.previous.rope && sample.segments == history.previous.segments;
+        if (!retained || (!same_rope && sample.body != history.previous.body))
+            history.previous = sample;
+        history.target = {hand->target.position, hand->target_rotation};
+        history.offset = link.hand_offset;
+        history.clearance = link.hand_clearance;
+        history.align = link.align_hands;
+    }
+}
+
+void WorldPhysicsState3D::prepare_hand_presentation(f32 alpha) {
+    _presentation_hands.clear();
+    for (const auto& c : _characters) {
+        const flecs::entity actor{_ecs, c.entity};
+        const auto* animator = actor.is_alive() ? actor.get<Animator3D>() : nullptr;
+        const auto* link = actor.is_alive() ? actor.get<CharacterAnimationLink3D>() : nullptr;
+        const auto* controller = actor.is_alive() ? actor.get<CharacterController3D>() : nullptr;
+        if (!animator || !link || !controller || !controller->desc.traversal.enabled)
+            continue;
+        for (u32 h = 0; h < c.hands.size(); ++h) {
+            const auto& history = c.hands[h];
+            const auto* hand = animator->find_ik(history.constraint);
+            if (!history.active || !hand || h >= link->hands.size() || link->hands[h] != history.constraint ||
+                !_physics.contains(history.current.body) || hand->target.kind != IKTarget3D::Kind::World ||
+                hand->target.position != history.target.position || hand->target_rotation != history.target.rotation ||
+                link->hand_clearance != history.clearance || link->align_hands != history.align ||
+                link->hand_offset != history.offset)
+                continue;
+            const auto& before = history.previous;
+            const auto& now = history.current;
+            Vec3f position = lerp(before.position, now.position, alpha);
+            Quatf rotation = slerp(before.rotation, now.rotation, alpha);
+            const auto bound = std::ranges::lower_bound(_bound, now.entity, {}, &Bound::entity);
+            if (bound != _bound.end() && bound->entity == now.entity && bound->body == now.body) {
+                // Reuse the rendered body's pose, including teleport resets and
+                // parent transforms. The grip's native local point is already scaled.
+                const flecs::entity entity{_ecs, now.entity};
+                const auto place = decompose(presentation_transform(entity).value_or(world_matrix(entity)));
+                position = place.position;
+                rotation = place.rotation;
+            }
+            Vec3f point = position + rotation.rotate(lerp(before.local_point, now.local_point, alpha));
+            Vec3f normal = rotation.rotate(normalize(lerp(before.local_normal, now.local_normal, alpha)));
+            Quatf hand_rotation = rotation * slerp(before.local_rotation, now.local_rotation, alpha);
+            if (now.rope.valid()) {
+                // Ropes render an averaged joint polyline, not separate capsules.
+                // Sample that same polyline even when climbing crosses a segment.
+                const auto rope = std::ranges::lower_bound(_ropes, now.entity, {}, &BoundRope::entity);
+                const auto* component = rope != _ropes.end() && rope->entity == now.entity && rope->rope == now.rope
+                                            ? flecs::entity{_ecs, rope->entity}.get<Rope3D>()
+                                            : nullptr;
+                if (component && component->sampled.size() == static_cast<std::size_t>(now.segments) + 1) {
+                    const auto& points = component->sampled;
+                    const f32 along =
+                        std::clamp(std::lerp(before.along, now.along, alpha), 0.f, static_cast<f32>(now.segments));
+                    const auto segment = std::min(static_cast<u32>(along), now.segments - 1);
+                    const auto sample = [&](u32 i) {
+                        return rope->previous.size() == points.size()
+                                   ? lerp(rope->previous[i].position, points[i].position, alpha)
+                                   : points[i].position;
+                    };
+                    point = lerp(sample(segment), sample(segment + 1), along - static_cast<f32>(segment));
+                }
+                // A rope grip faces the character; capsule twist does not turn it.
+                normal = normalize(
+                    lerp(before.rotation.rotate(before.local_normal), now.rotation.rotate(now.local_normal), alpha));
+                hand_rotation =
+                    slerp(before.rotation * before.local_rotation, now.rotation * now.local_rotation, alpha);
+            }
+            _presentation_hands.emplace_back(hand,
+                                             IKTargetPose3D{point + normal * history.clearance,
+                                                            history.align ? hand_rotation : hand->target_rotation});
+        }
+    }
+    std::ranges::sort(_presentation_hands, [](const auto& a, const auto& b) {
+        return std::less<const IKConstraint3D*>{}(a.first, b.first);
+    });
+}
+
+std::optional<IKTargetPose3D> WorldPhysicsState3D::presentation_ik_target(const IKConstraint3D& constraint) const {
+    const auto found = std::lower_bound(
+        _presentation_hands.begin(), _presentation_hands.end(), &constraint,
+        [](const auto& entry, const auto* key) { return std::less<const IKConstraint3D*>{}(entry.first, key); });
+    return found != _presentation_hands.end() && found->first == &constraint ? std::optional{found->second}
+                                                                             : std::nullopt;
 }
 
 TraversalState3D WorldPhysicsState3D::traversal_of(flecs::entity entity) const {
@@ -1003,11 +1168,11 @@ i32 WorldPhysicsState3D::advance(f32 frame_seconds) {
 }
 
 std::optional<Mat4f> WorldPhysicsState3D::render_transform(flecs::entity entity, f32 alpha) const {
-    if (!std::isfinite(alpha) || entity.world().c_ptr() != _ecs.c_ptr())
+    if (!entity.is_valid() || !std::isfinite(alpha) || entity.world().c_ptr() != _ecs.c_ptr())
         return {};
     alpha = std::clamp(alpha, 0.0f, 1.0f);
     Mat4f relative;
-    for (u32 depth = 0; entity.is_alive() && depth < 64; ++depth, entity = entity.parent()) {
+    for (u32 depth = 0; entity.is_valid() && entity.is_alive() && depth < 64; ++depth, entity = entity.parent()) {
         const auto* local = entity.get<Transform3D>();
         if (!local)
             break;
@@ -1033,6 +1198,54 @@ std::optional<Mat4f> WorldPhysicsState3D::render_transform(flecs::entity entity,
         relative = local->matrix() * relative;
     }
     return {};
+}
+
+void WorldPhysicsState3D::prepare_presentation(f32 alpha) {
+    _presentation_roots.clear();
+    _presentation_transforms.clear();
+    _presentation_poses.resize(_ragdolls.size());
+    alpha = std::clamp(alpha, 0.f, 1.f);
+    const auto seed = [&](EcsId id) {
+        const flecs::entity e{_ecs, id};
+        if (const auto pose = render_transform(e, alpha))
+            _presentation_roots.emplace_back(id, *pose);
+    };
+    for (const auto& b : _bound)
+        if (b.motion != Body3DMotion::Static) seed(b.entity);
+    for (const auto& c : _characters) seed(c.entity);
+    const auto by_id = [](const auto& a, const auto& b) { return a.first < b.first; };
+    std::ranges::sort(_presentation_roots, by_id);
+    _presentation_transforms.assign(_presentation_roots.begin(), _presentation_roots.end());
+    const auto descendants = [&](auto&& self, flecs::entity parent, const Mat4f& place, u32 depth) -> void {
+        if (depth >= 64) return;
+        parent.children([&](flecs::entity child) {
+            const auto root = std::ranges::lower_bound(_presentation_roots, child.id(), {}, [](const auto& e) { return e.first; });
+            if (root != _presentation_roots.end() && root->first == child.id()) return;
+            if (const auto* local = child.get<Transform3D>()) {
+                const auto world = place * local->matrix();
+                _presentation_transforms.emplace_back(child.id(), world);
+                self(self, child, world, depth + 1);
+            }
+        });
+    };
+    for (const auto& [id, pose] : _presentation_roots)
+        descendants(descendants, flecs::entity{_ecs, id}, pose, 0);
+    std::ranges::sort(_presentation_transforms, by_id);
+    for (std::size_t i = 0; i < _ragdolls.size(); ++i) {
+        _presentation_poses[i].first = _ragdolls[i].entity;
+        fill_pose_override(_ragdolls[i], alpha, _presentation_poses[i].second);
+    }
+    prepare_hand_presentation(alpha);
+}
+
+std::optional<Mat4f> WorldPhysicsState3D::presentation_transform(flecs::entity entity) const {
+    const auto found = std::ranges::lower_bound(_presentation_transforms, entity.id(), {}, [](const auto& e) { return e.first; });
+    if (found != _presentation_transforms.end() && found->first == entity.id()) return found->second;
+    return {};
+}
+const PoseOverride3D* WorldPhysicsState3D::presentation_pose(flecs::entity entity) const {
+    const auto found = std::ranges::lower_bound(_presentation_poses, entity.id(), {}, [](const auto& e) { return e.first; });
+    return found != _presentation_poses.end() && found->first == entity.id() ? &found->second : nullptr;
 }
 
 void WorldPhysicsState3D::interpolate(f32 alpha) {
@@ -1078,6 +1291,21 @@ void WorldPhysicsState3D::resync_from_world() {
             controller->state = state;
             if (controller->desc.traversal.enabled) {
                 controller->traversal_state = _physics.traversal(c.character);
+                if (const auto* link = e.get<CharacterAnimationLink3D>()) {
+                    if (auto* animator = e.get_mut<Animator3D>()) {
+                        // Refresh bridge-owned targets only. A manual target survives rollback.
+                        for (u32 h = 0; h < c.hands.size(); ++h) {
+                            auto& history = c.hands[h];
+                            auto* hand = animator->find_ik(history.constraint);
+                            if (history.active && hand && h < link->hands.size() && link->hands[h] == history.constraint &&
+                                hand->target.kind == IKTarget3D::Kind::World && hand->target.position == history.target.position &&
+                                hand->target_rotation == history.target.rotation)
+                                drive_traversal_hand(*hand, controller->traversal_state, *link, h);
+                            history.active = false;
+                        }
+                        sample_hands(c, controller->traversal_state, *link, *animator);
+                    }
+                }
             }
         }
     }
@@ -1093,6 +1321,7 @@ void WorldPhysicsState3D::resync_from_world() {
             component->state = _physics.ragdoll_state(r.ragdoll);
         }
     }
+    for (auto& r : _ropes) r.sampled = false;
     ropes_from_world();
 }
 
@@ -1259,37 +1488,10 @@ void WorldPhysicsState3D::sync_ragdolls() {
     sort_by_id(wanted);
     prune_refused(Made::Ragdoll, wanted);
 
-    std::vector<flecs::entity> to_create;
-    std::size_t i = 0, j = 0, w = 0;
-    const auto keep = [&](std::size_t from) {
-        if (w != from) {
-            _ragdolls[w] = std::move(_ragdolls[from]);
-        }
-        ++w;
-    };
-    while (i < _ragdolls.size() || j < wanted.size()) {
-        const bool have_bound = i < _ragdolls.size();
-        const bool have_wanted = j < wanted.size();
-        if(have_bound&&!sync_selected(_ragdolls[i].entity)){keep(i++);continue;}
-        if (have_bound && (!have_wanted || _ragdolls[i].entity < wanted[j].id())) {
-            // The entity (or its component) is gone: its character, if it was handed over, gets its place back as it is.
-            _physics.destroy_ragdoll(_ragdolls[i].ragdoll);
-            ++i;
-        } else if (have_wanted && (!have_bound || wanted[j].id() < _ragdolls[i].entity)) {
-            to_create.push_back(wanted[j]);
-            ++j;
-        } else {
-            if (_ragdolls[i].rebuild || !_physics.contains(_ragdolls[i].ragdoll)) {
-                _physics.destroy_ragdoll(_ragdolls[i].ragdoll);
-                to_create.push_back(wanted[j]);
-            } else {
-                keep(i);
-            }
-            ++i;
-            ++j;
-        }
-    }
-    _ragdolls.erase(_ragdolls.begin() + static_cast<std::ptrdiff_t>(w), _ragdolls.end());
+    auto [to_create, w] = reconcile_entities<true>(
+        _ragdolls, wanted, [&](EcsId id) { return sync_selected(id); },
+        [&](const BoundRagdoll& r, flecs::entity) { return r.rebuild || !_physics.contains(r.ragdoll); },
+        [&](const BoundRagdoll& r) { _physics.destroy_ragdoll(r.ragdoll); });
     for (const flecs::entity e : to_create) {
         const Ragdoll3D& component = *e.get<Ragdoll3D>();
         const Model3D& model = *e.get<SkinnedMeshRenderer3D>()->model;
@@ -1353,10 +1555,7 @@ void WorldPhysicsState3D::sync_ragdolls() {
             _ragdolls.push_back(std::move(b));
         }
     }
-    if (_ragdolls.size() > w) {
-        std::inplace_merge(_ragdolls.begin(), _ragdolls.begin() + static_cast<std::ptrdiff_t>(w), _ragdolls.end(),
-                           [](const BoundRagdoll& a, const BoundRagdoll& b) { return a.entity < b.entity; });
-    }
+    merge_created_entities(_ragdolls, w);
     for (const flecs::entity e : to_create) {
         if (const BoundRagdoll* r = bound_ragdoll(e)) {
             e.set<PhysicsRagdoll3D>({r->ragdoll});
@@ -1404,10 +1603,16 @@ void WorldPhysicsState3D::write_pose_override(BoundRagdoll& r, f32 alpha) {
         return;
     }
     PoseOverride3D& o = animator->pose_override;
+    fill_pose_override(r, alpha, o);
+}
+
+void WorldPhysicsState3D::fill_pose_override(const BoundRagdoll& r, f32 alpha, PoseOverride3D& o) const {
     bool any = false;
     for (const RagdollBonePose3D& b : r.current) {
         any = any || b.weight > 0.0f;
     }
+    if (alpha < 1)
+        for (const auto& before : r.previous) any |= before.weight > 0;
     if (!any) {
         // All clip: the animator is exactly what it is without a ragdoll.
         if (!o.empty()) {
@@ -1422,7 +1627,7 @@ void WorldPhysicsState3D::write_pose_override(BoundRagdoll& r, f32 alpha) {
         const std::size_t j = static_cast<std::size_t>(r.joint[k]);
         const RagdollBonePose3D& now = r.current[k];
         const RagdollBonePose3D& before = r.previous[k];
-        o.weights[j] = now.weight;
+        o.weights[j] = alpha >= 1 ? now.weight : before.weight + (now.weight - before.weight) * alpha;
         o.position[j] = alpha >= 1.0f ? now.position : lerp(before.position, now.position, alpha);
         o.rotation[j] = alpha >= 1.0f ? now.rotation : slerp(before.rotation, now.rotation, alpha);
     }
@@ -1657,36 +1862,10 @@ void WorldPhysicsState3D::sync_ropes() {
     sort_by_id(wanted);
     prune_refused(Made::Rope, wanted);
 
-    std::vector<flecs::entity> to_create;
-    std::size_t i = 0, j = 0, w = 0;
-    const auto keep = [&](std::size_t from) {
-        if (w != from) {
-            _ropes[w] = _ropes[from];
-        }
-        ++w;
-    };
-    while (i < _ropes.size() || j < wanted.size()) {
-        const bool have_bound = i < _ropes.size();
-        const bool have_wanted = j < wanted.size();
-        if(have_bound&&!sync_selected(_ropes[i].entity)){keep(i++);continue;}
-        if (have_bound && (!have_wanted || _ropes[i].entity < wanted[j].id())) {
-            _physics.destroy_rope(_ropes[i].rope);
-            ++i;
-        } else if (have_wanted && (!have_bound || wanted[j].id() < _ropes[i].entity)) {
-            to_create.push_back(wanted[j]);
-            ++j;
-        } else {
-            if (_ropes[i].rebuild || !_physics.contains(_ropes[i].rope)) {
-                _physics.destroy_rope(_ropes[i].rope);
-                to_create.push_back(wanted[j]);
-            } else {
-                keep(i);
-            }
-            ++i;
-            ++j;
-        }
-    }
-    _ropes.erase(_ropes.begin() + static_cast<std::ptrdiff_t>(w), _ropes.end());
+    auto [to_create, w] = reconcile_entities(
+        _ropes, wanted, [&](EcsId id) { return sync_selected(id); },
+        [&](const BoundRope& r, flecs::entity) { return r.rebuild || !_physics.contains(r.rope); },
+        [&](const BoundRope& r) { _physics.destroy_rope(r.rope); });
     for (const flecs::entity e : to_create) {
         const Rope3D& c = *e.get<Rope3D>();
         const Mat4f entity_matrix = world_matrix(e);
@@ -1752,10 +1931,7 @@ void WorldPhysicsState3D::sync_ropes() {
         forgive(e.id(), Made::Rope);
         _ropes.push_back(b);
     }
-    if (_ropes.size() > w) {
-        std::inplace_merge(_ropes.begin(), _ropes.begin() + static_cast<std::ptrdiff_t>(w), _ropes.end(),
-                           [](const BoundRope& a, const BoundRope& b) { return a.entity < b.entity; });
-    }
+    merge_created_entities(_ropes, w);
     for (const flecs::entity e : to_create) {
         const RopeHandle3D h = rope_of(e);
         if (h.valid()) {
@@ -1793,13 +1969,17 @@ void WorldPhysicsState3D::ropes_from_world() {
             continue;
         }
         c->state = _physics.rope_state(r.rope);
+        if (r.sampled) r.previous = c->sampled;
+        else r.previous.clear();
+        r.sampled = true;
         c->sampled = _physics.rope_points(r.rope);
         c->tension_start = _physics.rope_tension(r.rope, RopeEnd3D::Start);
         c->tension_end = _physics.rope_tension(r.rope, RopeEnd3D::End);
     }
 }
 
-void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
+void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene, f32 alpha) {
+    alpha = std::clamp(alpha, 0.f, 1.f);
     _rope_meshes.clear();
     struct Group {
         Material3D material;
@@ -1830,7 +2010,17 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
         MeshData3D& data = group->data;
         const u32 sides = std::clamp<u32>(c->sides, 3u, 16u);
         const f32 radius = c->render_radius > 0.0f ? c->render_radius : c->radius;
-        const std::vector<RopePoint3D>& pts = c->sampled;
+        const std::vector<RopePoint3D>* points = &c->sampled;
+        if (alpha < 1 && r.previous.size() == c->sampled.size()) {
+            _rope_render_points = c->sampled;
+            for (std::size_t i = 0; i < c->sampled.size(); ++i) {
+                _rope_render_points[i].position = lerp(r.previous[i].position, c->sampled[i].position, alpha);
+                const auto tangent = lerp(r.previous[i].tangent, c->sampled[i].tangent, alpha);
+                _rope_render_points[i].tangent = length_squared(tangent) > 0 ? normalize(tangent) : c->sampled[i].tangent;
+            }
+            points = &_rope_render_points;
+        }
+        const std::vector<RopePoint3D>& pts = *points;
         // Rings along the points, the frame carried from one to the next (no twist about the rope).
         const u32 first = static_cast<u32>(data.vertices.size());
         Vec3f normal{};
@@ -1881,7 +2071,7 @@ void WorldPhysicsState3D::collect_ropes(Renderer3D& renderer, Scene3D& scene) {
         }
         Mesh3D mesh = renderer.create_mesh(g.data).value_or({});
         if (mesh.valid()) {
-            scene.draw(mesh, Mat4f{}, g.material);
+            (void)scene.draw(mesh, Mat4f{}, g.material);
             _rope_meshes.push_back(std::move(mesh));
         }
     }
@@ -1974,26 +2164,7 @@ void drive_traversal_animator(Animator3D& animator, const TraversalState3D& trav
         if (hand == nullptr) {
             continue;
         }
-        const GripState3D& g = traversal.grips[h];
-        const bool reaching = g.phase == GripPhase3D::Reaching;
-        const bool holding = g.phase == GripPhase3D::Held || g.phase == GripPhase3D::Slipping;
-        // Over a ledge the hands are let go of half way up (they would be pulled through the chest).
-        const bool over = traversal.mode == TraversalMode3D::Mantling && traversal.mantle_progress > 0.6f;
-        if ((reaching || holding) && !over) {
-            hand->set_target(g.point + g.normal * link.hand_clearance);
-            if (link.align_hands) {
-                // The hand's own axes: +Z into the surface, +Y up it, +X to the character's left.
-                Mat4f m;
-                const Vec3f x = -g.right, y = g.surface_up, z = -g.normal;
-                m.m[0] = x.x; m.m[1] = x.y; m.m[2] = x.z;
-                m.m[4] = y.x; m.m[5] = y.y; m.m[6] = y.z;
-                m.m[8] = z.x; m.m[9] = z.y; m.m[10] = z.z;
-                hand->set_target_rotation(quat_of(m, {1.0f, 1.0f, 1.0f}) * link.hand_offset, 1.0f);
-            }
-            hand->set_weight(1.0f);
-        } else {
-            hand->set_weight(0.0f);
-        }
+        drive_traversal_hand(*hand, traversal, link, h);
     }
 }
 
@@ -2094,7 +2265,7 @@ Mesh3D draw_debug_lines(Renderer3D& renderer, Scene3D& scene, std::span<const De
         material.double_sided = true;
         material.casts_shadow = false;
         material.receives_shadow = false;
-        scene.draw(mesh, Mat4f{}, material);
+        (void)scene.draw(mesh, Mat4f{}, material);
     }
     return mesh;
 }

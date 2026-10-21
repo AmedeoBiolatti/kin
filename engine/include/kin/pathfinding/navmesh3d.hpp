@@ -45,6 +45,9 @@ struct NavMeshBuildOptions3D {
     // the walk surface to control extra margin; this does not split triangles.
     f32 agent_radius = 0.0f;
     f32 agent_height = 0.0f;
+    // Join vertically separated, oppositely facing boundary edges whose horizontal
+    // endpoints coincide within weld_distance. Zero keeps exact-edge topology.
+    f32 max_step_height = 0.0f;
 };
 
 // One walkable triangle of a NavMesh3D.
@@ -56,6 +59,8 @@ struct NavTriangle3D {
     std::array<u32, 3> neighbors{nav_none, nav_none, nav_none};
     // The connected part of the mesh it belongs to, 0 to region_count() - 1.
     u32 region = 0;
+    // A neighbor reached by stepping between two different-height edges.
+    std::array<bool, 3> steps{};
     Vec3f centroid{};
 };
 

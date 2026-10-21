@@ -151,19 +151,26 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.lod = {};
         scene.cull = true;
         _rendering.propagate_transforms();
-        _errors = apply_scene3d_settings(_world, scene, view).diagnostics;
+        WorldRenderState3D::Presentation3D presentation;
+        WorldRenderState3D::PosePresentation3D poses;
+        WorldRenderState3D::IKPresentation3D ik;
+        if (_options.bodies) {
+            _options.bodies->prepare_presentation(alpha);
+            if (alpha < 1) {
+                presentation = [&](flecs::entity e) { return _options.bodies->presentation_transform(e); };
+                poses = [&](flecs::entity e) { return _options.bodies->presentation_pose(e); };
+            }
+            ik = [&](const IKConstraint3D& k) { return _options.bodies->presentation_ik_target(k); };
+        }
+        _errors = apply_scene3d_settings(_world, scene, view, {}, presentation).diagnostics;
         if (!_errors.empty())
             return false;
         _rendering.apply_time_of_day(scene);
         const auto fog = scene.fog;
         _rendering.apply_weather(scene, fog);
-        _rendering.collect(scene, _options.bodies && alpha < 1
-                                      ? WorldRenderState3D::Presentation3D{[&](flecs::entity e) {
-                                            return _options.bodies->render_transform(e, alpha);
-                                        }}
-                                      : WorldRenderState3D::Presentation3D{});
+        _rendering.collect(scene, presentation, poses, ik);
         if (_options.bodies && _options.renderer && _options.renderer->available())
-            _options.bodies->collect_ropes(*_options.renderer, scene);
+            _options.bodies->collect_ropes(*_options.renderer, scene, alpha);
         _errors = scene.diagnostics();
         if (_errors.empty())
             if (const auto* overlay = scene.overlay_if_any())

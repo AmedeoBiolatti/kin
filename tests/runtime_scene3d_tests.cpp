@@ -166,8 +166,8 @@ void runtime(Renderer2D& renderer) {
     small_options.physics->max_bodies=2;SceneSession3D full{r3d,assets,small_options};
     check(full.load("level.kinscene")&&!full.spawn("object.kinprefab").value_or({})&&full.runtime_entities()==0&&full.physics()->body_count()==2,"full physics capacity damaged level");
     session.world()->raw().defer_begin();check(!session.spawn("object.kinprefab").value_or({}),"deferred spawn accepted");session.world()->raw().defer_end();
-    ok(session.prepare("level.kinscene"),"prepared lifecycle fixture failed");check(!session.spawn("object.kinprefab").value_or({}),"spawn accepted during prepared replacement");session.cancel();
-    session.unload();check(!session.resolve(old.root)&&!session.spawn("object.kinprefab").value_or({}),"unloaded session accepted handles/spawn");
+    ok(session.prepare("level.kinscene"),"prepared lifecycle fixture failed");check(!session.spawn("object.kinprefab").value_or({}),"spawn accepted during prepared replacement");check(session.cancel(),"cancel failed");
+    check(session.unload(),"unload failed");check(!session.resolve(old.root)&&!session.spawn("object.kinprefab").value_or({}),"unloaded session accepted handles/spawn");
     {
         Scratch storage;const auto archive=storage.path/"game.kinpak";
         check(write_content_pack(scratch.path,archive).ok,"runtime content pack creation failed");
@@ -258,7 +258,7 @@ void deferred(Renderer2D& renderer) {
     check(buffer.flush(*session.world(),error)&&commands.spawn(buffer,"object.kinprefab").status()==Status::Cancelled,"stale endpoint accepted request");
     commands=session.commands();
     auto held=commands.spawn(buffer,"object.kinprefab");check(buffer.flush(*session.world(),error),"prepared fixture failed");
-    check(session.prepare("level.kinscene")&&session.step(1.f/60)&&held.status()==Status::Cancelled,"prepared replacement request was executed");session.cancel();
+    check(session.prepare("level.kinscene")&&session.step(1.f/60)&&held.status()==Status::Cancelled,"prepared replacement request was executed");check(session.cancel(),"cancel failed");
     // Real system callbacks see Pending even after an earlier system's command
     // flush. The constructor runs only once all systems have finished.
     SceneRequest3D system_birth;
@@ -281,7 +281,7 @@ void deferred(Renderer2D& renderer) {
     check(!session.step(1.f/60)&&good.status()==Status::Cancelled&&session.runtime_prefabs()==0,"partial flush failure retained lifecycle requests");
     check(session.reload(),"partial flush reset failed");commands=session.commands();
     owner=std::make_shared<int>(2);weak=owner;
-    auto cancelled=commands.spawn(buffer,"object.kinprefab",{.configure=[owner](auto&){}});owner.reset();session.unload();
+    auto cancelled=commands.spawn(buffer,"object.kinprefab",{.configure=[owner](auto&){}});owner.reset();check(session.unload(),"unload failed");
     check(cancelled.status()==Status::Cancelled&&weak.expired()&&commands.spawn(buffer,"object.kinprefab").status()==Status::Cancelled,"unload left live requests or constructor captures");
     buffer.clear();
     SceneRequest3D default_request;check(default_request.status()==Status::Invalid&&!default_request.prefab(),"default ticket is live");

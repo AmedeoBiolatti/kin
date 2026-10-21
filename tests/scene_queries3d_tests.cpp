@@ -1,4 +1,5 @@
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -141,7 +142,7 @@ void queries(Renderer2D& renderer) {
               !fresh->entity.resolve(*session.world()),
           "reload retained old query endpoint/hit");
     auto live = session.queries();
-    session.unload();
+    assert(session.unload());
     check(!live && !live.raycast(from, to), "unload retained a query world");
     auto no_physics = options();
     no_physics.physics.reset();

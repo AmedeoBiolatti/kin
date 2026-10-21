@@ -67,7 +67,7 @@ void test_load_update_actions_and_spawn(Fixture& fixture) {
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-scripting-tests-load";
     std::filesystem::create_directories(dir);
     const std::filesystem::path script = dir / "scene.lua";
-    write_text(script, R"lua(
+    std::string source = R"lua(
 function on_load(scene)
     scene:set_clear_color(1, 2, 3)
     scene:entity("script-rect"):set_transform(4, 5):set_rect(6, 7, 8, 9, 10, 2, 3)
@@ -79,11 +79,19 @@ end
 function collect_actions(actions)
     actions:add("tick", "Tick")
 end
-)lua");
+)lua";
+#if KIN_TEST_LUA_RELEASE_NUMERICS
+    source.replace(source.find("set_clear_color(1,"), std::string("set_clear_color(1,").size(),
+                   "set_clear_color(255*0.5,");
+    constexpr auto red = 128; // retain sol2's existing rounded numeric conversion
+#else
+    constexpr auto red = 1;
+#endif
+    write_text(script, source);
 
     kin::ScriptScene scene = make_scene(dir, "scene.lua", false);
     assert(scene.script_loaded());
-    assert(scene.render_config().clear_color == kin::Color::rgb(1, 2, 3));
+    assert(scene.render_config().clear_color == kin::Color::rgb(red, 2, 3));
     assert(scene.ecs().count<kin::ScriptOwned>() == 1);
     assert((scene.ecs().count<kin::Transform2D, kin::RectRenderer>() == 1));
 

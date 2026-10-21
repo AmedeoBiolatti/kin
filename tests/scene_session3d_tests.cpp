@@ -1,6 +1,7 @@
 #include "result3d_helpers.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -264,7 +265,7 @@ void gpu_live_edits(Renderer2D& renderer) {
     renderer.present();
     ok(session.prepare("edits.kinscene"), "pending edit fixture failed");
     check(!change(left, "ModelMaterials3D", "variant", std::string("red")), "edit accepted with prepared replacement");
-    session.cancel();
+    assert(session.cancel());
     // Capacity failure: one body fills this world; old one must stay queryable.
     write(scratch.path / "full.kinscene",
           R"({"entities":[{"id":"box","components":{"Transform3D":{},"Collider3D":{}}}]})");
@@ -361,7 +362,7 @@ void gpu_session(Renderer2D& renderer) {
     check(session.world() == initial_world && first.alive() && session.generation() == generation,
           "prepare touched active world");
     check(!session.resize({200, 120}), "resize accepted while candidate retained");
-    session.cancel();
+    assert(session.cancel());
     check(!session.prepared() && session.world() == initial_world, "cancel touched active world");
     std::filesystem::copy_file(scratch.path / "parts.glb", scratch.path / "candidate.glb");
     write(
@@ -369,7 +370,7 @@ void gpu_session(Renderer2D& renderer) {
         R"({"entities":[{"id":"candidate","components":{"Transform3D":{},"ModelRenderer3D":{"asset":"candidate.glb"}}}]})");
     ok(session.prepare("candidate.kinscene"), "unique candidate preparation failed");
     check(!prepared_mesh.expired(), "candidate was not bound");
-    session.cancel();
+    assert(session.cancel());
     check(prepared_mesh.expired() && session.world() == initial_world, "cancel retained candidate GPU resources");
     ok(session.reload(), "unchanged reload failed");
     check(session.generation() == generation + 1 && session.view()->backend() == target &&
@@ -482,7 +483,7 @@ void gpu_session(Renderer2D& renderer) {
           "buffer failure did not recover");
 
     std::weak_ptr<IMeshBackend3D> weak = session.entity("quad").get<ModelRenderer3D>()->model->parts[0].mesh.backend();
-    session.unload();
+    assert(session.unload());
     check(!session.active() && !session.world() && !session.view() && weak.expired(),
           "unload pinned world/mesh resources");
     model.reset();
@@ -492,7 +493,7 @@ void gpu_session(Renderer2D& renderer) {
           "weak asset cache retained scene resources");
     for (int i = 0; i < 4; ++i) {
         ok(session.load("test.kinscene"), "repeated load failed");
-        session.unload();
+        assert(session.unload());
     }
     check(assets.stats().model_entries == 0, "repeated load/unload retained models");
 
@@ -698,7 +699,7 @@ void gpu_prepared_requests(Renderer2D& renderer) {
     check(says_cancelled_not_held(before) && says_cancelled_not_held(during) && session.runtime_prefabs() == 0,
           "requests were held or run while a replacement was prepared");
     // Cancelling the candidate does not bring them back; a request made now runs.
-    session.cancel();
+    assert(session.cancel());
     ok(session.step(1.f / 60), "step after cancel failed");
     check(before.status() == Status::Cancelled && during.status() == Status::Cancelled &&
               session.runtime_prefabs() == 0,

@@ -415,19 +415,31 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pos
         // left from the point it was last at (the weight is fading out).
         Vec3f target_world{};
         bool has_target = false;
+        const auto presented =
+            _ik_presentation && *_ik_presentation ? (*_ik_presentation)(k) : std::optional<IKTargetPose3D>{};
         if (k.kind != IKKind3D::FootPlacer) {
             if (k.target.kind == IKTarget3D::Kind::World) {
-                target_world = k.target.position;
+                target_world = presented ? presented->position : k.target.position;
                 has_target = true;
             } else if (k.target.kind == IKTarget3D::Kind::SceneEntity) {
                 const auto target = _ecs ? k.target.scene_entity.resolve(*_ecs) : EcsEntity{};
                 if (const auto* t = target ? target.get<WorldTransform3D>() : nullptr) {
-                    target_world = t->matrix.apply(k.target.position);
+                    const auto* explicit_pose = target.get<RenderTransform3D>();
+                    const auto pose = explicit_pose && explicit_pose->enabled ? explicit_pose->matrix
+                                      : _presentation && *_presentation
+                                          ? (*_presentation)(target.raw()).value_or(t->matrix)
+                                          : t->matrix;
+                    target_world = pose.apply(k.target.position);
                     has_target = true;
                 }
             } else if (k.target.kind == IKTarget3D::Kind::Entity && ecs.is_alive(k.target.entity)) {
                 if (const WorldTransform3D* t = ecs.entity(k.target.entity).get<WorldTransform3D>()) {
-                    target_world = t->matrix.apply(k.target.position);
+                    const auto entity = ecs.entity(k.target.entity);
+                    const auto* explicit_pose = entity.get<RenderTransform3D>();
+                    const auto pose = explicit_pose && explicit_pose->enabled ? explicit_pose->matrix
+                                      : _presentation && *_presentation ? (*_presentation)(entity).value_or(t->matrix)
+                                                                        : t->matrix;
+                    target_world = pose.apply(k.target.position);
                     has_target = true;
                 }
             }
@@ -468,7 +480,8 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pos
             pole_mode(o);
             if (k.match_rotation) {
                 o.match_rotation = true;
-                o.end_rotation = (rotation_of(to_model) * k.target_rotation).normalized();
+                o.end_rotation =
+                    (rotation_of(to_model) * (presented ? presented->rotation : k.target_rotation)).normalized();
                 o.rotation_weight = k.rotation_weight;
             }
             solve_two_bone(sk, a.ik_pose, a.ik_world, {k.resolved[0], k.resolved[1], k.resolved[2]}, target, o,
@@ -572,14 +585,14 @@ void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pos
 }
 
 void WorldRenderState3D::solve_pose(Animator3D& a, const Skeleton3D& sk, const Pose3D& base, const Mat4f& entity_matrix,
-                                    const flecs::world& ecs, u64 epoch) {
+                                    const flecs::world& ecs, u64 epoch, const PoseOverride3D* presented) {
     if (!a.ik_constraints.empty()) {
         solve_ik(a, sk, base, entity_matrix, ecs, epoch);
     } else {
         a.ik_pose = base;
         compute_world_matrices(sk, a.ik_pose, a.ik_world);
     }
-    const PoseOverride3D& o = a.pose_override;
+    const PoseOverride3D& o = presented ? *presented : a.pose_override;
     const u32 n = sk.joint_count();
     if (o.weights.size() != n || o.position.size() != n || o.rotation.size() != n) {
         return;
@@ -664,12 +677,111 @@ void WorldRenderState3D::clear_collection_cache() {
     _bucket_lookup_dirty = false;
 }
 
-void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentation) {
+// A collection's retention policy is separate from gathering mesh/model instances.
+struct WorldRenderState3D::RetainedBudget {
+    static constexpr std::size_t record_budget = 16 * 1024 * 1024;
+    static constexpr std::size_t min_records = 256, max_batches = 128, group_size = 256;
+    std::size_t bytes = 0, batches = 0;
+};
+
+bool WorldRenderState3D::Bucket::eligible(const RetainedBudget& budget) const {
+    const std::size_t bytes = instances.size() * sizeof(MeshInstance3D);
+    const std::size_t minimum = batch || spare ? RetainedBudget::min_records / 2 : RetainedBudget::min_records;
+    return instances.size() >= minimum && !mesh.skinned() &&
+           (material.blend == Blend3D::Opaque || material.blend == Blend3D::Mask) && !material.wireframe &&
+           !material.shader.backend() && budget.batches < RetainedBudget::max_batches &&
+           bytes <= RetainedBudget::record_budget - budget.bytes;
+}
+
+void WorldRenderState3D::Bucket::rebuild() {
+    std::vector<InstanceGroup3D> groups;
+    // Consecutive source ranges preserve draw order. Bounds follow edits;
+    // no spatial sorting, duplicate world or caller-maintained boxes.
+    if (instances.size() >= 2 * RetainedBudget::group_size) {
+        groups.reserve((instances.size() + RetainedBudget::group_size - 1) / RetainedBudget::group_size);
+        for (std::size_t first = 0; first < instances.size(); first += RetainedBudget::group_size)
+            groups.push_back({static_cast<u32>(first),
+                              static_cast<u32>(std::min(RetainedBudget::group_size, instances.size() - first))});
+    }
+    batch = InstanceBatch3D::create(mesh, instances, std::move(groups)).value_or({});
+}
+
+void WorldRenderState3D::Bucket::retain(RetainedBudget& budget) {
+    const std::size_t bytes = instances.size() * sizeof(MeshInstance3D);
+    const bool spare_usable =
+        spare && spare.instances().size() == instances.size() && spare.lifetime().use_count() == 1;
+    if (spare_usable && (!batch || batch.instances().size() != instances.size() || batch.lifetime().use_count() > 1))
+        std::swap(batch, spare);
+    if (!batch || batch.instances().size() != instances.size()) {
+        std::swap(batch, spare);
+        rebuild();
+    } else {
+        const auto previous = batch.instances();
+        const bool shared = batch.lifetime().use_count() > 1;
+        const auto changed = [&](std::size_t i) {
+            const auto& a = previous[i];
+            const auto& b = instances[i];
+            return a.tint != b.tint || a.id != b.id ||
+                   std::memcmp(a.transform.m, b.transform.m, sizeof(a.transform.m)) != 0;
+        };
+        for (std::size_t i = 0; i < previous.size();) {
+            if (!changed(i)) {
+                ++i;
+                continue;
+            }
+            // A separately collected scene must keep its snapshot. The usual
+            // clear/collect/render loop owns no old handle and edits in place.
+            if (shared) {
+                std::swap(batch, spare);
+                rebuild();
+                break;
+            }
+            const std::size_t first = i++;
+            while (i < previous.size() && changed(i))
+                ++i;
+            if (!batch.update(static_cast<u32>(first),
+                              std::span<const MeshInstance3D>(instances).subspan(first, i - first))) {
+                rebuild();
+                break;
+            }
+        }
+    }
+    budget.bytes += bytes;
+    ++budget.batches;
+    const auto spare_bytes = spare.instances().size_bytes();
+    if (spare && budget.batches < RetainedBudget::max_batches &&
+        spare_bytes <= RetainedBudget::record_budget - budget.bytes) {
+        budget.bytes += spare_bytes;
+        ++budget.batches;
+    } else {
+        spare = {};
+    }
+}
+
+const PoseOverride3D& WorldRenderState3D::pose_override_for(flecs::entity entity, const Animator3D& animator) const {
+    if (_pose_presentation && *_pose_presentation)
+        if (const auto* pose = (*_pose_presentation)(entity))
+            return *pose;
+    return animator.pose_override;
+}
+
+void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentation, const PosePresentation3D& poses,
+                                 const IKPresentation3D& ik) {
     struct Guard {
         const Presentation3D*& value;
         ~Guard() { value = nullptr; }
     } guard{_presentation};
     _presentation = &presentation;
+    struct PoseGuard {
+        const PosePresentation3D*& value;
+        ~PoseGuard() { value = nullptr; }
+    } pose_guard{_pose_presentation};
+    _pose_presentation = &poses;
+    struct IKGuard {
+        const IKPresentation3D*& value;
+        ~IKGuard() { value = nullptr; }
+    } ik_guard{_ik_presentation};
+    _ik_presentation = &ik;
     prepare_joint_attachments();
     auto& by_mesh = _bucket_lookup;
     if (_bucket_lookup_dirty) {
@@ -743,7 +855,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                     nodes = _pose_scratch;
                 } else {
                     if (!attachment_pose_prepared(entity.id()))
-                        solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, entity.world(), _epoch);
+                        solve_pose(*animator, skeleton, animator->player.pose(), *placement, entity.world(), _epoch,
+                                   &pose_override_for(entity, *animator));
                     nodes = animator->ik_world;
                 }
             }
@@ -762,84 +875,16 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
     // A bucket is a reuse aid for live draws, never a resident asset cache.
     if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))
         _bucket_lookup_dirty = true;
-    // Keep the authoring path cheap for small buckets. Larger eligible buckets reuse
-    // fixed CPU records instead of copying them into Scene3D every frame. This cap
-    // covers the extra live records, independent of the renderer's GPU table budget.
-    constexpr std::size_t record_budget = 16 * 1024 * 1024;
-    constexpr std::size_t min_records = 256, max_batches = 128, group_size = 256;
-    std::size_t retained_bytes = 0, retained_batches = 0;
+    RetainedBudget budget;
     for (Bucket& bucket : _buckets) {
-        const auto& material = bucket.material;
-        const std::size_t bytes = bucket.instances.size() * sizeof(MeshInstance3D);
-        const std::size_t minimum = bucket.batch || bucket.spare ? min_records / 2 : min_records;
-        const bool eligible = bucket.instances.size() >= minimum && !bucket.mesh.skinned() &&
-                              (material.blend == Blend3D::Opaque || material.blend == Blend3D::Mask) &&
-                              !material.wireframe && !material.shader.backend() && retained_batches < max_batches &&
-                              bytes <= record_budget - retained_bytes;
-        if (!eligible) {
+        if (!bucket.eligible(budget)) {
             bucket.batch = {};
             bucket.spare = {};
-            scene.draw_instanced(bucket.mesh, bucket.instances, material);
+            (void)scene.draw_instanced(bucket.mesh, bucket.instances, bucket.material);
             continue;
         }
-        const auto rebuild = [&] {
-            std::vector<InstanceGroup3D> groups;
-            // Consecutive source ranges preserve draw order. Bounds follow edits;
-            // no spatial sorting, duplicate world or caller-maintained boxes.
-            if (bucket.instances.size() >= 2 * group_size) {
-                groups.reserve((bucket.instances.size() + group_size - 1) / group_size);
-                for (std::size_t first = 0; first < bucket.instances.size(); first += group_size)
-                    groups.push_back({static_cast<u32>(first),
-                                      static_cast<u32>(std::min(group_size, bucket.instances.size() - first))});
-            }
-            bucket.batch = InstanceBatch3D::create(bucket.mesh, bucket.instances, std::move(groups)).value_or({});
-        };
-        const bool spare_usable = bucket.spare && bucket.spare.instances().size() == bucket.instances.size() &&
-                                  bucket.spare.lifetime().use_count() == 1;
-        if (spare_usable && (!bucket.batch || bucket.batch.instances().size() != bucket.instances.size() ||
-                             bucket.batch.lifetime().use_count() > 1))
-            std::swap(bucket.batch, bucket.spare);
-        if (!bucket.batch || bucket.batch.instances().size() != bucket.instances.size()) {
-            std::swap(bucket.batch, bucket.spare);
-            rebuild();
-        } else {
-            const auto previous = bucket.batch.instances();
-            const bool shared = bucket.batch.lifetime().use_count() > 1;
-            const auto changed = [&](std::size_t i) {
-                const auto& a = previous[i];
-                const auto& b = bucket.instances[i];
-                return a.tint != b.tint || a.id != b.id ||
-                       std::memcmp(a.transform.m, b.transform.m, sizeof(a.transform.m)) != 0;
-            };
-            for (std::size_t i = 0; i < previous.size();) {
-                if (!changed(i)) {
-                    ++i;
-                    continue;
-                }
-                // A separately collected scene must keep its snapshot. The usual
-                // clear/collect/render loop owns no old handle and edits in place.
-                if (shared) {
-                    std::swap(bucket.batch, bucket.spare);
-                    rebuild();
-                    break;
-                }
-                const std::size_t first = i++;
-                while (i < previous.size() && changed(i))
-                    ++i;
-                bucket.batch.update(static_cast<u32>(first),
-                                    std::span<const MeshInstance3D>(bucket.instances).subspan(first, i - first));
-            }
-        }
-        retained_bytes += bytes;
-        ++retained_batches;
-        const auto spare_bytes = bucket.spare.instances().size_bytes();
-        if (bucket.spare && retained_batches < max_batches && spare_bytes <= record_budget - retained_bytes) {
-            retained_bytes += spare_bytes;
-            ++retained_batches;
-        } else {
-            bucket.spare = {};
-        }
-        scene.draw_instanced(bucket.batch, material);
+        bucket.retain(budget);
+        (void)scene.draw_instanced(bucket.batch, bucket.material);
     }
     // Lights (P3b): the entity's place, and for a spot its -Z axis; the entity's id names the light across frames.
     _point_lights.each([&](flecs::entity entity, const WorldTransform3D& world, const PointLight3D& light,
@@ -893,7 +938,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         if (!draw_placement(entity, world, nullptr))
             return;
         if (emitter.enabled && emitter.system.count() > 0) {
-            scene.draw_particles(emitter.system, entity.id());
+            (void)scene.draw_particles(emitter.system, entity.id());
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
@@ -908,8 +953,13 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             return;
         const Skeleton3D& skeleton = model->skeletons[0];
         _pose_scratch.resize(skeleton.joint_count());
-        if (animator && animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton) {
-            if (animator->ik_constraints.empty() && animator->pose_override.empty()) {
+        const bool playing = animator && animator->bound_to(renderer.model) && animator->player.skeleton() == &skeleton;
+        const auto* override = animator ? &pose_override_for(it.entity(row), *animator) : nullptr;
+        if (playing || (override && !override->empty())) {
+            if (!playing)
+                _rest_pose.joints = skeleton.rest;
+            const Pose3D& base = playing ? animator->player.pose() : _rest_pose;
+            if (animator->ik_constraints.empty() && override->empty()) {
                 animator->player.joint_matrices(_pose_scratch);
                 if (!animator->ik_world.empty()) {
                     animator->ik_world.clear();
@@ -919,7 +969,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                 // The clips' pose with the constraints solved on it (and the physics override over that), in this
                 // frame's place of the entity.
                 if (!attachment_pose_prepared(it.entity(row).id()))
-                    solve_pose(*animator, skeleton, animator->player.pose(), world.matrix, it.world(), _epoch);
+                    solve_pose(*animator, skeleton, base, *placement, it.world(), _epoch,
+                               &pose_override_for(it.entity(row), *animator));
                 world_to_joint_matrices(skeleton, animator->ik_world, _pose_scratch);
             }
         } else {
@@ -933,8 +984,9 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                                       overrides->binding->materials.size() == model->parts.size()
                                   ? overrides->binding.get()
                                   : nullptr;
-        scene.draw_skinned(*model, _pose_scratch, *placement, renderer.tint, id,
-                           binding ? std::span<const Material3D>{binding->materials} : std::span<const Material3D>{});
+        (void)scene.draw_skinned(*model, _pose_scratch, *placement, renderer.tint, id,
+                                 binding ? std::span<const Material3D>{binding->materials}
+                                         : std::span<const Material3D>{});
     });
     // Meshes no longer drawn are let go.
     if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))

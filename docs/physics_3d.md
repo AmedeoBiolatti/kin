@@ -636,6 +636,16 @@ takes a `hang` clip (empty: the `fall` pose plays while it hangs). `DebugDraw3D:
 the anchors (yellow reaching, green held, orange slipping), normals and frames, the line to the body, the hang place, and a probe's
 candidates by provider; `WorldPhysicsState3DConfig::debug_grips` adds the first to `collect_debug`.
 
+`SceneFrame3D` and `SceneSession3D` sample linked hand targets during collection
+with the same alpha as bodies and rope tubes. Position, hand alignment and
+clearance follow moving/rotating holds and the rendered rope polyline. This
+changes neither the stored IK target nor the native traversal state. A target
+changed by gameplay after the physics step remains under gameplay control.
+Releasing or replacing a grip resets its history; `resync_from_world()` resets
+hand sampling together with bodies after rollback. Low-level collectors can
+pass `presentation_ik_target` as the fourth `WorldRenderState3D::collect`
+callback after `prepare_presentation(alpha)`.
+
 ### The climb level and the harness
 
 `tests/climb_level.hpp`: a 4 m wall with a ledge, a 5 m wall with a roof reaching out at 3 m, a smooth wall that cannot be gripped with

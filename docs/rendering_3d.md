@@ -1151,7 +1151,8 @@ light, `BLEND` as alpha, `MASK` as a cut-out (`alphaCutoff`), double-sided and
 `KHR_materials_unlit`, and its metallic and roughness factors and map, normal
 map (and its scale), occlusion map (and its strength) and emissive map.
 `scene.draw(model, transform)` draws its parts. A `kin::ModelFile3D` keeps one
-loaded and `poll()` loads it again when the file changes. Skins and animations
+loaded after the first successful `poll()`, then reloads on source edits.
+Construction does no I/O; check each returned result. Skins and animations
 are read too (see Skinned meshes below). The [tested glTF/export profile](gltf_profile3d.md)
 defines supported content and the export recipe. Morph geometry/channels, multiple
 distinct skin palettes and mixed skin/plain-node animation reject the whole asset.
@@ -1198,10 +1199,16 @@ everything that draws a model at rest is unchanged. A part is drawn at its node'
 matrix times its offset (`Model3D::part_transform(part, node_matrices)`).
 
 ```cpp
-kin::Model3D door = r3d.load_model("models/door.glb").value_or({});
-const kin::u32 nodes = static_cast<kin::u32>(door.node_skeleton);   // -1: nothing in it moves
+auto loaded = r3d.load_model("models/door.glb");
+if (!loaded) return report(kin::diagnostics3d_text(loaded.diagnostics));
+kin::Model3D door = std::move(*loaded);
+if (door.node_skeleton < 0 || std::size_t(door.node_skeleton) >= door.skeletons.size())
+    return report("door has no node animation");
+const kin::u32 nodes = static_cast<kin::u32>(door.node_skeleton);
+const auto* open = door.find_clip("Open", nodes);
+if (!open) return report("door has no Open clip");
 kin::AnimationPlayer3D player{&door.skeletons[nodes]};
-player.play(door.find_clip("Open", nodes), /*loop=*/false);
+player.play(open, /*loop=*/false);
 std::vector<kin::Mat4f> matrices;
 
 // each frame
@@ -1240,9 +1247,14 @@ animation of registered properties): that one's state machines can choose the
 clips and weights fed to this.
 
 ```cpp
-kin::Model3D hero = r3d.load_model("models/hero.glb").value_or({});          // skeletons, clips, skinned parts
+auto loaded = r3d.load_model("models/hero.glb");
+if (!loaded) return report(kin::diagnostics3d_text(loaded.diagnostics));
+kin::Model3D hero = std::move(*loaded);
+if (hero.skeletons.empty()) return report("hero has no skeleton");
+const auto* walk = hero.find_clip("Walk");
+if (!walk) return report("hero has no Walk clip");
 kin::AnimationPlayer3D player{&hero.skeletons[0]};
-player.play(hero.find_clip("Walk"));
+player.play(walk);
 std::vector<kin::Mat4f> joints;
 
 // each frame
@@ -1942,14 +1954,14 @@ options.initialize = [](kin::SceneSession3DContext& context) {
     // context.instance maps authored IDs. context.dependencies can include custom files.
 };
 kin::SceneSession3D session{renderer3d, assets, options};
-if (!session.load("scenes/camp.kinscene")) {
-    // Display session.diagnostics(); the previous active scene remains usable.
-}
+auto loaded = session.load("scenes/camp.kinscene");
+if (!loaded) return report(kin::diagnostics3d_text(loaded.diagnostics));
+// A failed replacement leaves the previous scene usable.
 // In the host's fixed-step loop: check session.step(fixed_dt).
 // In its render loop, composite only after a successful render:
-if (session.render())
-    renderer2d.draw_texture(session.view()->texture(), {0, 0, 960, 540});
-// Otherwise display session.diagnostics().
+auto rendered = session.render(alpha);
+if (rendered) renderer2d.draw_texture(session.view()->texture(), {0, 0, 960, 540});
+else report(kin::diagnostics3d_text(rendered.diagnostics));
 ```
 
 The complete camp scene lives in `examples/summit/content/scenes/camp.kinscene`.
@@ -2374,20 +2386,24 @@ struct Pickup { int amount = 1; };
 
 // Register native systems through the existing options.register_components hook.
 // Their normal C++ component queries need no components().native<T>() schema.
-auto supply = session.spawn("prefabs/camp-supply.kinprefab", {
+auto spawned = session.spawn("prefabs/camp-supply.kinprefab", {
     .position = kin::Vec3f{1, 0, 2},
     .configure = [](kin::SceneSpawnContext3D& context) {
         context.root.set(Pickup{2});
         // context.entity("local-child-id") resolves a member of this instance.
     }
-}).value_or({});
-if (!supply) { /* display session.diagnostics() */ }
+});
+if (!spawned) return report(kin::diagnostics3d_text(spawned.diagnostics));
+auto supply = *spawned;
 
 // Retain value handles; resolve when needed. Native runtime state stays native.
 if (auto entity = session.resolve(supply.root)) {
     const auto* pickup = entity.get<Pickup>();
     // Use pickup->amount for game rules, then release the complete object:
-    if (pickup) session.despawn(supply);
+    if (pickup) {
+        auto removed = session.despawn(supply);
+        if (!removed) report(kin::diagnostics3d_text(removed.diagnostics));
+    }
 }
 ```
 
@@ -2558,7 +2574,8 @@ options.initialize = camp_walk::install;
 
 // Each fixed step, from a device mapper, recording or test:
 camp_walk::submit(*session.world(), camp_walk::PlayerCommand{.move = {0, 1}});
-if (!session.step(dt)) { /* report session.diagnostics() */ }
+auto stepped = session.step(dt);
+if (!stepped) report(kin::diagnostics3d_text(stepped.diagnostics));
 ```
 
 This is example game code in `examples/camp_walk/gameplay.hpp`, built on existing
@@ -2629,24 +2646,25 @@ its gameplay steps:
 
 ```cpp
 struct Projectile { float remaining = 2; int damage = 1; };
-auto projectile = session.preload("prefabs/range-projectile.kinprefab").value_or({});
-auto pool = session.create_pool(projectile, {
+auto prepared = session.preload("prefabs/range-projectile.kinprefab");
+if (!prepared) return report(kin::diagnostics3d_text(prepared.diagnostics));
+auto projectile = *prepared;
+auto created = session.create_pool(projectile, {
     .capacity = 16,
-    .reset = [](kin::SceneSpawnContext3D& context) {
-        context.root.set(Projectile{}); // reset plain C++ health/timers/etc. here
-    },
-    .release = [](kin::SceneSpawnContext3D& context) {
-        context.root.set(Projectile{}); // optionally drop per-lease game resources
-    }
-}).value_or({});
-if (!projectile || !pool) { /* inspect session.diagnostics() */ }
-
-auto shot = session.spawn(pool, {.position = kin::Vec3f{-2.2f, .5f, 0}}).value_or({});
-if (shot) session.despawn(shot); // returns this lease to its pool
-auto stats = session.pool_stats(pool); // capacity/active/available/acquired/reused/exhausted
-
-session.release(pool);       // destroy active and inactive slots
-session.release(projectile); // release the bound preload reference
+    .reset = [](kin::SceneSpawnContext3D& context) { context.root.set(Projectile{}); },
+    .release = [](kin::SceneSpawnContext3D& context) { context.root.set(Projectile{}); }
+});
+if (!created) return report(kin::diagnostics3d_text(created.diagnostics));
+auto pool = *created;
+auto spawned = session.spawn(pool, {.position = kin::Vec3f{-2.2f, .5f, 0}});
+if (!spawned) return report(kin::diagnostics3d_text(spawned.diagnostics));
+auto returned = session.despawn(*spawned); // return the lease to its pool
+if (!returned) return report(kin::diagnostics3d_text(returned.diagnostics));
+auto stats = session.pool_stats(pool);
+auto released_pool = session.release(pool);
+if (!released_pool) return report(kin::diagnostics3d_text(released_pool.diagnostics));
+auto released_preload = session.release(projectile);
+if (!released_preload) report(kin::diagnostics3d_text(released_preload.diagnostics));
 ```
 
 `preload` uses the shared prefab loader, binders and asset ownership. It retains a
@@ -2727,7 +2745,8 @@ const kin::SceneFieldEdit3D changes[] = {
     {barrel, "Transform3D", "scale", kin::Vec3f{3.5f, 3.5f, 3.5f}},
     {barrel, "ModelMaterials3D", "variant", std::string("blue")}
 };
-if (!session.edit(changes)) { /* display session.diagnostics() */ }
+auto edited = session.edit(changes);
+if (!edited) report(kin::diagnostics3d_text(edited.diagnostics));
 ```
 
 Run edits on the renderer thread between steps/collection, outside deferred/readonly
@@ -3349,13 +3368,15 @@ and the world point there. `MeshRenderer3D`, `ModelRenderer3D` and `SkinnedMeshR
 draw with their entity's low 32 bits, or with an `id` of their own; the session maps
 either back to the live entity, the child that carries the renderer (walk its parents for
 a prefab root). It names no entity for a `compose` draw or for an entity hidden or gone
-since the render, and returns nothing over the background or without picking (with the
-reason in `diagnostics()`). Like `Renderer3D::pick` it waits for the GPU: ask on a click
+since the render. The result holds an empty optional over the background; disabled
+picking returns a failed result with diagnostics. Like `Renderer3D::pick` it waits for the GPU: ask on a click
 or when the pointer moves, not every frame.
 
 ```cpp
-if (input.pressed("select")) if (auto hit = session.pick(pointer_in_view).value_or({})) {
-    if (hit->entity) select(hit->entity);  // hit->position: the point clicked, in the world
+if (input.pressed("select")) {
+    auto picked = session.pick(pointer_in_view);
+    if (!picked) report(kin::diagnostics3d_text(picked.diagnostics));
+    else if (const auto& hit = *picked; hit && hit->entity) select(hit->entity);
 }
 ```
 
@@ -3376,12 +3397,14 @@ kin::SceneAssetRuntime level;
 if (!level.load(assets.root() / "scenes/level.kinscene", assets.root(), world.components())) {
     // Inspect level.diagnostics().
 }
-if (!kin::instantiate_scene3d(level, world, assets)) {
-    // Inspect level.diagnostics(). Binding failure removes only new entities.
-}
+auto bound = kin::instantiate_scene3d(level, world, assets);
+if (!bound) return report(kin::diagnostics3d_text(bound.diagnostics));
+// Binding failure removes only new entities.
 
 kin::SceneFrame3D frame{world, rendering};
-// Each fixed update: frame.step(dt), checking frame.diagnostics() on failure.
+// Each fixed update:
+auto stepped = frame.step(dt);
+if (!stepped) report(kin::diagnostics3d_text(stepped.diagnostics));
 kin::Scene3D scene;
 kin::ViewOptions3D options{.pick = true}; // pick is the game's; the rest the scene's
 // Each render: frame.collect(scene, &options), then custom draws and the game's
@@ -3452,74 +3475,67 @@ ignoring it. No 3D definitions or dependencies are needed by its scene context.
 
 ## Runtime failure reporting
 
-The 3D runtime facades use the same contract: check the returned handle/span or
-boolean, then read `diagnostics()` on the object that performed the operation.
-`Diagnostics3D` is a list of contextual messages; `diagnostics3d_text()` joins
-it for a log, HUD or run report. No diagnostic strings or history are allocated
-on the successful draw path.
+Fallible 3D loading, rendering, binding and authoring calls return `Result3D<T>`
+or `Status3D` for operations without a payload. Both are `[[nodiscard]]`. Each
+result owns its diagnostics; later calls cannot overwrite a saved failure.
+Inspect the result before dereferencing it. Successful calls have no diagnostics,
+and failed results have no payload. `diagnostics3d_text()` joins messages for a log
+or HUD; successful draw submissions allocate no diagnostic history.
 
 ```cpp
-auto model = assets.load_model("models/prop.glb").value_or({});
-if (!model) {
-    show_error(kin::diagnostics3d_text(assets.diagnostics()));
-    return;
-}
-if (!scene.draw(*model, transform)) {
-    show_error(kin::diagnostics3d_text(scene.diagnostics()));
-    return;
-}
-if (!r3d.render(view, scene)) {
-    show_error(kin::diagnostics3d_text(r3d.diagnostics()));
-}
+auto loaded = assets.load_model("models/prop.glb");
+if (!loaded) return show_error(kin::diagnostics3d_text(loaded.diagnostics));
+auto submitted = scene.draw(**loaded, transform);
+if (!submitted) return show_error(kin::diagnostics3d_text(submitted.diagnostics));
+auto rendered = r3d.render(view, scene);
+if (!rendered) show_error(kin::diagnostics3d_text(rendered.diagnostics));
 ```
 
-Stop or choose a fallback after a failed load; do not dereference the failed
-handle. `Renderer3D`, `Assets3D`, `PhysicsAssets3D`, `SceneFrame3D` and `SceneSession3D` report the
-last attempted operation. Successful operations clear old errors; observing
-capabilities, counters or current state does not clear them. A valid pick with
-no hit is an ordinary empty result with no error. Diagnostic references remain
-valid until the next operation on their owner. Calls belong on the owner thread. Resource operations have one diagnostic channel;
-legacy error-output parameters and `ModelFile3D::error()` are removed. Stateless
-CPU validators and parsers retain their documented result/output contracts; a
-query miss or a stale checked handle is distinct from an operational load failure.
+`Result3D<bool>` deliberately has no bool conversion: success and the bool payload
+answer different questions. A model watcher reports a successful `false` when the
+source has not changed. An unchanged failed
+source returns its cached failure without retrying; modifying/remounting it retries.
+A failed reload preserves the last good model.
 
-`Scene3D` is a command accumulator: it retains only the first rejected submission
-until `clear()`. Invalid material counts, insufficient poses, index ranges and
-oversized instance counts reject without changing already submitted commands or
-poses. Later submissions to an invalid scene are rejected too. Rendering and
-GPU warm-up report an invalid scene (including its overlay) before submitting
-GPU work. `clear_diagnostics()` explicitly acknowledges a rejected operation
-while retaining the previous commands; use it only when deliberately retaining
-the previous valid submission. Normal frame construction uses `clear()`.
+```cpp
+auto changed = file.poll();
+if (!changed.ok()) show_error(kin::diagnostics3d_text(changed.diagnostics));
+else if (*changed) rebind(file.model());
+```
 
-Instance/model batch construction returns an invalid batch plus diagnostics for
-invalid groups, skinning or transforms. A failed `InstanceBatch3D::update` returns
-false and preserves records, bounds and revisions; a successful update clears
-its last error. Diagnostic storage lives with the shared batch data, adding no
-fields to every retained draw handle. Asset load failure leaves existing asset
-handles valid. Model3D-file reload failure keeps the last good model and reports
-through `diagnostics()`.
-Missing required meshes or texture maps fail the load instead of returning a
-partially loaded model as a successful result.
+Owner `diagnostics()` accessors are inspection snapshots, valid until the next
+operation. Use returned diagnostics to retain a particular failure. Resource and
+session operations replace these snapshots; observing state/counters does not
+clear them. Calls belong on the owner thread. Legacy error-output parameters are
+removed. Query misses (for example no pick hit), predicates and checked stale
+handles keep their documented optional/bool semantics; they are not operational
+load failures. CPU builders and validators use returned results too.
 
-`instantiate_scene3d` returns a boolean and publishes binding failures through
-the supplied `SceneAssetRuntime::diagnostics()`, the same place as scene parsing
-and instantiation failures. The loader removes its new instance on binding
-failure and retains pre-existing world entities. Scene/frame collection forwards
-submission failures, including custom scene composition. Deferred lifecycle
-requests keep their completion status and an immutable failure message.
+`Scene3D` accumulates commands and latches the first rejected submission until
+`clear()`. A failed draw leaves existing commands and poses intact. Rendering and
+warm-up reject an invalid scene, including its overlay, before GPU work. This
+allows a host that checks the final render result to deliberately discard individual
+submission results with `(void)`. `clear_diagnostics()` explicitly acknowledges a
+refusal while retaining valid commands; normal frame construction uses `clear()`.
+A failed retained-batch update preserves its records, bounds and revision. Batch
+factories return a failed result, with no batch payload, on invalid input.
 
-Optional legacy output strings on asset/renderer load functions are copies of
-the same diagnostic report. New code needs no output parameter, and omitting it
-never loses the reason for a failure. They do not select another loading or
-error-handling path. Low-level pure data validators/parsers continue to return
-their validation report directly, without mutable diagnostic state.
+`instantiate_scene3d` returns `Status3D`; failed binding removes its new instance
+and retains existing entities. Deferred lifecycle requests expose completion status
+and an immutable failure message. SDL_Renderer fallback rendering succeeds after
+drawing the view background; `available()` and capabilities still distinguish it
+from the full GPU 3D implementation.
 
-Recoverable runtime validation and draw submission do not throw. Invalid fixed
-constructor configuration (session capacities, frame step ownership/audio pairs)
-and invalid arguments to the pure `Model3D::placement` transform helper remain
-programming-contract exceptions. Allocation failure is not converted into a
-promise of recoverable operation; these APIs are not declared `noexcept`.
+Recoverable runtime validation and submission do not throw. Invalid fixed
+constructor configuration (session capacities, frame ownership/audio pairs) is a
+programming-contract exception. Allocation failure is not converted into a promise
+of recoverable operation; these APIs are not `noexcept`.
+
+Headless `SceneApp` rendering supplies `alpha=1`: its fixed step is already
+complete. Windowed hosts pass the accumulator fraction to `collect(alpha)` or
+`render(alpha)`. The sampled presentation includes body-parented cameras, ragdoll
+bones, joint attachments, IK targets and rope geometry while authoritative ECS and
+physics state stay unchanged.
 
 
 ## Public statistics and debug controls
@@ -3603,7 +3619,10 @@ Call `session.step(fixed_dt)` from the fixed update and
 `session.render(accumulator / fixed_dt)` once per displayed frame. The session
 interpolates dynamic/kinematic bodies, characters and their child draw placements without
 writing gameplay transforms or advancing physics. Joint attachments use the
-same root placement. Explicit `RenderTransform3D` remains the host's override;
+same root placement. Linked traversal hands sample moving holds and rope
+polylines at that alpha, including hand rotation and surface clearance.
+Collection preserves gameplay-authored targets and native traversal state.
+Explicit `RenderTransform3D` remains the host's override;
 pass the same alpha to a game-owned `CameraRig3D`.
 
 Transparent TAA uses reprojected particle quads and blended-mesh velocities,

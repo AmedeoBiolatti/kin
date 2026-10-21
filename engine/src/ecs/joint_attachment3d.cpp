@@ -101,12 +101,21 @@ void WorldRenderState3D::prepare_joint_attachments() {
             }
             animator = target.raw().get_mut<Animator3D>();
         }
+        const auto* presentation = target.get<RenderTransform3D>();
+        const auto root_placement = presentation && presentation->enabled ? presentation->matrix
+                                    : _presentation && *_presentation
+                                        ? (*_presentation)(target.raw()).value_or(world->matrix)
+                                        : world->matrix;
         const bool playing = animator && animator->bound_to(model) && animator->player.skeleton() == &skeleton;
-        const bool solved = playing && (!animator->ik_constraints.empty() || !animator->pose_override.empty());
+        const auto* override = animator ? &pose_override_for(target.raw(), *animator) : nullptr;
+        const bool solved = animator && ((playing && !animator->ik_constraints.empty()) || !override->empty());
         std::optional<Mat4f> joint;
         if (solved) {
             if (!attachment_pose_prepared(target.id())) {
-                solve_pose(*animator, skeleton, animator->player.pose(), world->matrix, target.raw().world(), _epoch);
+                if (!playing)
+                    _rest_pose.joints = skeleton.rest;
+                solve_pose(*animator, skeleton, playing ? animator->player.pose() : _rest_pose, root_placement,
+                           target.raw().world(), _epoch, override);
                 _attachment_poses[_attachment_pose_count++] = target.id();
             }
             if (std::size_t(attachment._index) < animator->ik_world.size())
@@ -117,11 +126,6 @@ void WorldRenderState3D::prepare_joint_attachments() {
             attachment._status = Status::InvalidTransform;
             return;
         }
-        const auto* presentation = target.get<RenderTransform3D>();
-        const auto root_placement = presentation && presentation->enabled ? presentation->matrix
-                                    : _presentation && *_presentation
-                                        ? (*_presentation)(target.raw()).value_or(world->matrix)
-                                        : world->matrix;
         const auto placement = root_placement * *joint * attachment._offset * local->matrix();
         if (!finite_matrix(placement)) {
             attachment._status = Status::InvalidTransform;

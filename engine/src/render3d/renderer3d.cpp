@@ -272,8 +272,8 @@ Status3D Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
 
 bool Renderer3D::warm_up_operation(View3D& view, const Scene3D& scene) {
     _errors.clear();
-    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
-        return fail3d(_errors, "Renderer3D::warm_up", "operation requires a valid 3D view");
+    if (!view.valid()) {
+        return fail3d(_errors, "Renderer3D::warm_up", "operation requires a valid view");
     }
     if (!scene.diagnostics().empty()) {
         _errors = scene.diagnostics();
@@ -283,7 +283,9 @@ bool Renderer3D::warm_up_operation(View3D& view, const Scene3D& scene) {
         _errors = overlay->diagnostics();
         return false;
     }
-    if (_backend->warm_up(*view.backend(), scene))
+    if (dynamic_cast<FallbackView*>(view.backend()))
+        return true;
+    if (_backend && _backend->warm_up(*view.backend(), scene))
         return true;
     return fail3d(_errors, "Renderer3D::warm_up", "GPU warm-up failed");
 }
@@ -318,6 +320,7 @@ bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
         _renderer->push_render_target(fallback->target);
         _renderer->clear(fallback->options.background);
         _renderer->pop_render_target();
+        drawn = true;
     } else if (_backend) {
         drawn = _backend->render(*view.backend(), scene, _stats);
     }

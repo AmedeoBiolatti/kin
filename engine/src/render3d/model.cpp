@@ -1,3 +1,5 @@
+#include "model_bounds3d.hpp"
+
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
@@ -1121,21 +1123,12 @@ public:
             error = _path.string() + ": no triangles";
             return {};
         }
-        bool first = true;
+        detail::ModelBounds3D bounds;
         for (const ModelPart3D& part : model.parts) {
             const Bounds3D& b = part.mesh.bounds();
-            for (int i = 0; i < 8; ++i) {
-                const Vec3f p = part.transform.apply(
-                    {(i & 1) ? b.max.x : b.min.x, (i & 2) ? b.max.y : b.min.y, (i & 4) ? b.max.z : b.min.z});
-                model.bounds.min = first ? p
-                                         : Vec3f{std::min(model.bounds.min.x, p.x), std::min(model.bounds.min.y, p.y),
-                                                 std::min(model.bounds.min.z, p.z)};
-                model.bounds.max = first ? p
-                                         : Vec3f{std::max(model.bounds.max.x, p.x), std::max(model.bounds.max.y, p.y),
-                                                 std::max(model.bounds.max.z, p.z)};
-                first = false;
-            }
+            bounds.add(b, part.transform);
         }
+        model.bounds = bounds.bounds;
         return model;
     }
 
@@ -1598,14 +1591,12 @@ ModelFile3D::ModelFile3D(Renderer3D& renderer, std::filesystem::path path, const
     : _renderer(&renderer), _path(std::move(path)), _options(options) {}
 
 bool ModelFile3D::load() {
-    std::error_code ec;
-    _time = std::filesystem::last_write_time(_path, ec);
-    Model3D model = _renderer->load_model(_path, _options).value_or({});
-    if (!model.valid()) {
-        _errors = _renderer->diagnostics();
+    auto loaded = _renderer->load_model(_path, _options);
+    if (!loaded) {
+        _errors = std::move(loaded.diagnostics);
         return false;
     }
-    _model = std::move(model);
+    _model = std::move(*loaded);
     _errors.clear();
     return true;
 }
@@ -1613,20 +1604,22 @@ bool ModelFile3D::load() {
 Result3D<bool> ModelFile3D::poll() {
     std::error_code ec;
     const auto time = std::filesystem::last_write_time(_path, ec);
-    if (ec) {
-        // Packed content is immutable and has no filesystem modification time.
-        if (content_file_exists(_path)) {
-            if (_model.valid())
-                return result3d(false);
-            if (!load())
-                return {std::nullopt, _errors};
-            return result3d(true);
-        }
+    const auto size = content_file_size(_path);
+    const auto pack = content_pack_for(_path);
+    const bool same_pack = !_source_pack.owner_before(pack) && !pack.owner_before(_source_pack);
+    if (_attempted && time == _time && size == _source_size && same_pack) {
+        if (!_errors.empty())
+            return {std::nullopt, _errors}; // cached refusal; retry only after the source changes
+        return result3d(false);
+    }
+    _attempted = true;
+    _time = time;
+    _source_size = size;
+    _source_pack = pack;
+    if (ec && !size) {
         fail3d(_errors, "ModelFile3D::poll(" + _path.string() + ")", ec.message());
         return {std::nullopt, _errors};
     }
-    if (time == _time && _model.valid())
-        return result3d(false); // no new load attempted; keep the last load's diagnostic
     if (!load())
         return {std::nullopt, _errors};
     return result3d(true);

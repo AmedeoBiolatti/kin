@@ -675,7 +675,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             .input = frame.input,
             .scenes = scenes,
             .dt = 0.0f,
-            .alpha = 0.0f,
+            .alpha = 1.0f,
             .is_top = true,
             .debug_options = &debug_overlay.options(),
             .rng = root_key,

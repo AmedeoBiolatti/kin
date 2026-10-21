@@ -87,7 +87,7 @@ void placement_and_batches() {
               replacement.parts()[1].material.color == Color::rgb(0, 0, 255),
           "material replacement not applied to all parts");
     Scene3D scene;
-    scene.draw_instanced(batch);
+    (void)scene.draw_instanced(batch);
     batch = {}; // Scene must retain the data, not borrow the source object's storage.
     check(scene.draws().size() == 2, "scene did not retain full model");
     {
@@ -278,12 +278,12 @@ void node_pose(Renderer2D& renderer, Renderer3D& r3d) {
     Scene3D scene;
     scene.camera = Camera3D::look_at({0, .5f, 5}, {0, .5f, 0}, 60);
     auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
-    scene.draw(model, Mat4f{});
+    (void)scene.draw(model, Mat4f{});
     const auto still = image(renderer, r3d, view, scene);
     sample_clip(*clip, skeleton, 0, false, pose);
     compute_world_matrices(skeleton, pose, nodes);
     scene.clear();
-    scene.draw(model, Mat4f{}, nodes);
+    (void)scene.draw(model, Mat4f{}, nodes);
     const auto rest = image(renderer, r3d, view, scene);
     int coloured = 0, differing = 0;
     for (std::size_t i = 0; i < still.size(); ++i) {
@@ -296,7 +296,7 @@ void node_pose(Renderer2D& renderer, Renderer3D& r3d) {
     sample_clip(*clip, skeleton, 1, false, pose);
     compute_world_matrices(skeleton, pose, nodes);
     scene.clear();
-    scene.draw(model, Mat4f{}, nodes);
+    (void)scene.draw(model, Mat4f{}, nodes);
     const auto turned = image(renderer, r3d, view, scene);
     const auto pixel = [&](const std::vector<u8>& rgba, Vec3f world) {
         const auto at = scene.camera.project(world, {0, 0, 160, 120});
@@ -354,11 +354,11 @@ void gpu_assets(Renderer2D& renderer) {
     Scene3D scene;
     scene.camera = Camera3D::look_at({0, 2, 12}, {0, 1, 0}, 60);
     for (const auto& copy : copies)
-        scene.draw(*parts, copy.transform, copy.tint, copy.id);
+        (void)scene.draw(*parts, copy.transform, copy.tint, copy.id);
     auto view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
     const auto reference = image(renderer, r3d, view, scene);
     scene.clear();
-    scene.draw_instanced(ModelBatch3D::create(*parts, copies).value_or({}));
+    (void)scene.draw_instanced(ModelBatch3D::create(*parts, copies).value_or({}));
     const auto batched = image(renderer, r3d, view, scene);
     check(reference.size() == batched.size(), "image size mismatch");
     int colored = 0;

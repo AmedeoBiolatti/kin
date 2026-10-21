@@ -1,3 +1,4 @@
+#include <cassert>
 // CPU costs of kin/render3d that need no window: `batch` (InstanceBatch3D edits: bounds and the change history a
 // renderer reads), `wind` (a ParticleSystem3D of 20,000 live particles in gusts and turbulence). One line a case;
 // argv[1] picks the mode, default all. Medians of many frames, so a quiet machine matters (docs/rendering_3d.md,
@@ -107,7 +108,7 @@ void batch_case(const char* name, u32 edits, u32 span) {
         const u64 since = f.batch.revision();
         const double t0 = now_ms();
         for (const Edit& e : plan[frame % cycle])
-            f.batch.update(e.first, std::span<const MeshInstance3D>(values).subspan(e.at, span));
+            assert(f.batch.update(e.first, std::span<const MeshInstance3D>(values).subspan(e.at, span)));
         const double t1 = now_ms();
         read_batch(f.batch, since, reads);
         const double t2 = now_ms();

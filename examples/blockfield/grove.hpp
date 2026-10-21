@@ -267,10 +267,10 @@ public:
         Material3D mist{.unlit = true, .double_sided = true, .blend = Blend3D::Alpha, .texture = textures[1]};
         mist.casts_shadow = mist.receives_shadow = false;
         for (const auto& batch : foliage_batches)
-            scene.draw_instanced(batch, leaf);
+            (void)scene.draw_instanced(batch, leaf);
         for (const auto& b : smoke)
             if (!b.copies.empty())
-                scene.draw_instanced_group(meshes[1], b.copies, b.bounds, mist);
+                (void)scene.draw_instanced_group(meshes[1], b.copies, b.bounds, mist);
     }
     std::array<Camera, route_count> route{};
     std::vector<InstanceBatch3D> foliage_batches;

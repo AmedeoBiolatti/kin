@@ -12,6 +12,7 @@
 #include <limits>
 #include <numeric>
 #include <queue>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 
@@ -178,8 +179,9 @@ std::string check_input(std::span<const Vec3f> vertices, std::span<const u32> in
         return "weld_distance must be finite and not negative";
     }
     if (!(options.agent_radius >= 0.0f) || !std::isfinite(options.agent_radius) || !(options.agent_height >= 0.0f) ||
-        !std::isfinite(options.agent_height)) {
-        return "agent_radius and agent_height must be finite and not negative";
+        !std::isfinite(options.agent_height) || !(options.max_step_height >= 0) ||
+        !std::isfinite(options.max_step_height)) {
+        return "agent_radius, agent_height and max_step_height must be finite and not negative";
     }
     if (vertices.size() >= nav_none) {
         return "too many vertices";
@@ -320,7 +322,7 @@ f64 dot64(Vec3f a, Vec3f b) {
 // the entire footprint, not a few upward samples (a small/slanted ceiling can
 // fall between those). Obstacle winding does not matter.
 bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 3>& obstacle, Vec3f up, f32 height,
-                     const std::array<u32, 3>& neighbors) {
+                     const std::array<u32, 3>& neighbors, const std::array<bool, 3>& steps) {
     // Relative coordinates avoid cancellation of large world-space plane offsets.
     std::vector<Vec3f> polygon, clipped;
     for (const auto point : obstacle)
@@ -349,7 +351,7 @@ bool blocks_headroom(const std::array<Vec3f, 3>& floor, const std::array<Vec3f, 
         // does not occupy the floor interior. Keep a world-space tolerance.
         // Across an interior floor portal, a wall still blocks crossing.
         // Exposed tread edges have no portal to obstruct.
-        clip(inward, -dot64(inward, floor[edge] - floor[0]) - (neighbors[edge] == nav_none ? 1e-5 : 0));
+        clip(inward, -dot64(inward, floor[edge] - floor[0]) - (neighbors[edge] == nav_none || steps[edge] ? 1e-5 : 0));
     }
     const auto normal = normalize(cross(floor[1] - floor[0], floor[2] - floor[0]));
     const auto vertical = dot64(normal, up);
@@ -449,47 +451,48 @@ std::vector<u32> clear_triangles(const NavMesh3D& mesh, std::span<const Vec3f> v
                 const auto& v = obstacles.triangles[other].vertices;
                 return blocks_headroom(floor,
                                        {obstacles.vertices[v[0]], obstacles.vertices[v[1]], obstacles.vertices[v[2]]},
-                                       up, height, mesh.triangles[t].neighbors);
+                                       up, height, mesh.triangles[t].neighbors, mesh.triangles[t].steps);
             });
         }
     }
     if (mesh.options.agent_radius > 0) {
-        // Follow the local floor topology, rather than every border in a region:
-        // a ramp can connect vertically overlapping floors in the same region.
-        // Only traverse triangles within radius of this footprint. A distant
-        // connection cannot bring a balcony's projected border down to the ground.
+        // Propagate from actual borders, inside their radius and through local
+        // floor topology. Interior triangles do no distance work, and a distant
+        // ramp cannot bring a balcony border onto the floor underneath it.
         const auto walkable = keep;
         std::vector<Vec3f> projected;
         projected.reserve(mesh.vertices.size());
         for (const auto vertex : mesh.vertices)
             projected.push_back(flat(vertex, up));
-        std::vector<u32> visited(mesh.triangles.size(), nav_none);
+        std::vector<u64> visited(mesh.triangles.size(), 0);
+        u64 stamp = 0;
         const f64 radius_squared = f64(mesh.options.agent_radius) * mesh.options.agent_radius;
         for (u32 t = 0; t < mesh.triangles.size(); ++t) {
             if (!walkable[t])
                 continue;
-            const auto& ids = mesh.triangles[t].vertices;
-            const std::array<Vec3f, 3> floor{projected[ids[0]], projected[ids[1]], projected[ids[2]]};
-            stack.clear();
-            stack.push_back(t);
-            visited[t] = t;
-            while (!stack.empty() && keep[t]) {
-                const auto current = stack.back();
-                stack.pop_back();
-                const auto& triangle = mesh.triangles[current];
-                for (u32 i = 0; i < 3; ++i) {
-                    const auto a = projected[triangle.vertices[i]], b = projected[triangle.vertices[(i + 1) % 3]];
+            const auto& border = mesh.triangles[t];
+            for (u32 edge = 0; edge < 3; ++edge) {
+                const auto next = border.neighbors[edge];
+                if (next != nav_none && walkable[next])
+                    continue;
+                ++stamp;
+                const auto a = projected[border.vertices[edge]], b = projected[border.vertices[(edge + 1) % 3]];
+                stack.assign(1, t);
+                visited[t] = stamp;
+                while (!stack.empty()) {
+                    const auto current = stack.back();
+                    stack.pop_back();
+                    const auto& tri = mesh.triangles[current];
+                    const std::array<Vec3f, 3> floor{projected[tri.vertices[0]], projected[tri.vertices[1]],
+                                                     projected[tri.vertices[2]]};
                     if (boundary_distance_squared(floor, a, b, up) > radius_squared)
                         continue;
-                    const auto next = triangle.neighbors[i];
-                    if (next == nav_none || !walkable[next]) {
-                        keep[t] = false;
-                        break;
-                    }
-                    if (visited[next] != t) {
-                        visited[next] = t;
-                        stack.push_back(next);
-                    }
+                    keep[current] = false;
+                    for (const auto neighbor : tri.neighbors)
+                        if (neighbor != nav_none && walkable[neighbor] && visited[neighbor] != stamp) {
+                            visited[neighbor] = stamp;
+                            stack.push_back(neighbor);
+                        }
                 }
             }
         }
@@ -1046,6 +1049,98 @@ void drop_straight_corners(std::vector<Vec3f>& path) {
 
 } // namespace
 
+namespace {
+void join_steps(NavMesh3D& mesh) {
+    if (!(mesh.options.max_step_height > 0))
+        return;
+    std::vector<Vec3f> projected;
+    for (const auto v : mesh.vertices)
+        projected.push_back(flat(v, mesh.options.up));
+    const auto welded = weld(projected, mesh.options.weld_distance);
+    struct Edge {
+        u32 a, b, triangle, edge;
+    };
+    std::vector<Edge> edges;
+    for (u32 t = 0; t < mesh.triangles.size(); ++t)
+        for (u32 e = 0; e < 3; ++e)
+            if (mesh.triangles[t].neighbors[e] == nav_none) {
+                const auto& tri = mesh.triangles[t];
+                edges.push_back({welded[tri.vertices[e]], welded[tri.vertices[(e + 1) % 3]], t, e});
+            }
+    const auto key = [](const Edge& e) { return std::pair{std::min(e.a, e.b), std::max(e.a, e.b)}; };
+    std::ranges::sort(edges, [&](const Edge& a, const Edge& b) {
+        return std::tuple{key(a), a.triangle, a.edge} < std::tuple{key(b), b.triangle, b.edge};
+    });
+    for (std::size_t first = 0; first < edges.size();) {
+        auto end = first + 1;
+        while (end < edges.size() && key(edges[end]) == key(edges[first]))
+            ++end;
+        for (auto i = first; i < end; ++i) {
+            const auto& a = edges[i];
+            auto& ta = mesh.triangles[a.triangle];
+            if (ta.neighbors[a.edge] != nav_none || a.a == a.b)
+                continue;
+            std::size_t selected = end;
+            f32 closest = inf;
+            for (auto j = first; j < end; ++j) {
+                const auto& b = edges[j];
+                const auto& tb = mesh.triangles[b.triangle];
+                if (a.triangle == b.triangle || a.a != b.b || a.b != b.a || tb.neighbors[b.edge] != nav_none)
+                    continue;
+                const auto h0 = dot(mesh.vertices[tb.vertices[(b.edge + 1) % 3]] - mesh.vertices[ta.vertices[a.edge]],
+                                    mesh.options.up);
+                const auto h1 = dot(mesh.vertices[tb.vertices[b.edge]] - mesh.vertices[ta.vertices[(a.edge + 1) % 3]],
+                                    mesh.options.up);
+                const auto height = std::max(std::abs(h0), std::abs(h1));
+                if (h0 * h1 >= 0 && height > 0 && height <= mesh.options.max_step_height && height < closest) {
+                    closest = height;
+                    selected = j;
+                }
+            }
+            if (selected != end) {
+                const auto& b = edges[selected];
+                ta.neighbors[a.edge] = b.triangle;
+                ta.steps[a.edge] = true;
+                mesh.triangles[b.triangle].neighbors[b.edge] = a.triangle;
+                mesh.triangles[b.triangle].steps[b.edge] = true;
+            }
+        }
+        first = end;
+    }
+}
+
+std::vector<Vec3f> step_path(const NavMesh3D& mesh, const std::vector<u32>& corridor, Vec3f from, Vec3f to) {
+    std::vector<Vec3f> result;
+    std::size_t first = 0;
+    for (std::size_t k = 1; k < corridor.size(); ++k) {
+        const auto& tri = mesh.triangles[corridor[k - 1]];
+        u32 edge = 0;
+        while (edge < 3 && tri.neighbors[edge] != corridor[k])
+            ++edge;
+        if (edge == 3 || !tri.steps[edge])
+            continue;
+        const auto a = mesh.vertices[tri.vertices[edge]], b = mesh.vertices[tri.vertices[(edge + 1) % 3]];
+        const auto leave = crossing(from, a, b, to, mesh.options.up);
+        std::vector<u32> section(corridor.begin() + first, corridor.begin() + k);
+        const auto path = taut_path(mesh, std::move(section), from, leave);
+        result.insert(result.end(), path.begin(), path.end());
+        const auto& next = mesh.triangles[corridor[k]];
+        u32 other = 0;
+        while (other < 3 && next.neighbors[other] != corridor[k - 1])
+            ++other;
+        const auto delta = flat(b - a, mesh.options.up);
+        const auto along = std::clamp(dot(flat(leave - a, mesh.options.up), delta) / dot(delta, delta), 0.f, 1.f);
+        from = lerp(mesh.vertices[next.vertices[(other + 1) % 3]], mesh.vertices[next.vertices[other]], along);
+        result.push_back(from);
+        first = k;
+    }
+    std::vector<u32> section(corridor.begin() + first, corridor.end());
+    const auto path = taut_path(mesh, std::move(section), from, to);
+    result.insert(result.end(), path.begin(), path.end());
+    return result;
+}
+} // namespace
+
 std::size_t NavMesh3D::memory_bytes() const {
     return sizeof(NavMesh3D) + vertices.capacity() * sizeof(Vec3f) + triangles.capacity() * sizeof(NavTriangle3D) +
            nodes.capacity() * sizeof(NavMeshNode3D) + node_triangles.capacity() * sizeof(u32);
@@ -1180,6 +1275,8 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
             }
         }
     }
+
+    join_steps(mesh);
 
     // Regions: flood fills in triangle order, so region numbers follow the
     // lowest triangle of each.
@@ -1322,7 +1419,9 @@ std::vector<Vec3f> find_path(const NavMesh3D& mesh, Vec3f from, Vec3f to, NavPat
     if (corridor.empty()) {
         return {};
     }
-    std::vector<Vec3f> path = taut_path(mesh, std::move(corridor), start->position, goal->position);
+    std::vector<Vec3f> path = mesh.options.max_step_height > 0
+                                  ? step_path(mesh, corridor, start->position, goal->position)
+                                  : taut_path(mesh, std::move(corridor), start->position, goal->position);
     drop_straight_corners(path);
     return path;
 }

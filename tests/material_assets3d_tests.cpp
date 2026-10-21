@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
@@ -193,7 +194,7 @@ void material_gpu(Renderer2D& renderer) {
         auto view = r3d.create_view({64, 64}).value_or({});
         Scene3D probe;
         probe.camera = Camera3D::look_at({0, 0, 3}, {0, 0, 0});
-        probe.draw(*model, Mat4f::identity(), colors::white, 0, shaded->materials);
+        (void)probe.draw(*model, Mat4f::identity(), colors::white, 0, shaded->materials);
         check(r3d.render(view, probe), "custom asset shader render failed");
         {
             auto target = renderer.create_render_target({64, 64});
@@ -356,7 +357,7 @@ void material_gpu(Renderer2D& renderer) {
     previous.reset();
     red.reset();
     green.reset();
-    session.unload();
+    assert(session.unload());
     assets.trim();
     {
         Assets3D small{r3d, scratch.path, {.materials = 1}};

@@ -79,12 +79,12 @@ void test_bounds_follow_edits() {
     // 100 scattered single edits, the groups read after each, then after all of them read once.
     for (int i = 0; i < 100; ++i) {
         const MeshInstance3D m = random_instance(rng, 5000 + i);
-        batch.update(rng.below(4000), {&m, 1});
+        assert(batch.update(rng.below(4000), {&m, 1}));
         check_groups(batch);
     }
     for (int i = 0; i < 500; ++i) {
         const MeshInstance3D m = random_instance(rng, 6000 + i);
-        batch.update(rng.below(4000), {&m, 1});
+        assert(batch.update(rng.below(4000), {&m, 1}));
     }
     check_groups(batch);
     // Runs that span groups and the gaps between them, some of them taken from the batch itself (overlapping its own
@@ -94,10 +94,10 @@ void test_bounds_follow_edits() {
         std::vector<MeshInstance3D> run(n);
         for (u32 k = 0; k < n; ++k)
             run[k] = random_instance(rng, 7000 + k);
-        batch.update(first, run);
+        assert(batch.update(first, run));
         if (i % 3 == 0) {
             const u32 m = 1 + rng.below(800), from = rng.below(4000 - m + 1), to = rng.below(4000 - m + 1);
-            batch.update(to, batch.instances().subspan(from, m));
+            assert(batch.update(to, batch.instances().subspan(from, m)));
         }
         if (i % 4 == 0)
             check_groups(batch);
@@ -112,7 +112,7 @@ void test_bounds_follow_edits() {
         std::vector<MeshInstance3D> run(last - first);
         for (auto& m : run)
             m = random_instance(rng, 8000);
-        batch.update(first, run);
+        assert(batch.update(first, run));
         check_groups(batch);
     }
     // A copy taken off a face of its group's bounds and one put well inside: the bounds shrink, and stay as they were.
@@ -122,10 +122,10 @@ void test_bounds_follow_edits() {
     auto row = InstanceBatch3D::create(test_mesh(), line, {{0, 10}}).value_or({});
     const Bounds3D before = row.groups()[0].world_bounds;
     const MeshInstance3D inside{Mat4f::translation({4.5f, 0.0f, 0.0f}), colors::white, 5};
-    row.update(4, {&inside, 1});
+    assert(row.update(4, {&inside, 1}));
     assert(same(row.groups()[0].world_bounds, before));
     const MeshInstance3D away{Mat4f::translation({-20.0f, 0.0f, 0.0f}), colors::white, 1};
-    row.update(9, {&away, 1});
+    assert(row.update(9, {&away, 1}));
     assert(row.groups()[0].world_bounds.max.x < before.max.x - 0.9f && row.groups()[0].world_bounds.min.x < -20.0f);
     check_groups(row);
 }
@@ -140,7 +140,7 @@ void test_changed_ranges() {
     for (int i = 0; i < 12; ++i) {
         const MeshInstance3D m = random_instance(rng, 1);
         const u32 at = rng.below(count);
-        batch.update(at, {&m, 1});
+        assert(batch.update(at, {&m, 1}));
         lo = std::min(lo, at);
         hi = std::max(hi, at + 1);
     }
@@ -152,7 +152,7 @@ void test_changed_ranges() {
     for (int i = 0; i < 100; ++i) {
         const MeshInstance3D m = random_instance(rng, 2);
         const u32 at = rng.below(count);
-        batch.update(at, {&m, 1});
+        assert(batch.update(at, {&m, 1}));
         edited.insert(at);
         lo = std::min(lo, at);
         hi = std::max(hi, at + 1);
@@ -183,8 +183,8 @@ void test_changed_ranges() {
     // A reader nearer the end sees fewer of them; the one at the present sees none; the unknown ones see everything.
     const u64 later = batch.revision();
     const MeshInstance3D one = random_instance(rng, 3);
-    batch.update(4321, {&one, 1});
-    batch.update(17, {&one, 1});
+    assert(batch.update(4321, {&one, 1}));
+    assert(batch.update(17, {&one, 1}));
     assert(batch.changed_since(later).first == 17 && batch.changed_since(later).count == 4321 - 17 + 1);
     ranges.clear();
     batch.changed_ranges_since(later, ranges);
@@ -200,9 +200,9 @@ void test_changed_ranges() {
     // Edits that touch or overlap are one range.
     const u64 t = batch.revision();
     const std::vector<MeshInstance3D> a(5, one), b(5, one);
-    batch.update(100, a);
-    batch.update(105, b);
-    batch.update(103, std::span<const MeshInstance3D>(a).first(4));
+    assert(batch.update(100, a));
+    assert(batch.update(105, b));
+    assert(batch.update(103, std::span<const MeshInstance3D>(a).first(4)));
     ranges.clear();
     batch.changed_ranges_since(t, ranges);
     assert(ranges.size() == 1 && ranges[0].first == 100 && ranges[0].count == 10);
@@ -211,7 +211,7 @@ void test_changed_ranges() {
     const u64 old = batch.revision();
     for (int i = 0; i < 3000; ++i) {
         const u32 at = 2000 + rng.below(100);
-        batch.update(at, {&one, 1});
+        assert(batch.update(at, {&one, 1}));
     }
     const auto far = batch.changed_since(old);
     assert(far.first >= 2000 - 16 && far.first + far.count <= 2100 + 16);
@@ -231,20 +231,20 @@ void test_layout_revision() {
     broken.transform.m[0] = inf;
     const MeshInstance3D fine = random_instance(rng, 2);
     // Two copies without a finite box in a group: it has no bounds until both are mended.
-    batch.update(5, {&broken, 1});
+    assert(batch.update(5, {&broken, 1}));
     assert(copy.layout_revision() == layout + 1 && !valid(copy.groups()[0].world_bounds));
-    batch.update(7, {&broken, 1});
+    assert(batch.update(7, {&broken, 1}));
     assert(copy.layout_revision() == layout + 1);
-    batch.update(5, {&fine, 1});
+    assert(batch.update(5, {&fine, 1}));
     assert(copy.layout_revision() == layout + 1 && !valid(copy.groups()[0].world_bounds));
-    batch.update(7, {&fine, 1});
+    assert(batch.update(7, {&fine, 1}));
     assert(copy.layout_revision() == layout + 2 && valid(copy.groups()[0].world_bounds));
     check_groups(batch);
     layout = batch.layout_revision();
     // One edit over several groups: the layout moves once for it, whatever number of groups gained or lost their
     // bounds.
     std::vector<MeshInstance3D> run(250, broken);
-    batch.update(50, run);
+    assert(batch.update(50, run));
     assert(batch.layout_revision() == layout + 1);
     assert(!valid(batch.groups()[0].world_bounds) && !valid(batch.groups()[1].world_bounds) &&
            !valid(batch.groups()[2].world_bounds) && valid(batch.groups()[3].world_bounds));
@@ -263,7 +263,7 @@ void test_layout_revision() {
             if (rng.below(40) == 0)
                 edit[k].transform.m[13] = std::numeric_limits<f32>::quiet_NaN();
         }
-        batch.update(first, edit);
+        assert(batch.update(first, edit));
         bool moved = false;
         std::size_t index = 0;
         for (const InstanceGroup3D& g : batch.groups()) {
@@ -280,7 +280,7 @@ void test_layout_revision() {
     std::vector<MeshInstance3D> all(count);
     for (u32 i = 0; i < count; ++i)
         all[i] = random_instance(rng, i);
-    batch.update(0, all);
+    assert(batch.update(0, all));
     for (const auto& g : batch.groups())
         assert(valid(g.world_bounds));
     check_groups(batch);
