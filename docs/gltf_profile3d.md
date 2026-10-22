@@ -118,7 +118,9 @@ block a tread's headroom. Uphill rise
 across the radius adds a conservative margin from nearby connected slopes,
 including the underside tilt of a soffit over steps, without spreading a
 margin to distant doors. With step joining enabled, construction uses at least
-`max_step_height` of vertical clearance to remove hidden lower supports. Set
+`max_step_height` of vertical clearance: the effective height is
+`max(agent_height, max_step_height)`. This removes hidden lower supports and also
+blocks walls and low ceilings even when the requested agent height is zero. Set
 both dimensions and `max_step_height` to zero for point-agent navigation;
 changing any clearance dimension requires rebuilding.
 

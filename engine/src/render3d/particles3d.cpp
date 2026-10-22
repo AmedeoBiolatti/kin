@@ -495,6 +495,9 @@ f32 ParticleSystem3D::random(u32 index, u32 purpose) const {
 
 void ParticleSystem3D::clear() {
     _particles.clear();
+    _previous_motion.clear();
+    _motion_sampled = false;
+    ++_presentation_epoch;
     _next_index = 0;
     _carry = 0.0;
     _accumulated = 0.0;
@@ -503,18 +506,26 @@ void ParticleSystem3D::clear() {
     _dropped = 0;
 }
 
-f32 ParticleSystem3D::size_over_life(const ParticleDesc3D& d, f32 t) {
+namespace {
+template <class Curves> f32 size_curve(const Curves& d, f32 t) {
     t = std::clamp(t, 0.0f, 1.0f);
     return t < 0.5f ? lerp_f(d.size_start, d.size_mid, t * 2.0f) : lerp_f(d.size_mid, d.size_end, (t - 0.5f) * 2.0f);
 }
 
-f32 ParticleSystem3D::alpha_over_life(const ParticleDesc3D& d, f32 t) {
+template <class Curves> f32 alpha_curve(const Curves& d, f32 t) {
     t = std::clamp(t, 0.0f, 1.0f);
     f32 a = lerp_f(d.alpha_start, d.alpha_end, t);
     if (d.fade_in > 0.0f) {
         a *= std::clamp(t / d.fade_in, 0.0f, 1.0f);
     }
     return a;
+}
+} // namespace
+f32 ParticleSystem3D::size_over_life(const ParticleDesc3D& d, f32 t) {
+    return size_curve(d, t);
+}
+f32 ParticleSystem3D::alpha_over_life(const ParticleDesc3D& d, f32 t) {
+    return alpha_curve(d, t);
 }
 
 void ParticleSystem3D::advance(Particle3D& p, f64 dt, const Wind3D* wind) const {
@@ -614,7 +625,27 @@ void ParticleSystem3D::burst_at(Vec3f position, u32 count) {
     spawn(count, true, position, nullptr, 0.0);
 }
 
-void ParticleSystem3D::update(f64 dt, const Wind3D* wind) {
+void ParticleSystem3D::update(f64 dt, const Wind3D* wind, ParticleMotion3D motion) {
+    const bool capture_motion = motion == ParticleMotion3D::Capture;
+    if (std::isfinite(dt) && dt > 0) {
+        _previous_motion.clear();
+        _motion_sampled = capture_motion;
+        if (capture_motion) {
+            // Only the life curves are needed later; do not retain textures or
+            // copy unrelated emitter configuration into presentation history.
+            _previous_life.size_start = desc.size_start;
+            _previous_life.size_mid = desc.size_mid;
+            _previous_life.size_end = desc.size_end;
+            _previous_life.alpha_start = desc.alpha_start;
+            _previous_life.alpha_end = desc.alpha_end;
+            _previous_life.fade_in = desc.fade_in;
+            _previous_motion.reserve(_particles.size());
+            const auto carry = f32(std::max(_accumulated, 0.0));
+            for (const auto& p : _particles)
+                _previous_motion.push_back({p.index, p.position + p.velocity * carry,
+                                            std::clamp(p.age / p.lifetime, 0.f, 1.f), p.rotation + p.spin * carry});
+        }
+    }
     if (std::isfinite(dt) && dt > 0.0) { // NaN and infinity: no time (an infinite one would never be stepped through)
         _accumulated += dt;
     }
@@ -641,7 +672,9 @@ void ParticleSystem3D::update(f64 dt, const Wind3D* wind) {
     }
 }
 
-void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
+void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out, f32 alpha) const {
+    alpha = std::isfinite(alpha) ? std::clamp(alpha, 0.f, 1.f) : 1.f;
+    std::size_t prior = 0;
     const f32 acc = static_cast<f32>(std::max(_accumulated, 0.0));
     const u32 frames = desc.look.atlas_frames > 0 ? desc.look.atlas_frames
                                                   : std::max(1u, desc.look.atlas_columns * desc.look.atlas_rows);
@@ -649,7 +682,7 @@ void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
     for (const Particle3D& p : _particles) {
         const f32 t = std::clamp(p.age / p.lifetime, 0.0f, 1.0f);
         ParticleSprite3D s;
-        s.id = u64(p.index) + 1;
+        s.id = ((u64(_presentation_epoch) << 32) | u64(p.index)) + 1;
         s.position = p.position + p.velocity * acc;
         s.size = p.size * size_over_life(desc, t);
         s.rotation = p.rotation + p.spin * acc;
@@ -664,6 +697,19 @@ void ParticleSystem3D::sprites(std::vector<ParticleSprite3D>& out) const {
             s.frame = f;
         } else if (desc.frame_random && frames > 1) {
             s.frame = std::floor(p.random * static_cast<f32>(frames));
+        }
+        if (alpha < 1 && _motion_sampled) {
+            while (prior < _previous_motion.size() && _previous_motion[prior].index < p.index)
+                ++prior;
+            if (prior < _previous_motion.size() && _previous_motion[prior].index == p.index) {
+                const auto& old = _previous_motion[prior];
+                s.position = lerp(old.position, s.position, alpha);
+                s.rotation = std::lerp(old.rotation, s.rotation, alpha);
+                s.size = std::lerp(p.size * size_curve(_previous_life, old.life), s.size, alpha);
+                s.alpha = std::lerp(alpha_curve(_previous_life, old.life), s.alpha, alpha);
+            } else {
+                s.alpha *= alpha;
+            }
         }
         out.push_back(s);
     }
@@ -714,7 +760,7 @@ std::vector<u8> ParticleSystem3D::save() const {
     return out;
 }
 
-bool ParticleSystem3D::restore(std::span<const u8> bytes) {
+bool ParticleSystem3D::restore(std::span<const u8> bytes, ParticleRestore3D mode) {
     constexpr std::size_t header = 4 + 4 + 8 + 4 + 4 + 8 + 8 + 8 + 4;
     if (bytes.size() < header) {
         return false;
@@ -740,6 +786,16 @@ bool ParticleSystem3D::restore(std::span<const u8> bytes) {
         bytes.size() != header + static_cast<std::size_t>(count) * sizeof(Particle3D)) {
         return false;
     }
+    const bool identical =
+        _seed == seed && _next_index == next && _dropped == dropped && _carry == carry && _accumulated == accumulated &&
+        _time == time && _particles.size() == count &&
+        (count == 0 || std::memcmp(_particles.data(), bytes.data() + at, std::size_t(count) * sizeof(Particle3D)) == 0);
+    if (identical)
+        return true;
+    _previous_motion.clear();
+    _motion_sampled = false;
+    if (mode != ParticleRestore3D::Rollback)
+        ++_presentation_epoch;
     _seed = seed;
     _next_index = next;
     _dropped = dropped;

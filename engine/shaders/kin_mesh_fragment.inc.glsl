@@ -11,12 +11,15 @@
 layout(location = 5) in vec3 vCurrent;
 layout(location = 6) in vec3 vPrevious;
 layout(location = 7) flat in float vFresh;
-layout(location = 8) in float vIndependent;
+layout(location = 8) in vec3 vOldInCurrent;
 layout(location = 1) out vec4 FragVelocity;
 #include "kin_velocity.inc.glsl"
 #endif
 
 void main() {
+#ifdef KIN_VELOCITY
+    const float motion_footprint = 0.25 * length(fwidth(vCurrent.xy / vCurrent.z));
+#endif
     const vec4 color = kin_base_color();
     float alpha = color.a;
     if (alpha < material.params.w) {
@@ -35,6 +38,6 @@ void main() {
     }
     FragColor = kin_output(c, alpha);
 #ifdef KIN_VELOCITY
-    FragVelocity = vec4(0.0, vIndependent > 0.25 * length(fwidth(vCurrent.xy / vCurrent.z)) ? 4.0 : 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
+    FragVelocity = vec4(0.0, kin_independent_motion(vCurrent, vOldInCurrent) > motion_footprint ? 4.0 : 0.0, kin_velocity(vCurrent, vPrevious, vFresh));
 #endif
 }

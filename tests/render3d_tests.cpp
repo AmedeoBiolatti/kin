@@ -10315,7 +10315,7 @@ void test_gpu_physics_debug_lines() {
             state.propagate_transforms();
             state.collect(scene);
             if (with_physics_state) {
-                bodies.config().debug_draw = debug;
+                bodies.config().debug.enabled = debug;
                 bodies.collect_debug(r3d, scene);
             }
             const Pixels p = shoot_view(renderer, r3d, view, scene);
@@ -10368,7 +10368,7 @@ void test_gpu_physics_debug_lines() {
         }
         assert(found);
         // A ray and its hit through the same view.
-        bodies.config().debug_draw = true;
+        bodies.config().debug.enabled = true;
         const auto hit = physics.raycast({0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f});
         assert(hit && std::fabs(hit->point.y - 1.0f) < 0.03f);
         bodies.debug().ray({0.0f, 3.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, hit);
@@ -17742,6 +17742,124 @@ void test_gpu_particle_budget() {
 // Compare history against current-frame spatial reconstruction, then repeat with
 // camera motion and real jitter. Invisible/occluded sprites must instead preserve
 // the ordinary temporal resolve, including the background's thin geometry.
+void test_gpu_taa_explicit_history_identity() {
+    with_gpu("test_gpu_taa_explicit_history_identity", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "TAA"))
+            return;
+        const auto box = make_box(r3d, {1, 1, 1});
+        auto actual_view = r3d.create_view({160, 120}, {.pick = true}).value_or({});
+        auto reference_view = r3d.create_view({160, 120}).value_or({});
+        auto spatial_view = r3d.create_view({160, 120}).value_or({});
+        std::vector<kin::u8> pixels(32 * 32 * 4, 255);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                for (int c = 0; c < 3; ++c)
+                    pixels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
+        const auto checker = renderer.create_texture_from_rgba(pixels.data(), {32, 32});
+        const kin::Material3D glass{
+            .color = Color::rgba(255, 255, 255, 180), .unlit = true, .blend = kin::Blend3D::Alpha, .texture = checker};
+        int retained = 0;
+        for (int frame = 0; frame < 24; ++frame) {
+            kin::Scene3D actual, reference;
+            for (auto* scene : {&actual, &reference}) {
+                scene->camera = kin::Camera3D::look_at({0, 0, 6}, {}, 35);
+                scene->taa = {.enabled = true, .blend = .98f};
+                scene->debug.freeze_jitter = true;
+                (void)scene->draw(box, Mat4f::scaling({20, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
+            }
+            std::array<kin::MeshInstance3D, 2> copies;
+            for (int i = 0; i < 2; ++i)
+                copies[i] = {Mat4f::translation({(i ? .6f : -.6f) + frame * .002f, 0, 1}) *
+                                 Mat4f::scaling({.8f, .8f, .01f}),
+                             i ? Color::rgb(255, 120, 120) : kin::colors::white, static_cast<kin::u32>(400 + frame),
+                             (kin::u64(i + 1) << 32) | 1};
+            auto reference_copies = copies;
+            reference_copies[0].id = 17;
+            reference_copies[1].id = 29;
+            (void)reference.draw_instanced(box, reference_copies, glass);
+            if (frame % 2)
+                std::swap(copies[0], copies[1]);
+            (void)actual.draw_instanced(box, copies, glass);
+            const auto got = shoot_view(renderer, r3d, actual_view, actual);
+            renderer.present();
+            const auto expected = shoot_view(renderer, r3d, reference_view, reference);
+            renderer.present();
+            reference.taa.blend = 0;
+            const auto spatial = shoot_view(renderer, r3d, spatial_view, reference);
+            renderer.present();
+            if (frame >= 12)
+                for (int y = 30; y < 90; ++y)
+                    for (int x = 35; x < 125; ++x) {
+                        assert(largest_difference(got.at(x, y), expected.at(x, y)) == 0);
+                        retained += largest_difference(got.at(x, y), spatial.at(x, y)) > 2;
+                    }
+            // Picking reports the current ID, despite stable temporal IDs.
+            const auto picked = r3d.pick(actual_view, {50, 60});
+            assert(picked && picked->id == static_cast<kin::u32>(400 + frame));
+        }
+        assert(retained > 500);
+    });
+}
+
+void test_gpu_taa_fast_transparent_copy() {
+    with_gpu("test_gpu_taa_fast_transparent_copy", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "TAA"))
+            return;
+        const auto box = make_box(r3d, {1, 1, 1});
+        std::vector<kin::u8> pixels(32 * 32 * 4, 255);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                for (int c = 0; c < 3; ++c)
+                    pixels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
+        const auto checker = renderer.create_texture_from_rgba(pixels.data(), {32, 32});
+        const float radius = std::sqrt(.75f) * .15f;
+        for (float speed : {2.5f, 4.f, 7.f}) {
+            auto anonymous = r3d.create_view({160, 120}).value_or({});
+            auto identified = r3d.create_view({160, 120}).value_or({});
+            auto spatial = r3d.create_view({160, 120}).value_or({});
+            int retained = 0, difference = 0;
+            for (int frame = 0; frame < 24; ++frame) {
+                const float x = frame * speed * radius;
+                kin::Scene3D scene;
+                scene.camera = kin::Camera3D::look_at({x, 0, 6}, {x, 0, 0}, 15);
+                scene.taa = {.enabled = true, .blend = .98f};
+                (void)scene.draw(box, Mat4f::scaling({300, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
+                kin::MeshInstance3D copy{Mat4f::translation({x, 0, 1}) * Mat4f::scaling({.15f, .15f, .01f})};
+                const kin::Material3D glass{.color = Color::rgba(255, 255, 255, 180),
+                                            .unlit = true,
+                                            .blend = kin::Blend3D::Alpha,
+                                            .texture = checker};
+                (void)scene.draw_instanced(box, std::span{&copy, 1}, glass);
+                const auto actual = shoot_view(renderer, r3d, anonymous, scene);
+                renderer.present();
+                kin::Scene3D control;
+                control.camera = scene.camera;
+                control.taa = scene.taa;
+                (void)control.draw(box, Mat4f::scaling({300, 8, .1f}),
+                                   {.color = Color::rgb(40, 50, 60), .unlit = true});
+                copy.id = 17;
+                (void)control.draw_instanced(box, std::span{&copy, 1}, glass);
+                const auto expected = shoot_view(renderer, r3d, identified, control);
+                renderer.present();
+                control.taa.blend = 0;
+                const auto current = shoot_view(renderer, r3d, spatial, control);
+                renderer.present();
+                if (frame >= 12)
+                    for (int y = 45; y < 75; ++y)
+                        for (int px = 65; px < 95; ++px) {
+                            retained += largest_difference(expected.at(px, y), current.at(px, y)) > 2;
+                            difference = std::max(difference, largest_difference(actual.at(px, y), expected.at(px, y)));
+                        }
+            }
+            std::cerr << "fast transparent " << speed << " radii: reference retained " << retained
+                      << ", max difference " << difference << "\n";
+            assert(retained > 500 && difference <= 3);
+        }
+    });
+}
+
 void test_gpu_taa_live_transparency() {
     with_gpu("test_gpu_taa_live_transparency", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -17759,7 +17877,7 @@ void test_gpu_taa_live_transparency() {
             custom =
                 r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
                     .value_or({});
-        for (int mode = 0; mode < 7; ++mode) {
+        for (int mode = 0; mode < 12; ++mode) {
             if (mode == 4 && !custom)
                 continue;
             auto accumulated = r3d.create_view({160, 120}).value_or({});
@@ -17767,19 +17885,27 @@ void test_gpu_taa_live_transparency() {
             int retained_pixels = 0;
             for (int frame = 0; frame < 24; ++frame) {
                 kin::Scene3D scene;
-                const float camera_x = float(frame) * .008f;
+                const float camera_x = float(frame) * (mode == 11 ? .36f : .008f);
                 scene.camera = kin::Camera3D::look_at({camera_x, 0, 6}, {camera_x, 0, 0}, 60);
                 scene.lights.sun.color = {};
                 scene.lights.ambient = {1, 1, 1};
                 scene.taa = {.enabled = true, .blend = .98f};
-                // Adding an unrelated earlier draw must not change the stable
-                // transparent draw's appearance/history identity.
+                kin::Material3D sibling{.color = Color::rgba(255, 255, 255, 180),
+                                        .unlit = true,
+                                        .blend = kin::Blend3D::Alpha,
+                                        .texture = checker};
+                if (mode == 9 || mode == 10)
+                    sibling = {.color = Color::rgba(180, 60, 20, 150), .unlit = true, .blend = kin::Blend3D::Alpha};
+                // Keep the original unrelated opaque regression, then separately
+                // cover same-material and different-material transparent siblings.
                 if (mode == 3 && frame % 2)
                     (void)scene.draw(box, Mat4f::translation({-3, 3, 0}), {.unlit = true});
+                if (mode >= 7 && mode < 11 && frame % 2)
+                    (void)scene.draw(box, Mat4f::translation({-3, 3, 0}), sibling);
                 (void)scene.draw(box, Mat4f::scaling({12, 8, .1f}), {.color = Color::rgb(40, 50, 60), .unlit = true});
                 // Unrelated motion used to reject every transparent pixel.
                 (void)scene.draw(box, Mat4f::translation({-3, .1f * frame, 1}), {.unlit = true});
-                if (mode < 3 || mode >= 5) {
+                if (mode < 3 || mode == 5 || mode == 6) {
                     kin::ParticleLook3D l;
                     l.texture = checker;
                     l.blend = static_cast<kin::ParticleBlend3D>(mode >= 5 ? 0 : mode);
@@ -17808,11 +17934,24 @@ void test_gpu_taa_live_transparency() {
                         m.blend = kin::Blend3D::Opaque;
                         m.shader_params[4] = 1;
                     }
-                    (void)scene.draw(box,
-                                     Mat4f::translation({.1f + .01f * frame, 0, 1}) * Mat4f::rotation_z(15) *
-                                         Mat4f::scaling({2, 2, .1f}),
-                                     m);
+                    if (mode == 11) {
+                        // More than half a copy's spacing per frame: nearest-
+                        // neighbour matching picks the wrong tint and rejects history.
+                        std::vector<kin::MeshInstance3D> row;
+                        for (int i = -6; i <= 6; ++i)
+                            row.push_back(
+                                {Mat4f::translation({.36f * frame + .6f * i, 0, 1}) * Mat4f::scaling({.5f, 3.f, .1f}),
+                                 i % 2 ? Color::rgb(255, 80, 40) : Color::rgb(40, 180, 255)});
+                        (void)scene.draw_instanced(box, row, m);
+                    } else {
+                        (void)scene.draw(box,
+                                         Mat4f::translation({.1f + .01f * frame, 0, 1}) * Mat4f::rotation_z(15) *
+                                             Mat4f::scaling({2, 2, .1f}),
+                                         m);
+                    }
                 }
+                if ((mode == 8 || mode == 9) && frame % 2 == 0)
+                    (void)scene.draw(box, Mat4f::translation({-3, 3, 0}), sibling);
                 const auto actual = shoot_view(renderer, r3d, accumulated, scene);
                 if (mode == 4)
                     assert(r3d.debug_stats().taa_reactive_draws == 0);
@@ -17826,7 +17965,7 @@ void test_gpu_taa_live_transparency() {
                             retained_pixels += largest_difference(actual.at(x, y), expected.at(x, y)) > 2;
             }
             std::cerr << "live TAA mode " << mode << " retained pixels " << retained_pixels << "\n";
-            assert(retained_pixels > (mode == 4 ? 2000 : 12000));
+            assert(retained_pixels > (mode == 4 ? 2000 : mode == 11 ? 4000 : 12000));
         }
         // A moving sprite must uncover the old checker immediately while its
         // current pixels can still use their reprojected history.
@@ -17861,6 +18000,90 @@ void test_gpu_taa_live_transparency() {
 
 // A static transparent surface cannot lend its zero velocity to a moving
 // textured surface behind it. Compare with the current-frame reconstruction.
+void test_gpu_create_mesh_rejects_invalid_content() {
+    with_gpu("test_gpu_create_mesh_rejects_invalid_content", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        for (bool options : {false, true}) {
+            auto data = kin::meshes::box({1, 1, 1});
+            data.indices[0] = static_cast<kin::u32>(data.vertices.size());
+            auto index = options ? r3d.create_mesh(data, kin::MeshOptions3D{.levels = 2}) : r3d.create_mesh(data);
+            assert(!index && kin::diagnostics3d_text(index.diagnostics).find("past the") != std::string::npos);
+            data = kin::meshes::box({1, 1, 1});
+            data.skin.assign(data.vertices.size(), kin::MeshSkinVertex3D{{0, 0, 0, 0}, {0, 0, 0, 0}});
+            auto skin = options ? r3d.create_mesh(data, kin::MeshOptions3D{.levels = 2}) : r3d.create_mesh(data);
+            assert(!skin &&
+                   kin::diagnostics3d_text(skin.diagnostics).find("weights that sum to zero") != std::string::npos);
+        }
+    });
+}
+
+void test_gpu_taa_floor_crossing_camera() {
+    with_gpu("test_gpu_taa_floor_crossing_camera", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa && r3d.capabilities().particles, "TAA particles"))
+            return;
+        auto data = kin::meshes::box({1, 1, 1});
+        const auto box = r3d.create_mesh(data).value_or({});
+        data.skin.assign(data.vertices.size(), kin::MeshSkinVertex3D{{0, 0, 0, 0}, {1, 0, 0, 0}});
+        const auto skin = r3d.create_mesh(data).value_or({});
+        const std::array<Mat4f, 1> pose{Mat4f{}};
+        std::vector<kin::u8> pixels(32 * 32 * 4, 255);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                for (int c = 0; c < 3; ++c)
+                    pixels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
+        const auto checker = renderer.create_texture_from_rgba(pixels.data(), {32, 32});
+        for (int floor_mode = 0; floor_mode < 4; ++floor_mode)
+            for (int effect = 0; effect < 3; ++effect)
+                for (bool crossing : {false, true})
+                    for (float motion : {0.f, 1e-5f}) {
+                        auto temporal = r3d.create_view({160, 120}).value_or({});
+                        auto reference = r3d.create_view({160, 120}).value_or({});
+                        int retained = 0;
+                        for (int frame = 0; frame < 24; ++frame) {
+                            kin::Scene3D scene;
+                            const float x = frame * .008f;
+                            scene.camera = kin::Camera3D::look_at({x, 2, 6}, {x, 0, 0}, 60);
+                            scene.taa = {.enabled = true, .blend = .98f};
+                            scene.ambient_occlusion.enabled = (floor_mode % 2) == 1;
+                            const auto floor = Mat4f::translation({frame * motion, -.05f, crossing ? 0.f : -6.f}) *
+                                               Mat4f::scaling({50, .1f, crossing ? 80.f : 20.f});
+                            kin::Material3D ground{.color = Color::rgb(40, 50, 60), .unlit = true};
+                            if (floor_mode >= 2)
+                                assert(scene.draw_skinned(skin, pose, floor, ground));
+                            else
+                                assert(scene.draw(box, floor, ground));
+                            if (effect < 2) {
+                                auto p = sprite({0, 1, 1}, 2, {.7f, .7f, .7f}, .7f);
+                                p.id = 7;
+                                kin::ParticleLook3D look;
+                                look.texture = checker;
+                                look.blend = effect == 0 ? kin::ParticleBlend3D::Alpha : kin::ParticleBlend3D::Additive;
+                                assert(scene.draw_particles(look, std::span{&p, 1}, 19));
+                            } else {
+                                assert(scene.draw(box, Mat4f::translation({0, 1, 1}) * Mat4f::scaling({2, 2, .1f}),
+                                                  {.color = Color::rgba(255, 255, 255, 180),
+                                                   .unlit = true,
+                                                   .blend = kin::Blend3D::Alpha,
+                                                   .texture = checker}));
+                            }
+                            const auto actual = shoot_view(renderer, r3d, temporal, scene);
+                            renderer.present();
+                            scene.taa.blend = 0;
+                            const auto expected = shoot_view(renderer, r3d, reference, scene);
+                            renderer.present();
+                            if (frame >= 12)
+                                for (int y = 40; y < 80; ++y)
+                                    for (int x = 60; x < 105; ++x)
+                                        retained += largest_difference(actual.at(x, y), expected.at(x, y)) > 2;
+                        }
+                        std::cerr << "floor TAA " << floor_mode << "/" << effect << " crossing=" << crossing << " kept "
+                                  << retained << " motion " << motion << "\n";
+                        assert(retained > 8000);
+                    }
+    });
+}
+
 void test_gpu_taa_static_glass() {
     with_gpu("test_gpu_taa_static_glass", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -18337,6 +18560,75 @@ void test_gpu_particle_shadows_taa() {
                 }
             }
         }
+    });
+}
+
+// Drawing another scene into the shared local maps must not change the first
+// view's content identity when it redraws its own unchanged shadows.
+void test_gpu_particle_shadows_multiview_taa() {
+    with_gpu("test_gpu_particle_shadows_multiview_taa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().particle_shadows && r3d.capabilities().temporal_aa, "particle shadows and TAA"))
+            return;
+        const auto box = make_box(r3d, {1, 1, 1});
+        std::vector<kin::u8> texels(32 * 32 * 4, 255);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x)
+                for (int c = 0; c < 3; ++c)
+                    texels[(y * 32 + x) * 4 + c] = (x + y) % 2 ? 220 : 30;
+        const auto checker = renderer.create_texture_from_rgba(texels.data(), {32, 32});
+        for (int kind : {2, 3, 4, 2})
+            for (bool cached : {false, true}) {
+                std::vector<Pixels> baseline;
+                for (bool interleaved : {false, true}) {
+                    auto view = r3d.create_view({160, 120}).value_or({});
+                    auto other = r3d.create_view({160, 120}).value_or({});
+                    auto spatial = r3d.create_view({160, 120}).value_or({});
+                    int worst = 0, retained = 0;
+                    for (int frame = 0; frame < 24; ++frame) {
+                        kin::ParticleLook3D look;
+                        look.lit = 1;
+                        look.receives_shadow = true;
+                        auto scene = particle_shadow_scene(box, checker, kind, look);
+                        scene.lights.cache_shadows = cached;
+                        scene.camera = kin::Camera3D::look_at({frame * .008f, 0, 0}, {frame * .008f, 0, -4}, 60);
+                        scene.taa = {.enabled = true, .blend = .98f};
+                        if (interleaved) {
+                            auto foreign = particle_shadow_scene(box, checker, kind, look, true, 1.2f);
+                            foreign.lights.cache_shadows = cached;
+                            // Include a view with no temporal receivers too.
+                            foreign.taa.enabled = frame % 2 == 0;
+                            (void)shoot_view(renderer, r3d, other, foreign);
+                            renderer.present();
+                        }
+                        const auto actual = shoot_view(renderer, r3d, view, scene);
+                        renderer.present();
+                        if (!interleaved) {
+                            baseline.push_back(actual);
+                            scene.taa.blend = 0;
+                            const auto current = shoot_view(renderer, r3d, spatial, scene);
+                            renderer.present();
+                            if (frame >= 12)
+                                for (int y = 35; y < 85; ++y)
+                                    for (int x = 50; x < 110; ++x)
+                                        retained += largest_difference(actual.at(x, y), current.at(x, y)) > 2;
+                        } else if (frame >= 12)
+                            for (int y = 35; y < 85; ++y)
+                                for (int x = 50; x < 110; ++x)
+                                    worst =
+                                        std::max(worst, largest_difference(actual.at(x, y), baseline[frame].at(x, y)));
+                    }
+                    if (!interleaved) {
+                        std::cerr << "local shadow control retained " << retained << "\n";
+                        assert(retained > 200);
+                    }
+                    if (interleaved) {
+                        std::cerr << "local shadow multiview kind " << kind << " cache " << cached << " max " << worst
+                                  << "\n";
+                        assert(worst <= 2);
+                    }
+                }
+            }
     });
 }
 
@@ -20513,6 +20805,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_particle_local_lights());
     RUN(test_gpu_particle_shadows());
     RUN(test_gpu_particle_shadows_taa());
+    RUN(test_gpu_particle_shadows_multiview_taa());
     RUN(test_gpu_custom_feature_interactions());
     RUN(test_gpu_sky_restores_mesh_uniforms());
     RUN(test_gpu_particle_flipbook());
@@ -20520,8 +20813,12 @@ int main(int argc, char** argv) {
     RUN(test_gpu_rain_streaks_follow_the_wind());
     RUN(test_gpu_weather_cache_follows_every_change());
     RUN(test_gpu_particle_budget());
+    RUN(test_gpu_taa_explicit_history_identity());
+    RUN(test_gpu_taa_fast_transparent_copy());
     RUN(test_gpu_taa_live_transparency());
+    RUN(test_gpu_create_mesh_rejects_invalid_content());
     RUN(test_gpu_taa_static_glass());
+    RUN(test_gpu_taa_floor_crossing_camera());
     RUN(test_gpu_taa_transient_effects());
     RUN(test_gpu_particles_taa_and_msaa());
     RUN(test_gpu_particles_leave_skinned_alone());

@@ -1412,9 +1412,31 @@ void test_run_system_provides_and_flushes_command_buffer() {
     });
 }
 
+void test_deferred_handles_are_batch_scoped() {
+    kin::EcsWorld world;
+    register_components(world);
+    kin::EcsCommandBuffer commands, other;
+    const auto old = commands.create_entity("old");
+    std::string error;
+    assert(commands.flush(world, error));
+    const auto fresh = commands.create_entity("fresh");
+    assert(old.index == fresh.index && old.scope != fresh.scope);
+    assert(!commands.owns(old) && commands.owns(fresh));
+    assert(!other.owns(fresh));
+    commands.destroy(old);
+    assert(!commands.flush(world, error) && error.find("stale or foreign deferred entity handle") != std::string::npos);
+    assert(kin::EcsEntity{world.raw().lookup("old")}.alive());
+    assert(kin::EcsEntity{world.raw().lookup("fresh")}.alive());
+    commands.clear();
+    other.add<Marker>(fresh);
+    assert(!other.flush(world, error));
+    assert(kin::EcsEntity{world.raw().lookup("fresh")}.alive());
+}
+
 } // namespace
 
 int main() {
+    test_deferred_handles_are_batch_scoped();
     test_native_system_runs_through_frame();
     test_phase_and_order_are_deterministic();
     test_enable_disable_and_manual_run();

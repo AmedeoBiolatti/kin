@@ -342,18 +342,21 @@ struct RopeEvents3D {
     std::vector<RopeEvent3D> events;
 };
 
-struct WorldPhysicsState3DConfig {
-    // advance() steps in whole multiples of this, the way the engine's fixed step does.
-    f32 fixed_dt = 1.0f / 60.0f;
-    // advance() takes at most this many steps for one frame (a long frame must not spiral).
-    i32 max_steps = 8;
+struct PhysicsDebug3DSettings {
     // Debug lines for the 3D view (collect_debug); off draws nothing and costs nothing.
-    bool debug_draw = false;
-    DebugDraw3DOptions debug{};
+    bool enabled = false;
+    DebugDraw3DOptions options{};
     // Draw the contacts of the step as well (persist events must be on in the World3DConfig to see resting contacts).
-    bool debug_contacts = true;
+    bool contacts = true;
     // Draw the grips (anchors, surface normals, the hands' lines, the ledge's top) of characters with traversal on.
-    bool debug_grips = true;
+    bool grips = true;
+};
+
+struct WorldPhysicsState3DConfig {
+    // Used only by advance(); step(dt) always performs one authoritative step.
+    f32 fixed_dt = 1.0f / 60.0f;
+    i32 max_steps = 8;
+    PhysicsDebug3DSettings debug;
 };
 
 class WorldPhysicsState3D {
@@ -375,12 +378,13 @@ public:
     // One fixed step of `dt`: sync_bodies, entities to bodies, World3D::step, bodies to entities, events.
     void step(f32 dt);
     // Steps for `frame_seconds` of time at the configured fixed step (carrying the remainder); returns the steps
-    // taken. alpha() is then how far the next step is, 0 to 1, for interpolate().
+    // taken. Pass alpha() to SceneFrame3D::collect() for read-only presentation.
     i32 advance(f32 frame_seconds);
     f32 alpha() const { return _config.fixed_dt > 0.0f ? _accumulator / _config.fixed_dt : 0.0f; }
-    // Writes the Transform3D of every awake dynamic body as between the last two steps' places, `alpha` of the way
-    // (0: the one before, 1: the last: what step() leaves). For drawing between fixed steps; opt-in, call it
-    // after advance() with alpha().
+    // Legacy: writes presentation poses into gameplay Transform3D components.
+    // Prefer SceneSession3D::render(alpha), SceneFrame3D::collect(..., alpha), or
+    // render_transform(entity, alpha), which leave authoritative transforms intact.
+    [[deprecated("use read-only presentation through SceneSession3D, SceneFrame3D or render_transform")]]
     void interpolate(f32 alpha);
     // Read-only fixed-step presentation for a body/character or its descendants.
     // Does not write ECS transforms, physics poses or interpolation history.
@@ -466,7 +470,7 @@ public:
     Status3D teleport(flecs::entity entity, Vec3f position, Quatf rotation);
 
     // Draws the world's debug lines (the shapes, constraints, contacts) into `scene` as a wireframe, if
-    // config().debug_draw. Add your own with debug() first (rays, sweeps) and they are drawn too.
+    // config().debug.enabled. Add your own with debug() first (rays, sweeps) and they are drawn too.
     DebugDraw3D& debug() { return _debug; }
     void collect_debug(Renderer3D& renderer, Scene3D& scene);
 
@@ -561,7 +565,7 @@ private:
         Vec3f last_position{};
         // The feet after the last step and before it (interpolation).
         Vec3f position{}, previous_position{};
-        Quatf rotation{}, previous_rotation{}, last_rotation{};
+        Quatf rotation{}, previous_rotation{}, last_rotation{}, simulation_rotation{};
         Vec3f scale{1.0f, 1.0f, 1.0f};
         std::vector<HandHistory> hands; // allocated only for traversal-linked animators
         bool rebuild = false;

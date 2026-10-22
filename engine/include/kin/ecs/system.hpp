@@ -132,8 +132,10 @@ struct SystemParallelDiagnostic {
     std::string message;
 };
 
+// A placeholder belongs to one command-buffer batch, until clear()/successful flush().
 struct EcsDeferredEntity {
     u32 index = 0;
+    u64 scope = 0;
 };
 
 class EcsCommandBuffer {
@@ -173,7 +175,7 @@ public:
 
     template <typename T>
     void add(EcsDeferredEntity entity) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
             target.add<T>();
         });
     }
@@ -194,7 +196,7 @@ public:
 
     template <typename T>
     void remove(EcsDeferredEntity entity) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
             target.remove<T>();
         });
     }
@@ -215,7 +217,7 @@ public:
 
     template <typename T>
     void set(EcsDeferredEntity entity, T value) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [value = std::move(value)](EcsEntity target) mutable {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [value = std::move(value)](EcsEntity target) mutable {
             target.set<T>(std::move(value));
         });
     }
@@ -236,11 +238,14 @@ public:
 
     template <typename T>
     void modified(EcsDeferredEntity entity) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
             target.modified<T>();
         });
     }
 
+    bool owns(EcsDeferredEntity entity) const {
+        return entity.scope != 0 && entity.scope == _deferred_scope && entity.index < _next_deferred_entity;
+    }
     bool empty() const { return _commands.empty(); }
     std::size_t size() const { return _commands.size(); }
     void clear();
@@ -256,6 +261,7 @@ private:
         TargetKind kind = TargetKind::ExistingId;
         EcsId entity = 0;
         u32 deferred_index = 0;
+        u64 deferred_scope = 0;
     };
 
     using Command = std::function<bool(EcsWorld&, std::vector<EcsEntity>&, std::string&)>;
@@ -267,6 +273,7 @@ private:
 
     std::vector<Command> _commands;
     u32 _next_deferred_entity = 0;
+    u64 _deferred_scope = 0;
 };
 
 struct SystemContext {

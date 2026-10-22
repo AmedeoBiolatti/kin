@@ -1,3 +1,5 @@
+#include "navmesh3d_detail.hpp"
+
 #include <kin/pathfinding/navmesh3d.hpp>
 #include <kin/platform/log.hpp>
 
@@ -6,6 +8,7 @@
 #endif
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <compare>
 #include <cstring>
@@ -18,6 +21,242 @@
 #include <tuple>
 #include <unordered_map>
 #include <utility>
+
+namespace kin::navmesh_detail {
+namespace {
+f64 area(Vec3f a, Vec3f b, Vec3f c, Vec3f up) {
+    const f64 ux = f64(b.x) - a.x, uy = f64(b.y) - a.y, uz = f64(b.z) - a.z;
+    const f64 vx = f64(c.x) - a.x, vy = f64(c.y) - a.y, vz = f64(c.z) - a.z;
+    return (uy * vz - uz * vy) * up.x + (uz * vx - ux * vz) * up.y + (ux * vy - uy * vx) * up.z;
+}
+bool between(Vec3f p, Vec3f a, Vec3f b, Vec3f up) {
+    const f64 ax = f64(p.x) - a.x, ay = f64(p.y) - a.y, az = f64(p.z) - a.z;
+    const f64 bx = f64(p.x) - b.x, by = f64(p.y) - b.y, bz = f64(p.z) - b.z;
+    const f64 ua = ax * up.x + ay * up.y + az * up.z, ub = bx * up.x + by * up.y + bz * up.z;
+    const f64 uu = f64(up.x) * up.x + f64(up.y) * up.y + f64(up.z) * up.z;
+    return ax * bx + ay * by + az * bz - ua * ub / uu <= 0;
+}
+bool simple_boundary(std::span<const BoundaryPoint> boundary, std::span<const Vec3f> vertices, Vec3f up,
+                     std::vector<u32>* conflicts) {
+    const auto fail = [&](std::initializer_list<u32> points) {
+        if (conflicts)
+            conflicts->assign(points);
+        return false;
+    };
+    // Ear clipping requires a simple boundary. Rounding a reused endpoint onto
+    // a different side can otherwise turn a tiny face into a folded polygon.
+    for (u32 i = 0; i < boundary.size(); ++i) {
+        const auto a = vertices[boundary[i].vertex], b = vertices[boundary[(i + 1) % boundary.size()].vertex];
+        for (u32 j = i + 1; j < boundary.size(); ++j) {
+            if (boundary[i].vertex == boundary[j].vertex)
+                return fail({i, j});
+            if (j == i + 1 || (i == 0 && j + 1 == boundary.size()))
+                continue;
+            const auto c = vertices[boundary[j].vertex], d = vertices[boundary[(j + 1) % boundary.size()].vertex];
+            const auto ab_c = area(a, b, c, up), ab_d = area(a, b, d, up);
+            const auto cd_a = area(c, d, a, up), cd_b = area(c, d, b, up);
+            if ((ab_c * ab_d < 0 && cd_a * cd_b < 0) || (ab_c == 0 && between(c, a, b, up)) ||
+                (ab_d == 0 && between(d, a, b, up)) || (cd_a == 0 && between(a, c, d, up)) ||
+                (cd_b == 0 && between(b, c, d, up)))
+                return fail({i, u32((i + 1) % boundary.size()), j, u32((j + 1) % boundary.size())});
+        }
+    }
+    return true;
+}
+
+// Cache corner blockers under both tolerance policies. Removing an ear only
+// rebuilds its neighbours; other corners lose that one possible blocker. This
+// keeps clipping quadratic without changing ear selection or tie breaking.
+class BoundaryTriangulator {
+    struct Corner {
+        u32 before, after;
+        std::array<u32, 2> blockers{};
+        std::array<bool, 2> eligible{};
+        f64 tolerance = 0;
+        f32 distance = 0;
+        bool alive = true;
+    };
+
+    std::span<const BoundaryPoint> _boundary;
+    std::span<const Vec3f> _vertices;
+    Vec3f _up;
+    std::vector<Corner> _corners;
+    bool _precise_ready = false; // most boundaries never need the tolerance fallback
+
+    std::array<bool, 2> blocks(u32 i, u32 j) const {
+        const auto before = _corners[i].before, after = _corners[i].after;
+        if (_boundary[before].sides & _boundary[after].sides & _boundary[j].sides)
+            return {true, true};
+        const auto a = _vertices[_boundary[before].vertex], b = _vertices[_boundary[i].vertex],
+                   c = _vertices[_boundary[after].vertex], p = _vertices[_boundary[j].vertex];
+        const auto ab = area(a, b, p, _up), bc = area(b, c, p, _up), ca = area(c, a, p, _up);
+        const auto tolerance = _corners[i].tolerance;
+        return {ab >= -tolerance && bc >= -tolerance && ca >= -tolerance, ab >= 0 && bc >= 0 && ca >= 0};
+    }
+
+    void update(u32 i) {
+        auto& corner = _corners[i];
+        const auto a = _vertices[_boundary[corner.before].vertex], b = _vertices[_boundary[i].vertex],
+                   c = _vertices[_boundary[corner.after].vertex];
+        const auto twice = area(a, b, c, _up);
+        const f64 scale = f64(length_squared(c - a)) + length_squared(b - a) + length_squared(c - b);
+        corner.distance = length_squared(c - a);
+        corner.tolerance = std::abs(twice) * 1e-8;
+        const bool same_side = _boundary[corner.before].sides & _boundary[i].sides & _boundary[corner.after].sides;
+        corner.eligible = {!same_side && twice > 1e-12 * scale, !same_side && twice > 0};
+        corner.blockers = {};
+        if (corner.eligible[0] || (_precise_ready && corner.eligible[1]))
+            for (u32 j = 0; j < _corners.size(); ++j)
+                if (_corners[j].alive && j != i && j != corner.before && j != corner.after) {
+                    const auto blocked = blocks(i, j);
+                    corner.blockers[0] += corner.eligible[0] && blocked[0];
+                    corner.blockers[1] += _precise_ready && corner.eligible[1] && blocked[1];
+                }
+    }
+
+    u32 select_ear() {
+        u32 selected = ~0u;
+        f32 shortest = std::numeric_limits<f32>::infinity();
+        // Keep the original preference: conservative ears first, then exact
+        // positive ears; shortest diagonal, with input-order tie breaking.
+        for (u32 precise = 0; precise < 2; ++precise) {
+            if (precise && !_precise_ready) {
+                _precise_ready = true;
+                for (u32 i = 0; i < _corners.size(); ++i)
+                    if (_corners[i].alive)
+                        update(i);
+            }
+            for (u32 i = 0; i < _corners.size(); ++i) {
+                const auto& corner = _corners[i];
+                if (corner.alive && corner.eligible[precise] && !corner.blockers[precise] &&
+                    (selected == ~0u || corner.distance < shortest)) {
+                    selected = i;
+                    shortest = corner.distance;
+                }
+            }
+            if (selected != ~0u)
+                break;
+        }
+        return selected;
+    }
+
+    void remove_ear(u32 selected, u32& remaining) {
+        const auto before = _corners[selected].before, after = _corners[selected].after;
+        _corners[selected].alive = false;
+        --remaining;
+        if (remaining > 3) {
+            for (u32 i = 0; i < _corners.size(); ++i) {
+                if (!_corners[i].alive || i == before || i == after)
+                    continue;
+                if (_corners[i].eligible[0] || (_precise_ready && _corners[i].eligible[1])) {
+                    const auto blocked = blocks(i, selected);
+                    _corners[i].blockers[0] -= _corners[i].eligible[0] && blocked[0];
+                    _corners[i].blockers[1] -= _precise_ready && _corners[i].eligible[1] && blocked[1];
+                }
+            }
+        }
+        _corners[before].after = after;
+        _corners[after].before = before;
+        if (remaining > 3) {
+            update(before);
+            update(after);
+        }
+    }
+
+public:
+    BoundaryTriangulator(std::span<const BoundaryPoint> boundary, std::span<const Vec3f> vertices, Vec3f up)
+        : _boundary(boundary), _vertices(vertices), _up(up), _corners(boundary.size()) {
+        for (u32 i = 0; i < _corners.size(); ++i) {
+            _corners[i].before = u32((i + _corners.size() - 1) % _corners.size());
+            _corners[i].after = u32((i + 1) % _corners.size());
+        }
+        for (u32 i = 0; i < _corners.size(); ++i)
+            update(i);
+    }
+
+    std::vector<std::array<u32, 3>> triangulate(std::vector<u32>* conflicts) {
+        std::vector<std::array<u32, 3>> out;
+        out.reserve(_boundary.size() - 2);
+        u32 remaining = u32(_corners.size());
+        while (remaining > 3) {
+            const auto selected = select_ear();
+            if (selected == ~0u) {
+                if (conflicts)
+                    for (u32 i = 0; i < _corners.size(); ++i)
+                        if (_corners[i].alive)
+                            conflicts->push_back(i);
+                return {};
+            }
+            const auto before = _corners[selected].before, after = _corners[selected].after;
+            out.push_back({_boundary[before].vertex, _boundary[selected].vertex, _boundary[after].vertex});
+            remove_ear(selected, remaining);
+        }
+        u32 first = 0;
+        while (!_corners[first].alive)
+            ++first;
+        const auto second = _corners[first].after, third = _corners[second].after;
+        const auto a = _boundary[first].vertex, b = _boundary[second].vertex, c = _boundary[third].vertex;
+        if (!(area(_vertices[a], _vertices[b], _vertices[c], _up) > 0)) {
+            if (conflicts)
+                conflicts->assign({first, second, third});
+            return {}; // retain the whole source face, never drop its degenerate remainder
+        }
+        out.push_back({a, b, c});
+        return out;
+    }
+};
+} // namespace
+
+std::vector<std::array<u32, 3>> triangulate_boundary(std::span<const BoundaryPoint> boundary,
+                                                     std::span<const Vec3f> vertices, Vec3f up,
+                                                     std::vector<u32>* conflicts) {
+    if (conflicts)
+        conflicts->clear();
+    if (boundary.size() < 3 || !simple_boundary(boundary, vertices, up, conflicts))
+        return {};
+    return BoundaryTriangulator(boundary, vertices, up).triangulate(conflicts);
+}
+void BoundaryWarnings::warn() const {
+    u32 reported = 0;
+    for (const auto& [source, point] : _sources) {
+        if (reported == max_reported_faces)
+            break;
+        KIN_LOG_WARN_F("pathfinding", "step boundary could not be represented; conflicting shared samples withdrawn",
+                       (LogFields{{"source_triangle", std::to_string(source)},
+                                  {"x", std::to_string(point.x)},
+                                  {"y", std::to_string(point.y)},
+                                  {"z", std::to_string(point.z)}}));
+        ++reported;
+    }
+    if (_sources.size() > reported) {
+        auto lo = _sources.begin()->second, hi = lo;
+        for (const auto& [source, point] : _sources) {
+            lo = {std::min(lo.x, point.x), std::min(lo.y, point.y), std::min(lo.z, point.z)};
+            hi = {std::max(hi.x, point.x), std::max(hi.y, point.y), std::max(hi.z, point.z)};
+        }
+        KIN_LOG_WARN_F("pathfinding", "additional step boundary warnings suppressed",
+                       (LogFields{{"source_faces", std::to_string(_sources.size())},
+                                  {"reported_faces", std::to_string(reported)},
+                                  {"suppressed_faces", std::to_string(_sources.size() - reported)},
+                                  {"min_x", std::to_string(lo.x)},
+                                  {"min_y", std::to_string(lo.y)},
+                                  {"min_z", std::to_string(lo.z)},
+                                  {"max_x", std::to_string(hi.x)},
+                                  {"max_y", std::to_string(hi.y)},
+                                  {"max_z", std::to_string(hi.z)}}));
+    }
+}
+void warn_limit(Vec3f point, u32 triangle, u32 faces, std::string_view phase, u32 limit) {
+    KIN_LOG_WARN_F("pathfinding", "step seams reached the pass limit; unresolved seams stay unjoined",
+                   (LogFields{{"phase", std::string(phase)},
+                              {"passes", std::to_string(limit)},
+                              {"pass_triangle", std::to_string(triangle)},
+                              {"changed_faces", std::to_string(faces)},
+                              {"x", std::to_string(point.x)},
+                              {"y", std::to_string(point.y)},
+                              {"z", std::to_string(point.z)}}));
+}
+} // namespace kin::navmesh_detail
 
 namespace kin {
 namespace {
@@ -527,8 +766,8 @@ f64 boundary_distance_squared(const std::array<Vec3f, 3>& triangle, Vec3f a, Vec
 
 std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const Vec3f> vertices,
                                                 std::span<const u32> indices, bool erode = true,
-                                                NavMesh3D* obstacle_cache = nullptr,
-                                                std::span<const u8> selected = {}) {
+                                                NavMesh3D* obstacle_cache = nullptr, std::span<const u8> selected = {},
+                                                bool* changed = nullptr, std::vector<u8>* dependent = nullptr) {
     const auto up = mesh.options.up;
     std::vector<bool> keep(mesh.triangles.size(), true);
     std::vector<u32> stack;
@@ -634,8 +873,10 @@ std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const
                 }
             }
         }
+        if (dependent)
+            dependent->resize(mesh.triangles.size());
         for (u32 t = 0; t < mesh.triangles.size(); ++t) {
-            if (!selected.empty() && !selected[t])
+            if (!selected.empty() && !selected[t] && (!dependent || !(*dependent)[t]))
                 continue;
             const auto& ids = mesh.triangles[t].vertices;
             const std::array<Vec3f, 3> floor{mesh.vertices[ids[0]], mesh.vertices[ids[1]], mesh.vertices[ids[2]]};
@@ -706,7 +947,7 @@ std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const
             u32 mask = 0;
             bool needs_margin = false;
             const auto test = [&](f32 clearance, bool detect_margin) {
-                mask = 0;
+                mask &= 16u; // retain the support dependency across the optional margin test
                 const bool area = any_overlap(obstacles, low, high, stack, [&](u32 other) {
                     const auto& v = obstacles.triangles[other].vertices;
                     const std::array<Vec3f, 3> shape{obstacles.vertices[v[0]], obstacles.vertices[v[1]],
@@ -718,6 +959,9 @@ std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const
                             ? std::max(clearance, mesh.options.agent_height + ceiling_margin[other])
                             : clearance;
                     auto hit = blocks_headroom(floor, shape, up, prism_height, mesh.triangles[t].neighbors, step_tops);
+                    // A support band can make an otherwise blocking obstacle
+                    // pass. Its answer depends on seam topology beyond this
+                    // face, so retain it in subsequent clearance rechecks.
                     const auto obstacle_top = std::max(
                         {dot(shape[0] - floor[0], up), dot(shape[1] - floor[0], up), dot(shape[2] - floor[0], up)});
                     if ((hit & 8) && mesh.options.max_step_height > 0 &&
@@ -744,9 +988,11 @@ std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const
                             return false;
                         });
                         merge_supports(bands, up);
-                        if (!bands.empty())
+                        if (!bands.empty()) {
+                            mask |= 16u;
                             hit = blocks_headroom(floor, shape, up, prism_height, mesh.triangles[t].neighbors,
                                                   step_tops, bands);
+                        }
                     }
                     mask |= hit;
                     const auto top_above_floor =
@@ -766,6 +1012,8 @@ std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const
                 if (local > margin)
                     keep[t] = test(mesh.options.agent_height + local, false);
             }
+            if (dependent)
+                (*dependent)[t] |= static_cast<u8>((mask & 16u) != 0 || needs_margin);
             blocked[t] = static_cast<u8>(mask & 7u);
         }
         for (u32 t = 0; t < mesh.triangles.size(); ++t)
@@ -773,6 +1021,8 @@ std::optional<std::vector<u32>> clear_triangles(NavMesh3D& mesh, std::span<const
                 if (blocked[t] & (1u << e)) {
                     auto& tri = mesh.triangles[t];
                     const auto next = tri.neighbors[e];
+                    if (changed && next != nav_none)
+                        *changed = true;
                     tri.neighbors[e] = nav_none;
                     tri.steps[e] = false;
                     if (next != nav_none)
@@ -1405,7 +1655,12 @@ bool step_edges(const BoundaryEdges::Edge& a, const BoundaryEdges::Edge& b, Vec3
         return false;
     const auto u = flat(a.b - a.a, up), v = flat(b.b - b.a, up);
     const auto u2 = dot64(u, u), v2 = dot64(v, v);
-    if (!(u2 > 0 && v2 > 0) || dot64(u, v) >= 0 || length_squared(cross(u, v)) > 1e-8 * u2 * v2)
+    if (!(u2 > 0 && v2 > 0))
+        return false;
+    const auto rounding =
+        4 * std::numeric_limits<f32>::epsilon() * std::max({length(a.a), length(a.b), length(b.a), length(b.b)});
+    const auto angle = std::max(1e-4, rounding / std::sqrt(std::min(u2, v2)));
+    if (dot64(u, v) >= 0 || length_squared(cross(u, v)) > angle * angle * u2 * v2)
         return false;
     const auto n = cross(up, u) / f32(std::sqrt(u2));
     const auto offset = dot64(b.a - a.a, n);
@@ -1423,9 +1678,127 @@ bool step_edges(const BoundaryEdges::Edge& a, const BoundaryEdges::Edge& b, Vec3
     return offset >= -1e-5;
 }
 
-std::vector<u32> conform_steps(NavMesh3D& mesh) {
+void connect_triangles(NavMesh3D& mesh, const std::vector<std::array<u32, 3>>& kept) {
+    const auto up = mesh.options.up;
+    const auto vertex_count = mesh.vertices.size();
+    mesh.triangles.clear();
+    const Incidence uses = incidence(kept, vertex_count);
+    mesh.triangles.resize(kept.size());
+    for (u32 t = 0; t < static_cast<u32>(kept.size()); ++t) {
+        NavTriangle3D& tri = mesh.triangles[t];
+        tri.vertices = kept[t];
+        tri.centroid = (mesh.vertices[kept[t][0]] + mesh.vertices[kept[t][1]] + mesh.vertices[kept[t][2]]) / 3.0f;
+        for (u32 i = 0; i < 3; ++i) {
+            const u32 a = kept[t][i];
+            const u32 b = kept[t][(i + 1) % 3];
+            u32 sharing = 0;
+            u32 other = nav_none;
+            bool opposite = false;
+            for (const u32 u : uses.of(a)) {
+                if (u == t) {
+                    continue;
+                }
+                for (u32 k = 0; k < 3; ++k) {
+                    if (kept[u][k] == b) {
+                        ++sharing;
+                        other = u;
+                        opposite = kept[u][(k + 1) % 3] == a;
+                    }
+                }
+            }
+            if (sharing == 1 && opposite) {
+                tri.neighbors[i] = other;
+            } else if (sharing == 2) {
+                // A ramp may end on an uncut floor: two supports fold onto the
+                // same side of the seam. Join the upper support to the floor
+                // on the other side. Tied/nonmanifold surfaces stay separate.
+                const auto pa = mesh.vertices[a], pb = mesh.vertices[b];
+                const auto edge = flat(pb - pa, up);
+                const auto edge2 = dot64(edge, edge);
+                const auto gradient = [&](u32 face) {
+                    u32 c = 0;
+                    while (kept[face][c] == a || kept[face][c] == b)
+                        ++c;
+                    const auto delta = mesh.vertices[kept[face][c]] - pa;
+                    const auto along = dot64(flat(delta, up), edge) / edge2;
+                    const auto across = length(flat(delta, up) - edge * f32(along));
+                    return (dot64(delta, up) - along * dot64(pb - pa, up)) / across;
+                };
+                u32 same = nav_none, reverse = nav_none;
+                f64 same_slope = -std::numeric_limits<f64>::infinity();
+                f64 reverse_slope = same_slope;
+                bool tied = false;
+                for (const auto face : uses.of(a))
+                    for (u32 k = 0; k < 3; ++k) {
+                        const bool forward = kept[face][k] == a && kept[face][(k + 1) % 3] == b;
+                        const bool backward = kept[face][k] == b && kept[face][(k + 1) % 3] == a;
+                        if (!forward && !backward)
+                            continue;
+                        auto& selected = forward ? same : reverse;
+                        auto& slope = forward ? same_slope : reverse_slope;
+                        const auto candidate = gradient(face);
+                        if (std::abs(candidate - slope) < 1e-5)
+                            tied = true;
+                        if (candidate > slope) {
+                            selected = face;
+                            slope = candidate;
+                        }
+                    }
+                if (!tied && same == t && reverse != nav_none)
+                    tri.neighbors[i] = reverse;
+            }
+        }
+    }
+}
+
+// Prefer the first cut whose removal repairs the complete boundary; otherwise
+// retry the conflict with the largest off-edge rounding error. Candidate order
+// is significant, including when two errors are equal.
+u32 conflicting_cut(const std::vector<navmesh_detail::BoundaryPoint>& polygon, std::span<const u32> conflicts,
+                    const NavTriangle3D& tri, std::span<const Vec3f> vertices, Vec3f up) {
+    const auto is_cut = [&](u32 i) { return std::has_single_bit(u32(polygon[i].sides)); };
+    std::vector<u32> candidates;
+    for (const auto i : conflicts)
+        if (is_cut(i) && std::ranges::find(candidates, i) == candidates.end())
+            candidates.push_back(i);
+    if (candidates.empty())
+        for (u32 i = 0; i < polygon.size(); ++i)
+            if (is_cut(i))
+                candidates.push_back(i);
+    u32 selected = nav_none;
+    f64 worst = -1;
+    for (const auto i : candidates) {
+        auto trial = polygon;
+        trial.erase(trial.begin() + i);
+        if (!navmesh_detail::triangulate_boundary(trial, vertices, up).empty()) {
+            selected = i;
+            break;
+        }
+        const auto e = u32(std::countr_zero(u32(polygon[i].sides)));
+        const auto a = vertices[tri.vertices[e]], b = vertices[tri.vertices[(e + 1) % 3]];
+        const auto direction = b - a, delta = vertices[polygon[i].vertex] - a;
+        const auto along = dot64(delta, direction) / dot64(direction, direction);
+        const auto error = length_squared(delta - direction * f32(std::clamp(along, 0., 1.)));
+        if (error > worst) {
+            worst = error;
+            selected = i;
+        }
+    }
+    return selected;
+}
+
+struct SeamCuts {
+    std::vector<std::array<u32, 3>> triangles;
+    std::vector<u32> origins;
+};
+SeamCuts conform_steps(NavMesh3D& mesh, std::span<const u32> sources, navmesh_detail::BoundaryWarnings& warnings) {
     if (!(mesh.options.max_step_height > 0))
         return {};
+    const auto original_vertices = mesh.vertices.size();
+    const auto unchanged = [&] {
+        mesh.vertices.resize(original_vertices);
+        return SeamCuts{};
+    };
     const BoundaryEdges boundary(mesh);
     struct Cut {
         f32 along;
@@ -1445,6 +1818,13 @@ std::vector<u32> conform_steps(NavMesh3D& mesh) {
         const auto first = mesh.vertices[std::min(a, b)], last = mesh.vertices[std::max(a, b)];
         const auto position = endpoint.value_or(
             Vec3f{std::lerp(first.x, last.x, t), std::lerp(first.y, last.y, t), std::lerp(first.z, last.z, t)});
+        // Prefer this edge's own corners over a nearby endpoint belonging to
+        // another tiny face. Repeatedly choosing the lowest foreign index can
+        // move a corner onto a different edge and generate endless micro-cuts.
+        if (length_squared(position - first) < 1e-10f)
+            return Cut{along, std::min(a, b)};
+        if (length_squared(position - last) < 1e-10f)
+            return Cut{along, std::max(a, b)};
         u32 vertex = nav_none;
         const auto key = weld_key(position, 1e-5f);
         for (i64 x = -1; x <= 1; ++x)
@@ -1465,24 +1845,38 @@ std::vector<u32> conform_steps(NavMesh3D& mesh) {
         }
         return Cut{along, vertex};
     };
+    std::unordered_map<u32, std::vector<BoundaryEdges::Edge>> partners;
     for (const auto& a : boundary.edges)
         boundary.near(a, mesh.options.max_step_height, [&](const auto& b) {
             if (!step_edges(a, b, mesh.options.up, mesh.options.max_step_height))
                 return;
+            partners[a.triangle * 3 + a.edge].push_back(b);
             const auto direction = flat(a.b - a.a, mesh.options.up);
             for (const auto point : {b.a, b.b}) {
                 const auto along =
                     f32(dot64(flat(point - a.a, mesh.options.up), direction) / dot64(direction, direction));
-                if (along > 1e-4 && along < 1 - 1e-4) {
+                const auto slack = std::max(1e-4, 2.5e-7 * std::max(length(a.a), length(a.b)) /
+                                                      std::sqrt(dot64(direction, direction)));
+                if (along > slack && along < 1 - slack) {
                     Vec3f projected{std::lerp(a.a.x, a.b.x, along), std::lerp(a.a.y, a.b.y, along),
                                     std::lerp(a.a.z, a.b.z, along)};
-                    cuts[a.triangle][a.edge].push_back(
-                        cut(a.triangle, a.edge, along, length_squared(point - projected) < 1e-10f ? point : projected));
+                    if (direction.y == 0 && direction.z == 0)
+                        projected.x = point.x;
+                    if (direction.x == 0 && direction.z == 0)
+                        projected.y = point.y;
+                    if (direction.x == 0 && direction.y == 0)
+                        projected.z = point.z;
+                    const auto made =
+                        cut(a.triangle, a.edge, along, length_squared(point - projected) < 1e-10f ? point : projected);
+                    const auto& corners = mesh.triangles[a.triangle].vertices;
+                    // A cut that rounds onto its own edge's endpoint adds nothing and would never converge.
+                    if (made.vertex != corners[a.edge] && made.vertex != corners[(a.edge + 1) % 3])
+                        cuts[a.triangle][a.edge].push_back(made);
                 }
             }
         });
     if (cuts.empty())
-        return {};
+        return unchanged();
     const auto thin = [&](u32 t) {
         const auto& v = mesh.triangles[t].vertices;
         const auto a = mesh.vertices[v[0]], b = mesh.vertices[v[1]], c = mesh.vertices[v[2]];
@@ -1510,14 +1904,16 @@ std::vector<u32> conform_steps(NavMesh3D& mesh) {
     // than manufacturing a second uniform grid. Shared edges reuse the exact
     // cut vertex. Each slab retains all samples without long fans that radius
     // erosion would remove as a whole.
-    std::vector<u32> pending, seen(mesh.triangles.size());
+    std::vector<Section> pending;
+    std::vector<u32> seen(mesh.triangles.size());
     u32 stamp = 0;
     for (const auto& section : sections) {
         ++stamp;
-        pending.assign(1, section.triangle);
+        pending.assign(1, section);
         seen[section.triangle] = stamp;
         for (std::size_t q = 0; q < pending.size(); ++q) {
-            const auto t = pending[q];
+            const auto current = pending[q];
+            const auto t = current.triangle;
             const auto& tri = mesh.triangles[t];
             for (u32 e = 0; e < 3; ++e) {
                 const auto a = mesh.vertices[tri.vertices[e]], b = mesh.vertices[tri.vertices[(e + 1) % 3]];
@@ -1526,14 +1922,16 @@ std::vector<u32> conform_steps(NavMesh3D& mesh) {
                 const auto next = tri.neighbors[e];
                 if (before != after) {
                     const auto along = f32(before / (before - after));
-                    if (along > 1e-4f && along < 1 - 1e-4f) {
+                    if (along > 1e-4f && along < 1 - 1e-4f && !tri.steps[e]) {
                         const auto point = cut(t, e, along);
-                        cuts[t][e].push_back(point);
-                        if (next != nav_none) {
-                            u32 other = 0;
-                            while (mesh.triangles[next].neighbors[other] != t)
-                                ++other;
-                            cuts[next][other].push_back({1 - point.along, point.vertex});
+                        if (point.vertex != tri.vertices[e] && point.vertex != tri.vertices[(e + 1) % 3]) {
+                            cuts[t][e].push_back(point);
+                            if (next != nav_none) {
+                                u32 other = 0;
+                                while (mesh.triangles[next].neighbors[other] != t)
+                                    ++other;
+                                cuts[next][other].push_back({1 - point.along, point.vertex});
+                            }
                         }
                     }
                 }
@@ -1541,85 +1939,160 @@ std::vector<u32> conform_steps(NavMesh3D& mesh) {
                 const auto along = before == after ? 0.f : f32(before / (before - after));
                 const auto crossing_point = lerp(a, b, std::clamp(along, 0.f, 1.f));
                 const auto reach = mesh.options.max_step_height;
-                const bool nearby = std::abs(dot64(crossing_point - section.point, axis)) <= reach * length(axis);
-                if (next != nav_none && thin(next) && before * after <= 0 && nearby && seen[next] != stamp) {
+                const bool nearby = std::abs(dot64(crossing_point - current.point, axis)) <= reach * length(axis);
+                if (next != nav_none && !tri.steps[e] && thin(next) && before * after <= 0 && nearby &&
+                    seen[next] != stamp) {
                     seen[next] = stamp;
-                    pending.push_back(next);
+                    pending.push_back({next, current.point, section.direction});
                 }
-            }
-        }
-    }
-    std::vector<u32> indices;
-    for (u32 t = 0; t < mesh.triangles.size(); ++t) {
-        const auto& tri = mesh.triangles[t];
-        const auto found = cuts.find(t);
-        if (found == cuts.end()) {
-            indices.insert(indices.end(), tri.vertices.begin(), tri.vertices.end());
-            continue;
-        }
-        std::vector<u32> polygon;
-        for (u32 e = 0; e < 3; ++e) {
-            polygon.push_back(tri.vertices[e]);
-            auto& positions = found->second[e];
-            std::ranges::sort(positions, {}, &Cut::along);
-            f32 previous = -1;
-            for (const auto& point : positions)
-                if (point.along - previous > 1e-4) {
-                    polygon.push_back(point.vertex);
-                    previous = point.along;
-                }
-        }
-        // A convex polygon with collinear boundary vertices. Taking the
-        // shortest valid ear keeps the fine boundary sampling in the interior.
-        while (polygon.size() > 3) {
-            u32 selected = nav_none;
-            f32 shortest = inf;
-            for (u32 i = 0; i < polygon.size(); ++i) {
-                const auto a = mesh.vertices[polygon[(i + polygon.size() - 1) % polygon.size()]],
-                           b = mesh.vertices[polygon[i]], c = mesh.vertices[polygon[(i + 1) % polygon.size()]];
-                const auto area = [&](Vec3f p, Vec3f q, Vec3f r) {
-                    const auto u = q - p, v = r - p;
-                    return (f64(u.y) * v.z - f64(u.z) * v.y) * mesh.options.up.x +
-                           (f64(u.z) * v.x - f64(u.x) * v.z) * mesh.options.up.y +
-                           (f64(u.x) * v.y - f64(u.y) * v.x) * mesh.options.up.z;
-                };
-                const auto twice_area = area(a, b, c);
-                const f64 scale = f64(length_squared(c - a)) + length_squared(b - a) + length_squared(c - b);
-                if (twice_area <= 1e-5 * scale)
+                // Carry the section to the other height now, rather than waiting
+                // for the next whole-mesh pass to discover one more tread. Keep
+                // the horizontal plane, but restart the local reach at the riser.
+                if (next != nav_none || before == after || before * after > 0)
                     continue;
-                // Collinear boundary cuts are constraints too. An ear whose
-                // diagonal contains another corner would swallow those cuts
-                // and leave a degenerate residual polygon.
-                bool contains = false;
-                for (u32 j = 0; j < polygon.size(); ++j) {
-                    if (j == i || j == (i + 1) % polygon.size() || j == (i + polygon.size() - 1) % polygon.size())
+                const auto edge_direction = flat(b - a, mesh.options.up);
+                if (length_squared(cross(edge_direction, section.direction)) >
+                    1e-8 * dot64(edge_direction, edge_direction) * dot64(section.direction, section.direction))
+                    continue;
+                const auto found = partners.find(t * 3 + e);
+                if (found == partners.end())
+                    continue;
+                for (const auto& partner : found->second) {
+                    const auto u = dot64(partner.a - section.point, section.direction);
+                    const auto v = dot64(partner.b - section.point, section.direction);
+                    if (u == v)
                         continue;
-                    const auto p = mesh.vertices[polygon[j]];
-                    const auto tolerance = scale * 1e-6;
-                    if (area(a, b, p) >= -tolerance && area(b, c, p) >= -tolerance && area(c, a, p) >= -tolerance) {
-                        contains = true;
-                        break;
+                    const auto along_partner = f32(u / (u - v));
+                    if (along_partner < 0 || along_partner > 1)
+                        continue;
+                    const auto point = cut(partner.triangle, partner.edge, along_partner);
+                    const auto& corners = mesh.triangles[partner.triangle].vertices;
+                    if (point.vertex != corners[partner.edge] && point.vertex != corners[(partner.edge + 1) % 3])
+                        cuts[partner.triangle][partner.edge].push_back(point);
+                    if (thin(partner.triangle) && seen[partner.triangle] != stamp) {
+                        seen[partner.triangle] = stamp;
+                        pending.push_back({partner.triangle, mesh.vertices[point.vertex], section.direction});
                     }
                 }
-                if (contains)
-                    continue;
-                const auto distance = length_squared(c - a);
-                if (distance < shortest) {
-                    shortest = distance;
-                    selected = i;
-                }
             }
-            if (selected == nav_none)
-                break;
-            const auto i = selected;
-            indices.insert(indices.end(), {polygon[(i + polygon.size() - 1) % polygon.size()], polygon[i],
-                                           polygon[(i + 1) % polygon.size()]});
-            polygon.erase(polygon.begin() + i);
         }
-        if (polygon.size() == 3)
-            indices.insert(indices.end(), polygon.begin(), polygon.end());
     }
-    return indices;
+    // Normalize each physical edge once. Every incident face must consume the
+    // same samples, including when rounding makes a sample unrepresentable.
+    const auto key_of = [](u32 a, u32 b) { return (u64(std::min(a, b)) << 32) | std::max(a, b); };
+    struct EdgeCuts {
+        std::vector<Cut> points;
+        std::vector<std::pair<u32, u32>> uses;
+    };
+    std::unordered_map<u64, EdgeCuts> edges;
+    for (const auto& [t, sides] : cuts)
+        for (u32 e = 0; e < 3; ++e) {
+            if (sides[e].empty())
+                continue;
+            const auto& v = mesh.triangles[t].vertices;
+            auto& points = edges[key_of(v[e], v[(e + 1) % 3])].points;
+            points.insert(points.end(), sides[e].begin(), sides[e].end());
+        }
+    for (auto& [key, edge] : edges) {
+        const u32 a = u32(key >> 32), b = u32(key);
+        const auto first = mesh.vertices[a], direction = mesh.vertices[b] - first;
+        for (auto& point : edge.points)
+            point.along = f32(dot64(mesh.vertices[point.vertex] - first, direction) / dot64(direction, direction));
+        std::ranges::sort(edge.points, [](const Cut& a, const Cut& b) {
+            return a.along != b.along ? a.along < b.along : a.vertex < b.vertex;
+        });
+        f32 previous = -1;
+        std::size_t kept = 0;
+        for (const auto point : edge.points) {
+            if (point.vertex == a || point.vertex == b || point.along - previous <= 1e-4f)
+                continue;
+            edge.points[kept++] = point;
+            previous = point.along;
+        }
+        edge.points.resize(kept);
+    }
+    if (edges.empty())
+        return unchanged();
+    std::vector<u32> pending_faces;
+    std::vector<u8> scheduled(mesh.triangles.size());
+    const auto schedule = [&](u32 t) {
+        if (!scheduled[t]) {
+            scheduled[t] = 1;
+            pending_faces.push_back(t);
+        }
+    };
+    for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+        const auto& v = mesh.triangles[t].vertices;
+        for (u32 e = 0; e < 3; ++e) {
+            const auto key = key_of(v[e], v[(e + 1) % 3]);
+            const auto found = edges.find(key);
+            if (found == edges.end())
+                continue;
+            auto& edge = found->second;
+            edge.uses.emplace_back(t, e);
+            if (!edge.points.empty())
+                schedule(t);
+        }
+    }
+    std::unordered_map<u32, std::vector<std::array<u32, 3>>> triangulations;
+    for (std::size_t q = 0; q < pending_faces.size(); ++q) {
+        const auto t = pending_faces[q];
+        scheduled[t] = 0;
+        const auto& tri = mesh.triangles[t];
+        std::vector<navmesh_detail::BoundaryPoint> polygon;
+        for (u32 e = 0; e < 3; ++e) {
+            polygon.push_back({tri.vertices[e], u8((1u << e) | (1u << ((e + 2) % 3)))});
+            const auto found = edges.find(key_of(tri.vertices[e], tri.vertices[(e + 1) % 3]));
+            if (found == edges.end())
+                continue;
+            const auto& points = found->second.points;
+            if (tri.vertices[e] < tri.vertices[(e + 1) % 3]) {
+                for (const auto& point : points)
+                    polygon.push_back({point.vertex, u8(1u << e)});
+            } else {
+                for (auto i = points.rbegin(); i != points.rend(); ++i)
+                    polygon.push_back({i->vertex, u8(1u << e)});
+            }
+        }
+        if (polygon.size() == 3) {
+            triangulations.erase(t);
+            continue;
+        }
+        std::vector<u32> conflicts;
+        auto made = navmesh_detail::triangulate_boundary(polygon, mesh.vertices, mesh.options.up, &conflicts);
+        if (!made.empty()) {
+            triangulations[t] = std::move(made);
+            continue;
+        }
+        warnings.record(sources[t], tri.centroid);
+        // Withdraw the selected sample from every incident face. Unrelated
+        // cuts on the same edge remain available to join steps.
+        const auto selected = conflicting_cut(polygon, conflicts, tri, mesh.vertices, mesh.options.up);
+        // Original corners are never removed. A nontrivial boundary always has
+        // at least one cut, so each retry strictly reduces the shared samples.
+        const auto e = u32(std::countr_zero(u32(polygon[selected].sides)));
+        auto& edge = edges.at(key_of(tri.vertices[e], tri.vertices[(e + 1) % 3]));
+        std::erase_if(edge.points, [&](const auto& point) { return point.vertex == polygon[selected].vertex; });
+        for (const auto& [face, side] : edge.uses)
+            schedule(face);
+    }
+    SeamCuts result;
+    for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+        const auto found = triangulations.find(t);
+        if (found == triangulations.end()) {
+            result.triangles.push_back(mesh.triangles[t].vertices);
+            result.origins.push_back(t);
+        } else {
+            for (const auto& vertices : found->second) {
+                result.triangles.push_back(vertices);
+                result.origins.push_back(t);
+            }
+        }
+    }
+    if (result.triangles.size() == mesh.triangles.size() &&
+        std::ranges::equal(result.triangles, mesh.triangles, {}, std::identity{}, &NavTriangle3D::vertices))
+        return unchanged();
+    return result;
 }
 
 void join_steps(NavMesh3D& mesh, std::vector<u8>* joined = nullptr) {
@@ -1649,7 +2122,8 @@ void join_steps(NavMesh3D& mesh, std::vector<u8>* joined = nullptr) {
             const auto u = flat(a.b - a.a, up);
             const auto u2 = dot64(u, u);
             const auto begin = dot64(flat(b.b - a.a, up), u) / u2, end = dot64(flat(b.a - a.a, up), u) / u2;
-            if (std::abs(begin) > 1e-4 || std::abs(end - 1) > 1e-4)
+            const auto slack = std::max(1e-4, 2.5e-7 * std::max(length(a.a), length(a.b)) / std::sqrt(u2));
+            if (std::abs(begin) > slack || std::abs(end - 1) > slack)
                 return;
             const auto height = std::max(std::abs(dot(b.b - a.a, up)), std::abs(dot(b.a - a.b, up)));
             if (!(height > 1e-5))
@@ -1683,6 +2157,23 @@ std::vector<Vec3f> step_path(const NavMesh3D& mesh, const std::vector<u32>& orig
     (void)taut_path(mesh, original, from, to, &guide, &corridor);
     std::size_t aim = 1;
     std::size_t first = 0;
+    // The whole corridor has already been rerouted by the guide. Pull each
+    // height-continuous section once; it needs neither another route search
+    // nor a copy of the corridor. Each side keeps its own surface height.
+    const auto append_section = [&](std::span<const u32> section, Vec3f start, Vec3f goal) {
+        std::size_t begin = 0, end = section.size() - 1;
+        for (std::size_t k = 1; k < section.size(); ++k)
+            if (holds(mesh, section[k], start))
+                begin = k;
+        for (std::size_t k = end; k > begin; --k)
+            if (holds(mesh, section[k - 1], goal))
+                end = k - 1;
+        section = section.subspan(begin, end - begin + 1);
+        auto corners = pull_string(portals_of(mesh, section, start, goal), mesh.options.up);
+        shortcut(mesh, corners, section);
+        for (const auto& point : corners)
+            result.push_back(point.point);
+    };
     for (std::size_t k = 1; k < corridor.size(); ++k) {
         const auto& tri = mesh.triangles[corridor[k - 1]];
         u32 edge = 0;
@@ -1704,9 +2195,7 @@ std::vector<Vec3f> step_path(const NavMesh3D& mesh, const std::vector<u32>& orig
         while (aim + 1 < guide.size() && guide[aim].portal < k)
             ++aim;
         const auto leave = crossing(from, a, b, guide[aim].point, mesh.options.up);
-        std::vector<u32> section(corridor.begin() + first, corridor.begin() + k);
-        const auto path = taut_path(mesh, std::move(section), from, leave);
-        result.insert(result.end(), path.begin(), path.end());
+        append_section(std::span{corridor}.subspan(first, k - first), from, leave);
         const auto delta = flat(b - a, mesh.options.up);
         const auto along = std::clamp(dot(flat(leave - a, mesh.options.up), delta) / dot(delta, delta), 0.f, 1.f);
         const auto across = lerp(next_a, next_b, along);
@@ -1714,9 +2203,7 @@ std::vector<Vec3f> step_path(const NavMesh3D& mesh, const std::vector<u32>& orig
         result.push_back(from);
         first = k;
     }
-    std::vector<u32> section(corridor.begin() + first, corridor.end());
-    const auto path = taut_path(mesh, std::move(section), from, to);
-    result.insert(result.end(), path.begin(), path.end());
+    append_section(std::span{corridor}.subspan(first), from, to);
     return result;
 }
 } // namespace
@@ -1727,7 +2214,7 @@ std::size_t NavMesh3D::memory_bytes() const {
 }
 
 static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span<const u32> indices,
-                                      const NavMeshBuildOptions3D& options, std::string* error, bool conform = true) {
+                                      const NavMeshBuildOptions3D& options, std::string* error) {
     if (const std::string why = check_input(vertices, indices, options); !why.empty()) {
         return rejected(why, error);
     }
@@ -1739,6 +2226,7 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
     mesh.options = options;
     mesh.options.up = normalize(options.up);
     const Vec3f up = mesh.options.up;
+    std::vector<u32> seam_sources;
 
     {
         // Weld, then keep the triangles that are whole after welding, have a
@@ -1748,7 +2236,10 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
         const auto corner_of = [&](std::size_t i) { return welded[indices.empty() ? i : indices[i]]; };
         const f64 min_cos = std::cos(static_cast<f64>(options.max_slope_degrees) * 3.14159265358979323846 / 180.0);
         std::vector<std::array<u32, 3>> candidates;
+        std::vector<u32> candidate_sources;
         candidates.reserve(input_triangles);
+        if (options.max_step_height > 0)
+            candidate_sources.reserve(input_triangles);
         for (std::size_t t = 0; t < input_triangles; ++t) {
             const std::array<u32, 3> v{corner_of(t * 3), corner_of(t * 3 + 1), corner_of(t * 3 + 2)};
             if (v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) {
@@ -1770,6 +2261,8 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
                 continue;
             }
             candidates.push_back(v);
+            if (options.max_step_height > 0)
+                candidate_sources.push_back(u32(t));
         }
 
         // Drop a triangle that repeats an earlier one's three vertices.
@@ -1797,6 +2290,8 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
         for (std::size_t t = 0; t < candidates.size(); ++t) {
             if (keep[t]) {
                 kept.push_back(candidates[t]);
+                if (options.max_step_height > 0)
+                    seam_sources.push_back(candidate_sources[t]);
                 for (const u32 v : candidates[t]) {
                     used[v] = true;
                 }
@@ -1827,94 +2322,63 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
         // Join triangles across edges. Two walkable triangles on either side of
         // an edge go round it in opposite directions; an edge with more than two,
         // or two on one side (folded over each other), joins nothing.
-        const Incidence uses = incidence(kept, vertex_count);
-        mesh.triangles.resize(kept.size());
-        for (u32 t = 0; t < static_cast<u32>(kept.size()); ++t) {
-            NavTriangle3D& tri = mesh.triangles[t];
-            tri.vertices = kept[t];
-            tri.centroid = (mesh.vertices[kept[t][0]] + mesh.vertices[kept[t][1]] + mesh.vertices[kept[t][2]]) / 3.0f;
-            for (u32 i = 0; i < 3; ++i) {
-                const u32 a = kept[t][i];
-                const u32 b = kept[t][(i + 1) % 3];
-                u32 sharing = 0;
-                u32 other = nav_none;
-                bool opposite = false;
-                for (const u32 u : uses.of(a)) {
-                    if (u == t) {
-                        continue;
-                    }
-                    for (u32 k = 0; k < 3; ++k) {
-                        if (kept[u][k] == b) {
-                            ++sharing;
-                            other = u;
-                            opposite = kept[u][(k + 1) % 3] == a;
-                        }
-                    }
-                }
-                if (sharing == 1 && opposite) {
-                    tri.neighbors[i] = other;
-                } else if (sharing == 2) {
-                    // A ramp may end on an uncut floor: two supports fold onto the
-                    // same side of the seam. Join the upper support to the floor
-                    // on the other side. Tied/nonmanifold surfaces stay separate.
-                    const auto pa = mesh.vertices[a], pb = mesh.vertices[b];
-                    const auto edge = flat(pb - pa, up);
-                    const auto edge2 = dot64(edge, edge);
-                    const auto gradient = [&](u32 face) {
-                        u32 c = 0;
-                        while (kept[face][c] == a || kept[face][c] == b)
-                            ++c;
-                        const auto delta = mesh.vertices[kept[face][c]] - pa;
-                        const auto along = dot64(flat(delta, up), edge) / edge2;
-                        const auto across = length(flat(delta, up) - edge * f32(along));
-                        return (dot64(delta, up) - along * dot64(pb - pa, up)) / across;
-                    };
-                    u32 same = nav_none, reverse = nav_none;
-                    f64 same_slope = -std::numeric_limits<f64>::infinity();
-                    f64 reverse_slope = same_slope;
-                    bool tied = false;
-                    for (const auto face : uses.of(a))
-                        for (u32 k = 0; k < 3; ++k) {
-                            const bool forward = kept[face][k] == a && kept[face][(k + 1) % 3] == b;
-                            const bool backward = kept[face][k] == b && kept[face][(k + 1) % 3] == a;
-                            if (!forward && !backward)
-                                continue;
-                            auto& selected = forward ? same : reverse;
-                            auto& slope = forward ? same_slope : reverse_slope;
-                            const auto candidate = gradient(face);
-                            if (std::abs(candidate - slope) < 1e-5)
-                                tied = true;
-                            if (candidate > slope) {
-                                selected = face;
-                                slope = candidate;
-                            }
-                        }
-                    if (!tied && same == t && reverse != nav_none)
-                        tri.neighbors[i] = reverse;
-                }
-            }
-        }
-    }
-
-    const auto split_seams = [&] {
-        auto splits = conform_steps(mesh);
-        if (splits.empty())
-            return false;
-        auto point = mesh.options;
-        point.agent_height = point.agent_radius = 0;
-        point.weld_distance = 0; // original welding is done; preserve constructed constraints
-        auto rebuilt = build_navmesh3d_impl(mesh.vertices, splits, point, error, false);
-        rebuilt.options = mesh.options;
-        mesh = std::move(rebuilt);
-        return true;
-    };
-    if (conform) {
-        // Finish same-height seam cuts before step links hide their boundaries.
-        split_seams();
-        join_steps(mesh);
+        connect_triangles(mesh, kept);
     }
 
     bool filtered = false;
+    std::vector<u8> seam_changed, headroom_dependent;
+    navmesh_detail::BoundaryWarnings seam_warnings;
+    Vec3f seam_sample{};
+    u32 seam_triangle = nav_none, seam_faces = 0;
+    const auto split_seams = [&] {
+        auto splits = conform_steps(mesh, seam_sources, seam_warnings);
+        if (splits.triangles.empty())
+            return false;
+        filtered = true; // discard unused candidate cut vertices after refinement
+        auto previous = std::move(mesh.triangles);
+        connect_triangles(mesh, splits.triangles);
+        std::vector<u32> sources(splits.origins.size());
+        for (u32 t = 0; t < sources.size(); ++t)
+            sources[t] = seam_sources[splits.origins[t]];
+        seam_sources = std::move(sources);
+        seam_changed.assign(mesh.triangles.size(), 0);
+        if (!headroom_dependent.empty()) {
+            std::vector<u8> mapped(mesh.triangles.size());
+            for (u32 t = 0; t < mapped.size(); ++t)
+                mapped[t] = headroom_dependent[splits.origins[t]];
+            headroom_dependent = std::move(mapped);
+        }
+        seam_faces = 0;
+        for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+            const auto& tri = mesh.triangles[t];
+            const auto& old = previous[splits.origins[t]];
+            seam_changed[t] = tri.vertices != old.vertices;
+            for (u32 e = 0; e < 3 && !seam_changed[t]; ++e) {
+                const auto next = tri.neighbors[e];
+                seam_changed[t] = (next == nav_none ? nav_none : splits.origins[next]) != old.neighbors[e];
+            }
+            if (seam_changed[t] && seam_faces++ == 0) {
+                seam_sample = tri.centroid;
+                seam_triangle = splits.origins[t];
+            }
+        }
+        mesh.nodes.clear();
+        mesh.node_triangles.clear();
+        return true;
+    };
+    const auto pending_seams = [&] {
+        const auto vertices = mesh.vertices.size();
+        navmesh_detail::BoundaryWarnings probe_warnings;
+        const bool pending = !conform_steps(mesh, seam_sources, probe_warnings).triangles.empty();
+        mesh.vertices.resize(vertices);
+        return pending;
+    };
+    if (options.max_step_height > 0) {
+        if (navmesh_detail::refine(split_seams, [] {}, pending_seams))
+            navmesh_detail::warn_limit(seam_sample, seam_triangle, seam_faces, "before-clearance");
+        join_steps(mesh);
+    }
+
     const auto filter = [&](const std::vector<u32>& kept) {
         // Subsetting preserves every support/step link and every wall cut.
         // Only triangle numbers change. Re-welding and re-testing all source
@@ -1922,6 +2386,16 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
         std::vector<u32> remap(mesh.triangles.size(), nav_none);
         for (u32 i = 0; i < kept.size(); ++i)
             remap[kept[i]] = i;
+        if (!seam_sources.empty()) {
+            for (u32 i = 0; i < kept.size(); ++i)
+                seam_sources[i] = seam_sources[kept[i]];
+            seam_sources.resize(kept.size());
+        }
+        if (!headroom_dependent.empty()) {
+            for (u32 i = 0; i < kept.size(); ++i)
+                headroom_dependent[i] = headroom_dependent[kept[i]];
+            headroom_dependent.resize(kept.size());
+        }
         for (u32 i = 0; i < kept.size(); ++i)
             mesh.triangles[i] = mesh.triangles[kept[i]];
         mesh.triangles.resize(kept.size());
@@ -1937,33 +2411,50 @@ static NavMesh3D build_navmesh3d_impl(std::span<const Vec3f> vertices, std::span
         mesh.node_triangles.clear();
         filtered = true;
     };
-    if (options.agent_height > 0 || (conform && options.max_step_height > 0)) {
+    if (options.agent_height > 0 || options.max_step_height > 0) {
         NavMesh3D obstacles;
         // A tread placed on a continuous floor hides the lower support beneath
         // it even for a zero-height agent. Filtering exposes its entry seam.
         mesh.options.agent_height = std::max(options.agent_height, options.max_step_height);
-        if (const auto kept = clear_triangles(mesh, vertices, indices, false, &obstacles))
+        bool portals_changed = false;
+        const auto kept =
+            clear_triangles(mesh, vertices, indices, false, &obstacles, {}, &portals_changed, &headroom_dependent);
+        if (kept)
             filter(*kept);
         // Headroom filtering can expose an interior grid edge below a tread.
-        // Conform that new seam too. Rebuilding connectivity requires another
-        // obstacle check, so any wall cuts are restored before erosion.
-        if (conform)
-            for (u32 pass = 0; pass < 4 && split_seams(); ++pass) {
-                join_steps(mesh);
-                if (const auto kept = clear_triangles(mesh, vertices, indices, false, &obstacles))
-                    filter(*kept);
-            }
+        // Conform that new seam too. Only split faces and changed portals need
+        // another obstacle query; untouched rooms retain their clearance result.
+        if (options.max_step_height > 0 && (kept || portals_changed)) {
+            const bool limited = navmesh_detail::refine(
+                split_seams,
+                [&] {
+                    std::vector<u8> joined;
+                    join_steps(mesh, &joined);
+                    for (u32 t = 0; t < joined.size(); ++t)
+                        seam_changed[t] |= joined[t];
+                    if (const auto kept = clear_triangles(mesh, vertices, indices, false, &obstacles, seam_changed,
+                                                          nullptr, &headroom_dependent))
+                        filter(*kept);
+                },
+                pending_seams);
+            if (limited)
+                navmesh_detail::warn_limit(seam_sample, seam_triangle, seam_faces, "after-clearance");
+        }
+        if (error && !error->empty())
+            return {};
         std::vector<u8> joined;
         join_steps(mesh, &joined);
         if (!joined.empty()) {
             // Newly exposed seams were not available to the first join pass.
             // Recheck their support bands against the same obstacle tree: a
             // tall wall on a step line must never be reopened by the new join.
-            if (const auto kept = clear_triangles(mesh, vertices, indices, false, &obstacles, joined))
+            if (const auto kept =
+                    clear_triangles(mesh, vertices, indices, false, &obstacles, joined, nullptr, &headroom_dependent))
                 filter(*kept);
         }
         mesh.options.agent_height = options.agent_height;
     }
+    seam_warnings.warn();
     if (options.agent_radius > 0 && !mesh.triangles.empty()) {
         const auto height = mesh.options.agent_height;
         mesh.options.agent_height = 0;

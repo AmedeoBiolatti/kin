@@ -1,3 +1,5 @@
+#include "history3d.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <kin/render3d/model3d.hpp>
@@ -123,7 +125,8 @@ ModelBatch3D::ModelBatch3D(const Model3D& model, std::span<const MeshInstance3D>
                 reject("Model3D part/instance composition must be finite");
                 return;
             }
-            records.push_back({transform, copy.tint, copy.id});
+            records.push_back(
+                {transform, copy.tint, copy.id, detail::part_history3d(copy.history_id, &part - model.parts.data())});
         }
         _triangles += u64(records.size()) * part.mesh.triangle_count();
         _record_bytes += records.size() * sizeof(MeshInstance3D);

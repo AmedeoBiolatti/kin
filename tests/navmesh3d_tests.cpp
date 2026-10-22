@@ -1,3 +1,4 @@
+#include "../engine/src/pathfinding/navmesh3d_detail.hpp"
 #include "result3d_helpers.hpp"
 
 #include <kin/pathfinding/navmesh3d.hpp>
@@ -13,6 +14,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -912,7 +915,365 @@ Soup stair_fixture(bool nose = false, f32 width = 2) {
     soup.append(grid(20, int(std::round(width / .1f)), .1f, .8f, {4, 0, 0}));
     return soup;
 }
+// Rectangle tessellation deliberately rounds each axis independently. This
+// reproduces exporter grids whose samples do not line up with adjacent treads.
+Soup rectangle(float x0, float x1, float width, float height, float cell) {
+    const int cols = std::max(1, int(std::round((x1 - x0) / cell)));
+    const int rows = std::max(1, int(std::round(width / cell)));
+    auto s = grid(cols, rows);
+    for (auto& p : s.vertices)
+        p = {x0 + p.x * ((x1 - x0) / cols), height, p.z * (width / rows)};
+    return s;
+}
+void test_rounded_and_long_step_seams() {
+    for (int variant : {0, 1, 2, 3}) {
+        const int count = variant == 0 ? 3 : variant == 1 ? 4 : variant == 2 ? 64 : 200;
+        const float rise = variant == 0 ? .144f : variant == 1 ? .15f : .18f;
+        const float depth = variant == 0 ? .297f : .3f;
+        const float width = variant == 0 ? 1.767f : 3.f;
+        const float landing = variant == 0 ? 1.503f : 2.f;
+        const float cell = variant == 0 ? .1f : variant == 1 ? .25f : .1f;
+        const float nose = variant == 0 ? .02f : variant == 1 ? .03f : 0;
+        const bool continuous = variant < 3;
+        Soup s = rectangle(-landing, continuous ? count * depth + landing : 0, width, 0, cell);
+        for (int k = 0; k < count; ++k) {
+            const float x = k * depth, y = (k + 1) * rise;
+            const float sample = variant == 0 ? (k % 2 ? .05f : .1f) : 100.f;
+            s.append(rectangle(x, x + depth, width, y, sample));
+            s.append({{{x, y - rise, 0},
+                       {x, y - (nose > 0 ? .02f : 0), 0},
+                       {x, y - (nose > 0 ? .02f : 0), width},
+                       {x, y - rise, width}},
+                      {0, 1, 2, 0, 2, 3}});
+            if (nose > 0) {
+                s.append({{{x - nose, y, 0}, {x - nose, y, width}, {x, y, width}, {x, y, 0}}, {0, 1, 2, 0, 2, 3}});
+                s.append(
+                    {{{x - nose, y - .02f, 0}, {x - nose, y, 0}, {x - nose, y, width}, {x - nose, y - .02f, width}},
+                     {0, 1, 2, 0, 2, 3}});
+            }
+        }
+        s.append(rectangle(count * depth, count * depth + landing, width, count * rise, cell));
+        const auto turn = kin::Quatf::axis_angle({0, 1, 0}, variant == 0 ? 39.79f : 0.f);
+        for (auto& p : s.vertices)
+            p = turn.rotate(p);
+        for (float radius : {0.f, .3f}) {
+            if (radius > 0 && variant < 2)
+                continue;
+            const auto mesh = build(s, {.agent_radius = radius, .agent_height = 1.8f, .max_step_height = .25f});
+            for (const auto& ends :
+                 {std::pair{Vec3f{-1, 0, width / 2}, Vec3f{count * depth + .5f, count * rise, width / 2}},
+                  std::pair{Vec3f{count * depth + .5f, count * rise, width / 2}, Vec3f{-1, 0, width / 2}}}) {
+                const auto path = kin::find_path(mesh, turn.rotate(ends.first), turn.rotate(ends.second));
+                assert(!path.empty());
+                const auto direction = ends.second.y > ends.first.y ? 1.f : -1.f;
+                for (std::size_t k = 1; k < path.size(); ++k)
+                    assert(direction * (path[k].y - path[k - 1].y) >= -1e-5f);
+            }
+            for (u32 t = 0; t < mesh.triangles.size(); ++t) {
+                const auto& tri = mesh.triangles[t];
+                const auto a = mesh.vertices[tri.vertices[0]], b = mesh.vertices[tri.vertices[1]],
+                           c = mesh.vertices[tri.vertices[2]];
+                assert(kin::cross(b - a, c - a).y > 0);
+                for (auto next : tri.neighbors)
+                    if (next != kin::nav_none)
+                        assert(std::ranges::find(mesh.triangles[next].neighbors, t) !=
+                               mesh.triangles[next].neighbors.end());
+            }
+        }
+    }
+}
+// Area and overlap checks complement topology: positive, linked triangles can
+// still overlap when an unchecked ear contains another polygon corner.
+double signed_area(Vec3f a, Vec3f b, Vec3f c) {
+    return ((double(b.z) - a.z) * (double(c.x) - a.x) - (double(b.x) - a.x) * (double(c.z) - a.z)) * .5;
+}
+double overlap_area(const std::array<Vec3f, 3>& a, const std::array<Vec3f, 3>& b) {
+    struct Point {
+        double x, z;
+    };
+    std::vector<Point> polygon;
+    for (auto p : a)
+        polygon.push_back({p.x, p.z});
+    for (int edge = 0; edge < 3; ++edge) {
+        std::vector<Point> clipped;
+        const auto p = b[edge], q = b[(edge + 1) % 3];
+        const auto distance = [&](Point v) {
+            return (double(q.z) - p.z) * (v.x - p.x) - (double(q.x) - p.x) * (v.z - p.z);
+        };
+        if (polygon.empty())
+            return 0;
+        auto previous = polygon.back();
+        double before = distance(previous);
+        for (auto current : polygon) {
+            const double after = distance(current);
+            if ((before >= 0) != (after >= 0)) {
+                const auto t = before / (before - after);
+                clipped.push_back(
+                    {previous.x + (current.x - previous.x) * t, previous.z + (current.z - previous.z) * t});
+            }
+            if (after >= 0)
+                clipped.push_back(current);
+            previous = current;
+            before = after;
+        }
+        polygon = std::move(clipped);
+    }
+    double area = 0;
+    for (std::size_t i = 0; i < polygon.size(); ++i) {
+        const auto p = polygon[i], q = polygon[(i + 1) % polygon.size()];
+        area += p.z * q.x - p.x * q.z;
+    }
+    return std::abs(area) * .5;
+}
+void test_step_boundary_triangulation() {
+    using kin::navmesh_detail::BoundaryPoint;
+    for (float depth : {4.f, 1e-13f}) {
+        const std::vector<Vec3f> vertices{{0, 0, 0}, {0, 0, depth}, {2, 0, depth * .25f}, {4, 0, depth}, {4, 0, 0}};
+        std::vector<BoundaryPoint> boundary;
+        for (u32 i = 0; i < vertices.size(); ++i)
+            boundary.push_back({i, 0});
+        const auto made = kin::navmesh_detail::triangulate_boundary(boundary, vertices, {0, 1, 0});
+        assert(made.size() == vertices.size() - 2);
+        double expected = 0, actual = 0;
+        for (u32 i = 1; i + 1 < vertices.size(); ++i)
+            expected += signed_area(vertices[0], vertices[i], vertices[i + 1]);
+        std::map<std::pair<u32, u32>, int> uses;
+        for (const auto& t : made) {
+            const auto area = signed_area(vertices[t[0]], vertices[t[1]], vertices[t[2]]);
+            assert(area > 0);
+            actual += area;
+            for (u32 e = 0; e < 3; ++e)
+                ++uses[std::minmax(t[e], t[(e + 1) % 3])];
+        }
+        assert(std::abs(actual - expected) <= expected * 1e-10);
+        for (u32 i = 0; i < vertices.size(); ++i)
+            assert(uses[std::minmax(i, u32((i + 1) % vertices.size()))] == 1);
+        for (std::size_t i = 0; i < made.size(); ++i)
+            for (std::size_t j = i + 1; j < made.size(); ++j) {
+                const auto a = made[i], b = made[j];
+                assert(overlap_area({vertices[a[0]], vertices[a[1]], vertices[a[2]]},
+                                    {vertices[b[0]], vertices[b[1]], vertices[b[2]]}) < expected * 1e-10);
+            }
+    }
+    const std::vector<Vec3f> folded{{0, 0, 0}, {2, 0, 2}, {0, 0, 2}, {2, 0, 0}};
+    assert(kin::navmesh_detail::triangulate_boundary(std::array<BoundaryPoint, 4>{{{0, 0}, {1, 0}, {2, 0}, {3, 0}}},
+                                                     folded, {0, 1, 0})
+               .empty());
+    const std::vector<Vec3f> line{{0, 0, 0}, {1, 0, 0}, {2, 0, 0}};
+    assert(kin::navmesh_detail::triangulate_boundary(std::array<BoundaryPoint, 3>{{{0, 0}, {1, 0}, {2, 0}}}, line,
+                                                     {0, 1, 0})
+               .empty());
+}
+void test_step_refinement_limit() {
+    u32 split = 0, finished = 0;
+    const bool limited = kin::navmesh_detail::refine(
+        [&] {
+            ++split;
+            return true;
+        },
+        [&] { finished = split; }, [] { return true; });
+    assert(limited && split == 64 && finished == 64);
+    split = finished = 0;
+    assert(!kin::navmesh_detail::refine([&] { return ++split < 3; }, [&] { ++finished; }, [] { return true; }));
+    assert(split == 3 && finished == 2);
+    split = finished = 0;
+    u32 probes = 0;
+    assert(!kin::navmesh_detail::refine([&] { return ++split <= 64; }, [&] { ++finished; },
+                                        [&] {
+                                            ++probes;
+                                            return false;
+                                        }));
+    assert(split == 64 && finished == 64 && probes == 1);
+    const auto previous = kin::logger_config();
+    std::vector<kin::LogEvent> events;
+    kin::set_logger_config({.min_level = kin::LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+    kin::navmesh_detail::warn_limit({1.5f, 2.5f, 3.5f}, 17, 4, "after-clearance");
+    kin::navmesh_detail::BoundaryWarnings warnings;
+    warnings.record(3, {1, 2, 3});
+    warnings.record(3, {4, 5, 6}); // the same source in a later refinement pass
+    warnings.record(7, {7, 8, 9});
+    warnings.warn();
+    kin::set_logger_config(previous);
+    assert(events.size() == 3 && events[0].category == "pathfinding");
+    const auto field = [&](std::string_view name) {
+        for (const auto& item : events[0].fields)
+            if (item.name == name)
+                return item.value;
+        return std::string{};
+    };
+    assert(field("passes") == "64" && field("pass_triangle") == "17" && field("changed_faces") == "4");
+    assert(field("phase") == "after-clearance" && std::stod(field("x")) == 1.5 && std::stod(field("y")) == 2.5 &&
+           std::stod(field("z")) == 3.5);
+    assert(events[1].fields[0].name == "source_triangle" && events[1].fields[0].value == "3");
+    assert(events[2].fields[0].name == "source_triangle" && events[2].fields[0].value == "7");
+    assert(events[1].fields[1].value == "1.000000");
+}
+void test_boundary_warning_budget() {
+    const auto previous = kin::logger_config();
+    std::vector<kin::LogEvent> events;
+    kin::set_logger_config({.min_level = kin::LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+    kin::navmesh_detail::BoundaryWarnings warnings;
+    warnings.warn();
+    assert(events.empty());
+    for (u32 pass = 0; pass < 3; ++pass)
+        for (u32 i = 0; i < 5000; ++i) {
+            const u32 source = (i * 37) % 5000;
+            warnings.record(source, {float(source), 2, -float(source)});
+        }
+    warnings.warn();
+    kin::set_logger_config(previous);
+    assert(events.size() == 9); // thousands of faces and repeated passes have a fixed log budget
+    for (u32 i = 0; i < 8; ++i)
+        assert(events[i].fields[0].name == "source_triangle" && events[i].fields[0].value == std::to_string(i));
+    const auto& summary = events.back();
+    assert(summary.message == "additional step boundary warnings suppressed");
+    const auto field = [&](std::string_view name) {
+        for (const auto& item : summary.fields)
+            if (item.name == name)
+                return item.value;
+        return std::string{};
+    };
+    assert(field("source_faces") == "5000" && field("reported_faces") == "8" && field("suppressed_faces") == "4992");
+    assert(std::stof(field("min_x")) == 0 && std::stof(field("max_x")) == 4999);
+    assert(std::stof(field("min_y")) == 2 && std::stof(field("max_y")) == 2);
+    assert(std::stof(field("min_z")) == -4999 && std::stof(field("max_z")) == 0);
+}
+void test_step_cut_precision() {
+    // Two carried samples alias at endpoint precision in the first face;
+    // the wider face can represent both samples without folding its boundary.
+    for (float width : {1e-5f, 3e-5f}) {
+        const Soup s{{{0, 0, 0}, {0, 0, 1}, {width, 0, 0}, {-1, .1f, .5f}, {0, .1f, 1}, {0, .1f, .5f}},
+                     {0, 1, 2, 3, 4, 5}};
+        const auto mesh = build(s, {.weld_distance = 0, .max_step_height = .2f});
+        int floor_faces = 0;
+        for (const auto& tri : mesh.triangles)
+            floor_faces += mesh.vertices[tri.vertices[0]].y == 0;
+        assert(floor_faces == (width < 2e-5f ? 2 : 3));
+        std::vector<bool> used(mesh.vertices.size());
+        for (const auto& tri : mesh.triangles)
+            for (const auto v : tri.vertices)
+                used[v] = true;
+        assert(std::ranges::all_of(used, [](bool v) { return v; })); // no unused cut vertices accumulate
+        assert(kin::nearest(mesh, {width * .25f, 0, .25f}, {1e-7f, 1e-7f, 1e-7f}));
+    }
+    // A slope's projected width is below the old 2e-5 cutoff, but its samples
+    // are distinct in 3D. Valid small faces must still be able to join a step.
+    const float w = 1.5e-5f;
+    const Soup slope{{{0, 0, 0}, {0, 0, 1}, {w, w, 0}, {0, .1f, 0}, {w / 2, .1f + w / 2, 0}, {0, .1f, -1}},
+                     {0, 1, 2, 3, 4, 5}};
+    const auto mesh = build(slope, {.max_slope_degrees = 60, .weld_distance = 0, .max_step_height = .2f});
+    int floor_faces = 0;
+    for (const auto& tri : mesh.triangles)
+        floor_faces += mesh.vertices[tri.vertices[0]].y < .01f;
+    assert(floor_faces > 1 && mesh.region_count() == 1);
+}
+
+void test_shared_step_cut_is_atomic() {
+    // The carry cut on B-C rounds onto the opposite corner of its thin
+    // neighbour. Both faces must retain B-C, rather than only one dropping it.
+    const Soup s{{{0, 0, 0}, {0, 0, 1}, {10, 0, 0}, {5, 0, .500008f}, {-1, .1f, .5f}, {0, .1f, 1}, {0, .1f, .5f}},
+                 {0, 1, 2, 2, 1, 3, 4, 5, 6}};
+    const auto mesh = build(s, {.max_step_height = .2f});
+    double expected = 0, actual = 0;
+    for (std::size_t i = 0; i < s.indices.size(); i += 3)
+        expected += signed_area(s.vertices[s.indices[i]], s.vertices[s.indices[i + 1]], s.vertices[s.indices[i + 2]]);
+    for (const auto& tri : mesh.triangles)
+        actual +=
+            signed_area(mesh.vertices[tri.vertices[0]], mesh.vertices[tri.vertices[1]], mesh.vertices[tri.vertices[2]]);
+    if (std::abs(actual - expected) >= 1e-7 || mesh.region_count() != 1)
+        std::fprintf(stderr, "shared cut area %.12g expected %.12g, %u regions\n", actual, expected, mesh.regions);
+    assert(std::abs(actual - expected) < 1e-7 && mesh.region_count() == 1);
+    auto partial = s;
+    partial.vertices[4].z = partial.vertices[6].z = .25f;
+    partial.vertices[5].z = .5f;
+    const auto repaired = build(partial, {.max_step_height = .2f});
+    assert(std::ranges::any_of(repaired.vertices,
+                               [](auto p) { return std::abs(p.x - 7.5f) < 1e-5f && p.y == 0 && p.z == .25f; }));
+    assert(repaired.region_count() == 1);
+    double repaired_expected = 0, repaired_area = 0;
+    for (std::size_t i = 0; i < partial.indices.size(); i += 3)
+        repaired_expected += signed_area(partial.vertices[partial.indices[i]], partial.vertices[partial.indices[i + 1]],
+                                         partial.vertices[partial.indices[i + 2]]);
+    for (const auto& tri : repaired.triangles)
+        repaired_area += signed_area(repaired.vertices[tri.vertices[0]], repaired.vertices[tri.vertices[1]],
+                                     repaired.vertices[tri.vertices[2]]);
+    assert(std::abs(repaired_expected - repaired_area) < 1e-7);
+    auto separate = partial;
+    for (auto& p : separate.vertices)
+        p.x += 20;
+    // A non-walkable input face must not shift the reported source indices.
+    Soup two_spots{{{100, 0, 0}, {100, 1, 0}, {100, 0, 1}}, {0, 1, 2}};
+    two_spots.append(partial);
+    two_spots.append(separate);
+    const auto previous = kin::logger_config();
+    std::vector<kin::LogEvent> events;
+    kin::set_logger_config({.min_level = kin::LogLevel::Warn, .sdl_sink = false, .memory_events = &events});
+    (void)build(two_spots, {.max_step_height = .2f});
+    kin::set_logger_config(previous);
+    std::set<std::string> sources;
+    int warnings = 0;
+    for (const auto& event : events) {
+        if (!event.message.starts_with("step boundary"))
+            continue;
+        ++warnings;
+        for (const auto& field : event.fields)
+            if (field.name == "source_triangle")
+                sources.insert(field.value);
+    }
+    assert(warnings == 2 && (sources == std::set<std::string>{"2", "5"}));
+    for (const auto* output : {&mesh, &repaired}) {
+        for (u32 i = 0; i < output->triangles.size(); ++i)
+            for (u32 j = i + 1; j < output->triangles.size(); ++j) {
+                const auto a = output->triangles[i].vertices, b = output->triangles[j].vertices;
+                if (output->vertices[a[0]].y != output->vertices[b[0]].y)
+                    continue;
+                assert(overlap_area({output->vertices[a[0]], output->vertices[a[1]], output->vertices[a[2]]},
+                                    {output->vertices[b[0]], output->vertices[b[1]], output->vertices[b[2]]}) < 1e-12);
+            }
+    }
+}
+void test_step_support_clearance_recheck() {
+    // A short wall clips a rotated nosed flight. Faces that initially passed
+    // only because of a support band must be rechecked when seams change.
+    const float rise = .166217446f, depth = .398898125f, width = 3.22530031f, landing = 1.71745324f;
+    const float nose = .0359130502f;
+    Soup s = rectangle(-landing, 0, width, 0, .1f);
+    for (int k = 0; k < 5; ++k) {
+        const float x = k * depth, y = (k + 1) * rise;
+        s.append(rectangle(x, k == 4 ? 5 * depth + landing : x + depth, width, y, k % 2 ? .5f : .1f));
+        s.append({{{x - nose, y, 0}, {x - nose, y, width}, {x, y, width}, {x, y, 0}}, {0, 1, 2, 0, 2, 3}});
+        s.append({{{x - nose, y - .02f, 0}, {x - nose, y, 0}, {x - nose, y, width}, {x - nose, y - .02f, width}},
+                  {0, 1, 2, 0, 2, 3}});
+        s.append(
+            {{{x, y - rise, 0}, {x, y - .02f, 0}, {x, y - .02f, width}, {x, y - rise, width}}, {0, 1, 2, 0, 2, 3}});
+    }
+    // Use the exporter's independent sine/cosine rotation, including its rounding.
+    const float angle = 84.14431f * 3.14159265f / 180;
+    const float c = std::cos(angle), sn = std::sin(angle);
+    for (auto& p : s.vertices)
+        p = {c * p.x - sn * p.z + .530772448f, p.y, sn * p.x + c * p.z};
+    const Vec3f lo{-1.57196033f, 0, .320924044f}, hi{.346803045f, 1.512114f, .420924044f};
+    s.append(
+        {{{lo.x, lo.y, lo.z},
+          {hi.x, lo.y, lo.z},
+          {hi.x, lo.y, hi.z},
+          {lo.x, lo.y, hi.z},
+          {lo.x, hi.y, lo.z},
+          {hi.x, hi.y, lo.z},
+          {hi.x, hi.y, hi.z},
+          {lo.x, hi.y, hi.z}},
+         {0, 1, 2, 0, 2, 3, 4, 7, 6, 4, 6, 5, 0, 4, 5, 0, 5, 1, 1, 5, 6, 1, 6, 2, 2, 6, 7, 2, 7, 3, 3, 7, 4, 3, 4, 0}});
+    const auto mesh = build(s, {.agent_height = 1.8f, .max_step_height = .25f});
+    assert(!kin::nearest(mesh, {.17f, 2 * rise, .57f}, {.001f, .001f, .001f}));
+    assert(kin::nearest(mesh, {-1, rise, 1}, {.1f, 1, .1f}));
+}
 void test_step_seams_and_soffits() {
+    // A zero-thickness wall exactly on a grid edge only cuts portals. It
+    // removes no floor face, but later seam joining must not reopen it.
+    auto portal_wall = stair_fixture();
+    portal_wall.append({{{-.5f, 0, 0}, {-.5f, 3, 0}, {-.5f, 3, 2}, {-.5f, 0, 2}}, {0, 1, 2, 0, 2, 3}});
+    const auto wall_mesh = build(portal_wall, {.agent_height = 1.8f, .max_step_height = .25f});
+    assert(kin::find_path(wall_mesh, {-1, 0, 1}, {5, .8f, 1}).empty());
     // A nose extends a drop-off toward the lower tread. Radius erosion must
     // reach across the joined riser as well as along each individual tread.
     auto drop = grid(20, 40, .1f, 0, {-2, 0, 0});
@@ -971,6 +1332,61 @@ void test_step_seams_and_soffits() {
             }
         }
     }
+    // Descending noses retain vertical crossings at one horizontal footprint.
+    const auto nosed =
+        build(stair_fixture(true, 4), {.agent_radius = .3f, .agent_height = 1.8f, .max_step_height = .25f});
+    const Vec3f start{-0.920537353f, 0, 2.49026322f}, goal{4.61101627f, .8f, 2.84935427f};
+    const auto guided = kin::find_path(nosed, start, goal);
+    assert(!guided.empty());
+    horizontal = 0;
+    for (std::size_t i = 1; i < guided.size(); ++i) {
+        const auto d = guided[i] - guided[i - 1];
+        horizontal += std::hypot(d.x, d.z);
+    }
+    // A raw A* funnel detours by more than this budget on the same open flight.
+    assert(horizontal < 1.015f * std::hypot(goal.x - start.x, goal.z - start.z));
+    const auto descending = kin::find_path(nosed, goal, start);
+    assert(!descending.empty());
+    for (std::size_t i = 1; i < descending.size(); ++i)
+        assert(descending[i].x <= descending[i - 1].x + 1e-5f);
+
+    // Coarse treads between fine landings need all twelve risers to connect.
+    Soup coarse = grid(20, 30, .1f, 0, {-2, 0, 0});
+    for (int k = 0; k < 12; ++k) {
+        const float x = k * .3f, y = (k + 1) * .18f;
+        coarse.append({{{x, y, 0}, {x, y, 3}, {x + .3f, y, 3}, {x + .3f, y, 0}}, {0, 1, 2, 0, 2, 3}});
+    }
+    coarse.append(grid(20, 30, .1f, 2.16f, {3.6f, 0, 0}));
+    const auto coarse_mesh = build(coarse, {.agent_height = 1.8f, .max_step_height = .25f});
+    assert(coarse_mesh.region_count() == 1);
+    assert(!kin::find_path(coarse_mesh, {-1, 0, 1.5f}, {4.6f, 2.16f, 1.5f}).empty());
+
+    // A long slab next to tiny kerb segments must retain its entire floor area.
+    for (float angle : {0.f, 30.f}) {
+        Soup long_slab = grid(1, 1, 100, 0);
+        long_slab.append(grid(20, 80, .05f, .15f, {100, 0, 0}));
+        const auto turn = kin::Quatf::axis_angle({0, 1, 0}, angle);
+        for (auto& v : long_slab.vertices)
+            v = turn.rotate(v);
+        const auto mesh = build(long_slab, {.agent_height = 1.8f, .max_step_height = .25f});
+        assert(mesh.region_count() == 1);
+        double area = 0;
+        for (const auto& tri : mesh.triangles) {
+            const auto a = mesh.vertices[tri.vertices[0]], b = mesh.vertices[tri.vertices[1]],
+                       c = mesh.vertices[tri.vertices[2]];
+            area += .5 * std::abs(double(kin::cross(b - a, c - a).y));
+            for (u32 e = 0; e < 3; ++e) {
+                const auto u = turn.conjugate().rotate(mesh.vertices[tri.vertices[e]]);
+                const auto v = turn.conjugate().rotate(mesh.vertices[tri.vertices[(e + 1) % 3]]);
+                if (std::abs(u.x - 100) < 1e-4f && std::abs(v.x - 100) < 1e-4f && (u.z + v.z) * .5f > .001f &&
+                    (u.z + v.z) * .5f < 3.999f)
+                    assert(tri.neighbors[e] != kin::nav_none);
+            }
+        }
+        assert(std::abs(area - 10004) < .02);
+        assert(!kin::find_path(mesh, turn.rotate({50, 0, 2}), turn.rotate({100.5f, .15f, 2})).empty());
+    }
+
     // A single large roof triangle can extend below the current floor at
     // its far corner; classify its clipped overhead, not its lowest vertex.
     auto long_roof = stair_fixture();
@@ -1007,6 +1423,13 @@ void test_step_seams_and_soffits() {
 } // namespace
 
 int main() {
+    test_step_boundary_triangulation();
+    test_step_refinement_limit();
+    test_boundary_warning_budget();
+    test_shared_step_cut_is_atomic();
+    test_step_cut_precision();
+    test_step_support_clearance_recheck();
+    test_rounded_and_long_step_seams();
     test_step_seams_and_soffits();
     test_grid_with_hole_adjacency();
     test_path_around_the_hole();

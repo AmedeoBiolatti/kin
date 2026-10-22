@@ -40,7 +40,9 @@ struct NavMeshBuildOptions3D {
     // Nonzero height removes triangles whose vertical headroom intersects any
     // input geometry (including ceilings/walls). Radius then removes triangles
     // within that horizontal distance of a walkable boundary, including the
-    // newly blocked areas. With max_step_height zero, both zero disable clearance.
+    // newly blocked areas. Step construction uses max(agent_height, max_step_height)
+    // as its effective headroom, so low ceilings and walls also block a zero-height
+    // agent. Both height and step zero disable headroom checks.
     // Conservative: a triangle is removed whole if any part is unsafe. Tessellate
     // the walk surface to control extra margin. Step seams may be subdivided.
     f32 agent_radius = 0.0f;
@@ -112,11 +114,21 @@ struct NavMesh3D {
 // Agent clearance can remove further triangles and split/discard connected regions.
 // Step construction subdivides mismatched boundary seams (also same-height
 // T junctions), including shared interior edges. Other faces retain input order.
-// A floor hidden below a climbable tread is filtered even for zero-height agents;
-// newly exposed step seams are joined and checked against blocking geometry.
+// Samples propagate across tread supports in the same pass, including long
+// coarse flights. Conflicting cut samples are withdrawn on all incident faces;
+// other samples on those edges remain. Source geometry is retained; each affected
+// source face is tracked by input index across passes. Diagnostics show at most
+// eight faces with world positions, plus a count/bounds summary for the remainder.
+// Diagnostic source tracking is disabled when steps are disabled.
+// Step construction checks headroom at max(agent_height, max_step_height), even
+// for zero-height agents: hidden floors, low ceilings and walls are filtered.
+// Newly exposed step seams are joined and checked against blocking geometry.
 // Invalid input (an index out of range, a vertex or option that is not finite or
 // out of range, a count that is not a whole number of triangles) returns a failed
 // result with diagnostics. Valid empty input returns a successful empty mesh.
+// If a probe still finds work after 64 passes, unresolved seams warn and
+// remain unjoined; the last split still receives joining and clearance checks.
+// The remaining valid walk mesh is returned, not a build error.
 Result3D<NavMesh3D> build_navmesh3d(std::span<const Vec3f> vertices, std::span<const u32> indices,
                                     const NavMeshBuildOptions3D& options = {});
 

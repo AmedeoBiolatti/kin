@@ -1,3 +1,4 @@
+#include "legacy_physics3d_helpers.hpp"
 // The ECS side of kin/physics3d (kin/ecs/physics3d.hpp), without a GPU: bodies made for entities in entity id order
 // and destroyed with them, kinematic bodies following Transform3D and dynamic ones writing it back (under a
 // parent too), events routed to a place game code reads, determinism of a whole scene, debug lines, the ground
@@ -454,12 +455,12 @@ void test_interpolation() {
         bodies.step(dt);
     }
     const f32 last = crate.get<Transform3D>()->position.y;
-    bodies.interpolate(1.0f);
+    legacy_interpolate(bodies, 1.0f);
     CHECK(near(crate.get<Transform3D>()->position.y, last, 1e-6f));
-    bodies.interpolate(0.0f);
+    legacy_interpolate(bodies, 0.0f);
     const f32 before = crate.get<Transform3D>()->position.y;
     CHECK(before > last); // the one before the last step is higher: it is falling
-    bodies.interpolate(0.5f);
+    legacy_interpolate(bodies, 0.5f);
     CHECK(near(crate.get<Transform3D>()->position.y, 0.5f * (before + last), 1e-5f));
     // The interpolated pose is not read as a move by game code: the next step keeps the body going.
     const Vec3f at = physics.position(bodies.body_of(crate));
@@ -484,11 +485,11 @@ void test_teleported_entity_interpolates_from_there() {
     bodies.step(dt);
     const Vec3f after = physics.position(bodies.body_of(crate));
     CHECK(near(after.x, 8.0f, 1e-5f) && after.y < 7.0f && after.y > 6.9f);
-    bodies.interpolate(0.0f);
+    legacy_interpolate(bodies, 0.0f);
     CHECK(near(crate.get<Transform3D>()->position, {8, 7, 0}, 1e-5f));
-    bodies.interpolate(0.5f);
+    legacy_interpolate(bodies, 0.5f);
     CHECK(near(crate.get<Transform3D>()->position, {8, 0.5f * (7.0f + after.y), 0}, 1e-5f));
-    bodies.interpolate(1.0f);
+    legacy_interpolate(bodies, 1.0f);
     CHECK(near(crate.get<Transform3D>()->position, after, 1e-6f));
     // The interpolated pose is not read as a move: the body goes on falling from where it is.
     bodies.step(dt);
@@ -947,11 +948,11 @@ void test_character_parented_and_interpolated() {
     }
     // Interpolation: between the last two steps' feet, alpha 0 the earlier; alpha 1 what step leaves.
     const f32 x_now = hero.get<Transform3D>()->position.x;
-    bodies.interpolate(0.0f);
+    legacy_interpolate(bodies, 0.0f);
     const f32 x_before = hero.get<Transform3D>()->position.x;
-    bodies.interpolate(0.5f);
+    legacy_interpolate(bodies, 0.5f);
     const f32 x_half = hero.get<Transform3D>()->position.x;
-    bodies.interpolate(1.0f);
+    legacy_interpolate(bodies, 1.0f);
     CHECK(near(hero.get<Transform3D>()->position.x, x_now, 1e-4f));
     CHECK(x_before < x_half && x_half < x_now && near(x_now - x_before, 4.0f * dt, 0.02f));
     CHECK(near(x_half, 0.5f * (x_before + x_now), 1e-4f));
@@ -1511,9 +1512,9 @@ void test_resync_after_restore() {
     CHECK(near(hero.get<Transform3D>()->position, stood, 1e-6f));
     CHECK(hero.get<CharacterController3D>()->state.ground == CharacterGround3D::OnGround);
     // Interpolation has no history from before the rollback.
-    bodies.interpolate(0.0f);
+    legacy_interpolate(bodies, 0.0f);
     CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f) && near(hero.get<Transform3D>()->position, stood, 1e-6f));
-    bodies.interpolate(0.5f);
+    legacy_interpolate(bodies, 0.5f);
     CHECK(near(crate.get<Transform3D>()->position, at, 1e-6f) && near(hero.get<Transform3D>()->position, stood, 1e-6f));
     // And the step goes on from there: the entities are not read as a move by game code.
     bodies.step(dt);
@@ -1788,6 +1789,85 @@ void test_character_rotation_presentation() {
     }
     CHECK(hash == physics.state_hash());
 }
+void test_character_authored_rotation_survives_interpolation() {
+    kin::EcsWorld ecs;
+    ecs.raw().component<Transform3D>().add(flecs::OnInstantiate, flecs::Inherit);
+    World3D physics(serial());
+    WorldPhysicsState3D bodies{ecs, physics};
+    const auto hero = add_character(ecs.raw(), {0, 5, 0});
+    hero.get_mut<CharacterController3D>()->apply_facing = false;
+    bodies.step(dt);
+    const auto wanted = Quatf::axis_angle({0, 1, 0}, 90.f);
+    hero.get_mut<Transform3D>()->rotation = wanted;
+    for (int frame = 0; frame < 12; ++frame) {
+        bodies.step(dt);
+        for (float alpha : {0.f, .25f, .5f, 1.f}) {
+            const auto shown = bodies.render_transform(hero, alpha);
+            CHECK(shown && near(shown->apply_vector({0, 0, 1}), wanted.rotate({0, 0, 1}), 1e-4f));
+        }
+        legacy_interpolate(bodies, .5f);
+    }
+    CHECK(near(hero.get<Transform3D>()->rotation.rotate({0, 0, 1}), wanted.rotate({0, 0, 1}), 1e-4f));
+    // A turn can arrive on a render-only frame, between two fixed steps.
+    const auto snap = Quatf::axis_angle({0, 1, 0}, 30.f);
+    hero.get_mut<Transform3D>()->rotation = snap;
+    legacy_interpolate(bodies, .2f);
+    CHECK(near(hero.get<Transform3D>()->rotation.rotate({0, 0, 1}), snap.rotate({0, 0, 1}), 1e-4f));
+    legacy_interpolate(bodies, .8f);
+    bodies.step(dt);
+    CHECK(near(hero.get<Transform3D>()->rotation.rotate({0, 0, 1}), snap.rotate({0, 0, 1}), 1e-4f));
+    // Per-render mouse-look must not disable position interpolation.
+    bodies.step(dt);
+    const auto start = bodies.render_transform(hero, 0)->apply({});
+    const auto end = bodies.render_transform(hero, 1)->apply({});
+    CHECK(!near(start, end, 1e-6f));
+    hero.get_mut<Transform3D>()->rotation = wanted;
+    for (float alpha : {0.f, .25f, .5f, 1.f}) {
+        const auto shown = bodies.render_transform(hero, alpha);
+        CHECK(shown && near(shown->apply({}), lerp(start, end, alpha), 1e-5f));
+        CHECK(shown && near(shown->apply_vector({0, 0, 1}), wanted.rotate({0, 0, 1}), 1e-4f));
+    }
+    // A translation authored between steps survives repeated legacy renders,
+    // then becomes the native character's next teleport (also under a parent).
+    for (bool parented : {false, true}) {
+        const auto parent = ecs.raw().entity().set(Transform3D{.position = {3, 2, -1},
+                                                               .rotation = Quatf::axis_angle({0, 1, 0}, 25.f)});
+        if (parented)
+            hero.child_of(parent);
+        const Vec3f moved{4, 8, 2};
+        hero.get_mut<Transform3D>()->position = moved;
+        const auto expected = parented ? parent.get<Transform3D>()->matrix().apply(moved) : moved;
+        for (float alpha : {0.f, .3f, .8f, 1.f}) {
+            legacy_interpolate(bodies, alpha);
+            CHECK(hero.get<Transform3D>()->position == moved);
+            const auto shown = bodies.render_transform(hero, alpha);
+            CHECK(shown && near(shown->apply({}), expected, 1e-4f));
+        }
+        bodies.step(dt);
+        const auto at = physics.character(bodies.character_of(hero)).position;
+        CHECK(std::abs(at.x - expected.x) < 1e-4f && std::abs(at.z - expected.z) < 1e-4f);
+        CHECK(at.y <= expected.y && at.y > expected.y - .1f);
+        if (parented)
+            hero.remove(flecs::ChildOf, parent);
+        parent.destruct();
+    }
+    // A transform inherited after binding must be materialized before input
+    // and teleport detection; raw flecs get_mut would return null here.
+    const auto prefab = ecs.raw().prefab().set(Transform3D{.position = {10, 5, 0}});
+    hero.remove<Transform3D>();
+    hero.is_a(prefab);
+    CHECK(!hero.owns<Transform3D>() && hero.get<Transform3D>() != nullptr);
+    bodies.step(dt);
+    CHECK(hero.owns<Transform3D>());
+    CHECK(physics.character(bodies.character_of(hero)).position.x > 9.9f);
+    hero.remove(flecs::IsA, prefab);
+    // The legacy path may be called after game code removed a transform.
+    hero.remove<Transform3D>();
+    legacy_interpolate(bodies, .5f);
+    bodies.resync_from_world();
+    bodies.step(dt);
+}
+
 void test_kinematic_teleport_does_not_sweep() {
     kin::EcsWorld ecs;
     World3D physics(serial());
@@ -1816,6 +1896,7 @@ void test_kinematic_teleport_does_not_sweep() {
 int main() {
     test_sleeping_child_keeps_world_pose();
     test_character_rotation_presentation();
+    test_character_authored_rotation_survives_interpolation();
     test_kinematic_teleport_does_not_sweep();
     test_disabled_contacts_readable();
     test_bodies_in_entity_order();

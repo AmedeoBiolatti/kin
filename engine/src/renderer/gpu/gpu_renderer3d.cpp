@@ -64,6 +64,19 @@ bool taa_texture_hash(u64& key, const ITextureBackend* texture) {
     return backend->premultiplied();
 }
 
+// Transparent motion and appearance use the same material partition. Reordering
+// anonymous draws with different appearances cannot swap their histories.
+bool taa_material_hash(u64& key, const Material3D& material, const ITextureBackend* texture) {
+    taa_hash(key, material.color);
+    taa_hash(key, material.blend);
+    taa_hash(key, material.shader_params);
+    taa_hash(key, material.wrap_u);
+    taa_hash(key, material.wrap_v);
+    const auto shader = material.shader.backend().get();
+    taa_hash(key, shader);
+    return taa_texture_hash(key, texture);
+}
+
 // Cache payloads intentionally retain their native scalar representation and
 // field order. This writer adds no headers, padding, hashing or normalization.
 class CacheBytes {
@@ -2592,7 +2605,6 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
         return;
     }
     std::vector<GpuView3D::ParticleHistory>().swap(view._taa_particles);
-    decltype(view._taa_mesh_effects){}.swap(view._taa_mesh_effects);
     view._taa_depth = {};
     view._taa_in = {};
     view._taa_sharp = {};
@@ -2680,7 +2692,7 @@ u64 mix64(u64 x) {
 
 void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem* jobs, bool skinned) {
     // A copy's past is looked for in the last frame's copies of the same mesh in the
-    // same scene (the world or the overlay): by its MeshInstance3D::id when it has one
+    // same scene (the world or the overlay): by its explicit history_id, else its legacy id
     // (a copy of that mesh with that id), else by its place in the mesh's copies in
     // draw order, when there are as many as before and it has not moved more than
     // eight times its size (else it is probably another one). Failing that, by where it
@@ -2699,6 +2711,8 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
     struct Group {
         u64 key;
         u32 first, count, past_first, past_count;
+        u32 effect_first = ~0u, past_effect_first = ~0u;
+        bool transparent = false;
         bool grid_made = false;
         f32 cell = 1.0f;
         std::unordered_multimap<u64, u32> grid; // last frame's copies' centres by cell (made only if needed)
@@ -2707,7 +2721,13 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
     const u32 ref_count = static_cast<u32>(_refs.size());
     // By the mesh's serial, not its address: a mesh freed and another made in the same place would else inherit its
     // copies' past.
-    const auto key_of_ref = [&](u32 r) { return mix64(_refs[r].mesh->serial * 2 + _refs[r].scene); };
+    const auto key_of_ref = [&](u32 r) {
+        const auto& ref = _refs[r];
+        u64 key = mix64(ref.mesh->serial * 2 + ref.scene);
+        if (pass_of(ref.draw->material) != Pass::Opaque)
+            (void)taa_material_hash(key, ref.draw->material, ref.draw->material.texture.backend().get());
+        return key;
+    };
     // Groups in order of first appearance. Found by sorting the keys, not by a map made anew each frame.
     std::vector<u32>& group_of = _taa_group_of; // first the first draw of the same group, then its group
     {
@@ -2728,6 +2748,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             if (group_of[r] == r) { // the first of its group (a later draw's first is before it)
                 const u32 id = static_cast<u32>(groups.size());
                 groups.emplace_back(Group{key_of_ref(r), 0, 0, 0, 0});
+                groups.back().transparent = pass_of(_refs[r].draw->material) != Pass::Opaque;
                 group_of[r] = id;
             } else {
                 group_of[r] = group_of[group_of[r]];
@@ -2735,16 +2756,21 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             groups[group_of[r]].count += _refs[r].draw->count;
         }
     }
-    u32 total = 0;
+    u32 total = 0, effect_count = 0;
     for (Group& g : groups) {
         g.first = total;
         total += g.count;
-        now.groups.push_back({g.key, g.first, g.count});
+        if (g.transparent) {
+            g.effect_first = effect_count;
+            effect_count += g.count;
+        }
+        now.groups.push_back({g.key, g.first, g.count, g.effect_first});
         const auto past = std::lower_bound(last.groups.begin(), last.groups.end(), g.key,
                                            [](const GpuCopyHistory::Span& s, u64 key) { return s.key < key; });
         if (history_usable && past != last.groups.end() && past->key == g.key) {
             g.past_first = past->first;
             g.past_count = past->count;
+            g.past_effect_first = past->effect_first;
         } else {
             g.past_first = g.past_count = ~0u;
         }
@@ -2752,6 +2778,8 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
     std::sort(now.groups.begin(), now.groups.end(),
               [](const GpuCopyHistory::Span& a, const GpuCopyHistory::Span& b) { return a.key < b.key; });
     now.matrices.resize(total);
+    now.effects.assign(effect_count, 0);
+    _taa_matched.assign(effect_count, ~0u);
     _taa_prev.resize(total);
     _taa_slow.resize(total);
     // Skinned copies: each copy's joints in the frame's (a place in `now.joints`), and where its past is, for the
@@ -2768,7 +2796,10 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
         for (u32 r = 0; r < ref_count; ++r) {
             const Group& g = groups[group_of[r]];
             const bool same_count = g.past_count == g.count;
-            _taa_copy_refs[r] = {g.first + used[group_of[r]], same_count ? g.past_first + used[group_of[r]] : ~0u};
+            const auto offset = used[group_of[r]];
+            _taa_copy_refs[r] = {g.first + offset, same_count ? g.past_first + offset : ~0u,
+                                 g.transparent ? g.effect_first + offset : ~0u,
+                                 same_count && g.past_effect_first != ~0u ? g.past_effect_first + offset : ~0u};
             used[group_of[r]] += _refs[r].draw->count;
         }
     }
@@ -2783,7 +2814,7 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
                 now.joint_first[place.slot + i] = ref.skinned ? ref.joint_base + ref.skin_first[i] : ~0u;
             }
             Mat4f before = instance.transform;
-            bool settled = instance.id == 0;
+            bool settled = instance.history_id == 0 && instance.id == 0;
             if (settled && history_usable) {
                 // Most copies have not moved at all: no need to measure how far.
                 settled = place.past != ~0u && (before = last.matrices[place.past + i],
@@ -2793,6 +2824,8 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             if (settled) {
                 before.m[3] = 0.0f;
                 _taa_prev[flat] = before;
+                if (history_usable && place.effect != ~0u && place.past_effect != ~0u)
+                    _taa_matched[place.effect + i] = place.past_effect + i;
                 if (skinned) {
                     // Not moved at all (or no history to look in: nothing to compare with, posed as now).
                     _taa_past[flat] = history_usable && place.past != ~0u ? place.past + i : ~0u;
@@ -2828,8 +2861,10 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             u32 past_slot = ~0u; // where the copy was last frame (its record's place)
             {
                 bool by_id = false;
-                if (instance.id != 0) {
-                    const u64 id_key = mix64(g.key ^ (static_cast<u64>(instance.id) * 0x9e3779b97f4a7c15ULL));
+                if (instance.history_id != 0 || instance.id != 0) {
+                    const u64 identity = instance.history_id ? instance.history_id : instance.id;
+                    const u64 domain = instance.history_id ? 0xd6e8feb86659fd93ULL : 0;
+                    const u64 id_key = mix64(g.key ^ (identity * 0x9e3779b97f4a7c15ULL) ^ domain);
                     // Recorded whether or not there is a past to look in: the next frame's would else find none.
                     if (now.ids.emplace(id_key, slot).second &&
                         history_usable) { // a second copy with the id is matched by place
@@ -2856,8 +2891,12 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
                         Vec3f c;
                         f32 radius = 0.0f;
                         sphere_of(instance.transform, ref.center, ref.radius, c, radius);
+                        // Stable collection order is the common moving-copy path. A
+                        // tighter transparent radius still permits distant reorders
+                        // to fall back to spatial matching.
+                        const auto reach = g.transparent ? match_by_place_reach : match_by_place_move;
                         matched = same_count && length_squared(c - before.apply(ref.center)) <=
-                                                    match_by_place_move * match_by_place_move * radius * radius + 1e-6f;
+                                                    reach * reach * radius * radius + 1e-6f;
                         if (matched) {
                             past_slot = g.past_first + (slot - g.first);
                         }
@@ -2907,6 +2946,19 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
                             past_slot = g.past_first + found;
                         }
                     }
+                    // Keep the wider ordinal motion fallback for a fast copy
+                    // whose old location lies outside the spatial search. It
+                    // runs last so separated reorders still match by place.
+                    if (!matched && same_count && g.transparent) {
+                        before = last.matrices[g.past_first + (slot - g.first)];
+                        Vec3f centre;
+                        f32 radius;
+                        sphere_of(instance.transform, ref.center, ref.radius, centre, radius);
+                        matched = length_squared(centre - before.apply(ref.center)) <=
+                                  match_by_place_move * match_by_place_move * radius * radius + 1e-6f;
+                        if (matched)
+                            past_slot = g.past_first + (slot - g.first);
+                    }
                     fresh = !matched;
                 }
             }
@@ -2916,6 +2968,11 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
             }
             before.m[3] = fresh ? 1.0f : 0.0f; // a zero in any placing: free to say "no past"
             _taa_prev[flat] = before;
+            const auto effect = _taa_copy_refs[r].effect;
+            if (effect != ~0u)
+                _taa_matched[effect + i] = past_slot != ~0u && g.past_effect_first != ~0u
+                                               ? g.past_effect_first + (past_slot - g.past_first)
+                                               : ~0u;
             if (skinned) {
                 _taa_past[flat] = past_slot;
             }
@@ -2991,6 +3048,7 @@ struct GpuRenderer3D::FrameCtx {
     bool taa = false;
     bool taa_reset = false;
     bool taa_reactive = false;
+    bool shadow_history = false; // selected lit receivers actually consume content revisions
     bool mesh_coverage = false;
     u64 coverage_key = 1469598103934665603ull;
     u64 shadow_revision = 0;
@@ -4377,7 +4435,7 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
 
     // The shader's block: the spots, and each layer's matrix and numbers.
     const f32 side_f = static_cast<f32>(std::max(_local_side, 1u));
-    lu.local[0] = 1.0f / side_f;
+    lu.local[0] = any_spot_map || any_point_map ? 1.0f / side_f : 0.0f;
     for (u32 k = 0; k < ctx.spots.size(); ++k) {
         const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
         const SpotCone3D cone = spot_cone(l);
@@ -4753,6 +4811,30 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             const DrawRef& ref = _refs[task.ref];
             const u32 levels = std::max(ref.levels, 1u);
             const bool clustered = ref.clustered && ctx.lod[0].on;
+            // Independent props need one scalar test, not a compacted frustum
+            // and the multi-copy/LOD gather setup. Visit the same active planes
+            // in their original order, with the same radius and plane arithmetic.
+            if (task.end - task.begin == 1 && ref.levels <= 1 && !clustered && !view.moon) {
+                const Vec4f& sp =
+                    ref.cached_spheres ? ref.cached_spheres[task.begin] : _world_spheres[ref.sphere_first + task.begin];
+                const Vec3f c{sp.x, sp.y, sp.z};
+                if (view.bounded && !(task.flags & 1u)) {
+                    const Vec3f d = c - view.centre;
+                    const f32 reach = sp.w + view.radius;
+                    if (dot(d, d) > reach * reach)
+                        return;
+                }
+                u32 planes = task.plane_mask;
+                while (planes) {
+                    const Vec4f& p = view.frustum.planes[std::countr_zero(planes)];
+                    planes &= planes - 1;
+                    if (p.x * c.x + p.y * c.y + p.z * c.z + p.w < -sp.w)
+                        return;
+                }
+                buckets[task.first] = 0;
+                ++task.counts;
+                return;
+            }
             // Compact the active planes once per range, keeping their original order
             // and arithmetic. The hot loop reads a short contiguous frustum, not a bitset.
             GpuFrustum subset;
@@ -4943,7 +5025,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
         LocalCache& cache = _local_cache[view.cache];
         const auto* particles = particle_cast_view(view.view_projection);
-        bool cacheable = (cache_on || ctx.taa) && (!particles || !particles->unstable);
+        bool cacheable = (cache_on || ctx.shadow_history) && (!particles || !particles->unstable);
         if (cacheable) {
             std::vector<u8>& bytes = _local_payload;
             bytes.clear();
@@ -4988,19 +5070,29 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 }
             }
             if (cacheable) {
-                if (cache_on && cache.valid && cache.payload == bytes) {
+                const bool same = cache.valid && cache.payload == bytes;
+                if (ctx.shadow_history && (!same || !cache.fingerprinted)) {
+                    // Views share map slots, but each view's temporal identity
+                    // follows its own content even after another view used it.
+                    cache.revision = 1469598103934665603ull;
+                    taa_hash(cache.revision, bytes.data(), bytes.size());
+                    cache.fingerprinted = true;
+                } else if (!same) {
+                    ++cache.revision;
+                    cache.fingerprinted = false;
+                }
+                if (cache_on && same) {
                     view.cached = true;
                     ++stats.local_shadow_cached;
                     continue;
                 }
-                if (!cache.valid || cache.payload != bytes)
-                    ++cache.revision;
                 cache.payload.swap(bytes);
                 cache.valid = true;
             }
         }
         if (!cacheable) {
             ++cache.revision;
+            cache.fingerprinted = false;
             cache.valid = false;
         }
         view.drawn = true;
@@ -5193,6 +5285,9 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
     SDL_GPUBuffer* instances = _local_instances ? _local_instances->handle() : nullptr;
     SDL_GPUBuffer* lists = _local_lists ? _local_lists->handle() : instances;
     SDL_GPUBuffer* joint_offsets = _local_joint_offsets ? _local_joint_offsets->handle() : nullptr;
+    // These eight variants are fixed for this call. Avoid rebuilding and
+    // searching the full pipeline key for every caster in every light map.
+    std::array<SDL_GPUGraphicsPipeline*, 8> pipelines{};
     for (LocalView& view : _local_views) {
         if (!view.drawn) {
             continue;
@@ -5217,8 +5312,11 @@ void GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
             if (ref.skinned && (!ctx.joints || !joint_offsets)) {
                 continue;
             }
-            SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow,
-                                                  cutout, nullptr, false, ref.skinned);
+            const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
+            SDL_GPUGraphicsPipeline*& p = pipelines[variant];
+            if (!p)
+                p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                             false, ref.skinned);
             if (!p) {
                 continue;
             }
@@ -7345,26 +7443,32 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
         const Mat4f& t = ref.instances[0].transform;
         return length_squared(Vec3f{t.m[12], t.m[13], t.m[14]} - ctx.scenes[ref.scene]->camera.position);
     };
-    std::stable_sort(_order.begin(), _order.end(), [&](u32 a, u32 b) {
-        const DrawRef& x = _refs[a];
-        const DrawRef& y = _refs[b];
-        if (x.scene != y.scene) {
-            return x.scene < y.scene;
-        }
-        const Pass px = pass_of(x.draw->material), py = pass_of(y.draw->material);
-        if (px != py) {
-            return px < py;
-        }
-        if (px == Pass::Alpha) {
-            return draw_distance(x) > draw_distance(y);
-        }
-        const bool culled_x = !x.draw->material.double_sided, culled_y = !y.draw->material.double_sided;
-        if (culled_x != culled_y) {
-            return culled_x;
-        }
-        return x.mesh->serial <
-               y.mesh->serial; // not the pointer: a tie in depth between two draws would flip with the heap
+    // Sort compact values instead of repeatedly chasing large draw/material
+    // records. Equal keys still keep input order; alpha uses only depth after
+    // scene/pass, while the other passes use culling and mesh serial.
+    struct SortRef {
+        u64 group, mesh;
+        f32 distance;
+        u32 ref;
+    };
+    std::vector<SortRef> sorted;
+    sorted.reserve(_order.size());
+    for (const u32 r : _order) {
+        const DrawRef& ref = _refs[r];
+        const Pass pass = pass_of(ref.draw->material);
+        const bool alpha = pass == Pass::Alpha;
+        const u64 group = (u64(ref.scene) << 32) | (u64(pass) << 1) | u64(!alpha && ref.draw->material.double_sided);
+        sorted.push_back({group, ref.mesh->serial, alpha ? draw_distance(ref) : 0.0f, r});
+    }
+    std::stable_sort(sorted.begin(), sorted.end(), [](const SortRef& a, const SortRef& b) {
+        if (a.group != b.group)
+            return a.group < b.group;
+        if ((a.group & 0xffffffffu) == (u64(Pass::Alpha) << 1))
+            return a.distance > b.distance;
+        return a.mesh < b.mesh;
     });
+    for (std::size_t i = 0; i < sorted.size(); ++i)
+        _order[i] = sorted[i].ref;
     // The overlay in front of the world, seen by its own camera, and the velocity pass for it.
     ctx.overlaid = std::any_of(_order.begin(), _order.end(), [&](u32 r) { return _refs[r].scene == 1; });
 }
@@ -7776,7 +7880,7 @@ template <class Consume> bool GpuRenderer3D::visit_shadow_copy_bytes(Consume&& c
 bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
     ShadowCache& c = _shadow_cache;
     c.eligible = false;
-    if (!ctx.scene.lights.cache_shadows && !ctx.taa) {
+    if (!ctx.scene.lights.cache_shadows && !ctx.shadow_history) {
         c.valid = false;
         c.prev_key.clear();
         return false;
@@ -7931,7 +8035,7 @@ bool GpuRenderer3D::shadow_unchanged(FrameCtx& ctx) {
 void GpuRenderer3D::shadow_drawn(FrameCtx& ctx, bool complete) {
     ShadowCache& c = _shadow_cache;
     if (complete) {
-        if (c.eligible) {
+        if (ctx.shadow_history && c.eligible) {
             u64 content = 1469598103934665603ull;
             taa_hash(content, c.scratch.data(), c.scratch.size());
             visit_shadow_copy_bytes([&](const void* bytes, std::size_t size) {
@@ -7940,7 +8044,7 @@ void GpuRenderer3D::shadow_drawn(FrameCtx& ctx, bool complete) {
             });
             _shadow_revision = content;
         } else {
-            ++_shadow_revision; // untraceable render-target inputs
+            ++_shadow_revision; // invalidate future TAA readers without hashing unused content
         }
     }
     if (!ctx.scene.lights.cache_shadows) {
@@ -8098,19 +8202,20 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     auto* view = ctx.view;
     // Revisions belong to each view's history, not just the renderer's current
     // cache hit: another view may have updated the same map in between.
+    const bool map_receivers = ctx.shadow_history;
     u64 revision = 1469598103934665603ull;
-    if (ctx.shadows) {
+    if (ctx.shadows && map_receivers) {
         taa_hash(revision, _shadow_generation);
         taa_hash(revision, _shadow_revision);
     }
     for (const auto& local : _local_views) {
-        if (!local.wanted)
+        if (!local.wanted || !map_receivers)
             continue;
         taa_hash(revision, local.cache);
         taa_hash(revision, _local_cache[local.cache].revision);
     }
-    taa_hash(revision, _local_generation);
-    taa_hash(revision, _moon_generation);
+    // Each used local map's fingerprint already includes its allocation
+    // generation. Expiring an unused array must not reset another map's readers.
     taa_hash(revision, ctx.lu);
     taa_hash(revision, ctx.scene.lights.sun.color);
     taa_hash(revision, ctx.scene.lights.fill.color);
@@ -8140,27 +8245,6 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
         draw_particles(ctx, pass, true);
         particles_ok = ctx.stats.taa_reactive_draws - before == ctx.stats.particle_batches;
     };
-    std::unordered_map<u64, u64> effects;
-    std::unordered_map<u64, u32> mesh_offsets;
-    std::vector<u64> identities(_refs.size());
-    for (u32 r = 0; r < _refs.size(); ++r) {
-        const auto& ref = _refs[r];
-        if (pass_of(ref.draw->material) == Pass::Opaque)
-            continue;
-        u64 identity = mix64(ref.mesh->serial * 2 + ref.scene);
-        auto& offset = mesh_offsets[identity];
-        const auto first = offset;
-        offset += ref.draw->count;
-        bool identified = true;
-        for (u32 i = 0; i < ref.draw->count; ++i) {
-            identified &= ref.instances[i].id != 0;
-            taa_hash(identity, ref.instances[i].id);
-        }
-        if (!identified)
-            taa_hash(identity, first);
-        taa_hash(identity, ref.draw->count);
-        identities[r] = identity;
-    }
     DrawBinder binder{pass};
     _phase = Phase::All;
     for (u32 which = 0; which < 2; ++which) {
@@ -8204,22 +8288,20 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
             SDL_BindGPUFragmentSamplers(pass, 0, &picture, 1);
             u64 key = 1469598103934665603ull;
             taa_hash(key, ref.mesh->serial);
-            taa_hash(key, material.color);
-            taa_hash(key, material.blend);
-            taa_hash(key, material.shader_params);
-            taa_hash(key, material.wrap_u);
-            taa_hash(key, material.wrap_v);
-            const auto shader = material.shader.backend().get();
-            taa_hash(key, shader);
-            const bool unstable = taa_texture_hash(key, material.texture.backend().get());
-            for (u32 i = 0; i < ref.draw->count; ++i)
-                taa_hash(key, ref.instances[i].tint);
-            effects[identities[index]] = key;
-            taa_hash(ctx.coverage_key, key);
-            for (u32 i = 0; i < ref.draw->count; ++i)
+            const bool unstable = taa_material_hash(key, material, material.texture.backend().get());
+            // Appearance follows the same per-copy match as velocity and skinning.
+            // Anonymous draws sharing a mesh can disappear or reorder independently.
+            const auto first = _taa_copy_refs[index].effect;
+            bool changed = unstable;
+            for (u32 i = 0; i < ref.draw->count; ++i) {
+                u64 effect = key;
+                taa_hash(effect, ref.instances[i].tint);
+                view->_taa_now.effects[first + i] = effect;
+                const auto previous = _taa_matched[first + i];
+                changed |= previous >= view->_taa_last.effects.size() || view->_taa_last.effects[previous] != effect;
+                taa_hash(ctx.coverage_key, effect);
                 taa_hash(ctx.coverage_key, ref.instances[i].transform);
-            const auto prior = view->_taa_mesh_effects.find(identities[index]);
-            const bool changed = unstable || prior == view->_taa_mesh_effects.end() || prior->second != key;
+            }
             const Vec4f flags{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0};
             SDL_PushGPUFragmentUniformData(ctx.commands, 0, &flags, sizeof(flags));
             if (ref.clustered) {
@@ -8246,7 +8328,6 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     }
     if (!ctx.scenes[1])
         particles();
-    view->_taa_mesh_effects.swap(effects);
     SDL_EndGPURenderPass(pass);
     return particles_ok;
 }
@@ -8933,6 +9014,9 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     choose_local_lights(ctx);
     cull_and_upload(ctx);
     prepare_particles(ctx);
+    ctx.shadow_history = ctx.taa && std::ranges::any_of(_particle_batches, [](const auto& batch) {
+                             return batch.look.receives_shadow && batch.look.lit > 0;
+                         });
     order_draws(ctx);
     build_local_shadows(ctx);
     ctx.sun_shadow_cached = ctx.shadows && shadow_unchanged(ctx);

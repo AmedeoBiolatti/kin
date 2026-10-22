@@ -57,8 +57,14 @@ EcsCommandBuffer& command_buffer(const LuaScene3DBindings& api) {
         throw std::runtime_error("3D gameplay mutations require a script callback or system");
     return *buffer;
 }
-EcsEntity resolve(const LuaScene3DBindings& api, SceneEntity3D handle) {
+EcsEntity try_resolve(const LuaScene3DBindings& api, SceneEntity3D handle) {
     return api.active() ? handle.resolve(*api.world) : EcsEntity{};
+}
+EcsEntity resolve(const LuaScene3DBindings& api, SceneEntity3D handle) {
+    auto entity = try_resolve(api, handle);
+    if (!entity)
+        throw std::runtime_error(stale_entity_message);
+    return entity;
 }
 Character3D native_character(const LuaScene3DBindings& api, EcsEntity entity) {
     if (!entity || !api.queries)
@@ -173,7 +179,7 @@ const char* status(SceneRequestStatus3D value) {
     }
     return "invalid";
 }
-SceneSpawn3D spawn_options(const sol::optional<sol::table>& options) {
+SceneSpawn3D spawn_options(const LuaScene3DBindings& api, const sol::optional<sol::table>& options) {
     SceneSpawn3D out;
     if (!options)
         return out;
@@ -190,8 +196,10 @@ SceneSpawn3D spawn_options(const sol::optional<sol::table>& options) {
         out.rotation = lua_scene3d_detail::rotation(checked<sol::table>(rotation, "rotation"));
     }
     sol::object parent = (*options)["parent"];
-    if (parent != sol::nil)
+    if (parent != sol::nil) {
         out.parent = checked<SceneEntity3D>(parent, "parent");
+        (void)resolve(api, out.parent);
+    }
     return out;
 }
 } // namespace lua_scene3d_detail
@@ -203,7 +211,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
     lua.new_usertype<SceneEntity3D>(
         "KinSceneEntity3D", sol::no_constructor, "id",
         sol::property([](sol::this_state self) { return property_self<SceneEntity3D>(self).entity.id; }), "alive",
-        sol::protect([api](SceneEntity3D h) { return bool(resolve(*api, h)); }));
+        sol::protect([api](SceneEntity3D h) { return bool(try_resolve(*api, h)); }));
     lua.new_usertype<ScenePrefab3D>(
         "KinScenePrefab3D", sol::no_constructor, "root",
         sol::property([](sol::this_state self) { return property_self<ScenePrefab3D>(self).root; }));
@@ -233,16 +241,16 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         const auto e = script_entity(entity);
         const auto handle = api->handle(e);
         if (!handle)
-            throw std::runtime_error("entity is stale or belongs to another scene");
+            throw std::runtime_error(stale_entity_message);
         return handle;
     };
     scene["resolve"] = [api](sol::this_state state, SceneEntity3D handle) -> sol::object {
-        const auto entity = resolve(*api, handle);
+        const auto entity = try_resolve(*api, handle);
         if (!entity)
             return sol::nil;
         sol::state_view lua{state};
         sol::protected_function factory = lua.registry()["kin.entity"];
-        const auto result = factory(entity, [api, handle] { return bool(resolve(*api, handle)); });
+        const auto result = factory(entity, [api, handle] { return bool(try_resolve(*api, handle)); });
         if (!result.valid())
             throw sol::error(result);
         return result.get<sol::object>();
@@ -302,8 +310,8 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
     scene["contact_events"] = [api](sol::this_state state, sol::object filter_argument) {
         const auto filter = optional_argument<SceneEntity3D>(filter_argument, "filter");
         physics(*api);
-        if (filter && !resolve(*api, *filter))
-            throw std::runtime_error("3D contact filter entity is stale");
+        if (filter)
+            (void)resolve(*api, *filter);
         sol::state_view lua{state};
         auto rows = lua.create_table();
         int index = 0;
@@ -323,8 +331,8 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
     scene["character_events"] = [api](sol::this_state state, sol::object filter_argument) {
         const auto filter = optional_argument<SceneEntity3D>(filter_argument, "filter");
         physics(*api);
-        if (filter && !resolve(*api, *filter))
-            throw std::runtime_error("3D character-event filter entity is stale");
+        if (filter)
+            (void)resolve(*api, *filter);
         sol::state_view lua{state};
         auto rows = lua.create_table();
         int index = 0;
@@ -436,15 +444,15 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         if (!std::isfinite(seconds) || (seconds < 0 && seconds != -1))
             throw std::runtime_error("action fade must be -1 or finite and nonnegative");
         script_component_access("Animator3D", true);
-        return cancel_action3d(resolve(*api, action.actor), action.token, seconds);
+        return cancel_action3d(try_resolve(*api, action.actor), action.token, seconds);
     };
     scene["action_status"] = [api](LuaAction3D action) {
         script_component_access("Animator3D", false);
-        return action_status(action_status3d(resolve(*api, action.actor), action.token));
+        return action_status(action_status3d(try_resolve(*api, action.actor), action.token));
     };
     scene["action_event_valid"] = [api](LuaAction3D action) {
         script_component_access("Animator3D", false);
-        const auto actor = resolve(*api, action.actor);
+        const auto actor = try_resolve(*api, action.actor);
         const auto* animator = actor ? actor.get<Animator3D>() : nullptr;
         return animator && animator->player.action_event_valid(action.token);
     };
@@ -487,8 +495,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         if (target.is<SceneEntity3D>()) {
             destination.kind = IKTarget3D::Kind::SceneEntity;
             destination.scene_entity = checked<SceneEntity3D>(target, "target");
-            if (!resolve(*api, destination.scene_entity))
-                throw std::runtime_error("IK target entity is stale");
+            (void)resolve(*api, destination.scene_entity);
             if (offset != sol::nil)
                 destination.position = vector(checked<sol::table>(offset, "offset"));
         } else if (target.is<sol::table>()) {
@@ -566,8 +573,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
             sol::object ignore = (*options)["ignore"];
             if (ignore != sol::nil) {
                 filter.ignore = checked<SceneEntity3D>(ignore, "ignore");
-                if (!resolve(*api, filter.ignore))
-                    throw std::runtime_error("3D query ignore entity is stale");
+                (void)resolve(*api, filter.ignore);
             }
         }
         const auto hit = api->queries.raycast(vector(from), vector(to), filter);
@@ -580,6 +586,19 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         if (hit->entity)
             result["entity"] = SceneEntity3D(hit->entity);
         return sol::make_object(state, result);
+    };
+    scene["teleport"] = [api](SceneEntity3D handle, sol::object position_argument, sol::object rotation_argument) {
+        command_buffer(*api);
+        physics(*api);
+        const auto entity = resolve(*api, handle);
+        const auto position = vector(checked<sol::table>(position_argument, "position"));
+        const auto orientation = optional_argument<sol::table>(rotation_argument, "rotation");
+        const auto body = api->bodies->body_of(entity.raw());
+        const auto requested = orientation ? rotation(*orientation) : Quatf{};
+        if (!api->physics->contains(body))
+            return false;
+        const auto facing = orientation ? requested : api->physics->rotation(body);
+        return bool(api->bodies->teleport(entity.raw(), position, facing));
     };
     scene["impulse"] = [api](SceneEntity3D handle, sol::object value_argument) {
         const auto value = checked<sol::table>(value_argument, "value");
@@ -606,7 +625,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
     scene["spawn"] = [api, source_path](sol::object target, sol::object options_argument) {
         const auto options = optional_argument<sol::table>(options_argument, "options");
         auto& buffer = command_buffer(*api);
-        auto placement = spawn_options(options);
+        auto placement = spawn_options(*api, options);
         if (target.is<std::string>())
             return api->commands.spawn(buffer, source_path(checked<std::string>(target, "target")),
                                        std::move(placement));

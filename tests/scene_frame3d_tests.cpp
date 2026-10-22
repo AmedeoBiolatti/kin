@@ -150,6 +150,36 @@ void external_frame() {
 
 // Existing scene/prefab RGB triples keep their linear/HDR meaning through
 // reflected edits and collection, including checks on malformed edits.
+void temporal_identity() {
+    struct MeshBackend final : IMeshBackend3D {};
+    Mesh3D mesh{std::make_shared<MeshBackend>(), 3, 3, {{-1, -1, -1}, {1, 1, 1}}};
+    kin::EcsWorld world;
+    register_render3d_components(world);
+    WorldRenderState3D rendering{world};
+    SceneFrame3D frame{world, rendering};
+    auto entity = world.raw().entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = mesh, .id = 7});
+    Scene3D scene;
+    assert(frame.collect(scene) && scene.instances().size() == 1);
+    const auto identity = scene.instances()[0].history_id;
+    const auto old_entity = entity.id();
+    assert(identity && scene.instances()[0].id == 7);
+    entity.get_mut<MeshRenderer3D>()->id = 42;
+    assert(frame.collect(scene) && scene.instances()[0].history_id == identity && scene.instances()[0].id == 42);
+    entity.destruct();
+    entity = world.raw().entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = mesh, .id = 42});
+    assert(u32(entity.id()) == u32(old_entity) && entity.id() != old_entity);
+    assert(frame.collect(scene) && scene.instances()[0].history_id != identity);
+    // A second world using the same mesh and entity index cannot inherit this world's history.
+    kin::EcsWorld other;
+    register_render3d_components(other);
+    WorldRenderState3D other_rendering{other};
+    other.raw().entity().set(Transform3D{}).set(MeshRenderer3D{.mesh = mesh, .id = 42});
+    SceneFrame3D other_frame{other, other_rendering};
+    Scene3D other_scene;
+    assert(other_frame.collect(other_scene));
+    assert(other_scene.instances()[0].history_id != scene.instances()[0].history_id);
+}
+
 void retained_snapshots() {
     struct MeshBackend final : IMeshBackend3D {};
     Mesh3D mesh{std::make_shared<MeshBackend>(), 3, 3, {{-1, -1, -1}, {1, 1, 1}}};
@@ -312,6 +342,7 @@ void particle_presentation() {
 } // namespace
 
 int main() {
+    temporal_identity();
     particle_presentation();
     loader();
     external_frame();

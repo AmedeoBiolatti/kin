@@ -2241,9 +2241,9 @@ private:
             _ecs_state->propagate_transforms();
             _ecs_state->collect(_scene);
             if (_bodies) {
-                _bodies->config().debug_draw = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug) ||
-                                               (_s.climb && _s.climb_debug) || (_s.rag && _s.rag_debug) ||
-                                               (_s.rope && _s.rope_debug);
+                _bodies->config().debug.enabled = (_s.physics && _s.phys_debug) || (_s.ctrl && _s.ctrl_debug) ||
+                                                  (_s.climb && _s.climb_debug) || (_s.rag && _s.rag_debug) ||
+                                                  (_s.rope && _s.rope_debug);
                 if (_s.climb && _s.climb_debug)
                     climb_candidates_lines();
                 if (_s.ctrl && _s.ctrl_debug && _ctrl_hero.is_valid()) {

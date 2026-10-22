@@ -389,10 +389,18 @@ any list: an unlit wireframe mesh, one draw, depth tested; each line is a sliver
 software rasteriser such as lavapipe drops a triangle of no area, so the (a, b, b) lines of the wireframe material's own comment vanish
 there). Each end is also moved toward the eye along its view ray by 0.2 % of its distance (at least 3 mm): it shows at the same pixel
 but wins the depth test against the face it edges. A sphere's circles still show dotted where the facets of its 24 segment mesh lie
-outside them. The picture is the same on NVIDIA and lavapipe (tested). Off by default (`debug_draw = false`); off, no mesh is
+outside them. The picture is the same on NVIDIA and lavapipe (tested). Off by default (`config.debug.enabled = false`); off, no mesh is
 made and the picture is byte for byte what it was.
 
 ## Entities
+
+Use `SceneSession3D::render(alpha)` or `SceneFrame3D::collect(scene, view, alpha)`
+for fixed-step presentation. These leave gameplay transforms authoritative.
+`WorldPhysicsState3D::interpolate()` is deprecated and remains only for migration;
+it writes presentation poses into `Transform3D`. A standalone bridge's
+`config().debug` holds `{ enabled, options, contacts, grips }`; sessions expose
+only these controls through `SceneSession3DOptions::physics_debug`.
+
 
 ```cpp
 #include <kin/ecs/physics3d.hpp>
@@ -421,8 +429,9 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
   puts it, and the entity's Transform3D (its place from the parent as it is now) is rewritten after each step; the parent moving
   leaves the body behind. A kinematic body follows its entity (parents included) and a static one is moved when its entity is.
 * Dynamic bodies write position and rotation (not scale) into Transform3D after the step; a sleeping body is not written. Game code
-  that changes a dynamic entity's Transform3D between steps moves the body there (velocities kept). `interpolate(alpha)` (opt-in,
-  call after `advance()` with `alpha()`) writes the pose between the last two steps.
+  that changes a dynamic entity's Transform3D between steps moves the body there (velocities kept). Read-only presentation through
+  `SceneFrame3D::collect(scene, view, bodies.alpha())` blends the last two steps.
+  The deprecated `interpolate(alpha)` instead writes that pose into gameplay transforms.
 * Changing a live body's components does nothing until `rebuild(entity)`; changing `RigidBody3D::motion` rebuilds by itself.
 * **Refusals are remembered.** A body, character, ragdoll or rope that the world refuses (a dynamic `TriangleMesh`, a hull of fewer
   than four points, a character shorter than its width, a rope with no thickness) is warned about **once**, with the entity id, and
@@ -439,8 +448,7 @@ for (const kin::ContactEvent3D& e : bodies.events()) { auto entity = bodies.enti
   characters, ragdolls and ropes back but not the entities: `step()` writes only the awake dynamic bodies, so a sleeping one
   would keep the `Transform3D` from before the rollback, and an awake one would be interpolated from it. `resync_from_world()`
   writes the `Transform3D` of every dynamic and kinematic body, the feet and `state` of every character, the pose override and
-  `state` of every ragdoll and the points of every rope from the world as it is, and makes that the pose that `interpolate()`
-  starts from. It moves nothing in the world, leaves the fixed-step accumulator (`alpha()`) to the caller, and is also the call
+  `state` of every ragdoll and the points of every rope from the world as it is, and resets the presentation samples. It moves nothing in the world, leaves the fixed-step accumulator (`alpha()`) to the caller, and is also the call
   after any other change made straight to bodies (a `teleport`).
 * The events of the last `step()` (all the steps of one `advance()`) are in `events()` and on the ECS world as the singleton
   `PhysicsContacts3D`. `body_of(entity)`, and the `PhysicsBody3D` component on the entity, name its body.
@@ -529,7 +537,15 @@ world.set_character_velocity(hero, {0.0f, 12.0f, 3.0f});       // a launch pad: 
 (`WorldPhysicsState3D`) after the bodies of the sync, in ascending entity id order, from the entity's world place (a `Collider3D` on the
 same entity makes no second body). The game sets `input` (and `facing`); the system sends it, steps, writes the feet into
 `Transform3D::position`, `facing` into its rotation (physics never turns a character) and the state into the component. Moving the
-entity from game code is a teleport. A character under a parent is rewritten as its place from the parent, as a body is.
+entity from game code is a teleport. An authored rotation change resets rotation
+interpolation too. With `apply_facing=false`, the game owns that rotation; legacy
+`interpolate()` presentation is restored before the next simulation sample so
+it cannot drift toward an earlier pose. Edits on render-only frames are adopted
+before interpolation writes the component. Authored position edits are left
+intact through repeated render-only frames and teleported at the next fixed
+step. Position interpolation continues independently while game code turns the
+character each frame. A character under a parent is rewritten as its place from
+the parent, as a body is.
 `character_events()` and the singleton `CharacterEvents3D` carry the events with entity ids. A kinematic platform's entity moved by game
 code carries a character standing on it (`follow_transform`). `rebuild(entity)` makes the character again from the descriptor.
 
@@ -645,7 +661,7 @@ the surface), the surface's frame as its rotation (`align_hands`, `hand_offset`)
 is free or let go (the constraint's own `fade_seconds` makes the hand come and go), and `hanging` is a parameter; `locomotion_animator`
 takes a `hang` clip (empty: the `fall` pose plays while it hangs). `DebugDraw3D::grips(world, character)` and `candidates(...)` draw
 the anchors (yellow reaching, green held, orange slipping), normals and frames, the line to the body, the hang place, and a probe's
-candidates by provider; `WorldPhysicsState3DConfig::debug_grips` adds the first to `collect_debug`.
+candidates by provider; `WorldPhysicsState3DConfig::debug.grips` adds the first to `collect_debug`.
 
 `SceneFrame3D` and `SceneSession3D` sample linked hand targets during collection
 with the same alpha as bodies and rope tubes. Position, hand alignment and
@@ -750,7 +766,7 @@ characters in ascending entity id order, from the model's skeleton at its rest p
 `auto_options` otherwise), at the entity's place and scale; an `Animator3D` is added if there is none. Each step the system sets the
 targets from the animator's clip pose (IK is the renderer's, solved at draw time, and is not followed by the kinematic bodies), steps,
 and writes the bodies' pose into `Animator3D::pose_override` (`PoseOverride3D`: per joint a share and a world place). With every
-share 0 the override is cleared: an animator is exactly what it was. `WorldPhysicsState3D::interpolate(alpha)` interpolates the
+share 0 the override is cleared: an animator is exactly what it was. Read-only session/frame collection interpolates the
 override between the last two steps. Commands: `start_ragdoll`, `blend_ragdoll`, `ragdoll_get_up`, `animate_ragdoll`,
 `set_ragdoll_subtree(entity, joint_name)`.
 

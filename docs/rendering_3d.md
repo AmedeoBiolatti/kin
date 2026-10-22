@@ -917,7 +917,8 @@ velocity vectors drawn between two, gravity, drag toward the air's velocity (the
 solution for constant air, so any drag is stable), size, colour and alpha over life, rotation and spin, a per-particle random and a
 flipbook over the life. The simulation runs in fixed steps of 1/120 s taken out of the time `update(dt)` is given, with every random a hash of
 (seed, birth number, purpose): the same seed and the same calls make the same particles whatever the frame lengths were, `state_hash()` is
-a hash of all of it, and `save()` / `restore()` take the state to bytes and back for a rollback. A ground height (visual only: no
+a hash of all of it. For rollback/resimulation, `save()` and `restore(saved, ParticleRestore3D::Rollback)` preserve particle identity and presentation
+continuity. Plain `restore(saved)` treats a changed state as a new presentation epoch. A ground height (visual only: no
 physics) kills or bounces. The wind is read at every particle's own place each step, 32 at a time: the gust and turbulence sines run in f32
 turns by a polynomial (arithmetic only, so the same bits on every machine; within 1e-5 m/s of `Wind3D::velocity` near the origin, the
 error growing with the distance from it as the f32 turn counts coarsen: about 1e-3 of the turbulence speed at 10 km; the CPU test
@@ -3509,9 +3510,11 @@ Owner `diagnostics()` accessors are inspection snapshots, valid until the next
 operation. Use returned diagnostics to retain a particular failure. Resource and
 session operations replace these snapshots; observing state/counters does not
 clear them. Calls belong on the owner thread. Legacy error-output parameters are
-removed. Query misses (for example no pick hit), predicates and checked stale
+removed. C++ query misses (for example no pick hit), predicates and checked stale
 handles keep their documented optional/bool semantics; they are not operational
-load failures. CPU builders and validators use returned results too.
+load failures. Lua gameplay entity arguments instead raise the common stale-handle
+error; only explicit liveness queries return false/nil. CPU builders and
+validators use returned results too.
 
 `Scene3D` accumulates commands and latches the first rejected submission until
 `clear()`. A failed draw leaves existing commands and poses intact. Rendering and
@@ -3633,7 +3636,14 @@ with bounded history confidence for the composite. New/discontinuous coverage
 is rejected locally; unrelated instance motion does not reject every effect.
 Opaque custom materials use the opaque velocity path. Simulated particles have
 stable birth identities; immediate callers may set `ParticleSprite3D::id` and
-an emitter `history_id` on `draw_particles`. Zero IDs use submission order.
+an emitter `history_id` on `draw_particles`. Zero particle/emitter IDs use submission order.
+`clear()` and a changed-state `restore()` start a new presentation identity epoch.
+Restoring identical bytes preserves the existing presentation too. For rollback,
+use `restore(bytes, ParticleRestore3D::Rollback)` and resimulate with motion capture to preserve birth
+IDs and rebuild the corrected interpolation segment. Random birth indices,
+state hashes and rollback bytes keep their original
+simulation meaning. ECS interpolation retains compact motion/life samples,
+not complete rendered sprites on every fixed step.
 History retains the nearest 65,536 visible sprites per view; additional sprites use
 spatial reconstruction. Overlapping independently moving translucent layers
 share the foremost contributing velocity, so history confidence is capped.
@@ -3642,12 +3652,25 @@ independently of the camera beyond a fraction of the projected pixel footprint,
 including the following frame's old footprint. The threshold follows projected pixel size,
 not world units.
 Static geometry at different depths retains history during camera translation
-and rotation. The existing motion/normal target carries the marker; there is
+and rotation, including triangles that extend behind the camera. Independent
+motion is measured at visible fragments, so a vertex behind the camera does not
+turn sub-pixel motion into a full-face rejection. Derivative footprints are
+evaluated before cutout discards. The existing motion/normal target carries the marker; there is
 no extra opaque-motion target or fullscreen copy. Lit particles record local
 irradiance as shadow receivers do. Small lighting changes retain temporal coverage
 samples; larger changes lower history weight locally over the full reconstruction
 footprint. Frozen-jitter inspection uses current illumination wherever it changed.
-These changes do not reset particle geometry identities.
+These changes do not reset particle geometry identities. Transparent mesh appearance is recorded per matched
+instance alongside its velocity, with material partitions for anonymous draws.
+Anonymous transparent copies first try the same collection index within twice
+the copy's transformed bounding radius, then fall back to spatial matching.
+If that search misses, a final same-index fallback accepts motion up to eight
+radii. Separated copies can be added, removed or reordered without changing another
+copy's appearance history, including shared materials. Use explicit instance IDs
+for coincident copies, nearby reorderings or large jumps whose identity cannot
+be inferred reliably from order and position. Appearance records
+are allocated only for transparent copies; opaque copies keep the ordinary
+velocity history.
 
 Particle casters are culled individually against each light map and capped at
 16,384 per map in stable submission order, including each point-light face.
@@ -3660,7 +3683,38 @@ billboard maps update when their actual camera-dependent quads change.
 
 Lua bridges reflected ECS entities and session handles with
 `scene3d.handle(entity)` and `scene3d.resolve(handle)` (nil for stale handles).
+Every gameplay function taking an entity argument, including event filters, IK
+and query ignore options, raises `stale or foreign entity handle` when the
+entity was destroyed, belongs to an old scene generation or has an expired pool
+lease. Reflected entity access and deferred command targets use the same error.
+`alive()`/`valid()` remain false-returning liveness predicates; `id()` remains
+available for diagnostics. Action-status tokens retain their historical status
+and cancellation returns false after their actor expires. Missing components on
+a live entity retain each function's documented false/nil result.
 The authored skinned-renderer name is `SkinnedMeshRenderer`, while C++ uses
 `SkinnedMeshRenderer3D`. Camera rig angles are degrees and distances are metres;
 spring-arm `ease_out` is metres per second and `shoulder_radius_scale` is
 unitless.
+
+Lua `scene3d.teleport(entity, position, rotation?)` instantly moves a bound rigid
+body in world space, clears velocity and resets interpolation. `position` is a
+finite `{x,y,z}` table; optional `rotation` is a unit `{x,y,z,w}` quaternion and
+omission preserves the native rotation. The call requires a physics scene and
+mutation callback/system, returns false for a live entity without a bound rigid
+body, and raises on malformed arguments or stale handles. This is the explicit
+way to teleport a kinematic body; ordinary Transform3D animation continues to
+sweep.
+
+
+### Stable object identities
+
+`MeshInstance3D::id` remains the 32-bit picking value. Its separate 64-bit
+`history_id` identifies a live copy for TAA, independently of picking IDs and
+submission order. Supply a unique nonzero value for each copy and keep it until
+that object is replaced. Mesh/model `draw` and `draw_skinned` accept the same
+identity as their final argument; models derive distinct identities per part.
+Zero retains the direct API's legacy ID/order/spatial matching. ECS collection
+automatically includes entity generation, collection scope and prefab lease,
+so changing picking IDs does not reset history and a recycled lease starts fresh.
+See [the migration guide](3d_api_migration.md#final-presentation-api-adjustments)
+for the named particle modes, read-only interpolation and physics debug settings.

@@ -84,6 +84,7 @@ sol::table vector(sol::state_view, Vec3f);
 Quatf rotation(sol::table);
 f32 number(sol::table, const char*, f32 fallback, f32 minimum, f32 maximum);
 EcsCommandBuffer& command_buffer(const LuaScene3DBindings&);
+EcsEntity try_resolve(const LuaScene3DBindings&, SceneEntity3D);
 EcsEntity resolve(const LuaScene3DBindings&, SceneEntity3D);
 Character3D native_character(const LuaScene3DBindings&, EcsEntity);
 void physics(const LuaScene3DBindings&);

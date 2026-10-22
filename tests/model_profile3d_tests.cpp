@@ -95,6 +95,12 @@ void profile(Renderer3D& renderer, bool gpu) {
         error = kin::diagnostics3d_text(assets.diagnostics());
         check(!model && error.find(diagnostic) != std::string::npos && !assets.diagnostics().empty(),
               "unsupported asset accepted or missing actionable diagnostic");
+        const auto inspected = read_model_data(json, source.root / name);
+        check(bool(inspected) && !inspected->asset_diagnostics.empty(), "inspection lost profile diagnostics");
+        for (const auto& issue : inspected->asset_diagnostics)
+            check(issue.starts_with("model profile violation: ") &&
+                      issue.find("model profile violation: ", 1) == std::string::npos,
+                  "inconsistent or repeated model profile diagnostic prefix");
         if (gpu) {
             const auto direct = renderer.load_model(source.root / name, {}).value_or({});
             check(!direct && direct.parts.empty() &&

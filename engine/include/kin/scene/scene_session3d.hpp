@@ -199,9 +199,8 @@ struct SceneSession3DOptions {
     // No physics world/scratch pool allocated unless requested. Tune capacities
     // for the game; a transactional replacement briefly owns two physics worlds.
     std::optional<World3DConfig> physics;
-    // The bridge's debug drawing. Its `fixed_dt`/`max_steps` are for WorldPhysicsState3D::advance(), which the session
-    // never calls: step(dt) steps the physics once by dt (the engine's fixed step), so they are not read here.
-    WorldPhysicsState3DConfig bodies;
+    // Debug drawing only; the host owns the fixed timestep and catch-up policy.
+    PhysicsDebug3DSettings physics_debug;
     ColliderAssetLimits3D collision_limits;
     ParticleLimits3D particle_limits;
     SceneAssetLoadLimits limits{8u * 1024u * 1024u, 10000};

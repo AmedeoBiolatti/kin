@@ -61,6 +61,18 @@ Result3D<Mesh3D> Renderer3D::create_mesh(const MeshData3D& data, const MeshOptio
 
 Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data, const MeshOptions3D& requested) {
     _errors.clear();
+    const auto validation = data.validate();
+    if (!validation) {
+        const auto error = diagnostics3d_text(validation.diagnostics);
+        fail3d(_errors, "Renderer3D::create_mesh", error);
+        KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = error}}));
+        return {};
+    }
+    return upload_validated_mesh(data, requested);
+}
+
+Mesh3D Renderer3D::upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& requested) {
+    _errors.clear();
     MeshOptions3D options = requested;
     if (data.skinned() && (options.clusters || options.levels > 1)) {
         // A skinned mesh moves with its joints: levels and clusters are built from the mesh at rest and would not
@@ -68,13 +80,6 @@ Mesh3D Renderer3D::create_mesh_operation(const MeshData3D& data, const MeshOptio
         KIN_LOG_WARN("render", "3D: a skinned mesh cannot have levels of detail or clusters: made without them");
         options.clusters = false;
         options.levels = 1;
-    }
-    const auto validation = data.validate();
-    if (!validation) {
-        const auto error = diagnostics3d_text(validation.diagnostics);
-        fail3d(_errors, "Renderer3D::create_mesh", error);
-        KIN_LOG_WARN_F("render", "3D: mesh not made", (LogFields{{.name = "reason", .value = error}}));
-        return {};
     }
     const std::size_t vertices = data.vertices.size();
     const std::size_t indices = data.indices.empty() ? vertices : data.indices.size();

@@ -9,6 +9,62 @@ releases may change APIs.
 
 ### Fixed
 
+- Bound navmesh boundary-rejection diagnostics to eight face examples plus one
+  count/bounds summary per build, including when refinement rejects many faces.
+
+- Report each rejected navmesh source face once per build, withdraw only conflicting
+  samples, and avoid a pass-limit warning when the final pass completes the work.
+  Cache ear blockers to bound boundary triangulation to quadratic time.
+- Measure opaque motion at visible fragments for transparent TAA near the camera;
+  keep local-shadow content identities stable across interleaved views.
+- Document `restore(saved, ParticleRestore3D::Rollback)` for particle rollback presentation continuity.
+
+- Restore the eight-radius transparent motion fallback after spatial misses;
+  preserve character position edits between fixed steps in legacy interpolation.
+- Complete the last navmesh refinement pass before warning, report its location,
+  and replace unchecked ears/per-face drops with validated boundary triangulation
+  and shared-edge cut withdrawal. Cover area, overlap and precision limits.
+
+- Resolve rounded stair seam cuts and carry samples across long coarse flights;
+  retain valid geometry at the numerical pass limit and cover 64/200-tread paths.
+  Recheck support-dependent clearance when seam topology changes.
+- Try anonymous transparent copies in collection order before spatial matching,
+  preserving fast moving rows and avoiding the common per-frame place grid.
+- Preserve authored character turns on render-only frames and interpolate position
+  independently of mouse-look; materialize inherited transforms before updates.
+- Preserve particle presentation on identical restores and provide explicit
+  `restore(bytes, ParticleRestore3D::Rollback)` continuity for rollback/resimulation.
+
+
+- Preserve transparent TAA over stationary triangles extending behind the camera,
+  for plain/skinned meshes and both velocity paths. Evaluate motion derivatives
+  before cutout discards. Match shared-material transparent reorders spatially;
+  retain opaque-history coverage tests and allocate appearance arrays only for
+  transparent copies. Skip shadow-content fingerprints without temporal receivers.
+- Keep authored character rotations stable through legacy interpolation, reset
+  rotation history on snaps, and guard missing physics transform components.
+- Retain compact particle motion history instead of full sprite snapshots. Give
+  clear/restore a fresh presentation epoch without changing simulation randomness,
+  state hashes or saved bytes.
+- Reject stale/foreign deferred entity placeholders by command batch in C++ and
+  Lua. Report native exception positions in both Lua hosts. Destroyed reflected
+  2D entities reject later access (including `has()` and repeated `destroy()`) with
+  a Lua error; liveness predicates remain available.
+- Expose rigid-body `scene3d.teleport(entity, position, rotation?)`, preserving
+  orientation when omitted and resetting velocity/interpolation for kinematics.
+
+- Reuse navmesh seam topology and selectively recheck changed faces instead of
+  rebuilding the level per pass. Preserve long slab cuts and complete coarse
+  flights; cover rerouted stair guides and descending nosings. Document the
+  effective `max(agent_height, max_step_height)` headroom.
+- Track transparent appearance per matched copy and material partition, including
+  independent anonymous draws sharing a mesh. Frame the vendored Sponza smoke
+  fixture with ample coverage above the blank-picture threshold.
+- Use one stale-entity Lua error across gameplay arguments, reflected access and
+  commands; preserve explicit liveness queries and historical action tokens.
+- Centralize model profile diagnostic prefixes and upload preflighted primitives
+  without repeating mesh validation. Public mesh creation remains checked.
+
 - Interpolate character rotation and particle sprites with the fixed-step frame;
   clamp finite presentation alpha and skip unchanged sleeping-body roots. Add
   an explicit bridge teleport for kinematics and reuse rope readback buffers.
@@ -164,6 +220,16 @@ releases may change APIs.
   GPU when more than two are pending.
 
 ### Changed
+
+- Separate mesh temporal `history_id` from picking `id`; assign generation- and
+  pooled-lease-aware identities during ECS collection and distinct model-part IDs.
+  Zero history IDs preserve direct callers' existing matching behavior.
+- Deprecate the transform-mutating physics `interpolate()` API in favor of
+  read-only session/frame presentation.
+- Replace particle capture/restore booleans with `ParticleMotion3D` and
+  `ParticleRestore3D` modes, preserving defaults and simulation bytes.
+- Replace unused session bridge timestep settings with `physics_debug`; group
+  standalone bridge debug controls in `config.debug`. See the API migration guide.
 
 - Remove the unreachable `SceneSession3DReload::Failed` enumerator; failures use
   the existing `Result3D` diagnostics. `scene3d.entity` returns nil for missing IDs.

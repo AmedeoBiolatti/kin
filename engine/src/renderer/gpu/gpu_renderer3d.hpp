@@ -136,11 +136,13 @@ public:
 struct GpuCopyHistory {
     struct Span {
         u64 key;
-        u32 first, count; // a group's first matrix and how many
+        u32 first, count;       // a group's first matrix and how many
+        u32 effect_first = ~0u; // transparent appearances only
     };
     std::vector<Span> groups;         // by key
     std::unordered_map<u64, u32> ids; // a mesh's copy by id: its matrix
     std::vector<Mat4f> matrices;
+    std::vector<u64> effects; // transparent appearance, by the same matched copy
     // Skinned copies: the frame's joint matrices (the scene's, then the overlay's) and, by the same place as
     // `matrices`, where each copy's start in them (~0 for a copy that is not skinned). Empty in a frame with no skinned
     // copy.
@@ -209,7 +211,6 @@ private:
         f32 alpha = 0, frame = 0;
     };
     std::vector<ParticleHistory> _taa_particles;
-    std::unordered_map<u64, u64> _taa_mesh_effects;
     std::shared_ptr<GpuTextureBackend> _resolved; // what 2D draws sample
     // With Lod3D::occlusion (made by the first render that asks): the depth pyramid (level 0 a quarter of the view's
     // size, each next half of the one before; `_hiz_levels` of them), the depth it is built from when no pre-pass makes
@@ -602,9 +603,11 @@ private:
     std::vector<Mat4f> _taa_prev;                    // render()'s scratch: a matrix per copy of the scene
     std::vector<Mat4f> _taa_ordered;                 // and per copy in _instances
     struct CopyRef {
-        u32 slot = 0; // a draw's first copy among its group's in the view's record,
-        u32 past = 0; // and where its place was last frame (~0: no same-sized group then)
+        u32 slot = 0;                        // a draw's first copy among its group's in the view's record,
+        u32 past = 0;                        // and where its place was last frame (~0: no same-sized group then)
+        u32 effect = ~0u, past_effect = ~0u; // compact transparent-only records
     };
+    std::vector<u32> _taa_matched;               // previous history slot per current grouped copy (~0 when new)
     std::vector<CopyRef> _taa_copy_refs;         // match_copies' scratch, kept between frames:
     std::vector<std::pair<u64, u32>> _taa_keyed; // draws by group key,
     std::vector<u32> _taa_group_of;              // their groups,
@@ -675,6 +678,7 @@ private:
     struct LocalCache {
         std::vector<u8> payload;
         u64 revision = 0;
+        bool fingerprinted = false;
         bool valid = false;
     };
     std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades> _local_cache;

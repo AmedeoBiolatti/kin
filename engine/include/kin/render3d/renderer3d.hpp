@@ -160,6 +160,8 @@ public:
     const Diagnostics3D& diagnostics() const { return _errors; }
 
 private:
+    // Internal callers must validate every primitive before uploading any of them.
+    Mesh3D upload_validated_mesh(const MeshData3D& data, const MeshOptions3D& options);
     Mesh3D create_mesh_operation(const MeshData3D& data, const MeshOptions3D& options);
     Mesh3D create_mesh_operation(const MeshData3D& data);
     View3D create_view_operation(Vec2i size, const ViewOptions3D& options = {});

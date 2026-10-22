@@ -1,4 +1,5 @@
 #include "../scripting/lua_scene3d.hpp"
+#include "scene_identity3d.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -19,6 +20,8 @@
 #include <thread>
 
 namespace kin {
+using detail::SceneIdentity3D;
+using detail::SceneLease3D;
 namespace {
 std::vector<flecs::entity> children_of(flecs::entity entity) {
     std::vector<flecs::entity> children;
@@ -34,13 +37,6 @@ template <class T, class F> void inspect_components(flecs::world& world, F&& ins
         if (const auto* value = entity.get<T>())
             inspect(entity, *value);
 }
-struct SceneIdentity3D {
-    u64 session = 0, generation = 0;
-};
-struct SceneLease3D {
-    u64 instance = 0;
-    bool active = false;
-};
 } // namespace
 EcsEntity SceneEntity3D::resolve(EcsWorld& world) const {
     const auto* identity = world.raw().get<SceneIdentity3D>();
@@ -1084,8 +1080,8 @@ bool SceneSession3D::prepare_operation(const std::filesystem::path& path, bool r
             return false;
         if (d.options.physics) {
             candidate->physics = std::make_unique<World3D>(*d.options.physics);
-            candidate->bodies =
-                std::make_unique<WorldPhysicsState3D>(candidate->world, *candidate->physics, d.options.bodies);
+            candidate->bodies = std::make_unique<WorldPhysicsState3D>(
+                candidate->world, *candidate->physics, WorldPhysicsState3DConfig{.debug = d.options.physics_debug});
         }
         candidate->commands->physics = candidate->physics.get();
         candidate->commands->bodies = candidate->bodies.get();

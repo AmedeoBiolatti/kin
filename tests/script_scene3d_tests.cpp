@@ -129,7 +129,7 @@ function update(ctx)
         assert(saved_root:alive())
     elseif ticks == 3 then
         assert(removed.status == "succeeded" and not saved_root:alive())
-        assert(not scene3d.impulse(saved_root, {x=1,y=0,z=0}))
+        assert(not pcall(scene3d.impulse, saved_root, {x=1,y=0,z=0}))
         assert(scene3d.resolve(saved_root) == nil)
         local ok = pcall(scene3d.raycast, {x=0/0,y=0,z=4}, {x=0,y=0,z=-4})
         assert(not ok)
@@ -180,7 +180,38 @@ SceneSession3DOptions options(App& app, int& exits) {
     out.scripts.bind = [&exits](sol::state& lua) { lua["record_exit"] = [&exits] { ++exits; }; };
     return out;
 }
+void lua_kinematic_teleport(App& app, Renderer2D& renderer) {
+    Scratch source;
+    std::filesystem::copy_file(std::filesystem::path(KIN_TEST_MODELS) / "parts.glb", source.path / "parts.glb");
+    std::string kinematic = scene;
+    const auto mass = kinematic.find("\"mass\":1");
+    kinematic.insert(mass, "\"motion\":\"kinematic\",");
+    write(source.path / "test.kinscene", kinematic);
+    write(source.path / "logic.lua", R"lua(
+      function on_enter(ctx)
+        local body=scene3d.entity('crate')
+        assert(scene3d.teleport(body,{x=5,y=4,z=0},{x=0,y=0.70710678,z=0,w=0.70710678}))
+        assert(scene3d.teleport(body,{x=6,y=4,z=0})) -- preserve orientation when omitted
+        assert(not pcall(scene3d.teleport,body,{x=0/0,y=0,z=0}))
+        assert(not pcall(scene3d.teleport,body,{x=0,y=0,z=0},{x=0,y=0,z=0,w=2}))
+        assert(not scene3d.teleport(scene3d.entity('camera'),{x=0,y=0,z=0}))
+      end
+    )lua");
+    Renderer3D rendering{renderer};
+    Assets3D assets{rendering, source.path};
+    int exits = 0;
+    SceneSession3D session{rendering, assets, options(app, exits)};
+    ok(session, session.load("test.kinscene"), "Lua teleport fixture failed");
+    ok(session, session.step(.1f), "Lua teleport step failed");
+    const auto body = session.bodies()->body_of(session.entity("crate").raw());
+    check(length(session.physics()->position(body) - Vec3f{6, 4, 0}) < 1e-4f, "Lua teleport swept instead of snapping");
+    check(length(session.physics()->linear_velocity(body)) < 1e-4f, "Lua teleport retained a kinematic sweep");
+    check(length(session.physics()->rotation(body).rotate({0, 0, 1}) - Vec3f{1, 0, 0}) < 1e-4f,
+          "Lua teleport lost rotation");
+}
+
 void workflow(App& app, Renderer2D& renderer, bool gpu) {
+    lua_kinematic_teleport(app, renderer);
     InputMap input;
     input.bind("launch", Key::Space);
     app.input().set_map(input);
@@ -392,8 +423,17 @@ void workflow(App& app, Renderer2D& renderer, bool gpu) {
           fresh:patch('TestStats', {ticks=11})
           assert(not pcall(editor.commit, editor))
           assert(fresh:get('TestStats').ticks==11)
-          assert(not pcall(old.destroy, old))
-          assert(not pcall(scene3d.handle, old))
+          for _, call in ipairs({
+            function() old:destroy() end,
+            function() old:get('TestStats') end,
+            function() old:has('TestStats') end,
+            function() editor:commit() end,
+            function() scene3d.handle(old) end,
+          }) do
+            local ok, message = pcall(call)
+            assert(not ok and message:find('stale or foreign entity handle', 1, true)
+                   and message:find('logic.lua', 1, true), tostring(message))
+          end
           assert(fresh:alive())
         end
       end
@@ -533,22 +573,31 @@ function on_enter(ctx)
     assert(second and scene3d.cancel_action(second, 0))
     assert(scene3d.action_status(action) == 'playing') -- other actor's cancellation is isolated
     if previous_actor():alive() then error('old scene handle is still alive') end
-    assert(not scene3d.character_input(previous_actor(), {}))
+    assert(not pcall(scene3d.character_input, previous_actor(), {}))
 end
 function update(ctx)
     ticks = ticks + 1
     if not actor:alive() then
         stale = true
-        assert(not scene3d.character_input(actor, {}))
-        assert(scene3d.character_state(actor) == nil and scene3d.animation_state(actor) == nil)
-        assert(not scene3d.set_animation_parameter(actor, 'amount', 7))
-        assert(not scene3d.trigger_animation(actor, 'wave'))
+        assert(scene3d.resolve(actor) == nil)
+        local stale_calls = {
+            function() return scene3d.character_input(actor, {}) end,
+            function() return scene3d.character_state(actor) end,
+            function() return scene3d.animation_state(actor) end,
+            function() return scene3d.set_animation_parameter(actor, 'amount', 7) end,
+            function() return scene3d.trigger_animation(actor, 'wave') end,
+            function() return scene3d.contact_events(actor) end,
+            function() return scene3d.character_events(actor) end,
+            function() return scene3d.animation_events(actor) end,
+            function() return scene3d.spawn('prop.kinprefab', {parent=actor}) end,
+        }
+        for _, call in ipairs(stale_calls) do
+            local ok, message = pcall(call)
+            assert(not ok and message:find('stale or foreign entity handle', 1, true)
+                   and message:find('game.lua', 1, true), tostring(message))
+        end
         assert(scene3d.action_status(action) == 'superseded' and not scene3d.cancel_action(action))
         assert(not scene3d.action_event_valid(action))
-        assert(not pcall(scene3d.contact_events, actor))
-        assert(not pcall(scene3d.character_events, actor))
-        local events, dropped = scene3d.animation_events(actor)
-        assert(#events == 0 and dropped == 0)
         return
     end
     local turn = ticks >= 101 and ticks <= 110

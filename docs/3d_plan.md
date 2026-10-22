@@ -3301,7 +3301,7 @@ ropes are the next steps (P2c onward); the constraints they need are here.
    its edges are drawn; the old test passed through an `||`), and the material's depth bias does not lift coplanar edges above their
    face there. So each line is a thin triangle (a, b, c) and its ends are moved a hair toward the eye along their view rays; the two
    devices then draw the same pixels (106 awake and 426 static ones in the test). Opt-in through
-   `WorldPhysicsState3DConfig::debug_draw` (default off: nothing is made or drawn). A CPU projection through the 2D renderer was the
+   `WorldPhysicsState3DConfig::debug.enabled` (default off: nothing is made or drawn). A CPU projection through the 2D renderer was the
    alternative; this is cheaper to write and depth-tests against the scene.
 2. *Sensors are left out of queries unless `QueryFilter3D::sensors`*; they report overlaps as `sensor` events. A trigger volume should
    not stop a ray meant for floors.
@@ -3674,7 +3674,7 @@ providers' interface is ready for a rope and none is built).
 | The body response | `engine/src/physics3d/traversal_character3d.cpp`, hooks in `character3d.cpp` | grips, hanging, shimmy and climb, slip, load, mantle, resource, exhaustion; Jolt's swept `CharacterVirtual::Update` makes every move |
 | Events | `CharacterEventKind3D::Gripped, Slipped, GripReleased, Exhausted, MantleStarted, MantleFinished, MantleBlocked, Fell` (+ `hand`, `reason`) | with the walking events, sorted by (kind, limb) |
 | ECS | `Hold3D`, `SurfaceMaterial3D` (the physics struct is the component), `CharacterController3D::traversal` / `traversal_state`, `CharacterAnimationLink3D::hands` / `hanging` / `hand_clearance` / `align_hands` / `hand_offset`, `LocomotionClips3D::hang`, `drive_traversal_animator`, `WorldPhysicsState3D::traversal_of` | facing turned to the surface, the hands' IK on the anchors with the weight of the phase |
-| Debug draw | `DebugDraw3D::grips`, `candidates`, `WorldPhysicsState3DConfig::debug_grips` | anchors by phase, normals and frames, line to the body, hang place, ledge top, a probe's candidates by provider |
+| Debug draw | `DebugDraw3D::grips`, `candidates`, `WorldPhysicsState3DConfig::debug.grips` | anchors by phase, normals and frames, line to the body, hang place, ledge top, a probe's candidates by provider |
 | Level, timeline | `tests/climb_level.hpp`, `tests/reference/scenes/physics_climb.json` | one level and one scripted timeline (commands, teleports, stamina, checkpoints) for the CPU test, the picture and the bench |
 | Tests, bench | `kin-physics3d-traversal` (CPU), 3 functions in `kin-physics3d-ecs`, `kin_physics3d_bench climbing` | |
 | Harness, viewer | `kin_reference` scene `physics_climb`; Sponza Walk section "Climb (kin/physics3d, P2d)", `--preset climb` | |

@@ -176,7 +176,7 @@ if(BUILD_TESTING)
         file(WRITE "${_sponza_no_reference}" "Smoke tests must use their explicit vendored model.\n")
         add_test(NAME sponza-walk-smoke
             COMMAND sponza_walk --headless --frames 3 --width 480 --height 300
-                    --model "${PROJECT_SOURCE_DIR}/tests/fixtures/models/parts.glb" --eye 0,0,6 --target 0,0,0
+                    --model "${PROJECT_SOURCE_DIR}/tests/fixtures/models/parts.glb" --eye 0,0,3 --target 0,0,0
                     "--screenshot=${CMAKE_CURRENT_BINARY_DIR}/sponza_walk_smoke.png" --preset ao --skip-if-unavailable)
         set_tests_properties(sponza-walk-smoke PROPERTIES ENVIRONMENT "KIN_RENDER_BACKEND=gpu;KIN_REFERENCE_CACHE=${_sponza_no_reference}" SKIP_RETURN_CODE 77
             TIMEOUT 300)

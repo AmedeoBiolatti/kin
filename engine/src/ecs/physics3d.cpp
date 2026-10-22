@@ -384,7 +384,7 @@ WorldPhysicsState3D::WorldPhysicsState3D(flecs::world& world, World3D& physics, 
                            .build()),
       _ragdoll_query(
           world.query_builder<const Transform3D, const SkinnedMeshRenderer3D, const Ragdoll3D>().cached().build()),
-      _rope_query(world.query_builder().with<Rope3D>().inout_none().cached().build()), _debug(config.debug) {
+      _rope_query(world.query_builder().with<Rope3D>().inout_none().cached().build()), _debug(config.debug.options) {
     // This readable empty singleton exists even when collection is disabled.
     // No contacts are collected or copied on the disabled path.
     _ecs.set<PhysicsContacts3D>({});
@@ -830,7 +830,8 @@ void WorldPhysicsState3D::sync_characters() {
         c.last_position = e.get<Transform3D>()->position;
         c.position = c.previous_position = pose.position;
         c.rotation = c.previous_rotation = pose.rotation;
-        c.last_rotation = e.get<Transform3D>()->rotation;
+        if (const auto* local = e.get<Transform3D>())
+            c.last_rotation = c.simulation_rotation = local->rotation;
         if (c.character.valid()) {
             forgive(e.id(), Made::Character);
             _characters.push_back(c);
@@ -873,10 +874,21 @@ void WorldPhysicsState3D::characters_to_world(f32) {
         if (!e.is_alive()) {
             continue;
         }
-        const Transform3D* t = e.get<Transform3D>();
+        Transform3D* t = EcsEntity{e}.get_mut<Transform3D>();
         const CharacterController3D* controller = e.get<CharacterController3D>();
         if (t == nullptr || controller == nullptr) {
             continue;
+        }
+        const bool turned = t->rotation != c.last_rotation;
+        if (!turned) {
+            // Legacy interpolate() writes presentation into the component. Restore
+            // the last simulation rotation before sampling the next step.
+            t->rotation = c.simulation_rotation;
+            c.last_rotation = t->rotation;
+        }
+        if (turned) {
+            c.rotation = c.previous_rotation = decompose(world_matrix(e)).rotation;
+            c.last_rotation = c.simulation_rotation = t->rotation;
         }
         // Moved by game code since we wrote it: a teleport to where it was put (its world place now).
         if (t->position != c.last_position) {
@@ -884,7 +896,7 @@ void WorldPhysicsState3D::characters_to_world(f32) {
             _physics.teleport_character(c.character, p.position);
             c.position = c.previous_position = p.position;
             c.rotation = c.previous_rotation = p.rotation;
-            c.last_rotation = t->rotation;
+            c.last_rotation = c.simulation_rotation = t->rotation;
             c.last_position = t->position;
             c.hands.clear();
         }
@@ -930,7 +942,8 @@ void WorldPhysicsState3D::characters_from_world() {
             }
         }
         c.rotation = decompose(world_matrix(e)).rotation;
-        c.last_rotation = e.get<Transform3D>()->rotation;
+        if (const auto* local = e.get<Transform3D>())
+            c.last_rotation = c.simulation_rotation = local->rotation;
         // The animator, when the entity has the link.
         bool sampled_hands = false;
         const CharacterAnimationLink3D* link = e.get<CharacterAnimationLink3D>();
@@ -1192,8 +1205,10 @@ void WorldPhysicsState3D::step(f32 dt) {
             }
             b.last_position = p.position;
             b.last_rotation = p.rotation;
-            b.presentation_position = local->position;
-            b.presentation_rotation = local->rotation;
+            if (local) {
+                b.presentation_position = local->position;
+                b.presentation_rotation = local->rotation;
+            }
         }
     }
 
@@ -1323,10 +1338,11 @@ std::optional<Mat4f> WorldPhysicsState3D::render_transform(flecs::entity entity,
         const auto c = std::ranges::lower_bound(_characters, entity.id(), {}, &BoundCharacter::entity);
         if (c != _characters.end() && c->entity == entity.id()) {
             auto pose = decompose(world_matrix(entity));
-            if (local->position == c->last_position && local->rotation == c->last_rotation) {
+            // Mouse-look edits rotation independently of the fixed-step position.
+            if (local->position == c->last_position)
                 pose.position = lerp(c->previous_position, c->position, alpha);
+            if (local->rotation == c->last_rotation)
                 pose.rotation = slerp(c->previous_rotation, c->rotation, alpha);
-            }
             return Mat4f::trs(pose.position, pose.rotation, pose.scale) * relative;
         }
         relative = local->matrix() * relative;
@@ -1400,10 +1416,22 @@ void WorldPhysicsState3D::interpolate(f32 alpha) {
         write_back(b, lerp(b.previous_position, b.position, alpha), slerp(b.previous_rotation, b.rotation, alpha));
     }
     for (BoundCharacter& c : _characters) {
-        write_character(c, lerp(c.previous_position, c.position, alpha));
         const flecs::entity e{_ecs, c.entity};
         if (e.is_valid() && e.is_alive()) {
-            auto* transform = e.get_mut<Transform3D>();
+            auto* transform = EcsEntity{e}.get_mut<Transform3D>();
+            if (!transform)
+                continue;
+            // Leave an authored position for characters_to_world() to teleport
+            // on the next step. Repeated render-only frames must not consume it.
+            if (transform->position == c.last_position)
+                write_character(c, lerp(c.previous_position, c.position, alpha));
+            // Render-only frames can contain authored turns too. Adopt the edit
+            // before presentation overwrites it, just as characters_to_world does.
+            if (transform->rotation != c.last_rotation) {
+                c.rotation = c.previous_rotation = decompose(world_matrix(e)).rotation;
+                c.last_rotation = c.simulation_rotation = transform->rotation;
+                continue;
+            }
             const auto world_rotation = slerp(c.previous_rotation, c.rotation, alpha);
             transform->rotation =
                 e.parent().is_valid()
@@ -1441,7 +1469,8 @@ void WorldPhysicsState3D::resync_from_world() {
         const CharacterState3D state = _physics.character(c.character);
         c.position = c.previous_position = state.position;
         c.rotation = c.previous_rotation = decompose(world_matrix(e)).rotation;
-        c.last_rotation = e.get<Transform3D>()->rotation;
+        if (const auto* local = e.get<Transform3D>())
+            c.last_rotation = c.simulation_rotation = local->rotation;
         write_character(c, state.position);
         if (CharacterController3D* controller = e.get_mut<CharacterController3D>()) {
             controller->state = state;
@@ -1617,17 +1646,17 @@ Body3D WorldPhysicsState3D::body_of(flecs::entity entity) const {
 }
 
 void WorldPhysicsState3D::collect_debug(Renderer3D& renderer, Scene3D& scene) {
-    if (!_config.debug_draw) {
+    if (!_config.debug.enabled) {
         return;
     }
     // The caller's own lines (rays, sweeps) were added since the last call; the world's go in after them.
     DebugDraw3D& d = _debug;
-    d.options() = _config.debug;
+    d.options() = _config.debug.options;
     d.world(_physics);
-    if (_config.debug_contacts) {
+    if (_config.debug.contacts) {
         d.contacts(_events);
     }
-    if (_config.debug_grips) {
+    if (_config.debug.grips) {
         for (const BoundCharacter& c : _characters) {
             d.grips(_physics, c.character);
         }

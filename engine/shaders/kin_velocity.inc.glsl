@@ -9,3 +9,10 @@ vec2 kin_velocity(vec3 current, vec3 previous, float fresh) {
     // Clip space's +y is up and the picture's rows run down.
     return (current.xy / current.z - previous.xy / previous.z) * vec2(0.5, -0.5);
 }
+
+// Evaluate at the visible fragment. A triangle may extend behind the camera;
+// a sentinel at one of its vertices would reject history over the whole face.
+float kin_independent_motion(vec3 current, vec3 old_in_current) {
+    return current.z > 0.0 && old_in_current.z > 0.0
+        ? length(current.xy / current.z - old_in_current.xy / old_in_current.z) : 2.0;
+}

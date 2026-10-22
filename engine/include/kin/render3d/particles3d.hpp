@@ -193,6 +193,10 @@ struct Particle3D {
     u32 index = 0;       // its birth number
 };
 
+// Presentation capture and snapshot continuity are explicit, independent choices.
+enum class ParticleMotion3D : u8 { None, Capture };
+enum class ParticleRestore3D : u8 { Discontinuous, Rollback };
+
 // A simulation in fixed steps (`step` seconds, 1/120): update(dt) takes whole steps out of the time it has been given,
 // so the state after T seconds does not depend on how T was cut into frames, and a saved state restores to the same
 // future. Particles are drawn from `sprites()`. Deterministic: a particle's randoms are a hash of the seed, its birth
@@ -216,6 +220,7 @@ public:
 
     void set_seed(u64 seed) { _seed = seed; }
     u64 seed() const { return _seed; }
+    // Reset simulation and start a fresh presentation identity epoch.
     void clear();
     // `count` particles now, at the emitter (a burst), or at a world point.
     void burst(u32 count);
@@ -223,12 +228,16 @@ public:
     // Takes `dt` seconds (whole steps of `step` are run, the rest kept; at most `max_catch_up` of steps an update, the
     // time beyond it dropped into `skipped_time()`; a negative, NaN or infinite `dt` is ignored). `wind` is the air's
     // (null: none).
-    void update(f64 dt, const Wind3D* wind = nullptr);
+    // ParticleMotion3D::Capture retains compact presentation samples for sprites(..., alpha).
+    // It does not change simulation, rollback bytes or the state hash.
+    void update(f64 dt, const Wind3D* wind = nullptr, ParticleMotion3D motion = ParticleMotion3D::None);
     // Simulated seconds dropped by the catch-up cap since the last clear() (not simulation state: neither hashed nor
     // saved; restore() leaves it).
     f64 skipped_time() const { return _skipped_time; }
-    // The state a viewer shows now: the particles as sprites (with the unfinished step's motion carried on).
-    void sprites(std::vector<ParticleSprite3D>& out) const;
+    // The state a viewer shows now (with unfinished-step motion carried on). Alpha
+    // blends captured motion when update(..., ParticleMotion3D::Capture) was used.
+    // clear()/discontinuous restore() invalidate old presentation IDs and samples.
+    void sprites(std::vector<ParticleSprite3D>& out, f32 alpha = 1.0f) const;
     std::span<const Particle3D> particles() const { return _particles; }
     std::size_t count() const { return _particles.size(); }
     f64 time() const { return _time; }
@@ -238,7 +247,11 @@ public:
     // the transform and the seed are the game's: put them back yourself (the seed is saved and restored).
     u64 state_hash() const;
     std::vector<u8> save() const;
-    bool restore(std::span<const u8> bytes);
+    // Restoring identical state is a no-op, including presentation samples.
+    // ParticleRestore3D::Rollback keeps birth IDs stable during rollback/resimulation;
+    // update(..., ParticleMotion3D::Capture) rebuilds the corrected motion segment.
+    // Discontinuous (the default) rejects stale TAA when loading an unrelated snapshot.
+    bool restore(std::span<const u8> bytes, ParticleRestore3D mode = ParticleRestore3D::Discontinuous);
 
     // A particle's value over its life, as sprites() uses them (public for the tests).
     static f32 size_over_life(const ParticleDesc3D& desc, f32 t);
@@ -249,6 +262,18 @@ private:
     void advance(Particle3D& p, f64 dt, const Wind3D* wind) const;
     f32 random(u32 index, u32 purpose) const;
 
+    struct MotionSample {
+        u32 index;
+        Vec3f position;
+        f32 life, rotation;
+    };
+    std::vector<MotionSample> _previous_motion;
+    struct LifeCurves {
+        f32 size_start, size_mid, size_end, alpha_start, alpha_end, fade_in;
+    };
+    LifeCurves _previous_life{};
+    bool _motion_sampled = false;
+    u32 _presentation_epoch = 0; // separate from deterministic birth indices and rollback state
     u64 _seed = 1;
     std::vector<Particle3D> _particles;
     u32 _next_index = 0;

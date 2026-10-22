@@ -2,10 +2,29 @@
 
 #include <kin/assets/content.hpp>
 
+#include <sol/sol.hpp>
 #include <algorithm>
+#include <exception>
 #include <string>
 
 namespace kin::scripting_detail {
+
+void bind_script_errors(sol::state& lua) {
+    lua.set_exception_handler([](lua_State* state, sol::optional<const std::exception&>, sol::string_view what) {
+        lua_Debug caller{};
+        int level = 1;
+        while (lua_getstack(state, level, &caller)) {
+            lua_getinfo(state, "l", &caller);
+            if (caller.currentline > 0) break;
+            ++level;
+        }
+        luaL_where(state, level);
+        lua_pushlstring(state, what.data(), what.size());
+        lua_concat(state, 2);
+        return 1;
+    });
+}
+
 
 std::filesystem::path normalized_path(const std::filesystem::path& path) {
     std::error_code error;

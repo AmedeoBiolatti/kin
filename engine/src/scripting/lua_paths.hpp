@@ -3,11 +3,14 @@
 // Path rules shared by kin's Lua hosts (ScriptEngine, LuaScript): a script may
 // only reach files under its root, and module names are plain dotted names.
 
+#include <sol/forward.hpp>
 #include <filesystem>
 #include <optional>
 #include <string_view>
 
 namespace kin::scripting_detail {
+
+void bind_script_errors(sol::state& lua);
 
 std::filesystem::path normalized_path(const std::filesystem::path& path);
 bool path_within_root(const std::filesystem::path& path, const std::filesystem::path& root);

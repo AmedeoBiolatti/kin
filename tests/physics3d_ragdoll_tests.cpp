@@ -1,3 +1,4 @@
+#include "legacy_physics3d_helpers.hpp"
 // Ragdolls of kin/physics3d (kin/physics3d/ragdoll3d.hpp), without a GPU: the auto-built desc, the states and blends,
 // bone lengths and limits under a fall, continuous collision, partial ragdolls, hand-over to and recovery from a
 // character controller, the pose written into the animator, determinism with 0, 1 and 4 workers and saved states.
@@ -1329,9 +1330,9 @@ void test_interpolation_of_the_pose() {
                 CHECK(near(pose->position[j], lerp(before_last[j], latest[j], alpha), 1e-5f));
         CHECK(rig.animator().pose_override.position == latest && rig.physics.state_hash() == hash);
     }
-    rig.bodies.interpolate(0.0f);
+    legacy_interpolate(rig.bodies, 0.0f);
     const std::vector<Vec3f> at_zero = rig.animator().pose_override.position;
-    rig.bodies.interpolate(0.5f);
+    legacy_interpolate(rig.bodies, 0.5f);
     const std::vector<Vec3f> mid = rig.animator().pose_override.position;
     int moved = 0;
     for (std::size_t j = 0; j < latest.size(); ++j) {
@@ -1343,7 +1344,7 @@ void test_interpolation_of_the_pose() {
         }
     }
     CHECK(moved > 5);
-    rig.bodies.interpolate(1.0f);
+    legacy_interpolate(rig.bodies, 1.0f);
     CHECK(rig.animator().pose_override.position == latest);
 }
 

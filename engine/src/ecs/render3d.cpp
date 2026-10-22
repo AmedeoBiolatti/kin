@@ -1,5 +1,9 @@
+#include "../render3d/history3d.hpp"
+#include "../scene/scene_identity3d.hpp"
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <initializer_list>
@@ -96,8 +100,20 @@ struct Wanted {
 
 } // namespace
 
+u64 WorldRenderState3D::history_id(flecs::entity entity) const {
+    const auto* lease = entity.get<detail::SceneLease3D>();
+    const u64 scope = detail::history3d_mix(_history_identity);
+    const u64 object = detail::history3d_mix(entity.id() ^ scope);
+    const u64 id = lease ? detail::history3d_mix(object ^ lease->instance ^ 0xd6e8feb86659fd93ULL) : object;
+    return id ? id : 1;
+}
+
 WorldRenderState3D::WorldRenderState3D(flecs::world& world)
-    : _attachments(world.query_builder<JointAttachment3D>().term_at(0).self().build()),
+    : _history_identity([] {
+          static std::atomic<u64> next{1};
+          return next.fetch_add(1, std::memory_order_relaxed);
+      }()),
+      _attachments(world.query_builder<JointAttachment3D>().term_at(0).self().build()),
       _transform_observer(world.observer<Transform3D>("add_world_transform_3d")
                               .event(flecs::OnAdd)
                               .yield_existing()
@@ -128,6 +144,7 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
       _spot_lights(world.query_builder<const WorldTransform3D, const SpotLight3D, const RenderTransform3D*>().build()),
       _emitters(world.query_builder<const WorldTransform3D, const ParticleEmitter3D>().build()),
       _weather(world.query_builder<Weather3D>().build()) {
+    world.component<detail::SceneLease3D>();
     // Optional lookups during collection must not lazily register a component
     // while a Flecs table is being iterated, including in non-authored worlds.
     world.component<ModelMaterials3D>();
@@ -145,13 +162,10 @@ void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
         entity.get_mut<ParticleEmitter3D>();
     _emitters.each([&](flecs::entity entity, const WorldTransform3D& world, const ParticleEmitter3D&) {
         auto* emitter = entity.get_mut<ParticleEmitter3D>(); // all owned now, no structural change
-        emitter->previous_sprites.clear();
-        emitter->system.sprites(emitter->previous_sprites);
-        emitter->sampled = true;
         emitter->system.transform = world.matrix;
         const bool native_emitting = emitter->system.emitting;
         emitter->system.emitting = native_emitting && emitter->enabled && emitter->emitting;
-        emitter->system.update(dt, wind);
+        emitter->system.update(dt, wind, ParticleMotion3D::Capture);
         emitter->system.emitting = native_emitting;
     });
 }
@@ -725,7 +739,7 @@ void WorldRenderState3D::Bucket::retain(RetainedBudget& budget) {
         const auto changed = [&](std::size_t i) {
             const auto& a = previous[i];
             const auto& b = instances[i];
-            return a.tint != b.tint || a.id != b.id ||
+            return a.tint != b.tint || a.id != b.id || a.history_id != b.history_id ||
                    std::memcmp(a.transform.m, b.transform.m, sizeof(a.transform.m)) != 0;
         };
         for (std::size_t i = 0; i < previous.size();) {
@@ -823,9 +837,9 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                 if (!last || !(last->mesh == r.mesh) || !(last->material == r.material)) {
                     last = &bucket_for(r.mesh, r.material);
                 }
-                // The entity's id when none is given, as for models: pick names the entity and TAA matches its frames
-                // by it.
-                last->instances.push_back({*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu)});
+                // Picking retains the low entity index; history includes generation, scope and lease.
+                last->instances.push_back(
+                    {*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu), history_id(it.entity(i))});
             }
         }
     });
@@ -873,7 +887,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             bucket_for(part.mesh, material)
                 .instances.push_back(
                     {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint,
-                     id});
+                     id, detail::part_history3d(history_id(entity), index)});
         }
     });
     // A bucket is a reuse aid for live draws, never a resident asset cache.
@@ -942,28 +956,13 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         if (!draw_placement(entity, world, nullptr))
             return;
         if (emitter.enabled && emitter.system.count() > 0) {
-            if (!emitter.sampled || alpha >= 1) {
-                (void)scene.draw_particles(emitter.system, entity.id());
+            if (alpha >= 1) {
+                (void)scene.draw_particles(emitter.system, history_id(entity));
                 return;
             }
             _particle_sprites.clear();
-            emitter.system.sprites(_particle_sprites);
-            const auto& previous = emitter.previous_sprites;
-            std::size_t before = 0;
-            for (auto& sprite : _particle_sprites) {
-                while (before < previous.size() && previous[before].id < sprite.id)
-                    ++before;
-                if (before < previous.size() && previous[before].id == sprite.id) {
-                    const auto& old = previous[before];
-                    sprite.position = lerp(old.position, sprite.position, alpha);
-                    sprite.rotation = std::lerp(old.rotation, sprite.rotation, alpha);
-                    sprite.size = std::lerp(old.size, sprite.size, alpha);
-                    sprite.alpha = std::lerp(old.alpha, sprite.alpha, alpha);
-                } else {
-                    sprite.alpha *= alpha;
-                }
-            }
-            (void)scene.draw_particles(emitter.system.desc.look, _particle_sprites, entity.id());
+            emitter.system.sprites(_particle_sprites, alpha);
+            (void)scene.draw_particles(emitter.system.desc.look, _particle_sprites, history_id(entity));
         }
     });
     // Characters: each model in its animator's pose (the rest pose with none, or before its first animate()).
@@ -1002,7 +1001,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             _rest_pose.joints = skeleton.rest;
             compute_joint_matrices(skeleton, _rest_pose, _pose_scratch);
         }
-        // The entity's id when none is given: pick names the entity, and the velocity matches the character by it.
+        // Picking and temporal history have independent identities.
         const u32 id = renderer.id != 0 ? renderer.id : static_cast<u32>(it.entity(row).id() & 0xffffffffu);
         const auto* overrides = it.entity(row).get<ModelMaterials3D>();
         const auto* binding = overrides && overrides->binding && overrides->binding->model.lock() == renderer.model &&
@@ -1011,7 +1010,8 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                                   : nullptr;
         (void)scene.draw_skinned(*model, _pose_scratch, *placement, renderer.tint, id,
                                  binding ? std::span<const Material3D>{binding->materials}
-                                         : std::span<const Material3D>{});
+                                         : std::span<const Material3D>{},
+                                 history_id(it.entity(row)));
     });
     // Meshes no longer drawn are let go.
     if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))

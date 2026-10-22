@@ -83,6 +83,18 @@ and `error()` holds the message with the script's name and line
 (`rules.lua:12: attempt to index a nil value`). Each failure goes to
 `LuaScriptOptions::on_error`, or is logged as a warning under `script`.
 
+Native binding exceptions use the same script-position reporting, including
+errors caught by `pcall` or raised inside a module/callback.
+
+In the shared ECS API (`ScriptScene` and `SceneSession3D`), destroyed reflected
+entities reject component access and mutations with `stale or foreign entity
+handle`. This includes `has()` and a second `destroy()` in 2D scripts.
+`alive()` and `valid()` return false; `id()` remains available for diagnostics.
+Deferred entity placeholders belong to the command buffer's current batch.
+After a flush/clear, or in another buffer, using one raises
+`stale or foreign deferred entity handle`. Query a live entity after creation
+before retaining a handle across frames.
+
 A load runs the script in a **fresh** state, which replaces the loaded one
 only if it parses and runs; otherwise the previous script stays, handlers and
 all. So a broken edit never leaves a game without its rules.

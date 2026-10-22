@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -57,6 +58,16 @@ void test_errors_name_the_line() {
     assert(contains(script.error(), "rules:3:") && contains(script.error(), "boom"));
     assert(reported.size() == 1 && reported[0] == script.error());
     assert(script.call_for<int>("ok") == 1); // a failed call leaves the script working
+}
+
+void test_native_errors_name_the_line() {
+    kin::LuaScript script{{.setup = [](sol::state& lua) {
+        lua["boom"] = [] { throw std::runtime_error("native boom"); };
+    }}};
+    assert(script.load_string("function caught()\n local ok, message=pcall(boom)\n return not ok and message:find('rules:2:',1,true) ~= nil\nend\nfunction direct()\n boom()\nend\n", "rules"));
+    assert(script.call_for<bool>("caught") == true);
+    assert(!script.call("direct"));
+    assert(contains(script.error(), "rules:6:") && contains(script.error(), "native boom"));
 }
 
 void test_sandbox_is_deterministic() {
@@ -189,6 +200,7 @@ int main() {
 
     test_host_api_and_calls();
     test_errors_name_the_line();
+    test_native_errors_name_the_line();
     test_sandbox_is_deterministic();
     test_print_goes_to_the_log(log_events);
     test_instruction_limit_stops_runaway_scripts();

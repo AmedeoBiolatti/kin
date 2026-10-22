@@ -34,7 +34,7 @@ layout(location = 3) out vec3 vCurrent;  // clip x, y, w this frame
 layout(location = 4) out vec3 vPrevious; // and the last
 layout(location = 5) flat out float vFresh;
 layout(location = 6) out vec3 vWorld;
-layout(location = 7) out float vIndependent;
+layout(location = 7) out vec3 vOldInCurrent;
 
 void main() {
     const uint at = draw.first.x + uint(gl_InstanceIndex);
@@ -48,9 +48,7 @@ void main() {
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * vec4(aPos, 1.0);
     vPrevious = (draw.prior * previous_world).xyw;
-    const vec4 old_in_current = draw.current * previous_world;
-    vIndependent = old_in_current.w > 0.0 && vCurrent.z > 0.0
-        ? length(vCurrent.xy / vCurrent.z - old_in_current.xy / old_in_current.w) : 2.0;
+    vOldInCurrent = (draw.current * previous_world).xyw;
     vNormal = mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal;
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;

@@ -134,7 +134,10 @@ struct Material3D {
 struct MeshInstance3D {
     Mat4f transform{};
     Color tint = colors::white;
-    u32 id = 0; // what Renderer3D::pick says is under a pixel showing it
+    u32 id = 0; // picking ID; independent of an explicit history_id
+    // Stable per-copy identity for temporal history. Keep it for the object's lifetime;
+    // use a new value on replacement. Zero retains legacy id/order/spatial matching.
+    u64 history_id = 0;
 };
 
 // World-space box enclosing the renderer's transformed mesh spheres. Cache it while transforms
@@ -482,15 +485,17 @@ public:
     const Scene3D* overlay_if_any() const { return _overlay.get(); }
 
     // `mesh` placed by `transform`. Draws of the same mesh and material one
-    // after another are drawn as one (instanced).
+    // after another are drawn as one (instanced). history_id follows MeshInstance3D:
+    // a stable identity independent of picking; zero retains legacy matching.
     Status3D draw(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material = {},
-                  Color tint = colors::white, u32 id = 0);
+                  Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     // Each part of `model` (model.hpp), placed by `transform`.
-    Status3D draw(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
+    Status3D draw(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0,
+                  u64 history_id = 0);
     // Optional per-part materials, indexed as model.parts. Empty uses imported
     // materials; a nonempty span must match the part count (else rejects the submission).
     Status3D draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
-                  std::span<const Material3D> materials);
+                  std::span<const Material3D> materials, u64 history_id = 0);
     // `model` with its animated nodes in a pose (Model3D::node_skeleton: a door, a fan, a crane's arm): `node_matrices`
     // are that skeleton's world matrices in the model's space, one a joint (AnimationPlayer3D::joint_matrices, or
     // compute_world_matrices of a pose). A part that hangs from a node is placed by `transform` times
@@ -498,7 +503,7 @@ public:
     // that draws (to float rounding). A part whose node has no matrix here, or one that is not finite, is drawn at rest
     // (said once). A model with skins too: draw_skinned with node matrices, below.
     Status3D draw(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices,
-                  Color tint = colors::white, u32 id = 0);
+                  Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     // A skinned mesh (made from MeshData3D with a skin) in a pose: `joint_matrices` are the matrices of
     // compute_joint_matrices (kin/render3d/skeleton3d.hpp), at least Mesh3D::skin_joint_count() of them, copied into
     // the scene (they need not outlive the call; clear() takes them away). `transform` places the posed mesh: the
@@ -506,26 +511,27 @@ public:
     // with its own pose; copies of one mesh and material one after another are drawn as one. Drawn in every pass: the
     // main pass, the sun's shadow, the depth pre-pass (ambient occlusion, contact shadows, occlusion culling's
     // occluders), the temporal anti-aliasing's velocity (from last frame's matrices of the same copy, matched as its
-    // model matrix is: by `id`, else by order) and pick. A mesh without a skin is drawn as by draw(); too few matrices
-    // return a failed Status3D with owned diagnostics.
+    // model matrix is: by history_id, else legacy id/order/spatial matching) and pick. A mesh without a skin is drawn
+    // as by draw(); too few matrices return a failed Status3D with owned diagnostics.
     Status3D draw_skinned(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                          const Material3D& material = {}, Color tint = colors::white, u32 id = 0);
+                          const Material3D& material = {}, Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     // Every part of `model`: its skinned parts in the pose `joint_matrices` (of Model3D::skeletons[0]) placed by
     // `transform` alone, the others (not skinned) by `transform` times their node's placing, as draw(model, ...) does.
     // The pose is copied into the scene once and every skinned part points at that range (BrainStem's 59 parts keep one
-    // set of 18 matrices, not 59). `id` is what pick says of each part; it is also how a copy is matched across frames
-    // for the velocity. Only that first skeleton is posed: a part on a later skin of a model with several has no pose
-    // here and is not drawn (said once a model).
+    // set of 18 matrices, not 59). `id` is the picking value for every part; a nonzero
+    // history_id identifies the model and is subdivided per part for temporal matching.
+    // Asset loaders reject models requiring distinct skin palettes (kin-gltf/1).
+    // Only skeletons[0] is posed by this overload.
     Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                          Color tint = colors::white, u32 id = 0);
+                          Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                          Color tint, u32 id, std::span<const Material3D> materials);
+                          Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     // Both poses of a model with skins and animated nodes: its skinned parts by `joint_matrices` (of skeletons[0]), the
     // parts that hang from an animated node by `node_matrices` (of skeletons[node_skeleton], as draw(model, transform,
     // node_matrices) takes them). Empty node matrices: the call above.
     Status3D draw_skinned(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                           Color tint, u32 id, std::span<const Material3D> materials,
-                          std::span<const Mat4f> node_matrices);
+                          std::span<const Mat4f> node_matrices, u64 history_id = 0);
     // Many copies of `mesh`, in one draw.
     Status3D draw_instanced(const Mesh3D& mesh, std::span<const MeshInstance3D> instances,
                             const Material3D& material = {});
@@ -602,21 +608,23 @@ public:
 
 private:
     bool draw_operation(const Model3D& model, const Mat4f& transform, std::span<const Mat4f> node_matrices,
-                        Color tint = colors::white, u32 id = 0);
+                        Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     bool draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
-                        std::span<const Material3D> materials);
-    bool draw_operation(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0);
+                        std::span<const Material3D> materials, u64 history_id = 0);
+    bool draw_operation(const Model3D& model, const Mat4f& transform, Color tint = colors::white, u32 id = 0,
+                        u64 history_id = 0);
     bool draw_operation(const Mesh3D& mesh, const Mat4f& transform, const Material3D& material = {},
-                        Color tint = colors::white, u32 id = 0);
+                        Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
                                 Color tint, u32 id, std::span<const Material3D> materials,
-                                std::span<const Mat4f> node_matrices);
+                                std::span<const Mat4f> node_matrices, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                                Color tint, u32 id, std::span<const Material3D> materials);
+                                Color tint, u32 id, std::span<const Material3D> materials, u64 history_id = 0);
     bool draw_skinned_operation(const Model3D& model, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                                Color tint = colors::white, u32 id = 0);
+                                Color tint = colors::white, u32 id = 0, u64 history_id = 0);
     bool draw_skinned_operation(const Mesh3D& mesh, std::span<const Mat4f> joint_matrices, const Mat4f& transform,
-                                const Material3D& material = {}, Color tint = colors::white, u32 id = 0);
+                                const Material3D& material = {}, Color tint = colors::white, u32 id = 0,
+                                u64 history_id = 0);
     bool draw_instanced_operation(const ModelBatch3D& batch);
     bool draw_instanced_operation(const InstanceBatch3D& batch, const Material3D& material = {});
     bool draw_instanced_operation(const Mesh3D& mesh, std::span<const Mat4f> transforms,
@@ -637,7 +645,7 @@ private:
                                             bool skinned, u32 skin_first);
     // One skinned copy whose matrices start at `first_joint` of _joints (already there).
     void add_skinned_copy(const Mesh3D& mesh, u32 first_joint, const Mat4f& transform, const Material3D& material,
-                          Color tint, u32 id);
+                          Color tint, u32 id, u64 history_id = 0);
     void add_group(u32 first, u32 count, const Bounds3D& world_bounds);
 
     struct DrawStamp {

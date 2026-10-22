@@ -7,6 +7,7 @@ namespace kin {
 class EcsEntity;
 class EcsCommandBuffer;
 namespace scripting_detail {
+inline constexpr const char* stale_entity_message = "stale or foreign entity handle";
 // The scheduler's buffer while a Lua system runs, otherwise null. Native Lua
 // extensions use it so a failed system discards its deferred work normally.
 EcsCommandBuffer* current_script_commands();

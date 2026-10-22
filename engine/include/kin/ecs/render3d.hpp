@@ -84,8 +84,8 @@ struct MeshRenderer3D {
     Material3D material{};
     Color tint = colors::white;
     bool visible = true;
-    // What pick says of it, and how its frames are matched for the velocity under temporal anti-aliasing. 0: the
-    // entity's id (the low 32 bits of flecs's: an index that is recycled inherits the dead entity's history).
+    // Picking ID; zero uses the entity's low 32 bits. Temporal history has a separate
+    // automatic identity including entity generation, collection scope and prefab lease.
     u32 id = 0;
 };
 
@@ -98,8 +98,7 @@ struct ModelRenderer3D {
     std::shared_ptr<const Model3D> model;
     Color tint = colors::white;
     bool visible = true;
-    u32 id = 0; // zero: use the entity's ID for every model part (its low 32 bits: a recycled index inherits the dead
-                // one's history)
+    u32 id = 0; // picking ID; zero uses the entity's low 32 bits. History is generation/lease aware.
     ComponentAssetRef asset;
 };
 
@@ -158,9 +157,6 @@ struct ParticleEmitter3D {
     ComponentAssetRef texture_asset; // empty: procedural disc, or a C++ texture
     bool texture_nearest = false;
     std::string bound_texture; // runtime-only; empty refs clear only authored bindings
-    // Presentation history, sampled before the last fixed update; not authored.
-    std::vector<ParticleSprite3D> previous_sprites;
-    bool sampled = false;
 };
 
 // A skinned model (a character) drawn at the entity's WorldTransform3D, in the pose of the entity's Animator3D (the
@@ -171,9 +167,8 @@ struct SkinnedMeshRenderer3D {
     std::shared_ptr<const Model3D> model;
     Color tint = colors::white;
     bool visible = true;
-    // What pick says of every part of it, and how its frames are matched for the velocity under temporal anti-aliasing.
-    // 0: the entity's id (the low 32 bits of flecs's), so that pick names the entity and two characters do not swap
-    // histories; an index that is recycled inherits the dead entity's history.
+    // Picking ID for every part; zero uses the entity's low 32 bits. Temporal history
+    // uses an independent generation/lease-aware identity, subdivided per model part.
     u32 id = 0;
     // Optional authored reference; model stays runtime-only. Resolve before
     // animation/physics setup. An empty reference leaves C++ models untouched.
@@ -525,6 +520,8 @@ public:
     bool apply_weather(Scene3D& scene, const Fog3D& base_fog) const;
 
 private:
+    u64 history_id(flecs::entity entity) const;
+    u64 _history_identity; // collection scope, separate from simulation/rollback state
     const PosePresentation3D* _pose_presentation = nullptr;
     const IKPresentation3D* _ik_presentation = nullptr;
     const PoseOverride3D& pose_override_for(flecs::entity entity, const Animator3D& animator) const;

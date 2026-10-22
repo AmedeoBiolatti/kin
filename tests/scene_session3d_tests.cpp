@@ -783,6 +783,9 @@ void headless() {
         check(result, message);
     };
     ok(session.load("scenes/camp.kinscene"), "headless camp load failed");
+    check(!session.bodies()->config().debug.enabled && session.bodies()->config().debug.contacts &&
+              session.bodies()->config().debug.grips,
+          "session debug defaults changed");
     check(session.active() && !session.view() && session.physics() && session.physics()->body_count() >= 3,
           "headless camp incomplete");
     const auto hero = session.entity("survivor");
@@ -805,8 +808,26 @@ void headless() {
     ok(bool(prepared), "headless preload failed");
     const auto pool = session.create_pool(prepared, {.capacity = 2}).value_or({});
     ok(bool(pool), "headless pool failed");
-    const auto pooled = session.spawn(pool, {.position = Vec3f{-3, 2, 3}}).value_or({});
+    auto pooled = session.spawn(pool, {.position = Vec3f{-3, 2, 3}}).value_or({});
     ok(bool(pooled) && session.pool_stats(pool).active == 1, "headless pool spawn failed");
+    {
+        struct MeshBackend final : IMeshBackend3D {};
+        const Mesh3D mesh{std::make_shared<MeshBackend>(), 3, 3, {{-1, -1, -1}, {1, 1, 1}}};
+        auto root = session.resolve(pooled.root);
+        root.set(MeshRenderer3D{.mesh = mesh, .id = 123});
+        ok(session.collect(), "pooled history collect failed");
+        const auto identity = session.scene()->instances()[0].history_id;
+        ok(identity != 0, "pooled history identity missing");
+        ok(session.despawn(pooled), "history test lease return failed");
+        pooled = session.spawn(pool, {.position = Vec3f{-3, 2, 3}}).value_or({});
+        ok(bool(pooled) && session.resolve(pooled.root).id() == root.id(), "pool did not reuse physical entity");
+        session.resolve(pooled.root).set(MeshRenderer3D{.mesh = mesh, .id = 123});
+        ok(session.collect(), "reused history collect failed");
+        ok(session.scene()->instances()[0].history_id != identity, "pooled lease inherited temporal history");
+        // Keep the existing headless gameplay fixture unchanged.
+        session.resolve(pooled.root).remove<MeshRenderer3D>();
+    }
+
     auto commands = session.commands();
     EcsCommandBuffer buffer;
     std::string error;

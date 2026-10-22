@@ -39,7 +39,7 @@ draw;
 layout(location = 5) out vec3 vCurrent;  // clip x, y, w this frame
 layout(location = 6) out vec3 vPrevious; // and the last
 layout(location = 7) flat out float vFresh;
-layout(location = 8) out float vIndependent;
+layout(location = 8) out vec3 vOldInCurrent;
 #else
 layout(set = 1, binding = 0) uniform Draw {
     mat4 view_projection;
@@ -97,9 +97,7 @@ void main() {
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * (skin_matrix_previous(at, skin) * vec4(aPos, 1.0));
     vPrevious = (draw.prior * previous_world).xyw;
-    const vec4 old_in_current = draw.current * previous_world;
-    vIndependent = old_in_current.w > 0.0 && vCurrent.z > 0.0
-        ? length(vCurrent.xy / vCurrent.z - old_in_current.xy / old_in_current.w) : 2.0;
+    vOldInCurrent = (draw.current * previous_world).xyw;
 #else
     // The same expressions as prepass_velocity.vert's, so the velocity is the pre-pass's to the last bit.
     mat4 before = previous[at];
@@ -108,9 +106,7 @@ void main() {
     vCurrent = (draw.current * world).xyw;
     const vec4 previous_world = before * vec4(aPos, 1.0);
     vPrevious = (draw.prior * previous_world).xyw;
-    const vec4 old_in_current = draw.current * previous_world;
-    vIndependent = old_in_current.w > 0.0 && vCurrent.z > 0.0
-        ? length(vCurrent.xy / vCurrent.z - old_in_current.xy / old_in_current.w) : 2.0;
+    vOldInCurrent = (draw.current * previous_world).xyw;
 #endif
 #endif
 }

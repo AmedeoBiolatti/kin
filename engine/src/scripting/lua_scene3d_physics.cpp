@@ -16,8 +16,7 @@ SceneQueryFilter3D filter(const LuaScene3DBindings& api, const sol::optional<sol
         out.initial_overlap = option(*options, "initial_overlap", false);
         if (sol::object ignore = (*options)["ignore"]; ignore != sol::nil) {
             out.ignore = checked<SceneEntity3D>(ignore, "ignore");
-            if (!resolve(api, out.ignore))
-                throw std::runtime_error("3D query ignore entity is stale");
+            (void)resolve(api, out.ignore);
         }
     }
     return out;
@@ -399,8 +398,8 @@ void bind_physics(sol::state& lua, sol::table table, std::shared_ptr<LuaScene3DB
     scene["ragdoll_events"] = [api](sol::this_state state, sol::object filter_argument) {
         const auto filter = optional_argument<SceneEntity3D>(filter_argument, "filter");
         physics(*api);
-        if (filter && !resolve(*api, *filter))
-            throw std::runtime_error("ragdoll event filter is stale");
+        if (filter)
+            (void)resolve(*api, *filter);
         sol::state_view lua{state};
         auto rows = lua.create_table();
         int index = 0;
@@ -507,8 +506,8 @@ void bind_physics(sol::state& lua, sol::table table, std::shared_ptr<LuaScene3DB
     scene["rope_events"] = [api](sol::this_state state, sol::object filter_argument) {
         const auto filter = optional_argument<SceneEntity3D>(filter_argument, "filter");
         physics(*api);
-        if (filter && !resolve(*api, *filter))
-            throw std::runtime_error("rope event filter is stale");
+        if (filter)
+            (void)resolve(*api, *filter);
         sol::state_view lua{state};
         auto rows = lua.create_table();
         int index = 0;

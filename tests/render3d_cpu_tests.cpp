@@ -359,6 +359,61 @@ void test_particle_wind_field() {
 // The catch-up cap: an update runs at most max_catch_up of steps (30), whatever it is given; the rest is dropped and
 // counted in skipped_time(), which is not state. A non-finite or negative dt is no time at all. Frames under the cap
 // (60 and 144 Hz, ragged ones) still reach one state.
+void test_particle_motion_history_and_identity() {
+    ParticleSystem3D sampled{7}, plain{7};
+    for (auto* system : {&sampled, &plain}) {
+        system->desc.rate = 0;
+        system->desc.gravity = {};
+        system->desc.velocity_min = system->desc.velocity_max = {6, 0, 0};
+        system->burst(8);
+    }
+    std::vector<ParticleSprite3D> old, now, middle;
+    sampled.sprites(old);
+    sampled.update(1.0 / 60, nullptr, ParticleMotion3D::Capture);
+    plain.update(1.0 / 60);
+    sampled.sprites(now);
+    sampled.sprites(middle, .5f);
+    assert(sampled.state_hash() == plain.state_hash() && sampled.save() == plain.save());
+    for (std::size_t i = 0; i < old.size(); ++i) {
+        assert(length(middle[i].position - lerp(old[i].position, now[i].position, .5f)) < 1e-6f);
+        assert(middle[i].id == old[i].id && now[i].id == old[i].id);
+    }
+    const auto saved = sampled.save();
+    const auto before = sampled.state_hash();
+    assert(sampled.restore(saved) && sampled.state_hash() == before);
+    middle.clear();
+    sampled.sprites(middle, 0);
+    assert(middle[0].id == now[0].id && length(middle[0].position - old[0].position) < 1e-6f);
+    // Rewind one step and resimulate: IDs and the corrected interpolation
+    // segment agree with the original timeline, without changing saved bytes.
+    sampled.update(1.0 / 60, nullptr, ParticleMotion3D::Capture);
+    std::vector<ParticleSprite3D> advanced;
+    sampled.sprites(advanced, .5f);
+    assert(sampled.restore(saved, ParticleRestore3D::Rollback));
+    sampled.update(1.0 / 60, nullptr, ParticleMotion3D::Capture);
+    middle.clear();
+    sampled.sprites(middle, .5f);
+    assert(middle[0].id == advanced[0].id && middle[0].position == advanced[0].position);
+    assert(sampled.restore(saved)); // a different snapshot is a discontinuity by default
+    middle.clear();
+    sampled.sprites(middle);
+    assert(middle[0].id != now[0].id);
+    const auto restored_id = middle[0].id;
+    sampled.clear();
+    sampled.burst(1);
+    middle.clear();
+    sampled.sprites(middle);
+    assert(middle[0].id != old[0].id && middle[0].id != restored_id);
+    // A first automatic birth interpolates from zero coverage.
+    ParticleSystem3D fresh;
+    fresh.desc.rate = 120;
+    fresh.desc.fade_in = 0;
+    fresh.update(ParticleSystem3D::step, nullptr, ParticleMotion3D::Capture);
+    middle.clear();
+    fresh.sprites(middle, 0);
+    assert(!middle.empty() && middle[0].alpha == 0);
+}
+
 void test_particle_catch_up_cap() {
     const auto stream = [](u64 seed) {
         ParticleSystem3D s{seed};
@@ -511,6 +566,7 @@ int main() {
     test_layout_revision();
     test_particle_wind_field();
     test_particle_catch_up_cap();
+    test_particle_motion_history_and_identity();
     test_time_of_day_clock_exact();
     test_sun_times_at_the_poles();
     std::cout << "render3d on the CPU: instance batch bounds exact after scattered, spanning and broken edits, a tight "

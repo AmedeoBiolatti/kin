@@ -60,13 +60,20 @@ void placement_and_batches() {
     bad.bounds.min.y = std::numeric_limits<f32>::quiet_NaN();
     invalid([&] { return bad.placement({.size = 1}); });
 
-    std::array<MeshInstance3D, 3> copies{{{Mat4f::translation({16, 0, 0}), colors::white, 101},
-                                          {Mat4f::translation({-.1f, 0, 0}), Color::rgb(0, 0, 255), 202},
-                                          {Mat4f::translation({.1f, 0, 0}), Color::rgb(255, 0, 0), 303}}};
+    std::array<MeshInstance3D, 3> copies{
+        {{Mat4f::translation({16, 0, 0}), colors::white, 101, 0x100000001ULL},
+         {Mat4f::translation({-.1f, 0, 0}), Color::rgb(0, 0, 255), 202, 0x200000001ULL},
+         {Mat4f::translation({.1f, 0, 0}), Color::rgb(255, 0, 0), 303, 0x300000001ULL}}};
     auto batch = ModelBatch3D::create(model, copies).value_or({});
     check(batch.instance_count() == 3 && batch.parts().size() == 2 && batch.triangle_count() == 6,
           "whole model batch accounting");
     check(batch.record_bytes() == 6 * sizeof(MeshInstance3D), "batch CPU storage accounting");
+    Scene3D identified;
+    check(identified.draw(model, Mat4f::identity(), colors::white, 77, 0x100000001ULL), "identified model draw");
+    check(identified.instances().size() == 2 && identified.instances()[0].id == 77 &&
+              identified.instances()[1].id == 77 && identified.instances()[0].history_id &&
+              identified.instances()[0].history_id != identified.instances()[1].history_id,
+          "model parts did not get distinct history IDs");
     for (std::size_t p = 0; p < 2; ++p) {
         const auto& part = batch.parts()[p];
         check(part.instances.groups().size() == 3, "negative/cell-edge positions grouped incorrectly");
@@ -75,6 +82,11 @@ void placement_and_batches() {
             const auto original =
                 std::find_if(copies.begin(), copies.end(), [&](auto& copy) { return copy.id == record.id; });
             check(original != copies.end() && record.tint == original->tint, "copy tint or stable ID lost");
+            check(record.history_id != 0, "batch dropped explicit history ID");
+            const auto sibling = std::find_if(batch.parts()[1 - p].instances.instances().begin(),
+                                              batch.parts()[1 - p].instances.instances().end(),
+                                              [&](const auto& copy) { return copy.id == record.id; });
+            check(sibling->history_id != record.history_id, "model batch shared history across parts");
             check(near(record.transform.apply({.5f, 1, 2}),
                        original->transform.apply(model.parts[p].transform.apply({.5f, 1, 2}))),
                   "hierarchical part transform lost");

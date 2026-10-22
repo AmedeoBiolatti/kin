@@ -12,6 +12,7 @@
 #include <kin/physics3d/assets3d.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <kin/scene/scene_session3d.hpp>
 #endif
 #include <type_traits>
 
@@ -32,6 +33,22 @@ static_assert(HasCacheCounters<kin::RenderDebugStats3D>);
 static_assert(!HasForcedLevel<kin::Lod3D> && !HasReadback<kin::Lod3D>);
 static_assert(!HasFrozenJitter<kin::TemporalAA3D>);
 static_assert(HasForcedLevel<kin::RenderDebugOptions3D> && HasReadback<kin::RenderDebugOptions3D>);
+
+template <class T>
+concept BooleanMotion = requires(T& system) { system.update(0.01, nullptr, true); };
+template <class T>
+concept BooleanRestore = requires(T& system, std::span<const kin::u8> bytes) { system.restore(bytes, true); };
+static_assert(!BooleanMotion<kin::ParticleSystem3D> && !BooleanRestore<kin::ParticleSystem3D>);
+static_assert(std::is_same_v<decltype(kin::MeshInstance3D::history_id), kin::u64>);
+#ifdef KIN_EXPERIMENTAL_3D
+template <class T>
+concept HasFixedStep = requires(T settings) {
+    settings.fixed_dt;
+    settings.max_steps;
+};
+static_assert(!HasFixedStep<decltype(kin::SceneSession3DOptions::physics_debug)>);
+static_assert(HasFixedStep<kin::WorldPhysicsState3DConfig>);
+#endif
 
 // Colours of lights cannot silently become geometric directions or sRGB bytes.
 static_assert(sizeof(kin::LinearRgb) == 3 * sizeof(kin::f32));

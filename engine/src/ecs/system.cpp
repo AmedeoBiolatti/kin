@@ -181,7 +181,10 @@ void EcsCommandBuffer::defer(std::function<bool(EcsWorld&, std::string&)> apply)
 }
 
 EcsDeferredEntity EcsCommandBuffer::create_entity(std::string name) {
-    const EcsDeferredEntity deferred{_next_deferred_entity++};
+    static std::atomic<u64> next_scope{1};
+    if (_deferred_scope == 0)
+        _deferred_scope = next_scope.fetch_add(1, std::memory_order_relaxed);
+    const EcsDeferredEntity deferred{_next_deferred_entity++, _deferred_scope};
     _commands.push_back([index = deferred.index, name = std::move(name)](EcsWorld& world,
                                                                          std::vector<EcsEntity>& created,
                                                                          std::string&) {
@@ -205,7 +208,7 @@ void EcsCommandBuffer::destroy(EcsId entity) {
 }
 
 void EcsCommandBuffer::destroy(EcsDeferredEntity entity) {
-    add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+    add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
         target.destroy();
     });
 }
@@ -226,7 +229,7 @@ void EcsCommandBuffer::add(EcsId entity, std::string component) {
 }
 
 void EcsCommandBuffer::add(EcsDeferredEntity entity, std::string component) {
-    add_world_command({TargetKind::Deferred, 0, entity.index},
+    add_world_command({TargetKind::Deferred, 0, entity.index, entity.scope},
                       [component = std::move(component)](EcsWorld& world, EcsEntity target, std::string& error) {
                           if (!world.components().add(target, component)) {
                               error = world.components().last_error();
@@ -252,7 +255,7 @@ void EcsCommandBuffer::remove(EcsId entity, std::string component) {
 }
 
 void EcsCommandBuffer::remove(EcsDeferredEntity entity, std::string component) {
-    add_world_command({TargetKind::Deferred, 0, entity.index},
+    add_world_command({TargetKind::Deferred, 0, entity.index, entity.scope},
                       [component = std::move(component)](EcsWorld& world, EcsEntity target, std::string& error) {
                           if (!world.components().remove(target, component)) {
                               error = world.components().last_error();
@@ -284,7 +287,7 @@ void EcsCommandBuffer::patch_field(EcsId entity, std::string component, std::str
 }
 
 void EcsCommandBuffer::patch_field(EcsDeferredEntity entity, std::string component, std::string field, ComponentFieldValue value) {
-    add_world_command({TargetKind::Deferred, 0, entity.index},
+    add_world_command({TargetKind::Deferred, 0, entity.index, entity.scope},
                       [component = std::move(component), field = std::move(field), value = std::move(value)](EcsWorld& world,
                                                                                                             EcsEntity target,
                                                                                                             std::string& error) {
@@ -303,6 +306,7 @@ void EcsCommandBuffer::patch_field(EcsDeferredEntity entity, std::string compone
 void EcsCommandBuffer::clear() {
     _commands.clear();
     _next_deferred_entity = 0;
+    _deferred_scope = 0;
 }
 
 bool EcsCommandBuffer::flush(EcsWorld& world, std::string& error) {
@@ -350,9 +354,15 @@ bool EcsCommandBuffer::resolve_target(EcsWorld& world,
 }
 
 void EcsCommandBuffer::add_command(Target target, std::function<void(EcsEntity)> apply) {
-    _commands.push_back([target, apply = std::move(apply)](EcsWorld& world,
+    const bool valid_scope = target.kind != TargetKind::Deferred ||
+                             owns({target.deferred_index, target.deferred_scope});
+    _commands.push_back([target, valid_scope, apply = std::move(apply)](EcsWorld& world,
                                                            std::vector<EcsEntity>& created,
                                                            std::string& error) {
+        if (!valid_scope) {
+            error = "stale or foreign deferred entity handle";
+            return false;
+        }
         EcsEntity entity;
         if (!resolve_target(world, created, target, entity, error)) {
             return false;
@@ -363,9 +373,15 @@ void EcsCommandBuffer::add_command(Target target, std::function<void(EcsEntity)>
 }
 
 void EcsCommandBuffer::add_world_command(Target target, std::function<bool(EcsWorld&, EcsEntity, std::string&)> apply) {
-    _commands.push_back([target, apply = std::move(apply)](EcsWorld& world,
+    const bool valid_scope = target.kind != TargetKind::Deferred ||
+                             owns({target.deferred_index, target.deferred_scope});
+    _commands.push_back([target, valid_scope, apply = std::move(apply)](EcsWorld& world,
                                                            std::vector<EcsEntity>& created,
                                                            std::string& error) {
+        if (!valid_scope) {
+            error = "stale or foreign deferred entity handle";
+            return false;
+        }
         EcsEntity entity;
         if (!resolve_target(world, created, target, entity, error)) {
             return false;

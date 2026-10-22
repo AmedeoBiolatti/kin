@@ -644,7 +644,7 @@ struct ScriptEntityApi {
             if (self.get_type() != sol::type::table)
                 throw std::runtime_error("component commit requires its table; call with ':'");
             if (scene->closing || !entity.alive() || (lease && !lease()))
-                throw std::runtime_error("component entity or 3D lease is stale");
+                throw std::runtime_error(scripting_detail::stale_entity_message);
             sol::table table = self.as<sol::table>();
             const std::vector<ComponentPatchValue> patch_values = component_patch_values_from_lua(scene->ecs(), component_name, table);
             apply_component_patch_values(scene->ecs(), entity, component_name, patch_values);
@@ -817,7 +817,7 @@ std::optional<ScriptCommandTarget> command_target_from_lua(const sol::object& ob
     if (object.is<ScriptEntityApi>()) {
         const auto& entity = object.as<const ScriptEntityApi&>();
         if (!entity.alive())
-            throw std::runtime_error("command target entity or 3D lease is stale");
+            throw std::runtime_error(scripting_detail::stale_entity_message);
         return ScriptCommandTarget{.id = entity.id()};
     }
     if (object.is<ScriptDeferredEntityApi>()) {
@@ -933,11 +933,13 @@ private:
         }
     }
 
-    static ScriptCommandTarget require_target(const sol::object& target) {
+    ScriptCommandTarget require_target(const sol::object& target) const {
         std::optional<ScriptCommandTarget> resolved = command_target_from_lua(target);
         if (!resolved) {
             throw std::runtime_error("ECS command target must be an entity, deferred entity, or entity id");
         }
+        if (resolved->deferred && !commands->owns(resolved->deferred_entity))
+            throw std::runtime_error("stale or foreign deferred entity handle");
         return *resolved;
     }
 };
@@ -1350,8 +1352,10 @@ template <class Method, class C, class... A> decltype(auto) script_invoke(Method
         bool checks_liveness = false;
         if constexpr (std::is_same_v<Method, bool (ScriptEntityApi::*)() const>)
             checks_liveness = method == &ScriptEntityApi::alive || method == &ScriptEntityApi::valid;
-        if (!checks_liveness && !self.lease_valid())
-            throw std::runtime_error("3D entity lease is stale");
+        if constexpr (std::is_same_v<Method, EcsId (ScriptEntityApi::*)() const>)
+            checks_liveness = method == &ScriptEntityApi::id;
+        if (!checks_liveness && (!self.scene || self.scene->closing || !self.alive()))
+            throw std::runtime_error(scripting_detail::stale_entity_message);
     }
     return std::invoke(method, self, std::forward<A>(args)...);
 }
@@ -1378,7 +1382,9 @@ EcsEntity scripting_detail::script_entity(const sol::object& object) {
     if (!object.is<ScriptEntityApi>())
         throw std::runtime_error("expected a KinEntity");
     const auto& value = object.as<const ScriptEntityApi&>();
-    return value.scene && !value.scene->closing && value.alive() ? value.entity : EcsEntity{};
+    if (!value.scene || value.scene->closing || !value.alive())
+        throw std::runtime_error(stale_entity_message);
+    return value.entity;
 }
 
 void scripting_detail::script_component_access(std::string_view component, bool write) {
@@ -1387,19 +1393,7 @@ void scripting_detail::script_component_access(std::string_view component, bool 
 
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     : _impl(std::make_unique<Impl>()) {
-    _impl->lua.set_exception_handler([](lua_State* state, sol::optional<const std::exception&>, sol::string_view what) {
-        lua_Debug caller{};
-        int level = 1;
-        while (lua_getstack(state, level, &caller)) {
-            lua_getinfo(state, "l", &caller);
-            if (caller.currentline > 0) break;
-            ++level;
-        }
-        luaL_where(state, level);
-        lua_pushlstring(state, what.data(), what.size());
-        lua_concat(state, 2);
-        return 1;
-    });
+    scripting_detail::bind_script_errors(_impl->lua);
     _impl->lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
     sol::table package = _impl->lua.create_table();
     package["loaded"] = _impl->lua.create_table();

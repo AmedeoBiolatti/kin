@@ -1,3 +1,4 @@
+#include "history3d.hpp"
 #include "model_bounds3d.hpp"
 
 #include <kin/assets/content.hpp>
@@ -279,8 +280,9 @@ private:
                        (LogFields{{.name = "model", .value = _label}, {.name = "detail", .value = detail}}));
     }
     void unsupported(const char* what, const std::string& detail) {
-        note(what, detail);
-        const std::string issue = std::string(what) + ": " + detail;
+        const std::string message = "model profile violation: " + std::string(what);
+        note(message.c_str(), detail);
+        const std::string issue = message + ": " + detail;
         _out.asset_diagnostics.push_back(issue);
         if (_issues)
             _issues->push_back(issue);
@@ -294,7 +296,7 @@ private:
             const std::size_t n = skin.joints_count;
             if (n == 0 || n > max_skin_joints) {
                 unsupported(
-                    "model profile violation: unsupported skin; export at most 256 joints with readable MAT4 inverse "
+                    "unsupported skin; export at most 256 joints with readable MAT4 inverse "
                     "binds",
                     std::string{skin.name ? skin.name : "skin"} + " has " + std::to_string(n) + " joints, " +
                         (n == 0 ? "none" : "more than the " + std::to_string(max_skin_joints) + " a skin can have"));
@@ -302,7 +304,7 @@ private:
             }
             const cgltf_accessor* binds = skin.inverse_bind_matrices;
             if (const char* why = !binds ? nullptr : binds->type != cgltf_type_mat4 ? "not MAT4" : unreadable(binds)) {
-                unsupported("model profile violation: unsupported skin; export at most 256 joints with readable MAT4 "
+                unsupported("unsupported skin; export at most 256 joints with readable MAT4 "
                             "inverse binds",
                             std::string{skin.name ? skin.name : "skin"} +
                                 ": its inverse bind matrices cannot be read (" + why + ")");
@@ -348,7 +350,7 @@ private:
                 }
             }
             if (nodes.size() > max_skin_joints) {
-                unsupported("model profile violation: intermediary skin nodes exceed the joint limit; simplify the rig",
+                unsupported("intermediary skin nodes exceed the joint limit; simplify the rig",
                             std::string{skin.name ? skin.name : "skin"} + " would have " +
                                 std::to_string(nodes.size()) + " joints with them, more than the " +
                                 std::to_string(max_skin_joints) + " a skin can have");
@@ -386,8 +388,7 @@ private:
                 }
             }
             if (order.size() != count) {
-                unsupported("model profile violation: skin joints form a loop; export an acyclic rig",
-                            skin.name ? skin.name : "skin");
+                unsupported("skin joints form a loop; export an acyclic rig", skin.name ? skin.name : "skin");
                 continue;
             }
             SkinInfo info;
@@ -435,7 +436,7 @@ private:
                     sk.root_transform = world;
                     first_root = false;
                 } else if (std::memcmp(world.m, sk.root_transform.m, sizeof(world.m)) != 0) {
-                    unsupported("model profile violation: skin roots use different spaces; export a common root",
+                    unsupported("skin roots use different spaces; export a common root",
                                 skin.name ? skin.name : "skin");
                 }
             }
@@ -483,7 +484,7 @@ private:
             return;
         }
         if (marked > max_skin_joints) {
-            unsupported("model profile violation: animated node hierarchy exceeds the joint limit; split the model",
+            unsupported("animated node hierarchy exceeds the joint limit; split the model",
                         std::to_string(marked) + " nodes with those above them, more than " +
                             std::to_string(max_skin_joints));
             return;
@@ -649,7 +650,7 @@ private:
             out[i] = v;
         }
         if (none > 0 || bad > 0) {
-            unsupported("3D: model profile violation: skinned vertices require usable weights and valid joint indices",
+            unsupported("skinned vertices require usable weights and valid joint indices",
                         std::string{name} + ": " + std::to_string(none) + " vertices without weights, " +
                             std::to_string(bad) + " influences past the joints");
         }
@@ -723,7 +724,7 @@ private:
             }
         }
         if (!agree) {
-            unsupported("3D: model profile violation: a material's textures require matching KHR_texture_transform and "
+            unsupported("a material's textures require matching KHR_texture_transform and "
                         "TEXCOORD sets",
                         m->name ? m->name : "material");
             shared.reset();
@@ -767,11 +768,7 @@ private:
 
     // CPU inspection keeps partial data with diagnostics; usable GPU assets reject it.
     void refuse(const char* name, const std::string& why) {
-        note("model profile violation: primitive geometry cannot be read", std::string{name} + ": " + why);
-        _out.asset_diagnostics.push_back("model geometry could not be read: " + std::string{name} + ": " + why);
-        if (_issues) {
-            _issues->push_back("model geometry could not be read: " + std::string{name} + ": " + why);
-        }
+        unsupported("primitive geometry cannot be read", std::string{name} + ": " + why);
     }
 
     MeshData3D mesh_data(const cgltf_primitive& primitive, const SkinInfo* skin, const char* name) {
@@ -797,7 +794,7 @@ private:
                     attribute_index(primitive, cgltf_attribute_type_texcoord, placing->texcoord)) {
                 uvs = set;
             } else {
-                unsupported("model profile violation: material requires a missing TEXCOORD set; export that UV set",
+                unsupported("material requires a missing TEXCOORD set; export that UV set",
                             std::string{name} + ": TEXCOORD_" + std::to_string(placing->texcoord));
             }
         }
@@ -829,7 +826,7 @@ private:
         if (skin) {
             read = read_skin(primitive, *skin, data.vertices.size(), name, data.skin) && read;
             if (attribute_index(primitive, cgltf_attribute_type_joints, 1)) {
-                unsupported("model profile violation: more than four skin influences per vertex; limit weights to four "
+                unsupported("more than four skin influences per vertex; limit weights to four "
                             "before export",
                             name);
             }
@@ -943,8 +940,7 @@ private:
                 note("3D: an animation moves no joint of a skin and no node a part hangs from: it is left out", name);
             }
             if (morph) {
-                unsupported("model profile violation: morph target animation is unsupported; bake it before export",
-                            name);
+                unsupported("morph target animation is unsupported; bake it before export", name);
             }
             if (other && (!clip_of.empty() || node_clip)) {
                 note("3D: an animation moves nodes no part of the model hangs from: those channels are ignored", name);
@@ -964,12 +960,12 @@ private:
         const std::size_t keys = sampler.input->count;
         const std::size_t per_key = mode == Interpolation3D::CubicSpline ? 3 : 1;
         if (sampler.output->count < keys * per_key) {
-            unsupported("model profile violation: animation channel has fewer values than keys", _label);
+            unsupported("animation channel has fewer values than keys", _label);
             return;
         }
         for (const cgltf_accessor* accessor : {sampler.input, sampler.output}) {
             if (const char* why = unreadable(accessor)) {
-                unsupported("model profile violation: animation channel keys cannot be read", _label + ": " + why);
+                unsupported("animation channel keys cannot be read", _label + ": " + why);
                 return;
             }
         }
@@ -1080,10 +1076,11 @@ class Loader {
 public:
     using TextureResolver =
         std::function<Texture(const std::filesystem::path&, u32, bool, bool, const std::function<Texture()>&)>;
-    Loader(Renderer3D& r3d, std::filesystem::path path, const MeshOptions3D& options, TextureResolver resolver = {})
-        : _r3d(r3d), _path(std::move(path)), _options(options), _resolve_texture(std::move(resolver)) {}
+    Loader(Renderer3D& r3d, std::filesystem::path path, TextureResolver resolver = {})
+        : _r3d(r3d), _path(std::move(path)), _resolve_texture(std::move(resolver)) {}
 
-    Model3D load(std::string& error) {
+    using MeshUploader = std::function<Result3D<Mesh3D>(const MeshData3D&)>;
+    Model3D load(std::string& error, const MeshUploader& upload) {
         const std::optional<std::string> bytes = read_content_file(_path);
         if (!bytes) {
             error = "cannot read " + _path.string();
@@ -1148,7 +1145,7 @@ public:
         for (std::size_t i = 0; i < pending.size(); ++i) {
             auto& item = pending[i];
             auto& part = item.part;
-            auto mesh = _r3d.create_mesh(part.mesh, _options);
+            auto mesh = upload(part.mesh);
             if (!mesh) {
                 error = _path.string() + ": " + part.name + ": " + diagnostics3d_text(mesh.diagnostics);
                 return {};
@@ -1333,7 +1330,6 @@ private:
 
     Renderer3D& _r3d;
     std::filesystem::path _path;
-    MeshOptions3D _options;
     TextureResolver _resolve_texture;
     const cgltf_data* _data = nullptr;
     std::vector<std::string> _issues;
@@ -1575,7 +1571,10 @@ Model3D Renderer3D::load_model_shared(const std::filesystem::path& path, const M
             resolver = [assets](const auto& source, u32 embedded, bool nearest, bool srgb, const auto& load) {
                 return assets->share_texture(source, embedded, nearest, srgb, load);
             };
-        model = Loader{*this, path, options, std::move(resolver)}.load(why);
+        model = Loader{*this, path, std::move(resolver)}.load(why, [&](const MeshData3D& data) {
+            auto mesh = upload_validated_mesh(data, options);
+            return result3d(std::move(mesh), _errors);
+        });
     }
     if (!model.valid()) {
         KIN_LOG_WARN_F("render", "3D: model not loaded",
@@ -1589,25 +1588,25 @@ Model3D Renderer3D::load_model_shared(const std::filesystem::path& path, const M
     return model;
 }
 
-Status3D Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id) {
-    const bool accepted = draw_operation(model, transform, tint, id);
+Status3D Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id, u64 history_id) {
+    const bool accepted = draw_operation(model, transform, tint, id, history_id);
     return status3d(accepted, _errors);
 }
 
-bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id) {
+bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id, u64 history_id) {
     if (!_errors.empty())
         return false;
-    draw_operation(model, transform, tint, id, {});
+    draw_operation(model, transform, tint, id, std::span<const Material3D>{}, history_id);
     return _errors.empty();
 }
 Status3D Scene3D::draw(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
-                       std::span<const Material3D> materials) {
-    const bool accepted = draw_operation(model, transform, tint, id, materials);
+                       std::span<const Material3D> materials, u64 history_id) {
+    const bool accepted = draw_operation(model, transform, tint, id, materials, history_id);
     return status3d(accepted, _errors);
 }
 
 bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, Color tint, u32 id,
-                             std::span<const Material3D> materials) {
+                             std::span<const Material3D> materials, u64 history_id) {
     if (!_errors.empty())
         return false;
     if (!materials.empty() && materials.size() != model.parts.size())
@@ -1618,7 +1617,7 @@ bool Scene3D::draw_operation(const Model3D& model, const Mat4f& transform, Color
     for (size_t i = 0; i < model.parts.size(); ++i) {
         const auto& part = model.parts[i];
         draw_operation(part.mesh, transform * part.transform, materials.empty() ? part.material : materials[i], tint,
-                       id);
+                       id, detail::part_history3d(history_id, i));
     }
     return _errors.empty();
 }

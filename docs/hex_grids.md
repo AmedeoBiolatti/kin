@@ -112,6 +112,32 @@ also accepts an upper tread overlapping the lower support by up to this distance
 construction. Stair paths include both heights at each crossing. Stairs may be
 placed on a continuous floor: hidden lower triangles are filtered, new entry
 seams are joined, and blocking walls are checked again before radius erosion.
+Seam passes reuse the input weld and obstacle tree; only changed faces and
+portals and faces whose clearance depended on a support band repeat obstruction
+queries. Samples propagate across step partners in
+the same pass, so long coarse flights do not require one pass per tread. Rounded
+cuts reuse their own edge endpoints within 1e-5 m first. There is no separate
+minimum face size: boundary validation decides whether subdivision is
+representable. If numerical seams remain after 64 passes, the builder logs a
+`pathfinding` warning and returns the valid remaining mesh with
+those seams unjoined. The final split still receives joining and clearance checks;
+a non-mutating probe suppresses the warning if that split completed the work.
+Pass-limit warnings include the refinement phase, pass triangle, changed-face count and a
+world-space sample position. Shared edges consume one canonical cut list. If a
+rounded boundary cannot be triangulated safely, conflicting samples are withdrawn
+on all incident faces; unrelated samples on those edges remain. If a sample still
+cannot be represented, its seam stays unjoined. Each affected source face gets
+at most one warning per build with its input triangle index and world position,
+across both refinement phases. Rejection diagnostics show at most eight source
+faces, followed by one summary with total/suppressed counts and the bounds of all
+recorded warning positions when more faces were rejected. Unchecked ears and
+per-face degenerate drops are not used. Invalid input still returns a failed
+result with diagnostics. Boundary validation and clipping take
+quadratic time in the boundary sample count; cached blockers preserve the same
+ear and tie-breaking choices without repeatedly scanning every candidate polygon.
+The rare repair path may try removing each conflicting cut and triangulating
+again; that search can take cubic time in the face's cut count. The search
+preserves the existing first-successful-cut selection.
 Use tessellated walk surfaces to control conservative whole-triangle clearance.
 
 - `find_path` snaps both ends onto the mesh (within `NavPathOptions3D::extents`
@@ -143,8 +169,11 @@ without spreading the margin to distant parts of the level. Local slope searches
 run only when an overhead obstacle could make that margin relevant. A nonzero `agent_radius` then discards triangles within that
 horizontal distance of a walkable boundary, including boundaries made by headroom
 rejection. Different disconnected layers do not erode each other merely because
-their boundaries project to the same place. Both dimensions zero disable ordinary clearance checks. With step construction
-on, floor hidden under a climbable tread is still removed to expose its seam.
+their boundaries project to the same place. Headroom uses `max(agent_height, max_step_height)`: a nonzero step height also
+blocks low ceilings and walls for zero-height agents, and removes floor hidden
+under climbable treads to expose their seams. Only height and step both zero
+disable headroom checks; radius erosion is independent. The stored build options
+retain the requested dimensions.
 
 Clearance is conservative: unsafe triangles are removed whole. Step construction
 subdivides mismatched boundary edges and narrow tread strips before clearance;

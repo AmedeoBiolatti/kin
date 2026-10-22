@@ -92,6 +92,11 @@ readback errors instead of converting them into successful misses.
 - Lua `scene3d.handle(ecs_entity)` converts a reflected `KinEntity` to a checked
   session handle; `scene3d.resolve(handle)` returns a reflected entity or nil if
   stale. Use these around physics hits, prefab roots and ordinary ECS queries.
+  Gameplay calls with stale entity arguments now consistently raise
+  `stale or foreign entity handle`, including reflected access, deferred command
+  targets, event filters and query/IK options. Use `alive()` or `resolve()` before
+  optional work; missing components on a live entity still return false/nil.
+  Historical action tokens keep their query/cancellation semantics.
   Malformed supplied options, wrong userdata and wrong-typed optional arguments
   raise a Lua error. Nil/omitted optional arguments retain their defaults. Checks
   are local to the 3D bindings; the public engine-wide `SOL_ALL_SAFETIES_ON`
@@ -322,3 +327,62 @@ For an instantaneous rigid-body move use
 `WorldPhysicsState3D::teleport(entity, world_position, world_rotation)` and check
 its status. This clears velocity and interpolation history, including for
 kinematic bodies. Ordinary kinematic transform animation continues to sweep.
+
+Lua can use `scene3d.teleport(entity, world_position, world_rotation?)` for the
+same rigid-body operation. Omit the quaternion to retain native rotation.
+Destroyed reflected entities now reject access and repeated `destroy()` in 2D
+as well as 3D; check `alive()`/`valid()` for optional work. Native exceptions
+reported by either Lua host include the closest Lua caller position.
+`EcsDeferredEntity` now carries its creating command batch's scope. Only values
+returned by `create_entity()` are valid; do not retain placeholders across
+flushes or transfer them to another buffer. Lua enforces the same rule.
+Particle sprite IDs include a presentation epoch changed by `clear()` or a
+changed-state discontinuous `restore()`. Identical restores leave it unchanged;
+`ParticleRestore3D::Rollback` preserves it for rollback/resimulation. This does not change deterministic birth randomness,
+state hashes or saved bytes. Rebuild binary consumers for the appended deferred
+scope and the particle presentation API/layout changes; authored schemas are
+unchanged.
+
+
+## Final presentation API adjustments
+
+`MeshInstance3D::history_id` is a stable 64-bit temporal identity, separate from
+its 32-bit picking `id`. Direct `draw` and `draw_skinned` overloads also accept
+it as their final argument. Keep it stable while an object lives, unique among
+copies of the same mesh/material, and change it on replacement. Explicit history
+IDs take precedence over picking IDs; changing a picking ID preserves temporal
+identity. Model submissions derive a distinct history identity for each part.
+Zero preserves the existing picking-ID/order/spatial fallback for direct callers.
+ECS collection supplies independent identities containing the entity generation,
+collection scope and pooled-prefab lease, even when a custom picking ID is set.
+Recompile consumers: instance records now include an additional 64-bit field.
+
+`WorldPhysicsState3D::interpolate(alpha)` is deprecated because it writes
+presentation into gameplay transforms. Use `SceneSession3D::render(alpha)`,
+`SceneFrame3D::collect(scene, view, alpha)`, or `render_transform(entity, alpha)`
+for read-only presentation. The deprecated implementation remains available for
+migration and retains its existing behavior.
+
+Particle presentation choices use named modes, with unchanged defaults:
+
+```cpp
+particles.update(dt, wind, kin::ParticleMotion3D::Capture);
+particles.sprites(sprites, alpha);
+auto snapshot = particles.save();
+// After rewinding, resimulate with Capture to rebuild corrected motion samples.
+bool restored = particles.restore(snapshot, kin::ParticleRestore3D::Rollback);
+```
+
+Replace the former capture boolean with `ParticleMotion3D::None` or `Capture`,
+and the restore boolean with `ParticleRestore3D::Discontinuous` or `Rollback`.
+Saving, simulation hashes and rollback bytes are unchanged.
+
+`SceneSession3DOptions::bodies` is replaced by `physics_debug`, of type
+`PhysicsDebug3DSettings { enabled, options, contacts, grips }`. Sessions take their
+fixed timestep and catch-up policy from the host. The unused session settings
+`bodies.fixed_dt` and `bodies.max_steps` are removed. Standalone bridges retain
+`WorldPhysicsState3DConfig::{fixed_dt,max_steps}` for `advance()`; their drawing
+settings now live in `config.debug`. For example, replace
+`bodies.config().debug_draw = true` with `bodies.config().debug.enabled = true`,
+and `bodies.config().debug` (the old line-drawing options) with
+`bodies.config().debug.options`.

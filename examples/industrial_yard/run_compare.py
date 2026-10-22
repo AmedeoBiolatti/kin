@@ -132,10 +132,12 @@ def verify_pair(kin, godot):
     b, br, _ = godot
     keys = ['tier', 'props', 'actors', 'smoke', 'materials', 'structures', 'glass', 'motion', 'animation',
             'shadows', 'taa', 'ao', 'contact', 'point_lights', 'spot_lights', 'shadow_resolution',
-            'shadow_near', 'shadow_depth_bits', 'render_width', 'render_height', 'route_frame',
+            'shadow_depth_bits', 'render_width', 'render_height', 'route_frame',
             'moving_props', 'moving_batches', 'source_triangles', 'scene_triangles', 'recipe_bytes']
     for key in keys:
         assert a[key] == b[key], (key, a[key], b[key])
+    assert a['shadow_near_plane'] == b['shadow_near'], (
+        'shadow_near_plane', a['shadow_near_plane'], b['shadow_near'])
     for left, right in zip(ar, br):
         for key in ['moving_x_sum', 'moving_y_sum', 'moving_z_sum']:
             assert abs(float(left[key]) - float(right[key])) < .00002, (key, left, right)
