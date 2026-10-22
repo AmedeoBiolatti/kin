@@ -135,11 +135,11 @@ ScopedProfile::ScopedProfile(ProfileSession* session,
                              std::string_view name,
                              std::string_view category,
                              std::source_location location)
-    : _session(session),
+    : _session(session && session->active() ? session : nullptr),
       _name(name),
       _category(category),
       _location(location),
-      _start(Clock::now()) {
+      _start(_session ? Clock::now() : Clock::time_point{}) {
 }
 
 ScopedProfile::~ScopedProfile() {

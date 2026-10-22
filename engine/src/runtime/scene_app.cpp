@@ -28,7 +28,9 @@
 #include <kin/runtime/render_probe.hpp>
 #endif
 #include <kin/runtime/run_report.hpp>
+#if KIN_ENABLE_SCENE_SERVER
 #include <kin/runtime/scene_server.hpp>
+#endif
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/geometry.hpp>
 #include <kin/ui2/text.hpp>
@@ -579,6 +581,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         const char* value = std::getenv("KIN_LOG_FRAME_STATS");
         return value && value[0] == '1';
     }();
+    debug_overlay.set_recording_enabled(profile_enabled || config.headless.profile_render || log_frame_stats);
     i32 logged_frames = 0;
     const i32 windowed_frame_limit = window.mode == AppMode::Headless ? 0 : config.headless.frames;
     i32 frames_rendered = 0;
@@ -720,12 +723,14 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         frame_update_steps = 0;
         debug_overlay.begin_frame();
         ctx.renderer.reset_backend_stats();
+#if KIN_ENABLE_DEBUG_OVERLAY
         if (ctx.input.frame_pressed(Key::F1)) {
             debug_overlay.toggle();
         }
         if (ctx.input.frame_pressed(Key::F2)) {
             debug_overlay.toggle_capture();
         }
+#endif
         // Scene-side timing/counter recording is not free (games may walk system
         // snapshots and emit dozens of counters per phase), so only install the
         // sink when something will actually consume it.

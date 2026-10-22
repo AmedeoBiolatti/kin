@@ -91,6 +91,25 @@ jobs:
             cxx: clang++-18
           - name: Windows MSVC
             os: windows-2022
+          - name: Linux minimal shipping
+            os: ubuntu-24.04
+            cc: gcc-13
+            cxx: g++-13
+            config: MinSizeRel
+            options: >-
+              -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_BENCHMARKS=OFF
+              -DKIN_ENABLE_SCRIPTING=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
+              -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
+              -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON
+          - name: Windows scripting without audio or physics
+            os: windows-2022
+            options: >-
+              -DKIN_BUILD_EXAMPLES=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
+              -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
 
     steps:
       - uses: actions/checkout@v4
@@ -125,10 +144,16 @@ jobs:
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKIN_EXPERIMENTAL_3D=ON "-DKIN_GLSLC=$glslc"
 
       - name: Build
-        run: cmake --build build --config Release --parallel 4
+        run: cmake --build build --config ${{ matrix.config || 'Release' }} --parallel 4
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure -j 4 --timeout 300
+        run: ctest --test-dir build -C ${{ matrix.config || 'Release' }} --output-on-failure -j 4 --timeout 300
+
+      - name: Upload package size report
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-size-${{ matrix.name }}
+          path: build/packages/*.size.json
 
   # Signal Siege as Linux players get it. It is built in the Steam Runtime
   # (sniper, glibc 2.31), so it runs on Steam Deck and older distributions,

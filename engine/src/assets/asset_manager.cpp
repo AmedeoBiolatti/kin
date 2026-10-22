@@ -3,7 +3,9 @@
 
 #include <kin/l10n/localization.hpp>
 
+#if KIN_ENABLE_AUDIO
 #include <kin/audio/audio_catalog.hpp>
+#endif
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/particles/particle_catalog.hpp>
 #include <kin/platform/input.hpp>
@@ -263,7 +265,9 @@ void register_default_asset_loaders(AssetManager& assets) {
         return load_input_map(path);
     });
     register_particle_catalog_loader(assets);
+#if KIN_ENABLE_AUDIO
     register_audio_catalog_loader(assets);
+#endif
     register_tilemap_loader(assets);
     assets.register_loader<DialogueDocument>([](const std::filesystem::path& path) {
         DialogueLoadResult result = load_dialogue(path);

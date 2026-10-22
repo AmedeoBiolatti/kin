@@ -88,5 +88,30 @@ int main() {
     assert(profile.events().empty());
     assert(profile.frame() == 0);
 
+    // A scope entered while capture is inactive must stay inactive even if a
+    // session starts before that scope exits.
+    {
+        kin::ScopedProfile inactive{&profile, "inactive", "unit"};
+        profile.start("later");
+    }
+    assert(profile.events().empty());
+    profile.stop();
+
+    profile.start("manual-markers");
+    kin::set_current_profile_session(&profile);
+    int evaluated = 0;
+    {
+        KIN_PROFILE_SCOPE((++evaluated, "optional-marker"));
+    }
+    kin::set_current_profile_session(nullptr);
+    profile.stop();
+#ifdef KIN_ENABLE_PROFILING
+    assert(evaluated == 1);
+    assert(profile.events().size() == 1);
+#else
+    assert(evaluated == 0); // Disabled markers do not even evaluate arguments.
+    assert(profile.events().empty());
+#endif
+
     return 0;
 }

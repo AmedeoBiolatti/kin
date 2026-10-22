@@ -2,7 +2,9 @@
 #include <kin/ecs/component_schema.hpp>
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
+#if KIN_ENABLE_SCRIPTING
 #include <kin/scripting/script_scene.hpp>
+#endif
 
 #include <cassert>
 #include <cstdio>
@@ -263,6 +265,7 @@ void test_scene_validation_rejects_bad_component() {
     assert(!loaded.diagnostics.empty());
 }
 
+#if KIN_ENABLE_SCRIPTING
 void test_prefab_scene_asset_instantiates_after_script_owned_component() {
     kin::EcsWorld world;
     kin::register_builtin_editor_components(world);
@@ -372,6 +375,7 @@ end
     assert(!core.get<kin::RectRenderer>()->visible);
 }
 
+#endif
 } // namespace
 
 void test_linked_prefab_save_roundtrip() {
@@ -463,6 +467,7 @@ void test_linked_prefab_save_roundtrip() {
 int main() {
     test_scene_asset_instantiates_entities_and_prefabs();
     test_scene_validation_rejects_bad_component();
+#if KIN_ENABLE_SCRIPTING
     test_prefab_scene_asset_instantiates_after_script_owned_component();
     test_scene_asset_runtime_reloads_scene_and_keeps_old_on_invalid();
     test_scene_asset_runtime_reloads_prefab_and_preserves_overrides();

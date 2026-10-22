@@ -35,7 +35,6 @@ add_library(kin_engine STATIC
     src/core/utf8.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
-    src/ecs/audio.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -43,7 +42,6 @@ add_library(kin_engine STATIC
     src/ecs/event.cpp
     src/ecs/ecs_scene.cpp
     src/ecs/particles.cpp
-    src/ecs/physics.cpp
     src/ecs/render.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
@@ -70,8 +68,6 @@ add_library(kin_engine STATIC
     src/pathfinding/navmesh3d.cpp
     src/pathfinding/path_server.cpp
     src/pathfinding/pathfinding.cpp
-    src/physics/debug_render.cpp
-    src/physics/physics.cpp
     src/prefab/prefab_asset.cpp
     src/prefab/prefab_structure.cpp
     src/renderer/animation_import.cpp
@@ -108,7 +104,6 @@ add_library(kin_engine STATIC
     src/runtime/game_info.cpp
     src/runtime/debug_overlay.cpp
     src/runtime/scene_app.cpp
-    src/runtime/scene_server.cpp
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
     src/scene/scene_asset_runtime.cpp
@@ -143,6 +138,55 @@ add_library(kin_engine STATIC
     src/ui2/widgets_text_edit.cpp
 )
 add_library(kin::engine ALIAS kin_engine)
+
+if(KIN_ENABLE_AUDIO)
+    target_sources(kin_engine PRIVATE
+        src/audio/audio_catalog.cpp
+        src/audio/audio_clip.cpp
+        src/audio/audio_engine.cpp
+        src/audio/sdl_audio_backend.cpp
+        src/audio/spatial_audio.cpp
+        src/ecs/audio.cpp
+    )
+endif()
+if(KIN_ENABLE_PHYSICS)
+    target_sources(kin_engine PRIVATE
+        src/ecs/physics.cpp
+        src/physics/debug_render.cpp
+        src/physics/physics.cpp
+    )
+endif()
+if(KIN_ENABLE_SCRIPTING)
+    target_sources(kin_engine PRIVATE
+        src/scripting/script_engine.cpp
+        src/scripting/lua_l10n.cpp
+        src/scripting/lua_paths.cpp
+        src/scripting/lua_script.cpp
+        src/scripting/script_scene.cpp
+    )
+endif()
+if(KIN_ENABLE_SCENE_SERVER)
+    target_sources(kin_engine PRIVATE
+        src/runtime/scene_server.cpp
+    )
+endif()
+
+# Numeric definitions are public: consumers can guard optional subsystem use.
+foreach(feature SCRIPTING PHYSICS AUDIO SCENE_SERVER DEBUG_OVERLAY)
+    target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_${feature}=$<BOOL:${KIN_ENABLE_${feature}}>)
+endforeach()
+
+# These usage requirements also reach game sources and their final link.
+if(KIN_ENABLE_SIZE_OPTIMIZATIONS)
+    target_compile_options(kin_engine PUBLIC
+        "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<CXX_COMPILER_ID:GNU,Clang>>:-ffunction-sections;-fdata-sections>"
+        "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<CXX_COMPILER_ID:MSVC>>:/Gy;/Gw>")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(kin_engine INTERFACE "$<$<NOT:$<CONFIG:Debug>>:LINKER:--gc-sections>")
+    elseif(MSVC)
+        target_link_options(kin_engine INTERFACE "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF>")
+    endif()
+endif()
 
 kin_enable_release_optimizations(kin_engine)
 
@@ -264,12 +308,9 @@ target_include_directories(kin_core_allocation_instrumentation PUBLIC
 
 target_link_libraries(kin_engine PUBLIC
     flecs::flecs_static
-    box2d
     SDL3::SDL3-static
     SDL3_image::SDL3_image
     SDL3_ttf::SDL3_ttf
-    Lua::Lua
-    sol2::sol2
 )
 # 3D Lua argument checks are local to its bindings; retain sol2 defaults for 2D games.
 

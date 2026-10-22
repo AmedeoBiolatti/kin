@@ -52,6 +52,54 @@
         "KIN_EXPERIMENTAL_3D": "ON"
       },
       "description": "Release build with the experimental 3D renderer, physics, samples and tests."
+    },
+    {
+      "name": "desktop-release",
+      "displayName": "Desktop: full Release baseline",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "desktop-minimal",
+      "displayName": "Desktop: native game without optional subsystems",
+      "inherits": "desktop-release",
+      "cacheVariables": {
+        "KIN_ENABLE_SCRIPTING": "OFF",
+        "KIN_ENABLE_PHYSICS": "OFF",
+        "KIN_ENABLE_AUDIO": "OFF",
+        "KIN_ENABLE_SCENE_SERVER": "OFF",
+        "KIN_ENABLE_DEBUG_OVERLAY": "OFF",
+        "KIN_ENABLE_RENDER_PROBE": "OFF",
+        "KIN_ENABLE_DETERMINISM_CHECK": "OFF",
+        "KIN_ENABLE_RELEASE_PROFILING": "OFF",
+        "KIN_ENABLE_PROFILING": "OFF",
+        "KIN_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "desktop-shipping",
+      "displayName": "Desktop: minimal size, LTO, stripped package",
+      "inherits": "desktop-minimal",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "KIN_ENABLE_LTO": "ON",
+        "KIN_ENABLE_SIZE_OPTIMIZATIONS": "ON",
+        "KIN_PACKAGE_STRIP": "ON",
+        "KIN_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "desktop-profile",
+      "displayName": "Desktop: minimal with symbols and manual profiling",
+      "inherits": "desktop-minimal",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "KIN_ENABLE_PROFILING": "ON",
+        "KIN_BUILD_BENCHMARKS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -74,6 +122,22 @@
       "name": "3d",
       "configurePreset": "3d",
       "jobs": 4
+    },
+    {
+      "name": "desktop-release",
+      "configurePreset": "desktop-release"
+    },
+    {
+      "name": "desktop-minimal",
+      "configurePreset": "desktop-minimal"
+    },
+    {
+      "name": "desktop-shipping",
+      "configurePreset": "desktop-shipping"
+    },
+    {
+      "name": "desktop-profile",
+      "configurePreset": "desktop-profile"
     }
   ],
   "testPresets": [
@@ -98,6 +162,50 @@
       },
       "execution": {
         "jobs": 2
+      }
+    },
+    {
+      "name": "desktop-release",
+      "configurePreset": "desktop-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-minimal",
+      "configurePreset": "desktop-minimal",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-shipping",
+      "configurePreset": "desktop-shipping",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-profile",
+      "configurePreset": "desktop-profile",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
       }
     }
   ]

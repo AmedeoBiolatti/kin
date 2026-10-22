@@ -1,3 +1,7 @@
+if(NOT KIN_ENABLE_AUDIO)
+    message(FATAL_ERROR "KIN_BUILD_EXAMPLES requires KIN_ENABLE_AUDIO; disable examples for an audio-free build")
+endif()
+
 add_library(kin_example_workloads STATIC
     arena.cpp
     arena_art.cpp

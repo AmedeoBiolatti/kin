@@ -1,6 +1,8 @@
 #include <kin/runtime/debug_overlay.hpp>
 
+#if KIN_ENABLE_DEBUG_OVERLAY
 #include <kin/ui2/context.hpp>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +34,7 @@ f64 percentile(std::vector<f64> sorted, f64 percent) {
     return sorted[index];
 }
 
+#if KIN_ENABLE_DEBUG_OVERLAY
 std::string fmt_ms(f64 value) {
     char buffer[32]{};
     std::snprintf(buffer, sizeof(buffer), "%.2f", value);
@@ -129,12 +132,15 @@ ui2::WidgetStyle debug_toggle_style(Color fill, Color border) {
     return style;
 }
 
+#endif
+
 } // namespace
 
 void RuntimeDebugOverlay::begin_frame() {
 }
 
 void RuntimeDebugOverlay::record(std::string_view name, f64 ms) {
+    if (!_recording_enabled && !_visible && !_capture_active) return;
     record_to(_rows, name, ms);
     if (_capture_active) {
         record_to(_capture_rows, name, ms);
@@ -198,6 +204,7 @@ void RuntimeDebugOverlay::toggle_capture() {
 }
 
 void RuntimeDebugOverlay::render(Input& input, Renderer2D& renderer) {
+#if KIN_ENABLE_DEBUG_OVERLAY
     if (!_visible) {
         return;
     }
@@ -625,6 +632,10 @@ void RuntimeDebugOverlay::render(Input& input, Renderer2D& renderer) {
     ui.fill_rect({grip.x + grip.w - 14.0f, grip.y + grip.h - 13.0f, 10.0f, 1.0f}, Color::rgba(170, 190, 210, 220));
     ui.fill_rect({grip.x + grip.w - 8.0f, grip.y + grip.h - 19.0f, 4.0f, 1.0f}, Color::rgba(170, 190, 210, 220));
     _ui.end();
+#else
+    (void)input;
+    (void)renderer;
+#endif
 }
 
 DebugTimingStats RuntimeDebugOverlay::stats(std::string_view name) const {
@@ -685,6 +696,7 @@ const std::vector<RuntimeDebugOverlay::TimingRow>& RuntimeDebugOverlay::display_
 }
 
 void RuntimeDebugOverlay::refresh_display_cache() {
+#if KIN_ENABLE_DEBUG_OVERLAY
     const std::vector<TimingRow>& rows = display_rows_source();
     _display_frame_stats = stats_from(rows, "frame");
     _display_fps = fmt_fps(_display_frame_stats.last_ms);
@@ -710,6 +722,7 @@ void RuntimeDebugOverlay::refresh_display_cache() {
         row.copy_text = name + "\t" + value;
         _display_rows.push_back(std::move(row));
     }
+#endif
 }
 
 } // namespace kin

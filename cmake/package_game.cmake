@@ -11,9 +11,13 @@ file(LOCK "${output}/${KIN_PACKAGE_NAME}.lock" GUARD PROCESS TIMEOUT 60)
 file(REMOVE_RECURSE "${stage}")
 # Developer install settings must not turn the package into links to the build
 # tree or redirect its files under an unrelated DESTDIR.
+set(strip_argument)
+if(KIN_PACKAGE_STRIP)
+    set(strip_argument --strip)
+endif()
 execute_process(COMMAND "${CMAKE_COMMAND}" -E env --unset=DESTDIR "CMAKE_INSTALL_MODE=COPY"
     "${CMAKE_COMMAND}" --install "${KIN_PACKAGE_BUILD_DIR}"
-    --config "${KIN_PACKAGE_CONFIG}" --component "${KIN_PACKAGE_COMPONENT}" --prefix "${stage}"
+    --config "${KIN_PACKAGE_CONFIG}" --component "${KIN_PACKAGE_COMPONENT}" --prefix "${stage}" ${strip_argument}
     COMMAND_ERROR_IS_FATAL ANY)
 if(NOT EXISTS "${stage}/${KIN_PACKAGE_EXECUTABLE}")
     message(FATAL_ERROR "Package install did not produce ${KIN_PACKAGE_EXECUTABLE}")
@@ -29,3 +33,5 @@ file(WRITE "${stage}/SHA256SUMS" "${manifest}")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E tar cf "${KIN_PACKAGE_NAME}.zip" --format=zip "${KIN_PACKAGE_NAME}"
     WORKING_DIRECTORY "${output}" COMMAND_ERROR_IS_FATAL ANY)
 message(STATUS "Desktop package: ${output}/${KIN_PACKAGE_NAME}.zip")
+
+include("${CMAKE_CURRENT_LIST_DIR}/package_size.cmake")

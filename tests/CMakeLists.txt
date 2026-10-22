@@ -51,8 +51,10 @@ kin_add_test(kin_pathfinding_tests kin-pathfinding SOURCES pathfinding_tests.cpp
 kin_add_test(kin_navmesh3d_tests kin-navmesh3d SOURCES navmesh3d_tests.cpp)
 kin_add_test(kin_hex_tests kin-hex SOURCES hex_tests.cpp)
 kin_add_test(kin_path_server_tests kin-path-server SOURCES path_server_tests.cpp)
-kin_add_test(kin_physics_tests kin-physics SOURCES physics_tests.cpp)
-kin_add_test(kin_ecs_physics_tests kin-ecs-physics SOURCES ecs_physics_tests.cpp)
+if(KIN_ENABLE_PHYSICS)
+    kin_add_test(kin_physics_tests kin-physics SOURCES physics_tests.cpp)
+    kin_add_test(kin_ecs_physics_tests kin-ecs-physics SOURCES ecs_physics_tests.cpp)
+endif()
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)
@@ -91,6 +93,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
             "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}"
             "-DCONFIG=$<CONFIG>"
             "-DEXECUTABLE=$<TARGET_FILE_NAME:kin_desktop_package_fixture>"
+            "-DBUILD_EXECUTABLE=$<TARGET_FILE:kin_desktop_package_fixture>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/desktop_package_tests.cmake"
         CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
 endif()
@@ -306,15 +309,9 @@ if(KIN_ENABLE_DETERMINISM_CHECK)
     kin_add_test(kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)
 endif()
 
-add_executable(kin_server_tests
-    server_tests.cpp
-)
-
-target_link_libraries(kin_server_tests PRIVATE
-    kin::engine
-)
-
-add_test(NAME kin-server COMMAND kin_server_tests)
+if(KIN_ENABLE_SCENE_SERVER)
+    kin_add_test(kin_server_tests kin-server SOURCES server_tests.cpp)
+endif()
 
 add_executable(kin_scene_tests
     scene_tests.cpp

@@ -3,7 +3,9 @@
 #include <kin/platform/log.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/prefab/prefab_asset.hpp>
+#if KIN_ENABLE_SCRIPTING
 #include <kin/scripting/script_scene.hpp>
+#endif
 
 #include <algorithm>
 #include <optional>
@@ -144,6 +146,7 @@ SceneAssetRuntimeChange SceneAssetRuntime::poll_changes() const {
     return SceneAssetRuntimeChange::None;
 }
 
+#if KIN_ENABLE_SCRIPTING
 bool SceneAssetRuntime::reload_if_changed(ScriptScene& scene) {
     const SceneAssetRuntimeChange change = poll_changes();
     if (change == SceneAssetRuntimeChange::None) {
@@ -196,6 +199,8 @@ bool SceneAssetRuntime::reload(ScriptScene& scene) {
     scene.reload_script();
     return true;
 }
+
+#endif
 
 std::filesystem::path SceneAssetRuntime::resolve_asset(const std::filesystem::path& relative) const {
     if (relative.is_absolute()) {

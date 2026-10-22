@@ -4,7 +4,9 @@
 #include <kin/platform/input.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/runtime/debug_options.hpp>
+#if KIN_ENABLE_DEBUG_OVERLAY
 #include <kin/ui2/context.hpp>
+#endif
 
 #include <string>
 #include <string_view>
@@ -20,12 +22,13 @@ struct DebugTimingStats {
 
 class RuntimeDebugOverlay {
 public:
-    void set_visible(bool visible) { _visible = visible; }
+    void set_visible(bool visible) { _visible = KIN_ENABLE_DEBUG_OVERLAY && visible; }
     bool visible() const { return _visible; }
-    void toggle() { _visible = !_visible; }
+    void toggle() { set_visible(!_visible); }
 
     void begin_frame();
     void record(std::string_view name, f64 ms);
+    void set_recording_enabled(bool enabled) { _recording_enabled = enabled; }
     // Upserts a text row appended after the timing rows (value shown in the
     // LAST column); used for non-numeric diagnostics such as per-system
     // parallel execution decisions.
@@ -66,6 +69,7 @@ private:
     DebugTimingStats stats_from(const std::vector<TimingRow>& rows, std::string_view name) const;
     void record_to(std::vector<TimingRow>& rows, std::string_view name, f64 ms);
 
+    bool _recording_enabled = true;
     bool _visible = false;
     bool _bounds_initialized = false;
     bool _resizing = false;
@@ -81,8 +85,10 @@ private:
     std::vector<std::pair<std::string, std::string>> _status_rows;
     bool _capture_active = false;
     bool _capture_available = false;
+#if KIN_ENABLE_DEBUG_OVERLAY
     ui2::Context _ui;
     ui2::ScrollView _scroll;
+#endif
     DebugTimingStats _display_frame_stats;
     std::string _display_fps;
     std::vector<DisplayRow> _display_rows;
