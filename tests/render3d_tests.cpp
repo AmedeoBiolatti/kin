@@ -5,6 +5,7 @@
 #include "skin_fixtures.hpp"
 #include "texture_file_fixtures.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cassert>
@@ -1094,7 +1095,7 @@ void test_gpu_hdr_bloom() {
     });
 }
 
-// A negligible density selects the generic fog shader but rounds to zero opacity.
+// Fog starting beyond the geometry selects the generic shader with zero optical depth.
 // Compare it with unlit specialization, including pipeline/resource switches.
 void test_gpu_unlit_specialization() {
     std::vector<Pixels> reference;
@@ -1115,7 +1116,7 @@ void test_gpu_unlit_specialization() {
             const auto check = [&](kin::View3D& view, kin::Scene3D& scene, bool fast, bool textured) {
                 const auto fog = scene.fog;
                 if (!enabled && fast)
-                    scene.fog = {.enabled = true, .density = 1e-12f};
+                    scene.fog = {.enabled = true, .density = 0.1f, .start = 100.0f};
                 Pixels picture = shoot_view(renderer, r3d, view, scene);
                 scene.fog = fog;
                 const auto stats = r3d.debug_stats();
@@ -1125,7 +1126,15 @@ void test_gpu_unlit_specialization() {
                 if (enabled) {
                     assert(frame < reference.size());
                     if (picture.rgba != reference[frame].rgba) {
-                        std::cerr << "unlit frame mismatch: " << frame << '\n';
+                        int worst = 0;
+                        std::size_t changed = 0;
+                        for (std::size_t i = 0; i < picture.rgba.size(); ++i) {
+                            const int delta = std::abs(int(picture.rgba[i]) - int(reference[frame].rgba[i]));
+                            worst = std::max(worst, delta);
+                            changed += delta != 0;
+                        }
+                        std::cerr << "unlit frame mismatch: " << frame << ", changed channels: " << changed
+                                  << ", maximum difference: " << worst << '\n';
                         assert(false);
                     }
                 } else {
@@ -1169,7 +1178,7 @@ void test_gpu_unlit_specialization() {
                         // Mixed draws have two textured commands (same material, separated by other draws).
                         if (variant == 9) {
                             if (!enabled)
-                                scene.fog = {.enabled = true, .density = 1e-12f};
+                                scene.fog = {.enabled = true, .density = 0.1f, .start = 100.0f};
                             Pixels picture = shoot_view(renderer, r3d, view, scene);
                             assert(r3d.debug_stats().unlit_draws == (enabled ? 3u : 0u));
                             assert(r3d.debug_stats().unlit_textured_draws == (enabled ? 2u : 0u));
@@ -16379,6 +16388,16 @@ void test_particle_quads_cpu() {
 
 // The weather as a function of the clock and the camera: nothing stored, nothing drifting with the camera.
 void test_weather_volume_cpu() {
+    // Preserve exact field bits without comparing padding before the sprite's ID.
+    const auto same_sprite = [](const kin::ParticleSprite3D& a, const kin::ParticleSprite3D& b) {
+        const auto key = [](const kin::ParticleSprite3D& p) {
+            const std::array fields{p.position.x, p.position.y, p.position.z, p.size,  p.rotation,
+                                    p.colour.r,   p.colour.g,   p.colour.b,   p.alpha, p.velocity.x,
+                                    p.velocity.y, p.velocity.z, p.frame};
+            return std::pair{std::bit_cast<std::array<kin::u32, 13>>(fields), p.id};
+        };
+        return key(a) == key(b);
+    };
     kin::Weather3D w;
     w.rain.intensity = 1.0f;
     w.rain.max_particles = 4000;
@@ -16393,7 +16412,7 @@ void test_weather_volume_cpu() {
     kin::weather_sprites(w, cam, a, ba);
     kin::weather_sprites(w, cam, b, bb);
     assert(!a.empty() && a.size() == b.size() && ba.size() == bb.size());
-    assert(std::memcmp(a.data(), b.data(), a.size() * sizeof(kin::ParticleSprite3D)) == 0);
+    assert(std::equal(a.begin(), a.end(), b.begin(), same_sprite));
     {
         kin::Weather3D later = w;
         later.time += 0.5;
@@ -16401,13 +16420,13 @@ void test_weather_volume_cpu() {
         std::vector<kin::WeatherBatch3D> bc;
         kin::weather_sprites(later, cam, c, bc);
         assert(c.size() > 0 &&
-               std::memcmp(a.data(), c.data(), std::min(a.size(), c.size()) * sizeof(kin::ParticleSprite3D)) != 0);
+               !std::equal(a.begin(), a.begin() + std::min(a.size(), c.size()), c.begin(), same_sprite));
         // And the clock run back gives the picture again.
         later.time -= 0.5;
         std::vector<kin::ParticleSprite3D> d;
         std::vector<kin::WeatherBatch3D> bd;
         kin::weather_sprites(later, cam, d, bd);
-        assert(d.size() == a.size() && std::memcmp(a.data(), d.data(), a.size() * sizeof(kin::ParticleSprite3D)) == 0);
+        assert(d.size() == a.size() && std::equal(a.begin(), a.end(), d.begin(), same_sprite));
     }
     {
         kin::Weather3D off = w;

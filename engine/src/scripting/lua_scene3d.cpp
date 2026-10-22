@@ -252,7 +252,7 @@ void bind_lua_scene3d(sol::state& lua, LuaScene3DBindings bindings) {
         sol::protected_function factory = lua.registry()["kin.entity"];
         const auto result = factory(entity, [api, handle] { return bool(try_resolve(*api, handle)); });
         if (!result.valid())
-            throw sol::error(result);
+            throw result.get<sol::error>();
         return result.get<sol::object>();
     };
     scene["available"] = [api] { return api->active(); };
