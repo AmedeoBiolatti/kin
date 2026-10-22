@@ -7655,7 +7655,9 @@ void test_gpu_warm_up() {
     for (const Config& config : configs) {
         kin::u32 made[2] = {0, 0};
         for (const bool warm : {false, true}) {
+            bool ran = false;
             with_gpu("test_gpu_warm_up", [&](kin::Renderer2D& renderer) {
+                ran = true;
                 kin::Renderer3D r3d{renderer};
                 if (config.occlusion && !occlusion_capable(r3d)) {
                     made[warm] = warm ? 0 : 1;
@@ -7762,6 +7764,9 @@ void test_gpu_warm_up() {
                 renderer.present();
                 assert(r3d.debug_stats().pipelines_made == 0);
             });
+            if (!ran) {
+                return;
+            }
         }
         std::cerr << "warm_up, " << config.name << ": first render makes " << made[0] << " pipelines without, "
                   << made[1] << " after\n";
