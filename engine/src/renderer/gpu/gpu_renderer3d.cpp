@@ -8448,13 +8448,12 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     ctx.previous_joints = ctx.taa && _previous_joints ? _previous_joints->handle() : nullptr;
     ctx.previous_joint_offsets = ctx.taa && _previous_joint_offsets ? _previous_joint_offsets->handle() : nullptr;
     ctx.velocity_drawn = false; // the pre-pass began, so _ao_normals holds this frame's velocity
-    // Temporal anti-aliasing alone: the main pass writes the velocity, one geometry pass fewer. A custom shader's
-    // opaque mesh can't (it has no velocity output), so a frame with one keeps the pre-pass.
+    // Only stock mesh shaders define the main pass's velocity output. Colour-only particle/custom shaders must
+    // stay off that attachment: masking an undefined shader output does not preserve it on every backend.
     ctx.main_velocity = ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles &&
-                        ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
-                        std::none_of(_refs.begin(), _refs.end(), [](const DrawRef& ref) {
-                            return ref.draw->material.shader.backend() && pass_of(ref.draw->material) == Pass::Opaque;
-                        });
+                        _particle_batches.empty() && ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
+                        std::none_of(_refs.begin(), _refs.end(),
+                                     [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
     if (!ctx.main_velocity && (ao.enabled || want_contact || ctx.taa || ctx.soft_particles) && _ao_available &&
         (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
@@ -9217,21 +9216,22 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
     const auto custom_of = [](const Material3D& m) {
         return dynamic_cast<const GpuMaterialShader3D*>(m.shader.backend().get());
     };
-    bool custom_opaque = false;
+    bool custom_shader = false;
     for (const Scene3D* s : scenes) {
         if (!s) {
             continue;
         }
         for (const Scene3D::Draw& draw : s->draws()) {
-            custom_opaque = custom_opaque || (custom_of(draw.material) && pass_of(draw.material) == Pass::Opaque);
+            custom_shader = custom_shader || custom_of(draw.material);
         }
     }
     bool taa = scene.taa.enabled && _taa_available;
     const bool soft = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
+    const bool particles = _particles_available && (!scene.particle_draws().empty() || scene.weather.active());
     const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft;
     if (taa) {
         taa = ensure_taa_targets(*view, scene.taa.sharpness > 0.0f) &&
-              (needs_prepass || custom_opaque
+              (needs_prepass || custom_shader || particles
                    ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/true)
                    : ensure_velocity_target(*view));
     } else if (ao || contact || soft) {
@@ -9269,7 +9269,10 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
         const u32 res = lights.fill_shadow.resolution != 0 ? lights.fill_shadow.resolution : lights.shadow_resolution;
         ensure_moon_map(res, lights.fill_shadow.cascades);
     }
-    const bool main_velocity = taa && !needs_prepass && !custom_opaque;
+    const bool main_velocity = taa && !needs_prepass && !custom_shader && !particles;
+    // Submitted particles may all be culled. Prepare the stock-mesh MRT path too,
+    // so visibility cannot introduce a pipeline compile after warm_up().
+    const bool culled_particle_velocity = taa && !needs_prepass && !custom_shader && particles;
     if (occlusion) {
         std::array<std::pair<u32, u32>, GpuView3D::max_hiz_levels> size{};
         u32 levels = 0;
@@ -9305,6 +9308,8 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
             fullscreen(_output_dither_shader.handle(), view->_output_format);
         }
         sky_pipeline(format, samples, main_velocity);
+        if (culled_particle_velocity)
+            sky_pipeline(format, samples, true);
         if (taa && !main_velocity) {
             sky_velocity_pipeline(_ao_depth_format);
         }
@@ -9359,24 +9364,32 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
             const auto selection = material_pipeline(m, draw.skinned, taa, main_velocity, fog_on);
             const auto* custom = selection.custom;
             const MeshPipelineRequest request{format, samples, selection, main_velocity, draw.skinned};
-            pipeline(request);
-            if (fog_on && !custom) {
-                auto fog = request;
-                fog.material.mask = false;
-                fog.material.unlit = Unlit::Off;
-                fog.fog = true;
-                pipeline(fog);
-            }
-            if (lights_on && !custom) {
-                auto lit = request;
-                lit.material.mask = false;
-                lit.material.unlit = Unlit::Off;
-                lit.lights = true;
-                pipeline(lit);
-                if (fog_on) {
-                    lit.fog = true;
-                    pipeline(lit);
+            const auto warm_mesh = [&](const MeshPipelineRequest& candidate) {
+                pipeline(candidate);
+                if (fog_on && !custom) {
+                    auto fog = candidate;
+                    fog.material.mask = false;
+                    fog.material.unlit = Unlit::Off;
+                    fog.fog = true;
+                    pipeline(fog);
                 }
+                if (lights_on && !custom) {
+                    auto lit = candidate;
+                    lit.material.mask = false;
+                    lit.material.unlit = Unlit::Off;
+                    lit.lights = true;
+                    pipeline(lit);
+                    if (fog_on) {
+                        lit.fog = true;
+                        pipeline(lit);
+                    }
+                }
+            };
+            warm_mesh(request);
+            if (culled_particle_velocity) {
+                auto alternate = request;
+                alternate.velocity = true;
+                warm_mesh(alternate);
             }
 
             const bool opaque = pass_of(m) == Pass::Opaque;

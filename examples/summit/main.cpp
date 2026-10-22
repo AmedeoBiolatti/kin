@@ -14,6 +14,7 @@
 #include "settings.hpp"
 #include "view.hpp"
 
+#include <SDL3/SDL_stdinc.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1214,7 +1215,7 @@ int run(int argc, char** argv) {
 
         // The runtime times the GPU's frames only when someone reads them (KIN_LOG_FRAME_STATS asks it to).
         if (options.gpu_timing)
-            ::setenv("KIN_LOG_FRAME_STATS", "1", 1);
+            SDL_setenv_unsafe("KIN_LOG_FRAME_STATS", "1", 1);
         // --screenshot is ours (the picture without the app's capture): the runtime must not see it.
         std::vector<char*> kept;
         for (int i = 0; i < argc; ++i) {

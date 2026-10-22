@@ -9,6 +9,11 @@ releases may change APIs.
 
 ### Fixed
 
+- Preserve transparent TAA motion on software GPUs by routing colour-only particle
+  and custom material shaders through the velocity pre-pass. Keep particle-shadow
+  history stable across views, and restore Windows compilation of Summit, the
+  renderer tests and the reference tool.
+
 - Bound navmesh boundary-rejection diagnostics to eight face examples plus one
   count/bounds summary per build, including when refinement rejects many faces.
 

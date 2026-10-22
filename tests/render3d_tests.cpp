@@ -5,6 +5,7 @@
 #include "skin_fixtures.hpp"
 #include "texture_file_fixtures.hpp"
 
+#include <SDL3/SDL_stdinc.h>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -2905,10 +2906,10 @@ void test_gpu_environment_levels_written() {
         const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
         const auto picture = [&](bool poisoned, float roughness) {
             if (poisoned) {
-                setenv("KIN_POISON_TEXTURES", "1", 1);
+                SDL_setenv_unsafe("KIN_POISON_TEXTURES", "1", 1);
             }
             kin::Environment3D environment = r3d.create_environment(size, flat).value_or({});
-            unsetenv("KIN_POISON_TEXTURES");
+            SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
             assert(environment.valid());
             kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
             kin::Scene3D scene;
@@ -3937,7 +3938,7 @@ void test_gpu_taa_main_velocity() {
                 const Pixels b = shoot(with_pre, scene, true);
                 assert(!r3d.debug_stats().taa_main_velocity && r3d.debug_stats().ao_draws > 0);
                 // Only a frame with nothing else to need a pre-pass draws the velocity in the main pass.
-                const bool expect_main = extra == Extra::None || extra == Extra::CustomBlended;
+                const bool expect_main = extra == Extra::None;
                 assert(wrote == expect_main && (wrote ? pre_draws == 0 : pre_draws > 0));
                 if (a.rgba != b.rgba) {
                     std::size_t differing = 0;
@@ -7646,6 +7647,7 @@ void test_gpu_warm_up() {
         kin::u32 samples;
         bool hdr, pick, cascades, ao, contact, taa, custom, overlay, occlusion;
         bool particles = false, local_lights = false;
+        bool culled_particles = false;
     };
     const std::vector<Config> configs{
         {"plain", 4, false, true, false, false, false, false, false, false, false},
@@ -7660,6 +7662,7 @@ void test_gpu_warm_up() {
         {"taa + particles", 1, true, false, false, false, false, true, false, false, false, true, false},
         {"taa + soft lit particles", 1, true, false, false, true, false, true, false, true, false, true, true},
         {"lit particles, msaa", 4, false, false, false, false, false, false, false, false, false, true, true},
+        {.name = "taa + culled particles", .samples = 1, .taa = true, .particles = true, .culled_particles = true},
     };
     for (const Config& config : configs) {
         kin::u32 made[2] = {0, 0};
@@ -7739,6 +7742,8 @@ void test_gpu_warm_up() {
                 if (config.particles) {
                     kin::ParticleSprite3D p;
                     p.position = {0, 1, 1};
+                    if (config.culled_particles)
+                        p.position = {10000, 10000, 10000};
                     p.size = 1;
                     p.alpha = .7f;
                     for (const auto blend : {kin::ParticleBlend3D::Alpha, kin::ParticleBlend3D::Additive,
@@ -7751,7 +7756,7 @@ void test_gpu_warm_up() {
                         look.casts_shadow = config.local_lights;
                         (void)scene.draw_particles(look, std::span{&p, 1});
                     }
-                    scene.weather.rain.intensity = 1;
+                    scene.weather.rain.intensity = config.culled_particles ? 0 : 1;
                     scene.weather.rain.max_particles = 64;
                     scene.weather.rain.look.lit = config.local_lights ? 1.0f : 0.0f;
                     scene.weather.rain.look.receives_shadow = config.local_lights;
@@ -16009,7 +16014,8 @@ void test_particles_emitter_distributions() {
         assert(std::abs(static_cast<double>(inside) / 20000.0 - 0.125) < 0.01);
         assert(std::abs(mean_up / 20000.0) < 0.03);
         d.surface_only = true;
-        for (const kin::Particle3D& p : born(d).particles()) {
+        const kin::ParticleSystem3D shell = born(d);
+        for (const kin::Particle3D& p : shell.particles()) {
             assert(std::abs(kin::length(p.position) - 2.0f) < 1e-4f);
         }
     }
@@ -19077,7 +19083,7 @@ void test_gpu_sky_restores_mesh_uniforms() {
 }
 
 // Still particles retain temporal smoothing. MSAA preserves their interiors;
-// soft particles use the pre-pass for depth and velocity.
+// particles use the pre-pass for velocity, and soft particles also read its depth.
 void test_gpu_particles_taa_and_msaa() {
     with_gpu("test_gpu_particles_taa_and_msaa", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -19134,10 +19140,10 @@ void test_gpu_particles_taa_and_msaa() {
                 double biggest_mean = 0.0;
                 still(soft, true, biggest, biggest_mean);
                 const kin::RenderDebugStats3D stats = r3d.debug_stats();
-                std::cerr << "particles under TAA" << (soft ? " (soft, pre-pass velocity)" : " (main-pass velocity)")
+                std::cerr << "particles under TAA" << (soft ? " (soft)" : "") << " (pre-pass velocity)"
                           << ": still frames differ by at most " << biggest << " levels (mean " << biggest_mean
                           << "); the scene without them " << base_biggest << " (mean " << base_mean << ")\n";
-                assert(stats.particle_batches == 1 && stats.taa_main_velocity == !soft &&
+                assert(stats.particle_batches == 1 && !stats.taa_main_velocity && stats.ao_draws > 0 &&
                        stats.taa_reactive_draws == 1);
                 assert(biggest <= base_biggest + 6 && biggest_mean < base_mean + 0.05);
             }
@@ -19223,9 +19229,9 @@ void test_gpu_pick_before_render_and_after_resize() {
         kin::Scene3D scene;
         scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
         (void)scene.draw(box, Mat4f::identity(), {.color = Color::rgb(200, 60, 60)}, kin::colors::white, 7);
-        setenv("KIN_POISON_TEXTURES", "1", 1);
+        SDL_setenv_unsafe("KIN_POISON_TEXTURES", "1", 1);
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
-        unsetenv("KIN_POISON_TEXTURES");
+        SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
         assert(!r3d.pick(view, {80, 60}).value_or({}).hit); // never rendered
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
@@ -19234,9 +19240,9 @@ void test_gpu_pick_before_render_and_after_resize() {
         assert(!r3d.pick(view, {2, 2}).value_or({}).hit); // the background of a rendered view is still nothing
         renderer.present();
         // A resize makes the target again: nothing in it until the next render.
-        setenv("KIN_POISON_TEXTURES", "1", 1);
+        SDL_setenv_unsafe("KIN_POISON_TEXTURES", "1", 1);
         assert(r3d.resize(view, {128, 96}));
-        unsetenv("KIN_POISON_TEXTURES");
+        SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
         assert(!r3d.pick(view, {64, 48}).value_or({}).hit);
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);

@@ -664,12 +664,13 @@ draws one sample a pixel whatever `ViewOptions3D::samples` asks
   a buffer of its own beside the instances (the 128 B instance is untouched) and
   the view's last view-projection, **by the main pass** as a second colour
   output when temporal anti-aliasing is all that needs a depth pre-pass (no
-  ambient occlusion, contact shadows or occlusion culling, and no opaque mesh
-  with a custom shader): there is then no second geometry pass for it
+  ambient occlusion, contact shadows or occlusion culling, and no particles or
+  custom material shaders): there is then no second geometry pass for it
   (`debug_stats().taa_main_velocity`, `ao_draws` 0), which was the largest part of
   TAA's cost in big scenes (the kiln's fell by 2.2 ms of 7.2). Opaque and
   cut-out meshes write it; blended, additive and wireframe ones leave it as it
-  is. With any of those other features the pre-pass is drawn once and shared,
+  is. Colour-only particle/custom shaders use the pre-pass to preserve the motion
+  attachment on every backend. With any of those other features the pre-pass is drawn once and shared,
   writing four floats (the normal and the velocity, instead of two). The
   pictures of the two ways are identical to the byte. The first-person overlay has its own pass
   and its own previous camera, so a gun is neither smeared by the world behind
@@ -890,8 +891,8 @@ cone's in-scattering in fog (a lamp in mist shows no beam), soft shadows by ligh
 
 ### Particles and weather
 
-Off by default; off, the picture and the cost are those without them (the old shaders are not touched: particles have three shaders of
-their own, and the depth pre-pass is made only for soft particles). `kin/render3d/particles3d.hpp`; docs/3d_plan.md "P3c" has the models
+Off by default; off, the picture and the cost are those without them. Particles have their own shaders;
+the pre-pass supplies depth for soft particles and velocity under TAA. `kin/render3d/particles3d.hpp`; docs/3d_plan.md "P3c" has the models
 and the numbers.
 
 ```cpp

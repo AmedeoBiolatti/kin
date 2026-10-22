@@ -107,6 +107,7 @@
 #include <kin/ecs/render3d.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/platform/process.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/render3d/taa3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
@@ -2363,14 +2364,16 @@ struct SceneParticles {
 };
 
 double gpu_used_mb() {
-    FILE* pipe = popen("nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null", "r");
-    if (!pipe) {
+    kin::Process process;
+    if (!process.start({.args = {"nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"},
+                        .pipe_input = false,
+                        .capture_output = true,
+                        .errors_to_output = true}) ||
+        !process.wait(std::chrono::seconds{5}) || process.exit_code().value_or(-1) != 0) {
         return -1.0;
     }
-    char line[64] = {};
-    const bool read = std::fgets(line, sizeof line, pipe) != nullptr;
-    pclose(pipe);
-    return read ? std::atof(line) : -1.0;
+    const auto line = process.read_line();
+    return line ? std::atof(line->c_str()) : -1.0;
 }
 
 double resident_mb() {
