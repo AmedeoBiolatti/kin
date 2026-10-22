@@ -15,6 +15,9 @@
 #include <kin/scene/scene.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <kin/ui2/text.hpp>
+#if KIN_HEX_DEMO_BAKED_FONT
+#include "hud_font.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -380,7 +383,11 @@ private:
     }
 
     void draw_hud(kin::Renderer2D& r) const {
+#if KIN_HEX_DEMO_BAKED_FONT
+        const kin::ui2::Font font = hud_font::get();
+#else
         const kin::ui2::Font font = kin::ui2::system_ui_font(15);
+#endif
         const auto text = [&](std::string_view value, float x, float y, float points, kin::Color color) {
             kin::ui2::draw_text(r, font, value, {x, y}, points / 15.0f, color);
         };
@@ -432,6 +439,7 @@ private:
 } // namespace
 } // namespace demo
 
+#ifndef KIN_HEX_DEMO_TEST
 int main(int argc, char** argv) {
     kin::GameInfo game = demo::make_game_info();
     kin::SceneManager scenes;
@@ -448,3 +456,5 @@ int main(int argc, char** argv) {
         .reset_scenes = build_scenes,
     }, scenes);
 }
+
+#endif

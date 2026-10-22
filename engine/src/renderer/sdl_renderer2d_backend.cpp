@@ -3,7 +3,9 @@
 
 #include <kin/platform/log.hpp>
 
+#if KIN_ENABLE_IMAGE_IO
 #include <SDL3_image/SDL_image.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -236,10 +238,14 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
     // backing SDL_GPUDevice for future explicit-GPU work. Fall back to the
     // best-available driver if the gpu driver is unavailable (e.g. software).
     auto* sdl_window = static_cast<SDL_Window*>(window.native_handle());
+#if !KIN_HAS_GPU_RENDERER
+    _handle = SDL_CreateRenderer(sdl_window, "software");
+#else
     _handle = SDL_CreateRenderer(sdl_window, "gpu");
     if (!_handle) {
         _handle = SDL_CreateRenderer(sdl_window, nullptr);
     }
+#endif
     if (!_handle) {
         const std::string error = std::string("SDL_CreateRenderer failed: ") + SDL_GetError();
         KIN_LOG_ERROR_F("render",
@@ -248,6 +254,7 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
         throw std::runtime_error(error);
     }
 
+#if KIN_HAS_GPU_RENDERER
     // The GPU device is present only on the "gpu" driver; it gates materials_2d.
     _gpu_device = static_cast<SDL_GPUDevice*>(SDL_GetPointerProperty(
         SDL_GetRendererProperties(_handle), SDL_PROP_RENDERER_GPU_DEVICE_POINTER, nullptr));
@@ -262,6 +269,8 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
                            {.name = "msl", .value = (fmts & SDL_GPU_SHADERFORMAT_MSL) ? "1" : "0"},
                        }));
     }
+
+#endif
 
     if (vsync) {
         SDL_SetRenderVSync(_handle, 1);
@@ -298,6 +307,7 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
 }
 
 SdlRenderer2DBackend::~SdlRenderer2DBackend() {
+#if KIN_HAS_GPU_RENDERER
     for (ShaderEntry& e : _shaders) {
         if (e.state) {
             SDL_DestroyGPURenderState(e.state);
@@ -308,6 +318,7 @@ SdlRenderer2DBackend::~SdlRenderer2DBackend() {
     }
     _shaders.clear();
     _white_texture = {}; // free the SDL texture while the renderer is still alive
+#endif
     if (_mask_scratch) {
         SDL_DestroyTexture(_mask_scratch);
     }
@@ -386,6 +397,7 @@ void SdlRenderer2DBackend::present() {
 }
 
 bool SdlRenderer2DBackend::save_png(const char* path) {
+#if KIN_ENABLE_IMAGE_IO
     flush_batch();
     SDL_Surface* surface = SDL_RenderReadPixels(_handle, nullptr);
     if (!surface) {
@@ -394,6 +406,9 @@ bool SdlRenderer2DBackend::save_png(const char* path) {
     const bool ok = IMG_SavePNG(surface, path);
     SDL_DestroySurface(surface);
     return ok;
+#else
+    return false;
+#endif
 }
 
 bool SdlRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size) {
@@ -817,6 +832,7 @@ void SdlRenderer2DBackend::fill_gradient_rect(Rectf rect, const Gradient& gradie
     SDL_RenderGeometry(_handle, nullptr, vertices.data(), 4, indices.data(), 6);
 }
 
+#if KIN_HAS_GPU_RENDERER
 ShaderHandle SdlRenderer2DBackend::create_shader(const ShaderDesc& desc) {
     if (!_gpu_device) {
         return {}; // not on the gpu driver → caller degrades to a fill
@@ -917,6 +933,8 @@ void SdlRenderer2DBackend::draw_shader_surface(Rectf rect, ShaderHandle handle, 
     }
     SDL_SetGPURenderState(_handle, nullptr);
 }
+
+#endif
 
 void SdlRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     if (_transformed) {

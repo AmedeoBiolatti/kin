@@ -6,7 +6,9 @@
 #include <kin/assets/texture_file.hpp>
 #include <kin/platform/log.hpp>
 
+#if KIN_ENABLE_IMAGE_IO
 #include <SDL3_image/SDL_image.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -1571,6 +1573,7 @@ void GpuRenderer2DBackend::draw_sprites(const Texture& texture, std::span<const 
 }
 
 bool GpuRenderer2DBackend::save_png(const char* path) {
+#if KIN_ENABLE_IMAGE_IO
     // Scene screenshots should match presentation, including post-processing.
     // Bound render targets are captured directly at their own size.
     // Note: called after present() resets the frame, so `_scene` already holds the last
@@ -1610,6 +1613,9 @@ bool GpuRenderer2DBackend::save_png(const char* path) {
     const bool ok = IMG_SavePNG(surface, path);
     SDL_DestroySurface(surface);
     return ok;
+#else
+    return false;
+#endif
 }
 
 bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size) {

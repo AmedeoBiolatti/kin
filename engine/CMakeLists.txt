@@ -89,18 +89,7 @@ add_library(kin_engine STATIC
     src/renderer/static_texture_layer.cpp
     src/renderer/sprite_catalog.cpp
     src/renderer/sprite_sheet.cpp
-    src/renderer/sdl_renderer2d_backend.cpp
     src/renderer/rounded_rect_loop.cpp
-    src/renderer/shader_compiler.cpp
-    src/renderer/shader_reflect.cpp
-    src/renderer/gpu/gpu_buffer.cpp
-    src/renderer/gpu/gpu_device.cpp
-    src/renderer/gpu/gpu_frame_timer.cpp
-    src/renderer/gpu/gpu_geometry_batch.cpp
-    src/renderer/gpu/gpu_pipeline_cache.cpp
-    src/renderer/gpu/gpu_renderer2d_backend.cpp
-    src/renderer/gpu/gpu_shader.cpp
-    src/renderer/gpu/gpu_texture.cpp
     src/runtime/game_info.cpp
     src/runtime/debug_overlay.cpp
     src/runtime/scene_app.cpp
@@ -124,9 +113,9 @@ add_library(kin_engine STATIC
     src/ui2/context.cpp
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
+    src/ui2/text_baked.cpp
     src/ui2/text.cpp
     src/ui2/text_script.cpp
-    src/ui2/text_ttf.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
     src/ui2/widget_internal.cpp
@@ -138,6 +127,30 @@ add_library(kin_engine STATIC
     src/ui2/widgets_text_edit.cpp
 )
 add_library(kin::engine ALIAS kin_engine)
+
+target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
+if(KIN_HAS_SDL_RENDERER)
+    target_sources(kin_engine PRIVATE src/renderer/sdl_renderer2d_backend.cpp)
+endif()
+if(KIN_HAS_GPU_RENDERER)
+    target_sources(kin_engine PRIVATE
+        src/renderer/shader_compiler.cpp
+        src/renderer/shader_reflect.cpp
+        src/renderer/gpu/gpu_buffer.cpp
+        src/renderer/gpu/gpu_device.cpp
+        src/renderer/gpu/gpu_frame_timer.cpp
+        src/renderer/gpu/gpu_geometry_batch.cpp
+        src/renderer/gpu/gpu_pipeline_cache.cpp
+        src/renderer/gpu/gpu_renderer2d_backend.cpp
+        src/renderer/gpu/gpu_shader.cpp
+        src/renderer/gpu/gpu_texture.cpp
+    )
+else()
+    target_sources(kin_engine PRIVATE src/renderer/shader_disabled.cpp)
+endif()
+target_compile_definitions(kin_engine PUBLIC
+    KIN_HAS_GPU_RENDERER=$<BOOL:${KIN_HAS_GPU_RENDERER}>
+    KIN_HAS_SDL_RENDERER=$<BOOL:${KIN_HAS_SDL_RENDERER}>)
 
 if(KIN_ENABLE_AUDIO)
     target_sources(kin_engine PRIVATE
@@ -172,7 +185,7 @@ if(KIN_ENABLE_SCENE_SERVER)
 endif()
 
 # Numeric definitions are public: consumers can guard optional subsystem use.
-foreach(feature SCRIPTING PHYSICS AUDIO SCENE_SERVER DEBUG_OVERLAY)
+foreach(feature SCRIPTING PHYSICS AUDIO SCENE_SERVER DEBUG_OVERLAY IMAGE_IO TTF RUNTIME_PROFILING RUNTIME_ASSETS)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_${feature}=$<BOOL:${KIN_ENABLE_${feature}}>)
 endforeach()
 
@@ -309,8 +322,6 @@ target_include_directories(kin_core_allocation_instrumentation PUBLIC
 target_link_libraries(kin_engine PUBLIC
     flecs::flecs_static
     SDL3::SDL3-static
-    SDL3_image::SDL3_image
-    SDL3_ttf::SDL3_ttf
 )
 # 3D Lua argument checks are local to its bindings; retain sol2 defaults for 2D games.
 

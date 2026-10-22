@@ -1,5 +1,28 @@
 include_guard(GLOBAL)
 
+function(_kin_install_header_notice dependency relative marker name component)
+    FetchContent_GetProperties(${dependency} SOURCE_DIR source)
+    if(NOT source)
+        return()
+    endif()
+    file(READ "${source}/${relative}" header)
+    string(FIND "${header}" "${marker}" start REVERSE)
+    if(start LESS 0)
+        message(FATAL_ERROR "License marker missing from ${dependency}/${relative}")
+    endif()
+    string(SUBSTRING "${header}" ${start} -1 notice)
+    string(FIND "${notice}" "*/" end)
+    if(end LESS 0)
+        message(FATAL_ERROR "License comment not terminated in ${dependency}/${relative}")
+    endif()
+    string(SUBSTRING "${notice}" 0 ${end} notice)
+    string(STRIP "${notice}" notice)
+    set(path "${CMAKE_CURRENT_BINARY_DIR}/kin-package-notices/${dependency}/${name}")
+    file(CONFIGURE OUTPUT "${path}" CONTENT "@notice@\n" @ONLY)
+    install(FILES "${path}" DESTINATION "licenses/${dependency}"
+        COMPONENT ${component} EXCLUDE_FROM_ALL)
+endfunction()
+
 function(_kin_install_package_licenses component)
     set(root "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/..")
     install(FILES "${root}/LICENSE" DESTINATION licenses/kin COMPONENT ${component} EXCLUDE_FROM_ALL)
@@ -11,7 +34,7 @@ function(_kin_install_package_licenses component)
         "SDL3|LICENSE.txt" "flecs|LICENSE" "box2d|LICENSE"
         "lua|doc/readme.html" "sol2|LICENSE.txt" "earcut|LICENSE"
         "SDL3_image|LICENSE.txt" "SDL3_image|external/libpng/LICENSE"
-        "SDL3_image|external/zlib/LICENSE" "SDL3_image|src/stb_image.h"
+        "SDL3_image|external/zlib/LICENSE"
         "SDL3_ttf|LICENSE.txt" "SDL3_ttf|external/freetype/docs/FTL.TXT"
         "SDL3_ttf|external/harfbuzz/COPYING" "SDL3_ttf|external/plutosvg/LICENSE"
         "SDL3_ttf|external/plutovg/LICENSE"
@@ -29,6 +52,17 @@ function(_kin_install_package_licenses component)
             DESTINATION "licenses/${dependency}/${directory}"
             COMPONENT ${component} EXCLUDE_FROM_ALL)
     endforeach()
+    # Keep the complete license comments, without shipping the implementation
+    # headers merely to include their notices. Fail if upstream moves them.
+    if(KIN_ENABLE_IMAGE_IO)
+        _kin_install_header_notice(SDL3_image src/stb_image.h
+            "This software is available under 2 licenses" stb-LICENSE.txt ${component})
+        _kin_install_header_notice(SDL3 src/video/stb_image.h
+            "This software is available under 2 licenses" stb-LICENSE.txt ${component})
+        _kin_install_header_notice(SDL3 src/video/miniz.h
+            "This is free and unencumbered software released into the public domain."
+            miniz-LICENSE.txt ${component})
+    endif()
 endfunction()
 
 # Creates <target>_package and an isolated install component, kin-<target>.
@@ -118,8 +152,8 @@ function(kin_package_game target)
         set(architecture "${CMAKE_VS_PLATFORM_NAME}")
     endif()
     # Report settings from this configuration, alongside the actual byte counts.
-    set(build_settings "")
-    foreach(feature SCRIPTING PHYSICS AUDIO SCENE_SERVER DEBUG_OVERLAY RENDER_PROBE DETERMINISM_CHECK)
+    set(build_settings "set(KIN_PACKAGE_RENDERER ${KIN_RENDERER})\n")
+    foreach(feature SCRIPTING PHYSICS AUDIO SCENE_SERVER DEBUG_OVERLAY RENDER_PROBE DETERMINISM_CHECK IMAGE_IO TTF RUNTIME_PROFILING RUNTIME_ASSETS)
         string(APPEND build_settings "set(KIN_SIZE_${feature} $<BOOL:${KIN_ENABLE_${feature}}>)\n")
     endforeach()
     string(APPEND build_settings "set(KIN_SIZE_PROFILING $<OR:$<BOOL:${KIN_ENABLE_PROFILING}>,$<AND:$<CONFIG:Release>,$<BOOL:${KIN_ENABLE_RELEASE_PROFILING}>>>)\n")

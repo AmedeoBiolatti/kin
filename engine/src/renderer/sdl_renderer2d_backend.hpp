@@ -51,8 +51,10 @@ public:
     void fill_rounded_rect(Rectf rect, f32 radius, Color color) override;
     void draw_rounded_rect(Rectf rect, f32 radius, Color color, f32 width = 1.0f) override;
     void fill_gradient_rect(Rectf rect, const Gradient& gradient) override;
+#if KIN_HAS_GPU_RENDERER
     ShaderHandle create_shader(const ShaderDesc& desc) override;
     void draw_shader_surface(Rectf rect, ShaderHandle shader, const ShaderParams& params) override;
+#endif
     void draw_line(Vec2f a, Vec2f b, Color color) override;
 
     RenderTarget create_render_target(Vec2i size, ScaleMode mode) override;

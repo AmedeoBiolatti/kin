@@ -28,12 +28,12 @@
 
 namespace kin {
 
-// Selects the 2D backend for `window`. The SDL_GPU (Vulkan) backend is the default
-// when `allow_gpu` is true; KIN_RENDER_BACKEND=sdl forces the SDL_Renderer backend
-// (KIN_RENDER_BACKEND=gpu also forces a GPU attempt). `allow_gpu` must be false when
-// there is no real GPU (e.g. headless/dummy video driver). Falls back to the
-// SDL_Renderer backend if the GPU device can't be created. Construct a Renderer2D
-// from the result.
+// Selects the backend included by KIN_RENDERER. `auto` tries SDL_GPU when
+// allow_gpu is true, then falls back to SDL_Renderer. KIN_RENDER_BACKEND=sdl/gpu
+// overrides that runtime choice. `software` always uses SDL's software driver;
+// `gpu` always uses SDL_GPU and propagates device errors, without fallback.
+// Fixed profiles reject conflicting overrides. GPU-only headless apps require
+// a real video driver (their window can remain hidden).
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync = false,
                                                         bool allow_gpu = true);
 

@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -263,13 +264,18 @@ Font bitmap_font() {
 }
 
 Font load_ttf_font(const std::filesystem::path& path, f32 point_size, const TtfFontOptions& options) {
+#if KIN_ENABLE_TTF
     return Font{text_detail::make_ttf_backend(path, point_size, options)};
+#else
+    throw std::runtime_error("Font loading requires KIN_ENABLE_TTF");
+#endif
 }
 
 Font load_ttf_font(const std::filesystem::path& path, f32 point_size, f32 oversample, TextRendering rendering) {
     return load_ttf_font(path, point_size, TtfFontOptions{.oversample = oversample, .rendering = rendering});
 }
 
+#if KIN_ENABLE_TTF
 namespace {
 
 const std::filesystem::path& system_ui_font_path(bool bold) {
@@ -455,6 +461,41 @@ const std::vector<LanguageFont>& system_language_fonts() {
     }();
     return fonts;
 }
+
+#else
+namespace {
+std::mutex text_settings_mutex;
+std::string selected_language;
+std::optional<TextDirection> selected_direction;
+}
+void set_text_language(std::string_view language) {
+    const std::scoped_lock lock(text_settings_mutex);
+    selected_language = language;
+}
+std::string text_language() {
+    const std::scoped_lock lock(text_settings_mutex);
+    return selected_language;
+}
+void set_text_base_direction(std::optional<TextDirection> direction) {
+    const std::scoped_lock lock(text_settings_mutex);
+    selected_direction = direction;
+}
+std::optional<TextDirection> text_base_direction() {
+    const std::scoped_lock lock(text_settings_mutex);
+    return selected_direction;
+}
+Font system_ui_font(f32, TextRendering) { return bitmap_font(); }
+Font system_ui_font_bold(f32, TextRendering) { return bitmap_font(); }
+bool system_ui_font_available() { return false; }
+const std::vector<FontSource>& system_fallback_fonts() {
+    static const std::vector<FontSource> empty;
+    return empty;
+}
+const std::vector<LanguageFont>& system_language_fonts() {
+    static const std::vector<LanguageFont> empty;
+    return empty;
+}
+#endif
 
 Vec2f measure_text(const Font& font, std::string_view text, f32 scale) {
     const Font actual = font ? font : bitmap_font();

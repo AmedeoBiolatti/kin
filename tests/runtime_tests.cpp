@@ -340,6 +340,7 @@ int main() {
     const std::string report = actions.str();
     assert(report.find("start: Start [Enter]") != std::string::npos);
 
+#if KIN_ENABLE_RUNTIME_ASSETS
     // A headless run never polls the game's file watcher, so its data stays as
     // it was when the run began: deterministic, whatever changes on disk.
     {
@@ -362,6 +363,8 @@ int main() {
         assert(reloads == 1); // the change was there to see
         std::filesystem::remove(watched);
     }
+
+#endif
 
     std::ostringstream metadata;
     kin::run_scene_app({
@@ -510,6 +513,7 @@ int main() {
         std::filesystem::remove_all(dir);
     }
 
+#if KIN_ENABLE_RUNTIME_PROFILING
     // Runtime profile output is available for every game that uses
     // run_scene_app; no game-specific wiring is required.
     {
@@ -539,6 +543,13 @@ int main() {
         assert((json_text.find("seeded.update") != std::string::npos) == manual_profile);
         assert(kin::current_profile_session() == nullptr);
     }
+
+#else
+    {
+        kin::SceneManager unprofiled;
+        assert(kin::run_scene_app({.headless = {.enabled = true, .profile = true}}, unprofiled) != 0);
+    }
+#endif
 
     // Localization: --locale picks the language, a headless run without it shows
     // the base one, and missing text is reported (and fails the run if asked).

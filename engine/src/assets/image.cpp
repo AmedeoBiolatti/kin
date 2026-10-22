@@ -3,7 +3,9 @@
 #include <kin/platform/log.hpp>
 
 #include <SDL3/SDL.h>
+#if KIN_ENABLE_IMAGE_IO
 #include <SDL3_image/SDL_image.h>
+#endif
 
 #include <cstring>
 #include <stdexcept>
@@ -51,6 +53,7 @@ Image decode_image(std::span<const u8> bytes, std::string_view name) {
 }
 
 Image load_image(const std::filesystem::path& path) {
+#if KIN_ENABLE_IMAGE_IO
     const std::string filename = path_string(path);
     SDL_IOStream* stream = open_content_stream(path);
     SDL_Surface* loaded = stream ? IMG_Load_IO(stream, true) : nullptr;
@@ -90,9 +93,13 @@ Image load_image(const std::filesystem::path& path) {
                        {.name = "height", .value = std::to_string(image.size.y)},
                    }));
     return image;
+#else
+    throw std::runtime_error("Image loading requires KIN_ENABLE_IMAGE_IO");
+#endif
 }
 
 bool save_image(const Image& image, const std::filesystem::path& path) {
+#if KIN_ENABLE_IMAGE_IO
     if (!image.valid()) {
         KIN_LOG_ERROR_F("asset", "image save failed",
                         (LogFields{{.name = "path", .value = path_string(path)},
@@ -126,6 +133,9 @@ bool save_image(const Image& image, const std::filesystem::path& path) {
                               {.name = "width", .value = std::to_string(image.size.x)},
                               {.name = "height", .value = std::to_string(image.size.y)}}));
     return true;
+#else
+    return false;
+#endif
 }
 
 } // namespace kin

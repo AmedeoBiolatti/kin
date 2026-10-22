@@ -9,7 +9,11 @@
 
 #include "embedded_gpu_shader.hpp"
 #include "sdl_renderer2d_backend.hpp"
+#endif
+#if KIN_HAS_GPU_RENDERER
+#include "builtin_shaders.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -64,15 +68,14 @@ struct Renderer2D::OpenClip {
 
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
-    // The SDL_GPU/Vulkan backend is now the default when a real GPU is available
-    // (`allow_gpu` — false for headless/dummy-video). Opt out with KIN_RENDER_BACKEND=sdl
-    // to force the SDL_Renderer path; KIN_RENDER_BACKEND=gpu also forces an attempt. If
-    // the GPU device can't be created (no Vulkan, etc.) we fall back to SDL_Renderer, so
-    // the default degrades gracefully on machines without GPU support.
-    const char* choice = std::getenv("KIN_RENDER_BACKEND");
-    const bool force_sdl = choice && std::strcmp(choice, "sdl") == 0;
-    const bool force_gpu = choice && std::strcmp(choice, "gpu") == 0;
-    if ((allow_gpu || force_gpu) && !force_sdl) {
+    const auto choice = requested_renderer();
+#if !KIN_HAS_GPU_RENDERER
+    return std::make_unique<SdlRenderer2DBackend>(window, vsync);
+#elif !KIN_HAS_SDL_RENDERER
+    // No fallback is compiled into this profile. Propagate device errors.
+    return std::make_unique<GpuRenderer2DBackend>(window, vsync);
+#else
+    if ((allow_gpu || choice == RendererRequest::Gpu) && choice != RendererRequest::Sdl) {
         try {
             return std::make_unique<GpuRenderer2DBackend>(window, vsync);
         } catch (const std::exception& e) {
@@ -82,6 +85,7 @@ std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsy
         }
     }
     return std::make_unique<SdlRenderer2DBackend>(window, vsync);
+#endif
 }
 
 Texture::Texture(std::shared_ptr<ITextureBackend> backend)
@@ -213,7 +217,11 @@ Renderer2D::RenderTargetGuard::RenderTargetGuard(RenderTargetGuard&& other) noex
 }
 
 Renderer2D::Renderer2D(Window& window, bool vsync)
+#if KIN_HAS_SDL_RENDERER
     : Renderer2D(std::make_unique<SdlRenderer2DBackend>(window, vsync)) {
+#else
+    : Renderer2D(make_render_backend(window, vsync, true)) {
+#endif
 }
 
 Renderer2D::Renderer2D(std::unique_ptr<IRenderer2DBackend> backend)
@@ -680,6 +688,7 @@ void Renderer2D::set_color_output(ColorOutput output) {
 }
 
 ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
+#if KIN_HAS_GPU_RENDERER
     ShaderDesc used = desc;
     std::shared_ptr<const ShaderLayout> layout;
     if (desc.spirv.valid()) {
@@ -709,9 +718,13 @@ ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
         _shader_layouts[handle.value] = std::move(layout);
     }
     return handle;
+#else
+    return {};
+#endif
 }
 
 bool Renderer2D::reload_shader(ShaderHandle shader, const ShaderDesc& desc) {
+#if KIN_HAS_GPU_RENDERER
     if (!shader || !desc.spirv.valid()) {
         return false;
     }
@@ -730,6 +743,9 @@ bool Renderer2D::reload_shader(ShaderHandle shader, const ShaderDesc& desc) {
     }
     _shader_layouts[shader.value] = std::make_shared<const ShaderLayout>(std::move(*layout));
     return true;
+#else
+    return false;
+#endif
 }
 
 std::shared_ptr<const ShaderLayout> Renderer2D::shader_layout(ShaderHandle shader) const {
@@ -853,6 +869,7 @@ void Renderer2D::end_layer() {
 }
 
 ComputeShaderHandle Renderer2D::create_compute_shader(ShaderBlob spirv) {
+#if KIN_HAS_GPU_RENDERER
     if (!capabilities().compute) {
         return {};
     }
@@ -872,6 +889,9 @@ ComputeShaderHandle Renderer2D::create_compute_shader(ShaderBlob spirv) {
         KIN_LOG_ERROR_F("render", "create_compute_shader failed", (LogFields{{.name = "error", .value = e.what()}}));
         return {};
     }
+#else
+    return {};
+#endif
 }
 
 Texture Renderer2D::create_storage_texture(Vec2i size, TextureFormat format) {
@@ -1016,6 +1036,7 @@ void Renderer2D::clear_post_process() {
 }
 
 ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
+#if KIN_HAS_GPU_RENDERER
     const int key = static_cast<int>(id);
     if (auto it = _builtin_shaders.find(key); it != _builtin_shaders.end()) {
         return it->second;
@@ -1056,6 +1077,9 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
     }
     _builtin_shaders[key] = handle; // cache (incl. null on degrade) so we don't re-probe
     return handle;
+#else
+    return {};
+#endif
 }
 
 void Renderer2D::draw_line(Vec2f a, Vec2f b, Color color) {

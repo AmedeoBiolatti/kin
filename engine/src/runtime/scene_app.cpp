@@ -174,6 +174,8 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--headless") {
             options.enabled = true;
+        } else if (arg == "--render") {
+            options.render = true;
         } else if (arg == "--list-actions") {
             options.enabled = true;
             options.list_actions = true;
@@ -455,7 +457,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             .mode = parse_server_mode(config.headless.server_mode),
             .seed = config.headless.seed,
             .port = static_cast<u16>(config.headless.server_port),
-            .render = config.render_headless,
+            .render = config.render_headless || config.headless.render,
             .game = config.game,
             .reset_scenes = config.reset_scenes,
             .asset_server = config.asset_server,
@@ -501,6 +503,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     }
 
     RuntimeDebugOverlay debug_overlay;
+#if KIN_ENABLE_RUNTIME_PROFILING
     ProfileSession profile_session;
     const bool profile_enabled = config.headless.profile ||
         config.profile_json_output ||
@@ -513,6 +516,9 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             set_current_profile_session(&profile_session);
         }
     }
+#else
+    constexpr bool profile_enabled = false;
+#endif
     RunReport run_report;
     const bool probe_requested = config.probe_output != nullptr ||
         !config.headless.probe_render_path.empty() ||
@@ -695,17 +701,21 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
                                     std::string_view category,
                                     std::chrono::steady_clock::time_point start,
                                     std::source_location location = std::source_location::current()) {
+#if KIN_ENABLE_RUNTIME_PROFILING
         if (profile_enabled) {
             profile_session.record(name, category, ns_since(start), location);
         }
+#endif
     };
     const auto record_profile_value = [&](std::string_view name,
                                           std::string_view category,
                                           f64 ms,
                                           std::source_location location = std::source_location::current()) {
+#if KIN_ENABLE_RUNTIME_PROFILING
         if (profile_enabled) {
             profile_session.record(name, category, static_cast<u64>(std::max(0.0, ms) * 1'000'000.0), location);
         }
+#endif
     };
 
     auto frame_start = std::chrono::steady_clock::now();
@@ -787,15 +797,20 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         }
         prepare_frame(ctx);
         ++frames_run;
+#if KIN_ENABLE_RUNTIME_PROFILING
         if (profile_enabled) {
             profile_session.set_frame(frames_run);
         }
+#endif
+
         kin::SceneContext scene_ctx = make_scene_context(ctx);
         sync_ui_direction();
+#if KIN_ENABLE_RUNTIME_ASSETS
         runtime_detail::pump_scene_assets(config.asset_server, window.mode != AppMode::Headless);
         if (config.file_watcher && window.mode != AppMode::Headless) {
             config.file_watcher->poll();
         }
+#endif
         const auto update_start = std::chrono::steady_clock::now();
         scenes.update(scene_ctx);
         const f64 update_ms = ms_since(update_start);
@@ -839,7 +854,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         f64 render_scene_ms = 0.0;
         f64 overlay_ms = 0.0;
         f64 present_ms = 0.0;
-        if (!ctx.app.headless() || config.render_headless || config.headless.profile_render || config.headless.profile ||
+        if (!ctx.app.headless() || config.render_headless || config.headless.render || config.headless.profile_render || config.headless.profile ||
             probe_requested) {
 #ifdef KIN_ENABLE_RENDER_PROBE
             draw_trace.begin_frame();
@@ -880,10 +895,13 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             const RendererBackendStats present_stats = ctx.renderer.backend_stats();
             debug_overlay.record("present.flush", present_stats.last_present_flush_ms);
             debug_overlay.record("present.backend", present_stats.last_present_backend_ms);
+#if KIN_ENABLE_RUNTIME_PROFILING
             if (profile_enabled) {
                 profile_session.record("present.flush", "runtime", static_cast<u64>(present_stats.last_present_flush_ms * 1'000'000.0));
                 profile_session.record("present.backend", "runtime", static_cast<u64>(present_stats.last_present_backend_ms * 1'000'000.0));
             }
+#endif
+
             if (ctx.renderer.backend_name() == "SDL_GPU") {
                 debug_overlay.record("gpu.wait", present_stats.last_gpu_wait_ms);
                 record_profile_value("gpu.wait", "runtime", present_stats.last_gpu_wait_ms);
@@ -964,10 +982,13 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         frame_prepared = false;
     });
 
+#if KIN_ENABLE_RUNTIME_PROFILING
     if (config.headless.profile_render) {
         write_render_profile_report(std::cout, debug_overlay, window.max_frames);
     }
+#endif
 
+#if KIN_ENABLE_RUNTIME_PROFILING
     if (profile_enabled) {
         profile_session.stop();
         if (config.headless.profile_lines) {
@@ -1022,6 +1043,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             write_json(file);
         }
     }
+#endif
 
 #ifdef KIN_ENABLE_RENDER_PROBE
     if (probe) {

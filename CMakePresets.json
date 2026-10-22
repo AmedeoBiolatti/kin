@@ -100,6 +100,41 @@
         "KIN_ENABLE_PROFILING": "ON",
         "KIN_BUILD_BENCHMARKS": "ON"
       }
+    },
+    {
+      "name": "desktop-software",
+      "displayName": "Desktop: software renderer only",
+      "inherits": "desktop-shipping",
+      "cacheVariables": {
+        "KIN_RENDERER": "software"
+      }
+    },
+    {
+      "name": "desktop-gpu",
+      "displayName": "Desktop: gpu renderer only",
+      "inherits": "desktop-shipping",
+      "cacheVariables": {
+        "KIN_RENDERER": "gpu"
+      }
+    },
+    {
+      "name": "hex-small",
+      "displayName": "Hex demo: software, baked HUD, no file codecs or runtime tools",
+      "inherits": "desktop-software",
+      "cacheVariables": {
+        "KIN_HEX_DEMO_BAKED_FONT": "ON",
+        "KIN_ENABLE_IMAGE_IO": "OFF",
+        "KIN_ENABLE_TTF": "OFF",
+        "KIN_ENABLE_RUNTIME_PROFILING": "OFF",
+        "KIN_ENABLE_RUNTIME_ASSETS": "OFF",
+        "KIN_BUILD_GAME_ECS_GRAPH_DEMO": "OFF",
+        "KIN_BUILD_GAME_ECS_PARALLEL_BENCH": "OFF",
+        "KIN_BUILD_GAME_ECS_SYSTEMS_DEMO": "OFF",
+        "KIN_BUILD_GAME_ISOMETRIC_DEMO": "OFF",
+        "KIN_BUILD_GAME_LIGHTING_DEMO": "OFF",
+        "KIN_BUILD_GAME_SHAPES_DEMO": "OFF",
+        "KIN_BUILD_GAME_TEXT_EDIT_DEMO": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -138,6 +173,18 @@
     {
       "name": "desktop-profile",
       "configurePreset": "desktop-profile"
+    },
+    {
+      "name": "desktop-software",
+      "configurePreset": "desktop-software"
+    },
+    {
+      "name": "desktop-gpu",
+      "configurePreset": "desktop-gpu"
+    },
+    {
+      "name": "hex-small",
+      "configurePreset": "hex-small"
     }
   ],
   "testPresets": [
@@ -200,6 +247,39 @@
     {
       "name": "desktop-profile",
       "configurePreset": "desktop-profile",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-software",
+      "configurePreset": "desktop-software",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_AUDIO_DRIVER": "dummy",
+        "SDL_VIDEO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-gpu",
+      "configurePreset": "desktop-gpu",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_AUDIO_DRIVER": "dummy",
+        "KIN_REQUIRE_GPU_TESTS": "1"
+      }
+    },
+    {
+      "name": "hex-small",
+      "configurePreset": "hex-small",
       "output": {
         "outputOnFailure": true
       },

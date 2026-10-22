@@ -18,7 +18,51 @@ FetchContent_Declare(SDL3
     GIT_SHALLOW TRUE
 )
 
-FetchContent_MakeAvailable(SDL3)
+function(kin_configure_sdl)
+    set(policy_options AUDIO GPU RENDER OPENGL OPENGLES VULKAN METAL
+        RENDER_D3D RENDER_D3D11 RENDER_D3D12 RENDER_METAL RENDER_GPU RENDER_VULKAN)
+    foreach(option IN LISTS policy_options)
+        get_property(had_${option} CACHE SDL_${option} PROPERTY TYPE SET)
+        if(had_${option})
+            get_property(value_${option} CACHE SDL_${option} PROPERTY VALUE)
+            get_property(type_${option} CACHE SDL_${option} PROPERTY TYPE)
+            get_property(help_${option} CACHE SDL_${option} PROPERTY HELPSTRING)
+        endif()
+    endforeach()
+    if(NOT KIN_ENABLE_AUDIO)
+        set(SDL_AUDIO OFF)
+    endif()
+    # SDL's dependent options FORCE-write local overrides into the cache.
+    # Preserve the caller's settings so software -> gpu -> auto reconfiguration
+    # does not accidentally keep the previous profile's disabled drivers.
+    if(KIN_RENDERER STREQUAL "software")
+        set(SDL_GPU OFF)
+        set(SDL_RENDER ON)
+        foreach(driver OPENGL OPENGLES VULKAN METAL RENDER_D3D RENDER_D3D11
+                       RENDER_D3D12 RENDER_METAL RENDER_GPU RENDER_VULKAN)
+            set(SDL_${driver} OFF)
+        endforeach()
+    elseif(KIN_RENDERER STREQUAL "gpu")
+        set(SDL_RENDER OFF)
+        set(SDL_GPU ON)
+        set(SDL_OPENGL OFF)
+        set(SDL_OPENGLES OFF)
+    endif()
+    FetchContent_MakeAvailable(SDL3)
+    if(NOT KIN_ENABLE_IMAGE_IO)
+        # SDL 3.4 also embeds PNG/JPEG codecs independently of SDL_image. Keep its
+        # built-in disabled-codec stubs, excluding those implementations too.
+        target_compile_definitions(SDL3-static PRIVATE SDL_DISABLE_STB)
+    endif()
+    foreach(option IN LISTS policy_options)
+        if(had_${option})
+            set(SDL_${option} "${value_${option}}" CACHE "${type_${option}}" "${help_${option}}" FORCE)
+        else()
+            unset(SDL_${option} CACHE)
+        endif()
+    endforeach()
+endfunction()
+kin_configure_sdl()
 
 set(FLECS_STATIC ON CACHE BOOL "" FORCE)
 set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
@@ -197,25 +241,28 @@ endif()
 ]=])
 set(SDL3_DIR "${_sdl3_shim}" CACHE PATH "" FORCE)
 
-FetchContent_Declare(SDL3_image
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL_image.git
-    GIT_TAG release-3.4.4
-    GIT_SHALLOW TRUE
-)
+if(KIN_ENABLE_IMAGE_IO)
+    FetchContent_Declare(SDL3_image
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL_image.git
+        GIT_TAG release-3.4.4
+        GIT_SHALLOW TRUE
+    )
 
-FetchContent_MakeAvailable(SDL3_image)
+    FetchContent_MakeAvailable(SDL3_image)
+endif()
 
-set(SDLTTF_VENDORED ON CACHE BOOL "" FORCE)
-set(SDLTTF_DEPS_SHARED OFF CACHE BOOL "" FORCE)
-set(SDLTTF_INSTALL OFF CACHE BOOL "" FORCE)
-set(SDLTTF_SAMPLES OFF CACHE BOOL "" FORCE)
-set(SDLTTF_TESTS OFF CACHE BOOL "" FORCE)
+if(KIN_ENABLE_TTF)
+    set(SDLTTF_VENDORED ON CACHE BOOL "" FORCE)
+    set(SDLTTF_DEPS_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDLTTF_INSTALL OFF CACHE BOOL "" FORCE)
+    set(SDLTTF_SAMPLES OFF CACHE BOOL "" FORCE)
+    set(SDLTTF_TESTS OFF CACHE BOOL "" FORCE)
 
-FetchContent_Declare(SDL3_ttf
-    GIT_REPOSITORY https://github.com/libsdl-org/SDL_ttf.git
-    GIT_TAG release-3.2.2
-    GIT_SHALLOW TRUE
-)
+    FetchContent_Declare(SDL3_ttf
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL_ttf.git
+        GIT_TAG release-3.2.2
+        GIT_SHALLOW TRUE
+    )
 
 FetchContent_MakeAvailable(SDL3_ttf)
 
