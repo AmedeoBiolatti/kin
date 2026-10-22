@@ -27,7 +27,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 
 namespace kin::gpu {
@@ -5153,7 +5155,9 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     }
     stats.local_shadow_drawn = drawing;
     if (drawing == 0) {
-        stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity()) * sizeof(u32);
+        stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity() + _local_batch_list.capacity() +
+                                  _local_batch_refs.capacity()) *
+                                 sizeof(u32);
         found_copies.swap(_local_list);
         stats.local_slot_bytes = _local_slot.capacity() * sizeof(u32);
         return;
@@ -5189,6 +5193,43 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
         return slot;
     };
+    // Intern shadow state once per source ref. Sorting the light maps then
+    // compares small integer IDs instead of repeatedly visiting large DrawRefs.
+    struct BatchKey {
+        u64 mesh;
+        std::uintptr_t texture;
+        u32 retained, cutoff, state;
+        bool operator==(const BatchKey&) const = default;
+    };
+    struct BatchHash {
+        std::size_t operator()(const BatchKey& k) const {
+            u64 h = (k.mesh ^ k.texture) * 0x9e3779b97f4a7c15ull;
+            h = (h ^ k.retained) * 0x9e3779b97f4a7c15ull;
+            h = (h ^ k.cutoff) * 0x9e3779b97f4a7c15ull;
+            h = (h ^ k.state) * 0x9e3779b97f4a7c15ull;
+            return static_cast<std::size_t>(h ^ (h >> 32));
+        }
+    };
+    std::unordered_map<BatchKey, u32, BatchHash> batch_refs;
+    batch_refs.reserve(std::min<std::size_t>(_refs.size(), 1024));
+    _local_batch_refs.assign(_refs.size(), ~0u);
+    const auto batch_of = [&](u32 r) {
+        u32& batch = _local_batch_refs[r];
+        if (batch != ~0u)
+            return batch;
+        const DrawRef& ref = _refs[r];
+        const Material3D& material = ref.draw->material;
+        const bool cutout = material.blend == Blend3D::Mask;
+        // Opaque lighting state is unused. bind_cutout's texture, sampler and
+        // cutoff must match; tint alpha is already in each instance's record.
+        const BatchKey key{ref.mesh->serial,
+                           cutout ? reinterpret_cast<std::uintptr_t>(material.texture.backend().get()) : 0,
+                           ref.retained, cutout ? std::bit_cast<u32>(material.alpha_cutoff) : 0,
+                           u32(material.double_sided) | (u32(ref.skinned) << 1) | (u32(cutout) << 2) |
+                               (cutout ? (u32(material.wrap_u) << 8) | (u32(material.wrap_v) << 16) : 0)};
+        batch = batch_refs.try_emplace(key, r).first->second;
+        return batch;
+    };
     for (u32 v = 0; v < _local_views.size(); ++v) {
         LocalView& view = _local_views[v];
         view.entry_first = static_cast<u32>(_local_entries.size());
@@ -5199,6 +5240,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         for (const Found& f : found[v]) {
             LocalEntry entry;
             entry.ref = f.ref;
+            (void)batch_of(f.ref);
             entry.level = f.level;
             entry.list_first = static_cast<u32>(written);
             entry.clustered = !f.runs.empty();
@@ -5225,7 +5267,53 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         found_copies.resize(written);
         found_copies.swap(_local_list);
     }
-    stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity()) * sizeof(u32);
+    // Cache keys and the streamed union retain their original order. Only the
+    // depth draws change: compatible entries share one contiguous caster list.
+    const auto shadow_less = [&](const LocalEntry& a, const LocalEntry& b) {
+        const u32 ar = _local_batch_refs[a.ref], br = _local_batch_refs[b.ref];
+        return ar != br ? ar < br : a.level < b.level;
+    };
+    _local_batch_list.resize(_local_list.size());
+    u32 batches = 0, copies = 0;
+    for (LocalView& view : _local_views) {
+        if (!view.entry_count) {
+            view.entry_first = batches;
+            continue;
+        }
+        const auto first = _local_entries.begin() + view.entry_first;
+        const auto last = first + view.entry_count;
+        // Keep nearby source draws together: sorting the entire map by mesh
+        // destroys caster locality and can increase GPU depth-pass work.
+        constexpr std::ptrdiff_t batch_window = 128;
+        for (auto block = first; block != last;) {
+            const auto end = block + std::min(batch_window, last - block);
+            std::stable_sort(block, end, shadow_less);
+            block = end;
+        }
+        view.entry_first = batches;
+        view.entry_count = 0;
+        for (auto it = first; it != last; ++it) {
+            LocalEntry entry = *it;
+            std::copy_n(_local_list.data() + entry.list_first, entry.count, _local_batch_list.data() + copies);
+            entry.list_first = copies;
+            copies += entry.count;
+            // Cluster cuts have a different index run per copy. Keep their
+            // draw records intact, including their correspondence to the list.
+            if (view.entry_count && !entry.clustered && !_local_entries[batches - 1].clustered &&
+                _local_batch_refs[_local_entries[batches - 1].ref] == _local_batch_refs[entry.ref] &&
+                _local_entries[batches - 1].level == entry.level) {
+                _local_entries[batches - 1].count += entry.count;
+            } else {
+                _local_entries[batches++] = entry;
+                ++view.entry_count;
+            }
+        }
+    }
+    _local_entries.resize(batches);
+    _local_batch_list.swap(_local_list);
+    stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity() + _local_batch_list.capacity() +
+                              _local_batch_refs.capacity()) *
+                             sizeof(u32);
     if (union_count > 0) {
         const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
         ensure_buffer(_local_instances, instance_bytes, min_instance_buffer);

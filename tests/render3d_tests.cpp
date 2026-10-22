@@ -13078,7 +13078,7 @@ void test_gpu_spot_shadow_casters() {
                 renderer.present();
                 assert(r3d.debug_stats().local_shadow_casters == 6);
                 assert(r3d.debug_stats().local_shadow_triangles == caster_triangles);
-                assert(r3d.debug_stats().local_shadow_draws == (split ? 6u : 2u));
+                assert(r3d.debug_stats().local_shadow_draws == (split ? 3u : 2u)); // floor, pole, optional twin
                 return p;
             };
             for (const bool split : {false, true}) {
@@ -13945,6 +13945,145 @@ void test_gpu_local_shadow_cell_ranges() {
                            a.local_shadow_draws == b.local_shadow_draws);
                 }
             }
+    });
+}
+
+// Identical geometry in separate mesh allocations cannot batch: an independent
+// image oracle for shared-mesh batching, including cutout and buffer boundaries.
+void test_gpu_local_shadow_batching() {
+    with_gpu("test_gpu_local_shadow_batching", [&](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().local_shadows && r3d.capabilities().skinning, "local shadows and skinning"))
+            return;
+        const auto floor = make_box(r3d, {40, 0.2f, 40});
+        SkinRig rig{r3d, 10, 8, 2};
+        MeshData3D plain = kin::meshes::box({0.7f, 2, 0.7f});
+        for (auto* data : {&plain, &rig.tube.mesh})
+            for (auto& vertex : data->vertices)
+                vertex.uv = {vertex.uv.x * 3 - 0.5f, vertex.uv.y * 2 - 0.5f};
+        const auto mesh = r3d.create_mesh(plain).value_or({});
+        rig.mesh = r3d.create_mesh(rig.tube.mesh).value_or({});
+        const kin::u8 texels[][8]{{220, 180, 140, 255, 220, 180, 140, 90}, {220, 180, 140, 30, 220, 180, 140, 255}};
+        const kin::Texture textures[]{renderer.create_texture_from_rgba(texels[0], {2, 1}),
+                                      renderer.create_texture_from_rgba(texels[1], {2, 1})};
+        std::array<kin::Material3D, 10> materials;
+        for (kin::u32 i = 0; i < materials.size(); ++i) {
+            auto& m = materials[i];
+            m.color = {kin::u8(160 + i * 10), kin::u8(220 - i * 10), 150, kin::u8(190 + i * 6)};
+            m.roughness = 0.2f + i * 0.1f;
+            m.double_sided = i == 1 || i == 6;
+            if (i >= 2 && i != 7) {
+                m.blend = kin::Blend3D::Mask;
+                m.texture = textures[i == 5 ? 1 : 0];
+                m.wrap_u = i == 2 ? kin::Wrap3D::Clamp : kin::Wrap3D::Repeat;
+                m.wrap_v = i >= 8 ? kin::Wrap3D::Repeat : kin::Wrap3D::Clamp;
+                m.alpha_cutoff = i == 4 || i == 5 ? 0.7f : 0.2f;
+            }
+        }
+        std::vector<kin::InstanceBatch3D> resident;
+        for (int table = 0; table < 2; ++table) {
+            std::vector<kin::MeshInstance3D> copies;
+            for (int i = 0; i < 4; ++i)
+                copies.push_back({Mat4f::translation({float(i * 2 - 3), 1, float(table * 2 + 6)}),
+                                  {255, 255, 255, kin::u8(150 + i * 30)}});
+            resident.push_back(kin::InstanceBatch3D::create(mesh, std::move(copies)).value_or({}));
+        }
+        const auto lod_data = kin::meshes::sphere(0.5f, 24, 12);
+        const auto lod = r3d.create_mesh(lod_data, {.levels = 3}).value_or({});
+        assert(lod.level_count() > 1);
+        for (const bool skinned : {false, true}) {
+            std::vector<kin::Mesh3D> separate;
+            // Cross a batching window with repeated compatible groups. The
+            // copies fit inside the spot so culling cannot hide the boundary.
+            for (int i = 0; i < 150; ++i)
+                separate.push_back(r3d.create_mesh(skinned ? rig.tube.mesh : plain).value_or({}));
+            std::array<kin::Mesh3D, 3> separate_lod;
+            for (auto& m : separate_lod)
+                m = r3d.create_mesh(lod_data, {.levels = 3}).value_or({});
+            for (int light = 0; light < 3; ++light) {
+                std::array<Pixels, 4> reference;
+                std::array<kin::RenderDebugStats3D, 4> counts;
+                for (const bool batched : {false, true}) {
+                    auto view = r3d.create_view({240, 180}, {.samples = 1}).value_or({});
+                    for (int frame = 0; frame < 4; ++frame) {
+                        kin::Scene3D scene;
+                        scene.camera = kin::Camera3D::look_at({0, 16, 22}, {0, 0, 0}, 60);
+                        scene.camera.z_far = 100;
+                        scene.lights.sun.color = {};
+                        scene.lights.ambient = {0.1f, 0.1f, 0.1f};
+                        scene.lights.cache_shadows = frame != 0; // start both controls with uncached maps
+                        scene.lights.local_shadow_resolution = 512;
+                        scene.lod = {.enabled = true, .error_pixels = 3};
+                        if (light == 0) {
+                            kin::SpotLightSource3D spot{.position = {0, 15, 3},
+                                                        .direction = {0, -1, -0.2f},
+                                                        .color = {15, 15, 15},
+                                                        .radius = 45,
+                                                        .outer_angle = 65};
+                            spot.shadow_enabled = true;
+                            scene.add_spot_light(spot);
+                        } else if (light == 1) {
+                            kin::PointLightSource3D point{.position = {0, 10, 0}, .color = {15, 15, 15}, .radius = 40};
+                            point.shadow_enabled = true;
+                            scene.add_point_light(point);
+                        } else {
+                            scene.lights.shadow_area = {{-18, -2, -18}, {18, 6, 18}};
+                            scene.lights.fill = {.direction = {0.4f, 1, 0.3f}, .color = {1, 1, 1}};
+                            scene.lights.fill_shadow.enabled = true;
+                            scene.lights.fill_shadow.resolution = 512;
+                        }
+                        (void)scene.draw(floor, Mat4f::translation({0, -0.1f, 0}));
+                        for (kin::u32 i = 0; i < separate.size(); ++i) {
+                            const auto at =
+                                Mat4f::translation({float(int(i % 10)) * 1.4f - 6.3f, skinned ? 0.0f : 1.0f,
+                                                    float(i / 10) * 1.3f - 9.1f + (frame == 3 && i == 0 ? 0.4f : 0)});
+                            const Color tint{255, 255, 255, kin::u8(180 + i % 3 * 30)};
+                            const auto& m = batched ? (skinned ? rig.mesh : mesh) : separate[i];
+                            if (skinned)
+                                (void)scene.draw_skinned(m, rig.matrices(float(i * 3), -float(i * 2)), at,
+                                                         materials[i % materials.size()], tint);
+                            else
+                                (void)scene.draw(m, at, materials[i % materials.size()], tint);
+                        }
+                        for (std::size_t i = 0; i < separate_lod.size(); ++i)
+                            (void)scene.draw(batched ? lod : separate_lod[i],
+                                             Mat4f::translation({float(int(i) * 4 - 4), 0.5f, -12}), materials[i]);
+                        for (const auto& batch : resident)
+                            (void)scene.draw_instanced(batch, materials[4]);
+                        const auto image = shoot_view(renderer, r3d, view, scene);
+                        const auto st = r3d.debug_stats();
+                        assert(st.retained_instances == 8 && st.local_shadow_maps > 0);
+                        if (frame == 2)
+                            assert(st.local_shadow_cached == st.local_shadow_maps && st.local_shadow_draws == 0);
+                        else
+                            assert(st.local_shadow_draws > 0);
+                        if (!batched) {
+                            reference[frame] = image;
+                            counts[frame] = st;
+                        } else {
+                            assert(reference[frame].rgba == image.rgba);
+                            const auto& before = counts[frame];
+                            if (before.local_shadow_casters != st.local_shadow_casters ||
+                                before.local_shadow_triangles != st.local_shadow_triangles)
+                                std::cerr << "local shadow batching: skin=" << skinned << " light=" << light
+                                          << " frame=" << frame << " casters=" << before.local_shadow_casters << "/"
+                                          << st.local_shadow_casters << " triangles=" << before.local_shadow_triangles
+                                          << "/" << st.local_shadow_triangles << '\n';
+                            assert(before.local_shadow_casters == st.local_shadow_casters &&
+                                   before.local_shadow_triangles == st.local_shadow_triangles);
+                            assert(before.local_shadow_cached == st.local_shadow_cached &&
+                                   before.local_shadow_drawn == st.local_shadow_drawn);
+                            assert(before.instance_upload_bytes == st.instance_upload_bytes);
+                            if (light == 0 && frame == 0)
+                                assert(st.local_shadow_draws == 22); // two windows; global grouping would draw 14
+                            if (frame != 2)
+                                assert(st.local_shadow_draws < before.local_shadow_draws);
+                        }
+                        renderer.present();
+                    }
+                }
+            }
+        }
     });
 }
 
@@ -20772,6 +20911,7 @@ int main(int argc, char** argv) {
     RUN(test_shadow_reach_proofs());
     RUN(test_local_shadow_cell_proofs());
     RUN(test_gpu_local_shadow_cell_ranges());
+    RUN(test_gpu_local_shadow_batching());
     RUN(test_gpu_local_shadow_packing());
     RUN(test_gpu_spot_shadow_acne());
     RUN(test_gpu_spot_shadow_distance());

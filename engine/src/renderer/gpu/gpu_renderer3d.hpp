@@ -721,6 +721,8 @@ private:
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<u32> _local_list;                  // the lists, as uploaded
+    std::vector<u32> _local_batch_list;            // reused while joining compatible depth draws
+    std::vector<u32> _local_batch_refs;            // each ref's compatible depth-draw representative
     std::vector<std::array<u32, 2>> _local_copies; // the union's (ref, copy), packed directly into upload memory
     std::vector<u32> _local_joint_list;
     std::vector<std::array<u32, 2>> _local_runs; // a clustered copy's (first index, count) in _local_cluster_indices
