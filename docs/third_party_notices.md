@@ -8,6 +8,9 @@ into the engine.
 If you distribute a binary built with kin, include the license texts of these
 components with it. Each license is in the fetched source tree, under
 `<build>/_deps/<name>-src/`.
+The experimental [desktop package helper](shipping.md) includes these notices
+from the dependency sources automatically. Add notices for your own assets,
+fonts and additional libraries through its `LICENSE_FILES` argument.
 
 ## Direct dependencies
 

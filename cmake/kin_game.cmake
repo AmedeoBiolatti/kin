@@ -1,3 +1,5 @@
+include("${CMAKE_CURRENT_LIST_DIR}/kin_packaging.cmake")
+
 # Games built with kin, from their content to a package (docs/shipping.md).
 #
 #   kin_game(<target>

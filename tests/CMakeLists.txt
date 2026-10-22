@@ -73,6 +73,27 @@ kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp
     DEFINITIONS KIN_AUDIO_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
 kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
+if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
+    add_library(kin_desktop_package_library SHARED desktop_package_library.cpp)
+    set_target_properties(kin_desktop_package_library PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    add_executable(kin_desktop_package_fixture desktop_package_fixture.cpp)
+    target_link_libraries(kin_desktop_package_fixture PRIVATE kin::engine kin_desktop_package_library)
+    kin_configure_game_assets(kin_desktop_package_fixture package_fixture
+        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/desktop_package/assets")
+    kin_package_game(kin_desktop_package_fixture RUNTIME_TARGETS kin_desktop_package_library)
+    get_target_property(_package_script kin_desktop_package_fixture KIN_PACKAGE_SCRIPT)
+    get_target_property(_package_name kin_desktop_package_fixture KIN_PACKAGE_NAME)
+    add_test(NAME kin-desktop-package
+        COMMAND "${CMAKE_COMMAND}"
+            "-DPACKAGE_SCRIPT=${_package_script}"
+            "-DPACKAGE_NAME=${_package_name}"
+            "-DBUILD_DIR=${CMAKE_BINARY_DIR}"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DCONFIG=$<CONFIG>"
+            "-DEXECUTABLE=$<TARGET_FILE_NAME:kin_desktop_package_fixture>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/desktop_package_tests.cmake"
+        CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
+endif()
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
 kin_add_test(kin_texture_file_tests kin-texture-file SOURCES texture_file_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
