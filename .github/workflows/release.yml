@@ -57,4 +57,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" publish/* --verify-tag --title "Kin $RELEASE_TAG" --generate-notes
+          gh release create "$RELEASE_TAG" publish/* --verify-tag --draft --title "Kin $RELEASE_TAG" --generate-notes
+          gh release edit "$RELEASE_TAG" --draft=false

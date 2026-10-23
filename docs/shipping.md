@@ -340,6 +340,7 @@ python3 tools/prepare_release.py --check-tag v0.2.7 --revision <tag-commit> \
     --incoming incoming --output publish
 ```
 
-The output directory must be empty. Existing GitHub releases are not overwritten;
-if publication fails after a release was created, inspect its assets and recover
-explicitly rather than replacing published files automatically.
+The output directory must be empty. Assets are uploaded to a draft release and
+made public only after the upload succeeds. Existing GitHub releases are not
+overwritten; if publication fails after creating a draft, inspect its assets and
+recover explicitly rather than replacing published files automatically.
