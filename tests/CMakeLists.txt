@@ -150,7 +150,6 @@ if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
             -P "${CMAKE_CURRENT_SOURCE_DIR}/release_policy_tests.cmake"
         CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
     add_library(kin_desktop_package_library SHARED desktop_package_library.cpp)
-    set_target_properties(kin_desktop_package_library PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     add_executable(kin_desktop_package_fixture desktop_package_fixture.cpp)
     target_link_libraries(kin_desktop_package_fixture PRIVATE kin::engine kin_desktop_package_library)
     # Exercise the low-level loose-assets exporter; real Signal Siege acceptance

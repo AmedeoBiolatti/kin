@@ -21,10 +21,10 @@ class ComponentConfigTests(unittest.TestCase):
     def configure(self, extra='', options=(), success=True):
         (self.source/'CMakeLists.txt').write_text(f'''cmake_minimum_required(VERSION 3.22)
 project(components LANGUAGES CXX)
-include("{ROOT}/cmake/kin_components.cmake")
+include("{ROOT.as_posix()}/cmake/kin_components.cmake")
 {extra}
 kin_generate_component_config("${{CMAKE_BINARY_DIR}}/generated")
-add_executable(check "{ROOT}/tests/component_tests.cpp")
+add_executable(check "{ROOT.as_posix()}/tests/component_tests.cpp")
 target_link_libraries(check PRIVATE kin::components)
 ''', encoding='utf-8')
         result = subprocess.run(['cmake','-S',str(self.source),'-B',str(self.build),*options],
@@ -79,7 +79,7 @@ target_link_libraries(check PRIVATE kin::components)
     def test_package_metadata(self):
         self.configure(options=['-DCMAKE_BUILD_TYPE=Release','-DKIN_ENABLE_AUDIO=OFF'])
         with (self.source/'CMakeLists.txt').open('a') as stream:
-            stream.write(f'\nlist(APPEND CMAKE_MODULE_PATH "{ROOT}/cmake")\ninclude(kin_release)\ninclude(kin_packaging)\nkin_package_game(check VERSION 1.2.3)\n')
+            stream.write(f'\nlist(APPEND CMAKE_MODULE_PATH "{ROOT.as_posix()}/cmake")\ninclude(kin_release)\ninclude(kin_packaging)\nkin_package_game(check VERSION 1.2.3)\n')
         import shutil
         git=shutil.which('git')
         if git:

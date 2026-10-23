@@ -146,7 +146,12 @@ function(kin_package_game target)
             COMPONENT ${component} EXCLUDE_FROM_ALL
         LIBRARY DESTINATION lib CONFIGURATIONS ${configurations}
             COMPONENT ${component} EXCLUDE_FROM_ALL)
+    set(runtime_directories "$<TARGET_FILE_DIR:${target}>")
+    foreach(library IN LISTS PACKAGE_RUNTIME_TARGETS)
+        list(APPEND runtime_directories "$<TARGET_FILE_DIR:${library}>")
+    endforeach()
     install(RUNTIME_DEPENDENCY_SET ${runtime_set}
+        DIRECTORIES ${runtime_directories}
         PRE_EXCLUDE_REGEXES ${exclude}
         POST_EXCLUDE_REGEXES ${system_paths}
         RUNTIME DESTINATION . CONFIGURATIONS ${configurations}

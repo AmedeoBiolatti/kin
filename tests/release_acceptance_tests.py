@@ -25,7 +25,10 @@ class ReleaseAcceptanceTests(unittest.TestCase):
     def test_zip_paths_and_duplicates(self):
         for name in ('../escape','/absolute','game/../escape','game/C:/bad','game\\bad'):
             archive=self.root/'bad.zip'
-            with zipfile.ZipFile(archive,'w') as zipped: zipped.writestr(name,b'bad')
+            with zipfile.ZipFile(archive,'w') as zipped:
+                item=zipfile.ZipInfo()
+                item.filename=name  # Preserve malformed backslashes on Windows too.
+                zipped.writestr(item,b'bad')
             with self.assertRaises(ValueError): extract(archive,self.root/'out')
         archive=self.root/'case.zip'
         with zipfile.ZipFile(archive,'w') as zipped:
@@ -102,7 +105,7 @@ set(CMAKE_CXX_COMPILER_ID {compiler})
 set(CMAKE_CXX_COMPILER_VERSION {version})
 set(MSVC {'TRUE' if msvc else 'FALSE'})
 set(MSVC_VERSION {number})
-include("{ROOT}/cmake/kin_release_contract.cmake")
+include("{ROOT.as_posix()}/cmake/kin_release_contract.cmake")
 ''', encoding='utf-8')
             result=subprocess.run(['cmake','-P',str(script)],capture_output=True,text=True)
             self.assertEqual(result.returncode==0,success,result.stdout+result.stderr)
