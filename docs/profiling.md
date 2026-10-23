@@ -5,12 +5,26 @@ Kin has two complementary profiling paths:
 - full-game runtime profiling through any executable that uses `run_scene_app`
 - focused benchmark profiling through `kin_bench`
 
-Runtime phase profiling works in the normal build. Manual line/block profiling
-requires configuring the build with `KIN_ENABLE_PROFILING=ON`.
+Runtime phase profiling defaults to ON, including builds without the debug
+overlay. `KIN_ENABLE_RUNTIME_PROFILING=OFF` removes scene capture/reports and
+rejects profile requests (used by `hex-small`). Re-enable it in a separate
+measurement build when profiling that export. Manual line/block profiling is enabled by `KIN_ENABLE_PROFILING=ON`, or
+in Release by `KIN_ENABLE_RELEASE_PROFILING=ON` (the default).
 
 ## Build
 
-Enable manual profiling macros:
+For an optimized build with debug symbols and manual markers:
+
+```sh
+cmake --preset desktop-profile
+cmake --build --preset desktop-profile --parallel
+```
+
+This preset disables the optional gameplay subsystems; enable any the game
+needs, e.g. `-DKIN_ENABLE_AUDIO=ON`. It uses Ninja; on Windows run from a compiler
+developer shell. See [shipping](shipping.md) for all presets and size reports.
+
+Enable manual profiling macros in an existing build:
 
 ```sh
 cmake -S . -B build -DKIN_ENABLE_PROFILING=ON
@@ -20,7 +34,7 @@ cmake --build build --config Release
 Return to the default no-op macro build:
 
 ```sh
-cmake -S . -B build -DKIN_ENABLE_PROFILING=OFF
+cmake -S . -B build -DKIN_ENABLE_PROFILING=OFF -DKIN_ENABLE_RELEASE_PROFILING=OFF
 cmake --build build --config Release
 ```
 
@@ -232,8 +246,20 @@ Marker behavior:
 - `KIN_PROFILE_FUNCTION()` records the current function name.
 - `KIN_PROFILE_SCOPE("name")` records the enclosing lexical scope.
 - `KIN_PROFILE_LINE("name")` records the exact source file and line where the macro appears.
-- All three compile to no-ops unless `KIN_ENABLE_PROFILING=ON`.
+- All three compile to no-ops unless manual profiling is enabled for that
+  configuration. Disabled markers do not evaluate their arguments.
+- Compiled markers skip clock reads while no capture session is active.
 - Runtime executables only collect manual marker events when run with `--profile-lines`.
+- Manual profiles contain the markers actually placed in game code; the flag
+  does not instrument every source line automatically.
+- `--profile-lines` fails explicitly in builds without markers (including
+  `kin_bench`), instead of producing a misleading empty line profile.
+
+`KIN_ENABLE_DEBUG_OVERLAY=OFF` removes the overlay UI, its font lookup, and F1/F2
+shortcuts. Runtime phase reports, programmatic timing capture, GPU timing and
+`--profile-render` remain available. Normal runs do not retain the overlay's
+timing history unless the UI, a capture, a profile, or `KIN_LOG_FRAME_STATS` uses
+it. These controls do not remove all renderer counters or phase clock reads.
 
 ## Reading Results
 
@@ -252,3 +278,21 @@ JSON output is the source of truth for agents and tooling:
 
 Generated reports should go under `out/profile` or `out/bench`; `out/` is ignored
 by Git.
+
+## Measuring a package without compiled profiling
+
+`--headless --render --frames=N` renders a fixed number of frames without
+requiring profile capture or image codecs. The dummy video driver works for
+software exports; GPU exports need a real driver even with a hidden window.
+
+```sh
+SDL_VIDEO_DRIVER=dummy python3 tools/measure_game_run.py \
+  --game small build/hex-small/packages/hex_demo-Linux-x86_64-MinSizeRel/hex_demo \
+  --output out/shipping/run-times.json
+```
+
+This records one-frame and many-frame process durations, then estimates the
+incremental cost per frame. The one-frame value includes process startup, first
+render and shutdown; it is not a first-present measurement. Use `--profile` in a
+separate build with runtime profiling enabled for phase and percentile data.
+Do not benchmark while builds or other heavy work are running.

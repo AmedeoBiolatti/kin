@@ -12,7 +12,7 @@ bool render_power_grid(Arena& arena, Input& input, Renderer2D& renderer,
     if (output.x<=0 || output.y<=0) return false;
     const float dpi=std::isfinite(display_scale) && display_scale>0 ? display_scale : 1;
     const float w=output.x/dpi, h=output.y/dpi;
-    const auto font=ui2::system_ui_font(15);
+    const auto font=siege_ui_font(15);
     constexpr auto ink=Color::rgb(226,237,244), muted=Color::rgb(149,170,188);
     constexpr auto accent=Color::rgb(105,230,201), locked=Color::rgb(68,84,104);
     constexpr std::array<std::string_view,6> branches{"mobility","weapons","salvage","ballistics","defense","recovery"};
@@ -37,7 +37,10 @@ bool render_power_grid(Arena& arena, Input& input, Renderer2D& renderer,
     if (input.frame_pressed("grid_previous")) tier=(tier+5)%6;
     if (input.frame_pressed("grid_down")) branch=(branch+1)%6;
     if (input.frame_pressed("grid_up")) branch=(branch+5)%6;
-    const Rectf map{16,154,w-32,h-294};
+    const std::string help=tr("grid.help");
+    const float help_height=ui2::measure_text(font,help,12.0f/15*dpi).y/dpi;
+    const float map_top=std::max(154.0f,138.0f+help_height+4.0f);
+    const Rectf map{16,map_top,w-32,h-140-map_top};
     if (over(map) && input.frame_mouse_wheel_y()!=0) branch=(branch+(input.frame_mouse_wheel_y()<0?1:5))%6;
     const float tab_w=(w-40)/3;
     std::array<Rectf,6> tabs{};
@@ -80,7 +83,7 @@ bool render_power_grid(Arena& arena, Input& input, Renderer2D& renderer,
         center(tr("grid.tab",{{"name",tr("grid.branch."+std::string(branches[row]))},{"owned",owned},{"total",6}}),
                r.x+r.w*.5f,r.y+15,12,ink);
     }
-    text(tr("grid.help"),16,138,12,muted);
+    text(help,16,138,12,muted);
     fill(map,Color::rgb(16,27,39));
     for (int i=1;i<6;++i) {
         auto a=nodes[i-1],b=nodes[i];

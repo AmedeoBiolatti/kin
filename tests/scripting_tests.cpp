@@ -1,3 +1,4 @@
+#include <kin/ecs/editor.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
@@ -61,6 +62,22 @@ kin::ScriptScene make_scene(const std::filesystem::path& root,
         .name = "TestScript",
         .hot_reload = hot_reload,
     }};
+}
+
+// The editor entry point lives in the optional scene integration library.
+void test_editor_reload_coordinator() {
+    const auto dir = std::filesystem::temp_directory_path() / "kin-scripting-tests-coordinator";
+    const auto script = dir / "scene.lua";
+    write_text(script, "function on_load(scene) end\n");
+    auto scene = make_scene(dir, "scene.lua", false);
+    kin::EcsReloadCoordinator reload;
+    assert(reload.reload_script_scene(scene).ok);
+    write_text(script, "function on_load(scene) this is not lua end\n");
+    const auto failed = reload.reload_script_scene(scene);
+    assert(!failed.ok);
+    assert(!failed.diagnostics.empty());
+    write_text(script, "function on_load(scene) end\n");
+    assert(reload.reload_script_scene(scene).ok);
 }
 
 void test_load_update_actions_and_spawn(Fixture& fixture) {
@@ -828,6 +845,7 @@ int main() {
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
 #endif
     Fixture fixture;
+    test_editor_reload_coordinator();
     test_load_update_actions_and_spawn(fixture);
     test_input_query_can_quit_app(fixture);
     test_lua_can_query_and_mutate_existing_ecs_entities();

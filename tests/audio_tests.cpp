@@ -4,9 +4,11 @@
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
+#if KIN_ENABLE_SCRIPTING
 #include <kin/scripting/lua_audio.hpp>
 #include <kin/scripting/lua_script.hpp>
 #include <kin/scripting/script_engine.hpp>
+#endif
 #include <kin/ecs/audio.hpp>
 #if defined(KIN_EXPERIMENTAL_3D)
 #include <kin/ecs/scene3d.hpp>
@@ -967,6 +969,7 @@ void test_settings_and_report() {
 
 // Lua scripts drive the engine through bind_lua_audio, in a LuaScript and in a
 // ScriptScene's engine.
+#if KIN_ENABLE_SCRIPTING
 void test_lua_audio() {
     kin::AudioEngine audio = null_engine();
     audio.add_clip("dc", dc_clip(0.5f));
@@ -1012,6 +1015,7 @@ void test_lua_audio() {
     kin::ScriptEngine unbound;
     assert(!unbound.load_file(dir / "scene.lua"));
 }
+#endif
 
 void test_catalog_ducks_roundtrip() {
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-audio-tests-ducks";
@@ -1642,6 +1646,7 @@ void test_spectrum() {
     audio.enable_analysis("sfx", false);
     assert(audio.spectrum("sfx", 8).empty());
 
+#if KIN_ENABLE_SCRIPTING
     kin::LuaScript script{{.setup = [&](sol::state& lua) { kin::bind_lua_audio(lua, audio, catalog); }}};
     assert(script.load_string(R"(
         function check()
@@ -1651,6 +1656,7 @@ void test_spectrum() {
         end
     )"));
     assert(script.call_for<bool>("check") == true);
+#endif
 }
 
 // Music at 120 bpm in 4/4 (a beat is 24000 frames, a bar 96000), on its own bus.
@@ -1827,6 +1833,7 @@ void test_music_position_and_stingers() {
     }
     assert(threw);
 
+#if KIN_ENABLE_SCRIPTING
     // From Lua.
     kin::AudioEngine scripted = music_engine();
     kin::LuaScript script{{.setup = [&](sol::state& lua) { kin::bind_lua_audio(lua, scripted, catalog); }}};
@@ -1839,6 +1846,7 @@ void test_music_position_and_stingers() {
     render(scripted, 24000);
     assert(near(*script.call_for<float>("where"), 1.0f, 1e-3f));
     assert(script.call_for<kin::i64>("change").value_or(0) > 0);
+#endif
 }
 
 } // namespace
@@ -1869,7 +1877,9 @@ int main() {
     test_music();
     test_voice_controls();
     test_settings_and_report();
+#if KIN_ENABLE_SCRIPTING
     test_lua_audio();
+#endif
     test_catalog_ducks_roundtrip();
     test_filters();
     test_reverb_tail();

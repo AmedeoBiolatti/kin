@@ -1,6 +1,7 @@
 #include <kin/platform/app.hpp>
 
 #include <kin/platform/log.hpp>
+#include <kin/renderer/build.hpp>
 
 #include <SDL3/SDL.h>
 
@@ -24,11 +25,9 @@ std::string_view app_mode_name(AppMode mode) {
 App::App(AppConfig config)
     : _config(config) {
     set_max_fps(config.max_fps);
-    // KIN_RENDER_BACKEND=gpu keeps the real video driver even headless, so a
-    // --server --render capture can go through the GPU backend the game
-    // actually ships on (its window is created hidden either way).
-    const char* backend = std::getenv("KIN_RENDER_BACKEND");
-    if (headless() && !(backend && std::string_view(backend) == "gpu")) {
+    // A GPU-only headless app still needs a real driver and a hidden window.
+    const auto renderer = requested_renderer();
+    if (headless() && renderer != RendererRequest::Gpu) {
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     }
 

@@ -1,0 +1,130 @@
+name: Desktop release acceptance
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches: [main, 'ci/**']
+permissions:
+  contents: read
+jobs:
+  build:
+    name: Package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            preset: signal-siege-release-linux
+            artifact: Linux
+          - os: windows-2022
+            preset: signal-siege-release-windows
+            artifact: Windows
+    runs-on: ${{ matrix.os }}
+    env:
+      SDL_VIDEO_DRIVER: dummy
+      SDL_AUDIO_DRIVER: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/install-linux-deps.sh glslc
+      - name: Pinned Windows shader compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'VulkanSDK.exe'
+          $sdk = Join-Path $env:RUNNER_TEMP 'vulkan-sdk-1.4.350.0'
+          Invoke-WebRequest 'https://sdk.lunarg.com/sdk/download/1.4.350.0/windows/vulkansdk-windows-X64-1.4.350.0.exe' -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne '855b27ba05d2d8119c5114c5d4ff870ca38f2c632b11e1bb9923b9b7e6ecfe7b') { throw 'Vulkan SDK checksum mismatch' }
+          $arguments = 'install --accept-licenses --confirm-command --accept-messages --root="{0}"' -f $sdk
+          $process = Start-Process $installer -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0 -or !(Test-Path "$sdk/Bin/glslc.exe")) { throw 'Shader compiler installation failed' }
+          "VULKAN_SDK=$sdk" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          "$sdk/Bin" | Out-File $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Acceptance dependencies
+        run: python -m pip install Pillow==10.4.0
+      - name: Check bundled fonts
+        run: python tools/check_bundled_fonts.py
+      - name: Configure pinned release policy
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build real player package and integration checks
+        run: cmake --build --preset ${{ matrix.preset }} --parallel 4
+      - name: Packaging regressions
+        run: ctest --test-dir build/${{ matrix.preset }} -C Release -R "^kin-(desktop-package|examples|components|component-targets|component-config|asset-report|asset-cooking|bundled-fonts|release-acceptance-tools)$" --output-on-failure --timeout 300
+      - name: Audit compiler and linker settings
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          package=$(find build/${{ matrix.preset }}/packages -maxdepth 1 -name 'signal_siege-*.zip' ! -name '*-symbols.zip')
+          python tools/audit_release_build.py --build build/${{ matrix.preset }} --target signal_siege --package "$package" --output build/${{ matrix.preset }}/packages/release-audit.json
+      - name: Accept exact player artifact
+        shell: bash
+        run: |
+          package=$(find build/${{ matrix.preset }}/packages -maxdepth 1 -name 'signal_siege-*.zip' ! -name '*-symbols.zip')
+          python tools/accept_desktop_release.py --package "$package" --output build/${{ matrix.preset }}/acceptance --expected-revision "$GITHUB_SHA" --require-clean --require-readonly
+      - name: Retain player ZIP, matching symbols, reports and acceptance together
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-v1-${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            build/${{ matrix.preset }}/packages/signal_siege-*.zip
+            build/${{ matrix.preset }}/packages/signal_siege-*.json
+            build/${{ matrix.preset }}/packages/release-audit.json
+            build/${{ matrix.preset }}/acceptance/
+  linux-clean:
+    name: Fresh Ubuntu 24.04 runtime (${{ matrix.backend }})
+    needs: build
+    runs-on: ubuntu-24.04
+    container: ubuntu:24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [software, gpu]
+    steps:
+      - name: Install runtime and acceptance tools only
+        run: |
+          apt-get update
+          apt-get install -y python3 python3-pil binutils libstdc++6 libgcc-s1 libx11-6 libxext6 libxrandr2 libxcursor1 libxi6 libxfixes3 libxss1 libwayland-client0 libxkbcommon0 libudev1 libvulkan1 mesa-vulkan-drivers xvfb xauth
+          useradd --create-home --uid 1001 player
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-v1-Linux
+          path: incoming
+      - name: Run extracted package as an unprivileged player
+        run: |
+          package=$(find incoming/packages -maxdepth 1 -name 'signal_siege-*.zip' ! -name '*-symbols.zip')
+          export VK_ICD_FILENAMES=$(find /usr/share/vulkan/icd.d -name '*lvp*.json' -print -quit)
+          test -n "$VK_ICD_FILENAMES"
+          su -s /bin/sh player -c "xvfb-run -a python3 '$PWD/tools/accept_desktop_release.py' --package '$PWD/$package' --output /tmp/acceptance --backend '${{ matrix.backend }}' --video-driver x11 --expected-revision '$GITHUB_SHA' --require-clean --require-readonly"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-v1-clean-Linux-${{ matrix.backend }}
+          path: /tmp/acceptance/
+  windows-fresh:
+    name: Fresh Windows runner runtime
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install Pillow==10.4.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-v1-Windows
+          path: incoming
+      - name: Relocated read-only installation, restricted runtime PATH
+        shell: pwsh
+        run: |
+          $package = Get-ChildItem incoming/packages/signal_siege-*.zip | Where-Object Name -NotLike '*-symbols.zip'
+          python tools/accept_desktop_release.py --package $package.FullName --output acceptance --expected-revision $env:GITHUB_SHA --require-clean --require-readonly
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-v1-fresh-Windows
+          path: acceptance/

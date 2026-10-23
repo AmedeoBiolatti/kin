@@ -8,6 +8,9 @@ into the engine.
 If you distribute a binary built with kin, include the license texts of these
 components with it. Each license is in the fetched source tree, under
 `<build>/_deps/<name>-src/`.
+The experimental [desktop package helper](shipping.md) includes these notices
+from the dependency sources automatically. Add notices for your own assets,
+fonts and additional libraries through its `LICENSE_FILES` argument.
 
 ## Direct dependencies
 
@@ -36,7 +39,7 @@ are compiled in as well:
 |---|---|---|
 | [libpng](http://www.libpng.org/pub/png/libpng.html) | SDL_image | PNG Reference Library License v2 |
 | [zlib](https://zlib.net) | SDL_image | zlib |
-| [stb_image](https://github.com/nothings/stb) | SDL_image | Public domain / MIT |
+| [stb_image](https://github.com/nothings/stb) | SDL and SDL_image | Public domain / MIT |
 | [FreeType](https://freetype.org) | SDL_ttf | FreeType License (FTL) or GPLv2 — kin uses it under the FTL |
 | [HarfBuzz](https://harfbuzz.github.io) | SDL_ttf | "Old MIT" |
 | [plutosvg](https://github.com/sammycage/plutosvg) and [plutovg](https://github.com/sammycage/plutovg) | SDL_ttf | MIT |

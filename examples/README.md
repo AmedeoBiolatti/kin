@@ -13,7 +13,8 @@ runner enforces RAM limits and measures a complete 1,440-frame interior/exterior
 Two asset-free native applications share workload code with `kin_bench`.
 They are examples, playable/interactive demos, and reproducible performance
 fixtures. Neither requires downloaded assets, an account, or a network service.
-Run Observatory uses system fonts with the engine's bitmap fallback.
+Signal Siege bundles its multilingual fonts in its content pack. Run Observatory
+uses system fonts with the engine's bitmap fallback.
 
 ## Build and run
 
@@ -29,6 +30,30 @@ Run `build/bin/signal_siege` or `build/bin/run_observatory`. On Windows use
 `KIN_BUILD_EXAMPLES` defaults to ON when kin is the top-level project and is
 independent of `KIN_BUILD_GAMES`.
 Set it OFF to omit both apps and their optional `kin_bench` cases.
+
+## Signal Siege desktop export
+
+Use `signal-siege-shipping` for a larger-game shipping test:
+
+```sh
+cmake --preset signal-siege-shipping
+cmake --build --preset signal-siege-shipping --target signal_siege kin_example_tests
+ctest --preset signal-siege-shipping -R '^kin-examples$'
+cmake --build --preset signal-siege-shipping --target signal_siege_package
+```
+
+This preserves the existing GPU renderer and SDL fallback, audio, font shaping,
+image/screenshot support, debug overlay, profiling and runtime asset services.
+It removes Lua, Box2D, gamepad/HID and the unused SDL runtime-replacement dispatch
+mechanism; the game's collision logic uses its own spatial grid. The
+`signal-siege-reference` preset uses the same Release/LTO/section-GC/strip settings
+with all those optional subsystems enabled, for comparisons. Both presets build
+examples and omit the unrelated sample games and benchmarks.
+
+The export includes all four `.kinlang` files, bundled fonts and dependency
+notices. The OS supplies display/audio drivers. Extract the package and launch
+`signal_siege` (`.exe` on Windows). See [shipping](../docs/shipping.md#additional-desktop-qualification)
+for the acceptance profiles and the existing Steam Runtime release path.
 
 ## Signal Siege
 

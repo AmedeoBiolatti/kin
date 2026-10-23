@@ -1,0 +1,9 @@
+{
+  "schema": "kin.asset-manifest/1",
+  "roots_complete": true,
+  "roots": ["marker.txt"],
+  "assets": {
+    "marker.txt": {"dependencies": [], "dependencies_complete": true},
+    "unused.txt": {"dependencies": [], "dependencies_complete": true}
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "schema": "kin.asset-manifest/1",
+  "roots_complete": true,
+  "discover_dependencies": true,
+  "roots": [
+    "lang/fonts/latin.ttf",
+    "lang/fonts/arabic.ttf",
+    "lang/fonts/japanese.otf",
+    "lang/fonts/core-OFL.txt",
+    "lang/fonts/cjk-OFL.txt",
+    "lang/fonts/provenance.json"
+  ],
+  "dynamic_groups": {
+    "locales": [
+      "lang/en.kinlang",
+      "lang/fr.kinlang",
+      "lang/ja.kinlang",
+      "lang/ar.kinlang"
+    ],
+    "models": [
+      "models/crate.glb",
+      "models/gun.glb"
+    ]
+  },
+  "assets": {
+    "lang/fonts/core-OFL.txt": {
+      "dependencies_complete": true
+    },
+    "lang/fonts/cjk-OFL.txt": {
+      "dependencies_complete": true
+    },
+    "lang/fonts/provenance.json": {
+      "dependencies_complete": true
+    }
+  }
+}

@@ -1,5 +1,6 @@
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
+#include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/ui2/context.hpp>
@@ -47,6 +48,7 @@ public:
     std::string_view name() const override { return "Seeded"; }
 
     void update(kin::SceneContext& ctx) override {
+        KIN_PROFILE_SCOPE("seeded.update");
         _observed = kin::rng_u32(ctx.rng);
         ++_frames;
     }
@@ -338,6 +340,7 @@ int main() {
     const std::string report = actions.str();
     assert(report.find("start: Start [Enter]") != std::string::npos);
 
+#if KIN_ENABLE_RUNTIME_ASSETS
     // A headless run never polls the game's file watcher, so its data stays as
     // it was when the run began: deterministic, whatever changes on disk.
     {
@@ -360,6 +363,8 @@ int main() {
         assert(reloads == 1); // the change was there to see
         std::filesystem::remove(watched);
     }
+
+#endif
 
     std::ostringstream metadata;
     kin::run_scene_app({
@@ -408,6 +413,13 @@ int main() {
     assert(stats.median_ms == 2.0);
     assert(stats.p99_ms == 3.0);
     assert(overlay.stats("missing").last_ms == 0.0);
+    overlay.set_recording_enabled(false);
+    overlay.record("inactive", 1.0);
+    assert(overlay.stats("inactive").last_ms == 0.0);
+#if !KIN_ENABLE_DEBUG_OVERLAY
+    overlay.toggle();
+    assert(!overlay.visible());
+#endif
     assert(kin::key_name(kin::Key::F2) == std::string_view{"F2"});
     assert(kin::key_name(kin::Key::F12) == std::string_view{"F12"});
     overlay.start_capture();
@@ -416,6 +428,20 @@ int main() {
     overlay.stop_capture();
     assert(!overlay.capture_active());
     assert(overlay.capture_available());
+
+    // Requests for omitted runtime features must fail, not silently succeed.
+#if !KIN_ENABLE_SCENE_SERVER
+    {
+        kin::SceneManager scenes;
+        assert(kin::run_scene_app({.headless = {.server = true}}, scenes) != 0);
+    }
+#endif
+#ifndef KIN_ENABLE_PROFILING
+    {
+        kin::SceneManager scenes;
+        assert(kin::run_scene_app({.headless = {.profile_lines = true}}, scenes) != 0);
+    }
+#endif
 
     const kin::u64 default_pass_mask = kin::render_pass_mask::world |
         kin::render_pass_mask::effects |
@@ -487,6 +513,7 @@ int main() {
         std::filesystem::remove_all(dir);
     }
 
+#if KIN_ENABLE_RUNTIME_PROFILING
     // Runtime profile output is available for every game that uses
     // run_scene_app; no game-specific wiring is required.
     {
@@ -494,9 +521,14 @@ int main() {
         profiled.push(std::make_unique<SeededReportScene>());
         std::ostringstream profile_json;
         std::ostringstream profile_text;
+#ifdef KIN_ENABLE_PROFILING
+        constexpr bool manual_profile = true;
+#else
+        constexpr bool manual_profile = false;
+#endif
         const int code = kin::run_scene_app({
             .window = {.title = "profiled", .width = 64, .height = 64},
-            .headless = {.enabled = true, .profile = true, .frames = 3, .seed = 1},
+            .headless = {.enabled = true, .profile = true, .profile_lines = manual_profile, .frames = 3, .seed = 1},
             .profile_json_output = &profile_json,
             .profile_text_output = &profile_text,
         }, profiled);
@@ -508,7 +540,16 @@ int main() {
         assert(json_text.find("\"name\": \"update\"") != std::string::npos);
         assert(text.find("runtime profile profiled") != std::string::npos);
         assert(text.find("render.scene") != std::string::npos);
+        assert((json_text.find("seeded.update") != std::string::npos) == manual_profile);
+        assert(kin::current_profile_session() == nullptr);
     }
+
+#else
+    {
+        kin::SceneManager unprofiled;
+        assert(kin::run_scene_app({.headless = {.enabled = true, .profile = true}}, unprofiled) != 0);
+    }
+#endif
 
     // Localization: --locale picks the language, a headless run without it shows
     // the base one, and missing text is reported (and fails the run if asked).

@@ -1,11 +1,18 @@
 # Build output
 build/
 build-*/
+# Root build symlinks and local compiler transcripts
+/build-desktop-packaging
+/build-siege-shipping
+/clang.log
+/gcc.log
+/win.log
 out/
 cmake-build-*/
 CMakeUserPresets.json
 compile_commands.json
 Testing/
+__pycache__/
 
 # MSVC artifacts
 *.user

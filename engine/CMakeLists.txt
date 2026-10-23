@@ -1,3 +1,26 @@
+# Shared support has no dependency on optional components. In particular, the
+# default asset-loader registration in kin_engine may depend on audio, while
+# audio's logging/localization only depend on this lower layer.
+add_library(kin_foundation STATIC
+    src/assets/file_watcher.cpp
+    src/assets/content.cpp
+    src/assets/asset_types.cpp
+    src/core/json.cpp
+    src/core/jobs.cpp
+    src/core/json_value.cpp
+    src/core/utf8.cpp
+    src/l10n/gettext.cpp
+    src/l10n/language_file.cpp
+    src/l10n/localization.cpp
+    src/l10n/message_format.cpp
+    src/platform/log.cpp
+)
+target_compile_features(kin_foundation PUBLIC cxx_std_23)
+target_include_directories(kin_foundation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+find_package(Threads REQUIRED)
+target_link_libraries(kin_foundation PUBLIC kin::components SDL3::SDL3-static Threads::Threads)
+kin_enable_release_optimizations(kin_foundation)
+
 add_library(kin_engine STATIC
     src/anim/animation.cpp
     src/anim/anim_format.cpp
@@ -9,33 +32,17 @@ add_library(kin_engine STATIC
     src/anim/state_machine.cpp
     src/anim/track.cpp
     src/anim/value.cpp
-    src/audio/audio_analysis.cpp
-    src/audio/audio_catalog.cpp
-    src/audio/audio_clip.cpp
-    src/audio/audio_decoder.cpp
-    src/audio/audio_effects.cpp
-    src/audio/audio_engine.cpp
-    src/audio/audio_settings.cpp
-    src/audio/sdl_audio_backend.cpp
-    src/audio/spatial_audio.cpp
     src/assets/asset_manager.cpp
-    src/assets/content.cpp
     src/assets/asset_server.cpp
     src/assets/bake_cache.cpp
-    src/assets/file_watcher.cpp
     src/assets/image.cpp
     src/assets/texture_file.cpp
     src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
-    src/core/jobs.cpp
-    src/core/json.cpp
-    src/core/json_value.cpp
     src/core/profile.cpp
-    src/core/utf8.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
-    src/ecs/audio.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -43,22 +50,17 @@ add_library(kin_engine STATIC
     src/ecs/event.cpp
     src/ecs/ecs_scene.cpp
     src/ecs/particles.cpp
-    src/ecs/physics.cpp
     src/ecs/render.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
     src/ecs/ui2.cpp
     src/ecs/ui2_sync.cpp
-    src/l10n/gettext.cpp
-    src/l10n/language_file.cpp
-    src/l10n/localization.cpp
-    src/l10n/message_format.cpp
     src/platform/app.cpp
     src/platform/input.cpp
     src/platform/file_dialogs.cpp
     src/platform/gamepad.cpp
+    src/platform/resource_paths.cpp
     src/platform/process.cpp
-    src/platform/log.cpp
     src/platform/user_data.cpp
     src/platform/window.cpp
     src/particles/animation_particles.cpp
@@ -69,8 +71,6 @@ add_library(kin_engine STATIC
     src/pathfinding/navmesh3d.cpp
     src/pathfinding/path_server.cpp
     src/pathfinding/pathfinding.cpp
-    src/physics/debug_render.cpp
-    src/physics/physics.cpp
     src/prefab/prefab_asset.cpp
     src/prefab/prefab_structure.cpp
     src/renderer/animation_import.cpp
@@ -92,34 +92,16 @@ add_library(kin_engine STATIC
     src/renderer/static_texture_layer.cpp
     src/renderer/sprite_catalog.cpp
     src/renderer/sprite_sheet.cpp
-    src/renderer/sdl_renderer2d_backend.cpp
     src/renderer/rounded_rect_loop.cpp
-    src/renderer/shader_compiler.cpp
-    src/renderer/shader_reflect.cpp
-    src/renderer/gpu/gpu_buffer.cpp
-    src/renderer/gpu/gpu_device.cpp
-    src/renderer/gpu/gpu_frame_timer.cpp
-    src/renderer/gpu/gpu_geometry_batch.cpp
-    src/renderer/gpu/gpu_pipeline_cache.cpp
-    src/renderer/gpu/gpu_renderer2d_backend.cpp
-    src/renderer/gpu/gpu_shader.cpp
-    src/renderer/gpu/gpu_texture.cpp
     src/runtime/game_info.cpp
     src/runtime/debug_overlay.cpp
     src/runtime/scene_app.cpp
-    src/runtime/scene_server.cpp
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
     src/scene/scene_asset_runtime.cpp
     src/scene/scene_manager.cpp
     src/scene/transitions.cpp
     src/save/save_store.cpp
-    src/scripting/script_engine.cpp
-    src/scripting/lua_audio.cpp
-    src/scripting/lua_l10n.cpp
-    src/scripting/lua_paths.cpp
-    src/scripting/lua_script.cpp
-    src/scripting/script_scene.cpp
     src/tilemap/tilemap.cpp
     src/ui2/geometry.cpp
     src/ui2/layout.cpp
@@ -128,9 +110,9 @@ add_library(kin_engine STATIC
     src/ui2/context.cpp
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
+    src/ui2/text_baked.cpp
     src/ui2/text.cpp
     src/ui2/text_script.cpp
-    src/ui2/text_ttf.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
     src/ui2/widget_internal.cpp
@@ -141,7 +123,121 @@ add_library(kin_engine STATIC
     src/ui2/widgets_editor.cpp
     src/ui2/widgets_text_edit.cpp
 )
-add_library(kin::engine ALIAS kin_engine)
+# Keep the existing raw archive target. The public umbrella composes components
+# without static-library cycles: audio depends only on shared foundation code.
+add_library(kin_engine_components INTERFACE)
+add_library(kin::engine ALIAS kin_engine_components)
+target_link_libraries(kin_engine_components INTERFACE kin_engine)
+target_link_libraries(kin_engine PUBLIC kin_foundation)
+
+target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
+if(KIN_HAS_SDL_RENDERER)
+    target_sources(kin_engine PRIVATE src/renderer/sdl_renderer2d_backend.cpp)
+endif()
+if(KIN_HAS_COMPACT_RENDERER)
+    target_sources(kin_engine PRIVATE src/renderer/compact_renderer2d_backend.cpp
+        src/renderer/sdl_framebuffer_host.cpp)
+endif()
+if(KIN_HAS_GPU_RENDERER)
+    target_sources(kin_engine PRIVATE
+        src/renderer/shader_compiler.cpp
+        src/renderer/shader_reflect.cpp
+        src/renderer/gpu/gpu_buffer.cpp
+        src/renderer/gpu/gpu_device.cpp
+        src/renderer/gpu/gpu_frame_timer.cpp
+        src/renderer/gpu/gpu_geometry_batch.cpp
+        src/renderer/gpu/gpu_pipeline_cache.cpp
+        src/renderer/gpu/gpu_renderer2d_backend.cpp
+        src/renderer/gpu/gpu_shader.cpp
+        src/renderer/gpu/gpu_texture.cpp
+    )
+else()
+    target_sources(kin_engine PRIVATE src/renderer/shader_disabled.cpp)
+endif()
+target_compile_definitions(kin_engine PUBLIC
+    KIN_HAS_GPU_RENDERER=$<BOOL:${KIN_HAS_GPU_RENDERER}>
+    KIN_HAS_COMPACT_RENDERER=$<BOOL:${KIN_HAS_COMPACT_RENDERER}>
+    KIN_HAS_SDL_RENDERER=$<BOOL:${KIN_HAS_SDL_RENDERER}>)
+
+if(KIN_ENABLE_AUDIO)
+    add_library(kin_audio STATIC
+        src/audio/audio_analysis.cpp
+        src/audio/audio_catalog.cpp
+        src/audio/audio_clip.cpp
+        src/audio/audio_decoder.cpp
+        src/audio/audio_effects.cpp
+        src/audio/audio_engine.cpp
+        src/audio/audio_settings.cpp
+        src/audio/sdl_audio_backend.cpp
+        src/audio/spatial_audio.cpp
+)
+    add_library(kin::audio ALIAS kin_audio)
+    target_link_libraries(kin_audio PUBLIC kin_foundation)
+    target_link_libraries(kin_engine PUBLIC kin_audio)
+    kin_enable_release_optimizations(kin_audio)
+    add_library(kin_audio_ecs STATIC src/ecs/audio.cpp)
+    add_library(kin::audio_ecs ALIAS kin_audio_ecs)
+    target_link_libraries(kin_audio_ecs PUBLIC kin_audio kin_engine)
+    kin_enable_release_optimizations(kin_audio_ecs)
+    target_link_libraries(kin_engine_components INTERFACE kin_audio_ecs)
+endif()
+if(KIN_ENABLE_PHYSICS)
+    add_library(kin_physics STATIC src/physics/physics.cpp)
+    add_library(kin::physics ALIAS kin_physics)
+    target_compile_features(kin_physics PUBLIC cxx_std_23)
+    target_include_directories(kin_physics PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(kin_physics PUBLIC kin::components box2d)
+    kin_enable_release_optimizations(kin_physics)
+
+    add_library(kin_physics_render STATIC src/physics/debug_render.cpp)
+    add_library(kin::physics_render ALIAS kin_physics_render)
+    target_link_libraries(kin_physics_render PUBLIC kin_physics kin_engine)
+    kin_enable_release_optimizations(kin_physics_render)
+
+    add_library(kin_physics_ecs STATIC src/ecs/physics.cpp)
+    add_library(kin::physics_ecs ALIAS kin_physics_ecs)
+    target_link_libraries(kin_physics_ecs PUBLIC kin_physics kin_engine)
+    kin_enable_release_optimizations(kin_physics_ecs)
+    target_link_libraries(kin_engine_components INTERFACE kin_physics_render kin_physics_ecs)
+endif()
+if(KIN_ENABLE_SCRIPTING)
+    add_library(kin_scripting STATIC
+        src/scripting/lua_l10n.cpp
+        src/scripting/lua_paths.cpp
+        src/scripting/lua_script.cpp)
+    add_library(kin::scripting ALIAS kin_scripting)
+    target_link_libraries(kin_scripting PUBLIC kin_foundation Lua::Lua sol2::sol2)
+    kin_enable_release_optimizations(kin_scripting)
+
+    add_library(kin_scripting_scenes STATIC
+        src/scripting/script_engine.cpp
+        src/scripting/script_scene.cpp
+        src/scripting/script_runtime.cpp)
+    if(KIN_ENABLE_AUDIO)
+        target_sources(kin_scripting_scenes PRIVATE src/scripting/lua_audio.cpp)
+    endif()
+    add_library(kin::scripting_scenes ALIAS kin_scripting_scenes)
+    target_link_libraries(kin_scripting_scenes PUBLIC kin_scripting kin_engine)
+    kin_enable_release_optimizations(kin_scripting_scenes)
+    target_link_libraries(kin_engine_components INTERFACE kin_scripting_scenes)
+endif()
+if(KIN_ENABLE_SCENE_SERVER)
+    target_sources(kin_engine PRIVATE
+        src/runtime/scene_server.cpp
+    )
+endif()
+
+# These usage requirements also reach game sources and their final link.
+if(KIN_ENABLE_SIZE_OPTIMIZATIONS)
+    target_compile_options(kin_engine PUBLIC
+        "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<CXX_COMPILER_ID:GNU,Clang>>:-ffunction-sections;-fdata-sections>"
+        "$<$<AND:$<NOT:$<CONFIG:Debug>>,$<CXX_COMPILER_ID:MSVC>>:/Gy;/Gw>")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(kin_engine INTERFACE "$<$<NOT:$<CONFIG:Debug>>:LINKER:--gc-sections>")
+    elseif(MSVC)
+        target_link_options(kin_engine INTERFACE "$<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF>")
+    endif()
+endif()
 
 kin_enable_release_optimizations(kin_engine)
 
@@ -158,12 +254,12 @@ target_include_directories(kin_engine PUBLIC
 )
 if(KIN_ENABLE_RENDER_PROBE)
     target_sources(kin_engine PRIVATE src/renderer/draw_trace.cpp src/runtime/render_probe.cpp)
-    target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_RENDER_PROBE)
 endif()
 if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
 if(KIN_EXPERIMENTAL_3D)
+    target_link_libraries(kin_engine PRIVATE kin_scripting)
     # glTF 2.0 models (kin/render3d/model3d.hpp). A single C header, MIT.
     FetchContent_Declare(cgltf
         URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.14.tar.gz
@@ -198,7 +294,7 @@ if(KIN_EXPERIMENTAL_3D)
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
-    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/scene/scene_session3d.cpp src/scripting/lua_scene3d.cpp src/scripting/lua_scene3d_physics.cpp src/scene/scene_frame3d.cpp src/scene/scene_loader3d.cpp src/scene/camera_rig3d.cpp src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
+    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
                                       src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
                                       src/render3d/environment.cpp src/render3d/hdr_decode.c
                                       src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
@@ -211,6 +307,20 @@ if(KIN_EXPERIMENTAL_3D)
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
+    # Scene/frame orchestration sits above the engine and its adapters. The
+    # base renderer must not depend back on scripting or audio ECS archives.
+    add_library(kin_scene3d_runtime STATIC
+        src/scene/scene_session3d.cpp
+        src/scene/scene_frame3d.cpp
+        src/scripting/lua_scene3d.cpp
+        src/scripting/lua_scene3d_physics.cpp)
+    add_library(kin::scene3d_runtime ALIAS kin_scene3d_runtime)
+    target_link_libraries(kin_scene3d_runtime PUBLIC kin_engine kin_scripting_scenes)
+    if(KIN_ENABLE_AUDIO)
+        target_link_libraries(kin_scene3d_runtime PUBLIC kin_audio_ecs)
+    endif()
+    kin_enable_release_optimizations(kin_scene3d_runtime)
+    target_link_libraries(kin_engine_components INTERFACE kin_scene3d_runtime)
     # Sources that compute what the simulation starts from or the particles' randomness (body poses and kinematic targets,
     # the scene session, the sparks of a seed) get the physics glue's -ffp-contract=off below: a fused multiply-add rounds
     # once where two operations round twice, so a target with FMA (aarch64, or x86 with -mfma) would give other bits.
@@ -248,7 +358,6 @@ if(KIN_SHIPPING)
 endif()
 if(KIN_ENABLE_DETERMINISM_CHECK)
     target_sources(kin_engine PRIVATE src/runtime/determinism_check.cpp src/runtime/state_hash.cpp)
-    target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_DETERMINISM_CHECK)
 endif()
 
 add_library(kin_core_allocation_instrumentation OBJECT
@@ -263,23 +372,30 @@ target_include_directories(kin_core_allocation_instrumentation PUBLIC
 
 target_link_libraries(kin_engine PUBLIC
     flecs::flecs_static
-    box2d
     SDL3::SDL3-static
-    SDL3_image::SDL3_image
-    SDL3_ttf::SDL3_ttf
-    Lua::Lua
-    sol2::sol2
 )
 # 3D Lua argument checks are local to its bindings; retain sol2 defaults for 2D games.
 
+if(KIN_ENABLE_TTF)
+    target_sources(kin_engine PRIVATE src/ui2/text_ttf.cpp)
+    target_link_libraries(kin_engine PUBLIC SDL3_ttf::SDL3_ttf)
+endif()
+if(KIN_ENABLE_IMAGE_IO)
+    target_link_libraries(kin_engine PUBLIC SDL3_image::SDL3_image)
+endif()
+
 target_link_libraries(kin_engine PRIVATE earcut_hpp::earcut_hpp) # used only inside the engine
 
+if(KIN_ENABLE_AUDIO)
 # Third-party audio decoders, built as C without kin's warnings.
 add_library(kin_audio_codecs STATIC src/audio/codecs.c)
 target_include_directories(kin_audio_codecs SYSTEM PUBLIC "${dr_libs_SOURCE_DIR}" "${stb_SOURCE_DIR}")
 target_compile_options(kin_audio_codecs PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w>" "$<$<C_COMPILER_ID:MSVC>:/w>")
-target_link_libraries(kin_engine PRIVATE kin_audio_codecs)
+target_link_libraries(kin_audio PRIVATE kin_audio_codecs)
 
+endif()
+
+if(KIN_HAS_GPU_RENDERER)
 # SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK), built into
 # the engine (kin_embed_files), so a game needs no shader files beside it.
 # Without glslc the engine still builds; the GPU backend then has no shaders and
@@ -301,4 +417,6 @@ if(NOT _kin_gpu_built EQUAL _kin_gpu_wanted)
                             "cmake/kin_spirv.cmake; or set KIN_REQUIRE_GPU_SHADERS=OFF to ship without them")
     endif()
     message(STATUS "kin_engine: ${_kin_gpu_built} of ${_kin_gpu_wanted} SDL_GPU backend shaders (glslc not found)")
+endif()
+
 endif()

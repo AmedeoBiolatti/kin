@@ -628,10 +628,6 @@ bool save_audio_catalog(const AudioCatalog& catalog, const std::filesystem::path
     return static_cast<bool>(out);
 }
 
-void register_audio_catalog_loader(AssetManager& assets) {
-    assets.register_loader<AudioCatalog>([](const std::filesystem::path& path) {
-        return load_audio_catalog(path);
-    });
-}
+
 
 } // namespace kin

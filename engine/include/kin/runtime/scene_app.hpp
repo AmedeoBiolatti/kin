@@ -19,6 +19,8 @@ class Localization;
 
 struct HeadlessOptions {
     bool enabled = false;
+    // --render: render/present headless frames without enabling profiling.
+    bool render = false;
     bool list_actions = false;
     bool print_game_info = false;
     bool profile_render = false;

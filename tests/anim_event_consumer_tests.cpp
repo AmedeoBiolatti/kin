@@ -1,7 +1,9 @@
 #include <kin/anim/events.hpp>
 #include <kin/anim/player.hpp>
+#if KIN_ENABLE_AUDIO
 #include <kin/audio/audio.hpp>
 #include <kin/ecs/audio.hpp>
+#endif
 #include <kin/ecs/render.hpp>
 #include <kin/particles/animation_particles.hpp>
 #include <kin/particles/particle_catalog.hpp>
@@ -14,6 +16,7 @@
 
 namespace {
 
+#if KIN_ENABLE_AUDIO
 void write_u16(std::ofstream& out, kin::u16 value) {
     out.put(static_cast<char>(value & 0xff));
     out.put(static_cast<char>((value >> 8) & 0xff));
@@ -82,6 +85,7 @@ void test_sound_interpreter_plays_cue() {
     assert(audio.active_voice_count() == 1);
 }
 
+#endif
 void test_particle_interpreter_uses_target_position_and_offset() {
     kin::ParticleCatalog catalog;
     catalog.set_effect("spark", {.burst = {
@@ -120,6 +124,8 @@ void test_particle_interpreter_uses_target_position_and_offset() {
 } // namespace
 
 void run_event_consumer_tests() {
+#if KIN_ENABLE_AUDIO
     test_sound_interpreter_plays_cue();
+#endif
     test_particle_interpreter_uses_target_position_and_offset();
 }

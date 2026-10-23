@@ -1,3 +1,4 @@
+#include "example_common.hpp"
 #include "workloads.hpp"
 
 #include <kin/anim/track.hpp>
@@ -61,7 +62,7 @@ void ArenaHud::render(const Arena& arena, Renderer2D& renderer, Input& input, co
     // Text is rasterized at its on-screen size (up to the system font's 32 pt).
     const auto style = [&](float points, Color color) {
         const float size = std::min(32.0f, points * dpi);
-        return ui2::TextStyle{.font = ui2::system_ui_font(size), .scale = points * dpi / size, .color = color};
+        return ui2::TextStyle{.font = siege_ui_font(size), .scale = points * dpi / size, .color = color};
     };
     const auto px = [&](Rectf r) { return Rectf{r.x * dpi, r.y * dpi, r.w * dpi, r.h * dpi}; };
     const auto text = [&](std::string_view value, float x, float y, float points, Color color) {

@@ -5,6 +5,8 @@
 #include <kin/core/json.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/runtime/run_report.hpp>
+#include <kin/platform/user_data.hpp>
+#include <kin/save/save_store.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <algorithm>
 #include <charconv>
@@ -48,6 +50,7 @@ Options parse(int argc, char** argv) {
         else if (arg == "--scenario") o.scenario = value(arg);
         else if (arg == "--screenshot") o.screenshot = value(arg);
         else if (arg == "--vsync") o.vsync = true;
+        else if (arg == "--check-user-data") o.check_user_data = true;
         else if (arg == "--mute") o.mute = true;
         else if (arg == "--view" || arg.starts_with("--view=")) {
             const std::string view = arg == "--view" ? value(arg) : std::string{arg.substr(7)};
@@ -146,6 +149,17 @@ int run_example(int argc, char** argv, bool tracker, const ContentSearch& conten
                 "Standard Kin flags: --headless --frames N --seed N --report PATH --profile --profile-json PATH\n";
             return 0;
         }
+        if (options.check_user_data) {
+            if (tracker) throw std::invalid_argument("--check-user-data belongs to Signal Siege");
+            BestRunStore first;
+            first.set_locale("ja");
+            first.record({.won = true, .time = 123.0f, .kills = 7});
+            BestRunStore restored;
+            if (restored.locale() != "ja" || !restored.best().won || restored.best().time < 123.0f)
+                throw std::runtime_error("User settings did not survive a save/load round trip");
+            std::cout << "Settings round trip passed: " << (user_data_dir("kin") / "signal_siege" / "settings.json").string() << '\n';
+            return 0;
+        }
         InputMap input;
         input.bind("quit", Key::Escape); input.bind("pause", Key::P); input.bind("reset", Key::R);
         input.bind("autoplay", Key::B); input.bind("dash", Key::Space);
@@ -157,7 +171,7 @@ int run_example(int argc, char** argv, bool tracker, const ContentSearch& conten
         input.bind("menu_up", {Key::Up, Key::W}); input.bind("menu_down", {Key::Down, Key::S});
         input.bind("accept", {Key::Enter, Key::KeypadEnter, Key::Space});
         GameInfo game{.id = tracker ? "run_observatory" : "signal_siege", .title = tracker ? "Run Observatory" : "Signal Siege",
-            .version = "0.1", .description = tracker ? "Simulated LLM training tracker and UI benchmark" : "Arena survival and ECS performance example",
+            .version = KIN_EXAMPLE_GAME_VERSION, .description = tracker ? "Simulated LLM training tracker and UI benchmark" : "Arena survival and ECS performance example",
             .window = {.width = options.width, .height = options.height, .logical_width = tracker ? 0 : 1280, .logical_height = tracker ? 0 : 800, .resizable = true},
             .tags = {"example", "benchmark"}, .input_map = input};
         auto window = window_config(game); window.fixed_dt = 1.0f / 120; window.vsync = options.vsync;

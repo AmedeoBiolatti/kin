@@ -1,6 +1,8 @@
 #include <kin/assets/asset_manager.hpp>
 #include <kin/assets/file_watcher.hpp>
+#if KIN_ENABLE_AUDIO
 #include <kin/audio/audio_catalog.hpp>
+#endif
 #include <kin/l10n/localization.hpp>
 #include <kin/platform/log.hpp>
 
@@ -564,6 +566,7 @@ void test_localized_assets(const fs::path& dir) {
     l10n.set_locale("en");
     assert(*assets.load<std::string>("voice/intro.txt") == "Hello"); // another language, another file
 
+#if KIN_ENABLE_AUDIO
     kin::AudioCatalog audio;
     audio.set_root(root);
     audio.add_clip({.id = "intro", .path = "voice/intro.txt"});
@@ -571,6 +574,8 @@ void test_localized_assets(const fs::path& dir) {
     assert(audio.resolve_clip_path("intro") == root / "l10n/fr/voice/intro.txt");
     kin::set_active_localization(nullptr);
     assert(audio.resolve_clip_path("intro") == root / "voice/intro.txt");
+#endif
+    kin::set_active_localization(nullptr);
 }
 
 } // namespace

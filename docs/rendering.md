@@ -438,7 +438,8 @@ It compiles with `glslc` (the Vulkan SDK's: the one kin was built with, or
 that does not compile is logged (`ShaderFile::error()`) and the last good
 shader kept. `kin::compile_glsl()` compiles a file directly, and
 `Renderer2D::reload_shader()` replaces any shader in place. Shipped games load
-precompiled SPIR-V.
+precompiled SPIR-V. Kin embeds its built-in shaders in the engine; game-specific
+shader files belong in the game's packaged assets (see [shipping](shipping.md)).
 
 ### Pipelines
 

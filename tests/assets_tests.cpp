@@ -3,7 +3,9 @@
 #include <kin/assets/image.hpp>
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/anim/anim_format.hpp>
+#if KIN_ENABLE_AUDIO
 #include <kin/audio/audio_catalog.hpp>
+#endif
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/platform/app.hpp>
@@ -151,6 +153,7 @@ int main() {
         .pivot = {0.5f, 1.0f},
     });
     assert(kin::save_sprite_catalog(saved_catalog, catalog_path));
+#if KIN_ENABLE_AUDIO
     kin::AudioCatalog saved_audio;
     saved_audio.set_root(dir);
     saved_audio.add_bus({.id = "master", .volume = 1.0f});
@@ -164,6 +167,9 @@ int main() {
         .priority = 10,
     });
     assert(kin::save_audio_catalog(saved_audio, audio_path));
+#else
+    std::ofstream{audio_path} << "{}";
+#endif
     std::ofstream{prefab_path} << R"json({
   "schema": "kin.prefab/1",
   "id": "panel",
@@ -331,6 +337,7 @@ int main() {
     assert(input_meta->type == kin::AssetType::InputMap);
     assert(input_meta->status == kin::AssetStatus::Loaded);
 
+#if KIN_ENABLE_AUDIO
     const auto loaded_audio = assets.load<kin::AudioCatalog>("audio.kinaudio");
     assert(loaded_audio);
     assert(loaded_audio->cue("footstep") != nullptr);
@@ -339,6 +346,7 @@ int main() {
     assert(audio_meta != nullptr);
     assert(audio_meta->type == kin::AssetType::AudioCatalog);
     assert(audio_meta->status == kin::AssetStatus::Loaded);
+#endif
 
     const auto loaded_prefab = assets.load<kin::PrefabAsset>("panel.kinprefab");
     assert(loaded_prefab);
@@ -485,7 +493,7 @@ int main() {
     assets.unload("tiny.bmp");
     assert(!assets.loaded<kin::Image>("tiny.bmp"));
     assert(!bmp_handle);
-    assert(assets.stats().loaded_assets == 7);
+    assert(assets.stats().loaded_assets == 6 + KIN_ENABLE_AUDIO);
     bmp_meta = assets.metadata("tiny.bmp");
     assert(bmp_meta != nullptr);
     assert(bmp_meta->status == kin::AssetStatus::Discovered);

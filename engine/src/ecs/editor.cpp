@@ -2,7 +2,6 @@
 
 #include <kin/ecs/system.hpp>
 #include <kin/prefab/prefab_asset.hpp>
-#include <kin/scripting/script_scene.hpp>
 
 namespace kin {
 
@@ -90,13 +89,6 @@ ReloadResult EcsReloadCoordinator::migrate_data_schema(EcsWorld& world,
                                                        const std::vector<ComponentFieldSnapshot>& fields) {
     if (!world.components().migrate_data_schema(component, fields)) {
         return {.ok = false, .diagnostics = {world.components().last_error()}};
-    }
-    return {};
-}
-
-ReloadResult EcsReloadCoordinator::reload_script_scene(ScriptScene& scene) {
-    if (!scene.reload_script()) {
-        return {.ok = false, .diagnostics = {scene.last_script_error()}};
     }
     return {};
 }

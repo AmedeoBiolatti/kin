@@ -1053,6 +1053,12 @@ int main(int argc, char** argv) {
 
     kin::ProfileSession profile;
     kin::ProfileSession* profile_ptr = nullptr;
+#ifndef KIN_ENABLE_PROFILING
+    if (options.profile_lines) {
+        std::cerr << "--profile-lines requires KIN_ENABLE_PROFILING in this build\n";
+        return 2;
+    }
+#endif
     if (options.profile_lines) {
         profile.start("kin_bench");
         kin::set_current_profile_session(&profile);

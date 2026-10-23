@@ -38,20 +38,6 @@ template <class T, class F> void inspect_components(flecs::world& world, F&& ins
             inspect(entity, *value);
 }
 } // namespace
-EcsEntity SceneEntity3D::resolve(EcsWorld& world) const {
-    const auto* identity = world.raw().get<SceneIdentity3D>();
-    if (!identity || identity->session != session || identity->generation != generation)
-        return {};
-    auto result = world.entities().resolve(entity);
-    if (!result)
-        return {};
-    if (const auto* lease = result.get<SceneLease3D>()) {
-        if (lease->instance != instance || !lease->active)
-            return {};
-    } else if (instance)
-        return {};
-    return result;
-}
 namespace detail {
 struct SceneRequestState3D {
     mutable std::mutex mutex;

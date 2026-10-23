@@ -17,7 +17,8 @@
         "KIN_SHIPPING": "ON",
         "KIN_BUILD_TESTS": "OFF",
         "KIN_BUILD_BENCHMARKS": "OFF",
-        "KIN_EXPERIMENTAL_3D": "OFF"
+        "KIN_EXPERIMENTAL_3D": "OFF",
+        "KIN_PACKAGE_STRIP": "ON"
       }
     },
     {
@@ -52,6 +53,261 @@
         "KIN_EXPERIMENTAL_3D": "ON"
       },
       "description": "Release build with the experimental 3D renderer, physics, samples and tests."
+    },
+    {
+      "name": "desktop-release",
+      "displayName": "Desktop: full Release baseline",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "desktop-minimal",
+      "displayName": "Desktop: native game without optional subsystems",
+      "inherits": "desktop-release",
+      "cacheVariables": {
+        "KIN_ENABLE_SCRIPTING": "OFF",
+        "KIN_ENABLE_PHYSICS": "OFF",
+        "KIN_ENABLE_AUDIO": "OFF",
+        "KIN_ENABLE_SCENE_SERVER": "OFF",
+        "KIN_ENABLE_DEBUG_OVERLAY": "OFF",
+        "KIN_ENABLE_RENDER_PROBE": "OFF",
+        "KIN_ENABLE_DETERMINISM_CHECK": "OFF",
+        "KIN_ENABLE_RELEASE_PROFILING": "OFF",
+        "KIN_ENABLE_PROFILING": "OFF",
+        "KIN_BUILD_EXAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "desktop-shipping",
+      "displayName": "Desktop: minimal size, LTO, stripped package",
+      "inherits": "desktop-minimal",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "KIN_ENABLE_LTO": "ON",
+        "KIN_ENABLE_SIZE_OPTIMIZATIONS": "ON",
+        "KIN_PACKAGE_STRIP": "ON",
+        "KIN_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "desktop-profile",
+      "displayName": "Desktop: minimal with symbols and manual profiling",
+      "inherits": "desktop-minimal",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "KIN_ENABLE_PROFILING": "ON",
+        "KIN_BUILD_BENCHMARKS": "ON"
+      }
+    },
+    {
+      "name": "desktop-software",
+      "displayName": "Desktop: software renderer only",
+      "inherits": "desktop-shipping",
+      "cacheVariables": {
+        "KIN_RENDERER": "software"
+      }
+    },
+    {
+      "name": "desktop-gpu",
+      "displayName": "Desktop: gpu renderer only",
+      "inherits": "desktop-shipping",
+      "cacheVariables": {
+        "KIN_RENDERER": "gpu"
+      }
+    },
+    {
+      "name": "hex-small",
+      "displayName": "Hex demo: software, baked HUD, no file codecs or runtime tools",
+      "inherits": "desktop-software",
+      "cacheVariables": {
+        "KIN_HEX_DEMO_BAKED_FONT": "ON",
+        "KIN_ENABLE_IMAGE_IO": "OFF",
+        "KIN_ENABLE_TTF": "OFF",
+        "KIN_ENABLE_RUNTIME_PROFILING": "OFF",
+        "KIN_ENABLE_RUNTIME_ASSETS": "OFF",
+        "KIN_BUILD_GAME_ECS_GRAPH_DEMO": "OFF",
+        "KIN_BUILD_GAME_ECS_PARALLEL_BENCH": "OFF",
+        "KIN_BUILD_GAME_ECS_SYSTEMS_DEMO": "OFF",
+        "KIN_BUILD_GAME_ISOMETRIC_DEMO": "OFF",
+        "KIN_BUILD_GAME_LIGHTING_DEMO": "OFF",
+        "KIN_BUILD_GAME_SHAPES_DEMO": "OFF",
+        "KIN_BUILD_GAME_TEXT_EDIT_DEMO": "OFF"
+      }
+    },
+    {
+      "name": "hex-small-direct",
+      "displayName": "Hex demo: experimental SDL without dynamic API",
+      "inherits": "hex-small",
+      "cacheVariables": {
+        "KIN_ENABLE_SDL_DYNAMIC_API": "OFF"
+      }
+    },
+    {
+      "name": "hex-small-input",
+      "displayName": "Hex demo: keyboard/mouse, no SDL gamepad or HID",
+      "inherits": "hex-small-direct",
+      "cacheVariables": {
+        "KIN_ENABLE_SDL_GAMEPAD": "OFF"
+      }
+    },
+    {
+      "name": "hex-small-platform",
+      "displayName": "Hex demo: reduced SDL desktop services",
+      "inherits": "hex-small-input",
+      "cacheVariables": {
+        "KIN_ENABLE_SDL_DESKTOP_SERVICES": "OFF"
+      }
+    },
+    {
+      "name": "hex-small-x11",
+      "displayName": "Hex demo: reduced SDL, X11 window backend",
+      "inherits": "hex-small-platform",
+      "cacheVariables": {
+        "KIN_LINUX_VIDEO": "x11"
+      }
+    },
+    {
+      "name": "hex-small-x11-wayland",
+      "displayName": "Hex demo: reduced SDL, require X11 and Wayland",
+      "inherits": "hex-small-platform",
+      "cacheVariables": {
+        "KIN_LINUX_VIDEO": "x11-wayland"
+      }
+    },
+    {
+      "name": "hex-shipping",
+      "displayName": "Hex demo: recommended SDL software shipping baseline",
+      "description": "Retains SDL software rendering kernels; removes optional subsystems unused by this demo.",
+      "inherits": "hex-small-platform",
+      "cacheVariables": {
+        "KIN_RENDERER": "software",
+        "KIN_EXPERIMENTAL_MINIMAL_X11": "OFF"
+      }
+    },
+    {
+      "name": "hex-small-compact",
+      "displayName": "Experiment: replaces SDL rendering with compact CPU rasterizer",
+      "inherits": "hex-small-platform",
+      "cacheVariables": {
+        "KIN_RENDERER": "compact"
+      },
+      "description": "Size/performance experiment, not the recommended shipping renderer; removes used SDL rendering implementations."
+    },
+    {
+      "name": "hex-minimal-x11",
+      "displayName": "Experimental: SDL-free Linux X11 hex runtime",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel",
+        "KIN_EXPERIMENTAL_MINIMAL_X11": "ON",
+        "KIN_ENABLE_LTO": "ON",
+        "KIN_PACKAGE_STRIP": "ON"
+      },
+      "description": "Isolated platform and renderer replacement experiment; not the recommended game export."
+    },
+    {
+      "name": "signal-siege-reference",
+      "displayName": "Signal Siege: full-feature Release reference",
+      "inherits": "desktop-release",
+      "cacheVariables": {
+        "KIN_BUILD_EXAMPLES": "ON",
+        "KIN_BUILD_GAMES": "OFF",
+        "KIN_BUILD_BENCHMARKS": "OFF",
+        "KIN_ENABLE_LTO": "ON",
+        "KIN_ENABLE_SIZE_OPTIMIZATIONS": "ON",
+        "KIN_PACKAGE_STRIP": "ON",
+        "KIN_PACKAGE_DEBUG_SYMBOLS": "ON",
+        "KIN_RENDERER": "auto",
+        "KIN_ENABLE_SCRIPTING": "ON",
+        "KIN_ENABLE_PHYSICS": "ON",
+        "KIN_ENABLE_AUDIO": "ON",
+        "KIN_ENABLE_SCENE_SERVER": "ON",
+        "KIN_ENABLE_DEBUG_OVERLAY": "ON",
+        "KIN_ENABLE_IMAGE_IO": "ON",
+        "KIN_ENABLE_TTF": "ON",
+        "KIN_ENABLE_RUNTIME_PROFILING": "ON",
+        "KIN_ENABLE_RUNTIME_ASSETS": "ON",
+        "KIN_ENABLE_RENDER_PROBE": "ON",
+        "KIN_ENABLE_DETERMINISM_CHECK": "ON",
+        "KIN_ENABLE_RELEASE_PROFILING": "ON",
+        "KIN_ENABLE_SDL_DYNAMIC_API": "ON",
+        "KIN_ENABLE_SDL_GAMEPAD": "ON",
+        "KIN_ENABLE_SDL_DESKTOP_SERVICES": "ON"
+      }
+    },
+    {
+      "name": "signal-siege-shipping",
+      "displayName": "Signal Siege: shipping with existing GPU/SDL rendering, audio and multilingual UI",
+      "inherits": "signal-siege-reference",
+      "cacheVariables": {
+        "KIN_ENABLE_SCRIPTING": "OFF",
+        "KIN_ENABLE_PHYSICS": "OFF",
+        "KIN_ENABLE_SDL_DYNAMIC_API": "OFF",
+        "KIN_ENABLE_SDL_GAMEPAD": "OFF"
+      }
+    },
+    {
+      "name": "signal-siege-pgo-generate",
+      "displayName": "Signal Siege: instrument compiler PGO training",
+      "inherits": "signal-siege-shipping",
+      "binaryDir": "${sourceDir}/build/signal-siege-pgo",
+      "cacheVariables": {
+        "KIN_PGO_MODE": "generate"
+      }
+    },
+    {
+      "name": "signal-siege-pgo-use",
+      "displayName": "Signal Siege: use sealed compiler profiles",
+      "inherits": "signal-siege-pgo-generate",
+      "cacheVariables": {
+        "KIN_PGO_MODE": "use"
+      }
+    },
+    {
+      "name": "signal-siege-release-base",
+      "hidden": true,
+      "inherits": "signal-siege-shipping",
+      "cacheVariables": {
+        "KIN_RELEASE_CONTRACT": "ON",
+        "KIN_ENABLE_ASSET_COOKING": "ON",
+        "KIN_ENABLE_SCENE_SERVER": "OFF",
+        "KIN_ENABLE_RENDER_PROBE": "OFF",
+        "KIN_ENABLE_DETERMINISM_CHECK": "OFF",
+        "KIN_ENABLE_RELEASE_PROFILING": "OFF",
+        "KIN_ENABLE_RUNTIME_PROFILING": "OFF",
+        "KIN_ENABLE_DEBUG_OVERLAY": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "KIN_SHIPPING": "ON"
+      }
+    },
+    {
+      "name": "signal-siege-release-linux",
+      "inherits": "signal-siege-release-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc-13",
+        "CMAKE_CXX_COMPILER": "g++-13"
+      }
+    },
+    {
+      "name": "signal-siege-release-windows",
+      "inherits": "signal-siege-release-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "toolset": "v143",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     }
   ],
   "buildPresets": [
@@ -74,6 +330,112 @@
       "name": "3d",
       "configurePreset": "3d",
       "jobs": 4
+    },
+    {
+      "name": "desktop-release",
+      "configurePreset": "desktop-release"
+    },
+    {
+      "name": "desktop-minimal",
+      "configurePreset": "desktop-minimal"
+    },
+    {
+      "name": "desktop-shipping",
+      "configurePreset": "desktop-shipping"
+    },
+    {
+      "name": "desktop-profile",
+      "configurePreset": "desktop-profile"
+    },
+    {
+      "name": "desktop-software",
+      "configurePreset": "desktop-software"
+    },
+    {
+      "name": "desktop-gpu",
+      "configurePreset": "desktop-gpu"
+    },
+    {
+      "name": "hex-small",
+      "configurePreset": "hex-small"
+    },
+    {
+      "name": "hex-small-direct",
+      "configurePreset": "hex-small-direct"
+    },
+    {
+      "name": "hex-small-input",
+      "configurePreset": "hex-small-input"
+    },
+    {
+      "name": "hex-small-platform",
+      "configurePreset": "hex-small-platform"
+    },
+    {
+      "name": "hex-small-x11",
+      "configurePreset": "hex-small-x11"
+    },
+    {
+      "name": "hex-small-x11-wayland",
+      "configurePreset": "hex-small-x11-wayland"
+    },
+    {
+      "name": "hex-small-compact",
+      "configurePreset": "hex-small-compact"
+    },
+    {
+      "name": "hex-minimal-x11",
+      "configurePreset": "hex-minimal-x11"
+    },
+    {
+      "name": "hex-shipping",
+      "configurePreset": "hex-shipping"
+    },
+    {
+      "name": "signal-siege-reference",
+      "configurePreset": "signal-siege-reference"
+    },
+    {
+      "name": "signal-siege-shipping",
+      "configurePreset": "signal-siege-shipping"
+    },
+    {
+      "name": "signal-siege-pgo-generate",
+      "configurePreset": "signal-siege-pgo-generate",
+      "targets": [
+        "signal_siege"
+      ]
+    },
+    {
+      "name": "signal-siege-pgo-use",
+      "configurePreset": "signal-siege-pgo-use",
+      "targets": [
+        "signal_siege_package"
+      ]
+    },
+    {
+      "name": "signal-siege-release-linux",
+      "configurePreset": "signal-siege-release-linux",
+      "configuration": "Release",
+      "targets": [
+        "signal_siege_package",
+        "kin_example_tests",
+        "kin_desktop_package_fixture",
+        "kin_desktop_package_library",
+        "kin_component_tests"
+      ]
+    },
+    {
+      "name": "signal-siege-release-windows",
+      "configurePreset": "signal-siege-release-windows",
+      "configuration": "Release",
+      "targets": [
+        "signal_siege_package",
+        "kin_example_tests",
+        "kin_desktop_package_fixture",
+        "kin_desktop_package_library",
+        "kin_component_tests"
+      ]
     }
   ],
   "testPresets": [
@@ -98,6 +460,199 @@
       },
       "execution": {
         "jobs": 2
+      }
+    },
+    {
+      "name": "desktop-release",
+      "configurePreset": "desktop-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-minimal",
+      "configurePreset": "desktop-minimal",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-shipping",
+      "configurePreset": "desktop-shipping",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-profile",
+      "configurePreset": "desktop-profile",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-software",
+      "configurePreset": "desktop-software",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_AUDIO_DRIVER": "dummy",
+        "SDL_VIDEO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "desktop-gpu",
+      "configurePreset": "desktop-gpu",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_AUDIO_DRIVER": "dummy",
+        "KIN_REQUIRE_GPU_TESTS": "1"
+      }
+    },
+    {
+      "name": "hex-small",
+      "configurePreset": "hex-small",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-small-direct",
+      "configurePreset": "hex-small-direct",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-small-input",
+      "configurePreset": "hex-small-input",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-small-platform",
+      "configurePreset": "hex-small-platform",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-small-x11",
+      "configurePreset": "hex-small-x11",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-small-x11-wayland",
+      "configurePreset": "hex-small-x11-wayland",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-small-compact",
+      "configurePreset": "hex-small-compact",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "hex-minimal-x11",
+      "configurePreset": "hex-minimal-x11",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "hex-shipping",
+      "configurePreset": "hex-shipping",
+      "configuration": "MinSizeRel",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "signal-siege-reference",
+      "configurePreset": "signal-siege-reference",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
+      }
+    },
+    {
+      "name": "signal-siege-shipping",
+      "configurePreset": "signal-siege-shipping",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "environment": {
+        "SDL_VIDEO_DRIVER": "dummy",
+        "SDL_AUDIO_DRIVER": "dummy"
       }
     }
   ]

@@ -67,7 +67,9 @@ public:
     ReloadResult migrate_data_schema(EcsWorld& world,
                                      std::string_view component,
                                      const std::vector<ComponentFieldSnapshot>& fields);
+#if KIN_ENABLE_SCRIPTING
     ReloadResult reload_script_scene(ScriptScene& scene);
+#endif
     ReloadResult validate_prefab(const PrefabAsset& prefab, const EcsComponentRegistry& components);
 };
 

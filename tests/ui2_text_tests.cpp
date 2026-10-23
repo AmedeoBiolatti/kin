@@ -155,6 +155,9 @@ void test_cjk_wrapping() {
 
 // The system's UI font, if it has one, without fallbacks.
 std::filesystem::path plain_system_font() {
+#if !KIN_ENABLE_TTF
+    return {};
+#endif
     for (const char* path : {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                              "/Library/Fonts/Arial.ttf"}) {
         if (std::filesystem::exists(path)) {

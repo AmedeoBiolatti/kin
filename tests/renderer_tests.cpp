@@ -17,7 +17,10 @@
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/text.hpp>
 
+#include <SDL3/SDL.h>
+#if KIN_ENABLE_IMAGE_IO
 #include <SDL3_image/SDL_image.h>
+#endif
 
 #include <cassert>
 #include <chrono>
@@ -816,6 +819,7 @@ void test_capture_backdrop_round_trips() {
     assert(px[c + 3] == 255);
 }
 
+#if KIN_ENABLE_IMAGE_IO
 void test_gpu_save_png_captures_bound_render_target() {
     constexpr std::string_view test_name = "test_gpu_save_png_captures_bound_render_target";
     bool gpu_ready = false;
@@ -869,6 +873,7 @@ void test_gpu_save_png_captures_bound_render_target() {
 // draws: the backend keeps it alive until the frame is submitted. And frames that
 // drop textures that way keep working with GPU frame timing on, whose fence
 // thread once ran SDL's resource cleanup behind the render thread's back.
+#endif
 void test_gpu_texture_released_before_flush() {
     constexpr std::string_view test_name = "test_gpu_texture_released_before_flush";
     bool gpu_ready = false;
@@ -3345,10 +3350,14 @@ void test_color_luts() {
     assert(!kin::ColorLut::parse_cube("LUT_1D_SIZE 4\n", &error));
 
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "kin_lut_test.png";
+#if KIN_ENABLE_IMAGE_IO
     assert(invert->save_png(path));
     const std::optional<kin::ColorLut> loaded = kin::ColorLut::load(path, &error);
     assert(loaded && std::ranges::equal(loaded->strip(), invert->strip()));
     std::filesystem::remove(path);
+#else
+    assert(!invert->save_png(path));
+#endif
 }
 
 // Linear light on SDL_GPU: blending, textures, gradients, HDR and tonemapping,
@@ -3969,66 +3978,166 @@ int main(int argc, char** argv) {
     test_shader_surface_sources_on_fake_backend();
     test_sprite_sheet();
     test_sprite_catalog_resolves_refs_and_sheets();
+#if KIN_HAS_SDL_RENDERER
     test_sdl_backend_smoke();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_sdl_logical_size_follows_window_size();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_sdl_render_targets_and_gradients();
+#endif
+#if !KIN_HAS_COMPACT_RENDERER
     test_render_target_pool_reuse();
     test_render_target_move_assign_releases();
     test_blur_smooths_hard_edge();
+#endif
     test_blur_degrades_on_fake_backend();
+#if !KIN_HAS_COMPACT_RENDERER
     test_capture_backdrop_round_trips();
+#endif
+#if KIN_HAS_GPU_RENDERER && KIN_ENABLE_IMAGE_IO
     test_gpu_save_png_captures_bound_render_target();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_texture_released_before_flush();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_timing_survives_a_gpu_behind();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_native_coordinates_disable_logical_presentation();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_frame_timing();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_logical_transforms_are_immediate();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_native_pixel_size_and_pointer_mapping();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_shader_surface_binds_every_source();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_shader_params_and_formats_on_software_backends();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_data_textures_and_large_uniforms();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_resources_outlive_renderer();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_shader_reflection();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_min_max_blend_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_min_max_blend_on_gpu_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_shader_geometry();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_uploads_batch_in_order();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_pipeline_record();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_data_buffers();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_shader_surface_scaled();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_compute();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_shader_hot_reload();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_mipmaps();
     test_gpu_mipmaps_not_square();
     test_gpu_overdraw();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_layers();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_layers_on_software_backend();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_cached_target_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_cached_target_on_gpu_backend();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_transforms_on_software_backend();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_shapes_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_shapes_on_gpu_backend();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_masks_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_masks_on_gpu_backend();
+#endif
+#if KIN_HAS_SDL_RENDERER && KIN_HAS_GPU_RENDERER
     test_masks_on_accelerated_sdl_renderer();
+#endif
     test_color_math();
     test_color_luts();
+#if KIN_HAS_SDL_RENDERER
     test_linear_color_refused_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_linear_color_on_gpu_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_transforms_on_gpu_backend();
+#endif
     test_camera_zoom_and_rotation();
+#if KIN_HAS_GPU_RENDERER
     test_gpu_scopes();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_big_uploads();
     test_gpu_adaptive_upload_staging();
     test_gpu_empty_textures_are_clear();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_write_texture_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_gpu_write_texture();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_lighting_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_lighting_on_gpu_backend();
+#endif
     test_lighting_declines_without_render_targets();
+#if KIN_HAS_SDL_RENDERER
     test_sprite_batches_on_software_backend();
+#endif
+#if !KIN_HAS_COMPACT_RENDERER
     test_textures_outliving_their_renderer();
+#endif
+#if KIN_HAS_SDL_RENDERER
     test_flipped_sprites_on_software_backend();
+#endif
+#if KIN_HAS_GPU_RENDERER
     test_sprite_batches_on_gpu_backend();
+#endif
     return 0;
 }

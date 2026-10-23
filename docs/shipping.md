@@ -139,8 +139,9 @@ On Windows use the `ship-vs` preset (Visual Studio 2022), or `ship` from a
 developer prompt. It makes `my_game-1.0.0-windows-x86_64.zip`.
 
 `<game>_content` builds only the pack, beside the executable. `cmake --install
-build-ship --component my_game --prefix <dir>` installs the same folder
-without archiving it. With `KIN_PACK_CONTENT=OFF` the content ships as a loose
+build-ship --component my_game --prefix <dir>` installs the executable, content
+and licenses without archiving them; the exporter adds identity and checksum
+reports. With `KIN_PACK_CONTENT=OFF` the content ships as a loose
 `<name>/` folder instead of a pack.
 
 ## What a shipping build changes
@@ -243,3 +244,69 @@ If a dependency moves a license file, configuring fails and names it.
   pack only gathers them).
 - A pack appended to the executable, for a single-file game.
 - Installers, code signing, a Linux `.desktop` file and icon, macOS bundles.
+
+## Optional components and release optimization
+
+The existing `ship`, `ship-vs`, `2d` and `3d` presets retain their roles. The
+`desktop-*`, `hex-*` and `signal-siege-*` presets offer explicit component,
+renderer, size and profiling configurations. Each build has one component
+selection; the generated `kin/components.hpp` exposes `KIN_HAS_*` and
+`kin::components` constants. Disabled scripting, physics and audio omit their
+sources, external dependencies and owned tests. `KIN_EXPERIMENTAL_3D` currently
+requires scripting for its scene-session lifecycle and a GPU-capable renderer.
+`KIN_ENABLE_SCENE_SERVER` controls the server component and honors the existing
+`KIN_ENABLE_AGENT_SERVER` option as its default.
+
+`kin::engine` remains the umbrella target. Narrow consumers can link
+`kin::audio`, `kin::physics` or `kin::scripting`; ECS/render/scene adapters are
+separate targets (`kin::audio_ecs`, `kin::physics_ecs`, `kin::physics_render`,
+`kin::scripting_scenes`). The experimental 3D scene/frame orchestration is
+`kin::scene3d_runtime`, composed by the umbrella. See [audio](audio.md) and [scripting](scripting.md).
+
+Release options are explicit:
+
+- `KIN_ENABLE_LTO`: interprocedural optimization across engine and dependencies.
+- `KIN_ENABLE_SIZE_OPTIMIZATIONS`: function/data sections and linker garbage collection.
+- `KIN_PACKAGE_STRIP`: strip the staged copy, preserving build binaries.
+- `KIN_PACKAGE_DEBUG_SYMBOLS`: retain matching DWARF/PDB artifacts in a separate symbols ZIP.
+- `KIN_PGO_MODE=off|generate|use`: optional GNU/Clang profile training; instrumented
+  training binaries cannot be packaged. `tools/pgo_profiles.py` manages profiles
+  and `tools/train_signal_siege_pgo.py` supplies a repeatable training workload.
+
+`tools/audit_release_build.py` checks actual GNU/Clang Ninja compile/link commands.
+`tools/compare_package_sizes.py` compares the generated `.size.json` reports.
+Each export includes `release.json`, `SHA256SUMS` and player instructions;
+JSON sidecars and the separate symbols archive are bound to the exact player
+archive hash. Canonical `kin_game` exports retain Linux `.tar.gz` and Windows
+`.zip` naming; the explicit desktop-v1 qualification presets use ZIPs on both.
+
+## Asset manifests and cooking
+
+Pass `MANIFEST <file>` to `kin_game` to audit explicit roots, dynamic content
+groups and discovered dependencies. `<game>_asset_report` reports reachable,
+candidate and uncertain files; it never removes files. The same report verifies
+the installed content, including bytes extracted from its `.kinpak`.
+
+`KIN_ENABLE_ASSET_COOKING=ON` requires an explicit manifest. It minifies known
+Kin JSON formats without changing tokens, recompresses PNGs only when smaller,
+and copies other content unchanged. It verifies cached results and refreshes
+cooking at export. All content is retained, including unknown/manual dependencies.
+Signal Siege's manifest is in `examples/signal_siege/assets.manifest.json` and
+covers the canonical `examples/content` tree. Font subsets and their license
+notices live in that tree under `lang/fonts`; no system-font discovery is needed.
+
+## Additional desktop qualification
+
+The `signal-siege-release-linux` and `signal-siege-release-windows` presets
+opt into `release/desktop-v1.json`, compiler checks, symbols, cooking and a
+relocated/read-only installation acceptance suite. The Linux profile targets
+Ubuntu 24.04 x86-64 with GCC 13; it is additional to the older Steam Runtime
+baseline above and does not replace it. Windows retains the shipping build's
+static MSVC runtime.
+
+`tools/accept_desktop_release.py` verifies the player ZIP and its hash-bound
+reports, debug symbols, content pack, fonts, architecture/ABI, six scenarios,
+four locales and user settings persistence. `--smoke-only` measures ABI but
+explicitly does not qualify the artifact for release. The automated jobs are in
+`.github/workflows/desktop-release.yml`; Windows client and physical GPU/audio
+qualification remain separate checks.

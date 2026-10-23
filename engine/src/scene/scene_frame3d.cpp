@@ -13,6 +13,10 @@ SceneFrame3D::SceneFrame3D(EcsWorld& world, WorldRenderState3D& rendering, Scene
     : _world(world), _rendering(rendering), _options(std::move(options)) {
     if (bool(_options.audio) != bool(_options.audio_catalog))
         throw std::invalid_argument("scene frame audio requires both an engine and a catalog");
+#if !KIN_ENABLE_AUDIO
+    if (_options.audio)
+        throw std::invalid_argument("scene frame audio requires KIN_ENABLE_AUDIO");
+#endif
     if (_options.bodies && _options.physics_step)
         throw std::invalid_argument("scene frame requires one physics step owner");
 }
@@ -54,11 +58,13 @@ bool SceneFrame3D::after_phase_operation(SystemPhase phase, f32 dt) {
             _rendering.simulate_particles(dt);
             break;
         case SystemPhase::Audio:
+#if KIN_ENABLE_AUDIO
             if (_options.audio) {
                 update_audio_listeners(_world, *_options.audio);
                 update_audio_emitters(_world, *_options.audio, *_options.audio_catalog);
                 consume_audio_one_shots(_world, *_options.audio, *_options.audio_catalog);
             }
+#endif
             break;
         case SystemPhase::Editor:
             if (!validate())

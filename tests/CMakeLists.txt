@@ -6,10 +6,34 @@ add_compile_options(
     "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
 )
 
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_GENERATOR STREQUAL "Ninja")
+        get_property(component_manifest GLOBAL PROPERTY KIN_COMPONENT_MANIFEST)
+        add_test(NAME kin-component-targets
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_component_targets.py"
+                --build "${CMAKE_BINARY_DIR}" --manifest "${component_manifest}"
+                --output "${CMAKE_BINARY_DIR}/component-reports/targets-$<CONFIG>.json")
+    endif()
+    add_test(NAME kin-components
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/component_config_tests.py")
+    add_test(NAME kin-release-acceptance-tools
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_acceptance_tests.py")
+    add_test(NAME kin-bundled-fonts
+        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_bundled_fonts.py")
+    add_test(NAME kin-asset-cooking
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_cooking_tests.py")
+    add_test(NAME kin-asset-report
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_report_tests.py")
+endif()
+
 function(kin_add_test target test_name)
-    cmake_parse_arguments(TEST "" "" "SOURCES;LIBRARIES;DEFINITIONS;COMPILE_OPTIONS" ${ARGN})
+    cmake_parse_arguments(TEST "" "LINK_TARGET" "SOURCES;LIBRARIES;DEFINITIONS;COMPILE_OPTIONS" ${ARGN})
     add_executable(${target} ${TEST_SOURCES})
-    target_link_libraries(${target} PRIVATE kin::engine ${TEST_LIBRARIES})
+    if(NOT TEST_LINK_TARGET)
+        set(TEST_LINK_TARGET kin::engine)
+    endif()
+    target_link_libraries(${target} PRIVATE ${TEST_LINK_TARGET} ${TEST_LIBRARIES})
     if(TEST_DEFINITIONS)
         target_compile_definitions(${target} PRIVATE ${TEST_DEFINITIONS})
     endif()
@@ -19,6 +43,19 @@ function(kin_add_test target test_name)
     add_test(NAME ${test_name} COMMAND ${target})
 endfunction()
 
+# Component-owned tests use the same registry as configuration and packaging.
+function(kin_add_component_test component target test_name)
+    get_property(declared GLOBAL PROPERTY KIN_COMPONENT_${component}_TESTS)
+    if(NOT test_name IN_LIST declared)
+        message(FATAL_ERROR "Test ${test_name} is not declared by component ${component}")
+    endif()
+    if(KIN_ENABLE_${component})
+        kin_add_test(${target} ${test_name} ${ARGN})
+        set_tests_properties(${test_name} PROPERTIES LABELS "component:${component}")
+    endif()
+endfunction()
+
+kin_add_test(kin_component_tests kin-component-config SOURCES component_tests.cpp)
 kin_add_test(kin_core_tests kin-core SOURCES core_tests.cpp)
 kin_add_test(kin_math3d_tests kin-math3d SOURCES math3d_tests.cpp)
 kin_add_test(kin_render3d_api_tests kin-render3d-api SOURCES render3d_api_tests.cpp)
@@ -50,9 +87,15 @@ kin_add_test(kin_particle_tests kin-particles SOURCES particle_tests.cpp)
 kin_add_test(kin_pathfinding_tests kin-pathfinding SOURCES pathfinding_tests.cpp)
 kin_add_test(kin_navmesh3d_tests kin-navmesh3d SOURCES navmesh3d_tests.cpp)
 kin_add_test(kin_hex_tests kin-hex SOURCES hex_tests.cpp)
+kin_add_test(kin_hex_demo_tests kin-hex-demo SOURCES hex_demo_tests.cpp
+    DEFINITIONS KIN_HEX_DEMO_BAKED_FONT=$<BOOL:${KIN_HEX_DEMO_BAKED_FONT}>)
 kin_add_test(kin_path_server_tests kin-path-server SOURCES path_server_tests.cpp)
-kin_add_test(kin_physics_tests kin-physics SOURCES physics_tests.cpp)
-kin_add_test(kin_ecs_physics_tests kin-ecs-physics SOURCES ecs_physics_tests.cpp)
+kin_add_component_test(PHYSICS kin_physics_tests kin-physics
+    SOURCES physics_tests.cpp LINK_TARGET kin::physics_render)
+kin_add_component_test(PHYSICS kin_physics_component_tests kin-physics-component
+    SOURCES physics_component_tests.cpp LINK_TARGET kin::physics)
+kin_add_component_test(PHYSICS kin_ecs_physics_tests kin-ecs-physics
+    SOURCES ecs_physics_tests.cpp LINK_TARGET kin::physics_ecs)
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)
@@ -65,24 +108,84 @@ kin_add_test(kin_ui2_theme_file_tests kin-ui2-theme-file SOURCES ui2_theme_file_
 kin_add_test(kin_dialogue_tests kin-dialogue SOURCES dialogue_tests.cpp)
 kin_add_test(kin_l10n_tests kin-l10n SOURCES l10n_tests.cpp)
 kin_add_test(kin_bidi_tests kin-bidi SOURCES bidi_tests.cpp)
-kin_add_test(kin_assets_tests kin-assets SOURCES assets_tests.cpp anim_asset_loader_tests.cpp)
+if(KIN_ENABLE_IMAGE_IO)
+    kin_add_test(kin_assets_tests kin-assets SOURCES assets_tests.cpp anim_asset_loader_tests.cpp)
+else()
+    kin_add_test(kin_assets_tests kin-assets SOURCES assets_no_image_tests.cpp anim_asset_loader_tests.cpp)
+endif()
+kin_add_test(kin_shipping_features_tests kin-shipping-features SOURCES shipping_features_tests.cpp)
+kin_add_test(kin_sdl_capabilities_tests kin-sdl-capabilities SOURCES sdl_capabilities_tests.cpp
+    DEFINITIONS KIN_TEST_SDL_GAMEPAD=$<BOOL:${KIN_ENABLE_SDL_GAMEPAD}>
+        "KIN_TEST_SDL_HAS_X11=$<IN_LIST:x11,${KIN_SDL_VIDEO_DRIVERS}>"
+        "KIN_TEST_SDL_HAS_WAYLAND=$<IN_LIST:wayland,${KIN_SDL_VIDEO_DRIVERS}>")
 kin_add_test(kin_content_tests kin-content SOURCES content_tests.cpp)
 kin_add_test(kin_file_watcher_tests kin-file-watcher SOURCES file_watcher_tests.cpp)
-kin_add_test(kin_lua_script_tests kin-lua-script SOURCES lua_script_tests.cpp)
-kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp
+kin_add_component_test(SCRIPTING kin_lua_script_tests kin-lua-script SOURCES lua_script_tests.cpp LINK_TARGET kin::scripting)
+kin_add_component_test(AUDIO kin_audio_tests kin-audio SOURCES audio_tests.cpp LINK_TARGET kin::audio_ecs
     DEFINITIONS KIN_AUDIO_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/audio")
+if(KIN_ENABLE_SCRIPTING AND KIN_ENABLE_AUDIO)
+    target_link_libraries(kin_audio_tests PRIVATE kin::scripting_scenes)
+endif()
+kin_add_component_test(AUDIO kin_audio_component_tests kin-audio-component SOURCES audio_component_tests.cpp LINK_TARGET kin::audio)
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
 kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
+if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_GENERATOR STREQUAL "Ninja" AND
+       CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND KIN_PGO_MODE STREQUAL "off")
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME kin-compiler-pgo
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/compiler_pgo_tests.py"
+                    --build "${CMAKE_CURRENT_BINARY_DIR}/compiler-pgo"
+                    --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}")
+        endif()
+    endif()
+    add_test(NAME kin-release-policy
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DCONFIG=$<CONFIG>" "-DGENERATOR=${CMAKE_GENERATOR}"
+            "-DCC=${CMAKE_C_COMPILER}" "-DCXX=${CMAKE_CXX_COMPILER}"
+            "-DLTO=${KIN_ENABLE_LTO}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/release_policy_tests.cmake"
+        CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
+    add_library(kin_desktop_package_library SHARED desktop_package_library.cpp)
+    add_executable(kin_desktop_package_fixture desktop_package_fixture.cpp)
+    target_link_libraries(kin_desktop_package_fixture PRIVATE kin::engine kin_desktop_package_library)
+    # Exercise the low-level loose-assets exporter; real Signal Siege acceptance
+    # covers the canonical kin_game/.kinpak path.
+    kin_configure_asset_pipeline(kin_desktop_package_fixture package_fixture
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/desktop_package/assets"
+        "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/desktop_package/assets.manifest.json")
+    kin_package_game(kin_desktop_package_fixture RUNTIME_TARGETS kin_desktop_package_library)
+    get_target_property(_package_script kin_desktop_package_fixture KIN_PACKAGE_SCRIPT)
+    get_target_property(_package_name kin_desktop_package_fixture KIN_PACKAGE_NAME)
+    add_test(NAME kin-desktop-package
+        COMMAND "${CMAKE_COMMAND}"
+            "-DPACKAGE_SCRIPT=${_package_script}"
+            "-DPACKAGE_NAME=${_package_name}"
+            "-DBUILD_DIR=${CMAKE_BINARY_DIR}"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DCONFIG=$<CONFIG>"
+            "-DEXECUTABLE=$<TARGET_FILE_NAME:kin_desktop_package_fixture>"
+            "-DBUILD_EXECUTABLE=$<TARGET_FILE:kin_desktop_package_fixture>"
+            "-DDEBUG_SYMBOLS=${KIN_PACKAGE_DEBUG_SYMBOLS}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/desktop_package_tests.cmake"
+        CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
+endif()
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
 kin_add_test(kin_texture_file_tests kin-texture-file SOURCES texture_file_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
+if(KIN_HAS_COMPACT_RENDERER)
+    kin_add_test(kin_compact_renderer_tests kin-compact-renderer SOURCES compact_renderer_tests.cpp)
+endif()
 # Test-only material shaders for the GPU renderer tests. Without glslc (found by the
 # engine) they are not compiled and the tests that need them skip.
 set(_kin_test_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_compile_definitions(kin_renderer_tests PRIVATE KIN_TEST_SHADER_DIR="${_kin_test_shader_dir}")
 target_compile_definitions(kin_renderer_tests PRIVATE
     KIN_GPU_SHADER_DIR_FOR_TESTS="${CMAKE_BINARY_DIR}/engine/shaders")
-if(KIN_GLSLC)
+if(KIN_GLSLC AND KIN_HAS_GPU_RENDERER)
     file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
     set(_kin_test_spv)
     foreach(_name four_sources data_formats custom_vertex storage_read bench_read_texture bench_read_buffer bench_heavy)
@@ -278,22 +381,10 @@ target_link_libraries(kin_runtime_tests PRIVATE
 
 add_test(NAME kin-runtime COMMAND kin_runtime_tests)
 
-if(KIN_ENABLE_RENDER_PROBE)
-    kin_add_test(kin_render_probe_tests kin-render-probe SOURCES render_probe_tests.cpp)
-endif()
-if(KIN_ENABLE_DETERMINISM_CHECK)
-    kin_add_test(kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)
-endif()
+kin_add_component_test(RENDER_PROBE kin_render_probe_tests kin-render-probe SOURCES render_probe_tests.cpp)
+kin_add_component_test(DETERMINISM_CHECK kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)
 
-add_executable(kin_server_tests
-    server_tests.cpp
-)
-
-target_link_libraries(kin_server_tests PRIVATE
-    kin::engine
-)
-
-add_test(NAME kin-server COMMAND kin_server_tests)
+kin_add_component_test(SCENE_SERVER kin_server_tests kin-server SOURCES server_tests.cpp)
 
 add_executable(kin_scene_tests
     scene_tests.cpp
@@ -315,17 +406,13 @@ target_link_libraries(kin_scene_asset_tests PRIVATE
 
 add_test(NAME kin-scene-asset COMMAND kin_scene_asset_tests)
 
-add_executable(kin_scripting_tests
-    scripting_tests.cpp
-)
+kin_add_component_test(SCRIPTING kin_scripting_tests kin-scripting
+    SOURCES scripting_tests.cpp LINK_TARGET kin::scripting_scenes
+    DEFINITIONS KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)
 
-target_link_libraries(kin_scripting_tests PRIVATE
-    kin::engine
-)
 
-# sol2's legacy numeric policy is checked in Release; Debug defaults to strict checks.
-target_compile_definitions(kin_scripting_tests PRIVATE
-    KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)
-
-add_test(NAME kin-scripting COMMAND kin_scripting_tests)
-
+add_executable(kin_renderer_startup renderer_startup.cpp)
+target_link_libraries(kin_renderer_startup PRIVATE kin::engine)
+add_test(NAME kin-renderer-policy
+    COMMAND "${CMAKE_COMMAND}" "-DEXECUTABLE=$<TARGET_FILE:kin_renderer_startup>"
+        "-DRENDERER=${KIN_RENDERER}" -P "${CMAKE_CURRENT_SOURCE_DIR}/renderer_policy_tests.cmake")

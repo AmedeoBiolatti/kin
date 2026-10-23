@@ -44,8 +44,10 @@ public:
     void clear(EcsWorld& world);
 
     SceneAssetRuntimeChange poll_changes() const;
+#if KIN_ENABLE_SCRIPTING
     bool reload(ScriptScene& scene);
     bool reload_if_changed(ScriptScene& scene);
+#endif
 
     const SceneAsset* scene() const { return _loaded ? &_scene : nullptr; }
     const SceneInstance& instance() const { return _instance; }

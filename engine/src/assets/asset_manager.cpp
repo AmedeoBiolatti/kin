@@ -3,7 +3,9 @@
 
 #include <kin/l10n/localization.hpp>
 
+#if KIN_ENABLE_AUDIO
 #include <kin/audio/audio_catalog.hpp>
+#endif
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/particles/particle_catalog.hpp>
 #include <kin/platform/input.hpp>
@@ -21,6 +23,14 @@
 namespace kin {
 
 void register_animation_asset_loaders(AssetManager& assets);
+
+#if KIN_ENABLE_AUDIO
+void register_audio_catalog_loader(AssetManager& assets) {
+    assets.register_loader<AudioCatalog>([](const std::filesystem::path& path) {
+        return load_audio_catalog(path);
+    });
+}
+#endif
 
 namespace {
 
@@ -81,34 +91,6 @@ AssetType infer_asset_type(const std::filesystem::path& path) {
         return AssetType::Prefab;
     }
     return AssetType::Unknown;
-}
-
-std::string_view asset_type_name(AssetType type) {
-    switch (type) {
-    case AssetType::Unknown: return "Unknown";
-    case AssetType::Image: return "Image";
-    case AssetType::Animation: return "Animation";
-    case AssetType::AnimationStateMachine: return "AnimationStateMachine";
-    case AssetType::GameInfo: return "GameInfo";
-    case AssetType::InputMap: return "InputMap";
-    case AssetType::Particles: return "Particles";
-    case AssetType::Script: return "Script";
-    case AssetType::SpriteCatalog: return "SpriteCatalog";
-    case AssetType::AudioCatalog: return "AudioCatalog";
-    case AssetType::TileMap: return "TileMap";
-    case AssetType::Dialogue: return "Dialogue";
-    case AssetType::Prefab: return "Prefab";
-    }
-    return "Unknown";
-}
-
-std::string_view asset_status_name(AssetStatus status) {
-    switch (status) {
-    case AssetStatus::Discovered: return "Discovered";
-    case AssetStatus::Loaded: return "Loaded";
-    case AssetStatus::Missing: return "Missing";
-    }
-    return "Missing";
 }
 
 AssetManager::AssetManager(std::filesystem::path root)
@@ -263,7 +245,9 @@ void register_default_asset_loaders(AssetManager& assets) {
         return load_input_map(path);
     });
     register_particle_catalog_loader(assets);
+#if KIN_ENABLE_AUDIO
     register_audio_catalog_loader(assets);
+#endif
     register_tilemap_loader(assets);
     assets.register_loader<DialogueDocument>([](const std::filesystem::path& path) {
         DialogueLoadResult result = load_dialogue(path);

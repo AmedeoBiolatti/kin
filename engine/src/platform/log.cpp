@@ -2,7 +2,12 @@
 
 #include <kin/core/json.hpp>
 
+#ifndef KIN_LOG_SDL_SINK
+#define KIN_LOG_SDL_SINK 1
+#endif
+#if KIN_LOG_SDL_SINK
 #include <SDL3/SDL.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -10,6 +15,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -51,6 +57,7 @@ std::string thread_id_string() {
     return out.str();
 }
 
+#if KIN_LOG_SDL_SINK
 SDL_LogPriority to_sdl_priority(LogLevel level) {
     switch (level) {
     case LogLevel::Trace: return SDL_LOG_PRIORITY_TRACE;
@@ -62,6 +69,8 @@ SDL_LogPriority to_sdl_priority(LogLevel level) {
     }
     return SDL_LOG_PRIORITY_INFO;
 }
+
+#endif
 
 std::string file_name(std::string_view path) {
     const std::size_t slash = path.find_last_of("/\\");
@@ -140,11 +149,15 @@ void ensure_initialized_locked() {
             ? format_log_json_line(*warning)
             : format_log_text(*warning);
         if (g_logger.config.sdl_sink) {
+#if KIN_LOG_SDL_SINK
             SDL_LogMessage(SDL_LOG_CATEGORY_APPLICATION,
                            to_sdl_priority(warning->level),
                            "%.*s",
                            static_cast<int>(text.size()),
                            text.data());
+#else
+            std::cerr << text << '\n';
+#endif
         }
         if (g_logger.config.stream) {
             *g_logger.config.stream << text << '\n';
@@ -165,11 +178,15 @@ void emit_locked(const LogEvent& event) {
         : format_log_text(event);
 
     if (g_logger.config.sdl_sink) {
+#if KIN_LOG_SDL_SINK
         SDL_LogMessage(SDL_LOG_CATEGORY_APPLICATION,
                        to_sdl_priority(event.level),
                        "%.*s",
                        static_cast<int>(text.size()),
                        text.data());
+#else
+        std::cerr << text << '\n';
+#endif
     }
     if (g_logger.config.stream) {
         *g_logger.config.stream << text << '\n';

@@ -134,3 +134,14 @@ An edit to the script or any module it required reloads it, keeping the last
 good version if the new one fails; fixing the file reloads it. The watcher and
 the script may be destroyed in either order. See
 [hot-reloading game data](assets.md#hot-reloading-game-data).
+
+
+## Optional build targets
+
+`KIN_ENABLE_SCRIPTING` defaults to ON. Link `kin::scripting` for plain `LuaScript`
+sandboxes, including module loading and localization; this target does not link
+ECS or the engine base. Link `kin::scripting_scenes` for `ScriptEngine`,
+`ScriptScene` and scene/editor reload integration. `kin::engine` retains both
+when enabled. Scripting OFF creates neither target and does not fetch Lua/sol2.
+`<kin/components.hpp>` exposes `KIN_HAS_SCRIPTING` and
+`kin::components::scripting`. See [component configuration](shipping.md#component-registry-and-optional-libraries).
