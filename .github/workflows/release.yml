@@ -24,7 +24,9 @@ jobs:
       - name: Require a version tag matching the project
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 tools/prepare_release.py --check-tag "$RELEASE_TAG" --revision "$GITHUB_SHA"
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          python3 tools/prepare_release.py --check-tag "$RELEASE_TAG" --revision "$GITHUB_SHA"
 
   tests:
     needs: version

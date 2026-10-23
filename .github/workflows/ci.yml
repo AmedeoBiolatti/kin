@@ -33,7 +33,7 @@ jobs:
         with:
           script: |
             let run = true;
-            if (context.eventName === 'push' && context.ref !== 'refs/heads/main') {
+            if (context.eventName === 'push' && context.ref.startsWith('refs/heads/') && context.ref !== 'refs/heads/main') {
               const branch = context.ref.replace('refs/heads/', '');
               const {data} = await github.rest.pulls.list({
                 ...context.repo, state: 'open', head: `${context.repo.owner}:${branch}`, per_page: 1
