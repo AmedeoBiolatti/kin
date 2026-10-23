@@ -1,0 +1,60 @@
+name: Publish release
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Verify version tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a version tag matching the project
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 tools/prepare_release.py --check-tag "$RELEASE_TAG" --revision "$GITHUB_SHA"
+
+  tests:
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  desktop:
+    needs: version
+    uses: ./.github/workflows/desktop-release.yml
+
+  publish:
+    name: Publish validated artifacts
+    needs: [version, tests, desktop]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-v1-*
+          path: incoming
+      - name: Verify artifact identities and collect release files
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 tools/prepare_release.py --check-tag "$RELEASE_TAG" --revision "$GITHUB_SHA" --incoming incoming --output publish
+      - name: Publish without rebuilding the accepted packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" publish/* --verify-tag --title "Kin $RELEASE_TAG" --generate-notes

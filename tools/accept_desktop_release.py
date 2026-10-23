@@ -27,7 +27,12 @@ def extract(archive, destination):
     names=set()
     with zipfile.ZipFile(archive) as zipped:
         for item in zipped.infolist():
-            parts=item.filename.rstrip('/').split('/')
+            # ZipInfo normalizes backslashes on Windows and truncates NULs.
+            # Validate the original archive spelling before those transformations.
+            name=item.orig_filename
+            if name != item.filename or '\x00' in name:
+                raise ValueError('Unsafe ZIP path: '+repr(name))
+            parts=name.rstrip('/').split('/')
             if any(p in ('','.','..') or ':' in p or '\\' in p for p in parts):
                 raise ValueError('Unsafe ZIP path: '+item.filename)
             if stat.S_ISLNK(item.external_attr >> 16): raise ValueError('ZIP symlinks are unsupported')

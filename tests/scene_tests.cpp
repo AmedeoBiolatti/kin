@@ -229,6 +229,8 @@ void test_overlay_render_and_update_rules(Fixture& fixture) {
     fixture.scenes.update(fixture.ctx);
     assert(overlay.updates == 3);
     assert(ticking_overlay.updates == 1);
+    // Lifecycle callbacks reference these local counters; tear down before they expire.
+    reset_fixture(fixture);
 }
 
 void test_available_actions_follow_active_scene_stack(Fixture& fixture) {
@@ -276,6 +278,8 @@ void test_fade_overlay_pops_itself(Fixture& fixture) {
     assert(fixture.scenes.depth() == 1);
     assert(fixture.scenes.top() != nullptr);
     assert(fixture.scenes.top()->name() == "base");
+    // Lifecycle callbacks reference these local counters; tear down before they expire.
+    reset_fixture(fixture);
 }
 
 void test_replace_with_fade_replaces_scene_below_overlay(Fixture& fixture) {
@@ -295,6 +299,8 @@ void test_replace_with_fade_replaces_scene_below_overlay(Fixture& fixture) {
     assert(fixture.scenes.depth() == 2);
     assert(fixture.scenes.at(0)->name() == "next");
     assert(fixture.scenes.at(1)->name() == "FadeScene");
+    // Lifecycle callbacks reference these local counters; tear down before they expire.
+    reset_fixture(fixture);
 }
 
 void test_transition_to_replaces_scene_below_overlay(Fixture& fixture) {
@@ -321,6 +327,8 @@ void test_transition_to_replaces_scene_below_overlay(Fixture& fixture) {
     assert(old_scene.exits == 1);
     assert(fixture.scenes.depth() == 1);
     assert(fixture.scenes.at(0)->name() == "next");
+    // Lifecycle callbacks reference these local counters; tear down before they expire.
+    reset_fixture(fixture);
 }
 
 void test_ecs_scene_default_render_draws_world(Fixture& fixture) {

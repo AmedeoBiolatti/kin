@@ -29,11 +29,21 @@ class ReleaseAcceptanceTests(unittest.TestCase):
                 item=zipfile.ZipInfo()
                 item.filename=name  # Preserve malformed backslashes on Windows too.
                 zipped.writestr(item,b'bad')
-            with self.assertRaises(ValueError): extract(archive,self.root/'out')
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                extract(archive,self.root/'out')
         archive=self.root/'case.zip'
         with zipfile.ZipFile(archive,'w') as zipped:
             zipped.writestr('game/A',b'a');zipped.writestr('game/a',b'b')
         with self.assertRaises(ValueError): extract(archive,self.root/'out')
+
+    def test_zip_rejects_windows_normalization(self):
+        archive=self.root/'backslash.zip'
+        with zipfile.ZipFile(archive,'w') as zipped:
+            item=zipfile.ZipInfo()
+            item.filename='game\\bad'
+            zipped.writestr(item,b'bad')
+        with patch('zipfile.os.sep', '\\'):
+            with self.assertRaises(ValueError): extract(archive,self.root/'out')
 
     def test_content_pack_checksums_and_paths(self):
         import struct

@@ -1,5 +1,6 @@
 name: Desktop release acceptance
 on:
+  workflow_call:
   pull_request:
   workflow_dispatch:
   push:

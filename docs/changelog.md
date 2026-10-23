@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Added tag-triggered release publishing gated on the full CI matrix and fresh
+  desktop runtime acceptance. Publish the validated player archives, matching
+  symbols, reports and checksums without rebuilding.
+- Validate original ZIP entry names before Python's Windows normalization;
+  fix scene-test callback lifetimes exposed by release LTO.
+
 - Added optional engine component targets, renderer/SDL profiles, release LTO,
   section garbage collection, separate debug symbols, optional compiler PGO,
   asset dependency reports and lossless asset cooking. `kin_game` keeps the
