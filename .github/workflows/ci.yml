@@ -163,7 +163,7 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} ${{ matrix.options }}
+        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ${{ matrix.options }}
 
       - name: Install glslc (Windows)
         if: runner.os == 'Windows'
