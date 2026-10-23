@@ -66,8 +66,11 @@ def abi(root, maximum_glibc, maximum_glibcxx, enforce=True):
 def readonly(root, enable):
     if os.name=='nt':
         user=subprocess.check_output(['whoami'],text=True).strip()
-        rights='RX' if enable else 'F'
-        subprocess.run(['icacls',str(root),'/inheritance:r','/grant:r',f'{user}:(OI)(CI)({rights})','/T','/Q'],
+        # A read-only grant alone cannot override the runner's writable group
+        # grants (e.g. Administrators). Deny mutation explicitly while retaining
+        # read/execute and WRITE_DAC so the owner can restore the temporary tree.
+        operation=['/deny',f'{user}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)'] if enable else ['/remove:d',user]
+        subprocess.run(['icacls',str(root),*operation,'/T','/Q'],
                        check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     else:
         for path in sorted(root.rglob('*'),reverse=True):

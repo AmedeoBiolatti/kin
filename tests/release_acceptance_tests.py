@@ -78,12 +78,13 @@ class ReleaseAcceptanceTests(unittest.TestCase):
 
     def test_readonly_roundtrip(self):
         import os
-        if os.name=='nt' or os.geteuid()==0: self.skipTest('Native ACLs are covered by release CI acceptance')
+        if os.name!='nt' and os.geteuid()==0: self.skipTest('Root bypasses Unix permissions')
         folder=self.root/'game';folder.mkdir();(folder/'signal_siege').write_bytes(b'game')
         before=snapshot(folder)
         readonly(folder,True)
         try:
             with self.assertRaises(PermissionError): (folder/'write').write_text('bad', encoding='utf-8')
+            with self.assertRaises(PermissionError): (folder/'signal_siege').write_bytes(b'changed')
         finally: readonly(folder,False)
         self.assertEqual(snapshot(folder),before)
 
