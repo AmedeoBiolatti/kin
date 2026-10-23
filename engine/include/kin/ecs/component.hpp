@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/core/math3d.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/world.hpp>
@@ -41,6 +42,8 @@ enum class ComponentFieldKind {
     Color,
     EntityRef,
     AssetRef,
+    Vec3f,
+    Quatf,
 };
 
 struct ComponentEntityRef {
@@ -68,7 +71,11 @@ using ComponentFieldValue = std::variant<bool,
                                          Vec2i,
                                          Color,
                                          ComponentEntityRef,
-                                         ComponentAssetRef>;
+                                         ComponentAssetRef,
+                                         Vec3f,
+                                         Quatf>;
+
+ComponentFieldKind component_field_kind_from_value(const ComponentFieldValue& value);
 
 struct ComponentFieldDescriptor {
     std::string name;
@@ -180,12 +187,15 @@ template <> struct ComponentFieldKindOf<std::string> { static constexpr Componen
 template <> struct ComponentFieldKindOf<Vec2f> { static constexpr ComponentFieldKind value = ComponentFieldKind::Vec2f; };
 template <> struct ComponentFieldKindOf<Vec2i> { static constexpr ComponentFieldKind value = ComponentFieldKind::Vec2i; };
 template <> struct ComponentFieldKindOf<Color> { static constexpr ComponentFieldKind value = ComponentFieldKind::Color; };
+template <> struct ComponentFieldKindOf<Vec3f> { static constexpr ComponentFieldKind value = ComponentFieldKind::Vec3f; };
+template <> struct ComponentFieldKindOf<Quatf> { static constexpr ComponentFieldKind value = ComponentFieldKind::Quatf; };
+template <> struct ComponentFieldKindOf<ComponentAssetRef> { static constexpr ComponentFieldKind value = ComponentFieldKind::AssetRef; };
+template <> struct ComponentFieldKindOf<ComponentEntityRef> { static constexpr ComponentFieldKind value = ComponentFieldKind::EntityRef; };
 
 // Field types a native component member can be reflected as. These are exactly
-// the types ComponentFieldKindOf is specialized for above. Entity/asset refs are
-// intentionally absent: they have dedicated authored-id serialization and are
-// authored via the data-component path (DataComponentBuilder::field_entity_ref /
-// field_asset_ref), not as native member fields. Keeping this list in sync with
+// the types ComponentFieldKindOf is specialized for above, except entity refs:
+// those still use the data-component path for authored-id remapping. Asset refs
+// are path/ID values and work as native members too. Keeping this list in sync with
 // ComponentFieldKindOf ensures an unsupported native field fails on the
 // static_assert in NativeComponentBuilder::field() with a clear message rather
 // than an opaque "ComponentFieldKindOf has no member 'value'" error.
@@ -201,7 +211,10 @@ inline constexpr bool supported_component_field_v =
     std::is_same_v<T, std::string> ||
     std::is_same_v<T, Vec2f> ||
     std::is_same_v<T, Vec2i> ||
-    std::is_same_v<T, Color>;
+    std::is_same_v<T, Color> ||
+    std::is_same_v<T, Vec3f> ||
+    std::is_same_v<T, Quatf> ||
+    std::is_same_v<T, ComponentAssetRef>;
 
 inline bool field_value_matches_kind(const ComponentFieldValue& value, ComponentFieldKind kind) {
     switch (kind) {
@@ -218,6 +231,16 @@ inline bool field_value_matches_kind(const ComponentFieldValue& value, Component
     case ComponentFieldKind::Color: return std::holds_alternative<Color>(value);
     case ComponentFieldKind::EntityRef: return std::holds_alternative<ComponentEntityRef>(value);
     case ComponentFieldKind::AssetRef: return std::holds_alternative<ComponentAssetRef>(value);
+    case ComponentFieldKind::Vec3f: {
+        const auto* v = std::get_if<Vec3f>(&value);
+        return v && std::isfinite(v->x) && std::isfinite(v->y) && std::isfinite(v->z);
+    }
+    case ComponentFieldKind::Quatf: {
+        const auto* q = std::get_if<Quatf>(&value);
+        if (!q || !std::isfinite(q->x) || !std::isfinite(q->y) || !std::isfinite(q->z) || !std::isfinite(q->w)) return false;
+        const double n = double(q->x)*q->x + double(q->y)*q->y + double(q->z)*q->z + double(q->w)*q->w;
+        return std::abs(n - 1.0) <= .001;
+    }
     }
     return false;
 }
@@ -350,6 +373,18 @@ public:
 
     bool patch_field(EcsEntity entity, ComponentId id, std::string_view field, const ComponentFieldValue& value);
     bool patch_field(EcsEntity entity, std::string_view component, std::string_view field, const ComponentFieldValue& value);
+    // Optional owner policy for live field edits (e.g. transactional asset and
+    // physics updates). Installed only after scene construction. The handler
+    // performs the edit and returns an error on failure; nullopt leaves normal
+    // construction/spawn paths alone. The handler must not recurse.
+    using FieldPatchHandler = std::function<std::optional<bool>(EcsEntity, std::string_view, std::string_view,
+                                                const ComponentFieldValue&, std::string&)>;
+    void set_field_patch_handler(FieldPatchHandler handler) { _field_patch_handler = std::move(handler); }
+    // Copy an entire registered component between matching registries, including
+    // native runtime state. Both worlds must register the same native C++ type
+    // or data schema. No reference remapping or field patch policy is applied.
+    bool copy_component(EcsEntity source, std::string_view component,
+                        EcsComponentRegistry& destination, EcsEntity target) const;
     bool migrate_data_schema(std::string_view component, const std::vector<ComponentFieldSnapshot>& fields);
 
     const std::string& last_error() const { return _last_error; }
@@ -367,6 +402,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<detail::ComponentRecord>> _by_name;
     u64 _next_registration_sequence = 0;
     mutable std::string _last_error;
+    FieldPatchHandler _field_patch_handler;
 };
 
 void write_component_field_value_json(JsonWriter& json, const ComponentFieldValue& value);
@@ -403,6 +439,16 @@ public:
 
     template <typename Field>
     NativeComponentBuilder& field(std::string name, Field T::* member) {
+        return property<Field>(std::move(name), [member](const T& component) { return component.*member; },
+                               [member](T& component, const Field& value) { component.*member = value; return true; });
+    }
+
+    // A reflected authored property can adapt nested members or enum names
+    // without serializing runtime handles or introducing another field format.
+    // A setter returning false rejects the patch through the normal registry.
+    template <typename Field>
+    NativeComponentBuilder& property(std::string name, std::function<Field(const T&)> read,
+                                     std::function<bool(T&, const Field&)> write) {
         using FieldType = std::remove_cv_t<Field>;
         static_assert(detail::supported_component_field_v<FieldType>, "unsupported ECS component field type");
         if (!_record) {
@@ -410,6 +456,10 @@ public:
         }
         if (name.empty()) {
             _registry._last_error = "component field name is required";
+            return *this;
+        }
+        if (!read || !write) {
+            _registry._last_error = "component property requires a reader and writer";
             return *this;
         }
         for (const detail::ComponentFieldRecord& field : _record->fields) {
@@ -424,15 +474,14 @@ public:
             .name = std::move(name),
             .kind = detail::ComponentFieldKindOf<FieldType>::value,
         };
-        record.read = [member](const void* raw) -> ComponentFieldValue {
+        record.read = [read = std::move(read)](const void* raw) -> ComponentFieldValue {
             const T& component = *static_cast<const T*>(raw);
-            return component.*member;
+            return read(component);
         };
-        record.patch = [member](void* raw, const ComponentFieldValue& value) -> bool {
+        record.patch = [write = std::move(write)](void* raw, const ComponentFieldValue& value) -> bool {
             T& component = *static_cast<T*>(raw);
             if (const FieldType* typed = std::get_if<FieldType>(&value)) {
-                component.*member = *typed;
-                return true;
+                return write(component, *typed);
             }
             return false;
         };
@@ -530,6 +579,12 @@ public:
     }
     DataComponentBuilder& field_vec2i(std::string name, Vec2i default_value = {}) {
         return field(std::move(name), ComponentFieldKind::Vec2i, default_value);
+    }
+    DataComponentBuilder& field_vec3f(std::string name, Vec3f default_value = {}) {
+        return field(std::move(name), ComponentFieldKind::Vec3f, default_value);
+    }
+    DataComponentBuilder& field_quatf(std::string name, Quatf default_value = {}) {
+        return field(std::move(name), ComponentFieldKind::Quatf, default_value);
     }
     DataComponentBuilder& field_color(std::string name, Color default_value = {}) {
         return field(std::move(name), ComponentFieldKind::Color, default_value);

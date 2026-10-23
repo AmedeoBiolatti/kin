@@ -62,7 +62,8 @@ public:
                   RngKey rng,
                   f32 fixed_dt,
                   bool render,
-                  AssetServer* asset_server = nullptr);
+                  AssetServer* asset_server = nullptr,
+                  Renderer3D* renderer3d = nullptr);
 
     App& app() { return _app; }
     Window& window() { return _window; }
@@ -112,6 +113,7 @@ public:
     void queue_mouse_button(std::string button, std::string mode);
     // Queue a mouse wheel delta for the next step.
     void queue_mouse_wheel(f32 delta);
+    void queue_mouse_motion(Vec2f delta); // relative, window pixels
     // Queue text input for the next step.
     void queue_text(std::string text);
     // Queue a key for the next step, with modifiers held alongside it. mode is
@@ -129,7 +131,7 @@ public:
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion };
         Kind kind;
         std::string text;  // action name / button name / text input
         std::string mode;  // press / hold / release
@@ -150,6 +152,7 @@ private:
     f32 _fixed_dt;
     bool _render;
     AssetServer* _asset_server = nullptr;
+    Renderer3D* _renderer3d = nullptr;
     i64 _frame = 0;
     RunReport _report;
     std::vector<PendingInput> _pending;
@@ -186,6 +189,7 @@ struct ServerConfig {
     // Optional async assets are pumped before each simulation step. Kept last
     // so existing positional aggregate initialization remains source-compatible.
     AssetServer* asset_server = nullptr;
+    bool rendering_3d = false;
 };
 
 // Runs the game as a long-lived command server. Returns a process exit code.

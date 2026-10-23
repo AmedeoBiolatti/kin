@@ -1,0 +1,17 @@
+{
+ "name": "crowd",
+ "purpose": "Signal Breach's deck (1,536 tiles) and 20,000 instanced enemies: instancing, frustum culling, shadow casters. Speed, not truth.",
+ "procedural": "crowd",
+ "count": 20000,
+ "view": {"samples": 4, "background": [20, 24, 32]},
+ "lights": {
+  "sun": {"direction": [-0.4, 1.0, 0.25], "color": [1.0, 0.97, 0.92]},
+  "ambient": [0.25, 0.28, 0.35],
+  "shadow_area": [[0, -0.2, 0], [48, 4.0, 32]]
+ },
+ "cameras": [
+  {"name": "first_person", "eye": [2.0, 1.55, 16.0], "target": [48.0, 1.0, 16.0], "fov": 75},
+  {"name": "mid_deck", "eye": [24.0, 1.55, 16.0], "target": [48.0, 1.0, 16.0], "fov": 75},
+  {"name": "above", "eye": [24.0, 34.0, 46.0], "target": [24.0, 0.0, 16.0], "fov": 60}
+ ]
+}

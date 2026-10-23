@@ -1,4 +1,7 @@
 #include <kin/runtime/scene_app.hpp>
+#ifdef KIN_EXPERIMENTAL_3D
+#include <kin/render3d/renderer3d.hpp>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -373,6 +376,7 @@ void write_render_profile_report(std::ostream& out, const RuntimeDebugOverlay& o
         std::string_view{"app.hit_max_steps"},
         std::string_view{"app.pacing_wait"},
         std::string_view{"render.scene"},
+        std::string_view{"render3d.cpu"},
         std::string_view{"render.scene.camera"},
         std::string_view{"render.scene.view"},
         std::string_view{"render.scene.queue_reset"},
@@ -400,6 +404,12 @@ void write_render_profile_report(std::ostream& out, const RuntimeDebugOverlay& o
 
 int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     configure_runtime_logging(config.headless, config.game);
+#ifndef KIN_EXPERIMENTAL_3D
+    if (config.rendering_3d) {
+        KIN_LOG_ERROR("runtime", "3D rendering requested in a 2D-only build");
+        return 1;
+    }
+#endif
     KIN_LOG_INFO_F("runtime",
                    "scene app starting",
                    (LogFields{
@@ -447,6 +457,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             .game = config.game,
             .reset_scenes = config.reset_scenes,
             .asset_server = config.asset_server,
+            .rendering_3d = config.rendering_3d,
         };
         return run_scene_server(server, scenes);
 #endif
@@ -599,6 +610,10 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
     }
     bool pipelines_prewarmed = false;
     debug_overlay.options().overdraw_view = config.headless.overdraw_view;
+#ifdef KIN_EXPERIMENTAL_3D
+    std::unique_ptr<Renderer3D> renderer3d;
+#endif
+    Renderer3D* scene_renderer3d = nullptr;
     const auto user_shutdown = window.shutdown;
     window.shutdown = [&, user_shutdown](FrameContext& frame) {
 #ifdef KIN_ENABLE_DETERMINISM_CHECK
@@ -660,13 +675,18 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             .input = frame.input,
             .scenes = scenes,
             .dt = 0.0f,
-            .alpha = 0.0f,
+            .alpha = 1.0f,
             .is_top = true,
             .debug_options = &debug_overlay.options(),
             .rng = root_key,
             .report = &run_report,
+            .renderer3d = scene_renderer3d,
         };
         scenes.shutdown(shutdown_ctx);
+#ifdef KIN_EXPERIMENTAL_3D
+        renderer3d.reset();
+#endif
+        scene_renderer3d = nullptr;
     };
     const auto record_profile = [&](std::string_view name,
                                     std::string_view category,
@@ -713,6 +733,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             config.headless.profile || config.headless.profile_render) {
             debug_overlay.options().record_timing = [&](std::string_view name, f64 ms) {
                 debug_overlay.record(name, ms);
+                record_profile_value(name, "scene", ms);
             };
             debug_overlay.options().record_status = [&](std::string_view name, std::string value) {
                 debug_overlay.set_status(name, std::move(value));
@@ -728,6 +749,12 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         ctx.renderer.set_overdraw_view(debug_overlay.options().overdraw_view);
     };
     const auto make_scene_context = [&](FrameContext& ctx) {
+#ifdef KIN_EXPERIMENTAL_3D
+        if (config.rendering_3d && !renderer3d) {
+            renderer3d = std::make_unique<Renderer3D>(ctx.renderer);
+            scene_renderer3d = renderer3d.get();
+        }
+#endif
         return kin::SceneContext{
             .app = ctx.app,
             .window = ctx.window,
@@ -740,6 +767,7 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
             .debug_options = &debug_overlay.options(),
             .rng = root_key,
             .report = &run_report,
+            .renderer3d = scene_renderer3d,
         };
     };
 

@@ -33,6 +33,7 @@ enum class GpuBlendMode {
     Multiply,      // dst * src; the destination's alpha is kept
     Max,           // max(dst, src) per channel
     Min,           // min(dst, src) per channel
+    PremultipliedAdditive, // dst + src, src premultiplied; the destination's alpha kept (3D glows)
 };
 
 // What a draw does with the stencil buffer (stencil clips). `Equal` draws
@@ -86,7 +87,24 @@ struct GpuSdfInstance {
     u8 stroke_r = 0, stroke_g = 0, stroke_b = 0, stroke_a = 0;
 };
 
-enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances };
+// A 3D mesh's vertex (mesh.vert): 36 bytes.
+// A skinned mesh's second vertex stream: four joint indices and four weights (unorm, summing to 255), a byte each.
+struct GpuSkinVertex {
+    u8 j0 = 0, j1 = 0, j2 = 0, j3 = 0;
+    u8 w0 = 255, w1 = 0, w2 = 0, w3 = 0;
+};
+static_assert(sizeof(GpuSkinVertex) == 8);
+
+struct GpuMeshVertex {
+    f32 x = 0.0f, y = 0.0f, z = 0.0f;
+    f32 nx = 0.0f, ny = 1.0f, nz = 0.0f;
+    f32 u = 0.0f, v = 0.0f;
+    u8 r = 255, g = 255, b = 255, a = 255;
+};
+
+// None: no vertex buffer (a fullscreen triangle made in the shader).
+// SkinnedMeshVertices: MeshVertices in buffer slot 0, and a second buffer (slot 1, GpuSkinVertex) with the joints and weights.
+enum class GpuVertexLayout : u8 { Triangles, SpriteInstances, ShaderVertices, ShapeVertices, SdfInstances, MeshVertices, None, SkinnedMeshVertices };
 
 // Maps target-pixel coords -> NDC (top-left origin); fed to the vertex shader UBO.
 struct GpuView {

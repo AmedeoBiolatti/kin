@@ -1703,6 +1703,65 @@ void test_gpu_big_uploads() {
     }
 }
 
+// Staging shrinks after sustained small batches, regrows for a burst, and measures
+// aggregate occupancy when several individually small writes share a batch.
+void test_gpu_adaptive_upload_staging() {
+    constexpr std::string_view test_name = "test_gpu_adaptive_upload_staging";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        auto& window = app.create_window({.title="adaptive-staging",.width=64,.height=64,.hidden=true});
+        std::string reason;
+        auto renderer = try_create_gpu_renderer(window,reason);
+        if (!renderer) {skip_or_require_gpu_test(test_name,reason);return;}
+        gpu_ready = true;
+        constexpr kin::u64 mib = 1024*1024;
+        std::array<kin::u8,16> tiny_pixels{};
+        const auto tiny = renderer->create_texture_from_rgba(tiny_pixels.data(),{2,2});
+        assert(renderer->backend_stats().upload_staging_bytes==4*mib);
+        std::vector<kin::u8> pixels(4*mib);
+        for (std::size_t i=0;i<pixels.size();i+=4) {pixels[i]=211;pixels[i+1]=67;pixels[i+2]=29;pixels[i+3]=255;}
+        const auto big = renderer->create_texture_from_rgba(pixels.data(),{1024,1024});
+        const auto check = [&](const kin::Texture& texture,kin::Color expected) {
+            auto target=renderer->create_render_target({64,64},kin::ScaleMode::Nearest);
+            auto bind=renderer->scoped_render_target(target);
+            renderer->clear(kin::colors::black);
+            renderer->draw_texture(texture,{0,0,64,64});
+            std::vector<kin::u8> image;kin::Vec2i size;
+            assert(renderer->read_rgba({0,0,64,64},image,size));
+            assert(pixel_near(image,size,32,32,expected,1));
+        };
+        renderer->present();
+        for (int f=0;f<260;++f) {
+            for (std::size_t i=0;i<tiny_pixels.size();i+=4) {tiny_pixels[i]=kin::u8(f);tiny_pixels[i+1]=81;tiny_pixels[i+2]=197;tiny_pixels[i+3]=255;}
+            assert(renderer->update_texture(tiny,{0,0},{2,2},tiny_pixels.data()));
+            renderer->clear(kin::colors::black);renderer->draw_texture(tiny,{0,0,64,64});renderer->present();
+        }
+        assert(renderer->backend_stats().upload_staging_bytes==mib);
+        check(tiny,kin::Color::rgb(3,81,197));
+        check(big,kin::Color::rgb(211,67,29));
+        const auto allocations=renderer->backend_stats().upload_staging_allocations;
+        assert(renderer->update_texture(big,{0,0},{1024,1024},pixels.data()));
+        assert(renderer->backend_stats().upload_staging_bytes>=4*mib);
+        assert(renderer->backend_stats().upload_staging_allocations>allocations);
+        check(big,kin::Color::rgb(211,67,29));renderer->present();
+        const std::array<kin::Texture,3> textures{{
+            renderer->create_texture_from_rgba(pixels.data(),{512,256}),
+            renderer->create_texture_from_rgba(pixels.data(),{512,256}),
+            renderer->create_texture_from_rgba(pixels.data(),{512,256})}};
+        for (int f=0;f<260;++f) {
+            for (const auto& texture:textures) assert(renderer->update_texture(texture,{0,0},{512,256},pixels.data()));
+            renderer->clear(kin::colors::black);renderer->draw_texture(textures[2],{0,0,64,64});renderer->present();
+        }
+        assert(renderer->backend_stats().upload_staging_bytes==2*mib);
+        for (const auto& texture:textures) check(texture,kin::Color::rgb(211,67,29));
+        check(big,kin::Color::rgb(211,67,29));
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) throw;
+        skip_or_require_gpu_test(test_name,e.what());
+    }
+}
+
 // gpu_scope() times named parts of a frame on the GPU, while timing is on.
 void test_gpu_scopes() {
     constexpr std::string_view test_name = "test_gpu_scopes";
@@ -2164,6 +2223,63 @@ void test_gpu_mipmaps() {
         assert(renderer->update_texture(smooth, {0, 0}, {n, n}, red.data()));
         assert(color_near(drawn_small(smooth).second, kin::Color::rgb(255, 0, 0), 2));
     } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// A texture that is not square, mipmapped: every level it samples holds something. SDL's chain of blits
+// writes nothing once the shorter side's extent reaches 0, so the levels beyond that (the 1 x 1 end of a
+// 4:1 texture, made by the longer side) kept whatever their memory held and showed it when the texture
+// was drawn very small. KIN_POISON_TEXTURES fills the levels to be generated with white first, which
+// makes the unwritten ones certain to show (a texture of red, drawn into a single pixel, is white then).
+void test_gpu_mipmaps_not_square() {
+    constexpr std::string_view test_name = "test_gpu_mipmaps_not_square";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-mipmap-not-square-test", .width = 16, .height = 16, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+        kin::RenderTarget target = renderer->create_render_target({16, 16}, kin::ScaleMode::Nearest);
+        for (const kin::Vec2i size : {kin::Vec2i{256, 64}, kin::Vec2i{64, 256}, kin::Vec2i{256, 16}, kin::Vec2i{100, 36}}) {
+            for (const bool poisoned : {true, false}) {
+                std::vector<kin::u8> red(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 4);
+                for (std::size_t i = 0; i < red.size(); i += 4) {
+                    red[i] = 255;
+                    red[i + 3] = 255;
+                }
+                if (poisoned) {
+                    SDL_setenv_unsafe("KIN_POISON_TEXTURES", "1", 1);
+                }
+                const kin::Texture texture = renderer->create_texture_from_rgba(red.data(), size);
+                renderer->set_scale_mode(texture, kin::ScaleMode::Mipmapped); // the levels are made here
+                SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
+                std::vector<kin::u8> px;
+                kin::Vec2i read_size{};
+                {
+                    const auto bind = renderer->scoped_render_target(target);
+                    renderer->clear(kin::Color::rgb(0, 0, 0));
+                    renderer->draw_texture(texture, kin::Rectf{4.0f, 4.0f, 1.0f, 1.0f}); // far off: the last level it has
+                    assert(renderer->read_rgba({0.0f, 0.0f, 16.0f, 16.0f}, px, read_size));
+                }
+                const kin::Color got = kin::Color::rgba(px[(4 * 16 + 4) * 4], px[(4 * 16 + 4) * 4 + 1], px[(4 * 16 + 4) * 4 + 2], 255);
+                if (!color_near(got, kin::Color::rgb(255, 0, 0), 3)) {
+                    throw std::runtime_error(std::string(test_name) + ": " + std::to_string(size.x) + " x " + std::to_string(size.y) +
+                                             (poisoned ? " (poisoned)" : "") + " drawn small is (" + std::to_string(got.r) + ", " +
+                                             std::to_string(got.g) + ", " + std::to_string(got.b) + "), not red: a level nobody wrote");
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        SDL_unsetenv_unsafe("KIN_POISON_TEXTURES");
         if (gpu_ready || gpu_tests_required()) {
             throw;
         }
@@ -3843,7 +3959,11 @@ void test_post_process_degrades_on_fake_backend() {
 } // namespace
 
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "upload_staging") {
+        test_gpu_adaptive_upload_staging();
+        return 0;
+    }
     test_facade_with_fake_backend();
     test_post_process_degrades_on_fake_backend();
     test_shader_surface_sources_on_fake_backend();
@@ -3879,6 +3999,7 @@ int main() {
     test_gpu_compute();
     test_gpu_shader_hot_reload();
     test_gpu_mipmaps();
+    test_gpu_mipmaps_not_square();
     test_gpu_overdraw();
     test_gpu_layers();
     test_layers_on_software_backend();
@@ -3898,6 +4019,7 @@ int main() {
     test_camera_zoom_and_rotation();
     test_gpu_scopes();
     test_gpu_big_uploads();
+    test_gpu_adaptive_upload_staging();
     test_gpu_empty_textures_are_clear();
     test_write_texture_on_software_backend();
     test_gpu_write_texture();

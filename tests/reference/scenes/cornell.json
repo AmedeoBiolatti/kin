@@ -1,0 +1,13 @@
+{
+ "name": "cornell",
+ "purpose": "Light bouncing between walls, an area light, soft shadows. The light is an emitting panel: Cycles lights the box with it; kin, without area lights or bounced light, has a point light under it.",
+ "models": [{"file": "made/cornell.glb"}],
+ "view": {"samples": 4, "background": [0, 0, 0]},
+ "lights": {
+  "ambient": [0.0, 0.0, 0.0],
+  "points": [{"position": [0.278, 0.53, 0.2795], "color": [0.045, 0.032, 0.0105], "radius": 1.5}],
+  "shadow_area": "auto"
+ },
+ "cameras": [{"name": "front", "eye": [0.278, 0.273, -0.8], "target": [0.278, 0.273, 0.0], "fov": 39.3, "near": 0.01}],
+ "truth": {"world": [0, 0, 0], "sun": false, "samples": 1024}
+}

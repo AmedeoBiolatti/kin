@@ -1,0 +1,152 @@
+{
+ "name": "spot_shadows",
+ "purpose": "One shadowed spot light on a stage (P3b): a pillar, a thin pole, a cut-out tree (two crossed alpha-tested quads), a bench and a skinned walking man cast shadows onto the floor and the back wall; the cone's edge on the wall, the soft inner/outer falloff, the pole's shadow where the projection says. 'wall' is the wall close up, 'floor' the floor seen from above. Judged by eye and by the test's projection checks, not Cycles.",
+ "procedural": "stage",
+ "stage": {
+  "walls": true,
+  "pillars": [
+   [
+    -4.0,
+    -8.0
+   ],
+   [
+    5.5,
+    -9.5
+   ]
+  ],
+  "poles": [
+   [
+    1.5,
+    -4.0
+   ]
+  ],
+  "trees": [
+   [
+    -6.0,
+    -5.5
+   ]
+  ],
+  "benches": [
+   [
+    3.5,
+    -1.0
+   ]
+  ]
+ },
+ "models": [
+  {
+   "file": "cesium_man/CesiumMan.glb",
+   "position": [
+    -1.5,
+    0.0,
+    -2.5
+   ],
+   "rotation_y": 20.0,
+   "animation": {
+    "time": 0.6
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.0,
+  "background": [
+   6,
+   7,
+   10
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    0,
+    0,
+    0
+   ]
+  },
+  "ambient": [
+   0.02,
+   0.022,
+   0.03
+  ],
+  "spots": [
+   {
+    "position": [
+     1.0,
+     5.2,
+     5.5
+    ],
+    "target": [
+     0.0,
+     0.5,
+     -7.0
+    ],
+    "color": [
+     75,
+     70,
+     60
+    ],
+    "radius": 30.0,
+    "size": 0.15,
+    "inner": 17.0,
+    "outer": 33.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
+   }
+  ]
+ },
+ "cameras": [
+  {
+   "name": "overview",
+   "eye": [
+    -9.0,
+    5.5,
+    9.0
+   ],
+   "target": [
+    0.0,
+    1.2,
+    -5.0
+   ],
+   "fov": 52,
+   "near": 0.1
+  },
+  {
+   "name": "wall",
+   "eye": [
+    0.0,
+    2.2,
+    4.0
+   ],
+   "target": [
+    0.0,
+    2.0,
+    -9.0
+   ],
+   "fov": 55,
+   "near": 0.1
+  },
+  {
+   "name": "floor",
+   "eye": [
+    0.0,
+    9.0,
+    3.0
+   ],
+   "target": [
+    0.0,
+    0.0,
+    -4.5
+   ],
+   "fov": 55,
+   "near": 0.1
+  }
+ ]
+}

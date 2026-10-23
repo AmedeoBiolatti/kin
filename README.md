@@ -63,7 +63,8 @@ CI. Other platforms SDL3 supports may work but are untested.
 
 Requirements: CMake 3.22+, a C++23 compiler, Git, and network access on the
 first configure — CMake fetches SDL3, SDL3_image, SDL3_ttf, flecs, Box2D, Lua and
-sol2 with `FetchContent`.
+sol2 with `FetchContent` (and, with the experimental `KIN_EXPERIMENTAL_3D`, cgltf, meshoptimizer and
+Jolt Physics; `-DFETCHCONTENT_SOURCE_DIR_JOLTPHYSICS=<clone>` reuses a local clone).
 
 On Linux, SDL3 also needs the windowing and audio development packages. On
 Debian/Ubuntu:
@@ -190,3 +191,5 @@ and the [Code of Conduct](.github/CODE_OF_CONDUCT.md). Changes are recorded in t
 
 Kin is released under the [MIT License](LICENSE). Its dependencies are under
 their own permissive licenses; see [docs/third_party_notices.md](docs/third_party_notices.md).
+
+For a lean 2D-only build, use `cmake --preset 2d`, `cmake --build --preset 2d`, and `ctest --preset 2d`. The [3D API guide](docs/3d_api_migration.md) documents the naming/colour migration and the formatting check.

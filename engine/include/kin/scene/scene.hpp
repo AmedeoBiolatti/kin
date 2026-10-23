@@ -6,7 +6,6 @@
 #include <kin/platform/input.hpp>
 #include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
-
 #include <string_view>
 
 namespace kin {
@@ -15,6 +14,7 @@ class SceneManager;
 class JsonWriter;
 class EcsWorld;
 class AnimationAssetLibrary;
+class Renderer3D;
 struct RuntimeDebugOptions;
 struct RunReport;
 
@@ -28,7 +28,8 @@ struct SceneContext {
     // Fixed-timestep interpolation factor for render contexts: fraction of the
     // next sim step elapsed at render time (accumulator / fixed_dt, in [0,1)).
     // Defaults to 1.0 so contexts that do not interpolate render the latest
-    // stepped state. 0.0 in update contexts and headless fixed-frame renders.
+    // stepped state. Update contexts use 0.0; fixed-frame renders use 1.0,
+    // including headless App::run_for hosts.
     f32 alpha = 1.0f;
     bool is_top = true;
     RuntimeDebugOptions* debug_options = nullptr;
@@ -38,6 +39,9 @@ struct SceneContext {
     // Pass/fail sink for headless runs. Null in contexts that do not produce a
     // run report. Use report->fail("reason") to abort with a non-zero exit code.
     RunReport* report = nullptr;
+    // Optional shared 3D renderer, owned by the runtime. Null unless requested
+    // by SceneAppConfig::rendering_3d (and always null in a 2D-only build).
+    Renderer3D* renderer3d = nullptr;
 };
 
 class Scene {

@@ -1,0 +1,19 @@
+{
+ "name": "kiln_inside",
+ "purpose": "Occlusion culling (G3d) on the kiln as one clustered mesh: the cameras of kiln_near that look at the outside, and ones inside the dome, where the near shell hides most of the 5 million triangles. No Cycles truth: judged against the same scene without occlusion culling. Local only (see kiln.json). Run with --lod --lod-clusters [--lod-occlusion].",
+ "optional": true,
+ "models": [{"file": "local/kiln.glb"}],
+ "view": {"samples": 4, "background": [58, 64, 74]},
+ "lights": {
+  "sun": {"direction": [-0.4364, 0.788, -0.4364], "color": [1.15, 1.09, 1.01]},
+  "fill": {"direction": [0.1424, 0.5736, 0.8067], "color": [0.22, 0.22, 0.22]},
+  "ambient": [0.42, 0.42, 0.42],
+  "ground_ambient": [0.18, 0.18, 0.18],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {"name": "inside_low", "eye": [0.0, 0.3, 0.0], "target": [0.6, 0.5, 0.4], "fov": 70, "near": 0.01},
+  {"name": "inside_up", "eye": [0.0, 0.25, 0.1], "target": [0.0, 1.0, -0.2], "fov": 70, "near": 0.01},
+  {"name": "behind", "eye": [-1.6, 0.6, -1.6], "target": [0.2, 0.5, 0.2], "fov": 50, "near": 0.01}
+ ]
+}

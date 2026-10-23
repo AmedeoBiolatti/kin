@@ -3,12 +3,14 @@
 // and a per-frame command-buffer wrapper. kin forces the SPIR-V/Vulkan driver.
 #include <kin/core/types.hpp>
 #include <kin/platform/window.hpp>
+#include <kin/renderer/texture.hpp>
 
 #include "gpu_buffer.hpp"
 #include "gpu_texture.hpp"
 
 #include <SDL3/SDL.h>
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <mutex>
@@ -20,6 +22,7 @@
 
 namespace kin {
 class JobSystem;
+struct CompressedImage;
 }
 
 namespace kin::gpu {
@@ -54,6 +57,15 @@ public:
     GpuTexture create_render_texture(u32 width, u32 height,
                                      SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID);
     GpuTexture create_texture_from_rgba(const u8* pixels, u32 width, u32 height);
+    // A 2D texture of `format` for `usage`, `samples` a pixel (3D views'
+    // colour, depth and resolve targets).
+    // `levels` > 1 makes a mip chain (written level by level through storage bindings, read with texelFetch).
+    GpuTexture create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
+                             SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1, u32 levels = 1);
+    // As create_target, but a 2D array of `layers` (one pass renders into a
+    // layer; a shader samples the array): cascaded shadow maps.
+    GpuTexture create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
+                                   SDL_GPUTextureUsageFlags usage);
     // A depth-stencil target of depth_stencil_format() (stencil clips).
     GpuTexture create_depth_stencil(u32 width, u32 height);
     // The depth-stencil format this device draws into, INVALID if none.
@@ -62,6 +74,17 @@ public:
     // or with zeros when null. RGBA8 textures can also be render targets.
     GpuTexture create_texture(const void* pixels, u32 width, u32 height, SDL_GPUTextureFormat format,
                               u32 texel_bytes, SDL_GPUTextureUsageFlags extra_usage = 0);
+    // A sampled texture of a block-compressed `image` (image.valid()) with its own
+    // mip chain, every level uploaded through the staging buffer; never given
+    // generated mips (a block format is no render target). Pooled apart from the
+    // other kinds. Null when the device cannot sample the format (most desktop
+    // GPUs have no ASTC, some phones no BC). `decode_srgb`: as compressed_format.
+    GpuTexture create_texture_compressed(const CompressedImage& image, bool decode_srgb = true);
+    // The SDL_GPU format of a compressed TextureFormat; INVALID for the others.
+    // `decode_srgb` false: an sRGB format's UNORM twin, the same blocks read
+    // without decoding (a gamma pipeline's colour textures, which its shaders
+    // decode where they need linear light).
+    static SDL_GPUTextureFormat compressed_format(TextureFormat format, bool decode_srgb = true);
     // Uploads `pixels` (tightly packed, `texel_bytes` per texel) over the w x h
     // region at (x, y), ordered after the frames submitted before it. `whole`:
     // the region is the whole texture, so its storage may be cycled (a frame
@@ -73,6 +96,11 @@ public:
     // replaced and may get fresh storage.
     void upload_storage_buffer(SDL_GPUBuffer* buffer, u32 offset, u32 bytes, const void* data, bool cycle,
                                const std::function<void(std::span<u8>)>* fill = nullptr);
+    // Several ranges of a buffer in one staged write, never cycled (the rest of the buffer is kept): `ranges` are (offset,
+    // bytes) in the buffer, and `fill` writes them one after another into a span of their total. Like any upload it lands
+    // after the work submitted before it and before the next frame: a draw recorded already, not yet submitted, sees it.
+    void upload_storage_ranges(SDL_GPUBuffer* buffer, std::span<const std::array<u32, 2>> ranges,
+                               const std::function<void(std::span<u8>)>& fill);
     // As update_texture, but `fill` writes the texels straight into the upload
     // memory (no copy). It must not call back into the device.
     void write_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, bool whole,
@@ -83,15 +111,39 @@ public:
     // frame sees them. Recording at once keeps the order of uploads and draws:
     // a draw recorded before a cycled upload reads the old texels.
     void flush_uploads();
-    // A copy of `source` (RGBA8) with a full mip chain, made on the GPU with the
-    // uploads (the copies before the frame that draws it).
+    // A copy of `source` (RGBA8) with a mip chain of complete_mip_levels() levels, made on the GPU
+    // with the uploads (the copies before the frame that draws it).
     GpuTexture make_mipmapped(const GpuTexture& source);
-    // Remakes a mipmapped texture's smaller levels from level 0, with the uploads.
+    // Remakes a mipmapped texture's smaller levels from level 0, with the uploads. The texture must
+    // have complete_mip_levels() levels or fewer: see there.
     void generate_mipmaps(SDL_GPUTexture* texture);
+    // How many levels (level 0 included) of a width x height texture generate_mipmaps and
+    // make_mipmapped can fill: down to the level where the shorter side is 1 (a 1024 x 512 picture:
+    // 10 levels, the last 2 x 1). SDL_GenerateMipmapsForGPUTexture blits each level into the next with
+    // an extent of `size >> level`, which is 0 for the shorter side one level past that, so an empty
+    // blit: a longer chain (the 1 x 1 level of a 2:1 picture, as `max(width, height)` counts) would
+    // keep whatever its memory held, and sampling it, as far-off or very blurred reads do, would
+    // show that. Never make a mipmapped texture with more levels than this.
+    static u32 complete_mip_levels(u32 width, u32 height);
+    // Debug tool for reads of unwritten memory: with KIN_POISON_TEXTURES set (1: NaN in float
+    // texels, white in 8-bit ones; 2: the largest finite half / 3e4 in floats), every texture
+    // made by create_target, create_target_array and create_depth_stencil, and the 3D
+    // renderer's own (environment) ones, is filled with that before its first use, through the
+    // upload command buffer, so a texel read before anything wrote it shows up the same in
+    // every run instead of whatever the memory held. KIN_POISON_BUFFERS=1 does the same (0xFF
+    // bytes) for the buffers made by create_buffer with no data. Read on each call; unset, they cost one getenv.
+    // `first_level`: skip the levels before it (a mip chain whose level 0 is about to be uploaded: the
+    // upload cycles the texture, to fresh memory, so poison put there first would be lost).
+    void poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat format, u32 width, u32 height, u32 layers, u32 levels,
+                        SDL_GPUTextureUsageFlags usage, SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1, u32 first_level = 0);
+    void poison_buffer(SDL_GPUBuffer* buffer, u32 bytes);
     // Big uploads copy their texels on these workers too (null: none).
     void set_job_system(JobSystem* jobs) { _jobs = jobs; }
     // Texture uploads recorded and command buffers submitted for them so far.
     std::pair<u64, u64> upload_counts() const { return {_uploads_staged, _upload_batches}; }
+    std::pair<u64, u64> staging_stats() const { return {_staging ? _staging_size : 0u, _staging_allocations}; }
+    // wait_idle() calls so far (the 3D renderer reports those inside a render).
+    u64 idle_waits() const { return _idle_waits; }
 
     GpuBuffer create_buffer(SDL_GPUBufferUsageFlags usage, const void* data, u32 size);
     void upload_buffer(GpuBuffer& buffer, const void* data, u32 size);
@@ -100,6 +152,10 @@ public:
     // Download `src` to tightly-packed RGBA8 (waits for the GPU). Returns false on
     // failure. Used by the backend's read_rgba.
     bool read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba);
+    // A region of `src` (`texel_bytes` a texel), tightly packed (waits for the GPU).
+    bool read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out);
+    // `bytes` of `src` from `offset` (waits for the GPU, on a fence of its own that it releases once signalled).
+    bool read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vector<u8>& out);
 
     GpuFrame begin_frame(bool acquire_swapchain = false);
     void clear_render_target(GpuFrame& frame, const GpuTexture& target, ClearColor color);
@@ -111,6 +167,8 @@ public:
     u64 take_first_submit_ns() { return std::exchange(_first_submit_ns, 0); }
 
     SDL_GPUDevice* handle() const { return _device; }
+    // The handle as textures hold it: null once the device is gone.
+    const SharedDevice& shared() const { return _shared; }
     SDL_GPUTextureFormat swapchain_format() const { return _swapchain_format; }
     SDL_GPUPresentMode present_mode() const { return _present_mode; }
     const char* driver_name() const;
@@ -131,12 +189,15 @@ private:
     void stage_texture_upload(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const void* pixels,
                               u32 texel_bytes, bool cycle,
                               const std::function<void(std::span<u8>)>* fill = nullptr);
-    // Where an upload goes: a texture's region, or a range of a buffer.
+    // Where an upload goes: a texture's region (of mip `level`), or a range of a buffer.
     struct UploadDestination {
         SDL_GPUTexture* texture = nullptr;
         u32 x = 0, y = 0, w = 0, h = 0;
+        u32 level = 0;
+        bool blocks = false; // block-compressed texels, tightly packed: Vulkan wants a row length of 0 (or whole blocks)
         SDL_GPUBuffer* buffer = nullptr;
         u32 buffer_offset = 0;
+        std::span<const std::array<u32, 2>> ranges; // upload_storage_ranges: the buffer's ranges, from consecutive staging
     };
     void stage_upload(const UploadDestination& to, u32 bytes, const void* pixels, bool cycle,
                       const std::function<void(std::span<u8>)>* fill);
@@ -165,12 +226,18 @@ private:
     SDL_GPUCopyPass* _upload_pass = nullptr;
     SDL_GPUTransferBuffer* _staging = nullptr;
     u32 _staging_used = 0;
-    u32 _staging_size = 0;     // grows to fit the biggest upload, shrinks after
-    u64 _big_upload_batch = 0; // the batch of the last upload over half the usual size
+    u32 _staging_size = 0;     // current or next capacity; initially uses the bulk-upload floor
+    u32 _staging_recent_peak = 0, _staging_recent_batches = 0;
+    // A batch that filled the staging buffer is sent in parts: `_staging_overflow` marks the flush that sends one, and
+    // `_staging_spilled` adds up the parts sent so far, so that the batch's whole need is known at its last flush.
+    bool _staging_overflow = false;
+    u64 _staging_spilled = 0;
+    u64 _staging_allocations = 0;
     JobSystem* _jobs = nullptr;
     std::shared_ptr<GpuTexturePool> _texture_pool; // released sampled textures, for create_texture
     u64 _uploads_staged = 0;
     u64 _upload_batches = 0;
+    u64 _idle_waits = 0;
 };
 
 class GpuFrame {

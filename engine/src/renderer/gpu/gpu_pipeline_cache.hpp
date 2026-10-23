@@ -1,15 +1,53 @@
 #pragma once
-// Caches SDL_GPU graphics pipelines keyed by (vertex shader, fragment shader,
-// blend mode, color-target format, vertex layout): GpuVertex triangles or
-// GpuSpriteInstance quads. Reusable by
-// the default 2D path and by custom material/effect shaders (Phase G3+).
+// Caches SDL_GPU graphics pipelines keyed by what they are made from
+// (GpuPipelineKey): shaders, blend mode, colour-target format, vertex layout,
+// and the depth, stencil, culling and sample count of the pass they draw in.
+// Shared by the 2D path, custom material/effect shaders and 3D views.
 #include "gpu_geometry_batch.hpp" // GpuBlendMode
 
 #include <SDL3/SDL.h>
-
 #include <vector>
 
 namespace kin::gpu {
+
+// What a draw does with the depth buffer (3D views). Depth is reverse Z
+// (kin/core/math3d.hpp): nearer is greater, so a fragment passes where its
+// depth is greater than or equal to what is there.
+enum class GpuDepthTest : u8 { None, TestWrite, Test };
+// Which triangles are not drawn; counter-clockwise ones (as glTF winds them)
+// face the front.
+enum class GpuCull : u8 { None, Back, Front };
+
+struct GpuPipelineKey {
+    SDL_GPUShader* vertex = nullptr;
+    SDL_GPUShader* fragment = nullptr;
+    GpuBlendMode blend = GpuBlendMode::Alpha;
+    SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID; // the colour target's
+    GpuVertexLayout layout = GpuVertexLayout::Triangles;
+    // The depth-stencil target attached to the pass (INVALID: none), which
+    // `stencil` and `depth` test or write.
+    SDL_GPUTextureFormat depth_stencil = SDL_GPU_TEXTUREFORMAT_INVALID;
+    GpuStencilOp stencil = GpuStencilOp::None;
+    GpuDepthTest depth = GpuDepthTest::None;
+    GpuCull cull = GpuCull::None;
+    SDL_GPUSampleCount samples = SDL_GPU_SAMPLECOUNT_1; // the pass's targets'
+    // Triangles' edges only; drawn filled where the device has no line fill mode.
+    bool wireframe = false;
+    // No colour target, depth only (a shadow map); `format` is ignored.
+    bool depth_only = false;
+    // Pulled toward the camera (reverse Z), drawn over the faces it lies on:
+    // wireframes, lines on the ground.
+    bool depth_bias = false;
+    // A second colour target (3D: the velocity temporal anti-aliasing reads, written by the main pass). Never blended;
+    // `extra_write` false masks every channel, so a blended or wireframe draw leaves it as it is.
+    SDL_GPUTextureFormat extra_format = SDL_GPU_TEXTUREFORMAT_INVALID;
+    bool extra_write = false;
+    // A coverage pass can update R while retaining the motion in BA.
+    SDL_GPUColorComponentFlags write_mask =
+        SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
+
+    friend bool operator==(const GpuPipelineKey&, const GpuPipelineKey&) = default;
+};
 
 class GpuPipelineCache {
 public:
@@ -22,13 +60,26 @@ public:
     void init(SDL_GPUDevice* device) { _device = device; }
 
     // Returns a cached pipeline or creates one. Returns nullptr on failure.
-    // `depth_stencil`: the format of the stencil attached to the pass (INVALID:
-    // none), which `stencil` tests or writes.
-    SDL_GPUGraphicsPipeline* get(SDL_GPUShader* vertex, SDL_GPUShader* fragment,
-                                 GpuBlendMode blend, SDL_GPUTextureFormat target_format,
+    SDL_GPUGraphicsPipeline* get(const GpuPipelineKey& key);
+    // The 2D path's: no depth test, no culling, one sample. `depth_stencil`:
+    // the format of the stencil attached to the pass (INVALID: none), which
+    // `stencil` tests or writes.
+    SDL_GPUGraphicsPipeline* get(SDL_GPUShader* vertex, SDL_GPUShader* fragment, GpuBlendMode blend,
+                                 SDL_GPUTextureFormat target_format,
                                  GpuVertexLayout layout = GpuVertexLayout::Triangles,
                                  SDL_GPUTextureFormat depth_stencil = SDL_GPU_TEXTUREFORMAT_INVALID,
-                                 GpuStencilOp stencil = GpuStencilOp::None);
+                                 GpuStencilOp stencil = GpuStencilOp::None) {
+        return get(GpuPipelineKey{.vertex = vertex,
+                                  .fragment = fragment,
+                                  .blend = blend,
+                                  .format = target_format,
+                                  .layout = layout,
+                                  .depth_stencil = depth_stencil,
+                                  .stencil = stencil});
+    }
+
+    // How many pipelines are made.
+    std::size_t size() const { return _entries.size(); }
 
     void destroy();
     // Releases the pipelines made with `fragment` (it is being replaced). SDL
@@ -36,25 +87,19 @@ public:
     void forget(SDL_GPUShader* fragment);
 
     // Calls fn(vertex, fragment, blend, format, layout) for each pipeline made
-    // without a stencil (those with one are made when a clip first needs them).
-    template<typename Fn>
-    void for_each(Fn&& fn) const {
+    // without a depth-stencil target (those with one are made when a clip or
+    // a 3D view first needs them).
+    template <typename Fn> void for_each(Fn&& fn) const {
         for (const Entry& e : _entries) {
-            if (e.depth_stencil == SDL_GPU_TEXTUREFORMAT_INVALID) {
-                fn(e.vertex, e.fragment, e.blend, e.format, e.layout);
+            if (e.key.depth_stencil == SDL_GPU_TEXTUREFORMAT_INVALID) {
+                fn(e.key.vertex, e.key.fragment, e.key.blend, e.key.format, e.key.layout);
             }
         }
     }
 
 private:
     struct Entry {
-        SDL_GPUShader* vertex = nullptr;
-        SDL_GPUShader* fragment = nullptr;
-        GpuBlendMode blend = GpuBlendMode::Alpha;
-        SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
-        GpuVertexLayout layout = GpuVertexLayout::Triangles;
-        SDL_GPUTextureFormat depth_stencil = SDL_GPU_TEXTUREFORMAT_INVALID;
-        GpuStencilOp stencil = GpuStencilOp::None;
+        GpuPipelineKey key;
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
     };
 

@@ -1,0 +1,26 @@
+{
+ "name": "physics_rope",
+ "purpose": "kin/physics3d's ropes (P2e): chains of capsules with ball joints (Rope3D, drawn as tubes), on a recipe in tools/reference/kin_reference.cpp (PhysicsRope): a bridge of three ropes between two posts with a box on it between low walls; a rope hung from a beam 25 degrees out from the vertical with the skinned person under its end, who takes hold with both hands (frame 10), climbs (240 to 420) and lets go with a jump off (560); and a rope that a winch reels in (from frame 120) with a 15 kg crate on its end. The hands are on the rope by IK. Fixed step, no Cycles truth: the check is that two runs give the same picture byte for byte.",
+ "procedural": "physics_rope",
+ "debug": false,
+ "lead": 0,
+ "view": {"samples": 4, "background": [128, 150, 178]},
+ "lights": {
+  "sun": {"direction": [-0.45, 0.8, -0.4], "color": [1.15, 1.09, 1.0]},
+  "fill": {"direction": [0.2, 0.5, 0.8], "color": [0.22, 0.22, 0.24]},
+  "ambient": [0.42, 0.43, 0.46],
+  "ground_ambient": [0.2, 0.2, 0.18],
+  "shadow_area": [[-8, -0.6, -6], [20, 10, 6]],
+  "shadow_resolution": 4096,
+  "shadow_cascades": 3,
+  "shadow_distance": 70
+ },
+ "cameras": [
+  {"name": "overview", "eye": [6, 6, 24], "target": [6, 3.5, 0], "fov": 55, "near": 0.1, "frame": 0},
+  {"name": "bridge", "eye": [-5.5, 9.0, 6.0], "target": [-2, 3.0, 0], "fov": 45, "near": 0.1, "frame": 300},
+  {"name": "swing", "eye": [8, 5.0, 12.0], "target": [8.5, 4.5, 0], "fov": 50, "near": 0.1, "frame": 130},
+  {"name": "climb", "eye": [8, 5.0, 9.0], "target": [8.0, 5.0, 0], "fov": 45, "near": 0.1, "frame": 400},
+  {"name": "winch_start", "eye": [16, 3.5, 11.0], "target": [16, 2.8, 0], "fov": 45, "near": 0.1, "frame": 100},
+  {"name": "winch_end", "eye": [16, 3.5, 11.0], "target": [16, 2.8, 0], "fov": 45, "near": 0.1, "frame": 480}
+ ]
+}

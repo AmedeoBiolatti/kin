@@ -20,6 +20,8 @@ function(kin_add_test target test_name)
 endfunction()
 
 kin_add_test(kin_core_tests kin-core SOURCES core_tests.cpp)
+kin_add_test(kin_math3d_tests kin-math3d SOURCES math3d_tests.cpp)
+kin_add_test(kin_render3d_api_tests kin-render3d-api SOURCES render3d_api_tests.cpp)
 kin_add_test(kin_shape_tests kin-shapes SOURCES shape_tests.cpp)
 kin_add_test(kin_jobs_tests kin-jobs SOURCES jobs_tests.cpp)
 kin_add_test(kin_instrumentation_tests kin-instrumentation
@@ -46,6 +48,7 @@ kin_add_test(kin_ecs_render_tests kin-ecs-render SOURCES ecs_render_tests.cpp)
 kin_add_test(kin_ecs_animation_tests kin-ecs-animation SOURCES ecs_animation_tests.cpp)
 kin_add_test(kin_particle_tests kin-particles SOURCES particle_tests.cpp)
 kin_add_test(kin_pathfinding_tests kin-pathfinding SOURCES pathfinding_tests.cpp)
+kin_add_test(kin_navmesh3d_tests kin-navmesh3d SOURCES navmesh3d_tests.cpp)
 kin_add_test(kin_hex_tests kin-hex SOURCES hex_tests.cpp)
 kin_add_test(kin_path_server_tests kin-path-server SOURCES path_server_tests.cpp)
 kin_add_test(kin_physics_tests kin-physics SOURCES physics_tests.cpp)
@@ -53,6 +56,7 @@ kin_add_test(kin_ecs_physics_tests kin-ecs-physics SOURCES ecs_physics_tests.cpp
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)
+kin_add_test(kin_prefab_structure_tests kin-prefab-structure SOURCES prefab_structure_tests.cpp)
 kin_add_test(kin_ecs_lifecycle_tests kin-ecs-lifecycle SOURCES ecs_lifecycle_tests.cpp)
 kin_add_test(kin_ui2_tests kin-ui2 SOURCES ui2_tests.cpp)
 kin_add_test(kin_ui2_text_edit_tests kin-ui2-text-edit SOURCES ui2_text_edit_tests.cpp)
@@ -70,6 +74,7 @@ kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
 kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
+kin_add_test(kin_texture_file_tests kin-texture-file SOURCES texture_file_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
 # Test-only material shaders for the GPU renderer tests. Without glslc (found by the
 # engine) they are not compiled and the tests that need them skip.
@@ -106,6 +111,110 @@ if(KIN_GLSLC)
     add_dependencies(kin_renderer_tests kin_test_shaders)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
+if(KIN_EXPERIMENTAL_3D)
+    kin_add_test(kin_model_profile3d_tests kin-model-profile3d SOURCES model_profile3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    add_test(NAME kin-model-profile3d-gpu COMMAND kin_model_profile3d_tests gpu)
+    set_tests_properties(kin-model-profile3d-gpu PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_script_scene3d_tests kin-script-scene3d SOURCES script_scene3d_tests.cpp script_scene3d_advanced_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    add_test(NAME kin-script-scene3d-gpu COMMAND kin_script_scene3d_tests gpu)
+    set_tests_properties(kin-script-scene3d-gpu PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_errors3d_tests kin-errors3d SOURCES errors3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    kin_add_test(kin_scene_frame3d_tests kin-scene-frame3d SOURCES scene_frame3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    kin_add_test(kin_diagnostics3d_tests kin-diagnostics3d SOURCES diagnostics3d_tests.cpp)
+    kin_add_test(kin_render3d_cpu_tests kin-render3d-cpu SOURCES render3d_cpu_tests.cpp)
+    kin_add_test(kin_interaction3d_tests kin-interaction3d SOURCES interaction3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    set_tests_properties(kin-interaction3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_character_action3d_tests kin-character-actions3d SOURCES character_action3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    kin_add_test(kin_animation_event3d_tests kin-animation-events3d SOURCES animation_event3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    kin_add_test(kin_joint_attachment3d_tests kin-joint-attachment3d SOURCES joint_attachment3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    set_tests_properties(kin-joint-attachment3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_camera_rig3d_tests kin-camera-rig3d SOURCES camera_rig3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    set_tests_properties(kin-camera-rig3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_physics3d_query_tests kin-physics3d-queries SOURCES physics3d_query_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    kin_add_test(kin_scene_queries3d_tests kin-scene-queries3d SOURCES scene_queries3d_tests.cpp
+        LIBRARIES kin::core_allocation_instrumentation)
+    set_tests_properties(kin-scene-queries3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_camp_input_tests kin-camp-input SOURCES camp_input_tests.cpp)
+    kin_add_test(kin_camp_gameplay3d_tests kin-camp-gameplay3d SOURCES camp_gameplay3d_tests.cpp
+        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-camp-gameplay3d PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME kin-camp-push COMMAND kin_camp_gameplay3d_tests push)
+    set_tests_properties(kin-camp-push PROPERTIES SKIP_RETURN_CODE 77)
+    # Isolate GPU/Jolt setup/retirement between cases on RAM-constrained hosts.
+    foreach(_case RANGE 0 7)
+        add_test(NAME kin-camp-action-${_case} COMMAND kin_camp_gameplay3d_tests action ${_case})
+        set_tests_properties(kin-camp-action-${_case} PROPERTIES SKIP_RETURN_CODE 77)
+    endforeach()
+    kin_add_test(kin_scene_pipeline3d_tests kin-scene-pipeline3d SOURCES scene_pipeline3d_tests.cpp)
+    set_tests_properties(kin-scene-pipeline3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_prefab_pool3d_tests kin-prefab-pool3d SOURCES prefab_pool3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-prefab-pool3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_runtime_scene3d_tests kin-runtime-scene3d SOURCES runtime_scene3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-runtime-scene3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_particle_assets3d_tests kin-particle-assets3d SOURCES particle_assets3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    kin_add_test(kin_particle_shadow_tests kin-particle-shadows3d SOURCES particle_shadow_cast3d_tests.cpp)
+    set_tests_properties(kin-particle-shadows3d PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800)
+    add_test(NAME kin-particle-assets3d-cpu COMMAND kin_particle_assets3d_tests cpu)
+    set_tests_properties(kin-particle-assets3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_physics3d_asset_tests kin-physics3d-assets SOURCES physics3d_asset_tests.cpp
+        DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    kin_add_test(kin_material_assets3d_tests kin-material-assets3d SOURCES material_assets3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    if(KIN_GLSLC)
+        kin_compile_glsl(_kin_material_shader OUTPUT_DIR "${_kin_test_shader_dir}" SOURCES shaders/custom_flat.frag.glsl)
+        add_custom_target(kin_material_test_shader DEPENDS ${_kin_material_shader})
+        add_dependencies(kin_material_assets3d_tests kin_material_test_shader)
+        target_compile_definitions(kin_material_assets3d_tests PRIVATE KIN_TEST_MATERIAL_SHADER="${_kin_test_shader_dir}/custom_flat.frag.spv")
+    endif()
+    set_tests_properties(kin-material-assets3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_scene_session3d_tests kin-scene-session3d SOURCES scene_session3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-scene-session3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_scene3d_asset_tests kin-scene3d-assets SOURCES scene3d_asset_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    set_tests_properties(kin-scene3d-assets PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_model_assets3d_tests kin-model-assets3d SOURCES model_assets3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
+    set_tests_properties(kin-model-assets3d PROPERTIES SKIP_RETURN_CODE 77)
+    kin_add_test(kin_mesh_cluster_tests kin-mesh-clusters SOURCES mesh_cluster_tests.cpp)
+    kin_add_test(kin_skeleton_tests kin-skeleton SOURCES skeleton_tests.cpp)
+    kin_add_test(kin_physics3d_tests kin-physics3d SOURCES physics3d_tests.cpp)
+    add_test(NAME kin-physics3d-first-hull COMMAND kin_physics3d_tests first-hull)
+    add_test(NAME kin-physics3d-first-mesh COMMAND kin_physics3d_tests first-mesh)
+    kin_add_test(kin_physics3d_ecs_tests kin-physics3d-ecs SOURCES physics3d_ecs_tests.cpp)
+    kin_add_test(kin_physics3d_character_tests kin-physics3d-character SOURCES physics3d_character_tests.cpp
+        DEFINITIONS KIN_TEST_REFERENCE_SCENES="${PROJECT_SOURCE_DIR}/tests/reference/scenes")
+    kin_add_test(kin_physics3d_traversal_tests kin-physics3d-traversal SOURCES physics3d_traversal_tests.cpp
+        DEFINITIONS KIN_TEST_REFERENCE_SCENES="${PROJECT_SOURCE_DIR}/tests/reference/scenes")
+    kin_add_test(kin_physics3d_ragdoll_tests kin-physics3d-ragdoll SOURCES physics3d_ragdoll_tests.cpp)
+    kin_add_test(kin_physics3d_rope_tests kin-physics3d-rope SOURCES physics3d_rope_tests.cpp)
+    kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
+        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+                    KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    # Some 230 GPU tests: a few minutes on lavapipe here, longer on a CI runner, so
+    # it has its own limit (a TIMEOUT property takes precedence over ctest --timeout).
+    set_tests_properties(kin-render3d PROPERTIES TIMEOUT 1800)
+endif()
 kin_add_test(kin_isometric_demo_tests kin-isometric-demo SOURCES isometric_demo_tests.cpp)
 kin_add_test(kin_tilemap_tests kin-tilemap SOURCES tilemap_tests.cpp)
 
@@ -130,6 +239,18 @@ if(KIN_BUILD_BENCHMARKS)
     # ui2 text on the CPU: labels measured and drawn, ASCII and beyond.
     add_executable(kin_text_bench text_bench.cpp)
     target_link_libraries(kin_text_bench PRIVATE kin::engine)
+    # The 3D reference scenes (docs/3d_plan.md, G0): pictures and times.
+    if(KIN_EXPERIMENTAL_3D)
+        add_executable(kin_reference ${PROJECT_SOURCE_DIR}/tools/reference/kin_reference.cpp)
+        target_link_libraries(kin_reference PRIVATE kin::engine)
+        target_include_directories(kin_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        # kin/physics3d step times: piles and stacks of boxes, 1 to 8 workers (docs/physics_3d.md).
+        add_executable(kin_physics3d_bench physics3d_bench.cpp)
+        target_link_libraries(kin_physics3d_bench PRIVATE kin::engine)
+        # kin/render3d CPU costs that need no window: instance batch edits, particle wind (docs/rendering_3d.md).
+        add_executable(kin_render3d_bench render3d_bench.cpp)
+        target_link_libraries(kin_render3d_bench PRIVATE kin::engine)
+    endif()
     # SDL_GPU quads: draw_texture, fill_rect and draw_sprites, many a frame.
     add_executable(kin_draw_bench draw_bench.cpp)
     target_link_libraries(kin_draw_bench PRIVATE kin::engine)
@@ -201,6 +322,10 @@ add_executable(kin_scripting_tests
 target_link_libraries(kin_scripting_tests PRIVATE
     kin::engine
 )
+
+# sol2's legacy numeric policy is checked in Release; Debug defaults to strict checks.
+target_compile_definitions(kin_scripting_tests PRIVATE
+    KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)
 
 add_test(NAME kin-scripting COMMAND kin_scripting_tests)
 

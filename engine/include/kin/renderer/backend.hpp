@@ -27,6 +27,8 @@
 namespace kin {
 
 class JobSystem;
+class IRendererBackend3D;
+struct CompressedImage;
 
 // Mirroring a sprite within its rectangle, left-right (X) and/or upside
 // down (Y), before it turns about its pivot.
@@ -89,6 +91,7 @@ struct RendererBackendCapabilities {
     bool materials_2d = false;
     bool gradients = false; // fill_gradient_rect honored (else flat mid-color fill)
     bool text = false;
+    // 3D views (kin/render3d, experimental; renderer_3d() is not null).
     bool rendering_3d = false;
     // create_texture() accepts the data formats (R16Uint, Rg16Uint, R32Float).
     bool data_textures = false;
@@ -148,6 +151,9 @@ struct RendererBackendStats {
     // command buffers that carried them (batched: many uploads, one submit).
     u64 texture_uploads = 0;
     u64 texture_upload_submits = 0;
+    // SDL_GPU shared upload staging: current single-handle capacity and allocations
+    // since device creation. Excludes SDL cycle backings, retired buffers and driver pools.
+    u64 upload_staging_bytes = 0, upload_staging_allocations = 0;
     u64 saved_texture_draws() const {
         return texture_draws_submitted > texture_batch_flushes ? texture_draws_submitted - texture_batch_flushes : 0;
     }
@@ -287,6 +293,13 @@ public:
         }
         const std::vector<u8> zeros(static_cast<std::size_t>(size.x) * static_cast<std::size_t>(size.y) * 4u, 0);
         return create_texture_from_rgba(zeros.data(), size);
+    }
+    // A texture of block-compressed texels with their own mip chain
+    // (kin/assets/texture_file.hpp; the caller has checked image.valid()), never
+    // given generated mips. Default: an invalid texture, for a backend without
+    // compressed textures.
+    virtual Texture create_texture_compressed(const CompressedImage& /*image*/) {
+        return {};
     }
     // Replace the texels of a `size` region at `at` of `texture` with `pixels`
     // (RGBA8, tightly packed, row by row). False when the backend cannot update a
@@ -448,6 +461,9 @@ public:
     }
     // Worker threads the backend may use for large batches (null: none).
     virtual void set_job_system(JobSystem*) {}
+    // The backend's 3D part (capabilities().rendering_3d), owned by it; null
+    // where it draws no 3D.
+    virtual IRendererBackend3D* renderer_3d() { return nullptr; }
 
     virtual void set_viewport(Rectf rect) = 0;
     virtual void reset_viewport() = 0;

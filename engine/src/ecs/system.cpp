@@ -173,8 +173,18 @@ struct TaskSystemCallbackState final : detail::SystemCallbackState {
 
 } // namespace
 
+void EcsCommandBuffer::defer(std::function<bool(EcsWorld&, std::string&)> apply) {
+    _commands.push_back([apply=std::move(apply)](EcsWorld& world, std::vector<EcsEntity>&, std::string& error) {
+        if(!apply){error="empty deferred ECS command";return false;}
+        return apply(world,error);
+    });
+}
+
 EcsDeferredEntity EcsCommandBuffer::create_entity(std::string name) {
-    const EcsDeferredEntity deferred{_next_deferred_entity++};
+    static std::atomic<u64> next_scope{1};
+    if (_deferred_scope == 0)
+        _deferred_scope = next_scope.fetch_add(1, std::memory_order_relaxed);
+    const EcsDeferredEntity deferred{_next_deferred_entity++, _deferred_scope};
     _commands.push_back([index = deferred.index, name = std::move(name)](EcsWorld& world,
                                                                          std::vector<EcsEntity>& created,
                                                                          std::string&) {
@@ -198,7 +208,7 @@ void EcsCommandBuffer::destroy(EcsId entity) {
 }
 
 void EcsCommandBuffer::destroy(EcsDeferredEntity entity) {
-    add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+    add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
         target.destroy();
     });
 }
@@ -219,7 +229,7 @@ void EcsCommandBuffer::add(EcsId entity, std::string component) {
 }
 
 void EcsCommandBuffer::add(EcsDeferredEntity entity, std::string component) {
-    add_world_command({TargetKind::Deferred, 0, entity.index},
+    add_world_command({TargetKind::Deferred, 0, entity.index, entity.scope},
                       [component = std::move(component)](EcsWorld& world, EcsEntity target, std::string& error) {
                           if (!world.components().add(target, component)) {
                               error = world.components().last_error();
@@ -245,7 +255,7 @@ void EcsCommandBuffer::remove(EcsId entity, std::string component) {
 }
 
 void EcsCommandBuffer::remove(EcsDeferredEntity entity, std::string component) {
-    add_world_command({TargetKind::Deferred, 0, entity.index},
+    add_world_command({TargetKind::Deferred, 0, entity.index, entity.scope},
                       [component = std::move(component)](EcsWorld& world, EcsEntity target, std::string& error) {
                           if (!world.components().remove(target, component)) {
                               error = world.components().last_error();
@@ -277,7 +287,7 @@ void EcsCommandBuffer::patch_field(EcsId entity, std::string component, std::str
 }
 
 void EcsCommandBuffer::patch_field(EcsDeferredEntity entity, std::string component, std::string field, ComponentFieldValue value) {
-    add_world_command({TargetKind::Deferred, 0, entity.index},
+    add_world_command({TargetKind::Deferred, 0, entity.index, entity.scope},
                       [component = std::move(component), field = std::move(field), value = std::move(value)](EcsWorld& world,
                                                                                                             EcsEntity target,
                                                                                                             std::string& error) {
@@ -296,6 +306,7 @@ void EcsCommandBuffer::patch_field(EcsDeferredEntity entity, std::string compone
 void EcsCommandBuffer::clear() {
     _commands.clear();
     _next_deferred_entity = 0;
+    _deferred_scope = 0;
 }
 
 bool EcsCommandBuffer::flush(EcsWorld& world, std::string& error) {
@@ -343,9 +354,15 @@ bool EcsCommandBuffer::resolve_target(EcsWorld& world,
 }
 
 void EcsCommandBuffer::add_command(Target target, std::function<void(EcsEntity)> apply) {
-    _commands.push_back([target, apply = std::move(apply)](EcsWorld& world,
+    const bool valid_scope = target.kind != TargetKind::Deferred ||
+                             owns({target.deferred_index, target.deferred_scope});
+    _commands.push_back([target, valid_scope, apply = std::move(apply)](EcsWorld& world,
                                                            std::vector<EcsEntity>& created,
                                                            std::string& error) {
+        if (!valid_scope) {
+            error = "stale or foreign deferred entity handle";
+            return false;
+        }
         EcsEntity entity;
         if (!resolve_target(world, created, target, entity, error)) {
             return false;
@@ -356,9 +373,15 @@ void EcsCommandBuffer::add_command(Target target, std::function<void(EcsEntity)>
 }
 
 void EcsCommandBuffer::add_world_command(Target target, std::function<bool(EcsWorld&, EcsEntity, std::string&)> apply) {
-    _commands.push_back([target, apply = std::move(apply)](EcsWorld& world,
+    const bool valid_scope = target.kind != TargetKind::Deferred ||
+                             owns({target.deferred_index, target.deferred_scope});
+    _commands.push_back([target, valid_scope, apply = std::move(apply)](EcsWorld& world,
                                                            std::vector<EcsEntity>& created,
                                                            std::string& error) {
+        if (!valid_scope) {
+            error = "stale or foreign deferred entity handle";
+            return false;
+        }
         EcsEntity entity;
         if (!resolve_target(world, created, target, entity, error)) {
             return false;
@@ -489,13 +512,21 @@ bool EcsWorld::run_phase(SystemPhase phase, f32 dt, SystemExecutionMode mode) {
 }
 
 bool EcsWorld::run_frame(f32 dt) {
-    _events->begin_frame();
+    if(!_systems->_inside_phase_hook)_events->begin_frame();
     return _systems->run_frame(dt);
 }
 
 bool EcsWorld::run_frame(f32 dt, SystemExecutionMode mode) {
-    _events->begin_frame();
+    if(!_systems->_inside_phase_hook)_events->begin_frame();
     return _systems->run_frame(dt, mode);
+}
+
+bool EcsWorld::run_frame(f32 dt,const SystemPhaseHooks& hooks) {
+    return run_frame(dt,hooks,SystemExecutionMode::SerialGraph);
+}
+bool EcsWorld::run_frame(f32 dt,const SystemPhaseHooks& hooks,SystemExecutionMode mode) {
+    if(!_systems->_inside_phase_hook)_events->begin_frame();
+    return _systems->run_frame(dt,hooks,mode);
 }
 
 EcsSystemRegistry::EcsSystemRegistry(EcsWorld& world)
@@ -646,6 +677,7 @@ bool EcsSystemRegistry::remove(std::string_view id) {
 }
 
 bool EcsSystemRegistry::run_system(std::string_view id, f32 dt) {
+    if(_inside_phase_hook){_last_error="cannot rerun systems from a phase hook";return false;}
     SystemRecord* record = find_record(id);
     if (!record) {
         _last_error = "unknown system id '" + std::string{id} + "'";
@@ -655,6 +687,7 @@ bool EcsSystemRegistry::run_system(std::string_view id, f32 dt) {
 }
 
 bool EcsSystemRegistry::rebuild_schedule() {
+    if(_inside_phase_hook){_last_error="cannot rebuild the schedule from a phase hook";return false;}
     _last_schedule = build_schedule(enabled_records());
     apply_schedule_diagnostics(_last_schedule);
     if (!_last_schedule.valid && !_last_schedule.diagnostics.empty()) {
@@ -670,6 +703,7 @@ bool EcsSystemRegistry::run_phase(SystemPhase phase, f32 dt) {
 }
 
 bool EcsSystemRegistry::run_phase(SystemPhase phase, f32 dt, SystemExecutionMode mode) {
+    if(_inside_phase_hook){_last_error="cannot rerun systems from a phase hook";return false;}
     _last_schedule = build_schedule(eligible_records(&phase, dt), mode);
     apply_schedule_diagnostics(_last_schedule);
     if (!_last_schedule.valid) {
@@ -688,13 +722,18 @@ bool EcsSystemRegistry::run_frame(f32 dt) {
 }
 
 bool EcsSystemRegistry::run_frame(f32 dt, SystemExecutionMode mode) {
+    return run_frame(dt,SystemPhaseHooks{},mode);
+}
+
+bool EcsSystemRegistry::run_frame(f32 dt,const SystemPhaseHooks& hooks,SystemExecutionMode mode) {
+    if(_inside_phase_hook){_last_error="cannot rerun systems from a phase hook";return false;}
     _last_schedule = build_schedule(eligible_records(nullptr, dt), mode);
     apply_schedule_diagnostics(_last_schedule);
     if (!_last_schedule.valid) {
         _last_error = _last_schedule.diagnostics.empty() ? "invalid system schedule" : _last_schedule.diagnostics.front();
         return false;
     }
-    const bool ok = run_schedule(_last_schedule, dt);
+    const bool ok = run_schedule(_last_schedule, dt,(hooks.before||hooks.after)?&hooks:nullptr);
     if (ok) {
         _last_error.clear();
     }
@@ -1407,64 +1446,95 @@ SystemScheduleSnapshot EcsSystemRegistry::build_schedule(const std::vector<Syste
     return schedule;
 }
 
-bool EcsSystemRegistry::run_schedule(SystemScheduleSnapshot& schedule, f32 dt) {
+bool EcsSystemRegistry::invoke_phase_hook(const SystemPhaseHooks& hooks,SystemPhase phase,bool before) {
+    const auto& hook=before?hooks.before:hooks.after;
+    if(!hook)return true;
+    std::string error;
+    bool ok=false;
+    _inside_phase_hook=true;
+    try {ok=hook(phase,error);}
+    catch(const std::exception& exception){error=exception.what();}
+    catch(...){error="unknown phase hook error";}
+    _inside_phase_hook=false;
+    if(ok)return true;
+    _last_error=std::string(before?"before ":"after ")+std::string(system_phase_name(phase))+" phase: "+
+        (error.empty()?"host boundary failed":error);
+    _last_schedule.diagnostics.push_back(_last_error);
+    _world->events().emit_system(EcsEventKind::SystemError,{},_last_error);
+    return false;
+}
+
+bool EcsSystemRegistry::run_schedule(SystemScheduleSnapshot& schedule,f32 dt,const SystemPhaseHooks* hooks) {
+    bool ok=true;size_t next=0;
+    for(const auto phase:phases) {
+        if(hooks&&!invoke_phase_hook(*hooks,phase,true))return false;
+        bool phase_ok=true;
+        while(next<schedule.batches.size()&&schedule.batches[next].phase==phase) {
+            phase_ok=run_batch(schedule,schedule.batches[next],dt)&&phase_ok;++next;
+        }
+        ok=phase_ok&&ok;
+        // A native host boundary must never run after a failed phase. Preserve
+        // legacy continue-on-error execution for callers without host hooks.
+        if(hooks&&(!phase_ok||!invoke_phase_hook(*hooks,phase,false)))return false;
+    }
+    return ok;
+}
+
+bool EcsSystemRegistry::run_batch(SystemScheduleSnapshot& schedule,SystemBatch& batch,f32 dt) {
     bool ok = true;
-    for (SystemBatch& batch : schedule.batches) {
-        const auto batch_start = std::chrono::steady_clock::now();
-        if (schedule.requested_execution_mode == SystemExecutionMode::ParallelBatches &&
-            batch.parallel_eligible) {
-            const bool batch_ok = run_parallel_batch(schedule, batch, dt);
-            const auto batch_end = std::chrono::steady_clock::now();
-            batch.last_duration_ms = static_cast<f64>(std::chrono::duration_cast<std::chrono::nanoseconds>(batch_end - batch_start).count()) / 1'000'000.0;
-            ok = batch_ok && ok;
-            continue;
-        }
-        batch.execution_mode = SystemExecutionMode::SerialGraph;
-        std::vector<std::unique_ptr<EcsCommandBuffer>> command_buffers;
-        std::vector<SystemRunResult> results;
-        command_buffers.reserve(batch.systems.size());
-        results.reserve(batch.systems.size());
-        for (const SystemId& id : batch.systems) {
-            SystemRecord* record = find_record(id);
-            if (!record) {
-                _last_error = "scheduled system disappeared '" + id + "'";
-                ok = false;
-                continue;
-            }
-            auto commands = std::make_unique<EcsCommandBuffer>();
-            EcsCommandBuffer* commands_ptr = commands.get();
-            SystemRunResult result = execute_record(*record, dt, false, commands_ptr);
-            record->last_execution_mode = SystemExecutionMode::SerialGraph;
-            record->last_batch_execution_mode = SystemExecutionMode::SerialGraph;
-            record->last_execution_decision = result.decision;
-            record->execution_decision_reason = result.decision_reason;
-            record->worker_count = result.worker_count;
-            record->estimated_work_ms = result.estimated_work_ms;
-            command_buffers.push_back(std::move(commands));
-            if (!result.ok) {
-                _last_error = result.error;
-                KIN_LOG_ERROR_F("ecs",
-                                "system run failed",
-                                (LogFields{
-                                    {.name = "system", .value = record->descriptor.id},
-                                    {.name = "error", .value = result.error},
-                                }));
-                _world->events().emit_system(EcsEventKind::SystemError, record->descriptor.id, result.error);
-                ok = false;
-            } else if (result.elapsed_ns > 0) {
-                if (ProfileSession* profile = current_profile_session()) {
-                    profile->record(record->descriptor.id,
-                                    "ecs.system",
-                                    static_cast<u64>(result.elapsed_ns),
-                                    record->source_location);
-                }
-            }
-            results.push_back(result);
-        }
-        ok = flush_command_results(schedule, batch, results) && ok;
+    const auto batch_start = std::chrono::steady_clock::now();
+    if (schedule.requested_execution_mode == SystemExecutionMode::ParallelBatches &&
+        batch.parallel_eligible) {
+        const bool batch_ok = run_parallel_batch(schedule, batch, dt);
         const auto batch_end = std::chrono::steady_clock::now();
         batch.last_duration_ms = static_cast<f64>(std::chrono::duration_cast<std::chrono::nanoseconds>(batch_end - batch_start).count()) / 1'000'000.0;
+        return batch_ok;
     }
+    batch.execution_mode = SystemExecutionMode::SerialGraph;
+    std::vector<std::unique_ptr<EcsCommandBuffer>> command_buffers;
+    std::vector<SystemRunResult> results;
+    command_buffers.reserve(batch.systems.size());
+    results.reserve(batch.systems.size());
+    for (const SystemId& id : batch.systems) {
+        SystemRecord* record = find_record(id);
+        if (!record) {
+            _last_error = "scheduled system disappeared '" + id + "'";
+            ok = false;
+            continue;
+        }
+        auto commands = std::make_unique<EcsCommandBuffer>();
+        EcsCommandBuffer* commands_ptr = commands.get();
+        SystemRunResult result = execute_record(*record, dt, false, commands_ptr);
+        record->last_execution_mode = SystemExecutionMode::SerialGraph;
+        record->last_batch_execution_mode = SystemExecutionMode::SerialGraph;
+        record->last_execution_decision = result.decision;
+        record->execution_decision_reason = result.decision_reason;
+        record->worker_count = result.worker_count;
+        record->estimated_work_ms = result.estimated_work_ms;
+        command_buffers.push_back(std::move(commands));
+        if (!result.ok) {
+            _last_error = result.error;
+            KIN_LOG_ERROR_F("ecs",
+                            "system run failed",
+                            (LogFields{
+                                {.name = "system", .value = record->descriptor.id},
+                                {.name = "error", .value = result.error},
+                            }));
+            _world->events().emit_system(EcsEventKind::SystemError, record->descriptor.id, result.error);
+            ok = false;
+        } else if (result.elapsed_ns > 0) {
+            if (ProfileSession* profile = current_profile_session()) {
+                profile->record(record->descriptor.id,
+                                "ecs.system",
+                                static_cast<u64>(result.elapsed_ns),
+                                record->source_location);
+            }
+        }
+        results.push_back(result);
+    }
+    ok = flush_command_results(schedule, batch, results) && ok;
+    const auto batch_end = std::chrono::steady_clock::now();
+    batch.last_duration_ms = static_cast<f64>(std::chrono::duration_cast<std::chrono::nanoseconds>(batch_end - batch_start).count()) / 1'000'000.0;
     return ok;
 }
 

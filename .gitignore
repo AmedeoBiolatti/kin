@@ -33,3 +33,5 @@ Testing/
 .DS_Store
 Thumbs.db
 desktop.ini
+reference_out/
+__pycache__/

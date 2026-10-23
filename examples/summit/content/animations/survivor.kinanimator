@@ -1,0 +1,40 @@
+{
+  "schema": "kin.animator3d/1",
+  "machine": {"asset": "animations/survivor.kinanim", "name": "locomotion"},
+  "blend_spaces": {
+    "ground": {"parameter": "speed", "entries": [
+      {"clip": "Idle", "position": 0},
+      {"clip": "Walk", "position": 1.6},
+      {"clip": "Run", "position": 4.2}
+    ]}
+  },
+  "actions": [
+    {"name": "pickup", "clip": "Pickup", "mask_joint": "spine",
+     "fade_in": 0.06, "fade_out": 0.08, "base_events": true}
+  ],
+  "events": [
+    {"clip": "Pickup", "source": "action", "markers": [
+      {"phase": 0.4, "channel": "camp", "name": "pickup_contact"}
+    ]},
+    {"clip": "Walk", "markers": [
+      {"phase": 0.25, "channel": "camp", "name": "footstep", "value": "right"},
+      {"phase": 0.75, "channel": "camp", "name": "footstep", "value": "left"}
+    ]},
+    {"clip": "Run", "markers": [
+      {"phase": 0.25, "channel": "camp", "name": "footstep", "value": "right"},
+      {"phase": 0.75, "channel": "camp", "name": "footstep", "value": "left"}
+    ]}
+  ],
+  "layers": [],
+  "ik": [
+    {"name": "feet", "kind": "foot_placer",
+     "joints": ["pelvis", "hip_L", "knee_L", "ankle_L", "hip_R", "knee_R", "ankle_R"],
+     "toe_joints": ["toe_L", "toe_R"], "foot_heights": [0.05, 0.05], "toe_heights": [0.03, 0.03],
+     "pole": [0, 0, 1], "max_stretch": 1.1, "fade_seconds": 0.12,
+     "foot_smooth_seconds": 0.08, "toe_max_tilt_degrees": 0},
+    {"name": "hand_L", "kind": "two_bone", "joints": ["shoulder_L", "elbow_L", "hand_L"],
+     "weight": 0, "fade_seconds": 0.12, "pole": [0.5, -0.7, -0.5], "max_stretch": 1.12},
+    {"name": "hand_R", "kind": "two_bone", "joints": ["shoulder_R", "elbow_R", "hand_R"],
+     "weight": 0, "fade_seconds": 0.12, "pole": [-0.5, -0.7, -0.5], "max_stretch": 1.12}
+  ]
+}

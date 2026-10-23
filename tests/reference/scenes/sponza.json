@@ -1,0 +1,70 @@
+{
+ "name": "sponza",
+ "purpose": "An interior lit through its open roof: shadows across columns and arches, many textured materials (alpha-cut plants among them), light bounced into the galleries. kin's ambient light reaches everywhere; Cycles' sky only through the roof: the gap occlusion and bounced light close. Sponza (Crytek; Khronos glTF Sample Assets): fetched, not committed.",
+ "models": [
+  {
+   "file": "sponza/Sponza.gltf"
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   120,
+   150,
+   190
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.4,
+    1.0,
+    0.12
+   ],
+   "color": [
+    4.0,
+    3.8,
+    3.4
+   ]
+  },
+  "ambient": [
+   0.36,
+   0.4,
+   0.48
+  ],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {
+   "name": "nave",
+   "eye": [
+    -11.0,
+    2.0,
+    -0.3
+   ],
+   "target": [
+    10.0,
+    4.0,
+    0.3
+   ],
+   "fov": 65
+  },
+  {
+   "name": "roof",
+   "eye": [
+    2.0,
+    1.6,
+    0.0
+   ],
+   "target": [
+    -6.0,
+    9.0,
+    0.0
+   ],
+   "fov": 70
+  }
+ ],
+ "truth": {
+  "samples": 1024
+ }
+}

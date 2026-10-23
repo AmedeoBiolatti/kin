@@ -1,0 +1,152 @@
+{
+ "name": "moon_shadow",
+ "purpose": "The moon casts shadows (P3b): the fill light of a December night (full moon, 45 degrees north) with its own cascades over the pillars, poles and trees of a stage, the sun's shadow off below the horizon (TimeOfDay3D::shadows). 'night' is 20:30 (the moon's shadows alone), 'low' 16:00 and 'dawn' 7:54 (the low sun and the moon both up: both cast, two cascades each, the sun's strength fading with its height). The moon's light is a tenth of the sun's, so the exposure is raised.",
+ "procedural": "stage",
+ "stage": {
+  "walls": false,
+  "pillars": [
+   [
+    -4.0,
+    -4.0
+   ],
+   [
+    3.0,
+    -8.0
+   ],
+   [
+    7.0,
+    -3.0
+   ]
+  ],
+  "poles": [
+   [
+    0.0,
+    -2.0
+   ],
+   [
+    -1.0,
+    -6.0
+   ]
+  ],
+  "trees": [
+   [
+    -7.0,
+    -7.0
+   ],
+   [
+    5.0,
+    -5.5
+   ]
+  ],
+  "benches": [
+   [
+    -2.0,
+    2.0
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 5.0,
+  "bloom": 0.0,
+  "background": [
+   0,
+   0,
+   0
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    0,
+    0,
+    0
+   ]
+  },
+  "ambient": [
+   0.02,
+   0.02,
+   0.03
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 2,
+  "shadow_distance": 60,
+  "fill_shadow": {
+   "enabled": true,
+   "cascades": 2,
+   "resolution": 2048
+  }
+ },
+ "sky": {
+  "enabled": true,
+  "stars": true,
+  "star_brightness": 6.0,
+  "moon": {
+   "enabled": true,
+   "size": 2.0
+  }
+ },
+ "time_of_day": {
+  "hours": 20.5,
+  "day_of_year": 355,
+  "latitude": 45.0,
+  "moon_phase": 0.5,
+  "shadows": true
+ },
+ "cameras": [
+  {
+   "name": "night",
+   "eye": [
+    -9.0,
+    3.0,
+    9.0
+   ],
+   "target": [
+    1.0,
+    1.0,
+    -5.0
+   ],
+   "fov": 55,
+   "near": 0.1
+  },
+  {
+   "name": "low",
+   "eye": [
+    -9.0,
+    3.0,
+    9.0
+   ],
+   "target": [
+    1.0,
+    1.0,
+    -5.0
+   ],
+   "fov": 55,
+   "near": 0.1,
+   "hours": 16.0
+  },
+  {
+   "name": "dawn",
+   "eye": [
+    -9.0,
+    3.0,
+    9.0
+   ],
+   "target": [
+    1.0,
+    1.0,
+    -5.0
+   ],
+   "fov": 55,
+   "near": 0.1,
+   "hours": 7.9
+  }
+ ]
+}

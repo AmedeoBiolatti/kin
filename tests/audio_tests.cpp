@@ -8,6 +8,9 @@
 #include <kin/scripting/lua_script.hpp>
 #include <kin/scripting/script_engine.hpp>
 #include <kin/ecs/audio.hpp>
+#if defined(KIN_EXPERIMENTAL_3D)
+#include <kin/ecs/scene3d.hpp>
+#endif
 #include <kin/platform/log.hpp>
 
 #include <SDL3/SDL.h>
@@ -19,6 +22,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <thread>
@@ -524,6 +528,54 @@ void test_equal_power_pan() {
     const float right = out[1];
     assert(right > left);
     assert(near(left * left + right * right, 2.0f * 0.25f, 1e-3f));
+}
+
+// In 3D the pan follows the direction the listener faces, not the world's x;
+// behind is a little quieter; height counts toward the distance.
+void test_spatial_audio_3d() {
+    const kin::SpatialAudio s{.min_distance = 2.0f, .max_distance = 40.0f};
+    const kin::AudioListener3D facing_north{.position = {0.0f, 1.5f, 0.0f}, .forward = {0.0f, 0.0f, -1.0f}};
+    const auto at = [&](const kin::AudioListener3D& l, kin::Vec3f p) { return kin::calculate_spatial_audio_3d(l, p, s); };
+    assert(at(facing_north, {10.0f, 1.5f, 0.0f}).pan > 0.9f);  // east, to the right
+    assert(at(facing_north, {-10.0f, 1.5f, 0.0f}).pan < -0.9f);
+    assert(std::abs(at(facing_north, {0.0f, 1.5f, -10.0f}).pan) < 1e-5f); // ahead: centred
+    // Turned to face east, east is ahead and north is to the left.
+    const kin::AudioListener3D facing_east{.position = {0.0f, 1.5f, 0.0f}, .forward = {1.0f, 0.0f, 0.0f}};
+    assert(std::abs(at(facing_east, {10.0f, 1.5f, 0.0f}).pan) < 1e-5f);
+    assert(at(facing_east, {0.0f, 1.5f, -10.0f}).pan < -0.9f);
+    // Behind is quieter than ahead at the same distance (a fifth at most).
+    const float ahead = at(facing_north, {0.0f, 1.5f, -10.0f}).gain, behind = at(facing_north, {0.0f, 1.5f, 10.0f}).gain;
+    assert(behind < ahead && behind > ahead * 0.79f);
+    // Above, ten metres up, is as far as ten metres ahead, and centred.
+    assert(near(at(facing_north, {0.0f, 11.5f, 0.0f}).gain, ahead, 0.25f) && std::abs(at(facing_north, {0.0f, 11.5f, 0.0f}).pan) < 1e-5f);
+    // Close by, the pan fades: nothing jumps across the head.
+    assert(std::abs(at(facing_north, {0.5f, 1.5f, 0.0f}).pan) < 0.3f);
+    assert(at(facing_north, {0.0f, 1.5f, -50.0f}).gain == 0.0f);
+
+    // The engine, with a 3D listener: a sound to the right is louder on the right,
+    // and turning round swaps the sides.
+    kin::AudioEngine audio = null_engine();
+    audio.add_clip("dc", dc_clip(0.5f));
+    kin::AudioCatalog catalog;
+    catalog.add_cue({.id = "buzz", .clips = {"dc"}, .bus = "sfx", .loop = true, .spatial = true,
+                     .min_distance = 2.0f, .max_distance = 40.0f});
+    audio.set_listener_3d(facing_north);
+    const kin::AudioHandle buzz = audio.play(catalog, {.cue = "buzz", .position_3d = {5.0f, 1.5f, 0.0f}, .has_position_3d = true});
+    assert(buzz);
+    std::vector<kin::f32> out = render(audio, 4800);
+    assert(out[out.size() - 1] > out[out.size() - 2] * 2.0f); // right > left
+    audio.set_listener_3d({.position = {0.0f, 1.5f, 0.0f}, .forward = {0.0f, 0.0f, 1.0f}}); // turned round
+    out = render(audio, 4800);
+    assert(out[out.size() - 2] > out[out.size() - 1] * 2.0f);
+    // Moved far away: silent.
+    audio.set_position_3d(buzz, {0.0f, 1.5f, 100.0f});
+    out = render(audio, 4800);
+    assert(std::abs(out[out.size() - 1]) < 1e-4f && std::abs(out[out.size() - 2]) < 1e-4f);
+    // Back to a 2D listener: 2D positions as before.
+    audio.set_listener({0.0f, 0.0f});
+    audio.set_position(buzz, {3.0f, 0.0f});
+    out = render(audio, 4800);
+    assert(out[out.size() - 1] > out[out.size() - 2]);
 }
 
 // Mono output averages the two sides.
@@ -1412,6 +1464,84 @@ void test_ecs_emitters() {
     assert(near(render(audio, 16)[0], 0.25f));
 }
 
+#if defined(KIN_EXPERIMENTAL_3D)
+// In 3D the ECS bridge places emitters and one-shots at their WorldTransform3D (offset_3d in the entity's own space,
+// through set_position_3d), and the listener at the AudioListener entity's WorldTransform3D, or with none at the active
+// SceneCamera3D's, facing its -Z: the mix is the one set_listener_3d and position_3d give directly.
+void test_ecs_audio_3d() {
+    kin::AudioCatalog catalog;
+    catalog.add_cue({.id = "buzz", .clips = {"dc"}, .bus = "sfx", .loop = true, .spatial = true,
+                     .min_distance = 2.0f, .max_distance = 40.0f});
+    const auto engine = [] {
+        kin::AudioEngine audio = null_engine();
+        audio.add_clip("dc", dc_clip(0.5f));
+        return audio;
+    };
+    const auto turned = [](kin::Vec3f at, float degrees) {
+        return kin::WorldTransform3D{kin::Mat4f::trs(at, kin::Quatf::axis_angle({0.0f, 1.0f, 0.0f}, degrees), {1.0f, 1.0f, 1.0f})};
+    };
+    const kin::Vec3f eye{0.0f, 1.5f, 0.0f};
+
+    // What the engine gives a listener at the eye facing north (-Z) and a buzz 5 m east.
+    kin::AudioEngine reference = engine();
+    reference.set_listener_3d({.position = eye, .forward = {0.0f, 0.0f, -1.0f}});
+    reference.play(catalog, {.cue = "buzz", .position_3d = {5.0f, 1.5f, 0.0f}, .has_position_3d = true});
+    const std::vector<kin::f32> want = render(reference, 4800);
+
+    // No listener entity: the enabled camera hears (a disabled one of higher priority, facing south, does not). The drone
+    // is turned round, so its sound 1 m along its own +X is 1 m west of it: 5 m east of the eye.
+    kin::AudioEngine audio = engine();
+    kin::EcsWorld world;
+    kin::EcsEntity camera = world.entity("camera");
+    camera.set(kin::SceneCamera3D{});
+    camera.set(turned(eye, 0.0f));
+    kin::EcsEntity other = world.entity("other");
+    other.set(kin::SceneCamera3D{.enabled = false, .priority = 9});
+    other.set(turned(eye, 180.0f));
+    kin::EcsEntity drone = world.entity("drone");
+    drone.set(turned({6.0f, 1.5f, 0.0f}, 180.0f));
+    drone.set(kin::AudioEmitter{.cue = "buzz", .offset_3d = {1.0f, 0.0f, 0.0f}});
+    kin::update_audio_listeners(world, audio);
+    kin::update_audio_emitters(world, audio, catalog);
+    assert(drone.raw().get<kin::AudioEmitter>()->playing);
+    std::vector<kin::f32> out = render(audio, 4800);
+    assert(out[out.size() - 1] > out[out.size() - 2] * 2.0f); // right > left
+    assert(near(out[out.size() - 1], want[want.size() - 1]) && near(out[out.size() - 2], want[want.size() - 2]));
+
+    // The camera turns round: the drone is on its left.
+    camera.set(turned(eye, 180.0f));
+    kin::update_audio_listeners(world, audio);
+    out = render(audio, 4800);
+    assert(out[out.size() - 2] > out[out.size() - 1] * 2.0f);
+    // An AudioListener entity (a head facing north) is heard from over the camera.
+    kin::EcsEntity head = world.entity("head");
+    head.set(kin::AudioListener{});
+    head.set(turned(eye, 0.0f));
+    kin::update_audio_listeners(world, audio);
+    out = render(audio, 4800);
+    assert(out[out.size() - 1] > out[out.size() - 2] * 2.0f);
+    // The drone flies off (set_position_3d follows its transform): silent.
+    drone.set(turned({0.0f, 1.5f, 100.0f}, 0.0f));
+    kin::update_audio_emitters(world, audio, catalog);
+    out = render(audio, 4800);
+    assert(std::abs(out[out.size() - 1]) < 1e-4f && std::abs(out[out.size() - 2]) < 1e-4f);
+
+    // A one-shot at an entity's WorldTransform3D, to the head's right; one with a non-finite transform is dropped unplayed.
+    kin::EcsEntity bang = world.entity("bang");
+    bang.set(turned({4.0f, 1.5f, 0.0f}, 0.0f));
+    bang.set(kin::AudioOneShot{.cue = "buzz", .offset_3d = {1.0f, 0.0f, 0.0f}});
+    kin::EcsEntity lost = world.entity("lost");
+    lost.set(kin::WorldTransform3D{kin::Mat4f::translation({std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f})});
+    lost.set(kin::AudioOneShot{.cue = "buzz"});
+    const kin::i32 before = audio.active_voice_count();
+    kin::consume_audio_one_shots(world, audio, catalog);
+    assert(audio.active_voice_count() == before + 1);
+    assert(!bang.raw().has<kin::AudioOneShot>() && !lost.raw().has<kin::AudioOneShot>());
+    out = render(audio, 4800);
+    assert(near(out[out.size() - 1], want[want.size() - 1]) && near(out[out.size() - 2], want[want.size() - 2]));
+}
+#endif
+
 // Band-pass, notch, an EQ peak and shelves shape their bands as their gains say.
 void test_eq_effects() {
     using enum kin::AudioEffectType;
@@ -1727,6 +1857,7 @@ int main() {
     test_variation_is_seeded();
     test_limiter();
     test_equal_power_pan();
+    test_spatial_audio_3d();
     test_mono_output();
     test_preload_async();
     test_device_thread_mixes();
@@ -1751,6 +1882,9 @@ int main() {
     test_output_devices();
     test_hot_reload();
     test_ecs_emitters();
+#if defined(KIN_EXPERIMENTAL_3D)
+    test_ecs_audio_3d();
+#endif
     test_eq_effects();
     test_delay();
     test_level_meters();

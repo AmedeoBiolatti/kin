@@ -1,0 +1,216 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "campfire-effect",
+  "root": "effect",
+  "entities": [
+    {
+      "id": "effect",
+      "components": {
+        "Transform3D": {}
+      }
+    },
+    {
+      "id": "flames",
+      "parent": "effect",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0.22,
+            0
+          ]
+        },
+        "ParticleEmitter3D": {
+          "seed": 17,
+          "shape": "cone",
+          "extent": [
+            0.12,
+            0,
+            0
+          ],
+          "cone_angle": 15,
+          "rate": 55,
+          "max_particles": 96,
+          "lifetime": [
+            0.35,
+            0.7
+          ],
+          "speed": [
+            0.5,
+            1.0
+          ],
+          "size": [
+            0.24,
+            0.4
+          ],
+          "size_start": 0.8,
+          "size_mid": 1,
+          "size_end": 0.15,
+          "colour_start": [
+            4,
+            1,
+            0.08
+          ],
+          "colour_end": [
+            1,
+            0.08,
+            0.01
+          ],
+          "alpha_start": 0.8,
+          "alpha_end": 0,
+          "fade_in": 0.1,
+          "blend": "additive",
+          "sort": false,
+          "wind_influence": 0
+        }
+      }
+    },
+    {
+      "id": "smoke",
+      "parent": "effect",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0.35,
+            0
+          ]
+        },
+        "ParticleEmitter3D": {
+          "seed": 19,
+          "shape": "disc",
+          "extent": [
+            0.1,
+            0,
+            0
+          ],
+          "spread": 12,
+          "rate": 12,
+          "max_particles": 64,
+          "lifetime": [
+            1.5,
+            2.5
+          ],
+          "speed": [
+            0.5,
+            0.8
+          ],
+          "size": [
+            0.18,
+            0.28
+          ],
+          "size_start": 0.6,
+          "size_mid": 1.8,
+          "size_end": 3,
+          "colour_start": [
+            0.22,
+            0.2,
+            0.18
+          ],
+          "colour_end": [
+            0.4,
+            0.4,
+            0.4
+          ],
+          "alpha_start": 0.25,
+          "alpha_end": 0,
+          "fade_in": 0.15,
+          "blend": "alpha",
+          "lit": 0.5,
+          "drag": 0.6,
+          "velocity_min": [
+            -0.05,
+            0,
+            0
+          ],
+          "velocity_max": [
+            0.1,
+            0,
+            0.05
+          ]
+        }
+      }
+    },
+    {
+      "id": "sparks",
+      "parent": "effect",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0.22,
+            0
+          ]
+        },
+        "ParticleEmitter3D": {
+          "seed": 23,
+          "shape": "cone",
+          "extent": [
+            0.12,
+            0,
+            0
+          ],
+          "cone_angle": 25,
+          "rate": 14,
+          "max_particles": 48,
+          "lifetime": [
+            0.6,
+            1.1
+          ],
+          "speed": [
+            1.1,
+            2
+          ],
+          "size": [
+            0.018,
+            0.035
+          ],
+          "gravity": [
+            0,
+            -1.5,
+            0
+          ],
+          "colour_start": [
+            5,
+            1.2,
+            0.1
+          ],
+          "colour_end": [
+            1,
+            0.15,
+            0.02
+          ],
+          "alpha_start": 1,
+          "alpha_end": 0,
+          "blend": "additive",
+          "facing": "stretched",
+          "stretch": 0.035,
+          "sort": false
+        }
+      }
+    },
+    {
+      "id": "glow",
+      "parent": "effect",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0.5,
+            0
+          ]
+        },
+        "PointLight3D": {
+          "color": [
+            3,
+            1,
+            0.15
+          ],
+          "radius": 3.5,
+          "size": 0.2,
+          "shadow_enabled": false
+        }
+      }
+    }
+  ]
+}

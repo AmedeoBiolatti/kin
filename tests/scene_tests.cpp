@@ -323,9 +323,11 @@ void test_transition_to_replaces_scene_below_overlay(Fixture& fixture) {
     assert(fixture.scenes.at(0)->name() == "next");
 }
 
-void test_ecs_scene_default_render_draws_world() {
-    kin::App app{{.mode = kin::AppMode::Headless}};
-    kin::Window& window = app.create_window({.title = "ecs-render-scene-test", .width = 64, .height = 64, .hidden = true});
+void test_ecs_scene_default_render_draws_world(Fixture& fixture) {
+    // Keep one App lifetime: destroying a nested App shuts down SDL while the
+    // fixture's real renderer is still alive.
+    auto& app = fixture.app;
+    auto& window = fixture.window;
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
     kin::Renderer2D renderer{std::move(backend)};
@@ -395,6 +397,6 @@ int main() {
     test_fade_overlay_pops_itself(fixture);
     test_replace_with_fade_replaces_scene_below_overlay(fixture);
     test_transition_to_replaces_scene_below_overlay(fixture);
-    test_ecs_scene_default_render_draws_world();
+    test_ecs_scene_default_render_draws_world(fixture);
     return 0;
 }

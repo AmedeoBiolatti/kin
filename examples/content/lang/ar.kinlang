@@ -37,6 +37,11 @@
       "paused_hint": "P استئناف / R جولة جديدة",
       "ended_hint": "R جولة جديدة"
     },
+    "breach": {
+      "name": "SIGNAL BREACH",
+      "controls": "انقر للعب / WASD حركة / الفأرة نظر / الزر الأيسر إطلاق / SPACE قفز / SHIFT اندفاع / ESC إيقاف مؤقت / B لعب تلقائي",
+      "paused_hint": "انقر للمتابعة / ESC خروج / R إعادة"
+    },
     "results": {
       "secured": "تم تأمين القطاع",
       "lost": "فُقدت الإشارة",

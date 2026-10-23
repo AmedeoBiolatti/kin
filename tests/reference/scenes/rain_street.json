@@ -1,0 +1,232 @@
+{
+ "name": "rain_street",
+ "purpose": "Rain on a street at dusk (P3c): stretched streaks falling with the wind's slant in a 36 m volume that follows the camera, splashes where drops meet the ground (y = 0), three warm lamps with spot lights, fogged by the sky's colour; the weather dims the sun and ambient light and thickens the fog (Weather3D::apply). 'street' looks down the row of lamps, 'lamp' from near a lamp (streaks in its light), 'ground' from 40 cm up at the splashes.",
+ "procedural": "stage",
+ "stage": {
+  "walls": true,
+  "ground": [
+   80,
+   70
+  ],
+  "pillars": [
+   [
+    -9.0,
+    -10.0
+   ],
+   [
+    8.0,
+    -12.0
+   ],
+   [
+    -9.0,
+    3.0
+   ]
+  ],
+  "benches": [
+   [
+    3.5,
+    -2.0
+   ]
+  ],
+  "lamps": [
+   [
+    -4.0,
+    2.0,
+    4.2
+   ],
+   [
+    4.0,
+    -4.0,
+    4.2
+   ],
+   [
+    -4.0,
+    -10.0,
+    4.2
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.3,
+  "background": [
+   0,
+   0,
+   0
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    1,
+    1,
+    1
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.2,
+   0.25
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 2,
+  "shadow_distance": 80,
+  "spots": [
+   {
+    "position": [
+     -4.0,
+     4.3,
+     2.0
+    ],
+    "direction": [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    "color": [
+     60,
+     48,
+     30
+    ],
+    "radius": 16.0,
+    "size": 0.2,
+    "inner": 28.0,
+    "outer": 58.0
+   },
+   {
+    "position": [
+     4.0,
+     4.3,
+     -4.0
+    ],
+    "direction": [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    "color": [
+     60,
+     48,
+     30
+    ],
+    "radius": 16.0,
+    "size": 0.2,
+    "inner": 28.0,
+    "outer": 58.0
+   },
+   {
+    "position": [
+     -4.0,
+     4.3,
+     -10.0
+    ],
+    "direction": [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    "color": [
+     60,
+     48,
+     30
+    ],
+    "radius": 16.0,
+    "size": 0.2,
+    "inner": 28.0,
+    "outer": 58.0
+   }
+  ]
+ },
+ "sky": {
+  "enabled": true,
+  "turbidity": 6.0,
+  "stars": false
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.004,
+  "color_from_sky": true,
+  "sun_scatter": 0.0,
+  "max_opacity": 0.95
+ },
+ "time_of_day": {
+  "hours": 19.7,
+  "day_of_year": 172,
+  "latitude": 45.0
+ },
+ "weather": {
+  "rain": {
+   "intensity": 0.85,
+   "splash": 0.9
+  },
+  "wind": {
+   "direction": [
+    1.0,
+    0.0,
+    -0.3
+   ],
+   "speed": 5.0,
+   "gust": 0.5,
+   "gust_period": 7.0,
+   "turbulence": 0.6
+  },
+  "ground": 0.0,
+  "time": 12.0,
+  "apply": true
+ },
+ "cameras": [
+  {
+   "name": "street",
+   "eye": [
+    0.0,
+    1.7,
+    9.0
+   ],
+   "target": [
+    0.0,
+    2.0,
+    -12.0
+   ],
+   "fov": 62,
+   "near": 0.1
+  },
+  {
+   "name": "lamp",
+   "eye": [
+    -1.2,
+    1.9,
+    5.0
+   ],
+   "target": [
+    -4.0,
+    3.2,
+    2.0
+   ],
+   "fov": 66,
+   "near": 0.1
+  },
+  {
+   "name": "ground",
+   "eye": [
+    1.0,
+    0.45,
+    3.0
+   ],
+   "target": [
+    -0.5,
+    0.0,
+    -3.0
+   ],
+   "fov": 66,
+   "near": 0.1
+  }
+ ]
+}

@@ -169,6 +169,12 @@ void test_frame_rate_cap() {
 }
 
 int main() {
+#ifndef KIN_EXPERIMENTAL_3D
+    {
+        kin::SceneManager scenes;
+        assert(kin::run_scene_app({.rendering_3d = true}, scenes) == 1);
+    }
+#endif
     test_frame_rate_cap();
     char arg0[] = "game";
     char arg1[] = "--headless";

@@ -79,3 +79,119 @@ std::vector<kin::HexReach> range = kin::reachable_cells(nav, start, 40);
 The A* heuristic assumes no step costs less than
 `HexPathOptions::min_step_cost` (10). If some cells cost less, pass a lower value,
 or the path may not be the cheapest.
+
+## Navigation meshes
+
+`kin/pathfinding/navmesh3d.hpp` finds paths over a 3D level instead of a grid.
+`kin::build_navmesh3d` takes a triangle soup (positions and indices, or a
+`MeshData3D` and its transform with `KIN_EXPERIMENTAL_3D`), welds its vertices,
+keeps the triangles that face up and are no steeper than `max_slope_degrees`,
+joins those that share an edge, and numbers the connected regions. The result,
+`kin::NavMesh3D`, is plain data on the CPU; it needs only `kin/core`, so it is in
+the build without 3D too.
+
+```cpp
+kin::NavMeshBuildOptions3D options{.max_slope_degrees = 40.0f, .agent_radius = 0.4f,
+                                    .agent_height = 1.8f, .max_step_height = 0.25f};
+auto built = kin::build_navmesh3d(level.vertices, level.indices, options);
+if (!built) return report(kin::diagnostics3d_text(built.diagnostics));
+kin::NavMesh3D nav = std::move(*built);
+
+std::vector<kin::Vec3f> path = kin::find_path(nav, bot_position, goal); // the corners, both ends included
+if (auto hit = kin::raycast(nav, bot_position, bot_position + heading * 2.0f)) {
+    steer_away(hit->normal); // the edge of the walkable ground, 2 m ahead
+}
+std::optional<kin::NavPoint3D> on = kin::nearest(nav, click, {1.0f, 2.0f, 1.0f});
+std::optional<kin::NavPoint3D> wander = kin::random_point(nav, key);
+```
+
+`max_step_height` joins oppositely oriented tread boundaries within the configured
+rise. Construction subdivides mismatched seams and same-height T junctions; it
+also accepts an upper tread overlapping the lower support by up to this distance
+(a nosing). Empty horizontal gaps are never bridged. Zero disables step/seam
+construction. Stair paths include both heights at each crossing. Stairs may be
+placed on a continuous floor: hidden lower triangles are filtered, new entry
+seams are joined, and blocking walls are checked again before radius erosion.
+Seam passes reuse the input weld and obstacle tree; only changed faces and
+portals and faces whose clearance depended on a support band repeat obstruction
+queries. Samples propagate across step partners in
+the same pass, so long coarse flights do not require one pass per tread. Rounded
+cuts reuse their own edge endpoints within 1e-5 m first. There is no separate
+minimum face size: boundary validation decides whether subdivision is
+representable. If numerical seams remain after 64 passes, the builder logs a
+`pathfinding` warning and returns the valid remaining mesh with
+those seams unjoined. The final split still receives joining and clearance checks;
+a non-mutating probe suppresses the warning if that split completed the work.
+Pass-limit warnings include the refinement phase, pass triangle, changed-face count and a
+world-space sample position. Shared edges consume one canonical cut list. If a
+rounded boundary cannot be triangulated safely, conflicting samples are withdrawn
+on all incident faces; unrelated samples on those edges remain. If a sample still
+cannot be represented, its seam stays unjoined. Each affected source face gets
+at most one warning per build with its input triangle index and world position,
+across both refinement phases. Rejection diagnostics show at most eight source
+faces, followed by one summary with total/suppressed counts and the bounds of all
+recorded warning positions when more faces were rejected. Unchecked ears and
+per-face degenerate drops are not used. Invalid input still returns a failed
+result with diagnostics. Boundary validation and clipping take
+quadratic time in the boundary sample count; cached blockers preserve the same
+ear and tie-breaking choices without repeatedly scanning every candidate polygon.
+The rare repair path may try removing each conflicting cut and triangulating
+again; that search can take cubic time in the face's cut count. The search
+preserves the existing first-successful-cut selection.
+Use tessellated walk surfaces to control conservative whole-triangle clearance.
+
+- `find_path` snaps both ends onto the mesh (within `NavPathOptions3D::extents`
+  on each axis) and returns the path's corners: an A* search over the triangles'
+  edges finds a corridor, the funnel algorithm pulls the string through it taut,
+  and the corridor is moved past any vertex the string turned at that is not on a
+  border. Corners include border vertices and explicit step crossings. Seen from above the path is the
+  shortest round the obstacles on the sides it takes; going round another side
+  can be shorter; stair routes additionally depend on the selected step portals.
+  A segment between two corners is straight, so it can pass under a crest or
+  over a dip; follow the ground with `nearest` if the height matters. Empty when
+  an end is off the mesh or the ends are in different regions (`region_of`).
+- `raycast` walks a straight line over the surface and returns where it first
+  leaves the mesh, with the border's normal, or nothing when it gets there.
+- Everything is deterministic: the same input gives the same bytes and the
+  same paths on every run.
+
+Cost: on a 200 x 200 grid of 1 m squares with a pillar every 20 m (76,800
+triangles, 5.4 MiB) the build takes about 90 ms and a path between two random
+points about 1.1 ms (`kin_navmesh3d_tests` prints the line). Larger triangles are
+cheaper: the search's work grows with the triangles near the path.
+
+Agent dimensions affect construction. A nonzero `agent_height` discards floor
+triangles whose vertical prism intersects any input geometry above the supporting
+surface, including small/sloping ceilings and vertical walls. The test covers the
+whole triangle footprint, not just its vertices or centroid. With a nonzero radius,
+headroom includes nearby floor slopes and ceiling tilt across that radius,
+without spreading the margin to distant parts of the level. Local slope searches
+run only when an overhead obstacle could make that margin relevant. A nonzero `agent_radius` then discards triangles within that
+horizontal distance of a walkable boundary, including boundaries made by headroom
+rejection. Different disconnected layers do not erode each other merely because
+their boundaries project to the same place. Headroom uses `max(agent_height, max_step_height)`: a nonzero step height also
+blocks low ceilings and walls for zero-height agents, and removes floor hidden
+under climbable treads to expose their seams. Only height and step both zero
+disable headroom checks; radius erosion is independent. The stored build options
+retain the requested dimensions.
+
+Clearance is conservative: unsafe triangles are removed whole. Step construction
+subdivides mismatched boundary edges and narrow tread strips before clearance;
+it accepts overlapping stair nosings up to `max_step_height`, but never jumps
+empty horizontal gaps. Paths retain both sides of every step.
+Tessellate the walk surface finely enough for the margin the game needs (the clearance
+regressions use 0.1 m cells; a grid-aligned doorway needs up to two extra cells
+beyond the agent diameter); a single large floor triangle touching a border can be
+removed entirely. Include walls and ceilings in the source soup, not only the intended
+walkable floor. Empty geometry after clearance is a valid empty result; check `valid()`
+before finding paths. All queries, including nearest/raycast/random sampling, use
+this same filtered geometry. Surviving connectivity is preserved and regions are relabelled after filtering.
+A 1e-5 world-unit tolerance separates support contact from head obstruction.
+
+This is static navigation for an upright agent aligned with `up`, not a physics
+movement solver. Steer the character controller along the surface rather than
+teleporting along corner-to-corner chords through crests/dips. There are no off-mesh
+links (jumps, ladders), costs per area or moving obstacles: rebuild when geometry or
+agent dimensions change. See the [content profile](gltf_profile3d.md#navigation-geometry)
+for the authoring contract. The cost above measures point-agent construction;
+clearance adds geometry/BVH work and is an offline/loading operation.

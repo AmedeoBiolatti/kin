@@ -62,6 +62,7 @@ LuaScript::~LuaScript() {
 
 std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependencies) const {
     auto lua = std::make_unique<sol::state>();
+    scripting_detail::bind_script_errors(*lua);
     lua->open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string, sol::lib::utf8);
     // Nothing that reads the world outside the script, or makes up numbers.
     for (const char* name : {"dofile", "loadfile", "load", "require", "collectgarbage"}) {

@@ -21,8 +21,10 @@ add_library(kin_engine STATIC
     src/assets/asset_manager.cpp
     src/assets/content.cpp
     src/assets/asset_server.cpp
+    src/assets/bake_cache.cpp
     src/assets/file_watcher.cpp
     src/assets/image.cpp
+    src/assets/texture_file.cpp
     src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
@@ -54,6 +56,7 @@ add_library(kin_engine STATIC
     src/platform/app.cpp
     src/platform/input.cpp
     src/platform/file_dialogs.cpp
+    src/platform/gamepad.cpp
     src/platform/process.cpp
     src/platform/log.cpp
     src/platform/user_data.cpp
@@ -63,11 +66,13 @@ add_library(kin_engine STATIC
     src/particles/particle_field.cpp
     src/particles/particle_system.cpp
     src/pathfinding/hex_pathfinding.cpp
+    src/pathfinding/navmesh3d.cpp
     src/pathfinding/path_server.cpp
     src/pathfinding/pathfinding.cpp
     src/physics/debug_render.cpp
     src/physics/physics.cpp
     src/prefab/prefab_asset.cpp
+    src/prefab/prefab_structure.cpp
     src/renderer/animation_import.cpp
     src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
@@ -158,6 +163,86 @@ endif()
 if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
+if(KIN_EXPERIMENTAL_3D)
+    # glTF 2.0 models (kin/render3d/model3d.hpp). A single C header, MIT.
+    FetchContent_Declare(cgltf
+        URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.14.tar.gz
+        URL_HASH SHA256=2f3c97a6b989943f50e7d7f228688f6558fe37b1411c13a350e3560d061707d8
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(cgltf)
+    if(NOT cgltf_POPULATED)
+        FetchContent_Populate(cgltf)
+    endif()
+    target_include_directories(kin_engine SYSTEM PRIVATE "${cgltf_SOURCE_DIR}")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};cgltf.txt|${cgltf_SOURCE_DIR}/LICENSE" CACHE INTERNAL "")
+    # Levels of detail (kin/render3d/mesh_lod3d.hpp) and clusters (mesh_clusters3d.hpp): the simplifier, the vertex-cache
+    # optimiser, the meshlet builder and the cluster partitioner of meshoptimizer (MIT), compiled into the engine;
+    # its other sources (codecs, rasteriser, stripifier) are not used.
+    FetchContent_Declare(meshoptimizer
+        URL https://github.com/zeux/meshoptimizer/archive/refs/tags/v0.25.tar.gz
+        URL_HASH SHA256=68b2fef4e4eaad98e00c657c1e7f8982a7176e61dd7efdeaec67a025b8519be9
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_GetProperties(meshoptimizer)
+    if(NOT meshoptimizer_POPULATED)
+        FetchContent_Populate(meshoptimizer)
+    endif()
+    set(_kin_meshopt_sources allocator clusterizer indexgenerator partition simplifier vcacheoptimizer)
+    list(TRANSFORM _kin_meshopt_sources PREPEND "${meshoptimizer_SOURCE_DIR}/src/")
+    list(TRANSFORM _kin_meshopt_sources APPEND ".cpp")
+    target_sources(kin_engine PRIVATE ${_kin_meshopt_sources})
+    set_source_files_properties(${_kin_meshopt_sources} PROPERTIES COMPILE_OPTIONS
+        "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
+    target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
+    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
+                                      src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
+    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/scene/scene_session3d.cpp src/scripting/lua_scene3d.cpp src/scripting/lua_scene3d_physics.cpp src/scene/scene_frame3d.cpp src/scene/scene_loader3d.cpp src/scene/camera_rig3d.cpp src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
+                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
+                                      src/render3d/environment.cpp src/render3d/hdr_decode.c
+                                      src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+    option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)
+    # Source options follow the target's -O2. Keep this experiment to one
+    # translation unit; other engine sources and floating-point flags stay put.
+    set_property(SOURCE src/renderer/gpu/gpu_renderer3d.cpp APPEND PROPERTY COMPILE_OPTIONS
+        "$<$<AND:$<BOOL:${KIN_RENDERER3D_O3}>,$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3>")
+    set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
+        "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
+    target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
+    target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
+    # Sources that compute what the simulation starts from or the particles' randomness (body poses and kinematic targets,
+    # the scene session, the sparks of a seed) get the physics glue's -ffp-contract=off below: a fused multiply-add rounds
+    # once where two operations round twice, so a target with FMA (aarch64, or x86 with -mfma) would give other bits.
+    foreach(_kin_fp_source src/ecs/physics3d.cpp src/scene/scene_session3d.cpp src/scene/scene_frame3d.cpp src/render3d/particles3d.cpp)
+        set_property(SOURCE ${_kin_fp_source} APPEND PROPERTY COMPILE_OPTIONS
+            "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>")
+    endforeach()
+    # kin/physics3d: Jolt Physics behind kin's own types (docs/physics_3d.md). Its sources are compiled apart
+    # from the engine's, as an object library: Jolt's PUBLIC compile options (-mavx2, -mpopcnt, ...) and
+    # definitions would otherwise reach every engine source and change what the rest of kin compiles to. Only
+    # these files see Jolt's headers; no kin header includes them. -ffp-contract=off keeps the compiler from
+    # fusing multiply-adds in the glue (determinism); -fno-rtti is Jolt's own build setting, which its classes
+    # that these sources derive from need.
+    add_library(kin_physics3d_objects OBJECT
+        src/physics3d/shape3d.cpp
+        src/physics3d/world3d.cpp
+        src/physics3d/character3d.cpp
+        src/physics3d/traversal3d.cpp
+        src/physics3d/traversal_character3d.cpp
+        src/physics3d/ragdoll3d.cpp
+        src/physics3d/rope3d.cpp
+        src/physics3d/debug_draw3d.cpp
+    )
+    target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
+    target_include_directories(kin_physics3d_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(kin_physics3d_objects PRIVATE Jolt)
+    target_compile_options(kin_physics3d_objects PRIVATE
+        "$<$<CXX_COMPILER_ID:GNU,Clang>:-fno-rtti;-ffp-contract=off>")
+    kin_enable_release_optimizations(kin_physics3d_objects)
+    target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_physics3d_objects>)
+    target_link_libraries(kin_engine PRIVATE $<LINK_ONLY:Jolt>)
+endif()
 if(KIN_SHIPPING)
     target_compile_definitions(kin_engine PUBLIC KIN_SHIPPING)
 endif()
@@ -185,6 +270,8 @@ target_link_libraries(kin_engine PUBLIC
     Lua::Lua
     sol2::sol2
 )
+# 3D Lua argument checks are local to its bindings; retain sol2 defaults for 2D games.
+
 target_link_libraries(kin_engine PRIVATE earcut_hpp::earcut_hpp) # used only inside the engine
 
 # Third-party audio decoders, built as C without kin's warnings.
@@ -197,24 +284,15 @@ target_link_libraries(kin_engine PRIVATE kin_audio_codecs)
 # the engine (kin_embed_files), so a game needs no shader files beside it.
 # Without glslc the engine still builds; the GPU backend then has no shaders and
 # kin falls back to SDL_Renderer. Shipping builds require them (KIN_REQUIRE_GPU_SHADERS).
-set(_kin_gpu_shader_sources)
-foreach(_name textured_quad.vert textured_quad.frag sprite_instanced.vert shader_geometry.vert
-              overdraw_count.frag overdraw_heat.frag shape.frag shape.vert sdf_shape.frag sdf_shape.vert
-              distance_field.frag mask_composite.frag mask_stencil.frag color_output.frag
-              pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
-              pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag
-              transition_dissolve.frag transition_pixelate.frag transition_wipe.frag
-              transition_iris.frag transition_crossfade.frag)
-    list(APPEND _kin_gpu_shader_sources "${CMAKE_CURRENT_SOURCE_DIR}/shaders/${_name}.glsl")
-endforeach()
+include(kin_gpu_shaders)
 # The .spv files stay in the build too, for tests that read every engine shader.
-kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${_kin_gpu_shader_sources})
+kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${KIN_GPU_SHADER_SOURCES})
 kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
 if(KIN_GLSLC AND NOT KIN_SHIPPING)
     # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
-    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}")
+    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
 endif()
-list(LENGTH _kin_gpu_shader_sources _kin_gpu_wanted)
+list(LENGTH KIN_GPU_SHADER_SOURCES _kin_gpu_wanted)
 list(LENGTH _kin_gpu_spv _kin_gpu_built)
 if(NOT _kin_gpu_built EQUAL _kin_gpu_wanted)
     if(KIN_REQUIRE_GPU_SHADERS)

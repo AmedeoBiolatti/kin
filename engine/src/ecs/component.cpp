@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -136,6 +137,8 @@ std::string field_kind_name(ComponentFieldKind kind) {
     case ComponentFieldKind::Color: return "color";
     case ComponentFieldKind::EntityRef: return "entity_ref";
     case ComponentFieldKind::AssetRef: return "asset_ref";
+    case ComponentFieldKind::Vec3f: return "vec3f";
+    case ComponentFieldKind::Quatf: return "quatf";
     }
     return "unknown";
 }
@@ -154,6 +157,8 @@ std::optional<ComponentFieldKind> field_kind_from_name(std::string_view name) {
     if (name == "color") return ComponentFieldKind::Color;
     if (name == "entity_ref") return ComponentFieldKind::EntityRef;
     if (name == "asset_ref") return ComponentFieldKind::AssetRef;
+    if (name == "vec3f") return ComponentFieldKind::Vec3f;
+    if (name == "quatf") return ComponentFieldKind::Quatf;
     return std::nullopt;
 }
 
@@ -296,6 +301,12 @@ bool resolve_entity_ref_value(EcsWorld& world,
 }
 
 } // namespace
+
+ComponentFieldKind component_field_kind_from_value(const ComponentFieldValue& value) {
+    return std::visit([](const auto& typed) {
+        return detail::ComponentFieldKindOf<std::decay_t<decltype(typed)>>::value;
+    }, value);
+}
 
 std::string component_field_kind_name(ComponentFieldKind kind) {
     return field_kind_name(kind);
@@ -584,9 +595,20 @@ std::vector<EcsEntity> EcsComponentRegistry::entities() const {
 }
 
 bool EcsComponentRegistry::patch_field(EcsEntity entity, ComponentId id, std::string_view field_name, const ComponentFieldValue& value) {
+    if (entity.raw().world().c_ptr() != _world->raw().c_ptr() || !entity)
+        return set_error("field patch requires a live entity in this registry's world");
     detail::ComponentRecord* record = find_record(id);
     if (!record) {
         return set_error("unknown component id '" + std::to_string(id) + "'");
+    }
+
+    if (_field_patch_handler) {
+        std::string error;
+        if (const auto handled = _field_patch_handler(entity, record->descriptor.name, field_name, value, error)) {
+            if (!*handled) return set_error(std::move(error));
+            _last_error.clear();
+            return true;
+        }
     }
 
     void* raw = record->mutable_ptr(entity);
@@ -600,7 +622,7 @@ bool EcsComponentRegistry::patch_field(EcsEntity entity, ComponentId id, std::st
     if (found == record->fields.end()) {
         return set_error("unknown field '" + std::string{field_name} + "' on component '" + record->descriptor.name + "'");
     }
-    if (!found->patch(raw, value)) {
+    if (!detail::field_value_matches_kind(value, found->descriptor.kind) || !found->patch(raw, value)) {
         return set_error("type mismatch for field '" + std::string{field_name} + "' on component '" + record->descriptor.name + "'");
     }
 
@@ -615,6 +637,38 @@ bool EcsComponentRegistry::patch_field(EcsEntity entity, ComponentId id, std::st
                                     record->descriptor.name,
                                     std::string{field_name});
     _last_error.clear();
+    return true;
+}
+
+bool EcsComponentRegistry::copy_component(EcsEntity source, std::string_view name,
+                                         EcsComponentRegistry& destination, EcsEntity target) const {
+    const auto* from = find_record(name);
+    auto* to = destination.find_record(name);
+    if (source.raw().world().c_ptr() != _world->raw().c_ptr() ||
+        target.raw().world().c_ptr() != destination._world->raw().c_ptr() || !source || !target || !from || !to || !from->has(source) ||
+        from->descriptor.kind != to->descriptor.kind || from->type != to->type)
+        return destination.set_error("incompatible component copy: " + std::string(name));
+    if (from->descriptor.kind == ComponentKind::Native) {
+        const auto* info = ecs_get_type_info(_world->raw().c_ptr(), from->descriptor.id);
+        if (info && (info->hooks.flags & (ECS_TYPE_HOOK_COPY_ILLEGAL | ECS_TYPE_HOOK_COPY_CTOR_ILLEGAL | ECS_TYPE_HOOK_CTOR_ILLEGAL)))
+            return destination.set_error("native component cannot be staged by copy: " + std::string(name));
+        if (info && info->size)
+            ecs_set_id(destination._world->raw().c_ptr(), target.id(), to->descriptor.id,
+                       info->size, from->const_ptr(source));
+        else target.raw().add(to->descriptor.id);
+    } else {
+        if (from->fields.size() != to->fields.size())
+            return destination.set_error("incompatible data schema: " + std::string(name));
+        for (size_t i = 0; i < from->fields.size(); ++i)
+            if (from->fields[i].descriptor.name != to->fields[i].descriptor.name ||
+                from->fields[i].descriptor.kind != to->fields[i].descriptor.kind)
+                return destination.set_error("incompatible data schema: " + std::string(name));
+        if (!to->has(target)) to->add(target);
+        *static_cast<std::vector<ComponentFieldValue>*>(to->mutable_ptr(target)) =
+            *static_cast<const std::vector<ComponentFieldValue>*>(from->const_ptr(source));
+        to->modified(target);
+    }
+    destination._last_error.clear();
     return true;
 }
 
@@ -1075,6 +1129,10 @@ void write_component_field_value_json(JsonWriter& json, const ComponentFieldValu
         using T = std::decay_t<decltype(typed)>;
         if constexpr (std::is_same_v<T, Vec2f>) {
             json.begin_object().field("x", static_cast<f64>(typed.x)).field("y", static_cast<f64>(typed.y)).end_object();
+        } else if constexpr (std::is_same_v<T, Vec3f> || std::is_same_v<T, Quatf>) {
+            json.begin_object().field("x", f64(typed.x)).field("y", f64(typed.y)).field("z", f64(typed.z));
+            if constexpr (std::is_same_v<T, Quatf>) json.field("w", f64(typed.w));
+            json.end_object();
         } else if constexpr (std::is_same_v<T, Vec2i>) {
             json.begin_object().field("x", typed.x).field("y", typed.y).end_object();
         } else if constexpr (std::is_same_v<T, Color>) {
@@ -1250,6 +1308,25 @@ std::optional<ComponentFieldValue> component_field_value_from_json(ComponentFiel
             }
         }
         break;
+    case ComponentFieldKind::Vec3f:
+    case ComponentFieldKind::Quatf: {
+        const bool rotation = kind == ComponentFieldKind::Quatf;
+        const auto* x = value.is_array() ? number_at(0) : number_member("x");
+        const auto* y = value.is_array() ? number_at(1) : number_member("y");
+        const auto* z = value.is_array() ? number_at(2) : number_member("z");
+        const auto* w = value.is_array() ? number_at(3) : number_member("w");
+        if (!x || !y || !z || (rotation && !w) ||
+            (value.is_array() && value.items().size() != (rotation ? 4u : 3u))) break;
+        const auto fits_float = [](const JsonValue* number) {
+            return std::isfinite(number->as_number()) &&
+                std::abs(number->as_number()) <= std::numeric_limits<f32>::max();
+        };
+        if (!fits_float(x) || !fits_float(y) || !fits_float(z) || (rotation && !fits_float(w))) break;
+        ComponentFieldValue result = rotation ? ComponentFieldValue{Quatf{f32(x->as_number()), f32(y->as_number()), f32(z->as_number()), f32(w->as_number())}}
+                                              : ComponentFieldValue{Vec3f{f32(x->as_number()), f32(y->as_number()), f32(z->as_number())}};
+        if (detail::field_value_matches_kind(result, kind)) return result;
+        break;
+    }
     case ComponentFieldKind::Color: {
         const JsonValue* r = number_member("r");
         const JsonValue* g = number_member("g");

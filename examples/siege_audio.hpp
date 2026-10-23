@@ -15,12 +15,18 @@ namespace examples {
 // backend, so headless runs exercise the same path without making noise.
 class SiegeAudio {
 public:
-    explicit SiegeAudio(bool muted);
+    // `distance_scale`: world units a pixel of Signal Siege's (where cues fade
+    // over a screen's width); Signal Breach, in metres, passes 1/40.
+    explicit SiegeAudio(bool muted, float distance_scale = 1.0f);
 
     // Plays the effects for `events`, heard from `listener` (world units).
     void play_events(std::span<const ArenaEvent> events, Vec2f listener);
     // One of "ui_move", "ui_select", "wave", "win", "lose".
     void play(std::string_view cue);
+    // An effect cue ("shot", "enemy_shot", "hit", "kill", "pickup", "dash",
+    // "hurt") from a place in 3D, heard from set_listener_3d's listener.
+    void play_at(std::string_view cue, Vec3f position);
+    void set_listener_3d(const AudioListener3D& listener) { _engine.set_listener_3d(listener); }
     void set_drone(bool playing);
     void update(float dt);
 

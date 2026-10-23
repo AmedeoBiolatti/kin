@@ -1,0 +1,160 @@
+{
+ "name": "particles_budget",
+ "purpose": "The particle budget (P3c): a fountain of ~28,000 live sparks (additive, stretched along their velocity, a cone from the floor, gravity, drag, bouncing on it) over a stage, with snow (5,400 flakes) falling through the same view: more than 30,000 sprites in one frame. The cost tables time this scene (GPU ms from the report).",
+ "procedural": "stage",
+ "stage": {
+  "walls": true,
+  "pillars": [
+   [
+    -6.0,
+    -6.0
+   ],
+   [
+    6.0,
+    -6.0
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.3,
+  "background": [
+   0,
+   0,
+   0
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.3,
+    1.0,
+    0.5
+   ],
+   "color": [
+    1.2,
+    1.15,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.1,
+   0.1,
+   0.14
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048
+ },
+ "sky": {
+  "enabled": true
+ },
+ "weather": {
+  "snow": {
+   "intensity": 0.6
+  },
+  "wind": {
+   "direction": [
+    1,
+    0,
+    0
+   ],
+   "speed": 3.0,
+   "gust": 0.3
+  },
+  "time": 3.0
+ },
+ "particles": [
+  {
+   "name": "fountain",
+   "seed": 3,
+   "position": [
+    0,
+    0.1,
+    -4
+   ],
+   "shape": "cone",
+   "extent": [
+    0.25,
+    1,
+    1
+   ],
+   "cone_angle": 22,
+   "rate": 6200,
+   "max": 32000,
+   "simulate": 7.0,
+   "lifetime": [
+    4.0,
+    5.0
+   ],
+   "speed": [
+    5.0,
+    8.0
+   ],
+   "gravity": [
+    0,
+    -9.8,
+    0
+   ],
+   "drag": 0.15,
+   "size": [
+    0.05,
+    0.09
+   ],
+   "alpha_start": 0.9,
+   "alpha_end": 0.0,
+   "color_start": [
+    1.0,
+    0.7,
+    0.3
+   ],
+   "color_end": [
+    1.0,
+    0.2,
+    0.05
+   ],
+   "ground": 0.0,
+   "wind": false,
+   "look": {
+    "blend": "additive",
+    "facing": "stretched",
+    "stretch": 0.04,
+    "stretch_min": 0.05
+   },
+   "bounce": 0.35
+  }
+ ],
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    2.5,
+    9.0
+   ],
+   "target": [
+    0.0,
+    3.0,
+    -4.0
+   ],
+   "fov": 60,
+   "near": 0.1
+  },
+  {
+   "name": "close",
+   "eye": [
+    3.0,
+    1.5,
+    0.0
+   ],
+   "target": [
+    0.0,
+    3.0,
+    -4.0
+   ],
+   "fov": 60,
+   "near": 0.1
+  }
+ ]
+}

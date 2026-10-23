@@ -13,11 +13,15 @@
 #include "gpu_frame_timer.hpp"
 #include "gpu_geometry_batch.hpp"
 #include "gpu_pipeline_cache.hpp"
+#if defined(KIN_EXPERIMENTAL_3D)
+#include "gpu_renderer3d.hpp"
+#endif
 #include "gpu_shader.hpp"
 #include "gpu_texture.hpp"
 
 #include <SDL3/SDL.h>
 
+#include <deque>
 #include <memory>
 #include <tuple>
 #include <optional>
@@ -31,11 +35,13 @@ namespace gpu {
 // Wraps a GpuTexture so it lives behind a kin::Texture.
 class GpuTextureBackend : public ITextureBackend {
 public:
+    // `mipmapped`: the texture has its mip chain already (a compressed one's levels).
     explicit GpuTextureBackend(GpuTexture texture, bool premultiplied = false,
                                ScaleMode scale = ScaleMode::Nearest,
-                               TextureFormat format = TextureFormat::Rgba8)
+                               TextureFormat format = TextureFormat::Rgba8, bool mipmapped = false)
         : ITextureBackend(ITextureBackend::Kind::Gpu),
-          _texture(std::move(texture)), _premultiplied(premultiplied), _scale(scale), _format(format) {}
+          _texture(std::move(texture)), _mipmapped(mipmapped), _premultiplied(premultiplied), _scale(scale),
+          _format(format) {}
     Vec2i size() const override {
         return {static_cast<i32>(_texture.width()), static_cast<i32>(_texture.height())};
     }
@@ -45,6 +51,7 @@ public:
     // the old for the caller to keep until the frame's draws are submitted.
     GpuTexture replace_texture(GpuTexture texture) const {
         _mipmapped = true;
+        ++_version;
         return std::exchange(_texture, std::move(texture));
     }
     bool mipmapped() const { return _mipmapped; }
@@ -55,6 +62,10 @@ public:
     // create_texture_from_rgba (crisp bitmap fonts / pixel art); render targets use
     // Linear (blur). Mutable so set_scale_mode works through a const Texture&.
     ScaleMode scale_mode() const { return _scale; }
+    // Bumped whenever the texels are replaced from outside (update_texture, write_texture, a new mip chain): the 3D shadow cache
+    // keys a cut-out's texture on it. A render target (premultiplied) is drawn into without a bump: such a texture is never cached on.
+    u64 version() const { return _version; }
+    void bump_version() const { ++_version; }
     void set_scale_mode(ScaleMode mode) const { _scale = mode; }
     // The backend's frame serial when a draw last used it (see retain()).
     u64 used_in_frame() const { return _used_in_frame; }
@@ -62,6 +73,7 @@ public:
 
 private:
     mutable GpuTexture _texture;
+    mutable u64 _version = 0;
     mutable bool _mipmapped = false;
     bool _premultiplied = false;
     mutable ScaleMode _scale = ScaleMode::Nearest;
@@ -96,6 +108,7 @@ public:
     RendererBackendStats stats() const override {
         RendererBackendStats stats = _stats;
         std::tie(stats.texture_uploads, stats.texture_upload_submits) = _device.upload_counts();
+        std::tie(stats.upload_staging_bytes, stats.upload_staging_allocations) = _device.staging_stats();
         return stats;
     }
     void set_gpu_timing_enabled(bool enabled) override;
@@ -123,6 +136,7 @@ public:
 
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
     Texture create_texture(Vec2i size, TextureFormat format, const void* pixels) override;
+    Texture create_texture_compressed(const CompressedImage& image) override;
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,
                        const std::function<void(std::span<u8>)>& fill) override;
@@ -135,6 +149,9 @@ public:
         _jobs = jobs;
         _device.set_job_system(jobs);
     }
+#if defined(KIN_EXPERIMENTAL_3D)
+    IRendererBackend3D* renderer_3d() override;
+#endif
 
     void fill_rect(Rectf rect, Color color) override;
     void draw_rect(Rectf rect, Color color) override;
@@ -201,6 +218,9 @@ public:
     void set_post_process(std::span<const PostProcessPass> passes) override;
 
 private:
+#if defined(KIN_EXPERIMENTAL_3D)
+    friend class gpu::GpuRenderer3D; // records views into this frame, with its device and pipelines
+#endif
     // The blend a draw uses: its own (`natural`) under BlendMode::Alpha, else
     // the one set with set_blend_mode.
     gpu::GpuBlendMode resolve_blend(gpu::GpuBlendMode natural) const;
@@ -344,6 +364,15 @@ private:
     std::unordered_map<SDL_GPUShader*, u64> _fragment_ids; // created shaders' hashes
     void make_hinted_pipelines(u64 fragment_id, SDL_GPUShader* fragment);
     u32 _untimed_frames = 0; // submitted without a fence since the last timed one (timer full)
+    // Frames that showed nothing (a hidden or minimized window: no swapchain
+    // texture, so SDL does not hold the CPU back): each one's end, an empty
+    // command buffer's fence after it. More than max_unshown_in_flight
+    // pending: the oldest is waited for, so the CPU can't run ahead and pile
+    // up frames (and the render targets they cycle) without bound.
+    static constexpr std::size_t max_unshown_in_flight = 2;
+    std::deque<SDL_GPUFence*> _unshown_fences;
+    void hold_back_unshown_frame();
+    void release_unshown_fences(bool wait);
     // The open gpu_scope(): its name, and whether it is timed (the timer had room).
     std::optional<std::string> _scope;
     bool _scope_timed = false;
@@ -407,6 +436,9 @@ private:
     Vec2i coordinate_extent() const; // the same, in whole units
     f32 coordinates_to_pixels() const; // the current target's pixels per draw unit
     std::vector<std::vector<SDL_Rect>> _saved_clip_stacks; // clip per pushed target
+#if defined(KIN_EXPERIMENTAL_3D)
+    std::unique_ptr<gpu::GpuRenderer3D> _renderer_3d; // made when a Renderer3D first asks
+#endif
     std::vector<gpu::GpuShader> _shaders;                // custom material fragment shaders (handle = index+1)
     Vec2f _view_offset{0.0f, 0.0f};                      // active viewport origin (coord space); added to all verts
     std::vector<Vec2f> _view_offset_stack;              // saved offsets for push/pop_viewport

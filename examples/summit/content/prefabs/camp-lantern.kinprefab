@@ -1,0 +1,121 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "camp-lantern",
+  "root": "lantern",
+  "entities": [
+    {
+      "id": "lantern",
+      "components": {
+        "Transform3D": {
+          "position": [
+            -0.4159033,
+            -0.0978235,
+            -0.1051427
+          ],
+          "scale": [
+            2.2,
+            2.2,
+            2.2
+          ],
+          "rotation": [
+            -0.0943431,
+            0.0747312,
+            0.6163897,
+            -0.7781892
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/bottle.glb"
+        },
+        "ModelMaterials3D": {
+          "asset": "materials/lantern.kinmaterials",
+          "variant": "glow"
+        },
+        "PointLight3D": {
+          "color": [
+            2,
+            1.2,
+            0.25
+          ],
+          "radius": 2.5,
+          "size": 0.05
+        }
+      }
+    },
+    {
+      "id": "base",
+      "parent": "lantern",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            -0.015,
+            0
+          ],
+          "scale": [
+            0.34,
+            0.09,
+            0.34
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/box.glb"
+        },
+        "ModelMaterials3D": {
+          "asset": "materials/lantern.kinmaterials",
+          "variant": "frame"
+        }
+      }
+    },
+    {
+      "id": "cap",
+      "parent": "lantern",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0.14,
+            0
+          ],
+          "scale": [
+            0.34,
+            0.09,
+            0.34
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/box.glb"
+        },
+        "ModelMaterials3D": {
+          "asset": "materials/lantern.kinmaterials",
+          "variant": "frame"
+        }
+      }
+    },
+    {
+      "id": "handle",
+      "parent": "lantern",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0.16,
+            0
+          ],
+          "scale": [
+            0.07,
+            0.16,
+            0.07
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/box.glb"
+        },
+        "ModelMaterials3D": {
+          "asset": "materials/lantern.kinmaterials",
+          "variant": "frame"
+        }
+      }
+    }
+  ]
+}

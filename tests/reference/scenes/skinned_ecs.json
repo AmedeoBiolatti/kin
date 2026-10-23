@@ -1,0 +1,178 @@
+{
+ "name": "skinned_ecs",
+ "purpose": "Characters as entities (P1a part 2): SkinnedMeshRenderer and Animator3D with a state machine and a blend space over `speed` (bend at 0, wave at 1; the fourth ramps 0 to 1 over 8 s), stepped by WorldRenderState3D::animate at 60 Hz for 250 steps and drawn by collect(). Equal to skinned_blend, which samples the same blend directly.",
+ "models": [
+  {
+   "file": "made/floor20.glb"
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    -3.0,
+    0,
+    0
+   ],
+   "animation": {
+    "blend": {
+     "parameter": 0.0,
+     "points": [
+      {
+       "clip": "bend",
+       "position": 0.0
+      },
+      {
+       "clip": "wave",
+       "position": 1.0
+      }
+     ]
+    },
+    "ecs": true
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    -1.0,
+    0,
+    0
+   ],
+   "animation": {
+    "blend": {
+     "parameter": 0.33,
+     "points": [
+      {
+       "clip": "bend",
+       "position": 0.0
+      },
+      {
+       "clip": "wave",
+       "position": 1.0
+      }
+     ]
+    },
+    "ecs": true
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    1.0,
+    0,
+    0
+   ],
+   "animation": {
+    "blend": {
+     "parameter": 0.66,
+     "points": [
+      {
+       "clip": "bend",
+       "position": 0.0
+      },
+      {
+       "clip": "wave",
+       "position": 1.0
+      }
+     ]
+    },
+    "ecs": true
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    3.0,
+    0,
+    0
+   ],
+   "animation": {
+    "blend": {
+     "parameter": 0.0,
+     "points": [
+      {
+       "clip": "bend",
+       "position": 0.0
+      },
+      {
+       "clip": "wave",
+       "position": 1.0
+      }
+     ],
+     "parameter_to": 1.0,
+     "parameter_seconds": 8.0
+    },
+    "ecs": true
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -6,
+    -0.3,
+    -6
+   ],
+   [
+    6,
+    5,
+    6
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0,
+    1.6,
+    9.0
+   ],
+   "target": [
+    0,
+    1.3,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "above",
+   "eye": [
+    -4.0,
+    6.5,
+    6.5
+   ],
+   "target": [
+    0,
+    1.0,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  }
+ ]
+}

@@ -23,6 +23,9 @@ components with it. Each license is in the fetched source tree, under
 | [earcut.hpp](https://github.com/mapbox/earcut.hpp) | 3.2.4 | ISC | Mapbox |
 | [dr_libs](https://github.com/mackron/dr_libs) (dr_wav, dr_flac, dr_mp3) | commit dfe8377 (dr_wav 0.14.6, dr_flac 0.13.4, dr_mp3 0.7.4 pre-release) | Public domain (Unlicense) or MIT-0 | David Reid |
 | [stb_vorbis](https://github.com/nothings/stb) | 1.22 (commit 2c980bb) | Public domain (Unlicense) or MIT | Sean Barrett |
+| [cgltf](https://github.com/jkuhlmann/cgltf) (with `KIN_EXPERIMENTAL_3D`) | 1.14 | MIT | Johannes Kuhlmann |
+| [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`; simplifier, meshlet builder, cluster partitioner, index and vertex-cache tools) | 0.25 | MIT | Arseny Kapoulkine |
+| [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (with `KIN_EXPERIMENTAL_3D`; the rigid body engine behind `kin/physics3d`) | 5.5.0 | MIT | Jorrit Rouwe |
 
 ## Libraries bundled by SDL_image and SDL_ttf
 
@@ -41,3 +44,31 @@ are compiled in as well:
 The FreeType License asks that documentation for binary distributions credit it,
 for example: "Portions of this software are copyright © 2026 The FreeType
 Project (https://freetype.org). All rights reserved."
+
+## Bundled example assets
+
+Summit includes a selected subset of [Survival Kit 2.0 by Kenney](https://kenney.nl/assets/survival-kit), released under
+[CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/). The original license and a source/checksum manifest are in
+`examples/summit/content/kenney-survival/` and accompany the game's content package. These selected models and their shared
+colour atlas are unmodified. Summit also includes a fitted survivor mesh/skin and retargeted animations derived from
+[Kenney Animated Characters Survivors](https://kenney.nl/assets/animated-characters-survivors), CC0-1.0; its license and
+modification manifest are in `examples/summit/content/kenney-character/`.
+
+Summit's rock/ground materials derive from ambientCG's [Rock030](https://ambientcg.com/view?id=Rock030) and
+[Ground037](https://ambientcg.com/view?id=Ground037) by Lennart Demes, [CC0-1.0](https://docs.ambientcg.com/license/).
+The original colour/OpenGL normal JPEGs and derived packed AO/roughness maps are bundled with source manifests and a license
+notice in `examples/summit/content/ambientcg/`. See `examples/summit/content/README.md` for budgets and reproduction commands.
+
+## Reference assets (fetched, never distributed)
+
+`tools/reference/fetch.py` downloads sample models into a developer's cache for the 3D reference scenes and tests; none of them is
+committed, packed or shipped with kin. They come from the
+[Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets), pinned to one commit and checked against
+`tools/reference/assets.lock.json`:
+
+| Asset | Used for | License |
+|---|---|---|
+| CesiumMan | the `skinned_cesium` scene | CC BY 4.0 (Cesium); the Cesium logo and trademarks are excluded |
+| Fox | the `skinned_fox` scene and the animation timing | CC0 1.0 (PixelMannen, the model) and CC BY 4.0 (tomkranis, rigging and animation) |
+| BrainStem | locked and downloaded; not yet in a scene | Poser EULA (Keith Hunter): not redistributed |
+| Flight Helmet, Sponza | the `helmet` and `sponza` scenes | CC0 1.0; Cryengine Limited License Agreement (Crytek) |

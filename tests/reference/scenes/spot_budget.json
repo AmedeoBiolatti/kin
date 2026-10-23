@@ -1,0 +1,447 @@
+{
+ "name": "spot_budget",
+ "purpose": "The budget (P3b): twelve coloured spot lights over a field of posts and pillars, every one asking for a shadow, four shadow maps to give; the camera tracks along (`pan`), so the importance of each light changes as it goes. The hysteresis keeps the choice from flipping. Deterministic: two runs give the same pictures; the test checks the choice follows importance and does not flicker.",
+ "procedural": "stage",
+ "stage": {
+  "walls": false,
+  "pillars": [
+   [
+    -9.0,
+    -3.0
+   ],
+   [
+    -3.0,
+    -9.0
+   ],
+   [
+    3.0,
+    -3.0
+   ],
+   [
+    9.0,
+    -9.0
+   ],
+   [
+    -6.0,
+    -6.0
+   ],
+   [
+    6.0,
+    -6.0
+   ]
+  ],
+  "poles": [
+   [
+    -8.0,
+    -5.0
+   ],
+   [
+    -2.0,
+    -1.0
+   ],
+   [
+    4.0,
+    -7.0
+   ],
+   [
+    10.0,
+    -2.0
+   ],
+   [
+    0.0,
+    -5.0
+   ]
+  ],
+  "trees": [
+   [
+    -10.0,
+    -7.0
+   ],
+   [
+    8.0,
+    -4.0
+   ]
+  ],
+  "benches": [
+   [
+    -5.0,
+    -2.0
+   ],
+   [
+    5.0,
+    -8.0
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.0,
+  "background": [
+   5,
+   5,
+   8
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    0,
+    0,
+    0
+   ]
+  },
+  "ambient": [
+   0.02,
+   0.022,
+   0.03
+  ],
+  "max_shadowed_spots": 4,
+  "spots": [
+   {
+    "position": [
+     -10.0,
+     5.0,
+     1.0
+    ],
+    "target": [
+     -10.0,
+     0.0,
+     -3.0
+    ],
+    "color": [
+     63.0,
+     54.0,
+     36.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     -6.0,
+     5.0,
+     1.0
+    ],
+    "target": [
+     -6.0,
+     0.0,
+     -3.0
+    ],
+    "color": [
+     36.0,
+     54.0,
+     72.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     -2.0,
+     5.0,
+     1.0
+    ],
+    "target": [
+     -2.0,
+     0.0,
+     -3.0
+    ],
+    "color": [
+     63.0,
+     36.0,
+     45.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     2.0,
+     5.0,
+     1.0
+    ],
+    "target": [
+     2.0,
+     0.0,
+     -3.0
+    ],
+    "color": [
+     45.0,
+     63.0,
+     40.5
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     6.0,
+     5.0,
+     1.0
+    ],
+    "target": [
+     6.0,
+     0.0,
+     -3.0
+    ],
+    "color": [
+     63.0,
+     54.0,
+     36.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     10.0,
+     5.0,
+     1.0
+    ],
+    "target": [
+     10.0,
+     0.0,
+     -3.0
+    ],
+    "color": [
+     36.0,
+     54.0,
+     72.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     -8.0,
+     5.0,
+     -5.0
+    ],
+    "target": [
+     -8.0,
+     0.0,
+     -9.0
+    ],
+    "color": [
+     63.0,
+     36.0,
+     45.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     -4.0,
+     5.0,
+     -5.0
+    ],
+    "target": [
+     -4.0,
+     0.0,
+     -9.0
+    ],
+    "color": [
+     45.0,
+     63.0,
+     40.5
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     0.0,
+     5.0,
+     -5.0
+    ],
+    "target": [
+     0.0,
+     0.0,
+     -9.0
+    ],
+    "color": [
+     63.0,
+     54.0,
+     36.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     4.0,
+     5.0,
+     -5.0
+    ],
+    "target": [
+     4.0,
+     0.0,
+     -9.0
+    ],
+    "color": [
+     36.0,
+     54.0,
+     72.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     8.0,
+     5.0,
+     -5.0
+    ],
+    "target": [
+     8.0,
+     0.0,
+     -9.0
+    ],
+    "color": [
+     63.0,
+     36.0,
+     45.0
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   },
+   {
+    "position": [
+     12.0,
+     5.0,
+     -5.0
+    ],
+    "target": [
+     12.0,
+     0.0,
+     -9.0
+    ],
+    "color": [
+     45.0,
+     63.0,
+     40.5
+    ],
+    "radius": 14.0,
+    "size": 0.15,
+    "inner": 14.0,
+    "outer": 28.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 512
+   }
+  ]
+ },
+ "cameras": [
+  {
+   "name": "start",
+   "eye": [
+    -8.0,
+    3.0,
+    6.0
+   ],
+   "target": [
+    -4.0,
+    0.5,
+    -5.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "pan": [
+    0.03,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "middle",
+   "eye": [
+    0.0,
+    3.0,
+    6.0
+   ],
+   "target": [
+    0.0,
+    0.5,
+    -5.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "pan": [
+    0.03,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "end",
+   "eye": [
+    8.0,
+    3.0,
+    6.0
+   ],
+   "target": [
+    4.0,
+    0.5,
+    -5.0
+   ],
+   "fov": 60,
+   "near": 0.1,
+   "pan": [
+    0.03,
+    0.0,
+    0.0
+   ]
+  }
+ ]
+}

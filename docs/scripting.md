@@ -1,10 +1,14 @@
 # Scripting
 
-Kin runs Lua 5.4 (through sol2) in two hosts:
+Kin runs Lua 5.4 (through sol2) in these hosts:
 
 - **`ScriptScene`** (`kin/scripting/script_scene.hpp`): a scene written in Lua.
   The script gets the scene's ECS world, input and rendering, and can register
   ECS systems ([systems](ecs_systems.md#registering-lua-systems)).
+- **`SceneSession3D`**: authored 3D scenes use the shared Lua ECS API and native
+  frame stages, with checked physics, prepared prefab pools, animation/IK, and
+  traversal, ragdoll and rope controls. See the
+  [3D Lua workflow](rendering_3d.md#lua-gameplay-in-a-3d-scene) and `examples/lua_range`.
 - **`LuaScript`** (`kin/scripting/lua_script.hpp`): a script for code that does
   not live in the ECS, such as a game's rules, AI, balance formulas or level
   logic, run by plain C++. It knows nothing of scenes or entities: the host
@@ -78,6 +82,18 @@ Nothing a script does stops the game. A load or call that fails returns false,
 and `error()` holds the message with the script's name and line
 (`rules.lua:12: attempt to index a nil value`). Each failure goes to
 `LuaScriptOptions::on_error`, or is logged as a warning under `script`.
+
+Native binding exceptions use the same script-position reporting, including
+errors caught by `pcall` or raised inside a module/callback.
+
+In the shared ECS API (`ScriptScene` and `SceneSession3D`), destroyed reflected
+entities reject component access and mutations with `stale or foreign entity
+handle`. This includes `has()` and a second `destroy()` in 2D scripts.
+`alive()` and `valid()` return false; `id()` remains available for diagnostics.
+Deferred entity placeholders belong to the command buffer's current batch.
+After a flush/clear, or in another buffer, using one raises
+`stale or foreign deferred entity handle`. Query a live entity after creation
+before retaining a handle across frames.
 
 A load runs the script in a **fresh** state, which replaces the loaded one
 only if it parses and runs; otherwise the previous script stays, handlers and

@@ -5,6 +5,8 @@
 #include <kin/scripting/script_scene.hpp>
 
 #include <cassert>
+#include <cstdio>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -372,11 +374,98 @@ end
 
 } // namespace
 
+void test_linked_prefab_save_roundtrip() {
+    const auto root = std::filesystem::temp_directory_path() / "kin-linked-scene-save";
+    write_prefab_file(root / "forge.kinprefab");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    world.components().data("SaveLinks").field_entity_ref("target");
+    auto linked_source = kin::load_prefab_asset(root / "forge.kinprefab", world.components());
+    assert(linked_source.ok());
+    linked_source.prefab->entities[0].components.push_back({"SaveLinks", {{"target",kin::ComponentEntityRef{.authored_id="core"}}}});
+    assert(kin::save_prefab_asset(*linked_source.prefab, root / "forge.kinprefab"));
+    auto loaded = kin::parse_scene_asset(R"({"name":"Linked scene","script":"game.lua","clear_color":[1,2,3],
+      "entities":[{"id":"anchor"},{"id":"attachment","parent":"forge.core","components":{"SaveLinks":{"target":"forge.core"}}}],"prefabs":[
+      {"id":"forge","asset":"forge.kinprefab","parent":"anchor","pos":[12,13],
+       "overrides":{"core":{"RectRenderer":{"visible":false}}}},
+      {"id":"other","asset":"forge.kinprefab","parent":"forge.core","overrides":{"root":{"SaveLinks":{"target":"forge.core"}}}}]})", world.components());
+    assert(loaded.ok());
+    auto instance = kin::instantiate_scene_asset(world, *loaded.scene, root, world.components());
+    assert(instance.ok());
+    auto forge = instance.by_authored_id.at("forge");
+    auto core = instance.by_authored_id.at("forge.core");
+    assert(forge.get<kin::PrefabInstanceComponent>()->source ==
+           instance.by_authored_id.at("other").get<kin::PrefabInstanceComponent>()->source);
+    core.get_mut<kin::RectRenderer>()->size = {20,21};
+    auto runtime = world.entity("runtime-only").set(kin::Transform2D{});
+    auto saved = kin::build_scene_asset(world);
+    for (const auto& error : saved.diagnostics) std::fprintf(stderr, "%s\n", error.c_str());
+    assert(saved.ok() && saved.scene->prefabs.size() == 2 && saved.scene->entities.size() == 2);
+    assert(saved.scene->name == "Linked scene" && saved.scene->script == "game.lua" && saved.scene->clear_color.r == 1);
+    const auto found = std::ranges::find_if(saved.scene->prefabs, [](const auto& value) { return value.id == "forge"; });
+    assert(found != saved.scene->prefabs.end());
+    assert(found->overrides.entities.at("root")[0].fields.size() == 1); // pos only; defaults remain inherited
+    const auto& changed = found->overrides.entities.at("core")[0].fields;
+    assert(changed.size() == 2 && changed[0].name == "size" && changed[1].name == "visible");
+    std::ostringstream first; kin::write_scene_asset(first, *saved.scene);
+    std::ostringstream second; kin::write_scene_asset(second, kin::scene_asset_from_world(world));
+    assert(first.str() == second.str());
+    auto source = kin::load_prefab_asset(root / "forge.kinprefab", world.components());
+    assert(source.ok());
+    for (auto& component : source.prefab->entities[1].components) for (auto& field : component.fields)
+        if (field.name == "color") field.value = kin::Color::rgb(77,88,99);
+    assert(kin::save_prefab_asset(*source.prefab, root / "forge.kinprefab"));
+    kin::EcsWorld copy; kin::register_builtin_editor_components(copy);
+    copy.components().data("SaveLinks").field_entity_ref("target");
+    auto reparsed = kin::parse_scene_asset(first.str(), copy.components());
+    assert(reparsed.ok());
+    auto restored = kin::instantiate_scene_asset(copy, *reparsed.scene, root, copy.components());
+    assert(restored.ok());
+    auto restored_core = restored.by_authored_id.at("forge.core");
+    assert(restored_core.get<kin::RectRenderer>()->color.r == 77); // updated source default flows through
+    assert((restored_core.get<kin::RectRenderer>()->size == kin::Vec2f{20,21}));
+    assert(!restored_core.get<kin::RectRenderer>()->visible);
+    assert((restored.by_authored_id.at("forge").get<kin::Transform2D>()->pos == kin::Vec2f{12,13}));
+    assert(restored.by_authored_id.at("attachment").parent().id() == restored_core.id());
+    assert(restored.by_authored_id.at("other").parent().id() == restored_core.id());
+    for (const auto& id : {"forge", "other", "attachment"}) {
+        const auto links = copy.components().snapshot(restored.by_authored_id.at(id), "SaveLinks");
+        assert(links && std::get<kin::ComponentEntityRef>(links->fields[0].value).id == restored_core.id());
+    }
+    const auto attachment=instance.by_authored_id.at("attachment");
+    assert(world.components().patch_field(attachment,"SaveLinks","target",kin::ComponentEntityRef{.id=runtime.id()}));
+    assert(!kin::build_scene_asset(world).ok()); // runtime targets need an explicit export decision
+    const auto with_linked_runtime=kin::build_scene_asset(world,{.include_runtime_entities=true});
+    for (const auto& error:with_linked_runtime.diagnostics) std::fprintf(stderr,"%s\n",error.c_str());
+    assert(with_linked_runtime.ok());
+    assert(world.components().patch_field(attachment,"SaveLinks","target",kin::ComponentEntityRef{.id=core.id()}));
+    core.remove<kin::RectRenderer>();
+    assert(kin::build_scene_asset(world).ok()); // removing the private copy restores inherited defaults
+    assert(world.entities().rename(core, "Edited Core"));
+    const auto renamed=kin::build_scene_asset(world);
+    assert(renamed.ok()&&renamed.scene->prefabs[0].overrides.names.at("core")=="Edited Core");
+    auto flat = kin::build_scene_asset(world, {.preserve_prefabs = false});
+    assert(flat.ok() && flat.scene->prefabs.empty() && flat.scene->entities.size() == 6);
+    auto with_runtime = kin::build_scene_asset(world, {.include_runtime_entities = true, .preserve_prefabs = false});
+    for (const auto& error : with_runtime.diagnostics) std::fprintf(stderr, "%s\n", error.c_str());
+    assert(with_runtime.ok() && with_runtime.scene->entities.size() == 7);
+    restored_core.destroy();
+    assert(!kin::build_scene_asset(copy).ok()); // deleted source children are never silently recreated by a save
+    auto cyclic = kin::parse_scene_asset(R"({"entities":[{"id":"a","parent":"b"},{"id":"b","parent":"a"}]})", copy.components());
+    assert(!cyclic.ok());
+    auto invalid = kin::parse_scene_asset(R"({"entities":[{"id":"rolled-back"}],"prefabs":[{"id":"missing","asset":"missing.kinprefab"}]})", world.components());
+    assert(invalid.ok());
+    assert(!kin::instantiate_scene_asset(world,*invalid.scene,root,world.components()).ok());
+    assert(!world.entities().find_by_authored_id("rolled-back") && world.entities().find_by_authored_id("anchor"));
+    std::filesystem::remove_all(root);
+}
+
 int main() {
     test_scene_asset_instantiates_entities_and_prefabs();
     test_scene_validation_rejects_bad_component();
     test_prefab_scene_asset_instantiates_after_script_owned_component();
     test_scene_asset_runtime_reloads_scene_and_keeps_old_on_invalid();
     test_scene_asset_runtime_reloads_prefab_and_preserves_overrides();
+    test_linked_prefab_save_roundtrip();
     return 0;
 }

@@ -1,18 +1,23 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "ship",
       "displayName": "Shipping (Ninja)",
-      "description": "Games for players: KIN_SHIPPING, Release, no tests. On Windows, run from a Visual Studio developer prompt.",
+      "description": "Games for players: KIN_SHIPPING, Release, no tests, no experimental 3D engine. On Windows, run from a Visual Studio developer prompt.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build-ship",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "KIN_SHIPPING": "ON",
         "KIN_BUILD_TESTS": "OFF",
-        "KIN_BUILD_BENCHMARKS": "OFF"
+        "KIN_BUILD_BENCHMARKS": "OFF",
+        "KIN_EXPERIMENTAL_3D": "OFF"
       }
     },
     {
@@ -21,11 +26,79 @@
       "inherits": "ship",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
-      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "2d",
+      "displayName": "2D engine and samples",
+      "description": "Release build with the 2D GPU/software renderer and tests; no 3D engine, physics dependencies or shaders.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-2d",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "KIN_EXPERIMENTAL_3D": "OFF"
+      }
+    },
+    {
+      "name": "3d",
+      "displayName": "Experimental 3D engine and samples",
+      "inherits": "2d",
+      "binaryDir": "${sourceDir}/build-3d",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON"
+      },
+      "description": "Release build with the experimental 3D renderer, physics, samples and tests."
     }
   ],
   "buildPresets": [
-    { "name": "ship", "configurePreset": "ship", "configuration": "Release" },
-    { "name": "ship-vs", "configurePreset": "ship-vs", "configuration": "Release" }
+    {
+      "name": "ship",
+      "configurePreset": "ship",
+      "configuration": "Release"
+    },
+    {
+      "name": "ship-vs",
+      "configurePreset": "ship-vs",
+      "configuration": "Release"
+    },
+    {
+      "name": "2d",
+      "configurePreset": "2d",
+      "jobs": 4
+    },
+    {
+      "name": "3d",
+      "configurePreset": "3d",
+      "jobs": 4
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "2d",
+      "configurePreset": "2d",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      },
+      "environment": {
+        "KIN_RENDER_BACKEND": "sdl"
+      }
+    },
+    {
+      "name": "3d",
+      "configurePreset": "3d",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "jobs": 2
+      }
+    }
   ]
 }

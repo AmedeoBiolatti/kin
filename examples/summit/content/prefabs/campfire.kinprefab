@@ -1,0 +1,40 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "campfire",
+  "root": "campfire",
+  "entities": [
+    {
+      "id": "campfire",
+      "components": {
+        "Transform3D": {}
+      }
+    },
+    {
+      "id": "pit",
+      "parent": "campfire",
+      "components": {
+        "Transform3D": {
+          "scale": [
+            3.42,
+            3.42,
+            3.42
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/campfire-pit.glb"
+        },
+        "ModelMaterials3D": {
+          "asset": "materials/camp.kinmaterials",
+          "variant": "ember"
+        }
+      }
+    }
+  ],
+  "prefabs": [
+    {
+      "id": "effect",
+      "asset": "prefabs/campfire-effect.kinprefab",
+      "parent": "campfire"
+    }
+  ]
+}

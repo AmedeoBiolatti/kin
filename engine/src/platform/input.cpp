@@ -106,6 +106,7 @@ SDL_Scancode to_sdl_scancode(Key key) {
     case Key::F12: return SDL_SCANCODE_F12;
     case Key::PageUp: return SDL_SCANCODE_PAGEUP;
     case Key::PageDown: return SDL_SCANCODE_PAGEDOWN;
+    case Key::LeftShift: return SDL_SCANCODE_LSHIFT;
     case Key::Unknown: return SDL_SCANCODE_UNKNOWN;
     }
     return SDL_SCANCODE_UNKNOWN;
@@ -253,6 +254,7 @@ std::string_view key_name(Key key) {
     case Key::F12: return "F12";
     case Key::PageUp: return "PageUp";
     case Key::PageDown: return "PageDown";
+    case Key::LeftShift: return "LeftShift";
     }
     return "Unknown";
 }
@@ -467,6 +469,7 @@ void Input::advance_step_edges() {
     _key_pressed.fill(false);
     _key_released.fill(false);
     _mouse_wheel_y = 0.0f;
+    _mouse_motion = {};
 }
 
 void Input::consume_frame_edges() {
@@ -476,6 +479,7 @@ void Input::consume_frame_edges() {
     _mouse_frame_pressed.fill(false);
     _mouse_frame_released.fill(false);
     _frame_mouse_wheel_y = 0.0f;
+    _frame_mouse_motion = {};
     _text_input.clear();
 }
 
@@ -496,6 +500,7 @@ void Input::begin_frame(bool advance_transients) {
         // App::run already used the step wheel up in that step (advance_step_edges);
         // this clears it for callers that step without it (run_for, tests).
         _mouse_wheel_y = 0.0f;
+        _mouse_motion = {};
     } else {
         // A 0-step frame (refresh > sim rate): the per-frame MOUSE edges PERSIST so UI
         // driven from update() can still read a click that landed here on the next
@@ -526,6 +531,7 @@ void Input::begin_frame(bool advance_transients) {
     _key_frame_released.fill(false);
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
+    _frame_mouse_motion = {};
     _text_input.clear();
 }
 
@@ -551,6 +557,11 @@ void Input::process_native_event(const void* native_event) {
         _key_cur[event.key.scancode] = false;
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
     } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+        _last_mouse_motion_event_time_ns = event.motion.timestamp;
+        _mouse_motion.x += event.motion.xrel;
+        _mouse_motion.y += event.motion.yrel;
+        _frame_mouse_motion.x += event.motion.xrel;
+        _frame_mouse_motion.y += event.motion.yrel;
         _mouse_pos = {event.motion.x, event.motion.y};
         _mouse_window = static_cast<WindowId>(event.motion.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
@@ -714,6 +725,13 @@ Vec2f Input::drag_delta(MouseButton button) const {
         _mouse_pos.x - _drag_start[raw_button].x,
         _mouse_pos.y - _drag_start[raw_button].y,
     };
+}
+
+void Input::set_mouse_motion(Vec2f delta) {
+    _mouse_motion.x += delta.x;
+    _mouse_motion.y += delta.y;
+    _frame_mouse_motion.x += delta.x;
+    _frame_mouse_motion.y += delta.y;
 }
 
 void Input::set_mouse_wheel_y(f32 value) {

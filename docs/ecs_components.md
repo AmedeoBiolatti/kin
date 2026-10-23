@@ -21,10 +21,33 @@ world.components().native<Transform2D>("Transform2D")
     .field("rotation", &Transform2D::rotation);
 ```
 
-Fields are explicit member pointers. C++ cannot form a pointer like
-`&Transform2D::pos.x`, so V1 exposes `Vec2f`, `Vec2i`, and `Color` as first-class
-field values. Subfield accessors can be added later if editor UX needs separate
-`x` and `y` rows.
+Fields can be explicit member pointers or reflected properties. `Vec2f`,
+`Vec2i`, `Vec3f`, `Quatf` and `Color` are first-class field values. Properties
+adapt nested members or enums to the same inspection, patch and JSON paths:
+
+```cpp
+builder.property<bool>("shadows",
+    [](const Light& light) { return light.shadow.enabled; },
+    [](Light& light, const bool& value) { light.shadow.enabled = value; return true; });
+```
+
+The setter returns false to reject a value; it must leave the component unchanged
+on rejection. Both reader and writer are required.
+
+Scene owners can install `set_field_patch_handler` to validate/commit live field
+patches before mutation. Return `nullopt` for ordinary construction paths, `true`
+after performing the edit, or `false` with an error. The handler must not recurse.
+`SceneSession3D` installs this policy on activated authored scene members; see
+[live 3D editing](rendering_3d.md#live-field-editing) for automatic asset/physics updates.
+Native reflected setters and registration callbacks used there must confine changes
+to the supplied component/world: external side effects and shared-pointee mutations
+cannot be rolled back. Standalone registry behavior is unchanged without a policy.
+
+`copy_component(source, name, destination_registry, target)` copies full native
+runtime state or data values between matching registrations, including unreflected
+native handles and data tags. It bypasses field policies/setters and does no entity
+reference remapping. This is a staging/tool primitive; persistence uses the existing
+reflected snapshots and scene/prefab documents.
 
 Supported V1 field kinds:
 
@@ -32,11 +55,21 @@ Supported V1 field kinds:
 - `i32`, `i64`, `u32`, `u64`
 - `f32`, `f64`
 - `std::string`
-- `Vec2f`, `Vec2i`
+- `Vec2f`, `Vec2i`, `Vec3f`, `Quatf`
 - `Color`
+- `ComponentAssetRef` (a content path string, with runtime resources stored separately)
 
 `EntityRef` and `AssetRef` are supported metadata values. Scene and prefab JSON
 can store entity refs by authored id; instantiation remaps them to runtime ids.
+Native member fields support asset refs; entity refs remain data-component fields.
+`vec3f` accepts a three-number JSON array or an object with `x/y/z`; `quatf`
+accepts four numbers in `x/y/z/w` order or an object with those members.
+New 3D values must be finite and rotations must be unit quaternions (squared-length
+tolerance 0.001). Invalid JSON values, schema defaults and registry patches are rejected.
+Lua uses tables with the same named members. These value types are available even
+without experimental 3D rendering enabled.
+Lua `scene:with()` and `scene:count()` also recognize shared registry components,
+including schema-defined data components, without a separate script registration.
 
 ## Registering Data Components
 

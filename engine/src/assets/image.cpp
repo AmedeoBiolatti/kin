@@ -18,7 +18,37 @@ std::string path_string(const std::filesystem::path& path) {
     return path.string();
 }
 
+// The surface's pixels as tightly packed RGBA; frees it.
+Image to_image(SDL_Surface* converted) {
+    Image image;
+    image.size = {converted->w, converted->h};
+    image.rgba.resize(static_cast<std::size_t>(image.size.x * image.size.y * 4));
+    const auto* src = static_cast<const u8*>(converted->pixels);
+    const std::size_t row_bytes = static_cast<std::size_t>(image.size.x * 4);
+    for (i32 row = 0; row < image.size.y; ++row) {
+        std::memcpy(image.rgba.data() + static_cast<std::size_t>(row) * row_bytes,
+                    src + static_cast<std::size_t>(row) * static_cast<std::size_t>(converted->pitch), row_bytes);
+    }
+    SDL_DestroySurface(converted);
+    return image;
+}
+
 } // namespace
+
+Image decode_image(std::span<const u8> bytes, std::string_view name) {
+    SDL_IOStream* stream = SDL_IOFromConstMem(bytes.data(), bytes.size());
+    SDL_Surface* loaded = stream ? IMG_Load_IO(stream, true) : nullptr;
+    SDL_Surface* converted = loaded ? SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32) : nullptr;
+    if (loaded) {
+        SDL_DestroySurface(loaded);
+    }
+    if (!converted) {
+        KIN_LOG_ERROR_F("asset", "image decode failed",
+                        (LogFields{{.name = "name", .value = std::string{name}}, {.name = "error", .value = SDL_GetError()}}));
+        return {};
+    }
+    return to_image(converted);
+}
 
 Image load_image(const std::filesystem::path& path) {
     const std::string filename = path_string(path);
@@ -50,21 +80,7 @@ Image load_image(const std::filesystem::path& path) {
         throw std::runtime_error(error);
     }
 
-    Image image;
-    image.size = {converted->w, converted->h};
-    image.rgba.resize(static_cast<std::size_t>(image.size.x * image.size.y * 4));
-
-    const auto* src = static_cast<const u8*>(converted->pixels);
-    const std::size_t row_bytes = static_cast<std::size_t>(image.size.x * 4);
-    for (i32 row = 0; row < image.size.y; ++row) {
-        std::memcpy(
-            image.rgba.data() + static_cast<std::size_t>(row) * row_bytes,
-            src + static_cast<std::size_t>(row) * static_cast<std::size_t>(converted->pitch),
-            row_bytes
-        );
-    }
-
-    SDL_DestroySurface(converted);
+    Image image = to_image(converted);
     KIN_LOG_INFO_F("asset",
                    "image loaded",
                    (LogFields{

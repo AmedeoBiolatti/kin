@@ -268,6 +268,26 @@ When a `ProfileSession` is active, Kin records system timings as:
 <id>    category: ecs.system
 ```
 
+## Host phase boundaries
+
+Hosts can call `world.run_frame(dt, hooks[, mode])` with `SystemPhaseHooks::before`
+and/or `after` callbacks. Each receives `(SystemPhase, std::string& error)` and returns
+success. Callbacks run on the calling thread outside ECS iteration, including empty
+phases, after preceding batches have joined and flushed their command buffers. They
+may perform native work and ordinary ECS mutations, but must not rerun systems or
+rebuild the active schedule. Schedule/descriptor edits should happen between frames.
+
+The scheduler builds and validates the whole eligible graph before the first callback;
+rate and interval accounting happen once per frame, and the complete diagnostic
+snapshot remains available. Returning false or throwing reports a boundary error and
+stops later phases. A system failure finishes its current phase's batches and stops
+before that phase's after callback. Earlier commands/native work remain committed.
+Calls without hooks retain their existing continuation on system errors.
+
+`SceneSession3D` uses these hooks for physics after Physics, contact-driven lifecycle
+work after PostPhysics, and animation/particles after Animation. See the
+[C++ runtime prefab lifecycle](rendering_3d.md#c-runtime-prefab-gameplay) for request timing.
+
 ## Threading
 
 Kin supports opt-in concurrent execution for eligible Kin task systems and
@@ -304,6 +324,17 @@ world.systems().register_task({
 `remove<T>`, `set<T>`, and `modified<T>` commands. Commands can target existing
 entities by `EcsEntity` or `EcsId`, or entities created earlier in the same
 buffer by `EcsDeferredEntity`.
+
+Extensions can enqueue `defer(std::function<bool(EcsWorld&, std::string&)>)` for
+target-free work at the same flush point. The callback receives the actual flush
+world, returns false with an error on failure, and must not append to its buffer.
+Earlier successful commands remain applied if a later command fails. Captures are
+released when the buffer flush succeeds or the buffer is discarded. A failed flush
+retains its commands; discard it rather than retrying non-idempotent extension work.
+For 3D object lifecycles, use [SceneCommands3D](rendering_3d.md#c-runtime-prefab-gameplay)
+instead of loading/binding a prefab directly in an iteration or extension callback.
+It transfers a bounded request at flush and performs native work at the scene's
+next lifecycle boundary in `SceneSession3D::step()`.
 
 Flush rules:
 

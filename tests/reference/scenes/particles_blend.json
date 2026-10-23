@@ -1,0 +1,244 @@
+{
+ "name": "particles_blend",
+ "purpose": "Blend modes and order (P3c): two streams of 480 alpha puffs flowing toward the camera, red when young and far, blue when old and near, so the right order is blue over red. The left stream is drawn in the order the particles are kept (nearest first: wrong), the right sorted back to front. In the middle an additive green stream overlaps both (no order needed). 'front' shows all three, 'side' the sorted stream from the side.",
+ "procedural": "stage",
+ "stage": {
+  "walls": false,
+  "floor": false
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.3,
+  "background": [
+   0,
+   0,
+   0
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0,
+    1,
+    0
+   ],
+   "color": [
+    0,
+    0,
+    0
+   ]
+  },
+  "ambient": [
+   0.05,
+   0.05,
+   0.05
+  ]
+ },
+ "particles": [
+  {
+   "name": "unsorted",
+   "seed": 11,
+   "position": [
+    -1.36,
+    1.5,
+    -14.0
+   ],
+   "shape": "box",
+   "extent": [
+    0.3,
+    0.3,
+    0.2
+   ],
+   "rate": 100.0,
+   "max": 1000,
+   "simulate": 8.0,
+   "lifetime": [
+    4.0,
+    4.0
+   ],
+   "speed": [
+    0,
+    0
+   ],
+   "velocity_min": [
+    0,
+    0,
+    2.5
+   ],
+   "velocity_max": [
+    0,
+    0,
+    2.5
+   ],
+   "size": [
+    0.55,
+    0.8
+   ],
+   "alpha_start": 0.65,
+   "alpha_end": 0.65,
+   "color_start": [
+    1.0,
+    0.2,
+    0.1
+   ],
+   "color_end": [
+    0.1,
+    0.3,
+    1.0
+   ],
+   "look": {
+    "blend": "alpha",
+    "sort": false,
+    "lit": 0.0
+   }
+  },
+  {
+   "name": "sorted",
+   "seed": 11,
+   "position": [
+    1.36,
+    1.5,
+    -14.0
+   ],
+   "shape": "box",
+   "extent": [
+    0.3,
+    0.3,
+    0.2
+   ],
+   "rate": 100.0,
+   "max": 1000,
+   "simulate": 8.0,
+   "lifetime": [
+    4.0,
+    4.0
+   ],
+   "speed": [
+    0,
+    0
+   ],
+   "velocity_min": [
+    0,
+    0,
+    2.5
+   ],
+   "velocity_max": [
+    0,
+    0,
+    2.5
+   ],
+   "size": [
+    0.55,
+    0.8
+   ],
+   "alpha_start": 0.65,
+   "alpha_end": 0.65,
+   "color_start": [
+    1.0,
+    0.2,
+    0.1
+   ],
+   "color_end": [
+    0.1,
+    0.3,
+    1.0
+   ],
+   "look": {
+    "blend": "alpha",
+    "sort": true,
+    "lit": 0.0
+   }
+  },
+  {
+   "name": "additive",
+   "seed": 11,
+   "position": [
+    0.0,
+    1.5,
+    -14.0
+   ],
+   "shape": "box",
+   "extent": [
+    0.3,
+    0.3,
+    0.2
+   ],
+   "rate": 100.0,
+   "max": 1000,
+   "simulate": 8.0,
+   "lifetime": [
+    4.0,
+    4.0
+   ],
+   "speed": [
+    0,
+    0
+   ],
+   "velocity_min": [
+    0,
+    0,
+    2.5
+   ],
+   "velocity_max": [
+    0,
+    0,
+    2.5
+   ],
+   "size": [
+    0.55,
+    0.8
+   ],
+   "alpha_start": 0.65,
+   "alpha_end": 0.65,
+   "color_start": [
+    0.1,
+    0.8,
+    0.2
+   ],
+   "color_end": [
+    0.1,
+    0.8,
+    0.2
+   ],
+   "look": {
+    "blend": "additive",
+    "sort": false,
+    "lit": 0.0
+   }
+  }
+ ],
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0.0,
+    1.8,
+    2.0
+   ],
+   "target": [
+    0.0,
+    1.5,
+    -8.0
+   ],
+   "fov": 30,
+   "near": 0.1
+  },
+  {
+   "name": "side",
+   "eye": [
+    7.0,
+    2.5,
+    -3.0
+   ],
+   "target": [
+    0.0,
+    1.5,
+    -8.0
+   ],
+   "fov": 36,
+   "near": 0.1
+  }
+ ]
+}

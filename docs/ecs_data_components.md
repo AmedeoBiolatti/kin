@@ -15,7 +15,9 @@ world.components().data("Health")
 ```
 
 Data fields require defaults. Supported V1 kinds are `Bool`, integer and float
-scalars, `String`, `Vec2f`, `Vec2i`, `Color`, `EntityRef`, and `AssetRef`.
+scalars, `String`, `Vec2f`, `Vec2i`, `Vec3f`, `Quatf`, `Color`, `EntityRef`, and `AssetRef`.
+Use `.field_vec3f()` / `.field_quatf()` on the data builder, or `vec3f` /
+`quatf` kinds in `.kincomponents` schemas, with finite vectors and unit rotations.
 Entity refs can be serialized by authored id and remapped during scene/prefab
 instantiation.
 

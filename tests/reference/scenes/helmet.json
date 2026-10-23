@@ -1,0 +1,16 @@
+{
+ "name": "helmet",
+ "purpose": "Textured materials (base colour, normal, occlusion-roughness-metal maps), leather, glass, metal: the Flight Helmet (Khronos glTF Sample Assets, CC0).",
+ "models": [{"file": "flight_helmet/FlightHelmet.gltf"}],
+ "view": {"samples": 4, "background": [60, 64, 72]},
+ "lights": {
+  "sun": {"direction": [0.6, 0.8, 0.9], "color": [2.4, 2.35, 2.25]},
+  "ambient": [0.2, 0.21, 0.24],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {"name": "front", "fit": {"yaw": 20, "pitch": 10, "margin": 1.0}, "fov": 35, "near": 0.01},
+  {"name": "side", "fit": {"yaw": 100, "pitch": 5, "margin": 1.0}, "fov": 35, "near": 0.01}
+ ],
+ "truth": {"samples": 512}
+}

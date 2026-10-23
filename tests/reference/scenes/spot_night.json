@@ -1,0 +1,220 @@
+{
+ "name": "spot_night",
+ "purpose": "A night on a stage (P3b): two lamp posts with a spot light each (warm, shadowed), a flashlight carried with the camera (cool, shadowed, `attach`), the moon's faint light and a low ground mist; the spots are fogged like everything else. 'lamps' looks along the row of posts, 'torch' is the flashlight at pillars and a bench at the far end.",
+ "procedural": "stage",
+ "stage": {
+  "walls": false,
+  "pillars": [
+   [
+    -3.0,
+    -9.0
+   ],
+   [
+    4.0,
+    -11.0
+   ]
+  ],
+  "poles": [
+   [
+    0.5,
+    -6.0
+   ]
+  ],
+  "trees": [
+   [
+    -5.5,
+    -4.0
+   ],
+   [
+    6.0,
+    -3.0
+   ]
+  ],
+  "benches": [
+   [
+    2.5,
+    -1.5
+   ]
+  ],
+  "lamps": [
+   [
+    -4.0,
+    0.0,
+    4.2
+   ],
+   [
+    5.0,
+    -5.0,
+    4.2
+   ]
+  ]
+ },
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.35,
+  "background": [
+   0,
+   0,
+   0
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    0,
+    0,
+    0
+   ]
+  },
+  "ambient": [
+   0.012,
+   0.014,
+   0.022
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 2,
+  "shadow_distance": 60,
+  "spots": [
+   {
+    "position": [
+     -4.0,
+     4.3,
+     0.0
+    ],
+    "direction": [
+     0.25,
+     -1.0,
+     -0.15
+    ],
+    "color": [
+     60,
+     48,
+     30
+    ],
+    "radius": 18.0,
+    "size": 0.2,
+    "inner": 25.0,
+    "outer": 52.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
+   },
+   {
+    "position": [
+     5.0,
+     4.3,
+     -5.0
+    ],
+    "direction": [
+     -0.2,
+     -1.0,
+     0.1
+    ],
+    "color": [
+     60,
+     48,
+     30
+    ],
+    "radius": 18.0,
+    "size": 0.2,
+    "inner": 25.0,
+    "outer": 52.0,
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
+   },
+   {
+    "position": [
+     0.0,
+     0.0,
+     0.0
+    ],
+    "direction": [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    "color": [
+     140,
+     150,
+     170
+    ],
+    "radius": 30.0,
+    "size": 0.05,
+    "inner": 6.0,
+    "outer": 14.0,
+    "attach": {
+     "offset": [
+      0.25,
+      -0.25,
+      0.4
+     ]
+    },
+    "shadow_enabled": true,
+    "shadow_resolution": 1024
+   }
+  ]
+ },
+ "sky": {
+  "enabled": true,
+  "stars": true,
+  "star_brightness": 8.0,
+  "moon": {
+   "enabled": true,
+   "size": 2.0
+  }
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.006,
+  "height_density": 0.05,
+  "height_falloff": 0.35,
+  "base_height": 0.0,
+  "max_opacity": 0.9,
+  "sun_scatter": 0.0
+ },
+ "time_of_day": {
+  "hours": 1.5,
+  "day_of_year": 172,
+  "latitude": 45.0,
+  "moon_phase": 0.42
+ },
+ "cameras": [
+  {
+   "name": "lamps",
+   "eye": [
+    -8.0,
+    1.7,
+    9.0
+   ],
+   "target": [
+    2.0,
+    1.5,
+    -4.0
+   ],
+   "fov": 62,
+   "near": 0.1
+  },
+  {
+   "name": "torch",
+   "eye": [
+    0.0,
+    1.6,
+    6.0
+   ],
+   "target": [
+    -1.0,
+    1.0,
+    -9.0
+   ],
+   "fov": 62,
+   "near": 0.1
+  }
+ ]
+}

@@ -26,12 +26,13 @@ class GpuTexturePool {
 public:
     explicit GpuTexturePool(SharedDevice device) : _device(std::move(device)) {}
 
-    // A pooled texture of this size and format, or null.
-    SDL_GPUTexture* take(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage);
+    // A pooled texture of this size, format, usage and mip level count, or null.
+    SDL_GPUTexture* take(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
+                         u32 levels = 1);
     // Keeps `texture` (of `bytes`) for take(), or releases it when the pool is
     // over its size or closed.
     void give_back(SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
-                   SDL_GPUTextureUsageFlags usage, u64 bytes);
+                   SDL_GPUTextureUsageFlags usage, u64 bytes, u32 levels = 1);
     // Before each submission (about once a frame): releases what has waited
     // too long.
     void tick();
@@ -44,6 +45,7 @@ private:
         u32 width = 0, height = 0;
         SDL_GPUTextureFormat format = SDL_GPU_TEXTUREFORMAT_INVALID;
         SDL_GPUTextureUsageFlags usage = 0;
+        u32 levels = 1;
         u64 bytes = 0;
         u64 since = 0; // tick() count when given back
     };
@@ -62,9 +64,9 @@ public:
     GpuTexture() = default;
     GpuTexture(SharedDevice device, SDL_GPUTexture* texture,
                u32 width, u32 height, SDL_GPUTextureFormat format);
-    // A texture that goes back to `pool` (as `bytes`) when released.
+    // A texture (of `levels` mip levels) that goes back to `pool` (as `bytes`) when released.
     GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
-               std::shared_ptr<GpuTexturePool> pool, u64 bytes, SDL_GPUTextureUsageFlags usage);
+               std::shared_ptr<GpuTexturePool> pool, u64 bytes, SDL_GPUTextureUsageFlags usage, u32 levels = 1);
     ~GpuTexture();
 
     GpuTexture(const GpuTexture&) = delete;
@@ -86,6 +88,7 @@ private:
     std::shared_ptr<GpuTexturePool> _pool;
     u64 _bytes = 0; // for the pool
     SDL_GPUTextureUsageFlags _usage = 0;
+    u32 _levels = 1; // for the pool
     SDL_GPUTexture* _texture = nullptr;
     u32 _width = 0;
     u32 _height = 0;

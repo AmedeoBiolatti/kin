@@ -1,0 +1,64 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "camp-player",
+  "root": "player",
+  "entities": [
+    {
+      "id": "player",
+      "name": "Player",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "SkinnedMeshRenderer": {
+          "asset": "kenney-character/survivor.glb",
+          "visible": true,
+          "tint": [
+            255,
+            255,
+            255,
+            255
+          ]
+        },
+        "Animator3D": {
+          "clip": "Idle",
+          "speed": 1,
+          "loop": true,
+          "playing": true,
+          "fade_seconds": 0.15,
+          "remove_root_motion": true
+        },
+        "AnimatorAsset3D": {
+          "asset": "animations/survivor.kinanimator"
+        },
+        "CharacterController3D": {
+          "radius": 0.24,
+          "height": 1.8,
+          "crouch_height": 1.0,
+          "walk_speed": 2.5,
+          "sprint_speed": 4.2,
+          "jump_speed": 4.0,
+          "max_step_height": 0.25,
+          "coyote_seconds": 0.1,
+          "jump_buffer_seconds": 0.1
+        },
+        "CharacterAnimationLink3D": {}
+      }
+    }
+  ]
+}

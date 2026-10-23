@@ -1,0 +1,29 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "camp-barrel",
+  "root": "barrel",
+  "entities": [
+    {
+      "id": "barrel",
+      "components": {
+        "Transform3D": {
+          "scale": [
+            2.62,
+            2.62,
+            2.62
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/barrel.glb"
+        },
+        "ModelMaterials3D": {
+          "asset": "materials/camp.kinmaterials",
+          "variant": "brass"
+        },
+        "Collider3D": {
+          "asset": "colliders/barrel.kincollider"
+        }
+      }
+    }
+  ]
+}

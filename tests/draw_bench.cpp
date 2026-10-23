@@ -1,6 +1,11 @@
+#include <cassert>
 // Times drawing many quads a frame on the SDL_GPU backend, three ways:
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.
+#include <kin/core/jobs.hpp>
 #include <kin/platform/app.hpp>
+#if defined(KIN_EXPERIMENTAL_3D)
+#include <kin/render3d/renderer3d.hpp>
+#endif
 #include <kin/renderer/cached_target.hpp>
 #include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/render_view.hpp>
@@ -689,6 +694,221 @@ int cached(int frames) {
     return 0;
 }
 
+#if defined(KIN_EXPERIMENTAL_3D)
+// 3D views (kin/render3d): `count` lit meshes in a 1280 x 720 view with 4x
+// MSAA, laid over the frame. Boxes and spheres in one instanced draw each;
+// then `count` draws that can't merge (two meshes in turn). With and without
+// worker threads filling the instances.
+int meshes(int frames, int count) {
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "mesh-bench", .width = 1280, .height = 720, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    if (!backend || backend->name() != "SDL_GPU") {
+        std::fprintf(stderr, "SDL_GPU backend unavailable\n");
+        return 1;
+    }
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    kin::Renderer3D r3d{*renderer};
+    const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f})).value_or({});
+    const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.35f, 24, 12)).value_or({});
+    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)}).value_or({});
+    kin::JobSystem jobs;
+    // A grid on the ground, square, seen from above at an angle.
+    const int side = std::max(1, static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count)))));
+    const auto place = [&](int i, float turn) {
+        const float x = static_cast<float>(i % side) - side * 0.5f, z = static_cast<float>(i / side) - side * 0.5f;
+        return kin::Mat4f::translation({x, 0.0f, z}) * kin::Mat4f::rotation_y(turn + static_cast<float>(i));
+    };
+    kin::Scene3D scene;
+    scene.camera = kin::Camera3D::orbit({}, 30.0f, 45.0f, static_cast<float>(side) * 1.1f + 2.0f, 50.0f);
+    struct Case {
+        const char* name;
+        int kind; // 0 boxes, 1 balls, 2 separate draws
+    };
+    for (const Case c : {Case{"boxes, one draw", 0}, Case{"spheres, one draw", 1}, Case{"separate draws", 2}}) {
+        for (const bool threads : {false, true}) {
+            renderer->set_job_system(threads ? &jobs : nullptr);
+            std::vector<double> fill, render, gpu;
+            const auto frame = [&](int f) {
+                const auto t0 = clock::now();
+                scene.clear();
+                const float turn = static_cast<float>(f);
+                if (c.kind == 2) {
+                    for (int i = 0; i < count; ++i) {
+                        (void)scene.draw(i % 2 == 0 ? box : ball, place(i, turn), {.color = kin::Color::rgb(200, 120, 80)});
+                    }
+                } else {
+                    const auto room = scene.add_instances(c.kind == 0 ? box : ball, static_cast<std::size_t>(count),
+                                                          {.color = kin::Color::rgb(200, 120, 80)}).value_or({});
+                    for (int i = 0; i < count; ++i) {
+                        room[static_cast<std::size_t>(i)] = {place(i, turn), kin::Color::rgb(255, 255, static_cast<kin::u8>(i % 256))};
+                    }
+                }
+                const auto t1 = clock::now();
+                renderer->clear(kin::Color::rgb(0, 0, 0));
+                assert(r3d.render(view, scene));
+                renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
+                renderer->present();
+                fill.push_back(ms(t0, t1));
+                render.push_back(r3d.debug_stats().cpu_ms);
+                gpu.push_back(renderer->backend_stats().last_gpu_frame_ms);
+            };
+            for (int f = 0; f < 10; ++f) {
+                frame(f);
+            }
+            fill.clear();
+            render.clear();
+            gpu.clear();
+            std::vector<kin::u8> one;
+            kin::Vec2i one_size{};
+            renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+            const auto t0 = clock::now();
+            for (int f = 0; f < frames; ++f) {
+                frame(f);
+            }
+            renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+            const double per_frame = ms(t0, clock::now()) / frames;
+            std::erase_if(gpu, [](double v) { return v <= 0.0; });
+            for (auto* v : {&fill, &render, &gpu}) {
+                std::ranges::sort(*v);
+            }
+            const auto median = [](const std::vector<double>& v) { return v.empty() ? 0.0 : v[v.size() / 2]; };
+            std::printf("%d meshes, %-17s %-10s: scene %6.3f ms, render() %6.3f ms (min %6.3f), frame %6.3f ms, GPU %6.3f ms, "
+                        "%u draws, %llu triangles\n",
+                        count, c.name, threads ? "(workers)" : "(1 thread)", median(fill), median(render),
+                        render.empty() ? 0.0 : render.front(), per_frame, median(gpu), r3d.debug_stats().draws,
+                        static_cast<unsigned long long>(r3d.debug_stats().triangles));
+        }
+    }
+    renderer->set_job_system(nullptr);
+    return 0;
+}
+
+// The sun's shadow (kin/render3d), as Signal Breach has it: a 48 x 32 deck of
+// tiles, `count` enemies (three meshes, instanced) flying over it, the
+// shadow map over the deck; seen first person from one end, and from above
+// (the whole deck in view), and from the middle (half the deck behind).
+// Without shadows, then with. KIN_BENCH_REPEAT=N renders the view N times a
+// frame (the GPU's time divided by N): the 3D work then outweighs the rest of
+// the frame and the timer's noise. KIN_BENCH_SHADOW_RES=N sets the map's
+// size; KIN_BENCH_NO_RECEIVE=1 draws the map but samples it nowhere.
+int shadows(int frames, int count) {
+    const char* repeat_env = std::getenv("KIN_BENCH_REPEAT");
+    const int repeat = std::max(1, repeat_env ? std::atoi(repeat_env) : 1);
+    using clock = std::chrono::steady_clock;
+    const auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+    kin::App app{};
+    kin::Window& window = app.create_window({.title = "shadow-bench", .width = 1280, .height = 720, .hidden = true});
+    std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);
+    if (!backend || backend->name() != "SDL_GPU") {
+        std::fprintf(stderr, "SDL_GPU backend unavailable\n");
+        return 1;
+    }
+    auto renderer = std::make_unique<kin::Renderer2D>(std::move(backend));
+    renderer->set_gpu_timing_enabled(true);
+    kin::JobSystem jobs;
+    renderer->set_job_system(&jobs);
+    kin::Renderer3D r3d{*renderer};
+    const kin::Mesh3D tile = r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({});
+    const std::array<kin::Mesh3D, 3> enemy{r3d.create_mesh(kin::meshes::star_prism(5, 0.32f, 0.14f, 0.16f)).value_or({}),
+                                         r3d.create_mesh(kin::meshes::cylinder(0.4f, 0.16f, 6)).value_or({}),
+                                         r3d.create_mesh(kin::meshes::torus(0.26f, 0.07f, 20, 8)).value_or({})};
+    kin::View3D view = r3d.create_view({1280, 720}, {.samples = 4, .background = kin::Color::rgb(20, 24, 32)}).value_or({});
+    constexpr int width = 48, depth = 32;
+    std::vector<kin::MeshInstance3D> tiles;
+    for (int z = 0; z < depth; ++z) {
+        for (int x = 0; x < width; ++x) {
+            tiles.push_back({kin::Mat4f::translation({x + 0.5f, -0.5f, z + 0.5f}), kin::Color::rgb(90, 96, 110)});
+        }
+    }
+    // Where each enemy is: spread over the deck, a little above it.
+    std::vector<kin::Vec3f> at(static_cast<std::size_t>(count));
+    kin::u32 seed = 7;
+    const auto next = [&] {
+        seed = seed * 1664525u + 1013904223u;
+        return static_cast<float>(seed >> 8) / 16777216.0f;
+    };
+    for (kin::Vec3f& p : at) {
+        p = {next() * width, 0.6f + next() * 2.0f, next() * depth};
+    }
+    struct Case {
+        const char* name;
+        bool shadows;
+        bool above;
+    };
+    for (const Case c : {Case{"first person", false, false}, Case{"first person", true, false}, Case{"mid-deck", false, false},
+                         Case{"mid-deck", true, false}, Case{"above", false, true}, Case{"above", true, true}}) {
+        kin::Scene3D scene;
+        if (std::string_view{c.name} == "mid-deck") {
+            // In the middle, looking along the deck toward +x: what is behind is out of view.
+            scene.camera = kin::Camera3D::look_at({width * 0.5f, 1.55f, depth * 0.5f}, {width, 1.0f, depth * 0.5f}, 75.0f);
+            scene.camera.z_near = 0.05f;
+        } else if (c.above) {
+            scene.camera = kin::Camera3D::look_at({width * 0.5f, 34.0f, depth + 14.0f}, {width * 0.5f, 0.0f, depth * 0.5f}, 60.0f);
+        } else {
+            scene.camera = kin::Camera3D::look_at({2.0f, 1.55f, depth * 0.5f}, {width, 1.0f, depth * 0.5f}, 75.0f);
+            scene.camera.z_near = 0.05f;
+        }
+        std::vector<double> render, gpu;
+        const auto frame = [&](int f) {
+            scene.clear();
+            scene.lights.sun = {.direction = {-0.4f, 1.0f, 0.25f}, .color = {1.0f, 0.97f, 0.92f}};
+            scene.lights.ambient = {0.25f, 0.28f, 0.35f};
+            scene.lights.cache_shadows = false; // a bench renders one scene many times and means to time the shadow pass
+            scene.lights.shadow_area = c.shadows ? kin::Bounds3D{{0.0f, -0.2f, 0.0f}, {float(width), 4.0f, float(depth)}} : kin::Bounds3D{};
+            if (const char* res = std::getenv("KIN_BENCH_SHADOW_RES")) {
+                scene.lights.shadow_resolution = static_cast<kin::u32>(std::atoi(res));
+            }
+            const bool receive = std::getenv("KIN_BENCH_NO_RECEIVE") == nullptr;
+            (void)scene.draw_instanced(tile, tiles, {.receives_shadow = receive});
+            for (int k = 0; k < 3; ++k) {
+                const auto room = scene.add_instances(enemy[static_cast<std::size_t>(k)], static_cast<std::size_t>((count + 2 - k) / 3),
+                                                      {.color = kin::Color::rgb(200, 120, 80), .receives_shadow = receive}).value_or({});
+                for (std::size_t i = 0; i < room.size(); ++i) {
+                    const float turn = static_cast<float>(f) * 2.0f + static_cast<float>(i);
+                    room[i] = {kin::Mat4f::translation(at[i * 3 + static_cast<std::size_t>(k)]) * kin::Mat4f::rotation_y(turn)};
+                }
+            }
+            renderer->clear(kin::Color::rgb(0, 0, 0));
+            for (int k = 0; k < repeat; ++k) {
+                assert(r3d.render(view, scene));
+            }
+            renderer->draw_texture(view.texture(), {0.0f, 0.0f, 1280.0f, 720.0f});
+            renderer->present();
+            render.push_back(r3d.debug_stats().cpu_ms);
+            gpu.push_back(renderer->backend_stats().last_gpu_frame_ms / repeat);
+        };
+        for (int f = 0; f < 10; ++f) {
+            frame(f);
+        }
+        render.clear();
+        gpu.clear();
+        std::vector<kin::u8> one;
+        kin::Vec2i one_size{};
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size);
+        const auto t0 = clock::now();
+        for (int f = 0; f < frames; ++f) {
+            frame(f);
+        }
+        renderer->read_rgba({0.0f, 0.0f, 1.0f, 1.0f}, one, one_size); // wait for the GPU
+        const double per_frame = ms(t0, clock::now()) / frames / repeat;
+        std::erase_if(gpu, [](double v) { return v <= 0.0; });
+        for (auto* v : {&render, &gpu}) {
+            std::ranges::sort(*v);
+        }
+        const auto median = [](const std::vector<double>& v) { return v.empty() ? 0.0 : v[v.size() / 2]; };
+        const kin::RenderDebugStats3D& st = r3d.debug_stats();
+        std::printf("%d enemies, %-12s %-10s: render() %6.3f ms, frame %6.3f ms, GPU %6.3f ms; %u culled, %u casters\n", count, c.name,
+                    c.shadows ? "shadows" : "no shadows", median(render), per_frame, median(gpu), st.culled, st.shadow_casters);
+    }
+    renderer->set_job_system(nullptr);
+    return 0;
+}
+#endif
+
 int main(int argc, char** argv) {
     const int frames = argc > 1 ? std::atoi(argv[1]) : 60;
     if (argc > 3 && std::string_view{argv[3]} == "cached") {
@@ -707,6 +927,14 @@ int main(int argc, char** argv) {
     if (argc > 3 && std::string_view{argv[3]} == "shapes") {
         return shapes(frames, quads);
     }
+#if defined(KIN_EXPERIMENTAL_3D)
+    if (argc > 3 && std::string_view{argv[3]} == "meshes") {
+        return meshes(frames, quads);
+    }
+    if (argc > 3 && std::string_view{argv[3]} == "shadows") {
+        return shadows(frames, quads);
+    }
+#endif
     kin::App app{};
     kin::Window& window = app.create_window({.title = "draw-bench", .width = 1280, .height = 720, .hidden = true});
     std::unique_ptr<kin::IRenderer2DBackend> backend = kin::make_render_backend(window, false, true);

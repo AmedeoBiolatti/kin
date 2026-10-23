@@ -479,6 +479,44 @@ void test_component_fields_can_be_visited_without_snapshot_ownership() {
     assert(!names.empty());
 }
 
+void test_runtime_component_copy_and_owner_patch_policy() {
+    struct Runtime {
+        kin::i32 value=0;
+        std::shared_ptr<int> handle;
+    };
+    kin::EcsWorld original,staging;
+    for(auto* world:{&original,&staging}) {
+        world->components().native<Runtime>("Runtime").field("value",&Runtime::value);
+        world->components().data("Tag");
+        world->components().data("Data").field_i32("count",0);
+    }
+    auto source=original.entity().set(Runtime{7,std::make_shared<int>(42)});
+    auto target=staging.entity();
+    assert(original.components().copy_component(source,"Runtime",staging.components(),target));
+    assert(target.get<Runtime>()->value==7&&target.get<Runtime>()->handle==source.get<Runtime>()->handle);
+    assert(original.components().add(source,"Tag"));
+    assert(original.components().copy_component(source,"Tag",staging.components(),target));
+    assert(staging.components().has(target,"Tag"));
+    assert(original.components().add(source,"Data"));
+    assert(original.components().patch_field(source,"Data","count",kin::i32{9}));
+    assert(original.components().copy_component(source,"Data",staging.components(),target));
+    assert(std::get<kin::i32>(staging.components().snapshot(target,"Data")->fields[0].value)==9);
+    assert(!original.components().copy_component(target,"Runtime",staging.components(),target));
+    int calls=0;
+    original.components().set_field_patch_handler([&](kin::EcsEntity e,std::string_view component,
+        std::string_view name,const kin::ComponentFieldValue& value,std::string& error){
+        ++calls;assert(e.id()==source.id()&&component=="Runtime"&&name=="value");
+        assert(std::get<kin::i32>(value)==10);error="owner rejected edit";return false;
+    });
+    const auto sequence=original.events().dirty_state().last_event_sequence;
+    assert(!original.components().patch_field(source,"Runtime","value",kin::i32{10}));
+    assert(calls==1&&original.components().last_error()=="owner rejected edit"&&source.get<Runtime>()->value==7);
+    assert(original.events().since(sequence).empty());
+    original.components().set_field_patch_handler({});
+    assert(original.components().patch_field(source,"Runtime","value",kin::i32{10}));
+    assert(source.get<Runtime>()->value==10);
+}
+
 } // namespace
 
 int main() {
@@ -495,5 +533,6 @@ int main() {
     test_data_components_work_with_query_plans_scene_and_destroy_cleanup();
     test_failure_paths_set_diagnostics();
     test_component_fields_can_be_visited_without_snapshot_ownership();
+    test_runtime_component_copy_and_owner_patch_policy();
     return 0;
 }

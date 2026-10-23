@@ -205,11 +205,65 @@ void test_mouse_wheel_reaches_one_step() {
     assert((step_numbers == std::vector<int>{1, 2, 3, 1, 2, 3}));
 }
 
+void push_motion(float dx, float dy) {
+    SDL_Event event{};
+    event.type = SDL_EVENT_MOUSE_MOTION;
+    event.motion.xrel = dx;
+    event.motion.yrel = dy;
+    const bool pushed = SDL_PushEvent(&event);
+    assert(pushed);
+    (void)pushed;
+}
+
+// Mouse motion (what relative mouse mode reports, for mouse look) reaches update()
+// as the wheel does: mouse_motion() adds up across 0-step frames and is used up by
+// a frame's first step; frame_mouse_motion() is the rendered frame's own.
+void test_mouse_motion_reaches_one_step() {
+    kin::App app{{.mode = kin::AppMode::Headless, .max_steps = 3}};
+    std::vector<kin::Vec2f> step_motion;
+    std::vector<kin::Vec2f> render_motion;
+    app.set_time_scale(0.0f);
+    push_motion(3.0f, -1.0f);
+    app.run([&](float) { step_motion.push_back(app.input().mouse_motion()); },
+            [&](float) {
+        render_motion.push_back(app.input().frame_mouse_motion());
+        switch (render_motion.size()) {
+        case 1: // 0-step frame; more motion follows
+            push_motion(2.0f, 0.5f);
+            break;
+        case 2: // the next frame steps and sees both
+            app.set_time_scale(1e9f);
+            break;
+        case 3: // motion, then a frame of three steps
+            push_motion(-4.0f, 4.0f);
+            break;
+        default:
+            app.quit();
+            break;
+        }
+    });
+    using V = kin::Vec2f;
+    assert((render_motion == std::vector<V>{{3.0f, -1.0f}, {2.0f, 0.5f}, {0.0f, 0.0f}, {-4.0f, 4.0f}}));
+    assert((step_motion == std::vector<V>{{5.0f, -0.5f}, {}, {}, {-4.0f, 4.0f}, {}, {}}));
+    app.input().begin_frame();
+    assert(app.input().frame_mouse_motion() == V{} && app.input().mouse_motion() == V{});
+    app.input().set_mouse_motion({1.0f, 2.0f});
+    assert(app.input().frame_mouse_motion() == (V{1.0f, 2.0f}));
+    app.input().consume_frame_edges();
+    assert(app.input().frame_mouse_motion() == V{} && app.input().mouse_motion() == (V{1.0f, 2.0f}));
+}
+
 int main() {
+    // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
+    // resets hints between them, so retain the headless driver in the process
+    // environment even when GPU CI exports X11 for the separate 3D tests.
+    const auto driver_set = SDL_setenv_unsafe("SDL_VIDEO_DRIVER", "dummy", 1);
+    assert(driver_set == 0);
     test_logging();
     test_frame_time_snapper();
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
+    test_mouse_motion_reaches_one_step();
 
     kin::App app{{.mode = kin::AppMode::Headless}};
 
@@ -370,11 +424,16 @@ int main() {
     assert(!app.input().frame_pressed("copy"));                             // cleared next frame
     assert(!app.input().mouse_frame_pressed(kin::MouseButton::Left));        // cleared next frame
 
+    int completed_renders = 0;
     app.run_for(2, [&app](kin::f32 dt, kin::i32 frame) {
         assert(dt > 0.0f);
         assert(frame >= 0);
         assert(app.frame_stats().update_steps == 1);
+    }, [&](kin::f32 alpha) {
+        assert(alpha == 1 && app.frame_stats().alpha == 1);
+        ++completed_renders;
     });
+    assert(completed_renders == 2);
 
     return 0;
 }

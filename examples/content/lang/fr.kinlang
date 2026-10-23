@@ -37,6 +37,11 @@
       "paused_hint": "P reprendre / R nouvelle partie",
       "ended_hint": "R nouvelle partie"
     },
+    "breach": {
+      "name": "SIGNAL BREACH",
+      "controls": "CLIC jouer / WASD déplacer / souris regarder / clic gauche tirer / ESPACE sauter / MAJ ruée / ÉCHAP pause / B démo",
+      "paused_hint": "CLIC reprendre / ÉCHAP quitter / R recommencer"
+    },
     "results": {
       "secured": "SECTEUR SÉCURISÉ",
       "lost": "SIGNAL PERDU",

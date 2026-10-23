@@ -1,0 +1,15 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "camp-supply",
+  "root": "supply",
+  "entities": [{
+    "id": "supply",
+    "components": {
+      "Transform3D": {"scale": [3.8, 3.8, 3.8]},
+      "ModelRenderer3D": {"asset": "kenney-survival/bottle.glb"},
+      "Collider3D": {"kind": "sphere", "radius": 0.05, "offset": [0, 0.08, 0]},
+      "RigidBody3D": {"motion": "static", "sensor": true, "layer": 4},
+      "PointLight3D": {"color": [0.15, 1.2, 0.4], "radius": 1, "size": 0.04}
+    }
+  }]
+}

@@ -1,0 +1,942 @@
+// Step cost of kin/physics3d: piles and stacks of 500 and 2000 dynamic boxes, stepped
+// at 60 Hz with no job workers, 1, 4 and 8. Prints milliseconds a step as the mean and
+// the worst of three windows: the first 120 steps (falling and landing), then steps 120
+// to 360 (settling and sleeping). docs/physics_3d.md.
+//
+// With the argument `queries`: the cost of P2b instead: 1000 raycasts into a pile of 2000 bodies and into a mesh of 100,000
+// triangles, 100 shape casts, 100 overlaps, the step with contact events on and off for 500 bodies, and the ECS system's
+// overhead (WorldPhysicsState3D::step against World3D::step) for 500 dynamic bodies.
+//
+// With the argument `ecs`: the ECS system's fixed cost alone (WorldPhysicsState3D::step less World3D::step for the same bodies): 500 awake
+// bodies drifting with nothing to hit (the like for like measure of the system for awake bodies), 500 dynamic boxes falling and settling,
+// the same asleep (nothing touched: what a frame costs when the bodies are left alone), asleep with 10% of the entities gaining or losing a
+// tag each step (the bound set is read again), asleep with 10% of the transforms set to what they are each step, and a level of 500 static
+// boxes with 20 dynamic ones. The falling row is the world's own jitter as much as the system's, and the settling row is not like for like:
+// the system's pile falls asleep a few dozen steps after the raw world's (the entities' transforms round a hair differently: `ecs awake`
+// prints how many are awake as it settles), so its difference is mostly the world's own steps. `ecs asleep` and `ecs settle` run one case
+// alone and long, for a profiler.
+//
+// With the argument `climbing`: the cost of P2d (grab and climb): one grip probe (World3D::probe_grips: a fan of seven sphere sweeps
+// and the rays that refine them) in the climb level (tests/climb_level.hpp) with 500 dynamic boxes round it, a hand that is asked
+// to grab and finds nothing (two probes a step, per character), and 1, 10 and 100 characters hanging by both hands from a long wall
+// and shimmying along it, with and without the 500 boxes.
+//
+// With the argument `ragdolls`: the cost of P2e's ragdolls: 1, 10 and 50 bipeds (17 bodies and 16 joints each, made by
+// auto_ragdoll_desc) animated (kinematic bodies following a clip's pose, set each step), falling and landing, and settled (asleep),
+// alone and with 500 dynamic boxes in the same world, with no workers and with 4. With `ropes`: 1, 10 and 50 ropes of 20 segments,
+// swinging with a load, and at rest (asleep); and one climbing character on a rope.
+//
+// With the argument `characters`: the cost of P2c: the controller's step in the test level (tests/character_level.hpp), 0, 1, 10
+// and 100 characters walking about it, with and without 500 dynamic boxes round them (a heap they walk through), world steps on the
+// calling thread and with 4 workers.
+
+#include <kin/core/jobs.hpp>
+#include <kin/ecs/physics3d.hpp>
+#include <kin/ecs/world.hpp>
+#include <kin/physics3d/world3d.hpp>
+
+#include "character_level.hpp"
+#include "climb_level.hpp"
+#include "skin_fixtures.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <string>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+
+using namespace kin;
+
+namespace {
+
+struct Lcg {
+    u32 s = 12345;
+    f32 next() {
+        s = s * 1664525u + 1013904223u;
+        return static_cast<f32>(s >> 8) / static_cast<f32>(1u << 24);
+    }
+};
+
+void yard(World3D& world, f32 half) {
+    world.create_body({.shape = Shape3D::box({half + 2.0f, 0.5f, half + 2.0f}), .motion = Body3DMotion::Static,
+                       .position = {0.0f, -0.5f, 0.0f}, .friction = 0.5f});
+    const Shape3D wx = Shape3D::box({0.5f, 20.0f, half + 1.0f});
+    const Shape3D wz = Shape3D::box({half + 1.0f, 20.0f, 0.5f});
+    for (const f32 s : {-1.0f, 1.0f}) {
+        world.create_body({.shape = wx, .motion = Body3DMotion::Static, .position = {s * (half + 0.5f), 20.0f, 0.0f}});
+        world.create_body({.shape = wz, .motion = Body3DMotion::Static, .position = {0.0f, 20.0f, s * (half + 0.5f)}});
+    }
+}
+
+void make_pile(World3D& world, int count) {
+    const f32 half = count > 1000 ? 12.0f : 7.0f;
+    yard(world, half);
+    const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+    Lcg rng;
+    for (int i = 0; i < count; ++i) {
+        const f32 x = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
+        const f32 z = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
+        const f32 y = 1.0f + 0.7f * static_cast<f32>(i / 80);
+        const Quatf q = Quatf::axis_angle({rng.next() + 0.1f, rng.next(), rng.next()}, rng.next() * 360.0f);
+        world.create_body({.shape = box, .position = {x, y, z}, .rotation = q, .friction = 0.4f});
+    }
+    world.optimize_broad_phase();
+}
+
+// Columns of 10 boxes in a grid, started a hair apart so that they must be solved to stay up.
+void make_stacks(World3D& world, int count) {
+    const f32 half = count > 1000 ? 12.0f : 7.0f;
+    yard(world, half);
+    const Shape3D box = Shape3D::box({0.4f, 0.25f, 0.4f});
+    const int columns = count / 10;
+    const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<float>(columns))));
+    const f32 pitch = 2.0f * (half - 1.0f) / static_cast<f32>(side);
+    for (int c = 0; c < columns; ++c) {
+        const f32 x = -half + 1.0f + pitch * static_cast<f32>(c % side);
+        const f32 z = -half + 1.0f + pitch * static_cast<f32>(c / side);
+        for (int k = 0; k < 10; ++k) {
+            world.create_body({.shape = box, .position = {x + 0.001f * static_cast<f32>(k % 3), 0.25f + 0.502f * static_cast<f32>(k), z},
+                               .friction = 0.5f});
+        }
+    }
+    world.optimize_broad_phase();
+}
+
+struct Window {
+    double mean = 0.0;
+    double worst = 0.0;
+};
+
+Window time_steps(World3D& world, int frames) {
+    Window w;
+    for (int i = 0; i < frames; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)world.step(1.0f / 60.0f);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        w.mean += ms;
+        w.worst = std::max(w.worst, ms);
+    }
+    w.mean /= frames;
+    return w;
+}
+
+double since_ms(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+}
+
+// A grid mesh of `n` x `n` cells, two triangles each (n = 224: 100,352), hilly.
+Shape3D hill_mesh(int n) {
+    std::vector<Vec3f> v;
+    std::vector<u32> idx;
+    for (int z = 0; z <= n; ++z) {
+        for (int x = 0; x <= n; ++x) {
+            const f32 fx = static_cast<f32>(x), fz = static_cast<f32>(z);
+            v.push_back({fx * 0.25f, 1.5f * std::sin(fx * 0.11f) * std::cos(fz * 0.09f), fz * 0.25f});
+        }
+    }
+    for (int z = 0; z < n; ++z) {
+        for (int x = 0; x < n; ++x) {
+            const u32 i = static_cast<u32>(z * (n + 1) + x);
+            idx.insert(idx.end(), {i, i + static_cast<u32>(n) + 1, i + 1, i + 1, i + static_cast<u32>(n) + 1, i + static_cast<u32>(n) + 2});
+        }
+    }
+    return Shape3D::triangle_mesh(v, idx);
+}
+
+// The same pile as make_pile(world, 500), made of entities: the yard (a floor and four walls) and 500 dynamic boxes. `boxes` gets the boxes.
+void make_ecs_pile(kin::EcsWorld& ecs, std::vector<flecs::entity>& boxes) {
+    const f32 half = 7.0f;
+    Collider3D floor;
+    floor.half_extents = {half + 2.0f, 0.5f, half + 2.0f};
+    ecs.raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor).set(RigidBody3D{.motion = Body3DMotion::Static, .friction = 0.5f});
+    Collider3D wx;
+    wx.half_extents = {0.5f, 20.0f, half + 1.0f};
+    Collider3D wz;
+    wz.half_extents = {half + 1.0f, 20.0f, 0.5f};
+    for (const f32 sgn : {-1.0f, 1.0f}) {
+        ecs.raw().entity().set(Transform3D{.position = {sgn * (half + 0.5f), 20.0f, 0.0f}}).set(wx);
+        ecs.raw().entity().set(Transform3D{.position = {0.0f, 20.0f, sgn * (half + 0.5f)}}).set(wz);
+    }
+    Collider3D box;
+    box.half_extents = {0.4f, 0.3f, 0.35f};
+    Lcg rng;
+    for (int i = 0; i < 500; ++i) {
+        const f32 x = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
+        const f32 z = (rng.next() - 0.5f) * 2.0f * (half - 1.0f);
+        const f32 y = 1.0f + 0.7f * static_cast<f32>(i / 80);
+        const Quatf q = Quatf::axis_angle({rng.next() + 0.1f, rng.next(), rng.next()}, rng.next() * 360.0f);
+        boxes.push_back(ecs.raw().entity().set(Transform3D{.position = {x, y, z}, .rotation = q}).set(box).set(RigidBody3D{.friction = 0.4f}));
+    }
+}
+
+int queries() {
+    World3DConfig cfg;
+    cfg.max_bodies = 4096;
+    cfg.max_body_pairs = 262144;
+    cfg.max_contact_constraints = 65536;
+    cfg.single_threaded = true;
+    {
+        World3D pile(cfg);
+        make_pile(pile, 2000);
+        for (int i = 0; i < 200; ++i) {
+            (void)pile.step(1.0f / 60.0f);
+        }
+        Lcg rng;
+        std::vector<Vec3f> starts;
+        for (int i = 0; i < 1000; ++i) {
+            starts.push_back({(rng.next() - 0.5f) * 20.0f, 12.0f, (rng.next() - 0.5f) * 20.0f});
+        }
+        int hits = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        for (const Vec3f& s : starts) {
+            hits += pile.raycast(s, s + Vec3f{0.0f, -15.0f, 0.0f}).has_value() ? 1 : 0;
+        }
+        const double ray_ms = since_ms(t0);
+        std::size_t all_hits = 0;
+        t0 = std::chrono::steady_clock::now();
+        for (const Vec3f& s : starts) {
+            all_hits += pile.raycast_all(s, s + Vec3f{0.0f, -15.0f, 0.0f}).size();
+        }
+        const double all_ms = since_ms(t0);
+        std::printf("pile of 2000 bodies (%d awake): 1000 raycasts %.2f ms (%.1f us each, %d hit), 1000 raycast_all %.2f ms (%.1f us each, %.1f hits)\n",
+                    pile.active_body_count(), ray_ms, ray_ms, hits, all_ms, all_ms, static_cast<double>(all_hits) / 1000.0);
+        const Shape3D sphere = Shape3D::sphere(0.3f);
+        const Shape3D box = Shape3D::box({0.3f, 0.3f, 0.3f});
+        int cast_hits = 0;
+        t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 100; ++i) {
+            cast_hits += pile.shape_cast(i % 2 ? sphere : box, starts[static_cast<std::size_t>(i)], {}, {0.0f, -15.0f, 0.0f}).has_value() ? 1 : 0;
+        }
+        const double cast_ms = since_ms(t0);
+        std::size_t overlaps = 0;
+        t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 100; ++i) {
+            overlaps += pile.overlap(sphere, {starts[static_cast<std::size_t>(i)].x, 1.0f, starts[static_cast<std::size_t>(i)].z}, {}).size();
+        }
+        const double overlap_ms = since_ms(t0);
+        std::printf("pile of 2000 bodies: 100 shape casts %.2f ms (%.1f us each, %d hit), 100 overlaps %.2f ms (%.1f us each, %.1f bodies)\n",
+                    cast_ms, cast_ms * 10.0, cast_hits, overlap_ms, overlap_ms * 10.0, static_cast<double>(overlaps) / 100.0);
+    }
+    {
+        World3D world(cfg);
+        const Shape3D mesh = hill_mesh(224);
+        world.create_body({.shape = mesh, .motion = Body3DMotion::Static});
+        world.optimize_broad_phase();
+        Lcg rng;
+        int hits = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < 1000; ++i) {
+            const f32 x = rng.next() * 56.0f, z = rng.next() * 56.0f;
+            hits += world.raycast({x, 10.0f, z}, {x, -10.0f, z}).has_value() ? 1 : 0;
+        }
+        const double ms = since_ms(t0);
+        std::printf("mesh of 100,352 triangles: 1000 raycasts %.2f ms (%.1f us each, %d hit)\n", ms, ms, hits);
+        int casts = 0;
+        const auto t1 = std::chrono::steady_clock::now();
+        const Shape3D sphere = Shape3D::sphere(0.3f);
+        for (int i = 0; i < 100; ++i) {
+            const f32 x = rng.next() * 56.0f, z = rng.next() * 56.0f;
+            casts += world.shape_cast(sphere, {x, 10.0f, z}, {}, {0.0f, -20.0f, 0.0f}).has_value() ? 1 : 0;
+        }
+        std::printf("mesh of 100,352 triangles: 100 sphere casts %.2f ms (%.1f us each, %d hit)\n", since_ms(t1), since_ms(t1) * 10.0, casts);
+    }
+    // Events: a pile of 500 stepped with contact events off, on, and on with persist events.
+    std::printf("%-26s %12s %12s %14s\n", "500 body pile, one thread", "steps 0-120", "steps 120-360", "events");
+    for (int mode = 0; mode < 3; ++mode) {
+        World3DConfig c = cfg;
+        c.contact_events = mode > 0;
+        c.persist_events = mode == 2;
+        World3D world(c);
+        make_pile(world, 500);
+        std::size_t events = 0;
+        Window a, b;
+        for (int phase = 0; phase < 2; ++phase) {
+            Window& w = phase == 0 ? a : b;
+            const int n = phase == 0 ? 120 : 240;
+            for (int i = 0; i < n; ++i) {
+                const auto t0 = std::chrono::steady_clock::now();
+                (void)world.step(1.0f / 60.0f);
+                const double ms = since_ms(t0);
+                w.mean += ms;
+                w.worst = std::max(w.worst, ms);
+                events += world.drain_events().size();
+            }
+            w.mean /= n;
+        }
+        std::printf("%-26s %8.3f ms %9.3f ms %14zu\n", mode == 0 ? "events off" : mode == 1 ? "begin and end events" : "with persist events",
+                    a.mean, b.mean, events);
+    }
+    // The ECS system against the raw world: 500 dynamic boxes (the same recipe), the same steps.
+    {
+        Window raw_a, raw_b, ecs_a, ecs_b;
+        {
+            World3D world(cfg);
+            make_pile(world, 500);
+            raw_a = time_steps(world, 120);
+            raw_b = time_steps(world, 240);
+        }
+        {
+            kin::EcsWorld ecs;
+            World3D world(cfg);
+            WorldPhysicsState3D bodies{ecs, world};
+            std::vector<flecs::entity> boxes;
+            make_ecs_pile(ecs, boxes);
+            bodies.sync_bodies();
+            world.optimize_broad_phase(); // as make_pile does for the raw world: the two steps differ by the system's work alone
+            const auto run = [&](int frames) {
+                Window w;
+                for (int i = 0; i < frames; ++i) {
+                    const auto t0 = std::chrono::steady_clock::now();
+                    bodies.step(1.0f / 60.0f);
+                    const double ms = since_ms(t0);
+                    w.mean += ms;
+                    w.worst = std::max(w.worst, ms);
+                }
+                w.mean /= frames;
+                return w;
+            };
+            ecs_a = run(120);
+            ecs_b = run(240);
+        }
+        std::printf("ECS, 500 dynamic bodies, one thread: World3D::step %.3f / %.3f ms (steps 0-120 / 120-360), WorldPhysicsState3D::step %.3f / %.3f ms, overhead %.3f / %.3f ms\n",
+                    raw_a.mean, raw_b.mean, ecs_a.mean, ecs_b.mean, ecs_a.mean - raw_a.mean, ecs_b.mean - raw_b.mean);
+    }
+    return 0;
+}
+
+struct Tagged3DBench {}; // toggled on entities to make the ECS system re-read which entities have bodies
+
+// The ECS system's own cost: its step less the world's, for the same bodies. `touch` runs before each timed step, outside the timer.
+int ecs_overhead(const std::string& only) {
+    World3DConfig cfg;
+    cfg.max_bodies = 4096;
+    cfg.max_body_pairs = 262144;
+    cfg.max_contact_constraints = 65536;
+    cfg.single_threaded = true;
+    constexpr f32 dt = 1.0f / 60.0f;
+    std::printf("%-46s %10s %10s %10s %8s\n", "500 boxes, one thread", "world ms", "system ms", "overhead", "awake");
+    const auto report = [](const char* what, double raw, double ecs, int awake) {
+        std::printf("%-46s %10.3f %10.3f %10.3f %8d\n", what, raw, ecs, ecs - raw, awake);
+    };
+    // 500 bodies awake and drifting (no gravity, never asleep, no contacts): the world's step is the same in both, so the difference is the
+    // system's work for awake bodies alone.
+    {
+        const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+        World3D raw(cfg);
+        for (int i = 0; i < 500; ++i) {
+            Body3DDesc d;
+            d.shape = box;
+            d.position = {static_cast<f32>(i % 25) * 2.0f, 5.0f, static_cast<f32>(i / 25) * 2.0f};
+            d.linear_velocity = {0.1f, 0.0f, 0.0f};
+            d.gravity_factor = 0.0f;
+            d.allow_sleeping = false;
+            raw.create_body(d);
+        }
+        raw.optimize_broad_phase();
+        time_steps(raw, 60);
+        const double raw_ms = time_steps(raw, 240).mean;
+        kin::EcsWorld ecs;
+        World3D world(cfg);
+        WorldPhysicsState3D bodies{ecs, world};
+        Collider3D collider;
+        collider.half_extents = {0.4f, 0.3f, 0.35f};
+        RigidBody3D body;
+        body.gravity_factor = 0.0f;
+        body.allow_sleeping = false;
+        body.linear_velocity = {0.1f, 0.0f, 0.0f};
+        for (int i = 0; i < 500; ++i) {
+            ecs.raw().entity().set(Transform3D{.position = {static_cast<f32>(i % 25) * 2.0f, 5.0f, static_cast<f32>(i / 25) * 2.0f}}).set(collider).set(body);
+        }
+        bodies.sync_bodies();
+        world.optimize_broad_phase();
+        for (int i = 0; i < 60; ++i) {
+            bodies.step(dt);
+        }
+        double sum = 0.0;
+        for (int i = 0; i < 240; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            bodies.step(dt);
+            sum += since_ms(t0);
+        }
+        report("awake, drifting (no gravity, no contacts)", raw_ms, sum / 240, world.active_body_count());
+    }
+    // The pile: falling (steps 0-120), settling (120-360), asleep (600-840).
+    {
+        World3D raw(cfg);
+        make_pile(raw, 500);
+        const double a = time_steps(raw, 120).mean;
+        const double b = time_steps(raw, 240).mean;
+        time_steps(raw, 240);
+        const double c = time_steps(raw, 240).mean;
+        kin::EcsWorld ecs;
+        World3D world(cfg);
+        WorldPhysicsState3D bodies{ecs, world};
+        std::vector<flecs::entity> boxes;
+        make_ecs_pile(ecs, boxes);
+        bodies.sync_bodies();
+        world.optimize_broad_phase(); // as make_pile does for the raw world
+        const auto run = [&](int frames, auto&& touch) {
+            double sum = 0.0;
+            for (int i = 0; i < frames; ++i) {
+                touch(i);
+                const auto t0 = std::chrono::steady_clock::now();
+                bodies.step(dt);
+                sum += since_ms(t0);
+            }
+            return sum / frames;
+        };
+        const auto none = [](int) {};
+        if (only == "asleep") {
+            // For a profiler: the asleep pile alone, a long time.
+            run(600, none);
+            report("dynamic, asleep, 20000 steps", c, run(20000, none), world.active_body_count());
+            return 0;
+        }
+        if (only == "awake") {
+            // How many bodies are awake as the pile settles, raw world against system: the same, or the system keeps some awake.
+            World3D raw2(cfg);
+            make_pile(raw2, 500);
+            for (int i = 0; i < 360; ++i) {
+                (void)raw2.step(dt);
+                bodies.step(dt);
+                if (i % 30 == 29) {
+                    std::printf("step %3d: awake raw %d, system %d\n", i + 1, raw2.active_body_count(), world.active_body_count());
+                }
+            }
+            return 0;
+        }
+        if (only == "settle") {
+            // For a profiler: the pile falling and settling, several times over.
+            run(360, none);
+            for (int again = 0; again < 5; ++again) {
+                kin::EcsWorld ecs2;
+                World3D world2(cfg);
+                WorldPhysicsState3D bodies2{ecs2, world2};
+                std::vector<flecs::entity> boxes2;
+                make_ecs_pile(ecs2, boxes2);
+                bodies2.sync_bodies();
+                world2.optimize_broad_phase();
+                for (int i = 0; i < 360; ++i) {
+                    bodies2.step(dt);
+                }
+            }
+            return 0;
+        }
+        const double ea = run(120, none);
+        report("dynamic, steps 0-120 (falling)", a, ea, world.active_body_count());
+        const double eb = run(240, none);
+        report("dynamic, steps 120-360 (settling)", b, eb, world.active_body_count());
+        run(240, none);
+        const double ec = run(240, none);
+        report("dynamic, steps 600-840 (asleep)", c, ec, world.active_body_count());
+        // Asleep, 10% of the entities (50 a step, in turn) gain a tag or lose it again.
+        const double ed = run(240, [&](int i) {
+            for (int k = 0; k < 50; ++k) {
+                flecs::entity e = boxes[static_cast<std::size_t>((i * 50 + k) % 500)];
+                if (e.has<Tagged3DBench>()) {
+                    e.remove<Tagged3DBench>();
+                } else {
+                    e.add<Tagged3DBench>();
+                }
+            }
+        });
+        report("asleep, 10% gain or lose a tag each step", c, ed, world.active_body_count());
+        // Asleep, 10% of the transforms set to what they are (a write that changes nothing).
+        const double ee = run(240, [&](int i) {
+            for (int k = 0; k < 50; ++k) {
+                flecs::entity e = boxes[static_cast<std::size_t>((i * 50 + k) % 500)];
+                e.set(*e.get<Transform3D>());
+            }
+        });
+        report("asleep, 10% of transforms set (no change)", c, ee, world.active_body_count());
+    }
+    // A level: 500 static boxes (a grid on the floor) and 20 dynamic ones that fall on it and sleep.
+    {
+        World3D raw(cfg);
+        raw.create_body({.shape = Shape3D::box({40.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0.0f, -0.5f, 0.0f}});
+        for (int i = 0; i < 500; ++i) {
+            raw.create_body({.shape = Shape3D::box({0.4f, 0.2f, 0.4f}), .motion = Body3DMotion::Static,
+                             .position = {-30.0f + 2.0f * static_cast<f32>(i % 30), 0.2f, -20.0f + 2.0f * static_cast<f32>(i / 30)}});
+        }
+        for (int i = 0; i < 20; ++i) {
+            raw.create_body({.shape = Shape3D::box({0.3f, 0.3f, 0.3f}), .position = {-30.0f + 3.0f * static_cast<f32>(i), 1.5f, 0.0f}});
+        }
+        raw.optimize_broad_phase();
+        time_steps(raw, 360);
+        const double rawms = time_steps(raw, 240).mean;
+        kin::EcsWorld ecs;
+        World3D world(cfg);
+        WorldPhysicsState3D bodies{ecs, world};
+        Collider3D floor;
+        floor.half_extents = {40.0f, 0.5f, 40.0f};
+        ecs.raw().entity().set(Transform3D{.position = {0.0f, -0.5f, 0.0f}}).set(floor).set(RigidBody3D{.motion = Body3DMotion::Static});
+        Collider3D slab;
+        slab.half_extents = {0.4f, 0.2f, 0.4f};
+        for (int i = 0; i < 500; ++i) {
+            ecs.raw().entity().set(Transform3D{.position = {-30.0f + 2.0f * static_cast<f32>(i % 30), 0.2f, -20.0f + 2.0f * static_cast<f32>(i / 30)}})
+                .set(slab).set(RigidBody3D{.motion = Body3DMotion::Static});
+        }
+        Collider3D crate;
+        crate.half_extents = {0.3f, 0.3f, 0.3f};
+        for (int i = 0; i < 20; ++i) {
+            ecs.raw().entity().set(Transform3D{.position = {-30.0f + 3.0f * static_cast<f32>(i), 1.5f, 0.0f}}).set(crate).set(RigidBody3D{});
+        }
+        bodies.sync_bodies();
+        world.optimize_broad_phase();
+        for (int i = 0; i < 360; ++i) {
+            bodies.step(dt);
+        }
+        double sum = 0.0;
+        for (int i = 0; i < 240; ++i) {
+            const auto t0 = std::chrono::steady_clock::now();
+            bodies.step(dt);
+            sum += since_ms(t0);
+        }
+        report("level: 500 static + 20 dynamic, asleep", rawms, sum / 240, world.active_body_count());
+    }
+    return 0;
+}
+
+// The characters' cost: `count` walkers in the test level over a heap of `boxes` dynamic boxes. Each walks along +X (or back)
+// on its own lane, with a jump now and then, and turns round at the ends. Milliseconds a step over steps 240 to 480 (the heap
+// has settled by then; the walkers wake what they touch).
+int characters() {
+    std::printf("%-9s %6s %11s | %-22s | %s\n", "workers", "boxes", "characters", "step mean / worst ms", "per character (mean over none)");
+    for (const int workers : {-1, 4}) {
+        for (const int boxes : {0, 500}) {
+            double base = 0.0;
+            for (const int count : {0, 1, 10, 100}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                World3D world(cfg);
+                const character_level::Level level = character_level::build(world);
+                Lcg rng;
+                for (int i = 0; i < boxes; ++i) {
+                    // A heap on the walkers' side of the level (x 11 to 30, z -29 to -5) that they walk into.
+                    const Vec3f at{11.0f + rng.next() * 19.0f, 0.4f + 0.55f * static_cast<f32>(i / 170), -29.0f + rng.next() * 24.0f};
+                    world.create_body({.shape = Shape3D::box({0.35f, 0.25f, 0.3f}), .position = at,
+                                       .rotation = Quatf::axis_angle({0, 1, 0}, rng.next() * 360.0f), .friction = 0.5f});
+                }
+                world.optimize_broad_phase();
+                std::vector<Character3D> walkers;
+                for (int i = 0; i < count; ++i) {
+                    CharacterDesc3D d;
+                    // A grid: five columns 2.5 m apart, rows 1.2 m apart over z -29 to -5 (clear of the pieces of the level).
+                    d.position = {1.0f + static_cast<f32>(i % 5) * 2.5f, 0.0f, -29.0f + 1.2f * static_cast<f32>(i / 5)};
+                    walkers.push_back(world.create_character(d));
+                }
+                Window w;
+                const int total = 480;
+                for (int step = 0; step < total; ++step) {
+                    for (std::size_t i = 0; i < walkers.size(); ++i) {
+                        CharacterInput3D in;
+                        const bool back = ((step / 150) + static_cast<int>(i / 5)) % 2 == 1;
+                        in.forward = {back ? -1.0f : 1.0f, 0.0f, 0.0f};
+                        in.move = {0.0f, 1.0f};
+                        in.jump = step % 97 == static_cast<int>(i % 97);
+                        world.set_character_input(walkers[i], in);
+                    }
+                    const auto t0 = std::chrono::steady_clock::now();
+                    (void)world.step(1.0f / 60.0f);
+                    const double ms = since_ms(t0);
+                    if (step >= 240) {
+                        w.mean += ms;
+                        w.worst = std::max(w.worst, ms);
+                    }
+                }
+                w.mean /= static_cast<double>(total - 240);
+                if (count == 0) {
+                    base = w.mean;
+                }
+                std::printf("%-9s %6d %11d | %8.3f / %-11.3f | %s", workers < 0 ? "none" : std::to_string(workers).c_str(), boxes, count,
+                            w.mean, w.worst, "");
+                if (count > 0) {
+                    std::printf("%.4f ms (%.0f us)", (w.mean - base) / count, (w.mean - base) / count * 1000.0);
+                }
+                std::printf("   awake bodies %d\n", world.active_body_count());
+            }
+        }
+    }
+    return 0;
+}
+
+
+// The cost of grab and climb. The probe on its own (1000 of them, best of three runs), then characters.
+int climbing() {
+    const auto heap = [](World3D& world, int boxes, Vec3f from, Vec3f size) {
+        Lcg rng;
+        for (int i = 0; i < boxes; ++i) {
+            const Vec3f at{from.x + rng.next() * size.x, from.y + 0.4f + 0.55f * static_cast<f32>(i / 150), from.z + rng.next() * size.z};
+            world.create_body({.shape = Shape3D::box({0.35f, 0.25f, 0.3f}), .position = at,
+                               .rotation = Quatf::axis_angle({0, 1, 0}, rng.next() * 360.0f), .friction = 0.5f});
+        }
+    };
+    std::printf("probe: %-10s %-26s | %s\n", "boxes", "situation", "microseconds a probe");
+    for (const int boxes : {0, 500}) {
+        World3DConfig cfg;
+        cfg.single_threaded = true;
+        cfg.max_bodies = 4096;
+        cfg.max_body_pairs = 262144;
+        cfg.max_contact_constraints = 65536;
+        World3D world(cfg);
+        const climb_level::Level level = climb_level::build(world);
+        (void)level;
+        heap(world, boxes, {-4.0f, 0.0f, 3.0f}, {14.0f, 0.0f, 10.0f});
+        world.optimize_broad_phase();
+        for (int i = 0; i < 120; ++i) {
+            (void)world.step(1.0f / 60.0f);
+        }
+        struct Case {
+            const char* name;
+            Vec3f origin, direction;
+        };
+        const Case cases[] = {{"nothing in reach", {0.0f, 1.65f, 6.0f}, {0.0f, 0.0f, -1.0f}},
+                              {"a wall face", {0.0f, 1.65f, 0.7f}, {0.0f, 0.3f, -1.0f}},
+                              {"a ledge (lip found)", {0.0f, 3.7f, 0.7f}, {0.0f, 0.0f, -1.0f}},
+                              {"holds on a smooth wall", {19.75f, 1.65f, 0.5f}, {0.0f, 0.1f, -1.0f}}};
+        for (const Case& c : cases) {
+            GripProbeDesc3D p;
+            p.origin = c.origin;
+            p.direction = c.direction;
+            p.reach = 0.95f;
+            double best = 1e30;
+            std::size_t found = 0;
+            for (int run = 0; run < 3; ++run) {
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < 1000; ++i) {
+                    found += world.probe_grips(p).size();
+                }
+                best = std::min(best, since_ms(t0));
+            }
+            std::printf("probe: %-10d %-26s | %8.2f us   (%zu candidates a probe)\n", boxes, c.name, best, found / 3000);
+        }
+    }
+
+    std::printf("\n%-9s %6s %-22s %11s | %-22s | %s\n", "workers", "boxes", "what", "characters", "step mean / worst ms", "per character");
+    for (const int boxes : {0, 500}) {
+        for (const int mode : {0, 1, 2}) {
+            // 0: hanging still, 1: shimmying along the wall, 2: standing 6 m off with the grab command given (two probes a step)
+            double base = 0.0;
+            for (const int count : {0, 1, 10, 100}) {
+                World3DConfig cfg;
+                cfg.single_threaded = true;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                World3D world(cfg);
+                world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}, .friction = 0.6f});
+                world.create_body({.shape = Shape3D::box({40.0f, 4.0f, 0.5f}), .motion = Body3DMotion::Static, .position = {0, 4.0f, -0.5f}, .friction = 0.6f});
+                heap(world, boxes, {-25.0f, 0.0f, 8.0f}, {50.0f, 0.0f, 20.0f});
+                world.optimize_broad_phase();
+                std::vector<Character3D> hands;
+                for (int i = 0; i < count; ++i) {
+                    CharacterDesc3D d;
+                    d.traversal.enabled = true;
+                    d.traversal.resource.max = 1.0e6f; // never tired: the cost of hanging is what is measured
+                    // A row along the wall, 0.7 m apart (the first at x = -34), in the air and 1.5 m up (or 6 m off the wall).
+                    d.position = {-34.0f + 0.7f * static_cast<f32>(i % 100), mode == 2 ? 0.0f : 1.5f, mode == 2 ? 6.0f : 0.7f};
+                    hands.push_back(world.create_character(d));
+                }
+                Window w;
+                const int total = 360;
+                for (int step = 0; step < total; ++step) {
+                    for (std::size_t i = 0; i < hands.size(); ++i) {
+                        CharacterInput3D in;
+                        in.forward = {0.0f, 0.0f, -1.0f};
+                        if (mode == 1 && step > 60) {
+                            in.move = {((step / 80) % 2 == 0) ? 1.0f : -1.0f, 0.0f};
+                        }
+                        TraversalInput3D t;
+                        t.grab = {true, true};
+                        t.reach = {0.0f, 0.0f, -1.0f};
+                        world.set_character_input(hands[i], in);
+                        world.set_traversal_input(hands[i], t);
+                    }
+                    const auto t0 = std::chrono::steady_clock::now();
+                    (void)world.step(1.0f / 60.0f);
+                    const double ms = since_ms(t0);
+                    if (step >= 120) {
+                        w.mean += ms;
+                        w.worst = std::max(w.worst, ms);
+                    }
+                }
+                w.mean /= static_cast<double>(total - 120);
+                if (count == 0) {
+                    base = w.mean;
+                }
+                int holding = 0;
+                for (const Character3D c : hands) {
+                    holding += world.traversal(c).held > 0 ? 1 : 0;
+                }
+                std::printf("%-9s %6d %-22s %11d | %8.3f / %-11.3f | ", "none", boxes,
+                            mode == 0 ? "hanging still" : mode == 1 ? "shimmying" : "asking, nothing there", count, w.mean, w.worst);
+                if (count > 0) {
+                    std::printf("%.4f ms (%.0f us)", (w.mean - base) / count, (w.mean - base) / count * 1000.0);
+                }
+                std::printf("   holding %d\n", holding);
+            }
+        }
+    }
+    return 0;
+}
+
+
+struct RagdollRig {
+    Skeleton3D skeleton = skin_fixtures::make_biped();
+    RagdollDesc desc;
+    std::vector<Mat4f> model_world;
+    RagdollRig() {
+        desc = auto_ragdoll_desc(skeleton, skeleton.rest_pose());
+        compute_world_matrices(skeleton, skeleton.rest_pose(), model_world);
+    }
+    std::vector<Mat4f> bone_world(Vec3f at) const {
+        std::vector<Mat4f> out;
+        for (const RagdollBoneDesc3D& b : desc.bones) {
+            out.push_back(Mat4f::translation(at) * model_world[static_cast<std::size_t>(b.joint)]);
+        }
+        return out;
+    }
+};
+
+int ragdolls() {
+    const RagdollRig rig;
+    std::printf("%-8s %6s %9s | %-26s | %-26s | %-26s | %s\n", "workers", "boxes", "ragdolls", "animated (kinematic) ms", "falling steps 0-120 ms",
+                "settled steps 240-360 ms", "per ragdoll (settled / falling, over none)");
+    for (const int workers : {-1, 4}) {
+        for (const int boxes : {0, 500}) {
+            double base_fall = 0.0, base_settled = 0.0;
+            for (const int count : {0, 1, 10, 50}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                const auto build = [&](World3D& world, std::vector<RagdollHandle3D>& made) {
+                    world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static,
+                                       .position = {0, -0.5f, 0}, .friction = 0.6f});
+                    if (boxes > 0) {
+                        Lcg r;
+                        const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+                        for (int i = 0; i < boxes; ++i) {
+                            world.create_body({.shape = box, .position = {-20.0f + 40.0f * r.next(), 0.35f + 4.0f * r.next(), 14.0f + 8.0f * r.next()},
+                                               .rotation = Quatf::axis_angle({r.next() + 0.1f, r.next(), r.next()}, 360.0f * r.next()),
+                                               .friction = 0.5f});
+                        }
+                    }
+                    for (int i = 0; i < count; ++i) {
+                        // A grid, 2.4 m by 2.6 m apart (arms out are 1.9 m across), 2 m up.
+                        const Vec3f at{-28.0f + 2.4f * static_cast<f32>(i % 10), 2.0f, -3.0f - 2.6f * static_cast<f32>(i / 10)};
+                        made.push_back(world.create_ragdoll(rig.desc, rig.bone_world(at)));
+                    }
+                    world.optimize_broad_phase();
+                };
+                // Animated: the clip's pose (the rest pose, moving 1 m/s along X) set each step, bodies kinematic.
+                double animated = 0.0;
+                {
+                    World3D world(cfg);
+                    std::vector<RagdollHandle3D> made;
+                    build(world, made);
+                    for (int step = 0; step < 90; ++step) {
+                        const f32 x = static_cast<f32>(step) / 60.0f;
+                        for (std::size_t i = 0; i < made.size(); ++i) {
+                            world.set_ragdoll_targets(made[i], rig.bone_world({-28.0f + 2.4f * static_cast<f32>(i % 10) + x, 0.0f, -3.0f - 2.6f * static_cast<f32>(i / 10)}));
+                        }
+                        const auto t0 = std::chrono::steady_clock::now();
+                        (void)world.step(1.0f / 60.0f);
+                        if (step >= 30) {
+                            animated += since_ms(t0) / 60.0;
+                        }
+                    }
+                }
+                World3D world(cfg);
+                std::vector<RagdollHandle3D> made;
+                build(world, made);
+                for (const RagdollHandle3D r : made) {
+                    world.start_ragdoll(r, {});
+                }
+                const Window fall = time_steps(world, 120);
+                time_steps(world, 120);
+                const Window settled = time_steps(world, 120);
+                if (count == 0) {
+                    base_fall = fall.mean;
+                    base_settled = settled.mean;
+                }
+                std::printf("%-8s %6d %9d | %-26.3f | %8.3f / %-15.3f | %8.3f / %-15.3f | %.4f / %.4f ms   (awake %d)\n",
+                            workers < 0 ? "none" : std::to_string(workers).c_str(), boxes, count, animated, fall.mean, fall.worst, settled.mean,
+                            settled.worst, count > 0 ? (settled.mean - base_settled) / count : 0.0, count > 0 ? (fall.mean - base_fall) / count : 0.0,
+                            world.active_body_count());
+            }
+        }
+    }
+    return 0;
+}
+
+int ropes() {
+    std::printf("%-8s %6s %7s | %-26s | %-26s | %s\n", "workers", "boxes", "ropes", "swinging with a load ms", "at rest steps 300-420 ms",
+                "per rope (swinging / at rest)");
+    for (const int workers : {-1, 4}) {
+        for (const int boxes : {0, 500}) {
+            double base_swing = 0.0, base_rest = 0.0;
+            for (const int count : {0, 1, 10, 50}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                World3D world(cfg);
+                world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}, .friction = 0.6f});
+                if (boxes > 0) {
+                    Lcg r;
+                    const Shape3D box = Shape3D::box({0.4f, 0.3f, 0.35f});
+                    for (int i = 0; i < boxes; ++i) {
+                        world.create_body({.shape = box, .position = {-20.0f + 40.0f * r.next(), 0.35f + 4.0f * r.next(), 14.0f + 8.0f * r.next()},
+                                           .rotation = Quatf::axis_angle({r.next() + 0.1f, r.next(), r.next()}, 360.0f * r.next()), .friction = 0.5f});
+                    }
+                }
+                std::vector<Body3D> crates;
+                for (int i = 0; i < count; ++i) {
+                    const f32 x = -28.0f + 2.4f * static_cast<f32>(i % 10);
+                    const f32 z = -3.0f - 2.6f * static_cast<f32>(i / 10);
+                    const Body3D crate = world.create_body({.shape = Shape3D::box({0.2f, 0.2f, 0.2f}), .motion = Body3DMotion::Dynamic,
+                                                            .position = {x, 1.5f, z}, .mass = 20.0f});
+                    RopeDesc3D d;
+                    d.start = RopeAnchor3D::at({x, 6.0f, z});
+                    d.end = RopeAnchor3D::on(crate, {0.0f, 0.2f, 0.0f});
+                    d.segments = 20;
+                    if (const char* v = std::getenv("ROPE_V")) {
+                        d.velocity_steps = static_cast<u32>(std::atoi(v));
+                        d.position_steps = static_cast<u32>(std::atoi(std::getenv("ROPE_P")));
+                    }
+                    world.create_rope(d);
+                    crates.push_back(crate);
+                }
+                world.optimize_broad_phase();
+                // Swung: each crate is shoved.
+                for (const Body3D crate : crates) {
+                    world.add_impulse(crate, {60.0f, 0.0f, 0.0f});
+                }
+                Window swing = time_steps(world, 120);
+                // Rest: no shove again; it dies down and falls asleep.
+                time_steps(world, 180);
+                const Window rest = time_steps(world, 120);
+                if (count == 0) {
+                    base_swing = swing.mean;
+                    base_rest = rest.mean;
+                }
+                std::printf("%-8s %6d %7d | %8.3f / %-15.3f | %8.3f / %-15.3f | %.4f / %.4f ms   (awake %d)\n",
+                            workers < 0 ? "none" : std::to_string(workers).c_str(), boxes, count, swing.mean, swing.worst, rest.mean, rest.worst,
+                            count > 0 ? (swing.mean - base_swing) / count : 0.0, count > 0 ? (rest.mean - base_rest) / count : 0.0,
+                            world.active_body_count());
+            }
+        }
+    }
+    // One climbing character on a rope.
+    {
+        World3DConfig cfg;
+        cfg.single_threaded = true;
+        World3D world(cfg);
+        world.create_body({.shape = Shape3D::box({60.0f, 0.5f, 40.0f}), .motion = Body3DMotion::Static, .position = {0, -0.5f, 0}});
+        RopeDesc3D d;
+        d.start = RopeAnchor3D::at({0.0f, 12.0f, 0.0f});
+        d.end = RopeAnchor3D::free();
+        d.length = 8.0f;
+        world.create_rope(d);
+        CharacterDesc3D cd;
+        cd.traversal.enabled = true;
+        cd.traversal.resource.max = 1.0e6f;
+        cd.position = {0.0f, 2.4f, 0.7f};
+        const Character3D hero = world.create_character(cd);
+        double idle_ms = 0.0, climb_ms = 0.0;
+        for (int step = 0; step < 420; ++step) {
+            CharacterInput3D in;
+            in.forward = {0.0f, 0.0f, -1.0f};
+            if (step > 150) {
+                in.move = {0.0f, 1.0f};
+            }
+            TraversalInput3D t;
+            t.grab = {true, true};
+            t.reach = {0.0f, 0.5f, -1.0f};
+            world.set_character_input(hero, in);
+            world.set_traversal_input(hero, t);
+            const auto t0 = std::chrono::steady_clock::now();
+            (void)world.step(1.0f / 60.0f);
+            const double ms = since_ms(t0);
+            if (step >= 90 && step < 150) {
+                idle_ms += ms / 60.0;
+            } else if (step >= 180 && step < 420) {
+                climb_ms += ms / 240.0;
+            }
+        }
+        std::printf("\none character (70 kg) on an 8 m rope of 32 segments: hanging %.3f ms a step, climbing %.3f ms\n", idle_ms, climb_ms);
+    }
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "queries") {
+        return queries();
+    }
+    if (argc > 1 && std::string(argv[1]) == "ecs") {
+        return ecs_overhead(argc > 2 ? argv[2] : "");
+    }
+    if (argc > 1 && std::string(argv[1]) == "characters") {
+        return characters();
+    }
+    if (argc > 1 && std::string(argv[1]) == "climbing") {
+        return climbing();
+    }
+    if (argc > 1 && std::string(argv[1]) == "ragdolls") {
+        return ragdolls();
+    }
+    if (argc > 1 && std::string(argv[1]) == "ropes") {
+        return ropes();
+    }
+    std::printf("%-8s %6s %8s | %-24s | %-24s | %s\n", "scene", "boxes", "workers", "steps 0-120 mean/worst ms",
+                "steps 120-360 mean/worst", "awake at end");
+    for (const bool stacks : {false, true}) {
+        for (const int count : {500, 2000}) {
+            for (const int workers : {-1, 1, 4, 8}) {
+                World3DConfig cfg;
+                cfg.max_bodies = 4096;
+                cfg.max_body_pairs = 262144;
+                cfg.max_contact_constraints = 65536;
+                cfg.single_threaded = workers < 0;
+                JobSystem jobs({.workers = std::max(1, workers), .max_background = std::max(1, workers)});
+                if (workers > 0) {
+                    cfg.jobs = &jobs;
+                }
+                World3D world(cfg);
+                if (stacks) {
+                    make_stacks(world, count);
+                } else {
+                    make_pile(world, count);
+                }
+                const Window a = time_steps(world, 120);
+                const Window b = time_steps(world, 240);
+                std::printf("%-8s %6d %8s | %8.3f / %-13.3f | %8.3f / %-13.3f | %d\n", stacks ? "stacks" : "pile", count,
+                            workers < 0 ? "none" : std::to_string(workers).c_str(), a.mean, a.worst, b.mean, b.worst,
+                            world.active_body_count());
+            }
+        }
+    }
+    return 0;
+}

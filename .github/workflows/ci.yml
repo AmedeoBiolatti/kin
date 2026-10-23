@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     # ci/** branches run CI on push, so workflow changes can be tried before a PR.
-    branches: [main, 'ci/**']
+    branches: [main, 'ci/**', 'exp/3d-*']
   pull_request:
   workflow_dispatch:
 
@@ -13,6 +13,7 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 env:
   # Tests create SDL windows; CI runners have no display or audio device.
@@ -20,7 +21,60 @@ env:
   SDL_AUDIO_DRIVER: dummy
 
 jobs:
+  select-run:
+    name: Select CI event
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+    steps:
+      - uses: actions/github-script@v7
+        id: select
+        with:
+          script: |
+            let run = true;
+            if (context.eventName === 'push' && context.ref !== 'refs/heads/main') {
+              const branch = context.ref.replace('refs/heads/', '');
+              const {data} = await github.rest.pulls.list({
+                ...context.repo, state: 'open', head: `${context.repo.owner}:${branch}`, per_page: 1
+              });
+              run = data.length === 0;
+            }
+            core.setOutput('run', String(run));
+  format-3d:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
+    name: 3D C++ formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check clang-format 18 policy
+        run: |
+          python3 -m venv .ci-format
+          .ci-format/bin/python -m pip install clang-format==18.1.8
+          python3 tools/format_3d.py --check --clang-format .ci-format/bin/clang-format
+
+  build-2d:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
+    name: Linux 2D-only build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux dependencies
+        run: .github/scripts/install-linux-deps.sh glslc
+      - name: Configure
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: cmake --preset 2d
+      - name: Build
+        run: cmake --build --preset 2d
+      - name: Test
+        run: ctest --preset 2d --timeout 300
+
   build:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -43,18 +97,32 @@ jobs:
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-deps.sh
+        run: .github/scripts/install-linux-deps.sh glslc
 
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_EXPERIMENTAL_3D=ON
+
+      - name: Install glslc (Windows)
+        if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-shaderc
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $glslc = (Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/glslc.exe').Replace('\', '/')
+          & $glslc --version
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DKIN_EXPERIMENTAL_3D=ON "-DKIN_GLSLC=$glslc"
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
@@ -68,6 +136,8 @@ jobs:
   # and in the runtime: a game that needs anything from the build tree or the
   # working folder fails here. The package is kept as an artifact.
   ship-linux:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
     name: Ship Linux (Steam Runtime)
     runs-on: ubuntu-24.04
     env:
@@ -130,16 +200,28 @@ jobs:
   # Signal Siege as Windows players get it, with the GPU backend's shaders
   # (glslc from the runner's MSYS2), run from another folder.
   ship-windows:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
     name: Ship Windows
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
       - name: Install glslc
-        run: C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-ucrt-x86_64-shaderc && /ucrt64/bin/glslc --version"
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-shaderc
 
       - name: Configure
-        run: cmake --preset ship-vs -DKIN_GLSLC=C:/msys64/ucrt64/bin/glslc.exe
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $glslc = (Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/glslc.exe').Replace('\', '/')
+          & $glslc --version
+          cmake --preset ship-vs "-DKIN_GLSLC=$glslc"
 
       - name: Package
         run: cmake --build --preset ship-vs --target signal_siege_package --parallel 4
@@ -158,7 +240,21 @@ jobs:
   # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
   # virtual X display, and requires them to run.
   gpu:
-    name: Linux GPU (lavapipe)
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux GPU (lavapipe)
+            build_type: Release
+            examples: 'ON'
+            tests: '.'
+          - name: Linux GPU (lavapipe, Debug)
+            build_type: Debug
+            examples: 'OFF'
+            tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|scene-session3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton)$'
     runs-on: ubuntu-24.04
     env:
       SDL_VIDEO_DRIVER: x11
@@ -175,10 +271,18 @@ jobs:
         env:
           CC: gcc-13
           CXX: g++-13
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_GAMES=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF
 
       - name: Build
-        run: cmake --build build --parallel 4 --target kin_renderer_tests
+        run: cmake --build build --parallel 4
 
       - name: Test
-        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '^kin-renderer$' --output-on-failure --timeout 300
+        # Release runs every suite with a GPU and the examples enabled, so
+        # new GPU workflows cannot silently fall outside a hand-maintained list.
+        # Renderer and particle-shadow suites set longer TIMEOUT properties
+        # in tests/CMakeLists.txt, which take precedence over this default.
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' --output-on-failure --timeout 300
+
+      - name: Debug rope presentation on the GPU
+        if: matrix.build_type == 'Debug'
+        run: xvfb-run -a -s "-screen 0 1280x800x24" build/bin/kin_render3d_tests test_gpu_rope_tube

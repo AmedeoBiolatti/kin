@@ -67,23 +67,52 @@ void test_load_update_actions_and_spawn(Fixture& fixture) {
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-scripting-tests-load";
     std::filesystem::create_directories(dir);
     const std::filesystem::path script = dir / "scene.lua";
-    write_text(script, R"lua(
+    std::string source = R"lua(
 function on_load(scene)
     scene:set_clear_color(1, 2, 3)
-    scene:entity("script-rect"):set_transform(4, 5):set_rect(6, 7, 8, 9, 10, 2, 3)
+    local e = scene:entity("script-rect"):set_transform(4, 5):set_rect(6, 7, 8, 9, 10, 2, 3)
+    assert(e:alive())
+    local dead = scene:entity("destroyed-receiver")
+    dead:destroy()
+    assert(not dead:alive())
+    for _, call in ipairs({function() dead:has('Transform') end, function() dead:destroy() end}) do
+        local ok, message=pcall(call)
+        assert(not ok and message:find('stale or foreign entity handle',1,true) and message:find('scene.lua',1,true))
+    end
+    for _, name in ipairs({"id", "name", "valid", "alive", "destroy", "get_transform"}) do
+        assert(not pcall(e[name]))
+        assert(not pcall(e[name], {}))
+        assert(not pcall(e[name], scene))
+    end
+    local ok, message = pcall(scene.count)
+    assert(not ok and message:find("scene.lua") and message:find("invalid method receiver"))
+    ok, message = pcall(function() return KinContext.dt end)
+    assert(not ok and message:find("invalid property receiver"))
 end
 
 function update(ctx)
+    assert(ctx.dt > 0)
+    assert(not pcall(ctx.input.pressed))
+    assert(not pcall(ctx.app.quit))
 end
 
 function collect_actions(actions)
     actions:add("tick", "Tick")
 end
-)lua");
+)lua";
+#if KIN_TEST_LUA_RELEASE_NUMERICS
+    source.replace(source.find("set_clear_color(1,"), std::string("set_clear_color(1,").size(),
+                   "set_clear_color(255*0.5,");
+    constexpr auto red = 128; // retain sol2's existing rounded numeric conversion
+#else
+    constexpr auto red = 1;
+#endif
+    write_text(script, source);
 
     kin::ScriptScene scene = make_scene(dir, "scene.lua", false);
     assert(scene.script_loaded());
-    assert(scene.render_config().clear_color == kin::Color::rgb(1, 2, 3));
+    assert(scene.last_script_error().empty());
+    assert(scene.render_config().clear_color == kin::Color::rgb(red, 2, 3));
     assert(scene.ecs().count<kin::ScriptOwned>() == 1);
     assert((scene.ecs().count<kin::Transform2D, kin::RectRenderer>() == 1));
 
@@ -98,6 +127,7 @@ end
     assert(rect->order == 3);
 
     scene.update(fixture.ctx);
+    assert(scene.last_script_error().empty());
     kin::InputActionContext actions{"script"};
     scene.collect_actions(actions);
     const auto flattened = actions.flattened_actions();
@@ -272,6 +302,9 @@ function on_load(scene)
         local stats = entity:get("Stats")
         entity:patch("Stats", { hp = stats.hp + 3 })
     end)
+    assert(scene:count("Stats") == 1)
+    assert(#scene:with("Stats") == 1)
+    assert(scene:count("Stats", "MissingComponent") == 0)
 end
 )lua");
 
@@ -342,6 +375,7 @@ void test_lua_system_can_queue_command_buffer_mutations() {
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-scripting-tests-command-buffer";
     std::filesystem::create_directories(dir);
     write_text(dir / "scene.lua", R"lua(
+local old
 function on_load(scene)
     scene:register_system("lua.spawn_commands", {
         phase = "update",
@@ -356,6 +390,18 @@ function on_load(scene)
         local spawned = sys.commands:create("spawned")
         sys.commands:patch(spawned, "Stats", { hp = stats.hp })
         sys.commands:add(spawned, "ScriptOwned")
+        if old then
+            for _, op in ipairs({'destroy','add','remove','patch'}) do
+                local ok, message=pcall(function()
+                    if op=='destroy' then sys.commands:destroy(old)
+                    elseif op=='add' then sys.commands:add(old,'ScriptOwned')
+                    elseif op=='remove' then sys.commands:remove(old,'ScriptOwned')
+                    else sys.commands:patch(old,'Stats',{hp=99}) end
+                end)
+                assert(not ok and message:find('stale or foreign deferred entity handle',1,true)
+                       and message:find('scene.lua',1,true), tostring(message))
+            end
+        else old=spawned end
     end)
 
     scene:register_system("lua.destroy_commands", {
@@ -400,6 +446,8 @@ end
     const kin::SystemSnapshot spawn_snapshot = world.systems().snapshot("lua.spawn_commands");
     assert(spawn_snapshot.structural_mutation_policy == kin::SystemStructuralMutationPolicy::CommandBufferOnly);
     assert(spawn_snapshot.command_stats.flushed == 3);
+    assert(world.run_frame(0.1f));
+    assert(native.alive() && spawned.alive());
 }
 
 void test_lua_timer_helpers_and_interval_systems(Fixture& fixture) {

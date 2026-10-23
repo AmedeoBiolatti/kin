@@ -43,6 +43,14 @@ enum class SystemPhase {
 // per-phase arrays in this header and in system.cpp.
 inline constexpr std::size_t system_phase_count = 13;
 
+// Host-owned simulation at phase boundaries. Called even for empty phases,
+// outside iteration, after command buffers have flushed. Returning false (or
+// throwing) stops the remaining frame. Callbacks must not rerun the scheduler.
+struct SystemPhaseHooks {
+    std::function<bool(SystemPhase, std::string&)> before;
+    std::function<bool(SystemPhase, std::string&)> after;
+};
+
 enum class SystemKind {
     Native,
     DataNative,
@@ -124,12 +132,18 @@ struct SystemParallelDiagnostic {
     std::string message;
 };
 
+// A placeholder belongs to one command-buffer batch, until clear()/successful flush().
 struct EcsDeferredEntity {
     u32 index = 0;
+    u64 scope = 0;
 };
 
 class EcsCommandBuffer {
 public:
+    // Extension command, executed in scheduler flush order outside iteration.
+    // The callback must not append commands to this buffer. As with other
+    // commands, earlier successful operations are not rolled back on failure.
+    void defer(std::function<bool(EcsWorld&, std::string&)> apply);
     EcsDeferredEntity create_entity(std::string name = {});
     void destroy(EcsEntity entity);
     void destroy(EcsId entity);
@@ -161,7 +175,7 @@ public:
 
     template <typename T>
     void add(EcsDeferredEntity entity) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
             target.add<T>();
         });
     }
@@ -182,7 +196,7 @@ public:
 
     template <typename T>
     void remove(EcsDeferredEntity entity) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
             target.remove<T>();
         });
     }
@@ -203,7 +217,7 @@ public:
 
     template <typename T>
     void set(EcsDeferredEntity entity, T value) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [value = std::move(value)](EcsEntity target) mutable {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [value = std::move(value)](EcsEntity target) mutable {
             target.set<T>(std::move(value));
         });
     }
@@ -224,11 +238,14 @@ public:
 
     template <typename T>
     void modified(EcsDeferredEntity entity) {
-        add_command({TargetKind::Deferred, 0, entity.index}, [](EcsEntity target) {
+        add_command({TargetKind::Deferred, 0, entity.index, entity.scope}, [](EcsEntity target) {
             target.modified<T>();
         });
     }
 
+    bool owns(EcsDeferredEntity entity) const {
+        return entity.scope != 0 && entity.scope == _deferred_scope && entity.index < _next_deferred_entity;
+    }
     bool empty() const { return _commands.empty(); }
     std::size_t size() const { return _commands.size(); }
     void clear();
@@ -244,6 +261,7 @@ private:
         TargetKind kind = TargetKind::ExistingId;
         EcsId entity = 0;
         u32 deferred_index = 0;
+        u64 deferred_scope = 0;
     };
 
     using Command = std::function<bool(EcsWorld&, std::vector<EcsEntity>&, std::string&)>;
@@ -255,6 +273,7 @@ private:
 
     std::vector<Command> _commands;
     u32 _next_deferred_entity = 0;
+    u64 _deferred_scope = 0;
 };
 
 struct SystemContext {
@@ -645,6 +664,7 @@ public:
     bool run_phase(SystemPhase phase, f32 dt, SystemExecutionMode mode);
     bool run_frame(f32 dt = 0.0f);
     bool run_frame(f32 dt, SystemExecutionMode mode);
+    bool run_frame(f32 dt, const SystemPhaseHooks& hooks, SystemExecutionMode mode = SystemExecutionMode::SerialGraph);
 
     std::vector<SystemSnapshot> snapshots() const;
     SystemSnapshot snapshot(std::string_view id) const;
@@ -742,7 +762,11 @@ private:
     std::vector<SystemParallelDiagnostic> parallel_eligibility_reasons(const SystemRecord& record) const;
     SystemScheduleSnapshot build_schedule(const std::vector<SystemRecord*>& records,
                                           SystemExecutionMode requested_mode = SystemExecutionMode::SerialGraph) const;
-    bool run_schedule(SystemScheduleSnapshot& schedule, f32 dt);
+    bool run_schedule(SystemScheduleSnapshot& schedule, f32 dt, const SystemPhaseHooks* hooks = nullptr);
+    bool run_batch(SystemScheduleSnapshot& schedule, SystemBatch& batch, f32 dt);
+    bool invoke_phase_hook(const SystemPhaseHooks&, SystemPhase, bool before);
+    bool _inside_phase_hook = false;
+    friend class EcsWorld;
     bool run_parallel_batch(SystemScheduleSnapshot& schedule, SystemBatch& batch, f32 dt);
     bool collect_batch_records(const SystemBatch& batch, std::vector<SystemRecord*>& records, bool& has_native_system);
     void publish_parallel_results(SystemScheduleSnapshot& schedule,

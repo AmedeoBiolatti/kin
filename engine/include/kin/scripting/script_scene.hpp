@@ -1,27 +1,22 @@
 #pragma once
 
-#include <kin/ecs/ecs_scene.hpp>
-
-#include <functional>
 #include <filesystem>
+#include <functional>
+#include <kin/ecs/ecs_scene.hpp>
+#include <kin/scripting/script_engine.hpp>
 #include <memory>
+#include <sol/sol.hpp>
 #include <string>
 #include <string_view>
-#include <typeindex>
 #include <type_traits>
+#include <typeindex>
 #include <unordered_map>
 #include <vector>
-
-#include <sol/sol.hpp>
 
 namespace kin {
 
 class ScriptEngine;
 class ScriptScene;
-
-struct ScriptOwned {
-    i32 marker = 1;
-};
 
 struct ScriptDiagnostic {
     std::string message;

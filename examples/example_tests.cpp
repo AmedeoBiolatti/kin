@@ -1,6 +1,10 @@
 #include <kin/l10n/localization.hpp>
 
 #include <kin/assets/content.hpp>
+#include "arena_3d.hpp"
+#if defined(KIN_EXPERIMENTAL_3D)
+#include "breach.hpp"
+#endif
 #include "arena_art.hpp"
 #include "example_common.hpp"
 #include "siege_audio.hpp"
@@ -8,7 +12,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <stdexcept>
 #include <kin/platform/app.hpp>
 #include <iostream>
 #include <SDL3/SDL.h>
@@ -150,6 +156,118 @@ static void check_painter() {
     renderer.present();
 }
 
+#if defined(KIN_EXPERIMENTAL_3D)
+// Signal Breach's rules (no drawing): the deck's heights, walking up ramps and
+// off ledges, walls, jumping, shooting along the view, and the same run for
+// the same seed.
+static void check_breach() {
+    using namespace examples;
+    const BreachLevel level;
+    assert(level.ground(24.5f, 16.0f) == 1.5f);                 // the raised middle
+    assert(std::abs(level.ground(24.5f, 10.0f) - .75f) < .01f); // halfway up its north ramp
+    assert(level.ground(0.5f, 10.0f) == BreachLevel::wall_height);
+    assert(level.blocked(14.0f, 6.0f, .35f, 0));   // a pillar
+    assert(!level.blocked(24.5f, 8.2f, .35f, 0));  // the ramp's foot steps up
+    assert(level.blocked(24.5f, 12.2f, .35f, 0));  // the platform's edge from below, not via the ramp
+    assert(!level.line_of_sight({12, 1, 6}, {16, 1, 6}) && level.line_of_sight({12, 4, 6}, {16, 4, 6}));
+    const auto hit = level.raycast({24.5f, 5, 16}, {0, -1, 0}, 10);
+    assert(hit && std::abs(*hit - 3.5f) < .06f);
+
+    Breach breach(30, 3);
+    const auto run = [&](BreachInput in, int steps) {
+        for (int i = 0; i < steps; ++i) breach.step(1.0f / 120, in, true);
+    };
+    // Up the north ramp onto the middle: start at its foot facing +z (yaw 180).
+    breach.player = {24.5f, 0, 6.5f};
+    run({.move = {0, 1}, .yaw = 180}, 120 * 2);
+    assert(breach.player.z > 12.5f && std::abs(breach.player.y - 1.5f) < .01f && breach.grounded);
+    // Off the platform's west edge: a fall to the floor (no ramp there).
+    breach.player = {19.0f, 1.5f, 13.0f};
+    run({.move = {0, 1}, .yaw = 90}, 120);
+    assert(breach.player.x < 18 && breach.player.y == 0 && breach.grounded);
+    // A pillar stops the walk.
+    breach.player = {11.0f, 0, 6.0f};
+    run({.move = {0, 1}, .yaw = -90}, 120 * 2);
+    assert(breach.player.x < 13 - Breach::radius + .01f && breach.player.x > 12);
+    // A jump leaves the ground and comes back.
+    breach.player = {30.0f, 0, 26.0f};
+    breach.velocity = {};
+    run({.jump = true}, 1);
+    assert(!breach.grounded && breach.player.y > 0);
+    run({}, 120);
+    assert(breach.grounded && breach.player.y == 0);
+
+    // Aimed at an enemy and firing: it is hit (a plate takes three).
+    breach.reset(3);
+    run({}, 1); // positions for this step
+    const int kills = breach.kills;
+    for (int i = 0; i < 120 && breach.kills == kills; ++i) {
+        const Vec3f to = breach.enemy_positions()[0] - breach.eye_position();
+        const float yaw = std::atan2(-to.x, -to.z) * 57.29578f;
+        const float pitch = std::atan2(to.y, std::sqrt(to.x * to.x + to.z * to.z)) * 57.29578f;
+        breach.step(1.0f / 120, {.yaw = yaw, .pitch = pitch, .fire = true}, true);
+    }
+    // (Unless a wall stands between: then nothing is, which the line of sight says.)
+    assert(breach.kills > kills || !breach.level().line_of_sight(breach.eye_position(), breach.enemy_positions()[0]));
+    bool fired = false;
+    for (const BreachEvent& e : breach.events) fired = fired || e.kind == BreachEvent::Kind::Fire;
+    assert(fired);
+
+    // The autopilot plays; the same seed gives the same run.
+    Breach a(300, 11), b(300, 11), c(300, 12);
+    for (int i = 0; i < 1200; ++i) {
+        a.step(1.0f / 120, a.autopilot(), true);
+        b.step(1.0f / 120, b.autopilot(), true);
+        c.step(1.0f / 120, c.autopilot(), true);
+    }
+    assert(a.checksum() == b.checksum() && a.checksum() != c.checksum());
+    assert(a.kills > 0 && a.collected > 0 && std::isfinite(a.player.x));
+}
+
+// Signal Siege in 3D (--view 3d), where SDL_GPU is (skipped elsewhere unless
+// KIN_REQUIRE_GPU_TESTS): the ship shows where the camera puts it, the mouse
+// aims where it points, and drawing leaves the simulation alone.
+static void check_painter_3d() {
+    using namespace examples;
+    const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
+    const bool require = required && required[0] != '\0' && std::string_view{required} != "0";
+    kin::App app;
+    auto& window = app.create_window({.title = "siege-3d", .width = 1280, .height = 800, .hidden = true});
+    auto backend = make_render_backend(window, false, true);
+    if (!backend || backend->name() != "SDL_GPU") {
+        if (require) throw std::runtime_error("check_painter_3d: SDL_GPU unavailable");
+        std::cerr << "[SKIP] check_painter_3d: SDL_GPU unavailable\n";
+        return;
+    }
+    Renderer2D renderer{std::move(backend)};
+    renderer.set_logical_size(1280, 800);
+    Arena arena(180, 42);
+    for (int i = 0; i < 240; ++i) arena.step(1.0f / 120, arena.autopilot(), true);
+    const u64 checksum = arena.checksum();
+    ArenaPainter3D painter;
+    painter.init(renderer);
+    assert(painter.available());
+    renderer.clear(Color::rgb(12, 20, 28));
+    painter.draw(renderer, arena, {0, 0, 1280, 800});
+    assert(arena.checksum() == checksum);
+    assert(painter.stats().draws >= 4 && painter.stats().instances >= u32(arena.enemy_count()));
+    // The ship, cyan, at its place on the screen.
+    const auto ship = painter.world_to_screen(arena.player, .45f);
+    assert(ship && ship->x > 0 && ship->x < 1280 && ship->y > 0 && ship->y < 800);
+    std::vector<u8> px;
+    Vec2i size{};
+    assert(renderer.read_rgba({ship->x - 1, ship->y - 1, 3, 3}, px, size) && !px.empty());
+    const std::size_t mid = (std::size_t(size.y / 2) * std::size_t(size.x) + std::size_t(size.x / 2)) * 4;
+    assert(px[mid + 2] > 120 && px[mid + 1] > 120 && px[mid] < px[mid + 1]);
+    // Aiming at the screen point under an arena point finds that point again.
+    const Vec2f spot{arena.player.x + 300, arena.player.y - 120};
+    const auto shown = painter.world_to_screen(spot, .45f);
+    const auto found = shown ? painter.screen_to_world(*shown) : std::nullopt;
+    assert(found && std::abs(found->x - spot.x) < 2 && std::abs(found->y - spot.y) < 2);
+    renderer.present();
+}
+#endif
+
 int main(int argc, char** argv) {
     if (argc > 1 && std::string_view(argv[1]) == "--native-game") {
         check_native_display(argc > 2 ? argv[2] : nullptr, true);
@@ -193,6 +311,10 @@ int main(int argc, char** argv) {
     first.step(1.0f / 120, {.move = {1, 0}, .fire = true, .dash = true});
     assert(first.player.x > start.x && first.dash_cooldown > 0 && !first.shots.empty());
     check_painter();
+#if defined(KIN_EXPERIMENTAL_3D)
+    check_painter_3d();
+    check_breach();
+#endif
     check_siege_flow();
 
     Tracker tracker(10000, 7), replay(10000, 7);
@@ -300,6 +422,8 @@ int main(int argc, char** argv) {
     input.bind("grid_buy",Key::Enter);
     for (float scale : {1.0f,1.25f,2.0f}) {
         window.set_size({int(640*scale),int(480*scale)});
+        // X11 resize requests are asynchronous; hit tests need the new pixel size.
+        assert(SDL_SyncWindow(SDL_GetWindowFromID(window.id())));
         Arena grid_model(1,7); PowerGridState grid;
         const auto grid_draw=[&] {return render_power_grid(grid_model,input,renderer,grid,scale);};
         input.begin_frame(); input.set_mouse_pos({117*scale,187*scale});

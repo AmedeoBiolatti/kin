@@ -56,6 +56,39 @@ kin::AudioHandle handle = audio.play(catalog, request);
 audio.stop(handle, 0.5f); // fade out over half a second
 ```
 
+In 3D (a first-person game), give the listener a facing and sounds a 3D
+place: they are panned by their direction from the listener (to its right is
+right), fade with their 3D distance between the cue's `min` and `max`, pan
+less close up so nothing jumps across the head, and are up to a fifth quieter
+behind. `set_listener(Vec2f)` goes back to 2D.
+
+```cpp
+audio.set_listener_3d({.position = eye, .forward = camera.forward()});
+audio.play(catalog, {.cue = "shot", .position_3d = muzzle, .has_position_3d = true});
+audio.set_position_3d(handle, drone_position); // a sound that moves
+```
+
+The ECS bridge (`kin/ecs/audio.hpp`) does this for 3D entities by itself. An
+`AudioEmitter` or `AudioOneShot` on an entity with a `WorldTransform3D` sounds
+from it, at `offset_3d`: a point of the entity's own space, which moves and
+turns with it. `update_audio_listeners` puts the listener at the highest
+priority `AudioListener` entity's `WorldTransform3D`, facing its -Z with its +Y
+up (a camera's or a head's); with no listener entity it hears from the camera a
+`SceneSession3D` views the world through, the highest priority enabled
+`SceneCamera3D`. `Transform2D` entities sound in 2D as before; an entity with
+both transforms sounds in 3D. A transform that is not finite places nothing (a
+one-shot there is dropped, and it is logged once). A `SceneSession3D` given
+`options.audio` and `options.audio_catalog` runs the three bridge calls in each
+step, after the Audio phase's systems (see
+[rendering_3d.md](rendering_3d.md#owning-a-3d-scene-session)).
+
+```cpp
+car.set(kin::AudioEmitter{.cue = "engine", .offset_3d = {0.0f, 0.4f, 1.9f}}); // at the exhaust
+crate.set(kin::AudioOneShot{.cue = "thud"});  // once, where the crate is
+// No AudioListener anywhere: the scene's camera hears. Or the player's head does:
+head.set(kin::AudioListener{.priority = 1});
+```
+
 Call the engine from one thread. With a device, mixing happens on the device's
 audio thread, so a slow frame does not starve the sound card; `update(dt)` once
 a frame ages voices and picks up clips that finished loading. With the null

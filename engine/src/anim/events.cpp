@@ -9,6 +9,13 @@ void AnimationEventDispatch::on(std::string channel, EventInterpreter fn) {
     _channels[std::move(channel)] = std::move(fn);
 }
 
+bool AnimationEventDispatch::dispatch(EcsEntity target, const AnimationEvent& event) const {
+    const auto found = _channels.find(event.channel);
+    if (found == _channels.end()) return false;
+    found->second(target, event);
+    return true;
+}
+
 void AnimationEventDispatch::run(EcsWorld& world) {
     world.raw().each([this](flecs::entity entity, AnimationEventQueue& queue) {
         std::vector<AnimationEvent> unknown;

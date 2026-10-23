@@ -73,6 +73,12 @@ public:
     void show();
     void hide();
 
+    // Relative mouse mode (a first-person camera): the pointer hidden and held
+    // in the window, and Input::mouse_motion() still reporting every movement.
+    // SDL lets it go while the window is out of focus and takes it back after.
+    void set_relative_mouse(bool enabled);
+    bool relative_mouse() const;
+
     void set_text_input_enabled(bool enabled);
     bool text_input_enabled() const;
     // Where text is being typed, in window coordinates, so an input method

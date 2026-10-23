@@ -1,0 +1,244 @@
+{
+  "schema": "kin.scene/1",
+  "name": "Playable camp",
+  "entities": [
+    {
+      "id": "foot-dust",
+      "components": {
+        "Transform3D": {},
+        "ParticleEmitter3D": {
+          "seed": 29, "rate": 0, "max_particles": 24,
+          "lifetime": [0.22, 0.38], "speed": [0.15, 0.35],
+          "spread": 65, "size": [0.06, 0.12],
+          "size_start": 0.5, "size_mid": 1.2, "size_end": 1.8,
+          "colour_start": [0.45, 0.34, 0.21], "colour_end": [0.5, 0.42, 0.3],
+          "alpha_start": 0.35, "alpha_end": 0,
+          "drag": 2, "wind_influence": 0, "blend": "alpha", "lit": 0.5, "soft_distance": 0.08
+        }
+      }
+    },
+    {
+      "id": "camera",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            3,
+            8
+          ],
+          "rotation": [
+            -0.1305262,
+            0,
+            0,
+            0.9914449
+          ]
+        },
+        "SceneCamera3D": {
+          "fov": 60,
+          "far": 100
+        }
+      }
+    },
+    {
+      "id": "environment",
+      "components": {
+        "SceneEnvironment3D": {
+          "sky_enabled": true,
+          "hdr": true,
+          "samples": 1,
+          "ambient": [
+            0.3,
+            0.3,
+            0.35
+          ],
+          "fog_enabled": false
+        }
+      }
+    },
+    {
+      "id": "platform",
+      "components": {
+        "Transform3D": {
+          "position": [
+            0,
+            -0.2,
+            0
+          ],
+          "scale": [
+            24,
+            0.8,
+            24
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/box.glb"
+        },
+        "Collider3D": {
+          "asset": "colliders/platform.kincollider"
+        }
+      }
+    },
+    {
+      "id": "tent",
+      "components": {
+        "Transform3D": {
+          "position": [
+            -1.5,
+            0,
+            -1
+          ],
+          "scale": [
+            4.1,
+            4.1,
+            4.1
+          ]
+        },
+        "ModelRenderer3D": {
+          "asset": "kenney-survival/tent-canvas.glb"
+        },
+        "Collider3D": {
+          "asset": "colliders/tent.kincollider"
+        }
+      }
+    }
+  ],
+  "prefabs": [
+    {
+      "id": "player",
+      "asset": "prefabs/camp-player.kinprefab",
+      "overrides": {
+        "player": {
+          "Transform3D": {
+            "position": [
+              1,
+              0.1,
+              1
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "brass-barrel",
+      "asset": "prefabs/camp-barrel.kinprefab",
+      "overrides": {
+        "barrel": {
+          "Transform3D": {
+            "position": [
+              0.3,
+              0,
+              -1.5
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "blue-barrel",
+      "asset": "prefabs/camp-barrel.kinprefab",
+      "overrides": {
+        "barrel": {
+          "Transform3D": {
+            "position": [
+              2.2,
+              0,
+              0
+            ]
+          },
+          "ModelMaterials3D": {
+            "variant": "blue"
+          }
+        }
+      }
+    },
+    {
+      "id": "campfire",
+      "asset": "prefabs/campfire.kinprefab",
+      "overrides": {
+        "campfire": {
+          "Transform3D": {
+            "position": [
+              0,
+              0,
+              1
+            ]
+          }
+        }
+      },
+      "structure": {
+        "remove_entities": [
+          "effect/smoke"
+        ],
+        "add_entities": [
+          {
+            "id": "low-smoke",
+            "parent": "effect",
+            "components": {
+              "Transform3D": {
+                "position": [
+                  0,
+                  0.35,
+                  0
+                ]
+              },
+              "ParticleEmitter3D": {
+                "seed": 19,
+                "shape": "disc",
+                "extent": [
+                  0.1,
+                  0,
+                  0
+                ],
+                "spread": 12,
+                "rate": 6,
+                "max_particles": 32,
+                "lifetime": [
+                  1,
+                  1.5
+                ],
+                "speed": [
+                  0.5,
+                  0.8
+                ],
+                "size": [
+                  0.18,
+                  0.28
+                ],
+                "size_start": 0.6,
+                "size_mid": 1.8,
+                "size_end": 3,
+                "colour_start": [
+                  0.22,
+                  0.2,
+                  0.18
+                ],
+                "colour_end": [
+                  0.4,
+                  0.4,
+                  0.4
+                ],
+                "alpha_start": 0.25,
+                "alpha_end": 0,
+                "fade_in": 0.15,
+                "blend": "alpha",
+                "lit": 0.5,
+                "drag": 0.6,
+                "velocity_min": [
+                  -0.05,
+                  0,
+                  0
+                ],
+                "velocity_max": [
+                  0.1,
+                  0,
+                  0.05
+                ]
+              }
+            },
+            "name": "Low smoke"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+ "name": "hidden_dense",
+ "purpose": "hidden.json with 16 x 16 = 256 copies of a 100,352-triangle torus behind the wall (25 million triangles at full detail): the same three cameras, for how occlusion culling scales when much more is hidden. Run with --lod-occlusion.",
+ "procedural": "hidden",
+ "clusters": true,
+ "view": {"samples": 4, "background": [58, 64, 74]},
+ "lod": {"enabled": true},
+ "lights": {
+  "sun": {"direction": [-0.4364, 0.788, -0.4364], "color": [1.15, 1.09, 1.01]},
+  "fill": {"direction": [0.1424, 0.5736, 0.8067], "color": [0.22, 0.22, 0.22]},
+  "ambient": [0.42, 0.42, 0.42],
+  "ground_ambient": [0.18, 0.18, 0.18],
+  "shadow_area": "auto"
+ },
+ "cameras": [
+  {"name": "occluded", "eye": [0.0, 1.7, -10.0], "target": [0.0, 1.5, 6.0], "fov": 50, "near": 0.05},
+  {"name": "peek", "eye": [13.0, 1.7, -4.0], "target": [0.0, 0.8, 8.0], "fov": 50, "near": 0.05},
+  {"name": "open", "eye": [0.0, 3.5, 30.0], "target": [0.0, 0.8, 12.0], "fov": 50, "near": 0.05}
+ ],
+ "grid": [16, 16],
+ "spacing": [2.0, 2.2]
+}

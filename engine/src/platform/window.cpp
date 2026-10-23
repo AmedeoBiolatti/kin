@@ -146,6 +146,16 @@ void Window::hide() {
     }
 }
 
+void Window::set_relative_mouse(bool enabled) {
+    if (_handle) {
+        SDL_SetWindowRelativeMouseMode(to_sdl_window(_handle), enabled);
+    }
+}
+
+bool Window::relative_mouse() const {
+    return _handle && SDL_GetWindowRelativeMouseMode(to_sdl_window(_handle));
+}
+
 void Window::set_text_input_enabled(bool enabled) {
     if (!_handle) {
         return;

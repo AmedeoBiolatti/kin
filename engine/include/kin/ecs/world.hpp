@@ -26,6 +26,7 @@ class EcsSystemRegistry;
 class EcsWorld;
 enum class SystemPhase;
 enum class SystemExecutionMode;
+struct SystemPhaseHooks;
 struct WorldSnapshotOptions;
 struct WorldSnapshot;
 struct EntitySnapshot;
@@ -556,6 +557,8 @@ public:
     bool run_phase(SystemPhase phase, f32 dt, SystemExecutionMode mode);
     bool run_frame(f32 dt = 0.0f);
     bool run_frame(f32 dt, SystemExecutionMode mode);
+    bool run_frame(f32 dt, const SystemPhaseHooks& hooks);
+    bool run_frame(f32 dt, const SystemPhaseHooks& hooks, SystemExecutionMode mode);
     WorldSnapshot snapshot() const;
     WorldSnapshot snapshot(const WorldSnapshotOptions& options) const;
     EntitySnapshot snapshot(EcsEntity entity) const;

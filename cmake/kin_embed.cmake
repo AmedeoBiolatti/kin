@@ -19,6 +19,11 @@
 find_program(KIN_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/bin" "$ENV{VULKAN_SDK}/Bin")
 set(KIN_SPIRV_DIR "" CACHE PATH "Already-compiled .spv files to use instead of glslc (cmake/kin_spirv.cmake makes them)")
 
+# Shaders may #include the engine's (kin_material.inc.glsl: custom 3D material
+# shaders): glslc finds them here, and a rebuild follows their change.
+set(KIN_SHADER_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../engine/shaders" CACHE INTERNAL "")
+file(GLOB _KIN_SHADER_INCLUDES CONFIGURE_DEPENDS "${KIN_SHADER_INCLUDE_DIR}/*.inc.glsl")
+
 set(_KIN_EMBED_GENERATOR "${CMAKE_CURRENT_LIST_DIR}/kin_embed_generate.cmake")
 
 function(kin_compile_glsl out_var)
@@ -61,8 +66,8 @@ function(kin_compile_glsl out_var)
             set(output "${ARG_OUTPUT_DIR}/${spv_name}")
             add_custom_command(
                 OUTPUT "${output}"
-                COMMAND "${KIN_GLSLC}" -fshader-stage=${stage} -o "${output}" "${source}"
-                DEPENDS "${source}"
+                COMMAND "${KIN_GLSLC}" -fshader-stage=${stage} -I "${KIN_SHADER_INCLUDE_DIR}" -o "${output}" "${source}"
+                DEPENDS "${source}" ${_KIN_SHADER_INCLUDES}
                 COMMENT "glslc: ${name} -> ${spv_name}"
                 VERBATIM)
             list(APPEND outputs "${output}")

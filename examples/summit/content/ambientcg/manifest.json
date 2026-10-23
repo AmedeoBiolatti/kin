@@ -1,0 +1,47 @@
+{
+  "author": "ambientCG / Lennart Demes",
+  "license": "CC0-1.0",
+  "license_url": "https://docs.ambientcg.com/license/",
+  "materials": {
+    "Rock030": {
+      "source": "https://ambientcg.com/view?id=Rock030",
+      "download": "https://ambientcg.com/get?file=Rock030_1K-JPG.zip",
+      "archive_sha256": "2fd0bc2d214e2487c19062ed0798a85dd135b41cfc12bbaed42d5acae238f989",
+      "files": {
+        "Rock030-Color.jpg": {
+          "bytes": 1483352,
+          "sha256": "1dca8a336518ce0adca4b5cbe2ab30819c8769388f1c15278082a99f022c615a"
+        },
+        "Rock030-NormalGL.jpg": {
+          "bytes": 2528233,
+          "sha256": "8fd1d22eb6c7b6e4a374196c0de791f724538b8b86eb9c7a946fec1f5834cb94"
+        },
+        "Rock030-ORM.png": {
+          "bytes": 1438320,
+          "sha256": "6edbe2c421c5e72dc84d863a0f7386fe04c666ab1437076e0c46ee8faf155f77"
+        }
+      },
+      "modifications": "Original colour and OpenGL normal JPEGs; AO and roughness packed into R/G of ORM, metallic B=0"
+    },
+    "Ground037": {
+      "source": "https://ambientcg.com/view?id=Ground037",
+      "download": "https://ambientcg.com/get?file=Ground037_1K-JPG.zip",
+      "archive_sha256": "4e69db2b7251b1736fa70fe6fe4ab80d64bd220117dd5dd4c7caaead51c2574e",
+      "files": {
+        "Ground037-Color.jpg": {
+          "bytes": 2187764,
+          "sha256": "d92bec8a35b9cb16ec79b421ca0f572a7400286eae109beafa266629ef49a6cf"
+        },
+        "Ground037-NormalGL.jpg": {
+          "bytes": 2474236,
+          "sha256": "ea59dbdcfa5bf2f28bdd4aa896d4e5f96c4cce5939100dcc6db4bbbcdebfe38d"
+        },
+        "Ground037-ORM.png": {
+          "bytes": 1517150,
+          "sha256": "5fc2c655ef696fd89b190013f3d47f2fbd629c3cb77f94149eccdc3eca5a8f56"
+        }
+      },
+      "modifications": "Original colour and OpenGL normal JPEGs; AO and roughness packed into R/G of ORM, metallic B=0"
+    }
+  }
+}

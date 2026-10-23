@@ -1,0 +1,4 @@
+{"schema":"kin.collider3d/1","shape":{"kind":"compound","children":[
+  {"kind":"box","half_extents":[0.0625,0.125,0.125],"offset":[-0.0625,0.125,0]},
+  {"kind":"box","half_extents":[0.0625,0.125,0.125],"offset":[0.0625,0.125,0]}
+]}}

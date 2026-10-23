@@ -1,0 +1,132 @@
+{
+ "name": "snow_valley",
+ "purpose": "Snow in the valley (P3c): soft flakes drifting with a 6 m/s wind that gusts, in a camera-following volume, over the P3a valley with its sky and fog; the weather dims the light and thickens the haze. The flakes are lit by the scene's sun and ambient light (tinted, not glowing), fogged by distance, fade near the camera. 'valley' looks along it, 'close' at a few metres of flakes, 'drift' side-on to the wind.",
+ "procedural": "landscape",
+ "trees": 2500,
+ "view": {
+  "samples": 4,
+  "hdr": true,
+  "exposure": 1.0,
+  "bloom": 0.2
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.0,
+    1.0,
+    0.0
+   ],
+   "color": [
+    1,
+    1,
+    1
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.2,
+   0.25
+  ],
+  "shadow_area": "auto",
+  "shadow_resolution": 2048,
+  "shadow_cascades": 4,
+  "shadow_distance": 500
+ },
+ "time_of_day": {
+  "hours": 15.5,
+  "day_of_year": 40,
+  "latitude": 47.0
+ },
+ "sky": {
+  "enabled": true,
+  "turbidity": 5.0,
+  "sun_disc": 30.0
+ },
+ "fog": {
+  "enabled": true,
+  "density": 0.0006,
+  "height_density": 0.002,
+  "height_falloff": 0.05,
+  "base_height": 20.0,
+  "color_from_sky": true,
+  "sun_scatter": 0.2,
+  "sun_anisotropy": 0.7,
+  "max_opacity": 0.98
+ },
+ "weather": {
+  "snow": {
+   "intensity": 1.0,
+   "max": 14000,
+   "size": [
+    0.07,
+    0.18
+   ],
+   "box": [
+    40,
+    24,
+    40
+   ],
+   "alpha": 0.9
+  },
+  "wind": {
+   "direction": [
+    1.0,
+    0.0,
+    0.25
+   ],
+   "speed": 6.0,
+   "gust": 0.5,
+   "gust_period": 8.0,
+   "turbulence": 0.8
+  },
+  "time": 20.0,
+  "apply": true
+ },
+ "cameras": [
+  {
+   "name": "valley",
+   "eye": [
+    0.0,
+    8.0,
+    60.0
+   ],
+   "target": [
+    0.0,
+    25.0,
+    -500.0
+   ],
+   "fov": 60,
+   "near": 0.1
+  },
+  {
+   "name": "close",
+   "eye": [
+    0.0,
+    6.0,
+    40.0
+   ],
+   "target": [
+    10.0,
+    6.0,
+    -50.0
+   ],
+   "fov": 60,
+   "near": 0.1
+  },
+  {
+   "name": "drift",
+   "eye": [
+    -30.0,
+    8.0,
+    40.0
+   ],
+   "target": [
+    30.0,
+    8.0,
+    10.0
+   ],
+   "fov": 60,
+   "near": 0.1
+  }
+ ]
+}

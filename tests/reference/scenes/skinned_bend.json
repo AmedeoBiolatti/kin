@@ -1,0 +1,141 @@
+{
+ "name": "skinned_bend",
+ "purpose": "Skinning without a download (P1a): a tube bound to three joints, the 'bend' clip at four times and 'wave' behind; judged against the CPU skinning reference (tests/render3d_tests.cpp), not Cycles.",
+ "models": [
+  {
+   "file": "made/floor20.glb"
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    -3.0,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "bend",
+    "time": 0.0
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    -1.0,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "bend",
+    "time": 0.5
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    1.0,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "bend",
+    "time": 1.0
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    3.0,
+    0,
+    0
+   ],
+   "animation": {
+    "clip": "bend",
+    "time": 1.5
+   }
+  },
+  {
+   "file": "made/skinned_bend.glb",
+   "position": [
+    0,
+    0,
+    -3
+   ],
+   "rotation_y": 35,
+   "animation": {
+    "clip": "wave",
+    "time": 1.0
+   }
+  }
+ ],
+ "view": {
+  "samples": 4,
+  "background": [
+   130,
+   160,
+   200
+  ]
+ },
+ "lights": {
+  "sun": {
+   "direction": [
+    0.5,
+    0.9,
+    0.6
+   ],
+   "color": [
+    1.1,
+    1.07,
+    1.0
+   ]
+  },
+  "ambient": [
+   0.2,
+   0.22,
+   0.28
+  ],
+  "shadow_area": [
+   [
+    -6,
+    -0.3,
+    -6
+   ],
+   [
+    6,
+    5,
+    6
+   ]
+  ]
+ },
+ "cameras": [
+  {
+   "name": "front",
+   "eye": [
+    0,
+    1.6,
+    9.0
+   ],
+   "target": [
+    0,
+    1.3,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  },
+  {
+   "name": "above",
+   "eye": [
+    -4.0,
+    6.5,
+    6.5
+   ],
+   "target": [
+    0,
+    1.0,
+    0
+   ],
+   "fov": 40,
+   "near": 0.05
+  }
+ ]
+}

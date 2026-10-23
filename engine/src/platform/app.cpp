@@ -292,7 +292,7 @@ void App::run_for(i32 frames,
             .clamped_frame_time = _config.fixed_dt,
             .accumulator_before_update = _config.fixed_dt,
             .accumulator_after_update = 0.0f,
-            .alpha = 0.0f,
+            .alpha = 1.0f,
             .update_steps = 1,
             .hit_max_steps = false,
         };
@@ -300,7 +300,7 @@ void App::run_for(i32 frames,
         pump_events();
         update(_config.fixed_dt, frame);
         if (_running) {
-            render(0.0f);
+            render(1.0f);
         }
     }
     KIN_LOG_INFO_F("runtime",

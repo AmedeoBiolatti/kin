@@ -1,8 +1,11 @@
-#include <kin/scripting/script_engine.hpp>
-
 #include "lua_l10n.hpp"
 #include "lua_paths.hpp"
+#include "lua_scene_context.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/dialogue/dialogue.hpp>
@@ -11,14 +14,10 @@
 #include <kin/ecs/time.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scripting/script_engine.hpp>
 #include <kin/scripting/script_scene.hpp>
-
-#include <sol/sol.hpp>
-
-#include <algorithm>
-#include <cstdint>
-#include <filesystem>
 #include <optional>
+#include <sol/sol.hpp>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -28,7 +27,48 @@
 
 namespace kin {
 
+struct ScriptEngineHost : ScriptSceneBindings {
+    std::vector<SystemId> systems;
+    bool closing = false;
+    EcsWorld& ecs() const {
+        if (closing)
+            throw std::runtime_error("script state is closing");
+        return *world;
+    }
+    const ScriptComponentRegistry* script_components() const { return components; }
+    std::filesystem::path resolved_script_path() const { return script_path; }
+    void clear_script_entities() const {
+        if (clear_entities)
+            clear_entities();
+    }
+    void set_clear_color(Color color) const {
+        if (set_background)
+            set_background(color);
+    }
+    void mark_render_cache_dirty(std::string_view) const {
+        if (mark_render_dirty)
+            mark_render_dirty();
+    }
+    void clear_systems() {
+        if (world && !systems.empty()) {
+            const auto registered = world->systems().snapshots();
+            for (const auto& id : systems)
+                if (std::ranges::any_of(registered, [&](const auto& entry) { return entry.id == id; }))
+                    world->systems().remove(id);
+        }
+        systems.clear();
+    }
+};
+
+namespace scripting_detail {
+thread_local EcsCommandBuffer* script_commands = nullptr;
+EcsCommandBuffer* current_script_commands() {
+    return script_commands;
+}
+} // namespace scripting_detail
+
 struct ScriptEngine::Impl {
+    std::unique_ptr<ScriptEngineHost> host;
     sol::state lua;
     std::filesystem::path asset_root;
     std::vector<std::filesystem::path> dependencies;
@@ -105,6 +145,7 @@ struct ScriptComponentFilter {
     ScriptComponentKind kind = ScriptComponentKind::Unknown;
     const ScriptComponentRegistry::ComponentEntry* custom = nullptr;
     std::string metadata_name;
+    ComponentId metadata_id = 0;
 };
 
 struct ScriptSystemAccessContext {
@@ -132,8 +173,8 @@ ScriptComponentKind component_kind(std::string_view name) {
     return ScriptComponentKind::Unknown;
 }
 
-const ScriptComponentRegistry::ComponentEntry* script_component_entry(const ScriptScene* scene,
-                                                                        std::string_view name) {
+const ScriptComponentRegistry::ComponentEntry* script_component_entry(const ScriptEngineHost* scene,
+                                                                      std::string_view name) {
     const ScriptComponentRegistry* registry = scene ? scene->script_components() : nullptr;
     return registry ? registry->find(name) : nullptr;
 }
@@ -154,7 +195,7 @@ bool has_component(const EcsEntity& entity, const ScriptComponentFilter& filter)
         return filter.custom->has(entity);
     }
     if (!filter.metadata_name.empty()) {
-        return filter.kind == ScriptComponentKind::Unknown;
+        return entity.raw().has(filter.metadata_id);
     }
     return has_component(entity, filter.kind);
 }
@@ -236,6 +277,11 @@ sol::object component_value_to_lua(sol::this_state state, const ComponentFieldVa
             result["x"] = typed.x;
             result["y"] = typed.y;
             return result;
+        } else if constexpr (std::is_same_v<T, Vec3f> || std::is_same_v<T, Quatf>) {
+            sol::table result = lua.create_table();
+            result["x"] = typed.x; result["y"] = typed.y; result["z"] = typed.z;
+            if constexpr (std::is_same_v<T, Quatf>) result["w"] = typed.w;
+            return result;
         } else if constexpr (std::is_same_v<T, Vec2i>) {
             sol::table result = lua.create_table();
             result["x"] = typed.x;
@@ -297,6 +343,16 @@ std::optional<ComponentFieldValue> component_value_from_lua(ComponentFieldKind k
         if (object.get_type() == sol::type::table) {
             sol::table table = object.as<sol::table>();
             return ComponentFieldValue{Vec2i{table.get_or("x", 0), table.get_or("y", 0)}};
+        }
+        break;
+    case ComponentFieldKind::Vec3f:
+    case ComponentFieldKind::Quatf:
+        if (object.get_type() == sol::type::table) {
+            sol::table table = object.as<sol::table>();
+            ComponentFieldValue value = kind == ComponentFieldKind::Vec3f
+                ? ComponentFieldValue{Vec3f{table.get_or("x", 0.0f), table.get_or("y", 0.0f), table.get_or("z", 0.0f)}}
+                : ComponentFieldValue{Quatf{table.get_or("x", 0.0f), table.get_or("y", 0.0f), table.get_or("z", 0.0f), table.get_or("w", 1.0f)}};
+            if (detail::field_value_matches_kind(value, kind)) return value;
         }
         break;
     case ComponentFieldKind::Color:
@@ -441,8 +497,11 @@ void write_lua_report_value(JsonWriter& json, const sol::object& value, i32 dept
 }
 
 struct ScriptEntityApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
     EcsEntity entity;
+    std::function<bool()> lease;
+
+    bool lease_valid() const { return !lease || lease(); }
 
     EcsId id() const {
         return entity.id();
@@ -453,11 +512,11 @@ struct ScriptEntityApi {
     }
 
     bool valid() const {
-        return entity.valid();
+        return lease_valid() && entity.valid();
     }
 
     bool alive() const {
-        return entity.alive();
+        return lease_valid() && entity.alive();
     }
 
     void destroy() {
@@ -546,7 +605,7 @@ struct ScriptEntityApi {
         if (!found.is_valid() || !found.is_alive()) {
             return sol::nil;
         }
-        return sol::make_object(state, ScriptEntityApi{scene, EcsEntity{found}});
+        return sol::make_object(state, ScriptEntityApi{scene, EcsEntity{found}, lease});
     }
 
     ScriptEntityApi& patch(std::string_view component, sol::table values) {
@@ -581,10 +640,15 @@ struct ScriptEntityApi {
                 result[std::string{name}] = component_value_to_lua(state, value);
             });
         const std::string component_name{component};
-        result["commit"] = [scene = scene, entity = entity, component_name](sol::table self) -> sol::table {
-            const std::vector<ComponentPatchValue> patch_values = component_patch_values_from_lua(scene->ecs(), component_name, self);
+        result["commit"] = [scene = scene, entity = entity, component_name, lease = lease](sol::stack_object self) -> sol::table {
+            if (self.get_type() != sol::type::table)
+                throw std::runtime_error("component commit requires its table; call with ':'");
+            if (scene->closing || !entity.alive() || (lease && !lease()))
+                throw std::runtime_error(scripting_detail::stale_entity_message);
+            sol::table table = self.as<sol::table>();
+            const std::vector<ComponentPatchValue> patch_values = component_patch_values_from_lua(scene->ecs(), component_name, table);
             apply_component_patch_values(scene->ecs(), entity, component_name, patch_values);
-            return self;
+            return table;
         };
         return sol::object{result};
     }
@@ -751,7 +815,9 @@ struct ScriptCommandTarget {
 
 std::optional<ScriptCommandTarget> command_target_from_lua(const sol::object& object) {
     if (object.is<ScriptEntityApi>()) {
-        ScriptEntityApi entity = object.as<ScriptEntityApi>();
+        const auto& entity = object.as<const ScriptEntityApi&>();
+        if (!entity.alive())
+            throw std::runtime_error(scripting_detail::stale_entity_message);
         return ScriptCommandTarget{.id = entity.id()};
     }
     if (object.is<ScriptDeferredEntityApi>()) {
@@ -765,7 +831,7 @@ std::optional<ScriptCommandTarget> command_target_from_lua(const sol::object& ob
 }
 
 struct ScriptCommandBufferApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
     EcsCommandBuffer* commands = nullptr;
 
     bool valid() const {
@@ -867,17 +933,19 @@ private:
         }
     }
 
-    static ScriptCommandTarget require_target(const sol::object& target) {
+    ScriptCommandTarget require_target(const sol::object& target) const {
         std::optional<ScriptCommandTarget> resolved = command_target_from_lua(target);
         if (!resolved) {
             throw std::runtime_error("ECS command target must be an entity, deferred entity, or entity id");
         }
+        if (resolved->deferred && !commands->owns(resolved->deferred_entity))
+            throw std::runtime_error("stale or foreign deferred entity handle");
         return *resolved;
     }
 };
 
 struct ScriptSystemContextApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
     EcsCommandBuffer* commands_ptr = nullptr;
     f32 delta_time = 0.0f;
     std::string id;
@@ -906,7 +974,7 @@ struct ScriptSystemContextApi {
 };
 
 struct ScriptSceneApi {
-    ScriptScene* scene = nullptr;
+    ScriptEngineHost* scene = nullptr;
 
     ScriptEntityApi entity(sol::optional<std::string> name) {
         EcsEntity created = name ? scene->ecs().entity(*name) : scene->ecs().entity();
@@ -983,9 +1051,7 @@ struct ScriptSceneApi {
         scene->clear_script_entities();
     }
 
-    void set_clear_color(i32 r, i32 g, i32 b) {
-        scene->render_config().clear_color = script_color(r, g, b);
-    }
+    void set_clear_color(i32 r, i32 g, i32 b) { scene->set_clear_color(script_color(r, g, b)); }
 
     void mark_render_cache_dirty() {
         scene->mark_render_cache_dirty("script api");
@@ -1024,29 +1090,47 @@ struct ScriptSceneApi {
             .reads = query_descriptor.reads,
             .writes = query_descriptor.writes,
         });
-        return !scene->ecs().systems().register_task(std::move(system_descriptor),
-                                                     [scene = scene, plan = std::move(plan), run = std::move(run), access = std::move(access)](SystemContext& ctx) mutable {
-                                                         for (EcsEntity entity : scene->ecs().query_entities(plan)) {
-                                                             const ScriptSystemAccessContext* previous = current_script_system_access;
-                                                             current_script_system_access = access.get();
-                                                             ScriptSystemContextApi system_context{
-                                                                 .scene = scene,
-                                                                 .commands_ptr = ctx.commands,
-                                                                 .delta_time = ctx.dt,
-                                                                 .id = std::string{ctx.system_id},
-                                                                 .phase_name = std::string{system_phase_name(ctx.phase)},
-                                                                 .parallel = ctx.running_parallel,
-                                                             };
-                                                             sol::protected_function_result result =
-                                                                 run(ScriptEntityApi{scene, entity}, ctx.dt, system_context);
-                                                             current_script_system_access = previous;
-                                                             if (!result.valid()) {
-                                                                 sol::error error = result;
-                                                                 throw std::runtime_error("system '" + access->system_id + "' entity=" + std::to_string(entity.id()) + ": " + error.what());
-                                                             }
-                                                         }
-                                                     })
-                    .empty();
+        const bool registered =
+            !scene->ecs()
+                 .systems()
+                 .register_task(std::move(system_descriptor),
+                                [scene = scene, plan = std::move(plan), run = std::move(run),
+                                 access = std::move(access)](SystemContext& ctx) mutable {
+                                    for (EcsEntity entity : scene->ecs().query_entities(plan)) {
+                                        const ScriptSystemAccessContext* previous = current_script_system_access;
+                                        auto* previous_commands = scripting_detail::script_commands;
+                                        struct Reset {
+                                            const ScriptSystemAccessContext* access;
+                                            EcsCommandBuffer* commands;
+                                            ~Reset() {
+                                                current_script_system_access = access;
+                                                scripting_detail::script_commands = commands;
+                                            }
+                                        } reset{previous, previous_commands};
+                                        current_script_system_access = access.get();
+                                        scripting_detail::script_commands = ctx.commands;
+                                        ScriptSystemContextApi system_context{
+                                            .scene = scene,
+                                            .commands_ptr = ctx.commands,
+                                            .delta_time = ctx.dt,
+                                            .id = std::string{ctx.system_id},
+                                            .phase_name = std::string{system_phase_name(ctx.phase)},
+                                            .parallel = ctx.running_parallel,
+                                        };
+                                        sol::protected_function_result result =
+                                            run(ScriptEntityApi{scene, entity}, ctx.dt, system_context);
+                                        current_script_system_access = previous;
+                                        if (!result.valid()) {
+                                            sol::error error = result;
+                                            throw std::runtime_error("system '" + access->system_id + "' entity=" +
+                                                                     std::to_string(entity.id()) + ": " + error.what());
+                                        }
+                                    }
+                                })
+                 .empty();
+        if (registered)
+            scene->systems.emplace_back(id);
+        return registered;
     }
 
 private:
@@ -1063,6 +1147,10 @@ private:
 
                 const ScriptComponentRegistry::ComponentEntry* entry = script_component_entry(scene, name);
                 if (!entry) {
+                    if (const auto* descriptor = scene->ecs().components().find(name)) {
+                        components.push_back({.kind = ScriptComponentKind::Unknown, .metadata_name = name, .metadata_id = descriptor->id});
+                        continue;
+                    }
                     components.clear();
                     components.push_back({.kind = ScriptComponentKind::Unknown});
                     return components;
@@ -1074,7 +1162,7 @@ private:
     }
 
     void collect_matching(const std::vector<ScriptComponentFilter>& components, auto&& callback) {
-        if (!components.empty() && components[0].kind == ScriptComponentKind::Unknown && !components[0].custom) {
+        if (!components.empty() && components[0].kind == ScriptComponentKind::Unknown && !components[0].custom && components[0].metadata_name.empty()) {
             return;
         }
 
@@ -1097,6 +1185,12 @@ private:
             for (EcsEntity entity : candidates) {
                 visit(entity);
             }
+            return;
+        }
+
+        if (!components[0].metadata_name.empty()) {
+            const auto plan = scene->ecs().build_query_plan({.all = {components[0].metadata_name}});
+            for (auto entity : scene->ecs().query_entities(plan)) visit(entity);
             return;
         }
 
@@ -1130,41 +1224,29 @@ private:
 struct ScriptInputApi {
     Input* input = nullptr;
 
-    bool pressed(std::string_view action) const {
-        return input->pressed(action);
-    }
+    bool pressed(std::string_view action) const { return input && input->pressed(action); }
 
-    bool held(std::string_view action) const {
-        return input->held(action);
-    }
+    bool held(std::string_view action) const { return input && input->held(action); }
 
-    bool released(std::string_view action) const {
-        return input->released(action);
-    }
+    bool released(std::string_view action) const { return input && input->released(action); }
 };
 
 struct ScriptAppApi {
     App* app = nullptr;
 
     void quit() {
+        if (!app)
+            throw std::runtime_error("script host has no application");
         app->quit();
     }
 };
 
 struct ScriptContextApi {
-    SceneContext* ctx = nullptr;
+    ScriptFrameContext ctx;
 
-    f32 dt() const {
-        return ctx->dt;
-    }
-
-    ScriptInputApi input() const {
-        return ScriptInputApi{&ctx->input};
-    }
-
-    ScriptAppApi app() const {
-        return ScriptAppApi{&ctx->app};
-    }
+    f32 dt() const { return ctx.dt; }
+    ScriptInputApi input() const { return ScriptInputApi{ctx.input}; }
+    ScriptAppApi app() const { return ScriptAppApi{ctx.app}; }
 };
 
 struct ScriptActionsApi {
@@ -1257,10 +1339,61 @@ struct ScriptDialoguePlayerApi {
     }
 };
 
+
+// Check self without changing legacy argument conversions (including numeric
+// colours). Sol2's unchecked member thunk dereferences a missing receiver.
+template <class C> C& script_self(const sol::stack_object& value, bool property = false) {
+    if (!value.is<C>())
+        throw std::runtime_error(property ? "invalid property receiver" : "invalid method receiver; call the method with ':'");
+    return value.as<C&>();
+}
+template <class Method, class C, class... A> decltype(auto) script_invoke(Method method, C& self, A&&... args) {
+    if constexpr (std::is_same_v<C, ScriptEntityApi>) {
+        bool checks_liveness = false;
+        if constexpr (std::is_same_v<Method, bool (ScriptEntityApi::*)() const>)
+            checks_liveness = method == &ScriptEntityApi::alive || method == &ScriptEntityApi::valid;
+        if constexpr (std::is_same_v<Method, EcsId (ScriptEntityApi::*)() const>)
+            checks_liveness = method == &ScriptEntityApi::id;
+        if (!checks_liveness && (!self.scene || self.scene->closing || !self.alive()))
+            throw std::runtime_error(scripting_detail::stale_entity_message);
+    }
+    return std::invoke(method, self, std::forward<A>(args)...);
+}
+template <class R, class C, class... A> auto script_method(R (C::*method)(A...)) {
+    return [method](sol::stack_object self, A... arguments) -> R {
+        return script_invoke(method, script_self<C>(self), std::forward<A>(arguments)...);
+    };
+}
+template <class R, class C, class... A> auto script_method(R (C::*method)(A...) const) {
+    return [method](sol::stack_object self, A... arguments) -> R {
+        return script_invoke(method, script_self<C>(self), std::forward<A>(arguments)...);
+    };
+}
+template <class R, class C> auto script_property(R (C::*method)() const) {
+    return sol::property([method](sol::this_state state) -> R {
+        return std::invoke(method, script_self<C>(sol::stack_object(state, 1), true));
+    });
+}
+
+
 } // namespace
+
+EcsEntity scripting_detail::script_entity(const sol::object& object) {
+    if (!object.is<ScriptEntityApi>())
+        throw std::runtime_error("expected a KinEntity");
+    const auto& value = object.as<const ScriptEntityApi&>();
+    if (!value.scene || value.scene->closing || !value.alive())
+        throw std::runtime_error(stale_entity_message);
+    return value.entity;
+}
+
+void scripting_detail::script_component_access(std::string_view component, bool write) {
+    warn_undeclared_script_access(write ? "write" : "read", component);
+}
 
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     : _impl(std::make_unique<Impl>()) {
+    scripting_detail::bind_script_errors(_impl->lua);
     _impl->lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
     sol::table package = _impl->lua.create_table();
     package["loaded"] = _impl->lua.create_table();
@@ -1272,7 +1405,12 @@ ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     }
 }
 
-ScriptEngine::~ScriptEngine() = default;
+ScriptEngine::~ScriptEngine() {
+    if (_impl->host) {
+        _impl->host->closing = true;
+        _impl->host->clear_systems();
+    }
+}
 
 bool ScriptEngine::load_file(const std::filesystem::path& path) {
     const std::filesystem::path absolute = normalized_dependency_path(path);
@@ -1363,19 +1501,43 @@ void ScriptEngine::record_dependency(const std::filesystem::path& path) {
 }
 
 bool ScriptEngine::call_on_load(ScriptScene& scene) {
-    return call_optional("on_load", ScriptSceneApi{&scene});
+    return call_on_load({.world = &scene.ecs(),
+                         .components = scene.script_components(),
+                         .script_path = scene.resolved_script_path(),
+                         .clear_entities = [&scene] { scene.clear_script_entities(); },
+                         .set_background = [&scene](Color c) { scene.render_config().clear_color = c; },
+                         .mark_render_dirty = [&scene] { scene.mark_render_cache_dirty("script api"); }});
+}
+
+bool ScriptEngine::call_on_load(ScriptSceneBindings bindings) {
+    if (!bindings.world || (_impl->host && _impl->host->world != bindings.world)) {
+        _last_error = "script bindings require one live world per Lua state";
+        return false;
+    }
+    if (!_impl->host)
+        _impl->host = std::make_unique<ScriptEngineHost>();
+    _impl->host->clear_systems();
+    static_cast<ScriptSceneBindings&>(*_impl->host) = std::move(bindings);
+    return call_optional("on_load", ScriptSceneApi{_impl->host.get()});
 }
 
 bool ScriptEngine::call_on_enter(SceneContext& ctx) {
-    return call_optional("on_enter", ScriptContextApi{&ctx});
+    return call_on_enter(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
-
 bool ScriptEngine::call_on_exit(SceneContext& ctx) {
-    return call_optional("on_exit", ScriptContextApi{&ctx});
+    return call_on_exit(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
-
 bool ScriptEngine::call_update(SceneContext& ctx) {
-    return call_optional("update", ScriptContextApi{&ctx});
+    return call_update(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
+}
+bool ScriptEngine::call_on_enter(ScriptFrameContext ctx) {
+    return call_optional("on_enter", ScriptContextApi{ctx});
+}
+bool ScriptEngine::call_on_exit(ScriptFrameContext ctx) {
+    return call_optional("on_exit", ScriptContextApi{ctx});
+}
+bool ScriptEngine::call_update(ScriptFrameContext ctx) {
+    return call_optional("update", ScriptContextApi{ctx});
 }
 
 bool ScriptEngine::call_collect_actions(InputActionContext& actions) const {
@@ -1450,100 +1612,105 @@ bool ScriptEngine::call_optional_const(std::string_view name, Args&&... args) co
 }
 
 void ScriptEngine::register_bindings() {
+    _impl->lua.registry()["kin.entity"] = [this](EcsEntity e, std::function<bool()> lease) {
+        if (!_impl->host || _impl->host->closing || !e || e.raw().world().c_ptr() != _impl->host->world->raw().c_ptr())
+            throw std::runtime_error("entity does not belong to this Lua scene");
+        return ScriptEntityApi{_impl->host.get(), e, std::move(lease)};
+    };
     scripting_detail::bind_l10n(_impl->lua, true);
     _impl->lua.new_usertype<ScriptEntityApi>("KinEntity",
         sol::no_constructor,
-        "id", &ScriptEntityApi::id,
-        "name", &ScriptEntityApi::name,
-        "valid", &ScriptEntityApi::valid,
-        "alive", &ScriptEntityApi::alive,
-        "destroy", &ScriptEntityApi::destroy,
-        "has", &ScriptEntityApi::has,
-        "get", &ScriptEntityApi::get,
-        "component", &ScriptEntityApi::component,
-        "timer", &ScriptEntityApi::timer,
-        "cooldown", &ScriptEntityApi::cooldown,
-        "ready", &ScriptEntityApi::ready,
-        "child", &ScriptEntityApi::child,
-        "patch", &ScriptEntityApi::patch,
-        "add_script_owned", &ScriptEntityApi::add_script_owned,
-        "remove", &ScriptEntityApi::remove,
-        "set_transform", &ScriptEntityApi::set_transform,
-        "get_transform", &ScriptEntityApi::get_transform,
-        "translate", &ScriptEntityApi::translate,
-        "set_rect", &ScriptEntityApi::set_rect,
-        "get_rect", &ScriptEntityApi::get_rect,
-        "set_line", &ScriptEntityApi::set_line,
-        "get_line", &ScriptEntityApi::get_line);
+        "id", script_method(&ScriptEntityApi::id),
+        "name", script_method(&ScriptEntityApi::name),
+        "valid", script_method(&ScriptEntityApi::valid),
+        "alive", script_method(&ScriptEntityApi::alive),
+        "destroy", script_method(&ScriptEntityApi::destroy),
+        "has", script_method(&ScriptEntityApi::has),
+        "get", script_method(&ScriptEntityApi::get),
+        "component", script_method(&ScriptEntityApi::component),
+        "timer", script_method(&ScriptEntityApi::timer),
+        "cooldown", script_method(&ScriptEntityApi::cooldown),
+        "ready", script_method(&ScriptEntityApi::ready),
+        "child", script_method(&ScriptEntityApi::child),
+        "patch", script_method(&ScriptEntityApi::patch),
+        "add_script_owned", script_method(&ScriptEntityApi::add_script_owned),
+        "remove", script_method(&ScriptEntityApi::remove),
+        "set_transform", script_method(&ScriptEntityApi::set_transform),
+        "get_transform", script_method(&ScriptEntityApi::get_transform),
+        "translate", script_method(&ScriptEntityApi::translate),
+        "set_rect", script_method(&ScriptEntityApi::set_rect),
+        "get_rect", script_method(&ScriptEntityApi::get_rect),
+        "set_line", script_method(&ScriptEntityApi::set_line),
+        "get_line", script_method(&ScriptEntityApi::get_line));
 
     _impl->lua.new_usertype<ScriptDeferredEntityApi>("KinDeferredEntity",
         sol::no_constructor,
-        "index", sol::property(&ScriptDeferredEntityApi::index));
+        "index", script_property(&ScriptDeferredEntityApi::index));
 
     _impl->lua.new_usertype<ScriptCommandBufferApi>("KinCommandBuffer",
         sol::no_constructor,
-        "valid", sol::property(&ScriptCommandBufferApi::valid),
-        "size", sol::property(&ScriptCommandBufferApi::size),
-        "create", &ScriptCommandBufferApi::create,
-        "destroy", &ScriptCommandBufferApi::destroy,
-        "add", &ScriptCommandBufferApi::add,
-        "remove", &ScriptCommandBufferApi::remove,
-        "patch", &ScriptCommandBufferApi::patch);
+        "valid", script_property(&ScriptCommandBufferApi::valid),
+        "size", script_property(&ScriptCommandBufferApi::size),
+        "create", script_method(&ScriptCommandBufferApi::create),
+        "destroy", script_method(&ScriptCommandBufferApi::destroy),
+        "add", script_method(&ScriptCommandBufferApi::add),
+        "remove", script_method(&ScriptCommandBufferApi::remove),
+        "patch", script_method(&ScriptCommandBufferApi::patch));
 
     _impl->lua.new_usertype<ScriptSystemContextApi>("KinSystemContext",
         sol::no_constructor,
-        "dt", sol::property(&ScriptSystemContextApi::dt),
-        "system_id", sol::property(&ScriptSystemContextApi::system_id),
-        "phase", sol::property(&ScriptSystemContextApi::phase),
-        "running_parallel", sol::property(&ScriptSystemContextApi::running_parallel),
-        "commands", sol::property(&ScriptSystemContextApi::commands));
+        "dt", script_property(&ScriptSystemContextApi::dt),
+        "system_id", script_property(&ScriptSystemContextApi::system_id),
+        "phase", script_property(&ScriptSystemContextApi::phase),
+        "running_parallel", script_property(&ScriptSystemContextApi::running_parallel),
+        "commands", script_property(&ScriptSystemContextApi::commands));
 
     _impl->lua.new_usertype<ScriptSceneApi>("KinScene",
         sol::no_constructor,
-        "entity", &ScriptSceneApi::entity,
-        "find", &ScriptSceneApi::find,
-        "authored", &ScriptSceneApi::authored,
-        "entities", &ScriptSceneApi::entities,
-        "with", &ScriptSceneApi::with,
-        "count", &ScriptSceneApi::count,
-        "register_system", &ScriptSceneApi::register_system,
-        "clear_script_entities", &ScriptSceneApi::clear_script_entities,
-        "set_clear_color", &ScriptSceneApi::set_clear_color,
-        "mark_render_cache_dirty", &ScriptSceneApi::mark_render_cache_dirty);
+        "entity", script_method(&ScriptSceneApi::entity),
+        "find", script_method(&ScriptSceneApi::find),
+        "authored", script_method(&ScriptSceneApi::authored),
+        "entities", script_method(&ScriptSceneApi::entities),
+        "with", script_method(&ScriptSceneApi::with),
+        "count", script_method(&ScriptSceneApi::count),
+        "register_system", script_method(&ScriptSceneApi::register_system),
+        "clear_script_entities", script_method(&ScriptSceneApi::clear_script_entities),
+        "set_clear_color", script_method(&ScriptSceneApi::set_clear_color),
+        "mark_render_cache_dirty", script_method(&ScriptSceneApi::mark_render_cache_dirty));
 
     _impl->lua.new_usertype<ScriptInputApi>("KinInput",
         sol::no_constructor,
-        "pressed", &ScriptInputApi::pressed,
-        "held", &ScriptInputApi::held,
-        "released", &ScriptInputApi::released);
+        "pressed", script_method(&ScriptInputApi::pressed),
+        "held", script_method(&ScriptInputApi::held),
+        "released", script_method(&ScriptInputApi::released));
 
     _impl->lua.new_usertype<ScriptAppApi>("KinApp",
         sol::no_constructor,
-        "quit", &ScriptAppApi::quit);
+        "quit", script_method(&ScriptAppApi::quit));
 
     _impl->lua.new_usertype<ScriptContextApi>("KinContext",
         sol::no_constructor,
-        "dt", sol::property(&ScriptContextApi::dt),
-        "input", sol::property(&ScriptContextApi::input),
-        "app", sol::property(&ScriptContextApi::app));
+        "dt", script_property(&ScriptContextApi::dt),
+        "input", script_property(&ScriptContextApi::input),
+        "app", script_property(&ScriptContextApi::app));
 
     _impl->lua.new_usertype<ScriptActionsApi>("KinActions",
         sol::no_constructor,
-        "add", &ScriptActionsApi::add);
+        "add", script_method(&ScriptActionsApi::add));
 
     _impl->lua.new_usertype<ScriptDialoguePlayerApi>("KinDialoguePlayer",
         sol::constructors<ScriptDialoguePlayerApi()>(),
-        "load", &ScriptDialoguePlayerApi::load,
-        "start", &ScriptDialoguePlayerApi::start,
-        "advance", &ScriptDialoguePlayerApi::advance,
-        "choose_index", &ScriptDialoguePlayerApi::choose_index,
-        "choose_id", &ScriptDialoguePlayerApi::choose_id,
-        "skip_line", &ScriptDialoguePlayerApi::skip_line,
-        "reset", &ScriptDialoguePlayerApi::reset,
-        "ended", sol::property(&ScriptDialoguePlayerApi::ended),
-        "current_node", sol::property(&ScriptDialoguePlayerApi::current_node),
-        "view", &ScriptDialoguePlayerApi::view,
-        "consume_events", &ScriptDialoguePlayerApi::consume_events);
+        "load", script_method(&ScriptDialoguePlayerApi::load),
+        "start", script_method(&ScriptDialoguePlayerApi::start),
+        "advance", script_method(&ScriptDialoguePlayerApi::advance),
+        "choose_index", script_method(&ScriptDialoguePlayerApi::choose_index),
+        "choose_id", script_method(&ScriptDialoguePlayerApi::choose_id),
+        "skip_line", script_method(&ScriptDialoguePlayerApi::skip_line),
+        "reset", script_method(&ScriptDialoguePlayerApi::reset),
+        "ended", script_property(&ScriptDialoguePlayerApi::ended),
+        "current_node", script_property(&ScriptDialoguePlayerApi::current_node),
+        "view", script_method(&ScriptDialoguePlayerApi::view),
+        "consume_events", script_method(&ScriptDialoguePlayerApi::consume_events));
 }
 
 } // namespace kin

@@ -4,14 +4,26 @@
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/render.hpp>
+#if defined(KIN_EXPERIMENTAL_3D)
+#include <kin/ecs/scene3d.hpp>
+#endif
 
 #include <algorithm>
 #include <fstream>
 #include <ostream>
+#include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
+#include "../prefab/prefab_asset_json.hpp"
 
 namespace kin {
 namespace {
+
+struct SceneHeader {
+    std::string name;
+    std::filesystem::path script;
+    Color clear_color;
+};
 
 const ComponentFieldDescriptor* find_field(const ComponentDescriptor& descriptor, std::string_view name) {
     const auto found = std::ranges::find_if(descriptor.fields, [&](const ComponentFieldDescriptor& field) {
@@ -45,25 +57,6 @@ Color color_from_json(const JsonValue* value, Color fallback) {
     return Color::rgb(clamp(items[0].as_int()), clamp(items[1].as_int()), clamp(items[2].as_int()));
 }
 
-Vec2f vec2f_from_json(const JsonValue* value, Vec2f fallback = {}) {
-    if (!value) {
-        return fallback;
-    }
-    if (value->is_object()) {
-        return {
-            static_cast<f32>(value->number_at("x", fallback.x)),
-            static_cast<f32>(value->number_at("y", fallback.y)),
-        };
-    }
-    if (value->is_array() && value->items().size() >= 2) {
-        return {
-            static_cast<f32>(value->items()[0].as_number(fallback.x)),
-            static_cast<f32>(value->items()[1].as_number(fallback.y)),
-        };
-    }
-    return fallback;
-}
-
 SceneComponentDocument parse_component(std::string_view component_name,
                                        const JsonValue& json,
                                        const EcsComponentRegistry& components,
@@ -72,27 +65,6 @@ SceneComponentDocument parse_component(std::string_view component_name,
         .name = std::string{component_name},
         .fields = parse_component_fields(component_name, json, components, diagnostics),
     };
-}
-
-std::vector<PrefabComponentAsset> parse_prefab_component_map(const JsonValue& json,
-                                                             const EcsComponentRegistry& components,
-                                                             std::vector<std::string>& diagnostics) {
-    std::vector<PrefabComponentAsset> result;
-    if (!json.is_object()) {
-        diagnostics.push_back("prefab override components must be an object");
-        return result;
-    }
-    for (const auto& [component_name, component_json] : json.members()) {
-        PrefabComponentAsset prefab_component{.name = std::string{component_name}};
-        for (ComponentFieldSnapshot field : parse_component_fields(component_name, component_json, components, diagnostics)) {
-            prefab_component.fields.push_back({
-                .name = std::move(field.name),
-                .value = std::move(field.value),
-            });
-        }
-        result.push_back(std::move(prefab_component));
-    }
-    return result;
 }
 
 SceneAsset parse_scene_object(const JsonValue& root,
@@ -136,29 +108,12 @@ SceneAsset parse_scene_object(const JsonValue& root,
         if (!prefabs->is_array()) {
             diagnostics.push_back("scene prefabs must be an array");
         } else {
-            for (const JsonValue& prefab_json : prefabs->items()) {
-                if (!prefab_json.is_object()) {
+            for (const JsonValue& reference_json : prefabs->items()) {
+                if (!reference_json.is_object()) {
                     diagnostics.push_back("scene prefab entry must be an object");
                     continue;
                 }
-                ScenePrefabInstanceAsset prefab{
-                    .id = prefab_json.string_at("id"),
-                    .asset = prefab_json.string_at("asset"),
-                    .name = prefab_json.string_at("name"),
-                    .parent = prefab_json.string_at("parent"),
-                    .pos = vec2f_from_json(prefab_json.find("pos")),
-                };
-                if (const JsonValue* overrides = prefab_json.find("overrides")) {
-                    if (!overrides->is_object()) {
-                        diagnostics.push_back("prefab '" + prefab.id + "' overrides must be an object");
-                    } else {
-                        for (const auto& [entity_id, entity_overrides] : overrides->members()) {
-                            prefab.overrides.entities[entity_id] =
-                                parse_prefab_component_map(entity_overrides, components, diagnostics);
-                        }
-                    }
-                }
-                scene.prefabs.push_back(std::move(prefab));
+                scene.prefabs.push_back(prefab_json::reference(reference_json,components,diagnostics));
             }
         }
     }
@@ -168,15 +123,6 @@ SceneAsset parse_scene_object(const JsonValue& root,
 void write_component(JsonWriter& json, const SceneComponentDocument& component) {
     json.key(component.name).begin_object();
     for (const ComponentFieldSnapshot& field : component.fields) {
-        json.key(field.name);
-        write_component_field_value_json(json, field.value);
-    }
-    json.end_object();
-}
-
-void write_prefab_component(JsonWriter& json, const PrefabComponentAsset& component) {
-    json.key(component.name).begin_object();
-    for (const PrefabFieldAsset& field : component.fields) {
         json.key(field.name);
         write_component_field_value_json(json, field.value);
     }
@@ -263,13 +209,15 @@ void assign_prefab_authored_ids(EcsWorld& world,
 void mark_prefab_metadata(EcsWorld& world,
                           const ScenePrefabInstanceAsset& prefab_config,
                           const PrefabAsset& prefab,
-                          PrefabInstance& instance) {
+                          PrefabInstance& instance,
+                          std::shared_ptr<const SceneDocument> source) {
     instance.instance_id = prefab_config.id;
     instance.source_prefab_id = prefab.id;
     instance.root.set(PrefabInstanceComponent{
         .instance_id = prefab_config.id,
         .prefab_id = prefab.id,
         .asset_path = prefab_config.asset.string(),
+        .source = std::move(source),
     });
     for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
         EcsEntity entity = instance.by_authored_id.at(prefab_entity.id);
@@ -288,6 +236,10 @@ void mark_prefab_metadata(EcsWorld& world,
 } // namespace
 
 void register_builtin_editor_components(EcsWorld& world) {
+#if defined(KIN_EXPERIMENTAL_3D)
+    register_render3d_components(world);
+    register_physics3d_components(world);
+#endif
     if (!world.components().find("Transform2D")) {
         world.components().native<Transform2D>("Transform2D")
             .field("pos", &Transform2D::pos)
@@ -403,35 +355,7 @@ void write_scene_asset(std::ostream& out, const SceneAsset& scene) {
     }
     json.end_array();
     json.key("prefabs").begin_array();
-    for (const ScenePrefabInstanceAsset& prefab : scene.prefabs) {
-        json.begin_object();
-        json.field("id", std::string_view{prefab.id});
-        json.field("asset", std::string_view{prefab.asset.string()});
-        if (!prefab.name.empty()) {
-            json.field("name", std::string_view{prefab.name});
-        }
-        if (!prefab.parent.empty()) {
-            json.field("parent", std::string_view{prefab.parent});
-        }
-        if (prefab.pos.x != 0.0f || prefab.pos.y != 0.0f) {
-            json.key("pos").begin_object();
-            json.field("x", static_cast<f64>(prefab.pos.x));
-            json.field("y", static_cast<f64>(prefab.pos.y));
-            json.end_object();
-        }
-        if (!prefab.overrides.entities.empty()) {
-            json.key("overrides").begin_object();
-            for (const auto& [entity_id, components] : prefab.overrides.entities) {
-                json.key(entity_id).begin_object();
-                for (const PrefabComponentAsset& component : components) {
-                    write_prefab_component(json, component);
-                }
-                json.end_object();
-            }
-            json.end_object();
-        }
-        json.end_object();
-    }
+    for(const auto& prefab:scene.prefabs)prefab_json::write_reference(json,prefab);
     json.end_array();
     json.end_object();
     out << '\n';
@@ -440,6 +364,15 @@ void write_scene_asset(std::ostream& out, const SceneAsset& scene) {
 std::vector<std::string> validate_scene_asset(const SceneAsset& scene,
                                               const EcsComponentRegistry& components) {
     std::vector<std::string> diagnostics;
+    const auto parent_root = [&](std::string_view id) -> std::string {
+        if (find_scene_entity(scene, id)) return std::string(id);
+        const ScenePrefabInstanceAsset* match = nullptr;
+        for (const auto& prefab : scene.prefabs) {
+            if (id == prefab.id || id.starts_with(prefab.id + "."))
+                if (!match || prefab.id.size() > match->id.size()) match = &prefab;
+        }
+        return match ? match->id : std::string{};
+    };
     if (scene.schema != "kin.scene/1") {
         diagnostics.push_back("unsupported scene schema '" + scene.schema + "'");
     }
@@ -450,7 +383,7 @@ std::vector<std::string> validate_scene_asset(const SceneAsset& scene,
         } else if (!ids.insert(entity.id).second) {
             diagnostics.push_back("duplicate scene authored id '" + entity.id + "'");
         }
-        if (!entity.parent.empty() && !find_scene_entity(scene, entity.parent)) {
+        if (!entity.parent.empty() && parent_root(entity.parent).empty()) {
             diagnostics.push_back("entity '" + entity.id + "' parent '" + entity.parent + "' does not exist");
         }
         std::vector<std::string> component_diagnostics = validate_components(entity.id, entity.components, components);
@@ -467,8 +400,20 @@ std::vector<std::string> validate_scene_asset(const SceneAsset& scene,
         if (prefab.asset.empty()) {
             diagnostics.push_back("prefab instance '" + prefab.id + "' requires an asset");
         }
-        if (!prefab.parent.empty() && !ids.contains(prefab.parent) && !find_scene_entity(scene, prefab.parent)) {
+        if (!prefab.parent.empty() && parent_root(prefab.parent).empty()) {
             diagnostics.push_back("prefab instance '" + prefab.id + "' parent '" + prefab.parent + "' does not exist");
+        }
+    }
+    std::unordered_map<std::string, std::string> parents;
+    for (const auto& entity : scene.entities) parents[entity.id] = parent_root(entity.parent);
+    for (const auto& prefab : scene.prefabs) parents[prefab.id] = parent_root(prefab.parent);
+    for (const auto& [id, ignored] : parents) {
+        (void)ignored;
+        std::unordered_set<std::string> seen;
+        auto node = id;
+        while (!node.empty() && parents.contains(node)) {
+            if (!seen.insert(node).second) { diagnostics.push_back("scene parent cycle involving '" + id + "'"); break; }
+            node = parents.at(node);
         }
     }
     return diagnostics;
@@ -477,7 +422,7 @@ std::vector<std::string> validate_scene_asset(const SceneAsset& scene,
 SceneInstance instantiate_scene_asset(EcsWorld& world,
                                       const SceneAsset& scene,
                                       const std::filesystem::path& asset_root,
-                                      EcsComponentRegistry& components) {
+                                      EcsComponentRegistry& components,PrefabAssetLoadOptions limits,SceneInstantiateOptions options) {
     SceneInstance instance;
     instance.diagnostics = validate_scene_asset(scene, components);
     if (!instance.diagnostics.empty()) {
@@ -486,7 +431,19 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
 
     register_scene_metadata_components(world);
 
+    struct Rollback {
+        EcsWorld& world;
+        std::vector<EcsEntity> owned;
+        bool committed = false;
+        ~Rollback() {
+            if (!committed) for (auto it = owned.rbegin(); it != owned.rend(); ++it)
+                if (it->alive()) world.entities().destroy(*it);
+        }
+    } rollback{world};
+
     std::unordered_map<std::string, EcsEntity> created;
+    std::unordered_map<std::string, std::shared_ptr<const SceneDocument>> prefab_sources;
+    std::unordered_map<std::string, PrefabLoadResult> prefab_assets;
     for (const SceneEntityDocument& entity : scene.entities) {
         EcsEntity runtime = world.entities().create({
             .name = entity.name,
@@ -497,17 +454,12 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
             return instance;
         }
         created[entity.id] = runtime;
+        rollback.owned.push_back(runtime);
         instance.by_authored_id[entity.id] = runtime;
     }
 
     for (const SceneEntityDocument& entity : scene.entities) {
         EcsEntity runtime = created.at(entity.id);
-        if (!entity.parent.empty()) {
-            if (!world.entities().reparent(runtime, created.at(entity.parent))) {
-                instance.diagnostics.push_back(world.entities().last_error());
-                return instance;
-            }
-        }
         for (const SceneComponentDocument& component : entity.components) {
             if (!apply_component(world, runtime, component, instance.diagnostics)) {
                 return instance;
@@ -515,15 +467,34 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
         }
     }
 
-    for (const ScenePrefabInstanceAsset& prefab_config : scene.prefabs) {
-        PrefabLoadResult loaded = load_prefab_asset(asset_root / prefab_config.asset, components);
+    std::vector<const ScenePrefabInstanceAsset*> pending;
+    for (const auto& prefab : scene.prefabs) pending.push_back(&prefab);
+    while (!pending.empty()) {
+        const auto next = std::ranges::find_if(pending, [&](const auto* prefab) {
+            return prefab->parent.empty() || instance.by_authored_id.contains(prefab->parent);
+        });
+        if (next == pending.end()) {
+            instance.diagnostics.push_back("scene prefab parents cannot be resolved");
+            return instance;
+        }
+        const auto& prefab_config = **next;
+        pending.erase(next);
+        const auto source_path = (asset_root / prefab_config.asset).lexically_normal();
+        const auto source_key = source_path.string();
+        auto [cached, inserted] = prefab_assets.try_emplace(source_key);
+        limits.content_root=asset_root;
+        if (inserted) cached->second = load_prefab_asset(source_path, components,limits);
+        auto& loaded = cached->second;
         if (!loaded.ok()) {
             instance.diagnostics.push_back("failed to load prefab '" + prefab_config.asset.string() + "'");
             instance.diagnostics.insert(instance.diagnostics.end(), loaded.diagnostics.begin(), loaded.diagnostics.end());
             return instance;
         }
-        for (const PrefabEntityAsset& prefab_entity : loaded.prefab->entities) {
-            const bool root = prefab_entity.id == loaded.prefab->root;
+        auto edited=apply_prefab_overrides(*loaded.prefab,prefab_config.overrides,components,false);
+        if(!edited.ok()){instance.diagnostics=std::move(edited.diagnostics);return instance;}
+        const auto& effective=*edited.prefab;
+        for (const PrefabEntityAsset& prefab_entity : effective.entities) {
+            const bool root = prefab_entity.id == effective.root;
             const std::string authored_id = scene_prefab_authored_id(prefab_config.id, prefab_entity.id, root);
             if (instance.by_authored_id.contains(authored_id) || world.entities().find_by_authored_id(authored_id)) {
                 instance.diagnostics.push_back("duplicate prefab authored entity id '" + authored_id + "'");
@@ -553,31 +524,234 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
             instance.diagnostics.insert(instance.diagnostics.end(), prefab_instance.diagnostics.begin(), prefab_instance.diagnostics.end());
             return instance;
         }
-        assign_prefab_authored_ids(world, prefab_config, *loaded.prefab, prefab_instance, instance.diagnostics);
+        rollback.owned.insert(rollback.owned.end(), prefab_instance.entities.begin(), prefab_instance.entities.end());
+        assign_prefab_authored_ids(world, prefab_config, effective, prefab_instance, instance.diagnostics);
         if (!instance.diagnostics.empty()) {
             return instance;
         }
-        mark_prefab_metadata(world, prefab_config, *loaded.prefab, prefab_instance);
+        auto& source = prefab_sources[source_key];
+        if(!source)source=prefab_instance.source;
+        mark_prefab_metadata(world,prefab_config,effective,prefab_instance,source);
 
         instance.prefab_instances[prefab_config.id] = prefab_instance;
-        for (const PrefabEntityAsset& prefab_entity : loaded.prefab->entities) {
-            const bool root = prefab_entity.id == loaded.prefab->root;
+        for (const PrefabEntityAsset& prefab_entity : effective.entities) {
+            const bool root = prefab_entity.id == effective.root;
             const std::string authored_id = scene_prefab_authored_id(prefab_config.id, prefab_entity.id, root);
             instance.by_authored_id[authored_id] = prefab_instance.by_authored_id.at(prefab_entity.id);
         }
     }
 
-    for (EcsEntity entity : world.entities().hierarchy_roots()) {
-        instance.roots.push_back(entity);
+    for (const auto& entity : scene.entities) if (!entity.parent.empty()) {
+        const auto parent = instance.by_authored_id.find(entity.parent);
+        if (parent == instance.by_authored_id.end() || !world.entities().reparent(created.at(entity.id), parent->second)) {
+            instance.diagnostics.push_back("entity '" + entity.id + "' parent '" + entity.parent + "' cannot be resolved");
+            return instance;
+        }
     }
+    // Global authored references can point forward to ordinary entities or
+    // prefab children. Local prefab refs already have their runtime IDs.
+    for (const auto& [id, entity] : instance.by_authored_id) {
+        (void)id;
+        for (const auto& component : world.snapshot(entity).components) for (const auto& field : component.fields) {
+            if (const auto* reference = std::get_if<ComponentEntityRef>(&field.value); reference && !reference->id && !reference->authored_id.empty()) {
+                const auto target = world.entities().find_by_authored_id(reference->authored_id);
+                if (!target) { instance.diagnostics.push_back("unresolved entity reference '" + reference->authored_id + "'"); return instance; }
+                auto resolved = *reference; resolved.id = target.id();
+                if (!components.patch_field(entity, component.descriptor.id, field.name, resolved)) {
+                    instance.diagnostics.push_back(components.last_error()); return instance;
+                }
+            }
+        }
+    }
+
+    std::unordered_set<EcsId> managed;
+    for (const auto& [id, entity] : instance.by_authored_id) managed.insert(entity.id());
+    for (const auto& [id, entity] : instance.by_authored_id)
+        if (!entity.parent() || !managed.contains(entity.parent().id())) instance.roots.push_back(entity);
+    std::ranges::sort(instance.roots, {}, &EcsEntity::id);
+    if (options.update_scene_header) apply_scene_header(world, scene);
+    rollback.committed = true;
     return instance;
 }
 
+void apply_scene_header(EcsWorld& world, const SceneAsset& scene) {
+    world.raw().entity("kin::prefab::scene_header").set(SceneHeader{scene.name, scene.script, scene.clear_color});
+}
+
 SceneAsset scene_asset_from_world(EcsWorld& world, const SceneSaveOptions& options) {
-    (void)options;
+    auto result = build_scene_asset(world, options);
+    if (!result.ok()) throw std::runtime_error(result.diagnostics.front());
+    return std::move(*result.scene);
+}
+
+bool link_prefab_entity(EcsWorld& world,EcsEntity root,EcsEntity child,std::string local_id) {
+    if(!root||!child||root.id()==child.id()||local_id.empty()||child.has<PrefabInstanceComponent>())return false;
+    const auto* link=root.get<PrefabInstanceComponent>();const auto* root_member=root.get<PrefabEntityComponent>();
+    const auto parent_entity=child.parent();if(!parent_entity)return false;
+    const auto* parent=parent_entity.get<PrefabEntityComponent>();
+    if(!link||!root_member||local_id==root_member->authored_entity_id||!parent||parent->instance_id!=link->instance_id)return false;
+    if(const auto* member=child.get<PrefabEntityComponent>();member&&(member->instance_id!=link->instance_id||member->authored_entity_id!=local_id))return false;
+    const auto instance=link->instance_id;const auto global=instance+"."+local_id;
+    if(auto existing=world.entities().find_by_authored_id(global);existing&&existing.id()!=child.id())return false;
+    if(!world.entities().set_authored_id(child,global))return false;
+    child.set(PrefabEntityComponent{instance,std::move(local_id)});return true;
+}
+
+bool remove_prefab_component(EcsWorld& world,EcsEntity entity,std::string_view component) {
+    if(!entity||!entity.has<PrefabEntityComponent>()||!world.components().has(entity,component))return false;
+    const auto snapshot=world.snapshot(entity);
+    for(const auto& c:snapshot.components) {
+        if(c.descriptor.kind==ComponentKind::Native){
+            const auto* info=ecs_get_type_info(world.raw().c_ptr(),c.descriptor.id);
+            if(info&&info->size){const auto* value=ecs_get_id(world.raw().c_ptr(),entity.id(),c.descriptor.id);ecs_set_id(world.raw().c_ptr(),entity.id(),c.descriptor.id,info->size,value);}
+            else entity.raw().add(c.descriptor.id);
+        } else {
+            if(!world.components().add(entity,c.descriptor.id))return false;
+            for(const auto& f:c.fields)if(!world.components().patch_field(entity,c.descriptor.id,f.name,f.value))return false;
+        }
+    }
+    entity.raw().remove(flecs::IsA,flecs::Wildcard);
+    return world.components().remove(entity,component);
+}
+
+SceneSaveResult build_scene_asset(EcsWorld& world, const SceneSaveOptions& options) {
     SceneAsset scene;
-    scene.entities = scene_document_from_world(world).entities;
-    return scene;
+    SceneSaveResult result;
+    const auto header = world.raw().lookup("kin::prefab::scene_header");
+    if (header) if (const auto* value = header.get<SceneHeader>()) {
+        scene.name = value->name; scene.script = value->script; scene.clear_color = value->clear_color;
+    }
+    auto document = scene_document_from_world(world);
+    std::unordered_map<std::string, EcsEntity> entities;
+    for (const auto& item : document.entities) {
+        auto entity = world.entities().find_by_authored_id(item.id);
+        if (entity) entities.emplace(item.id, entity);
+    }
+    if (options.include_runtime_entities) {
+        const auto include = [&](EcsEntity entity) {
+            // Authored entities already have a canonical document ID. Adding
+            // a synthetic alias could overwrite prefab membership with an ID
+            // absent from the document, depending on unordered-map iteration.
+            const auto authored = world.entities().authored_id(entity).value_or(std::string{});
+            entities.try_emplace(authored.empty() ? "entity." + std::to_string(entity.id()) : authored, entity);
+        };
+        for (auto entity : world.entities().all()) include(entity);
+        for (auto entity : world.components().entities()) include(entity);
+        world.raw().each([&](flecs::entity raw) { include(EcsEntity{raw}); });
+    }
+    std::unordered_map<std::string, const SceneEntityDocument*> documents;
+    for (const auto& item : document.entities) if (entities.contains(item.id)) documents.emplace(item.id, &item);
+    for (auto& item : document.entities) if (entities.contains(item.id)) {
+        for (auto& component : item.components) for (auto& field : component.fields) {
+            bool valid = detail::field_value_matches_kind(field.value, field.kind);
+            if (const auto* scalar = std::get_if<f32>(&field.value)) valid &= std::isfinite(*scalar);
+            if (const auto* scalar = std::get_if<f64>(&field.value)) valid &= std::isfinite(*scalar);
+            if (!valid) result.diagnostics.push_back("entity '" + item.id + "' has an invalid value for '" + component.name + "." + field.name + "'");
+            if (auto* ref = std::get_if<ComponentEntityRef>(&field.value)) {
+                if (ref->id && world.raw().is_alive(ref->id)) {
+                    ref->authored_id = world.entities().authored_id(world.entity_by_id(ref->id)).value_or(std::string{});
+                    if (ref->authored_id.empty() && options.include_runtime_entities) ref->authored_id = "entity." + std::to_string(ref->id);
+                }
+                if ((ref->id || !ref->authored_id.empty()) && !documents.contains(ref->authored_id))
+                    result.diagnostics.push_back("entity '" + item.id + "' reference '" + component.name + "." + field.name + "' targets an entity excluded from this save");
+            }
+        }
+    }
+    std::unordered_map<std::string, std::unordered_map<std::string, std::string>> members;
+    for (const auto& [id, entity] : entities) if (const auto* member = entity.get<PrefabEntityComponent>()) {
+        if(!members[member->instance_id].emplace(member->authored_entity_id,id).second)
+            result.diagnostics.push_back("duplicate local prefab entity ID '"+member->authored_entity_id+"'");
+    }
+    const auto error = [&](const std::string& instance, const std::string& reason) {
+        result.diagnostics.push_back("prefab '" + instance + "': " + reason + "; unpack explicitly for unsupported edits");
+    };
+    if(options.preserve_prefabs)for(const auto& [id,group]:members) {
+        const bool rooted=std::ranges::any_of(entities,[&](const auto& entry){const auto* link=entry.second.template get<PrefabInstanceComponent>();return link&&link->instance_id==id;});
+        if(!rooted)error(id,"orphaned instance members have no linked root");
+    }
+    for (auto& item : document.entities) {
+        const auto runtime = entities.find(item.id);
+        if (runtime == entities.end()) continue;
+        const auto* member = runtime->second.get<PrefabEntityComponent>();
+        if (!options.preserve_prefabs || !member) {
+            scene.entities.push_back(std::move(item));
+            continue;
+        }
+        const auto* link = runtime->second.get<PrefabInstanceComponent>();
+        if (!link) continue; // serialized as an override of the instance root
+        if(item.id!=link->instance_id){error(item.id,"linked instance authored ID changed");continue;}
+        if (!link->source || link->asset_path.empty()) { error(item.id, "source defaults are unavailable"); continue; }
+        ScenePrefabInstanceAsset prefab{.id = item.id, .asset = link->asset_path, .name = item.name, .parent = item.parent};
+        const auto& group = members[link->instance_id];
+        const auto canonical = [&](ComponentFieldValue value) {
+            if (auto* ref = std::get_if<ComponentEntityRef>(&value)) {
+                if (ref->id && world.raw().is_alive(ref->id)) {
+                    const auto target = world.entity_by_id(ref->id);
+                    if (const auto* local = target.get<PrefabEntityComponent>(); local && local->instance_id == link->instance_id)
+                        ref->authored_id = local->authored_entity_id;
+                }
+                ref->id = 0;
+            }
+            return value;
+        };
+        for (const auto& base : link->source->entities) {
+            const auto found = group.find(base.id);
+            if (found == group.end() || !documents.contains(found->second)) {
+                if(base.parent.empty()||group.contains(base.parent))prefab.overrides.remove_entities.push_back(base.id);
+                continue;
+            }
+            const auto& live = *documents.at(found->second);
+            const bool original_name = live.name == base.name || live.name == base.name + "." + std::to_string(entities.at(found->second).id());
+            if (base.id != member->authored_entity_id) {
+                if (!original_name) {
+                    if(live.name.empty())error(item.id,"child names cannot be empty");
+                    else prefab.overrides.names[base.id]=live.name;
+                }
+                const auto parent = group.find(base.parent);
+                const auto expected=parent==group.end()?std::string{}:parent->second;
+                if(live.parent!=expected) {
+                    const auto local=std::ranges::find_if(group,[&](const auto& pair){return pair.second==live.parent;});
+                    if(local==group.end())error(item.id,"child parent is outside the prefab instance");
+                    else prefab.overrides.parents[base.id]=local->first;
+                }
+            } else {
+                if (original_name) prefab.name.clear();
+                else if (live.name.empty()) error(item.id, "root name was cleared");
+            }
+            for (const auto& component : base.components) {
+                if (std::ranges::none_of(live.components, [&](const auto& candidate) { return candidate.name == component.name; }))
+                    prefab.overrides.remove_components[base.id].push_back(component.name);
+            }
+            for (const auto& component : live.components) {
+                const auto original = std::ranges::find_if(base.components, [&](const auto& candidate) { return candidate.name == component.name; });
+                PrefabComponentAsset changed{.name = component.name};
+                for (const auto& field : component.fields) {
+                    const auto* before = original == base.components.end() ? nullptr : [&]() -> const ComponentFieldSnapshot* {
+                        const auto f = std::ranges::find_if(original->fields, [&](const auto& old) { return old.name == field.name; });
+                        return f == original->fields.end() ? nullptr : &*f;
+                    }();
+                    if (!before || canonical(before->value) != canonical(field.value)) changed.fields.push_back({field.name, canonical(field.value)});
+                }
+                if (original == base.components.end() || !changed.fields.empty()) prefab.overrides.entities[base.id].push_back(std::move(changed));
+            }
+        }
+        for(const auto& [local,id]:group) {
+            if(std::ranges::any_of(link->source->entities,[&](const auto& e){return e.id==local;}))continue;
+            if(!documents.contains(id)){error(item.id,"added child is excluded from save");continue;}
+            const auto& live=*documents.at(id);
+            const auto parent=std::ranges::find_if(group,[&](const auto& pair){return pair.second==live.parent;});
+            if(parent==group.end()){error(item.id,"added child parent is outside the prefab instance");continue;}
+            PrefabEntityAsset added{.id=local,.name=live.name,.parent=parent->first};
+            for(const auto& component:live.components){PrefabComponentAsset c{.name=component.name};for(const auto& field:component.fields)c.fields.push_back({field.name,canonical(field.value)});added.components.push_back(std::move(c));}
+            prefab.overrides.add_entities.push_back(std::move(added));
+        }
+        std::ranges::sort(prefab.overrides.add_entities,{},&PrefabEntityAsset::id);
+        scene.prefabs.push_back(std::move(prefab));
+    }
+    if (!result.diagnostics.empty()) return result;
+    result.diagnostics = validate_scene_asset(scene, world.components());
+    if (result.diagnostics.empty()) result.scene = std::move(scene);
+    return result;
 }
 
 } // namespace kin

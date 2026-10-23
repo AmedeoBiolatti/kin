@@ -1,5 +1,8 @@
 # Rendering And Sprites
 
+3D views drawn inside the 2D frame, experimental, have a page of their own:
+[3D rendering](rendering_3d.md).
+
 ## Sprite References
 
 ECS rendering uses sprite references instead of storing concrete sprite/texture
