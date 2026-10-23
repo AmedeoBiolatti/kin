@@ -1,18 +1,13 @@
 #include <kin/particles/particle_field.hpp>
 
 #include <algorithm>
+#include <array>
 
 namespace kin {
 namespace {
 
-RngKey split_key(RngKey& key) {
-    auto [next, sub] = split(key);
-    key = next;
-    return sub;
-}
-
-f32 random_range(RngKey& key, ParticleRange range) {
-    return rng_f32(split_key(key), range.min, range.max);
+f32 random_range(RngKey key, ParticleRange range) {
+    return rng_f32(key, range.min, range.max);
 }
 
 u8 brightness_to_u8(f32 value) {
@@ -46,20 +41,30 @@ void reset_particle_field(ParticleFieldState& state, const ParticleField& field)
 
     RngKey key = make_key(field.seed);
     for (i32 i = 0; i < field.count; ++i) {
-        const f32 brightness = random_range(key, field.brightness);
+        // Preserve the six-split stream explicitly. GCC 13.3 with -Os/LTO
+        // incorrectly drops key's initialization when an outlined helper both
+        // reads and updates it through a reference. Keep splitting by value.
+        std::array<RngKey, 6> samples;
+        for (auto& sample : samples) {
+            const auto [next, sub] = split(key);
+            key = next;
+            sample = sub;
+        }
+        const auto& [brightness_key, x_key, y_key, vx_key, vy_key, size_key] = samples;
+        const f32 brightness = random_range(brightness_key, field.brightness);
         const Color color = field.use_brightness
             ? Color{brightness_to_u8(brightness), brightness_to_u8(brightness), brightness_to_u8(brightness), 255}
             : field.color;
         state.particles.push_back({
             .position = {
-                rng_f32(split_key(key), field.area.x, field.area.x + field.area.w),
-                rng_f32(split_key(key), field.area.y, field.area.y + field.area.h),
+                rng_f32(x_key, field.area.x, field.area.x + field.area.w),
+                rng_f32(y_key, field.area.y, field.area.y + field.area.h),
             },
             .velocity = {
-                random_range(key, field.velocity_x),
-                random_range(key, field.velocity_y),
+                random_range(vx_key, field.velocity_x),
+                random_range(vy_key, field.velocity_y),
             },
-            .size = random_range(key, field.size),
+            .size = random_range(size_key, field.size),
             .color = color,
         });
     }
