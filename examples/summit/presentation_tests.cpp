@@ -1066,8 +1066,14 @@ void test_settings_round_trip_and_fallback() {
         CHECK(read_settings(JsonValue(payload), d));
         CHECK(d.first_person && d.look == "afternoon" && d.bindings == InputBindings::defaults());
     }
-    // A settings file in a directory that cannot be written: save says so, load still returns the defaults.
-    SaveStore nowhere = make_settings_store(fs::path("/proc/kin_no_such_dir"));
+    // A regular file cannot be a settings directory on any platform, regardless of write permissions.
+    const fs::path blocked = dir.path / "not_a_directory";
+    {
+        std::ofstream out{blocked};
+        out << "blocks directory creation";
+        CHECK(out.good());
+    }
+    SaveStore nowhere = make_settings_store(blocked);
     CHECK(!save_settings(nowhere, w));
     CHECK(load_settings(nowhere) == SummitSettings{});
 }
