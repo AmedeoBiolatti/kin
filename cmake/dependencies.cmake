@@ -12,15 +12,28 @@ set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
 set(SDL_POWER OFF CACHE BOOL "" FORCE)
 set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
 
+set(_kin_sdl_source_options)
+if(NOT KIN_ENABLE_SDL_DYNAMIC_API)
+    # Populate normally (including user-supplied FETCHCONTENT_SOURCE_DIR_SDL3),
+    # but defer add_subdirectory until an isolated source copy has been patched.
+    set(_kin_sdl_source_options SOURCE_SUBDIR __kin_populate_only)
+endif()
 FetchContent_Declare(SDL3
     GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
     GIT_TAG release-3.4.10
     GIT_SHALLOW TRUE
+    ${_kin_sdl_source_options}
 )
 
 function(kin_configure_sdl)
     set(policy_options AUDIO GPU RENDER OPENGL OPENGLES VULKAN METAL
-        RENDER_D3D RENDER_D3D11 RENDER_D3D12 RENDER_METAL RENDER_GPU RENDER_VULKAN)
+        RENDER_D3D RENDER_D3D11 RENDER_D3D12 RENDER_METAL RENDER_GPU RENDER_VULKAN
+        JOYSTICK HIDAPI HIDAPI_JOYSTICK HIDAPI_LIBUSB HIDAPI_LIBUSB_SHARED VIRTUAL_JOYSTICK
+        TRAY DBUS IBUS X11 X11_SHARED X11_XCURSOR X11_XDBE X11_XINPUT X11_XFIXES
+        X11_XRANDR X11_XSCRNSAVER X11_XSHAPE X11_XSYNC X11_XTEST
+        FRIBIDI FRIBIDI_SHARED LIBTHAI LIBTHAI_SHARED WAYLAND WAYLAND_SHARED
+        WAYLAND_LIBDECOR WAYLAND_LIBDECOR_SHARED KMSDRM KMSDRM_SHARED
+        RPI ROCKCHIP VIVANTE OPENVR)
     foreach(option IN LISTS policy_options)
         get_property(had_${option} CACHE SDL_${option} PROPERTY TYPE SET)
         if(had_${option})
@@ -32,12 +45,36 @@ function(kin_configure_sdl)
     if(NOT KIN_ENABLE_AUDIO)
         set(SDL_AUDIO OFF)
     endif()
+    if(NOT KIN_ENABLE_SDL_GAMEPAD)
+        foreach(option JOYSTICK HIDAPI HIDAPI_JOYSTICK HIDAPI_LIBUSB VIRTUAL_JOYSTICK)
+            set(SDL_${option} OFF)
+        endforeach()
+    endif()
+    if(NOT KIN_ENABLE_SDL_DESKTOP_SERVICES)
+        foreach(option TRAY DBUS IBUS)
+            set(SDL_${option} OFF)
+        endforeach()
+    endif()
+    if(NOT KIN_LINUX_VIDEO STREQUAL "auto")
+        foreach(option X11 WAYLAND KMSDRM RPI ROCKCHIP VIVANTE OPENVR)
+            set(SDL_${option} OFF)
+        endforeach()
+        if(KIN_LINUX_VIDEO MATCHES "x11")
+            set(SDL_X11 ON)
+        endif()
+        if(KIN_LINUX_VIDEO MATCHES "wayland")
+            set(SDL_WAYLAND ON)
+        endif()
+    endif()
     # SDL's dependent options FORCE-write local overrides into the cache.
     # Preserve the caller's settings so software -> gpu -> auto reconfiguration
     # does not accidentally keep the previous profile's disabled drivers.
-    if(KIN_RENDERER STREQUAL "software")
+    if(KIN_RENDERER STREQUAL "software" OR KIN_RENDERER STREQUAL "compact")
         set(SDL_GPU OFF)
         set(SDL_RENDER ON)
+        if(KIN_RENDERER STREQUAL "compact")
+            set(SDL_RENDER OFF)
+        endif()
         foreach(driver OPENGL OPENGLES VULKAN METAL RENDER_D3D RENDER_D3D11
                        RENDER_D3D12 RENDER_METAL RENDER_GPU RENDER_VULKAN)
             set(SDL_${driver} OFF)
@@ -49,11 +86,38 @@ function(kin_configure_sdl)
         set(SDL_OPENGLES OFF)
     endif()
     FetchContent_MakeAvailable(SDL3)
+    if(NOT KIN_ENABLE_SDL_DYNAMIC_API)
+        include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_sdl_direct.cmake")
+        kin_prepare_sdl_direct("${sdl3_SOURCE_DIR}" "${sdl3_BINARY_DIR}/../sdl3-direct-src")
+        add_subdirectory("${KIN_SDL_DIRECT_SOURCE_DIR}" "${sdl3_BINARY_DIR}")
+    endif()
     if(NOT KIN_ENABLE_IMAGE_IO)
         # SDL 3.4 also embeds PNG/JPEG codecs independently of SDL_image. Keep its
         # built-in disabled-codec stubs, excluding those implementations too.
         target_compile_definitions(SDL3-static PRIVATE SDL_DISABLE_STB)
     endif()
+    # SDL's cache describes requested options, not necessarily compiled drivers.
+    # Capture generated configuration to report actual capabilities and reject
+    # explicitly requested drivers that SDL silently disabled for missing deps.
+    set(video_drivers)
+    # The final per-configuration headers are file(GENERATE) outputs and do not
+    # exist yet on a clean configure. Driver defines in the intermediate header
+    # are already resolved and independent of the selected build configuration.
+    file(STRINGS "${sdl3_BINARY_DIR}/CMakeFiles/SDL_build_config.h.intermediate"
+        drivers REGEX "^#define SDL_VIDEO_DRIVER_[A-Z0-9]+ 1$")
+    foreach(driver IN LISTS drivers)
+        string(REGEX REPLACE "^#define SDL_VIDEO_DRIVER_([A-Z0-9]+) 1$" "\\1" driver "${driver}")
+        string(TOLOWER "${driver}" driver)
+        list(APPEND video_drivers "${driver}")
+    endforeach()
+    list(REMOVE_DUPLICATES video_drivers)
+    list(SORT video_drivers)
+    foreach(required x11 wayland)
+        if(KIN_LINUX_VIDEO MATCHES "${required}" AND NOT required IN_LIST video_drivers)
+            message(FATAL_ERROR "KIN_LINUX_VIDEO=${KIN_LINUX_VIDEO} requires SDL's ${required} driver; install its development dependencies")
+        endif()
+    endforeach()
+    set(KIN_SDL_VIDEO_DRIVERS "${video_drivers}" PARENT_SCOPE)
     foreach(option IN LISTS policy_options)
         if(had_${option})
             set(SDL_${option} "${value_${option}}" CACHE "${type_${option}}" "${help_${option}}" FORCE)

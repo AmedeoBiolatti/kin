@@ -1,0 +1,12 @@
+{
+  "schema": "kin.asset-manifest/1",
+  "discover_dependencies": true,
+  "roots_complete": true,
+  "roots": ["scenes/main.kinscene", "components/gameplay.kincomponents"],
+  "assets": {
+    "scenes/main.kinscene": {"dependencies_complete": true},
+    "prefabs/sample.kinprefab": {"dependencies_complete": true},
+    "components/gameplay.kincomponents": {"dependencies_complete": true},
+    "scripts/main.lua": {"dependencies_complete": true}
+  }
+}

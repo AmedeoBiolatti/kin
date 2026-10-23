@@ -69,7 +69,9 @@ struct Renderer2D::OpenClip {
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     const auto choice = requested_renderer();
-#if !KIN_HAS_GPU_RENDERER
+#if KIN_HAS_COMPACT_RENDERER
+    return std::make_unique<CompactRenderer2DBackend>(window, vsync);
+#elif !KIN_HAS_GPU_RENDERER
     return std::make_unique<SdlRenderer2DBackend>(window, vsync);
 #elif !KIN_HAS_SDL_RENDERER
     // No fallback is compiled into this profile. Propagate device errors.
@@ -1355,13 +1357,18 @@ void Renderer2D::apply_transform(const Affine2& transform) {
     if (transform == _transform) {
         return;
     }
-    _transform = transform;
     _backend->set_transform(transform);
+    _transform = transform;
 }
 
 void Renderer2D::push_transform(const Affine2& transform) {
     _transform_stack.push_back(_transform);
-    apply_transform(_transform * transform);
+    try {
+        apply_transform(_transform * transform);
+    } catch (...) {
+        _transform_stack.pop_back();
+        throw;
+    }
 }
 
 void Renderer2D::pop_transform() {

@@ -6,6 +6,14 @@ add_compile_options(
     "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
 )
 
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME kin-asset-cooking
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_cooking_tests.py")
+    add_test(NAME kin-asset-report
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_report_tests.py")
+endif()
+
 function(kin_add_test target test_name)
     cmake_parse_arguments(TEST "" "" "SOURCES;LIBRARIES;DEFINITIONS;COMPILE_OPTIONS" ${ARGN})
     add_executable(${target} ${TEST_SOURCES})
@@ -78,12 +86,32 @@ kin_add_test(kin_audio_tests kin-audio SOURCES audio_tests.cpp
 kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
 kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
 if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_GENERATOR STREQUAL "Ninja" AND
+       CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND KIN_PGO_MODE STREQUAL "off")
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME kin-compiler-pgo
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/compiler_pgo_tests.py"
+                    --build "${CMAKE_CURRENT_BINARY_DIR}/compiler-pgo"
+                    --cc "${CMAKE_C_COMPILER}" --cxx "${CMAKE_CXX_COMPILER}")
+        endif()
+    endif()
+    add_test(NAME kin-release-policy
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}"
+            "-DCONFIG=$<CONFIG>" "-DGENERATOR=${CMAKE_GENERATOR}"
+            "-DCC=${CMAKE_C_COMPILER}" "-DCXX=${CMAKE_CXX_COMPILER}"
+            "-DLTO=${KIN_ENABLE_LTO}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/release_policy_tests.cmake"
+        CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
     add_library(kin_desktop_package_library SHARED desktop_package_library.cpp)
     set_target_properties(kin_desktop_package_library PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     add_executable(kin_desktop_package_fixture desktop_package_fixture.cpp)
     target_link_libraries(kin_desktop_package_fixture PRIVATE kin::engine kin_desktop_package_library)
     kin_configure_game_assets(kin_desktop_package_fixture package_fixture
-        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/desktop_package/assets")
+        SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/desktop_package/assets"
+        MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/desktop_package/assets.manifest.json")
     kin_package_game(kin_desktop_package_fixture RUNTIME_TARGETS kin_desktop_package_library)
     get_target_property(_package_script kin_desktop_package_fixture KIN_PACKAGE_SCRIPT)
     get_target_property(_package_name kin_desktop_package_fixture KIN_PACKAGE_NAME)
@@ -96,12 +124,16 @@ if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
             "-DCONFIG=$<CONFIG>"
             "-DEXECUTABLE=$<TARGET_FILE_NAME:kin_desktop_package_fixture>"
             "-DBUILD_EXECUTABLE=$<TARGET_FILE:kin_desktop_package_fixture>"
+            "-DDEBUG_SYMBOLS=${KIN_PACKAGE_DEBUG_SYMBOLS}"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/desktop_package_tests.cmake"
         CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
 endif()
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
 kin_add_test(kin_texture_file_tests kin-texture-file SOURCES texture_file_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
+if(KIN_HAS_COMPACT_RENDERER)
+    kin_add_test(kin_compact_renderer_tests kin-compact-renderer SOURCES compact_renderer_tests.cpp)
+endif()
 # Test-only material shaders for the GPU renderer tests. Without glslc (found by the
 # engine) they are not compiled and the tests that need them skip.
 set(_kin_test_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")

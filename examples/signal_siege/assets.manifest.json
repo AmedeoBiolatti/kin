@@ -1,0 +1,9 @@
+{
+  "schema": "kin.asset-manifest/1",
+  "roots_complete": true,
+  "discover_dependencies": true,
+  "roots": [],
+  "dynamic_groups": {
+    "locales": ["en.kinlang", "fr.kinlang", "ja.kinlang", "ar.kinlang"]
+  }
+}

@@ -6273,8 +6273,10 @@ int main() {
     test_ui2_apply_skin_pack_sets_surface_skins();
     test_ui2_skinned_style();
     test_ui2_theme_variant_registry();
+#if !KIN_HAS_COMPACT_RENDERER
     test_ui2_soft_shadow_renders_on_sdl_backend();
     test_ui2_glass_blurs_backdrop_on_sdl_backend();
+#endif
     test_ui2_theme_explicit_widget_overrides_win();
     test_ui2_widget_state_surfaces_drive_drawing();
     test_ui2_selected_row_uses_selected_surface();

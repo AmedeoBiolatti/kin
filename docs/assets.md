@@ -235,3 +235,22 @@ Not yet implemented: ref-counted auto-unload (assets are released via
 `AssetManager::unload`/`clear`), and an asset processing pipeline (`.meta`/import
 settings/cached artifacts/multiple sources). Hot-reload `Modified` events are
 reserved but not yet emitted.
+
+## Shipping inventory and dependency declarations
+
+The runtime dependency cache is separate from the build-time shipping graph.
+Games can declare roots, dynamic groups and asset dependencies in a
+`kin.asset-manifest/1` JSON manifest and pass it as `MANIFEST` to
+`kin_configure_game_assets`. With `discover_dependencies: true`, supported scene and catalog references are
+tracked automatically using their loader path rules. Lua/custom component loads
+still require declarations. Only explicit roots and their transitive dependencies
+become reachable; recognized files are not automatically rooted. Reports expose
+edge provenance and root-to-file chains, and all files are still packaged. See
+[asset manifests and dry-run reachability](shipping.md#asset-manifests-and-dry-run-reachability)
+for the schema, commands and completeness rules.
+
+For export-time processing, enable `KIN_ENABLE_ASSET_COOKING`. The portable cooker
+minifies known Kin JSON assets and losslessly recompresses PNG while retaining
+all files and paths. Other assets pass through unchanged. Per-file hashed caches
+and ZIP-bound cooking reports are separate from runtime asset caches. See
+[lossless asset cooking](shipping.md#lossless-asset-cooking).

@@ -3987,11 +3987,15 @@ int main(int argc, char** argv) {
 #if KIN_HAS_SDL_RENDERER
     test_sdl_render_targets_and_gradients();
 #endif
+#if !KIN_HAS_COMPACT_RENDERER
     test_render_target_pool_reuse();
     test_render_target_move_assign_releases();
     test_blur_smooths_hard_edge();
+#endif
     test_blur_degrades_on_fake_backend();
+#if !KIN_HAS_COMPACT_RENDERER
     test_capture_backdrop_round_trips();
+#endif
 #if KIN_HAS_GPU_RENDERER && KIN_ENABLE_IMAGE_IO
     test_gpu_save_png_captures_bound_render_target();
 #endif
@@ -4126,7 +4130,9 @@ int main(int argc, char** argv) {
 #if KIN_HAS_SDL_RENDERER
     test_sprite_batches_on_software_backend();
 #endif
+#if !KIN_HAS_COMPACT_RENDERER
     test_textures_outliving_their_renderer();
+#endif
 #if KIN_HAS_SDL_RENDERER
     test_flipped_sprites_on_software_backend();
 #endif

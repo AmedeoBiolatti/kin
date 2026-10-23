@@ -34,6 +34,8 @@ def main():
             "label": label, "report": str(Path(path)), "config": report["config"],
             "compiler": report["compiler"], "compiler_version": report["compiler_version"],
             "features": report["features"], "optimizations": report["optimizations"],
+            "renderer": report.get("renderer"), "linux_video": report.get("linux_video"),
+            "sdl_video_drivers": report.get("sdl_video_drivers"),
             "bytes": metrics, "categories": report["categories"],
             "delta_bytes": {name: value - baseline[name] for name, value in metrics.items()},
             "delta_percent": {name: 100 * (value / baseline[name] - 1) for name, value in metrics.items()},

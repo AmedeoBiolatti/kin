@@ -88,6 +88,7 @@ public:
 
 private:
     friend class SdlRenderer2DBackend;
+    friend class CompactRenderer2DBackend;
     friend class gpu::GpuDevice;
     friend class FileDialogs;
 

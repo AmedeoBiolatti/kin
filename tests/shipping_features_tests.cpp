@@ -13,7 +13,17 @@ int main() {
     try { kin::renderer_request("typo"); }
     catch (const std::invalid_argument&) { refused = true; }
     assert(refused);
-#if !KIN_HAS_GPU_RENDERER
+#if KIN_HAS_COMPACT_RENDERER
+    assert(kin::renderer_request(nullptr) == kin::RendererRequest::Compact);
+    assert(kin::renderer_request("compact") == kin::RendererRequest::Compact);
+    for (const char* choice : {"sdl", "gpu"}) {
+        refused = false;
+        try { kin::renderer_request(choice); }
+        catch (const std::invalid_argument&) { refused = true; }
+        assert(refused);
+    }
+    assert(!kin::shader_compiler_available());
+#elif !KIN_HAS_GPU_RENDERER
     assert(kin::renderer_request(nullptr) == kin::RendererRequest::Sdl);
     assert(kin::renderer_request("sdl") == kin::RendererRequest::Sdl);
     refused = false;
@@ -34,7 +44,7 @@ int main() {
     auto& window = app.create_window({.title = "shipping features", .width = 32, .height = 32, .hidden = true});
     kin::Renderer2D renderer{kin::make_render_backend(window, false, false)};
 #if !KIN_HAS_GPU_RENDERER
-    assert(renderer.backend_name() == "software");
+    assert(renderer.backend_name() == (KIN_HAS_COMPACT_RENDERER ? "compact" : "software"));
     assert(!renderer.capabilities().materials_2d);
     assert(!renderer.create_shader({}));
     assert(!renderer.create_compute_shader({}));

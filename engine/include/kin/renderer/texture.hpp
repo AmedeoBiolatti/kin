@@ -102,7 +102,7 @@ public:
     // texture wrapper so the per-sprite draw path can compare a tag + static_cast
     // instead of paying dynamic_cast on every textured draw. Unknown stays the
     // default so unrelated backends (tests/fakes) never match a real backend's cast.
-    enum class Kind { Unknown, Sdl, Gpu };
+    enum class Kind { Unknown, Sdl, Gpu, Compact };
 
     explicit ITextureBackend(Kind kind = Kind::Unknown) : _kind(kind) {}
     virtual ~ITextureBackend() = default;
@@ -131,6 +131,7 @@ private:
     friend class Renderer2D;
     friend class RenderQueue;
     friend class SdlRenderer2DBackend;
+    friend class CompactRenderer2DBackend;
     friend class GpuRenderer2DBackend;
     friend class gpu::GpuRenderer3D; // binds materials' textures
     friend class Assets3D; // weak, renderer-scoped texture sharing

@@ -102,14 +102,18 @@ jobs:
               -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
-              -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON
-          - name: Linux small software export
+              -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON -DKIN_PACKAGE_DEBUG_SYMBOLS=ON
+          - name: Linux SDL software shipping baseline
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
             config: MinSizeRel
+            preset: hex-shipping
             options: >-
               -DKIN_RENDERER=software -DKIN_HEX_DEMO_BAKED_FONT=ON
+              -DKIN_ENABLE_SDL_DYNAMIC_API=OFF
+              -DKIN_ENABLE_SDL_GAMEPAD=OFF -DKIN_ENABLE_SDL_DESKTOP_SERVICES=OFF
+              -DKIN_LINUX_VIDEO=x11-wayland
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_BENCHMARKS=OFF
               -DKIN_ENABLE_SCRIPTING=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
               -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
@@ -117,18 +121,31 @@ jobs:
               -DKIN_ENABLE_RUNTIME_ASSETS=OFF -DKIN_ENABLE_RUNTIME_PROFILING=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
-              -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON
+              -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON -DKIN_PACKAGE_DEBUG_SYMBOLS=ON
               -DKIN_BUILD_GAME_ECS_GRAPH_DEMO=OFF -DKIN_BUILD_GAME_ECS_PARALLEL_BENCH=OFF
               -DKIN_BUILD_GAME_ECS_SYSTEMS_DEMO=OFF -DKIN_BUILD_GAME_ISOMETRIC_DEMO=OFF
               -DKIN_BUILD_GAME_LIGHTING_DEMO=OFF -DKIN_BUILD_GAME_SHAPES_DEMO=OFF
               -DKIN_BUILD_GAME_TEXT_EDIT_DEMO=OFF
-          - name: Windows scripting without audio or physics
+          - name: Windows scripting with direct SDL
             os: windows-2022
             options: >-
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
+              -DKIN_ENABLE_SDL_DYNAMIC_API=OFF
+              -DKIN_ENABLE_SDL_GAMEPAD=OFF -DKIN_ENABLE_SDL_DESKTOP_SERVICES=OFF
               -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
+          - name: Linux compact CPU export
+            os: ubuntu-24.04
+            cc: gcc-13
+            cxx: g++-13
+            config: MinSizeRel
+            preset: hex-small-compact
+            options: -DKIN_LINUX_VIDEO=x11-wayland
+          - name: Windows compact CPU export
+            os: windows-2022
+            config: MinSizeRel
+            preset: hex-small-compact
 
     steps:
       - uses: actions/checkout@v4
@@ -168,11 +185,32 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.config || 'Release' }} --output-on-failure -j 4 --timeout 300
 
+      - name: Package recommended SDL software export
+        if: matrix.preset == 'hex-shipping'
+        run: cmake --build build --config MinSizeRel --target hex_demo_package
+
+      - name: Audit shipping compiler and linker commands
+        if: runner.os == 'Linux' && matrix.preset == 'hex-shipping'
+        run: python3 tools/audit_release_build.py --build build --target hex_demo --output build/packages/release-audit.json
+
+      - name: Upload matching debug symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-symbols-${{ matrix.name }}
+          path: build/packages/*-symbols.zip
+          if-no-files-found: ignore
+
       - name: Upload package size report
         uses: actions/upload-artifact@v4
         with:
           name: package-size-${{ matrix.name }}
-          path: build/packages/*.size.json
+          path: |
+            build/packages/*.size.json
+            build/packages/*.cook.json
+            build/asset-reports/*.cook.json
+            build/packages/*.assets.json
+            build/asset-reports/*.assets.json
+            build/packages/release-audit.json
 
   # Signal Siege as Linux players get it. It is built in the Steam Runtime
   # (sniper, glibc 2.31), so it runs on Steam Deck and older distributions,

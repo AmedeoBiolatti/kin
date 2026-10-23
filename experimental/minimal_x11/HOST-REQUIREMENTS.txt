@@ -1,0 +1,19 @@
+Experimental Linux/X11 thin export
+
+Requires a running X11 server (or XWayland), DISPLAY access and host-installed
+libX11.so.6 plus its dependencies (normally libxcb, libXau and libXdmcp).
+The system loader, glibc, libstdc++, libgcc and libm also remain prerequisites.
+These libraries are intentionally excluded from this package. It is not a
+self-contained binary. Check the measured host dependency report for the exact
+libraries and byte counts on the build machine; those counts are not downloads
+required on every destination.
+
+One TrueColor window with copied CPU RGBA presentation. Mouse goal/unit picking,
+Tab orientation, O offset, R reset and Escape/WM close are supported. No native
+Wayland, GPU, audio, gamepads, text entry/IME, clipboard, dialogs or full Kin App
+API. Fonts and terrain use the same code/assets as the regular hex demo.
+
+Run ./hex_demo (interactive), or:
+./hex_demo --headless --render --frames=10 --report=-
+--hidden uses a real display without mapping a window.
+--capture=frame.ppm writes the final framebuffer.

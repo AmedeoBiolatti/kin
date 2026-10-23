@@ -132,6 +132,10 @@ target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
 if(KIN_HAS_SDL_RENDERER)
     target_sources(kin_engine PRIVATE src/renderer/sdl_renderer2d_backend.cpp)
 endif()
+if(KIN_HAS_COMPACT_RENDERER)
+    target_sources(kin_engine PRIVATE src/renderer/compact_renderer2d_backend.cpp
+        src/renderer/sdl_framebuffer_host.cpp)
+endif()
 if(KIN_HAS_GPU_RENDERER)
     target_sources(kin_engine PRIVATE
         src/renderer/shader_compiler.cpp
@@ -150,6 +154,7 @@ else()
 endif()
 target_compile_definitions(kin_engine PUBLIC
     KIN_HAS_GPU_RENDERER=$<BOOL:${KIN_HAS_GPU_RENDERER}>
+    KIN_HAS_COMPACT_RENDERER=$<BOOL:${KIN_HAS_COMPACT_RENDERER}>
     KIN_HAS_SDL_RENDERER=$<BOOL:${KIN_HAS_SDL_RENDERER}>)
 
 if(KIN_ENABLE_AUDIO)

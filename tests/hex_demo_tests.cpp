@@ -57,6 +57,7 @@ int main() {
         throw std::runtime_error("Expected hex terrain/marker was not rendered");
     };
     for (int layout = 0; layout < 4; ++layout) {
+        app.input().set_mouse_pos({0, 0}, window.id());
         key(kin::Key::R);
         if (layout & 1) key(kin::Key::Tab);
         if (layout & 2) key(kin::Key::O);

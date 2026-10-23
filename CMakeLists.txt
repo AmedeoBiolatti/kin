@@ -96,3 +96,6 @@ endif()
 if(BUILD_TESTING AND KIN_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
+
+# Include all compiled dependencies, including nested codec/font libraries.
+kin_apply_release_tree("${CMAKE_CURRENT_SOURCE_DIR}")

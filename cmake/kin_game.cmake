@@ -195,9 +195,12 @@ function(kin_configure_game_assets target game_name)
     option(KIN_COPY_GAME_ASSETS "Copy game assets beside built binaries after build" OFF)
 
     set(options)
-    set(one_value_args SOURCE_DIR)
+    set(one_value_args SOURCE_DIR MANIFEST)
     set(multi_value_args)
     cmake_parse_arguments(KIN_GAME "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+    if(KIN_GAME_UNPARSED_ARGUMENTS OR KIN_GAME_KEYWORDS_MISSING_VALUES)
+        message(FATAL_ERROR "Invalid kin_configure_game_assets arguments: ${KIN_GAME_UNPARSED_ARGUMENTS}; missing values: ${KIN_GAME_KEYWORDS_MISSING_VALUES}")
+    endif()
 
     if(NOT KIN_GAME_SOURCE_DIR)
         set(KIN_GAME_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets")
