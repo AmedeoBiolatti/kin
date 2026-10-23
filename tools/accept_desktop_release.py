@@ -163,6 +163,8 @@ def accept(package, output, backend='software', expected_revision=None, require_
             environment.update(SDL_VIDEO_DRIVER=video_driver or ('x11' if backend=='gpu' and os.name!='nt' else 'windows' if backend=='gpu' else 'dummy'),
                 SDL_AUDIO_DRIVER='dummy',KIN_RENDER_BACKEND='gpu' if backend=='gpu' else 'sdl',KIN_LOG_FORMAT='text',
                 XDG_DATA_HOME=str(temp/'player-data'),APPDATA=str(temp/'player-data'),HOME=str(temp/'player-home'),USERPROFILE=str(temp/'player-home'))
+            if backend=='software': environment['SDL_RENDER_DRIVER']='software'
+            else: environment.pop('SDL_RENDER_DRIVER',None)
             if os.name=='nt': environment['PATH']=os.pathsep.join([str(Path(os.environ['SystemRoot'])/'System32'),os.environ['SystemRoot']])
             readonly(root,True)
             enforced=False
