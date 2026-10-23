@@ -1,19 +1,11 @@
 #include <kin/platform/resource_paths.hpp>
 
-#include <SDL3/SDL.h>
+#include <kin/assets/content.hpp>
 
 #include <stdexcept>
 #include <string>
 
 namespace kin {
-
-std::filesystem::path executable_dir() {
-    const char* base = SDL_GetBasePath();
-    if (!base || !*base) {
-        throw std::runtime_error(std::string{"Cannot locate executable directory: "} + SDL_GetError());
-    }
-    return std::filesystem::u8path(base);
-}
 
 std::filesystem::path game_assets_dir(std::string_view game_name,
                                       const std::filesystem::path& development_root) {

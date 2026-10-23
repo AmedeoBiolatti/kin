@@ -5,8 +5,10 @@
 #include <kin/audio/audio_clip.hpp>
 #include <kin/audio/backend.hpp>
 #include <kin/l10n/localization.hpp>
+#if KIN_ENABLE_SCRIPTING
 #include <kin/scripting/lua_script.hpp>
 #include <kin/scripting/script_engine.hpp>
+#endif
 #include <kin/ui2/text.hpp>
 
 #include <algorithm>
@@ -189,14 +191,20 @@ void test_reads(const fs::path& root) {
     assert(kin::list_content_files(root / "nothing", true).empty());
 
     // Loaders: an image (SDL_image), a sound (SDL), language files, scripts.
+#if KIN_ENABLE_IMAGE_IO
     const kin::Image hero = kin::load_image(root / "hero.bmp");
     assert(hero.size.x == 2 && hero.size.y == 2);
+#endif
+#if KIN_ENABLE_AUDIO
     assert(kin::load_audio_clip(root / "sounds/hit.wav").valid());
     assert(kin::load_audio_stream(root / "sounds/hit.wav").valid()); // streamed music reads the same way
 
+#endif
     kin::AssetManager assets{root};
     kin::register_default_asset_loaders(assets);
+#if KIN_ENABLE_IMAGE_IO
     assert(assets.load<kin::Image>("hero.bmp")->size.x == 2);
+#endif
     assets.discover();
     const kin::AssetMetadata* rules = assets.metadata("data/rules.txt");
     assert(rules && rules->size_bytes == 15 && rules->status == kin::AssetStatus::Discovered);
@@ -211,6 +219,7 @@ void test_reads(const fs::path& root) {
     assert(l10n.localized_path(root, "sounds/hit.wav") == "sounds/hit.wav");
     assert(!l10n.load_directory(root / "no-lang", errors));
 
+#if KIN_ENABLE_SCRIPTING
     kin::LuaScriptOptions options;
     options.module_root = root / "scripts";
     kin::LuaScript script{options};
@@ -228,10 +237,13 @@ void test_reads(const fs::path& root) {
     assert(!engine.load_file(root, "scripts/broken.lua"));
     assert(engine.last_error().find("broken.lua") != std::string::npos);
 
+#endif
+#if KIN_ENABLE_TTF
     if (kin::content_file_exists(root / "fonts/ui.ttf")) {
         const kin::ui2::Font font = kin::ui2::load_ttf_font(root / "fonts/ui.ttf", 16.0f);
         assert(kin::ui2::measure_text(font, "Play", 1.0f).x > 0.0f);
     }
+#endif
 }
 
 void test_mounts(const fs::path& work, const fs::path& source) {
@@ -277,11 +289,13 @@ void test_mount_through_link(const fs::path& work) {
     const fs::path real = fs::weakly_canonical(work / "real"); // also a Windows short name made long
     assert(kin::content_file_exists(real / "game" / "hero.bmp"));
     assert(kin::content_file_exists(fs::weakly_canonical(root / "scripts" / "util.lua")));
+#if KIN_ENABLE_SCRIPTING
     kin::LuaScriptOptions options;
     options.module_root = root / "scripts";
     kin::LuaScript script{options};
     assert(script.load_file(root / "scripts/main.lua"));
     assert(script.call_for<int>("answer") == 42);
+#endif
     kin::unmount_content_pack(root);
     assert(!kin::content_file_exists(real / "game" / "hero.bmp"));
 }

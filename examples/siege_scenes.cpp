@@ -57,7 +57,7 @@ struct Screen {
 
     ui2::TextStyle style(float points, Color color) const {
         const float size = std::min(32.0f, points * dpi);
-        return {.font = ui2::system_ui_font(size), .scale = points * dpi / size, .color = color};
+        return {.font = siege_ui_font(size), .scale = points * dpi / size, .color = color};
     }
     Rectf px(Rectf r) const { return {r.x * dpi, r.y * dpi, r.w * dpi, r.h * dpi}; }
     float width(std::string_view value, float points) const {
@@ -424,7 +424,7 @@ std::unique_ptr<Scene> make_results(std::shared_ptr<Siege> siege, RunResult resu
 } // namespace
 
 BestRunStore::BestRunStore(std::filesystem::path root)
-    : _saves(std::make_unique<SaveStore>(SaveStoreConfig{.game_id = "signal_siege", .game_version = "0.2", .root_override = std::move(root)})) {
+    : _saves(std::make_unique<SaveStore>(SaveStoreConfig{.game_id = "signal_siege", .game_version = KIN_EXAMPLE_GAME_VERSION, .root_override = std::move(root)})) {
     const SaveLoadResult loaded = _saves->read_settings();
     if (loaded.result.ok) {
         _best.time = static_cast<float>(loaded.payload.number_at("best_time", 0));

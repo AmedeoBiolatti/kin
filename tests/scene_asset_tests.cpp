@@ -471,6 +471,7 @@ int main() {
     test_prefab_scene_asset_instantiates_after_script_owned_component();
     test_scene_asset_runtime_reloads_scene_and_keeps_old_on_invalid();
     test_scene_asset_runtime_reloads_prefab_and_preserves_overrides();
+#endif
     test_linked_prefab_save_roundtrip();
     return 0;
 }

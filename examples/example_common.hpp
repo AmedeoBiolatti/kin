@@ -2,6 +2,7 @@
 
 #include <kin/runtime/scene_app.hpp>
 #include <kin/save/save_store.hpp>
+#include <kin/ui2/text.hpp>
 
 #include <filesystem>
 
@@ -16,9 +17,12 @@ struct Options {
     int width = 1280, height = 800;
     float ui_scale = 0; // zero follows the window's current display
     bool benchmark = false, help = false, vsync = false, power_grid = false, mute = false;
+    bool check_user_data = false;
     bool view_3d = false; // Signal Siege's arena drawn in 3D (--view 3d; KIN_EXPERIMENTAL_3D)
     std::string scenario = "live", screenshot;
 };
+
+ui2::Font siege_ui_font(float size);
 
 // Saves the frame as --screenshot once `ticks` reaches --capture-frame.
 void capture(SceneContext& ctx, const Options& options, int ticks, bool& captured);

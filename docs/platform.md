@@ -4,11 +4,12 @@ What a game or tool built on kin needs from the desktop beyond windows and
 input, without calling SDL itself: files dropped on a window, the system's file
 dialogs, child processes, and where to keep the user's data.
 
-For read-only game resources, `executable_dir()` and `game_assets_dir(game_name)`
-in `kin/platform/resource_paths.hpp` resolve paths independently of the working
-directory. See [desktop packaging](shipping.md) for the asset layout and CMake
-export targets. Keep saves in the user data directory below, not beside the
-executable.
+For read-only game resources use `find_content_root` in `kin/assets/content.hpp`,
+which finds the content folder or `.kinpak` beside the executable independently
+of the working directory. `game_assets_dir` in `kin/platform/resource_paths.hpp`
+retains the older loose `assets/<game>` layout for compatibility. See
+[shipping](shipping.md). Keep saves in the user data directory below, not beside
+the executable.
 
 ## Dropped files
 

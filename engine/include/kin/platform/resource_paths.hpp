@@ -6,7 +6,7 @@
 namespace kin {
 
 // Absolute directory containing the desktop executable, independent of cwd.
-// Throws if the platform cannot determine it; never falls back to cwd.
+// Shared with kin/assets/content.hpp; follows its platform fallback behavior.
 std::filesystem::path executable_dir();
 
 // Packages store each game's resources at <executable>/assets/<game_name>.

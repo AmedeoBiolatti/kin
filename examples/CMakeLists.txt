@@ -7,6 +7,7 @@ add_library(kin_example_workloads STATIC
     arena_art.cpp
     arena_3d.cpp
     arena_hud.cpp
+    siege_fonts.cpp
     siege_audio.cpp
     siege_scenes.cpp
     power_grid.cpp
@@ -15,6 +16,7 @@ add_library(kin_example_workloads STATIC
 )
 target_include_directories(kin_example_workloads PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(kin_example_workloads PUBLIC kin::engine)
+target_compile_definitions(kin_example_workloads PRIVATE KIN_EXAMPLE_GAME_VERSION="${PROJECT_VERSION}")
 kin_enable_release_optimizations(kin_example_workloads)
 
 foreach(example signal_siege run_observatory)
@@ -23,7 +25,7 @@ foreach(example signal_siege run_observatory)
 endforeach()
 # Signal Siege's content (its language files) is read from content/ while it
 # is made, reloading as it changes, and ships as signal_siege.kinpak.
-kin_game(signal_siege TITLE "Signal Siege")
+kin_game(signal_siege TITLE "Signal Siege" MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/signal_siege/assets.manifest.json")
 kin_game(run_observatory TITLE "Run Observatory" NO_CONTENT)
 
 # Signal Breach: Signal Siege first person, on the experimental 3D renderer

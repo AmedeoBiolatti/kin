@@ -1,0 +1,18 @@
+{
+  "schema": "kin.release-contract/1",
+  "id": "desktop-v1",
+  "architecture": "x86_64",
+  "linux": {
+    "baseline": "Ubuntu 24.04 x86-64",
+    "compiler": "GNU 13.x",
+    "maximum_glibc": "2.39",
+    "maximum_glibcxx": "3.4.33",
+    "host": ["glibc", "libstdc++", "libgcc_s", "desktop display server", "graphics and audio drivers"]
+  },
+  "windows": {
+    "baseline": "Windows 10/11 x64",
+    "compiler": "Visual Studio 2022 MSVC 19.3x/19.4x",
+    "runtime": "Static MSVC runtime in shipping builds; Windows system DLLs and drivers supplied by the OS"
+  },
+  "qualification": "The contract is a target policy. Passing binary audits and CI acceptance is required; Windows 10 client and physical GPU/audio qualification remains a separate manual check."
+}

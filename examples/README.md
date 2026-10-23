@@ -13,7 +13,8 @@ runner enforces RAM limits and measures a complete 1,440-frame interior/exterior
 Two asset-free native applications share workload code with `kin_bench`.
 They are examples, playable/interactive demos, and reproducible performance
 fixtures. Neither requires downloaded assets, an account, or a network service.
-Run Observatory uses system fonts with the engine's bitmap fallback.
+Signal Siege bundles its multilingual fonts in its content pack. Run Observatory
+uses system fonts with the engine's bitmap fallback.
 
 ## Build and run
 
@@ -49,10 +50,10 @@ mechanism; the game's collision logic uses its own spatial grid. The
 with all those optional subsystems enabled, for comparisons. Both presets build
 examples and omit the unrelated sample games and benchmarks.
 
-The export includes all four `.kinlang` files and dependency notices. It uses
-host system fonts, display/audio drivers and the normal system runtime, as the
-original app does. Unzip the package and launch `signal_siege` (`.exe` on Windows).
-See [shipping measurements](../docs/shipping.md#signal-siege-larger-game-export).
+The export includes all four `.kinlang` files, bundled fonts and dependency
+notices. The OS supplies display/audio drivers. Extract the package and launch
+`signal_siege` (`.exe` on Windows). See [shipping](../docs/shipping.md#additional-desktop-qualification)
+for the acceptance profiles and the existing Steam Runtime release path.
 
 ## Signal Siege
 

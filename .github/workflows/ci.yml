@@ -206,6 +206,9 @@ jobs:
           name: package-size-${{ matrix.name }}
           path: |
             build/packages/*.size.json
+            build/component-reports/*.json
+            build/generated/kin/components.json
+            build/packages/*.components.json
             build/packages/*.cook.json
             build/asset-reports/*.cook.json
             build/packages/*.assets.json

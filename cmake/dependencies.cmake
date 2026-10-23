@@ -225,6 +225,7 @@ if(KIN_ENABLE_SCRIPTING)
     FetchContent_MakeAvailable(sol2)
 endif()
 
+if(KIN_ENABLE_AUDIO)
 # Audio decoders (kin/audio/audio_decoder.hpp): dr_wav, dr_flac and dr_mp3, and
 # stb_vorbis. Single-file C libraries; engine/src/audio/codecs.c compiles them.
 # dr_libs is pinned past its last release for its fuzzing fixes.
@@ -238,6 +239,9 @@ if(NOT dr_libs_POPULATED)
     FetchContent_Populate(dr_libs)
 endif()
 
+endif()
+
+if(KIN_ENABLE_AUDIO OR KIN_EXPERIMENTAL_3D)
 FetchContent_Declare(stb
     URL https://github.com/nothings/stb/archive/2c980bb59875b0d32144a71867fbdebb2f77cd20.tar.gz
     URL_HASH SHA256=9a955b1b49a4410088a2e0ee2a9c057c3c907d0c1d75454144cb980aca0ba515
@@ -246,6 +250,8 @@ FetchContent_Declare(stb
 FetchContent_GetProperties(stb)
 if(NOT stb_POPULATED)
     FetchContent_Populate(stb)
+endif()
+
 endif()
 
 # Polygon triangulation for filled shapes (kin/renderer/shape.hpp). Header-only.
@@ -328,39 +334,66 @@ if(KIN_ENABLE_TTF)
         GIT_SHALLOW TRUE
     )
 
-FetchContent_MakeAvailable(SDL3_ttf)
+    FetchContent_MakeAvailable(SDL3_ttf)
+endif()
 
-# The license texts a binary built with kin carries (docs/third_party_notices.md):
-# "<name in the package>|<file>" pairs, installed by kin_game beside each game.
-# Lua keeps its license in lua.h; it is cut out into a file of its own.
+# Exact dependency notices, only for components present in this build.
+if(KIN_ENABLE_SCRIPTING)
 file(READ "${lua_SOURCE_DIR}/src/lua.h" _kin_lua_header)
 string(REGEX MATCH "\\* Copyright \\(C\\)[^\n]*Lua\\.org.*SOFTWARE\\.\n" _kin_lua_license "${_kin_lua_header}")
 string(REGEX REPLACE "(^|\n)\\* ?" "\\1" _kin_lua_license "${_kin_lua_license}")
 file(WRITE "${CMAKE_BINARY_DIR}/licenses/Lua.txt" "${_kin_lua_license}")
-set(KIN_THIRD_PARTY_LICENSES
-    "SDL.txt|${sdl3_SOURCE_DIR}/LICENSE.txt"
-    "SDL_image.txt|${sdl3_image_SOURCE_DIR}/LICENSE.txt"
-    "SDL_ttf.txt|${sdl3_ttf_SOURCE_DIR}/LICENSE.txt"
-    "flecs.txt|${flecs_SOURCE_DIR}/LICENSE"
-    "Box2D.txt|${box2d_SOURCE_DIR}/LICENSE"
-    "Lua.txt|${CMAKE_BINARY_DIR}/licenses/Lua.txt"
-    "sol2.txt|${sol2_SOURCE_DIR}/LICENSE.txt"
-    "earcut.hpp.txt|${earcut_SOURCE_DIR}/LICENSE"
-    "libpng.txt|${sdl3_image_SOURCE_DIR}/external/libpng/LICENSE"
-    "zlib.txt|${sdl3_image_SOURCE_DIR}/external/zlib/LICENSE"
-    "FreeType.txt|${sdl3_ttf_SOURCE_DIR}/external/freetype/docs/FTL.TXT"
-    "HarfBuzz.txt|${sdl3_ttf_SOURCE_DIR}/external/harfbuzz/COPYING"
-    "plutosvg.txt|${sdl3_ttf_SOURCE_DIR}/external/plutosvg/LICENSE"
-    "plutovg.txt|${sdl3_ttf_SOURCE_DIR}/external/plutovg/LICENSE"
-    CACHE INTERNAL "")
-foreach(_kin_license IN LISTS KIN_THIRD_PARTY_LICENSES)
-    string(REPLACE "|" ";" _kin_license "${_kin_license}")
-    list(GET _kin_license 1 _kin_license_file)
-    if(NOT EXISTS "${_kin_license_file}")
-        message(FATAL_ERROR "License text not found: ${_kin_license_file} (update KIN_THIRD_PARTY_LICENSES "
-                            "in cmake/dependencies.cmake to match the dependency)")
-    endif()
-endforeach()
+endif()
+set(KIN_THIRD_PARTY_LICENSES)
+if(EXISTS "<file>")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "<name in the package>|<file>")
+endif()
+if(EXISTS "\n)\\* ?")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "(^|\n)\\* ?")
+endif()
+if(EXISTS "${sdl3_SOURCE_DIR}/LICENSE.txt")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "SDL.txt|${sdl3_SOURCE_DIR}/LICENSE.txt")
+endif()
+if(EXISTS "${sdl3_image_SOURCE_DIR}/LICENSE.txt")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "SDL_image.txt|${sdl3_image_SOURCE_DIR}/LICENSE.txt")
+endif()
+if(EXISTS "${sdl3_ttf_SOURCE_DIR}/LICENSE.txt")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "SDL_ttf.txt|${sdl3_ttf_SOURCE_DIR}/LICENSE.txt")
+endif()
+if(EXISTS "${flecs_SOURCE_DIR}/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "flecs.txt|${flecs_SOURCE_DIR}/LICENSE")
+endif()
+if(EXISTS "${box2d_SOURCE_DIR}/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "Box2D.txt|${box2d_SOURCE_DIR}/LICENSE")
+endif()
+if(EXISTS "${CMAKE_BINARY_DIR}/licenses/Lua.txt")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "Lua.txt|${CMAKE_BINARY_DIR}/licenses/Lua.txt")
+endif()
+if(EXISTS "${sol2_SOURCE_DIR}/LICENSE.txt")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "sol2.txt|${sol2_SOURCE_DIR}/LICENSE.txt")
+endif()
+if(EXISTS "${earcut_SOURCE_DIR}/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "earcut.hpp.txt|${earcut_SOURCE_DIR}/LICENSE")
+endif()
+if(EXISTS "${sdl3_image_SOURCE_DIR}/external/libpng/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "libpng.txt|${sdl3_image_SOURCE_DIR}/external/libpng/LICENSE")
+endif()
+if(EXISTS "${sdl3_image_SOURCE_DIR}/external/zlib/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "zlib.txt|${sdl3_image_SOURCE_DIR}/external/zlib/LICENSE")
+endif()
+if(EXISTS "${sdl3_ttf_SOURCE_DIR}/external/freetype/docs/FTL.TXT")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "FreeType.txt|${sdl3_ttf_SOURCE_DIR}/external/freetype/docs/FTL.TXT")
+endif()
+if(EXISTS "${sdl3_ttf_SOURCE_DIR}/external/harfbuzz/COPYING")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "HarfBuzz.txt|${sdl3_ttf_SOURCE_DIR}/external/harfbuzz/COPYING")
+endif()
+if(EXISTS "${sdl3_ttf_SOURCE_DIR}/external/plutosvg/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "plutosvg.txt|${sdl3_ttf_SOURCE_DIR}/external/plutosvg/LICENSE")
+endif()
+if(EXISTS "${sdl3_ttf_SOURCE_DIR}/external/plutovg/LICENSE")
+    list(APPEND KIN_THIRD_PARTY_LICENSES "plutovg.txt|${sdl3_ttf_SOURCE_DIR}/external/plutovg/LICENSE")
+endif()
+set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES}" CACHE INTERNAL "" FORCE)
 
 # Jolt Physics (kin/physics3d, docs/physics_3d.md), only with the experimental 3D
 # option: a rigid body engine, MIT. Built as a static library without its

@@ -7,6 +7,15 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Added optional engine component targets, renderer/SDL profiles, release LTO,
+  section garbage collection, separate debug symbols, optional compiler PGO,
+  asset dependency reports and lossless asset cooking. `kin_game` keeps the
+  existing content-pack layout and package names while sharing the audited
+  desktop exporter. Signal Siege now carries its multilingual font subsets.
+- Added versioned release identity, package size/provenance reports and desktop
+  acceptance CI alongside the existing Steam Runtime builds.
+
+
 ### Fixed
 
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle

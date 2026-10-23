@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import zipfile
 from PIL import Image
+from content_pack import extract_content_pack
 
 CASES = [
     ("arena", 120, ["--locale=en"], 300, False),
@@ -48,13 +49,20 @@ def main():
                 raise RuntimeError("Expected one packaged manifest")
             root = candidates[0].parent
             count = 0
-            for line in candidates[0].read_text().splitlines():
+            for line in candidates[0].read_text(encoding="utf-8").splitlines():
                 expected, relative = line.split("  ", 1)
                 if hashlib.sha256((root / relative).read_bytes()).hexdigest() != expected:
                     raise RuntimeError(f"Checksum mismatch: {relative}")
                 count += 1
+            if (root / "signal_siege.kinpak").is_file():
+                content = extract_content_pack(root / "signal_siege.kinpak", Path(temp) / "verified content")
+                languages = content / "lang"
+            elif (root / "signal_siege/lang").is_dir():
+                languages = root / "signal_siege/lang"
+            else:
+                languages = root / "assets/signal_siege"
             for locale in ("en", "fr", "ja", "ar"):
-                if not (root / "assets/signal_siege" / f"{locale}.kinlang").is_file():
+                if not (languages / f"{locale}.kinlang").is_file():
                     raise RuntimeError(f"Missing localization asset: {locale}")
             binary = root / ("signal_siege.exe" if os.name == "nt" else "signal_siege")
             binary.chmod(binary.stat().st_mode | 0o100)
@@ -64,7 +72,7 @@ def main():
                            "--report=-", "--screenshot", str(capture), "--capture-frame", str(frames),
                            "--fail-on-missing-text", *options]
                 result = subprocess.run(command, cwd=temp, env=environment, capture_output=True,
-                                        text=True, check=True, timeout=300)
+                                        text=True, encoding="utf-8", check=True, timeout=300)
                 report = json.loads(result.stdout)
                 if report["status"] != "ok" or report["localization"]["missing_text"]:
                     raise RuntimeError(f"Run/localization failure: {report}")
@@ -94,7 +102,7 @@ def main():
                 (output / f"package-{index}-{case}.json").write_text(json.dumps(report, indent=2) + "\n")
                 print(f"{label}/{case}: {expected_backend}; state and pixels match", flush=True)
     (output / "checks.json").write_text(json.dumps({"schema": "kin.signal-siege-export/1", "gpu": args.gpu,
-        "note": "Trusted local ZIPs, manifest verification, unrelated cwd, fixed seed, silent tool runs without saved-game writes; exact shared state and decoded pixel comparison. System fonts are host prerequisites. GPU software drivers establish functionality, not hardware performance.",
+        "note": "Trusted local ZIPs, manifest verification, unrelated cwd, fixed seed, silent tool runs without saved-game writes; exact shared state and decoded pixel comparison. Bundled fonts are verified by desktop release acceptance. GPU software drivers establish functionality, not hardware performance.",
         "runs": rows}, indent=2) + "\n")
 
 

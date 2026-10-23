@@ -1,5 +1,50 @@
 include("${CMAKE_CURRENT_LIST_DIR}/kin_packaging.cmake")
 
+function(kin_configure_asset_pipeline target game_name KIN_GAME_SOURCE_DIR KIN_GAME_MANIFEST)
+    option(KIN_ENABLE_ASSET_COOKING "Cook lossless game assets for shipping" OFF)
+    set_target_properties(${target} PROPERTIES KIN_GAME_ASSETS_DIR "${KIN_GAME_SOURCE_DIR}" KIN_GAME_ASSETS_NAME "${game_name}")
+    if(KIN_GAME_MANIFEST)
+        get_filename_component(manifest "${KIN_GAME_MANIFEST}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        if(NOT EXISTS "${manifest}")
+            message(FATAL_ERROR "Asset manifest does not exist: ${manifest}")
+        endif()
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set(tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/report_game_assets.py")
+        set_target_properties(${target} PROPERTIES
+            KIN_GAME_ASSET_MANIFEST "${manifest}"
+            KIN_GAME_ASSET_REPORT_PYTHON "${Python3_EXECUTABLE}"
+            KIN_GAME_ASSET_REPORT_TOOL "${tool}")
+        add_custom_target(${target}_asset_report
+            COMMAND "${Python3_EXECUTABLE}" "${tool}"
+                --assets "${KIN_GAME_SOURCE_DIR}" --manifest "${manifest}"
+                --output "${CMAKE_BINARY_DIR}/asset-reports/${target}-$<CONFIG>.assets.json"
+            COMMENT "Auditing ${game_name} assets (dry run; all files kept)"
+            VERBATIM)
+    endif()
+
+    if(KIN_ENABLE_ASSET_COOKING)
+        if(NOT KIN_GAME_MANIFEST)
+            message(FATAL_ERROR "Asset cooking requires an explicit MANIFEST for ${target}")
+        endif()
+        set(cook_tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/cook_game_assets.py")
+        set(cook_output "${CMAKE_BINARY_DIR}/cooked-assets/${target}/$<CONFIG>")
+        set(cook_cache "${CMAKE_BINARY_DIR}/asset-cook-cache")
+        set(cook_report "${CMAKE_BINARY_DIR}/asset-reports/${target}-$<CONFIG>.cook.json")
+        set(cook_target "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+        set_target_properties(${target} PROPERTIES
+            KIN_GAME_COOK_OUTPUT "${cook_output}" KIN_GAME_COOK_CACHE "${cook_cache}"
+            KIN_GAME_COOK_REPORT "${cook_report}" KIN_GAME_COOK_TOOL "${cook_tool}"
+            KIN_GAME_COOK_TARGET "${cook_target}")
+        add_custom_target(${target}_cook_assets
+            COMMAND "${Python3_EXECUTABLE}" "${cook_tool}"
+                --assets "${KIN_GAME_SOURCE_DIR}" --manifest "${manifest}"
+                --output "${cook_output}" --cache "${cook_cache}" --report "${cook_report}"
+                --target "${cook_target}"
+            COMMENT "Cooking ${game_name} assets (lossless; all files kept)" VERBATIM)
+    endif()
+
+endfunction()
+
 # Games built with kin, from their content to a package (docs/shipping.md).
 #
 #   kin_game(<target>
@@ -83,7 +128,7 @@ END
 endfunction()
 
 function(kin_game target)
-    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON" "FILES" ${ARGN})
+    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST" "FILES;RUNTIME_TARGETS" ${ARGN})
     if(NOT ARG_NAME)
         set(ARG_NAME "${target}")
     endif()
@@ -130,20 +175,13 @@ function(kin_game target)
         target_link_options(${target} PRIVATE -static-libstdc++ -static-libgcc)
     endif()
 
-    install(TARGETS ${target} RUNTIME DESTINATION . COMPONENT ${target})
+    set_target_properties(${target} PROPERTIES KIN_PACKAGE_INSTALL_COMPONENT "${target}")
+    if(content AND IS_DIRECTORY "${content}")
+        kin_configure_asset_pipeline(${target} "${ARG_NAME}" "${content}" "${ARG_MANIFEST}")
+    endif()
     if(ARG_FILES)
         install(FILES ${ARG_FILES} DESTINATION . COMPONENT ${target})
     endif()
-    install(FILES "${_KIN_ROOT_DIR}/LICENSE" DESTINATION licenses RENAME kin.txt COMPONENT ${target})
-    install(FILES "${_KIN_ROOT_DIR}/docs/third_party_notices.md" DESTINATION licenses
-            RENAME README.md COMPONENT ${target})
-    foreach(license IN LISTS KIN_THIRD_PARTY_LICENSES)
-        string(REPLACE "|" ";" license "${license}")
-        list(GET license 0 license_name)
-        list(GET license 1 license_file)
-        install(FILES "${license_file}" DESTINATION licenses RENAME "${license_name}" COMPONENT ${target})
-    endforeach()
-
     set(package_depends ${target})
     if(content AND IS_DIRECTORY "${content}")
         if(KIN_PACK_CONTENT)
@@ -159,32 +197,23 @@ function(kin_game target)
             endif()
             list(APPEND package_depends ${target}_content)
             install(FILES "${pack}" DESTINATION . COMPONENT ${target})
+            set_target_properties(${target} PROPERTIES KIN_GAME_CONTENT_PACK "${ARG_NAME}.kinpak")
         else()
+            set_target_properties(${target} PROPERTIES KIN_GAME_CONTENT_DIRECTORY "${ARG_NAME}")
             install(DIRECTORY "${content}/" DESTINATION "${ARG_NAME}" COMPONENT ${target}
                     PATTERN ".*" EXCLUDE)
         endif()
     endif()
 
     _kin_game_platform(platform)
-    set(package "${ARG_NAME}-${ARG_VERSION}-${platform}")
-    set(packages "${CMAKE_BINARY_DIR}/packages")
-    set(staging "${packages}/staging/${target}")
-    if(WIN32)
-        set(archive "${packages}/${package}.zip")
-        set(tar_args cf "${archive}" --format=zip)
-    else()
-        set(archive "${packages}/${package}.tar.gz")
-        set(tar_args czf "${archive}")
+    set_target_properties(${target} PROPERTIES KIN_PACKAGE_BASENAME "${ARG_NAME}-${ARG_VERSION}-${platform}")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT KIN_RELEASE_CONTRACT)
+        set_target_properties(${target} PROPERTIES KIN_PACKAGE_ARCHIVE_EXTENSION "tar.gz")
     endif()
-    add_custom_target(${target}_package
-        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${staging}"
-        COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --config $<CONFIG> --component ${target}
-                --prefix "${staging}/${package}" --strip
-        COMMAND "${CMAKE_COMMAND}" -E chdir "${staging}" "${CMAKE_COMMAND}" -E tar ${tar_args} "${package}"
-        COMMAND "${CMAKE_COMMAND}" -E echo "Packaged ${archive}"
-        COMMENT "Packaging ${ARG_NAME}"
-        VERBATIM)
-    add_dependencies(${target}_package ${package_depends})
+    kin_package_game(${target} VERSION "${ARG_VERSION}" RUNTIME_TARGETS ${ARG_RUNTIME_TARGETS})
+    if(TARGET ${target}_package)
+        add_dependencies(${target}_package ${package_depends})
+    endif()
 endfunction()
 
 # The older way to set up a game's assets, kept for games that use it: bakes
@@ -192,31 +221,28 @@ endfunction()
 # copies the assets beside the binaries. It now also sets the game up with
 # kin_game, its assets folder as the content.
 function(kin_configure_game_assets target game_name)
-    option(KIN_COPY_GAME_ASSETS "Copy game assets beside built binaries after build" OFF)
-
-    set(options)
-    set(one_value_args SOURCE_DIR MANIFEST)
-    set(multi_value_args)
-    cmake_parse_arguments(KIN_GAME "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
-    if(KIN_GAME_UNPARSED_ARGUMENTS OR KIN_GAME_KEYWORDS_MISSING_VALUES)
-        message(FATAL_ERROR "Invalid kin_configure_game_assets arguments: ${KIN_GAME_UNPARSED_ARGUMENTS}; missing values: ${KIN_GAME_KEYWORDS_MISSING_VALUES}")
+    option(KIN_COPY_GAME_ASSETS "Copy legacy game assets beside built binaries" OFF)
+    cmake_parse_arguments(ASSETS "" "SOURCE_DIR;MANIFEST" "" ${ARGN})
+    if(ASSETS_UNPARSED_ARGUMENTS OR ASSETS_KEYWORDS_MISSING_VALUES)
+        message(FATAL_ERROR "Invalid kin_configure_game_assets arguments")
     endif()
-
-    if(NOT KIN_GAME_SOURCE_DIR)
-        set(KIN_GAME_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    if(NOT ASSETS_SOURCE_DIR)
+        set(ASSETS_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets")
     endif()
-
-    kin_game(${target} CONTENT "${KIN_GAME_SOURCE_DIR}" NAME "${game_name}")
-    target_compile_definitions(${target} PRIVATE
-        "$<$<NOT:$<CONFIG:Release>>:KIN_ASSETS_ROOT=\"${KIN_GAME_SOURCE_DIR}\">"
-    )
-
+    get_filename_component(source "${ASSETS_SOURCE_DIR}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(NOT IS_DIRECTORY "${source}" OR NOT game_name MATCHES "^[A-Za-z0-9_-]+$")
+        message(FATAL_ERROR "Invalid game assets directory or name: ${source}; ${game_name}")
+    endif()
+    set(manifest_argument)
+    if(ASSETS_MANIFEST)
+        set(manifest_argument MANIFEST "${ASSETS_MANIFEST}")
+    endif()
+    kin_game(${target} CONTENT "${source}" NAME "${game_name}" ${manifest_argument})
+    target_compile_definitions(${target} PRIVATE "$<$<CONFIG:Debug>:KIN_ASSETS_ROOT=\"${source}\">")
     if(KIN_COPY_GAME_ASSETS)
-        add_custom_command(TARGET ${target} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-                "${KIN_GAME_SOURCE_DIR}"
-                "$<TARGET_FILE_DIR:${target}>/assets/${game_name}"
-            COMMENT "Copying ${game_name} assets"
-        )
+        add_custom_target(${target}_assets
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory "${source}" "$<TARGET_FILE_DIR:${target}>/assets/${game_name}"
+            COMMENT "Copying ${game_name} legacy assets" VERBATIM)
+        add_dependencies(${target} ${target}_assets)
     endif()
 endfunction()

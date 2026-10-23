@@ -17,7 +17,8 @@
         "KIN_SHIPPING": "ON",
         "KIN_BUILD_TESTS": "OFF",
         "KIN_BUILD_BENCHMARKS": "OFF",
-        "KIN_EXPERIMENTAL_3D": "OFF"
+        "KIN_EXPERIMENTAL_3D": "OFF",
+        "KIN_PACKAGE_STRIP": "ON"
       }
     },
     {
@@ -265,6 +266,48 @@
       "cacheVariables": {
         "KIN_PGO_MODE": "use"
       }
+    },
+    {
+      "name": "signal-siege-release-base",
+      "hidden": true,
+      "inherits": "signal-siege-shipping",
+      "cacheVariables": {
+        "KIN_RELEASE_CONTRACT": "ON",
+        "KIN_ENABLE_ASSET_COOKING": "ON",
+        "KIN_ENABLE_SCENE_SERVER": "OFF",
+        "KIN_ENABLE_RENDER_PROBE": "OFF",
+        "KIN_ENABLE_DETERMINISM_CHECK": "OFF",
+        "KIN_ENABLE_RELEASE_PROFILING": "OFF",
+        "KIN_ENABLE_RUNTIME_PROFILING": "OFF",
+        "KIN_ENABLE_DEBUG_OVERLAY": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "KIN_SHIPPING": "ON"
+      }
+    },
+    {
+      "name": "signal-siege-release-linux",
+      "inherits": "signal-siege-release-base",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc-13",
+        "CMAKE_CXX_COMPILER": "g++-13"
+      }
+    },
+    {
+      "name": "signal-siege-release-windows",
+      "inherits": "signal-siege-release-base",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "toolset": "v143",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
     }
   ],
   "buildPresets": [
@@ -368,6 +411,30 @@
       "configurePreset": "signal-siege-pgo-use",
       "targets": [
         "signal_siege_package"
+      ]
+    },
+    {
+      "name": "signal-siege-release-linux",
+      "configurePreset": "signal-siege-release-linux",
+      "configuration": "Release",
+      "targets": [
+        "signal_siege_package",
+        "kin_example_tests",
+        "kin_desktop_package_fixture",
+        "kin_desktop_package_library",
+        "kin_component_tests"
+      ]
+    },
+    {
+      "name": "signal-siege-release-windows",
+      "configurePreset": "signal-siege-release-windows",
+      "configuration": "Release",
+      "targets": [
+        "signal_siege_package",
+        "kin_example_tests",
+        "kin_desktop_package_fixture",
+        "kin_desktop_package_library",
+        "kin_component_tests"
       ]
     }
   ],

@@ -414,6 +414,32 @@ int run_scene_app(const SceneAppConfig& config, SceneManager& scenes) {
         return 1;
     }
 #endif
+#if !KIN_ENABLE_RUNTIME_ASSETS
+    if (config.asset_server || config.file_watcher) {
+        KIN_LOG_ERROR("runtime", "Asset pumping and watching require KIN_ENABLE_RUNTIME_ASSETS");
+        return 1;
+    }
+#endif
+#if !KIN_ENABLE_IMAGE_IO
+    if (!config.headless.screenshot_path.empty()) {
+        KIN_LOG_ERROR("runtime", "Screenshots require KIN_ENABLE_IMAGE_IO");
+        return 1;
+    }
+#endif
+#if !KIN_ENABLE_RUNTIME_PROFILING
+    if (config.headless.profile || config.headless.profile_render || config.headless.profile_lines ||
+        config.profile_json_output || config.profile_text_output ||
+        !config.headless.profile_json_path.empty() || !config.headless.profile_text_path.empty()) {
+        KIN_LOG_ERROR("runtime", "Runtime profiles require KIN_ENABLE_RUNTIME_PROFILING");
+        return 1;
+    }
+#endif
+#ifndef KIN_ENABLE_PROFILING
+    if (config.headless.profile_lines) {
+        KIN_LOG_ERROR("runtime", "--profile-lines requires a build with KIN_ENABLE_PROFILING enabled");
+        return 1;
+    }
+#endif
     KIN_LOG_INFO_F("runtime",
                    "scene app starting",
                    (LogFields{

@@ -1,4 +1,5 @@
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/build.hpp>
 
 #include <kin/assets/texture_file.hpp>
 #include <kin/platform/log.hpp>
@@ -7,11 +8,14 @@
 
 #include <cmath>
 
-#include "embedded_gpu_shader.hpp"
+#if KIN_HAS_COMPACT_RENDERER
+#include "compact_renderer2d_backend.hpp"
+#endif
+#if KIN_HAS_SDL_RENDERER
 #include "sdl_renderer2d_backend.hpp"
 #endif
 #if KIN_HAS_GPU_RENDERER
-#include "builtin_shaders.hpp"
+#include "embedded_gpu_shader.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
 #endif
 

@@ -2,9 +2,6 @@
 
 #include <kin/ecs/system.hpp>
 #include <kin/prefab/prefab_asset.hpp>
-#if KIN_ENABLE_SCRIPTING
-#include <kin/scripting/script_scene.hpp>
-#endif
 
 namespace kin {
 
@@ -95,16 +92,6 @@ ReloadResult EcsReloadCoordinator::migrate_data_schema(EcsWorld& world,
     }
     return {};
 }
-
-#if KIN_ENABLE_SCRIPTING
-ReloadResult EcsReloadCoordinator::reload_script_scene(ScriptScene& scene) {
-    if (!scene.reload_script()) {
-        return {.ok = false, .diagnostics = {scene.last_script_error()}};
-    }
-    return {};
-}
-
-#endif
 
 ReloadResult EcsReloadCoordinator::validate_prefab(const PrefabAsset& prefab, const EcsComponentRegistry& components) {
     std::vector<std::string> diagnostics = validate_prefab_asset(prefab, components);

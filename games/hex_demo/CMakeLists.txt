@@ -10,6 +10,10 @@ target_link_libraries(hex_demo PRIVATE
 )
 
 kin_game(hex_demo TITLE "Hex Demo")
+if(KIN_HEX_DEMO_BAKED_FONT)
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/FONT-LICENSE.txt"
+        DESTINATION licenses/game COMPONENT hex_demo)
+endif()
 
 target_compile_options(hex_demo PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic>

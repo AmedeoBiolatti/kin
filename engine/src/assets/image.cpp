@@ -38,6 +38,7 @@ Image to_image(SDL_Surface* converted) {
 } // namespace
 
 Image decode_image(std::span<const u8> bytes, std::string_view name) {
+#if KIN_ENABLE_IMAGE_IO
     SDL_IOStream* stream = SDL_IOFromConstMem(bytes.data(), bytes.size());
     SDL_Surface* loaded = stream ? IMG_Load_IO(stream, true) : nullptr;
     SDL_Surface* converted = loaded ? SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32) : nullptr;
@@ -50,6 +51,9 @@ Image decode_image(std::span<const u8> bytes, std::string_view name) {
         return {};
     }
     return to_image(converted);
+#else
+    throw std::runtime_error("Image decoding requires KIN_ENABLE_IMAGE_IO");
+#endif
 }
 
 Image load_image(const std::filesystem::path& path) {

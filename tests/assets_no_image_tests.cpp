@@ -10,6 +10,10 @@ int main() {
     try { kin::load_image("unused.png"); }
     catch (const std::runtime_error&) { refused = true; }
     assert(refused);
+    refused = false;
+    try { kin::decode_image({}, "unused.png"); }
+    catch (const std::runtime_error&) { refused = true; }
+    assert(refused);
     kin::Image image{{1, 1}, {255, 0, 0, 255}};
     assert(image.valid());
     assert(!kin::save_image(image, "unused.png"));

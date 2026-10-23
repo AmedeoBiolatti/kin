@@ -140,7 +140,7 @@ endfunction()
 function(kin_enable_release_link_optimizations target)
 endfunction()
 add_executable(check main.cpp)
-kin_configure_game_assets(check demo SOURCE_DIR "{self.assets}" MANIFEST "{self.manifest}")
+kin_configure_asset_pipeline(check demo "{self.assets}" "{self.manifest}")
 kin_package_game(check)
 ''')
         build=self.base/'build'

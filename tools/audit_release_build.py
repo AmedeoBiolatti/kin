@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Verify actual GNU/Clang Ninja commands, not just release option values."""
 import argparse
+import hashlib
+import zipfile
 import json
 from pathlib import Path
 import shlex
@@ -12,10 +14,11 @@ def main():
     parser.add_argument("--build", required=True, type=Path)
     parser.add_argument("--target", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--package", type=Path, help="Bind this audit to an exact built player ZIP")
     args = parser.parse_args()
     build = args.build.resolve()
     cache = {}
-    for line in (build / "CMakeCache.txt").read_text().splitlines():
+    for line in (build / "CMakeCache.txt").read_text(encoding='utf-8').splitlines():
         if line and not line.startswith(("#", "//")) and "=" in line:
             key, value = line.split("=", 1)
             cache[key.split(":", 1)[0]] = value
@@ -34,7 +37,7 @@ def main():
     pgo = {"mode": cache.get("KIN_PGO_MODE", "off")}
     pgo_flag = None
     if pgo["mode"] != "off":
-        settings = json.loads((build / "kin-pgo-settings.json").read_text())
+        settings = json.loads((build / "kin-pgo-settings.json").read_text(encoding='utf-8'))
         root = settings["profile_dir"]
         if settings["compiler"] == "GNU":
             pgo_flag = f"-fprofile-{'generate' if pgo['mode'] == 'generate' else 'use'}={root}/raw"
@@ -46,7 +49,7 @@ def main():
             expected.append("-fprofile-update=atomic")
     failures = []
     checked = []
-    for entry in json.loads((build / "compile_commands.json").read_text()):
+    for entry in json.loads((build / "compile_commands.json").read_text(encoding='utf-8')):
         if Path(entry["file"]).suffix not in (".c", ".cc", ".cpp", ".cxx", ".C"):
             continue
         words = entry.get("arguments") or shlex.split(entry["command"])
@@ -87,8 +90,17 @@ def main():
               "configuration": cache["CMAKE_BUILD_TYPE"], "compile_units": len(checked),
               "required_compile_flags": expected, "link_commands": links, "pgo": pgo,
               "failures": failures, "passed": not failures}
+    if args.package:
+        with zipfile.ZipFile(args.package) as archive:
+            identities = [name for name in archive.namelist() if name.endswith("/release.json")]
+            if len(identities) != 1:
+                parser.error("Player ZIP needs one release identity")
+            identity = json.loads(archive.read(identities[0]))
+            if identity["target"] != args.target or identity["config"] != cache["CMAKE_BUILD_TYPE"]:
+                parser.error("Player identity does not match audited target/configuration")
+        report["package_sha256"] = hashlib.sha256(args.package.read_bytes()).hexdigest()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(report, indent=2) + "\n")
+    args.output.write_text(json.dumps(report, indent=2) + "\n", encoding='utf-8')
     print(f"{len(checked)} compilation units; {len(failures)} failures; {args.output}")
     raise SystemExit(bool(failures))
 
