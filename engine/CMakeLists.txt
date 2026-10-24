@@ -6,6 +6,7 @@ add_library(kin_foundation STATIC
     src/assets/content.cpp
     src/assets/asset_types.cpp
     src/core/json.cpp
+    src/core/hash.cpp
     src/core/jobs.cpp
     src/core/json_value.cpp
     src/core/utf8.cpp
@@ -17,8 +18,12 @@ add_library(kin_foundation STATIC
 )
 target_compile_features(kin_foundation PUBLIC cxx_std_23)
 target_include_directories(kin_foundation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-find_package(Threads REQUIRED)
-target_link_libraries(kin_foundation PUBLIC kin::components SDL3::SDL3-static Threads::Threads)
+target_link_libraries(kin_foundation PUBLIC kin::components SDL3::SDL3-static)
+target_compile_definitions(kin_foundation PUBLIC KIN_ENABLE_THREADS=$<BOOL:${KIN_ENABLE_THREADS}>)
+if(KIN_ENABLE_THREADS)
+    find_package(Threads REQUIRED)
+    target_link_libraries(kin_foundation PUBLIC Threads::Threads)
+endif()
 kin_enable_release_optimizations(kin_foundation)
 
 add_library(kin_engine STATIC
@@ -134,6 +139,18 @@ target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
 if(KIN_HAS_SDL_RENDERER)
     target_sources(kin_engine PRIVATE src/renderer/sdl_renderer2d_backend.cpp)
 endif()
+if(KIN_HAS_WEBGL2_RENDERER)
+    set(_kin_webgl_shaders
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sdf2d.vert.glsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sdf2d.frag.glsl")
+    target_sources(kin_engine PRIVATE
+        src/renderer/webgl2_renderer2d_backend.cpp
+        src/renderer/webgl2_device.cpp
+        src/runtime/browser_app.cpp)
+    target_compile_options(kin_foundation PUBLIC -fexceptions)
+    target_link_options(kin_engine INTERFACE -fexceptions -sMIN_WEBGL_VERSION=2 -sMAX_WEBGL_VERSION=2
+        -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=web -sEXIT_RUNTIME=0)
+endif()
 if(KIN_HAS_COMPACT_RENDERER)
     target_sources(kin_engine PRIVATE src/renderer/compact_renderer2d_backend.cpp
         src/renderer/sdl_framebuffer_host.cpp)
@@ -155,7 +172,10 @@ else()
     target_sources(kin_engine PRIVATE src/renderer/shader_disabled.cpp)
 endif()
 target_compile_definitions(kin_engine PUBLIC
+    KIN_ENABLE_PHYSICS3D=$<BOOL:${KIN_ENABLE_PHYSICS3D}>
+    KIN_ENABLE_SCENE3D_RUNTIME=$<BOOL:${KIN_ENABLE_SCENE3D_RUNTIME}>
     KIN_HAS_GPU_RENDERER=$<BOOL:${KIN_HAS_GPU_RENDERER}>
+    KIN_HAS_WEBGL2_RENDERER=$<BOOL:${KIN_HAS_WEBGL2_RENDERER}>
     KIN_HAS_COMPACT_RENDERER=$<BOOL:${KIN_HAS_COMPACT_RENDERER}>
     KIN_HAS_SDL_RENDERER=$<BOOL:${KIN_HAS_SDL_RENDERER}>)
 
@@ -259,7 +279,6 @@ if(KIN_ENABLE_AGENT_SERVER)
     target_compile_definitions(kin_engine PUBLIC KIN_ENABLE_AGENT_SERVER)
 endif()
 if(KIN_EXPERIMENTAL_3D)
-    target_link_libraries(kin_engine PRIVATE kin_scripting)
     # glTF 2.0 models (kin/render3d/model3d.hpp). A single C header, MIT.
     FetchContent_Declare(cgltf
         URL https://github.com/jkuhlmann/cgltf/archive/refs/tags/v1.14.tar.gz
@@ -294,10 +313,29 @@ if(KIN_EXPERIMENTAL_3D)
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
     target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
-    target_sources(kin_engine PRIVATE src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp src/render3d/camera3d.cpp src/render3d/mesh.cpp
-                                      src/render3d/renderer3d.cpp src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
-                                      src/render3d/environment.cpp src/render3d/hdr_decode.c
-                                      src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+    target_sources(kin_engine PRIVATE
+        src/render3d/camera3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
+        src/render3d/scene3d.cpp src/render3d/shadow_cascades.cpp src/render3d/local_lights.cpp
+        src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
+        src/render3d/environment.cpp src/render3d/hdr_decode.c)
+    if(KIN_HAS_GPU_RENDERER)
+        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+    elseif(KIN_HAS_WEBGL2_RENDERER)
+        target_sources(kin_engine PRIVATE src/renderer/webgl2_renderer3d.cpp)
+        list(APPEND _kin_webgl_shaders
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/mesh.vert.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/mesh.frag.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sky.vert.glsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/webgl2/sky.frag.glsl")
+    endif()
+    if(KIN_ENABLE_PHYSICS3D)
+        target_sources(kin_engine PRIVATE
+            src/ecs/render3d.cpp src/ecs/joint_attachment3d.cpp src/ecs/scene3d.cpp
+            src/ecs/scene3d_settings.cpp src/ecs/animator3d_asset.cpp src/ecs/particles3d_asset.cpp
+            src/scene/scene_loader3d.cpp src/scene/scene_entity3d.cpp src/scene/camera_rig3d.cpp
+            src/scene/interaction3d.cpp src/scene/joint_attachment3d.cpp
+            src/ecs/physics3d.cpp src/ecs/physics3d_asset.cpp src/physics3d/assets3d.cpp)
+    endif()
     option(KIN_RENDERER3D_O3 "Use -O3 for the GPU 3D renderer in Release (GCC/Clang only)" OFF)
     # Source options follow the target's -O2. Keep this experiment to one
     # translation unit; other engine sources and floating-point flags stay put.
@@ -307,20 +345,22 @@ if(KIN_EXPERIMENTAL_3D)
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)
-    # Scene/frame orchestration sits above the engine and its adapters. The
-    # base renderer must not depend back on scripting or audio ECS archives.
-    add_library(kin_scene3d_runtime STATIC
-        src/scene/scene_session3d.cpp
-        src/scene/scene_frame3d.cpp
-        src/scripting/lua_scene3d.cpp
-        src/scripting/lua_scene3d_physics.cpp)
-    add_library(kin::scene3d_runtime ALIAS kin_scene3d_runtime)
-    target_link_libraries(kin_scene3d_runtime PUBLIC kin_engine kin_scripting_scenes)
-    if(KIN_ENABLE_AUDIO)
-        target_link_libraries(kin_scene3d_runtime PUBLIC kin_audio_ecs)
+    if(KIN_ENABLE_SCENE3D_RUNTIME)
+        # Scene/frame orchestration sits above the engine and its adapters. The
+        # base renderer must not depend back on scripting or audio ECS archives.
+        add_library(kin_scene3d_runtime STATIC
+            src/scene/scene_session3d.cpp
+            src/scene/scene_frame3d.cpp
+            src/scripting/lua_scene3d.cpp
+            src/scripting/lua_scene3d_physics.cpp)
+        add_library(kin::scene3d_runtime ALIAS kin_scene3d_runtime)
+        target_link_libraries(kin_scene3d_runtime PUBLIC kin_engine kin_scripting_scenes)
+        if(KIN_ENABLE_AUDIO)
+            target_link_libraries(kin_scene3d_runtime PUBLIC kin_audio_ecs)
+        endif()
+        kin_enable_release_optimizations(kin_scene3d_runtime)
+        target_link_libraries(kin_engine_components INTERFACE kin_scene3d_runtime)
     endif()
-    kin_enable_release_optimizations(kin_scene3d_runtime)
-    target_link_libraries(kin_engine_components INTERFACE kin_scene3d_runtime)
     # Sources that compute what the simulation starts from or the particles' randomness (body poses and kinematic targets,
     # the scene session, the sparks of a seed) get the physics glue's -ffp-contract=off below: a fused multiply-add rounds
     # once where two operations round twice, so a target with FMA (aarch64, or x86 with -mfma) would give other bits.
@@ -328,30 +368,32 @@ if(KIN_EXPERIMENTAL_3D)
         set_property(SOURCE ${_kin_fp_source} APPEND PROPERTY COMPILE_OPTIONS
             "$<$<CXX_COMPILER_ID:GNU,Clang>:-ffp-contract=off>")
     endforeach()
-    # kin/physics3d: Jolt Physics behind kin's own types (docs/physics_3d.md). Its sources are compiled apart
-    # from the engine's, as an object library: Jolt's PUBLIC compile options (-mavx2, -mpopcnt, ...) and
-    # definitions would otherwise reach every engine source and change what the rest of kin compiles to. Only
-    # these files see Jolt's headers; no kin header includes them. -ffp-contract=off keeps the compiler from
-    # fusing multiply-adds in the glue (determinism); -fno-rtti is Jolt's own build setting, which its classes
-    # that these sources derive from need.
-    add_library(kin_physics3d_objects OBJECT
-        src/physics3d/shape3d.cpp
-        src/physics3d/world3d.cpp
-        src/physics3d/character3d.cpp
-        src/physics3d/traversal3d.cpp
-        src/physics3d/traversal_character3d.cpp
-        src/physics3d/ragdoll3d.cpp
-        src/physics3d/rope3d.cpp
-        src/physics3d/debug_draw3d.cpp
-    )
-    target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
-    target_include_directories(kin_physics3d_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-    target_link_libraries(kin_physics3d_objects PRIVATE Jolt)
-    target_compile_options(kin_physics3d_objects PRIVATE
-        "$<$<CXX_COMPILER_ID:GNU,Clang>:-fno-rtti;-ffp-contract=off>")
-    kin_enable_release_optimizations(kin_physics3d_objects)
-    target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_physics3d_objects>)
-    target_link_libraries(kin_engine PRIVATE $<LINK_ONLY:Jolt>)
+    if(KIN_ENABLE_PHYSICS3D)
+        # kin/physics3d: Jolt Physics behind kin's own types (docs/physics_3d.md). Its sources are compiled apart
+        # from the engine's, as an object library: Jolt's PUBLIC compile options (-mavx2, -mpopcnt, ...) and
+        # definitions would otherwise reach every engine source and change what the rest of kin compiles to. Only
+        # these files see Jolt's headers; no kin header includes them. -ffp-contract=off keeps the compiler from
+        # fusing multiply-adds in the glue (determinism); -fno-rtti is Jolt's own build setting, which its classes
+        # that these sources derive from need.
+        add_library(kin_physics3d_objects OBJECT
+            src/physics3d/shape3d.cpp
+            src/physics3d/world3d.cpp
+            src/physics3d/character3d.cpp
+            src/physics3d/traversal3d.cpp
+            src/physics3d/traversal_character3d.cpp
+            src/physics3d/ragdoll3d.cpp
+            src/physics3d/rope3d.cpp
+            src/physics3d/debug_draw3d.cpp
+        )
+        target_compile_features(kin_physics3d_objects PUBLIC cxx_std_23)
+        target_include_directories(kin_physics3d_objects PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        target_link_libraries(kin_physics3d_objects PRIVATE Jolt)
+        target_compile_options(kin_physics3d_objects PRIVATE
+            "$<$<CXX_COMPILER_ID:GNU,Clang>:-fno-rtti;-ffp-contract=off>")
+        kin_enable_release_optimizations(kin_physics3d_objects)
+        target_sources(kin_engine PRIVATE $<TARGET_OBJECTS:kin_physics3d_objects>)
+        target_link_libraries(kin_engine PRIVATE $<LINK_ONLY:Jolt>)
+    endif()
 endif()
 if(KIN_SHIPPING)
     target_compile_definitions(kin_engine PUBLIC KIN_SHIPPING)
@@ -387,36 +429,41 @@ endif()
 target_link_libraries(kin_engine PRIVATE earcut_hpp::earcut_hpp) # used only inside the engine
 
 if(KIN_ENABLE_AUDIO)
-# Third-party audio decoders, built as C without kin's warnings.
-add_library(kin_audio_codecs STATIC src/audio/codecs.c)
-target_include_directories(kin_audio_codecs SYSTEM PUBLIC "${dr_libs_SOURCE_DIR}" "${stb_SOURCE_DIR}")
-target_compile_options(kin_audio_codecs PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w>" "$<$<C_COMPILER_ID:MSVC>:/w>")
-target_link_libraries(kin_audio PRIVATE kin_audio_codecs)
+    # Third-party audio decoders, built as C without kin's warnings.
+    add_library(kin_audio_codecs STATIC src/audio/codecs.c)
+    target_include_directories(kin_audio_codecs SYSTEM PUBLIC "${dr_libs_SOURCE_DIR}" "${stb_SOURCE_DIR}")
+    target_compile_options(kin_audio_codecs PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w>" "$<$<C_COMPILER_ID:MSVC>:/w>")
+    target_link_libraries(kin_audio PRIVATE kin_audio_codecs)
 
+endif()
+
+if(KIN_HAS_WEBGL2_RENDERER)
+    include(kin_webgl_shaders)
+    kin_embed_webgl_shaders(kin_engine ${_kin_webgl_shaders})
 endif()
 
 if(KIN_HAS_GPU_RENDERER)
-# SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK), built into
-# the engine (kin_embed_files), so a game needs no shader files beside it.
-# Without glslc the engine still builds; the GPU backend then has no shaders and
-# kin falls back to SDL_Renderer. Shipping builds require them (KIN_REQUIRE_GPU_SHADERS).
-include(kin_gpu_shaders)
-# The .spv files stay in the build too, for tests that read every engine shader.
-kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${KIN_GPU_SHADER_SOURCES})
-kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
-if(KIN_GLSLC AND NOT KIN_SHIPPING)
-    # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
-    target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
-endif()
-list(LENGTH KIN_GPU_SHADER_SOURCES _kin_gpu_wanted)
-list(LENGTH _kin_gpu_spv _kin_gpu_built)
-if(NOT _kin_gpu_built EQUAL _kin_gpu_wanted)
-    if(KIN_REQUIRE_GPU_SHADERS)
-        message(FATAL_ERROR "The GPU backend has ${_kin_gpu_built} of its ${_kin_gpu_wanted} shaders: install "
-                            "the Vulkan SDK (or your distribution's glslc), or pass KIN_SPIRV_DIR made by "
-                            "cmake/kin_spirv.cmake; or set KIN_REQUIRE_GPU_SHADERS=OFF to ship without them")
+    # SDL_GPU backend shaders: GLSL -> SPIR-V via glslc (Vulkan SDK), built into
+    # the engine (kin_embed_files), so a game needs no shader files beside it.
+    # Without glslc the engine still builds; the GPU backend then has no shaders and
+    # kin falls back to SDL_Renderer. Shipping builds require them (KIN_REQUIRE_GPU_SHADERS).
+    include(kin_gpu_shaders)
+    # The .spv files stay in the build too, for tests that read every engine shader.
+    kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${KIN_GPU_SHADER_SOURCES})
+    kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
+    if(KIN_GLSLC AND NOT KIN_SHIPPING)
+        # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
+        target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
     endif()
-    message(STATUS "kin_engine: ${_kin_gpu_built} of ${_kin_gpu_wanted} SDL_GPU backend shaders (glslc not found)")
-endif()
+    list(LENGTH KIN_GPU_SHADER_SOURCES _kin_gpu_wanted)
+    list(LENGTH _kin_gpu_spv _kin_gpu_built)
+    if(NOT _kin_gpu_built EQUAL _kin_gpu_wanted)
+        if(KIN_REQUIRE_GPU_SHADERS)
+            message(FATAL_ERROR "The GPU backend has ${_kin_gpu_built} of its ${_kin_gpu_wanted} shaders: install "
+                                "the Vulkan SDK (or your distribution's glslc), or pass KIN_SPIRV_DIR made by "
+                                "cmake/kin_spirv.cmake; or set KIN_REQUIRE_GPU_SHADERS=OFF to ship without them")
+        endif()
+        message(STATUS "kin_engine: ${_kin_gpu_built} of ${_kin_gpu_wanted} SDL_GPU backend shaders (glslc not found)")
+    endif()
 
 endif()

@@ -1,4 +1,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/kin_packaging.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/kin_web.cmake")
 
 function(kin_configure_asset_pipeline target game_name KIN_GAME_SOURCE_DIR KIN_GAME_MANIFEST)
     option(KIN_ENABLE_ASSET_COOKING "Cook lossless game assets for shipping" OFF)
@@ -152,8 +153,13 @@ function(kin_game target)
     target_compile_definitions(${target} PRIVATE KIN_GAME_CONTENT_NAME="${ARG_NAME}")
     if(ARG_NO_CONTENT)
         set(content "")
-    elseif(NOT KIN_SHIPPING)
+    elseif(NOT KIN_SHIPPING AND NOT EMSCRIPTEN)
         target_compile_definitions(${target} PRIVATE KIN_GAME_CONTENT_DIR="${content}")
+    endif()
+
+    if(EMSCRIPTEN)
+        kin_package_web_game(${target} CONTENT "${content}" NAME "${ARG_NAME}")
+        return()
     endif()
 
     if(WIN32)

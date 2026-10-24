@@ -249,7 +249,7 @@ void routes_and_replay() {
 }
 } // namespace
 
-int main() {
+int run_summit_expedition_tests() {
     progression();
     shelter_and_collision();
     prop_collision();
@@ -262,3 +262,9 @@ int main() {
     std::puts("expedition_tests: all passed");
     return 0;
 }
+
+#ifndef KIN_WEB_TEST_DRIVER
+int main() {
+    return run_summit_expedition_tests();
+}
+#endif

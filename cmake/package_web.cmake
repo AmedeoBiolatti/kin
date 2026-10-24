@@ -1,0 +1,21 @@
+# Keep the entry point at the ZIP root, as required by itch.io HTML uploads.
+file(REMOVE_RECURSE "${STAGE}")
+file(MAKE_DIRECTORY "${STAGE}")
+get_filename_component(dir "${HTML}" DIRECTORY)
+get_filename_component(name "${HTML}" NAME_WE)
+configure_file("${HTML}" "${STAGE}/index.html" COPYONLY)
+foreach(extension js wasm data)
+    if(EXISTS "${dir}/${name}.${extension}")
+        file(COPY "${dir}/${name}.${extension}" DESTINATION "${STAGE}")
+    elseif(NOT extension STREQUAL "data")
+        message(FATAL_ERROR "Missing browser artifact: ${dir}/${name}.${extension}")
+    endif()
+endforeach()
+execute_process(COMMAND "${CMAKE_COMMAND}" --install "${BUILD_DIR}" --config "${CONFIG}"
+    --prefix "${STAGE}" --component "${COMPONENT}" COMMAND_ERROR_IS_FATAL ANY)
+get_filename_component(out "${ARCHIVE}" DIRECTORY)
+file(MAKE_DIRECTORY "${out}")
+file(GLOB files RELATIVE "${STAGE}" "${STAGE}/*")
+execute_process(COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE}" --format=zip ${files}
+    WORKING_DIRECTORY "${STAGE}" COMMAND_ERROR_IS_FATAL ANY)
+message(STATUS "Web bundle: ${ARCHIVE}")

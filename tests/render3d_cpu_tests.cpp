@@ -538,6 +538,58 @@ void test_time_of_day_clock_exact() {
     assert(still.hours == 8.0f);
 }
 
+void test_renderer_owned_sky_lighting() {
+    for (f32 hour : {0.0f, 6.0f, 12.0f, 20.0f}) {
+        TimeOfDay3D day{.hours = hour, .shadows = true};
+        Sky3D sky{.enabled = true};
+        const SkyState3D full = evaluate(day, sky);
+        assert(full.ambient.r > 0 && full.ground_ambient.b > 0);
+        day.compute_ambient = false;
+        const SkyState3D fast = evaluate(day, sky);
+        assert(fast.ambient.r == 0 && fast.ground_ambient.b == 0);
+        assert(fast.sun_direction == full.sun_direction && fast.moon_direction == full.moon_direction);
+        assert(fast.sun_color.r == full.sun_color.r && fast.moon_color.b == full.moon_color.b);
+        assert(fast.fog_color.g == full.fog_color.g && fast.daylight == full.daylight);
+        Lights3D lights;
+        lights.ambient = {0.2f, 0.3f, 0.4f};
+        lights.ground_ambient = {true, {0.5f, 0.6f, 0.7f}};
+        Fog3D fog;
+        apply(day, lights, sky, fog);
+        assert(lights.ambient.g == 0.3f && lights.ground_ambient.color.b == 0.7f);
+        assert(lights.sun.direction == full.sun_direction && fog.colour.g == full.fog_color.g);
+        assert(sky.moon_direction == full.moon_direction && sky.moon_light == full.moon_light);
+    }
+
+    Sky3D sky{.enabled = true, .light_threshold = 0.01f, .light_interval = 4};
+    const Vec3f sun = normalize(Vec3f{0.4f, 1, 0.3f});
+    sky_model::AmbientLight3D cache;
+    assert(cache.update(sky, sun));
+    assert(cache.ambient.r == sky_irradiance(sky, sun, {0, 1, 0}, 16, 8).r);
+    assert(cache.ground.b == sky_irradiance(sky, sun, {0, -1, 0}, 16, 8).b);
+    const f32 old = cache.ambient.r;
+    Sky3D changed = sky;
+    changed.intensity *= 2;
+    for (int i = 0; i < 3; ++i)
+        assert(!cache.update(changed, sun));
+    assert(cache.ambient.r == old);
+    assert(cache.update(changed, sun));
+    assert(cache.ambient.r > old);
+    assert(std::abs(cache.ambient.r - sky_irradiance(changed, sun, {0, 1, 0}, 16, 8).r) < 1e-6f);
+    for (int i = 0; i < 100; ++i)
+        assert(!cache.update(changed, sun));
+    changed.intensity += 0.001f;
+    assert(!cache.update(changed, sun));
+    changed.intensity += 0.1f;
+    assert(cache.update(changed, sun)); // Small edits accumulate against the last computed value.
+    sky_model::AmbientLight3D other_view;
+    assert(other_view.update(sky, sun) && other_view.ambient.r == old);
+    assert(!cache.update(changed, sun)); // Another view does not invalidate this view's cache.
+    changed.light_interval = 0;
+    changed.light_threshold = 0;
+    changed.night_color.b += 0.1f;
+    assert(cache.update(changed, sun));
+}
+
 // The poles: polar day at +90 in June and polar night at -90, the reverse in December (f32 cos(90 degrees) is -4e-8,
 // which used to turn the decision round); a latitude past 90 is a pole.
 void test_sun_times_at_the_poles() {
@@ -569,6 +621,7 @@ int main() {
     test_particle_motion_history_and_identity();
     test_time_of_day_clock_exact();
     test_sun_times_at_the_poles();
+    test_renderer_owned_sky_lighting();
     std::cout << "render3d on the CPU: instance batch bounds exact after scattered, spanning and broken edits, a tight "
                  "change history past 16 edits, "
                  "particle wind within 1e-3 m/s of Wind3D::velocity, particle catch-up capped at 30 steps, the game "

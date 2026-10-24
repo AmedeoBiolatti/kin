@@ -63,6 +63,7 @@ kin_add_test(kin_math3d_tests kin-math3d SOURCES math3d_tests.cpp)
 kin_add_test(kin_render3d_api_tests kin-render3d-api SOURCES render3d_api_tests.cpp)
 kin_add_test(kin_shape_tests kin-shapes SOURCES shape_tests.cpp)
 kin_add_test(kin_jobs_tests kin-jobs SOURCES jobs_tests.cpp)
+kin_add_test(kin_serial_jobs_tests kin-serial-jobs SOURCES serial_jobs_tests.cpp LINK_TARGET kin_foundation)
 kin_add_test(kin_instrumentation_tests kin-instrumentation
     SOURCES instrumentation_tests.cpp
     LIBRARIES kin::core_allocation_instrumentation
@@ -216,7 +217,7 @@ if(KIN_GLSLC AND KIN_HAS_GPU_RENDERER)
     add_dependencies(kin_renderer_tests kin_test_shaders)
 endif()
 kin_add_test(kin_rendering_tests kin-rendering SOURCES rendering_tests.cpp)
-if(KIN_EXPERIMENTAL_3D)
+if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     kin_add_test(kin_model_profile3d_tests kin-model-profile3d SOURCES model_profile3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models")
     add_test(NAME kin-model-profile3d-gpu COMMAND kin_model_profile3d_tests gpu)
@@ -320,6 +321,13 @@ if(KIN_EXPERIMENTAL_3D)
     # it has its own limit (a TIMEOUT property takes precedence over ctest --timeout).
     set_tests_properties(kin-render3d PROPERTIES TIMEOUT 1800)
 endif()
+if(KIN_EXPERIMENTAL_3D AND NOT KIN_ENABLE_SCENE3D_RUNTIME)
+    kin_add_test(kin_render3d_cpu_tests kin-render3d-cpu SOURCES render3d_cpu_tests.cpp)
+    kin_add_test(kin_mesh_cluster_tests kin-mesh-clusters SOURCES mesh_cluster_tests.cpp)
+    if(KIN_ENABLE_PHYSICS3D)
+        kin_add_test(kin_skeleton_tests kin-skeleton SOURCES skeleton_tests.cpp)
+    endif()
+endif()
 kin_add_test(kin_isometric_demo_tests kin-isometric-demo SOURCES isometric_demo_tests.cpp)
 kin_add_test(kin_tilemap_tests kin-tilemap SOURCES tilemap_tests.cpp)
 
@@ -346,12 +354,14 @@ if(KIN_BUILD_BENCHMARKS)
     target_link_libraries(kin_text_bench PRIVATE kin::engine)
     # The 3D reference scenes (docs/3d_plan.md, G0): pictures and times.
     if(KIN_EXPERIMENTAL_3D)
-        add_executable(kin_reference ${PROJECT_SOURCE_DIR}/tools/reference/kin_reference.cpp)
-        target_link_libraries(kin_reference PRIVATE kin::engine)
-        target_include_directories(kin_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        # kin/physics3d step times: piles and stacks of boxes, 1 to 8 workers (docs/physics_3d.md).
-        add_executable(kin_physics3d_bench physics3d_bench.cpp)
-        target_link_libraries(kin_physics3d_bench PRIVATE kin::engine)
+        if(KIN_ENABLE_PHYSICS3D)
+            add_executable(kin_reference ${PROJECT_SOURCE_DIR}/tools/reference/kin_reference.cpp)
+            target_link_libraries(kin_reference PRIVATE kin::engine)
+            target_include_directories(kin_reference PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+            # kin/physics3d step times: piles and stacks of boxes, 1 to 8 workers (docs/physics_3d.md).
+            add_executable(kin_physics3d_bench physics3d_bench.cpp)
+            target_link_libraries(kin_physics3d_bench PRIVATE kin::engine)
+        endif()
         # kin/render3d CPU costs that need no window: instance batch edits, particle wind (docs/rendering_3d.md).
         add_executable(kin_render3d_bench render3d_bench.cpp)
         target_link_libraries(kin_render3d_bench PRIVATE kin::engine)
@@ -382,6 +392,7 @@ target_link_libraries(kin_runtime_tests PRIVATE
 )
 
 add_test(NAME kin-runtime COMMAND kin_runtime_tests)
+kin_add_test(kin_owned_scene_session_tests kin-owned-scene-session SOURCES owned_scene_session_tests.cpp)
 
 kin_add_component_test(RENDER_PROBE kin_render_probe_tests kin-render-probe SOURCES render_probe_tests.cpp)
 kin_add_component_test(DETERMINISM_CHECK kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)

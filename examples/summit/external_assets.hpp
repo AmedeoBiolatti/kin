@@ -21,6 +21,13 @@ public:
     u32 scenery_instances() const { return _scenery_instances; }
     u64 scenery_triangles() const { return _scenery_triangles; }
     u64 instance_record_bytes() const { return _instance_record_bytes; }
+    u32 loaded_models() const {
+        u32 count = 0;
+        for (const auto& model : _models)
+            if (model)
+                ++count;
+        return count;
+    }
 
 private:
     std::array<kin::AssetHandle<kin::Model3D>, PropCount> _models;

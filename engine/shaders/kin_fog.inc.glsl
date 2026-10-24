@@ -13,21 +13,21 @@ struct KinFog {
 // The optical depth from `eye` along the unit `dir` for `dist` (`infinite`: to the end of the ray, the distance term
 // left out). The height fog's density is d * e^(-k (y - base)): its integral along the ray is closed.
 float kin_fog_optical_depth(KinFog f, vec3 eye, vec3 dir, float dist, bool infinite) {
-    const float start = f.limits.x;
-    const float len = infinite ? 1e30 : max(dist - start, 0.0);
+    float start = f.limits.x;
+    float len = infinite ? 1e30 : max(dist - start, 0.0);
     float tau = infinite ? 0.0 : f.density.x * len;
-    const float d = f.density.y;
+    float d = f.density.y;
     if (d > 0.0 && len > 0.0) {
-        const float k = f.density.z;
+        float k = f.density.z;
         // From the start on, to infinity too: the sky's depth is the limit of the geometry's as `dist` grows.
-        const float y0 = eye.y + dir.y * start - f.density.w;
-        const float kd = k * dir.y;
-        const float at_start = exp(clamp(-k * y0, -80.0, 80.0));
+        float y0 = eye.y + dir.y * start - f.density.w;
+        float kd = k * dir.y;
+        float at_start = exp(clamp(-k * y0, -80.0, 80.0));
         float shape;
         if (infinite) {
             shape = kd > 1e-6 ? 1.0 / kd : 1e8;
         } else {
-            const float x = kd * len;
+            float x = kd * len;
             shape = abs(x) < 1e-3 ? len * (1.0 - 0.5 * x) : (1.0 - exp(clamp(-x, -80.0, 80.0))) / kd;
         }
         tau += d * at_start * shape;
@@ -43,8 +43,8 @@ float kin_fog_opacity(KinFog f, float tau) {
 // Henyey-Greenstein lobe, scaled so that an even one is 1).
 vec3 kin_fog_sun(KinFog f, vec3 c, vec3 dir, vec3 sun_dir, vec3 sun_light) {
     if (f.limits.z > 0.0) {
-        const float g = f.limits.w;
-        const float mu = dot(dir, sun_dir);
+        float g = f.limits.w;
+        float mu = dot(dir, sun_dir);
         c += sun_light * (f.limits.z * (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * mu, 1e-4), 1.5));
     }
     return c;
@@ -62,8 +62,8 @@ vec3 kin_fog_colour(KinFog f, KinSky sky, vec3 dir, vec3 sun_dir, vec3 sun_light
 // KIN_FOG_ROWS - 1, evenly in the log of kin_air_mass's rounded sin: the rows crowd near the horizon), FogTable::coordinate.
 const int KIN_FOG_ROWS = 48; // = sky_model::FogTable::rows (sky3d.hpp): change both, the C++ static_assert sees only its side
 float kin_fog_row(float s) {
-    const float h = max(s, 0.0);
-    const float c = min(sqrt(h * h + 0.000625), 1.0);
+    float h = max(s, 0.0);
+    float c = min(sqrt(h * h + 0.000625), 1.0);
     return clamp(log(c * 40.0) * 0.2710850307, 0.0, 1.0) * float(KIN_FOG_ROWS - 1);
 }
 
@@ -71,16 +71,16 @@ float kin_fog_row(float s) {
 // function parameter at every fragment or particle corner.
 #define KIN_FOG_TABLE_READER(FUNCTION, SKY, TABLE) \
 vec3 FUNCTION(vec3 dir) { \
-    const vec3 v = normalize(vec3(dir.x, max(dir.y, 0.0), dir.z) + vec3(1e-6, 0.0, 0.0)); \
-    const float x = kin_fog_row(v.y); \
-    const int i = min(int(x), KIN_FOG_ROWS - 2); \
-    const float w = x - float(i); \
-    const int k = i * 4; \
-    const float mu = dot(v, (SKY).sun.xyz); \
+    vec3 v = normalize(vec3(dir.x, max(dir.y, 0.0), dir.z) + vec3(1e-6, 0.0, 0.0)); \
+    float x = kin_fog_row(v.y); \
+    int i = min(int(x), KIN_FOG_ROWS - 2); \
+    float w = x - float(i); \
+    int k = i * 4; \
+    float mu = dot(v, (SKY).sun.xyz); \
     vec3 light = kin_rayleigh_phase(mu) * mix(TABLE[k].rgb, TABLE[k + 4].rgb, w) + \
                  kin_mie_phase(mu, (SKY).shape.y) * mix(TABLE[k + 1].rgb, TABLE[k + 5].rgb, w); \
     if ((SKY).shape.w > 0.0) { \
-        const float mu_moon = dot(v, (SKY).moon.xyz); \
+        float mu_moon = dot(v, (SKY).moon.xyz); \
         light += kin_rayleigh_phase(mu_moon) * mix(TABLE[k + 2].rgb, TABLE[k + 6].rgb, w) + \
                  kin_mie_phase(mu_moon, (SKY).shape.y) * mix(TABLE[k + 3].rgb, TABLE[k + 7].rgb, w); \
     } \

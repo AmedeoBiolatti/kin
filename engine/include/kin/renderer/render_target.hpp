@@ -40,6 +40,7 @@ public:
 private:
     friend class SdlRenderer2DBackend; // constructs via the private ctor below
     friend class GpuRenderer2DBackend;
+    friend class WebGL2Renderer2DBackend;
     explicit RenderTarget(Texture texture) : _texture(std::move(texture)) {}
 
     Texture _texture;

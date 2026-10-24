@@ -33,8 +33,8 @@ struct KinSky {
 float kin_air_mass(float s) {
     // sqrt(s^2 + e^2), e = 0.025 (1.4 degrees): the horizon's air mass (38) is not met at the horizon itself but rounded
     // off over its last degree, so that the sky's colour has no kink where the ground begins (the slope is 0 there).
-    const float c = min(sqrt(max(s, 0.0) * max(s, 0.0) + 0.000625), 1.0);
-    const float zenith_degrees = degrees(acos(c));
+    float c = min(sqrt(max(s, 0.0) * max(s, 0.0) + 0.000625), 1.0);
+    float zenith_degrees = degrees(acos(c));
     return 1.0 / (c + 0.50572 * pow(96.07995 - zenith_degrees, -1.6364));
 }
 
@@ -43,33 +43,33 @@ float kin_rayleigh_phase(float mu) {
 }
 
 float kin_mie_phase(float mu, float g) {
-    const float g2 = g * g;
+    float g2 = g * g;
     return (1.0 - g2) / (4.0 * KIN_PI * pow(max(1.0 + g2 - 2.0 * g * mu, 1e-4), 1.5));
 }
 
 // The sun's light through the atmosphere to the ground, per colour, for a sun at sin(elevation) `s`.
 vec3 kin_sun_transmittance(KinSky a, float s) {
-    const float m = kin_air_mass(s);
+    float m = kin_air_mass(s);
     return exp(-(KIN_TAU_R + vec3(KIN_MIE_EXT * a.shape.x) + KIN_TAU_OZONE) * m);
 }
 
 // One light's scattering along the unit ray `v` (above the horizon): `e` its light above the atmosphere, `l` toward it.
 vec3 kin_scatter(KinSky a, vec3 v, vec3 l, float e) {
-    const float tau_m = a.shape.x;
-    const float mv = kin_air_mass(v.y);
-    const float ms = kin_air_mass(l.y);
-    const float mu = dot(v, l);
-    const float pr = kin_rayleigh_phase(mu);
-    const float pm = kin_mie_phase(mu, a.shape.y);
+    float tau_m = a.shape.x;
+    float mv = kin_air_mass(v.y);
+    float ms = kin_air_mass(l.y);
+    float mu = dot(v, l);
+    float pr = kin_rayleigh_phase(mu);
+    float pm = kin_mie_phase(mu, a.shape.y);
     vec3 sum = vec3(0.0);
     for (int i = 0; i < KIN_SKY_STEPS; ++i) {
-        const float u = (float(i) + 0.5) / float(KIN_SKY_STEPS);
-        const float dw = 2.0 * KIN_SKY_TOP * u / float(KIN_SKY_STEPS);   // dw = top * d(u^2)
-        const float q = 1.0 - KIN_SKY_TOP * u * u;                        // e^(-h/H_R)
-        const float qm = pow(q, KIN_H_RATIO);                             // e^(-h/H_M)
-        const vec3 along = mv * (KIN_TAU_R * (1.0 - q) + vec3(KIN_MIE_EXT * tau_m * (1.0 - qm)));
-        const vec3 toward_light = ms * (KIN_TAU_R * q + vec3(KIN_MIE_EXT * tau_m * qm) + KIN_TAU_OZONE);
-        const vec3 weight = KIN_TAU_R * pr + vec3(tau_m * KIN_H_RATIO * pm * qm / q);
+        float u = (float(i) + 0.5) / float(KIN_SKY_STEPS);
+        float dw = 2.0 * KIN_SKY_TOP * u / float(KIN_SKY_STEPS);   // dw = top * d(u^2)
+        float q = 1.0 - KIN_SKY_TOP * u * u;                        // e^(-h/H_R)
+        float qm = pow(q, KIN_H_RATIO);                             // e^(-h/H_M)
+        vec3 along = mv * (KIN_TAU_R * (1.0 - q) + vec3(KIN_MIE_EXT * tau_m * (1.0 - qm)));
+        vec3 toward_light = ms * (KIN_TAU_R * q + vec3(KIN_MIE_EXT * tau_m * qm) + KIN_TAU_OZONE);
+        vec3 weight = KIN_TAU_R * pr + vec3(tau_m * KIN_H_RATIO * pm * qm / q);
         sum += weight * exp(-(along + toward_light)) * dw;
     }
     return sum * (mv * KIN_PI * e);
@@ -79,7 +79,7 @@ vec3 kin_scatter(KinSky a, vec3 v, vec3 l, float e) {
 // scattering and the night's own, times the sky's brightness.
 vec3 kin_sky_scatter(KinSky a, vec3 v) {
     v = normalize(vec3(v.x, max(v.y, 0.0), v.z) + vec3(1e-6, 0.0, 0.0));
-    const float twilight_sun = a.sun.w * exp(-max(-a.sun.y, 0.0) / KIN_SKY_TWILIGHT);
+    float twilight_sun = a.sun.w * exp(-max(-a.sun.y, 0.0) / KIN_SKY_TWILIGHT);
     vec3 light = kin_scatter(a, v, a.sun.xyz, twilight_sun);
     if (a.shape.w > 0.0) {
         light += kin_scatter(a, v, a.moon.xyz, a.shape.w * exp(-max(-a.moon.y, 0.0) / KIN_SKY_TWILIGHT));
@@ -89,8 +89,8 @@ vec3 kin_sky_scatter(KinSky a, vec3 v) {
 
 // The ground as it is lit: its albedo times the light a horizontal surface takes from the sun and the zenith's sky.
 vec3 kin_sky_ground(KinSky a) {
-    const float cut = smoothstep(-0.01, 0.04, a.sun.y);
-    const vec3 sun = a.sun.w * kin_sun_transmittance(a, a.sun.y) * max(a.sun.y, 0.0) * cut;
+    float cut = smoothstep(-0.01, 0.04, a.sun.y);
+    vec3 sun = a.sun.w * kin_sun_transmittance(a, a.sun.y) * max(a.sun.y, 0.0) * cut;
     return a.ground.rgb * (sun + kin_sky_scatter(a, vec3(0.0, 1.0, 0.0)));
 }
 

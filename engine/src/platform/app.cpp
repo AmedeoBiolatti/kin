@@ -57,6 +57,8 @@ App::~App() {
     KIN_LOG_INFO_F("runtime",
                    "app shutdown",
                    (LogFields{{.name = "windows", .value = std::to_string(_windows.size())}}));
+    _update = {};
+    _render = {};
     _windows.clear();
     SDL_Quit();
 }
@@ -151,99 +153,116 @@ f32 FrameTimeSnapper::advance(f32 frame_time, f32 fixed_dt, f32 tolerance) {
     return static_cast<f32>(snapped + paid);
 }
 
-void App::run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)> render) {
+void App::start_loop(std::function<void(f32)> update, std::function<void(f32)> render) {
+    _update = std::move(update);
+    _render = std::move(render);
+    _accumulator = 0.0f;
+    _snapper.reset();
+    _advance_input = true;
+    _frame_stats = {};
     _running = true;
+    KIN_LOG_INFO_F(
+        "runtime", "app loop started",
+        (LogFields{
+            {.name = "mode", .value = std::string{app_mode_name(_config.mode)}},
+            {.name = "fixed_dt", .value = std::to_string(_config.fixed_dt > 0 ? _config.fixed_dt : default_fixed_dt)},
+            {.name = "max_frame_time", .value = std::to_string(std::max(0.0f, _config.max_frame_time))},
+            {.name = "max_steps", .value = std::to_string(std::max(1, _config.max_steps))},
+        }));
+}
+
+bool App::step_loop(f32 elapsed_seconds) {
+    if (!_running) {
+        return false;
+    }
     const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
     const f32 max_frame_time = std::max(0.0f, _config.max_frame_time);
     const i32 max_steps = std::max(1, _config.max_steps);
-    f32 accumulator = 0.0f;
-    FrameTimeSnapper snapper;
-    u64 last = SDL_GetTicksNS();
-    u64 next_frame_ns = 0; // when the next frame may start, under max_fps
-    bool advance_input = true;
+    const f32 raw_frame_time = std::isfinite(elapsed_seconds) ? std::max(0.0f, elapsed_seconds) : 0.0f;
+    const f32 frame_time = std::min(raw_frame_time, max_frame_time);
+    const f32 pacing_wait = _frame_stats.pacing_wait;
+    // time_scale paces real time into the accumulator (game-speed control);
+    // it never changes fixed_dt or step contents, so determinism holds.
+    const f32 snapped = _snapper.advance(frame_time, fixed_dt, _config.snap_tolerance);
+    _accumulator += snapped * _time_scale;
+    _frame_stats = {
+        .raw_frame_time = raw_frame_time,
+        .clamped_frame_time = frame_time,
+        .accumulator_before_update = _accumulator,
+        .accumulator_after_update = _accumulator,
+        .alpha = 0.0f,
+        .update_steps = 0,
+        .hit_max_steps = false,
+        .pacing_wait = pacing_wait,
+        .snapped_frame_time = snapped,
+    };
+
+    _input.begin_frame(_advance_input);
+    pump_events();
+
+    i32 steps = 0;
+    while (_running && _accumulator >= fixed_dt && steps < max_steps) {
+        // Counts the step being run, so update() sees 1 in a frame's first step,
+        // as under run_for.
+        _frame_stats.update_steps = steps + 1;
+        _update(fixed_dt);
+        _accumulator -= fixed_dt;
+        ++steps;
+        _frame_stats.accumulator_after_update = _accumulator;
+        if (steps == 1) {
+            // Consume the KEYBOARD edges and the step wheel after the FIRST fixed
+            // step so navigation read in update() does not re-fire in later steps
+            // or in render() (ui2's MenuScene reads nav in both update() and
+            // render()), and a wheel notch reaches exactly one step. Mouse, text
+            // and frame-wheel edges are intentionally preserved: render-time
+            // immediate UI (ui2 reads clicks via mouse_frame_pressed in render())
+            // is the sole consumer of those, so clearing them here dropped roughly
+            // half of all clicks — whichever frames ran a fixed step. Held state in
+            // _key_cur/_mouse_cur is left intact regardless.
+            _input.advance_step_edges();
+        }
+    }
+    if (steps == max_steps && _accumulator >= fixed_dt) {
+        // We exhausted the step budget with time still backlogged: drop it to
+        // avoid a spiral of death. If the loop instead drained naturally on
+        // its last allowed step (_accumulator < fixed_dt), there is no backlog
+        // to discard and the leftover feeds the render interpolation alpha.
+        _accumulator = 0.0f;
+        _snapper.reset();
+        _frame_stats.hit_max_steps = true;
+        _frame_stats.accumulator_after_update = _accumulator;
+    }
+
+    if (_running) {
+        _frame_stats.alpha = fixed_dt > 0.0f ? _accumulator / fixed_dt : 0.0f;
+        _render(_frame_stats.alpha);
+    }
+    _advance_input = steps > 0;
+    return _running;
+}
+
+void App::run(std::function<void(f32)> update, std::function<void(f32)> render) {
+#ifdef __EMSCRIPTEN__
+    if (!headless()) {
+        throw std::logic_error("Browser apps must drive start_loop/step_loop from requestAnimationFrame");
+    }
+#endif
+    start_loop(std::move(update), std::move(render));
     i32 frames = 0;
-
-    KIN_LOG_INFO_F("runtime",
-                   "app loop started",
-                   (LogFields{
-                       {.name = "mode", .value = std::string{app_mode_name(_config.mode)}},
-                       {.name = "fixed_dt", .value = std::to_string(fixed_dt)},
-                       {.name = "max_frame_time", .value = std::to_string(max_frame_time)},
-                       {.name = "max_steps", .value = std::to_string(max_steps)},
-                   }));
-
+    u64 last = SDL_GetTicksNS();
+    u64 next_frame_ns = 0;
     while (_running) {
         ++frames;
         const u64 now = SDL_GetTicksNS();
-        const f32 raw_frame_time = static_cast<f32>(now - last) / 1'000'000'000.0f;
+        step_loop(static_cast<f32>(now - last) / 1'000'000'000.0f);
         last = now;
-        const f32 frame_time = std::min(raw_frame_time, max_frame_time);
-        const f32 pacing_wait = _frame_stats.pacing_wait;
-        // time_scale paces real time into the accumulator (game-speed control);
-        // it never changes fixed_dt or step contents, so determinism holds.
-        const f32 snapped = snapper.advance(frame_time, fixed_dt, _config.snap_tolerance);
-        accumulator += snapped * _time_scale;
-        _frame_stats = {
-            .raw_frame_time = raw_frame_time,
-            .clamped_frame_time = frame_time,
-            .accumulator_before_update = accumulator,
-            .accumulator_after_update = accumulator,
-            .alpha = 0.0f,
-            .update_steps = 0,
-            .hit_max_steps = false,
-            .pacing_wait = pacing_wait,
-            .snapped_frame_time = snapped,
-        };
-
-        _input.begin_frame(advance_input);
-        pump_events();
-
-        i32 steps = 0;
-        while (_running && accumulator >= fixed_dt && steps < max_steps) {
-            // Counts the step being run, so update() sees 1 in a frame's first step,
-            // as under run_for.
-            _frame_stats.update_steps = steps + 1;
-            update(fixed_dt);
-            accumulator -= fixed_dt;
-            ++steps;
-            _frame_stats.accumulator_after_update = accumulator;
-            if (steps == 1) {
-                // Consume the KEYBOARD edges and the step wheel after the FIRST fixed
-                // step so navigation read in update() does not re-fire in later steps
-                // or in render() (ui2's MenuScene reads nav in both update() and
-                // render()), and a wheel notch reaches exactly one step. Mouse, text
-                // and frame-wheel edges are intentionally preserved: render-time
-                // immediate UI (ui2 reads clicks via mouse_frame_pressed in render())
-                // is the sole consumer of those, so clearing them here dropped roughly
-                // half of all clicks — whichever frames ran a fixed step. Held state in
-                // _key_cur/_mouse_cur is left intact regardless.
-                _input.advance_step_edges();
-            }
-        }
-        if (steps == max_steps && accumulator >= fixed_dt) {
-            // We exhausted the step budget with time still backlogged: drop it to
-            // avoid a spiral of death. If the loop instead drained naturally on
-            // its last allowed step (accumulator < fixed_dt), there is no backlog
-            // to discard and the leftover feeds the render interpolation alpha.
-            accumulator = 0.0f;
-            snapper.reset();
-            _frame_stats.hit_max_steps = true;
-            _frame_stats.accumulator_after_update = accumulator;
-        }
-
-        if (_running) {
-            _frame_stats.alpha = fixed_dt > 0.0f ? accumulator / fixed_dt : 0.0f;
-            render(_frame_stats.alpha);
-        }
-
         if (!headless()) {
             pace_frame(next_frame_ns);
         }
-        advance_input = steps > 0;
     }
-    KIN_LOG_INFO_F("runtime",
-                   "app loop stopped",
-                   (LogFields{{.name = "frames", .value = std::to_string(frames)}}));
+    _update = {};
+    _render = {};
+    KIN_LOG_INFO_F("runtime", "app loop stopped", (LogFields{{.name = "frames", .value = std::to_string(frames)}}));
 }
 
 void App::pace_frame(u64& next_frame_ns) {

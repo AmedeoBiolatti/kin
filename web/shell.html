@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kin game</title>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #11151b; color: #eee; font: 16px system-ui; }
+    canvas { display: block; width: 100%; height: 100%; outline: none; }
+    #status { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
+    #status[hidden] { display: none; }
+    #fullscreen { position: absolute; bottom: 8px; right: 8px; padding: 6px 10px; }
+  </style>
+</head>
+<body>
+  <canvas id="canvas" width="960" height="540" tabindex="0" aria-label="Game"></canvas>
+  <div id="status" role="status">Loading…</div>
+  <button id="fullscreen" type="button">Fullscreen</button>
+  <script>
+    const canvas = document.getElementById('canvas');
+    const status = document.getElementById('status');
+    var Module = {
+      canvas,
+      arguments: new URLSearchParams(location.search).getAll('arg'),
+      onRuntimeInitialized() { status.textContent = 'Starting game…'; },
+      onGameReady() { status.hidden = true; canvas.focus(); },
+      onGameFinished() { status.hidden = false; status.textContent = 'Game ended. Reload to play again.'; },
+      onAbort(reason) { status.hidden = false; status.textContent = 'Unable to start: ' + reason; },
+      printErr(message) { console.error(message); }
+    };
+    canvas.addEventListener('contextmenu', event => event.preventDefault());
+    canvas.addEventListener('pointerdown', () => canvas.focus());
+    canvas.addEventListener('keydown', event => {
+      if (['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(event.key)) event.preventDefault();
+    });
+    canvas.addEventListener('webglcontextlost', event => {
+      event.preventDefault();
+      status.hidden = false;
+      status.textContent = 'Graphics context lost. Reload the page to continue.';
+    });
+    document.getElementById('fullscreen').addEventListener('click', () => {
+      document.documentElement.requestFullscreen().catch(error => console.error(error));
+      canvas.focus();
+    });
+  </script>
+  {{{ SCRIPT }}}
+</body>
+</html>

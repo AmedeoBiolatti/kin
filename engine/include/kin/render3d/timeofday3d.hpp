@@ -31,6 +31,9 @@ struct TimeOfDay3D {
     // as the game set them) once it is above the horizon and bright enough, its strength fading in over its first 8
     // degrees and with its light. Off, apply() leaves them as they are (the sun casts while it shines, the moon never).
     bool shadows = false;
+    // Skip CPU hemisphere integration when the renderer supplies sky lighting.
+    // evaluate() leaves ambient results zero; apply() preserves the caller's ambient lights.
+    bool compute_ambient = true;
     // advance()'s own: the clock summed exactly (f64; `hours` is f32, and a frame at speed 1 is below its resolution
     // in the evening) and the `hours` it last wrote, so that it notices when the game sets `hours` itself and starts
     // again from that. Not authored, not for setting: leave them alone.
@@ -62,7 +65,8 @@ SkyState3D evaluate(const TimeOfDay3D& time, const Sky3D& sky = {});
 // Puts it into the scene's settings: lights.sun (direction and colour), lights.fill (the moon's light; its shadow when
 // TimeOfDay3D::shadows asks), the ambient and ground ambient, sky.moon_direction and moon_light and `moon` (on while
 // the moon is up), and fog.colour. Leaves what is a look (the sky's haze and intensity, the fog's density, the stars)
-// as it is. Returns the state.
+// as it is. With compute_ambient=false, the caller's ambient lights are retained.
+// Returns the state.
 SkyState3D apply(const TimeOfDay3D& time, Lights3D& lights, Sky3D& sky, Fog3D& fog);
 // The solar hour (0 to 24) the sun's upper limb rises and sets, with 0.833 degrees of refraction and size; nothing
 // (a polar day or night: -1 and -1 for night, 0 and 24 for day) when it does not.

@@ -12,6 +12,14 @@ Most games should use `kin::default_job_system()`: the ECS scheduler, the asset
 server and the path server all run on it, so the whole program has one worker
 per core instead of each system starting its own threads.
 
+For cooperative execution, construct `JobSystem{{.single_threaded = true}}`.
+`run()` queues work, `pump()` executes it and applies completion callbacks,
+and `wait()` / `get()` help execute pending work without applying callbacks.
+`parallel_for` runs serially and no workers are created. The build option
+`KIN_ENABLE_THREADS=OFF` selects this mode for all job systems, including the
+default pool; worker count zero still means automatic sizing in a threaded
+build. See [browser runtime details](web.md#runtime) for the execution contract.
+
 ## Background jobs
 
 `run()` starts work on a worker and returns a `kin::Job<T>` handle:

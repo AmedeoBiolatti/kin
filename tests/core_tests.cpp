@@ -1,14 +1,17 @@
+#include <cassert>
+#include <kin/core/hash.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
 #include <kin/core/types.hpp>
-
-#include <cassert>
 #include <limits>
 #include <source_location>
 #include <sstream>
 #include <string>
 
 int main() {
+    assert(kin::hash_bytes(nullptr, 0) == 0xcbf29ce484222325ull);
+    assert(kin::hash_bytes("hello", 5) == 0xa430d84680aabd0bull);
+    assert(kin::hash_bytes("lo", 2, kin::hash_bytes("hel", 3)) == kin::hash_bytes("hello", 5));
     static_assert(sizeof(kin::i8) == 1);
     static_assert(sizeof(kin::i16) == 2);
     static_assert(sizeof(kin::i32) == 4);
@@ -37,9 +40,8 @@ int main() {
     assert(value >= -1.0f);
     assert(value <= 1.0f);
 
-    const kin::i32 full_range = kin::rng_i32(sub_a,
-                                              std::numeric_limits<kin::i32>::min(),
-                                              std::numeric_limits<kin::i32>::max());
+    const kin::i32 full_range =
+        kin::rng_i32(sub_a, std::numeric_limits<kin::i32>::min(), std::numeric_limits<kin::i32>::max());
     assert(full_range >= std::numeric_limits<kin::i32>::min());
     assert(full_range <= std::numeric_limits<kin::i32>::max());
 
@@ -50,9 +52,7 @@ int main() {
     profile.record("escaped\"scope", "unit", 1'000'000, shared_location);
     profile.record("escaped\"scope", "unit", 3'000'000, shared_location);
     profile.record("other", "unit", 2'000'000);
-    {
-        kin::ScopedProfile scope{&profile, "raii", "unit"};
-    }
+    { kin::ScopedProfile scope{&profile, "raii", "unit"}; }
     KIN_PROFILE_SCOPE("macro-scope-compiles");
     KIN_PROFILE_FUNCTION();
     KIN_PROFILE_LINE("macro-line-compiles");
@@ -100,9 +100,7 @@ int main() {
     profile.start("manual-markers");
     kin::set_current_profile_session(&profile);
     int evaluated = 0;
-    {
-        KIN_PROFILE_SCOPE((++evaluated, "optional-marker"));
-    }
+    { KIN_PROFILE_SCOPE((++evaluated, "optional-marker")); }
     kin::set_current_profile_session(nullptr);
     profile.stop();
 #ifdef KIN_ENABLE_PROFILING

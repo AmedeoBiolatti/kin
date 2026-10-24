@@ -1,6 +1,7 @@
 #include <kin/scene/scene_manager.hpp>
 
 #include <kin/renderer/draw_trace.hpp>
+#include <exception>
 
 namespace kin {
 namespace {
@@ -124,11 +125,21 @@ void SceneManager::flush_pending(SceneContext& ctx) {
 }
 
 void SceneManager::shutdown(SceneContext& ctx) {
+    std::exception_ptr failure;
     _pending.clear();
     while (!_stack.empty()) {
-        _stack.back()->on_exit(ctx);
+        try {
+            _stack.back()->on_exit(ctx);
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
         _pending.clear();
         _stack.pop_back();
+    }
+    if (failure) {
+        std::rethrow_exception(failure);
     }
 }
 

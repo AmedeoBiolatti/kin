@@ -1,6 +1,9 @@
 if(NOT KIN_ENABLE_AUDIO)
     message(FATAL_ERROR "KIN_BUILD_EXAMPLES requires KIN_ENABLE_AUDIO; disable examples for an audio-free build")
 endif()
+if(KIN_EXPERIMENTAL_3D AND (NOT KIN_ENABLE_PHYSICS3D OR NOT KIN_ENABLE_SCENE3D_RUNTIME))
+    message(FATAL_ERROR "The existing 3D examples require KIN_ENABLE_PHYSICS3D and KIN_ENABLE_SCENE3D_RUNTIME; disable KIN_BUILD_EXAMPLES for render-only builds")
+endif()
 
 add_library(kin_example_workloads STATIC
     arena.cpp

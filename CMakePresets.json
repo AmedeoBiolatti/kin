@@ -308,6 +308,88 @@
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
       }
+    },
+    {
+      "name": "webgl2",
+      "displayName": "Experimental WebGL2 browser runtime",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "KIN_SHIPPING": "ON",
+        "KIN_RENDERER": "webgl2",
+        "KIN_ENABLE_THREADS": "OFF",
+        "KIN_RELEASE_CONTRACT": "OFF",
+        "KIN_PACKAGE_STRIP": "OFF",
+        "KIN_EXPERIMENTAL_3D": "OFF",
+        "KIN_REQUIRE_GPU_SHADERS": "OFF",
+        "BUILD_TESTING": "OFF",
+        "KIN_BUILD_TESTS": "OFF",
+        "KIN_BUILD_BENCHMARKS": "OFF",
+        "KIN_BUILD_EXAMPLES": "OFF",
+        "KIN_ENABLE_SCRIPTING": "OFF",
+        "KIN_ENABLE_PHYSICS": "OFF",
+        "KIN_ENABLE_AUDIO": "OFF",
+        "KIN_ENABLE_SCENE_SERVER": "OFF",
+        "KIN_ENABLE_DEBUG_OVERLAY": "OFF",
+        "KIN_ENABLE_RENDER_PROBE": "OFF",
+        "KIN_ENABLE_DETERMINISM_CHECK": "OFF",
+        "KIN_ENABLE_PROFILING": "OFF",
+        "KIN_ENABLE_RELEASE_PROFILING": "OFF",
+        "KIN_ENABLE_RUNTIME_PROFILING": "OFF",
+        "KIN_ENABLE_RUNTIME_ASSETS": "OFF",
+        "KIN_ENABLE_IMAGE_IO": "OFF",
+        "KIN_ENABLE_TTF": "OFF",
+        "KIN_ENABLE_SDL_DESKTOP_SERVICES": "OFF",
+        "KIN_BUILD_GAMES": "OFF"
+      }
+    },
+    {
+      "name": "hex-webgl2",
+      "displayName": "Hex demo for itch.io (WebGL2)",
+      "inherits": "webgl2",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "KIN_HEX_DEMO_BAKED_FONT": "ON",
+        "KIN_BUILD_GAME_ECS_GRAPH_DEMO": "OFF",
+        "KIN_BUILD_GAME_ECS_PARALLEL_BENCH": "OFF",
+        "KIN_BUILD_GAME_ECS_SYSTEMS_DEMO": "OFF",
+        "KIN_BUILD_GAME_ISOMETRIC_DEMO": "OFF",
+        "KIN_BUILD_GAME_LIGHTING_DEMO": "OFF",
+        "KIN_BUILD_GAME_SHAPES_DEMO": "OFF",
+        "KIN_BUILD_GAME_TEXT_EDIT_DEMO": "OFF",
+        "KIN_BUILD_GAMES": "ON"
+      }
+    },
+    {
+      "name": "webgl2-3d",
+      "displayName": "WebGL2 3D rendering fixture",
+      "inherits": "webgl2",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON",
+        "KIN_ENABLE_PHYSICS3D": "OFF",
+        "KIN_ENABLE_SCENE3D_RUNTIME": "OFF",
+        "KIN_BUILD_WEBGL2_FIXTURE": "ON"
+      }
+    },
+    {
+      "name": "summit-webgl2",
+      "displayName": "Summit browser export (core WebGL2)",
+      "inherits": "webgl2",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON",
+        "KIN_ENABLE_PHYSICS3D": "ON",
+        "KIN_ENABLE_SCENE3D_RUNTIME": "OFF",
+        "KIN_ENABLE_IMAGE_IO": "ON",
+        "KIN_ENABLE_TTF": "ON",
+        "KIN_ENABLE_AUDIO": "ON",
+        "KIN_ENABLE_RUNTIME_ASSETS": "ON",
+        "KIN_BUILD_WEB_SUMMIT": "ON",
+        "KIN_WEB_PERSISTENCE": "ON"
+      }
     }
   ],
   "buildPresets": [

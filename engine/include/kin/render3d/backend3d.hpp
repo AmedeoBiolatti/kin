@@ -1,7 +1,7 @@
 #pragma once
 
 // The seam between Renderer3D and a renderer backend that can draw 3D views
-// (IRenderer2DBackend::renderer_3d(); SDL_GPU only). Experimental: see
+// (IRenderer2DBackend::renderer_3d(); SDL_GPU and WebGL2). Experimental: see
 // docs/3d_plan.md.
 
 #include <array>

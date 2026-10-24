@@ -1,15 +1,21 @@
 #include "benchmark.hpp"
 
 #include <cstdio>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <filesystem>
 #include <iomanip>
+#include <iterator>
 #include <kin/core/json.hpp>
+#include <sstream>
 #include <stdexcept>
 
 namespace summit {
 
-ExpeditionBenchmark::ExpeditionBenchmark(const std::string& path, Clock::time_point process_start, f64 warmup_seconds)
-    : _path(path), _process_start(process_start), _warmup_seconds(warmup_seconds) {
+ExpeditionBenchmark::ExpeditionBenchmark(const std::string& path, Clock::time_point process_start, f64 warmup_seconds,
+                                         f64 frame_limit)
+    : _path(path), _process_start(process_start), _warmup_seconds(warmup_seconds), _frame_limit(frame_limit) {
     const auto directory = std::filesystem::path(path).parent_path();
     if (!directory.empty())
         std::filesystem::create_directories(directory);
@@ -19,7 +25,8 @@ ExpeditionBenchmark::ExpeditionBenchmark(const std::string& path, Clock::time_po
     _csv << "frame,step,leg,phase,measured,frame_interval_ms,scene_build_ms,cpu_submit_ms,draws,triangles,instances,"
             "culled,shadow_draws,shadow_casters,shadow_cascades,local_shadow_maps,local_shadow_draws,skinned_copies,"
             "skin_matrices,retained_gpu_bytes,instance_upload_bytes,spatial_groups,feet_x,feet_y,feet_z,width,height,"
-            "profile_mono_ms,next_hit_max_steps,next_raw_frame_ms\n";
+            "profile_mono_ms,next_hit_max_steps,next_raw_frame_ms,ui_ms,gpu_frame_ms,retained_upload_bytes,"
+            "prepared_draws,prepared_reused\n";
     _csv << std::fixed << std::setprecision(6);
 }
 
@@ -46,14 +53,17 @@ void ExpeditionBenchmark::begin_frame(const AppFrameStats& app) {
          << ',' << s.shadow_cascades << ',' << s.local_shadow_maps << ',' << s.local_shadow_draws << ','
          << s.skinned_copies << ',' << s.skin_matrices << ',' << s.retained_gpu_bytes << ',' << s.instance_upload_bytes
          << ',' << s.spatial_groups << ',' << p.feet.x << ',' << p.feet.y << ',' << p.feet.z << ',' << p.size.x << ','
-         << p.size.y << ',' << p.mono_ms << ',' << app.hit_max_steps << ',' << app.raw_frame_time * 1000.0 << '\n';
+         << p.size.y << ',' << p.mono_ms << ',' << app.hit_max_steps << ',' << app.raw_frame_time * 1000.0 << ','
+         << p.ui_ms << ',' << p.gpu_ms << ',' << s.retained_upload_bytes << ',' << s.prepared_draws << ','
+         << s.prepared_reused << '\n';
     if (!_csv)
         throw std::runtime_error("cannot write Summit benchmark CSV");
     _have_pending = false;
 }
 
 void ExpeditionBenchmark::capture(const Game& game, i32 leg, const SummitView& view, const RenderDebugStats3D& stats,
-                                  Vec2i size, f64 build_ms, f64 submit_ms) {
+                                  Vec2i size, f64 build_ms, f64 submit_ms, f64 ui_ms,
+                                  const RendererBackendStats& backend) {
     _pending = {};
     _pending.frame = ++_frames;
     _pending.step = game.step_count();
@@ -65,12 +75,18 @@ void ExpeditionBenchmark::capture(const Game& game, i32 leg, const SummitView& v
     _pending.stats = stats;
     _pending.build_ms = build_ms;
     _pending.submit_ms = submit_ms;
+    _pending.ui_ms = ui_ms;
+    if (backend.gpu_frames_sampled != _gpu_sample) {
+        _pending.gpu_ms = backend.last_gpu_frame_ms;
+        _gpu_sample = backend.gpu_frames_sampled;
+    }
     _pending.mono_ms = std::chrono::duration<f64, std::milli>(Clock::now().time_since_epoch()).count();
     _have_pending = true;
     _scenery = view.scenery_instances();
     _scenery_triangles = view.scenery_triangles();
     _record_bytes = view.instance_record_bytes();
     _static_triangles = view.static_triangles();
+    _core_quality = view.core_quality();
 }
 
 void ExpeditionBenchmark::finish(const Game& game, i32 samples) {
@@ -81,6 +97,8 @@ void ExpeditionBenchmark::finish(const Game& game, i32 samples) {
     std::ofstream output(_path + ".json");
     if (!_csv || !output)
         throw std::runtime_error("cannot finish Summit benchmark files");
+    std::ostringstream hash;
+    hash << std::hex << game.state_hash();
     JsonWriter j(output);
     j.begin_object()
         .field("scenery", game.level().expedition.dense_scenery ? "dense" : "compact")
@@ -88,10 +106,13 @@ void ExpeditionBenchmark::finish(const Game& game, i32 samples) {
         .field("completed", game.player(0).summit)
         .field("steps", game.step_count())
         .field("final_hash", game.state_hash())
+        .field("final_hash_hex", hash.str())
         .field("falls", game.player(0).falls)
         .field("deaths", game.player(0).deaths)
         .field("sheltered", game.player(0).expedition.shelter_visited)
         .field("samples", samples)
+        .field("quality", _core_quality ? "core" : "native")
+        .field("native_frame_limit", _frame_limit)
         .field("width", _pending.size.x)
         .field("height", _pending.size.y)
         .field("rendered_frames", _frames)
@@ -103,9 +124,19 @@ void ExpeditionBenchmark::finish(const Game& game, i32 samples) {
         .field("instance_record_bytes", _record_bytes)
         .field("static_triangles", _static_triangles)
         .field("prop_colliders", u64(game.props().size()))
-        .field("clock", "real-time 60 Hz simulation; uncapped native window; full start-to-start frame intervals")
+        .field("clock", "real-time 60 Hz simulation; full start-to-start frame intervals; browser paced by rAF")
         .field("loading", "whole level preloaded; no asset streaming; startup excluded from measured traversal")
         .end_object();
+    output.flush();
+#ifdef __EMSCRIPTEN__
+    // Export only when explicitly benchmarking; ordinary games retain no trace history.
+    std::ifstream csv_file(_path), metadata_file(_path + ".json");
+    const std::string csv{std::istreambuf_iterator<char>(csv_file), {}},
+        metadata{std::istreambuf_iterator<char>(metadata_file), {}};
+    EM_ASM(
+        { Module.kinSummitBenchmark = ({csv : UTF8ToString($0), metadata : JSON.parse(UTF8ToString($1))}); },
+        csv.c_str(), metadata.c_str());
+#endif
     std::printf("summit: benchmark %s complete=%d steps=%llu frames=%llu startup %.1f ms asset setup %.1f ms\n",
                 _path.c_str(), int(game.player(0).summit), (unsigned long long)game.step_count(),
                 (unsigned long long)_frames, _first_present_ms, _asset_setup_ms);

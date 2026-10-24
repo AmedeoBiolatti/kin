@@ -584,11 +584,14 @@ struct World3D::Impl {
             activation.now = [this](const JPH::BodyID& id, bool active) { add_activation(id, active); };
             system.SetBodyActivationListener(&activation);
         }
-        if (cfg.single_threaded) {
+        // The barrier adapter retains queued jobs until workers release them. A cooperative
+        // Kin queue has no workers to do that, including every non-pthread browser build.
+        JobSystem* jobs = cfg.single_threaded ? nullptr : (cfg.jobs ? cfg.jobs : &default_job_system());
+        if (!jobs || jobs->worker_count() == 0) {
             single.reset(new JPH::JobSystemSingleThreaded(JPH::cMaxPhysicsJobs));
             job_system = single.get();
         } else {
-            pooled = std::make_unique<KinJobs>(cfg.jobs != nullptr ? *cfg.jobs : default_job_system());
+            pooled = std::make_unique<KinJobs>(*jobs);
             job_system = pooled.get();
         }
     }

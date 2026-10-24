@@ -25,6 +25,10 @@
 #include <iostream>
 #include <kin/assets/content.hpp>
 #include <kin/platform/gamepad.hpp>
+#include <kin/platform/user_data.hpp>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <kin/ui2/context.hpp>
@@ -54,6 +58,7 @@ struct Options {
     i64 expect_steps = -1;   // fail unless the run took this many steps
     int max_steps = 60000;
     int samples = 4;
+    f32 fps = 0;
     bool first_person = false;
     bool hud = true;
     bool headless = false;
@@ -83,6 +88,7 @@ struct Options {
     bool procedural_assets = false;
     bool expedition = false;
     bool dense_scenery = true;
+    bool core_quality = false;
     std::string benchmark;
     f64 benchmark_warmup = 2.0;
     Clock::time_point started = Clock::now();
@@ -91,6 +97,12 @@ struct Options {
 
 Options parse(int argc, char** argv) {
     Options o;
+#ifdef __EMSCRIPTEN__
+    // The core browser profile keeps the route and bundled assets with a smaller scenery budget.
+    // An explicit --scenery dense still selects the full native layout.
+    o.dense_scenery = false;
+    o.core_quality = true;
+#endif
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         const auto value = [&]() -> std::string {
@@ -119,7 +131,12 @@ Options parse(int argc, char** argv) {
             o.benchmark = value();
         else if (arg == "--benchmark-warmup")
             o.benchmark_warmup = std::clamp(number(value()), 0.0, 30.0);
-        else if (arg == "--scenery") {
+        else if (arg == "--quality") {
+            const auto quality = value();
+            if (quality != "core" && quality != "native")
+                throw std::invalid_argument("--quality needs core or native");
+            o.core_quality = quality == "core";
+        } else if (arg == "--scenery") {
             const auto detail = value();
             if (detail != "compact" && detail != "dense")
                 throw std::invalid_argument("--scenery needs compact or dense");
@@ -140,6 +157,8 @@ Options parse(int argc, char** argv) {
             o.max_steps = std::clamp(static_cast<int>(number(value())), 1, 5'000'000);
         else if (arg == "--samples")
             o.samples = std::clamp(static_cast<int>(number(value())), 1, 8);
+        else if (arg == "--fps")
+            o.fps = std::clamp(f32(number(value())), 0.0f, 1000.0f);
         else if (arg == "--first-person")
             o.first_person = true;
         else if (arg == "--no-hud")
@@ -206,6 +225,12 @@ Options parse(int argc, char** argv) {
         throw std::invalid_argument("no look named " + o.look + " (--help lists them)");
     if (o.classic && o.expedition)
         throw std::invalid_argument("choose --classic or --expedition");
+#ifdef __EMSCRIPTEN__
+    if (!o.core_quality)
+        throw std::invalid_argument("the browser renderer supports --quality core only");
+#endif
+    if (o.core_quality)
+        o.samples = 1;
     return o;
 }
 
@@ -220,6 +245,8 @@ void print_help() {
                  "extraction.\n"
                  "  --classic             the original procedural 150 m climbing course\n"
                  "  --scenery dense|compact  forested expedition (default dense) or the earlier sparse layout\n"
+                 "  --quality core|native  matched SDR/hemisphere/2-cascade profile or full native quality\n"
+                 "  --fps N               native frame limit (0: uncapped; browsers use requestAnimationFrame)\n"
                  "  --benchmark CSV       real-time bot traversal with streamed full-frame metrics (windowed only)\n"
                  "  --benchmark-warmup S   render at base for S seconds before starting the bot (2)\n"
                  "  --procedural-assets   use the original camp props and omit imported scenery\n"
@@ -443,9 +470,14 @@ struct ShotPlan {
     bool done = false;
 };
 
+struct SceneOutcome {
+    bool unavailable = false;
+};
+
 class SummitScene final : public Scene {
 public:
-    explicit SummitScene(Options options) : _options(std::move(options)) {
+    explicit SummitScene(Options options, std::shared_ptr<SceneOutcome> outcome = {})
+        : _options(std::move(options)), _outcome(std::move(outcome)) {
         _game = std::make_unique<Game>(_options.seed, GameConfig{.expedition = expedition_mode(_options),
                                                                  .dense_scenery = _options.dense_scenery});
         // Settings: a windowed run reads and keeps the player's file; a scripted or headless run uses the defaults (a
@@ -537,8 +569,8 @@ public:
         }
         _rig.observe(*_game, 0);
         if (!_options.benchmark.empty())
-            _benchmark =
-                std::make_unique<ExpeditionBenchmark>(_options.benchmark, _options.started, _options.benchmark_warmup);
+            _benchmark = std::make_unique<ExpeditionBenchmark>(_options.benchmark, _options.started,
+                                                               _options.benchmark_warmup, _options.fps);
     }
     ~SummitScene() override {
         release_mouse();
@@ -546,6 +578,10 @@ public:
     }
 
     std::string_view name() const override { return "Summit"; }
+    void on_exit(SceneContext&) override {
+        if (_outcome)
+            _outcome->unavailable = _unavailable;
+    }
 
     void update(SceneContext& ctx) override {
         if (_quit || _failed || (_benchmark && !_benchmark->ready()))
@@ -715,10 +751,47 @@ public:
         renderer.draw_texture(_view.texture(), {0.0f, 0.0f, float(out.x), float(out.y)});
         ++_frames;
         _presentation_time += double(frame_dt);
+        const auto ui_started = Clock::now();
         draw_ui(ctx, out);
+        const double ui_ms = std::chrono::duration<double, std::milli>(Clock::now() - ui_started).count();
+#ifdef __EMSCRIPTEN__
+        const Vec3f feet = _game->feet(0);
+        const auto& stats = _r3d->stats();
+        EM_ASM(
+            {
+                Module.kinSummit = ({
+                    frames : $0,
+                    steps : $1,
+                    x : $2,
+                    y : $3,
+                    z : $4,
+                    phase : $5,
+                    assets : !!$6,
+                    instances : $7,
+                    triangles : $8,
+                    skinned : $9,
+                    shadows : $10,
+                    font : !!$11,
+                    look : UTF8ToString($12),
+                    fillMs : $13,
+                    renderMs : $14,
+                    uiMs : $15
+                });
+            },
+            _frames, _updates, feet.x, feet.y, feet.z, int(_game->player(0).expedition.phase),
+            _summit_view->bundled_assets_ready(), stats.instances, double(stats.triangles), stats.skinned_copies,
+            stats.shadow_cascades, ui2::system_ui_font_available(), _settings.look.c_str(), scene_ms, _render_ms,
+            ui_ms);
+        EM_ASM(
+            {
+                Module.kinSummit.uiWarmupMs = $0;
+                Module.kinSummit.hudPrepared = !!$1;
+            },
+            _ui_warmup_ms, _ui_prepared_size == out);
+#endif
         if (_benchmark)
             _benchmark->capture(*_game, _bot ? _bot->leg() : -1, *_summit_view, _r3d->debug_stats(), _view_size,
-                                scene_ms, _render_ms);
+                                scene_ms, _render_ms, ui_ms, ctx.renderer.backend_stats());
         if (_options.gpu_timing) {
             const RendererBackendStats st = ctx.renderer.backend_stats();
             if (st.gpu_frames_sampled != _gpu_sampled) {
@@ -734,8 +807,7 @@ private:
         const auto setup_start = Clock::now();
         _r3d = ctx.renderer3d;
         if (!_r3d || !_r3d->available()) {
-            std::fprintf(stderr, "summit: this renderer cannot draw 3D: it needs SDL_GPU (KIN_RENDER_BACKEND=gpu, a "
-                                 "Vulkan/Metal/D3D12 device)\n");
+            std::fprintf(stderr, "summit: this renderer cannot draw 3D views\n");
             if (ctx.report)
                 ctx.report->fail("no 3D renderer");
             _failed = true;
@@ -744,7 +816,8 @@ private:
             _r3d = nullptr;
             return false;
         }
-        _summit_view = std::make_unique<SummitView>(*_r3d, _game->level(), !_options.procedural_assets);
+        _summit_view =
+            std::make_unique<SummitView>(*_r3d, _game->level(), !_options.procedural_assets, _options.core_quality);
         _summit_view->set_look(_settings.look);
         _summit_view->set_effects(_settings.effects, _settings.time_speed);
         if (_options.hours >= 0.0f)
@@ -791,8 +864,13 @@ private:
 
     // Only a run that changed them writes the file (a picture run, or one that only played, leaves it as it was).
     void save() {
-        if (_store && !_options.no_settings && _settings_changed)
-            save_settings(*_store, _settings);
+        if (_store && !_options.no_settings && _settings_changed) {
+            const bool saved = save_settings(*_store, _settings);
+#ifdef __EMSCRIPTEN__
+            if (saved)
+                EM_ASM({ Module.kinStorage ?.flush(); });
+#endif
+        }
         _settings_changed = false;
     }
 
@@ -914,7 +992,7 @@ private:
     void capture_mouse(Window& window) {
         window.set_relative_mouse(true);
         _window = &window;
-        _captured = true;
+        _captured = window.relative_mouse();
     }
     void release_mouse() {
         if (_window != nullptr && _captured)
@@ -1047,6 +1125,33 @@ private:
     // The HUD (unless hidden) and the menu, painted over the 3D picture; the menu's mouse is handled here, where the
     // pointer is.
     void draw_ui(SceneContext& ctx, Vec2i out) {
+#ifdef __EMSCRIPTEN__
+        if (_ui_prepared_size != out) {
+            const auto started = Clock::now();
+            auto target = ctx.renderer.create_render_target({1, 1}, ScaleMode::Nearest);
+            if (!target)
+                throw std::runtime_error("Could not prepare Summit's HUD fonts");
+            ctx.renderer.push_render_target(target);
+            ui2::Context warm;
+            warm.begin(ctx.input, ctx.renderer, 0);
+            const Vec2f screen{f32(out.x), f32(out.y)};
+            auto model = build_hud_model(*_game, 0, _notices);
+            model.phase = ExpeditionPhase::Climbing;
+            model.objective = "Reach ridge camp / choose your route";
+            model.objective_detail = "Ahead / 53 m  Orange: climb  Blue: cave";
+            model.interaction = "Hold R to repair the beacon";
+            draw_hud(warm, model, hud_layout(screen), _bindings, 0, {});
+            Menu menu(&_settings);
+            menu.open_main();
+            draw_menu(warm, menu, menu_layout(screen, i32(menu_row_count)), _bindings, screen, {-1, -1});
+            menu.open_controls();
+            draw_menu(warm, menu, menu_layout(screen, i32(action_count) + 1), _bindings, screen, {-1, -1});
+            warm.end();
+            ctx.renderer.pop_render_target();
+            _ui_prepared_size = out;
+            _ui_warmup_ms = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+        }
+#endif
         const bool show_hud = _options.hud && _settings.hud;
         const bool menu_open = _menu.open();
         _menu.set_expedition_complete(_game->config().expedition &&
@@ -1160,6 +1265,7 @@ public:
 
 private:
     Options _options;
+    std::shared_ptr<SceneOutcome> _outcome;
     SummitSettings _settings;
     std::unique_ptr<SaveStore> _store;
     std::unique_ptr<Game> _game;
@@ -1183,6 +1289,10 @@ private:
     Vec2i _view_size{};
     Scene3D _scene;
     ui2::Context _ui;
+#ifdef __EMSCRIPTEN__
+    Vec2i _ui_prepared_size{};
+    double _ui_warmup_ms = 0;
+#endif
     std::vector<ShotPlan> _shots;
     int _pending_shot = -1;
     int _updates = 0, _frames = 0, _after = 0;
@@ -1201,6 +1311,14 @@ private:
 int run(int argc, char** argv) {
     try {
         Options options = parse(argc, argv);
+#ifdef __EMSCRIPTEN__
+        set_user_data_dir_override("/persistent");
+        SDL_setenv_unsafe("KIN_UI_FONT_REGULAR", "/summit/fonts/latin.ttf", 1);
+        SDL_setenv_unsafe("KIN_UI_FONT_BOLD", "/summit/fonts/latin.ttf", 1);
+        if (!fs::exists("/summit/fonts/latin.ttf"))
+            throw std::runtime_error("Summit's bundled UI font is missing");
+        options.samples = 1;
+#endif
         if (options.help) {
             print_help();
             return 0;
@@ -1210,8 +1328,13 @@ int run(int argc, char** argv) {
         if (!options.script.empty() && options.screenshot.empty() && options.benchmark.empty())
             return run_cpu_script(options);
 
-        if (!options.procedural_assets && find_content_root(KIN_GAME_CONTENT, argc, argv).empty())
+        if (!options.procedural_assets && find_content_root(KIN_GAME_CONTENT, argc, argv).empty()) {
+#ifdef __EMSCRIPTEN__
+            throw std::runtime_error("Summit's bundled content is missing");
+#else
             std::fprintf(stderr, "summit: content unavailable; using procedural props\n");
+#endif
+        }
 
         // The runtime times the GPU's frames only when someone reads them (KIN_LOG_FRAME_STATS asks it to).
         if (options.gpu_timing)
@@ -1224,7 +1347,8 @@ int run(int argc, char** argv) {
                 a == "--preset" || a == "--script" || a == "--record" || a == "--replay" || a == "--expect-hash" ||
                 a == "--expect-steps" || a == "--max-steps" || a == "--samples" || a == "--settings" || a == "--drop" ||
                 a == "--time-speed" || a == "--hours" || a == "--no-fx" || a == "--fx" || a == "--camp" ||
-                a == "--orbit" || a == "--scenery" || a == "--benchmark" || a == "--benchmark-warmup") {
+                a == "--orbit" || a == "--scenery" || a == "--benchmark" || a == "--benchmark-warmup" ||
+                a == "--quality" || a == "--fps") {
                 ++i;
                 continue;
             }
@@ -1254,19 +1378,18 @@ int run(int argc, char** argv) {
                       .input_map = input};
         auto window = window_config(game);
         window.vsync = false;
-        window.max_fps = 0.0f;
+        window.max_fps = options.fps;
         window.high_pixel_density = !headless.enabled && options.benchmark.empty();
-        SceneManager scenes;
-        SummitScene* scene = nullptr;
-        {
-            auto s = std::make_unique<SummitScene>(options);
-            scene = s.get();
-            scenes.push(std::move(s));
-        }
-        const int code = run_scene_app(
-            {.window = window, .headless = headless, .game = &game, .render_headless = true, .rendering_3d = true},
-            scenes);
-        if (scene != nullptr && scene->unavailable()) {
+        auto outcome = std::make_shared<SceneOutcome>();
+        auto scenes = std::make_unique<SceneManager>();
+        scenes->push(std::make_unique<SummitScene>(options, outcome));
+        SceneAppConfig config{
+            .window = window, .headless = headless, .game = &game, .render_headless = true, .rendering_3d = true};
+#ifdef __EMSCRIPTEN__
+        config.pipeline_record_path = std::filesystem::path{};
+#endif
+        const int code = run_scene_app(std::move(config), std::move(scenes), outcome);
+        if (outcome->unavailable) {
             const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
             const bool require_gpu = required && required[0] && std::string_view(required) != "0";
             return options.skip_if_unavailable && !require_gpu ? exit_skipped : 1;
@@ -1274,6 +1397,9 @@ int run(int argc, char** argv) {
         return code;
     } catch (const std::exception& e) {
         std::cerr << "summit: " << e.what() << '\n';
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ Module.onAbort ?.(UTF8ToString($0)); }, e.what());
+#endif
         return 1;
     }
 }

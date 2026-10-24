@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <initializer_list>
@@ -282,7 +283,7 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
     static const auto paths = [] {
         const auto first_existing = [](std::initializer_list<const char*> candidates) {
             for (const char* candidate : candidates) {
-                if (std::filesystem::exists(candidate)) {
+                if (candidate && *candidate && std::filesystem::exists(candidate)) {
                     return std::filesystem::path{candidate};
                 }
             }
@@ -293,6 +294,7 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
             std::filesystem::path bold;
         } result;
         result.regular = first_existing({
+            std::getenv("KIN_UI_FONT_REGULAR"),
             "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -300,6 +302,7 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
             "/Library/Fonts/Arial.ttf",
         });
         result.bold = first_existing({
+            std::getenv("KIN_UI_FONT_BOLD"),
             "C:/Windows/Fonts/segoeuib.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",

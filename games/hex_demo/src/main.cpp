@@ -71,19 +71,19 @@ private:
 #ifndef KIN_HEX_DEMO_TEST
 int main(int argc, char** argv) {
     kin::GameInfo game = demo::make_game_info();
-    kin::SceneManager scenes;
+    auto scenes = std::make_unique<kin::SceneManager>();
 
     const auto build_scenes = [](kin::SceneManager& target) {
         target.push(std::make_unique<demo::HexDemoScene>());
     };
-    build_scenes(scenes);
+    build_scenes(*scenes);
 
     return kin::run_scene_app({
         .window = kin::window_config(game),
         .headless = kin::parse_headless_options(argc, argv),
         .game = &game,
         .reset_scenes = build_scenes,
-    }, scenes);
+    }, std::move(scenes));
 }
 
 #endif

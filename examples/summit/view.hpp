@@ -30,7 +30,7 @@ using namespace kin;
 
 class SummitView {
 public:
-    SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_assets = true);
+    SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_assets = true, bool core_quality = false);
 
     // False for a name that is not a look (the look is unchanged).
     bool set_look(const std::string& name);
@@ -40,8 +40,9 @@ public:
     // The effects that are on, and the game hours a minute the clock runs at (0: frozen).
     void set_effects(const EffectSettings& effects, f32 time_hours_per_minute);
     const EffectSettings& effects() const { return _effects; }
-    // The view's options the look wants (HDR, exposure, bloom); the size and samples are the caller's.
+    // Native quality follows the look's HDR/exposure/bloom; core uses SDR and one sample.
     ViewOptions3D view_options(u32 samples) const;
+    bool core_quality() const { return _core_quality; }
 
     // Once a fixed step after Game::step(): what happened (a landing's dust, a camp reached) for the frames to draw.
     void on_step(const Game& game, i32 player = 0);
@@ -72,6 +73,9 @@ public:
     u32 scenery_instances() const { return _external_assets.scenery_instances(); }
     u64 scenery_triangles() const { return _external_assets.scenery_triangles(); }
     u64 instance_record_bytes() const { return _external_assets.instance_record_bytes(); }
+    bool bundled_assets_ready() const {
+        return _imported_person && _imported_materials && _external_assets.loaded_models() == PropCount;
+    }
 
 private:
     void drive_person(const Game& game, i32 player, f32 dt);
@@ -83,7 +87,10 @@ private:
     std::vector<Piece> _equipment;
 
     Renderer3D* _r3d;
+    bool _core_quality = false;
+    sky_model::AmbientLight3D _core_ambient;
     Assets3D _assets;
+    bool _imported_person = false, _imported_materials = false;
     ExternalAssets _external_assets;
     const Look* _look;
     EffectSettings _effects{};

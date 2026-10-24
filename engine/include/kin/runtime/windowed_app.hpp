@@ -1,12 +1,12 @@
 #pragma once
 
+#include <functional>
 #include <kin/core/types.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
-
-#include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -59,6 +59,27 @@ struct FrameContext {
 
 using FrameUpdate = std::function<void(FrameContext&)>;
 using FrameRender = std::function<void(FrameContext&)>;
+
+// Owns window/renderer/callback state across caller-driven frames. References
+// captured by game callbacks must remain valid until finish() or destruction.
+// Native run_windowed_app is the synchronous adapter for this same session.
+class WindowedAppSession {
+public:
+    WindowedAppSession(WindowedAppConfig config, FrameUpdate update, FrameRender render);
+    ~WindowedAppSession();
+    WindowedAppSession(const WindowedAppSession&) = delete;
+    WindowedAppSession& operator=(const WindowedAppSession&) = delete;
+    bool step(f32 elapsed_seconds);
+    void run();
+    void finish();
+    App& app();
+    Window& window();
+    Renderer2D& renderer();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
+};
 
 void run_windowed_app(const WindowedAppConfig& config, FrameUpdate update, FrameRender render);
 

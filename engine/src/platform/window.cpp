@@ -40,6 +40,12 @@ Vec2i primary_display_size() {
 
 Window::Window(const WindowConfig& config) {
     SDL_WindowFlags flags = 0;
+#if KIN_HAS_WEBGL2_RENDERER
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    flags |= SDL_WINDOW_OPENGL;
+#endif
     if (config.resizable) {
         flags |= SDL_WINDOW_RESIZABLE;
     }

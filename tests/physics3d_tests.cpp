@@ -604,6 +604,13 @@ void test_determinism() {
     const std::vector<u64> serial_run = pile_hashes(serial(), 300, frames);
     CHECK(serial_run == pile_hashes(serial(), 300, frames)); // twice
     {
+        JobSystem cooperative({.single_threaded = true});
+        World3DConfig cfg;
+        cfg.jobs = &cooperative;
+        // Default world configuration must step and destroy safely without background workers.
+        CHECK(pile_hashes(cfg, 300, frames) == serial_run);
+    }
+    {
         JobSystem one({.workers = 1, .max_background = 1});
         World3DConfig cfg;
         cfg.jobs = &one;

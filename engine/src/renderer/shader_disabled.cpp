@@ -4,7 +4,7 @@
 
 namespace kin {
 namespace {
-constexpr auto disabled = "Shader support is disabled by KIN_RENDERER=software";
+constexpr auto disabled = "SPIR-V shader APIs are unavailable on this renderer";
 }
 
 bool shader_compiler_available() { return false; }
