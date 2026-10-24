@@ -2,8 +2,8 @@
 #include <kin/render3d/errors3d.hpp>
 
 // Experimental 3D rendering (docs/3d_plan.md): 3D views drawn inside a 2D
-// frame, on the SDL_GPU backend. The API may change in any release. Built
-// with KIN_EXPERIMENTAL_3D (a CMake option).
+// frame, on the SDL_GPU and experimental WebGL2 backends. The API may change
+// in any release. Built with KIN_EXPERIMENTAL_3D (a CMake option).
 //
 //     kin::Renderer3D r3d{renderer};
 //     kin::Mesh3D cube = r3d.create_mesh(kin::meshes::box({1, 1, 1})).value_or({});
@@ -15,7 +15,7 @@
 //     r3d.render(view, scene);                       // after the 2D drawn so far
 //     renderer.draw_texture(view.texture(), {0, 0, 640, 360});
 //
-// Without SDL_GPU (SDL_Renderer, headless runs), meshes are empty and a view
+// Without a 3D backend (SDL_Renderer, headless runs), meshes are empty and a view
 // shows only its background.
 
 #if !defined(KIN_EXPERIMENTAL_3D)
@@ -76,7 +76,7 @@ public:
     // Draws through `renderer`, which must outlive it.
     explicit Renderer3D(Renderer2D& renderer);
 
-    // Whether the renderer's backend draws 3D (SDL_GPU does, SDL_Renderer
+    // Whether the renderer's backend draws 3D (SDL_GPU and WebGL2 do, SDL_Renderer
     // doesn't).
     bool available() const { return _backend != nullptr; }
     // What views can have; all defaults where 3D isn't available.

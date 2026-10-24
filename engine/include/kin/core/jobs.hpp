@@ -47,6 +47,10 @@ struct JobSystemConfig {
     // Most workers running background jobs at once, so parallel_for always has
     // threads free. 0: half the workers, at least 1.
     i32 max_background = 0;
+    // Cooperative execution on the caller: work runs when pumped or waited on,
+    // and completion callbacks still run only in pump()/drain(). Browser builds
+    // without pthreads always use this mode. Zero workers retains its old meaning.
+    bool single_threaded = false;
 };
 
 struct JobSystemStats {
@@ -71,12 +75,19 @@ struct JobStateBase {
     std::atomic<JobStatus> status{JobStatus::Queued};
     mutable std::mutex mutex;
     mutable std::condition_variable finished;
+    std::function<void()> progress;
 
     bool is_finished() const {
         const JobStatus s = status.load(std::memory_order_acquire);
         return s == JobStatus::Done || s == JobStatus::Cancelled;
     }
     void wait() const {
+        if (progress) {
+            while (!is_finished()) {
+                progress();
+            }
+            return;
+        }
         std::unique_lock lock{mutex};
         finished.wait(lock, [this] { return is_finished(); });
     }
@@ -215,6 +226,7 @@ private:
 
     void enqueue(StatePtr state, bool has_then);
     void worker_loop();
+    bool run_one();
 
     // One parallel_for's bookkeeping; see parallel_for().
     struct ParallelRun {
@@ -239,6 +251,7 @@ private:
     u64 _parallel_generation = 0;
     std::mutex _parallel_mutex; // one parallel_for at a time
     bool _stopping = false;
+    bool _single_threaded = false;
     std::vector<std::thread> _workers;
 };
 

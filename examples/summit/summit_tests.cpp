@@ -1626,7 +1626,7 @@ void test_nothing_of_the_route_is_inside_decor() {
 
 } // namespace
 
-int main(int argc, char** argv) {
+int run_summit_tests(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "-v")
             verbose = true;
@@ -1677,3 +1677,9 @@ int main(int argc, char** argv) {
     std::printf("summit_tests: all passed\n");
     return 0;
 }
+
+#ifndef KIN_WEB_TEST_DRIVER
+int main(int argc, char** argv) {
+    return run_summit_tests(argc, argv);
+}
+#endif

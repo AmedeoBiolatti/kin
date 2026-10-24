@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <kin/assets/content.hpp>
 #include <kin/render3d/renderer3d.hpp>
+#include <stdexcept>
 
 namespace summit {
 using namespace kin;
@@ -42,6 +43,10 @@ ExternalAssets::ExternalAssets(Assets3D& assets, const SummitLevel& level, bool 
     std::printf("summit: external assets %u/%u models, shared atlas %s\n", loaded, unsigned(PropCount),
                 atlas ? "loaded" : "missing");
 
+#ifdef __EMSCRIPTEN__
+    if (loaded != PropCount)
+        throw std::runtime_error("Summit's bundled prop assets are incomplete");
+#endif
     const auto scenery = scenery_props(level);
     _scenery_instances = u32(scenery.size());
     std::size_t mesh_batches = 0;

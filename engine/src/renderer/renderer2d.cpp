@@ -14,6 +14,9 @@
 #if KIN_HAS_SDL_RENDERER
 #include "sdl_renderer2d_backend.hpp"
 #endif
+#if KIN_HAS_WEBGL2_RENDERER
+#include "webgl2_renderer2d_backend.hpp"
+#endif
 #if KIN_HAS_GPU_RENDERER
 #include "embedded_gpu_shader.hpp"
 #include "gpu/gpu_renderer2d_backend.hpp"
@@ -73,7 +76,9 @@ struct Renderer2D::OpenClip {
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     const auto choice = requested_renderer();
-#if KIN_HAS_COMPACT_RENDERER
+#if KIN_HAS_WEBGL2_RENDERER
+    return std::make_unique<WebGL2Renderer2DBackend>(window, vsync);
+#elif KIN_HAS_COMPACT_RENDERER
     return std::make_unique<CompactRenderer2DBackend>(window, vsync);
 #elif !KIN_HAS_GPU_RENDERER
     return std::make_unique<SdlRenderer2DBackend>(window, vsync);

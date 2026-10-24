@@ -7,6 +7,20 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
+  ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,
+  fullscreen and persistent settings with a storage-denied fallback.
+- Share owned scene/window sessions between native loops and browser frames;
+  add cooperative jobs and select serial Jolt when workers are unavailable.
+  Permit rendering-only 3D builds without Jolt or Lua.
+- Add WebGL2 render targets, instancing, stock PBR materials, skinning,
+  procedural sky/fog and cascaded sun shadows. Cache material state and instance
+  buffers, preserve indexed 2D geometry and draw common HUD shapes analytically
+  with shared native coverage math. Keep caches bounded with streaming fallback.
+- Add browser rendering/gameplay CI, simulation exports, pixel references and
+  matched native/browser benchmark tools. Record CPU, upload and pacing data
+  separately from optional profiling/GPU diagnostics; retain exact symbols.
+
 - Added tag-triggered release publishing gated on the full CI matrix and fresh
   desktop runtime acceptance. Publish the validated player archives, matching
   symbols, reports and checksums without rebuilding.

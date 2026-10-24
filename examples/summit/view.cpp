@@ -302,11 +302,16 @@ void SummitView::make_textures(bool external_assets) {
         _grass_normal = load("Ground037-NormalGL.jpg", false);
         _grass_orm = load("Ground037-ORM.png", false);
         if (_rock_albedo && _rock_normal && _rock_orm && _grass_albedo && _grass_normal && _grass_orm) {
+            _imported_materials = true;
             std::printf("summit: imported PBR materials 2/2, six 1K maps, shared ORM/AO\n");
             return;
         }
         _rock_orm = _grass_orm = Texture{};
     }
+#ifdef __EMSCRIPTEN__
+    if (external_assets)
+        throw std::runtime_error("Summit's bundled terrain materials are incomplete");
+#endif
     constexpr i32 size = 512;
     std::vector<f32> h(std::size_t(size) * std::size_t(size));
     for (i32 y = 0; y < size; ++y) {
@@ -375,9 +380,10 @@ void SummitView::make_textures(bool external_assets) {
         r.set_scale_mode(_rock_normal, ScaleMode::Mipmapped);
 }
 
-SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_assets)
-    : _r3d(&r3d), _assets(r3d, content_root()), _external_assets(_assets, level, external_assets),
-      _look(&looks().front()), _bounds(level.bounds), _level_height(level.height()) {
+SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_assets, bool core_quality)
+    : _r3d(&r3d), _core_quality(core_quality), _assets(r3d, content_root()),
+      _external_assets(_assets, level, external_assets), _look(&looks().front()), _bounds(level.bounds),
+      _level_height(level.height()) {
     make_textures(external_assets);
     const auto upload = [&](std::vector<RenderMeshData> data, std::vector<Part>& into, bool textured,
                             f32 normal_scale) {
@@ -544,9 +550,14 @@ SummitView::SummitView(Renderer3D& r3d, const SummitLevel& level, bool external_
             }
         }
         if (imported) {
+            _imported_person = true;
             std::printf("summit: authored survivor loaded, canonical 25-joint rig, five clips\n");
             _person_model = std::move(imported);
         } else {
+#ifdef __EMSCRIPTEN__
+            if (external_assets)
+                throw std::runtime_error("Summit's bundled survivor rig/animations are incomplete");
+#endif
             auto model = std::make_shared<Model3D>(*make_climber(r3d, style_for_player(0)));
             make_climber_clips(*model);
             _person_model = std::move(model);
@@ -609,10 +620,17 @@ bool SummitView::set_look(const std::string& name) {
 
 void SummitView::set_effects(const EffectSettings& effects, f32 time_hours_per_minute) {
     _effects = effects;
+    if (_core_quality || !_r3d->capabilities().particles) {
+        _effects.fires = false;
+        _effects.puffs = false;
+        _effects.wind_particles = false;
+    }
     _time_speed = time_hours_per_minute;
 }
 
 ViewOptions3D SummitView::view_options(u32 samples) const {
+    if (_core_quality)
+        return {.samples = 1, .background = Color::rgb(120, 150, 190)};
     return {.samples = samples,
             .background = Color::rgb(120, 150, 190),
             .hdr = true,
@@ -833,7 +851,7 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
                  .intensity = 1.0f,
                  .sun_size = 1.0f,
                  .sun_disc = 30.0f,
-                 .stars = k.stars,
+                 .stars = !_core_quality && k.stars,
                  .moon = false};
     scene.fog = {.enabled = true,
                  .density = e.fog_density,
@@ -844,13 +862,24 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
                  .sun_scatter = 0.25f,
                  .sun_anisotropy = 0.6f};
     l.sky_lights_scene = true;
-    const SkyState3D sky_state =
-        kin::apply({.hours = e.hours, .day_of_year = 172.0f, .latitude = 46.0f}, l, scene.sky, scene.fog);
+    TimeOfDay3D day{.hours = e.hours, .day_of_year = 172.0f, .latitude = 46.0f};
+    day.compute_ambient = !_core_quality;
+    const SkyState3D sky_state = kin::apply(day, l, scene.sky, scene.fog);
+    if (_core_quality) {
+        _core_ambient.update(scene.sky, l.sun.direction);
+        l.sky_lights_scene = false;
+        l.ambient = _core_ambient.ambient;
+        l.ground_ambient = {.enabled = true, .color = _core_ambient.ground};
+    }
     l.shadow_area = _bounds;
     l.shadow_resolution = 2048;
     // Four cascades over 64 m: the climber's wall is a few metres away and the sun often grazes it; wider maps show the
     // texels as stripes on such a face.
     l.shadow_cascades = 4;
+    if (_core_quality) {
+        l.shadow_resolution = 1024;
+        l.shadow_cascades = 2;
+    }
     l.shadow_distance = 64.0f;
     Weather3D& w = scene.weather;
     w = Weather3D{};
@@ -870,6 +899,10 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
     if (w.active()) {
         const Fog3D base = scene.fog;
         w.apply(l, scene.fog, base);
+    }
+    if (_core_quality) {
+        // Keep weather's fog/light changes, without the native weather sprites.
+        w.rain.intensity = w.snow.intensity = w.mist.intensity = w.dust.intensity = 0;
     }
 
     for (const Part& p : _terrain)
@@ -974,8 +1007,9 @@ void SummitView::fill(Scene3D& scene, const Game& game, const CameraView& camera
             sl.inner_angle = 28.0f;
             sl.outer_angle = 55.0f;
             sl.id = u32(2000 + i);
-            scene.add_spot_light(sl);
-            _lights_added += 2;
+            if (!_core_quality)
+                scene.add_spot_light(sl);
+            _lights_added += _core_quality ? 1 : 2;
         }
     }
     if (game.config().expedition)

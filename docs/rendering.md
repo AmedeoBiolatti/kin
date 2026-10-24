@@ -1,5 +1,8 @@
 # Rendering And Sprites
 
+The experimental [WebGL2 browser target](web.md) implements a subset of this API;
+its capabilities and build instructions are documented separately.
+
 3D views drawn inside the 2D frame, experimental, have a page of their own:
 [3D rendering](rendering_3d.md).
 

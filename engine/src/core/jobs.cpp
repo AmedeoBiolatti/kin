@@ -43,6 +43,12 @@ void set_default_job_system(JobSystem* jobs) {
 }
 
 JobSystem::JobSystem(JobSystemConfig config) {
+    _single_threaded = config.single_threaded || !KIN_ENABLE_THREADS;
+    if (_single_threaded) {
+        _max_background = 1;
+        return;
+    }
+#if KIN_ENABLE_THREADS
     const i32 hardware = static_cast<i32>(std::max(1u, std::thread::hardware_concurrency()));
     const i32 workers = config.workers > 0 ? config.workers : std::max(1, hardware - 1);
     _max_background = config.max_background > 0 ? std::min(config.max_background, workers)
@@ -51,6 +57,7 @@ JobSystem::JobSystem(JobSystemConfig config) {
     for (i32 i = 0; i < workers; ++i) {
         _workers.emplace_back([this] { worker_loop(); });
     }
+#endif
 }
 
 JobSystem::~JobSystem() {
@@ -70,12 +77,17 @@ JobSystem::~JobSystem() {
         job->stop.request_stop();
     }
     _work_cv.notify_all();
+#if KIN_ENABLE_THREADS
     for (std::thread& worker : _workers) {
         worker.join();
     }
+#endif
 }
 
 void JobSystem::enqueue(StatePtr state, bool has_then) {
+    if (_single_threaded) {
+        state->progress = [this] { run_one(); };
+    }
     {
         std::lock_guard lock{_mutex};
         if (has_then) {
@@ -84,6 +96,36 @@ void JobSystem::enqueue(StatePtr state, bool has_then) {
         _queue.push_back(std::move(state));
     }
     _work_cv.notify_one();
+}
+
+bool JobSystem::run_one() {
+    StatePtr job;
+    {
+        std::lock_guard lock{_mutex};
+        if (_queue.empty()) {
+            return false;
+        }
+        job = std::move(_queue.front());
+        _queue.pop_front();
+    }
+    if (job->start()) {
+        {
+            std::lock_guard lock{_mutex};
+            _running.push_back(job);
+        }
+        try {
+            job->task(job->stop.get_token());
+        } catch (...) {
+            job->error = std::current_exception();
+        }
+        job->task = nullptr;
+        job->finish(detail::JobStatus::Done);
+        {
+            std::lock_guard lock{_mutex};
+            std::erase(_running, job);
+        }
+    }
+    return true;
 }
 
 void JobSystem::worker_loop() {
@@ -154,7 +196,7 @@ void JobSystem::parallel_for(i32 count, const std::function<void(i32)>& body) {
     if (count <= 0) {
         return;
     }
-    if (count == 1 || t_in_parallel_for) {
+    if (_single_threaded || count == 1 || t_in_parallel_for) {
         for (i32 i = 0; i < count; ++i) {
             body(i);
         }
@@ -182,6 +224,17 @@ void JobSystem::parallel_for(i32 count, const std::function<void(i32)>& body) {
 }
 
 void JobSystem::pump() {
+    if (_single_threaded) {
+        // Only work queued at entry: callbacks may enqueue a later generation.
+        std::size_t count = 0;
+        {
+            std::lock_guard lock{_mutex};
+            count = _queue.size();
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            run_one();
+        }
+    }
     for (;;) {
         StatePtr job;
         {
@@ -205,6 +258,10 @@ void JobSystem::pump() {
 
 void JobSystem::drain() {
     for (;;) {
+        if (_single_threaded) {
+            while (run_one()) {
+            }
+        }
         {
             std::unique_lock lock{_mutex};
             _idle_cv.wait(lock, [&] { return _stopping || (_queue.empty() && _running.empty()); });

@@ -12,6 +12,8 @@ PATTERNS = (
     "engine/include/kin/render3d/*.hpp",
     "engine/src/render3d/*.hpp",
     "engine/src/render3d/*.cpp",
+    "engine/src/renderer/webgl2*.*pp",
+    "experimental/webgl2/*.*pp",
     "engine/src/renderer/gpu/gpu_*3d.hpp",
     "engine/src/renderer/gpu/gpu_*3d.cpp",
     "engine/src/renderer/gpu/gpu_mesh_pool.*pp",

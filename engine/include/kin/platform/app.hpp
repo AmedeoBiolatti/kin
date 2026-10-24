@@ -86,6 +86,10 @@ public:
     const Input& input() const { return _input; }
 
     void run(std::function<void(f32 dt)> update, std::function<void(f32 alpha)> render);
+    // Caller-driven loop (e.g. requestAnimationFrame). Own callbacks and all
+    // referenced game state until the loop stops. step_loop never sleeps.
+    void start_loop(std::function<void(f32 dt)> update, std::function<void(f32 alpha)> render);
+    bool step_loop(f32 elapsed_seconds);
     void run_for(i32 frames, std::function<void(f32 dt, i32 frame)> update);
     void run_for(i32 frames,
                  std::function<void(f32 dt, i32 frame)> update,
@@ -118,6 +122,11 @@ private:
     AppFrameStats _frame_stats{};
     f32 _time_scale = 1.0f;
     f32 _max_fps = 0.0f;
+    std::function<void(f32)> _update;
+    std::function<void(f32)> _render;
+    f32 _accumulator = 0.0f;
+    FrameTimeSnapper _snapper;
+    bool _advance_input = true;
 
     void pace_frame(u64& next_frame_ns);
     bool _running = false;

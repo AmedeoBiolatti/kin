@@ -147,6 +147,41 @@ LinearRgb sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u3
 
 namespace sky_model {
 
+bool AmbientLight3D::update(const Sky3D& sky, Vec3f sun_direction) {
+    const Vec3f sun = length_squared(sun_direction) > 0 ? normalize(sun_direction) : Vec3f{0, 1, 0};
+    const Vec3f moon = length_squared(sky.moon_direction) > 0 ? normalize(sky.moon_direction) : Vec3f{0, 1, 0};
+    const std::array<f32, 17> key{sun.x,
+                                  sun.y,
+                                  sun.z,
+                                  sky.sun_intensity,
+                                  sky.turbidity,
+                                  sky.intensity,
+                                  sky.ground_color.r,
+                                  sky.ground_color.g,
+                                  sky.ground_color.b,
+                                  sky.moon ? 1.0f : 0.0f,
+                                  moon.x,
+                                  moon.y,
+                                  moon.z,
+                                  sky.moon_light,
+                                  sky.night_color.r,
+                                  sky.night_color.g,
+                                  sky.night_color.b};
+    f32 moved = 0;
+    for (std::size_t i = 0; i < key.size(); ++i)
+        moved = std::max(moved, std::abs(key[i] - _key[i]) / std::max(1.0f, std::abs(_key[i])));
+    const u32 interval = std::max(1u, sky.light_interval);
+    _age = std::min(_age, interval - 1) + 1;
+    if (_made && (moved <= std::max(0.0f, sky.light_threshold) || _age < interval))
+        return false;
+    ambient = sky_irradiance(sky, sun, {0, 1, 0}, 16, 8);
+    ground = sky_irradiance(sky, sun, {0, -1, 0}, 16, 8);
+    _key = key;
+    _age = 0;
+    _made = true;
+    return true;
+}
+
 f32 FogTable3D::coordinate(f32 s) {
     // c is air_mass()'s: the rounding's 0.025 at the horizon, 1 at the zenith, its log over log 40 from 0 to 1.
     const f32 h = std::max(s, 0.0f);
@@ -358,8 +393,10 @@ SkyState3D evaluate(const TimeOfDay3D& time, const Sky3D& base) {
     sky.moon = s.moon_light > 0.0f;
     sky.moon_direction = s.moon_direction;
     sky.moon_light = s.moon_light;
-    s.ambient = sky_irradiance(sky, s.sun_direction, {0.0f, 1.0f, 0.0f});
-    s.ground_ambient = sky_irradiance(sky, s.sun_direction, {0.0f, -1.0f, 0.0f});
+    if (time.compute_ambient) {
+        s.ambient = sky_irradiance(sky, s.sun_direction, {0.0f, 1.0f, 0.0f});
+        s.ground_ambient = sky_irradiance(sky, s.sun_direction, {0.0f, -1.0f, 0.0f});
+    }
     // The fog's colour: the sky at the horizon, away from the sun.
     Vec3f away{-s.sun_direction.x, 0.0f, -s.sun_direction.z};
     if (length_squared(away) < 1e-6f) {
@@ -381,8 +418,10 @@ SkyState3D apply(const TimeOfDay3D& time, Lights3D& lights, Sky3D& sky, Fog3D& f
     const bool moon_up = s.moon_color.r + s.moon_color.g + s.moon_color.b > 0.0f;
     lights.fill.direction = s.moon_direction;
     lights.fill.color = s.moon_color;
-    lights.ambient = s.ambient;
-    lights.ground_ambient = {true, s.ground_ambient};
+    if (time.compute_ambient) {
+        lights.ambient = s.ambient;
+        lights.ground_ambient = {true, s.ground_ambient};
+    }
     if (time.shadows) {
         const auto smooth = [](f32 a, f32 b, f32 x) {
             const f32 t = std::clamp((x - a) / (b - a), 0.0f, 1.0f);

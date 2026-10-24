@@ -1,7 +1,7 @@
 #include <kin/assets/asset_manager.hpp>
 #include <kin/assets/content.hpp>
-
 #include <kin/l10n/localization.hpp>
+#include <sstream>
 
 #if KIN_ENABLE_AUDIO
 #include <kin/audio/audio_catalog.hpp>

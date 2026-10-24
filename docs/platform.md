@@ -1,5 +1,8 @@
 # Platform: files and processes
 
+For the experimental browser runtime and its current platform limitations, see
+[WebGL2 builds](web.md).
+
 What a game or tool built on kin needs from the desktop beyond windows and
 input, without calling SDL itself: files dropped on a window, the system's file
 dialogs, child processes, and where to keep the user's data.

@@ -1,7 +1,8 @@
 option(KIN_HEX_DEMO_BAKED_FONT "Use the embedded ASCII HUD font in hex_demo" OFF)
-add_executable(hex_demo
-    src/main.cpp
-)
+add_executable(hex_demo src/main.cpp)
+if(EMSCRIPTEN)
+    set_property(TARGET hex_demo PROPERTY KIN_WEB_EXTRA_LICENSES "${CMAKE_CURRENT_SOURCE_DIR}/FONT-LICENSE.txt")
+endif()
 
 target_compile_definitions(hex_demo PRIVATE KIN_HEX_DEMO_BAKED_FONT=$<BOOL:${KIN_HEX_DEMO_BAKED_FONT}>)
 

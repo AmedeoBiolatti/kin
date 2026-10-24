@@ -99,11 +99,16 @@ MaterialShader3D Renderer3D::compile_material_shader_operation(const std::filesy
     MaterialShader3D shader;
     if (!_backend) {
         why = "3D is not available";
-    } else if (const std::optional<std::vector<u8>> spirv = compile_glsl(source, ShaderStage::Fragment, &why)) {
-        shader = create_material_shader_operation(*spirv);
-        if (!shader.valid()) {
-            why = "the device refused the shader";
+    } else {
+#if KIN_HAS_GPU_RENDERER
+        if (const auto spirv = compile_glsl(source, ShaderStage::Fragment, &why)) {
+            shader = create_material_shader_operation(*spirv);
+            if (!shader)
+                why = "the device refused the shader";
         }
+#else
+        why = "runtime SPIR-V compilation is not available on this renderer; export a target-specific shader asset";
+#endif
     }
     if (!shader.valid()) {
         KIN_LOG_WARN_F("render", "3D: material shader not made",

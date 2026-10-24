@@ -1,8 +1,7 @@
 #pragma once
 
-#include <kin/core/types.hpp>
-
 #include <cstddef>
+#include <kin/core/hash.hpp>
 #include <string>
 #include <vector>
 
@@ -40,7 +39,5 @@ u64 hash_state(SceneManager& scenes, StateCoverage* coverage = nullptr);
 
 // The same state, item by item, in a stable order.
 std::vector<StateItem> describe_state(SceneManager& scenes);
-
-u64 hash_bytes(const void* data, std::size_t size, u64 seed = 0xcbf29ce484222325ull);
 
 } // namespace kin

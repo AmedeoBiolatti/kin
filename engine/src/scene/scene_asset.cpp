@@ -236,7 +236,7 @@ void mark_prefab_metadata(EcsWorld& world,
 } // namespace
 
 void register_builtin_editor_components(EcsWorld& world) {
-#if defined(KIN_EXPERIMENTAL_3D)
+#if defined(KIN_EXPERIMENTAL_3D) && KIN_ENABLE_PHYSICS3D
     register_render3d_components(world);
     register_physics3d_components(world);
 #endif

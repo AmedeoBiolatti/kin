@@ -813,6 +813,12 @@ suggestion; `apply()` writes them into the lights, the sky's moon and the fog's 
 looks); `sun_times()` gives sunrise and sunset. North is -z, east +x. As a component: put a `TimeOfDay3D` on an entity and call
 `WorldRenderState3D::advance_time_of_day(dt)` and `apply_time_of_day(scene)`.
 
+Set `TimeOfDay3D::compute_ambient=false` when the renderer supplies sky lighting
+and the CPU hemisphere integrals are unused. Sun/moon motion, direct light,
+daylight and fog are still evaluated every call. The returned ambient values
+are zero and `apply()` retains the caller's ambient lights. The default is true,
+preserving existing callers. Browser Summit uses this fast path.
+
 **The sky's light** (`Lights3D::sky_lights_scene`): the atmosphere and ground (no disc, stars or moon) are drawn into a 256 x 128 panorama,
 mipped and filtered with the environment machinery, and take the place of `environment` and `ambient`. It is made again only when
 the sun or the sky moved by more than `Sky3D::light_threshold` and `light_interval` renders (4) have passed, so a day sweep re-filters a few

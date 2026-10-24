@@ -1,12 +1,12 @@
 #pragma once
 
-#include <kin/runtime/game_info.hpp>
-#include <kin/platform/log.hpp>
-#include <kin/scene/scene_manager.hpp>
-
-#include <functional>
 #include <filesystem>
+#include <functional>
 #include <iosfwd>
+#include <kin/platform/log.hpp>
+#include <kin/runtime/game_info.hpp>
+#include <kin/scene/scene_manager.hpp>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -135,8 +135,37 @@ HeadlessOptions parse_headless_options(int argc, char** argv);
 
 void write_available_actions(std::ostream& out, const std::vector<AvailableInputAction>& actions);
 
+// Owns scenes, copied configuration and game metadata across asynchronous
+// frames. Optional keep_alive retains game-owned services referenced by config
+// or callbacks; raw service/output pointers otherwise remain borrowed.
+class SceneAppSession {
+public:
+    SceneAppSession(SceneAppConfig config, std::unique_ptr<SceneManager> scenes, std::shared_ptr<void> keep_alive = {});
+    ~SceneAppSession();
+    SceneAppSession(const SceneAppSession&) = delete;
+    SceneAppSession& operator=(const SceneAppSession&) = delete;
+    bool step(f32 elapsed_seconds);
+    int run();
+    int finish();
+    int exit_code() const;
+    bool finished() const;
+    SceneManager& scenes();
+    WindowedAppSession* windowed();
+
+private:
+    SceneAppSession(SceneAppConfig config, SceneManager& borrowed);
+    friend int run_scene_app(const SceneAppConfig&, SceneManager&);
+    struct Impl;
+    std::unique_ptr<Impl> _impl;
+};
+
 // Runs the scene app and returns a process exit code: 0 on success, 1 if a
 // scene reported a failure via SceneContext::report.
 int run_scene_app(const SceneAppConfig& config, SceneManager& scenes);
+
+// Owned entry point. Native runs synchronously. Browser transfers the session
+// to requestAnimationFrame and returns after initialization; no stack-owned
+// configuration, game metadata or scene manager escapes into the callback.
+int run_scene_app(SceneAppConfig config, std::unique_ptr<SceneManager> scenes, std::shared_ptr<void> keep_alive = {});
 
 } // namespace kin

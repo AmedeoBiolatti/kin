@@ -121,6 +121,9 @@ void AssetServer::pump(PumpMode mode) {
     _events.clear();
 
     if (mode == PumpMode::Budgeted) {
+        // A cooperative queue has no worker to complete these tasks. Never
+        // execute during enqueue(), which is called with server locks held.
+        if (_jobs->worker_count() == 0) _jobs->pump();
         // Non-blocking: apply whatever finished so far, once.
         std::vector<std::unique_ptr<LoadJob>> batch;
         {

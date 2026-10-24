@@ -5,8 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <kin/core/hash.hpp>
 #include <kin/render3d/skeleton3d.hpp>
-#include <kin/runtime/state_hash.hpp>
 
 namespace summit {
 

@@ -806,6 +806,12 @@ Benchmark runs ignore live game controls so shared-desktop input cannot pause th
 Reports include traversal p50/p95/p99, long frames, startup/asset setup, draw counts and process-tree peak RSS. Startup and the
 two-second rendering warmup are excluded from traversal timings. The whole level is preloaded; this does not test asset streaming.
 
+To match the browser rendering budget on native, use `--quality core --scenery compact`: SDR, one sample,
+cached hemisphere sky lighting and two 1024px shadow cascades, without stars, particles or spot lights.
+`--fps 60` adds a native frame ceiling; the default remains uncapped. The full native profile remains the default.
+For the matched NVIDIA/Vulkan native/browser traversal harness and separate GPU diagnostics, see
+[web comparisons](../docs/web.md).
+
 ### Original climbing course
 
 Use `--classic` to play the original course. The existing `--script climb`, `fall` and `rope` runs still use this course and retain

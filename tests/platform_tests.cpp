@@ -424,6 +424,42 @@ int main() {
     assert(!app.input().frame_pressed("copy"));                             // cleared next frame
     assert(!app.input().mouse_frame_pressed(kin::MouseButton::Left));        // cleared next frame
 
+    // Browser-driven frames use the same accumulator as App::run, without
+    // sleeping or leaving stack-owned state in an asynchronous callback.
+    {
+        kin::App driven{{.mode = kin::AppMode::Headless,
+                         .fixed_dt = 0.125f,
+                         .max_frame_time = 0.5f,
+                         .max_steps = 2,
+                         .snap_tolerance = 0}};
+        int updates = 0, renders = 0;
+        driven.start_loop(
+            [&](kin::f32 dt) {
+                assert(dt == 0.125f);
+                ++updates;
+            },
+            [&](kin::f32) { ++renders; });
+        assert(driven.step_loop(0.3125f));
+        assert(updates == 2 && renders == 1 && driven.frame_stats().alpha == 0.5f);
+        driven.step_loop(0.03125f);
+        assert(updates == 2 && renders == 2 && driven.frame_stats().alpha == 0.75f);
+        driven.step_loop(1.0f);
+        assert(updates == 4 && driven.frame_stats().hit_max_steps && driven.frame_stats().alpha == 0);
+        driven.set_time_scale(0);
+        driven.step_loop(0.25f);
+        assert(updates == 4);
+        driven.quit();
+        assert(!driven.step_loop(0.25f) && renders == 4);
+        driven.set_time_scale(1);
+        driven.start_loop(
+            [&](kin::f32) {
+                ++updates;
+                driven.quit();
+            },
+            [&](kin::f32) { ++renders; });
+        assert(!driven.step_loop(0.125f) && updates == 5 && renders == 4);
+    }
+
     int completed_renders = 0;
     app.run_for(2, [&app](kin::f32 dt, kin::i32 frame) {
         assert(dt > 0.0f);

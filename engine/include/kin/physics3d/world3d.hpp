@@ -353,6 +353,7 @@ struct World3DConfig {
     // as the world. A JobSystem's `max_background` limits how many workers help.
     JobSystem* jobs = nullptr;
     // Runs the whole step on the calling thread (no jobs; for tests and tools).
+    // Cooperative/no-worker Kin job systems always use Jolt's serial job system.
     bool single_threaded = false;
     // Contact events (begin and end of each body pair's touching, sensor overlaps), opt-in. Off costs
     // nothing: a game that drains them and throws them away should turn them off (each is recorded in Jolt's

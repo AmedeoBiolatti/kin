@@ -139,6 +139,20 @@ LinearRgb sky_ground_light(const Sky3D& sky, Vec3f sun_direction);
 LinearRgb sky_irradiance(const Sky3D& sky, Vec3f sun_direction, Vec3f normal, u32 samples_u = 64, u32 samples_v = 32);
 
 namespace sky_model {
+// Core-profile diffuse lighting at 16x8 samples per hemisphere. Call update once
+// per rendered view; light_threshold/light_interval bound recalculation as the sky moves.
+// Camera motion and sun/moon discs do not change this diffuse light.
+class AmbientLight3D {
+public:
+    bool update(const Sky3D& sky, Vec3f sun_direction);
+    LinearRgb ambient{}, ground{};
+
+private:
+    std::array<f32, 17> _key{};
+    u32 _age = 0;
+    bool _made = false;
+};
+
 // The sky's light as the GPU's fog reads it (Fog3D::colour_from_sky): from a table made once for each sky and sun, not
 // the integral at every pixel. A ray's scattering splits by its phase functions, the only part that depends on the
 // angle mu to the light: a light's share along a ray at sin(elevation) s is rayleigh_phase(mu) R(s) + mie_phase(mu)
