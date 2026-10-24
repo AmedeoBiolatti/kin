@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     # ci/** branches run CI on push, so workflow changes can be tried before a PR.
     branches: [main, 'ci/**', 'exp/3d-*']
@@ -32,7 +33,7 @@ jobs:
         with:
           script: |
             let run = true;
-            if (context.eventName === 'push' && context.ref !== 'refs/heads/main') {
+            if (context.eventName === 'push' && context.ref.startsWith('refs/heads/') && context.ref !== 'refs/heads/main') {
               const branch = context.ref.replace('refs/heads/', '');
               const {data} = await github.rest.pulls.list({
                 ...context.repo, state: 'open', head: `${context.repo.owner}:${branch}`, per_page: 1
@@ -162,7 +163,7 @@ jobs:
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} ${{ matrix.options }}
+        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ${{ matrix.options }}
 
       - name: Install glslc (Windows)
         if: runner.os == 'Windows'

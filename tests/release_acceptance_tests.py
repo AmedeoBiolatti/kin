@@ -29,11 +29,21 @@ class ReleaseAcceptanceTests(unittest.TestCase):
                 item=zipfile.ZipInfo()
                 item.filename=name  # Preserve malformed backslashes on Windows too.
                 zipped.writestr(item,b'bad')
-            with self.assertRaises(ValueError): extract(archive,self.root/'out')
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                extract(archive,self.root/'out')
         archive=self.root/'case.zip'
         with zipfile.ZipFile(archive,'w') as zipped:
             zipped.writestr('game/A',b'a');zipped.writestr('game/a',b'b')
         with self.assertRaises(ValueError): extract(archive,self.root/'out')
+
+    def test_zip_rejects_windows_normalization(self):
+        archive=self.root/'backslash.zip'
+        with zipfile.ZipFile(archive,'w') as zipped:
+            item=zipfile.ZipInfo()
+            item.filename='game\\bad'
+            zipped.writestr(item,b'bad')
+        with patch('zipfile.os.sep', '\\'):
+            with self.assertRaises(ValueError): extract(archive,self.root/'out')
 
     def test_content_pack_checksums_and_paths(self):
         import struct
@@ -68,12 +78,13 @@ class ReleaseAcceptanceTests(unittest.TestCase):
 
     def test_readonly_roundtrip(self):
         import os
-        if os.name=='nt' or os.geteuid()==0: self.skipTest('Native ACLs are covered by release CI acceptance')
+        if os.name!='nt' and os.geteuid()==0: self.skipTest('Root bypasses Unix permissions')
         folder=self.root/'game';folder.mkdir();(folder/'signal_siege').write_bytes(b'game')
         before=snapshot(folder)
         readonly(folder,True)
         try:
             with self.assertRaises(PermissionError): (folder/'write').write_text('bad', encoding='utf-8')
+            with self.assertRaises(PermissionError): (folder/'signal_siege').write_bytes(b'changed')
         finally: readonly(folder,False)
         self.assertEqual(snapshot(folder),before)
 

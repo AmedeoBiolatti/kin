@@ -310,3 +310,37 @@ four locales and user settings persistence. `--smoke-only` measures ABI but
 explicitly does not qualify the artifact for release. The automated jobs are in
 `.github/workflows/desktop-release.yml`; Windows client and physical GPU/audio
 qualification remain separate checks.
+
+## Publishing a release
+
+`.github/workflows/release.yml` runs when a `vMAJOR.MINOR.PATCH` tag is pushed.
+The tag must match `project(kin VERSION ...)` and point at the commit being
+tested. Finalize the version and changelog before tagging. A manual workflow
+run must also select that version tag; running it on a branch is rejected.
+
+Publication waits for the complete CI matrix and desktop acceptance workflow,
+including the fresh Linux software/GPU and Windows runtime jobs. It downloads
+their artifacts from the same workflow run and never rebuilds the accepted
+players. `tools/prepare_release.py` verifies the source revision, version,
+clean-source identity, package hashes, symbol binding, compiler audit and
+acceptance reports before collecting the upload directory.
+
+The GitHub release contains the validated Signal Siege sample players for
+Linux and Windows, their matching symbols and component/asset/cooking/size
+reports, acceptance reports, `release-manifest.json` and an outer `SHA256SUMS`.
+These desktop-v1 Linux players require Ubuntu 24.04 or newer; they do not replace
+the separate Steam Runtime compatibility build. This workflow publishes sample
+game packages, not an engine SDK or Android/WebAssembly exports. Automated
+acceptance does not substitute for the physical GPU/audio checks above.
+
+For a local review of downloaded workflow artifacts:
+
+```sh
+python3 tools/prepare_release.py --check-tag v0.2.7 --revision <tag-commit> \
+    --incoming incoming --output publish
+```
+
+The output directory must be empty. Assets are uploaded to a draft release and
+made public only after the upload succeeds. Existing GitHub releases are not
+overwritten; if publication fails after creating a draft, inspect its assets and
+recover explicitly rather than replacing published files automatically.

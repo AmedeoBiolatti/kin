@@ -241,7 +241,10 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
 #if !KIN_HAS_GPU_RENDERER
     _handle = SDL_CreateRenderer(sdl_window, "software");
 #else
-    _handle = SDL_CreateRenderer(sdl_window, "gpu");
+    // Keep the accelerated default, but honor SDL's explicit driver override
+    // (including "software" when qualifying the CPU fallback on a real display).
+    const char* driver = SDL_GetHint(SDL_HINT_RENDER_DRIVER);
+    _handle = SDL_CreateRenderer(sdl_window, driver && *driver ? driver : "gpu");
     if (!_handle) {
         _handle = SDL_CreateRenderer(sdl_window, nullptr);
     }

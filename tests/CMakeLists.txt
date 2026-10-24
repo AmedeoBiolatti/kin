@@ -19,6 +19,8 @@ if(Python3_Interpreter_FOUND)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/component_config_tests.py")
     add_test(NAME kin-release-acceptance-tools
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_acceptance_tests.py")
+    add_test(NAME kin-release-publishing
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_publishing_tests.py")
     add_test(NAME kin-bundled-fonts
         COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_bundled_fonts.py")
     add_test(NAME kin-asset-cooking

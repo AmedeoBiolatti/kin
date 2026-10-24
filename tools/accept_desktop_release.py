@@ -27,7 +27,12 @@ def extract(archive, destination):
     names=set()
     with zipfile.ZipFile(archive) as zipped:
         for item in zipped.infolist():
-            parts=item.filename.rstrip('/').split('/')
+            # ZipInfo normalizes backslashes on Windows and truncates NULs.
+            # Validate the original archive spelling before those transformations.
+            name=item.orig_filename
+            if name != item.filename or '\x00' in name:
+                raise ValueError('Unsafe ZIP path: '+repr(name))
+            parts=name.rstrip('/').split('/')
             if any(p in ('','.','..') or ':' in p or '\\' in p for p in parts):
                 raise ValueError('Unsafe ZIP path: '+item.filename)
             if stat.S_ISLNK(item.external_attr >> 16): raise ValueError('ZIP symlinks are unsupported')
@@ -61,8 +66,11 @@ def abi(root, maximum_glibc, maximum_glibcxx, enforce=True):
 def readonly(root, enable):
     if os.name=='nt':
         user=subprocess.check_output(['whoami'],text=True).strip()
-        rights='RX' if enable else 'F'
-        subprocess.run(['icacls',str(root),'/inheritance:r','/grant:r',f'{user}:(OI)(CI)({rights})','/T','/Q'],
+        # A read-only grant alone cannot override the runner's writable group
+        # grants (e.g. Administrators). Deny mutation explicitly while retaining
+        # read/execute and WRITE_DAC so the owner can restore the temporary tree.
+        operation=['/deny',f'{user}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)'] if enable else ['/remove:d',user]
+        subprocess.run(['icacls',str(root),*operation,'/T','/Q'],
                        check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     else:
         for path in sorted(root.rglob('*'),reverse=True):
@@ -155,6 +163,8 @@ def accept(package, output, backend='software', expected_revision=None, require_
             environment.update(SDL_VIDEO_DRIVER=video_driver or ('x11' if backend=='gpu' and os.name!='nt' else 'windows' if backend=='gpu' else 'dummy'),
                 SDL_AUDIO_DRIVER='dummy',KIN_RENDER_BACKEND='gpu' if backend=='gpu' else 'sdl',KIN_LOG_FORMAT='text',
                 XDG_DATA_HOME=str(temp/'player-data'),APPDATA=str(temp/'player-data'),HOME=str(temp/'player-home'),USERPROFILE=str(temp/'player-home'))
+            if backend=='software': environment['SDL_RENDER_DRIVER']='software'
+            else: environment.pop('SDL_RENDER_DRIVER',None)
             if os.name=='nt': environment['PATH']=os.pathsep.join([str(Path(os.environ['SystemRoot'])/'System32'),os.environ['SystemRoot']])
             readonly(root,True)
             enforced=False

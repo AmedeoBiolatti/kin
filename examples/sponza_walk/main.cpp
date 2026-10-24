@@ -779,13 +779,13 @@ using Clock = std::chrono::steady_clock;
 
 class SponzaScene final : public Scene {
 public:
-    SponzaScene(Options options, fs::path model_path)
-        : _options(std::move(options)), _model_path(std::move(model_path)) {
+    SponzaScene(Options options, fs::path model_path, bool& unavailable)
+        : _options(std::move(options)), _model_path(std::move(model_path)), _unavailable(unavailable) {
+        _unavailable = false;
         if (_options.sensitivity > 0)
             _s.sensitivity = _options.sensitivity;
     }
     ~SponzaScene() override { release_mouse(); }
-    bool unavailable() const { return _unavailable; }
 
     std::string_view name() const override { return "Sponza Walk"; }
 
@@ -2768,7 +2768,7 @@ private:
 
     Options _options;
     fs::path _model_path;
-    bool _unavailable = false;
+    bool& _unavailable;
     Settings _s;
     Caps _caps;
     int _default_msaa = 2;
@@ -2939,11 +2939,10 @@ int run(int argc, char** argv) {
         // A window draws at the display's own pixels (the panel scales by display_scale()); a headless picture is as
         // big as asked.
         window.high_pixel_density = !headless.enabled;
+        bool unavailable = false;
         SceneManager scenes;
-        SponzaScene* scene = nullptr;
         const auto build = [&](SceneManager& manager) {
-            auto next = std::make_unique<SponzaScene>(options, model);
-            scene = next.get();
+            auto next = std::make_unique<SponzaScene>(options, model, unavailable);
             manager.push(std::move(next));
         };
         build(scenes);
@@ -2953,7 +2952,7 @@ int run(int argc, char** argv) {
                                         .render_headless = headless_picture,
                                         .reset_scenes = build},
                                        scenes);
-        if (scene && scene->unavailable()) {
+        if (unavailable) {
             const char* required = std::getenv("KIN_REQUIRE_GPU_TESTS");
             const bool require_gpu = required && required[0] && std::string_view(required) != "0";
             return options.skip_if_unavailable && !require_gpu ? exit_skipped : 1;

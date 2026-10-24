@@ -190,6 +190,10 @@ void test_particle_catalog_seed_roundtrip() {
     const kin::ParticleFieldState first = kin::init_particle_field(*field);
     const kin::ParticleFieldState second = kin::init_particle_field(*reloaded_field);
     assert(first.particles.size() == second.particles.size());
+    // Seed 777 consumes brightness, then x/y. Preserve this stream across
+    // compiler versions and LTO, not just equality between two wrong streams.
+    assert((first.particles[0].position == kin::Vec2f{0x1.31d9ccp+2f, 0x1.27c698p+3f}));
+
     assert(first.particles[0].position == second.particles[0].position);
     assert(first.particles[1].velocity == second.particles[1].velocity);
 }

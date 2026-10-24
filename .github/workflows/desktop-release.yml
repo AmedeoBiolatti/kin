@@ -1,5 +1,6 @@
 name: Desktop release acceptance
 on:
+  workflow_call:
   pull_request:
   workflow_dispatch:
   push:
@@ -53,7 +54,7 @@ jobs:
       - name: Build real player package and integration checks
         run: cmake --build --preset ${{ matrix.preset }} --parallel 4
       - name: Packaging regressions
-        run: ctest --test-dir build/${{ matrix.preset }} -C Release -R "^kin-(desktop-package|examples|components|component-targets|component-config|asset-report|asset-cooking|bundled-fonts|release-acceptance-tools)$" --output-on-failure --timeout 300
+        run: ctest --test-dir build/${{ matrix.preset }} -C Release -R "^kin-(desktop-package|examples|components|component-targets|component-config|asset-report|asset-cooking|bundled-fonts|release-acceptance-tools|release-publishing)$" --output-on-failure --timeout 300
       - name: Audit compiler and linker settings
         if: runner.os == 'Linux'
         shell: bash
