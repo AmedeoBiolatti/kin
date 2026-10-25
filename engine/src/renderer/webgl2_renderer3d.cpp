@@ -199,6 +199,8 @@ bool visible(const Bounds3D& bounds, const Mat4f& matrix) {
 GLint wrap(Wrap3D mode) {
     return mode == Wrap3D::Repeat ? GL_REPEAT : mode == Wrap3D::Mirror ? GL_MIRRORED_REPEAT : GL_CLAMP_TO_EDGE;
 }
+// EXT_texture_filter_anisotropic's names (WebGL2's header has none).
+constexpr GLenum texture_max_anisotropy = 0x84FE, max_texture_max_anisotropy = 0x84FF;
 u32 level_for(const Scene3D& scene, const Scene3D::Draw& draw, const MeshInstance3D& copy, f32 height) {
     const u32 count = draw.mesh.level_count();
     if (scene.debug.force_level >= 0)
@@ -248,7 +250,10 @@ struct WebGLRenderer3D::Impl {
     bool warned = false;
     std::unordered_map<std::string_view, GLint> uniforms, sky_uniforms;
     sky_model::FogTable3D fog_table;
-    std::array<GLuint, 27> samplers{};
+    // By wrap and filter, then the mipmapped ones' by anisotropy (2 to 16) and wrap; the mipmapped ones read with
+    // `anisotropy`, this render's Scene3D::anisotropy, clamped.
+    std::array<GLuint, 27 + 15 * 9> samplers{};
+    u32 anisotropy = 1;
     std::array<MaterialBinding, 5> material_bindings{};
     std::shared_ptr<InstanceBudget> instance_budget = std::make_shared<InstanceBudget>();
     std::vector<Instance> instance_scratch;
@@ -392,6 +397,12 @@ struct WebGLRenderer3D::Impl {
         const auto* driver = reinterpret_cast<const char*>(glGetString(unmasked ? 0x9246 : GL_RENDERER));
         const std::string name = driver ? driver : "";
         caps.software = name.find("SwiftShader") != std::string::npos || name.find("llvmpipe") != std::string::npos;
+        if (emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(),
+                                              "EXT_texture_filter_anisotropic")) {
+            GLfloat most = 1.0f;
+            glGetFloatv(max_texture_max_anisotropy, &most);
+            caps.max_anisotropy = most >= 16.0f ? 16u : most >= 1.0f ? u32(most) : 1u;
+        }
     }
     ~Impl() {
         glDeleteSamplers(GLsizei(samplers.size()), samplers.data());
@@ -413,7 +424,9 @@ struct WebGLRenderer3D::Impl {
     GLint uniform(const char* name) { return location(program, name); }
     GLuint sampler(Wrap3D u, Wrap3D v, ScaleMode mode) {
         const u32 filter = mode == ScaleMode::Nearest ? 0 : mode == ScaleMode::Mipmapped ? 2 : 1;
-        auto& value = samplers[u32(u) * 9 + u32(v) * 3 + filter];
+        const u32 slant = filter == 2 ? anisotropy : 1;
+        auto& value =
+            samplers[slant > 1 ? 27 + (slant - 2) * 9 + u32(u) * 3 + u32(v) : u32(u) * 9 + u32(v) * 3 + filter];
         if (!value) {
             glGenSamplers(1, &value);
             glSamplerParameteri(value, GL_TEXTURE_WRAP_S, wrap(u));
@@ -423,6 +436,8 @@ struct WebGLRenderer3D::Impl {
                                 : filter == 0 ? GL_NEAREST
                                               : GL_LINEAR);
             glSamplerParameteri(value, GL_TEXTURE_MAG_FILTER, filter == 0 ? GL_NEAREST : GL_LINEAR);
+            if (slant > 1)
+                glSamplerParameterf(value, texture_max_anisotropy, GLfloat(slant));
         }
         return value;
     }
@@ -930,6 +945,8 @@ bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, Rend
     _impl->renderer.before_3d();
     // The 2D pass and texture uploads can change bindings between 3D renders.
     _impl->material_bindings = {};
+    // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy.
+    _impl->anisotropy = std::clamp(scene.anisotropy, 1u, _impl->caps.max_anisotropy);
     _impl->prepare(view->prepared, scene, stats);
     _impl->shadows(*view, scene, stats);
     _impl->shadow_uniforms(*view, scene.lights);

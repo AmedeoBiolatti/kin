@@ -287,7 +287,8 @@ struct Settings {
     float rope_length = 6.0f;
     float rope_stamina = 400.0f;
     // View
-    int msaa = 2; // index into the device's sample counts
+    int msaa = 2;       // index into the device's sample counts
+    int anisotropy = 1; // Scene3D::anisotropy (1: off, to 16)
     float background[3] = {120, 150, 190};
     bool cull = true;
     int wireframe = 0; // WireMode
@@ -437,6 +438,7 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
     scene.debug.gpu_culling = s.lod_gpu;
     scene.debug.stats_readback = s.lod && s.lod_readback;
     scene.cull = s.cull;
+    scene.anisotropy = static_cast<u32>(std::clamp(s.anisotropy, 1, 16));
     // The sky and the fog (the time of day, when it drives them, last: it replaces the sun's direction and colour, the
     // fill and the ambient).
     scene.sky = {.enabled = s.sky,

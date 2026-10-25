@@ -429,6 +429,23 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   all of the material's textures do past 0..1. Models set them from the
   glTF sampler (`REPEAT`, the glTF default, when it names none); samplers are
   made by filter and wrap on first use.
+- `Scene3D::anisotropy` (1, off, by default; up to 16): anisotropic filtering
+  of the materials' mipmapped textures. Where a surface is seen at a slant (a
+  street, a floor, a wall along the view) a pixel covers many texels along the
+  slant and few across it; trilinear reads it from the mip that fits the long
+  side, which blurs the texture to its mean colour a few metres away, while
+  anisotropic filtering reads up to `anisotropy` samples along the slant from
+  the mip that fits the short side, so it stays sharp into the distance.
+  Facing the camera it changes next to nothing (the hardware may choose the
+  mip its own way with the filtering on: under 1 of 255 on average in kin's
+  test, on NVIDIA, Intel and lavapipe). Nearest and unmipmapped textures are
+  read as before, and every pass reads a material's textures alike (the
+  cut-outs in the shadow maps, the pre-pass and picking; particles), so a
+  cut-out's edge agrees in all of them; the overlay is drawn with the scene's.
+  It is clamped to `RendererCapabilities3D::max_anisotropy`: 16 on SDL_GPU
+  (SDL makes its devices with the feature), and on WebGL2 what
+  `EXT_texture_filter_anisotropic` allows (1 without it). `SceneEnvironment3D`
+  authors it as `anisotropy`.
 
 Unlit materials use dedicated colour-only or base-textured main-pass shaders, with separate cut-out variants. They preserve
 vertex/material/tint colours, sRGB conversion, emission, alpha/additive blending, HDR and MSAA, while omitting lighting resources

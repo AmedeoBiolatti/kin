@@ -463,6 +463,14 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    // Anisotropic filtering of the materials' mipmapped textures: where a surface is seen at a slant (a street, a
+    // floor, a wall along the view), its texture is read with up to this many samples along the slant, from the mip
+    // that fits the slant's short side, instead of with one from the mip that fits its long side (which blurs it into
+    // the distance). 1 (the default) is off: trilinear, the picture and the cost as without it; 2 to 16, clamped to
+    // RendererCapabilities3D::max_anisotropy. Nearest and unmipmapped textures are read as before. Every pass reads a
+    // material's textures alike (the cut-outs' in shadows, the pre-pass and picking; particles), so that a cut-out's
+    // edge is the same in all of them; the overlay is drawn with the scene's.
+    u32 anisotropy = 1;
     Lod3D lod{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:

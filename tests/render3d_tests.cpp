@@ -520,7 +520,7 @@ void test_sdl_renderer_has_no_3d() {
     assert(!r3d.available());
     assert(&r3d.renderer() == &renderer);
     const kin::RendererCapabilities3D caps = r3d.capabilities();
-    assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1);
+    assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1 && caps.max_anisotropy == 1);
     assert(!r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({}).valid());
 
     kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)}).value_or({});
@@ -626,6 +626,7 @@ void test_gpu_reports_3d() {
         for (const kin::u32 samples : {caps.max_samples, caps.max_samples_hdr}) {
             assert(samples == 1 || samples == 2 || samples == 4 || samples == 8);
         }
+        assert(caps.max_anisotropy == 16);
         std::cerr << "3D: depth " << caps.depth_bits << (caps.depth_float ? " float" : " unorm") << ", samples "
                   << caps.max_samples << " (HDR " << caps.max_samples_hdr << ")\n";
     });
@@ -2782,6 +2783,89 @@ void test_gpu_wrap_modes() {
             expect(repeat[static_cast<std::size_t>(i)], want_repeat[static_cast<std::size_t>(i)], "repeated");
             expect(mirror[static_cast<std::size_t>(i)], want_mirror[static_cast<std::size_t>(i)], "mirrored");
         }
+    });
+}
+
+// Anisotropic filtering (Scene3D::anisotropy): a floor of stripes running away from the camera, seen from 20 cm above
+// it. Four metres away a pixel covers about 25 texels along the stripes and under one across them: trilinear reads it
+// from a mip where the stripes have averaged out to grey, 16 samples along the slant keep them, clamped or repeated.
+// Facing the camera, where there is no slant, it changes next to nothing; a nearest texture is read as before; more
+// than the device has is the most it has, and 0 is 1 (off).
+void test_gpu_anisotropy() {
+    with_gpu("test_gpu_anisotropy", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        assert(r3d.capabilities().max_anisotropy == 16);
+        // 64 x 1024 texels: columns two wide, white then black, the same all the way along v.
+        std::vector<kin::u8> texels(64u * 1024u * 4u, 255);
+        for (std::size_t i = 0; i < 64u * 1024u; ++i) {
+            if (i % 64 / 2 % 2 == 1) {
+                texels[i * 4] = texels[i * 4 + 1] = texels[i * 4 + 2] = 0;
+            }
+        }
+        const kin::Texture stripes = renderer.create_texture_from_rgba(texels.data(), {64, 1024});
+        renderer.set_scale_mode(stripes, kin::ScaleMode::Mipmapped);
+        const auto quad = [&](Vec3f a, Vec3f b, Vec3f c, Vec3f d, float v) {
+            MeshData3D data;
+            data.vertices = {
+                {a, {0, 0, 1}, {0, 0}}, {b, {0, 0, 1}, {1, 0}}, {c, {0, 0, 1}, {1, v}}, {d, {0, 0, 1}, {0, v}}};
+            data.indices = {0, 1, 2, 0, 2, 3};
+            return r3d.create_mesh(data).value_or({});
+        };
+        // 2 m across (u 0 to 1) and 20 m away (v 0 to 1); and 2 m square, its texels as wide as they are tall.
+        const kin::Mesh3D floor = quad({-1, 0, 0}, {1, 0, 0}, {1, 0, -20}, {-1, 0, -20}, 1.0f);
+        const kin::Mesh3D wall = quad({-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}, 0.0625f);
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](const kin::Mesh3D& mesh, kin::Camera3D camera, kin::u32 anisotropy,
+                               kin::Wrap3D wrap = kin::Wrap3D::Clamp) {
+            kin::Scene3D scene;
+            scene.camera = camera;
+            scene.anisotropy = anisotropy;
+            (void)scene.draw(mesh, Mat4f::identity(),
+                             {.unlit = true, .double_sided = true, .texture = stripes, .wrap_u = wrap, .wrap_v = wrap});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const kin::Camera3D low = kin::Camera3D::look_at({0.0f, 0.2f, 0.0f}, {0.0f, 0.0f, -2.0f}, 40.0f);
+        // The darkest and the brightest of the floor's row four metres away, its middle 1.2 m.
+        const auto contrast = [&](const Pixels& p) {
+            const kin::Vec2f left = low.project({-0.6f, 0.0f, -4.0f}, screen)->pos,
+                             right = low.project({0.6f, 0.0f, -4.0f}, screen)->pos;
+            int darkest = 255, brightest = 0;
+            for (int x = static_cast<int>(left.x); x <= static_cast<int>(right.x); ++x) {
+                const int g = p.at(x, static_cast<int>(left.y)).g;
+                darkest = std::min(darkest, g);
+                brightest = std::max(brightest, g);
+            }
+            return brightest - darkest;
+        };
+        const Pixels trilinear = shoot(floor, low, 1), sharp = shoot(floor, low, 16),
+                     repeated = shoot(floor, low, 16, kin::Wrap3D::Repeat);
+        std::cerr << "anisotropy: the stripes' contrast 4 m away " << contrast(trilinear) << " trilinear, "
+                  << contrast(sharp) << " at 16 (" << contrast(repeated) << " repeated)\n";
+        assert(contrast(trilinear) < 48);
+        assert(contrast(sharp) > 128 && contrast(repeated) > 128);
+        assert(shoot(floor, low, 1000).rgba == sharp.rgba);
+        assert(shoot(floor, low, 0).rgba == trilinear.rgba);
+
+        // Face on, 6 m away (a pixel about 1.2 texels each way): next to what it was. The hardware may choose the mip
+        // its own way with the filtering on, a little apart from trilinear's (NVIDIA's moves a stripe's edge by up to
+        // 13 of 255 here, lavapipe's by 17, Intel's not at all), but not the picture as a whole (on average under 1).
+        const kin::Camera3D facing = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+        const Pixels plain = shoot(wall, facing, 1), filtered = shoot(wall, facing, 16);
+        int most = 0;
+        double total = 0.0;
+        for (std::size_t i = 0; i < plain.rgba.size(); ++i) {
+            const int change = std::abs(static_cast<int>(plain.rgba[i]) - static_cast<int>(filtered.rgba[i]));
+            most = std::max(most, change);
+            total += change;
+        }
+        const double mean = total / static_cast<double>(plain.rgba.size());
+        std::cerr << "anisotropy: face on, a channel changed by " << mean << " on average, at most " << most << '\n';
+        assert(mean <= 2.0 && most <= 48);
+
+        renderer.set_scale_mode(stripes, kin::ScaleMode::Nearest);
+        assert(shoot(floor, low, 16).rgba == shoot(floor, low, 1).rgba);
     });
 }
 
@@ -20871,6 +20955,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_inverse_square());
     RUN(test_gpu_model_materials());
     RUN(test_gpu_wrap_modes());
+    RUN(test_gpu_anisotropy());
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());

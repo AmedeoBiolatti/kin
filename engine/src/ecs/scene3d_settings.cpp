@@ -170,6 +170,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("taa_enabled", taa.enabled);
         SETTING("taa_blend", taa.blend);
         SETTING("taa_sharpness", taa.sharpness);
+        SETTING("anisotropy", anisotropy);
         SETTING("samples", view.samples);
         SETTING("background", view.background);
         SETTING("hdr", view.hdr);
@@ -282,7 +283,8 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.ambient_occlusion.radius > 0 && settings.ambient_occlusion.intensity >= 0 &&
                  settings.contact_shadows.distance >= 0 && settings.contact_shadows.thickness > 0 &&
                  settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
-                 settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 &&
+                 settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 && settings.anisotropy >= 1 &&
+                 settings.anisotropy <= 16 &&
                  (settings.view.samples == 1 || settings.view.samples == 2 || settings.view.samples == 4 ||
                   settings.view.samples == 8);
         if (!valid)
@@ -299,6 +301,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.ambient_occlusion = settings.ambient_occlusion;
             scene.contact_shadows = settings.contact_shadows;
             scene.taa = settings.taa;
+            scene.anisotropy = settings.anisotropy;
             scene.lod = settings.lod;
             if (view)
                 *view = scene3d_view_options(settings.view, *view);

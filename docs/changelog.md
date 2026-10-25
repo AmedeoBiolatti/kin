@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add anisotropic filtering of 3D materials' mipmapped textures
+  (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
+  `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with
+  `EXT_texture_filter_anisotropic`; `RendererCapabilities3D::max_anisotropy`
+  says how far it goes.
+
 - Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
   ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,
   fullscreen and persistent settings with a storage-denied fallback.

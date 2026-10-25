@@ -98,6 +98,7 @@ const std::map<std::string, std::string>& presets() {
         {"bloom", "bloom=0.8,bloom_threshold=0.9"},
         {"msaa1", "msaa=1"},
         {"msaa8", "msaa=8"},
+        {"anisotropy", "anisotropy=16"},
         {"point-lights", "drop_light=1,light_r=14,light_g=9,light_b=4"},
         {"character", "character=on,char_clip=blend,char_count=5"}, // skinned entities with an animator (P1a part 2)
         {"character-all", "character=on,char_count=5,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
@@ -635,6 +636,7 @@ private:
         for (unsigned n : caps.samples)
             samples.push_back(std::to_string(n));
         choice("msaa", "MSAA samples", s.msaa, samples);
+        islider("anisotropy", "Anisotropic filtering (1: off)", s.anisotropy, 1, 16);
         slider("bg_r", "Background red", s.background[0], 0.0f, 255.0f);
         slider("bg_g", "Background green", s.background[1], 0.0f, 255.0f);
         slider("bg_b", "Background blue", s.background[2], 0.0f, 255.0f);

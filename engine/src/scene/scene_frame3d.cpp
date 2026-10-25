@@ -155,6 +155,7 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.ambient_occlusion = {};
         scene.contact_shadows = {};
         scene.taa = {};
+        scene.anisotropy = 1;
         scene.lod = {};
         scene.cull = true;
         _rendering.propagate_transforms();
