@@ -62,6 +62,7 @@ WindowedAppConfig window_config(const GameInfo& info) {
         .hdr = info.window.hdr,
         .resizable = info.window.resizable,
         .borderless = info.window.borderless,
+        .wait_for_events = info.window.wait_for_events,
         .input_map = info.input_map,
     };
 }

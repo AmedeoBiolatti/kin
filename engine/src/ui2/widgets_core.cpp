@@ -241,6 +241,16 @@ AdvancedTextLayout layout_advanced_text(const AdvancedTextContent& content, Adva
         if (whitespace && line_boxes.empty()) {
             return;
         }
+        // After a piece in the same font, start where it would in one string with
+        // it: measured apart, the pieces lose what joins them (the font's spacing
+        // between letters, kerning across the two).
+        if (!line_boxes.empty() && !box.icon && !box.text.empty()) {
+            const AdvancedTextRenderBox& previous = layout.boxes[line_boxes.back()];
+            if (!previous.icon && !previous.text.empty() && previous.style.font.identity() == box.style.font.identity() &&
+                previous.style.scale == box.style.scale) {
+                x = previous.rect.x + measure_text(box.style.font, previous.text + box.text, box.style.scale).x - width;
+            }
+        }
         box.rect = {x, y, width, height};
         const std::size_t index = layout.boxes.size();
         layout.boxes.push_back(std::move(box));

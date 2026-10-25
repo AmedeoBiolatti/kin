@@ -290,6 +290,10 @@ public:
     // A wheel turn of `value` notches this frame, as the OS would report it: it adds
     // to both mouse_wheel_y() and frame_mouse_wheel_y().
     void set_mouse_wheel_y(f32 value);
+    // The same sideways (tilting wheels, touchpads), positive to the right.
+    f32 mouse_wheel_x() const { return _mouse_wheel_x; }
+    f32 frame_mouse_wheel_x() const { return _frame_mouse_wheel_x; }
+    void set_mouse_wheel_x(f32 value);
     // How far the mouse moved, in window pixels (x right, y down), whether or not
     // the pointer could follow: with the window's relative mouse mode on (a
     // first-person camera; Window::set_relative_mouse) the pointer stays put and
@@ -391,6 +395,8 @@ private:
     WindowId _keyboard_window = 0;
     f32 _mouse_wheel_y = 0.0f;       // since a fixed step last read it
     f32 _frame_mouse_wheel_y = 0.0f; // since the last rendered frame
+    f32 _mouse_wheel_x = 0.0f;
+    f32 _frame_mouse_wheel_x = 0.0f;
     Vec2f _mouse_motion{};           // since a fixed step last read it
     Vec2f _frame_mouse_motion{};     // since the last rendered frame
     u64 _last_key_press_event_time_ns = 0;

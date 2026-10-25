@@ -380,6 +380,13 @@ const std::vector<FontSource>& system_fallback_fonts() {
             {"C:/Windows/Fonts/Nirmala.ttf", "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
              "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
              "/System/Library/Fonts/Kohinoor.ttc"},
+            // Symbols UI text uses that UI fonts often lack: technical (⌕ ⎇ ⏎),
+            // arrows, shapes, dingbats
+            {"C:/Windows/Fonts/seguisym.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+             "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf", "/System/Library/Fonts/Apple Symbols.ttf"},
+            {"/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+             "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/opentype/freefont/FreeSerif.otf",
+             "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"},
         };
         std::vector<FontSource> found;
         for (const auto& candidates : scripts) {

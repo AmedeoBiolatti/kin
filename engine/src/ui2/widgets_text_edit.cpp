@@ -514,6 +514,7 @@ void Editor::handle_keys() {
         } else {
             stop_editing();
             _w.result.tab_direction = shift ? -1 : 1;
+            _ctx.request_focus_move(_w.id, _w.result.tab_direction);
         }
     }
     if (_ctx.key_pressed(Key::Escape)) {
@@ -611,6 +612,9 @@ void Editor::draw(const Interaction& it) {
         _ctx.text(_w.placeholder, {x0, vp.y - _s.scroll.y}, hint);
     }
     const bool blink_on = ((_frame - _s.caret_frame) / caret_blink_frames) % 2 == 0;
+    if (_s.active && _w.enabled && !_w.read_only) {
+        _ctx.request_redraw(); // the caret blinks
+    }
     if (_s.active && _w.enabled && !_w.read_only && blink_on) {
         const std::size_t line = line_of(_s.caret);
         const f32 y = vp.y + static_cast<f32>(line) * _view.pitch - _s.scroll.y;
@@ -660,6 +664,15 @@ void Editor::run() {
 
     if (it.focused && _w.enabled) {
         _s.active = true;
+    } else if (_s.active && !it.pressed && _ctx.focus_moved()) {
+        _s.active = false; // Tab took focus elsewhere
+        _s.clear_selection();
+    }
+    if (_w.enabled && _w.tab == UiTabKey::LeaveField) {
+        _ctx.register_focusable(_w.id);
+    }
+    if (_w.enabled && (it.hot || it.active)) {
+        _ctx.set_cursor(SystemCursor::Text);
     }
     handle_mouse(it);
     if (_s.active && _w.enabled) {

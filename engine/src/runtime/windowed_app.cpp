@@ -13,7 +13,8 @@ AppConfig app_config(const WindowedAppConfig& config) {
             .vsync = config.vsync,
             .yield_when_unpaced = config.yield_when_unpaced,
             .max_fps = config.max_fps,
-            .snap_tolerance = config.snap_tolerance};
+            .snap_tolerance = config.snap_tolerance,
+            .wait_for_events = config.wait_for_events};
 }
 WindowConfig window_config(const WindowedAppConfig& config) {
     return {.title = config.title,

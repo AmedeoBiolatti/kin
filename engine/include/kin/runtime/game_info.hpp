@@ -27,6 +27,9 @@ struct GameWindowInfo {
     bool borderless = false;
     ColorSpace color_space = ColorSpace::Gamma; // see Renderer2D::set_color_space
     bool hdr = false;
+    // A tool rather than a game: draw only when something changes (see
+    // AppConfig::wait_for_events).
+    bool wait_for_events = false;
 };
 
 // Every member has a default, so a designated initializer can leave any out

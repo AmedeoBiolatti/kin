@@ -23,7 +23,7 @@ std::string_view app_mode_name(AppMode mode) {
 } // namespace
 
 App::App(AppConfig config)
-    : _config(config) {
+    : _config(config), _wait_for_events(config.wait_for_events) {
     set_max_fps(config.max_fps);
     // A GPU-only headless app still needs a real driver and a hidden window.
     const auto renderer = requested_renderer();
@@ -195,6 +195,7 @@ bool App::step_loop(f32 elapsed_seconds) {
         .hit_max_steps = false,
         .pacing_wait = pacing_wait,
         .snapped_frame_time = snapped,
+        .idle_wait = std::exchange(_idle_wait, 0.0f),
     };
 
     _input.begin_frame(_advance_input);
@@ -258,11 +259,47 @@ void App::run(std::function<void(f32)> update, std::function<void(f32)> render) 
         last = now;
         if (!headless()) {
             pace_frame(next_frame_ns);
+            if (_running && _wait_for_events && wait_for_change()) {
+                // However long the wait, the frame it ends runs one step: the time
+                // spent idle is not game time to catch up on.
+                const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
+                last = SDL_GetTicksNS() - static_cast<u64>(static_cast<f64>(fixed_dt) * 1'000'000'000.0);
+            }
         }
+        _redraw_in = -1.0f;
     }
     _update = {};
     _render = {};
     KIN_LOG_INFO_F("runtime", "app loop stopped", (LogFields{{.name = "frames", .value = std::to_string(frames)}}));
+}
+
+void App::request_redraw(f32 seconds) {
+    seconds = std::max(0.0f, seconds);
+    _redraw_in = _redraw_in < 0.0f ? seconds : std::min(_redraw_in, seconds);
+}
+
+// Under wait_for_events, after a frame: blocks until an event comes, a redraw
+// falls due or max_idle_wait passes. False when the next frame starts at once.
+bool App::wait_for_change() {
+    if (_settle_frames > 0) {
+        --_settle_frames;
+        return false;
+    }
+    if (_redraw_in == 0.0f) {
+        return false;
+    }
+    f32 timeout = _config.max_idle_wait > 0.0f ? _config.max_idle_wait : -1.0f;
+    if (_redraw_in > 0.0f) {
+        timeout = timeout < 0.0f ? _redraw_in : std::min(timeout, _redraw_in);
+    }
+    const u64 start = SDL_GetTicksNS();
+    // A null event leaves it queued for pump_events().
+    const bool event = SDL_WaitEventTimeout(nullptr, timeout < 0.0f ? -1 : static_cast<Sint32>(std::ceil(timeout * 1000.0f)));
+    _idle_wait = static_cast<f32>(SDL_GetTicksNS() - start) / 1'000'000'000.0f;
+    if (event) {
+        _settle_frames = 2;
+    }
+    return true;
 }
 
 void App::pace_frame(u64& next_frame_ns) {

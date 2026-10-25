@@ -253,6 +253,27 @@ void test_mouse_motion_reaches_one_step() {
     assert(app.input().frame_mouse_motion() == V{} && app.input().mouse_motion() == (V{1.0f, 2.0f}));
 }
 
+void test_window_area_at() {
+    using kin::WindowArea;
+    // A 300x200 window: a 30 high title bar with a button in it, 4 point edges.
+    const kin::WindowChrome chrome{.drag = {{0, 0, 300, 30}}, .exclude = {{250, 0, 50, 30}}, .resize_border = 4};
+    const kin::Vec2f size{300, 200};
+    const auto at = [&](float x, float y, bool resizable = true) { return kin::window_area_at(chrome, {x, y}, size, resizable); };
+    assert(at(100, 15) == WindowArea::Drag);
+    assert(at(260, 15) == WindowArea::Client); // the button
+    assert(at(100, 100) == WindowArea::Client);
+    assert(at(100, 2) == WindowArea::ResizeTop);
+    assert(at(1, 1) == WindowArea::ResizeTopLeft);
+    assert(at(299, 1) == WindowArea::ResizeTopRight);
+    assert(at(1, 100) == WindowArea::ResizeLeft);
+    assert(at(299, 100) == WindowArea::ResizeRight);
+    assert(at(1, 199) == WindowArea::ResizeBottomLeft);
+    assert(at(150, 199) == WindowArea::ResizeBottom);
+    assert(at(299, 199) == WindowArea::ResizeBottomRight);
+    assert(at(100, 2, false) == WindowArea::Drag); // not resizable (or maximized): no edges
+    assert(at(260, 2, false) == WindowArea::Client);
+}
+
 int main() {
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process
@@ -261,6 +282,7 @@ int main() {
     assert(driver_set == 0);
     test_logging();
     test_frame_time_snapper();
+    test_window_area_at();
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
     test_mouse_motion_reaches_one_step();
@@ -288,6 +310,8 @@ int main() {
     assert(second.id() != 0);
     assert(first.id() != second.id());
     assert(first.borderless());
+    first.set_chrome({.drag = {{0, 0, 320, 30}}, .exclude = {}, .resize_border = 4});
+    first.set_chrome({.drag = {}, .exclude = {}, .resize_border = 0}); // replaced, hit test kept
     assert(!second.borderless());
     assert((first.pixel_size() == kin::Vec2i{320, 180}));
     assert(first.display_scale() > 0);

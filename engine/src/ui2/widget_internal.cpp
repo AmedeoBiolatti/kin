@@ -230,8 +230,8 @@ UiTextInputResult edit_text_input(Context& ctx,
         state.active = false;
         state.clear_selection();
     }
-    if (!enabled) {
-        state.active = false;
+    if (!enabled || (state.active && !it.focused && !it.pressed && ctx.focus_moved())) {
+        state.active = false; // disabled, or Tab took focus elsewhere
     }
 
     // While an input method composes, the keys are its own.

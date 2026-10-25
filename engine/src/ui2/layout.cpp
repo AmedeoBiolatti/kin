@@ -42,6 +42,11 @@ f32 cross_margin_start(const UiPadding& margin, UiLayoutAxis axis) {
     return horizontal(axis) ? margin.top : margin.left;
 }
 
+// Overlays and floating nodes take no room in their parent's flow.
+bool out_of_flow(const LayoutStyle& style) {
+    return style.overlay || style.floats;
+}
+
 f32 clamp_axis(const SizeAxis& spec, f32 value) {
     if (spec.min > 0.0f) {
         value = std::max(value, spec.min);
@@ -126,7 +131,7 @@ void measure_grid(LayoutNode& node, const std::vector<LayoutNode>& nodes, Layout
     const std::size_t cols = static_cast<std::size_t>(cols_i);
     std::size_t flow_count = 0;
     for (const i32 child_index : node.children) {
-        if (!nodes[static_cast<std::size_t>(child_index)].style.overlay) {
+        if (!out_of_flow(nodes[static_cast<std::size_t>(child_index)].style)) {
             ++flow_count;
         }
     }
@@ -138,7 +143,7 @@ void measure_grid(LayoutNode& node, const std::vector<LayoutNode>& nodes, Layout
     std::size_t flow = 0;
     for (const i32 child_index : node.children) {
         const LayoutNode& child = nodes[static_cast<std::size_t>(child_index)];
-        if (child.style.overlay) {
+        if (out_of_flow(child.style)) {
             continue;
         }
         const std::size_t col = flow % cols;
@@ -189,7 +194,7 @@ void measure(std::vector<LayoutNode>& nodes, LayoutScratch& scratch, const std::
                 f32 cross_max = 0.0f;
                 for (const i32 child_index : node.children) {
                     const LayoutNode& child = nodes[static_cast<std::size_t>(child_index)];
-                    if (child.style.overlay) {
+                    if (out_of_flow(child.style)) {
                         continue;
                     }
                     main_sum += main_margin(child.style.margin, axis) +
@@ -199,7 +204,7 @@ void measure(std::vector<LayoutNode>& nodes, LayoutScratch& scratch, const std::
                                              child_measure_extent(child, cross_axis(child.style, axis), cross_of(child.intrinsic, axis)));
                 }
                 const auto flow_count = std::ranges::count_if(node.children, [&](i32 child_index) {
-                    return !nodes[static_cast<std::size_t>(child_index)].style.overlay;
+                    return !out_of_flow(nodes[static_cast<std::size_t>(child_index)].style);
                 });
                 if (flow_count > 1) {
                     main_sum += node.style.spacing * static_cast<f32>(flow_count - 1);
@@ -224,6 +229,7 @@ void measure(std::vector<LayoutNode>& nodes, LayoutScratch& scratch, const std::
             }
         }
 
+        node.content = measured;
         if (node.style.width.mode == SizeMode::Fixed) {
             measured.x = node.style.width.value;
         }
@@ -275,6 +281,32 @@ void arrange_line(std::vector<LayoutNode>& nodes,
 
     const f32 spacing_total = count > 0 ? style.spacing * static_cast<f32>(count - 1) : 0.0f;
     const f32 leftover = std::max(0.0f, content_main - reserved_main - spacing_total);
+    // Too long: the children that shrink give up the excess, each in proportion to
+    // its size, none below its min (a second pass hands on what those could not).
+    f32 excess = reserved_main + spacing_total - content_main;
+    for (i32 pass = 0; pass < 2 && excess > 0.01f; ++pass) {
+        f32 shrinkable = 0.0f;
+        for (std::size_t k = 0; k < count; ++k) {
+            const LayoutNode& child = nodes[static_cast<std::size_t>(flow_children[begin + k])];
+            const SizeAxis& spec = main_axis(child.style, axis);
+            if (child.style.shrink && spec.mode != SizeMode::Grow && main_size[k] > spec.min) {
+                shrinkable += main_size[k];
+            }
+        }
+        if (shrinkable <= 0.0f) {
+            break;
+        }
+        const f32 share = std::min(1.0f, excess / shrinkable);
+        for (std::size_t k = 0; k < count; ++k) {
+            const LayoutNode& child = nodes[static_cast<std::size_t>(flow_children[begin + k])];
+            const SizeAxis& spec = main_axis(child.style, axis);
+            if (child.style.shrink && spec.mode != SizeMode::Grow && main_size[k] > spec.min) {
+                const f32 to = std::max(spec.min, main_size[k] * (1.0f - share));
+                excess -= main_size[k] - to;
+                main_size[k] = to;
+            }
+        }
+    }
     if (grow_weight > 0.0f) {
         for (std::size_t k = 0; k < count; ++k) {
             const LayoutNode& child = nodes[static_cast<std::size_t>(flow_children[begin + k])];
@@ -418,7 +450,14 @@ void arrange(std::vector<LayoutNode>& nodes, LayoutScratch& scratch) {
         }
 
         const UiLayoutAxis axis = node.style.axis;
-        const Rectf content = inset(node.solved, node.style.padding);
+        const Rectf frame = inset(node.solved, node.style.padding); // overlays anchor here
+        Rectf content = frame;
+        if (node.style.scroll_x) {
+            content.w = std::max(content.w, node.content.x - node.style.padding.left - node.style.padding.right);
+        }
+        if (node.style.scroll_y) {
+            content.h = std::max(content.h, node.content.y - node.style.padding.top - node.style.padding.bottom);
+        }
         const f32 content_main = main_of({content.w, content.h}, axis);
         const f32 content_cross = cross_of({content.w, content.h}, axis);
         const f32 content_main_origin = horizontal(axis) ? content.x : content.y;
@@ -427,16 +466,24 @@ void arrange(std::vector<LayoutNode>& nodes, LayoutScratch& scratch) {
         flow_children.clear();
         for (const i32 child_index : node.children) {
             LayoutNode& child = nodes[static_cast<std::size_t>(child_index)];
+            if (child.style.floats) {
+                // Sized against the root; placed at the end (place_floating).
+                const Rectf& root = scratch.root;
+                child.solved = {node.solved.x, node.solved.y,
+                                std::min(resolve_axis(child.style.width, child.intrinsic.x, root.w), root.w),
+                                std::min(resolve_axis(child.style.height, child.intrinsic.y, root.h), root.h)};
+                continue;
+            }
             if (!child.style.overlay) {
                 flow_children.push_back(child_index);
                 continue;
             }
 
-            const f32 available_w = std::max(0.0f, content.w - child.style.margin.left - child.style.margin.right);
-            const f32 available_h = std::max(0.0f, content.h - child.style.margin.top - child.style.margin.bottom);
+            const f32 available_w = std::max(0.0f, frame.w - child.style.margin.left - child.style.margin.right);
+            const f32 available_h = std::max(0.0f, frame.h - child.style.margin.top - child.style.margin.bottom);
             const f32 w = resolve_axis(child.style.width, child.intrinsic.x, available_w);
             const f32 h = resolve_axis(child.style.height, child.intrinsic.y, available_h);
-            const Rectf margin_rect = inset(content, child.style.margin);
+            const Rectf margin_rect = inset(frame, child.style.margin);
             child.solved = anchor_rect(margin_rect,
                                        child.style.anchor,
                                        {std::min(w, margin_rect.w), std::min(h, margin_rect.h)},
@@ -528,12 +575,86 @@ void arrange(std::vector<LayoutNode>& nodes, LayoutScratch& scratch) {
     }
 }
 
+// Where a floating node of `size` goes next to `parent`, kept inside `root`.
+Rectf float_rect(const LayoutStyle& style, Rectf parent, Vec2f size, Rectf root) {
+    const Vec2f o = style.float_offset;
+    // How far [at, at + extent) runs out of [lo, lo + span).
+    const auto overflow = [](f32 at, f32 extent, f32 lo, f32 span) {
+        return std::max(0.0f, lo - at) + std::max(0.0f, at + extent - (lo + span));
+    };
+    // The first side, or the other when the first runs out and the other less.
+    const auto pick = [&](f32 first, f32 other, f32 extent, f32 lo, f32 span) {
+        const f32 a = overflow(first, extent, lo, span);
+        return a > 0.0f && overflow(other, extent, lo, span) < a ? other : first;
+    };
+    Vec2f at{};
+    switch (style.float_side) {
+    case UiFloat::Below:
+    case UiFloat::Above: {
+        const f32 below = parent.y + parent.h + o.y;
+        const f32 above = parent.y - size.y - o.y;
+        at = {parent.x + o.x, style.float_side == UiFloat::Below ? pick(below, above, size.y, root.y, root.h)
+                                                                 : pick(above, below, size.y, root.y, root.h)};
+        break;
+    }
+    case UiFloat::Right:
+    case UiFloat::Left: {
+        const f32 right = parent.x + parent.w + o.x;
+        const f32 left = parent.x - size.x - o.x;
+        at = {style.float_side == UiFloat::Right ? pick(right, left, size.x, root.x, root.w)
+                                                 : pick(left, right, size.x, root.x, root.w),
+              parent.y + o.y};
+        break;
+    }
+    case UiFloat::Point:
+        at = {pick(o.x, o.x - size.x, size.x, root.x, root.w), pick(o.y, o.y - size.y, size.y, root.y, root.h)};
+        break;
+    }
+    // Then along, to stay inside (the start wins when it is larger than the root).
+    at.x = std::max(root.x, std::min(at.x, root.x + root.w - size.x));
+    at.y = std::max(root.y, std::min(at.y, root.y + root.h - size.y));
+    return {at.x, at.y, size.x, size.y};
+}
+
 } // namespace
+
+void place_floating(std::vector<LayoutNode>& nodes, Rectf root, LayoutScratch& scratch) {
+    const std::size_t count = nodes.size();
+    if (std::ranges::none_of(nodes, [](const LayoutNode& node) { return node.style.floats; })) {
+        return;
+    }
+    // One past each node's last descendant (the arena is pre-order).
+    scratch.subtree_end.resize(count);
+    for (std::size_t i = count; i-- > 0;) {
+        scratch.subtree_end[i] = nodes[i].children.empty()
+                                     ? static_cast<i32>(i) + 1
+                                     : scratch.subtree_end[static_cast<std::size_t>(nodes[i].children.back())];
+    }
+    // Pre-order: a floating node inside another is placed after its parent moved.
+    for (std::size_t i = 0; i < count; ++i) {
+        const LayoutNode& node = nodes[i];
+        if (!node.style.floats || node.parent < 0) {
+            continue;
+        }
+        const Rectf to = float_rect(node.style, nodes[static_cast<std::size_t>(node.parent)].solved,
+                                    {node.solved.w, node.solved.h}, root);
+        const f32 dx = to.x - node.solved.x;
+        const f32 dy = to.y - node.solved.y;
+        if (dx == 0.0f && dy == 0.0f) {
+            continue;
+        }
+        for (i32 k = static_cast<i32>(i); k < scratch.subtree_end[i]; ++k) {
+            nodes[static_cast<std::size_t>(k)].solved.x += dx;
+            nodes[static_cast<std::size_t>(k)].solved.y += dy;
+        }
+    }
+}
 
 void solve(std::vector<LayoutNode>& nodes, i32 root, Rectf available, LayoutScratch& scratch) {
     if (nodes.empty() || root < 0 || root >= static_cast<i32>(nodes.size())) {
         return;
     }
+    scratch.root = available;
     measure(nodes, scratch);
     nodes[static_cast<std::size_t>(root)].solved = available;
     arrange(nodes, scratch);
@@ -571,6 +692,7 @@ void solve(std::vector<LayoutNode>& nodes, i32 root, Rectf available, LayoutScra
             stack.insert(stack.end(), node.children.begin(), node.children.end());
         }
     }
+    place_floating(nodes, available, scratch);
 }
 
 void solve(std::vector<LayoutNode>& nodes, i32 root, Rectf available) {

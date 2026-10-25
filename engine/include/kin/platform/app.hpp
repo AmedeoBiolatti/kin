@@ -32,6 +32,15 @@ struct AppConfig {
     // A frame time within this many seconds of a whole number of fixed steps
     // counts as exactly that many (0: off): see FrameTimeSnapper.
     f32 snap_tolerance = 0.001f;
+    // Draw only when something may have changed: after input or a window event
+    // (and two frames more, for hover that resolves a frame late), or when asked
+    // with App::request_redraw, instead of every frame. For tools and editors,
+    // which would otherwise keep the CPU and GPU busy while nobody touches them.
+    // Each frame drawn runs one fixed step. Ignored by headless runs.
+    bool wait_for_events = false;
+    // While waiting, wake at least this often anyway (0: never), so work that
+    // sends no event, such as a file watcher or an asset load, still shows.
+    f32 max_idle_wait = 0.5f;
 };
 
 // Snaps measured frame times to whole fixed steps, so ordinary jitter (a frame
@@ -65,6 +74,7 @@ struct AppFrameStats {
     bool hit_max_steps = false;
     f32 pacing_wait = 0.0f; // seconds slept after the previous frame to hold max_fps
     f32 snapped_frame_time = 0.0f; // what the accumulator was given (FrameTimeSnapper)
+    f32 idle_wait = 0.0f; // seconds waited for an event before this frame (wait_for_events)
 };
 
 class App {
@@ -109,6 +119,14 @@ public:
     f32 max_fps() const { return _max_fps; }
     void set_max_fps(f32 fps) { _max_fps = fps > 0.0f ? fps : 0.0f; }
 
+    // Draw only when something changes (see AppConfig::wait_for_events).
+    bool waits_for_events() const { return _wait_for_events; }
+    void set_wait_for_events(bool enabled) { _wait_for_events = enabled; }
+    // While waiting for events, draw another frame within `seconds` (0: next)
+    // though nothing happens. Asks for one frame: something that animates asks
+    // again each frame until it is done.
+    void request_redraw(f32 seconds = 0.0f);
+
     f32 time_scale() const { return _time_scale; }
     void set_time_scale(f32 scale) { _time_scale = scale > 0.0f ? scale : 0.0f; }
 
@@ -129,7 +147,12 @@ private:
     bool _advance_input = true;
 
     void pace_frame(u64& next_frame_ns);
+    bool wait_for_change();
     bool _running = false;
+    bool _wait_for_events = false;
+    f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none
+    i32 _settle_frames = 0; // frames still to draw after an event before waiting again
+    f32 _idle_wait = 0.0f;
 };
 
 } // namespace kin

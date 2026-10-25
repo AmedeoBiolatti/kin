@@ -110,6 +110,10 @@ public:
     // The topmost recorded region becomes next frame's hot.
     void register_hit(Id id, i32 z);
 
+    // A click on `id` at `pos`: true when it follows a click on the same id within
+    // half a second's worth of frames and a few pixels (a double click).
+    bool register_click(Id id, Vec2f pos);
+
 private:
     u64 _frame = 0;
     Id _hot{};
@@ -120,6 +124,9 @@ private:
     Id _hit_id{};
     i32 _hit_z = 0;
     bool _has_hit = false;
+    Id _last_click_id{};
+    u64 _last_click_frame = 0;
+    Vec2f _last_click_pos{};
 };
 
 } // namespace kin::ui2

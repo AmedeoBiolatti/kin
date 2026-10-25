@@ -1,5 +1,7 @@
 #include <kin/ui2/context.hpp>
 
+#include <kin/platform/app.hpp>
+
 #include <kin/anim/value.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/post_blur.hpp>
@@ -7,6 +9,7 @@
 #include "mirror_internal.hpp"
 
 #include <algorithm>
+#include <iterator>
 #include <array>
 #include <cmath>
 #include <atomic>
@@ -324,6 +327,17 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _renderer = &renderer;
     _dt = dt;
     _state.begin_frame();
+    _cursor = SystemCursor::Default;
+    _redraw = false;
+    _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
+                 input.mouse_frame_pressed(MouseButton::Middle);
+    // State not asked for all last frame belonged to something no longer built.
+    if (!_states.empty()) {
+        const u64 frame = _state.frame();
+        std::erase_if(_states, [frame](const auto& kv) {
+            return !kv.second.kept && kv.second.frame + 1 < frame;
+        });
+    }
     // GC stale surface-animation entries (widgets not drawn for a few frames).
     if (!_surface_anim.empty()) {
         const u64 frame = _state.frame();
@@ -334,6 +348,11 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _nodes.clear();
     _stack.clear();
     _pending.clear();
+    _compose.clear();
+    _compose_ids.clear();
+    _scroll_ids.clear();
+    _splits_open.clear();
+    _list_heights.clear();
     _diagnostics.clear();
     _draw_scopes.clear();
     _clip_stack.clear();
@@ -349,7 +368,9 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _in_shadow = false;
     _debug_last_hue = 0.0f;
     _surface_fill_under = colors::black;
+    _wants_text_input_last = _wants_text_input;
     _wants_text_input = false;
+    _focus_order.clear();
     _text_input_area.reset();
     _text_input_cursor = 0;
     _root = {};
@@ -361,6 +382,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     if (!_input->mouse_held(MouseButton::Left) && !_drag.dragging) {
         _drag = {};
     }
+    dispatch_bindings();
 }
 
 SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& style, const Interaction& it,
@@ -392,6 +414,19 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
     current.glow_size = lerp_f(current.glow_size, target.glow_size);
     current.opacity = lerp_f(current.opacity, target.opacity);
     found->second.last_frame = frame;
+
+    // Close enough to stop: colours within a step a channel (mixing rounds, and
+    // would otherwise creep forever), sizes within a hundredth.
+    const auto near = [](Color a, Color b) {
+        return std::abs(a.r - b.r) <= 1 && std::abs(a.g - b.g) <= 1 && std::abs(a.b - b.b) <= 1 && std::abs(a.a - b.a) <= 1;
+    };
+    if (near(current.fill, target.fill) && near(current.border, target.border) && near(current.glow_color, target.glow_color) &&
+        near(current.glass_tint, target.glass_tint) && std::abs(current.border_width - target.border_width) < 0.01f &&
+        std::abs(current.glow_size - target.glow_size) < 0.01f && std::abs(current.opacity - target.opacity) < 0.01f) {
+        current = target;
+    } else {
+        _redraw = true; // still on the way
+    }
 
     // Everything else (radius, fill_kind, gradient, shadow, skin, ...) snaps to target.
     SurfaceStyle out = target;
@@ -431,6 +466,7 @@ void Context::end() {
         !_state.focused_this_frame() && !blocked_by_modal) {
         _state.clear_focused();
     }
+    finish_focus();
     // Frame invariant: every push must have a matching pop by end(). A leftover entry means a
     // forgotten pop_clip()/pop_draw_scope(), which silently mis-clips everything drawn after it.
     if (_debug.detect_invariants) {
@@ -936,6 +972,10 @@ f32 Context::mouse_wheel_y() const {
     return _input ? _input->frame_mouse_wheel_y() : 0.0f;
 }
 
+f32 Context::mouse_wheel_x() const {
+    return _input ? _input->frame_mouse_wheel_x() : 0.0f;
+}
+
 bool Context::key_pressed(Key key) const {
     return _input && _input->frame_pressed(key);
 }
@@ -982,6 +1022,42 @@ void Context::apply_text_input(Window& window) const {
     if (_wants_text_input && _text_input_area) {
         window.set_text_input_area(*_text_input_area, _text_input_cursor);
     }
+}
+
+void Context::apply(App& app, Window& window) const {
+    apply_text_input(window);
+    window.set_cursor(_cursor);
+    if (_redraw) {
+        app.request_redraw();
+    }
+    // A window drawing its own title bar: what its drags_window() boxes are, in
+    // window coordinates, and edges to resize it by.
+    if (window.borderless() && _renderer) {
+        constexpr f32 resize_border = 5.0f;
+        const auto to_window = [&](Rectf r) {
+            const Vec2f a = _renderer->logical_to_window({r.x, r.y});
+            const Vec2f b = _renderer->logical_to_window({r.x + r.w, r.y + r.h});
+            return Rectf{a.x, a.y, b.x - a.x, b.y - a.y};
+        };
+        WindowChrome chrome{.drag = {}, .exclude = {}, .resize_border = resize_border};
+        std::ranges::transform(_chrome.drag, std::back_inserter(chrome.drag), to_window);
+        std::ranges::transform(_chrome.exclude, std::back_inserter(chrome.exclude), to_window);
+        window.set_chrome(std::move(chrome));
+    }
+}
+
+const WindowChrome& Context::window_chrome() const {
+    return _chrome;
+}
+
+void Context::keep_state(Id id, bool keep) {
+    if (const auto it = _states.find(id.value); it != _states.end()) {
+        it->second.kept = keep;
+    }
+}
+
+void Context::drop_state(Id id) {
+    _states.erase(id.value);
 }
 
 std::string Context::clipboard_text() const {
@@ -1949,6 +2025,11 @@ void Context::begin_layout(Rectf root) {
     _nodes.clear();
     _stack.clear();
     _pending.clear();
+    _compose.clear();
+    _compose_ids.clear();
+    _scroll_ids.clear();
+    _splits_open.clear();
+    _list_heights.clear();
     _root = root;
 
     LayoutStyle style;
@@ -1991,6 +2072,9 @@ void Context::end_layout() {
     }
 
     solve(_nodes, 0, _root, _layout_scratch);
+    if (!_compose.empty()) {
+        layout_compose();
+    }
 
     // Map each node to its widget (at most one per node; widget() makes a dedicated node).
     std::vector<i32> node_pending(_nodes.size(), -1);
@@ -2014,11 +2098,16 @@ void Context::end_layout() {
     // Effective layer = max(own layer, parent's effective layer). A child can never draw
     // behind an ancestor, while higher-layer subtrees still float above lower ones globally.
     // Nodes are stored pre-order (parent index < child index), so one forward pass resolves it.
+    // A floating node lifts its subtree this far above whatever it hangs off.
+    constexpr i32 floating_layer = 1000;
     std::vector<i32> effective_layer(_nodes.size(), 0);
     for (std::size_t i = 0; i < _nodes.size(); ++i) {
         const i32 parent = _nodes[i].parent;
         const i32 base = parent >= 0 ? effective_layer[static_cast<std::size_t>(parent)] : 0;
         effective_layer[i] = std::max(_nodes[i].style.layer, base);
+        if (_nodes[i].style.floats) {
+            effective_layer[i] = base + floating_layer + std::max(0, _nodes[i].style.layer);
+        }
     }
 
     std::vector<DrawEntry> draws;
@@ -2034,8 +2123,79 @@ void Context::end_layout() {
         return lhs.layer < rhs.layer;
     });
 
+    // Clipping boxes (composition): each node draws under the clip of its nearest
+    // clipping ancestor. clips[] holds each clipping box (its rect, corner radius
+    // and the clip around it); visible[] the same intersected, for hit tests.
+    struct Clip {
+        Rectf rect{};
+        f32 radius = 0.0f;
+        i32 parent = -1;
+    };
+    std::vector<i32> clip_of;
+    std::vector<Clip> clips;
+    std::vector<Rectf> visible;
+    if (!_compose.empty()) {
+        std::vector<i32> clip_children(_nodes.size(), -1); // the clip a node's children draw under
+        std::vector<f32> radius(_nodes.size(), -1.0f);    // >= 0: the node clips
+        for (const ComposeNode& c : _compose) {
+            if (c.clip) {
+                radius[static_cast<std::size_t>(c.node)] = c.clip_radius;
+            }
+        }
+        clip_of.assign(_nodes.size(), -1);
+        for (std::size_t i = 0; i < _nodes.size(); ++i) {
+            const i32 parent = _nodes[i].parent;
+            // Floating boxes draw outside their ancestors' clips.
+            const i32 inherited =
+                parent >= 0 && !_nodes[i].style.floats ? clip_children[static_cast<std::size_t>(parent)] : -1;
+            clip_of[i] = inherited;
+            clip_children[i] = inherited;
+            if (radius[i] >= 0.0f) {
+                const Rectf own = _nodes[i].solved;
+                visible.push_back(inherited >= 0 ? rect_intersect(visible[static_cast<std::size_t>(inherited)], own) : own);
+                clips.push_back({own, radius[i], inherited});
+                clip_children[i] = static_cast<i32>(clips.size()) - 1;
+            }
+        }
+    }
+
+    // The clips open on the renderer, outermost first; moving to another clip pops
+    // back to the clip both share and pushes down to it.
+    std::vector<i32> open_clips;
+    std::vector<i32> path;
+    const auto use_clip = [&](i32 want) {
+        if ((open_clips.empty() ? -1 : open_clips.back()) == want) {
+            return;
+        }
+        path.clear();
+        for (i32 c = want; c >= 0; c = clips[static_cast<std::size_t>(c)].parent) {
+            path.push_back(c);
+        }
+        std::ranges::reverse(path);
+        std::size_t shared = 0;
+        while (shared < open_clips.size() && shared < path.size() && open_clips[shared] == path[shared]) {
+            ++shared;
+        }
+        while (open_clips.size() > shared) {
+            pop_clip();
+            open_clips.pop_back();
+        }
+        for (std::size_t k = shared; k < path.size(); ++k) {
+            const Clip& clip = clips[static_cast<std::size_t>(path[k])];
+            if (clip.radius > 0.0f) {
+                push_clip(clip.rect, {clip.radius, clip.radius, clip.radius, clip.radius});
+            } else {
+                push_clip(clip.rect);
+            }
+            open_clips.push_back(path[k]);
+        }
+    };
+
     for (const DrawEntry& entry : draws) {
         const LayoutNode& node = _nodes[static_cast<std::size_t>(entry.node)];
+        if (!clip_of.empty()) {
+            use_clip(clip_of[static_cast<std::size_t>(entry.node)]);
+        }
         if (!entry.widget) {
             draw_layout_surface(node.solved, node.style);
             continue;
@@ -2045,7 +2205,18 @@ void Context::end_layout() {
             _pending[static_cast<std::size_t>(p)].finalize(*this, node.solved);
         }
     }
+    if (!clip_of.empty()) {
+        use_clip(-1);
+    }
 
+    if (!_compose.empty()) {
+        record_compose(clip_of, visible);
+        _compose.clear();
+        _compose_ids.clear();
+        _scroll_ids.clear();
+        _splits_open.clear();
+        _list_heights.clear();
+    }
     _stack.clear();
 }
 

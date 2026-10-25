@@ -44,6 +44,188 @@ auto size = kin::ui2::measure_text(*font, "START", 2.0f);
 kin::ui2::draw_text_centered(renderer, *font, "START", center, 2.0f, color);
 ```
 
+## Composition (experimental)
+
+Inside `begin_layout()`/`end_layout()`, a box is an open container: a layout
+node with a surface, a hit region and any children, so rows, tabs and panes are
+built from boxes and labels instead of picked from the widget list.
+
+```cpp
+ui.begin_layout(screen);
+{
+    auto files = ui.scroll(make_id("files"), vbox().fill());
+    ui.list(make_id("rows"), int(entries.size()), 22.0f, [&](int i) { // only visible rows are built
+        auto row = ui.box(make_id(make_id("row"), i),
+                          hbox().fill().gap(6).items(UiAlign::Center)
+                              .hover_bg(hover).selected_bg(accent).selected_if(i == selected));
+        ui.label(entries[i].name, {.width = grow()});
+        if (row.hovered) ui.label("x");
+        if (row.clicked) selected = i;
+    });
+}
+ui.end_layout();
+```
+
+- `box()` returns a scope (it ends the box when it goes) carrying `hot`,
+  `clicked`, `double_clicked`, `secondary_clicked` (right button), ... and
+  `hovered`, which unlike `hot` stays true over the box's children; the box's
+  `surface.hovered` follows it. Boxes are hit-tested where they were drawn last
+  frame, like `hot`, so their results are there while their children are
+  declared. `bounds` is that rect, to anchor a popup or a drag.
+- `clip` clips the children to the box; `clip_rounded` to its rounded corners
+  (a path clip: two layers and a render pass each, so only where corners show).
+- `scroll()` clips and scrolls its children, vertically and with
+  `ScrollBoxOptions::horizontal` sideways too (they keep their width; the wheel
+  sideways or Shift+wheel). The wheel moves the innermost scroll box under the
+  pointer that can move that way, and the scrollbars' thumbs are dragged before
+  the content is placed, so both move it in the same frame.
+  `scroll_offset(id)` and `set_scroll_offset(id, offset)` read and set it.
+- `list(id, count, row_height, row)` calls `row(i)` only for the rows visible in
+  the enclosing scroll box, plus a few either side; `scroll_to_row(list, i)`
+  brings a row into view next frame, built or not.
+- `begin_split()` / `split_next()` / `end_split()` make two clipped panes and a
+  handle that drags the ratio, kept by id.
+- `label()`, `image()`, `spacer()` and `add(widget)` add leaves the layout
+  keeps; `widget(w)` still writes a widget's results back.
+
+### Styles in one line
+
+`BoxStyle` and `LayoutStyle` chain: start from `hbox()` (children side by
+side) or `vbox()` and add what differs. `w()`/`h()` take a `SizeAxis` or pixels,
+`fill()` grows both ways, `pad()`/`margins()` take one, two (x, y) or four
+values, `gap()`, `justify()` (along) and `items()` (across) align, and `center()`
+does both. For the look, `bg()` fills every state that has no fill of its own,
+whichever comes first, `hover_bg()`, `pressed_bg()` and `selected_bg()` give one,
+and `rounded()`, `border()` and `focus_border()` the rest. `passive()`,
+`clipped()`, `selected_if()`, `disabled_if()`, `tab_stop()`, `key_scope()` and
+`cursor_shape()` set the flags. Designated initializers still work.
+
+### State a component keeps
+
+`ui.state<T>(id)` is a `T` kept for `id`, made the first time it is asked for
+(`ui.state<T>(id, make)` makes it with `make()`). A function that builds part of
+the UI can keep its own state with it, so the caller passes only what it shows:
+
+```cpp
+void section(Context& ui, Id id, std::string_view title, auto&& body) {
+    struct Section { bool open = true; };
+    Section& state = ui.state<Section>(id);
+    if (ui.box(make_id(id, "header"), hbox().w(grow()).h(22).hover_bg(hover)).clicked) state.open = !state.open;
+    if (state.open) body();
+}
+```
+
+It goes once a whole frame passes without it being asked for, as what used it is
+gone; `keep_state(id)` keeps it anyway (a panel that is hidden for a while)
+until `drop_state(id)`.
+
+### Pointer shapes and drawing less
+
+`BoxStyle::cursor` sets the pointer's shape over a box and its children; text
+fields show the I-beam and splitters the resize arrows. `cursor()` is the
+frame's choice. Something still moving, such as a hover transition or a
+blinking caret, asks for another frame (`wants_redraw()`).
+
+A tool can draw only when something changes: set `wait_for_events` in its
+`GameWindowInfo` (or `AppConfig`), and the loop sleeps until input or a window
+event comes (drawing two frames more, as hover resolves a frame late), a
+`request_redraw()` falls due, or `max_idle_wait` passes. Call
+`ui.apply(ctx.app, ctx.window)` after `end()` each frame: it hands over the text
+input, the pointer shape and the redraw requests. Each frame drawn runs one
+fixed step, so game time stops while the window idles.
+
+### Menus and popovers
+
+A box with `floating()` leaves its parent's flow and hangs next to it instead:
+`Below` (a dropdown), `Above`, `Right` (a submenu), `Left`, or at a `Point` (a
+context menu at the pointer), moved by an offset. It is sized against the
+layout's root, not its parent, and kept inside the root: on the other side when
+it fits better there, then moved along. It draws above everything else and
+outside its ancestors' clips, and it and its contents are hit before what is
+under them. Build it where it belongs, while it is open:
+
+```cpp
+auto title = ui.box(id, ui::hbox().pad(8, 2).hover_bg(hover).selected_if(open));
+ui.label("File", text);
+if (open) {
+    auto menu = ui.box(ui::make_id(id, "menu"), ui::vbox().w(280).pad(4).bg(panel).floating(ui::UiFloat::Below));
+    // rows; a row's submenu is a box floating(ui::UiFloat::Right) built inside the row
+    if (menu.pressed_outside) { open = false; }
+}
+```
+
+`pressed_outside` is true when a mouse button went down this frame away from the
+box (as it was last frame): what closes a popup.
+
+### Text that runs out of room
+
+A label given `TextOverflow::Ellipsis` is as wide as its text while its line has
+room and narrower, its text cut with "…", when it has not:
+
+```cpp
+ui.label(file_name, text, {}, ui::TextOverflow::Ellipsis);
+```
+
+It shrinks (`LayoutStyle::shrink`, CSS's flex-shrink): when a line is too long
+for its parent, the children that shrink give up the excess in proportion to
+their size, none below its `min`. A box may shrink too, a tab say, and the label
+in it is then cut to the tab.
+
+Text in runs of their own colour, such as code coloured by its syntax, is
+`AdvancedText` with `TextRun`s; a run starts where its text would in the whole
+line:
+
+```cpp
+ui::AdvancedText line;
+line.content.runs = {keyword_run, name_run};
+line.layout_options.wrap = false;
+ui.add(std::move(line));
+```
+
+### Icons
+
+`ui.svg(document, size, tint)` draws an SVG icon. The document is its text,
+embedded in the program or read from a file; it is drawn into a texture once per
+document, size and options, and kept as long as the Context. With `.mask` only
+its shape counts, in the tint: one-colour glyphs. `.oversample` is texels per
+layout unit, for a display with more pixels than the layout has units.
+`rasterize_svg()` (`kin/assets/image.hpp`) draws one into an `Image`.
+
+### A window's own title bar
+
+A borderless window (`GameWindowInfo::borderless`) has no system title bar, so
+the app draws one. A box with `drags_window()` moves the window when pressed,
+except over the interactive boxes inside it (the menu titles, the buttons), and
+a double click maximizes it where the system does that. `ui.apply()` hands these
+areas to the window each frame, with edges to resize it by. The buttons call
+`Window::minimize()`, `toggle_maximized()` and `request_close()`.
+
+### Keyboard
+
+Boxes with `focusable` join the focus order (by `tab_index`, then as built),
+and so do `TextInput`s and `TextEdit`s that leave on Tab. Once any box is
+focusable, or focus is already in the order, Tab and Shift+Tab move along it
+(at `end()`) and the box focused is scrolled into view; Enter or Space clicks the
+focused box. A text field hands Tab on itself, and stops editing when Tab takes
+focus elsewhere.
+
+Key bindings fire from where focus is. A box's `key_context` names a scope;
+a binding with that context applies while focus is inside the box, and the
+innermost context wins over outer ones and over global bindings (no context):
+
+```cpp
+ui.bind({.action = "save", .key = Key::S, .modifiers = KeyModifiers::Ctrl, .context = "editor"});
+ui.bind({.action = "down", .key = Key::Down, .context = "explorer"});
+// each frame, after ui.begin():
+if (ui.action_triggered("save")) save();
+```
+
+Modifiers must match exactly. Bindings without Ctrl or Alt are skipped while a
+text field has the keys, so typing is not taken for commands.
+
+`games/studio_demo` is an editor-style window built this way, and
+`games/nextcode_look` rebuilds next_code's window (menus, icons, title bar).
+
 ## Text That Scales
 
 TTF fonts are made one of two ways (`kin::ui2::TextRendering`):

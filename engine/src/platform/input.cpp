@@ -469,6 +469,7 @@ void Input::advance_step_edges() {
     _key_pressed.fill(false);
     _key_released.fill(false);
     _mouse_wheel_y = 0.0f;
+    _mouse_wheel_x = 0.0f;
     _mouse_motion = {};
 }
 
@@ -479,6 +480,7 @@ void Input::consume_frame_edges() {
     _mouse_frame_pressed.fill(false);
     _mouse_frame_released.fill(false);
     _frame_mouse_wheel_y = 0.0f;
+    _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
     _text_input.clear();
 }
@@ -500,6 +502,7 @@ void Input::begin_frame(bool advance_transients) {
         // App::run already used the step wheel up in that step (advance_step_edges);
         // this clears it for callers that step without it (run_for, tests).
         _mouse_wheel_y = 0.0f;
+        _mouse_wheel_x = 0.0f;
         _mouse_motion = {};
     } else {
         // A 0-step frame (refresh > sim rate): the per-frame MOUSE edges PERSIST so UI
@@ -531,6 +534,7 @@ void Input::begin_frame(bool advance_transients) {
     _key_frame_released.fill(false);
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
+    _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
     _text_input.clear();
 }
@@ -587,6 +591,8 @@ void Input::process_native_event(const void* native_event) {
     } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
         _mouse_wheel_y += event.wheel.y;
         _frame_mouse_wheel_y += event.wheel.y;
+        _mouse_wheel_x += event.wheel.x;
+        _frame_mouse_wheel_x += event.wheel.x;
         _mouse_window = static_cast<WindowId>(event.wheel.windowID);
     } else if (event.type == SDL_EVENT_TEXT_INPUT && event.text.text) {
         _text_input += event.text.text;
@@ -737,6 +743,11 @@ void Input::set_mouse_motion(Vec2f delta) {
 void Input::set_mouse_wheel_y(f32 value) {
     _mouse_wheel_y += value;
     _frame_mouse_wheel_y += value;
+}
+
+void Input::set_mouse_wheel_x(f32 value) {
+    _mouse_wheel_x += value;
+    _frame_mouse_wheel_x += value;
 }
 
 void Input::set_mouse_pos(Vec2f pos, WindowId window_id) {

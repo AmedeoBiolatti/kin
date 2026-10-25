@@ -12,12 +12,18 @@
 
 #include <array>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
+
+namespace kin {
+class App;
+}
 
 namespace kin::ui2 {
 
@@ -39,6 +45,130 @@ void collect_overflows(bool enabled);
 bool collecting_overflows();
 std::vector<OverflowRecord> collected_overflows();
 void clear_collected_overflows();
+
+// Composition (experimental): open containers for the immediate layout builder.
+// A box is a layout node with a surface, a hit region and any children. It is
+// hit-tested against where it was drawn last frame (so it can answer hovered and
+// clicked while its children are still being declared), and drawn at end_layout().
+struct BoxStyle {
+    LayoutStyle layout{};
+    InteractiveSurfaceStyle surface{}; // `hovered` shows while the pointer is over the box or its children
+    bool draw_surface = false;
+    bool interactive = true; // registers a hit region (hot/clicked); false = layout and drawing only
+    bool clip = false;       // children are clipped to the box
+    // Clip to the box's rounded corners (surface.normal.radius). A path clip draws
+    // through two layers, a render pass each: use it where the corners show.
+    bool clip_rounded = false;
+    bool selected = false;
+    bool enabled = true;
+    // In the Tab order (by tab_index, then as built); Enter or Space while focused clicks it.
+    bool focusable = false;
+    i32 tab_index = 0;
+    // Key bindings with this context apply while focus is in the box (see Context::bind).
+    std::string_view key_context{};
+    // The pointer's shape over the box and its children (Default: the parent's).
+    SystemCursor cursor = SystemCursor::Default;
+    // Pressing it moves the window, as a system title bar does (except over the
+    // interactive boxes inside it): a window that draws its own (borderless).
+    bool window_drag = false;
+    i32 z = 0;
+
+    // Shorthands that chain (start from hbox() or vbox()):
+    //   ui.box(id, ui::hbox().w(ui::grow()).h(22).pad(8, 0).gap(6).items(ui::UiAlign::Center)
+    //                  .hover_bg(hover).selected_bg(accent).selected_if(row == current))
+    // The layout ones are LayoutStyle's.
+    BoxStyle& row() { layout.row(); return *this; }
+    BoxStyle& col() { layout.col(); return *this; }
+    BoxStyle& w(auto value) { layout.w(value); return *this; }
+    BoxStyle& h(auto value) { layout.h(value); return *this; }
+    BoxStyle& size(f32 w_px, f32 h_px) { layout.size(w_px, h_px); return *this; }
+    BoxStyle& fill() { layout.fill(); return *this; }
+    BoxStyle& pad(auto... values) { layout.pad(values...); return *this; }
+    BoxStyle& margins(auto... values) { layout.margins(values...); return *this; }
+    BoxStyle& gap(f32 value) { layout.gap(value); return *this; }
+    BoxStyle& justify(UiAlign align) { layout.justify(align); return *this; }
+    BoxStyle& items(UiAlign align) { layout.items(align); return *this; }
+    BoxStyle& center() { layout.center(); return *this; }
+    BoxStyle& wrapped() { layout.wrapped(); return *this; }
+    BoxStyle& grid(i32 columns) { layout.grid(columns); return *this; }
+    BoxStyle& at(UiAnchor where, Vec2f offset = {}) { layout.at(where, offset); return *this; }
+    BoxStyle& on_layer(i32 value) { layout.on_layer(value); return *this; }
+    // Next to the parent box instead of in it, over everything (see LayoutStyle::floats):
+    //   if (open) { auto menu = ui.box(id, ui::vbox().floating(ui::UiFloat::Below)...); }
+    // A floating box and what is in it are hit before anything under them.
+    BoxStyle& shrinks() { layout.shrinks(); return *this; }
+    BoxStyle& floating(UiFloat side = UiFloat::Below, Vec2f offset = {}) { layout.floating(side, offset); return *this; }
+    // A fill in every state not given its own with hover_bg() and the like
+    // (before or after this).
+    BoxStyle& bg(Color color);
+    BoxStyle& hover_bg(Color color);    // while hovered or pressed
+    BoxStyle& pressed_bg(Color color);
+    BoxStyle& selected_bg(Color color); // see selected_if()
+    BoxStyle& rounded(f32 radius);      // every state
+    BoxStyle& border(Color color, f32 width = 1.0f);
+    BoxStyle& focus_border(Color color, f32 width = 1.0f);
+    BoxStyle& passive() { interactive = false; return *this; } // no hit region
+    BoxStyle& clipped(bool to_corners = false) { clip = true; clip_rounded = to_corners; return *this; }
+    BoxStyle& selected_if(bool value) { selected = value; return *this; }
+    BoxStyle& disabled_if(bool value) { enabled = !value; return *this; }
+    BoxStyle& tab_stop(i32 index = 0) { focusable = true; tab_index = index; return *this; }
+    BoxStyle& key_scope(std::string_view context) { key_context = context; return *this; }
+    BoxStyle& cursor_shape(SystemCursor shape) { cursor = shape; return *this; }
+    BoxStyle& depth(i32 value) { z = value; return *this; }
+    BoxStyle& drags_window() { window_drag = true; return *this; }
+};
+
+// How Context::svg() draws an icon.
+struct SvgOptions {
+    f32 oversample = 1.0f; // texels per unit: Window::display_scale() on a high-density display
+    bool mask = false;     // only its shape counts, in the tint: a one-colour glyph (gpui's svg())
+};
+
+inline BoxStyle hbox() { return BoxStyle{}.row(); } // children side by side
+inline BoxStyle vbox() { return BoxStyle{}.col(); } // children top to bottom
+
+struct BoxResult : Interaction {
+    // The pointer is over the box, including over its children. `hot` is exclusive
+    // (the innermost box under the pointer); `hovered` is not.
+    bool hovered = false;
+    bool double_clicked = false;    // a second click soon after the first, in the same place
+    bool secondary_clicked = false; // the right button released over the box
+    bool pressed_outside = false;   // a button went down this frame away from the box: close a popup
+    Rectf bounds{};                 // where the box was last frame; empty on its first frame
+};
+
+struct ScrollBoxOptions {
+    f32 wheel_step = 48.0f;
+    f32 scrollbar_thickness = 8.0f;
+    f32 min_thumb = 18.0f;
+    bool show_scrollbar = true;
+    bool vertical = true;
+    bool horizontal = false; // children keep their width and scroll sideways (wheel x, or Shift+wheel)
+};
+
+// A key, with exactly these modifiers, fires `action` while focus is inside a box
+// whose key_context is `context` (empty: anywhere). The innermost context wins.
+struct KeyBinding {
+    std::string action{};
+    Key key = Key::Unknown;
+    KeyModifiers modifiers = KeyModifiers::None;
+    std::string context{};
+};
+
+struct SplitOptions {
+    LayoutStyle layout{.width = grow(), .height = grow()};
+    UiLayoutAxis axis = UiLayoutAxis::Horizontal; // Horizontal: panes side by side
+    f32 ratio = 0.5f;                             // the first pane's share on its first frame
+    f32 min_first = 60.0f;
+    f32 min_second = 60.0f;
+    f32 thickness = 4.0f;
+};
+
+// Rows [first, last) of a list, the ones a list() builds this frame.
+struct ListRange {
+    i32 first = 0;
+    i32 last = 0;
+};
 
 class Context {
 public:
@@ -297,6 +427,7 @@ public:
     bool pointer_released(MouseButton button = MouseButton::Left) const;
     // The wheel this rendered frame (Input::frame_mouse_wheel_y).
     f32 mouse_wheel_y() const;
+    f32 mouse_wheel_x() const;
     bool key_pressed(Key key) const;
     // Pressed this frame, or auto-repeated while held: for keys that act again
     // while held, such as a text caret's arrows and Backspace.
@@ -318,6 +449,39 @@ public:
     // Starts or stops the window's text input as widgets want it, and tells
     // the input method where the caret is: call it once a frame, after end().
     void apply_text_input(Window& window) const;
+    // Everything a frame asks of the window and the app, once a frame after
+    // end(): text input (apply_text_input), the pointer's shape, and another
+    // frame while something is still moving (App::request_redraw, which matters
+    // when the app waits for events).
+    void apply(App& app, Window& window) const;
+    // The drags_window() boxes (and the interactive boxes inside them) as last laid
+    // out, in layout units: what apply() hands a borderless window.
+    const WindowChrome& window_chrome() const;
+
+    // The pointer's shape this frame, set by what it is over: a box with a
+    // BoxStyle::cursor, a text field, a splitter. The last call wins; Default
+    // when nothing set it.
+    void set_cursor(SystemCursor cursor) { _cursor = cursor; }
+    SystemCursor cursor() const { return _cursor; }
+    // Something drawn this frame is still changing (a state transition, a
+    // blinking caret), so the next frame should be drawn though nothing happens.
+    void request_redraw() { _redraw = true; }
+    bool wants_redraw() const { return _redraw; }
+
+    // State that belongs to a part of the UI rather than to the app (whether a
+    // section is open, a panel's filter text): a T kept for `id`, made with
+    // T{} (or `make()`) the first time it is asked for. A component can then
+    // keep its own state, as a gpui view does. It goes once a frame passes
+    // without it being asked for (what used it is gone), unless keep_state()
+    // keeps it; the reference holds until then. Asking for the id as another
+    // type starts it over.
+    template <class T>
+    T& state(Id id);
+    template <class T, class Make>
+    T& state(Id id, Make&& make);
+    void keep_state(Id id, bool keep = true); // kept while not asked for too, until drop_state()
+    void drop_state(Id id);
+    bool has_state(Id id) const { return _states.contains(id.value); }
     std::string clipboard_text() const;
     void set_clipboard_text(std::string_view text);
     UiTextInputState& text_input_state(Id id, std::string_view value = {});
@@ -410,6 +574,129 @@ public:
 
     void end_layout();
 
+    // Like widget(), but the layout keeps its own copy: for widgets whose results
+    // are not needed (labels, images, spacers), so they can be temporaries.
+    template <typename W>
+    void add(W w, LayoutStyle style = {}) {
+        const i32 index = add_node(style, measure(w));
+        _pending.push_back({index, [w = std::move(w)](Context& ctx, Rectf solved) mutable {
+                                w.bounds = solved;
+                                run(ctx, w);
+                            }});
+    }
+    void label(std::string_view text, LayoutStyle style = {});
+    // With `overflow` Ellipsis (or Shrink) a label shrinks (LayoutStyle::shrink): as
+    // wide as its text while its line has room, narrower with its text cut with "…"
+    // when it has not. A tab title, a file name in a tree row, a menu item.
+    void label(std::string_view text, const TextStyle& text_style, LayoutStyle style = {},
+               TextOverflow overflow = TextOverflow::Visible);
+    void image(const Sprite& sprite, Vec2f size, Color tint = colors::white, LayoutStyle style = {});
+    // An SVG icon `size` units big. `svg` is the document's text (embedded in the
+    // program, or read from a file). It is drawn into a texture once per document,
+    // size and SvgOptions and kept as long as the Context.
+    void svg(std::string_view svg, Vec2f size, Color tint = colors::white, SvgOptions options = {}, LayoutStyle style = {});
+    const Sprite& svg_sprite(std::string_view svg, Vec2f size, SvgOptions options = {}); // empty when unreadable
+    void spacer(LayoutStyle style = {.width = grow(), .height = grow()});
+
+    // Composition (experimental). Must be inside begin_layout()/end_layout().
+    //
+    //   {
+    //       auto row = ui.box(make_id("row"), style); // RAII: the box ends at scope exit
+    //       ui.label(name);                            // children
+    //       if (row.clicked) { ... }
+    //   }
+    //
+    // or begin_box()/end_box() explicitly.
+    BoxResult begin_box(Id id, const BoxStyle& style);
+    void end_box();
+
+    class BoxScope : public BoxResult {
+    public:
+        BoxScope(Context* ctx, BoxResult result, void (Context::*end)())
+            : BoxResult(result),
+              _ctx(ctx),
+              _end(end) {}
+        ~BoxScope() {
+            if (_ctx) {
+                (_ctx->*_end)();
+            }
+        }
+        BoxScope(BoxScope&& other) noexcept
+            : BoxResult(other),
+              _ctx(other._ctx),
+              _end(other._end) {
+            other._ctx = nullptr;
+        }
+        BoxScope(const BoxScope&) = delete;
+        BoxScope& operator=(const BoxScope&) = delete;
+        BoxScope& operator=(BoxScope&&) = delete;
+
+    private:
+        Context* _ctx = nullptr;
+        void (Context::*_end)() = nullptr;
+    };
+    [[nodiscard]] BoxScope box(Id id, const BoxStyle& style) {
+        return BoxScope(this, begin_box(id, style), &Context::end_box);
+    }
+
+    // A box whose children scroll. Give it a bounded size (fixed or grow); its
+    // content is laid out at full size and moved by the offset, which the Context
+    // keeps by id. The wheel scrolls the innermost scroll box under the pointer
+    // that can move that way, in the same frame.
+    BoxResult begin_scroll(Id id, const BoxStyle& style, ScrollBoxOptions options = {});
+    void end_scroll();
+    [[nodiscard]] BoxScope scroll(Id id, const BoxStyle& style, ScrollBoxOptions options = {}) {
+        return BoxScope(this, begin_scroll(id, style, options), &Context::end_scroll);
+    }
+    Vec2f scroll_offset(Id id) const;
+    void set_scroll_offset(Id id, Vec2f offset); // clamped at the next end_layout()
+
+    // Rows of one height, of which only those visible in the enclosing scroll box
+    // (plus a few either side) are built: `row(i)` is called for each, inside a
+    // horizontal row container of that height.
+    template <typename F>
+    void list(Id id, i32 count, f32 row_height, F&& row) {
+        list(id, count, row_height, LayoutStyle{.width = grow()}, std::forward<F>(row));
+    }
+    template <typename F>
+    void list(Id id, i32 count, f32 row_height, LayoutStyle style, F&& row) {
+        const ListRange range = begin_list(id, count, row_height, style);
+        for (i32 i = range.first; i < range.last; ++i) {
+            begin_list_row();
+            row(i);
+            end_container();
+        }
+        end_list();
+    }
+    ListRange begin_list(Id id, i32 count, f32 row_height, LayoutStyle style = {.width = grow()});
+    void begin_list_row();
+    void end_list();
+    // Scrolls the list's scroll box, next frame, so that row is in view (built or not).
+    void scroll_to_row(Id list, i32 row);
+
+    // Two panes and a draggable handle between them:
+    //   ui.begin_split(id, opts); ...first pane...; ui.split_next(); ...second...; ui.end_split();
+    // The ratio is kept by id.
+    void begin_split(Id id, SplitOptions options = {});
+    void split_next();
+    void end_split();
+    f32 split_ratio(Id id) const;
+
+    // Keyboard focus order. Focusable boxes join it; so do text fields, which also
+    // hand Tab on. Tab and Shift+Tab move along it at end() once focus is in it (or
+    // any box is focusable), and the box focused is scrolled into view.
+    void register_focusable(Id id, i32 tab_index = 0);
+    void request_focus_move(Id from, i32 direction); // at end(): +1 next, -1 previous
+    // True for the frame after Tab (or request_focus_move) moved focus: a text field
+    // that is still editing without focus stops.
+    bool focus_moved() const { return _focus_moved; }
+
+    // Key bindings, dispatched at begin() from where focus is (see KeyBinding).
+    // Bindings without Ctrl or Alt are skipped while a text field has the keys.
+    void bind(KeyBinding binding);
+    void clear_bindings() { _bindings.clear(); }
+    bool action_triggered(std::string_view action) const;
+
 private:
     struct Pending {
         i32 node = -1;
@@ -494,6 +781,101 @@ private:
     LayoutScratch _layout_scratch; // reused across end_layout() calls, avoids per-frame alloc
     Rectf _root{};
 
+    // Composition (experimental). Per-node tags for this layout, and what each id
+    // was last frame (rects, scroll offsets, split ratios), kept across frames.
+    enum class ComposeKind : u8 { Box, Scroll, ScrollbarY, ScrollbarX, List, Split, SplitHandle };
+    struct ComposeNode {
+        i32 node = -1;
+        Id id{};
+        ComposeKind kind = ComposeKind::Box;
+        bool clip = false;
+        f32 clip_radius = 0.0f;
+        f32 row_height = 0.0f; // lists
+        std::string key_context{};
+        ScrollBoxOptions scroll{};
+        bool interactive = false;
+        bool window_drag = false;
+    };
+    struct ComposeRecord {
+        Rectf rect{};
+        Rectf visible{}; // rect within its clips: where it can be hit
+        Id parent{};     // the enclosing recorded box
+        bool scroll = false;
+        f32 row_height = 0.0f; // lists
+        std::string key_context{};
+        u64 frame = 0;
+    };
+    struct ScrollRecord {
+        Vec2f offset{};
+        Vec2f content{};  // content size, padding included
+        Vec2f viewport{}; // box size
+        std::array<Rectf, 2> track{};       // scrollbars as last drawn: [0] vertical, [1] horizontal
+        std::array<Interaction, 2> thumb{}; // their thumbs this frame
+        std::array<f32, 2> grab{-1.0f, -1.0f}; // pointer-to-thumb offset while one is dragged
+        u64 frame = 0;
+    };
+    struct SplitFrame {
+        Id id{};
+        SplitOptions options{};
+        Interaction handle{};
+    };
+    struct FocusEntry {
+        Id id{};
+        Id box{};        // the enclosing box, for key contexts
+        i32 tab_index = 0;
+        u32 order = 0;
+        bool box_entry = false; // a focusable box (opts the Context into Tab)
+    };
+    struct Reveal {
+        Id id{};        // a box, or a list with `row`
+        i32 row = -1;
+    };
+    void begin_compose(Id id, ComposeKind kind, const BoxStyle& style, LayoutStyle layout);
+    BoxResult compose_interaction(Id id, const BoxStyle& style);
+    i32 compose_z(const BoxStyle& style) const;
+    void scroll_thumbs(Id id, const ScrollBoxOptions& options, i32 z);
+    void layout_compose();
+    void reveal(const Reveal& target);
+    void record_compose(const std::vector<i32>& clip_of, const std::vector<Rectf>& visible_clips);
+    void draw_scrollbar(Id id, Rectf track, i32 axis, const ScrollBoxOptions& options);
+    void add_focusable(Id id, i32 tab_index, bool box_entry);
+    void finish_focus();
+    void dispatch_bindings();
+    std::vector<ComposeNode> _compose;
+    std::vector<Id> _compose_ids;    // open boxes, innermost last (parent of the next record)
+    std::vector<Id> _scroll_ids;     // open scroll boxes, innermost last
+    std::vector<SplitFrame> _splits_open;
+    std::vector<f32> _list_heights;  // open lists' row heights, innermost last
+    std::unordered_map<u64, ComposeRecord> _compose_records;
+    std::unordered_map<u64, ScrollRecord> _scroll_records;
+    std::unordered_map<u64, f32> _split_ratios;
+    std::vector<Reveal> _reveals;    // applied at the next end_layout()
+    std::vector<FocusEntry> _focus_order; // this frame's, as registered
+    std::unordered_map<u64, Id> _focus_boxes; // last frame: focusable id -> enclosing box
+    std::optional<std::pair<Id, i32>> _focus_move;
+    std::vector<KeyBinding> _bindings;
+    std::vector<std::string> _actions; // fired this frame
+    bool _wants_text_input_last = false;
+    bool _focus_moved = false;
+    bool _any_press = false; // a mouse button went down this frame (before widgets took it)
+    WindowChrome _chrome;    // the drags_window() boxes as last laid out, in layout units
+    SystemCursor _cursor = SystemCursor::Default;
+    bool _redraw = false;
+
+    struct StateSlot {
+        std::unique_ptr<void, void (*)(void*)> value{nullptr, nullptr};
+        const void* type = nullptr; // state_type<T>()
+        u64 frame = 0;              // last asked for
+        bool kept = false;
+    };
+    template <class T>
+    static const void* state_type() {
+        static const char tag = 0;
+        return &tag;
+    }
+    std::unordered_map<u64, StateSlot> _states;
+    std::unordered_map<u64, Sprite> _svg_sprites;
+
     Id _open_popup{};
     Id _open_subpopup{};
     Id _popup_opened_this_frame{};
@@ -554,5 +936,21 @@ struct SolitaryPixelOptions {
 // Context::pixel_causation() to attribute each one. Returns at most `max_results` hits.
 std::vector<SolitaryPixel> find_solitary_pixels(const u8* rgba, i32 width, i32 height,
                                                 SolitaryPixelOptions options = {}, std::size_t max_results = 256);
+
+template <class T>
+T& Context::state(Id id) {
+    return state<T>(id, [] { return T{}; });
+}
+
+template <class T, class Make>
+T& Context::state(Id id, Make&& make) {
+    StateSlot& slot = _states[id.value];
+    slot.frame = _state.frame();
+    if (slot.type != state_type<T>()) {
+        slot.value = {new T(std::forward<Make>(make)()), [](void* value) { delete static_cast<T*>(value); }};
+        slot.type = state_type<T>();
+    }
+    return *static_cast<T*>(slot.value.get());
+}
 
 } // namespace kin::ui2

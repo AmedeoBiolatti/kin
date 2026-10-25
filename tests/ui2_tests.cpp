@@ -14,7 +14,11 @@
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
 
+#include <kin/assets/image.hpp>
+
+#include <array>
 #include <cassert>
+#include <tuple>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -40,7 +44,7 @@ using namespace kin;
 
 // Identity backend: window space == logical space, so test pointer coordinates are
 // also logical coordinates. It records primitive destinations for small geometry probes.
-class IdentityBackend final : public IRenderer2DBackend {
+class IdentityBackend : public IRenderer2DBackend {
 public:
     explicit IdentityBackend(std::vector<Rectf>* fills = nullptr)
         : fills(fills) {}
@@ -150,6 +154,21 @@ bool rect_eq(Rectf r, f32 x, f32 y, f32 w, f32 h) {
 Renderer2D make_renderer() {
     return Renderer2D{std::make_unique<IdentityBackend>()};
 }
+
+// An IdentityBackend whose textures exist (with a size, and nothing in them).
+class SizedTexture final : public ITextureBackend {
+public:
+    explicit SizedTexture(Vec2i size) : _size(size) {}
+    Vec2i size() const override { return _size; }
+
+private:
+    Vec2i _size;
+};
+
+class TexturingBackend final : public IdentityBackend {
+public:
+    Texture create_texture_from_rgba(const u8*, Vec2i size) override { return Texture{std::make_shared<SizedTexture>(size)}; }
+};
 
 Renderer2D make_recording_renderer(std::vector<Rectf>& fills) {
     return Renderer2D{std::make_unique<IdentityBackend>(&fills)};
@@ -546,6 +565,52 @@ void test_solve_grow_min_max_constraints() {
     ui2::solve(n, 0, {0, 0, 300, 20});
     assert(rect_eq(n[1].solved, 0, 0, 50, 20));
     assert(rect_eq(n[2].solved, 50, 0, 150, 20));
+}
+
+void test_solve_floating() {
+    // A 300x200 root whose padding puts a 40x20 parent at `at`; the parent holds a
+    // floating 120x150 node on `side`.
+    const auto place = [](Vec2f at, ui2::UiFloat side, Vec2f offset = {}) {
+        std::vector<ui2::LayoutNode> n;
+        ui2::LayoutStyle root;
+        root.width = ui2::fixed(300);
+        root.height = ui2::fixed(200);
+        root.padding = {at.x, at.y, 0, 0};
+        n.push_back({root, {}, {}, {}, -1});
+        ui2::LayoutStyle parent;
+        parent.width = ui2::fixed(40);
+        parent.height = ui2::fixed(20);
+        n.push_back({parent, {}, {}, {}, 0});
+        n[0].children.push_back(1);
+        ui2::LayoutStyle menu;
+        menu.width = ui2::fixed(120);
+        menu.height = ui2::fixed(150);
+        menu.floating(side, offset);
+        n.push_back({menu, {}, {}, {}, 1});
+        n[1].children.push_back(2);
+        ui2::LayoutStyle item;
+        item.width = ui2::grow();
+        item.height = ui2::fixed(10);
+        n.push_back({item, {}, {}, {}, 2});
+        n[2].children.push_back(3);
+        ui2::solve(n, 0, {0, 0, 300, 200});
+        assert(approx(n[1].intrinsic.x, 40) && approx(n[1].intrinsic.y, 20)); // takes no room in its parent
+        assert(rect_eq(n[3].solved, n[2].solved.x, n[2].solved.y, 120, 10));  // its content moved with it
+        return n[2].solved;
+    };
+    // Where it fits, on its side; else on the other; then moved along to stay in.
+    assert(rect_eq(place({10, 0}, ui2::UiFloat::Below), 10, 20, 120, 150));
+    assert(rect_eq(place({10, 0}, ui2::UiFloat::Below, {0, 4}), 10, 24, 120, 150));
+    assert(rect_eq(place({10, 170}, ui2::UiFloat::Below), 10, 20, 120, 150)); // above it
+    assert(rect_eq(place({10, 60}, ui2::UiFloat::Below), 10, 50, 120, 150));  // fits neither: pushed up
+    assert(rect_eq(place({200, 0}, ui2::UiFloat::Below), 180, 20, 120, 150)); // pushed left
+    assert(rect_eq(place({10, 170}, ui2::UiFloat::Above), 10, 20, 120, 150));
+    assert(rect_eq(place({10, 0}, ui2::UiFloat::Right), 50, 0, 120, 150));
+    assert(rect_eq(place({200, 0}, ui2::UiFloat::Right), 80, 0, 120, 150)); // to the left
+    assert(rect_eq(place({200, 0}, ui2::UiFloat::Left), 80, 0, 120, 150));
+    assert(rect_eq(place({10, 0}, ui2::UiFloat::Left), 50, 0, 120, 150));
+    assert(rect_eq(place({0, 0}, ui2::UiFloat::Point, {250, 180}), 130, 30, 120, 150)); // up and left of it
+    assert(rect_eq(place({0, 0}, ui2::UiFloat::Point, {20, 30}), 20, 30, 120, 150));
 }
 
 void test_solve_overlay_excluded_from_fit() {
@@ -4134,6 +4199,847 @@ void test_layout_end_to_end() {
     assert(!quit.clicked);
 }
 
+
+// --- composition: open boxes, scroll boxes, lazy lists, splits ---------------------
+
+void test_compose_box_nesting_and_clicks() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::BoxResult row;
+    ui2::BoxResult close;
+
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 100});
+        {
+            auto r = ui.box(ui2::make_id("row"),
+                            {.layout = {.width = ui2::grow(), .height = ui2::fixed(30), .axis = ui2::UiLayoutAxis::Horizontal}});
+            ui.label("file.cpp", {.width = ui2::grow()});
+            {
+                auto c = ui.box(ui2::make_id("close"), {.layout = {.width = ui2::fixed(20), .height = ui2::fixed(20)}});
+                close = c;
+            }
+            row = r;
+        }
+        ui.end_layout();
+        ui.end();
+    };
+
+    // Frame 1 lays out; nothing has a rect to hit yet.
+    input.begin_frame();
+    input.set_mouse_pos({190, 10});
+    build();
+    assert(!row.hovered && !close.hovered);
+    assert(row.bounds.w == 0.0f);
+
+    // Frame 2 hits last frame's rects; frame 3 sees who was on top.
+    input.begin_frame();
+    input.set_mouse_pos({190, 10});
+    build();
+    assert(rect_eq(row.bounds, 0, 0, 200, 30));
+    assert(rect_eq(close.bounds, 180, 0, 20, 20));
+    input.begin_frame();
+    input.set_mouse_pos({190, 10});
+    build();
+    assert(close.hot && close.hovered);
+    assert(!row.hot && row.hovered); // hovered through its child, but not the one clicked
+
+    // Over the row's label: the row is hot; press and release click it.
+    input.begin_frame();
+    input.set_mouse_pos({50, 10});
+    build();
+    input.begin_frame();
+    input.set_mouse_pos({50, 10});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    assert(row.hot && row.pressed && !close.hovered);
+    input.begin_frame();
+    input.set_mouse_pos({50, 10});
+    input.set_mouse_held(MouseButton::Left, false);
+    build();
+    assert(row.clicked && !close.clicked);
+}
+
+void test_compose_scroll_box() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id id = ui2::make_id("scroll");
+    std::vector<ui2::Spacer> items(10);
+
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto s = ui.scroll(id, {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            for (ui2::Spacer& item : items) {
+                ui.widget(item, {.width = ui2::grow(), .height = ui2::fixed(30)});
+            }
+        }
+        ui.end_layout();
+        ui.end();
+    };
+
+    input.begin_frame();
+    input.set_mouse_pos({50, 50});
+    build();
+    assert(approx(items[1].bounds.y, 30.0f));
+    assert(ui.scroll_offset(id).y == 0.0f);
+
+    // The wheel moves the content in the frame it turns.
+    input.begin_frame();
+    input.set_mouse_pos({50, 50});
+    input.set_mouse_wheel_y(-1.0f);
+    build();
+    assert(approx(ui.scroll_offset(id).y, 48.0f));
+    assert(approx(items[1].bounds.y, 30.0f - 48.0f));
+
+    // Not past the end: 10 * 30 of content in 100.
+    ui.set_scroll_offset(id, {0.0f, 1000.0f});
+    input.begin_frame();
+    input.set_mouse_pos({50, 50});
+    build();
+    assert(approx(ui.scroll_offset(id).y, 200.0f));
+    assert(approx(items[9].bounds.y + items[9].bounds.h, 100.0f));
+
+    // A wheel outside the box does nothing.
+    input.begin_frame();
+    input.set_mouse_pos({50, 250});
+    input.set_mouse_wheel_y(1.0f);
+    build();
+    assert(approx(ui.scroll_offset(id).y, 200.0f));
+}
+
+void test_compose_lazy_list() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id scroll = ui2::make_id("files");
+    std::vector<i32> built;
+
+    const auto build = [&]() {
+        built.clear();
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto s = ui.scroll(scroll, {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            ui.list(ui2::make_id("rows"), 100000, 20.0f, [&](i32 i) {
+                built.push_back(i);
+                ui.label("row");
+            });
+        }
+        ui.end_layout();
+        ui.end();
+    };
+
+    input.begin_frame();
+    build();
+    assert(!built.empty() && built.front() == 0);
+    assert(built.size() < 40); // not 100000
+    input.begin_frame();
+    build();
+    assert(built.front() == 0 && built.size() <= 12); // 5 visible + overscan
+
+    // Far down: the content is still 100000 rows tall, and only rows near the view are built.
+    ui.set_scroll_offset(scroll, {0.0f, 20.0f * 50000.0f});
+    input.begin_frame();
+    build(); // places the list at the new offset
+    input.begin_frame();
+    build();
+    assert(approx(ui.scroll_offset(scroll).y, 20.0f * 50000.0f));
+    assert(built.size() <= 12);
+    assert(built.front() >= 49995 && built.back() <= 50010);
+}
+
+void test_compose_split() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id id = ui2::make_id("split");
+    ui2::Spacer left;
+    ui2::Spacer right;
+
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 400, 200});
+        ui.begin_split(id, {.ratio = 0.25f, .thickness = 4.0f});
+        ui.widget(left, {.width = ui2::grow(), .height = ui2::grow()});
+        ui.split_next();
+        ui.widget(right, {.width = ui2::grow(), .height = ui2::grow()});
+        ui.end_split();
+        ui.end_layout();
+        ui.end();
+    };
+
+    input.begin_frame();
+    input.set_mouse_pos({102, 100});
+    build();
+    assert(rect_eq(left.bounds, 0, 0, 100, 200));
+    assert(rect_eq(right.bounds, 104, 0, 296, 200));
+
+    // Grab the handle and drag it to the middle.
+    input.begin_frame();
+    input.set_mouse_pos({102, 100});
+    build();
+    input.begin_frame();
+    input.set_mouse_pos({102, 100});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    input.begin_frame();
+    input.set_mouse_pos({202, 100});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    assert(approx(ui.split_ratio(id), 0.5f));
+    assert(rect_eq(left.bounds, 0, 0, 200, 200));
+
+    // Not past the second pane's minimum.
+    input.begin_frame();
+    input.set_mouse_pos({399, 100});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    assert(approx(right.bounds.w, 60.0f));
+}
+
+
+void test_compose_clicks_double_and_secondary() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::BoxResult box;
+    const auto frame = [&](Vec2f pos, MouseButton button, bool held) {
+        input.begin_frame();
+        input.set_mouse_pos(pos);
+        input.set_mouse_held(button, held);
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 100});
+        {
+            auto b = ui.box(ui2::make_id("file"), {.layout = {.width = ui2::fixed(100), .height = ui2::fixed(30)}});
+            box = b;
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    frame({10, 10}, MouseButton::Left, false);
+    frame({10, 10}, MouseButton::Left, false);
+    frame({10, 10}, MouseButton::Left, true);
+    frame({10, 10}, MouseButton::Left, false);
+    assert(box.clicked && !box.double_clicked);
+    frame({11, 10}, MouseButton::Left, true);
+    frame({11, 10}, MouseButton::Left, false);
+    assert(box.clicked && box.double_clicked);
+    frame({11, 10}, MouseButton::Left, true);
+    frame({11, 10}, MouseButton::Left, false);
+    assert(box.clicked && !box.double_clicked); // a third click starts afresh
+
+    frame({10, 10}, MouseButton::Right, true);
+    assert(!box.secondary_clicked);
+    frame({10, 10}, MouseButton::Right, false);
+    assert(box.secondary_clicked && !box.clicked);
+}
+
+void test_compose_scroll_thumb_and_horizontal() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id id = ui2::make_id("code");
+    ui2::Spacer wide;
+    std::vector<ui2::Spacer> lines(10);
+
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 400, 300});
+        {
+            auto s = ui.scroll(id, {.layout = {.width = ui2::fixed(200), .height = ui2::fixed(100)}},
+                               {.scrollbar_thickness = 10.0f, .horizontal = true});
+            ui.widget(wide, {.width = ui2::fixed(500), .height = ui2::fixed(20)});
+            for (ui2::Spacer& line : lines) {
+                ui.widget(line, {.width = ui2::grow(), .height = ui2::fixed(30)});
+            }
+        }
+        ui.end_layout();
+        ui.end();
+    };
+
+    input.begin_frame();
+    input.set_mouse_pos({50, 50});
+    build();
+    // Laid out at full width: rows that grow take the content's width, not the box's.
+    assert(approx(wide.bounds.w, 500.0f));
+    assert(approx(lines[0].bounds.w, 500.0f));
+
+    // A sideways wheel, and Shift with the vertical one, scroll sideways.
+    input.begin_frame();
+    input.set_mouse_pos({50, 50});
+    input.set_mouse_wheel_x(1.0f);
+    build();
+    assert(approx(ui.scroll_offset(id).x, 48.0f) && ui.scroll_offset(id).y == 0.0f);
+    assert(approx(wide.bounds.x, -48.0f));
+    input.begin_frame();
+    input.set_mouse_pos({50, 50});
+    input.set_modifier_held(KeyModifiers::Shift, true);
+    input.set_mouse_wheel_y(-1.0f);
+    build();
+    input.set_modifier_held(KeyModifiers::Shift, false);
+    assert(approx(ui.scroll_offset(id).x, 96.0f) && ui.scroll_offset(id).y == 0.0f);
+
+    // The vertical thumb (track x 190..200, y 0..90; content 320 in 100: thumb 28 tall)
+    // is dragged before the content is placed: it moves in the same frame.
+    ui.set_scroll_offset(id, {0.0f, 0.0f});
+    for (int i = 0; i < 2; ++i) {
+        input.begin_frame();
+        input.set_mouse_pos({195, 5});
+        build();
+    }
+    input.begin_frame();
+    input.set_mouse_pos({195, 5});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    input.begin_frame();
+    input.set_mouse_pos({195, 5 + 31});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    const f32 offset = ui.scroll_offset(id).y;
+    assert(offset > 100.0f); // half the travel: about half of 230
+    assert(approx(lines[0].bounds.y, 20.0f - offset));
+    input.set_mouse_held(MouseButton::Left, false);
+}
+
+void test_compose_rounded_and_nested_clips_balance() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui.set_debug_options({.detect_invariants = true});
+    for (int frame = 0; frame < 2; ++frame) {
+        input.begin_frame();
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 300, 300});
+        {
+            auto card = ui.box(ui2::make_id("card"),
+                               {.layout = {.width = ui2::fixed(200), .height = ui2::fixed(200)},
+                                .surface = {.normal = {.radius = 8.0f}},
+                                .clip_rounded = true});
+            auto inner = ui.scroll(ui2::make_id("inner"), {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            ui.label("one");
+            ui.label("two");
+        }
+        {
+            auto sibling = ui.box(ui2::make_id("sibling"), {.layout = {.width = ui2::fixed(50), .height = ui2::fixed(50)}, .clip = true});
+            ui.label("three");
+        }
+        ui.end_layout();
+        ui.end();
+        for (const auto& d : ui.diagnostics()) {
+            assert(d.kind != ui2::Context::DiagnosticKind::UnbalancedStack);
+        }
+    }
+}
+
+void test_compose_focus_tab_and_keys() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui.bind({.action = "save", .key = Key::S, .modifiers = KeyModifiers::Ctrl, .context = "editor"});
+    ui.bind({.action = "save_all", .key = Key::S, .modifiers = KeyModifiers::Ctrl});
+    ui.bind({.action = "find", .key = Key::F, .modifiers = KeyModifiers::Ctrl});
+    std::vector<ui2::BoxResult> rows(30);
+    const ui2::Id scroll = ui2::make_id("scroll");
+
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto editor = ui.box(ui2::make_id("editor"),
+                                 {.layout = {.width = ui2::grow(), .height = ui2::grow()}, .interactive = false, .key_context = "editor"});
+            auto s = ui.scroll(scroll, {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                auto row = ui.box(ui2::make_id(ui2::make_id("row"), static_cast<u64>(i)),
+                                  {.layout = {.width = ui2::grow(), .height = ui2::fixed(20)}, .focusable = true});
+                rows[i] = row;
+            }
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    const auto key = [&](Key k, KeyModifiers mods = KeyModifiers::None) {
+        input.begin_frame();
+        input.set_modifier_held(mods, true);
+        input.set_key_pressed(k);
+        build();
+        input.set_key_released(k);
+        input.set_modifier_held(mods, false);
+    };
+
+    input.begin_frame();
+    build();
+    // Outside any context only the global binding fires.
+    key(Key::S, KeyModifiers::Ctrl);
+    assert(!ui.action_triggered("save") && ui.action_triggered("save_all"));
+
+    // Tab focuses the first focusable box, then the next.
+    key(Key::Tab);
+    input.begin_frame();
+    build();
+    assert(rows[0].focused);
+    key(Key::Tab);
+    input.begin_frame();
+    build();
+    assert(rows[1].focused && !rows[0].focused);
+    key(Key::Tab, KeyModifiers::Shift);
+    input.begin_frame();
+    build();
+    assert(rows[0].focused);
+
+    // Focus is inside "editor" now: its binding wins over the global one for Ctrl+S.
+    key(Key::S, KeyModifiers::Ctrl);
+    assert(ui.action_triggered("save") && !ui.action_triggered("save_all"));
+    key(Key::F, KeyModifiers::Ctrl);
+    assert(ui.action_triggered("find"));
+    key(Key::F); // without Ctrl: not the binding
+    assert(!ui.action_triggered("find"));
+
+    // Enter clicks the focused box.
+    key(Key::Enter);
+    assert(rows[0].clicked);
+
+    // Shift+Tab from the first wraps to the last, scrolled into view (600 of content in 100).
+    key(Key::Tab, KeyModifiers::Shift);
+    input.begin_frame();
+    build();
+    input.begin_frame();
+    build();
+    assert(rows.back().focused);
+    assert(approx(ui.scroll_offset(scroll).y, 500.0f));
+}
+
+void test_compose_scroll_to_row() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id scroll = ui2::make_id("scroll");
+    const ui2::Id rows = ui2::make_id("rows");
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto s = ui.scroll(scroll, {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            ui.list(rows, 1000, 20.0f, [&](i32) { ui.label("row"); });
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    input.begin_frame();
+    build();
+    ui.scroll_to_row(rows, 500); // not built: below the view
+    input.begin_frame();
+    build();
+    assert(approx(ui.scroll_offset(scroll).y, 501.0f * 20.0f - 100.0f));
+    ui.scroll_to_row(rows, 10); // above it
+    input.begin_frame();
+    build();
+    assert(approx(ui.scroll_offset(scroll).y, 200.0f));
+}
+
+void test_compose_state() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    struct Counter {
+        i32 frames = 0;
+    };
+    const ui2::Id panel = ui2::make_id("panel");
+    const ui2::Id named = ui2::make_id("named");
+    const ui2::Id kept = ui2::make_id("kept");
+    const auto frame = [&](bool ask) {
+        input.begin_frame();
+        ui.begin(input, renderer);
+        if (ask) {
+            ++ui.state<Counter>(panel).frames;
+        }
+        ui.end();
+    };
+
+    frame(true);
+    frame(true);
+    frame(true);
+    assert(ui.state<Counter>(panel).frames == 3);
+    // A frame without it keeps it; a second one drops it.
+    frame(false);
+    assert(ui.has_state(panel));
+    frame(false);
+    assert(!ui.has_state(panel));
+    frame(true);
+    assert(ui.state<Counter>(panel).frames == 1);
+
+    // Made by `make` the first time only; another type starts it over.
+    assert(ui.state<std::string>(named, [] { return std::string("first"); }) == "first");
+    assert(ui.state<std::string>(named, [] { return std::string("second"); }) == "first");
+    assert(ui.state<i32>(named) == 0);
+
+    // keep_state() keeps it without being asked for, until drop_state().
+    ui.state<Counter>(kept).frames = 7;
+    ui.keep_state(kept);
+    for (i32 i = 0; i < 5; ++i) {
+        frame(false);
+    }
+    assert(ui.has_state(kept) && ui.state<Counter>(kept).frames == 7);
+    ui.drop_state(kept);
+    assert(!ui.has_state(kept));
+}
+
+void test_compose_style_shorthands() {
+    const Color base = Color::rgb(10, 10, 10);
+    const Color hover = Color::rgb(20, 20, 20);
+    const Color chosen = Color::rgb(30, 30, 30);
+    const ui2::BoxStyle style = ui2::hbox().w(ui2::grow()).h(22).pad(8, 2).gap(6).items(ui2::UiAlign::Center)
+                                    .hover_bg(hover).bg(base).selected_bg(chosen).rounded(4).tab_stop(2).key_scope("tree");
+    assert(style.layout.axis == ui2::UiLayoutAxis::Horizontal);
+    assert(style.layout.width.mode == ui2::SizeMode::Grow);
+    assert(style.layout.height.mode == ui2::SizeMode::Fixed && approx(style.layout.height.value, 22.0f));
+    assert(approx(style.layout.padding.left, 8.0f) && approx(style.layout.padding.top, 2.0f) &&
+           approx(style.layout.padding.right, 8.0f) && approx(style.layout.padding.bottom, 2.0f));
+    assert(approx(style.layout.spacing, 6.0f) && style.layout.cross == ui2::UiAlign::Center);
+    assert(style.draw_surface && style.focusable && style.tab_index == 2 && style.key_context == "tree");
+    // bg() after hover_bg() leaves the hover fill; every state is rounded.
+    assert(style.surface.normal.fill == base && style.surface.focused.fill == base && style.surface.disabled.fill == base);
+    assert(style.surface.hovered.fill == hover && style.surface.pressed.fill == hover);
+    assert(style.surface.selected.fill == chosen);
+    assert(approx(style.surface.hovered.radius, 4.0f) && approx(style.surface.selected.radius, 4.0f));
+    // A second bg() replaces the first wherever it showed.
+    const ui2::BoxStyle twice = ui2::vbox().bg(base).bg(chosen);
+    assert(twice.surface.hovered.fill == chosen && twice.surface.normal.fill == chosen);
+
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::Spacer inside;
+    input.begin_frame();
+    ui.begin(input, renderer);
+    ui.begin_layout({0, 0, 400, 300});
+    {
+        auto box = ui.box(ui2::make_id("box"), ui2::vbox().size(100, 50).pad(10).margins(5, 0));
+        ui.widget(inside, ui2::LayoutStyle{}.fill());
+    }
+    ui.end_layout();
+    ui.end();
+    assert(rect_eq(inside.bounds, 15, 10, 80, 30));
+}
+
+void test_compose_cursor_and_redraw() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const auto frame = [&](Vec2f pos, f32 dt) {
+        input.begin_frame();
+        input.set_mouse_pos(pos);
+        ui.begin(input, renderer, dt);
+        ui.begin_layout({0, 0, 400, 200});
+        ui.begin_split(ui2::make_id("split"), {.ratio = 0.5f, .thickness = 4.0f});
+        {
+            auto link = ui.box(ui2::make_id("link"), ui2::vbox().fill().hover_bg(Color::rgb(90, 90, 90)).cursor_shape(SystemCursor::Pointer));
+            auto inner = ui.box(ui2::make_id("inner"), ui2::vbox().size(50, 50));
+        }
+        ui.split_next();
+        {
+            auto text = ui.box(ui2::make_id("text"), ui2::vbox().fill().cursor_shape(SystemCursor::Text));
+        }
+        ui.end_split();
+        ui.end_layout();
+        ui.end();
+    };
+
+    // The shape follows what the pointer is over (a frame late, as hover does):
+    // a child box takes its parent's unless it has its own.
+    frame({300, 100}, 0.0f);
+    frame({300, 100}, 0.0f);
+    assert(ui.cursor() == SystemCursor::Text);
+    frame({20, 20}, 0.0f);
+    frame({20, 20}, 0.0f);
+    assert(ui.cursor() == SystemCursor::Pointer);
+    frame({201, 100}, 0.0f);
+    frame({201, 100}, 0.0f);
+    assert(ui.cursor() == SystemCursor::ResizeEW);
+    assert(!ui.wants_redraw()); // no dt: no transitions
+
+    // A hover transition asks for frames until it lands, and no longer.
+    frame({300, 100}, 1.0f / 60.0f);
+    frame({300, 100}, 1.0f / 60.0f);
+    assert(!ui.wants_redraw());
+    frame({100, 150}, 1.0f / 60.0f);
+    frame({100, 150}, 1.0f / 60.0f);
+    assert(ui.wants_redraw());
+    for (i32 i = 0; i < 120 && ui.wants_redraw(); ++i) {
+        frame({100, 150}, 1.0f / 60.0f);
+    }
+    assert(!ui.wants_redraw());
+}
+
+void test_compose_floating_menu() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::BoxResult title;
+    ui2::BoxResult panel;
+    ui2::BoxResult item;
+    ui2::BoxResult under;
+    const auto frame = [&](Vec2f pos, bool press) {
+        input.begin_frame();
+        input.set_mouse_pos(pos);
+        if (press) {
+            input.set_mouse_pressed(MouseButton::Left);
+        }
+        ui.begin(input, renderer, 0.0f);
+        ui.begin_layout({0, 0, 400, 200});
+        {
+            auto window = ui.box(ui2::make_id("window"), ui2::vbox().fill().passive());
+            {
+                // A clipped bar 20 high: the menu hangs below it all the same.
+                auto bar = ui.box(ui2::make_id("bar"), ui2::hbox().w(ui2::grow()).h(20).clipped());
+                auto t = ui.box(ui2::make_id("title"), ui2::hbox().size(60, 20));
+                title = t;
+                auto p = ui.box(ui2::make_id("panel"), ui2::vbox().w(150).pad(4).floating(ui2::UiFloat::Below, {0, 2}));
+                panel = p;
+                auto i = ui.box(ui2::make_id("item"), ui2::hbox().w(ui2::grow()).h(26));
+                item = i;
+            }
+            // Built after the menu, under it on screen.
+            auto u = ui.box(ui2::make_id("under"), ui2::vbox().fill());
+            under = u;
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    frame({30, 40}, false);
+    frame({30, 40}, false);
+    frame({30, 40}, false);
+    assert(rect_eq(panel.bounds, 0, 22, 150, 34));
+    assert(rect_eq(item.bounds, 4, 26, 142, 26));
+    // The menu is hit before what is under it, though built inside a clipped bar
+    // and before the box under it.
+    assert(item.hot && item.hovered && panel.hovered);
+    assert(!under.hovered);
+    assert(!panel.pressed_outside);
+
+    frame({30, 40}, true);
+    assert(item.pressed && !panel.pressed_outside);
+    frame({300, 150}, false);
+    frame({300, 150}, true);
+    assert(panel.pressed_outside && !item.pressed);
+}
+
+void test_compose_label_ellipsis() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::TextStyle style{.font = ui2::bitmap_font(), .scale = 1.0f, .color = colors::white};
+    const std::string name = "a_rather_long_file_name.cpp";
+    const f32 text_w = ui2::measure_text(style.font, name, 1.0f).x;
+    ui2::BoxResult after;
+    const auto frame = [&](f32 row_w) {
+        input.begin_frame();
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 600, 100});
+        {
+            auto row = ui.box(ui2::make_id("row"), ui2::hbox().w(row_w).h(20).passive());
+            ui.label(name, style, {}, ui2::TextOverflow::Ellipsis);
+            auto a = ui.box(ui2::make_id("after"), ui2::hbox().size(40, 20));
+            after = a;
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    // With room, as wide as its text (not stretched); without, what is left.
+    frame(400);
+    frame(400);
+    assert(approx(after.bounds.x, text_w));
+    frame(100);
+    frame(100);
+    assert(approx(after.bounds.x, 60));
+
+    // A box that fits its content is as wide as the whole text (a tab and its title);
+    // made to shrink itself, the text inside is cut with it.
+    ui2::BoxResult tab;
+    const auto tabs = [&](f32 row_w, bool tab_shrinks) {
+        input.begin_frame();
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 600, 100});
+        {
+            auto row = ui.box(ui2::make_id("tabs"), ui2::hbox().w(row_w).h(20).passive());
+            {
+                ui2::BoxStyle look = ui2::hbox().pad(10, 0);
+                if (tab_shrinks) {
+                    look.shrinks();
+                }
+                auto t = ui.box(ui2::make_id("tab"), look);
+                tab = t;
+                ui.label(name, style, {}, ui2::TextOverflow::Ellipsis);
+            }
+            auto other = ui.box(ui2::make_id("other"), ui2::hbox().size(40, 20));
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    tabs(400, false);
+    tabs(400, false);
+    assert(approx(tab.bounds.w, text_w + 20));
+    tabs(100, true);
+    tabs(100, true);
+    assert(approx(tab.bounds.w, 60));
+}
+
+void test_solve_shrink() {
+    // A 100 wide row of 50 + 30 + 60 (40 too many): the two that shrink give it up
+    // in proportion to their size, the 30 keeps its width.
+    const auto row = [](f32 min_last) {
+        std::vector<ui2::LayoutNode> n;
+        ui2::LayoutStyle root;
+        root.axis = ui2::UiLayoutAxis::Horizontal;
+        root.width = ui2::fixed(100);
+        root.height = ui2::fixed(10);
+        n.push_back({root, {}, {}, {}, -1});
+        for (const auto& [w, shrinks, min] : {std::tuple{50.0f, true, 0.0f}, {30.0f, false, 0.0f}, {60.0f, true, min_last}}) {
+            ui2::LayoutStyle child;
+            child.width = ui2::fixed(w);
+            child.width.min = min;
+            child.height = ui2::fixed(10);
+            child.shrink = shrinks;
+            n.push_back({child, {}, {}, {}, 0});
+            n[0].children.push_back(static_cast<i32>(n.size()) - 1);
+        }
+        ui2::solve(n, 0, {0, 0, 100, 10});
+        return std::array{n[1].solved.w, n[2].solved.w, n[3].solved.w};
+    };
+    const auto free = row(0.0f);
+    assert(approx(free[0], 50.0f - 40.0f * 50.0f / 110.0f) && approx(free[1], 30) && approx(free[2], 60.0f - 40.0f * 60.0f / 110.0f));
+    const auto held = row(55.0f); // the last stops at 55; the first gives the rest
+    assert(approx(held[2], 55) && approx(held[0], 15) && approx(held[1], 30));
+}
+
+void test_compose_svg_icons() {
+    Input input;
+    Renderer2D renderer{std::make_unique<TexturingBackend>()};
+    ui2::Context ui;
+    // A black square in the left half of its view box.
+    const std::string_view svg =
+        R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="0" y="0" width="8" height="16" fill="#000"/></svg>)";
+
+    const Image image = rasterize_svg(svg, {32, 32});
+    assert(image.valid() && image.size == Vec2i(32, 32));
+    const auto alpha = [&](i32 x, i32 y) { return image.rgba[static_cast<std::size_t>((y * 32 + x) * 4 + 3)]; };
+    assert(alpha(4, 16) == 255 && alpha(28, 16) == 0);
+    assert(!rasterize_svg("not an svg", {16, 16}).valid());
+
+    ui.begin(input, renderer);
+    ui.begin_layout({0, 0, 100, 100});
+    const Sprite& icon = ui.svg_sprite(svg, {16, 16}, {.oversample = 2.0f});
+    assert(icon.valid() && icon.texture.size() == Vec2i(32, 32));
+    const Sprite& again = ui.svg_sprite(svg, {16, 16}, {.oversample = 2.0f});
+    assert(&again == &icon); // drawn once, then kept
+    assert(&ui.svg_sprite(svg, {16, 16}, {.oversample = 2.0f, .mask = true}) != &icon);
+    assert(!ui.svg_sprite("<nope", {16, 16}).valid());
+    ui.svg(svg, {16, 16}, Color::rgb(200, 100, 0), {.mask = true});
+    ui.end_layout();
+    ui.end();
+}
+
+void test_compose_window_drag_areas() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const auto frame = [&] {
+        input.begin_frame();
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 400, 200});
+        {
+            auto window = ui.box(ui2::make_id("window"), ui2::vbox().fill().passive());
+            {
+                auto bar = ui.box(ui2::make_id("bar"), ui2::hbox().w(ui2::grow()).h(30).passive().drags_window());
+                { auto menu = ui.box(ui2::make_id("menu"), ui2::hbox().size(50, 30)); }
+                { auto icon = ui.box(ui2::make_id("icon"), ui2::hbox().size(20, 30).passive()); } // not a button: drags
+                { auto close = ui.box(ui2::make_id("close"), ui2::hbox().size(40, 30)); }
+            }
+            auto body = ui.box(ui2::make_id("body"), ui2::vbox().fill());
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    frame();
+    const WindowChrome& chrome = ui.window_chrome();
+    assert(chrome.drag.size() == 1 && rect_eq(chrome.drag[0], 0, 0, 400, 30));
+    assert(chrome.exclude.size() == 2);
+    assert(rect_eq(chrome.exclude[0], 0, 0, 50, 30) && rect_eq(chrome.exclude[1], 70, 0, 40, 30));
+}
+
+void test_compose_coloured_runs() {
+    // Coloured runs in a composed row are AdvancedText, one line of it: the runs
+    // land where the plain text's letters do.
+    const ui2::TextStyle style{.font = ui2::bitmap_font(), .scale = 2.0f, .color = colors::white};
+    const auto drawn = [&](const auto& build) {
+        std::vector<Rectf> fills;
+        Renderer2D renderer = make_recording_renderer(fills);
+        Input input;
+        ui2::Context ui;
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 400, 100});
+        {
+            auto row = ui.box(ui2::make_id("row"), ui2::hbox().w(ui2::grow()).passive());
+            build(ui);
+        }
+        ui.end_layout();
+        ui.end();
+        return fills;
+    };
+    const std::vector<Rectf> plain = drawn([&](ui2::Context& ui) { ui.label("let x = 42;", style); });
+    const std::vector<Rectf> runs = drawn([&](ui2::Context& ui) {
+        ui2::AdvancedText text;
+        for (const auto& [part, color] : {std::pair{"let ", Color::rgb(207, 142, 109)}, std::pair{"x = ", colors::white},
+                                          std::pair{"42", Color::rgb(42, 172, 184)}, std::pair{";", colors::white}}) {
+            ui2::TextRun run;
+            run.text = part;
+            run.style = style;
+            run.style.color = color;
+            text.content.runs.emplace_back(std::move(run));
+        }
+        text.layout_options.wrap = false;
+        ui.add(std::move(text));
+    });
+    assert(!plain.empty() && plain.size() == runs.size());
+    for (std::size_t i = 0; i < plain.size(); ++i) {
+        assert(rect_eq(runs[i], plain[i].x, plain[i].y, plain[i].w, plain[i].h));
+    }
+}
+
+void test_compose_text_fields_join_tab_order() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::TextInput name{.id = ui2::make_id("name")};
+    ui2::TextInput email{.id = ui2::make_id("email")};
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 300, 200});
+        ui.begin_column({.width = ui2::grow(), .height = ui2::fit()});
+        ui.widget(name, {.width = ui2::grow()});
+        ui.widget(email, {.width = ui2::grow()});
+        ui.end_container();
+        ui.end_layout();
+        ui.end();
+    };
+    input.begin_frame();
+    build();
+    ui.state().set_focused(name.id);
+    input.begin_frame();
+    build();
+    assert(name.state.active);
+    input.begin_frame();
+    input.set_key_pressed(Key::Tab);
+    build();
+    input.set_key_released(Key::Tab);
+    input.begin_frame();
+    build();
+    assert(email.state.active && !name.state.active);
+}
+
 // --- ECS bridge: component storage feeds the same ui2 run()/region() core ------------
 
 void test_ecs_bridge_button_click() {
@@ -6164,6 +7070,8 @@ int main() {
     test_solve_margins_reserve_flow_space();
     test_solve_percent_sizes_against_parent_content();
     test_solve_grow_min_max_constraints();
+    test_solve_floating();
+    test_solve_shrink();
     test_solve_overlay_excluded_from_fit();
     test_solve_overlay_grow_fills_content();
     test_solve_overlay_anchors();
@@ -6249,6 +7157,24 @@ int main() {
     test_advanced_text_link_interaction();
     test_advanced_text_polish_features();
     test_layout_end_to_end();
+    test_compose_box_nesting_and_clicks();
+    test_compose_scroll_box();
+    test_compose_lazy_list();
+    test_compose_split();
+    test_compose_clicks_double_and_secondary();
+    test_compose_scroll_thumb_and_horizontal();
+    test_compose_rounded_and_nested_clips_balance();
+    test_compose_focus_tab_and_keys();
+    test_compose_scroll_to_row();
+    test_compose_text_fields_join_tab_order();
+    test_compose_state();
+    test_compose_style_shorthands();
+    test_compose_cursor_and_redraw();
+    test_compose_floating_menu();
+    test_compose_label_ellipsis();
+    test_compose_svg_icons();
+    test_compose_window_drag_areas();
+    test_compose_coloured_runs();
     test_ecs_bridge_button_click();
     test_ecs_bridge_layer_occlusion();
     test_ecs_layout_matches_solver();

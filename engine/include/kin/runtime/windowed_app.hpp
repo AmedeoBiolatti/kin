@@ -42,6 +42,8 @@ struct WindowedAppConfig {
     bool hidden = false;
     bool borderless = false;
     bool high_pixel_density = false;
+    // Draw only when something changes (see AppConfig::wait_for_events).
+    bool wait_for_events = false;
     std::optional<InputMap> input_map;
     // Called after the loop exits while the renderer and its device are still
     // alive. Scene runtimes use this to release scene-owned GPU/SDL resources.

@@ -96,6 +96,15 @@ void run(Context& ctx, TextInput& widget) {
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.result = edit_text_input(ctx, widget.state, widget.bounds, widget.text_style, widget.style, it, widget.enabled);
+    if (widget.enabled) {
+        if (it.hot || it.active) {
+            ctx.set_cursor(SystemCursor::Text);
+        }
+        ctx.register_focusable(widget.id);
+        if (widget.state.active && ctx.key_typed(Key::Tab)) {
+            ctx.request_focus_move(widget.id, ctx.modifier_held(KeyModifiers::Shift) ? -1 : 1);
+        }
+    }
     draw_text_input(ctx, widget.bounds, widget.state, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled));
 }
 
