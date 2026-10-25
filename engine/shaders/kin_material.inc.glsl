@@ -120,6 +120,11 @@ vec3 mapped_normal(vec3 n, float front) {
     t = normalize(t - n * dot(n, t));
     b = normalize(b - n * dot(n, b));
     vec3 m = texture(uNormalMap, vUV).xyz * 2.0 - 1.0;
+    // No normal of the map points into the surface: where z would (every texel of a map of two channels, BC5, whose
+    // blue reads 0), the map holds x and y only, and z is what makes the normal a unit one.
+    if (m.z < 0.0) {
+        m.z = sqrt(max(1.0 - dot(m.xy, m.xy), 0.0));
+    }
     m.xy *= material.pbr.z;
     return normalize(front * (t * m.x - b * m.y) + n * m.z);
 }

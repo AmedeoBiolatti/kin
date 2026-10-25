@@ -2576,7 +2576,8 @@ void test_gpu_metal_and_roughness() {
 }
 
 // A normal map tilts the shading: a pixel's normal leans where the map says,
-// +x along u and up (+y here) where green is high; a flat map changes nothing.
+// +x along u and up (+y here) where green is high; a flat map changes nothing;
+// a map of two channels (x and y) has its z rebuilt.
 void test_gpu_normal_map() {
     with_gpu("test_gpu_normal_map", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -2616,6 +2617,22 @@ void test_gpu_normal_map() {
         // A scale of nothing is a flat map.
         const float none = shoot(toward_x, from_right, 0.0f);
         assert(none > 0.95f * level && none < 1.05f * level);
+        // A map of two channels (BC5, the format normal maps are kept in; its blue reads 0) holds x and y, and z is
+        // rebuilt: a normal leaned 45 degrees toward +x shades as the map with its blue does, whether the two channels
+        // are an RGBA8 texture's with blue 0 or BC5 blocks.
+        const kin::Texture leaned = map(218, 128, 218), leaned_xy = map(218, 128, 0);
+        kin::CompressedImage two{.format = kin::TextureFormat::Bc5RgUnorm, .size = {4, 4}};
+        two.levels.push_back({.size = {4, 4}, .bytes = {218, 218, 0, 0, 0, 0, 0, 0, 128, 128, 0, 0, 0, 0, 0, 0}});
+        const kin::Texture leaned_bc5 = renderer.create_texture_compressed(two);
+        const float lean = shoot(leaned, from_right), xy = shoot(leaned_xy, from_right);
+        assert(lean > 1.2f * level);
+        assert(xy > 0.98f * lean && xy < 1.02f * lean);
+        if (leaned_bc5.valid()) {
+            const float bc5 = shoot(leaned_bc5, from_right);
+            assert(bc5 > 0.98f * lean && bc5 < 1.02f * lean);
+        } else {
+            std::cerr << "normal map: this device samples no BC5, its case skipped\n";
+        }
     });
 }
 

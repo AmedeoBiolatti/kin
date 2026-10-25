@@ -404,7 +404,12 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
 - `metallic_roughness`: a texture with roughness in G and metallic in B,
   times the two factors. `normal` (with `normal_scale`): a tangent-space
   normal map (green up, as glTF stores it); the tangent frame comes from the
-  UVs on the GPU, so meshes need no tangents. `occlusion` (R, with
+  UVs on the GPU, so meshes need no tangents. A map of two channels holds x
+  and y only, and z is rebuilt: BC5 (`TextureFormat::Bc5RgUnorm`), the format
+  normal maps are best kept in (each channel compressed on its own, where BC1
+  bends fine relief by tens of degrees), or any whose blue reads 0. No normal
+  of a map points into the surface, so a texel whose z would is read so too;
+  the others are read as they are. `occlusion` (R, with
   `occlusion_strength`) dims the ambient light only. `emissive_texture`: a
   colour times `emissive` (without it, `emissive` is a share of the base
   colour as before).

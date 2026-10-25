@@ -43,6 +43,8 @@ vec3 normal_for_surface() {
     t = normalize(t - n * dot(n, t));
     b = normalize(b - n * dot(n, b));
     vec3 mapped = texture(uNormal, uv).xyz * 2.0 - 1.0;
+    // A map of two channels (RG, BC5: blue reads 0) holds x and y: z makes the normal a unit one.
+    if (mapped.z < 0.0) mapped.z = sqrt(max(1.0 - dot(mapped.xy, mapped.xy), 0.0));
     mapped.xy *= uNormalScale;
     return normalize(front * (t * mapped.x - b * mapped.y) + n * mapped.z);
 }
