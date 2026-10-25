@@ -833,6 +833,7 @@ private:
     void begin_compose(Id id, ComposeKind kind, const BoxStyle& style, LayoutStyle layout);
     BoxResult compose_interaction(Id id, const BoxStyle& style);
     i32 compose_z(const BoxStyle& style) const;
+    Rectf pixel_snap(Rectf rect) const;
     void scroll_thumbs(Id id, const ScrollBoxOptions& options, i32 z);
     void layout_compose();
     void reveal(const Reveal& target);
@@ -858,6 +859,7 @@ private:
     bool _wants_text_input_last = false;
     bool _focus_moved = false;
     bool _any_press = false; // a mouse button went down this frame (before widgets took it)
+    f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
     WindowChrome _chrome;    // the drags_window() boxes as last laid out, in layout units
     SystemCursor _cursor = SystemCursor::Default;
     bool _redraw = false;

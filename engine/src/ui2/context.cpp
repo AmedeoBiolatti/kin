@@ -329,6 +329,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _state.begin_frame();
     _cursor = SystemCursor::Default;
     _redraw = false;
+    _pixel_scale = renderer.content_scale();
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
                  input.mouse_frame_pressed(MouseButton::Middle);
     // State not asked for all last frame belonged to something no longer built.
@@ -1474,7 +1475,30 @@ void Context::check_draw(std::string_view kind, Rectf rect, bool corner_exempt) 
     }
 }
 
+// Under a content scale, edges on whole pixels: a hairline is one pixel, not one
+// or two by where it falls, and nothing is smeared across a pixel's edge. Never
+// thinner than a pixel.
+Rectf Context::pixel_snap(Rectf rect) const {
+    const f32 s = _pixel_scale;
+    if (s <= 0.0f) {
+        return rect;
+    }
+    const auto edge = [s](f32 v) { return std::round(v * s) / s; };
+    const f32 x0 = edge(rect.x);
+    const f32 y0 = edge(rect.y);
+    f32 x1 = edge(rect.x + rect.w);
+    f32 y1 = edge(rect.y + rect.h);
+    if (rect.w > 0.0f && x1 <= x0) {
+        x1 = x0 + 1.0f / s;
+    }
+    if (rect.h > 0.0f && y1 <= y0) {
+        y1 = y0 + 1.0f / s;
+    }
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
 void Context::push_clip(Rectf bounds) {
+    bounds = pixel_snap(bounds);
     // Clips are untransformed: reflected here, innermost scope first.
     for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
         bounds.x = *axis - bounds.x - bounds.w;
@@ -1486,6 +1510,7 @@ void Context::push_clip(Rectf bounds) {
 }
 
 void Context::push_clip(Rectf bounds, std::array<f32, 4> corner_radii) {
+    bounds = pixel_snap(bounds);
     if (std::ranges::all_of(corner_radii, [](f32 r) { return r <= 0.0f; })) {
         push_clip(bounds);
         return;
@@ -1510,6 +1535,7 @@ void Context::pop_clip() {
 }
 
 void Context::fill_rect(Rectf rect, Color color) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0) {
         check_draw("fill_rect", rect);
         // Direct fills (e.g. zebra row stripes) get a stable wireframe color too. surface()'s
@@ -1526,6 +1552,7 @@ void Context::fill_rect(Rectf rect, Color color) {
 }
 
 void Context::outline_rect(Rectf rect, Color color) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0) {
         check_draw("outline_rect", rect);
         record_draw(DrawOp::Kind::Outline, rect, 0.0f, 1.0f, color);
@@ -1534,6 +1561,7 @@ void Context::outline_rect(Rectf rect, Color color) {
 }
 
 void Context::outline_rect(Rectf rect, Color color, f32 width) {
+    rect = pixel_snap(rect);
     if (!_renderer || color.a == 0 || width <= 0.0f) {
         return;
     }
@@ -1555,6 +1583,7 @@ void Context::outline_rect(Rectf rect, Color color, f32 width) {
 }
 
 void Context::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0) {
         check_draw("fill_rounded_rect", rect, true);
         if (_theme.debug_component_tint && !_in_shadow) {
@@ -1569,6 +1598,7 @@ void Context::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
 }
 
 void Context::outline_rounded_rect(Rectf rect, f32 radius, Color color, f32 width) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0 && width > 0.0f) {
         check_draw("outline_rounded_rect", rect, true);
         record_draw(DrawOp::Kind::RoundedOutline, rect, radius, width, color);
@@ -1577,6 +1607,7 @@ void Context::outline_rounded_rect(Rectf rect, f32 radius, Color color, f32 widt
 }
 
 void Context::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
+    rect = pixel_snap(rect);
     if (!_renderer || rect.w <= 0.0f || rect.h <= 0.0f || (gradient.start.a == 0 && gradient.end.a == 0)) {
         return;
     }
@@ -1924,6 +1955,7 @@ void Context::texture(const Texture& texture, Rectf bounds, Color tint) {
 }
 
 void Context::sprite(const Sprite& sprite, Rectf bounds, Color tint, bool corner_exempt) {
+    bounds = pixel_snap(bounds);
     if (_renderer && sprite.valid() && bounds.w > 0.0f && bounds.h > 0.0f && tint.a > 0) {
         check_draw("sprite", bounds, corner_exempt);
         record_draw(DrawOp::Kind::Sprite, bounds, 0.0f, 0.0f, tint);

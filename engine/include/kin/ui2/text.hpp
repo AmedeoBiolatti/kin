@@ -178,8 +178,11 @@ std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_v
 // falling back to bitmap_font() when no TTF is found. `_bold` returns the
 // matching bold cut (for title/emphasis tiers); falls back to the regular cut,
 // then to the bitmap font. Sizes are clamped to [8, 32]pt.
-Font system_ui_font(f32 point_size, TextRendering rendering = TextRendering::Bitmap);
-Font system_ui_font_bold(f32 point_size, TextRendering rendering = TextRendering::Bitmap);
+// `oversample` is TtfFontOptions::oversample: on a display with more pixels than
+// the layout has units (Window::display_scale(), or the renderer's output over
+// logical size), pass that ratio and text is drawn from glyphs that size.
+Font system_ui_font(f32 point_size, TextRendering rendering = TextRendering::Bitmap, f32 oversample = 1.0f);
+Font system_ui_font_bold(f32 point_size, TextRendering rendering = TextRendering::Bitmap, f32 oversample = 1.0f);
 bool system_ui_font_available(); // true when a real TTF backs system_ui_font
 
 struct TextWrapOptions {

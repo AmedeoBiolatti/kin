@@ -220,7 +220,7 @@ UiTextInputResult edit_text_input(Context& ctx,
     if ((it.pressed || it.focused) && enabled) {
         state.active = true;
         if (it.pressed) {
-            const f32 text_x = text_input_text_x(bounds, metrics, state.text, text_style);
+            const f32 text_x = text_input_text_x(bounds, metrics, state.text, text_style) - state.scroll_x;
             move_text_caret(state,
                             caret_from_text_pos(state, ctx.pointer().x, text_x, text_style.font, text_style.scale),
                             false);
@@ -344,6 +344,22 @@ UiTextInputResult edit_text_input(Context& ctx,
             result.cancelled = true;
         }
     }
+    // Text longer than the field slides so the caret stays in it; an idle field
+    // shows the text's start.
+    const f32 room = std::max(0.0f, bounds.w - metrics.padding.left - metrics.padding.right);
+    if (!state.active || paragraph_direction(state.text) == TextDirection::RightToLeft) {
+        state.scroll_x = 0.0f;
+    } else {
+        const f32 caret = caret_x(text_style.font, state.text, state.caret, text_style.scale);
+        const f32 width = measure_text(text_style.font, state.text, text_style.scale).x + 1.0f; // and the caret after it
+        if (caret - state.scroll_x > room - 1.0f) {
+            state.scroll_x = caret - room + 1.0f;
+        }
+        if (caret < state.scroll_x) {
+            state.scroll_x = caret;
+        }
+        state.scroll_x = std::clamp(state.scroll_x, 0.0f, std::max(0.0f, width - room));
+    }
     return result;
 }
 
@@ -361,9 +377,13 @@ void draw_text_input(Context& ctx, Rectf bounds, const UiTextInputState& state, 
     }
     const std::string_view text = composition.empty() ? std::string_view{state.text} : std::string_view{shown};
     const Vec2f text_size = measure_text(text_style.font, text.empty() ? "Mg" : text, text_style.scale);
-    const Vec2f text_pos{text_input_text_x(bounds, metrics, text, text_style), bounds.y + (bounds.h - text_size.y) * 0.5f};
+    const Vec2f text_pos{text_input_text_x(bounds, metrics, text, text_style) - state.scroll_x,
+                         bounds.y + (bounds.h - text_size.y) * 0.5f};
     const f32 top = bounds.y + metrics.padding.top * 0.5f;
     const f32 height = std::max(0.0f, bounds.h - metrics.padding.top * 0.5f - metrics.padding.bottom * 0.5f);
+    // The text stays inside the field (between its paddings, the caret at either end too).
+    ctx.push_clip({bounds.x + metrics.padding.left - 1.0f, bounds.y,
+                   std::max(0.0f, bounds.w - metrics.padding.left - metrics.padding.right + 2.0f), bounds.h});
     if (state.has_selection() && composition.empty()) {
         const auto [start, end] = selection_range(state);
         for (const auto& [x0, x1] : selection_spans(text_style.font, text, start, end, text_style.scale)) {
@@ -382,6 +402,7 @@ void draw_text_input(Context& ctx, Rectf bounds, const UiTextInputState& state, 
         ctx.fill_rect({caret_x, top, 1.0f, height}, text_style.color);
         ctx.set_text_input_area({bounds.x, top, bounds.w, height}, caret_x);
     }
+    ctx.pop_clip();
 }
 
 bool parse_f32(std::string_view text, f32& out) {

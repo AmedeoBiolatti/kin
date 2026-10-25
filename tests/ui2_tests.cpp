@@ -5009,6 +5009,105 @@ void test_compose_coloured_runs() {
     }
 }
 
+void test_text_input_scrolls_long_text() {
+    std::vector<Rectf> fills;
+    std::vector<Rectf> clips;
+    Renderer2D renderer = make_recording_renderer(fills);
+    Input input;
+    ui2::Context ui;
+    const ui2::TextStyle style{.font = ui2::bitmap_font(), .scale = 1.0f, .color = colors::white};
+    ui2::TextInput field{.id = ui2::make_id("path")};
+    field.text_style = style;
+    field.style.padding = {8, 4, 8, 4};
+    field.state.text = "/a/rather/long/path/to/a/project/folder";
+    const f32 width = ui2::measure_text(style.font, field.state.text, 1.0f).x;
+    const auto frame = [&](Vec2f pointer, bool press) {
+        input.begin_frame();
+        input.set_mouse_pos(pointer);
+        if (press) {
+            input.set_mouse_pressed(MouseButton::Left);
+        }
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 400, 100});
+        ui.widget(field, {.width = ui2::fixed(116), .height = ui2::fixed(24)}); // 100 between the paddings
+        ui.end_layout();
+        ui.end();
+    };
+    // Idle: the start shows.
+    frame({300, 80}, false);
+    assert(field.state.scroll_x == 0.0f);
+    // Editing at the end: slid so the caret is just inside the field.
+    field.state.active = true;
+    field.state.caret = field.state.text.size();
+    frame({300, 80}, false);
+    assert(approx(field.state.scroll_x, width + 1.0f - 100.0f));
+    // A click maps through the slide: at the field's left edge is the first letter shown.
+    const f32 slide = field.state.scroll_x;
+    frame({9, 12}, false);
+    frame({9, 12}, true);
+    const std::size_t clicked = field.state.caret;
+    const f32 at = ui2::caret_x(style.font, field.state.text, clicked, 1.0f);
+    assert(std::fabs(at - slide) < 8.0f);
+    // Home brings the start back into view.
+    field.state.caret = 0;
+    frame({300, 80}, false);
+    assert(field.state.scroll_x == 0.0f);
+    // Leaving the field (a click elsewhere): the start again.
+    field.state.caret = field.state.text.size();
+    frame({300, 80}, false);
+    assert(field.state.scroll_x > 0.0f);
+    frame({300, 80}, true);
+    assert(!field.state.active && field.state.scroll_x == 0.0f);
+}
+
+void test_system_font_oversample() {
+    if (!ui2::system_ui_font_available()) {
+        return; // a machine without a system TTF: nothing to compare
+    }
+    // Glyphs drawn 1.5 times finer for a display at 150%, measured the same: the
+    // layout does not move, the text gets sharper.
+    const ui2::Font plain = ui2::system_ui_font(14);
+    const ui2::Font fine = ui2::system_ui_font(14, ui2::TextRendering::Bitmap, 1.5f);
+    assert(fine.identity() != plain.identity());
+    assert(ui2::system_ui_font(14, ui2::TextRendering::Bitmap, 1.5f).identity() == fine.identity()); // cached
+    assert(ui2::system_ui_font(14, ui2::TextRendering::Bitmap, 1.0f).identity() == plain.identity());
+    const Vec2f a = ui2::measure_text(plain, "Kin Studio", 1.0f);
+    const Vec2f b = ui2::measure_text(fine, "Kin Studio", 1.0f);
+    assert(std::fabs(a.x - b.x) <= 2.0f && std::fabs(a.y - b.y) <= 2.0f);
+}
+
+void test_pixel_snapping_under_a_content_scale() {
+    // A backend presenting at 1.5 pixels a unit, as a display at 150%.
+    class ScaledBackend final : public IdentityBackend {
+    public:
+        explicit ScaledBackend(std::vector<Rectf>* fills) : IdentityBackend(fills) {}
+        f32 content_scale() const override { return 1.5f; }
+    };
+    std::vector<Rectf> fills;
+    Renderer2D renderer{std::make_unique<ScaledBackend>(&fills)};
+    Input input;
+    ui2::Context ui;
+    ui.begin(input, renderer);
+    ui.fill_rect({10.2f, 3.0f, 100.3f, 1.0f}, colors::white); // a 1-unit hairline
+    ui.fill_rect({4.0f, 0.1f, 0.2f, 0.2f}, colors::white);    // smaller than a pixel
+    ui.end();
+    const auto on_pixels = [](f32 v) { return std::fabs(v * 1.5f - std::round(v * 1.5f)) < 0.001f; };
+    assert(fills.size() == 2);
+    for (const Rectf& r : fills) {
+        assert(on_pixels(r.x) && on_pixels(r.y) && on_pixels(r.x + r.w) && on_pixels(r.y + r.h));
+    }
+    assert(approx(fills[0].h * 1.5f, 1.0f) || approx(fills[0].h * 1.5f, 2.0f)); // whole pixels, one or two
+    assert(approx(fills[1].w * 1.5f, 1.0f) && approx(fills[1].h * 1.5f, 1.0f)); // never under a pixel
+
+    // No content scale: drawn where asked.
+    fills.clear();
+    Renderer2D plain = make_recording_renderer(fills);
+    ui.begin(input, plain);
+    ui.fill_rect({10.2f, 3.0f, 100.3f, 1.0f}, colors::white);
+    ui.end();
+    assert(fills.size() == 1 && rect_eq(fills[0], 10.2f, 3.0f, 100.3f, 1.0f));
+}
+
 void test_compose_text_fields_join_tab_order() {
     Input input;
     Renderer2D renderer = make_renderer();
@@ -7175,6 +7274,9 @@ int main() {
     test_compose_svg_icons();
     test_compose_window_drag_areas();
     test_compose_coloured_runs();
+    test_text_input_scrolls_long_text();
+    test_system_font_oversample();
+    test_pixel_snapping_under_a_content_scale();
     test_ecs_bridge_button_click();
     test_ecs_bridge_layer_occlusion();
     test_ecs_layout_matches_solver();

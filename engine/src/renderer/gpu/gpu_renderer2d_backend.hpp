@@ -128,6 +128,8 @@ public:
 
     void set_logical_size(Vec2i size) override;
     void set_integer_logical_size(Vec2i size) override;
+    bool set_content_scale(f32 scale) override;
+    f32 content_scale() const override { return _content_scale; }
     void push_native_coordinates() override;
     void pop_native_coordinates() override;
     Vec2i output_size() const override;
@@ -384,11 +386,13 @@ private:
     RendererBackendStats _stats;                    // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec2i _logical_size{0, 0}; // 0 = render at window size (no logical presentation)
+    f32 _content_scale = 0.0f; // > 0: the scene is the window's pixels, a coordinate unit this many of them
     bool _integer_scale = false;
     f32 _view_scale = 1.0f;    // logical -> native (scene texture) scale under logical presentation
     struct NativeState {
         Vec2i logical_size{};
         bool integer_scale = false;
+        f32 content_scale = 0.0f;
         f32 view_scale = 1.0f;
         std::vector<SDL_Rect> clip_stack;
         Vec2f view_offset{0.0f, 0.0f};

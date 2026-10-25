@@ -44,6 +44,9 @@ struct UiTextInputState {
     std::size_t caret = 0;
     std::size_t selection_anchor = unset_selection;
     bool active = false;
+    // How far text longer than the field is slid left, so the caret stays in view
+    // while editing (0 when not: the field shows the text's start). Kept by the widget.
+    f32 scroll_x = 0.0f;
 
     bool has_selection() const { return selection_anchor != unset_selection && selection_anchor != caret; }
     std::size_t selection_start() const { return !has_selection() ? caret : (selection_anchor < caret ? selection_anchor : caret); }

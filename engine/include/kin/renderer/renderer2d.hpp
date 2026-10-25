@@ -261,6 +261,14 @@ public:
     void set_logical_size(Vec2i size);
     void set_integer_logical_size(i32 width, i32 height);
     void set_integer_logical_size(Vec2i size);
+    // Native presentation at a uniform scale, for UI on a high-density display: the
+    // frame is the window's own pixels, a coordinate unit is `scale` of them (1.5 on
+    // a display at 150%), and nothing is resampled on the way to the screen. Draw
+    // text with fonts oversampled by the same scale and it lands on whole pixels.
+    // Replaces a logical size, as set_logical_size replaces it. False when this
+    // backend can't (then use a logical size); 0 turns it off.
+    bool set_content_scale(f32 scale);
+    f32 content_scale() const; // 0 when off
     Vec2i output_size() const;
     Vec2f window_to_logical(Vec2f window_px) const;
     Vec2f logical_to_window(Vec2f logical) const;

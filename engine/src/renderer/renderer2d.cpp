@@ -361,6 +361,27 @@ void Renderer2D::set_integer_logical_size(Vec2i size) {
                    }));
 }
 
+bool Renderer2D::set_content_scale(f32 scale) {
+    if (!(scale >= 0.0f) || !std::isfinite(scale)) {
+        return false;
+    }
+    if (scale == _backend->content_scale()) {
+        return true;
+    }
+    const bool done = _backend->set_content_scale(scale);
+    KIN_LOG_INFO_F("render",
+                   "content scale set",
+                   (LogFields{
+                       {.name = "scale", .value = std::to_string(scale)},
+                       {.name = "supported", .value = done ? "true" : "false"},
+                   }));
+    return done;
+}
+
+f32 Renderer2D::content_scale() const {
+    return _backend->content_scale();
+}
+
 Vec2i Renderer2D::output_size() const {
     return _backend->output_size();
 }

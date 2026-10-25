@@ -317,23 +317,26 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
     return bold ? paths.bold : paths.regular;
 }
 
-Font cached_system_font(f32 point_size, bool bold, TextRendering rendering) {
+Font cached_system_font(f32 point_size, bool bold, TextRendering rendering, f32 oversample) {
     struct Key {
         i32 size;
         bool bold;
         TextRendering rendering;
+        i32 oversample; // hundredths
         auto operator<=>(const Key&) const = default;
     };
     static std::map<Key, Font> cache;
     const i32 clamped = static_cast<i32>(std::clamp(point_size, 8.0f, 32.0f));
-    const Key key{clamped, bold, rendering};
+    oversample = std::clamp(oversample, 1.0f, 8.0f);
+    const Key key{clamped, bold, rendering, static_cast<i32>(std::lround(oversample * 100.0f))};
     if (const auto it = cache.find(key); it != cache.end()) {
         return it->second;
     }
     const std::filesystem::path& path = system_ui_font_path(bold);
     Font font = path.empty() ? bitmap_font()
                              : load_ttf_font(path, static_cast<f32>(clamped),
-                                             TtfFontOptions{.rendering = rendering,
+                                             TtfFontOptions{.oversample = oversample,
+                                                            .rendering = rendering,
                                                             .fallbacks = system_fallback_fonts(),
                                                             .language_fallbacks = system_language_fonts()});
     cache.emplace(key, font);
@@ -342,12 +345,12 @@ Font cached_system_font(f32 point_size, bool bold, TextRendering rendering) {
 
 } // namespace
 
-Font system_ui_font(f32 point_size, TextRendering rendering) {
-    return cached_system_font(point_size, false, rendering);
+Font system_ui_font(f32 point_size, TextRendering rendering, f32 oversample) {
+    return cached_system_font(point_size, false, rendering, oversample);
 }
 
-Font system_ui_font_bold(f32 point_size, TextRendering rendering) {
-    return cached_system_font(point_size, true, rendering);
+Font system_ui_font_bold(f32 point_size, TextRendering rendering, f32 oversample) {
+    return cached_system_font(point_size, true, rendering, oversample);
 }
 
 bool system_ui_font_available() {
@@ -494,8 +497,8 @@ std::optional<TextDirection> text_base_direction() {
     const std::scoped_lock lock(text_settings_mutex);
     return selected_direction;
 }
-Font system_ui_font(f32, TextRendering) { return bitmap_font(); }
-Font system_ui_font_bold(f32, TextRendering) { return bitmap_font(); }
+Font system_ui_font(f32, TextRendering, f32) { return bitmap_font(); }
+Font system_ui_font_bold(f32, TextRendering, f32) { return bitmap_font(); }
 bool system_ui_font_available() { return false; }
 const std::vector<FontSource>& system_fallback_fonts() {
     static const std::vector<FontSource> empty;

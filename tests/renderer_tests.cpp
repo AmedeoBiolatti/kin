@@ -1158,6 +1158,43 @@ void test_gpu_resources_outlive_renderer() {
     }
 }
 
+void test_gpu_content_scale() {
+    constexpr std::string_view test_name = "test_gpu_content_scale";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        auto& window = app.create_window({.title = "gpu-content-scale", .width = 320, .height = 240,
+                                          .hidden = true, .high_pixel_density = true});
+        std::string reason;
+        auto renderer = try_create_gpu_renderer(window, reason);
+        if (!renderer) { skip_or_require_gpu_test(test_name, reason); return; }
+        gpu_ready = true;
+        renderer->clear();
+        const auto pixels = window.pixel_size();
+        // A unit is 1.5 pixels: the frame is the window's pixels, coordinates fit it.
+        assert(renderer->set_content_scale(1.5f));
+        assert(renderer->content_scale() == 1.5f);
+        renderer->clear();
+        assert(renderer->output_size() == kin::Vec2i(static_cast<int>(pixels.x / 1.5f), static_cast<int>(pixels.y / 1.5f)));
+        const auto units = window.size();
+        const kin::Vec2f center{units.x * .5f, units.y * .5f};
+        const auto logical = renderer->window_to_logical(center);
+        assert(std::abs(logical.x - pixels.x * .5f / 1.5f) < .01f && std::abs(logical.y - pixels.y * .5f / 1.5f) < .01f);
+        const auto back = renderer->logical_to_window(logical);
+        assert(std::abs(back.x - center.x) < .01f && std::abs(back.y - center.y) < .01f);
+        renderer->present();
+        // A logical size takes over again, and 0 turns it off.
+        renderer->set_logical_size(160, 100);
+        assert(renderer->content_scale() == 0.0f && renderer->output_size() == kin::Vec2i(160, 100));
+        assert(renderer->set_content_scale(2.0f) && renderer->set_content_scale(0.0f));
+        renderer->clear();
+        assert(renderer->content_scale() == 0.0f && renderer->output_size() == pixels);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) throw;
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_native_pixel_size_and_pointer_mapping() {
     constexpr std::string_view test_name = "test_gpu_native_pixel_size_and_pointer_mapping";
     bool gpu_ready = false;
@@ -4015,6 +4052,7 @@ int main(int argc, char** argv) {
     test_gpu_logical_transforms_are_immediate();
 #endif
 #if KIN_HAS_GPU_RENDERER
+    test_gpu_content_scale();
     test_gpu_native_pixel_size_and_pointer_mapping();
 #endif
 #if KIN_HAS_GPU_RENDERER

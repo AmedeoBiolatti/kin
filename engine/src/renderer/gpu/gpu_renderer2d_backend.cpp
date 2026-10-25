@@ -457,7 +457,11 @@ void GpuRenderer2DBackend::ensure_scene() {
     // no logical size, the scene tracks the window 1:1.
     const Vec2i window = _window ? _window->pixel_size() : Vec2i{1280, 720};
     Vec2i wanted;
-    if (_logical_size.x > 0 && _logical_size.y > 0) {
+    if (_content_scale > 0.0f) {
+        // The window's own pixels, with coordinates scaled: nothing to resample.
+        _view_scale = _content_scale;
+        wanted = {std::max(1, window.x), std::max(1, window.y)};
+    } else if (_logical_size.x > 0 && _logical_size.y > 0) {
         f32 scale = std::min(static_cast<f32>(window.x) / static_cast<f32>(_logical_size.x),
                              static_cast<f32>(window.y) / static_cast<f32>(_logical_size.y));
         if (scale <= 0.0f) {
@@ -499,6 +503,9 @@ Vec2f GpuRenderer2DBackend::coordinate_size() const {
         return _rt_stack.back().coords;
     }
     if (scene_uses_logical_coordinates()) {
+        if (_content_scale > 0.0f) {
+            return {static_cast<f32>(_scene_size.x) / _content_scale, static_cast<f32>(_scene_size.y) / _content_scale};
+        }
         return {static_cast<f32>(_logical_size.x), static_cast<f32>(_logical_size.y)};
     }
     const Vec2i size = current_size();
@@ -511,7 +518,7 @@ Vec2i GpuRenderer2DBackend::current_size() const {
 }
 
 bool GpuRenderer2DBackend::scene_uses_logical_coordinates() const {
-    return _rt_stack.empty() && _native_stack.empty() && _logical_size.x > 0 && _logical_size.y > 0;
+    return _rt_stack.empty() && _native_stack.empty() && (_content_scale > 0.0f || (_logical_size.x > 0 && _logical_size.y > 0));
 }
 
 void GpuRenderer2DBackend::ensure_frame() {
@@ -1709,7 +1716,21 @@ void GpuRenderer2DBackend::set_logical_size(Vec2i size) {
     }
     _logical_size = size; // scene renders at this size; present letterboxes to the window
     _integer_scale = false;
+    _content_scale = 0.0f;
     ensure_scene();
+}
+
+bool GpuRenderer2DBackend::set_content_scale(f32 scale) {
+    if (_frame) {
+        flush_to_frame();
+        _frame->submit();
+        end_frame();
+    }
+    _content_scale = scale > 0.0f ? scale : 0.0f;
+    _logical_size = {};
+    _integer_scale = false;
+    ensure_scene();
+    return true;
 }
 
 void GpuRenderer2DBackend::set_integer_logical_size(Vec2i size) {
@@ -1720,6 +1741,7 @@ void GpuRenderer2DBackend::set_integer_logical_size(Vec2i size) {
     }
     _logical_size = size;
     _integer_scale = true;
+    _content_scale = 0.0f;
     ensure_scene();
 }
 
@@ -1733,6 +1755,7 @@ void GpuRenderer2DBackend::push_native_coordinates() {
     _native_stack.push_back(NativeState{
         .logical_size = _logical_size,
         .integer_scale = _integer_scale,
+        .content_scale = _content_scale,
         .view_scale = _view_scale,
         .clip_stack = _clip_stack,
         .view_offset = _view_offset,
@@ -1756,6 +1779,7 @@ void GpuRenderer2DBackend::pop_native_coordinates() {
     if (_native_stack.empty()) {
         _logical_size = {};
         _integer_scale = false;
+        _content_scale = 0.0f;
         _view_scale = 1.0f;
         _clip_stack.clear();
         _view_offset = {0.0f, 0.0f};
@@ -1765,6 +1789,7 @@ void GpuRenderer2DBackend::pop_native_coordinates() {
         _native_stack.pop_back();
         _logical_size = state.logical_size;
         _integer_scale = state.integer_scale;
+        _content_scale = state.content_scale;
         _view_scale = state.view_scale;
         _clip_stack = std::move(state.clip_stack);
         _view_offset = state.view_offset;
@@ -1778,6 +1803,10 @@ Vec2i GpuRenderer2DBackend::output_size() const {
     // Layout space is logical when presentation is active; native-coordinate scopes
     // and render targets expose the current texture's pixel size.
     if (scene_uses_logical_coordinates()) {
+        if (_content_scale > 0.0f) {
+            const Vec2f size = coordinate_size();
+            return {static_cast<i32>(size.x), static_cast<i32>(size.y)}; // whole units that fit
+        }
         return _logical_size;
     }
     return _scene_size;
