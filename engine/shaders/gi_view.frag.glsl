@@ -1,22 +1,32 @@
 #version 450 core
-// kin's GI scene seen from the camera (RenderDebugOptions3D::gi_view; docs/3d_plan.md, G5a): a full-screen triangle
-// over the main pass. Each pixel's ray walks the voxels it passes through, one by one where a surface is near and in
-// jumps the distances allow elsewhere (from a voxel whose centre is d voxels from the nearest surface voxel's, no
-// surface voxel's box is nearer than d - 1.74 to any point of it), to the first voxel a surface is in.
+// kin's GI scene seen from the camera (RenderDebugOptions3D::gi_view; docs/3d_plan.md, G5): a full-screen triangle
+// over the main pass. Each pixel's ray walks the voxels (kin_gi_march) to the first one a surface is in, and shows its
+// colour, normal, emission, the light leaving it (the lit scene), or the probes' light where it is; or the walk's cost.
 layout(location = 0) out vec4 FragColor;
 
-layout(set = 2, binding = 0) uniform sampler3D uDistance;
-layout(set = 2, binding = 1) uniform sampler3D uAlbedo;
+layout(set = 2, binding = 0) uniform sampler3D uGiDistance;
+layout(set = 2, binding = 1) uniform sampler3D uGiAlbedo;
 layout(set = 2, binding = 2) uniform sampler3D uNormal;
 layout(set = 2, binding = 3) uniform sampler3D uEmission;
+layout(set = 2, binding = 4) uniform sampler3D uRadiance;
+layout(set = 2, binding = 5) uniform sampler3D uGiIrradiance;
+layout(set = 2, binding = 6) uniform sampler3D uGiMoments;
+layout(set = 2, binding = 7) uniform sampler3D uGiProbes;
+layout(set = 2, binding = 8) uniform sampler3D uRadianceBack;
+
+#define KIN_GI_SCENE
+#define KIN_GI_PROBES
+#include "kin_gi.inc.glsl"
 
 layout(std140, set = 3, binding = 0) uniform View {
     mat4 inverse_view_projection;
     vec4 camera;  // xyz: the eye; w: 1 orthographic
     vec4 forward; // xyz: the way the camera looks
     vec4 origin;  // xyz: voxel (0, 0, 0)'s low corner; w: voxels a unit
-    vec4 size;    // xyz: voxels a side; w: what is shown (GiView3D: 1 colour, 2 normal, 3 emission, 4 steps)
-    vec4 target;  // xy: the picture's size; z: 1 to encode to sRGB
+    vec4 size;    // xyz: voxels a side; w: what is shown (GiView3D: 1 colour, 2 normal, 3 emission, 4 steps, 5 the
+                  // light leaving, 6 the probes' light)
+    vec4 target;  // xy: the picture's size; z: 1 to encode to sRGB; w: 1 with probes
+    KinGiProbes probes;
 } u;
 
 vec3 encode(vec3 c) {
@@ -38,45 +48,30 @@ void main() {
         from = near.xyz / near.w;
         way = normalize(u.forward.xyz);
     }
-    // In voxels.
-    const vec3 o = (from - u.origin.xyz) * u.origin.w;
-    const vec3 size = u.size.xyz;
-    const vec3 inv = 1.0 / way;
-    const vec3 t0 = (vec3(0.0) - o) * inv, t1 = (size - o) * inv;
-    const float enter = max(max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z)), 0.0);
-    const float leave = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+    const int mode = int(u.size.w + 0.5);
     vec3 c = vec3(0.04, 0.045, 0.06); // nothing hit
     int steps = 0;
-    if (enter < leave) {
-        float t = enter + 1e-4;
-        const ivec3 last = ivec3(size) - 1;
-        for (; steps < 1024 && t < leave; ++steps) {
-            const vec3 q = o + way * t;
-            const ivec3 voxel = clamp(ivec3(floor(q)), ivec3(0), last);
-            const vec4 albedo = texelFetch(uAlbedo, voxel, 0);
-            if (albedo.a > 0.0) {
-                const vec3 n = texelFetch(uNormal, voxel, 0).xyz * 2.0 - 1.0;
-                const int mode = int(u.size.w + 0.5);
-                if (mode == 1) {
-                    c = albedo.rgb * (0.55 + 0.45 * abs(dot(n, way)));
-                } else if (mode == 2) {
-                    c = n * 0.5 + 0.5;
-                } else if (mode == 3) {
-                    c = texelFetch(uEmission, voxel, 0).rgb;
-                }
-                break;
-            }
-            const float d = texelFetch(uDistance, voxel, 0).r;
-            if (d >= 3.0) {
-                t += d - 1.74;
-            } else {
-                // To the voxel's far side along the ray, and a little past it.
-                const vec3 exit = (vec3(voxel) + step(vec3(0.0), way) - o) * inv;
-                t = max(min(min(exit.x, exit.y), exit.z), t) + 1e-4;
-            }
+    ivec3 voxel;
+    float t;
+    if (kin_gi_march((from - u.origin.xyz) * u.origin.w, way, 1e30, u.size.xyz, 1024, voxel, t, steps)) {
+        const vec4 albedo = texelFetch(uGiAlbedo, voxel, 0);
+        const vec3 n = texelFetch(uNormal, voxel, 0).xyz * 2.0 - 1.0;
+        if (mode == 1) {
+            c = albedo.rgb * (0.55 + 0.45 * abs(dot(n, way)));
+        } else if (mode == 2) {
+            c = n * 0.5 + 0.5;
+        } else if (mode == 3) {
+            c = texelFetch(uEmission, voxel, 0).rgb;
+        } else if (mode == 5) {
+            c = (dot(n, way) <= 0.0 ? texelFetch(uRadiance, voxel, 0) : texelFetch(uRadianceBack, voxel, 0)).rgb;
+        } else if (mode == 6 && u.target.w > 0.5) {
+            // On the side the camera sees.
+            const vec3 facing = dot(n, way) > 0.0 ? -n : n;
+            const vec3 at = u.origin.xyz + (vec3(voxel) + 0.5) / u.origin.w;
+            c = kin_gi_irradiance(u.probes, at, facing, -way) * u.probes.bias.z;
         }
     }
-    if (int(u.size.w + 0.5) == 4) {
+    if (mode == 4) {
         c = heat(float(steps) / 96.0);
     }
     FragColor = vec4(u.target.z > 0.5 ? encode(c) : c, 1.0);

@@ -81,6 +81,11 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 gi_copies = 0;
     u64 gi_triangles = 0;
     u32 gi_dispatches = 0;
+    // Its probes (GiProbes3D): how many there are, how many this render updated (and the rays they cast), and whether
+    // their light was in the picture.
+    u32 gi_probes = 0, gi_probes_updated = 0;
+    u32 gi_rays = 0;
+    bool gi_lit = false;
     // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal
     // anti-aliasing and occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered
     // buffer too), in bytes, and how many feature groups of them this render gave back: a feature that has not been

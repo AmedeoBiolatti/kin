@@ -7,8 +7,10 @@ namespace kin {
 // What the view shows of Scene3D::global_illumination's GI scene instead of the picture
 // (RenderDebugOptions3D::gi_view): each pixel traced through its voxels to the first one a surface is in, and that
 // voxel's colour (shaded a little by which way it faces the camera), normal or emission; `Steps` the trace's cost, from
-// blue (a few steps) to red (many). Off, or with no GI scene, the picture is drawn as ever.
-enum class GiView3D : u8 { Off, Albedo, Normal, Emission, Steps };
+// blue (a few steps) to red (many); `Radiance` the light leaving the voxel (the lit scene), `Irradiance` the probes'
+// light there (what a white surface facing the camera would show). Off, or with no GI scene, the picture is drawn as
+// ever.
+enum class GiView3D : u8 { Off, Albedo, Normal, Emission, Steps, Radiance, Irradiance };
 
 // Explicit diagnostic overrides, separate from visual quality and budgets.
 // Defaults preserve normal rendering and never request a blocking readback.

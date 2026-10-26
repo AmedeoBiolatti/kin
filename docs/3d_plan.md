@@ -2613,6 +2613,62 @@ part once and voxelize only the regions moving copies leave and enter; batch the
 into one dispatch (a table of their runs instead of a dispatch each), so a slab or a region is a handful of
 dispatches; the flood only round what changed.
 
+#### G5b — results
+
+`GlobalIllumination3D::probes` (`GiProbes3D`: `spacing`, `rays`, `per_render`, `hysteresis`, `intensity`), the
+lit scene and the probes (`gi_light.comp`, `gi_probe_place.comp`, `gi_probe_trace.comp`, `gi_probe_update.comp`,
+`kin_gi.inc.glsl`), read by the stock shaders' light variants (`KIN_GI`: three more samplers, the probes' 3D
+atlases; with the probes on, those variants draw). Authored as `SceneEnvironment3D`'s `gi_*` keys. Each render:
+the probes stand (after a build), the lit scene, a batch of probes traces, the batch takes its rays in. What
+changed on the way, each found by a check:
+
+- **Reflections** (planned for G5d) came now: Sponza's shade measured (0.015, 0.016, 0.019) in linear light where
+  Cycles has (0.003, 0.002, 0.001), the open sky's reflection off 4% stone; probes finer or denser did not move it.
+  A rough surface now reflects what the probes see along the reflection, a smooth one the environment dimmed by the
+  share of the sky's light they see that way: the shade went to (0.001, 0.001, 0.000) and Sponza's mean from 15 to 7.
+- **A metal's colour:** the voxels held base x (1 - metallic), so the furnace's metal spheres were black to the
+  probes (its mean went from 0.23 to 1.84 levels, p99 42); now the base colour (a metal reflects its colour's share),
+  0.27 and p99 3.
+- **Emission first:** the Cornell box's panel is half a millimetre under the ceiling, in the same voxels, and the
+  ceiling (drawn first) owned them: the box lit by the panel alone was black. An emissive triangle now owns a voxel
+  before any other (the owners' top bit).
+- **Two sides:** a thin wall's voxel had one light for both sides, so a dark room would have seen the lit room's
+  side of the wall. Each side now has its own (a second lit-scene texture); a voxel with faces both ways (opposite
+  faces in it, or a double-sided material) counts as double-sided, so probes beside a thin wall are not taken as
+  inside it.
+
+Checks (`test_gpu_gi_furnace`, `_rooms`, `_tunnel`, `_bleeding`, with G5a's; the same numbers on the RTX 4080,
+Intel's and lavapipe):
+
+| What | Without the probes | With them |
+|---|---|---|
+| A white ball in an even sky (the furnace) | the sky's 0.5 | within 1 level of without |
+| Two rooms, a wall of no thickness between, a panel lighting the left | both floors black | left 115, right 0 (no leak); two views the same to the byte |
+| A tunnel 8 x 2 x 2 under an even sky, floor inside / outside | 128 / 128 | 28 / 125 (in light about a twentieth) |
+| A white ground by a sunlit red wall: red over green, by the wall / 5 m away | 1.00 / 1.00 | 1.24 / 1.03 |
+
+Against Cycles (`tools/reference/run.py`, the RTX 4080, 1280 x 720; `kin_reference --gi`, voxels a 128th of the
+scene's bounds, probes every 4, 128 rays, 0.97 kept, as many probes a render as a million rays allow, 8,192; the
+Cornell box's point light is marked a stand-in, left out with `--gi`, which lights the box with its panel):
+
+| Picture | without: mean, PSNR, SSIM | with: mean, PSNR, SSIM | GPU ms without / with |
+|---|---|---|---|
+| cornell/front | 10.20, 22.4 dB, 0.887 | **7.61, 24.7 dB, 0.986** | 0.06 / 1.23 |
+| furnace/front | 0.23, 48.6 dB, 0.998 | 0.27, 50.4 dB, 0.998 | 0.06 / 1.19 |
+| sponza/nave | 50.10, 13.3 dB, 0.501 | **7.10, 28.0 dB, 0.805** | 0.34 / 2.51 |
+| sponza/roof | 33.98, 15.7 dB, 0.641 | **6.50, 27.4 dB, 0.840** | 0.29 / 2.36 |
+
+What is left of the distance: the Cornell box's light is grey where Cycles' is warm (kin's materials take emission
+as a share of the base colour, and the panel's base is grey: its glTF emissive colour is not kept), and its area
+light's shadows (the probes' light is low-frequency); Sponza's shade a third darker than Cycles' and a little cooler.
+The cost: about 1.2 ms for the Cornell box (4.1 million voxels, 31,744 probes) and 2.1 for Sponza (750,000 voxels,
+13,616 probes), 8,192 probes and a million rays a render in both: a cost of the voxels and the probes, not of the
+picture's size. The budget work is G5c's (fewer probes and voxels a render, cascades).
+
+**The Bistro** (`--gi`, the square's box 60 x 27 x 65 m, voxels of 0.30 m): the shade loses the open sky's blue and
+is warmer, the arch's tunnel goes dark inside as the original's is, the night's lamps bounce onto the facades and the
+street; the same picture to the byte from run to run. Its comparison with Godot is G5c's, with the cascades.
+
 ### Later, each on request
 
 Gamepad aiming (unless kin's gamepad input lands first, then in M2);

@@ -2924,8 +2924,12 @@ struct GiLevel {
         return Mat4f::translation({-1.5f, 1.4f, 2.0f}) * Mat4f::rotation_y(45.0f) * Mat4f::rotation_z(-90.0f) *
                Mat4f::scaling({2.2f, 1.0f, 2.4f});
     }
+    // The GI scene alone (no probes: the picture is as without it).
     static kin::GlobalIllumination3D settings() {
-        return {.enabled = true, .area = {{-4.0f, -0.5f, -4.0f}, {4.0f, 3.5f, 4.0f}}, .cell = 0.1f};
+        return {.enabled = true,
+                .area = {{-4.0f, -0.5f, -4.0f}, {4.0f, 3.5f, 4.0f}},
+                .cell = 0.1f,
+                .probes = {.enabled = false}};
     }
 
     kin::Mesh3D plane, ball, box;
@@ -3053,7 +3057,7 @@ void test_gpu_gi_scene() {
 
 // When the GI scene is built: once, and again only when something it is made of changes (a copy moving, a pose, a
 // material); two views of one scene build it to the byte alike; with it off nothing is built, and the picture is the
-// same with it on (it has no light yet).
+// same with it on and its probes off (the GI scene alone lights nothing).
 void test_gpu_gi_scene_builds() {
     with_gpu("test_gpu_gi_scene_builds", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -3162,6 +3166,256 @@ void test_gpu_gi_view() {
         const Pixels picture = shoot_view(renderer, r3d, view, scene);
         renderer.present();
         assert(picture.rgba != albedo.rgba);
+    });
+}
+
+// Global illumination's probes (G5b) on small scenes made of flat quads facing in: what their light does.
+struct GiRooms {
+    explicit GiRooms(kin::Renderer3D& r3d) : plane(r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({})) {}
+
+    // A quad `w` x `d` centred at `at`, facing `facing` (+-x, +-y or +-z: 'x', 'X' for -x, ...).
+    void quad(kin::Scene3D& scene, Vec3f at, char facing, float w, float d, const kin::Material3D& m) const {
+        Mat4f turn = Mat4f::identity();
+        switch (facing) {
+        case 'Y':
+            turn = Mat4f::rotation_x(180.0f);
+            break;
+        case 'x':
+            turn = Mat4f::rotation_z(-90.0f);
+            break;
+        case 'X':
+            turn = Mat4f::rotation_z(90.0f);
+            break;
+        case 'z':
+            turn = Mat4f::rotation_x(90.0f);
+            break;
+        case 'Z':
+            turn = Mat4f::rotation_x(-90.0f);
+            break;
+        default:
+            break;
+        }
+        (void)scene.draw(plane, Mat4f::translation(at) * turn * Mat4f::scaling({w, 1.0f, d}), m);
+    }
+    // A scene lit by nothing but what it is given: no sun, no ambient.
+    static kin::Scene3D dark(kin::Camera3D camera) {
+        kin::Scene3D scene;
+        scene.camera = camera;
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        return scene;
+    }
+    static kin::GlobalIllumination3D settings(kin::Bounds3D area, float cell) {
+        return {.enabled = true, .area = area, .cell = cell, .probes = {.rays = 192, .hysteresis = 0.5f}};
+    }
+
+    kin::Mesh3D plane;
+};
+
+// Renders `frames` times (the probes' light settles over renders), then reads the picture.
+Pixels settle(kin::Renderer2D& renderer, kin::Renderer3D& r3d, kin::View3D& view, const kin::Scene3D& scene,
+              int frames) {
+    for (int i = 1; i < frames; ++i) {
+        render_ok(r3d, view, scene);
+        renderer.present();
+    }
+    Pixels p = shoot_view(renderer, r3d, view, scene);
+    renderer.present();
+    return p;
+}
+
+// The mean of a 7 x 7 block of a picture round where `at` shows, each channel 0 to 255.
+std::array<float, 3> block_at(const Pixels& p, const kin::Camera3D& camera, Vec3f at) {
+    const auto where = camera.project(at, screen);
+    assert(where);
+    std::array<float, 3> sum{};
+    for (int y = -3; y <= 3; ++y) {
+        for (int x = -3; x <= 3; ++x) {
+            const Color c = p.at(static_cast<int>(where->pos.x) + x, static_cast<int>(where->pos.y) + y);
+            sum[0] += c.r;
+            sum[1] += c.g;
+            sum[2] += c.b;
+        }
+    }
+    for (float& v : sum) {
+        v /= 49.0f;
+    }
+    return sum;
+}
+
+// The furnace: a white ball in an even sky of light 0.5 shows that light everywhere, with the probes as without them
+// (they see the sky, and the ball lit by it, and bring back no more and no less).
+void test_gpu_gi_furnace() {
+    with_gpu("test_gpu_gi_furnace", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        const kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 0.0f, 4.0f}, {0.0f, 0.0f, 0.0f}, 40.0f);
+        const auto scene_of = [&](bool gi) {
+            kin::Scene3D scene = GiRooms::dark(camera);
+            scene.lights.ambient = {0.5f, 0.5f, 0.5f};
+            scene.lights.ground_ambient = {.enabled = true, .color = {0.5f, 0.5f, 0.5f}};
+            if (gi) {
+                scene.global_illumination = GiRooms::settings({{-2.0f, -2.0f, -2.0f}, {2.0f, 2.0f, 2.0f}}, 0.05f);
+                scene.global_illumination.probes.hysteresis = 0.0f;
+            }
+            (void)scene.draw(ball, Mat4f::identity(), {.color = kin::colors::white, .roughness = 1.0f});
+            return scene;
+        };
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D lit = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false));
+        renderer.present();
+        const Pixels with = settle(renderer, r3d, lit, scene_of(true), 16);
+        assert(r3d.debug_stats().gi_lit && r3d.debug_stats().gi_probes > 0);
+        float worst = 0.0f;
+        for (const Vec3f at : {Vec3f{0.0f, 0.0f, 1.0f}, Vec3f{0.0f, 0.8f, 0.6f}, Vec3f{0.0f, -0.8f, 0.6f},
+                               Vec3f{0.8f, 0.0f, 0.6f}, Vec3f{-0.6f, 0.6f, 0.53f}}) {
+            const auto a = block_at(without, camera, at), b = block_at(with, camera, at);
+            for (int c = 0; c < 3; ++c) {
+                worst = std::max(worst, std::abs(a[c] - b[c]));
+            }
+        }
+        std::cerr << "gi furnace: the ball with the probes at most " << worst << " levels from without\n";
+        assert(worst <= 4.0f);
+    });
+}
+
+// Two rooms of 4 x 4 x 4 side by side, a wall of no thickness between them, lit by nothing but an emissive panel in
+// the left one's ceiling: with the probes the left floor is lit and the right one stays dark (no light through the
+// wall); without them both are black. Two views give the same pictures.
+void test_gpu_gi_rooms() {
+    with_gpu("test_gpu_gi_rooms", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiRooms rooms{r3d};
+        // From above: the ceilings face down, so they are not drawn from here.
+        const kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 12.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        const auto scene_of = [&](bool gi) {
+            kin::Scene3D scene = GiRooms::dark(camera);
+            if (gi) {
+                scene.global_illumination = GiRooms::settings({{-4.5f, -0.5f, -2.5f}, {4.5f, 4.5f, 2.5f}}, 0.1f);
+            }
+            const kin::Material3D grey{.color = Color::rgb(180, 180, 180)};
+            rooms.quad(scene, {0.0f, 0.0f, 0.0f}, 'y', 8.0f, 4.0f, grey);
+            rooms.quad(scene, {0.0f, 4.0f, 0.0f}, 'Y', 8.0f, 4.0f, grey);
+            rooms.quad(scene, {-4.0f, 2.0f, 0.0f}, 'x', 4.0f, 4.0f, grey);
+            rooms.quad(scene, {4.0f, 2.0f, 0.0f}, 'X', 4.0f, 4.0f, grey);
+            rooms.quad(scene, {0.0f, 2.0f, -2.0f}, 'z', 8.0f, 4.0f, grey);
+            rooms.quad(scene, {0.0f, 2.0f, 2.0f}, 'Z', 8.0f, 4.0f, grey);
+            kin::Material3D wall = grey;
+            wall.double_sided = true;
+            rooms.quad(scene, {0.0f, 2.0f, 0.0f}, 'x', 4.0f, 4.0f, wall);
+            rooms.quad(scene, {-2.0f, 3.95f, 0.0f}, 'Y', 1.5f, 1.5f, {.color = kin::colors::white, .emissive = 4.0f});
+            return scene;
+        };
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false));
+        renderer.present();
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D other = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels with = settle(renderer, r3d, view, scene_of(true), 24);
+        const Pixels again = settle(renderer, r3d, other, scene_of(true), 24);
+        const auto left = block_at(with, camera, {-2.0f, 0.0f, 0.0f}),
+                   right = block_at(with, camera, {2.0f, 0.0f, 0.0f});
+        const auto dark_left = block_at(without, camera, {-2.0f, 0.0f, 0.0f});
+        std::cerr << "gi rooms: the left floor " << left[1] << ", the right " << right[1] << " (without the probes "
+                  << dark_left[1] << ")\n";
+        assert(dark_left[1] < 1.0f);
+        assert(left[1] > 40.0f);
+        assert(right[1] < std::max(2.0f, 0.02f * left[1]));
+        assert(with.rgba == again.rgba);
+    });
+}
+
+// A tunnel 8 long, 2 wide and 2 high, open at its ends, on a ground under an even sky: without the probes the floor
+// inside has the open sky's light, as the ground outside does; with them, a little through the ends.
+void test_gpu_gi_tunnel() {
+    with_gpu("test_gpu_gi_tunnel", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiRooms rooms{r3d};
+        const kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 14.0f, 0.01f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        const auto scene_of = [&](bool gi) {
+            kin::Scene3D scene = GiRooms::dark(camera);
+            scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+            if (gi) {
+                scene.global_illumination = GiRooms::settings({{-6.0f, -0.5f, -6.0f}, {6.0f, 2.5f, 6.0f}}, 0.1f);
+            }
+            const kin::Material3D grey{.color = Color::rgb(160, 160, 160)};
+            rooms.quad(scene, {0.0f, 0.0f, 0.0f}, 'y', 12.0f, 12.0f, grey);
+            rooms.quad(scene, {0.0f, 2.0f, 0.0f}, 'Y', 8.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 1.0f, -1.0f}, 'z', 8.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 1.0f, 1.0f}, 'Z', 8.0f, 2.0f, grey);
+            // The walls' and the ceiling's outsides, so that the tunnel is closed from the outside too.
+            rooms.quad(scene, {0.0f, 2.0f, 0.0f}, 'y', 8.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 1.0f, -1.0f}, 'Z', 8.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 1.0f, 1.0f}, 'z', 8.0f, 2.0f, grey);
+            return scene;
+        };
+        // From above, the tunnel's roof hides its floor: look in from an end instead, and at the ground beside it.
+        const kin::Camera3D inside = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, 60.0f);
+        const kin::Camera3D outside = kin::Camera3D::look_at({0.0f, 1.0f, 4.0f}, {1.0f, 0.0f, 4.0f}, 60.0f);
+        const auto shots = [&](bool gi) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            kin::Scene3D in = scene_of(gi), out = scene_of(gi);
+            in.camera = inside;
+            out.camera = outside;
+            const Pixels a = settle(renderer, r3d, view, in, gi ? 24 : 1);
+            const Pixels b = settle(renderer, r3d, view, out, gi ? 4 : 1);
+            return std::pair{block_at(a, inside, {1.0f, 0.0f, 0.0f})[1], block_at(b, outside, {1.0f, 0.0f, 4.0f})[1]};
+        };
+        const auto [in_plain, out_plain] = shots(false);
+        const auto [in_gi, out_gi] = shots(true);
+        std::cerr << "gi tunnel: the floor inside " << in_plain << " and outside " << out_plain
+                  << " without the probes; " << in_gi << " and " << out_gi << " with them\n";
+        const auto linear = [](float c) { return kin::srgb_to_linear(c / 255.0f); };
+        assert(std::abs(in_plain - out_plain) < 3.0f);
+        assert(linear(out_gi) > 0.8f * linear(out_plain));
+        assert(linear(in_gi) < 0.25f * linear(out_gi)); // in light, not in the picture's levels
+    });
+}
+
+// Colour bleeding: a white ground beside a red wall, the sun on both, no sky: with the probes the ground by the wall is
+// red with the wall's light and the ground far from it is not; without them neither is.
+void test_gpu_gi_bleeding() {
+    with_gpu("test_gpu_gi_bleeding", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiRooms rooms{r3d};
+        const kin::Camera3D camera = kin::Camera3D::look_at({3.0f, 9.0f, 0.01f}, {3.0f, 0.0f, 0.0f}, 50.0f);
+        const auto scene_of = [&](bool gi) {
+            kin::Scene3D scene = GiRooms::dark(camera);
+            scene.lights.sun = {.direction = {1.0f, 0.6f, 0.2f}, .color = {1.0f, 1.0f, 1.0f}};
+            if (gi) {
+                scene.global_illumination = GiRooms::settings({{-1.0f, -0.5f, -4.0f}, {8.0f, 4.0f, 4.0f}}, 0.1f);
+            }
+            rooms.quad(scene, {3.0f, 0.0f, 0.0f}, 'y', 10.0f, 8.0f, {.color = Color::rgb(200, 200, 200)});
+            rooms.quad(scene, {0.0f, 1.5f, 0.0f}, 'x', 3.0f, 6.0f, {.color = Color::rgb(220, 30, 30)});
+            return scene;
+        };
+        const auto redness = [&](const Pixels& p, float x) {
+            const auto c = block_at(p, camera, {x, 0.0f, 0.0f});
+            return c[0] / std::max(c[1], 1.0f);
+        };
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false));
+        renderer.present();
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels with = settle(renderer, r3d, view, scene_of(true), 24);
+        std::cerr << "gi bleeding: red over green by the wall " << redness(with, 0.4f) << " (far "
+                  << redness(with, 5.0f) << "); without the probes " << redness(without, 0.4f) << " (far "
+                  << redness(without, 5.0f) << ")\n";
+        assert(std::abs(redness(without, 0.4f) - redness(without, 5.0f)) < 0.05f);
+        assert(redness(with, 0.4f) > 1.12f * redness(with, 5.0f));
     });
 }
 
@@ -21436,6 +21690,10 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_scene());
     RUN(test_gpu_gi_scene_builds());
     RUN(test_gpu_gi_view());
+    RUN(test_gpu_gi_furnace());
+    RUN(test_gpu_gi_rooms());
+    RUN(test_gpu_gi_tunnel());
+    RUN(test_gpu_gi_bleeding());
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());

@@ -208,8 +208,11 @@ struct FrameUniforms {
     f32 cascade_forward[4];                      // the camera's forward
     f32 occlusion[4];                            // 1 with ambient occlusion, 0, 1 / the view's size
     f32 lights[max_lights * 2 * 4];
+    f32 gi_origin[4]; // global illumination's probes (kin_gi.inc.glsl's KinGiProbes): probe 0's place, the spacing,
+    f32 gi_counts[4]; // probes a side, 1 when they light the scene,
+    f32 gi_bias[4];   // the look-up's offsets along the normal and toward the eye, their light's strength
 };
-static_assert(sizeof(FrameUniforms) == 1120);
+static_assert(sizeof(FrameUniforms) == 1168);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1296,23 +1299,24 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         }
     }
     // Spot lights and the shadows of lights that are not the sun (P3b): the light variants of the stock mesh shaders.
-    // They sample two more depth arrays (the dummy `_no_shadow` where there is no map), so they need the shadow format;
+    // They sample two more depth arrays (the dummy `_no_shadow` where there is no map), and global illumination's
+    // three probe atlases (G5b; a dummy where there are none), so they need the shadow format;
     // absent, and the features off (said once, when a scene asks).
-    if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow) {
+    if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow && _gi_none) {
         try {
             _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv",
                                                           /*uniform_buffers=*/3,
-                                                          /*samplers=*/12);
+                                                          /*samplers=*/15);
             _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                               "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
-                                                              /*samplers=*/12);
+                                                              /*samplers=*/15);
             if (_mesh_velocity_shader) {
                 _mesh_velocity_light_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
-                                             /*uniform_buffers=*/3, /*samplers=*/12);
+                                             /*uniform_buffers=*/3, /*samplers=*/15);
                 _mesh_velocity_light_fog_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
-                                             /*uniform_buffers=*/4, /*samplers=*/12);
+                                             /*uniform_buffers=*/4, /*samplers=*/15);
             }
             _lights_available = true;
             _capabilities.local_shadows = true;
@@ -2619,11 +2623,16 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
          {_gcb[1].scan, _gcb[1].blocks, _gcb[1].args, _gcb[1].list, _gcb[1].counts, _gcb[1].indices, _gc_job_history}) {
         bytes += b ? b->size() : 0u;
     }
-    // The GI scene: a half, two 8-bit texels and four halves a voxel, and the build's two words.
-    if (view._gi.distance) {
-        bytes += static_cast<u64>(view._gi.size[0]) * view._gi.size[1] * view._gi.size[2] * (2 + 4 + 4 + 8);
-    }
-    for (const std::shared_ptr<GpuBuffer>& b : {view._gi.owners, view._gi.seeds}) {
+    // The GI scene: a half, two 8-bit texels and four halves a voxel, and the build's two words; the lit scene's four
+    // halves; the probes' atlases (8 x 8 of four halves, 16 x 16 of two, four halves of data a probe) and rays.
+    const GpuView3D::Gi& gi = view._gi;
+    const u64 voxels = static_cast<u64>(gi.size[0]) * gi.size[1] * gi.size[2];
+    bytes += gi.distance ? voxels * (2 + 4 + 4 + 8) : 0u;
+    bytes += gi.radiance ? voxels * 16 : 0u;
+    bytes += gi.irradiance ? static_cast<u64>(gi.probe_counts[0]) * gi.probe_counts[1] * gi.probe_counts[2] *
+                                 (64 * 8 + 256 * 4 + 8)
+                           : 0u;
+    for (const std::shared_ptr<GpuBuffer>& b : {gi.owners, gi.seeds, gi.rays}) {
         bytes += b ? b->size() : 0u;
     }
     return bytes;
@@ -3163,7 +3172,8 @@ struct GpuRenderer3D::FrameCtx {
     // main pass.
     bool soft_particles = false;
     bool particles = false;
-    bool gi = false; // the view has a GI scene for this render (Scene3D::global_illumination)
+    bool gi = false;     // the view has a GI scene for this render (Scene3D::global_illumination)
+    bool gi_lit = false; // and its probes light the scene (the light variants read them)
 };
 
 void GpuRenderer3D::age_targets(FrameCtx& ctx) {
@@ -7696,6 +7706,17 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         const f32 size = std::max(ctx.chosen[i].second->size, 0.01f);
         put_color(f.lights + i * 8 + 4, ctx.chosen[i].second->color, size * size);
     }
+    // The probes are in the scene's world: the overlay keeps the sky's light.
+    if (ctx.gi_lit && s == 0) {
+        const GpuView3D::Gi& g = view->_gi;
+        put(f.gi_origin, g.probe_origin, g.spacing);
+        put(f.gi_counts,
+            {static_cast<f32>(g.probe_counts[0]), static_cast<f32>(g.probe_counts[1]),
+             static_cast<f32>(g.probe_counts[2])},
+            1.0f);
+        put(f.gi_bias, {0.3f * g.spacing, 0.1f * g.spacing, std::max(scene.global_illumination.probes.intensity, 0.0f)},
+            0.0f);
+    }
 
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &f, sizeof(f));
 }
@@ -8776,6 +8797,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const SDL_GPUTextureSamplerBinding moon_binding{
         ctx.lights_variant && ctx.moon_cascades > 0 && _moon_map ? _moon_map.handle() : _no_shadow.handle(),
         _compare_sampler};
+    const std::array<SDL_GPUTextureSamplerBinding, 3> gi_binding = gi_bindings(*view, ctx.gi_lit);
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
@@ -8875,7 +8897,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                     const auto base = texture_binding(material.texture, material.wrap_u, material.wrap_v);
                     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
                 } else if (unlit == Unlit::Off) {
-                    const std::array<SDL_GPUTextureSamplerBinding, 12> samplers{
+                    const std::array<SDL_GPUTextureSamplerBinding, 15> samplers{
                         texture_binding(material.texture, material.wrap_u, material.wrap_v),
                         shadow_binding,
                         texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v),
@@ -8887,8 +8909,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         occlusion_binding,
                         contact_binding,
                         local_binding,
-                        moon_binding};
-                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom || lit_variant ? 12u : 10u);
+                        moon_binding,
+                        gi_binding[0],
+                        gi_binding[1],
+                        gi_binding[2]};
+                    // Custom shaders have twelve; the stock light variants fifteen (global illumination's probes).
+                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
                 }
                 bound_textures = textures;
                 bound_wrap = wrap;
@@ -9193,6 +9219,13 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.gi_scene"};
         ctx.gi = gi_scene(ctx.commands, *view, scene, stats);
     }
+    if (ctx.gi) {
+        // The probes' light is read by the light variants of the stock shaders: where it is on, they draw.
+        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.gi_probes"};
+        const Mat4f to_environment = Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -scene.lights.environment_rotation);
+        ctx.gi_lit = _lights_available && gi_probes(ctx.commands, *view, scene, ctx.environment, to_environment, stats);
+        ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
+    }
     {
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.sun_shadow"};
         shadow_pass(ctx);
@@ -9313,8 +9346,9 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
                                            [](const PointLightSource3D& l) { return l.shadow_enabled; });
     const bool moon_shadow =
         lights.fill_shadow.enabled && lights.fill_shadow.strength > 0.0f && area_size.x > 0 && area_size.z > 0;
+    const bool gi_lit = scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
     const bool lights_on = _lights_available && (!lights.spots.empty() || spot_shadows || point_shadows ||
-                                                 moon_shadow || lights.sun_shadow_strength < 1.0f);
+                                                 moon_shadow || lights.sun_shadow_strength < 1.0f || gi_lit);
     if (lights_on && (spot_shadows || point_shadows) && _shadow_shader && _shadow_vertex_shader) {
         u32 side = 0;
         for (const SpotLightSource3D& l : lights.spots) {

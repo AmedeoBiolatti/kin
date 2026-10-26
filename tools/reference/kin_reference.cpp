@@ -14,6 +14,7 @@
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
 //                 [--bake-cache DIR]
+//                 [--gi] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H]
 //
 // --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR
 // (Renderer3D::set_bake_cache), and reads them back on the next run with the same DIR instead of building them: the
@@ -1929,6 +1930,11 @@ struct Overrides {
     long particles = 0;        // --particles N: a system with N live particles in the scene's middle
     bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and
                                // the shadow pass would be timed once
+    // --gi: global illumination over the scene's bounds (a twentieth larger), voxels of --gi-cell (else a 128th of the
+    // bounds' longest side), probes every --gi-spacing voxels casting --gi-rays rays, keeping --gi-hysteresis.
+    bool gi = false;
+    double gi_cell = 0.0, gi_hysteresis = -1.0;
+    int gi_spacing = 0, gi_rays = 0;
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -2585,6 +2591,20 @@ int main(int argc, char** argv) {
             over.readback = true;
         } else if (a == "--lod-room") {
             over.lod_room = std::atol(next().c_str());
+        } else if (a == "--gi") {
+            over.gi = true;
+        } else if (a == "--gi-cell") {
+            over.gi = true;
+            over.gi_cell = std::atof(next().c_str());
+        } else if (a == "--gi-spacing") {
+            over.gi = true;
+            over.gi_spacing = std::max(2, std::atoi(next().c_str()));
+        } else if (a == "--gi-rays") {
+            over.gi = true;
+            over.gi_rays = std::max(16, std::atoi(next().c_str()));
+        } else if (a == "--gi-hysteresis") {
+            over.gi = true;
+            over.gi_hysteresis = std::atof(next().c_str());
         } else if (a == "--samples") {
             samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
         } else if (a == "--supersample") {
@@ -3060,9 +3080,28 @@ int main(int argc, char** argv) {
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;
+            scene.global_illumination = {};
+            if (over.gi) {
+                const kin::Vec3f extent = bounds.size(), pad = extent * 0.05f + kin::Vec3f{0.05f, 0.05f, 0.05f};
+                scene.global_illumination = {.enabled = true,
+                                             .area = {bounds.min - pad, bounds.max + pad},
+                                             .cell = over.gi_cell > 0.0
+                                                         ? static_cast<float>(over.gi_cell)
+                                                         : std::max({extent.x, extent.y, extent.z}) / 128.0f};
+                kin::GiProbes3D& probes = scene.global_illumination.probes;
+                probes.spacing = over.gi_spacing > 0 ? static_cast<kin::u32>(over.gi_spacing) : probes.spacing;
+                probes.rays = over.gi_rays > 0 ? static_cast<kin::u32>(over.gi_rays) : probes.rays;
+                probes.hysteresis =
+                    over.gi_hysteresis >= 0.0 ? static_cast<float>(over.gi_hysteresis) : probes.hysteresis;
+            }
             attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
+                    // A light standing in for an emissive surface (the Cornell box's panel) is left out with global
+                    // illumination, which takes the surface's own light.
+                    if (over.gi && p.find("stand_in") && p.find("stand_in")->as_bool()) {
+                        continue;
+                    }
                     scene.add_point_light({.position = vec3(p.find("position")),
                                            .color = light_color(p.find("color")),
                                            .radius = static_cast<float>(p.number_at("radius", 1.0)),
@@ -3574,6 +3613,12 @@ int main(int argc, char** argv) {
                         "shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
+            if (stats.gi_voxels > 0) {
+                std::printf(
+                    "                 global illumination: %u voxels, %u probes (%u updated a render, %u rays)%s\n",
+                    stats.gi_voxels, stats.gi_probes, stats.gi_probes_updated, stats.gi_rays,
+                    stats.gi_lit ? "" : ", not yet lit");
+            }
             if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
                 std::printf("                 lights: %u spots, %u shadow maps (%u drawn, %u cached) with %u draws of "
                             "%u casters, %u moon cascades, %.1f MB of maps%s\n",

@@ -1,5 +1,5 @@
 #version 450 core
-// kin's GI scene (docs/3d_plan.md, G5a): every voxel emptied before a build (no owner, no surface).
+// kin's GI scene (docs/3d_plan.md, G5a): every voxel emptied before a build (no owner, no faces, no surface).
 layout(local_size_x = 64) in;
 
 layout(set = 1, binding = 0, rgba8) uniform writeonly image3D uAlbedo;
@@ -7,6 +7,9 @@ layout(set = 1, binding = 1, rgba8) uniform writeonly image3D uNormal;
 layout(set = 1, binding = 2, rgba16f) uniform writeonly image3D uEmission;
 layout(std430, set = 1, binding = 3) writeonly buffer Owners {
     uint owners[];
+};
+layout(std430, set = 1, binding = 4) writeonly buffer Sides {
+    uint sides[];
 };
 layout(std140, set = 2, binding = 0) uniform Params {
     uvec4 size; // xyz: voxels a side
@@ -20,6 +23,7 @@ void main() {
     }
     const ivec3 voxel = ivec3(i % p.size.x, (i / p.size.x) % p.size.y, i / (p.size.x * p.size.y));
     owners[i] = 0xffffffffu;
+    sides[i] = 0u;
     imageStore(uAlbedo, voxel, vec4(0.0));
     imageStore(uNormal, voxel, vec4(0.0));
     imageStore(uEmission, voxel, vec4(0.0));

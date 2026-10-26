@@ -172,6 +172,16 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("taa_sharpness", taa.sharpness);
         SETTING("anisotropy", anisotropy);
         SETTING("texture_lod_bias", texture_lod_bias);
+        SETTING("gi_enabled", global_illumination.enabled);
+        SETTING("gi_min", global_illumination.area.min);
+        SETTING("gi_max", global_illumination.area.max);
+        SETTING("gi_cell", global_illumination.cell);
+        SETTING("gi_probes", global_illumination.probes.enabled);
+        SETTING("gi_probe_spacing", global_illumination.probes.spacing);
+        SETTING("gi_probe_rays", global_illumination.probes.rays);
+        SETTING("gi_probes_per_render", global_illumination.probes.per_render);
+        SETTING("gi_hysteresis", global_illumination.probes.hysteresis);
+        SETTING("gi_intensity", global_illumination.probes.intensity);
         SETTING("samples", view.samples);
         SETTING("background", view.background);
         SETTING("hdr", view.hdr);
@@ -286,6 +296,13 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
                  settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 && settings.anisotropy >= 1 &&
                  settings.anisotropy <= 16 && std::abs(settings.texture_lod_bias) <= 2 &&
+                 std::isfinite(settings.global_illumination.cell) && settings.global_illumination.cell > 0 &&
+                 settings.global_illumination.probes.spacing >= 2 && settings.global_illumination.probes.rays >= 16 &&
+                 settings.global_illumination.probes.rays <= 256 &&
+                 settings.global_illumination.probes.hysteresis >= 0 &&
+                 settings.global_illumination.probes.hysteresis <= .99f &&
+                 settings.global_illumination.probes.intensity >= 0 &&
+                 std::isfinite(settings.global_illumination.probes.intensity) &&
                  (settings.view.samples == 1 || settings.view.samples == 2 || settings.view.samples == 4 ||
                   settings.view.samples == 8);
         if (!valid)
@@ -305,6 +322,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.anisotropy = settings.anisotropy;
             scene.texture_lod_bias = settings.texture_lod_bias;
             scene.lod = settings.lod;
+            scene.global_illumination = settings.global_illumination;
             if (view)
                 *view = scene3d_view_options(settings.view, *view);
         }

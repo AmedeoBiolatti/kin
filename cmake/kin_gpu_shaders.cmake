@@ -22,7 +22,8 @@ set(_kin_gpu_shader_names_3D
     particle_temporal.vert taa_reactive.frag particle_reactive.frag particle_soft_reactive.frag particle_light.vert
     particle_light.frag particle_soft_light.frag particle_reactive_light.frag particle_soft_reactive_light.frag particle_shadow.vert particle_shadow.frag
     particle_soft_shadow.frag particle_reactive_shadow.frag particle_soft_reactive_shadow.frag particle_cast.frag
-    gi_clear.comp gi_voxelize.comp gi_voxelize_attributes.comp gi_flood.comp gi_view.frag)
+    gi_clear.comp gi_voxelize.comp gi_voxelize_attributes.comp gi_flood.comp gi_view.frag
+    gi_light.comp gi_probe_place.comp gi_probe_trace.comp gi_probe_update.comp)
 
 set(_kin_gpu_shader_names ${_kin_gpu_shader_names_2D})
 if(KIN_EXPERIMENTAL_3D)

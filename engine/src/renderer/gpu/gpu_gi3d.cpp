@@ -1,5 +1,6 @@
 // The SDL_GPU backend's global illumination (docs/3d_plan.md, G5): the GI scene (G5a), the scene in voxels of
-// Scene3D::global_illumination's area, built in compute; its debug view and its read-back.
+// Scene3D::global_illumination's area, built in compute; the lit scene and the probes (G5b); the debug view and the
+// read-back.
 #include "embedded_gpu_shader.hpp"
 #include "gpu_device.hpp"
 #include "gpu_geometry_batch.hpp"
@@ -48,6 +49,13 @@ struct GiFloodUniforms {
     i32 step[4];
 };
 
+// kin_gi.inc.glsl's KinGiProbes.
+struct GiProbeUniforms {
+    f32 origin[4]; // probe 0's place, the spacing
+    f32 counts[4]; // probes a side, 1 when they have light to give
+    f32 bias[4];   // along the normal, toward the eye (world units), their light's strength
+};
+
 // gi_view.frag's View.
 struct GiViewUniforms {
     f32 inverse_view_projection[16];
@@ -56,13 +64,66 @@ struct GiViewUniforms {
     f32 origin[4];
     f32 size[4];
     f32 target[4];
+    GiProbeUniforms probes;
 };
-static_assert(sizeof(GiViewUniforms) == 144);
+static_assert(sizeof(GiViewUniforms) == 192);
+
+// gi_light.comp's Params, and a light as it reads them.
+struct GiLightUniforms {
+    f32 origin[4];
+    f32 size[4];
+    f32 sun_direction[4];
+    f32 sun_colour[4];
+    f32 fill_direction[4];
+    f32 fill_colour[4];
+    GiProbeUniforms probes;
+};
+struct GiLight {
+    f32 at[4];     // place, reach
+    f32 colour[4]; // linear, the square of the size
+    f32 axis[4];   // a spot's way, the cosine of its outer angle (-2: a point light)
+    f32 cone[4];   // 1 / (cos inner - cos outer)
+};
+static_assert(sizeof(GiLight) == 64);
+constexpr u32 max_gi_lights = 256;
+
+// gi_probe_place.comp's Params.
+struct GiPlaceUniforms {
+    f32 origin[4];
+    f32 size[4];
+    GiProbeUniforms probes;
+    f32 misc[4]; // empty the tiles, the distance past which a probe sleeps (voxels)
+};
+
+// gi_probe_trace.comp's Params.
+struct GiTraceUniforms {
+    f32 origin[4];
+    f32 size[4]; // w: the most steps a ray takes
+    GiProbeUniforms probes;
+    u32 batch[4]; // first, probes, rays a probe, all probes
+    f32 rotation[16];
+    f32 sky[4]; // strength, the level to read, 1 with an environment
+    f32 environment_matrix[16];
+    f32 ambient[4];
+    f32 ground[4];
+};
+
+// gi_probe_update.comp's Params.
+struct GiUpdateUniforms {
+    GiProbeUniforms probes;
+    u32 batch[4];
+    f32 rotation[16];
+    f32 misc[4]; // hysteresis, the farthest distance kept (world)
+};
+
+// The most rays a batch casts (16 bytes each in the rays' buffer).
+constexpr u32 max_gi_rays = 1u << 20;
 
 constexpr u32 gi_threads = 64; // every GI compute shader's workgroup
 
 SDL_GPUComputePipeline* make_gi_compute(SDL_GPUDevice* device, std::string_view file, u32 samplers,
-                                        u32 readonly_buffers, u32 readwrite_textures, u32 readwrite_buffers) {
+                                        u32 readonly_buffers, u32 readwrite_textures, u32 readwrite_buffers,
+                                        u32 threads_x = gi_threads, u32 threads_y = 1) {
     const std::span<const unsigned char> code = embedded_gpu_shader(file);
     if (code.empty()) {
         return nullptr;
@@ -77,8 +138,8 @@ SDL_GPUComputePipeline* make_gi_compute(SDL_GPUDevice* device, std::string_view 
     info.num_readwrite_storage_textures = readwrite_textures;
     info.num_readwrite_storage_buffers = readwrite_buffers;
     info.num_uniform_buffers = 1;
-    info.threadcount_x = gi_threads;
-    info.threadcount_y = 1;
+    info.threadcount_x = threads_x;
+    info.threadcount_y = threads_y;
     info.threadcount_z = 1;
     return SDL_CreateGPUComputePipeline(device, &info);
 }
@@ -140,6 +201,15 @@ f32 srgb_to_linear(u8 c) {
 
 void GpuRenderer3D::make_gi() {
     SDL_GPUDevice* handle = _device->handle();
+    // Bound where there are no probes (the light variants read three 3D textures whether or not): a probe asleep,
+    // giving nothing (never read then).
+    try {
+        _gi_none =
+            _device->create_volume(1, 1, 1, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        const std::array<u8, 8> none{};
+        _device->update_texture(_gi_none.handle(), 0, 0, 1, 1, none.data(), 8, true);
+    } catch (const std::exception&) {
+    }
     try {
         const SDL_GPUTextureUsageFlags usage =
             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
@@ -149,15 +219,28 @@ void GpuRenderer3D::make_gi() {
                 throw std::runtime_error("no 3D storage texture of a format the GI scene needs");
             }
         }
-        _gi_clear = make_gi_compute(handle, "gi_clear.comp.spv", 0, 0, 3, 1);
-        _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 3, 5, 0, 1);
-        _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 3, 6, 3, 0);
+        // The probes' atlases are read and written by their update.
+        for (const SDL_GPUTextureFormat format :
+             {SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT}) {
+            if (!SDL_GPUTextureSupportsFormat(handle, format, SDL_GPU_TEXTURETYPE_3D,
+                                              usage | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE)) {
+                throw std::runtime_error("no 3D storage texture of a format the probes need");
+            }
+        }
+        _gi_clear = make_gi_compute(handle, "gi_clear.comp.spv", 0, 0, 3, 2);
+        _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 2, 5, 0, 2);
+        _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 7, 3, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 0, 1, 1, 1);
-        if (!_gi_clear || !_gi_voxelize || !_gi_attributes || !_gi_flood) {
+        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 7, 1, 2, 0);
+        _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 0, 3, 0);
+        _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 0, 0, 1);
+        _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 1, 3, 0, 16, 16);
+        if (!_gi_clear || !_gi_voxelize || !_gi_attributes || !_gi_flood || !_gi_light || !_gi_place || !_gi_trace ||
+            !_gi_update) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
         }
         _gi_view_shader = GpuShader::from_embedded(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "gi_view.frag.spv",
-                                                   /*uniform_buffers=*/1, /*samplers=*/4);
+                                                   /*uniform_buffers=*/1, /*samplers=*/9);
         SDL_GPUSamplerCreateInfo sampler{};
         sampler.min_filter = SDL_GPU_FILTER_NEAREST;
         sampler.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -165,7 +248,10 @@ void GpuRenderer3D::make_gi() {
         sampler.address_mode_u = sampler.address_mode_v = sampler.address_mode_w =
             SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
         _gi_sampler = SDL_CreateGPUSampler(handle, &sampler);
-        if (!_gi_sampler) {
+        sampler.min_filter = SDL_GPU_FILTER_LINEAR;
+        sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
+        _gi_linear = SDL_CreateGPUSampler(handle, &sampler);
+        if (!_gi_sampler || !_gi_linear) {
             throw std::runtime_error(std::string{"sampler not made: "} + SDL_GetError());
         }
         // Bound for the skin and the joints of a draw without them (every binding a shader declares is bound).
@@ -183,15 +269,18 @@ void GpuRenderer3D::make_gi() {
 
 void GpuRenderer3D::release_gi_pipelines() {
     SDL_GPUDevice* handle = _device->handle();
-    for (SDL_GPUComputePipeline** compute : {&_gi_clear, &_gi_voxelize, &_gi_attributes, &_gi_flood}) {
+    for (SDL_GPUComputePipeline** compute :
+         {&_gi_clear, &_gi_voxelize, &_gi_attributes, &_gi_flood, &_gi_light, &_gi_place, &_gi_trace, &_gi_update}) {
         if (*compute) {
             SDL_ReleaseGPUComputePipeline(handle, *compute);
             *compute = nullptr;
         }
     }
-    if (_gi_sampler) {
-        SDL_ReleaseGPUSampler(handle, _gi_sampler);
-        _gi_sampler = nullptr;
+    for (SDL_GPUSampler** sampler : {&_gi_sampler, &_gi_linear}) {
+        if (*sampler) {
+            SDL_ReleaseGPUSampler(handle, *sampler);
+            *sampler = nullptr;
+        }
     }
     _gi_available = false;
 }
@@ -296,8 +385,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                     continue;
                 }
             }
-            if (items + triangles >= 0xffffffffull) {
-                break; // items are numbered in 32 bits
+            if (items + triangles >= 0x7fffffffull) {
+                break; // items are numbered in 31 bits (the owners' top bit puts the emissive first)
             }
             GiCopy g{};
             std::memcpy(g.model, t.m, sizeof(g.model));
@@ -335,9 +424,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         key.add(m.blend);
         key.add(m.alpha_cutoff);
         key.add(m.emissive);
-        key.add(m.metallic);
         key.add(m.double_sided);
-        for (const Texture* texture : {&m.texture, &m.metallic_roughness, &m.emissive_texture}) {
+        for (const Texture* texture : {&m.texture, &m.emissive_texture}) {
             key.add(texture->backend().get());
         }
         key.add(m.wrap_u);
@@ -395,14 +483,17 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     u32 dispatches = 0;
     const GiFloodUniforms whole{{size[0], size[1], size[2], 0}, {0, 0, 0, 0}};
     const std::array<u32, 2> voxel_groups = gi_groups(voxels);
-    // 1. Every voxel empty (the textures and owners are written whole: their old storage can go).
+    // 1. Every voxel empty (the textures and the two words are written whole: their old storage can go). The seeds'
+    // word holds the faces' ways until the flood.
     {
         const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> textures{
             SDL_GPUStorageTextureReadWriteBinding{.texture = view._gi.albedo.handle(), .cycle = true},
             SDL_GPUStorageTextureReadWriteBinding{.texture = view._gi.normal.handle(), .cycle = true},
             SDL_GPUStorageTextureReadWriteBinding{.texture = view._gi.emission.handle(), .cycle = true}};
-        const SDL_GPUStorageBufferReadWriteBinding owners{.buffer = view._gi.owners->handle(), .cycle = true};
-        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 3, &owners, 1);
+        const std::array<SDL_GPUStorageBufferReadWriteBinding, 2> words{
+            SDL_GPUStorageBufferReadWriteBinding{.buffer = view._gi.owners->handle(), .cycle = true},
+            SDL_GPUStorageBufferReadWriteBinding{.buffer = view._gi.seeds->handle(), .cycle = true}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 3, words.data(), 2);
         if (!pass) {
             view._gi.valid = false;
             return false;
@@ -428,18 +519,18 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         for (const u32 j : order) {
             const Job& job = jobs[j];
             const Material3D& m = job.draw->material;
-            const std::array<SDL_GPUTextureSamplerBinding, 3> samplers{
+            const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
                 texture_binding(m.texture, m.wrap_u, m.wrap_v),
-                texture_binding(m.metallic_roughness, m.wrap_u, m.wrap_v),
                 texture_binding(m.emissive_texture, m.wrap_u, m.wrap_v)};
-            SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), 3);
-            const std::array<SDL_GPUBuffer*, 6> buffers{job.mesh->vertices,
+            SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), 2);
+            const std::array<SDL_GPUBuffer*, 7> buffers{job.mesh->vertices,
                                                         job.mesh->indices,
                                                         job.skinned ? job.mesh->skin : _gi_empty->handle(),
                                                         job.skinned ? _gi_joints->handle() : _gi_empty->handle(),
                                                         _gi_copies->handle(),
-                                                        view._gi.owners->handle()};
-            SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), attributes ? 6 : 5);
+                                                        view._gi.owners->handle(),
+                                                        view._gi.seeds->handle()};
+            SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), attributes ? 7 : 5);
             GiVoxelizeUniforms u{};
             u.origin[0] = origin.x;
             u.origin[1] = origin.y;
@@ -461,7 +552,6 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             u.material[0] = std::max(m.emissive, 0.0f);
             u.material[1] = m.alpha_cutoff;
             u.material[2] = m.double_sided ? 1.0f : 0.0f;
-            u.material[3] = std::clamp(m.metallic, 0.0f, 1.0f);
             u.first[0] = job.copy_first;
             SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
             const std::array<u32, 2> groups = gi_groups(static_cast<u64>(job.copies) * job.triangles);
@@ -470,8 +560,10 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         }
     };
     if (!jobs.empty()) {
-        const SDL_GPUStorageBufferReadWriteBinding owners{.buffer = view._gi.owners->handle(), .cycle = false};
-        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &owners, 1);
+        const std::array<SDL_GPUStorageBufferReadWriteBinding, 2> words{
+            SDL_GPUStorageBufferReadWriteBinding{.buffer = view._gi.owners->handle(), .cycle = false},
+            SDL_GPUStorageBufferReadWriteBinding{.buffer = view._gi.seeds->handle(), .cycle = false}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, words.data(), 2);
         if (!pass) {
             view._gi.valid = false;
             return false;
@@ -541,11 +633,318 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     view._gi.cell = cell;
     view._gi.key = key.value;
     view._gi.valid = true;
+    view._gi.placed = false; // the probes move with the scene
     stats.gi_built = true;
     stats.gi_copies = static_cast<u32>(_gi_copy_bytes.size() / sizeof(GiCopy));
     stats.gi_triangles = items;
     stats.gi_dispatches = dispatches;
     return true;
+}
+
+namespace {
+
+// A probe grid's uniforms (KinGiProbes): `lit` when they have light to give. The look-up moves out from a surface by
+// three tenths of the spacing (past the voxel the probes' rays stop at, a voxel before the surface) and a tenth toward
+// the eye.
+void probe_uniforms(Vec3f origin, f32 spacing, const std::array<u32, 3>& counts, const GiProbes3D& settings, bool lit,
+                    GiProbeUniforms& u) {
+    u.origin[0] = origin.x;
+    u.origin[1] = origin.y;
+    u.origin[2] = origin.z;
+    u.origin[3] = spacing;
+    for (int a = 0; a < 3; ++a) {
+        u.counts[a] = static_cast<f32>(counts[a]);
+    }
+    u.counts[3] = lit ? 1.0f : 0.0f;
+    u.bias[0] = 0.3f * spacing;
+    u.bias[1] = 0.1f * spacing;
+    u.bias[2] = std::max(settings.intensity, 0.0f);
+    u.bias[3] = 0.0f;
+}
+
+// A turn for the rays of update `n`, the same each run: an axis and an angle from a hash of n.
+Mat4f ray_rotation(u64 n) {
+    const auto next = [&n] {
+        n += 0x9e3779b97f4a7c15ull;
+        u64 z = n;
+        z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+        z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+        z ^= z >> 31;
+        return static_cast<f32>(z >> 40) / static_cast<f32>(1u << 24);
+    };
+    const f32 z = next() * 2.0f - 1.0f, a = next() * 6.2831853f, r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+    return Mat4f::rotation(Quatf::axis_angle({r * std::cos(a), r * std::sin(a), z}, next() * 360.0f));
+}
+
+} // namespace
+
+std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_bindings(const GpuView3D& view, bool lit) const {
+    if (!lit || !view._gi.irradiance) {
+        const SDL_GPUTextureSamplerBinding none{_gi_none.handle(), _owner->_sampler_linear};
+        return {none, none, none};
+    }
+    return {SDL_GPUTextureSamplerBinding{view._gi.irradiance.handle(), _gi_linear},
+            SDL_GPUTextureSamplerBinding{view._gi.moments.handle(), _gi_linear},
+            SDL_GPUTextureSamplerBinding{view._gi.probe_data.handle(), _gi_sampler}};
+}
+
+bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
+                              const GpuEnvironment3D* environment, const Mat4f& to_environment,
+                              RenderDebugStats3D& stats) {
+    GpuView3D::Gi& g = view._gi;
+    const GiProbes3D& settings = scene.global_illumination.probes;
+    if (!g.valid || !settings.enabled) {
+        g.lit = false;
+        return false;
+    }
+    // The grid: a probe every `spacing` voxels from the area's corner to past its far one, further apart where there
+    // would be more than max_gi_probes or 128 along a side (the moments' atlas's 2048 texels).
+    const std::array<f32, 3> extent{static_cast<f32>(g.size[0]) * g.cell, static_cast<f32>(g.size[1]) * g.cell,
+                                    static_cast<f32>(g.size[2]) * g.cell};
+    f32 spacing = static_cast<f32>(std::max(settings.spacing, 2u)) * g.cell;
+    std::array<u32, 3> counts{};
+    for (;;) {
+        for (int a = 0; a < 3; ++a) {
+            counts[a] = static_cast<u32>(std::ceil(extent[a] / spacing - 1e-3f)) + 1;
+        }
+        if (static_cast<u64>(counts[0]) * counts[1] * counts[2] <= max_gi_probes &&
+            std::max({counts[0], counts[1], counts[2]}) <= 128) {
+            break;
+        }
+        spacing *= 1.1f;
+    }
+    const u32 total = counts[0] * counts[1] * counts[2];
+    const bool fresh = !g.irradiance || g.probe_counts != counts || g.spacing != spacing || g.probe_origin != g.origin;
+    try {
+        if (fresh) {
+            const SDL_GPUTextureUsageFlags usage = SDL_GPU_TEXTUREUSAGE_SAMPLER |
+                                                   SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE |
+                                                   SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE;
+            g.irradiance = _device->create_volume(counts[0] * 8, counts[1] * 8, counts[2],
+                                                  SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
+            g.moments = _device->create_volume(counts[0] * 16, counts[1] * 16, counts[2],
+                                               SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, usage);
+            g.probe_data = _device->create_volume(counts[0], counts[1], counts[2],
+                                                  SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
+            g.probe_counts = counts;
+            g.spacing = spacing;
+            g.probe_origin = g.origin;
+            g.next = 0;
+            g.updates = 0;
+            g.placed = false;
+            g.lit = false;
+        }
+        if (!g.radiance || g.radiance.width() != g.size[0] || g.radiance.height() != g.size[1]) {
+            for (GpuTexture* t : {&g.radiance, &g.radiance_back}) {
+                *t = _device->create_volume(g.size[0], g.size[1], g.size[2], SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                            SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+            }
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the GI probes could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        g.irradiance = {};
+        g.lit = false;
+        return false;
+    }
+    const f32 per_unit = 1.0f / g.cell;
+    const auto put4 = [](f32* to, f32 x, f32 y, f32 z, f32 w) {
+        to[0] = x;
+        to[1] = y;
+        to[2] = z;
+        to[3] = w;
+    };
+    const u64 voxels = static_cast<u64>(g.size[0]) * g.size[1] * g.size[2];
+    u32 dispatches = 0;
+
+    // 1. Where the probes stand (after each build of the scene; on a new grid their tiles are emptied first).
+    if (!g.placed) {
+        GiPlaceUniforms u{};
+        put4(u.origin, g.origin.x, g.origin.y, g.origin.z, per_unit);
+        put4(u.size, static_cast<f32>(g.size[0]), static_cast<f32>(g.size[1]), static_cast<f32>(g.size[2]), 0.0f);
+        probe_uniforms(g.probe_origin, g.spacing, g.probe_counts, settings, false, u.probes);
+        put4(u.misc, fresh ? 1.0f : 0.0f, 1.8f * spacing * per_unit, 0.0f, 0.0f);
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> textures{
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.probe_data.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.irradiance.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.moments.handle()}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 3, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        const SDL_GPUTextureSamplerBinding distance{g.distance.handle(), _gi_linear};
+        SDL_BindGPUComputePipeline(pass, _gi_place);
+        SDL_BindGPUComputeSamplers(pass, 0, &distance, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        const std::array<u32, 2> groups = gi_groups(total);
+        SDL_DispatchGPUCompute(pass, groups[0], groups[1], 1);
+        SDL_EndGPUComputePass(pass);
+        ++dispatches;
+        g.placed = true;
+    }
+
+    // 2. The lit scene: what leaves each surface voxel, lit by the sun, the fill, the lamps and the probes (as they
+    // were: the bounce of the render before).
+    const Lights3D& lights = scene.lights;
+    std::vector<GiLight> list;
+    list.reserve(std::min<std::size_t>(lights.points.size() + lights.spots.size(), max_gi_lights));
+    for (const PointLightSource3D& l : lights.points) {
+        if (list.size() >= max_gi_lights) {
+            break;
+        }
+        const f32 size = std::max(l.size, 0.01f);
+        GiLight q{};
+        put4(q.at, l.position.x, l.position.y, l.position.z, std::max(l.radius, 1e-3f));
+        put4(q.colour, l.color.r, l.color.g, l.color.b, size * size);
+        put4(q.axis, 0.0f, -1.0f, 0.0f, -2.0f);
+        list.push_back(q);
+    }
+    for (const SpotLightSource3D& l : lights.spots) {
+        if (list.size() >= max_gi_lights) {
+            break;
+        }
+        const f32 size = std::max(l.size, 0.01f);
+        const Vec3f way = length_squared(l.direction) > 0.0f ? normalize(l.direction) : Vec3f{0.0f, -1.0f, 0.0f};
+        constexpr f32 to_radians = 3.14159265f / 180.0f;
+        const f32 outer = std::min(l.outer_angle, 89.9f), inner = std::clamp(l.inner_angle, 0.0f, outer - 0.1f);
+        const f32 cos_outer = std::cos(outer * to_radians), cos_inner = std::cos(inner * to_radians);
+        GiLight q{};
+        put4(q.at, l.position.x, l.position.y, l.position.z, std::max(l.radius, 1e-3f));
+        put4(q.colour, l.color.r, l.color.g, l.color.b, size * size);
+        put4(q.axis, way.x, way.y, way.z, cos_outer);
+        put4(q.cone, 1.0f / std::max(cos_inner - cos_outer, 1e-4f), 0.0f, 0.0f, 0.0f);
+        list.push_back(q);
+    }
+    const u32 light_bytes = static_cast<u32>(std::max<std::size_t>(list.size(), 1) * sizeof(GiLight));
+    ensure_buffer(_gi_lights, light_bytes, 16 * sizeof(GiLight), SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+    if (!list.empty()) {
+        _device->upload_storage_buffer(_gi_lights->handle(), 0, light_bytes, list.data(), /*cycle=*/true);
+    }
+    {
+        GiLightUniforms u{};
+        put4(u.origin, g.origin.x, g.origin.y, g.origin.z, per_unit);
+        put4(u.size, static_cast<f32>(g.size[0]), static_cast<f32>(g.size[1]), static_cast<f32>(g.size[2]),
+             static_cast<f32>(list.size()));
+        const LinearRgb sun = lights.sun.color, fill = lights.fill.color;
+        const bool sun_shines = sun.r + sun.g + sun.b > 0.0f && length_squared(lights.sun.direction) > 0.0f;
+        const bool fill_shines = fill.r + fill.g + fill.b > 0.0f && length_squared(lights.fill.direction) > 0.0f;
+        const Vec3f to_sun = sun_shines ? normalize(lights.sun.direction) : Vec3f{0.0f, 1.0f, 0.0f};
+        const Vec3f to_fill = fill_shines ? normalize(lights.fill.direction) : Vec3f{0.0f, 1.0f, 0.0f};
+        put4(u.sun_direction, to_sun.x, to_sun.y, to_sun.z, std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
+        put4(u.sun_colour, sun.r, sun.g, sun.b, sun_shines ? 1.0f : 0.0f);
+        put4(u.fill_direction, to_fill.x, to_fill.y, to_fill.z, 0.0f);
+        put4(u.fill_colour, fill.r, fill.g, fill.b, fill_shines ? 1.0f : 0.0f);
+        probe_uniforms(g.probe_origin, g.spacing, g.probe_counts, settings, g.lit, u.probes);
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> radiance{
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance.handle(), .cycle = true},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance_back.handle(), .cycle = true}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, radiance.data(), 2, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        const std::array<SDL_GPUTextureSamplerBinding, 3> probes = gi_bindings(view, g.lit);
+        const std::array<SDL_GPUTextureSamplerBinding, 7> samplers{
+            SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.albedo.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.emission.handle(), _gi_sampler},
+            probes[0],
+            probes[1],
+            probes[2]};
+        SDL_GPUBuffer* light_buffer = _gi_lights->handle();
+        SDL_BindGPUComputePipeline(pass, _gi_light);
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+        SDL_BindGPUComputeStorageBuffers(pass, 0, &light_buffer, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        const std::array<u32, 2> groups = gi_groups(voxels);
+        SDL_DispatchGPUCompute(pass, groups[0], groups[1], 1);
+        SDL_EndGPUComputePass(pass);
+        ++dispatches;
+    }
+
+    // 3. This render's batch of probes casts its rays, 4. and takes them in.
+    const u32 rays = std::clamp(settings.rays, 16u, 256u);
+    u32 batch = settings.per_render == 0 ? total : std::min(settings.per_render, total);
+    batch = std::max(1u, std::min(batch, max_gi_rays / rays));
+    const u32 first = g.next % total;
+    const Mat4f rotation = ray_rotation(g.updates);
+    ensure_buffer(g.rays, batch * rays * 16u, 4096,
+                  SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE);
+    {
+        GiTraceUniforms u{};
+        put4(u.origin, g.origin.x, g.origin.y, g.origin.z, per_unit);
+        put4(u.size, static_cast<f32>(g.size[0]), static_cast<f32>(g.size[1]), static_cast<f32>(g.size[2]), 512.0f);
+        probe_uniforms(g.probe_origin, g.spacing, g.probe_counts, settings, false, u.probes);
+        u.batch[0] = first;
+        u.batch[1] = batch;
+        u.batch[2] = rays;
+        u.batch[3] = total;
+        std::memcpy(u.rotation, rotation.m, sizeof(u.rotation));
+        if (environment) {
+            put4(u.sky, lights.environment_intensity, 0.35f * static_cast<f32>(environment->levels - 1), 1.0f, 0.0f);
+            std::memcpy(u.environment_matrix, to_environment.m, sizeof(u.environment_matrix));
+        }
+        const LinearRgb up = lights.ambient, down = lights.ground_ambient.enabled ? lights.ground_ambient.color : up;
+        put4(u.ambient, up.r, up.g, up.b, 0.0f);
+        put4(u.ground, down.r, down.g, down.b, 0.0f);
+        const SDL_GPUStorageBufferReadWriteBinding out{.buffer = g.rays->handle(), .cycle = true};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, nullptr, 0, &out, 1);
+        if (!pass) {
+            return false;
+        }
+        const std::array<SDL_GPUTextureSamplerBinding, 7> samplers{
+            SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.albedo.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.radiance.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.probe_data.handle(), _gi_sampler},
+            environment ? SDL_GPUTextureSamplerBinding{environment->specular.handle(), _environment_sampler}
+                        : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
+            SDL_GPUTextureSamplerBinding{g.radiance_back.handle(), _gi_sampler}};
+        SDL_BindGPUComputePipeline(pass, _gi_trace);
+        SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        const std::array<u32, 2> groups = gi_groups(static_cast<u64>(batch) * rays);
+        SDL_DispatchGPUCompute(pass, groups[0], groups[1], 1);
+        SDL_EndGPUComputePass(pass);
+        ++dispatches;
+    }
+    {
+        GiUpdateUniforms u{};
+        probe_uniforms(g.probe_origin, g.spacing, g.probe_counts, settings, false, u.probes);
+        u.batch[0] = first;
+        u.batch[1] = batch;
+        u.batch[2] = rays;
+        u.batch[3] = total;
+        std::memcpy(u.rotation, rotation.m, sizeof(u.rotation));
+        put4(u.misc, std::clamp(settings.hysteresis, 0.0f, 0.99f), 1.5f * 1.7320508f * spacing, 0.0f, 0.0f);
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> textures{
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.irradiance.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.moments.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.probe_data.handle()}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, textures.data(), 3, nullptr, 0);
+        if (!pass) {
+            return false;
+        }
+        SDL_GPUBuffer* ray_buffer = g.rays->handle();
+        SDL_BindGPUComputePipeline(pass, _gi_update);
+        SDL_BindGPUComputeStorageBuffers(pass, 0, &ray_buffer, 1);
+        SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+        const u32 across = std::min(batch, 32768u);
+        SDL_DispatchGPUCompute(pass, across, (batch + across - 1) / across, 1);
+        SDL_EndGPUComputePass(pass);
+        ++dispatches;
+    }
+    g.next = (first + batch) % total;
+    g.updates += batch;
+    // Their light is shown once every probe has had an update (before, a probe not yet reached would give black).
+    g.lit = g.updates >= total;
+    stats.gi_probes = total;
+    stats.gi_probes_updated = batch;
+    stats.gi_rays = batch * rays;
+    stats.gi_dispatches += dispatches;
+    stats.gi_lit = g.lit;
+    return g.lit;
 }
 
 void GpuRenderer3D::draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
@@ -594,11 +993,21 @@ void GpuRenderer3D::draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPa
     u.target[0] = static_cast<f32>(view._size.x);
     u.target[1] = static_cast<f32>(view._size.y);
     u.target[2] = encode ? 1.0f : 0.0f;
-    const std::array<SDL_GPUTextureSamplerBinding, 4> textures{
+    u.target[3] = view._gi.lit ? 1.0f : 0.0f;
+    probe_uniforms(view._gi.probe_origin, view._gi.spacing, view._gi.probe_counts, scene.global_illumination.probes,
+                   view._gi.lit, u.probes);
+    const std::array<SDL_GPUTextureSamplerBinding, 3> probes = gi_bindings(view, view._gi.lit);
+    const std::array<SDL_GPUTextureSamplerBinding, 9> textures{
         SDL_GPUTextureSamplerBinding{view._gi.distance.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{view._gi.albedo.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{view._gi.normal.handle(), _gi_sampler},
-        SDL_GPUTextureSamplerBinding{view._gi.emission.handle(), _gi_sampler}};
+        SDL_GPUTextureSamplerBinding{view._gi.emission.handle(), _gi_sampler},
+        SDL_GPUTextureSamplerBinding{view._gi.radiance ? view._gi.radiance.handle() : _gi_none.handle(), _gi_sampler},
+        probes[0],
+        probes[1],
+        probes[2],
+        SDL_GPUTextureSamplerBinding{view._gi.radiance_back ? view._gi.radiance_back.handle() : _gi_none.handle(),
+                                     _gi_sampler}};
     SDL_BindGPUGraphicsPipeline(pass, p);
     SDL_BindGPUFragmentSamplers(pass, 0, textures.data(), static_cast<u32>(textures.size()));
     SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));

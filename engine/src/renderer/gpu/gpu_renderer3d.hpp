@@ -238,6 +238,12 @@ private:
     // voxels' distances (R16F), colours and normals (RGBA8) and emission (RGBA16F), and the build's two words a voxel
     // (the owners, then the flood's seeds, the two swapping in the flood); its size, where it is, and a key of what it
     // was built from: it is built again when that changes.
+    // With its probes (G5b): the lit scene (RGBA16F, the light leaving each voxel's front, and its back where it has
+    // one), the probes' atlases (3D textures:
+    // irradiance RGBA16F, 8 x 8 a probe; moments RG16F, 16 x 16; their data RGBA16F, one a probe: offset and state)
+    // and the rays of a batch; the grid (its counts, where probe 0 stands, the spacing), the next probe to update, the
+    // updates so far (the rays' turn), whether the probes stand where the scene's last build put them, and whether
+    // their light can be shown.
     struct Gi {
         GpuTexture distance, albedo, normal, emission;
         std::shared_ptr<GpuBuffer> owners, seeds;
@@ -246,6 +252,15 @@ private:
         f32 cell = 0.0f;
         u64 key = 0;
         bool valid = false; // the textures hold a built scene
+        GpuTexture radiance, radiance_back, irradiance, moments, probe_data;
+        std::shared_ptr<GpuBuffer> rays;
+        std::array<u32, 3> probe_counts{};
+        Vec3f probe_origin{};
+        f32 spacing = 0.0f; // world units
+        u32 next = 0;
+        u64 updates = 0;
+        bool placed = false;
+        bool lit = false;
     } _gi;
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
@@ -441,6 +456,13 @@ private:
     void make_gi();
     void release_gi_pipelines();
     bool gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, RenderDebugStats3D& stats);
+    // G5b: the lit scene and the probes' update, after gi_scene (compute passes into `commands`): the sky the probes'
+    // rays meet is `environment` (null: the hemisphere of Lights3D::ambient and ground_ambient) turned by
+    // `to_environment`. True when the probes' light is in the picture this render.
+    bool gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
+                   const GpuEnvironment3D* environment, const Mat4f& to_environment, RenderDebugStats3D& stats);
+    // The probes' three atlases as the light variants bind them (samplers 12 to 14), dummies without.
+    std::array<SDL_GPUTextureSamplerBinding, 3> gi_bindings(const GpuView3D& view, bool lit) const;
     void draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
                       const Scene3D& scene, const Mat4f& view_projection, SDL_GPUTextureFormat format, u32 samples,
                       SDL_GPUTextureFormat velocity_format, bool encode);
@@ -452,11 +474,17 @@ private:
     SDL_GPUComputePipeline* _gi_voxelize = nullptr;   // gi_voxelize.comp
     SDL_GPUComputePipeline* _gi_attributes = nullptr; // gi_voxelize_attributes.comp
     SDL_GPUComputePipeline* _gi_flood = nullptr;      // gi_flood.comp
+    SDL_GPUComputePipeline* _gi_light = nullptr;      // gi_light.comp
+    SDL_GPUComputePipeline* _gi_place = nullptr;      // gi_probe_place.comp
+    SDL_GPUComputePipeline* _gi_trace = nullptr;      // gi_probe_trace.comp
+    SDL_GPUComputePipeline* _gi_update = nullptr;     // gi_probe_update.comp
+    SDL_GPUSampler* _gi_linear = nullptr;             // filtered, clamped on all three axes
+    GpuTexture _gi_none;                              // 1 x 1 x 1, zero: the probes' bindings without probes
     GpuShader _gi_view_shader;                        // gi_view.frag
     SDL_GPUSampler* _gi_sampler = nullptr;            // texel by texel, clamped (the shaders fetch)
     // A build's copies (each draw's in a run: placing, normals, colour, first joint) and their joint matrices, and a
     // small buffer bound where a draw has no skin; grow.
-    std::shared_ptr<GpuBuffer> _gi_copies, _gi_joints, _gi_empty;
+    std::shared_ptr<GpuBuffer> _gi_copies, _gi_joints, _gi_empty, _gi_lights;
     std::vector<u8> _gi_copy_bytes;
     std::vector<Mat4f> _gi_joint_data;
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).

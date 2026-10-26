@@ -7,14 +7,18 @@ releases may change APIs.
 
 ## [Unreleased]
 
-- Add the first layer of 3D global illumination, the GI scene
-  (`Scene3D::global_illumination`, off by default;
-  `RendererCapabilities3D::global_illumination`): the scene in voxels with a
-  distance field and each surface voxel's colour, normal and emission, built in
-  compute from every opaque and cut-out copy in its area (skinned ones in their
-  pose), with no gap through a wall of no thickness and the same voxels to the
-  byte each time. It lights nothing yet; `RenderDebugOptions3D::gi_view` shows
-  it and `Renderer3D::read_gi_scene` reads it back.
+- Add 3D global illumination (`Scene3D::global_illumination`, off by default;
+  `RendererCapabilities3D::global_illumination`; authored as
+  `SceneEnvironment3D`'s `gi_*` keys): the scene in voxels with a distance field
+  (every opaque and cut-out copy in its area, skinned ones in their pose; no gap
+  through a wall of no thickness; the same voxels to the byte each time), each
+  surface voxel lit by the sun, the fill, the point and spot lights through rays
+  walked through it, and probes traced through it (`GiProbes3D`, DDGI) that light
+  the picture: the sky's light only where they see it, bounced light and
+  emission, none through walls, and reflections dimmed where the sky is hidden.
+  Sponza against Cycles: from 50 levels off on average to 7.
+  `RenderDebugOptions3D::gi_view` shows the voxels and `Renderer3D::read_gi_scene`
+  reads them back.
 - Add anisotropic filtering of 3D materials' mipmapped textures
   (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
   `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with

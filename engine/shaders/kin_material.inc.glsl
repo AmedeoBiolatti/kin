@@ -34,6 +34,15 @@ layout(set = 2, binding = 9) uniform sampler2D uContactShadow;    // R: the shar
 layout(set = 2, binding = 10) uniform sampler2DArrayShadow uLocalShadow; // depth from a spot (a layer), or a face of a point light's cube (six layers), compared
 layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // depth from the fill light (the moon), a layer a cascade, compared
 #endif
+#ifdef KIN_GI
+// Global illumination's probes (G5b; docs/3d_plan.md, G5): only the stock light variants (mesh_light*.frag) have them,
+// so that every other shader, and custom ones, keep their samplers.
+layout(set = 2, binding = 12) uniform sampler3D uGiIrradiance;
+layout(set = 2, binding = 13) uniform sampler3D uGiMoments;
+layout(set = 2, binding = 14) uniform sampler3D uGiProbes;
+#define KIN_GI_PROBES
+#include "kin_gi.inc.glsl"
+#endif
 
 const float PI = 3.14159265358979;
 #include "kin_material_uniforms.inc.glsl"
@@ -344,6 +353,25 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         around = mix(frame.ground_ambient.rgb, frame.ambient.rgb, n.y * 0.5 + 0.5);
         above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, reflected.y * 0.5 + 0.5);
     }
+#ifdef KIN_GI
+    // With global illumination's probes the diffuse is theirs: the sky's light where they see it, the light of every
+    // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
+    // light along the reflection, blurred: what the probes see that way; a smooth surface keeps the sky's sharp
+    // reflection, dimmed by how much of the sky's light the probes see that way (none in a closed room).
+    if (frame.gi_counts.w > 0.5) {
+        const KinGiProbes probes = KinGiProbes(frame.gi_origin, frame.gi_counts, frame.gi_bias);
+        around = kin_gi_irradiance(probes, vWorld, n, v) * frame.gi_bias.z;
+        const vec3 r = normalize(mix(reflect(-v, n), n, s.alpha));
+        const vec3 traced = kin_gi_irradiance(probes, vWorld, r, v) * frame.gi_bias.z;
+        const vec3 open = frame.environment.w > 0.5
+                              ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
+                              : mix(frame.ground_ambient.rgb, frame.ambient.rgb, r.y * 0.5 + 0.5);
+        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+        const float seen = clamp(dot(traced, luma) / max(dot(open, luma), 1e-6), 0.0, 1.0);
+        const float smooth_share = (1.0 - roughness) * (1.0 - roughness);
+        above = mix(traced, above * seen, smooth_share);
+    }
+#endif
     const vec3 dielectric = sky_reflectance(vec3(0.04), ab);
     const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
     if (frame.occlusion.x > 0.5 && material.maps.z > 0.5) {

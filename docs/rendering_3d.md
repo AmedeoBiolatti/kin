@@ -782,40 +782,67 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
 
 `scene.global_illumination = {.enabled = true, .area = level_box, .cell = 0.15f}` (off by default; off, the picture
 and the cost are as without it). Light that reaches a surface off other surfaces, and the sky's light kept out of where
-walls hide it, built in layers that several strategies share (the plan's G5). What is there so far is the first layer,
-the **GI scene**: the scene in voxels of `cell` units over `area`, in one level (where the box would need more than
-`max_gi_side`, 256, voxels along a side or `max_gi_voxels`, 4,194,304, in all, the voxels are larger). Every voxel
-holds its distance to the nearest voxel a surface is in; each voxel a surface touches holds that surface's diffuse
-colour (the base colour times one minus metallic: the material's, the copy's tint, the vertices' and the texture's at
-the voxel's nearest point of the surface, read at the mip whose texels are the voxel's size), its normal (the face's,
-on the side its vertices' normals are) and its emission (as `mesh.frag` makes it). It lights nothing yet: the picture
-is as without it.
+walls hide it, built in layers that several strategies share (the plan's G5): the **GI scene**, the scene in voxels; the
+**lit scene**, the light leaving each of its surface voxels; and the first strategy, **probes** traced through them
+(DDGI), which light the picture. With it on, a surface's diffuse light from the sky or the environment becomes the
+probes': the sky's light where they see the sky, the light of every surface they see, none through a wall. Sponza against
+Cycles goes from 50 levels off on average to 7, the Cornell box (lit by its panel through the probes) from 10 to 7.6: see
+the plan's G5b results.
 
-- **What it takes in:** every opaque and cut-out copy that reaches into `area` (a copy's bounding sphere), skinned
-  copies in their pose, a cut-out only where its texture's alpha at the voxel's size passes its cutoff; not the
-  overlay, nor blended, additive, wireframe or unlit draws.
-- **How it is built:** in compute, in the render, before the passes that draw. Every voxel a triangle touches
-  (Schwarz and Seidel's conservative surface voxelization: the triangle's plane passes through the voxel's box and
-  their three axis-aligned projections overlap), so a wall of no thickness has no gap a ray can pass. A voxel's
-  owner, which writes its colour, normal and emission, is the touching triangle drawn first (copies in draw order,
-  each one's triangles in index order), so the same scene gives the same voxels to the byte whatever order the GPU
-  runs in. A jump flood (Rong and Tan) gives the distances, from voxel centre to voxel centre. A triangle over more
-  than eight columns of voxels is shared by its workgroup's 64 threads.
-- **When:** in the first render with it, then again, whole, in the render after anything it is made of changes (a
-  copy moving, a pose, a mesh, a material's colour, textures or emission, the area or the cell); otherwise it is kept
-  (`debug_stats().gi_built`). A moving character costs a build in every render it moves, until the cascades round
-  the camera of the next steps update only what changed.
-- **Where:** compute that writes 3D textures of half floats, 8-bit and four-half-float texels
-  (`RendererCapabilities3D::global_illumination`); else off, with one line in the log the first time it is asked
-  for. Where the device has it, the meshes' buffers are made readable by compute, which costs nothing unused. Not
-  on WebGL2.
-- **Memory:** 18 bytes a voxel for its textures and 8 for the build's two words (a full level: about 110 MB),
-  counted in `debug_stats().feature_bytes` and given back after 120 renders without it, as the other features'.
-- **Seeing it:** `scene.debug.gi_view` (`GiView3D::Albedo`, `Normal`, `Emission`, `Steps`) shows the GI scene traced
-  from the camera instead of the picture: each pixel walks the voxels its ray passes, in jumps the distances allow,
-  to the first one a surface is in. `r3d.read_gi_scene(view, out)` reads it back (a `GiScene3D`: its size, where it is
-  and its arrays), waiting for the GPU. `debug_stats()` has `gi_voxels` (0 without one), `gi_built`, `gi_copies`,
-  `gi_triangles` and `gi_dispatches`. Cost: see the plan's G5a results.
+- **The GI scene:** voxels of `cell` units over `area`, in one level (where the box would need more than `max_gi_side`,
+  256, voxels along a side or `max_gi_voxels`, 4,194,304, in all, the voxels are larger). Every voxel holds its distance
+  to the nearest voxel a surface is in; each voxel a surface touches holds that surface's colour (the base colour, a
+  metal's too: the material's, the copy's tint, the vertices' and the texture's at the voxel's nearest point of the
+  surface, read at the mip whose texels are the voxel's size), its normal (the face's, on the side its vertices'
+  normals are; a voxel with faces looking both ways, a wall thinner than a voxel, counts as double-sided) and its
+  emission (as `mesh.frag` makes it). It takes in every opaque and cut-out copy that reaches into `area` (a copy's
+  bounding sphere), skinned copies in their pose, a cut-out only where its texture's alpha at the voxel's size passes its
+  cutoff; not the overlay, nor blended, additive, wireframe or unlit draws.
+- **How it is built:** in compute, before the passes that draw. Every voxel a triangle touches (Schwarz and Seidel's
+  conservative surface voxelization), so a wall of no thickness has no gap a ray can pass. A voxel's owner, which
+  writes its colour, normal and emission, is the touching triangle drawn first, an emissive one before any other (a
+  lamp's panel a millimetre under a ceiling keeps its light); the same scene gives the same voxels to the byte. A jump
+  flood (Rong and Tan) gives the distances. Built again, whole, in the render after anything it is made of changes (a
+  copy moving, a pose, a mesh, a material's colour, textures or emission, the area or the cell), kept otherwise
+  (`debug_stats().gi_built`): a moving character costs a build in every render it moves, until the cascades of the next
+  steps update only what changed.
+- **The lit scene:** each render, every surface voxel's light: its colour times the sun's and the fill light's, each
+  point and spot light's within reach (kin_lit's fall-off and cones) through a ray walked toward the light through the
+  voxels (a surface in the way: none), and the probes' light (the bounce of the render before), plus its emission. A
+  double-sided voxel has each side's own light, so a wall between a lit room and a dark one is dark on the dark side.
+- **The probes** (`global_illumination.probes`, a `GiProbes3D`): on a grid every `spacing` voxels (4; further apart
+  where there would be more than `max_gi_probes`, 32,768, or 128 along a side). After each build a probe more than 1.8
+  spacings from every surface sleeps (no surface reads it), and one within 1.8 voxels of a surface moves to the place
+  with the most room nearby. Each render (`per_render` of them in turn; 0, all, and at most a million rays) each casts
+  `rays` rays (128, a spherical Fibonacci set turned each render) through the voxels: a hit reads the lit scene, a
+  miss the sky (the environment's specular chain, or the ambient and ground ambient). Each keeps its irradiance
+  (octahedral, 6 x 6 texels) and the mean and mean square of its rays' distances (14 x 14), keeping `hysteresis` (0.97)
+  of what it had. One whose rays meet more than a quarter backs of one-sided surfaces is inside something and gives
+  nothing. Their light is shown once every probe has had an update.
+- **What a surface reads:** the eight probes round it, each weighted by distance, by whether it is in front of the
+  surface, and by whether it can see it (Chebyshev's inequality on its distances that way), the look-up moved out three
+  tenths of a spacing along the normal and a tenth toward the eye; times `intensity`. Its reflections: a rough surface's
+  what the probes see along the reflection, a smooth one's the environment's dimmed by the share of the sky's light the
+  probes see that way. GTAO and the occlusion maps still multiply both (keep GTAO's radius under the probes' spacing, or
+  creases are darkened twice). Only the stock shaders' light variants read the probes: with them on, those draw
+  (`debug_stats().lights_variant`); a custom material shader keeps the sky's light, and the overlay its own.
+- **Where:** compute that writes 3D textures of half floats, 8-bit and four-half-float texels and reads and writes
+  them for the probes (`RendererCapabilities3D::global_illumination`), and the light variants (the shadow format);
+  else off, with one line in the log the first time it is asked for. Where the device has it, the meshes' buffers are
+  made readable by compute, which costs nothing unused. Not on WebGL2.
+- **Memory:** 34 bytes a voxel (the scene's 18, the lit scene's two sides' 16) and 8 more while building, and 1.5 KB a
+  probe (a level of 4 million voxels and 32,768 probes: about 220 MB), counted in `debug_stats().feature_bytes` and
+  given back after 120 renders without it, as the other features'.
+- **Authored:** `SceneEnvironment3D`'s `gi_enabled`, `gi_min`, `gi_max`, `gi_cell`, `gi_probes`, `gi_probe_spacing`,
+  `gi_probe_rays`, `gi_probes_per_render`, `gi_hysteresis` and `gi_intensity`.
+- **Seeing it:** `scene.debug.gi_view` (`GiView3D::Albedo`, `Normal`, `Emission`, `Steps`, `Radiance`, `Irradiance`)
+  shows the GI scene traced from the camera instead of the picture: each pixel walks the voxels its ray passes, in
+  jumps the distances allow, to the first one a surface is in; `Radiance` is the light leaving it, `Irradiance` the
+  probes' light there. `r3d.read_gi_scene(view, out)` reads the voxels back (a `GiScene3D`), waiting for the GPU.
+  `debug_stats()` has `gi_voxels` (0 without), `gi_built`, `gi_copies`, `gi_triangles`, `gi_dispatches`, `gi_probes`,
+  `gi_probes_updated`, `gi_rays` and `gi_lit`.
+- **Cost:** see the plan's G5a and G5b results (Sponza at 1280 x 720: about 2.1 ms of GPU a render, 8,192 of its
+  13,616 probes updated each render; a whole build of the Bistro's level about 17 ms).
 
 ### Levels of detail
 

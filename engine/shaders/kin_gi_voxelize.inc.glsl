@@ -1,26 +1,27 @@
 // kin's GI scene (docs/3d_plan.md, G5a): one draw's triangles into the voxels they touch. Built twice from this file:
-// gi_voxelize.comp gives each touched voxel its owner, the least item touching it (an item is a copy's triangle,
-// numbered in the order the scene draws them, so the same scene gives the same owners whatever order the GPU runs
-// in), and gi_voxelize_attributes.comp (KIN_GI_ATTRIBUTES) has each owner write its voxel's colour, normal and
-// emission. A triangle touches a voxel when its plane passes through the voxel's box and the box's three axis-aligned
+// gi_voxelize.comp gives each touched voxel its owner, the least item touching it, an emissive one before any other
+// (an item is a copy's triangle, numbered in the order the scene draws them, so the same scene gives the same owners
+// whatever order the GPU runs in; a lamp's panel just under a ceiling keeps its voxels, and its light), and gi_voxelize_attributes.comp (KIN_GI_ATTRIBUTES) has each owner write its voxel's colour, normal and
+// emission. The first also marks, in a second word a voxel, which ways the faces in it look (a bit for each of the
+// six axis directions, the one nearest each face's normal): a voxel with faces looking both ways along an axis (a wall
+// thinner than a voxel) is taken as double-sided. A triangle touches a voxel when its plane passes through the voxel's box and the box's three axis-aligned
 // projections overlap the triangle's (Schwarz and Seidel's conservative surface voxelization, 2010): every voxel it
 // passes through, so no ray gets between them. A thread an item; a triangle over more than a few columns of voxels
 // (along the axis its normal is nearest) is shared by its workgroup's threads, a column each.
 layout(local_size_x = 64) in;
 
-layout(set = 0, binding = 0) uniform sampler2D uBase;       // the material's base colour (white without)
-layout(set = 0, binding = 1) uniform sampler2D uMetalRough; // B metallic (white without)
-layout(set = 0, binding = 2) uniform sampler2D uEmissive;   // the emissive map (any texture without: p.flags.w)
-layout(std430, set = 0, binding = 3) readonly buffer Vertices {
+layout(set = 0, binding = 0) uniform sampler2D uBase;     // the material's base colour (white without)
+layout(set = 0, binding = 1) uniform sampler2D uEmissive; // the emissive map (any texture without: p.flags.w)
+layout(std430, set = 0, binding = 2) readonly buffer Vertices {
     uint vertices[]; // GpuMeshVertex: position, normal, uv (floats), colour (sRGB bytes): 9 words each
 };
-layout(std430, set = 0, binding = 4) readonly buffer Indices {
+layout(std430, set = 0, binding = 3) readonly buffer Indices {
     uint indices[];
 };
-layout(std430, set = 0, binding = 5) readonly buffer Skin {
+layout(std430, set = 0, binding = 4) readonly buffer Skin {
     uvec2 skin[]; // GpuSkinVertex: four joint indices, four weights (unorm), a byte each
 };
-layout(std430, set = 0, binding = 6) readonly buffer Joints {
+layout(std430, set = 0, binding = 5) readonly buffer Joints {
     mat4 joints[];
 };
 struct Copy {
@@ -29,12 +30,15 @@ struct Copy {
     vec4 colour;                    // the material's colour times the copy's tint, linear
     uvec4 skin;                     // x: its first joint matrix in Joints
 };
-layout(std430, set = 0, binding = 7) readonly buffer Copies {
+layout(std430, set = 0, binding = 6) readonly buffer Copies {
     Copy copies[];
 };
 #ifdef KIN_GI_ATTRIBUTES
-layout(std430, set = 0, binding = 8) readonly buffer Owners {
+layout(std430, set = 0, binding = 7) readonly buffer Owners {
     uint owners[];
+};
+layout(std430, set = 0, binding = 8) readonly buffer Sides {
+    uint sides[];
 };
 layout(set = 1, binding = 0, rgba8) uniform writeonly image3D uAlbedo;
 layout(set = 1, binding = 1, rgba8) uniform writeonly image3D uNormal;
@@ -43,6 +47,9 @@ layout(set = 1, binding = 2, rgba16f) uniform writeonly image3D uEmission;
 layout(std430, set = 1, binding = 0) buffer Owners {
     uint owners[]; // ~0: no surface
 };
+layout(std430, set = 1, binding = 1) buffer Sides {
+    uint sides[];
+};
 #endif
 
 layout(std140, set = 2, binding = 0) uniform Params {
@@ -50,7 +57,7 @@ layout(std140, set = 2, binding = 0) uniform Params {
     uvec4 size;    // xyz: voxels a side; w: the draw's first item
     uvec4 mesh;    // x: its first index in Indices, y: its triangles, z: its base vertex, w: its copies
     uvec4 flags;   // x: skinned, y: a cut-out, z: the textures hold sRGB bytes (decode them), w: an emissive map
-    vec4 material; // x: emissive strength, y: alpha cutoff, z: 1 double-sided, w: metallic
+    vec4 material; // x: emissive strength, y: alpha cutoff, z: 1 double-sided
     uvec4 first;   // x: the draw's first copy in Copies
 } p;
 
@@ -223,6 +230,7 @@ vec4 base_at(Tri t, Corners k, vec3 b, vec2 uv) {
 
 void visit(Tri t, Corners k, ivec3 voxel, uint item) {
     const uint at = uint(voxel.x) + p.size.x * (uint(voxel.y) + p.size.y * uint(voxel.z));
+    item |= p.material.x > 0.0 ? 0u : 0x80000000u; // the emissive first
 #ifdef KIN_GI_ATTRIBUTES
     if (owners[at] != item) {
         return;
@@ -231,8 +239,6 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
     vec2 uv;
     surface_at(t, k, voxel, b, uv);
     const vec4 base = base_at(t, k, b, uv);
-    const float metallic =
-        clamp(p.material.w * textureLod(uMetalRough, uv, mip_for(t, k, vec2(textureSize(uMetalRough, 0)))).b, 0.0, 1.0);
     // The face's normal (the voxel space's axes are the world's), on the side its vertices' normals are.
     vec3 n = normalize(t.n);
     const vec3 smooth_normal = k.normal[0] * b.x + k.normal[1] * b.y + k.normal[2] * b.z;
@@ -250,8 +256,12 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
         }
         emission = own * p.material.x;
     }
-    imageStore(uAlbedo, voxel, vec4(clamp(base.rgb * (1.0 - metallic), 0.0, 1.0), 1.0));
-    imageStore(uNormal, voxel, vec4(n * 0.5 + 0.5, p.material.z > 0.5 ? 1.0 : 128.0 / 255.0));
+    // The base colour, metals' too: a metal reflects its colour's share of the light, here as if diffuse (the GI's
+    // light is blurred), which keeps a furnace's metal as bright as its sky.
+    imageStore(uAlbedo, voxel, vec4(clamp(base.rgb, 0.0, 1.0), 1.0));
+    const uint ways = sides[at];
+    const bool both_ways = ((ways & 0x15u) & ((ways >> 1u) & 0x15u)) != 0u;
+    imageStore(uNormal, voxel, vec4(n * 0.5 + 0.5, p.material.z > 0.5 || both_ways ? 1.0 : 128.0 / 255.0));
     imageStore(uEmission, voxel, vec4(min(emission, vec3(65000.0)), 0.0));
 #else
     if (p.flags.y != 0u) {
@@ -263,6 +273,11 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
         }
     }
     atomicMin(owners[at], item);
+    const vec3 facing = k.normal[0] + k.normal[1] + k.normal[2];
+    const vec3 face = dot(t.n, facing) < 0.0 ? -t.n : t.n;
+    const vec3 a = abs(face);
+    const uint axis = a.x >= a.y && a.x >= a.z ? 0u : a.y >= a.z ? 1u : 2u;
+    atomicOr(sides[at], 1u << (axis * 2u + (face[axis] < 0.0 ? 1u : 0u)));
 #endif
 }
 

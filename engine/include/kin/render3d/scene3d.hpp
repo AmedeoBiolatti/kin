@@ -400,20 +400,38 @@ struct Lod3D {
     Occlusion3D occlusion{};
 };
 
-// The most voxels the GI scene has along a side, and in all (GlobalIllumination3D::cell grows to keep within them).
+// The most voxels the GI scene has along a side, and in all (GlobalIllumination3D::cell grows to keep within them);
+// the most probes (GiProbes3D::spacing grows to keep within them, and within 128 along a side).
 constexpr u32 max_gi_side = 256;
 constexpr u32 max_gi_voxels = 1u << 22;
+constexpr u32 max_gi_probes = 1u << 15;
+
+// Global illumination's first strategy (G5b): probes on a grid over the area, every `spacing` voxels, each casting
+// `rays` rays through the GI scene and keeping what it sees (DDGI). A surface takes its diffuse light from the eight
+// probes round it, those that can see it, in place of the sky's or the environment's: the sky's light where the
+// probes see the sky, the light of every surface they see (lit by the sun and the lamps through rays walked toward
+// them, and by the probes themselves: the bounces add up over frames), none through walls.
+struct GiProbes3D {
+    bool enabled = true;
+    // Voxels between neighbouring probes (at least 2): the light's finest detail is about this. More where the area
+    // would need more than max_gi_probes.
+    u32 spacing = 4;
+    u32 rays = 128;         // rays a probe casts at each update (16 to 256)
+    u32 per_render = 0;     // probes updated each render, in turn (0: all of them)
+    f32 hysteresis = 0.97f; // how much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower
+    f32 intensity = 1.0f;   // their light's strength
+};
 
 // Global illumination (docs/rendering_3d.md, "Global illumination"; docs/3d_plan.md, G5): light that reaches a surface
-// off other surfaces, and the sky's light kept out of where walls hide it. What is built so far (G5a) is its first
-// layer, the GI scene: the scene in voxels of `cell` over `area`, each holding its distance to the nearest surface, and
-// each voxel a surface touches that surface's colour, normal and emission. RenderDebugOptions3D::gi_view shows it and
-// Renderer3D::read_gi_scene reads it back; the picture is as without it. It takes in every opaque and cut-out copy that
-// reaches into `area` (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay,
-// blended, additive, wireframe or unlit ones, and is built again, whole, in the render after any of them changes
-// (a copy moving, a pose, a mesh, a material). Off by default; off, the picture and the cost are as without it. Needs
-// compute (RendererCapabilities3D::global_illumination); else off, with a line in the log the first time it is asked
-// for.
+// off other surfaces, and the sky's light kept out of where walls hide it. Its layers: the GI scene, the scene in
+// voxels of `cell` over `area`, each holding its distance to the nearest surface, and each voxel a surface touches that
+// surface's colour, normal and emission (G5a); the lit scene, the light leaving each of those voxels; and `probes`, the
+// first strategy, which light the picture (G5b). The GI scene takes in every opaque and cut-out copy that reaches into
+// `area` (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay, blended,
+// additive, wireframe or unlit ones, and is built again, whole, in the render after any of them changes (a copy moving,
+// a pose, a mesh, a material). RenderDebugOptions3D::gi_view shows it and Renderer3D::read_gi_scene reads it back. Off
+// by default; off, the picture and the cost are as without it. Needs compute (RendererCapabilities3D::
+// global_illumination); else off, with a line in the log the first time it is asked for.
 struct GlobalIllumination3D {
     bool enabled = false;
     // The box it takes in (the level). Empty: nothing, and the feature is off.
@@ -421,6 +439,7 @@ struct GlobalIllumination3D {
     // A voxel's side (units): the finest detail it has. Larger where `area` would need more than max_gi_side voxels a
     // side or max_gi_voxels in all.
     f32 cell = 0.15f;
+    GiProbes3D probes{};
 };
 
 // A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a

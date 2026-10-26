@@ -23,4 +23,8 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 cascade_forward; // xyz: the camera's forward, to measure view depth along
     vec4 occlusion;     // x: 1 with ambient occlusion, y: 1 with contact shadows, zw: 1 / the view's size
     vec4 lights[MAX_LIGHTS * 2]; // position.xyz and radius; colour.rgb (linear)
+    // Global illumination's probes (kin_gi.inc.glsl's KinGiProbes; G5b): gi_counts.w is 1 when they light the scene.
+    vec4 gi_origin;
+    vec4 gi_counts;
+    vec4 gi_bias;
 } frame;
