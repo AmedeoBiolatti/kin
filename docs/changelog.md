@@ -16,6 +16,12 @@ releases may change APIs.
   `pairs` over string keys walks in one order everywhere, and scene scripts'
   `math.random` follows `--seed`; the ECS scheduler's rate and interval
   counters can be saved and restored beside the world.
+- Add experimental networking (`KIN_ENABLE_NET`, `kin::net`): a shared layer of
+  transports (loopback with a link simulator, UDP), handshakes that refuse
+  another game, build, model or setting, round trips and timeouts, under a first
+  sync model, deterministic input sync, with lockstep and rollback, clock sync
+  between peers, desync detection by state hashes and a rollback sync test.
+  See [networking](networking.md).
 
 ## [0.3.0] — 2026-11-10
 

@@ -392,6 +392,22 @@ if(KIN_ENABLE_PYTHON)
     endif()
     kin_enable_release_optimizations(kin_python_scripts)
 endif()
+if(KIN_ENABLE_NET)
+    # Networking (docs/networking.md) needs only the foundation: a game links kin::net beside kin::engine.
+    add_library(kin_net STATIC
+        src/net/input_sync.cpp
+        src/net/link.cpp
+        src/net/loopback.cpp)
+    if(NOT EMSCRIPTEN)
+        target_sources(kin_net PRIVATE src/net/udp.cpp)
+    endif()
+    add_library(kin::net ALIAS kin_net)
+    target_link_libraries(kin_net PUBLIC kin_foundation)
+    if(WIN32)
+        target_link_libraries(kin_net PRIVATE ws2_32)
+    endif()
+    kin_enable_release_optimizations(kin_net)
+endif()
 if(KIN_ENABLE_SCENE_SERVER)
     target_sources(kin_engine PRIVATE
         src/runtime/scene_server.cpp
