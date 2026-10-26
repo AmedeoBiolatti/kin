@@ -9,6 +9,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace kin {
 namespace {
@@ -82,6 +83,14 @@ const ParticleEffect* ParticleCatalog::effect(std::string_view name) const {
 const ParticleField* ParticleCatalog::field(std::string_view name) const {
     const auto found = _fields.find(std::string{name});
     return found == _fields.end() ? nullptr : &found->second;
+}
+
+bool ParticleCatalog::remove_effect(std::string_view name) {
+    return _effects.erase(std::string{name}) > 0;
+}
+
+bool ParticleCatalog::remove_field(std::string_view name) {
+    return _fields.erase(std::string{name}) > 0;
 }
 
 bool ParticleCatalog::has_effect(std::string_view name) const {
@@ -188,26 +197,86 @@ bool parse_particle_pixel_policy(std::string_view value, ParticlePixelPolicy& ou
     return false;
 }
 
-ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
-    const std::optional<std::string> text = read_content_text(path);
-    if (!text) {
-        KIN_LOG_ERROR_F("asset",
-                        "particle catalog open failed",
-                        (LogFields{
-                            {.name = "path", .value = path.string()},
-                            {.name = "type", .value = "Particles"},
-                        }));
-        throw std::runtime_error("Failed to open particle catalog: " + path.string());
-    }
-    std::istringstream file{*text};
+namespace {
 
-    ParticleCatalog catalog;
+// "a,b" or "a" (both the same).
+bool read_pair(std::string_view text, f32& a, f32& b) {
+    std::istringstream in{std::string(text)};
+    char comma = 0;
+    if (!(in >> a)) {
+        return false;
+    }
+    b = a;
+    if (in >> comma) {
+        return comma == ',' && static_cast<bool>(in >> b);
+    }
+    return true;
+}
+
+bool read_color_text(std::string_view text, Color& color) {
+    std::string spaced(text);
+    std::ranges::replace(spaced, ',', ' ');
+    std::istringstream in{spaced};
+    i32 c[4]{};
+    if (!(in >> c[0] >> c[1] >> c[2] >> c[3])) {
+        return false;
+    }
+    color = {static_cast<u8>(std::clamp(c[0], 0, 255)), static_cast<u8>(std::clamp(c[1], 0, 255)),
+             static_cast<u8>(std::clamp(c[2], 0, 255)), static_cast<u8>(std::clamp(c[3], 0, 255))};
+    return true;
+}
+
+// An effect's `name=value` settings after its first ones; false: one is not known, or not read.
+bool read_extra(std::string_view token, ParticleBurst& burst, std::string& why) {
+    const std::size_t equals = token.find('=');
+    if (equals == std::string_view::npos) {
+        why = "expected name=value, not '" + std::string(token) + "'";
+        return false;
+    }
+    const std::string_view name = token.substr(0, equals);
+    const std::string_view value = token.substr(equals + 1);
+    f32 a = 0.0f;
+    f32 b = 0.0f;
+    bool read = false;
+    if (name == "direction") {
+        read = read_pair(value, a, b) && ((burst.direction = a), true);
+    } else if (name == "spread") {
+        read = read_pair(value, a, b) && ((burst.spread = a), true);
+    } else if (name == "shape") {
+        const std::optional<ParticleShape> shape = particle_shape_named(value);
+        read = shape && ((burst.shape = *shape), true);
+    } else if (name == "shape_size") {
+        read = read_pair(value, a, b) && ((burst.shape_size = {a, b}), true);
+    } else if (name == "drag") {
+        read = read_pair(value, a, b) && ((burst.drag = a), true);
+    } else if (name == "rotation") {
+        read = read_pair(value, a, b) && ((burst.rotation = {a, b}), true);
+    } else if (name == "spin") {
+        read = read_pair(value, a, b) && ((burst.spin = {a, b}), true);
+    } else if (name == "mid_at") {
+        read = read_pair(value, a, b) && ((burst.mid_at = a), (burst.use_mid = true), true);
+    } else if (name == "mid_size") {
+        read = read_pair(value, a, b) && ((burst.mid_size = a), (burst.use_mid = true), true);
+    } else if (name == "mid_color") {
+        read = read_color_text(value, burst.mid_color) && ((burst.use_mid = true), true);
+    } else {
+        why = "unknown effect setting '" + std::string(name) + "'";
+        return false;
+    }
+    if (!read) {
+        why = "can't read " + std::string(name) + " '" + std::string(value) + "'";
+    }
+    return read;
+}
+
+bool read_catalog(std::string_view text, const std::string& where, ParticleCatalog& catalog, std::string& error) {
+    std::istringstream file{std::string(text)};
     std::string line;
     i32 line_no = 0;
     const auto fail = [&](std::string_view message) {
-        throw std::runtime_error(path.string() + ":" + std::to_string(line_no) + ": " + std::string{message});
+        error = where + ":" + std::to_string(line_no) + ": " + std::string{message};
+        return false;
     };
-
     while (std::getline(file, line)) {
         ++line_no;
         std::istringstream in(trim_comment(std::move(line)));
@@ -219,7 +288,7 @@ ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
             std::string name;
             ParticleEffect effect;
             if (!(in >> name >> effect.burst.count)) {
-                fail("malformed effect");
+                return fail("malformed effect");
             }
             effect.burst.speed = read_range(in);
             effect.burst.lifetime = read_range(in);
@@ -229,9 +298,16 @@ ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
             in >> effect.burst.acceleration.x >> effect.burst.acceleration.y
                >> effect.burst.render.layer >> effect.burst.render.order;
             if (!in) {
-                fail("effect requires count, speed, lifetime, sizes, colors, acceleration, layer, order");
+                return fail("effect requires count, speed, lifetime, sizes, colors, acceleration, layer, order");
             }
             effect.burst.render.sprite_id = read_optional_sprite(in);
+            std::string token;
+            std::string why;
+            while (in >> token) {
+                if (!read_extra(token, effect.burst, why)) {
+                    return fail(why);
+                }
+            }
             catalog.set_effect(std::move(name), std::move(effect));
             continue;
         }
@@ -243,7 +319,7 @@ ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
             i32 use_brightness = 1;
             if (!(in >> name >> field.count >> seed
                      >> field.area.x >> field.area.y >> field.area.w >> field.area.h)) {
-                fail("malformed field");
+                return fail("malformed field");
             }
             field.seed = seed;
             field.velocity_x = read_range(in);
@@ -253,7 +329,7 @@ ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
             field.color = read_color(in);
             in >> use_brightness >> wrap >> field.render.layer >> field.render.order;
             if (!in) {
-                fail("field requires count, seed, area, ranges, color, flags, layer, order");
+                return fail("field requires count, seed, area, ranges, color, flags, layer, order");
             }
             field.use_brightness = use_brightness != 0;
             field.wrap = wrap != 0;
@@ -261,34 +337,62 @@ ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
             catalog.set_field(std::move(name), std::move(field));
             continue;
         }
-        fail("unknown directive");
+        return fail("unknown directive");
     }
-
-    KIN_LOG_INFO_F("asset",
-                   "particle catalog loaded",
-                   (LogFields{
-                       {.name = "path", .value = path.string()},
-                       {.name = "type", .value = "Particles"},
-                       {.name = "effects", .value = std::to_string(catalog.effects().size())},
-                       {.name = "fields", .value = std::to_string(catalog.fields().size())},
-                   }));
-    return catalog;
+    return true;
 }
 
-bool save_particle_catalog(const ParticleCatalog& catalog, const std::filesystem::path& path) {
-    std::ofstream out(path);
-    if (!out) {
-        return false;
-    }
-
-    out << "# kin particle catalog\n";
+template <typename Map>
+std::vector<std::string> sorted_names(const Map& map) {
     std::vector<std::string> names;
-    names.reserve(catalog.effects().size());
-    for (const auto& [name, effect] : catalog.effects()) {
+    names.reserve(map.size());
+    for (const auto& [name, value] : map) {
         names.push_back(name);
     }
     std::ranges::sort(names);
-    for (const std::string& name : names) {
+    return names;
+}
+
+void write_range_extra(std::ostream& out, std::string_view name, ParticleRange range) {
+    out << ' ' << name << '=' << range.min;
+    if (range.max != range.min) {
+        out << ',' << range.max;
+    }
+}
+
+} // namespace
+
+std::string_view particle_shape_name(ParticleShape shape) {
+    switch (shape) {
+    case ParticleShape::Point: return "point";
+    case ParticleShape::Circle: return "circle";
+    case ParticleShape::Box: return "box";
+    }
+    return "point";
+}
+
+std::optional<ParticleShape> particle_shape_named(std::string_view name) {
+    if (name == "point") return ParticleShape::Point;
+    if (name == "circle") return ParticleShape::Circle;
+    if (name == "box") return ParticleShape::Box;
+    return std::nullopt;
+}
+
+bool parse_particle_catalog(std::string_view text, ParticleCatalog& out, std::string& error) {
+    ParticleCatalog catalog;
+    error.clear();
+    if (!read_catalog(text, "particles", catalog, error)) {
+        return false;
+    }
+    out = std::move(catalog);
+    return true;
+}
+
+std::string serialize_particle_catalog(const ParticleCatalog& catalog) {
+    std::ostringstream out;
+    out << "# kin particle catalog\n";
+    const ParticleBurst plain{};
+    for (const std::string& name : sorted_names(catalog.effects())) {
         const ParticleBurst& burst = catalog.effect(name)->burst;
         out << "effect " << name << ' ' << burst.count << ' '
             << burst.speed.min << ' ' << burst.speed.max << ' '
@@ -299,16 +403,37 @@ bool save_particle_catalog(const ParticleCatalog& catalog, const std::filesystem
         write_color(out, burst.end_color);
         out << ' ' << burst.acceleration.x << ' ' << burst.acceleration.y << ' '
             << burst.render.layer << ' ' << burst.render.order << ' '
-            << (burst.render.sprite_id.empty() ? "-" : burst.render.sprite_id) << '\n';
+            << (burst.render.sprite_id.empty() ? "-" : burst.render.sprite_id);
+        // The rest, where not as kin makes them.
+        if (burst.direction != plain.direction) {
+            out << " direction=" << burst.direction;
+        }
+        if (burst.spread != plain.spread) {
+            out << " spread=" << burst.spread;
+        }
+        if (burst.shape != plain.shape) {
+            out << " shape=" << particle_shape_name(burst.shape);
+        }
+        if (burst.shape_size != plain.shape_size) {
+            out << " shape_size=" << burst.shape_size.x << ',' << burst.shape_size.y;
+        }
+        if (burst.drag != plain.drag) {
+            out << " drag=" << burst.drag;
+        }
+        if (burst.rotation.min != 0.0f || burst.rotation.max != 0.0f) {
+            write_range_extra(out, "rotation", burst.rotation);
+        }
+        if (burst.spin.min != 0.0f || burst.spin.max != 0.0f) {
+            write_range_extra(out, "spin", burst.spin);
+        }
+        if (burst.use_mid) {
+            out << " mid_at=" << burst.mid_at << " mid_size=" << burst.mid_size << " mid_color="
+                << static_cast<i32>(burst.mid_color.r) << ',' << static_cast<i32>(burst.mid_color.g) << ','
+                << static_cast<i32>(burst.mid_color.b) << ',' << static_cast<i32>(burst.mid_color.a);
+        }
+        out << '\n';
     }
-
-    names.clear();
-    names.reserve(catalog.fields().size());
-    for (const auto& [name, field] : catalog.fields()) {
-        names.push_back(name);
-    }
-    std::ranges::sort(names);
-    for (const std::string& name : names) {
+    for (const std::string& name : sorted_names(catalog.fields())) {
         const ParticleField& field = *catalog.field(name);
         out << "field " << name << ' ' << field.count << ' ' << field.seed << ' '
             << field.area.x << ' ' << field.area.y << ' ' << field.area.w << ' ' << field.area.h << ' '
@@ -321,6 +446,42 @@ bool save_particle_catalog(const ParticleCatalog& catalog, const std::filesystem
             << field.render.layer << ' ' << field.render.order << ' '
             << (field.render.sprite_id.empty() ? "-" : field.render.sprite_id) << '\n';
     }
+    return out.str();
+}
+
+ParticleCatalog load_particle_catalog(const std::filesystem::path& path) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
+        KIN_LOG_ERROR_F("asset",
+                        "particle catalog open failed",
+                        (LogFields{
+                            {.name = "path", .value = path.string()},
+                            {.name = "type", .value = "Particles"},
+                        }));
+        throw std::runtime_error("Failed to open particle catalog: " + path.string());
+    }
+    ParticleCatalog catalog;
+    std::string error;
+    if (!read_catalog(*text, path.string(), catalog, error)) {
+        throw std::runtime_error(error);
+    }
+    KIN_LOG_INFO_F("asset",
+                   "particle catalog loaded",
+                   (LogFields{
+                       {.name = "path", .value = path.string()},
+                       {.name = "type", .value = "Particles"},
+                       {.name = "effects", .value = std::to_string(catalog.effects().size())},
+                       {.name = "fields", .value = std::to_string(catalog.fields().size())},
+                   }));
+    return catalog;
+}
+
+bool save_particle_catalog(const ParticleCatalog& catalog, const std::filesystem::path& path) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        return false;
+    }
+    out << serialize_particle_catalog(catalog);
     return static_cast<bool>(out);
 }
 

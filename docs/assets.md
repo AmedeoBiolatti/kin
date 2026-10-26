@@ -147,6 +147,23 @@ its entity is (`offset` from it): once as it starts (`burst_at_start`), and
 `rate` times a second while `emitting`. An emitter with no effect is the
 game's to emit from, in code, as before.
 
+A particle catalog's `effect` line gives a burst: how many particles, their
+speed and lifetime ranges, start and end sizes and colours, acceleration
+(gravity), layer, order and sprite. The settings after those are optional
+`name=value` words: `direction` and `spread` (degrees, clockwise from right; a
+spread of 360, the default, goes every way); `shape` (`point`, `circle` or
+`box`) and `shape_size`, where the particles start; `drag` (the part of their
+speed they lose each second); `rotation` and `spin` (a degree range, or
+`a,b`); and `mid_at`, `mid_size` and `mid_color`, a size and colour they pass
+through partway through their lives. Only settings that differ from their
+defaults are written, so effects that don't use them read as they always did.
+`parse_particle_catalog` and `serialize_particle_catalog` read and write the
+text, for editors.
+
+```text
+effect fire 14 30 70 0.4 0.8 8 2 255 240 150 255 140 20 10 0 0 -40 300 0 - direction=270 spread=40 shape=circle shape_size=12,6 mid_at=0.4 mid_size=6 mid_color=255,130,30,220
+```
+
 Tilemaps draw with the rest (`WorldRenderState`), their top left where their
 entity is, on `RenderLayer::TileBack` unless their `layer` says otherwise. A
 map's cells are squares, or hexagons (`TileMap::grid`: pointy-top in rows or

@@ -32,6 +32,11 @@ releases may change APIs.
   or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
   the new `TextRenderer` (text in the world, in a content font or the system's)
   to scene files. Add `AssetType::Shape` (`.svg`).
+- Give particle effects a direction and spread, an emission shape (point,
+  circle, box), drag, rotation and spin, and a size and colour midway through
+  their lives, written as optional `name=value` settings so older catalogs
+  read unchanged. Add `parse_particle_catalog`, `serialize_particle_catalog`,
+  and `ParticleCatalog::remove_effect`/`remove_field`.
 - Write f32 field values in their shortest form (`0.2`, not `0.20000000298`).
 - Add `input.drop` to the scene server and `App::hold_close` for editors.
 

@@ -23,6 +23,13 @@ struct Particle {
     Color start_color{255, 255, 255, 255};
     Color end_color{255, 255, 255, 0};
     ParticleRenderStyle render{};
+    f32 drag = 0.0f;
+    f32 rotation = 0.0f; // degrees
+    f32 spin = 0.0f;     // degrees a second
+    bool use_mid = false;
+    f32 mid_at = 0.5f;
+    f32 mid_size = 1.0f;
+    Color mid_color{255, 255, 255, 255};
 };
 
 struct ParticleRenderOptions {
