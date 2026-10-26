@@ -269,8 +269,10 @@ struct TaaUniforms {
     f32 sizes[4];  // the picture's width and height, and 1 over them
     f32 params[4]; // history weight, 1 when there is no history, 1 to sharpen, sharpness
     f32 jitter[4]; // this frame's offset in pixels
+    f32 depth[4];  // x: 1 when the main pass's depth is bound (the nearest surface's velocity is taken at edges);
+                   // y: where the overlay's slice of it starts (2: no overlay)
 };
-static_assert(sizeof(TaaUniforms) == 48);
+static_assert(sizeof(TaaUniforms) == 64);
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
@@ -1035,7 +1037,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                                   SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
                 throw std::runtime_error("no four-float colour target or storage texture");
             }
-            _taa_pipeline = make_compute(handle, "taa.comp.spv", {.samplers = 4});
+            _taa_pipeline = make_compute(handle, "taa.comp.spv", {.samplers = 6, .readwrite_textures = 2});
             if (!_taa_pipeline) {
                 throw std::runtime_error(std::string{"compute pipeline not made: "} + SDL_GetError());
             }
@@ -1044,6 +1046,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             _reactive_shader =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "taa_reactive.frag.spv", 1, 1);
             _taa_available = true;
+            _taa_depth_sampled =
+                SDL_GPUTextureSupportsFormat(handle, _depth_format, SDL_GPU_TEXTURETYPE_2D,
+                                             SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: temporal anti-aliasing not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
@@ -2589,10 +2594,10 @@ u64 texture_bytes(const GpuTexture& t) {
 
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
-    for (const GpuTexture* t :
-         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw,
-          &view._contact_across, &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion,
-          &view._taa_history[0], &view._taa_history[1], &view._occ_depth}) {
+    for (const GpuTexture* t : {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across,
+                                &view._contact_raw, &view._contact_across, &view._taa_depth, &view._taa_in,
+                                &view._taa_sharp, &view._taa_motion, &view._taa_history[0], &view._taa_history[1],
+                                &view._taa_dilated[0], &view._taa_dilated[1], &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
@@ -2619,6 +2624,7 @@ void GpuRenderer3D::release_taa(GpuView3D& view) {
     view._taa_sharp = {};
     view._taa_motion = {};
     view._taa_history = {};
+    view._taa_dilated = {};
     view._taa_valid = false;
     view._taa_coverage_key = 0;
     view._taa_reactive = false;
@@ -2635,13 +2641,22 @@ bool GpuRenderer3D::ensure_taa_targets(GpuView3D& view, bool sharpen) {
         constexpr SDL_GPUTextureUsageFlags stored =
             SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
         if (!sized(view._taa_depth)) {
-            view._taa_depth = _device->create_target(w, h, _depth_format, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET);
+            view._taa_depth = _device->create_target(w, h, _depth_format,
+                                                     SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                                                         (_taa_depth_sampled ? SDL_GPU_TEXTUREUSAGE_SAMPLER : 0));
             made = true;
         }
         for (GpuTexture& history : view._taa_history) {
             if (!sized(history)) {
                 history = _device->create_target(w, h, hdr_format, stored);
                 view._taa_valid = false; // nothing in it
+                made = true;
+            }
+        }
+        for (GpuTexture& dilated : view._taa_dilated) {
+            if (!sized(dilated)) {
+                dilated = _device->create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32_UINT, stored);
+                view._taa_valid = false;
                 made = true;
             }
         }
@@ -2999,21 +3014,27 @@ void GpuRenderer3D::match_copies(GpuView3D& view, bool history_usable, JobSystem
 
 const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
                                              const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive,
-                                             bool reject, bool fixed_jitter, RenderDebugStats3D& stats) {
+                                             bool reject, bool fixed_jitter, const GpuTexture* depth, bool overlaid,
+                                             RenderDebugStats3D& stats) {
     const f32 w = static_cast<f32>(view._size.x), h = static_cast<f32>(view._size.y);
     const GpuTexture& past_motion = reset ? view._ao_normals : view._taa_motion;
     const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history,
                               f32 sharpen, f32 sharpness) {
-        const std::array<SDL_GPUTextureSamplerBinding, 4> inputs{
+        const std::array<SDL_GPUTextureSamplerBinding, 6> inputs{
             SDL_GPUTextureSamplerBinding{current.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{history.handle(), _owner->_sampler_linear},
             SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
-            SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler}};
+            SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{depth ? depth->handle() : _owner->_white.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler}};
         const TaaUniforms u{{w, h, 1.0f / w, 1.0f / h},
                             {std::clamp(taa.blend, 0.0f, 0.98f), reset ? 1.0f : 0.0f, sharpen, sharpness},
                             {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
-                             reject ? 1.0f : 0.0f}};
-        if (!compute_pass(commands, _taa_pipeline, target, inputs, &u, sizeof(u))) {
+                             reject ? 1.0f : 0.0f},
+                            {depth ? 1.0f : 0.0f, overlaid ? overlay_split : 2.0f, 0.0f, 0.0f}};
+        // (The sharpening dispatch binds this frame's velocities as its second output too, and writes nothing there.)
+        if (!compute_pass_two(commands, _taa_pipeline, target, view._taa_dilated[1 - view._taa_read], inputs, &u,
+                              sizeof(u))) {
             return false;
         }
         ++stats.taa_dispatches;
@@ -8330,7 +8351,8 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     target.texture = view->_ao_normals.handle();
     target.load_op = SDL_GPU_LOADOP_LOAD;
     target.store_op = SDL_GPU_STOREOP_STORE;
-    auto depth = depth_target(view->_taa_depth.handle(), SDL_GPU_STOREOP_DONT_CARE, false);
+    auto depth = depth_target(view->_taa_depth.handle(),
+                              _taa_depth_sampled ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE, false);
     depth.load_op = SDL_GPU_LOADOP_LOAD;
     auto* pass = SDL_BeginGPURenderPass(ctx.commands, &target, 1, &depth);
     if (!pass)
@@ -8650,10 +8672,10 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         });
     ctx.taa_reactive = ctx.taa && (!_particle_batches.empty() || ctx.mesh_coverage);
     // Reverse Z: the far plane.
-    SDL_GPUDepthStencilTargetInfo depth =
-        depth_target(ctx.taa ? view->_taa_depth.handle() : view->_depth.handle(),
-                     ctx.taa_reactive ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE,
-                     /*cycle=*/true);
+    SDL_GPUDepthStencilTargetInfo depth = depth_target(
+        ctx.taa ? view->_taa_depth.handle() : view->_depth.handle(),
+        ctx.taa_reactive || (ctx.taa && _taa_depth_sampled) ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE,
+        /*cycle=*/true);
 
     // With the velocity written here: a second colour target, cleared to no motion as the pre-pass clears it.
     std::array<SDL_GPUColorTargetInfo, 2> targets{colour, SDL_GPUColorTargetInfo{}};
@@ -8988,9 +9010,13 @@ void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
             warn_once(_taa_prepass_warned,
                       "3D: temporal anti-aliasing: the velocity pass could not begin, so this frame has no history");
         }
+        // The main pass's depth (the overlay's in front, in its slice of the range): the resolve takes the velocity
+        // of the nearest surface round each pixel at an edge.
+        const bool depth = _taa_depth_sampled && view->_taa_depth;
         ctx.shown = resolve_taa(commands, *view, view->_hdr ? view->_scene : view->_taa_in, taa_settings,
                                 ctx.taa_reset || !ctx.velocity_drawn, ctx.jitter, ctx.taa_reactive,
-                                ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter, stats);
+                                ctx.coverage_key != view->_taa_coverage_key, ctx.scene.debug.freeze_jitter,
+                                depth ? &view->_taa_depth : nullptr, ctx.overlaid, stats);
         view->_taa_valid = ctx.velocity_drawn;
         for (u32 s = 0; s < 2; ++s) {
             if (ctx.scenes[s]) {

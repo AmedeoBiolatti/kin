@@ -3215,6 +3215,97 @@ PatternSurface make_pattern_surface(kin::Renderer3D& r3d, kin::Renderer2D& rende
     return {r3d.create_mesh(plane).value_or({}), renderer.create_texture_from_rgba(texels.data(), {640, 480})};
 }
 
+// Temporal anti-aliasing of an edge that moves a fraction of a pixel a frame (a character's at rest, swaying): as
+// smooth as a still one's. Each frame's jitter puts a pixel at the edge on the slab one frame and beside it the
+// next, so its own velocity flickers between the slab's and the background's; read by its own, the edge's history
+// was found in the wrong place or dropped, and at a tenth of a pixel a frame the edge was 2.3 times as far from a
+// 16-sample picture as a still one, at a whole pixel 8 times (close to none at all). The resolve takes the nearest
+// surface's velocity round each pixel: now within a quarter of a still edge. With temporal anti-aliasing alone (the
+// main pass writes the velocity) and with ambient occlusion (the pre-pass does).
+void test_gpu_taa_slow_motion() {
+    with_gpu("test_gpu_taa_slow_motion", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const kin::Mesh3D slab = make_box(r3d, {6.0f, 4.0f, 0.1f});
+        const kin::Mesh3D wall = make_box(r3d, {20.0f, 16.0f, 0.1f});
+        const kin::Material3D white{.color = Color::rgb(255, 255, 255), .unlit = true};
+        const kin::Material3D grey{.color = Color::rgb(40, 40, 40), .unlit = true};
+        const auto at = [](float x) { return Mat4f::translation({x, 0.0f, 0.0f}) * Mat4f::rotation_z(25.0f); };
+        const auto shoot = [&](kin::View3D& view, const kin::Scene3D& s) {
+            Pixels p = shoot_view(renderer, r3d, view, s);
+            renderer.present();
+            return p;
+        };
+        const auto fill = [&](kin::Scene3D& s, float x) {
+            (void)s.draw(wall, Mat4f::translation({0.0f, 0.0f, -2.0f}), grey);
+            (void)s.draw(slab, at(x), white, kin::colors::white, 0, 7);
+        };
+        for (const bool ao : {false, true}) {
+            if (ao && lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion")) {
+                break;
+            }
+            double still = 0.0;
+            for (const float speed : {0.0f, 0.1f, 0.3f, 1.0f}) {
+                kin::View3D view =
+                    r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+                kin::Scene3D scene;
+                scene.camera = flat_camera();
+                scene.taa = {.enabled = true};
+                scene.ambient_occlusion.enabled = ao;
+                Pixels now;
+                float x = 0.0f;
+                for (int f = 0; f < 32; ++f) {
+                    x = 0.1f * speed * static_cast<float>(f);
+                    scene.clear();
+                    fill(scene, x);
+                    now = shoot(view, scene);
+                }
+                assert(r3d.debug_stats().taa_main_velocity == !ao);
+                // The last frame at 16 sub-pixel offsets, averaged in linear light, and with one sample.
+                std::vector<float> reference(160 * 120, 0.0f);
+                for (int i = 0; i < 17; ++i) {
+                    kin::Scene3D s;
+                    s.camera = i < 16 ? flat_camera((static_cast<float>(i % 4) + 0.5f) / 4.0f * 0.1f - 0.05f,
+                                                    (static_cast<float>(i / 4) + 0.5f) / 4.0f * 0.1f - 0.05f)
+                                      : flat_camera();
+                    fill(s, x);
+                    kin::View3D one =
+                        r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+                    const Pixels p = shoot(one, s);
+                    if (i == 16) {
+                        break;
+                    }
+                    for (int k = 0; k < 160 * 120; ++k) {
+                        reference[static_cast<std::size_t>(k)] += decode_srgb(p.at(k % 160, k / 160).g) / 16.0f;
+                    }
+                }
+                double e = 0.0;
+                int n = 0;
+                for (int k = 0; k < 160 * 120; ++k) {
+                    const int want = encode_srgb(reference[static_cast<std::size_t>(k)]);
+                    const int far = encode_srgb(decode_srgb(40)), near = 255;
+                    if (want <= far + 3 || want >= near - 3) {
+                        continue; // the edge's pixels only
+                    }
+                    const double d = level(now.at(k % 160, k / 160)) - want;
+                    e += d * d;
+                    ++n;
+                }
+                const double error = n > 0 ? e / n : 0.0;
+                if (speed == 0.0f) {
+                    still = error;
+                }
+                std::cerr << "taa: an edge moving " << speed << " pixels a frame (" << (ao ? "pre-pass" : "main pass")
+                          << " velocity): mean square error " << error << " against 16 samples (" << n
+                          << " pixels; still " << still << ")\n";
+                assert(n > 100 && error < still * 1.3 + 20.0);
+            }
+        }
+    });
+}
+
 // Temporal anti-aliasing: off is the old picture and runs nothing; on, a still
 // scene settles to a picture with the intermediate levels along edges that one
 // sample a pixel can't make, near what a supersampled render gives; a moving
@@ -20906,6 +20997,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_occlusion_speedups());
     RUN(test_taa_jitter());
     RUN(test_gpu_taa());
+    RUN(test_gpu_taa_slow_motion());
     RUN(test_gpu_taa_over_detail());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());

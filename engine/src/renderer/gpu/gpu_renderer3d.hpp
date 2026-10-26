@@ -193,6 +193,9 @@ private:
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
+    // The velocities the resolve took (the nearest surface's round each pixel; two halves in R32_UINT), this frame's
+    // and the last, read and written as the history is: the next frame compares its own with them.
+    std::array<GpuTexture, 2> _taa_dilated;
     u32 _taa_read = 0;       // which of the two holds the last frame
     u32 _taa_frame = 0;      // frames drawn with it, for the jitter
     bool _taa_valid = false; // the history holds a picture to blend
@@ -375,7 +378,7 @@ private:
     // Resolves `input` into the history and returns the picture to show.
     const GpuTexture* resolve_taa(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& input,
                                   const TemporalAA3D& taa, bool reset, Vec2f jitter, bool reactive, bool reject,
-                                  bool fixed_jitter, RenderDebugStats3D& stats);
+                                  bool fixed_jitter, const GpuTexture* depth, bool overlaid, RenderDebugStats3D& stats);
 
     // render()'s stages, in the order they run, over a FrameCtx (defined in the .cpp)
     // that holds what they share. Each records into the frame's command buffer; any
@@ -595,6 +598,9 @@ private:
     // Temporal anti-aliasing needs the pre-pass and four-float colour targets,
     // and a float storage texture; else it is off (said once, when asked for).
     bool _taa_available = false;
+    // The main pass's one-sample depth (_taa_depth) can be sampled: kept for the resolve, which takes the velocity of
+    // the nearest surface at an edge (the overlay's in front, as its slice of the depth range puts it).
+    bool _taa_depth_sampled = false;
     // The main pass writes velocity when temporal anti-aliasing has no other use for a pre-pass.
     bool _taa_warned = false;
     bool _taa_prepass_warned = false;

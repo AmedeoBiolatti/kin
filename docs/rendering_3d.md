@@ -710,18 +710,27 @@ draws one sample a pixel whatever `ViewOptions3D::samples` asks
   material that changes between frames does not break matching; a copy that
   moves more than twice its size in a frame has no history (bullets: give them
   ids). Costs CPU: about 0.3 ms a render for 22,000 copies.
-- **Resolve** (`taa.comp`): reproject by velocity, read the history with a
-  Catmull-Rom filter (five taps), clip it to a 3 x 3 box of this frame's colours in
-  YCoCg (mean and spread, inside the neighbours' range), mix with weight `blend`,
-  less where the surface read from moved differently from this one (the
-  velocity the last frame had there), where the history is read between pixels,
-  with speed and with how far the clip moved it; none off the screen, for a new
-  copy or the first frame. This frame's colour is read from its 3 x 3 neighbours
-  by how near the pixel centre each sample fell (a Gaussian), not as the pixel's
-  own sample, which would pull the picture to wherever the last few jitters were
-  (with the jitter at 0 it is the pixel's own). Light is compressed
-  (`c / (1 + max c)`) for the clip and the mix. `sharpness` (0 to 1) adds a
-  local-contrast boost kept inside the neighbours' range, one more dispatch.
+- **Resolve** (`taa.comp`): reproject by the velocity of the nearest surface round
+  the pixel (its 3 x 3, by the main pass's depth; a surface within a fiftieth of
+  the pixel's own depth is the same one): each frame's jitter puts a pixel at an
+  edge on one surface one frame and on the other the next, and read by its own
+  flickering velocity a moving edge (a character's) would keep little of its
+  anti-aliasing. The world round the overlay keeps its own, as the gun is fixed to
+  the screen while the world turns behind it. Read the history with a Catmull-Rom
+  filter (five taps), clip it to a 3 x 3 box of this frame's colours in YCoCg
+  (mean and spread, inside the neighbours' range), mix with weight `blend`, less
+  where no surface within a pixel of the spot read from moved as this one did last
+  frame (the velocities the last frame had there), a little where the history is
+  read between pixels (at most 30%), with speed and with how far the clip moved
+  it; none off the screen, for a new copy or the first frame. An edge moving a
+  tenth to a whole pixel a frame is within a quarter of a still one's error
+  against a 16-sample picture (it was 2.3 to 8 times it). This frame's colour is
+  read from its 3 x 3 neighbours by how near the pixel centre each sample fell (a
+  Gaussian), not as the pixel's own sample, which would pull the picture to
+  wherever the last few jitters were (with the jitter at 0 it is the pixel's own).
+  Light is compressed (`c / (1 + max c)`) for the clip and the mix. `sharpness` (0
+  to 1) adds a local-contrast boost kept inside the neighbours' range, one more
+  dispatch.
 - **Before the post chain**: bloom, exposure and the tonemap work on the
   resolved picture. An 8-bit view is drawn in linear float into a texture of its
   own, resolved, then clipped at white and encoded (`view_output.frag` mode 3);

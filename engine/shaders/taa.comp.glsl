@@ -1,16 +1,17 @@
 #version 450 core
 // kin's temporal anti-aliasing (Scene3D::taa): this frame's picture, drawn a
 // fraction of a pixel off (the jitter), blended into the picture of the frames
-// before. Each pixel looks for where its point was last frame (the velocity
-// the pre-pass wrote), reads the history there with a Catmull-Rom filter,
-// clips it to the colours near the pixel in this frame (a 3 x 3 box in YCoCg,
-// from the mean and spread, inside the neighbours' own range: history that
-// does not agree with what is there now is a ghost) and mixes. The history
-// weight falls to nothing where there is none (off the screen, a new mesh,
-// the first frame), where the surface the history shows moved differently
-// from this one (the velocity the last frame had at that spot is compared
-// with this frame's: something that left a spot uncovered, or arrived on it),
-// and a little with speed and with how far the clip moved it.
+// before. Each pixel looks for where its point was last frame (the velocity of
+// the nearest surface round it: edge_velocity), reads the history there with a
+// Catmull-Rom filter, clips it to the colours near the pixel in this frame (a
+// 3 x 3 box in YCoCg, from the mean and spread, inside the neighbours' own
+// range: history that does not agree with what is there now is a ghost) and
+// mixes. The history weight falls to nothing where there is none (off the
+// screen, a new mesh, the first frame), where the surface the history shows
+// moved differently from this one (the velocity the last frame's resolve took
+// at that spot is compared with this frame's: something that left a spot
+// uncovered, or arrived on it), and a little with speed and with how far the
+// clip moved it.
 // Light is compressed (c / (1 + max c)) for the clip and the mix, so a very
 // bright pixel does not outweigh its neighbours or flicker. A second mode
 // (params.z) sharpens a finished picture: a small local-contrast boost kept
@@ -22,11 +23,15 @@ layout(set = 0, binding = 1) uniform sampler2D uHistory;
 layout(set = 0, binding = 2)
     uniform sampler2D uMotion; // BA: contributing-layer motion; R > 1: coverage; G: opaque independent motion
 layout(set = 0, binding = 3) uniform sampler2D uPastMotion; // the same, of the last frame
+layout(set = 0, binding = 4) uniform sampler2D uDepth;      // the main pass's depth (reverse Z) where depth.x is 1
+layout(set = 0, binding = 5) uniform usampler2D uPastDilated; // the velocities the last frame's resolve took
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uResult;
+layout(set = 1, binding = 1, r32ui) uniform writeonly uimage2D uDilated; // this frame's (two halves), for the next
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // the picture's width and height, and 1 over them
     vec4 params; // x: history weight, y: 1 when there is no history, z: 1 to sharpen instead, w: sharpness
     vec4 jitter; // xy: jitter, z: coverage present (2: frozen jitter), w: physical coverage changed (excluding jitter)
+    vec4 depth;  // x: 1 when uDepth is the main pass's depth; y: where the overlay's slice of it starts (2: none)
 }
 params;
 
@@ -107,6 +112,36 @@ float changed_light(ivec2 pixel, vec4 motion) {
     return before.r > 3.5 ? abs(fract(before.r) - fract(motion.r)) : 0.0;
 }
 
+// The velocity a pixel's history is found by. Each frame's jitter puts a pixel at an edge on one surface one frame
+// and on the other the next, so its own velocity flickers between the two: where the nearer surface moves (a
+// character over a wall), the edge's history is found in the wrong place or taken for a surface that moved
+// differently and dropped, and a moving edge keeps little of its anti-aliasing. With the main pass's depth, the
+// velocity of the nearest surface round the pixel (one clearly nearer: within a fiftieth of its depth is the same
+// surface) is the edge's on both sides of it. The world round the overlay keeps its own: the gun is fixed to the
+// screen while the world behind it turns with the camera, and given the gun's velocity the world's edge would smear.
+vec2 edge_velocity(ivec2 p) {
+    const vec2 own = texelFetch(uMotion, p, 0).ba;
+    if (params.depth.x < 0.5) {
+        return own;
+    }
+    const ivec2 last = ivec2(params.sizes.xy) - 1;
+    const float own_depth = texelFetch(uDepth, p, 0).r;
+    const bool world = own_depth < params.depth.y;
+    float nearest = own_depth * 1.02 + 1e-7; // reverse Z: nearer is larger
+    vec2 chosen = own;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const ivec2 q = clamp(p + ivec2(x, y), ivec2(0), last);
+            const float d = texelFetch(uDepth, q, 0).r;
+            if (d > nearest && !(world && d >= params.depth.y)) {
+                nearest = d;
+                chosen = texelFetch(uMotion, q, 0).ba;
+            }
+        }
+    }
+    return chosen;
+}
+
 void main() {
     const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (p.x >= int(params.sizes.x) || p.y >= int(params.sizes.y)) {
@@ -117,7 +152,8 @@ void main() {
         return;
     }
     const vec4 current = fetch(p);
-    const vec2 velocity = texelFetch(uMotion, p, 0).ba;
+    const vec2 velocity = edge_velocity(p);
+    imageStore(uDilated, p, uvec4(packHalf2x16(velocity), 0u, 0u, 0u));
     const vec2 uv = (vec2(p) + 0.5) * params.sizes.zw;
     const vec2 past = uv - velocity;
     if (params.params.y > 0.5 || any(lessThan(past, vec2(0.0))) || any(greaterThan(past, vec2(1.0))) ||
@@ -224,7 +260,10 @@ void main() {
     // grows a little with speed.
     const ivec2 size = ivec2(params.sizes.xy);
     const ivec2 nearest = clamp(ivec2(floor(past * params.sizes.xy)), ivec2(0), size - 1);
-    const float mismatch_px = length((texelFetch(uPastMotion, nearest, 0).ba - velocity) * params.sizes.xy);
+    // (The last frame's velocity there as its resolve took it: a pixel at that edge took the edge's then, as this one
+    // does now.)
+    const vec2 then = unpackHalf2x16(texelFetch(uPastDilated, nearest, 0).r);
+    const float mismatch_px = length((then - velocity) * params.sizes.xy);
     const float speed = length(velocity * params.sizes.xy);
     float weight = params.params.x;
     // Illumination changes lower confidence continuously. Small fire flicker
@@ -246,9 +285,12 @@ void main() {
     // probably not this surface.
     weight *= 1.0 - 0.25 * clamp(speed / 3.0, 0.0, 1.0);
     // Reading between two pixels blurs (each frame's, kept for ten): the further from a
-    // pixel centre the history is read, the less of it is trusted.
+    // pixel centre the history is read, the less of it is trusted. Only a little: the
+    // Catmull-Rom read keeps most of the detail, and a deeper cut (0.6 of it) left an
+    // edge moving a fraction of a pixel a frame with few frames to smooth it (0.3 keeps
+    // such an edge within a quarter of a still one, and a slow pan as sharp as before).
     const vec2 between = abs(fract(past * params.sizes.xy) - 0.5);
-    weight *= 1.0 - 0.6 * clamp(max(between.x, between.y) * 3.0, 0.0, 1.0);
+    weight *= 1.0 - 0.3 * clamp(max(between.x, between.y) * 3.0, 0.0, 1.0);
     weight *= 1.0 - 0.5 * clamp(outside - 1.0, 0.0, 1.0);
     const vec3 colour = mix(filtered / filtered_weight, from_ycocg(h), weight);
     imageStore(uResult, p, vec4(expand(colour), mix(filtered_alpha / filtered_weight, history.a, weight)));

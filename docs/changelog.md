@@ -15,6 +15,11 @@ releases may change APIs.
 - Read 3D normal maps of two channels (BC5, or any whose blue reads 0) as x and
   y with z rebuilt; they were lit from behind (z read as -1). Maps of three
   channels are read as before.
+- Keep temporal anti-aliasing on moving edges: the resolve reprojects by the
+  nearest surface's velocity round each pixel (from the main pass's depth) and
+  trusts a history read between pixels more. An edge moving a tenth of a pixel
+  a frame (a character at rest) was 2.3 times as far from a 16-sample picture as
+  a still one, and at a whole pixel 8 times; now both are within a quarter.
 
 - Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
   ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,
