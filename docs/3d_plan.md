@@ -2723,8 +2723,28 @@ clock** (8.0 ms without GI; the same share, a fifth). Of it, about: the GI scene
 their light on the view 21%, reading it in the main pass 36%. The light variants with nothing else to light cost about
 0.15 ms: a variant of their own is not worth it.
 
-Left for G5c: the Bistro against Godot. Then, if the budget must hold while the laptop throttles: the light on the view
-at a quarter of the view's size, or the main pass shading only what the pre-pass kept.
+Then the flicker the user saw in the live game (standing still: details pulsing a few times a second, a shadow at a
+door for 0.2 s every 2-3 s; none of it in the fixed-step runs the checks and timings used): the Bistro drew each prop at
+rest rebuilt from its last two physics steps, its matrix a little different each render (the frame's own blend), so
+every one of its 98 props was "changed" in every live render, the 64 boxes' cap merged them into one round the square
+and the GI scene was made again over most of its first level every fourth render. Fixed in the port (a prop at rest is
+drawn with its own matrix) and made safer here: many changes are gathered by place (an 8-unit grid, doubled till they
+are 64 boxes at most), not into one box; a change goes on for four renders (a game rendering more often than it steps
+keeps the every-fourth cadence). And the probes placed again round a change: they stay where they stand while it has
+room, and keep the verdict of their rays that they are inside something (a probe in a closed building, woken by being
+placed again, lit the facades with its dark inside till its next update). Last, the light on the view read in the main
+pass weighs the texels instead of picking one, and keeps 85% of the render before's (reprojected), so that the jitter
+of temporal anti-aliasing does not make it flicker at the edges of things: GI's own flicker over the start view,
+frame to frame, from 0.16% of the pixels changing by more than 16 levels beyond what they do without it to 0.10%
+(a shop window's frame as without GI). What flickers still, with or without GI: thin bright things (the tables' menus)
+under temporal anti-aliasing's 8-frame jitter.
+
+Against Godot (`tools/compare.py shots ... --port=--gi`, 2404 x 1352): by day the arch's tunnel 0.057 against Godot's
+0.065 (0.238 without GI), the start's view 0.158 against 0.165, the side street 0.173 against 0.168; at night the
+port is far darker (0.04-0.05 against 0.17-0.27): what is next.
+
+Left for G5c: the night. Then, if the budget must hold while the laptop throttles: the light on the view at a quarter
+of the view's size, or the main pass shading only what the pre-pass kept.
 
 ### Later, each on request
 

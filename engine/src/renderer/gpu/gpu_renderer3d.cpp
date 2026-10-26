@@ -2651,6 +2651,7 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
                                  gi.probe_levels * (64 * 8 + 256 * 4 + 8)
                            : 0u;
     bytes += gi.light ? static_cast<u64>(gi.light.width()) * gi.light.height() * 16 : 0u;
+    bytes += gi.last_light ? static_cast<u64>(gi.last_light.width()) * gi.last_light.height() * 16 : 0u;
     for (const std::shared_ptr<GpuBuffer>& b :
          {gi.owners, gi.seeds, gi.rays, gi.place_list, gi.batch_list, gi.light_list}) {
         bytes += b ? b->size() : 0u;
@@ -8669,7 +8670,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
-            ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, stats);
+            ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, ctx.taa, stats);
         }
     }
 }

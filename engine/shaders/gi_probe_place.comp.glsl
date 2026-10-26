@@ -3,8 +3,13 @@
 // A probe more than `misc.y` voxels from every surface sleeps (no surface ever reads it: a surface reads the eight
 // probes of its cell, all nearer it than that); one nearer than 1.8 voxels to a surface moves, within two fifths of
 // the spacing, to the place of the most room about it (the nearest of those with 1.8, else the roomiest; ties to the
-// first tried), and one with no room anywhere there stays, inside the wall, giving nothing. A probe new to its window
-// (the list's bit 23) has its tiles emptied first: it gives nothing until it has been traced.
+// first tried), and one with no room anywhere there stays, inside the wall, giving nothing. Placed again (something
+// changed nearby), a probe stays where it stood while that still has room: moved, it would light the place with what
+// it saw from elsewhere until its next updates. One its rays found inside
+// something (gi_probe_update.comp: more than a quarter of them met backs) stays so until they say otherwise: placed
+// again because something changed nearby, it would give its light for the renders until its next update, every time.
+// A probe new to its window (the list's bit 23) has its tiles emptied first: it gives nothing until it has been
+// traced.
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform sampler3D uGiDistance;
@@ -50,10 +55,14 @@ void main() {
     const float cell = p.scene.level[k].w, spacing = p.probes.level[k].w / cell; // in voxels
     const vec3 base = vec3(world) * spacing - p.scene.level[k].xyz;
     const float here = room(k, base);
+    const vec4 before = imageLoad(uProbeData, stored);
+    const vec3 kept = before.xyz / cell; // where it stood (voxels from its grid point)
     vec3 best = vec3(0.0);
     float state = 1.0;
     if (here > p.misc.y) {
         state = 0.0;
+    } else if (!fresh && before.w != 0.0 && room(k, base + kept) >= 1.8) {
+        best = kept; // it stays: where it stands still has room
     } else if (here < 1.8) {
         float best_room = here, best_length = 0.0;
         for (int z = -2; z <= 2; ++z) {
@@ -83,6 +92,9 @@ void main() {
     }
     if (state == 1.0 && !traced) {
         state = 0.25;
+    }
+    if (!fresh && state > 0.0 && before.w < 0.0) {
+        state = -1.0;
     }
     imageStore(uProbeData, stored, vec4(best * cell, state));
 }

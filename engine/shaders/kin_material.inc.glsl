@@ -237,9 +237,10 @@ vec3 kin_emissive(vec3 base) {
 // ambient light or environment. Not the surface's own light (kin_emissive).
 #ifdef KIN_GI
 // The probes' light here, as gi_resolve.comp read it on what the pre-pass drew, from the four texels round this pixel
-// (at half its size): filtered where all four are within `near` of this fragment's `depth` along the view; else the
-// one of them most weighted that is, or where none is (a thin thing between texels, or a surface the pre-pass did not
-// draw: glass, in front of what it shows) the one nearest in depth. For the way `n` (this surface's normal, its normal
+// (at half its size), filtered: on what the pre-pass drew, those within `near` of this fragment's `depth` along the
+// view (all four, most often), or where none is (a thin thing between texels) the one nearest in depth; on what it did
+// not draw (glass, in front of what it shows) all of them with light. Weighed, not picked, so that a texel coming or
+// going as the view's jitter moves does not make the light jump. For the way `n` (this surface's normal, its normal
 // map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
 // (the sky's stands).
 bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced) {
@@ -247,8 +248,9 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
     const vec2 uv = gl_FragCoord.xy * 0.5 / vec2(size);
     // x, y, z, w: the texels at (0, 1), (1, 1), (1, 0) and (0, 0) from the footprint's first.
     const vec4 depths = textureGather(uGiLight, uv, 3);
+    const bool drawn = material.maps.z > 0.5;
     vec4 light, slope;
-    if (all(greaterThan(depths, vec4(0.0))) && all(lessThanEqual(abs(depths - depth), vec4(near)))) {
+    if (all(greaterThan(depths, vec4(0.0))) && (!drawn || all(lessThanEqual(abs(depths - depth), vec4(near))))) {
         light = textureLod(uGiLight, uv, 0.0);
         slope = textureLod(uGiSlope, uv, 0.0);
     } else {
@@ -256,8 +258,11 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
         const vec2 f = fract(at);
         const vec4 weight = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
         const ivec2 offsets[4] = ivec2[4](ivec2(0, 1), ivec2(1, 1), ivec2(1, 0), ivec2(0, 0));
-        int pick = -1, nearest_one = -1;
-        float most = -1.0, nearest = 1e30;
+        const ivec2 base = ivec2(floor(at));
+        int nearest_one = -1;
+        float nearest = 1e30, total = 0.0;
+        light = vec4(0.0);
+        slope = vec4(0.0);
         for (int i = 0; i < 4; ++i) {
             if (depths[i] == 0.0) {
                 continue; // no surface
@@ -267,18 +272,23 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
                 nearest = off;
                 nearest_one = i;
             }
-            if (depths[i] > 0.0 && off <= near && weight[i] > most) {
-                most = weight[i];
-                pick = i;
+            if (depths[i] > 0.0 && (!drawn || off <= near)) {
+                const ivec2 q = clamp(base + offsets[i], ivec2(0), size - 1);
+                light += weight[i] * texelFetch(uGiLight, q, 0);
+                slope += weight[i] * texelFetch(uGiSlope, q, 0);
+                total += weight[i];
             }
         }
-        pick = pick >= 0 ? pick : nearest_one;
-        if (pick < 0 || depths[pick] <= 0.0) {
+        if (total > 0.0) {
+            light /= total;
+            slope /= total;
+        } else if (nearest_one >= 0 && depths[nearest_one] > 0.0) {
+            const ivec2 q = clamp(base + offsets[nearest_one], ivec2(0), size - 1);
+            light = texelFetch(uGiLight, q, 0);
+            slope = texelFetch(uGiSlope, q, 0);
+        } else {
             return false;
         }
-        const ivec2 q = clamp(ivec2(floor(at)) + offsets[pick], ivec2(0), size - 1);
-        light = texelFetch(uGiLight, q, 0);
-        slope = texelFetch(uGiSlope, q, 0);
     }
     probed = light.rgb * clamp(slope.w + dot(slope.xyz, n), 0.0, 4.0);
     traced = light.rgb * clamp(slope.w + dot(slope.xyz, r), 0.0, 4.0);

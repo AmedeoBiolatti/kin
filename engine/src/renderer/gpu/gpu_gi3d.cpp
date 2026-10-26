@@ -13,6 +13,7 @@
 #include <cstring>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/skeleton3d.hpp>
+#include <map>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -140,8 +141,11 @@ struct GiResolveUniforms {
     f32 eye[4];
     f32 forward[4];
     GiProbeUniforms probes;
+    f32 last_view_projection[16];
+    f32 last_eye[4]; // w: 1 with a render before
+    f32 last_forward[4];
 };
-static_assert(sizeof(GiResolveUniforms) == 240);
+static_assert(sizeof(GiResolveUniforms) == 336);
 
 // The most rays a batch casts (16 bytes each in the rays' buffer).
 constexpr u32 max_gi_rays = 1u << 20;
@@ -308,6 +312,30 @@ GiBlocks grown(GiBlocks b, i32 by, const std::array<i32, 3>& limit) {
     return b;
 }
 
+// At most `most` boxes round `boxes`: those whose centres are in one cell of a grid (8 units a side, doubled till there
+// are few enough cells) made one, the box round them. Many small changes far apart stay many small boxes, not one round
+// them all.
+void gather_boxes(std::vector<Bounds3D>& boxes, std::size_t most) {
+    for (f32 side = 8.0f; boxes.size() > most; side *= 2.0f) {
+        std::map<std::array<i64, 3>, Bounds3D> cells;
+        for (const Bounds3D& b : boxes) {
+            const Vec3f c = (b.min + b.max) * (0.5f / side);
+            const std::array<i64, 3> key{static_cast<i64>(std::floor(c.x)), static_cast<i64>(std::floor(c.y)),
+                                         static_cast<i64>(std::floor(c.z))};
+            const auto [at, fresh] = cells.try_emplace(key, b);
+            if (!fresh) {
+                Bounds3D& all = at->second;
+                all = {{std::min(all.min.x, b.min.x), std::min(all.min.y, b.min.y), std::min(all.min.z, b.min.z)},
+                       {std::max(all.max.x, b.max.x), std::max(all.max.y, b.max.y), std::max(all.max.z, b.max.z)}};
+            }
+        }
+        boxes.clear();
+        for (const auto& [key, b] : cells) {
+            boxes.push_back(b);
+        }
+    }
+}
+
 bool overlaps(const Bounds3D& a, const Bounds3D& b) {
     return a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y && a.min.z <= b.max.z &&
            b.min.z <= a.max.z;
@@ -365,7 +393,7 @@ void GpuRenderer3D::make_gi() {
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
-        _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 5, 0, 2, 0, 8, 8);
+        _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 7, 0, 2, 0, 8, 8);
         if (!_gi_clear || !_gi_voxelize || !_gi_attributes || !_gi_flood || !_gi_light || !_gi_place || !_gi_trace ||
             !_gi_update || !_gi_resolve) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
@@ -696,14 +724,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 ++j;
             }
         }
-        if (changed.size() > 64) {
-            Bounds3D all = changed[0];
-            for (const Bounds3D& b : changed) {
-                all = {{std::min(all.min.x, b.min.x), std::min(all.min.y, b.min.y), std::min(all.min.z, b.min.z)},
-                       {std::max(all.max.x, b.max.x), std::max(all.max.y, b.max.y), std::max(all.max.z, b.max.z)}};
-            }
-            changed = {all};
-        }
+        gather_boxes(changed, 64);
     }
 
     // The blocks to make again, each level's: all of them on a whole build, else those its window gained (the camera
@@ -745,10 +766,12 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             }
         }
     };
-    // A change that does not go on from one the render before.
+    // A change that does not go on from one in the last four renders (a game may render more often than it steps, so
+    // that something moving does not change in every render).
+    const bool recent = g.ticks - g.last_change_tick <= 4;
     const bool started = std::any_of(changed.begin(), changed.end(), [&](const Bounds3D& b) {
-        return std::none_of(g.last_changes.begin(), g.last_changes.end(),
-                            [&](const Bounds3D& before) { return overlaps(b, before); });
+        return !recent || std::none_of(g.last_changes.begin(), g.last_changes.end(),
+                                       [&](const Bounds3D& before) { return overlaps(b, before); });
     });
     for (u32 k = 0; k < levels; ++k) {
         const f32 c = cell * static_cast<f32>(1u << k);
@@ -799,14 +822,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 waiting.push_back(b);
             }
         }
-        if (waiting.size() > 64) {
-            Bounds3D all = waiting[0];
-            for (const Bounds3D& b : waiting) {
-                all = {{std::min(all.min.x, b.min.x), std::min(all.min.y, b.min.y), std::min(all.min.z, b.min.z)},
-                       {std::max(all.max.x, b.max.x), std::max(all.max.y, b.max.y), std::max(all.max.z, b.max.z)}};
-            }
-            waiting = {all};
-        }
+        gather_boxes(waiting, 64);
         const bool turn = (k == 0 && started) || g.ticks % (4u << k) == (2u << k) - 2u;
         if (!turn) {
             continue;
@@ -823,8 +839,11 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         }
         waiting.clear();
     }
+    if (!changed.empty()) {
+        g.last_changes = std::move(changed);
+        g.last_change_tick = g.ticks;
+    }
     ++g.ticks;
-    g.last_changes = std::move(changed);
     const u64 total_voxels = window_voxels * levels;
     stats.gi_voxels = static_cast<u32>(total_voxels);
     stats.gi_levels = levels;
@@ -1161,13 +1180,19 @@ std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_atlases(const GpuV
 }
 
 bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
-                               const Mat4f& projection, RenderDebugStats3D& stats) {
+                               const Mat4f& projection, bool jittered, RenderDebugStats3D& stats) {
     GpuView3D::Gi& g = view._gi;
     if (!g.lit || !g.irradiance || !_gi_resolve || !view._ao_depth || !view._ao_normals) {
         return false;
     }
     const u32 w = static_cast<u32>(view._size.x), h = static_cast<u32>(view._size.y);
     const u32 hw = std::max(1u, (w + 1) / 2), hh = std::max(1u, (h + 1) / 2);
+    // The last render's light becomes what this one keeps from (the textures take turns), with temporal
+    // anti-aliasing's jitter (without, nothing moves under a texel: it would only lag).
+    std::swap(g.light, g.last_light);
+    std::swap(g.slope, g.last_slope);
+    const bool keep =
+        jittered && g.has_last && g.last_light && g.last_light.width() == hw && g.last_light.height() == hh;
     try {
         if (!g.light || g.light.width() != hw || g.light.height() != hh) {
             const SDL_GPUTextureUsageFlags usage =
@@ -1180,6 +1205,9 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
                        (LogFields{{.name = "reason", .value = e.what()}}));
         g.light = {};
         g.slope = {};
+        g.last_light = {};
+        g.last_slope = {};
+        g.has_last = false;
         return false;
     }
     const GiMarker marker{commands, _gpu_markers, "kin3d.gi_resolve"};
@@ -1202,6 +1230,11 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     std::memcpy(u.eye, eye, sizeof(eye));
     std::memcpy(u.forward, way, sizeof(way));
     gi_uniforms(view, scene.global_illumination.probes.intensity, true, nullptr, u.probes.counts);
+    std::memcpy(u.last_view_projection, g.last_view_projection.m, sizeof(u.last_view_projection));
+    const f32 last_eye[4] = {g.last_eye.x, g.last_eye.y, g.last_eye.z, keep ? 1.0f : 0.0f};
+    const f32 last_way[4] = {g.last_forward.x, g.last_forward.y, g.last_forward.z, 0.0f};
+    std::memcpy(u.last_eye, last_eye, sizeof(last_eye));
+    std::memcpy(u.last_forward, last_way, sizeof(last_way));
     const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> out{
         SDL_GPUStorageTextureReadWriteBinding{.texture = g.light.handle(), .cycle = true},
         SDL_GPUStorageTextureReadWriteBinding{.texture = g.slope.handle(), .cycle = true}};
@@ -1209,17 +1242,24 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     if (!pass) {
         return false;
     }
-    const std::array<SDL_GPUTextureSamplerBinding, 5> samplers{
+    const SDL_GPUTextureSamplerBinding flat{_owner->_white.handle(), _owner->_sampler_linear};
+    const std::array<SDL_GPUTextureSamplerBinding, 7> samplers{
         SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{g.irradiance.handle(), _gi_linear},
         SDL_GPUTextureSamplerBinding{g.moments.handle(), _gi_linear},
-        SDL_GPUTextureSamplerBinding{g.probe_data.handle(), _gi_sampler}};
+        SDL_GPUTextureSamplerBinding{g.probe_data.handle(), _gi_sampler},
+        keep ? SDL_GPUTextureSamplerBinding{g.last_light.handle(), _gi_linear} : flat,
+        keep ? SDL_GPUTextureSamplerBinding{g.last_slope.handle(), _gi_linear} : flat};
     SDL_BindGPUComputePipeline(pass, _gi_resolve);
     SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
     SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
     SDL_DispatchGPUCompute(pass, (hw + 7) / 8, (hh + 7) / 8, 1);
     SDL_EndGPUComputePass(pass);
+    g.last_view_projection = projection * camera.view();
+    g.last_eye = camera.position;
+    g.last_forward = forward;
+    g.has_last = true;
     stats.gi_resolved = true;
     ++stats.gi_dispatches;
     return true;

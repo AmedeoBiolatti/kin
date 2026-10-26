@@ -826,7 +826,9 @@ the plan's G5b results.
   apart where a level would have more than `max_gi_probes`, 65,536), a window of them in each level, moving with the
   voxels'. A probe more than 1.8 spacings from every surface sleeps (at most 7.9 voxels: the distances are kept to 8),
   and one within 1.8 voxels of a surface moves to the place with the most room nearby; they are placed again where the
-  scene changes, and a probe new to its window starts empty. Each render a batch of them (`per_render`, 2,048; 0, all;
+  scene changes (one stays where it stands while that still has room, and one its rays found inside something stays
+  so till they say otherwise: moved or woken, a probe would light with what it saw from elsewhere till its next
+  update), and a probe new to its window starts empty. Each render a batch of them (`per_render`, 2,048; 0, all;
   at most a million rays) each casts `rays` rays (128, a spherical Fibonacci set turned each render) through the
   voxels, from the finest window that holds it on to the coarser ones: a hit reads the lit scene, a miss the sky (the
   environment's specular chain, or the ambient and ground ambient). The probes new to their windows go first, the
@@ -841,9 +843,13 @@ the plan's G5b results.
   surface keeps the sky's light. They are read once a texel at half the view's size, after the depth and normal
   pre-pass (which global illumination brings with it), on the surface each texel stands for (the nearest of its 2 x
   2 pixels): the light facing its normal, and how its brightness changes with the way faced (a linear fit from three
-  more ways, 60 degrees round the normal). The main pass takes the four texels round each pixel, filtered where all
-  four are at its depth, else the one most like it (a thin thing between texels, or glass in front of what it shows),
-  and turns that light to the normal map's normal for the diffuse and to the reflection: a rough surface reflects
+  more ways, 60 degrees round the normal). With temporal anti-aliasing, each texel keeps 85% of what the same place
+  held the render before (found where the last view put it, if it held the same surface, give or take its own pixels'
+  spread), so that the jitter, which moves what a texel's pixels show at the edges of things, does not make the light
+  flicker; a change of light shows within a few renders. The main pass takes the four texels round each pixel,
+  filtered: those at its depth (all four, most often), else the nearest in depth (a thin thing between texels); for
+  what the pre-pass did not draw (glass, in front of what it shows) all four; and turns that light to the normal map's
+  normal for the diffuse and to the reflection: a rough surface reflects
   that, a smooth one the environment dimmed by the share of the sky's light that is. (Read by each fragment instead,
   the probes cost the Bistro 13 ms at 2844 x 1600, the overdraw's fragments too; read so, about 1.4.) GTAO and the
   occlusion maps still multiply both (keep GTAO's radius under the probes' spacing, or creases are darkened twice).

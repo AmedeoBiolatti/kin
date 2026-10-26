@@ -263,11 +263,17 @@ private:
         std::vector<u32> made;
         std::vector<std::array<i32, 7>> rewritten;
         std::array<std::vector<Bounds3D>, max_gi_levels> waiting_changes; // what changed, each level's, not yet made
-        std::vector<Bounds3D> last_changes;                               // what changed in the render before
-        u32 ticks = 0;                                                    // renders that had the GI scene
+        std::vector<Bounds3D> last_changes; // what changed in the last render something did, and its tick
+        u32 last_change_tick = 0;
+        u32 ticks = 0; // renders that had the GI scene
         u64 renders = 0;
         GpuTexture irradiance, moments, probe_data;
-        GpuTexture light, slope; // the probes' light on the view (gi_resolve.comp's; RGBA16F, half its size)
+        // The probes' light on the view (gi_resolve.comp's; RGBA16F, half its size), and the render before's, which it
+        // keeps from (the pairs take turns), with that render's view.
+        GpuTexture light, slope, last_light, last_slope;
+        Mat4f last_view_projection{};
+        Vec3f last_eye{}, last_forward{};
+        bool has_last = false;
         std::shared_ptr<GpuBuffer> rays, place_list, batch_list, light_list;
         std::array<u32, 3> probe_counts{};
         u32 spacing = 0, probe_levels = 0;
@@ -483,9 +489,10 @@ private:
     std::array<SDL_GPUTextureSamplerBinding, 2> gi_bindings(const GpuView3D& view, bool resolved) const;
     std::array<SDL_GPUTextureSamplerBinding, 3> gi_atlases(const GpuView3D& view, bool lit) const;
     // G5c: the probes' light on what the pre-pass drew, at half the view's size (gi_resolve.comp), after it and its
-    // compute (`projection`: the one it drew with); true when it was read.
+    // compute (`projection`: the one it drew with; `jittered`: temporal anti-aliasing's, which each texel's keeping
+    // from the render before evens out); true when it was read.
     bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
-                    RenderDebugStats3D& stats);
+                    bool jittered, RenderDebugStats3D& stats);
     // The view's GI scene and probes as the shaders read them (kin_gi.inc.glsl's KinGiScene, 5 vec4s, into `scene`;
     // KinGiProbes, 6, into `probes`; either may be null).
     void gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const;
