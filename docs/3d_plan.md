@@ -2564,6 +2564,55 @@ GI for the near field, cones traced through the field for occlusion between
 the probes' spacing and GTAO's reach, reflection probes and screen-space
 reflections, a baked source.
 
+#### G5a — results
+
+`Scene3D::global_illumination` (`enabled`, `area`, `cell`) builds the GI scene in compute
+(`gpu_gi3d.cpp`; `kin_gi_voxelize.inc.glsl`, `gi_clear.comp`, `gi_flood.comp`, `gi_view.frag`): every voxel
+of 3D textures over the area (a half for the distance, RGBA8 for colour and normal, four halves for emission),
+`debug.gi_view` and `Renderer3D::read_gi_scene`. The steps of a build, each a compute pass: clear; owners (a
+dispatch a draw, `atomicMin` of the item); attributes (a dispatch a draw, the owner writes); the flood (a seed
+pass, rounds at half the reach down to one and one more at one, the distances). A triangle over more than
+eight columns of voxels along its normal's axis is shared by its workgroup. Meshes' vertex, index and skin
+buffers (and the shared pages) are made readable by compute where the device has the feature.
+
+Checks (`test_gpu_gi_scene`, `test_gpu_gi_scene_builds`, `test_gpu_gi_view`, on the RTX 4080, Intel's and
+lavapipe, the same numbers on all three):
+
+| What | Result |
+|---|---|
+| A floor 0.27 above the area's bottom, voxels of 0.1 | one layer (7), the layers either side empty; above it the distances are the layers counted, exactly |
+| Two walls of no thickness, upright and turned 45 degrees | 0 of 80,802 points of them in an empty voxel: no ray gets through |
+| A ball's distances, from 0.15 to 0.65 m outside it | within 0.81 voxels of its surface's |
+| The floor's colour and normal | its linear colour to the byte (147, 32, 8); normal (128, 255, 128) |
+| A skinned box of one joint | its pose's voxels full, its rest's empty |
+| A cut-out clear on its left half | that half empty, the other full |
+| An emissive wall (green, emissive 2) | its light 1.154 against 1.155 |
+| Built when | once; again for a pose, a copy moved, a material's colour; not for the same scene |
+| Two views of one scene | the same voxels to the byte |
+| Off | nothing built or kept; the picture the same as with it on (it lights nothing) |
+| The debug view | the wall's grey to the level straight ahead; 0 of 361 points of it show what is behind |
+
+The rest of the renderer is untouched: `kin_render3d_tests` passes whole on lavapipe (259 GPU fixtures),
+and the other 121 of kin's tests pass (`kin-renderer`'s `test_gpu_native_pixel_size_and_pointer_mapping`
+fails, as it does in a build of 2026-10-23 on this desktop, whose scale is 1.5).
+
+**The Bistro** (the gallery's port, `--gi`, the level's box 160 x 50 x 170 m: voxels of 0.69 m, 231 x 73 x
+246, 4.15 million; a box 60 x 27 x 65 m round the square: 0.30 m): its 1,030 opaque draws, 3.09 million
+triangles, 269 distinct sets of vertex and index buffers. The mannequin's idle pose changes each frame, so
+the scene is built every frame: 600 frames at 1280 x 720 take 23.0 s against 8.7 s without it, about 24 ms
+a build (the laptop in power-saver). Switched off one at a time, the owners' pass saves about 12 ms, the
+attributes' 13 and the flood 3. SDL_GPU puts a barrier between dispatches each time another buffer is bound
+for reading, and 620 of the draws are under 16 workgroups: the GPU idles between them. Dispatching the draws
+in the order of their buffers (the items keep their draw order, so the voxels do not change) brings a build
+to about 17 ms; recording it costs the CPU about 4 ms. The debug view shows the level recognisably at 0.30
+m (the arch's vault, the doors, the awnings, the posed mannequin); thin things (the festoon lights' cables)
+come out a voxel thick, and the trees' cut-out leaves, mostly clear at a voxel's size, not at all.
+
+What this leaves for G5c, where the budget is: a moving thing must not cost a whole build. Build the static
+part once and voxelize only the regions moving copies leave and enter; batch the draws that share buffers
+into one dispatch (a table of their runs instead of a dispatch each), so a slab or a region is a handful of
+dispatches; the flood only round what changed.
+
 ### Later, each on request
 
 Gamepad aiming (unless kin's gamepad input lands first, then in M2);

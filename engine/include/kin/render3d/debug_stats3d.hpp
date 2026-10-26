@@ -73,6 +73,14 @@ struct RenderDebugStats3D : RenderStats3D {
     // culling, an opaque mesh with a custom shader) or without temporal anti-aliasing.
     bool taa_main_velocity = false;
     u32 taa_reactive_draws = 0; // transient coverage draws; no extra targets, zero without TAA/effects
+    // The GI scene (Scene3D::global_illumination): its voxels (0 without one this render), whether this render built it
+    // again (else it was kept: nothing it is made of changed), and, when it did, the copies and triangles it voxelized
+    // and its compute dispatches.
+    u32 gi_voxels = 0;
+    bool gi_built = false;
+    u32 gi_copies = 0;
+    u64 gi_triangles = 0;
+    u32 gi_dispatches = 0;
     // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal
     // anti-aliasing and occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered
     // buffer too), in bytes, and how many feature groups of them this render gave back: a feature that has not been

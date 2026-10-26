@@ -319,7 +319,8 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
         src/render3d/environment.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
-        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
+                                          src/renderer/gpu/gpu_mesh_pool.cpp)
     elseif(KIN_HAS_WEBGL2_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/webgl2_renderer3d.cpp)
         list(APPEND _kin_webgl_shaders

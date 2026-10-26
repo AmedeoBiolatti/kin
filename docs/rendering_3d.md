@@ -778,6 +778,45 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   sharpening), `taa_reset`, `taa_jitter`, `taa_reactive_draws` and `samples`.
   See the plan's G2d results for numbers.
 
+### Global illumination
+
+`scene.global_illumination = {.enabled = true, .area = level_box, .cell = 0.15f}` (off by default; off, the picture
+and the cost are as without it). Light that reaches a surface off other surfaces, and the sky's light kept out of where
+walls hide it, built in layers that several strategies share (the plan's G5). What is there so far is the first layer,
+the **GI scene**: the scene in voxels of `cell` units over `area`, in one level (where the box would need more than
+`max_gi_side`, 256, voxels along a side or `max_gi_voxels`, 4,194,304, in all, the voxels are larger). Every voxel
+holds its distance to the nearest voxel a surface is in; each voxel a surface touches holds that surface's diffuse
+colour (the base colour times one minus metallic: the material's, the copy's tint, the vertices' and the texture's at
+the voxel's nearest point of the surface, read at the mip whose texels are the voxel's size), its normal (the face's,
+on the side its vertices' normals are) and its emission (as `mesh.frag` makes it). It lights nothing yet: the picture
+is as without it.
+
+- **What it takes in:** every opaque and cut-out copy that reaches into `area` (a copy's bounding sphere), skinned
+  copies in their pose, a cut-out only where its texture's alpha at the voxel's size passes its cutoff; not the
+  overlay, nor blended, additive, wireframe or unlit draws.
+- **How it is built:** in compute, in the render, before the passes that draw. Every voxel a triangle touches
+  (Schwarz and Seidel's conservative surface voxelization: the triangle's plane passes through the voxel's box and
+  their three axis-aligned projections overlap), so a wall of no thickness has no gap a ray can pass. A voxel's
+  owner, which writes its colour, normal and emission, is the touching triangle drawn first (copies in draw order,
+  each one's triangles in index order), so the same scene gives the same voxels to the byte whatever order the GPU
+  runs in. A jump flood (Rong and Tan) gives the distances, from voxel centre to voxel centre. A triangle over more
+  than eight columns of voxels is shared by its workgroup's 64 threads.
+- **When:** in the first render with it, then again, whole, in the render after anything it is made of changes (a
+  copy moving, a pose, a mesh, a material's colour, textures or emission, the area or the cell); otherwise it is kept
+  (`debug_stats().gi_built`). A moving character costs a build in every render it moves, until the cascades round
+  the camera of the next steps update only what changed.
+- **Where:** compute that writes 3D textures of half floats, 8-bit and four-half-float texels
+  (`RendererCapabilities3D::global_illumination`); else off, with one line in the log the first time it is asked
+  for. Where the device has it, the meshes' buffers are made readable by compute, which costs nothing unused. Not
+  on WebGL2.
+- **Memory:** 18 bytes a voxel for its textures and 8 for the build's two words (a full level: about 110 MB),
+  counted in `debug_stats().feature_bytes` and given back after 120 renders without it, as the other features'.
+- **Seeing it:** `scene.debug.gi_view` (`GiView3D::Albedo`, `Normal`, `Emission`, `Steps`) shows the GI scene traced
+  from the camera instead of the picture: each pixel walks the voxels its ray passes, in jumps the distances allow,
+  to the first one a surface is in. `r3d.read_gi_scene(view, out)` reads it back (a `GiScene3D`: its size, where it is
+  and its arrays), waiting for the GPU. `debug_stats()` has `gi_voxels` (0 without one), `gi_built`, `gi_copies`,
+  `gi_triangles` and `gi_dispatches`. Cost: see the plan's G5a results.
+
 ### Levels of detail
 
 `r3d.create_mesh(data, {.levels = 4})` (or `load_model(path, {.levels = 4})`) builds, at load, up to

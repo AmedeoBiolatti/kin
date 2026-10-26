@@ -2887,6 +2887,284 @@ void test_gpu_anisotropy() {
     });
 }
 
+// The GI scene (Scene3D::global_illumination, G5a) of a small level, read back: voxels of 0.1 over a box 8 x 4 x 8.
+struct GiLevel {
+    explicit GiLevel(kin::Renderer3D& r3d, kin::Renderer2D& renderer)
+        : plane(r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({})),
+          ball(r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({})) {
+        MeshData3D box_data = kin::meshes::box({0.4f, 0.4f, 0.4f});
+        box_data.skin.assign(box_data.vertices.size(), kin::MeshSkinVertex3D{{0, 0, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
+        box = r3d.create_mesh(box_data).value_or({});
+        // Two texels: the left one clear, the right one opaque.
+        const kin::u8 halves[8] = {255, 255, 255, 0, 255, 255, 255, 255};
+        halves_texture = renderer.create_texture_from_rgba(halves, {2, 1});
+    }
+
+    // A floor 7 x 7 at y 0.27; a wall of no thickness facing +x at x 1.13 (y 0.3 to 2.5, z -2 to 2); a green emissive
+    // one like it turned 45 degrees about y round (-1.5, 1.4, 2); a ball of radius 1 at (-1.5, 1.5, -1.8); a box 0.4 a
+    // side of one joint at (2.5, 0.83, -2.5), posed 1.5 higher (`lift`); a cut-out 2 x 1 facing +z at z 3.6, round
+    // (-2, 1), clear on its left half.
+    void draw(kin::Scene3D& scene, float lift = 1.5f, Vec3f ball_at = {-1.5f, 1.5f, -1.8f}) const {
+        (void)scene.draw(plane, Mat4f::translation({0.0f, 0.27f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}),
+                         {.color = floor_colour});
+        (void)scene.draw(plane, wall(), {.color = Color::rgb(220, 220, 220)});
+        (void)scene.draw(plane, slanted(), {.color = Color::rgb(0, 200, 0), .emissive = 2.0f});
+        (void)scene.draw(ball, Mat4f::translation(ball_at), {.color = Color::rgb(90, 90, 200)});
+        const std::array<Mat4f, 1> pose{Mat4f::translation({0.0f, lift, 0.0f})};
+        (void)scene.draw_skinned(box, pose, Mat4f::translation({2.5f, 0.83f, -2.5f}));
+        (void)scene.draw(plane,
+                         Mat4f::translation({-2.0f, 1.0f, 3.6f}) * Mat4f::rotation_x(90.0f) *
+                             Mat4f::scaling({2.0f, 1.0f, 1.0f}),
+                         {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = halves_texture});
+    }
+    static Mat4f wall() {
+        return Mat4f::translation({1.13f, 1.4f, 0.0f}) * Mat4f::rotation_z(-90.0f) * Mat4f::scaling({2.2f, 1.0f, 4.0f});
+    }
+    static Mat4f slanted() {
+        return Mat4f::translation({-1.5f, 1.4f, 2.0f}) * Mat4f::rotation_y(45.0f) * Mat4f::rotation_z(-90.0f) *
+               Mat4f::scaling({2.2f, 1.0f, 2.4f});
+    }
+    static kin::GlobalIllumination3D settings() {
+        return {.enabled = true, .area = {{-4.0f, -0.5f, -4.0f}, {4.0f, 3.5f, 4.0f}}, .cell = 0.1f};
+    }
+
+    kin::Mesh3D plane, ball, box;
+    kin::Texture halves_texture;
+    Color floor_colour = Color::rgb(200, 100, 50);
+};
+
+// Reads a GI scene's voxels by index or by the point they hold.
+struct GiVoxels {
+    kin::GiScene3D s;
+    std::size_t index(int x, int y, int z) const {
+        return static_cast<std::size_t>(x) +
+               s.size[0] * (static_cast<std::size_t>(y) + s.size[1] * static_cast<std::size_t>(z));
+    }
+    std::array<int, 3> of(Vec3f p) const {
+        return {static_cast<int>(std::floor((p.x - s.origin.x) / s.cell)),
+                static_cast<int>(std::floor((p.y - s.origin.y) / s.cell)),
+                static_cast<int>(std::floor((p.z - s.origin.z) / s.cell))};
+    }
+    bool full(int x, int y, int z) const { return (s.albedo[index(x, y, z)] >> 24) != 0; }
+    bool full(Vec3f p) const {
+        const auto v = of(p);
+        return full(v[0], v[1], v[2]);
+    }
+    float distance(int x, int y, int z) const { return s.distance[index(x, y, z)]; }
+    int channel(std::size_t i, int c) const { return static_cast<int>((s.albedo[i] >> (8 * c)) & 255u); }
+    int normal(std::size_t i, int c) const { return static_cast<int>((s.normal[i] >> (8 * c)) & 255u); }
+};
+
+// What the GI scene holds: one layer for a floor and the layers above counted off by the distances; a ball's distances
+// its surface's to within a voxel; two walls of no thickness, one turned, with every point of them in a full voxel (so
+// no ray gets through); a skinned box where its pose puts it, not at rest; a cut-out's clear half empty; the floor's
+// colour and normal, the emissive wall's light.
+void test_gpu_gi_scene() {
+    with_gpu("test_gpu_gi_scene", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiLevel level{r3d, renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
+        scene.global_illumination = GiLevel::settings();
+        level.draw(scene);
+        render_ok(r3d, view, scene);
+        const kin::RenderDebugStats3D stats = r3d.debug_stats();
+        assert(stats.gi_voxels == 80u * 40u * 80u && stats.gi_built && stats.gi_copies == 6);
+        GiVoxels g;
+        assert(r3d.read_gi_scene(view, g.s).value_or(false));
+        assert((g.s.size == std::array<kin::u32, 3>{80, 40, 80}));
+        assert(std::abs(g.s.cell - 0.1f) < 1e-6f);
+
+        // The floor: layer 7 (0.27 is 0.77 above the area's floor), the layers either side empty, and above it the
+        // distances count the layers, far from everything else (x 3.2, z 1).
+        const auto [fx, fy, fz] = g.of({3.2f, 0.27f, 1.0f});
+        assert(fy == 7);
+        assert(g.full(fx, 7, fz) && !g.full(fx, 6, fz) && !g.full(fx, 8, fz));
+        for (int k = 0; k <= 10; ++k) {
+            assert(std::abs(g.distance(fx, 7 + k, fz) - static_cast<float>(k)) < 0.01f);
+        }
+        const std::size_t f = g.index(fx, 7, fz);
+        const auto linear_byte = [](kin::u8 c) {
+            return static_cast<int>(std::lround(kin::srgb_to_linear(static_cast<float>(c) / 255.0f) * 255.0f));
+        };
+        std::cerr << "gi scene: the floor's voxel " << g.channel(f, 0) << ' ' << g.channel(f, 1) << ' '
+                  << g.channel(f, 2) << ", normal " << g.normal(f, 0) << ' ' << g.normal(f, 1) << ' ' << g.normal(f, 2)
+                  << ' ' << g.normal(f, 3) << '\n';
+        assert(std::abs(g.channel(f, 0) - linear_byte(200)) <= 1 && std::abs(g.channel(f, 1) - linear_byte(100)) <= 1 &&
+               std::abs(g.channel(f, 2) - linear_byte(50)) <= 1 && g.channel(f, 3) == 255);
+        assert(std::abs(g.normal(f, 0) - 128) <= 1 && g.normal(f, 1) == 255 && std::abs(g.normal(f, 2) - 128) <= 1 &&
+               g.normal(f, 3) == 128);
+
+        // The upright wall in layer x 51 (x 1.13), the layers either side empty; every point of both walls in a full
+        // voxel.
+        const auto [wx, wy, wz] = g.of({1.13f, 1.4f, 0.0f});
+        assert(wx == 51 && g.full(51, wy, wz) && !g.full(50, wy, wz) && !g.full(52, wy, wz));
+        int points = 0, missed = 0;
+        for (const Mat4f& placing : {GiLevel::wall(), GiLevel::slanted()}) {
+            for (int i = 0; i <= 200; ++i) {
+                for (int j = 0; j <= 200; ++j) {
+                    const Vec3f on = placing.apply({-0.499f + 0.998f * static_cast<float>(i) / 200.0f, 0.0f,
+                                                    -0.499f + 0.998f * static_cast<float>(j) / 200.0f});
+                    ++points;
+                    missed += g.full(on) ? 0 : 1;
+                }
+            }
+        }
+        std::cerr << "gi scene: " << missed << " of " << points << " points of the walls in an empty voxel\n";
+        assert(missed == 0);
+
+        // The ball: from points 0.15 to 0.65 outside it (above its middle, so the floor is further), the distance in
+        // voxels from their voxel's centre to its surface, to within one.
+        const Vec3f ball{-1.5f, 1.5f, -1.8f};
+        float worst = 0.0f;
+        for (int i = 0; i < 400; ++i) {
+            const float a = static_cast<float>(i) * 2.399963f, h = static_cast<float>(i % 20) / 20.0f;
+            const float flat = std::sqrt(1.0f - h * h);
+            const Vec3f way = kin::normalize(Vec3f{std::cos(a) * flat, h, std::sin(a) * flat});
+            const Vec3f at = ball + way * (1.0f + 0.15f + 0.5f * static_cast<float>(i % 7) / 6.0f);
+            const auto v = g.of(at);
+            const Vec3f centre{g.s.origin.x + (v[0] + 0.5f) * g.s.cell, g.s.origin.y + (v[1] + 0.5f) * g.s.cell,
+                               g.s.origin.z + (v[2] + 0.5f) * g.s.cell};
+            const float truth = (kin::length(centre - ball) - 1.0f) / g.s.cell;
+            worst = std::max(worst, std::abs(g.distance(v[0], v[1], v[2]) - truth));
+        }
+        std::cerr << "gi scene: the ball's distances at most " << worst << " voxels from its surface's\n";
+        assert(worst <= 1.0f);
+
+        // The box: its top in its pose (y 2.53), not at rest (y 1.03).
+        assert(g.full({2.5f, 2.53f, -2.5f}) && !g.full({2.5f, 1.03f, -2.5f}));
+        // The cut-out: its opaque half full, its clear half empty.
+        assert(g.full({-1.3f, 1.0f, 3.6f}) && !g.full({-2.7f, 1.0f, 3.6f}));
+        // The emissive wall: its colour (green, linear 0.578) times 2.
+        const auto e = g.of(GiLevel::slanted().apply({0.0f, 0.0f, 0.0f}));
+        const std::size_t ei = g.index(e[0], e[1], e[2]);
+        const float green = kin::srgb_to_linear(200.0f / 255.0f) * 2.0f;
+        std::cerr << "gi scene: the emissive wall's light " << g.s.emission[ei * 3] << ' ' << g.s.emission[ei * 3 + 1]
+                  << ' ' << g.s.emission[ei * 3 + 2] << " (green " << green << ")\n";
+        assert(std::abs(g.s.emission[ei * 3 + 1] - green) < green * 0.01f && g.s.emission[ei * 3] < 0.01f &&
+               g.s.emission[ei * 3 + 2] < 0.01f);
+        assert(g.s.emission[f * 3 + 1] == 0.0f);
+    });
+}
+
+// When the GI scene is built: once, and again only when something it is made of changes (a copy moving, a pose, a
+// material); two views of one scene build it to the byte alike; with it off nothing is built, and the picture is the
+// same with it on (it has no light yet).
+void test_gpu_gi_scene_builds() {
+    with_gpu("test_gpu_gi_scene_builds", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        GiLevel level{r3d, renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D other = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
+        const auto scene_of = [&](bool on, float lift, Vec3f ball_at) {
+            kin::Scene3D scene;
+            scene.camera = camera;
+            scene.lights.sun.direction = {-0.4f, 1.0f, 0.3f};
+            if (on) {
+                scene.global_illumination = GiLevel::settings();
+            }
+            level.draw(scene, lift, ball_at);
+            return scene;
+        };
+        const Vec3f ball{-1.5f, 1.5f, -1.8f};
+        const auto built = [&](kin::View3D& v, const kin::Scene3D& scene) {
+            render_ok(r3d, v, scene);
+            renderer.present();
+            return r3d.debug_stats().gi_built;
+        };
+        const auto voxels = [&](kin::View3D& v) {
+            kin::GiScene3D s;
+            assert(r3d.read_gi_scene(v, s).value_or(false));
+            return s;
+        };
+        assert(built(view, scene_of(true, 1.5f, ball)));
+        assert(!built(view, scene_of(true, 1.5f, ball)));
+        const kin::GiScene3D first = voxels(view);
+        assert(built(view, scene_of(true, 1.0f, ball)));                           // a pose
+        assert(built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f}))); // a copy moving
+        assert(!built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f})));
+        level.floor_colour = Color::rgb(60, 60, 60); // a material
+        assert(built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f})));
+        level.floor_colour = Color::rgb(200, 100, 50);
+        // Back where it began, in another view: the same voxels, to the byte.
+        assert(built(other, scene_of(true, 1.5f, ball)));
+        const kin::GiScene3D again = voxels(other);
+        assert(again.distance == first.distance && again.albedo == first.albedo && again.normal == first.normal &&
+               again.emission == first.emission);
+        // Off: nothing built or kept, and the picture as with it on.
+        kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false, 1.5f, ball));
+        renderer.present();
+        assert(r3d.debug_stats().gi_voxels == 0 && !r3d.debug_stats().gi_built);
+        kin::GiScene3D none;
+        assert(!r3d.read_gi_scene(plain, none).value_or(true));
+        const Pixels with = shoot_view(renderer, r3d, view, scene_of(true, 1.5f, ball));
+        renderer.present();
+        assert(with.rgba == without.rgba);
+    });
+}
+
+// The GI scene seen from the camera (RenderDebugOptions3D::gi_view): the wall straight ahead in its colour (Albedo,
+// as it faces the camera) or its normal, and nothing of what is behind it anywhere inside its edges.
+void test_gpu_gi_view() {
+    with_gpu("test_gpu_gi_view", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiLevel level{r3d, renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({3.5f, 1.4f, 0.0f}, {1.13f, 1.4f, 0.0f}, 60.0f);
+        scene.global_illumination = GiLevel::settings();
+        level.draw(scene);
+        const auto encode = [](float linear) {
+            return static_cast<int>(std::lround(kin::linear_to_srgb(linear) * 255.0f));
+        };
+        scene.debug.gi_view = kin::GiView3D::Albedo;
+        const Pixels albedo = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const Color middle = albedo.at(80, 60);
+        const int grey = encode(kin::srgb_to_linear(220.0f / 255.0f));
+        std::cerr << "gi view: the wall's middle " << int(middle.r) << ' ' << int(middle.g) << ' ' << int(middle.b)
+                  << " (" << grey << ")\n";
+        assert(std::abs(middle.r - grey) <= 3 && std::abs(middle.g - grey) <= 3 && std::abs(middle.b - grey) <= 3);
+        // Inside the wall's edges (pulled in a tenth): the wall's grey, never what is behind it.
+        int seen = 0, through = 0;
+        for (int i = 1; i < 20; ++i) {
+            for (int j = 1; j < 20; ++j) {
+                const Vec3f on = GiLevel::wall().apply({-0.4f + 0.8f * i / 20.0f, 0.0f, -0.4f + 0.8f * j / 20.0f});
+                const auto p = scene.camera.project(on, screen);
+                if (!p || p->pos.x < 0 || p->pos.y < 0 || p->pos.x >= 160 || p->pos.y >= 120) {
+                    continue;
+                }
+                const Color c = albedo.at(p->pos);
+                ++seen;
+                through += (std::abs(c.r - c.g) > 12 || std::abs(c.g - c.b) > 12 || c.g < 120) ? 1 : 0;
+            }
+        }
+        std::cerr << "gi view: " << through << " of " << seen << " points of the wall show something else\n";
+        assert(seen > 200 && through == 0);
+        scene.debug.gi_view = kin::GiView3D::Normal;
+        const Pixels normal = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        const Color n = normal.at(80, 60);
+        assert(n.r >= 253 && std::abs(n.g - encode(0.5f)) <= 3 && std::abs(n.b - encode(0.5f)) <= 3);
+        scene.debug.gi_view = kin::GiView3D::Off;
+        const Pixels picture = shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        assert(picture.rgba != albedo.rgba);
+    });
+}
+
 // The texture mip bias (Scene3D::texture_lod_bias): a texture of 32 x 32 texels whose levels are olive, teal and
 // red (from 8 x 8 on) over 16 pixels reads its teal level 1; a bias of -1 reads olive, +1 red, -0.5 between olive and
 // teal. Without it the picture is as before.
@@ -21155,6 +21433,9 @@ int main(int argc, char** argv) {
     RUN(test_gpu_wrap_modes());
     RUN(test_gpu_anisotropy());
     RUN(test_gpu_texture_lod_bias());
+    RUN(test_gpu_gi_scene());
+    RUN(test_gpu_gi_scene_builds());
+    RUN(test_gpu_gi_view());
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());

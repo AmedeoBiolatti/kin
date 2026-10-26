@@ -47,6 +47,9 @@ struct RendererCapabilities3D {
     bool gpu_driven_clusters = false;
     // Whether Lod3D::occlusion can work: the GPU cut, plus a sampled depth format and R32F storage textures.
     bool occlusion_culling = false;
+    // Whether Scene3D::global_illumination can work: compute that writes 3D textures (half floats, 8-bit and four
+    // half-float texels) and reads the meshes' buffers.
+    bool global_illumination = false;
     // Whether spot lights, the shadows of lights that are not the sun and the fill light's shadow can work (the light
     // shaders and a depth format that can be sampled; P3b); where not, they are off and a line in the log says so the
     // first time one is asked for.
@@ -113,6 +116,26 @@ struct ClusterDraw3D {
     u32 first_instance = 0; // the copy's slot in the instance buffer
 };
 
+// The GI scene a render built (Scene3D::global_illumination; Renderer3D::read_gi_scene), for tests and tools:
+// `size` voxels of `cell` units, voxel (0, 0, 0)'s low corner at `origin`; the arrays a value a voxel, x fastest, then
+// y, then z.
+struct GiScene3D {
+    Vec3f origin{};
+    f32 cell = 0.0f;
+    std::array<u32, 3> size{};
+    // From the voxel's centre to the nearest centre of a voxel a surface is in, in voxels (0 in one; large where the
+    // scene has no surface at all).
+    std::vector<f32> distance;
+    // The surface's colour (linear, 8 bits a channel, red in the lowest byte); alpha 255 where a surface is in the
+    // voxel, 0 elsewhere (and then the rest is 0 too).
+    std::vector<u32> albedo;
+    // Its normal (the face of the triangle that owns the voxel, on the side its vertices' normals are), each component
+    // as (n + 1) / 2 in a byte; alpha 255 for a double-sided material, 128 for a single-sided one.
+    std::vector<u32> normal;
+    // Its emission (linear RGB, three floats a voxel).
+    std::vector<f32> emission;
+};
+
 // A view's targets on the backend.
 class IViewBackend3D {
 public:
@@ -163,6 +186,9 @@ public:
     virtual bool read_cluster_picks(IViewBackend3D&, std::vector<ClusterPick3D>&) { return false; }
     // The indirect draws of the last render's GPU cut, a (view, copy) each; waits for the GPU.
     virtual bool read_cluster_draws(IViewBackend3D&, std::vector<ClusterDraw3D>&) { return false; }
+    // The GI scene the view holds (built by the last render with Scene3D::global_illumination), for tests and tools;
+    // waits for the GPU. False when it has none.
+    virtual bool read_gi_scene(IViewBackend3D&, GiScene3D&) { return false; }
 };
 
 } // namespace kin

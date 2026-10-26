@@ -150,6 +150,9 @@ public:
     // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the
     // second pass's (the camera's view only) follow.
     Result3D<bool> read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out);
+    // The GI scene the view holds (Scene3D::global_illumination, built by the last render with it on), for tests and
+    // tools; waits for the GPU like pick(). False when the view has none.
+    Result3D<bool> read_gi_scene(View3D& view, GiScene3D& out);
     // Compact, nonblocking summary of the last render().
     const RenderStats3D& stats() const { return _stats; }
     // Detailed implementation counters for profilers/tools. Reading this never
@@ -177,6 +180,7 @@ private:
     PickResult3D pick_operation(View3D& view, Vec2i pixel);
     bool read_cluster_picks_operation(View3D& view, std::vector<ClusterPick3D>& out);
     bool read_cluster_draws_operation(View3D& view, std::vector<ClusterDraw3D>& out);
+    bool read_gi_scene_operation(View3D& view, GiScene3D& out);
     friend class Assets3D;
     Model3D load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error,
                               Assets3D* assets);

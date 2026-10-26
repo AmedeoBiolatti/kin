@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add the first layer of 3D global illumination, the GI scene
+  (`Scene3D::global_illumination`, off by default;
+  `RendererCapabilities3D::global_illumination`): the scene in voxels with a
+  distance field and each surface voxel's colour, normal and emission, built in
+  compute from every opaque and cut-out copy in its area (skinned ones in their
+  pose), with no gap through a wall of no thickness and the same voxels to the
+  byte each time. It lights nothing yet; `RenderDebugOptions3D::gi_view` shows
+  it and `Renderer3D::read_gi_scene` reads it back.
 - Add anisotropic filtering of 3D materials' mipmapped textures
   (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
   `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with

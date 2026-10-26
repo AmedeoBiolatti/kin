@@ -158,6 +158,7 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.anisotropy = 1;
         scene.texture_lod_bias = 0.0f;
         scene.lod = {};
+        scene.global_illumination = {};
         scene.cull = true;
         _rendering.propagate_transforms();
         WorldRenderState3D::Presentation3D presentation;

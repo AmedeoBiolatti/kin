@@ -400,6 +400,29 @@ struct Lod3D {
     Occlusion3D occlusion{};
 };
 
+// The most voxels the GI scene has along a side, and in all (GlobalIllumination3D::cell grows to keep within them).
+constexpr u32 max_gi_side = 256;
+constexpr u32 max_gi_voxels = 1u << 22;
+
+// Global illumination (docs/rendering_3d.md, "Global illumination"; docs/3d_plan.md, G5): light that reaches a surface
+// off other surfaces, and the sky's light kept out of where walls hide it. What is built so far (G5a) is its first
+// layer, the GI scene: the scene in voxels of `cell` over `area`, each holding its distance to the nearest surface, and
+// each voxel a surface touches that surface's colour, normal and emission. RenderDebugOptions3D::gi_view shows it and
+// Renderer3D::read_gi_scene reads it back; the picture is as without it. It takes in every opaque and cut-out copy that
+// reaches into `area` (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay,
+// blended, additive, wireframe or unlit ones, and is built again, whole, in the render after any of them changes
+// (a copy moving, a pose, a mesh, a material). Off by default; off, the picture and the cost are as without it. Needs
+// compute (RendererCapabilities3D::global_illumination); else off, with a line in the log the first time it is asked
+// for.
+struct GlobalIllumination3D {
+    bool enabled = false;
+    // The box it takes in (the level). Empty: nothing, and the feature is off.
+    Bounds3D area{};
+    // A voxel's side (units): the finest detail it has. Larger where `area` would need more than max_gi_side voxels a
+    // side or max_gi_voxels in all.
+    f32 cell = 0.15f;
+};
+
 // A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a
 // handle rather than copying the records each frame. Update between renders, never concurrently
 // with rendering. Groups' bounds follow the edits exactly (as instance_bounds of the group's copies would give) at a
@@ -480,6 +503,7 @@ public:
     // picture as without it. Read as `anisotropy` is, in every pass. Where RendererCapabilities3D::texture_lod_bias.
     f32 texture_lod_bias = 0.0f;
     Lod3D lod{};
+    GlobalIllumination3D global_illumination{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:
     // off, the picture and the cost are as without the features.

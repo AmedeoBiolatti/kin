@@ -278,6 +278,20 @@ bool Renderer3D::read_cluster_draws_operation(View3D& view, std::vector<ClusterD
     return _backend->read_cluster_draws(*view.backend(), out);
 }
 
+Result3D<bool> Renderer3D::read_gi_scene(View3D& view, GiScene3D& out) {
+    auto value = read_gi_scene_operation(view, out);
+    return result3d(std::move(value), _errors);
+}
+
+bool Renderer3D::read_gi_scene_operation(View3D& view, GiScene3D& out) {
+    _errors.clear();
+    out = {};
+    if (!view.valid() || !_backend || dynamic_cast<FallbackView*>(view.backend())) {
+        return fail3d(_errors, "Renderer3D::read_gi_scene", "operation requires a valid 3D view");
+    }
+    return _backend->read_gi_scene(*view.backend(), out);
+}
+
 Status3D Renderer3D::warm_up(View3D& view, const Scene3D& scene) {
     auto value = warm_up_operation(view, scene);
     return status3d(std::move(value), _errors);

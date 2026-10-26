@@ -296,6 +296,24 @@ GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL
     return GpuTexture{_shared, texture, width, height, format};
 }
 
+GpuTexture GpuDevice::create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
+                                     SDL_GPUTextureUsageFlags usage) {
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_3D;
+    info.format = format;
+    info.usage = usage;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = depth;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture (volume) failed");
+    }
+    return GpuTexture{_shared, texture, width, height, format};
+}
+
 SDL_GPUTextureFormat GpuDevice::depth_stencil_format() const {
     for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT}) {
         if (SDL_GPUTextureSupportsFormat(_device, format, SDL_GPU_TEXTURETYPE_2D,
@@ -940,6 +958,53 @@ bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, 
     // No fence (the submit failed) or a failed wait: the copy may not have run, so the transfer buffer is not read.
     const bool arrived = fence && wait_for_readback(_device, fence);
 
+    bool ok = false;
+    if (void* mapped = arrived ? SDL_MapGPUTransferBuffer(_device, tb, false) : nullptr) {
+        out.resize(bytes);
+        std::memcpy(out.data(), mapped, bytes);
+        SDL_UnmapGPUTransferBuffer(_device, tb);
+        ok = true;
+    }
+    SDL_ReleaseGPUTransferBuffer(_device, tb);
+    return ok;
+}
+
+bool GpuDevice::read_volume(const GpuTexture& src, u32 depth, u32 texel_bytes, std::vector<u8>& out) {
+    if (!_device || !src.handle() || depth == 0) {
+        return false;
+    }
+    flush_uploads();
+    const u64 total = static_cast<u64>(src.width()) * src.height() * depth * texel_bytes;
+    if (total > std::numeric_limits<u32>::max()) {
+        return false;
+    }
+    const u32 bytes = static_cast<u32>(total);
+    SDL_GPUTransferBufferCreateInfo tb_info{};
+    tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tb_info.size = bytes;
+    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(_device, &tb_info);
+    if (!tb) {
+        return false;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(_device);
+    if (!cmd) {
+        SDL_ReleaseGPUTransferBuffer(_device, tb);
+        return false;
+    }
+    SDL_GPUTextureRegion region{};
+    region.texture = src.handle();
+    region.w = src.width();
+    region.h = src.height();
+    region.d = depth;
+    SDL_GPUTextureTransferInfo dst{};
+    dst.transfer_buffer = tb;
+    dst.pixels_per_row = src.width();
+    dst.rows_per_layer = src.height();
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_DownloadFromGPUTexture(copy, &region, &dst);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    const bool arrived = fence && wait_for_readback(_device, fence); // as read_texture_region
     bool ok = false;
     if (void* mapped = arrived ? SDL_MapGPUTransferBuffer(_device, tb, false) : nullptr) {
         out.resize(bytes);

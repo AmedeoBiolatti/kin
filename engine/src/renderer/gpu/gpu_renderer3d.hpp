@@ -234,9 +234,23 @@ private:
     u32 _occ_words = 0; // clusters the history covers
     std::vector<OccRegion> _occ_layout;
     bool _occ_reset = true; // View3D::reset_history(), a resize: the history is dropped
+    // With Scene3D::global_illumination (G5a; gpu_gi3d.cpp), made by the first render that asks: the GI scene, its
+    // voxels' distances (R16F), colours and normals (RGBA8) and emission (RGBA16F), and the build's two words a voxel
+    // (the owners, then the flood's seeds, the two swapping in the flood); its size, where it is, and a key of what it
+    // was built from: it is built again when that changes.
+    struct Gi {
+        GpuTexture distance, albedo, normal, emission;
+        std::shared_ptr<GpuBuffer> owners, seeds;
+        std::array<u32, 3> size{};
+        Vec3f origin{};
+        f32 cell = 0.0f;
+        u64 key = 0;
+        bool valid = false; // the textures hold a built scene
+    } _gi;
     // Renders since each feature's targets were last used; at GpuRenderer3D::feature_release_frames (120) they are
     // given back (age_targets). Zero while the feature runs, so a feature toggled every other render never lets go.
-    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0;
+    u32 _idle_ao = 0, _idle_contact = 0, _idle_depth = 0, _idle_normals = 0, _idle_taa = 0, _idle_occlusion = 0,
+        _idle_gi = 0;
 };
 
 class GpuRenderer3D final : public IRendererBackend3D {
@@ -419,6 +433,32 @@ private:
     void push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot = 0, bool record_history = true);
     // Lights3D::sky_lights_scene: the sky drawn into a small panorama and filtered, when it has moved enough.
     void sky_environment(FrameCtx& ctx);
+    // G5, global illumination (gpu_gi3d.cpp). make_gi: the GI scene's pipelines, with the renderer (where the device
+    // cannot, absent and RendererCapabilities3D::global_illumination false). gi_scene: the view's GI scene for `scene`,
+    // built (compute passes into `commands`) when it has none or what it is made of changed; true when the view has one
+    // for this render. draw_gi_view: RenderDebugOptions3D::gi_view over the main pass (`pass`: its colour `format`,
+    // `samples`, its velocity target's format or INVALID), traced with `view_projection` (the one the pass draws with).
+    void make_gi();
+    void release_gi_pipelines();
+    bool gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, RenderDebugStats3D& stats);
+    void draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
+                      const Scene3D& scene, const Mat4f& view_projection, SDL_GPUTextureFormat format, u32 samples,
+                      SDL_GPUTextureFormat velocity_format, bool encode);
+    bool read_gi_scene(IViewBackend3D& view, GiScene3D& out) override;
+    void release_gi(GpuView3D& view);
+    bool _gi_available = false;
+    bool _gi_warned = false;
+    SDL_GPUComputePipeline* _gi_clear = nullptr;      // gi_clear.comp
+    SDL_GPUComputePipeline* _gi_voxelize = nullptr;   // gi_voxelize.comp
+    SDL_GPUComputePipeline* _gi_attributes = nullptr; // gi_voxelize_attributes.comp
+    SDL_GPUComputePipeline* _gi_flood = nullptr;      // gi_flood.comp
+    GpuShader _gi_view_shader;                        // gi_view.frag
+    SDL_GPUSampler* _gi_sampler = nullptr;            // texel by texel, clamped (the shaders fetch)
+    // A build's copies (each draw's in a run: placing, normals, colour, first joint) and their joint matrices, and a
+    // small buffer bound where a draw has no skin; grow.
+    std::shared_ptr<GpuBuffer> _gi_copies, _gi_joints, _gi_empty;
+    std::vector<u8> _gi_copy_bytes;
+    std::vector<Mat4f> _gi_joint_data;
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to

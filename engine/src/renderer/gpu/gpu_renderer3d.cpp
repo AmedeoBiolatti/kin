@@ -1058,6 +1058,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     _capabilities.ambient_occlusion = _capabilities.contact_shadows = _ao_available;
     _capabilities.temporal_aa = _taa_available;
+    // Global illumination (G5): its compute, before any mesh is made (their buffers are made for it to read).
+    make_gi();
     // Fog and the sky (P3a): the fog variants of the stock mesh shaders (one more uniform block, in the slot custom
     // parameters have elsewhere), the sky pass's shaders, the panorama pass of the sky's image-based light. Each its
     // own try: a device without them draws as before (said once when a scene asks).
@@ -1322,6 +1324,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
 }
 
 GpuRenderer3D::~GpuRenderer3D() {
+    release_gi_pipelines();
     if (_compare_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _compare_sampler);
     }
@@ -1764,12 +1767,16 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
         }
         const u32 vertex_bytes = static_cast<u32>((vertex_count + extra_vertices) * sizeof(GpuMeshVertex));
         const u32 index_bytes = static_cast<u32>(index_count * sizeof(u32));
+        // Where global illumination can be had, its compute reads every mesh's vertices, indices and skin.
+        const SDL_GPUBufferUsageFlags gi_read =
+            _capabilities.global_illumination ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0;
         const SDL_GPUBufferCreateInfo vertex_info{
-            .usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = vertex_bytes, .props = 0};
-        const SDL_GPUBufferCreateInfo index_info{.usage = SDL_GPU_BUFFERUSAGE_INDEX, .size = index_bytes, .props = 0};
+            .usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read, .size = vertex_bytes, .props = 0};
+        const SDL_GPUBufferCreateInfo index_info{
+            .usage = SDL_GPU_BUFFERUSAGE_INDEX | gi_read, .size = index_bytes, .props = 0};
         if (!clusters && !source.skinned()) {
             if (!_mesh_buffers)
-                _mesh_buffers = std::make_shared<GpuMeshBufferPool>(_device->shared());
+                _mesh_buffers = std::make_shared<GpuMeshBufferPool>(_device->shared(), gi_read);
             mesh->allocation = _mesh_buffers->allocate(vertex_bytes, index_bytes);
             if (mesh->allocation) {
                 mesh->buffer_pool = _mesh_buffers;
@@ -1833,7 +1840,7 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
         if (!clusters && !chain && source.skinned() && source.skin.size() == vertex_count) {
             // The skin stream: a second vertex buffer, 8 bytes a vertex. A joint whose weight came to nothing points at
             // joint 0 (always there), so that the shader never reads a matrix that is not.
-            const SDL_GPUBufferCreateInfo skin_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+            const SDL_GPUBufferCreateInfo skin_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read,
                                                     .size = static_cast<u32>(vertex_count * sizeof(GpuSkinVertex)),
                                                     .props = 0};
             mesh->skin = SDL_CreateGPUBuffer(_device->handle(), &skin_info);
@@ -2612,6 +2619,13 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
          {_gcb[1].scan, _gcb[1].blocks, _gcb[1].args, _gcb[1].list, _gcb[1].counts, _gcb[1].indices, _gc_job_history}) {
         bytes += b ? b->size() : 0u;
     }
+    // The GI scene: a half, two 8-bit texels and four halves a voxel, and the build's two words.
+    if (view._gi.distance) {
+        bytes += static_cast<u64>(view._gi.size[0]) * view._gi.size[1] * view._gi.size[2] * (2 + 4 + 4 + 8);
+    }
+    for (const std::shared_ptr<GpuBuffer>& b : {view._gi.owners, view._gi.seeds}) {
+        bytes += b ? b->size() : 0u;
+    }
     return bytes;
 }
 
@@ -3149,6 +3163,7 @@ struct GpuRenderer3D::FrameCtx {
     // main pass.
     bool soft_particles = false;
     bool particles = false;
+    bool gi = false; // the view has a GI scene for this render (Scene3D::global_illumination)
 };
 
 void GpuRenderer3D::age_targets(FrameCtx& ctx) {
@@ -3195,6 +3210,7 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             v._occ_words = 0;
             v._occ_reset = true;
         });
+    age(v._idle_gi, ctx.gi, static_cast<bool>(v._gi.distance), [&] { release_gi(v); });
     // The renderer's second gathered buffer (occlusion culling's 12 bytes a triangle of the room) goes when no view has
     // used it.
     const bool second_held = _gcb[1].indices || _gcb[1].scan || _gc_job_history;
@@ -8987,6 +9003,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     if (!particles_done) {
         particles_now();
     }
+    if (ctx.gi && ctx.scene.debug.gi_view != GiView3D::Off) {
+        // The GI scene instead of the picture (RenderDebugOptions3D::gi_view).
+        draw_gi_view(commands, pass, *view, ctx.scene, ctx.drawn[0], ctx.taa ? hdr_format : view->_format,
+                     ctx.taa ? 1u : view->_samples, ctx.main_velocity ? hdr_format : SDL_GPU_TEXTUREFORMAT_INVALID,
+                     !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM);
+    }
     SDL_EndGPURenderPass(pass);
     if (ctx.taa_reactive && !reactive_pass(ctx)) {
         // The colour pass is complete. Show it and reset temporal history;
@@ -9166,6 +9188,10 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     {
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.clusters"};
         cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
+    }
+    {
+        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.gi_scene"};
+        ctx.gi = gi_scene(ctx.commands, *view, scene, stats);
     }
     {
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.sun_shadow"};

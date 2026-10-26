@@ -66,6 +66,9 @@ public:
     // layer; a shader samples the array): cascaded shadow maps.
     GpuTexture create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
                                    SDL_GPUTextureUsageFlags usage);
+    // A 3D texture of `format`, width x height x depth (the GI scene's voxels); its texels are not set.
+    GpuTexture create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
+                             SDL_GPUTextureUsageFlags usage);
     // A depth-stencil target of depth_stencil_format() (stencil clips).
     GpuTexture create_depth_stencil(u32 width, u32 height);
     // The depth-stencil format this device draws into, INVALID if none.
@@ -154,6 +157,8 @@ public:
     bool read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba);
     // A region of `src` (`texel_bytes` a texel), tightly packed (waits for the GPU).
     bool read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out);
+    // All of a 3D texture made by create_volume, `depth` slices of its width x height, tightly packed (waits for the GPU).
+    bool read_volume(const GpuTexture& src, u32 depth, u32 texel_bytes, std::vector<u8>& out);
     // `bytes` of `src` from `offset` (waits for the GPU, on a fence of its own that it releases once signalled).
     bool read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vector<u8>& out);
 
