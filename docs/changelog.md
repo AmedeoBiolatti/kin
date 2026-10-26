@@ -54,6 +54,18 @@ releases may change APIs.
   and `ParticleCatalog::remove_effect`/`remove_field`.
 - Write f32 field values in their shortest form (`0.2`, not `0.20000000298`).
 - Add `input.drop` to the scene server and `App::hold_close` for editors.
+- Add game controller bindings (`pad` lines, `PadControl`: buttons, the d-pad,
+  sticks and triggers pushed past halfway) and axes (`InputAxis`, `axis`
+  lines: bindings for -1 and 1, analog sticks, a dead zone;
+  `Input::axis`) to input maps, read by `parse_input_map` and written by
+  `serialize_input_map`. `App::open_gamepads` polls a controller with the
+  window's events. `binding_held` and `axis_value` let editors try bindings
+  that are not in the map.
+- Add scripts on entities: `ScriptComponent` names a Lua file, which
+  `EntityScripts` runs with `on_start`, `on_update` and `on_contact`. `self`
+  reaches the entity's components, transform, `Animator`, input actions and
+  axes; scripts can find, spawn and destroy entities. Changed script files are
+  read again while the game runs. Add `check_lua_syntax`.
 
 - Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
   ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,

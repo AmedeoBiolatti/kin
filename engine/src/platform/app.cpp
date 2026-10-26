@@ -57,6 +57,7 @@ App::~App() {
     KIN_LOG_INFO_F("runtime",
                    "app shutdown",
                    (LogFields{{.name = "windows", .value = std::to_string(_windows.size())}}));
+    _gamepads.reset(); // its subsystem stopped before SDL is
     _update = {};
     _render = {};
     _windows.clear();
@@ -118,7 +119,16 @@ void App::handle_window_close(WindowId window_id) {
     }
 }
 
+void App::open_gamepads() {
+    if (!_gamepads) {
+        _gamepads = std::make_unique<Gamepads>();
+    }
+}
+
 void App::pump_events() {
+    if (_gamepads) {
+        _input.set_gamepad(_gamepads->poll()); // it reads the controller itself, apart from the events
+    }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
         _input.process_native_event(&event);

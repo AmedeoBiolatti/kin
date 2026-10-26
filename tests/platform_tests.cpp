@@ -316,7 +316,63 @@ void test_window_area_at() {
     assert(at(260, 2, false) == WindowArea::Client);
 }
 
+// Actions bound to a controller's buttons and sticks' ways; axes from keys
+// and sticks, less a dead zone; all of it written and read back.
+void test_gamepad_bindings_and_axes() {
+    kin::InputMap map;
+    map.bind("jump", kin::Key::Space);
+    map.bind("jump", kin::PadControl::A);
+    map.bind("left", kin::PadControl::LeftStickLeft);
+    map.set_axis({.name = "move_x",
+                  .negative = {*kin::parse_binding_text("key:A")},
+                  .positive = {*kin::parse_binding_text("key:D"), *kin::parse_binding_text("pad:dpad_right")},
+                  .sticks = {{.axis = kin::PadAxis::LeftX}},
+                  .dead_zone = 0.2f});
+    map.set_axis({.name = "move_y", .sticks = {{.axis = kin::PadAxis::LeftY, .inverted = true}}});
+
+    kin::Input input;
+    input.set_map(map);
+    assert(input.axis("move_x") == 0.0f && input.axis("nothing") == 0.0f);
+    kin::GamepadState pad{.connected = true};
+    pad.set_button(kin::GamepadButton::A, true);
+    pad.left_x = -0.6f;
+    pad.left_y = 0.6f; // up
+    input.set_gamepad(pad);
+    assert(input.pressed("jump") && input.held("jump") && input.frame_pressed("jump") && input.held("left"));
+    // Past the dead zone (0.2): (0.6 - 0.2) / 0.8 = 0.5 of the way; down positive once inverted.
+    assert(std::abs(input.axis("move_x") + 0.5f) < 1e-4f && std::abs(input.axis("move_y") + 0.5f) < 1e-4f);
+    input.advance_step_edges();
+    assert(!input.pressed("jump") && input.held("jump"));
+    pad.set_button(kin::GamepadButton::A, false);
+    pad.left_x = 0.1f; // in the dead zone
+    input.set_gamepad(pad);
+    assert(input.released("jump") && !input.held("left") && input.axis("move_x") == 0.0f);
+    // A key held: all the way, pushed further than the stick.
+    input.set_action_held("jump", true); // Space; and D through an action bound to it
+    kin::InputMap with_right = map;
+    with_right.bind("right", kin::Key::D);
+    input.set_map(with_right);
+    input.set_action_held("right", true);
+    assert(input.axis("move_x") == 1.0f);
+    // No controller: its sticks read nothing.
+    input.set_action_held("right", false);
+    input.set_gamepad({});
+    assert(input.axis("move_x") == 0.0f && !input.held("left"));
+
+    const std::string text = kin::serialize_input_map(map);
+    assert(text.find("pad jump a\n") != std::string::npos && text.find("pad left left_stick_left\n") != std::string::npos);
+    assert(text.find("axis move_x - key:A\naxis move_x + key:D\naxis move_x + pad:dpad_right\naxis move_x stick left_x\n") != std::string::npos);
+    assert(text.find("axis move_y stick -left_y\n") != std::string::npos);
+    kin::InputMap read;
+    std::string error;
+    assert(kin::parse_input_map(text, read, error) && read == map);
+    assert(!kin::parse_input_map("axis move_x sideways key:A\n", read, error) && error.find("line 1") != std::string::npos);
+    assert(!kin::parse_input_map("pad jump z\n", read, error));
+    assert(kin::pad_control_name(kin::PadControl::RightTrigger) == "right_trigger");
+}
+
 int main() {
+    test_gamepad_bindings_and_axes();
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process
     // environment even when GPU CI exports X11 for the separate 3D tests.

@@ -9,6 +9,7 @@
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/script.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
 #if KIN_ENABLE_AUDIO
@@ -573,6 +574,17 @@ void register_builtin_editor_components(EcsWorld& world) {
             .readonly()
             .description("Its map's cells, once read (0: not read).");
     }
+#if KIN_ENABLE_SCRIPTING
+    if (!world.components().find("ScriptComponent")) {
+        // A Lua script of the game's content run for the entity (EntityScripts:
+        // on_start, on_update, on_contact; kin/scripting/entity_scripts.hpp).
+        world.components().native<ScriptComponent>("ScriptComponent")
+            .field("asset", &ScriptComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Script)})
+            .description("A .lua file of the content.")
+            .field("enabled", &ScriptComponent::enabled);
+    }
+#endif
     if (!world.components().find("Animator")) {
         // An animation of an animation file of the game's content played on
         // the entity: its tracks set its components' fields (update_animators).

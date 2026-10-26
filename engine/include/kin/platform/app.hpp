@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/platform/gamepad.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/window.hpp>
 
@@ -111,6 +112,11 @@ public:
     // app quits (quit()) or stays (forget_close()), e.g. after asking about
     // unsaved work. Not held (the default), the app stops at once.
     void hold_close(bool held) { _hold_close = held; }
+    // Game controllers opened (the first one SDL finds, now and when one is
+    // plugged in), their state given to input() each frame: what actions and
+    // axes bound to a controller read. Once is enough; later calls do nothing.
+    void open_gamepads();
+    bool gamepads_open() const { return _gamepads != nullptr; }
     bool close_asked() const { return _close_asked; }
     void forget_close() { _close_asked = false; }
 
@@ -158,6 +164,7 @@ private:
     bool wait_for_change();
     bool _running = false;
     bool _hold_close = false;
+    std::unique_ptr<Gamepads> _gamepads;
     bool _close_asked = false;
     bool _wait_for_events = false;
     f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none

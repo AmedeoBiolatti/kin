@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -145,6 +146,10 @@ InputBinding key_binding(Key key, KeyModifiers modifiers = KeyModifiers::None) {
     };
 }
 
+std::size_t pad_index(InputBinding binding) {
+    return binding.code >= 0 ? static_cast<std::size_t>(binding.code) : static_cast<std::size_t>(-1);
+}
+
 InputBinding mouse_binding(MouseButton button) {
     return {
         .device = InputBindingDevice::MouseButton,
@@ -274,7 +279,108 @@ std::string_view binding_name(InputBinding binding) {
     if (binding.device == InputBindingDevice::Key) {
         return key_name(to_key(binding.code));
     }
+    if (binding.device == InputBindingDevice::Gamepad) {
+        return pad_control_name(static_cast<PadControl>(binding.code));
+    }
     return mouse_button_name(to_mouse_button(binding.code));
+}
+
+std::string_view pad_control_name(PadControl control) {
+    switch (control) {
+    case PadControl::A: return "a";
+    case PadControl::B: return "b";
+    case PadControl::X: return "x";
+    case PadControl::Y: return "y";
+    case PadControl::Back: return "back";
+    case PadControl::Start: return "start";
+    case PadControl::LeftStick: return "left_stick";
+    case PadControl::RightStick: return "right_stick";
+    case PadControl::LeftShoulder: return "left_shoulder";
+    case PadControl::RightShoulder: return "right_shoulder";
+    case PadControl::DPadUp: return "dpad_up";
+    case PadControl::DPadDown: return "dpad_down";
+    case PadControl::DPadLeft: return "dpad_left";
+    case PadControl::DPadRight: return "dpad_right";
+    case PadControl::LeftStickLeft: return "left_stick_left";
+    case PadControl::LeftStickRight: return "left_stick_right";
+    case PadControl::LeftStickUp: return "left_stick_up";
+    case PadControl::LeftStickDown: return "left_stick_down";
+    case PadControl::RightStickLeft: return "right_stick_left";
+    case PadControl::RightStickRight: return "right_stick_right";
+    case PadControl::RightStickUp: return "right_stick_up";
+    case PadControl::RightStickDown: return "right_stick_down";
+    case PadControl::LeftTrigger: return "left_trigger";
+    case PadControl::RightTrigger: return "right_trigger";
+    case PadControl::Count: break;
+    }
+    return "unknown";
+}
+
+std::string_view pad_axis_name(PadAxis axis) {
+    switch (axis) {
+    case PadAxis::LeftX: return "left_x";
+    case PadAxis::LeftY: return "left_y";
+    case PadAxis::RightX: return "right_x";
+    case PadAxis::RightY: return "right_y";
+    case PadAxis::LeftTrigger: return "left_trigger";
+    case PadAxis::RightTrigger: return "right_trigger";
+    }
+    return "left_x";
+}
+
+bool parse_pad_control(std::string_view name, PadControl& out) {
+    const std::string target = lower_copy(name);
+    for (u8 code = 0; code < static_cast<u8>(PadControl::Count); ++code) {
+        if (pad_control_name(static_cast<PadControl>(code)) == target) {
+            out = static_cast<PadControl>(code);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool parse_pad_axis(std::string_view name, PadAxis& out) {
+    const std::string target = lower_copy(name);
+    for (u8 code = 0; code <= static_cast<u8>(PadAxis::RightTrigger); ++code) {
+        if (pad_axis_name(static_cast<PadAxis>(code)) == target) {
+            out = static_cast<PadAxis>(code);
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string binding_text(InputBinding binding) {
+    switch (binding.device) {
+    case InputBindingDevice::Key: return "key:" + std::string(key_name(to_key(binding.code)));
+    case InputBindingDevice::MouseButton: return "mouse:" + std::string(mouse_button_name(to_mouse_button(binding.code)));
+    case InputBindingDevice::Gamepad: return "pad:" + std::string(pad_control_name(static_cast<PadControl>(binding.code)));
+    }
+    return {};
+}
+
+std::optional<InputBinding> parse_binding_text(std::string_view text) {
+    const std::size_t colon = text.find(':');
+    if (colon == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const std::string_view device = text.substr(0, colon);
+    const std::string_view name = text.substr(colon + 1);
+    if (device == "key") {
+        Key key = Key::Unknown;
+        return parse_key(name, key) ? std::optional(key_binding(key)) : std::nullopt;
+    }
+    if (device == "mouse") {
+        MouseButton button = MouseButton::Left;
+        return parse_mouse_button(name, button) ? std::optional(mouse_binding(button)) : std::nullopt;
+    }
+    if (device == "pad") {
+        PadControl control = PadControl::A;
+        return parse_pad_control(name, control)
+                   ? std::optional(InputBinding{.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)})
+                   : std::nullopt;
+    }
+    return std::nullopt;
 }
 
 bool parse_key(std::string_view name, Key& out) {
@@ -330,29 +436,15 @@ void write_modifiers(std::ostream& out, KeyModifiers modifiers) {
     }
 }
 
-InputMap load_input_map(const std::filesystem::path& path) {
-    const std::optional<std::string> text = read_content_text(path);
-    if (!text) {
-        KIN_LOG_ERROR_F("input",
-                        "input map open failed",
-                        (LogFields{{.name = "path", .value = path.string()},
-                                   {.name = "error", .value = "open_failed"}}));
-        throw std::runtime_error("Failed to open input map: " + path.string());
-    }
-    std::istringstream file{*text};
-
+bool parse_input_map(std::string_view text, InputMap& out, std::string& error) {
+    std::istringstream file{std::string(text)};
     InputMap map;
     std::string line;
     i32 line_no = 0;
     const auto fail = [&](std::string_view message) {
-        KIN_LOG_ERROR_F("input",
-                        "input map parse failed",
-                        (LogFields{{.name = "path", .value = path.string()},
-                                   {.name = "line", .value = std::to_string(line_no)},
-                                   {.name = "error", .value = std::string{message}}}));
-        throw std::runtime_error(path.string() + ":" + std::to_string(line_no) + ": " + std::string{message});
+        error = "line " + std::to_string(line_no) + ": " + std::string{message};
+        return false;
     };
-
     while (std::getline(file, line)) {
         ++line_no;
         std::istringstream in(trim_comment(std::move(line)));
@@ -360,67 +452,93 @@ InputMap load_input_map(const std::filesystem::path& path) {
         if (!(in >> kind)) {
             continue;
         }
-
         if (kind == "key") {
             std::string action;
             std::string key_name_text;
             if (!(in >> action >> key_name_text)) {
-                fail("key requires action and key name");
+                return fail("key requires action and key name");
             }
-
             Key key = Key::Unknown;
             if (!parse_key(key_name_text, key)) {
-                fail("unknown key");
+                return fail("unknown key");
             }
-
             KeyModifiers modifiers = KeyModifiers::None;
             for (std::string modifier; in >> modifier;) {
                 if (!parse_modifier(modifier, modifiers)) {
-                    fail("unknown key modifier");
+                    return fail("unknown key modifier");
                 }
             }
-
             map.bind(action, key, modifiers);
             continue;
         }
-
         if (kind == "mouse") {
             std::string action;
             std::string button_name_text;
             if (!(in >> action >> button_name_text)) {
-                fail("mouse requires action and button name");
+                return fail("mouse requires action and button name");
             }
-
             MouseButton button = MouseButton::Left;
             if (!parse_mouse_button(button_name_text, button)) {
-                fail("unknown mouse button");
+                return fail("unknown mouse button");
             }
-
             map.bind(action, button);
             continue;
         }
-
-        fail("unknown directive");
+        if (kind == "pad") {
+            std::string action;
+            std::string control_name;
+            if (!(in >> action >> control_name)) {
+                return fail("pad requires action and control name");
+            }
+            PadControl control = PadControl::A;
+            if (!parse_pad_control(control_name, control)) {
+                return fail("unknown pad control");
+            }
+            map.bind(action, control);
+            continue;
+        }
+        if (kind == "axis") {
+            std::string name;
+            std::string what;
+            std::string value;
+            if (!(in >> name >> what >> value)) {
+                return fail("axis requires a name, then -, +, stick or deadzone, and its value");
+            }
+            InputAxis axis = map.axis(name) ? *map.axis(name) : InputAxis{.name = name};
+            if (what == "-" || what == "+") {
+                const std::optional<InputBinding> binding = parse_binding_text(value);
+                if (!binding) {
+                    return fail("unknown axis binding (key:<Key>, mouse:<button>, pad:<control>)");
+                }
+                (what == "-" ? axis.negative : axis.positive).push_back(*binding);
+            } else if (what == "stick") {
+                InputAxisStick stick;
+                stick.inverted = value.starts_with('-');
+                if (!parse_pad_axis(stick.inverted ? std::string_view(value).substr(1) : std::string_view(value), stick.axis)) {
+                    return fail("unknown pad axis");
+                }
+                axis.sticks.push_back(stick);
+            } else if (what == "deadzone") {
+                try {
+                    axis.dead_zone = std::clamp(std::stof(value), 0.0f, 0.95f);
+                } catch (const std::exception&) {
+                    return fail("deadzone requires a number");
+                }
+            } else {
+                return fail("unknown axis part");
+            }
+            map.set_axis(std::move(axis));
+            continue;
+        }
+        return fail("unknown directive");
     }
-
-    KIN_LOG_INFO_F("input",
-                   "input map loaded",
-                   (LogFields{{.name = "path", .value = path.string()},
-                              {.name = "count", .value = std::to_string(map.action_count())},
-                              {.name = "status", .value = "loaded"}}));
-    return map;
+    out = std::move(map);
+    error.clear();
+    return true;
 }
 
-bool save_input_map(const InputMap& map, const std::filesystem::path& path) {
-    std::ofstream out(path);
-    if (!out) {
-        KIN_LOG_ERROR_F("input",
-                        "input map save failed",
-                        (LogFields{{.name = "path", .value = path.string()},
-                                   {.name = "error", .value = "open_failed"}}));
-        return false;
-    }
-
+std::string serialize_input_map(const InputMap& map) {
+    std::ostringstream out;
     out << "# kin input map\n";
     for (const InputAction& action : map.actions()) {
         for (InputBinding binding : action.bindings) {
@@ -430,10 +548,62 @@ bool save_input_map(const InputMap& map, const std::filesystem::path& path) {
                 out << '\n';
             } else if (binding.device == InputBindingDevice::MouseButton) {
                 out << "mouse " << action.name << ' ' << mouse_button_name(to_mouse_button(binding.code)) << '\n';
+            } else {
+                out << "pad " << action.name << ' ' << pad_control_name(static_cast<PadControl>(binding.code)) << '\n';
             }
         }
     }
+    for (const InputAxis& axis : map.axes()) {
+        for (InputBinding binding : axis.negative) {
+            out << "axis " << axis.name << " - " << binding_text(binding) << '\n';
+        }
+        for (InputBinding binding : axis.positive) {
+            out << "axis " << axis.name << " + " << binding_text(binding) << '\n';
+        }
+        for (const InputAxisStick& stick : axis.sticks) {
+            out << "axis " << axis.name << " stick " << (stick.inverted ? "-" : "") << pad_axis_name(stick.axis) << '\n';
+        }
+        out << "axis " << axis.name << " deadzone " << axis.dead_zone << '\n';
+    }
+    return out.str();
+}
 
+InputMap load_input_map(const std::filesystem::path& path) {
+    const std::optional<std::string> text = read_content_text(path);
+    if (!text) {
+        KIN_LOG_ERROR_F("input",
+                        "input map open failed",
+                        (LogFields{{.name = "path", .value = path.string()},
+                                   {.name = "error", .value = "open_failed"}}));
+        throw std::runtime_error("Failed to open input map: " + path.string());
+    }
+    InputMap map;
+    std::string error;
+    if (!parse_input_map(*text, map, error)) {
+        KIN_LOG_ERROR_F("input",
+                        "input map parse failed",
+                        (LogFields{{.name = "path", .value = path.string()},
+                                   {.name = "error", .value = error}}));
+        throw std::runtime_error(path.string() + ": " + error);
+    }
+    KIN_LOG_INFO_F("input",
+                   "input map loaded",
+                   (LogFields{{.name = "path", .value = path.string()},
+                              {.name = "count", .value = std::to_string(map.action_count())},
+                              {.name = "status", .value = "loaded"}}));
+    return map;
+}
+
+bool save_input_map(const InputMap& map, const std::filesystem::path& path) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        KIN_LOG_ERROR_F("input",
+                        "input map save failed",
+                        (LogFields{{.name = "path", .value = path.string()},
+                                   {.name = "error", .value = "open_failed"}}));
+        return false;
+    }
+    out << serialize_input_map(map);
     const bool ok = static_cast<bool>(out);
     if (ok) {
         KIN_LOG_INFO_F("input",
@@ -468,6 +638,9 @@ void Input::advance_step_edges() {
     _key_prev = _key_cur;
     _key_pressed.fill(false);
     _key_released.fill(false);
+    _pad_prev = _pad_cur;
+    _pad_pressed.fill(false);
+    _pad_released.fill(false);
     _mouse_wheel_y = 0.0f;
     _mouse_wheel_x = 0.0f;
     _mouse_motion = {};
@@ -477,6 +650,8 @@ void Input::consume_frame_edges() {
     _key_frame_pressed.fill(false);
     _key_frame_repeated.fill(false);
     _key_frame_released.fill(false);
+    _pad_frame_pressed.fill(false);
+    _pad_frame_released.fill(false);
     _mouse_frame_pressed.fill(false);
     _mouse_frame_released.fill(false);
     _frame_mouse_wheel_y = 0.0f;
@@ -494,6 +669,9 @@ void Input::begin_frame(bool advance_transients) {
         _key_prev = _key_cur;
         _key_pressed.fill(false);
         _key_released.fill(false);
+        _pad_prev = _pad_cur;
+        _pad_pressed.fill(false);
+        _pad_released.fill(false);
         _mouse_prev = _mouse_cur;
         _mouse_pressed.fill(false);
         _mouse_released.fill(false);
@@ -532,6 +710,8 @@ void Input::begin_frame(bool advance_transients) {
     _key_frame_pressed.fill(false);
     _key_frame_repeated.fill(false);
     _key_frame_released.fill(false);
+    _pad_frame_pressed.fill(false);
+    _pad_frame_released.fill(false);
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
     _frame_mouse_wheel_x = 0.0f;
@@ -901,6 +1081,42 @@ void InputMap::bind(std::string_view action, MouseButton button) {
                                {.name = "binding", .value = std::string{mouse_button_name(button)}}}));
 }
 
+void InputMap::bind(std::string_view action, PadControl control) {
+    _bindings[std::string(action)].push_back({.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)});
+}
+
+void InputMap::set_bindings(std::string_view action, std::vector<InputBinding> bindings) {
+    if (bindings.empty()) {
+        _bindings.erase(std::string(action));
+    } else {
+        _bindings[std::string(action)] = std::move(bindings);
+    }
+}
+
+void InputMap::set_axis(InputAxis axis) {
+    std::string name = axis.name;
+    _axes[std::move(name)] = std::move(axis);
+}
+
+bool InputMap::remove_axis(std::string_view name) {
+    return _axes.erase(std::string(name)) > 0;
+}
+
+const InputAxis* InputMap::axis(std::string_view name) const {
+    const auto found = _axes.find(std::string(name));
+    return found == _axes.end() ? nullptr : &found->second;
+}
+
+std::vector<InputAxis> InputMap::axes() const {
+    std::vector<InputAxis> result;
+    result.reserve(_axes.size());
+    for (const auto& [name, axis] : _axes) {
+        result.push_back(axis);
+    }
+    std::ranges::sort(result, {}, &InputAxis::name);
+    return result;
+}
+
 void InputMap::unbind(std::string_view action) {
     const std::size_t erased = _bindings.erase(std::string(action));
     KIN_LOG_DEBUG_F("input",
@@ -912,6 +1128,7 @@ void InputMap::unbind(std::string_view action) {
 void InputMap::clear() {
     const std::size_t count = _bindings.size();
     _bindings.clear();
+    _axes.clear();
     KIN_LOG_DEBUG_F("input",
                     "input bindings cleared",
                     (LogFields{{.name = "count", .value = std::to_string(count)}}));
@@ -1110,6 +1327,10 @@ bool Input::pressed(std::string_view action) const {
             return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
                 (_key_pressed[scancode] || (_key_cur[scancode] && !_key_prev[scancode]));
         }
+        if (binding.device == InputBindingDevice::Gamepad) {
+            const std::size_t control = pad_index(binding);
+            return control < pad_control_count && (_pad_pressed[control] || (_pad_cur[control] && !_pad_prev[control]));
+        }
         const u8 button = binding_mouse_button(binding);
         return valid_mouse_button(button) && (_mouse_pressed[button] || (_mouse_cur[button] && !_mouse_prev[button]));
     });
@@ -1125,6 +1346,10 @@ bool Input::held(std::string_view action) const {
         if (binding.device == InputBindingDevice::Key) {
             const SDL_Scancode scancode = binding_scancode(binding);
             return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_cur[scancode];
+        }
+        if (binding.device == InputBindingDevice::Gamepad) {
+            const std::size_t control = pad_index(binding);
+            return control < pad_control_count && _pad_cur[control];
         }
         const u8 button = binding_mouse_button(binding);
         return valid_mouse_button(button) && _mouse_cur[button];
@@ -1143,6 +1368,10 @@ bool Input::released(std::string_view action) const {
             return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
                 (_key_released[scancode] || (!_key_cur[scancode] && _key_prev[scancode]));
         }
+        if (binding.device == InputBindingDevice::Gamepad) {
+            const std::size_t control = pad_index(binding);
+            return control < pad_control_count && (_pad_released[control] || (!_pad_cur[control] && _pad_prev[control]));
+        }
         const u8 button = binding_mouse_button(binding);
         return valid_mouse_button(button) && (_mouse_released[button] || (!_mouse_cur[button] && _mouse_prev[button]));
     });
@@ -1158,6 +1387,10 @@ bool Input::frame_pressed(std::string_view action) const {
         if (binding.device == InputBindingDevice::Key) {
             const SDL_Scancode scancode = binding_scancode(binding);
             return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_frame_pressed[scancode];
+        }
+        if (binding.device == InputBindingDevice::Gamepad) {
+            const std::size_t control = pad_index(binding);
+            return control < pad_control_count && _pad_frame_pressed[control];
         }
         const u8 button = binding_mouse_button(binding);
         return valid_mouse_button(button) && _mouse_frame_pressed[button];
@@ -1175,9 +1408,99 @@ bool Input::frame_released(std::string_view action) const {
             const SDL_Scancode scancode = binding_scancode(binding);
             return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_frame_released[scancode];
         }
+        if (binding.device == InputBindingDevice::Gamepad) {
+            const std::size_t control = pad_index(binding);
+            return control < pad_control_count && _pad_frame_released[control];
+        }
         const u8 button = binding_mouse_button(binding);
         return valid_mouse_button(button) && _mouse_frame_released[button];
     });
+}
+
+bool pad_control_held(const GamepadState& pad, PadControl control) {
+    if (!pad.connected) {
+        return false;
+    }
+    constexpr f32 half = 0.5f;
+    const auto code = static_cast<u8>(control);
+    if (code < static_cast<u8>(GamepadButton::Count)) {
+        return pad.button(static_cast<GamepadButton>(code));
+    }
+    switch (control) {
+    case PadControl::LeftStickLeft: return pad.left_x < -half;
+    case PadControl::LeftStickRight: return pad.left_x > half;
+    case PadControl::LeftStickUp: return pad.left_y > half;
+    case PadControl::LeftStickDown: return pad.left_y < -half;
+    case PadControl::RightStickLeft: return pad.right_x < -half;
+    case PadControl::RightStickRight: return pad.right_x > half;
+    case PadControl::RightStickUp: return pad.right_y > half;
+    case PadControl::RightStickDown: return pad.right_y < -half;
+    case PadControl::LeftTrigger: return pad.left_trigger > half;
+    case PadControl::RightTrigger: return pad.right_trigger > half;
+    default: return false;
+    }
+}
+
+bool binding_held(const Input& input, InputBinding binding) {
+    switch (binding.device) {
+    case InputBindingDevice::Key: return input.held(to_key(binding.code));
+    case InputBindingDevice::MouseButton: return input.mouse_held(to_mouse_button(binding.code));
+    case InputBindingDevice::Gamepad:
+        return binding.code >= 0 && binding.code < static_cast<i32>(PadControl::Count) &&
+               pad_control_held(input.gamepad(), static_cast<PadControl>(binding.code));
+    }
+    return false;
+}
+
+f32 axis_value(const Input& input, const InputAxis& axis) {
+    const auto held_any = [&](const std::vector<InputBinding>& bindings) {
+        return std::ranges::any_of(bindings, [&](InputBinding binding) { return binding_held(input, binding); });
+    };
+    f32 value = (held_any(axis.positive) ? 1.0f : 0.0f) - (held_any(axis.negative) ? 1.0f : 0.0f);
+    // A stick pushed further wins; the dead zone taken off and the rest stretched to the end.
+    const GamepadState& pad = input.gamepad();
+    if (pad.connected) {
+        const f32 dead = std::clamp(axis.dead_zone, 0.0f, 0.95f);
+        for (const InputAxisStick& stick : axis.sticks) {
+            f32 raw = 0.0f;
+            switch (stick.axis) {
+            case PadAxis::LeftX: raw = pad.left_x; break;
+            case PadAxis::LeftY: raw = pad.left_y; break;
+            case PadAxis::RightX: raw = pad.right_x; break;
+            case PadAxis::RightY: raw = pad.right_y; break;
+            case PadAxis::LeftTrigger: raw = pad.left_trigger; break;
+            case PadAxis::RightTrigger: raw = pad.right_trigger; break;
+            }
+            if (stick.inverted) {
+                raw = -raw;
+            }
+            const f32 past = std::abs(raw) <= dead ? 0.0f : std::copysign((std::abs(raw) - dead) / (1.0f - dead), raw);
+            if (std::abs(past) > std::abs(value)) {
+                value = past;
+            }
+        }
+    }
+    return std::clamp(value, -1.0f, 1.0f);
+}
+
+void Input::set_gamepad(const GamepadState& state) {
+    _pad = state;
+    for (std::size_t control = 0; control < pad_control_count; ++control) {
+        const bool now = pad_control_held(state, static_cast<PadControl>(control));
+        if (now && !_pad_cur[control]) {
+            _pad_pressed[control] = true;
+            _pad_frame_pressed[control] = true;
+        } else if (!now && _pad_cur[control]) {
+            _pad_released[control] = true;
+            _pad_frame_released[control] = true;
+        }
+        _pad_cur[control] = now;
+    }
+}
+
+f32 Input::axis(std::string_view name) const {
+    const InputAxis* axis = _map.axis(name);
+    return axis ? axis_value(*this, *axis) : 0.0f;
 }
 
 } // namespace kin

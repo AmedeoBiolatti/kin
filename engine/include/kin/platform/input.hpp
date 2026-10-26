@@ -1,6 +1,7 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/platform/gamepad.hpp>
 #include <kin/platform/window.hpp>
 
 #include <array>
@@ -23,6 +24,7 @@ struct DroppedFile {
 };
 
 class App;
+class Input;
 class InputMap;
 
 enum class Key {
@@ -131,9 +133,43 @@ enum class MouseButton : u8 {
     X2,
 };
 
+// A control of a game controller an action can be bound to: its buttons, each
+// stick's four ways (pushed past halfway) and its triggers (pulled past halfway).
+enum class PadControl : u8 {
+    A, // the south face button (Cross)
+    B,
+    X,
+    Y,
+    Back,
+    Start,
+    LeftStick, // pressed in
+    RightStick,
+    LeftShoulder,
+    RightShoulder,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+    LeftStickLeft,
+    LeftStickRight,
+    LeftStickUp,
+    LeftStickDown,
+    RightStickLeft,
+    RightStickRight,
+    RightStickUp,
+    RightStickDown,
+    LeftTrigger,
+    RightTrigger,
+    Count,
+};
+
+// A game controller's analog input, for an axis.
+enum class PadAxis : u8 { LeftX, LeftY, RightX, RightY, LeftTrigger, RightTrigger };
+
 enum class InputBindingDevice {
     Key,
     MouseButton,
+    Gamepad, // code: a PadControl
 };
 
 struct InputBinding {
@@ -147,6 +183,27 @@ struct InputBinding {
 struct InputAction {
     std::string name;
     std::vector<InputBinding> bindings;
+};
+
+// A number from -1 to 1 the player sets: keys, buttons or a stick's ways
+// for its two ends (held: -1 or 1, both: 0), or a controller's analog input
+// (`sticks`; `inverted`: its other way), less a dead zone in the middle; the
+// one pushed furthest wins. "move_x" from A and D, the arrows and the left stick.
+struct InputAxisStick {
+    PadAxis axis = PadAxis::LeftX;
+    bool inverted = false;
+
+    friend constexpr bool operator==(InputAxisStick, InputAxisStick) = default;
+};
+
+struct InputAxis {
+    std::string name;
+    std::vector<InputBinding> negative;
+    std::vector<InputBinding> positive;
+    std::vector<InputAxisStick> sticks;
+    f32 dead_zone = 0.2f;
+
+    friend bool operator==(const InputAxis&, const InputAxis&) = default;
 };
 
 struct InputActionHint {
@@ -165,7 +222,32 @@ struct AvailableInputAction {
 std::string_view key_name(Key key);
 std::string_view mouse_button_name(MouseButton button);
 std::string_view binding_name(InputBinding binding);
+std::string_view pad_control_name(PadControl control); // "a", "dpad_left", "left_stick_up", "left_trigger"
+std::string_view pad_axis_name(PadAxis axis);         // "left_x", "right_trigger"
+bool parse_key(std::string_view name, Key& out);
+bool parse_mouse_button(std::string_view name, MouseButton& out);
+bool parse_pad_control(std::string_view name, PadControl& out);
+bool parse_pad_axis(std::string_view name, PadAxis& out);
+// Whether a controller's control is down: a button, a stick's way or a
+// trigger past halfway (none while it is not connected).
+bool pad_control_held(const GamepadState& pad, PadControl control);
+// Whether `binding` is held on `input` (its modifiers not asked), and an
+// axis's value there (-1 to 1): what Input::held() and Input::axis() read,
+// for a binding or an axis that is not in its map (an editor trying one).
+bool binding_held(const Input& input, InputBinding binding);
+f32 axis_value(const Input& input, const InputAxis& axis);
 
+// A binding as an input file writes it in an axis: "key:A", "mouse:MouseLeft", "pad:dpad_left".
+std::string binding_text(InputBinding binding);
+std::optional<InputBinding> parse_binding_text(std::string_view text);
+
+// An input file: "key <action> <Key> [Shift|Ctrl|Alt...]", "mouse <action>
+// <MouseButton>", "pad <action> <control>", and an axis's lines, "axis <name>
+// - <binding>", "axis <name> + <binding>", "axis <name> stick [-]<pad axis>",
+// "axis <name> deadzone <0..1>". Read (false: `error` says which line and why),
+// and written, actions and axes by name.
+bool parse_input_map(std::string_view text, InputMap& out, std::string& error);
+std::string serialize_input_map(const InputMap& map);
 InputMap load_input_map(const std::filesystem::path& path);
 bool save_input_map(const InputMap& map, const std::filesystem::path& path);
 
@@ -175,18 +257,30 @@ public:
     void bind(std::string_view action, Key key, KeyModifiers modifiers);
     void bind(std::string_view action, std::initializer_list<Key> keys);
     void bind(std::string_view action, MouseButton button);
+    void bind(std::string_view action, PadControl control);
+    // Its bindings, all of them (none: it is gone).
+    void set_bindings(std::string_view action, std::vector<InputBinding> bindings);
     void unbind(std::string_view action);
     void clear();
 
-    bool empty() const { return _bindings.empty(); }
+    bool empty() const { return _bindings.empty() && _axes.empty(); }
     i32 action_count() const { return static_cast<i32>(_bindings.size()); }
     std::vector<InputAction> actions() const;
     const std::vector<InputBinding>* bindings(std::string_view action) const;
+
+    // Axes, by name: one of that name replaced.
+    void set_axis(InputAxis axis);
+    bool remove_axis(std::string_view name);
+    const InputAxis* axis(std::string_view name) const;
+    std::vector<InputAxis> axes() const;
+
+    friend bool operator==(const InputMap&, const InputMap&) = default;
 
 private:
     friend class Input;
 
     std::unordered_map<std::string, std::vector<InputBinding>> _bindings;
+    std::unordered_map<std::string, InputAxis> _axes;
 };
 
 class InputActionContext {
@@ -356,6 +450,14 @@ public:
     bool released(std::string_view action) const;
     bool frame_pressed(std::string_view action) const;
     bool frame_released(std::string_view action) const;
+    // An axis of the map, -1 to 1 (0 when there is no such axis).
+    f32 axis(std::string_view name) const;
+
+    // The game controller's state, as App passes it each frame when it opens
+    // controllers (AppConfig::gamepads), or as a test sets it: what actions
+    // and axes bound to a controller read.
+    void set_gamepad(const GamepadState& state);
+    const GamepadState& gamepad() const { return _pad; }
 
 private:
     friend class App;
@@ -411,6 +513,16 @@ private:
 
     std::unordered_map<WindowId, Vec2f> _window_mouse_pos;
     InputMap _map;
+
+    // The controller: as last set, and each control as a button (edges as the keys').
+    static constexpr std::size_t pad_control_count = static_cast<std::size_t>(PadControl::Count);
+    GamepadState _pad{};
+    std::array<bool, pad_control_count> _pad_cur = {};
+    std::array<bool, pad_control_count> _pad_prev = {};
+    std::array<bool, pad_control_count> _pad_pressed = {};
+    std::array<bool, pad_control_count> _pad_released = {};
+    std::array<bool, pad_control_count> _pad_frame_pressed = {};
+    std::array<bool, pad_control_count> _pad_frame_released = {};
 };
 
 } // namespace kin

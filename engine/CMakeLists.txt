@@ -238,7 +238,8 @@ if(KIN_ENABLE_SCRIPTING)
     add_library(kin_scripting_scenes STATIC
         src/scripting/script_engine.cpp
         src/scripting/script_scene.cpp
-        src/scripting/script_runtime.cpp)
+        src/scripting/script_runtime.cpp
+        src/scripting/entity_scripts.cpp)
     if(KIN_ENABLE_AUDIO)
         target_sources(kin_scripting_scenes PRIVATE src/scripting/lua_audio.cpp)
     endif()

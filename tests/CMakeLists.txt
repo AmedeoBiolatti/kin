@@ -420,6 +420,7 @@ target_link_libraries(kin_scene_asset_tests PRIVATE
 
 add_test(NAME kin-scene-asset COMMAND kin_scene_asset_tests)
 
+kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
 kin_add_component_test(SCRIPTING kin_scripting_tests kin-scripting
     SOURCES scripting_tests.cpp LINK_TARGET kin::scripting_scenes
     DEFINITIONS KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)
