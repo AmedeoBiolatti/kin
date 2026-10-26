@@ -145,8 +145,8 @@ static_assert(sizeof(GiResolveUniforms) == 240);
 
 // The most rays a batch casts (16 bytes each in the rays' buffer).
 constexpr u32 max_gi_rays = 1u << 20;
-// The lit scene's turn: each render lights its blocks made again and a quarter of the rest.
-constexpr u32 gi_light_turns = 4;
+// The lit scene's turn: each render lights its blocks made again and an eighth of the rest.
+constexpr u32 gi_light_turns = 8;
 // The flood's rounds (the distances are kept to 8), a pass each.
 constexpr std::array<i32, 5> gi_flood_rounds{8, 4, 2, 1, 1};
 
@@ -745,6 +745,11 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             }
         }
     };
+    // A change that does not go on from one the render before.
+    const bool started = std::any_of(changed.begin(), changed.end(), [&](const Bounds3D& b) {
+        return std::none_of(g.last_changes.begin(), g.last_changes.end(),
+                            [&](const Bounds3D& before) { return overlaps(b, before); });
+    });
     for (u32 k = 0; k < levels; ++k) {
         const f32 c = cell * static_cast<f32>(1u << k);
         if (whole) {
@@ -780,10 +785,20 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             mark(k, slab);
             floods[k].push_back({edge, over});
         }
-        // What changed: in the first level at once, in level k every 2^k renders (the coarser levels, further out,
-        // wait a render or three), kept till then.
+        // What changed, kept till its level's turn: the first level's at once after a render in which nothing changed
+        // there, else (something that keeps moving: a character's pose, a falling prop) every fourth render; level k's
+        // (further out, coarser) every 4 x 2^k renders, the levels' turns in different renders.
         std::vector<Bounds3D>& waiting = g.waiting_changes[k];
-        waiting.insert(waiting.end(), changed.begin(), changed.end());
+        for (const Bounds3D& b : changed) {
+            // Not one a box already waiting holds (an animation's, render after render).
+            const bool held = std::any_of(waiting.begin(), waiting.end(), [&](const Bounds3D& w) {
+                return w.min.x <= b.min.x && w.min.y <= b.min.y && w.min.z <= b.min.z && b.max.x <= w.max.x &&
+                       b.max.y <= w.max.y && b.max.z <= w.max.z;
+            });
+            if (!held) {
+                waiting.push_back(b);
+            }
+        }
         if (waiting.size() > 64) {
             Bounds3D all = waiting[0];
             for (const Bounds3D& b : waiting) {
@@ -792,7 +807,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             }
             waiting = {all};
         }
-        if ((g.ticks & ((1u << k) - 1u)) != 0) {
+        const bool turn = (k == 0 && started) || g.ticks % (4u << k) == (2u << k) - 2u;
+        if (!turn) {
             continue;
         }
         for (const Bounds3D& b : waiting) {
@@ -808,6 +824,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         waiting.clear();
     }
     ++g.ticks;
+    g.last_changes = std::move(changed);
     const u64 total_voxels = window_voxels * levels;
     stats.gi_voxels = static_cast<u32>(total_voxels);
     stats.gi_levels = levels;

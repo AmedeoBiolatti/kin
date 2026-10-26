@@ -420,7 +420,7 @@ struct GiProbes3D {
     u32 rays = 128; // rays a probe casts at each update (16 to 256)
     // Probes updated each render: those new to their window first, then the others in turn (0: as many as a million
     // rays allow).
-    u32 per_render = 4096;
+    u32 per_render = 2048;
     f32 hysteresis = 0.97f; // how much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower
     f32 intensity = 1.0f;   // their light's strength
 };

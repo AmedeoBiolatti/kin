@@ -1,8 +1,9 @@
 #version 450 core
 // kin's GI probes (docs/3d_plan.md, G5b): each probe of the batch takes its rays into its tiles, a workgroup a probe
-// and a thread a texel. Irradiance (8 x 8): each texel's direction, the cosine-weighted mean of the rays' light (the
-// light a surface facing that way receives, over pi). Moments (16 x 16): the mean of the rays' distances and their
-// squares, weighted by the cosine to the 50th (each texel sees a narrow cone). Each is blended with what the texel
+// and a thread a texel inside a tile (the borders copied after). Irradiance (8 x 8): each texel's direction, the
+// cosine-weighted mean of the rays' light (the light a surface facing that way receives, over pi). Moments (16 x 16):
+// the mean of the rays' distances and their squares, weighted by the cosine to the 50th (each texel sees a narrow
+// cone). Each is blended with what the texel
 // held, keeping `hysteresis` of it (none in a probe's first update). The border texels hold their octahedral
 // neighbours, so that filtering across a tile's edge reads the other side of the sphere. A probe whose rays meet
 // more than a quarter backs is inside something: it gives nothing until that changes.
@@ -31,6 +32,8 @@ shared vec4 found[256];
 shared vec3 ways[256];
 shared uint backs;
 shared uint fresh;
+shared vec2 moments_inside[196];   // the moments' tile inside its border, after this update
+shared vec4 irradiance_inside[36]; // the irradiance's
 
 vec3 fibonacci(uint i, uint n) {
     const float phi = 2.399963229728653 * float(i);
@@ -60,6 +63,19 @@ ivec2 source_of(ivec2 t, int n) {
         return ivec2(n - 2, last - t.y);
     }
     return t;
+}
+
+// Border texel `i` of an n x n tile (4 (n - 1) of them): the top row, the bottom row, then the left and right columns
+// between them.
+ivec2 border_texel(int i, int n) {
+    if (i < n) {
+        return ivec2(i, 0);
+    }
+    if (i < 2 * n) {
+        return ivec2(i - n, n - 1);
+    }
+    const int j = i - 2 * n;
+    return j < n - 2 ? ivec2(0, 1 + j) : ivec2(n - 1, 1 + j - (n - 2));
 }
 
 vec3 direction_of(ivec2 texel, int n) {
@@ -99,27 +115,32 @@ void main() {
     memoryBarrierShared();
     barrier();
     const float keep = fresh != 0u ? 0.0 : p.misc.x;
-    const ivec2 t = ivec2(gl_LocalInvocationID.xy);
 
-    // Moments.
-    {
-        const vec3 dir = direction_of(source_of(t, 16), 16);
+    // Each thread one texel inside a tile: the moments' 14 x 14 first, then the irradiance's 6 x 6, each one walk over
+    // the rays; then the borders copy them.
+    if (local < 196u) {
+        const ivec2 t = ivec2(1 + int(local % 14u), 1 + int(local / 14u));
+        const vec3 dir = direction_of(t, 16);
         vec2 sum = vec2(0.0);
         float total = 0.0;
         for (uint r = 0u; r < n; ++r) {
-            const float w = pow(max(0.0, dot(dir, ways[r])), 50.0);
+            // The cosine to the 50th, as e^(50 (c - 1)) (the same near 1, where it is not nothing).
+            const float w = exp2(72.13475 * (dot(dir, ways[r]) - 1.0));
             const float d = min(abs(found[r].w), farthest);
             sum += w * vec2(d, d * d);
             total += w;
         }
         const ivec3 at = ivec3(probe.xy * 16 + t, probe.z);
+        vec2 value = imageLoad(uMoments, at).rg;
         if (total > 1e-6) {
-            imageStore(uMoments, at, vec4(mix(sum / total, imageLoad(uMoments, at).rg, keep), 0.0, 0.0));
+            value = mix(sum / total, value, keep);
+            imageStore(uMoments, at, vec4(value, 0.0, 0.0));
         }
-    }
-    // Irradiance.
-    if (t.x < 8 && t.y < 8) {
-        const vec3 dir = direction_of(source_of(t, 8), 8);
+        moments_inside[local] = value;
+    } else if (local < 232u) {
+        const uint i = local - 196u;
+        const ivec2 t = ivec2(1 + int(i % 6u), 1 + int(i / 6u));
+        const vec3 dir = direction_of(t, 8);
         vec3 sum = vec3(0.0);
         float total = 0.0;
         for (uint r = 0u; r < n; ++r) {
@@ -128,9 +149,24 @@ void main() {
             total += w;
         }
         const ivec3 at = ivec3(probe.xy * 8 + t, probe.z);
+        vec4 value = imageLoad(uIrradiance, at);
         if (total > 1e-6) {
-            imageStore(uIrradiance, at, vec4(mix(sum / total, imageLoad(uIrradiance, at).rgb, keep), 1.0));
+            value = vec4(mix(sum / total, value.rgb, keep), 1.0);
+            imageStore(uIrradiance, at, value);
         }
+        irradiance_inside[i] = value;
+    }
+    memoryBarrierShared();
+    barrier();
+    // The borders: 60 of the moments' tile, 28 of the irradiance's.
+    if (local < 60u) {
+        const ivec2 t = border_texel(int(local), 16);
+        const ivec2 from = source_of(t, 16) - 1;
+        imageStore(uMoments, ivec3(probe.xy * 16 + t, probe.z), vec4(moments_inside[from.y * 14 + from.x], 0.0, 0.0));
+    } else if (local < 88u) {
+        const ivec2 t = border_texel(int(local - 60u), 8);
+        const ivec2 from = source_of(t, 8) - 1;
+        imageStore(uIrradiance, ivec3(probe.xy * 8 + t, probe.z), irradiance_inside[from.y * 6 + from.x]);
     }
     if (local == 0u) {
         imageStore(uProbeData, probe, vec4(data.xyz, float(backs) > 0.25 * float(n) ? -1.0 : 1.0));

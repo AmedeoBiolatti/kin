@@ -2681,22 +2681,24 @@ window in each level too. What is made again, and how:
   voxelized and flooded again (the flood over them and two blocks more, written over one more; at the side a window
   left, the block along its new edge). The voxelizer counts voxels from the world's origin, not the window's, so a
   voxel holds the same wherever its window stood: made again where it changed, or after the window moved or jumped,
-  the scene is to the byte the one built afresh (`test_gpu_gi_scene_builds`, `_scrolls`). The coarser levels take
-  what changed every 2^k renders.
+  the scene is to the byte the one built afresh (`test_gpu_gi_scene_builds`, `_scrolls`). A change is made at once
+  after a still render, else (an animation, a falling prop) every fourth render; the coarser levels' every 4 x 2^k
+  renders, each level in its own renders.
 - **Fewer triangles:** each mesh keeps the box of each run of 64 of its triangles; the voxelizer takes only the runs
   that reach a block being made (a workgroup a run), and clamps each triangle to the box round those blocks.
 - **Fewer passes:** the flood's seeding and its writing folded into its first and last rounds (five passes, not
   seven), all its boxes a pass (boxes that overlap made one).
 - **The probes:** placed again only near where the distances were written; those new to a window traced first (a
   queue: a level whose probes are not traced yet leaves the place to the next, `test_gpu_gi_probes_scroll`); the lit
-  scene lights the blocks made this render and a quarter of the others in turn.
+  scene lights the blocks made this render and an eighth of the others in turn; 2,048 probes traced a render (was
+  4,096).
 - **Their light on the view:** read once a texel at half the view's size after the pre-pass (`gi_resolve.comp`: the
   light facing the surface's normal and a linear fit of its brightness round it), and by the main pass from the four
   texels round each pixel, turned to the normal map's normal and the reflection.
 
 The Bistro at 2844 x 1600 (`--gi`, the RTX 4080 laptop, the mannequin posed anew each render; GPU times from kin's
 fences, each part timed in its own submission, and passes compared in alternating blocks of one run, the laptop
-throttling at 86-87 C): GI from about 24 ms a render to about 4.3.
+throttling at 86-87 C): GI from about 24 ms a render to about 4.3 in part 1 (kin 5a363b6):
 
 | Part | ms | What did it |
 |---|---|---|
@@ -2711,9 +2713,18 @@ each scene (`max_gi_probes` now 65,536 a level, so the Cornell box keeps probes 
 dB, SSIM 0.978; G5b 7.61), the furnace 0.53 (44.1 dB; 0.27), Sponza's nave 7.09 (7.10), its roof 6.91 (6.50): the
 light read on the view loses nothing that shows.
 
-Left for G5c: the budget (2 ms: about 4.3 now; what is left to try is updating a posed character's blocks less often
-than each render, fewer probes a render, the main pass shading only what the pre-pass kept, and the coarser levels'
-probes less often), and the Bistro against Godot.
+Then the work spread over renders: what keeps changing (the mannequin's pose) made every fourth render and the coarser
+levels' in their own renders (a test: a pose changing every render is made every fourth, and the scene catches up to
+the byte the one built afresh once it stops), boxes already waiting not queued again, an eighth of the lit scene a
+render, 2,048 probes traced a render, and the probes' update a walk over the rays a thread (the borders copied). Timed
+as the average of a render (the work comes in some renders, not others) and with GI on and off in alternating blocks of
+one run: **about 2.35 ms a render with the laptop throttling** (its frame without GI 11.9 ms), **about 1.6 at full
+clock** (8.0 ms without GI; the same share, a fifth). Of it, about: the GI scene 15%, the probes 28% (their trace 14%),
+their light on the view 21%, reading it in the main pass 36%. The light variants with nothing else to light cost about
+0.15 ms: a variant of their own is not worth it.
+
+Left for G5c: the Bistro against Godot. Then, if the budget must hold while the laptop throttles: the light on the view
+at a quarter of the view's size, or the main pass shading only what the pre-pass kept.
 
 ### Later, each on request
 

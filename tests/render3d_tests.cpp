@@ -3059,9 +3059,10 @@ void test_gpu_gi_scene() {
 }
 
 // When the GI scene is built: once, and again only where something it is made of changes (a copy moving, a pose, a
-// material: the blocks round it, not all of them); two views of one scene build it to the byte alike, and a scene made
-// again where it changed is to the byte the one built afresh; with it off nothing is built, and the picture is the
-// same with it on and its probes off (the GI scene alone lights nothing).
+// material: the blocks round it, not all of them; a change that goes on every render, every fourth render); two views
+// of one scene build it to the byte alike, and a scene made again where it changed is to the byte the one built
+// afresh; with it off nothing is built, and the picture is the same with it on and its probes off (the GI scene alone
+// lights nothing).
 void test_gpu_gi_scene_builds() {
     with_gpu("test_gpu_gi_scene_builds", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -3117,6 +3118,24 @@ void test_gpu_gi_scene_builds() {
         const kin::GiScene3D back = voxels(view);
         assert(back.distance == first.distance && back.albedo == first.albedo && back.normal == first.normal &&
                back.emission == first.emission);
+        // A pose that changes every render (an animation) is made every fourth render once it goes on; when it stops,
+        // the scene catches up within three renders, to the byte the one built afresh.
+        int made = 0;
+        for (int i = 1; i <= 8; ++i) {
+            made += built(view, scene_of(true, 1.5f - 0.05f * static_cast<float>(i), ball)) ? 1 : 0;
+        }
+        std::cerr << "gi scene builds: a pose changing 8 renders running made in " << made << '\n';
+        assert(made >= 2 && made <= 3);
+        const float stopped = 1.5f - 0.05f * 8.0f;
+        for (int i = 0; i < 3; ++i) {
+            (void)built(view, scene_of(true, stopped, ball));
+        }
+        assert(!built(view, scene_of(true, stopped, ball)));
+        kin::View3D third = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        assert(built(third, scene_of(true, stopped, ball)));
+        const kin::GiScene3D caught = voxels(view), afresh = voxels(third);
+        assert(caught.distance == afresh.distance && caught.albedo == afresh.albedo && caught.normal == afresh.normal &&
+               caught.emission == afresh.emission);
         // Off: nothing built or kept, and the picture as with it on.
         kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false, 1.5f, ball));

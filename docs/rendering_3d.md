@@ -811,19 +811,22 @@ the plan's G5b results.
   slabs a window gains when it moves (all of a window that jumps past where it was; all of every level when the
   settings change). A block made again is emptied, voxelized from the copies that reach into it, and its distances
   flooded again with a margin; the rest keep theirs. A voxel holds the same whether it was made with the rest or
-  alone, and wherever its window stood: the same scene gives the same voxels to the byte however it got there.
+  alone, and wherever its window stood: the same scene gives the same voxels to the byte however it got there. What
+  changed is made in the first level at once after a render in which nothing changed there, else (something that
+  keeps moving: an animated character, a falling prop) every fourth render; in level k every 4 x 2^k renders, the
+  levels in different renders (the light it bounces is low and slow, the probes' kept over many renders).
   `debug_stats()`: `gi_built` (anything made this render), `gi_blocks`.
 - **The lit scene:** each surface voxel's light: its colour times the sun's and the fill light's, each point and spot
   light's within reach (kin_lit's fall-off and cones) through a ray walked toward the light through the voxels (a
   surface in the way: none), and the probes' light (the bounce of the render before), plus its emission. A double-sided
   voxel has each side's own light, so a wall between a lit room and a dark one is dark on the dark side. Each render
-  lights the blocks it made and a quarter of all the others in turn (a light that changes is in all of it within four
+  lights the blocks it made and an eighth of all the others in turn (a light that changes is in all of it within eight
   renders).
 - **The probes** (`global_illumination.probes`, a `GiProbes3D`): on a grid every `spacing` voxels (2, 4 or 8: 4; further
   apart where a level would have more than `max_gi_probes`, 65,536), a window of them in each level, moving with the
   voxels'. A probe more than 1.8 spacings from every surface sleeps (at most 7.9 voxels: the distances are kept to 8),
   and one within 1.8 voxels of a surface moves to the place with the most room nearby; they are placed again where the
-  scene changes, and a probe new to its window starts empty. Each render a batch of them (`per_render`, 4,096; 0, all;
+  scene changes, and a probe new to its window starts empty. Each render a batch of them (`per_render`, 2,048; 0, all;
   at most a million rays) each casts `rays` rays (128, a spherical Fibonacci set turned each render) through the
   voxels, from the finest window that holds it on to the coarser ones: a hit reads the lit scene, a miss the sky (the
   environment's specular chain, or the ambient and ground ambient). The probes new to their windows go first, the
@@ -868,8 +871,8 @@ the plan's G5b results.
   `gi_lit` and `gi_resolved`. With `debug.gpu_pass_markers` each of its passes is a debug group (`kin3d.gi_clear`,
   `_voxelize`, `_attributes`, `_flood`, `_place`, `_light`, `_trace`, `_update`, `_resolve`).
 - **Cost:** see the plan's G5a to G5c results: the Bistro at 2844 x 1600 on an RTX 4080 laptop, its mannequin
-  posed anew each render, about 4.3 ms of GPU a render (the GI scene 1.3, the probes 1.2, their light on the view 0.5,
-  its reading in the main pass 0.9 and the light variants 0.3).
+  posed anew each render, about 1.6 ms of GPU a render at full clock and 2.35 throttled (a fifth of the frame without
+  it: the GI scene about 15%, the probes 28%, their light on the view 21%, reading it in the main pass 36%).
 
 ### Levels of detail
 

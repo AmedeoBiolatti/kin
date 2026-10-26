@@ -23,8 +23,8 @@ releases may change APIs.
   fixed over an area it holds), made again only where something changed or a
   window moved, to the byte as if built afresh; the probes' light is read once a
   pixel at half the view's size after the depth pre-pass (which global
-  illumination turns on). The Bistro at 2844 x 1600: about 4.3 ms of GPU a
-  render.
+  illumination turns on); what keeps moving is made every fourth render. The
+  Bistro at 2844 x 1600: about 1.6 ms of GPU a render (2.35 throttled).
 - Add anisotropic filtering of 3D materials' mipmapped textures
   (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
   `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with

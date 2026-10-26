@@ -263,6 +263,7 @@ private:
         std::vector<u32> made;
         std::vector<std::array<i32, 7>> rewritten;
         std::array<std::vector<Bounds3D>, max_gi_levels> waiting_changes; // what changed, each level's, not yet made
+        std::vector<Bounds3D> last_changes;                               // what changed in the render before
         u32 ticks = 0;                                                    // renders that had the GI scene
         u64 renders = 0;
         GpuTexture irradiance, moments, probe_data;
