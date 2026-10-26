@@ -229,6 +229,9 @@ public:
         f32 lut_strength = 1.0f;
     };
     virtual bool set_color_output(const ColorOutputState&) { return false; }
+    // `scene` drawn into `dest` (through the transform) as the output pass
+    // would show it (Renderer2D::draw_color_output).
+    virtual bool draw_color_output(const Texture&, Rectf, Rectf, const ColorOutputState&, bool) { return false; }
     // The current target's size in pixels (a layer's resolution is a share of it).
     virtual Vec2i current_target_pixels() const { return {}; }
     // Draws show how many times each pixel is shaded instead of themselves.

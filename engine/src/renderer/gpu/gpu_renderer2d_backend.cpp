@@ -308,6 +308,49 @@ bool GpuRenderer2DBackend::set_color_output(const ColorOutputState& output) {
     return true;
 }
 
+bool GpuRenderer2DBackend::draw_color_output(const Texture& scene, Rectf source_rect, Rectf dest, const ColorOutputState& output, bool linear) {
+    const auto* source = as_gpu(scene.backend().get());
+    if (!_color_output_shader.handle() || !source || !source->texture()) {
+        return false;
+    }
+    ensure_frame();
+    const auto* lut = as_gpu(output.lut.backend().get());
+    const bool has_lut = lut && lut->texture() && output.lut_size > 1;
+    struct Uniforms {
+        f32 a[4];
+        f32 b[4];
+        f32 c[4];
+    } uniforms{{output.exposure, static_cast<f32>(output.tonemap), output.dither ? 1.0f : 0.0f, linear ? 1.0f : 0.0f},
+               {output.lut_strength, 0.0f, static_cast<f32>(output.lut_size), 0.0f},
+               {has_lut ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f}};
+    const f32 x0 = dest.x, y0 = dest.y, x1 = dest.x + dest.w, y1 = dest.y + dest.h;
+    // The part of the picture `source_rect` (its pixels; empty: all of it) says.
+    const f32 tw = static_cast<f32>(std::max(1u, source->texture().width())), th = static_cast<f32>(std::max(1u, source->texture().height()));
+    const bool part = source_rect.w > 0.0f && source_rect.h > 0.0f;
+    const f32 u0 = part ? source_rect.x / tw : 0.0f, v0 = part ? source_rect.y / th : 0.0f;
+    const f32 u1 = part ? (source_rect.x + source_rect.w) / tw : 1.0f, v1 = part ? (source_rect.y + source_rect.h) / th : 1.0f;
+    std::array<gpu::GpuVertex, 6> verts{{
+        {x0, y0, u0, v0, 255, 255, 255, 255},
+        {x1, y0, u1, v0, 255, 255, 255, 255},
+        {x1, y1, u1, v1, 255, 255, 255, 255},
+        {x0, y0, u0, v0, 255, 255, 255, 255},
+        {x1, y1, u1, v1, 255, 255, 255, 255},
+        {x0, y1, u0, v1, 255, 255, 255, 255},
+    }};
+    place(verts);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> extra{{
+        {.texture = has_lut ? lut->texture().handle() : _white.handle(), .sampler = _sampler_linear},
+        {.texture = _white.handle(), .sampler = _sampler_linear},
+    }};
+    retain(scene);
+    if (has_lut) {
+        retain(output.lut);
+    }
+    _batch.push(verts, _color_output_shader.handle(), source->texture().handle(), current_scissor(),
+                resolve_blend(gpu::GpuBlendMode::Alpha), &uniforms, sizeof(uniforms), _sampler_linear, extra);
+    return true;
+}
+
 const gpu::GpuTexture* GpuRenderer2DBackend::run_output_pass(const gpu::GpuTexture* source) {
     const bool linear = _color_space == ColorSpace::Linear;
     const bool lut = static_cast<bool>(_color_output.lut) || static_cast<bool>(_color_output.lut_to);

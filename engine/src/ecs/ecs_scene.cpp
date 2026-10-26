@@ -2,6 +2,7 @@
 
 #include <kin/assets/content.hpp>
 #include <kin/ecs/camera.hpp>
+#include <kin/ecs/lighting.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/platform/window.hpp>
 #include <kin/runtime/debug_options.hpp>
@@ -10,6 +11,7 @@
 #include <chrono>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace kin {
 namespace {
@@ -110,6 +112,21 @@ void EcsScene::render(SceneContext& ctx) {
 
     ctx.renderer.clear(_render_config.clear_color);
 
+    if (_render_config.scene_lighting) {
+        // The colour output a ColorGrade says, while there is one.
+        if (std::optional<ColorOutput> output = scene_color_output(ecs())) {
+            ctx.renderer.set_color_output(std::move(*output));
+            _graded = true;
+        } else if (std::exchange(_graded, false)) {
+            ctx.renderer.set_color_output({});
+        }
+    }
+
+    Vec2f screen = _render_config.view_size;
+    if (screen.x <= 0.0f || screen.y <= 0.0f) {
+        const Vec2i points = ctx.window.size();
+        screen = {static_cast<f32>(points.x), static_cast<f32>(points.y)};
+    }
     Camera2D camera;
     const Camera2D* camera_ptr = nullptr;
     if (_render_config.camera_callback) {
@@ -118,16 +135,21 @@ void EcsScene::render(SceneContext& ctx) {
         camera_ptr = &camera;
     } else if (_render_config.scene_cameras) {
         DebugStepTimer timer{timing_debug, "render.scene.camera"};
-        Vec2f size = _render_config.view_size;
-        if (size.x <= 0.0f || size.y <= 0.0f) {
-            const Vec2i points = ctx.window.size();
-            size = {static_cast<f32>(points.x), static_cast<f32>(points.y)};
-        }
-        if (std::optional<Camera2D> found = scene_camera(ecs(), size)) {
+        if (std::optional<Camera2D> found = scene_camera(ecs(), screen)) {
             camera = *found;
             camera_ptr = &camera;
         }
     }
+
+    // Lit: the world (and its effects) drawn first, then lit, then the UI layer and above.
+    const bool lit = _render_config.scene_lighting && scene_lighting(ecs()) != nullptr;
+    constexpr u64 unlit_passes = render_pass_mask::ui | render_pass_mask::debug | render_pass_mask::editor_overlay;
+    const auto light_world = [&] {
+        DebugStepTimer timer{timing_debug, "render.scene.lighting"};
+        const Rectf area = camera_ptr ? Rectf{0.0f, 0.0f, camera_ptr->viewport.x, camera_ptr->viewport.y}
+                                      : Rectf{0.0f, 0.0f, screen.x, screen.y};
+        apply_scene_lighting(ctx.renderer, _lighting, ecs(), camera_ptr ? camera_ptr->view_transform() : Affine2{}, area);
+    };
 
     RenderProfile profile;
     RenderView view;
@@ -220,7 +242,13 @@ void EcsScene::render(SceneContext& ctx) {
         }
         {
             DebugStepTimer timer{timing_debug, "render.scene.flush_world"};
-            _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask);
+            if (lit) {
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask & ~unlit_passes);
+                light_world();
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask & unlit_passes);
+            } else {
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask);
+            }
         }
     } else {
         WorldRenderState& state = render_state();
@@ -254,7 +282,13 @@ void EcsScene::render(SceneContext& ctx) {
         }
         {
             DebugStepTimer timer{timing_debug, "render.scene.flush_world"};
-            _dynamic_render_queue.flush(ctx.renderer, view, pass_mask);
+            if (lit) {
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask & ~unlit_passes);
+                light_world();
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask & unlit_passes);
+            } else {
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask);
+            }
         }
     }
     if (debug) {

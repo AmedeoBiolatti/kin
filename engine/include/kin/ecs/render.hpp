@@ -27,6 +27,7 @@ struct ParticleSystemComponent;
 struct ParticleFieldComponent;
 struct TilemapComponent;
 struct TextRenderer;
+struct ShaderEffect;
 
 // Where an entity sits relative to its parent (flecs ChildOf), or to the world
 // without one: scaled, then turned (degrees, clockwise), then moved to `pos`.
@@ -75,6 +76,8 @@ struct SpriteRenderer {
     // negative Transform2D scale on an axis mirrors it too (both cancel out).
     bool flip_x = false;
     bool flip_y = false;
+    // How it combines with what is under it: Additive for glows, Multiply for shade.
+    BlendMode blend = BlendMode::Alpha;
 };
 
 // A texture, or a region of one (`source`; empty: all of it), drawn at the
@@ -98,6 +101,7 @@ struct TextureRenderer {
     // As SpriteRenderer's.
     bool flip_x = false;
     bool flip_y = false;
+    BlendMode blend = BlendMode::Alpha;
 };
 
 struct RectRenderer {
@@ -111,6 +115,7 @@ struct RectRenderer {
     bool outline = false;
     bool visible = true;
     bool static_renderable = false;
+    BlendMode blend = BlendMode::Alpha;
 };
 
 struct LineRenderer {
@@ -167,6 +172,7 @@ struct ShapeRenderer {
     f32 sort_y_offset = 0.0f;
     bool visible = true;
     bool static_renderable = false;
+    BlendMode blend = BlendMode::Alpha;
 
     // What `mesh` was made from (kept by bind_shape_renderers).
     ShapeSpec made{};
@@ -297,6 +303,7 @@ private:
     flecs::query<const ParticleFieldComponent, const ClipGroup*> _particle_fields;
     flecs::query<const Transform2D, const WorldTransform, const TilemapComponent, const ClipGroup*> _tilemaps;
     flecs::query<const Transform2D, const WorldTransform, const TextRenderer, const ClipGroup*> _texts;
+    flecs::query<const Transform2D, const WorldTransform, const ShaderEffect, const ClipGroup*> _shader_effects;
     // Clip groups' queues by owner; those used by the current collect, in order.
     std::unordered_map<u64, std::shared_ptr<RenderQueue>> _group_queues;
     std::vector<u64> _groups_used;
@@ -379,6 +386,11 @@ bool submit_text(RenderQueue& queue,
                  const WorldTransform& transform,
                  const TextRenderer& text,
                  const RenderView* view = nullptr);
+bool submit_shader_effect(RenderQueue& queue,
+                          flecs::entity entity,
+                          const WorldTransform& transform,
+                          const ShaderEffect& effect,
+                          const RenderView* view = nullptr);
 bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particles);
 bool submit_particles(RenderQueue& queue, const ParticleFieldComponent& field);
 // A tilemap (kin/ecs/tilemap.hpp) with its top left at `world`'s position;

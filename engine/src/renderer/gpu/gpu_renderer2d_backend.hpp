@@ -169,6 +169,7 @@ public:
                      const MaskOptions& options) override;
     bool set_color_space(ColorSpace space, bool hdr) override;
     bool set_color_output(const ColorOutputState& output) override;
+    bool draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutputState& output, bool linear) override;
     bool push_stencil_clip(std::span<const Vec2f> triangles) override;
     bool push_stencil_mask(const Texture& mask, Rectf source, Rectf dest, const MaskOptions& options) override;
     void pop_stencil_clip() override;

@@ -6,10 +6,12 @@
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/camera.hpp>
+#include <kin/ecs/lighting.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
+#include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
 #if KIN_ENABLE_AUDIO
@@ -32,6 +34,21 @@
 
 namespace kin {
 namespace {
+
+// A renderer's `blend` field described: how it combines with what is under it.
+template <typename T>
+EcsComponentRegistry::NativeComponentBuilder<T>& describe_blend(EcsComponentRegistry::NativeComponentBuilder<T>& builder) {
+    return builder
+        .template property<std::string>("blend", [](const T& r) { return std::string(blend_mode_name(r.blend)); },
+                                        [](T& r, const std::string& name) {
+                                            const std::optional<BlendMode> mode = blend_mode_named(name.empty() ? "alpha" : name);
+                                            if (!mode) return false;
+                                            r.blend = *mode;
+                                            return true;
+                                        })
+        .choices({"alpha", "additive", "multiply", "max", "min"})
+        .description("How it combines with what is under it: additive for glows and light, multiply for shade.");
+}
 
 struct SceneHeader {
     std::string name;
@@ -397,18 +414,19 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("scale", &Transform2D::scale);
     }
     if (!world.components().find("RectRenderer")) {
-        world.components().native<RectRenderer>("RectRenderer")
-            .field("offset", &RectRenderer::offset)
+        auto rect = world.components().native<RectRenderer>("RectRenderer");
+        rect.field("offset", &RectRenderer::offset)
             .field("size", &RectRenderer::size)
             .field("color", &RectRenderer::color)
             .field("layer", &RectRenderer::layer)
             .field("order", &RectRenderer::order)
             .field("visible", &RectRenderer::visible);
+        describe_blend(rect);
     }
     if (!world.components().find("TextureRenderer")) {
         // An image of the game's content, by its path (Assets2D binds it).
-        world.components().native<TextureRenderer>("TextureRenderer")
-            .field("asset", &TextureRenderer::asset)
+        auto texture = world.components().native<TextureRenderer>("TextureRenderer");
+        texture.field("asset", &TextureRenderer::asset)
             .asset_type(std::string{asset_type_name(AssetType::Image)})
             .field("offset", &TextureRenderer::offset)
             .field("size", &TextureRenderer::size)
@@ -419,12 +437,13 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("visible", &TextureRenderer::visible)
             .field("flip_x", &TextureRenderer::flip_x)
             .field("flip_y", &TextureRenderer::flip_y);
+        describe_blend(texture);
     }
     if (!world.components().find("SpriteRenderer")) {
         // A sprite of a catalog of the game's content, by the catalog's path and
         // the sprite's id (Assets2D binds the catalog).
-        world.components().native<SpriteRenderer>("SpriteRenderer")
-            .field("asset", &SpriteRenderer::asset)
+        auto sprite = world.components().native<SpriteRenderer>("SpriteRenderer");
+        sprite.field("asset", &SpriteRenderer::asset)
             .asset_type(std::string{asset_type_name(AssetType::SpriteCatalog)})
             .property<std::string>("sprite", [](const SpriteRenderer& r) { return r.sprite.id; },
                                    [](SpriteRenderer& r, const std::string& id) {
@@ -446,6 +465,7 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("visible", &SpriteRenderer::visible)
             .field("flip_x", &SpriteRenderer::flip_x)
             .field("flip_y", &SpriteRenderer::flip_y);
+        describe_blend(sprite);
     }
     if (!world.components().find("SpriteAnimator")) {
         // An animation of its SpriteRenderer's catalog played on it
@@ -523,8 +543,8 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("ParticleSystemComponent")) {
         // Particles: an effect of a particle catalog of the game's content,
         // burst where the entity is (update_particles; Assets2D binds the catalog).
-        world.components().native<ParticleSystemComponent>("ParticleSystemComponent")
-            .field("asset", &ParticleSystemComponent::asset)
+        auto particles = world.components().native<ParticleSystemComponent>("ParticleSystemComponent");
+        particles.field("asset", &ParticleSystemComponent::asset)
             .asset_type(std::string{asset_type_name(AssetType::Particles)})
             .field("effect", &ParticleSystemComponent::effect)
             .entry_of("asset")
@@ -544,12 +564,13 @@ void register_builtin_editor_components(EcsWorld& world) {
                            [](ParticleSystemComponent&, const u32&) { return true; }) // as it is: nothing to set
             .readonly()
             .description("Its particles alive now.");
+        describe_blend(particles);
     }
     if (!world.components().find("ParticleFieldComponent")) {
         // A field of particles (snow, stars) of a particle catalog, its area
         // from where the entity is (Assets2D makes it).
-        world.components().native<ParticleFieldComponent>("ParticleFieldComponent")
-            .field("asset", &ParticleFieldComponent::asset)
+        auto field = world.components().native<ParticleFieldComponent>("ParticleFieldComponent");
+        field.field("asset", &ParticleFieldComponent::asset)
             .asset_type(std::string{asset_type_name(AssetType::Particles)})
             .field("field", &ParticleFieldComponent::name)
             .entry_of("asset")
@@ -557,6 +578,7 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("sprites", &ParticleFieldComponent::sprites_asset)
             .asset_type(std::string{asset_type_name(AssetType::SpriteCatalog)})
             .description("The sprite catalog its sprites are of.");
+        describe_blend(field);
     }
     if (!world.components().find("TilemapComponent")) {
         // A tilemap file (square cells or hexagons) drawn from where the entity
@@ -612,6 +634,82 @@ void register_builtin_editor_components(EcsWorld& world) {
             .readonly()
             .description("The machine's state now.");
     }
+    if (!world.components().find("LightComponent")) {
+        // A light where its entity is: it brightens the world when the scene
+        // has a SceneLighting (kin/ecs/lighting.hpp).
+        world.components().native<LightComponent>("LightComponent")
+            .field("color", &LightComponent::color)
+            .field("radius", &LightComponent::radius)
+            .range(0.0, 100000.0)
+            .description("Nothing further is lit; scaled with its entity.")
+            .field("intensity", &LightComponent::intensity)
+            .range(0.0, 4.0)
+            .description("1 adds its colour in full at the centre.")
+            .field("shape", &LightComponent::shape_asset)
+            .asset_type(std::string{asset_type_name(AssetType::Image)})
+            .description("An image whose alpha shapes it (a cone, a window); none: round.")
+            .field("rotation", &LightComponent::rotation)
+            .units("degrees")
+            .field("enabled", &LightComponent::enabled);
+    }
+    if (!world.components().find("SceneLighting")) {
+        // The scene darkened to an ambient light and lit by its lights (the
+        // first one found is the scene's).
+        world.components().native<SceneLighting>("SceneLighting")
+            .field("enabled", &SceneLighting::enabled)
+            .field("ambient", &SceneLighting::ambient)
+            .description("What is not lit looks like this much light: black is dark, white unlit.")
+            .field("resolution", &SceneLighting::resolution)
+            .range(0.05, 1.0)
+            .description("Light-map pixels per screen point (lights are smooth: half is plenty).");
+    }
+    if (!world.components().find("ColorGrade")) {
+        // The game's colour output while it is in the scene: exposure and
+        // tonemapping (a linear game's), a look, dithering.
+        world.components().native<ColorGrade>("ColorGrade")
+            .field("enabled", &ColorGrade::enabled)
+            .field("exposure", &ColorGrade::exposure)
+            .range(0.0, 16.0)
+            .description("Scales the light (a linear game's).")
+            .property<std::string>("tonemap", [](const ColorGrade& g) { return std::string(tonemap_name(g.tonemap)); },
+                                   [](ColorGrade& g, const std::string& name) {
+                                       const std::optional<Tonemap> tonemap = tonemap_named(name.empty() ? "none" : name);
+                                       if (!tonemap) return false;
+                                       g.tonemap = *tonemap;
+                                       return true;
+                                   })
+            .choices({"none", "reinhard", "aces"})
+            .description("How light above white comes into range (a linear game's).")
+            .field("look", &ColorGrade::lut_asset)
+            .asset_type(std::string{asset_type_name(AssetType::ColorLut)} + "," + std::string{asset_type_name(AssetType::Image)})
+            .description("A .cube file or a LUT image the colours are graded through.")
+            .field("strength", &ColorGrade::strength)
+            .range(0.0, 1.0)
+            .description("How much of the look.")
+            .field("dither", &ColorGrade::dither)
+            .description("Noise of half a step, so dark gradients do not band.");
+    }
+    if (!world.components().find("ShaderEffect")) {
+        // A fragment shader of the content drawn over a box at the entity
+        // (kin/ecs/shader_effect.hpp).
+        auto effect = world.components().native<ShaderEffect>("ShaderEffect");
+        effect.field("asset", &ShaderEffect::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Shader)})
+            .description("A .frag.glsl file of the content.")
+            .field("texture", &ShaderEffect::texture_asset)
+            .asset_type(std::string{asset_type_name(AssetType::Image)})
+            .description("An image it samples (sampler 0).")
+            .field("size", &ShaderEffect::size)
+            .description("The box it covers, centred on the entity.")
+            .field("offset", &ShaderEffect::offset)
+            .field("params", &ShaderEffect::params)
+            .description("Its uniforms' values by name: \"speed=1.5 tint=1,0.8,0.6,1\".")
+            .field("layer", &ShaderEffect::layer)
+            .field("order", &ShaderEffect::order)
+            .field("y_sort", &ShaderEffect::y_sort)
+            .field("visible", &ShaderEffect::visible);
+        describe_blend(effect);
+    }
     if (!world.components().find("CameraComponent")) {
         // What the game sees of its world: EcsScene draws through the first
         // current one, looking at where its entity is (kin/ecs/camera.hpp).
@@ -635,8 +733,8 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("ShapeRenderer")) {
         // A vector shape at the entity: a box, a rounded box, an ellipse, a
         // regular polygon, or an SVG file (Assets2D makes its mesh).
-        world.components().native<ShapeRenderer>("ShapeRenderer")
-            .property<std::string>("shape", [](const ShapeRenderer& r) { return std::string(shape_kind_name(r.spec.kind)); },
+        auto shape = world.components().native<ShapeRenderer>("ShapeRenderer");
+        shape.property<std::string>("shape", [](const ShapeRenderer& r) { return std::string(shape_kind_name(r.spec.kind)); },
                                    [](ShapeRenderer& r, const std::string& name) {
                                        const std::optional<ShapeKind> kind = shape_kind_named(name);
                                        if (!kind) return false;
@@ -667,6 +765,7 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("order", &ShapeRenderer::order)
             .field("y_sort", &ShapeRenderer::y_sort)
             .field("visible", &ShapeRenderer::visible);
+        describe_blend(shape);
     }
     if (!world.components().find("ClipGroup")) {
         // Its entity's renderers, and those of every entity under it, cut to a

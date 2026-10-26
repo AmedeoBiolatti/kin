@@ -28,6 +28,7 @@ struct ParticleSystemComponent {
     bool burst_at_start = false;
     Vec2f offset{};
     ComponentAssetRef sprites_asset{};
+    BlendMode blend = BlendMode::Alpha; // Additive: sparks, fire, glows
     f32 until_next = 0.0f; // seconds to its next burst
     bool started = false;  // its burst at start made
 };
@@ -44,6 +45,7 @@ struct ParticleFieldComponent {
     // catalog changes; and binds `sprites_asset` to `sprites`.
     ComponentAssetRef asset{};
     ComponentAssetRef sprites_asset{};
+    BlendMode blend = BlendMode::Alpha;
     const ParticleField* bound = nullptr; // the field `state` was made from
 };
 

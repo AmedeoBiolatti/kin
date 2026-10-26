@@ -23,6 +23,7 @@
 
 #include <kin/assets/asset_manager.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/renderer/shader.hpp>
 #include <kin/renderer/texture.hpp>
 #include <kin/ui2/text.hpp>
 
@@ -41,6 +42,7 @@ namespace kin {
 
 class AnimationAssetLibrary;
 class AudioCatalog;
+class ColorLut;
 class PropertyRegistry;
 class ParticleCatalog;
 class Renderer2D;
@@ -91,6 +93,17 @@ public:
     // An animation file (.kinanim): its animations and state machines. Null
     // when it cannot be read.
     std::shared_ptr<AnimationAssetLibrary> animations(std::string_view path);
+    // A fragment shader of the content: a .frag.glsl file compiled (with
+    // glslc, where it is found; else the .spv file beside it, as Kin Studio
+    // writes it) or a .spv file. Read again in place when its file changes
+    // (the handle stays; a version that does not compile keeps the last).
+    // Null when it cannot be had.
+    ShaderHandle shader(std::string_view path);
+    // Bumped each time `path`'s shader is made or made again (0: never).
+    u64 shader_version(std::string_view path) const;
+    // A colour look (ColorLut::load: a .cube file, or a LUT image). Null when
+    // it cannot be read.
+    std::shared_ptr<const ColorLut> color_lut(std::string_view path);
     // The fields animations can set in `world` (its described components'),
     // made again when it describes more.
     const PropertyRegistry& properties(EcsWorld& world);
@@ -149,6 +162,16 @@ private:
     // By path and size ("path@size").
     std::unordered_map<std::string, Read<ui2::Font>, PathHash, std::equal_to<>> _fonts;
     std::unordered_map<std::string, Read<AnimationAssetLibrary>, PathHash, std::equal_to<>> _animations;
+    std::unordered_map<std::string, Read<ColorLut>, PathHash, std::equal_to<>> _luts;
+    struct ShaderMade {
+        ShaderHandle handle{};
+        FileTime time;      // the source's when made
+        FileTime spv_time;  // the .spv beside it's
+        u64 version = 0;
+    };
+    std::unordered_map<std::string, ShaderMade, PathHash, std::equal_to<>> _shaders;
+    bool make_shader(const std::string& path, ShaderMade& made);
+    u64 _shader_versions = 0;
     struct Properties {
         std::shared_ptr<PropertyRegistry> registry;
         std::size_t described = 0; // the world's described components when made
@@ -168,7 +191,9 @@ private:
 // catalog, an AudioEmitter's catalog, a particle system's catalog (and a
 // field's state made from its catalog's field), a TilemapComponent's map,
 // when they name one; a ShapeRenderer's mesh made again when its spec (or
-// its SVG file) changed; a TextRenderer's font; an Animator's animation file.
+// its SVG file) changed; a TextRenderer's font; an Animator's animation file;
+// a LightComponent's shape, a ColorGrade's look, a ShaderEffect's shader,
+// image and uniforms.
 void bind_texture_renderers(EcsWorld& world, Assets2D& assets);
 void bind_sprite_renderers(EcsWorld& world, Assets2D& assets);
 void bind_audio_emitters(EcsWorld& world, Assets2D& assets);
@@ -178,5 +203,8 @@ void bind_tilemaps(EcsWorld& world, Assets2D& assets);
 void bind_shape_renderers(EcsWorld& world, Assets2D& assets);
 void bind_text_renderers(EcsWorld& world, Assets2D& assets);
 void bind_animators(EcsWorld& world, Assets2D& assets);
+void bind_lights(EcsWorld& world, Assets2D& assets);
+void bind_color_grades(EcsWorld& world, Assets2D& assets);
+void bind_shader_effects(EcsWorld& world, Assets2D& assets);
 
 } // namespace kin

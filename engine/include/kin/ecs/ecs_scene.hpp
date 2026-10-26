@@ -3,6 +3,7 @@
 #include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/renderer/lighting.hpp>
 #include <kin/renderer/render_profile.hpp>
 #include <kin/scene/scene.hpp>
 
@@ -38,6 +39,11 @@ struct EcsSceneRenderConfig {
     bool assets = true;
     std::filesystem::path asset_root;
     i32 asset_check_frames = 30;
+    // A SceneLighting in the world darkens the world to its ambient and lights
+    // it with its LightComponents, after the world and before what is on the
+    // UI layer and above (kin/ecs/lighting.hpp); a ColorGrade sets the
+    // renderer's colour output while it is there.
+    bool scene_lighting = true;
 };
 
 class EcsScene : public Scene {
@@ -90,6 +96,8 @@ private:
     std::unique_ptr<Assets2D> _assets;
     std::vector<std::pair<std::string, Assets2D::Binder>> _asset_binders;
     i32 _asset_frames = 0;
+    LightLayer _lighting;
+    bool _graded = false; // a ColorGrade set the colour output
 };
 
 } // namespace kin

@@ -59,6 +59,8 @@ add_library(kin_engine STATIC
     src/ecs/render.cpp
     src/ecs/animator.cpp
     src/ecs/camera.cpp
+    src/ecs/lighting.cpp
+    src/ecs/shader_effect.cpp
     src/ecs/sprite_animator.cpp
     src/ecs/text.cpp
     src/ecs/system.cpp
@@ -87,6 +89,7 @@ add_library(kin_engine STATIC
     src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
     src/renderer/render_profile.cpp
+    src/renderer/material.cpp
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp

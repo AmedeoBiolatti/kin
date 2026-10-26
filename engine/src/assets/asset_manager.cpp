@@ -110,6 +110,12 @@ AssetType infer_asset_type(const std::filesystem::path& path) {
     if (ext == ".svg") {
         return AssetType::Shape;
     }
+    if (ext == ".glsl" || ext == ".spv") {
+        return AssetType::Shader;
+    }
+    if (ext == ".cube") {
+        return AssetType::ColorLut;
+    }
     return AssetType::Unknown;
 }
 

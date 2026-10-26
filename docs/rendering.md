@@ -524,6 +524,35 @@ shader kept. `kin::compile_glsl()` compiles a file directly, and
 precompiled SPIR-V. Kin embeds its built-in shaders in the engine; game-specific
 shader files belong in the game's packaged assets (see [shipping](shipping.md)).
 
+### Shader effects in a scene
+
+A `ShaderEffect` (`kin/ecs/shader_effect.hpp`) draws a fragment shader of the
+content over a box at its entity:
+
+```json
+"ShaderEffect": {"asset": "shaders/water.frag.glsl", "size": {"x": 400, "y": 100},
+                 "params": "speed=3 tint=0.2,0.6,1,1"}
+```
+
+- **Where it draws:** the box is centred on the entity (`offset` from it),
+  turned and scaled with it. It draws among the world's renderers, by `layer`
+  and `order`.
+- **Uniforms:** `params` sets the uniform block's members by name. kin sets
+  `time` (moved on by `update_shader_effects(world, dt)`) and `size` (the
+  box's) itself.
+- **Texture:** `texture` names an image of the content, sampled as `sTexture`
+  at sampler 0.
+- **Loading:** `Assets2D` compiles `.frag.glsl` files with glslc where one is
+  found. Without glslc it loads the `.frag.spv` beside the source, which
+  Kin Studio writes as the shader is saved. A shipped game needs that `.spv`
+  in its content.
+- **Hot reload:** a shader that changes is compiled again and reloaded in
+  place. A version that does not compile keeps the last good one, and the
+  reason is in `Assets2D::problems()`.
+
+Shaders are SPIR-V, so they draw on the Vulkan backend. Elsewhere, and on SDL's
+renderer, nothing is drawn and the problem says why.
+
 ### Pipelines
 
 The GPU needs a pipeline for each combination of shader, blend mode, target
@@ -905,6 +934,12 @@ combine with what is under them:
 | `Max` | max(dst, src), each channel and alpha | overlapping shadows, fog of war, coverage, heat maps |
 | `Min` | min(dst, src), each channel and alpha | the reverse |
 
+`SpriteRenderer`, `TextureRenderer`, `RectRenderer`, `ShapeRenderer`,
+`ShaderEffect` and the particle components have a `blend` field (`alpha`,
+`additive`, `multiply`, `max` or `min`). Their queued draws carry
+`blend_material(mode)`, which sets that mode for the draw and restores the
+previous one afterwards.
+
 `Max` and `Min` let overlapping shapes each be drawn on their own, in any order,
 into one target: two shadows that overlap darken it once, not twice. The source
 is not weighted by its alpha. The SDL_GPU backend has them; SDL's software
@@ -997,6 +1032,17 @@ trilinearly:
 The lighting demo makes a look per time of day from the neutral LUT and
 cross-fades between them as the time changes.
 
+A scene can set its own colour output with a `ColorGrade` component
+(`kin/ecs/lighting.hpp`). Its fields are `exposure`, `tonemap` (`none`,
+`reinhard` or `aces`), `look` (a `.cube` file or a LUT image of the content),
+`strength` and `dither`. `EcsScene` sets the colour output each frame while
+the component is there, and resets it when the component goes.
+
+`Renderer2D::draw_color_output(picture, source, dest, output, linear)` draws a
+picture as the output pass would show it, and `LayerOptions::grade` lays a
+layer over that way. An editor uses them to show a graded game in part of its
+window.
+
 ### Colour maths
 
 `kin/renderer/color.hpp`: `srgb_to_linear`, `linear_to_srgb`, `LinearColor`
@@ -1052,6 +1098,31 @@ draw_ui(renderer);                                // drawn after: not darkened
 backends both have; it uses no shaders. Where they are missing it returns
 `false` and leaves the scene unlit. `games/lighting_demo` has lamps, a campfire, a
 coloured crystal and a flashlight, with a day/night cycle.
+
+### Lights in a scene
+
+Scene files and the ECS can do the same with components (`kin/ecs/lighting.hpp`):
+
+```json
+{"id": "night", "components": {"SceneLighting": {"ambient": {"r": 30, "g": 32, "b": 60, "a": 255}}}},
+{"id": "torch", "parent": "player", "components": {"Transform2D": {},
+  "LightComponent": {"color": {"r": 255, "g": 190, "b": 120, "a": 255}, "radius": 160}}}
+```
+
+- A world that has a `SceneLighting` is lit. `EcsScene` draws the world, applies
+  the light map, and then draws what is on the UI layer and above, which stays
+  unlit.
+- A `LightComponent` lights from where its entity is. It turns with its entity,
+  and its radius scales with the entity's scale.
+- `shape` names an image of the content that shapes the light.
+- `scene_lights(world, to_screen)` returns a world's lights as `Light2D`s, placed
+  through a camera's view transform.
+- `apply_scene_lighting(renderer, layer, world, to_screen, area)` lights the
+  world the way `EcsScene` does, for code that draws its own world.
+- The first `SceneLighting` found is the scene's. Turning it off
+  (`enabled: false`) leaves the scene unlit.
+- `EcsSceneRenderConfig::scene_lighting = false` turns off both the lighting and
+  the colour grade.
 
 ## Performance And Data Layout Notes
 

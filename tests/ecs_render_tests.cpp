@@ -5,7 +5,9 @@
 #include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/ecs_scene.hpp>
+#include <kin/ecs/lighting.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/text.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/scene/scene_asset.hpp>
@@ -126,6 +128,8 @@ public:
     std::vector<kin::Vec2f> pivots;
 
     void set_transform(const kin::Affine2& transform) override { transforms.push_back(transform); }
+    void set_blend_mode(kin::BlendMode mode) override { blends.push_back(mode); }
+    std::vector<kin::BlendMode> blends;
     void draw_shape_mesh(std::span<const kin::ShapeVertex> vertices, std::span<const kin::u32>, kin::u32,
                          kin::Color tint) override {
         shape_vertex_counts.push_back(vertices.size());
@@ -1437,6 +1441,87 @@ void test_scene_shapes_clips_and_text() {
     fs::remove_all(dir);
 }
 
+// Lights, a scene's lighting and colour grade, blend modes and shader effects
+// as a scene file gives them: described, bound, placed and drawn.
+void test_lights_blends_and_shader_effects() {
+    namespace fs = std::filesystem;
+    assert(kin::blend_mode_name(kin::BlendMode::Additive) == "additive" && kin::blend_mode_named("multiply") == kin::BlendMode::Multiply);
+    assert(!kin::blend_mode_named("glow") && !kin::blend_material(kin::BlendMode::Alpha));
+    assert(kin::blend_material(kin::BlendMode::Additive)->blend == kin::BlendMode::Additive);
+    assert(kin::tonemap_named("aces") == kin::Tonemap::Aces && kin::tonemap_name(kin::Tonemap::Reinhard) == "reinhard");
+
+    // Params: name=numbers words; others skipped; written back as read.
+    const std::vector<kin::ShaderParamValue> params = kin::parse_shader_params("speed=1.5  tint=1,0.5,0.25,1 bad=x =3 alone");
+    assert(params.size() == 2 && params[0].name == "speed" && params[0].values == std::vector<kin::f32>{1.5f});
+    assert(params[1].name == "tint" && params[1].values.size() == 4 && near(params[1].values[2], 0.25f));
+    assert(kin::format_shader_params(params) == "speed=1.5 tint=1,0.5,0.25,1");
+
+    const fs::path dir = fs::temp_directory_path() / "kin_scene_lights_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        // A 2-point LUT that changes nothing.
+        std::ofstream cube(dir / "look.cube");
+        cube << "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+    }
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const std::string scene = R"json({
+  "schema": "kin.scene/1",
+  "name": "Night",
+  "entities": [
+    {"id": "sky", "components": {"SceneLighting": {"ambient": {"r": 20, "g": 20, "b": 40, "a": 255}}, "ColorGrade": {"tonemap": "aces", "look": "look.cube", "strength": 0.5}}},
+    {"id": "lamp", "components": {"Transform2D": {"pos": {"x": 100, "y": 50}, "rotation": 30, "scale": {"x": 2, "y": 1}},
+      "LightComponent": {"color": {"r": 255, "g": 200, "b": 100, "a": 255}, "radius": 40, "rotation": 15}}},
+    {"id": "off", "components": {"Transform2D": {}, "LightComponent": {"enabled": false}}},
+    {"id": "glow", "components": {"Transform2D": {"pos": {"x": 10, "y": 10}}, "RectRenderer": {"size": {"x": 8, "y": 8}, "blend": "additive"}}},
+    {"id": "water", "components": {"Transform2D": {"pos": {"x": 60, "y": 60}},
+      "ShaderEffect": {"asset": "missing.frag.glsl", "size": {"x": 30, "y": 20}, "params": "speed=2", "blend": "multiply"}}}
+  ]
+})json";
+    kin::SceneLoadResult loaded = kin::parse_scene_asset(scene, world.components());
+    assert(loaded.ok());
+    kin::SceneInstance instance = kin::instantiate_scene_asset(world, *loaded.scene, dir, world.components());
+    assert(instance.ok());
+    kin::EcsEntity glow = instance.by_authored_id.at("glow");
+    kin::EcsEntity water = instance.by_authored_id.at("water");
+    assert(glow.get<kin::RectRenderer>()->blend == kin::BlendMode::Additive);
+    assert(water.get<kin::ShaderEffect>()->params == "speed=2" && water.get<kin::ShaderEffect>()->blend == kin::BlendMode::Multiply);
+
+    // The scene's lighting, and its lights placed through a camera that doubles the world.
+    const kin::SceneLighting* lighting = kin::scene_lighting(world);
+    assert(lighting && lighting->ambient.b == 40);
+    const std::vector<kin::Light2D> lights = kin::scene_lights(world, kin::Affine2::scaling({2.0f, 2.0f}));
+    assert(lights.size() == 1);
+    assert(near(lights[0].position, {200.0f, 100.0f}) && near(lights[0].radius, 160.0f) && near(lights[0].rotation, 45.0f));
+    assert(lights[0].color.g == 200);
+
+    // Bound: the look read, the shader not (no such file: a problem, and nothing drawn).
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Assets2D assets{renderer, dir};
+    assets.bind(world);
+    const std::optional<kin::ColorOutput> output = kin::scene_color_output(world);
+    assert(output && output->tonemap == kin::Tonemap::Aces && output->lut && output->lut->size() == 2 && near(output->lut_strength, 0.5f));
+    assert(!water.get<kin::ShaderEffect>()->shader && assets.problems().contains("missing.frag.glsl"));
+
+    // The additive rect draws in its blend mode, and back to alpha after.
+    kin::WorldRenderState state{world};
+    state.propagate_transforms();
+    kin::RenderQueue queue;
+    state.collect_all(queue, {}, {});
+    assert(queue.size() == 1); // the rect; the shader effect has no shader
+    raw->blends.clear();
+    queue.flush(renderer);
+    assert(raw->blends.size() == 2 && raw->blends[0] == kin::BlendMode::Additive && raw->blends[1] == kin::BlendMode::Alpha);
+
+    // Off: no lighting.
+    instance.by_authored_id.at("sky").get_mut<kin::SceneLighting>()->enabled = false;
+    assert(!kin::scene_lighting(world));
+    fs::remove_all(dir);
+}
+
 // An animation file named by an Animator: its tracks set described fields
 // (any, as "Component.field"), of the entity and of a child by name; it plays
 // through once, or on when it repeats; a prefab's instances each their own.
@@ -1555,6 +1640,7 @@ int main() {
     test_assets2d_binds_particles();
     test_assets2d_binds_tilemaps();
     test_scene_shapes_clips_and_text();
+    test_lights_blends_and_shader_effects();
     test_animators();
 #if KIN_ENABLE_AUDIO
     test_assets2d_binds_audio_emitters();

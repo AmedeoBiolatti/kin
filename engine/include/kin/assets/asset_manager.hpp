@@ -50,6 +50,8 @@ enum class AssetType {
     Model,  // a 3D model: .glb, .gltf
     TileSet, // .kintileset: tiles maps share
     Shape,   // .svg: a vector shape (SVG-lite)
+    Shader,  // .glsl (.frag.glsl), .spv: a fragment shader
+    ColorLut, // .cube: a colour look (a LUT image is an Image)
 };
 
 enum class AssetStatus {

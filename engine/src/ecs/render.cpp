@@ -4,14 +4,17 @@
 #include <kin/core/jobs.hpp>
 
 #include <kin/ecs/particles.hpp>
+#include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/text.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/render_profile.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -177,7 +180,9 @@ WorldRenderState::WorldRenderState(flecs::world& world)
       _tilemaps(world.query_builder<const Transform2D, const WorldTransform, const TilemapComponent, const ClipGroup*>()
                     .term_at(3).self().up().cached().build()),
       _texts(world.query_builder<const Transform2D, const WorldTransform, const TextRenderer, const ClipGroup*>()
-                 .term_at(3).self().up().cached().build()) {
+                 .term_at(3).self().up().cached().build()),
+      _shader_effects(world.query_builder<const Transform2D, const WorldTransform, const ShaderEffect, const ClipGroup*>()
+                          .term_at(3).self().up().cached().build()) {
 }
 
 RenderQueue& WorldRenderState::group_queue(flecs::entity owner, const SpriteRenderOptions& options) {
@@ -325,6 +330,11 @@ void WorldRenderState::collect_all(RenderQueue& queue,
             submit_text(to(it, i), it.entity(i), t, r, options.view);
         }
     });
+    each_row(_shader_effects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShaderEffect& r) {
+        if (wanted(it, i)) {
+            submit_shader_effect(to(it, i), it.entity(i), t, r, options.view);
+        }
+    });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
     each_particles(_particle_systems, [&](flecs::iter& it, std::size_t i, const ParticleSystemComponent& particles) {
@@ -405,7 +415,8 @@ private:
 // submit_texture()'s work, into `out` instead of a queue: safe on a worker.
 bool prepare_texture(const WorldTransform& transform, const TextureRenderer& texture, const ViewCuller& culler,
                      PreparedSprite& out) {
-    if (!texture.visible || !texture.texture) {
+    // A blended one is a command of its own (collect_textures submits it after).
+    if (!texture.visible || !texture.texture || texture.blend != BlendMode::Alpha) {
         return false;
     }
     const Flip flip = flip_for(transform, texture.flip_x, texture.flip_y);
@@ -520,6 +531,12 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                     }
                 }
             });
+            for (i32 i = 0; i < rows; ++i) {
+                const auto row = static_cast<std::size_t>(i);
+                if (textures[row].blend != BlendMode::Alpha && textures[row].static_renderable == statics) {
+                    submit_texture(queue, it.entity(row), world[row], textures[row], options.view);
+                }
+            }
         }
     });
 }
@@ -560,6 +577,9 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
     // Text is always dynamic: its callback carries the camera it is drawn through.
     each_row(_texts, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TextRenderer& r) {
         submit_text(to(it, i), it.entity(i), t, r, options.view);
+    });
+    each_row(_shader_effects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShaderEffect& r) {
+        submit_shader_effect(to(it, i), it.entity(i), t, r, options.view);
     });
     // Everything above was culled as it was submitted; only particles still need it.
     const u64 unculled = queue.submitted();
@@ -677,7 +697,7 @@ bool submit_sprite(RenderQueue& queue,
                                   sprite.order,
                                   sprite.y_sort,
                                   sprite_anchor_pos(transform, sprite, resolved).y + sprite.sort_y_offset);
-    queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, {}, rotation, pivot, flip);
+    queue.draw_sprite(key, resolved.sprite, dest, sprite.tint, blend_ref(sprite.blend), rotation, pivot, flip);
     return true;
 }
 
@@ -711,7 +731,7 @@ bool submit_texture(RenderQueue& queue,
                                   texture.y_sort,
                                   to_world(transform, texture.offset).y + texture.sort_y_offset);
     queue.draw_texture_region(key, texture.texture, texture_source_rect(texture), dest, texture.tint,
-                              transform.rotation, pivot, flip);
+                              transform.rotation, pivot, flip, blend_ref(texture.blend));
     return true;
 }
 
@@ -758,11 +778,12 @@ bool submit_rect(RenderQueue& queue,
                       .rect = bounds,
                       .color = rect.color,
                       .rotation = transform.rotation,
-                      .pivot = pivot});
+                      .pivot = pivot,
+                      .material = blend_material(rect.blend)});
     } else if (rect.outline) {
-        queue.draw_rect(key, bounds, rect.color);
+        queue.draw_rect(key, bounds, rect.color, blend_ref(rect.blend));
     } else {
-        queue.fill_rect(key, bounds, rect.color);
+        queue.fill_rect(key, bounds, rect.color, blend_ref(rect.blend));
     }
     return true;
 }
@@ -832,7 +853,7 @@ bool submit_shape(RenderQueue& queue,
                                   shape.order,
                                   shape.y_sort,
                                   to_world(transform, shape.offset).y + shape.sort_y_offset);
-    queue.draw_shape(key, shape.mesh, place, shape.tint);
+    queue.draw_shape(key, shape.mesh, place, shape.tint, blend_ref(shape.blend));
     return true;
 }
 
@@ -866,6 +887,48 @@ bool submit_text(RenderQueue& queue,
                         const auto placed = renderer.scoped_transform(camera ? camera->view_transform() * place : place);
                         draw_text_layout(renderer, text, laid);
                     });
+    return true;
+}
+
+bool submit_shader_effect(RenderQueue& queue,
+                          [[maybe_unused]] flecs::entity entity,
+                          const WorldTransform& transform,
+                          const ShaderEffect& effect,
+                          const RenderView* view) {
+    KIN_DRAW_ENTITY(entity, "ShaderEffect");
+    if (!effect.visible || !effect.shader || effect.size.x <= 0.0f || effect.size.y <= 0.0f) {
+        return false;
+    }
+    const Affine2 place = Affine2::trs(transform.pos, transform.rotation, transform.scale);
+    const Rectf box{effect.offset.x - effect.size.x * 0.5f, effect.offset.y - effect.size.y * 0.5f, effect.size.x, effect.size.y};
+    const Rectf bounds = transformed_bounds(place, box);
+    if (view && !render_view_visible(*view, bounds)) {
+        return false;
+    }
+    // Drawn as text is: the callback puts the camera back on.
+    std::optional<Camera2D> camera;
+    if (view && view->camera && !view->output_space) {
+        camera = *view->camera;
+    }
+    ShaderParams uniforms = effect.uniforms;
+    if (uniforms.layout) {
+        uniforms.set("time", effect.time);
+        uniforms.set("size", std::array{effect.size.x, effect.size.y});
+    }
+    const RenderKey key = key_for(effect.layer, effect.order, effect.y_sort, to_world(transform, effect.offset).y + effect.sort_y_offset);
+    queue.custom(key,
+                 [shader = effect.shader, texture = effect.texture, uniforms = std::move(uniforms), blend = effect.blend, box, place,
+                  camera](Renderer2D& renderer) {
+                     const auto placed = renderer.scoped_transform(camera ? camera->view_transform() * place : place);
+                     const Renderer2D::BlendModeGuard blended = blend != BlendMode::Alpha ? renderer.scoped_blend_mode(blend)
+                                                                                          : Renderer2D::BlendModeGuard{};
+                     if (texture) {
+                         renderer.draw_shader_surface(box, shader, uniforms, texture);
+                     } else {
+                         renderer.draw_shader_surface(box, shader, uniforms);
+                     }
+                 },
+                 "ShaderEffect");
     return true;
 }
 
@@ -908,6 +971,7 @@ bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particl
                                 .pixel_grid = particles.system.pixel_grid(),
                                 .sprites = particles.sprites,
                                 .sort = queue.sort() != RenderSortMode::Submission,
+                                .blend = particles.blend,
                             });
 }
 
@@ -924,6 +988,7 @@ bool submit_particles(RenderQueue& queue, const ParticleFieldComponent& field) {
                                 .pixel_grid = field.state.pixel_grid,
                                 .sprites = field.sprites,
                                 .sort = queue.sort() != RenderSortMode::Submission,
+                                .blend = field.blend,
                             });
 }
 

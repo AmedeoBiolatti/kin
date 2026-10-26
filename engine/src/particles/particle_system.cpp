@@ -57,7 +57,8 @@ void submit_particle(RenderQueue& queue,
                      Rectf rect,
                      Color color,
                      const SpriteCatalog* sprites,
-                     bool output_pixel_rect) {
+                     bool output_pixel_rect,
+                     const Material2D* material) {
     const RenderKey key = key_for(particle);
     ResolvedSprite resolved;
     if (sprites &&
@@ -72,6 +73,7 @@ void submit_particle(RenderQueue& queue,
             .color = color,
             .texture = resolved.sprite.texture,
             .rotation = particle.rotation,
+            .material = material,
         });
     } else {
         queue.submit({
@@ -81,6 +83,7 @@ void submit_particle(RenderQueue& queue,
             .output_pixel_rect = output_pixel_rect,
             .color = color,
             .rotation = particle.rotation,
+            .material = material,
         });
     }
 }
@@ -358,7 +361,8 @@ bool submit_particles(RenderQueue& queue,
                         rect,
                         particle_color_at(particle),
                         options.sprites,
-                        options.pixel_policy == ParticlePixelPolicy::Output);
+                        options.pixel_policy == ParticlePixelPolicy::Output,
+                        blend_material(options.blend));
         submitted = true;
     }
     return submitted;

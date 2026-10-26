@@ -220,6 +220,9 @@ public:
         f32 opacity = 1.0f;
         f32 resolution = 1.0f; // of the current target's pixels, each way
         BlendMode blend = BlendMode::Alpha;
+        // Laid over as this colour output shows it (draw_color_output), in
+        // place of `opacity` and `blend`: an editor's view of a graded game.
+        std::optional<ColorOutput> grade{};
     };
     [[nodiscard]] LayerGuard begin_layer(LayerOptions options);
     [[nodiscard]] LayerGuard begin_layer() { return begin_layer(LayerOptions{}); }
@@ -240,6 +243,12 @@ public:
     // (capabilities().color_output); elsewhere kept but not applied.
     void set_color_output(ColorOutput output);
     const ColorOutput& color_output() const { return _color_output; }
+    // `scene` (a picture of one: a render target's texture) drawn into `dest`
+    // as `output` would show it on the display: exposed and tonemapped when
+    // `linear` (the picture holds linear light), graded, dithered. For an
+    // editor's view of a game graded otherwise than itself. False (nothing
+    // drawn) where the backend can't (capabilities().color_output).
+    bool draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutput& output, bool linear);
 
     // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
     // every draw adds one layer where it covers, and the screen shows the counts
@@ -587,6 +596,9 @@ private:
     ColorOutput _color_output;
     Texture _lut_texture;    // _color_output.lut's, uploaded
     Texture _lut_to_texture; // and lut_to's
+    // draw_color_output()'s LUT, and the one it was made from.
+    Texture _preview_lut_texture;
+    std::shared_ptr<const ColorLut> _preview_lut;
     // The shapes drawn as they are called: reused buffers, and how finely to
     // tessellate under the current transform.
     ShapeMesh _shape_scratch;

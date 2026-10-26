@@ -37,6 +37,7 @@ struct ParticleRenderOptions {
     f32 pixel_grid = 1.0f;
     const SpriteCatalog* sprites = nullptr;
     bool sort = true;
+    BlendMode blend = BlendMode::Alpha; // Additive: sparks, fire, glows
 };
 
 class ParticleSystem {

@@ -23,6 +23,8 @@ std::string_view asset_type_name(AssetType type) {
     case AssetType::Model: return "Model";
     case AssetType::TileSet: return "TileSet";
     case AssetType::Shape: return "Shape";
+    case AssetType::Shader: return "Shader";
+    case AssetType::ColorLut: return "ColorLut";
     }
     return "Unknown";
 }

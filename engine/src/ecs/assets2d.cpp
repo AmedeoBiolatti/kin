@@ -1,6 +1,8 @@
 #include <kin/ecs/assets2d.hpp>
 
 #include <kin/ecs/animator.hpp>
+#include <kin/ecs/lighting.hpp>
+#include <kin/ecs/shader_effect.hpp>
 
 #include <kin/anim/anim_format.hpp>
 #include <kin/anim/binding.hpp>
@@ -12,8 +14,11 @@
 #include <kin/ecs/text.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/particles/particle_catalog.hpp>
+#include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/renderer/shader_compiler.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 #include <kin/renderer/svg.hpp>
 #if KIN_ENABLE_AUDIO
@@ -292,6 +297,95 @@ std::shared_ptr<AnimationAssetLibrary> Assets2D::animations(std::string_view pat
     return mutable_of(_animations.emplace(std::move(key), std::move(read)).first->second.catalog);
 }
 
+std::shared_ptr<const ColorLut> Assets2D::color_lut(std::string_view path) {
+    if (path.empty()) {
+        return nullptr;
+    }
+    if (const auto found = _luts.find(path); found != _luts.end()) {
+        return found->second.catalog;
+    }
+    std::string key(path);
+    Read<ColorLut> read{.catalog = nullptr, .files = {{key, file_time(path)}}};
+    std::string error;
+    if (std::optional<ColorLut> lut = ColorLut::load(_manager.resolve(path), &error)) {
+        read.catalog = std::make_shared<const ColorLut>(std::move(*lut));
+        _problems.erase(key);
+    } else {
+        tell(_problems, key, error.empty() ? std::string("it is not a colour look (.cube, or a LUT image)") : error);
+    }
+    ++_version;
+    return _luts.emplace(std::move(key), std::move(read)).first->second.catalog;
+}
+
+namespace {
+
+// "water.frag.glsl" -> "water.frag.spv".
+std::string spv_beside(std::string_view path) {
+    std::string spv(path);
+    if (const std::size_t dot = spv.rfind('.'); dot != std::string::npos && spv.find('/', dot) == std::string::npos) {
+        spv.erase(dot);
+    }
+    return spv + ".spv";
+}
+
+} // namespace
+
+bool Assets2D::make_shader(const std::string& path, ShaderMade& made) {
+    made.time = file_time(path);
+    const bool spirv_file = lowercase_extension(path) == ".spv";
+    const std::string spv_path = spirv_file ? path : spv_beside(path);
+    made.spv_time = spirv_file ? made.time : file_time(spv_path);
+    std::optional<std::vector<u8>> spirv;
+    std::string error;
+    if (!spirv_file && shader_compiler_available()) {
+        spirv = compile_glsl(_manager.resolve(path), ShaderStage::Fragment, &error);
+    } else if (made.spv_time) {
+        if (const std::optional<std::string> bytes = read_content_file(_manager.resolve(spv_path))) {
+            spirv = std::vector<u8>(bytes->begin(), bytes->end());
+        }
+    } else {
+        error = "no glslc to compile it, and no " + spv_path + " beside it";
+    }
+    if (!spirv || spirv->empty()) {
+        tell(_problems, path, error.empty() ? std::string("it is not a shader") : error);
+        return false;
+    }
+    ShaderDesc desc;
+    desc.spirv = {spirv->data(), static_cast<u32>(spirv->size())};
+    if (const std::optional<ShaderLayout> layout = reflect_spirv(desc.spirv)) {
+        desc.num_samplers = std::max(1u, layout->samplers);
+        desc.num_uniform_buffers = layout->uniform_buffers;
+        desc.num_storage_buffers = layout->storage_buffers;
+    }
+    const bool made_now = made.handle ? _renderer.reload_shader(made.handle, desc) : static_cast<bool>(made.handle = _renderer.create_shader(desc));
+    if (!made_now) {
+        tell(_problems, path, "the renderer could not make it (it needs the GPU renderer)");
+        return false;
+    }
+    _problems.erase(path);
+    made.version = ++_shader_versions;
+    ++_version;
+    return true;
+}
+
+ShaderHandle Assets2D::shader(std::string_view path) {
+    if (path.empty()) {
+        return {};
+    }
+    if (const auto found = _shaders.find(path); found != _shaders.end()) {
+        return found->second.handle;
+    }
+    std::string key(path);
+    ShaderMade made;
+    make_shader(key, made);
+    return _shaders.emplace(std::move(key), made).first->second.handle;
+}
+
+u64 Assets2D::shader_version(std::string_view path) const {
+    const auto found = _shaders.find(path);
+    return found == _shaders.end() ? 0 : found->second.version;
+}
+
 const PropertyRegistry& Assets2D::properties(EcsWorld& world) {
     Properties& made = _properties[&world];
     const std::size_t described = world.components().descriptors().size();
@@ -324,6 +418,9 @@ bool Assets2D::bind(EcsWorld& world) {
     bind_shape_renderers(world, *this);
     bind_text_renderers(world, *this);
     bind_animators(world, *this);
+    bind_lights(world, *this);
+    bind_color_grades(world, *this);
+    bind_shader_effects(world, *this);
     for (auto& [name, binder] : _binders) {
         if (binder) {
             binder(world, *this);
@@ -364,6 +461,16 @@ std::vector<std::string> Assets2D::reload_changed() {
     reread(_svgs);
     reread(_fonts);
     reread(_animations);
+    reread(_luts);
+    // Shaders: made again in place (their handles stay), when they or the .spv beside them changed.
+    for (auto& [path, made] : _shaders) {
+        const bool spirv_file = lowercase_extension(path) == ".spv";
+        if (file_time(path) != made.time || (!spirv_file && file_time(spv_beside(path)) != made.spv_time)) {
+            if (make_shader(path, made)) {
+                changed.push_back(path);
+            }
+        }
+    }
     // Those read through manager(): as they were when first seen here.
     for (const std::string& path : _manager.loaded_asset_paths()) {
         const std::optional<std::filesystem::file_time_type> now = file_time(path);
@@ -621,6 +728,68 @@ void bind_animators(EcsWorld& world, Assets2D& assets) {
     }
     if (!rebound.empty()) {
         assets.changed();
+    }
+}
+
+} // namespace kin
+
+namespace kin {
+
+void bind_lights(EcsWorld& world, Assets2D& assets) {
+    std::vector<std::pair<flecs::entity, Texture>> rebound;
+    world.raw().each([&](flecs::entity entity, const LightComponent& light) {
+        Texture shape = assets.texture(light.shape_asset.id);
+        if (!(shape == light.shape)) {
+            rebound.emplace_back(entity, std::move(shape));
+        }
+    });
+    for (auto& [entity, shape] : rebound) {
+        EcsEntity owner{entity}; // one from a prefab gets its own copy first
+        owner.get_mut<LightComponent>()->shape = std::move(shape);
+        owner.modified<LightComponent>();
+    }
+}
+
+void bind_color_grades(EcsWorld& world, Assets2D& assets) {
+    std::vector<std::pair<flecs::entity, std::shared_ptr<const ColorLut>>> rebound;
+    world.raw().each([&](flecs::entity entity, const ColorGrade& grade) {
+        std::shared_ptr<const ColorLut> lut = assets.color_lut(grade.lut_asset.id);
+        if (lut != grade.lut) {
+            rebound.emplace_back(entity, std::move(lut));
+        }
+    });
+    for (auto& [entity, lut] : rebound) {
+        EcsEntity owner{entity};
+        owner.get_mut<ColorGrade>()->lut = std::move(lut);
+        owner.modified<ColorGrade>();
+    }
+}
+
+void bind_shader_effects(EcsWorld& world, Assets2D& assets) {
+    struct Rebound {
+        flecs::entity entity;
+        ShaderHandle shader;
+        u64 version = 0;
+        Texture texture;
+    };
+    std::vector<Rebound> rebound;
+    world.raw().each([&](flecs::entity entity, const ShaderEffect& effect) {
+        const ShaderHandle shader = assets.shader(effect.asset.id);
+        const u64 version = assets.shader_version(effect.asset.id);
+        Texture texture = assets.texture(effect.texture_asset.id);
+        if (shader != effect.shader || version != effect.made_for || !(texture == effect.texture) || effect.params != effect.made_from) {
+            rebound.push_back({entity, shader, version, std::move(texture)});
+        }
+    });
+    for (Rebound& made : rebound) {
+        EcsEntity owner{made.entity};
+        ShaderEffect& effect = *owner.get_mut<ShaderEffect>();
+        effect.shader = made.shader;
+        effect.texture = std::move(made.texture);
+        effect.uniforms = made.shader ? make_shader_params(assets.renderer(), made.shader, effect.params) : ShaderParams{};
+        effect.made_from = effect.params;
+        effect.made_for = made.version;
+        owner.modified<ShaderEffect>();
     }
 }
 

@@ -61,6 +61,22 @@ releases may change APIs.
   `serialize_input_map`. `App::open_gamepads` polls a controller with the
   window's events. `binding_held` and `axis_value` let editors try bindings
   that are not in the map.
+- Add lights to scenes: `LightComponent` lights from its entity, and
+  `SceneLighting` (the ambient colour) makes `EcsScene` light the world, while
+  the UI layer and above stay unlit. Add `scene_lights` and
+  `apply_scene_lighting`.
+- Add `ColorGrade`: a scene's exposure, tonemapping, look (a `.cube` file or a
+  LUT image) and dithering, set as the colour output.
+- Add `Renderer2D::draw_color_output` and `LayerOptions::grade` for graded
+  previews.
+- Add a `blend` field to sprites, textures, rects, shapes and particles
+  (`blend_material`; the renderer applies a material's blend mode).
+- Add `ShaderEffect`: a fragment shader of the content drawn over a box at its
+  entity, with its uniforms set by name from `params`.
+  - `time` and `size` are set by kin.
+  - `Assets2D::shader` compiles the shader with glslc, or loads the `.spv`
+    beside it, and reloads it in place when it changes.
+  - Add `AssetType::Shader` and `AssetType::ColorLut`.
 - Add scripts on entities: `ScriptComponent` names a Lua file, which
   `EntityScripts` runs with `on_start`, `on_update` and `on_contact`. `self`
   reaches the entity's components, transform, `Animator`, input actions and
