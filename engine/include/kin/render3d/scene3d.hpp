@@ -350,6 +350,13 @@ struct ContactShadows3D {
 struct TemporalAA3D {
     bool enabled = false;
     f32 blend = 0.9f; // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
+    // The same where the picture holds still (moving under half a pixel a frame), never below blend (and none with a
+    // blend of 0). A still pixel reads its history exactly, so it can keep more: detail finer than a pixel (print,
+    // a railing's bars), which one frame's samples miss in some of the jitter's places, stays steady instead of
+    // shimmering with the jitter's period. Its clip is wider too (by the spread of the colours round it). After a
+    // reset (a cut, the first frame) a still pixel takes the mean of the frames the history holds until that weighs
+    // as much. At blend or below, still pixels are treated as moving ones.
+    f32 still_blend = 0.96f;
     // A local-contrast boost on the result, 0 (off) to 1, within surfaces: not at a silhouette or a crease (where the
     // depth bends), whose anti-aliased pixels it would push back into steps. Costs one more dispatch.
     f32 sharpness = 0.0f;

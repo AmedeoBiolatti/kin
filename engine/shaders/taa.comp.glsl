@@ -13,9 +13,14 @@
 // uncovered, or arrived on it), and a little with speed and with how far the
 // clip moved it.
 // Light is compressed (c / (1 + max c)) for the clip and the mix, so a very
-// bright pixel does not outweigh its neighbours or flicker. A second mode
-// (params.z) sharpens a finished picture: a small local-contrast boost kept
-// inside the neighbours' range, within surfaces (not where the depth bends).
+// bright pixel does not outweigh its neighbours or flicker. A still pixel (the
+// picture moving under half a pixel a frame) keeps more of its history, with a
+// wider clip: detail finer than a pixel (a menu's print, a railing's bars),
+// which one frame's few samples miss in some of the jitter's places, is held
+// steady there instead of being pulled toward each frame's samples, which
+// shimmered with the jitter's period. A second mode (params.z) sharpens a
+// finished picture: a small local-contrast boost kept inside the neighbours'
+// range, within surfaces (not where the depth bent in the last frames).
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0)
     uniform sampler2D uCurrent; // this frame, or in sharpen mode the result so far; linear, premultiplied
@@ -26,12 +31,14 @@ layout(set = 0, binding = 3) uniform sampler2D uPastMotion; // the same, of the 
 layout(set = 0, binding = 4) uniform sampler2D uDepth;      // the main pass's depth (reverse Z) where depth.x is 1
 layout(set = 0, binding = 5) uniform usampler2D uPastDilated; // the velocities the last frame's resolve took
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uResult;
-layout(set = 1, binding = 1, r32ui) uniform writeonly uimage2D uDilated; // this frame's (two halves), for the next
+layout(set = 1, binding = 1, r32ui) uniform writeonly uimage2D uDilated; // this frame's (pack_dilated), for the next
 layout(set = 2, binding = 0) uniform Params {
     vec4 sizes;  // the picture's width and height, and 1 over them
     vec4 params; // x: history weight, y: 1 when there is no history, z: 1 to sharpen instead, w: sharpness
     vec4 jitter; // xy: jitter, z: coverage present (2: frozen jitter), w: physical coverage changed (excluding jitter)
-    vec4 depth;  // x: 1 when uDepth is the main pass's depth; y: where the overlay's slice of it starts (2: none)
+    vec4 depth;  // x: 1 when uDepth is the main pass's depth; y: where the overlay's slice of it starts (2: none);
+                 // z: 1 when the sharpening follows (the resolve keeps where the depth bent, for it)
+    vec4 still;  // x: the history weight of a still pixel; y: 1 when still pixels keep more than moving ones
 }
 params;
 
@@ -49,6 +56,19 @@ vec3 to_ycocg(vec3 c) {
 
 vec3 from_ycocg(vec3 c) {
     return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
+}
+
+// The velocities kept for the next frame (uDilated): two halves, each with its two lowest bits (a relative 0.4 % of
+// the velocity, far under the half pixel the next frame's mismatch test goes by) given to how recently the depth bent
+// at the pixel: 15 where it bends now, one less each frame since (followed as the picture moves), for the sharpening.
+uint pack_dilated(vec2 velocity, uint bent) {
+    return (packHalf2x16(velocity) & ~0x00030003u) | (bent & 3u) | ((bent >> 2u) << 16u);
+}
+vec2 dilated_velocity(uint packed) {
+    return unpackHalf2x16(packed & ~0x00030003u);
+}
+uint dilated_bent(uint packed) {
+    return (packed & 3u) | (((packed >> 16u) & 3u) << 2u);
 }
 
 vec4 fetch(ivec2 p) {
@@ -94,24 +114,32 @@ void sharpen(ivec2 p) {
     const vec3 blur = (n + s + e + w) * 0.25;
     // Not at a silhouette, whose blended pixels (the resolve's anti-aliasing) the boost would push to either side,
     // back into steps: texture detail within a surface is sharpened, the outline of one surface against another left
-    // as the resolve gave it. The depth (reverse Z, its far plane at infinity) runs straight across any plane on the
-    // screen, however slanted (a floor to the horizon), so where it bends across the pixel's cross there is an edge: a
-    // silhouette, the sky beside a roof, a crease.
+    // as the resolve gave it. Where the depth bent (depth_bends) in any of the last eight frames, not only this one:
+    // the jitter moves a thing thinner than a pixel (a railing's bar, a cable) in and out of one frame's depth, while
+    // the resolved picture holds it in every frame, so going by this frame's depth alone sharpened its pixels in some
+    // of the jitter's places and not in the others: a flicker with the jitter's period. Back to the full boost over
+    // eight more frames after an edge has gone.
     float boost = params.params.w * 1.5;
     if (params.depth.x > 0.5) {
-        const ivec2 last = ivec2(params.sizes.xy) - 1;
-        const float d = texelFetch(uDepth, p, 0).r;
-        const float dn = texelFetch(uDepth, clamp(p + ivec2(0, -1), ivec2(0), last), 0).r;
-        const float ds = texelFetch(uDepth, clamp(p + ivec2(0, 1), ivec2(0), last), 0).r;
-        const float de = texelFetch(uDepth, clamp(p + ivec2(1, 0), ivec2(0), last), 0).r;
-        const float dw = texelFetch(uDepth, clamp(p + ivec2(-1, 0), ivec2(0), last), 0).r;
-        const float bend = max(abs(de + dw - 2.0 * d), abs(dn + ds - 2.0 * d));
-        if (bend > 0.01 * max(d, max(max(dn, ds), max(de, dw)))) {
-            boost = 0.0;
-        }
+        const uint bent = dilated_bent(texelFetch(uPastDilated, p, 0).r); // this frame's, in this mode
+        boost *= clamp(1.0 - float(bent) / 8.0, 0.0, 1.0);
     }
     const vec3 sharp = clamp(c + (c - blur) * boost, low, high);
     imageStore(uResult, p, vec4(expand(sharp), centre.a));
+}
+
+// Whether the depth bends across the pixel's cross. The depth (reverse Z, its far plane at infinity) runs straight
+// across any plane on the screen, however slanted (a floor to the horizon), so where it bends there is an edge: a
+// silhouette, the sky beside a roof, a crease.
+bool depth_bends(ivec2 p) {
+    const ivec2 last = ivec2(params.sizes.xy) - 1;
+    const float d = texelFetch(uDepth, p, 0).r;
+    const float dn = texelFetch(uDepth, clamp(p + ivec2(0, -1), ivec2(0), last), 0).r;
+    const float ds = texelFetch(uDepth, clamp(p + ivec2(0, 1), ivec2(0), last), 0).r;
+    const float de = texelFetch(uDepth, clamp(p + ivec2(1, 0), ivec2(0), last), 0).r;
+    const float dw = texelFetch(uDepth, clamp(p + ivec2(-1, 0), ivec2(0), last), 0).r;
+    const float bend = max(abs(de + dw - 2.0 * d), abs(dn + ds - 2.0 * d));
+    return bend > 0.01 * max(d, max(max(dn, ds), max(de, dw)));
 }
 
 // R: mesh=2, new mesh=3, matched particle=4+irradiance, new
@@ -171,11 +199,20 @@ void main() {
     }
     const vec4 current = fetch(p);
     const vec2 velocity = edge_velocity(p);
-    imageStore(uDilated, p, uvec4(packHalf2x16(velocity), 0u, 0u, 0u));
     const vec2 uv = (vec2(p) + 0.5) * params.sizes.zw;
     const vec2 past = uv - velocity;
-    if (params.params.y > 0.5 || any(lessThan(past, vec2(0.0))) || any(greaterThan(past, vec2(1.0))) ||
-        any(isnan(velocity))) {
+    const ivec2 size = ivec2(params.sizes.xy);
+    // The last frame's pixel this one's history is read from.
+    const ivec2 nearest = clamp(ivec2(floor(past * params.sizes.xy)), ivec2(0), size - 1);
+    const bool no_history = params.params.y > 0.5 || any(lessThan(past, vec2(0.0))) ||
+                            any(greaterThan(past, vec2(1.0))) || any(isnan(velocity));
+    uint bent = 0u;
+    if (params.depth.z > 0.5) {
+        const uint before = no_history ? 0u : dilated_bent(texelFetch(uPastDilated, nearest, 0).r);
+        bent = depth_bends(p) ? 15u : max(before, 1u) - 1u;
+    }
+    imageStore(uDilated, p, uvec4(pack_dilated(velocity, bent), 0u, 0u, 0u));
+    if (no_history) {
         imageStore(uResult, p, current);
         return;
     }
@@ -252,7 +289,16 @@ void main() {
     }
     const vec3 mean = sum / 9.0;
     const vec3 spread = sqrt(max(sum_squares / 9.0 - mean * mean, vec3(0.0)));
-    const vec3 box_low = max(mean - 1.25 * spread, low), box_high = min(mean + 1.25 * spread, high);
+    vec3 box_low = max(mean - 1.25 * spread, low), box_high = min(mean + 1.25 * spread, high);
+    // A still pixel's box goes by the spread alone, further (2.5 of it), past what this frame's nine samples reached:
+    // one frame's samples can all miss a detail finer than a pixel (the jitter puts them elsewhere), and clipped to
+    // them its history was pulled to the background and back once a period. A flat neighbourhood (no spread) clips as
+    // tightly as before, so a change of light on it is followed at once.
+    const float speed = length(velocity * params.sizes.xy);
+    // (Nothing of this where a still pixel keeps no more than a moving one: TemporalAA3D::still_blend at blend.)
+    const float still = params.still.y > 0.5 ? 1.0 - clamp(speed / 0.5, 0.0, 1.0) : 0.0;
+    box_low = mix(box_low, min(box_low, mean - 2.5 * spread), still);
+    box_high = mix(box_high, max(box_high, mean + 2.5 * spread), still);
 
     vec4 history = history_at(past);
     if (any(isnan(history)) || any(isinf(history))) {
@@ -276,14 +322,14 @@ void main() {
     // by something else then (or covers what was something else): the history is
     // of another surface and is dropped, over the half pixel past a tolerance that
     // grows a little with speed.
-    const ivec2 size = ivec2(params.sizes.xy);
-    const ivec2 nearest = clamp(ivec2(floor(past * params.sizes.xy)), ivec2(0), size - 1);
     // (The last frame's velocity there as its resolve took it: a pixel at that edge took the edge's then, as this one
     // does now.)
-    const vec2 then = unpackHalf2x16(texelFetch(uPastDilated, nearest, 0).r);
+    const vec2 then = dilated_velocity(texelFetch(uPastDilated, nearest, 0).r);
     const float mismatch_px = length((then - velocity) * params.sizes.xy);
-    const float speed = length(velocity * params.sizes.xy);
-    float weight = params.params.x;
+    // A still pixel's history is read from its own place, exactly (no blur to accumulate): it keeps more of it (the
+    // mean of the frames the history holds while they are few, then more than a moving pixel). The tests below still
+    // drop it where it is of another surface or the light changed.
+    float weight = mix(params.params.x, params.still.x, still);
     // Illumination changes lower confidence continuously. Small fire flicker
     // still accumulates coverage samples; larger moving-light/shadow changes
     // respond promptly over the full reconstruction footprint.
@@ -309,7 +355,8 @@ void main() {
     // such an edge within a quarter of a still one, and a slow pan as sharp as before).
     const vec2 between = abs(fract(past * params.sizes.xy) - 0.5);
     weight *= 1.0 - 0.3 * clamp(max(between.x, between.y) * 3.0, 0.0, 1.0);
-    weight *= 1.0 - 0.5 * clamp(outside - 1.0, 0.0, 1.0);
+    // (Not for a still pixel, whose wider box already sets how far its history may be.)
+    weight *= 1.0 - 0.5 * clamp(outside - 1.0, 0.0, 1.0) * (1.0 - still);
     const vec3 colour = mix(filtered / filtered_weight, from_ycocg(h), weight);
     imageStore(uResult, p, vec4(expand(colour), mix(filtered_alpha / filtered_weight, history.a, weight)));
 }

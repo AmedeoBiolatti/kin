@@ -4576,6 +4576,84 @@ void test_gpu_taa_over_detail() {
     });
 }
 
+// Detail finer than a pixel under a still camera: bars seven tenths of a pixel wide in front of a stone-like wall
+// (grey texels, one a pixel), which one frame's samples miss in some of the jitter's places. Settled, the picture
+// changes less from frame to frame than with still_blend at blend (still pixels treated as moving ones), and the
+// sharpening adds little to that: it goes by where the depth bent in the last eight frames, as this frame's depth
+// misses a bar in some of them (going by it alone, the bars' blended pixels were sharpened in some of the jitter's
+// places and not in the others).
+void test_gpu_taa_still_detail() {
+    with_gpu("test_gpu_taa_still_detail", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        std::vector<kin::u8> texels(160 * 120 * 4);
+        kin::u32 seed = 12345u;
+        for (std::size_t i = 0; i < texels.size(); i += 4) {
+            seed = seed * 1664525u + 1013904223u;
+            texels[i] = texels[i + 1] = texels[i + 2] = static_cast<kin::u8>(120 + (seed >> 24) * 100 / 255);
+            texels[i + 3] = 255;
+        }
+        const kin::Texture stone = renderer.create_texture_from_rgba(texels.data(), {160, 120});
+        kin::MeshData3D plane;
+        plane.vertices = {{{-8, -6, 0}, {0, 0, 1}, {0, 1}},
+                          {{8, -6, 0}, {0, 0, 1}, {1, 1}},
+                          {{8, 6, 0}, {0, 0, 1}, {1, 0}},
+                          {{-8, 6, 0}, {0, 0, 1}, {0, 0}}};
+        plane.indices = {0, 1, 2, 0, 2, 3};
+        const kin::Mesh3D wall = r3d.create_mesh(plane).value_or({});
+        const kin::Mesh3D bar = make_box(r3d, {0.07f, 14.0f, 0.1f});
+        const kin::Material3D dark{.color = Color::rgb(20, 20, 20), .unlit = true};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        kin::Scene3D scene;
+        std::vector<kin::MeshInstance3D> bars;
+        for (int i = 0; i < 20; ++i) { // 7.3 pixels apart: each falls somewhere else in its pixel
+            bars.push_back({Mat4f::translation({-7.5f + 0.73f * static_cast<float>(i), 0.0f, 1.0f})});
+        }
+        const auto draw = [&] {
+            scene.clear();
+            scene.camera = flat_camera();
+            (void)scene.draw(wall, Mat4f::identity(), {.unlit = true, .texture = stone});
+            (void)scene.draw_instanced(bar, bars, dark);
+        };
+        // How much the pixels change from one frame to the next over two jitter periods, once settled: the sum of the
+        // changes over the steps, in levels.
+        const auto shimmer = [&](const kin::TemporalAA3D& taa) {
+            scene.taa = taa;
+            view.reset_history();
+            Pixels before;
+            long total = 0;
+            for (int f = 0; f < 136; ++f) {
+                draw();
+                Pixels now = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+                if (f > 120) {
+                    for (int y = 0; y < 120; ++y) {
+                        for (int x = 0; x < 160; ++x) {
+                            total += std::abs(level(now.at(x, y)) - level(before.at(x, y)));
+                        }
+                    }
+                }
+                before = std::move(now);
+            }
+            return total;
+        };
+        scene.taa = {.enabled = true};
+        draw();
+        shoot_view(renderer, r3d, view, scene);
+        renderer.present();
+        if (lacks(r3d.capabilities().temporal_aa, "temporal anti-aliasing")) {
+            return;
+        }
+        const long moving = shimmer({.enabled = true, .still_blend = 0.9f});
+        const long still = shimmer({.enabled = true});
+        const long moving_sharp = shimmer({.enabled = true, .still_blend = 0.9f, .sharpness = 1.0f});
+        const long still_sharp = shimmer({.enabled = true, .sharpness = 1.0f});
+        std::printf("    still detail: changes %ld (%ld treated as moving), sharpened %ld (%ld)\n", still, moving,
+                    still_sharp, moving_sharp);
+        assert(still * 2 < moving);
+        assert(still_sharp < still * 1.5);
+    });
+}
+
 // A crowd of one mesh that loses a copy from the middle of its list (and gains
 // one at the front) while it moves: the places in the list no longer say which
 // copy is which, so the copies are matched by where they were. The pixels a
@@ -21788,6 +21866,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_taa());
     RUN(test_gpu_taa_slow_motion());
     RUN(test_gpu_taa_over_detail());
+    RUN(test_gpu_taa_still_detail());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());
     RUN(test_gpu_taa_main_velocity());

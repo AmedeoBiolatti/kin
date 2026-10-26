@@ -169,6 +169,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("occlusion_pixel_margin", lod.occlusion.pixel_margin);
         SETTING("taa_enabled", taa.enabled);
         SETTING("taa_blend", taa.blend);
+        SETTING("taa_still_blend", taa.still_blend);
         SETTING("taa_sharpness", taa.sharpness);
         SETTING("anisotropy", anisotropy);
         SETTING("texture_lod_bias", texture_lod_bias);
@@ -297,12 +298,13 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.ambient_occlusion.radius > 0 && settings.ambient_occlusion.intensity >= 0 &&
                  settings.contact_shadows.distance >= 0 && settings.contact_shadows.thickness > 0 &&
                  settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
-                 settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 && settings.anisotropy >= 1 &&
-                 settings.anisotropy <= 16 && std::abs(settings.texture_lod_bias) <= 2 &&
-                 std::isfinite(settings.global_illumination.cell) && settings.global_illumination.cell > 0 &&
-                 settings.global_illumination.levels >= 1 && settings.global_illumination.levels <= max_gi_levels &&
-                 settings.global_illumination.side >= 32 && settings.global_illumination.side <= max_gi_side &&
-                 settings.global_illumination.height >= 32 && settings.global_illumination.height <= max_gi_side &&
+                 settings.taa.still_blend >= 0 && settings.taa.still_blend <= .98f && settings.taa.sharpness >= 0 &&
+                 settings.taa.sharpness <= 1 && settings.anisotropy >= 1 && settings.anisotropy <= 16 &&
+                 std::abs(settings.texture_lod_bias) <= 2 && std::isfinite(settings.global_illumination.cell) &&
+                 settings.global_illumination.cell > 0 && settings.global_illumination.levels >= 1 &&
+                 settings.global_illumination.levels <= max_gi_levels && settings.global_illumination.side >= 32 &&
+                 settings.global_illumination.side <= max_gi_side && settings.global_illumination.height >= 32 &&
+                 settings.global_illumination.height <= max_gi_side &&
                  static_cast<u64>(settings.global_illumination.side) * settings.global_illumination.side *
                          settings.global_illumination.height <=
                      max_gi_voxels &&

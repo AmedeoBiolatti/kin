@@ -7,6 +7,15 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Steady TAA on detail finer than a pixel: still pixels (moving under half a
+  pixel a frame) keep more of their history (`TemporalAA3D::still_blend`, 0.96
+  by default, never below `blend`; authored as `SceneEnvironment3D`'s
+  `taa_still_blend`) with a clip box by the spread of the colours round them,
+  and the sharpening keeps off edges the depth showed in any of the last eight
+  frames, not only this one (a thin thing comes and goes in one frame's depth
+  with the jitter). Such detail (print, a railing's bars) shimmered with the
+  jitter's period. The Bistro's start view at 2404 x 1352: pixels changing by
+  more than 16 levels a frame from 5,566 to 537, and a little sharper.
 - Add 3D global illumination (`Scene3D::global_illumination`, off by default;
   `RendererCapabilities3D::global_illumination`; authored as
   `SceneEnvironment3D`'s `gi_*` keys): the scene in voxels with a distance field

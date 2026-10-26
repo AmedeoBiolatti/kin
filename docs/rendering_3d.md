@@ -674,7 +674,7 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   (`uContactShadow`) in kin's include; ones compiled before still work. Full
   size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
   ### Temporal anti-aliasing `scene.taa = {.enabled = true, .blend = 0.9f,
-  .sharpness = 0.0f, .jitter_scale = 1.0f, .jitter_samples = 8}` (off by
+  .still_blend = 0.96f, .sharpness = 0.0f, .jitter_scale = 1.0f, .jitter_samples = 8}` (off by
   default; off, the picture is bit-identical and nothing extra exists: no
   pass, no buffer). Each frame is drawn a Halton (2, 3) fraction of a pixel
   off (`kin::taa_jitter`, `kin/render3d/taa3d.hpp`), and a compute pass blends
@@ -734,17 +734,34 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   read between pixels (at most 30%), with speed and with how far the clip moved
   it; none off the screen, for a new copy or the first frame. An edge moving a
   tenth to a whole pixel a frame is within a quarter of a still one's error
-  against a 16-sample picture (it was 2.3 to 8 times it). This frame's colour is
+  against a 16-sample picture (it was 2.3 to 8 times it). A **still pixel**
+  (moving under half a pixel a frame, in between by degrees) reads its history
+  exactly, so it keeps more of it (`still_blend`, never below `blend`; at `blend`
+  or below, still pixels are treated as moving ones) and its clip box goes by the
+  spread alone, 2.5 of it, past this frame's range: detail finer than a pixel (a
+  menu's print, a railing's bars), which one frame's nine samples can all miss
+  where the jitter puts them, was pulled to the background and back once a jitter
+  period, a shimmer with the jitter's rhythm. A flat neighbourhood still clips as
+  tightly (a change of light there is followed at once); the tests that drop
+  history (another surface, a change of light) apply as before. Not solved: a bar
+  thinner than a pixel against a perfectly flat background (the sky) loses most
+  of its contrast, as the frames that miss it clip it away. This frame's colour is
   read from its 3 x 3 neighbours by how near the pixel centre each sample fell (a
   Gaussian), not as the pixel's own sample, which would pull the picture to
   wherever the last few jitters were (with the jitter at 0 it is the pixel's own).
   Light is compressed (`c / (1 + max c)`) for the clip and the mix. `sharpness` (0
   to 1) adds a local-contrast boost kept inside the neighbours' range, one more
-  dispatch, within surfaces: not where the depth bends across the pixel's cross (a
-  silhouette, the sky beside a roof, a crease; the depth runs straight across any
-  plane, however slanted), whose blended pixels the boost would push back into
-  steps. An outline's pixels keep the resolve's blend; the cells of a checkerboard
-  on one plane come out 29% steeper.
+  dispatch, within surfaces: not where the depth bent across the pixel's cross in
+  the last eight frames (a silhouette, the sky beside a roof, a crease; the depth
+  runs straight across any plane, however slanted), whose blended pixels the boost
+  would push back into steps. Eight frames, not this one alone: the jitter moves a
+  thing thinner than a pixel in and out of one frame's depth, so its pixels were
+  sharpened in some of the jitter's places and not in the others. The resolve
+  keeps how many frames ago the depth bent in the two lowest bits of each half of
+  the velocities it keeps for the next frame (a relative 0.4% of the velocity,
+  far under the half pixel it is judged by), followed as the picture moves; no
+  memory is added. An outline's pixels keep the resolve's blend; the cells of a
+  checkerboard on one plane come out 29% steeper.
 - **Before the post chain**: bloom, exposure and the tonemap work on the
   resolved picture. An 8-bit view is drawn in linear float into a texture of its
   own, resolved, then clipped at white and encoded (`view_output.frag` mode 3);

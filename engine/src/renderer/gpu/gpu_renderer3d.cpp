@@ -271,9 +271,11 @@ struct TaaUniforms {
     f32 params[4]; // history weight, 1 when there is no history, 1 to sharpen, sharpness
     f32 jitter[4]; // this frame's offset in pixels
     f32 depth[4];  // x: 1 when the main pass's depth is bound (the nearest surface's velocity is taken at edges);
-                   // y: where the overlay's slice of it starts (2: no overlay)
+                   // y: where the overlay's slice of it starts (2: no overlay); z: 1 when the sharpening follows (the
+                   // resolve keeps where the depth bent, for it)
+    f32 still[4];  // x: the history weight of a still pixel; y: 1 when still pixels keep more than moving ones
 };
-static_assert(sizeof(TaaUniforms) == 64);
+static_assert(sizeof(TaaUniforms) == 80);
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
@@ -3064,8 +3066,18 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
                                              RenderDebugStats3D& stats) {
     const f32 w = static_cast<f32>(view._size.x), h = static_cast<f32>(view._size.y);
     const GpuTexture& past_motion = reset ? view._ao_normals : view._taa_motion;
+    const f32 sharpness = std::clamp(taa.sharpness, 0.0f, 1.0f);
+    const bool sharpened = sharpness > 0.0f && view._taa_sharp;
+    // A still pixel's history weight: the mean of the frames the history holds while they are few (it reads them
+    // exactly; kept at still_blend, a cut's first frames would weigh for long), then still_blend. At blend or below
+    // (or with a blend of 0, no history anywhere), still pixels are treated as moving ones.
+    const f32 blend = std::clamp(taa.blend, 0.0f, 0.98f);
+    const f32 most = std::clamp(taa.still_blend, 0.0f, 0.98f);
+    const bool hold = blend > 0.0f && most > blend;
+    const u32 held = reset ? 0u : view._taa_held;
+    const f32 still_blend = std::min(most, 1.0f - 1.0f / static_cast<f32>(held + 1));
     const auto dispatch = [&](const GpuTexture& target, const GpuTexture& current, const GpuTexture& history,
-                              f32 sharpen, f32 sharpness) {
+                              f32 sharpen, f32 amount) {
         const std::array<SDL_GPUTextureSamplerBinding, 6> inputs{
             SDL_GPUTextureSamplerBinding{current.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{history.handle(), _owner->_sampler_linear},
@@ -3073,12 +3085,15 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
             SDL_GPUTextureSamplerBinding{past_motion.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{depth ? depth->handle() : _owner->_white.handle(), _point_sampler},
             SDL_GPUTextureSamplerBinding{view._taa_dilated[view._taa_read].handle(), _point_sampler}};
-        const TaaUniforms u{{w, h, 1.0f / w, 1.0f / h},
-                            {std::clamp(taa.blend, 0.0f, 0.98f), reset ? 1.0f : 0.0f, sharpen, sharpness},
-                            {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
-                             reject ? 1.0f : 0.0f},
-                            {depth ? 1.0f : 0.0f, overlaid ? overlay_split : 2.0f, 0.0f, 0.0f}};
-        // (The sharpening dispatch binds this frame's velocities as its second output too, and writes nothing there.)
+        const TaaUniforms u{
+            {w, h, 1.0f / w, 1.0f / h},
+            {blend, reset ? 1.0f : 0.0f, sharpen, amount},
+            {jitter.x, jitter.y, (reactive || view._taa_reactive) ? (fixed_jitter ? 2.0f : 1.0f) : 0.0f,
+             reject ? 1.0f : 0.0f},
+            {depth ? 1.0f : 0.0f, overlaid ? overlay_split : 2.0f, depth && sharpened ? 1.0f : 0.0f, 0.0f},
+            {still_blend, hold ? 1.0f : 0.0f, 0.0f, 0.0f}};
+        // (The sharpening dispatch binds this frame's velocities as its second output too, and writes nothing there;
+        // it reads them, with where the depth bent, as its last input.)
         if (!compute_pass_two(commands, _taa_pipeline, target, view._taa_dilated[1 - view._taa_read], inputs, &u,
                               sizeof(u))) {
             return false;
@@ -3093,9 +3108,9 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
     }
     view._taa_read = write;
     view._taa_reactive = reactive;
+    view._taa_held = reset ? 1u : std::min(view._taa_held + 1u, 1000u);
     const GpuTexture* shown = &view._taa_history[write];
-    const f32 sharpness = std::clamp(taa.sharpness, 0.0f, 1.0f);
-    if (sharpness > 0.0f && view._taa_sharp && dispatch(view._taa_sharp, *shown, *shown, 1.0f, sharpness)) {
+    if (sharpened && dispatch(view._taa_sharp, *shown, *shown, 1.0f, sharpness)) {
         shown = &view._taa_sharp;
     }
     return shown;

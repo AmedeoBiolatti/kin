@@ -197,11 +197,13 @@ private:
     GpuTexture _taa_depth, _taa_in, _taa_sharp;
     GpuTexture _taa_motion; // the last frame's pre-pass normals and velocity (swapped with _ao_normals each frame)
     std::array<GpuTexture, 2> _taa_history;
-    // The velocities the resolve took (the nearest surface's round each pixel; two halves in R32_UINT), this frame's
-    // and the last, read and written as the history is: the next frame compares its own with them.
+    // The velocities the resolve took (the nearest surface's round each pixel; two halves in R32_UINT, their lowest
+    // bits holding how recently the depth bent there, for the sharpening), this frame's and the last, read and written
+    // as the history is: the next frame compares its own with them.
     std::array<GpuTexture, 2> _taa_dilated;
     u32 _taa_read = 0;       // which of the two holds the last frame
     u32 _taa_frame = 0;      // frames drawn with it, for the jitter
+    u32 _taa_held = 0;       // frames the history holds since it was last reset (a still pixel's weight)
     bool _taa_valid = false; // the history holds a picture to blend
     u64 _taa_coverage_key = 0;
     u64 _taa_shadow_revision = 0;
