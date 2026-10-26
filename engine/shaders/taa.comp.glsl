@@ -15,7 +15,7 @@
 // Light is compressed (c / (1 + max c)) for the clip and the mix, so a very
 // bright pixel does not outweigh its neighbours or flicker. A second mode
 // (params.z) sharpens a finished picture: a small local-contrast boost kept
-// inside the neighbours' range.
+// inside the neighbours' range, within surfaces (not where the depth bends).
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0)
     uniform sampler2D uCurrent; // this frame, or in sharpen mode the result so far; linear, premultiplied
@@ -92,7 +92,25 @@ void sharpen(ivec2 p) {
     const vec3 e = compress(fetch(p + ivec2(1, 0)).rgb), w = compress(fetch(p + ivec2(-1, 0)).rgb);
     const vec3 low = min(c, min(min(n, s), min(e, w))), high = max(c, max(max(n, s), max(e, w)));
     const vec3 blur = (n + s + e + w) * 0.25;
-    const vec3 sharp = clamp(c + (c - blur) * (params.params.w * 1.5), low, high);
+    // Not at a silhouette, whose blended pixels (the resolve's anti-aliasing) the boost would push to either side,
+    // back into steps: texture detail within a surface is sharpened, the outline of one surface against another left
+    // as the resolve gave it. The depth (reverse Z, its far plane at infinity) runs straight across any plane on the
+    // screen, however slanted (a floor to the horizon), so where it bends across the pixel's cross there is an edge: a
+    // silhouette, the sky beside a roof, a crease.
+    float boost = params.params.w * 1.5;
+    if (params.depth.x > 0.5) {
+        const ivec2 last = ivec2(params.sizes.xy) - 1;
+        const float d = texelFetch(uDepth, p, 0).r;
+        const float dn = texelFetch(uDepth, clamp(p + ivec2(0, -1), ivec2(0), last), 0).r;
+        const float ds = texelFetch(uDepth, clamp(p + ivec2(0, 1), ivec2(0), last), 0).r;
+        const float de = texelFetch(uDepth, clamp(p + ivec2(1, 0), ivec2(0), last), 0).r;
+        const float dw = texelFetch(uDepth, clamp(p + ivec2(-1, 0), ivec2(0), last), 0).r;
+        const float bend = max(abs(de + dw - 2.0 * d), abs(dn + ds - 2.0 * d));
+        if (bend > 0.01 * max(d, max(max(dn, ds), max(de, dw)))) {
+            boost = 0.0;
+        }
+    }
+    const vec3 sharp = clamp(c + (c - blur) * boost, low, high);
     imageStore(uResult, p, vec4(expand(sharp), centre.a));
 }
 

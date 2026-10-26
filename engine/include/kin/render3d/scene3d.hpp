@@ -349,8 +349,10 @@ struct ContactShadows3D {
 // docs/rendering_3d.md for how, and what it cannot do.
 struct TemporalAA3D {
     bool enabled = false;
-    f32 blend = 0.9f;     // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
-    f32 sharpness = 0.0f; // a small local-contrast boost on the result, 0 (off) to 1; costs one more dispatch
+    f32 blend = 0.9f; // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
+    // A local-contrast boost on the result, 0 (off) to 1, within surfaces: not at a silhouette or a crease (where the
+    // depth bends), whose anti-aliased pixels it would push back into steps. Costs one more dispatch.
+    f32 sharpness = 0.0f;
     f32 jitter_scale =
         1.0f; // the jitter's reach: 1 is a pixel; 0 turns the jitter off (no anti-aliasing, for looking at the rest)
     u32 jitter_samples = 8; // frames before the jitter sequence repeats (1 to 16)

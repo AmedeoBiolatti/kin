@@ -3511,7 +3511,9 @@ void test_gpu_taa() {
         shoot(view, scene);
         assert(r3d.debug_stats().taa_jitter.x == a.x && r3d.debug_stats().taa_jitter.y == a.y); // a period of 2
 
-        // Sharpening is one more dispatch: flat areas are left alone and edges are steeper.
+        // Sharpening is one more dispatch: flat areas are left alone, and so is an outline against what is behind it
+        // (the blend the resolve gave its pixels, which a boost would push back into steps); detail within a surface is
+        // steeper.
         const auto steepness = [](const Pixels& p) {
             long sum = 0;
             for (int y = 0; y < 120; ++y) {
@@ -3532,12 +3534,34 @@ void test_gpu_taa() {
         for (int f = 0; f < 16; ++f) {
             sharp = shoot(view, scene);
         }
-        std::cerr << "taa: steepness (sum of squared differences along rows) " << steepness(soft) << " soft, "
-                  << steepness(sharp) << " sharpened\n";
+        std::cerr << "taa: the slab's outline, steepness (sum of squared differences along rows) " << steepness(soft)
+                  << " soft, " << steepness(sharp) << " sharpened\n";
         assert(r3d.debug_stats().taa_dispatches == 2);
-        assert(steepness(sharp) > steepness(soft) + steepness(soft) / 20);
+        assert(steepness(sharp) < steepness(soft) + steepness(soft) / 50);
         expect(sharp.at(80, 60), Color::rgb(255, 255, 255), "inside the slab, sharpened");
         expect(sharp.at(5, 5), black, "outside the slab, sharpened");
+        {
+            // A checkerboard on one plane, its cells four pixels across: their edges are the texture's, within the
+            // surface, and steeper sharpened.
+            const PatternSurface pattern = make_pattern_surface(r3d, renderer);
+            const auto board = [&](float sharpness) {
+                kin::Scene3D s;
+                s.camera = flat_camera();
+                s.taa = {.enabled = true, .sharpness = sharpness};
+                (void)s.draw(pattern.mesh, Mat4f::identity(),
+                             {.unlit = true, .texture = pattern.texture, .wrap_u = kin::Wrap3D::Repeat});
+                view.reset_history();
+                Pixels p;
+                for (int f = 0; f < 16; ++f) {
+                    p = shoot(view, s);
+                }
+                return steepness(p);
+            };
+            const long cells_soft = board(0.0f), cells_sharp = board(1.0f);
+            std::cerr << "taa: a checkerboard's cells, steepness " << cells_soft << " soft, " << cells_sharp
+                      << " sharpened\n";
+            assert(cells_sharp > cells_soft + cells_soft / 20);
+        }
 
         // Resets: a reset_history() and a resize each drop it; the frame after shows no blend (two levels at the edge).
         scene.taa = {.enabled = true};

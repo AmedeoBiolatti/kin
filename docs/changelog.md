@@ -16,6 +16,9 @@ releases may change APIs.
   2, `RendererCapabilities3D::texture_lod_bias`; authored as
   `SceneEnvironment3D`'s `texture_lod_bias`): with TAA, sharper textures
   without sharpening edges.
+- Keep TAA's sharpening (`TemporalAA3D::sharpness`) within surfaces: where the
+  depth bends (a silhouette, a crease) it no longer pushes an anti-aliased
+  outline's blended pixels back into steps.
 - Read 3D normal maps of two channels (BC5, or any whose blue reads 0) as x and
   y with z rebuilt; they were lit from behind (z read as -1). Maps of three
   channels are read as before.

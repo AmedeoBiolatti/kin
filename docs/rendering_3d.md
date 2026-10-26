@@ -455,232 +455,232 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   materials' mipmapped textures are read from, moved by that many levels;
   negative is finer and sharper. Temporal anti-aliasing averages the shimmer
   of a finer level, and its resolve softens textures a little: a bias of -0.5
-  (Godot's with its TAA) to -1 (FSR 2's at native resolution) gives that back
-  without `TemporalAA3D::sharpness`, whose boost also steepens the blended
-  pixels of anti-aliased edges back into steps. Read as `anisotropy` is, in
-  every pass. Where `RendererCapabilities3D::texture_lod_bias`: SDL_GPU on
-  Vulkan and Direct3D 12 (Metal's samplers have no bias; WebGL2 none either).
-  `SceneEnvironment3D` authors it as `texture_lod_bias`.
-
-Unlit materials use dedicated colour-only or base-textured main-pass shaders, with separate cut-out variants. They preserve
-vertex/material/tint colours, sRGB conversion, emission, alpha/additive blending, HDR and MSAA, while omitting lighting resources
-and unused normal/world-position outputs. Fog, skinned meshes, temporal AA and custom materials use the general shaders.
-Shadow, picking and depth/normal passes keep their existing shaders. `warmup()` prepares the selected unlit pipeline too.
-`RenderDebugStats3D::unlit_draws` counts specialized main-pass commands; `unlit_textured_draws` is its textured subset.
-Specialization is selected automatically when the material and view support it.
-
-`wireframe` draws only the mesh's triangles' edges, a pixel wide, unlit in
-the material's colour, just in front of faces in the same place (a little
-depth bias): a model's edges drawn over it, or lines on the ground made of
-degenerate triangles (`a, b, b`). Wireframes cast no shadow and are not
-picked. They need line fill, which desktop GPUs have; where the pipeline
-can't be made they are not drawn.
-
-`blend`: `Opaque` (the default), `Alpha` (over what is behind by its alpha;
-drawn after the opaque, furthest first) or `Additive` (adds light: sparks,
-tracers, flashes, in any order). Transparent draws are depth-tested but don't
-hide what is behind them.
-
-Copies wholly outside the camera's view are skipped (`scene.cull`, on by
-default): each is tested as its mesh's bounding sphere, moved and scaled with
-it, and only the visible ones are sent to the GPU. `stats().culled` counts
-the rest.
-
-`scene.overlay()` is a scene drawn over this one, in front of everything in
-it, with its own camera and this scene's lights: a first-person gun or hands,
-which then never sink into a wall. It is drawn in the same pass, in its own
-slice of the depth range.
-
-Lights: `scene.lights.sun` (`direction`, toward the light; `color`, linear,
-above 1 is brighter: what a white surface facing it shows, so a Lambert
-surface of albedo a shows a times `color`; a glossy surface adds its highlight), `scene.lights.fill` (a second sun that casts no
-shadow, black by default), `scene.lights.ambient` (with
-`ground_ambient.enabled`, using `ground_ambient.color` for light from below: faces between take
-a mix by how far they face up), and point lights
-(`scene.add_point_light({position, color, radius, size})`: muzzle flashes, explosions,
-lamps). A point light falls off with the square of the distance, as light
-does: its `color` is what a white surface facing it shows one unit away
-(twice as far, a quarter), and the light is windowed to nothing at `radius`
-(`(1 - (d/r)^4)^2`, as glTF's punctual lights). `size` is the light's own
-size (1 cm by default): nearer than that it is no brighter, as the light
-spreads over a body that big. Give flashes and fireballs theirs, or what
-stands in them blazes white. Before G1a the fall-off was `(1 - d^2/r^2)^2` without the inverse
-square: colours of those days are about the old colour times the square of the
-distance they were used at. At most 16 point lights light a
-frame: those whose reach is in view, the strongest and nearest first; point
-lights are cleared with the draws. Spot lights (`add_spot_light`, a cone of a point light) and the shadows of lights that are not the sun
-are below ("Spot lights and shadows from lights that are not the sun"). Light is added in linear light; the result
-is stored as the 2D pipeline stores colour, or kept HDR (see Views).
-
-The material shader skips a point light's shadow and BRDF evaluation when its
-windowed attenuation is zero. Positive contributions, however small, retain the
-same shading; this adds no light lists, caches or GPU buffers.
-
-Image-based light: `scene.lights.environment` is an `Environment3D`, an
-equirectangular HDR picture of the sky or a room (`r3d.load_environment(
-"sky.hdr")` reads a Radiance `.hdr` through the content folder or pack;
-`r3d.create_environment(size, rgb_floats)` takes linear RGB floats, rows top to
-bottom, 2:1). With one set, surfaces take their ambient light from it instead
-of `ambient`/`ground_ambient` (which are then not used; the sun, fill and point
-lights go on): the diffuse from its irradiance by the normal, the specular
-from a mip a roughness (GGX-filtered; a NaN or infinite texel of the picture
-is filtered as black) along the reflection, times the same
-split-sum fit as before. `environment_intensity` scales it,
-`environment_rotation` (degrees) turns it about +y. The picture's centre is
-+x, its top +y, and going right from the centre turns toward +z (Blender's
-world texture in kin's axes). The filtered copies (a 7-level equirect chain up
-to 1024 x 512 for the specular, 64 x 32 for the irradiance, half floats) are
-made by compute shaders in the first render that uses the environment, once
-(`debug_stats().environment_prefilters`); that render needs `compute` and a float
-format that storage textures can write, else the hemisphere stays. An
-environment is not drawn as a background (the view's `background` colour is),
-and in the overlay it is carried into the overlay's space.
-
-The sun casts shadows over `scene.lights.shadow_area`, a box round what
-casts and receives them (the level): one shadow map
-(`shadow_resolution`, 2048 texels by default) over that box, filtered over
-3x3 taps. Opaque meshes cast (`casts_shadow`); copies culled from the
-camera still cast when their shadow may fall in view (the copy swept down
-the light, through the area, reaches the camera's view), and are left out
-otherwise. A smaller box is sharper. The overlay gets no shadows.
-
-Sun receiver offsets are configurable in shadow texels: `shadow_bias` (depth,
-1 by default) and `shadow_normal_offset` (1.5 by default). Sun receiver offsets
-use the mesh normal facing the viewer, rather than normal-map relief: changing
-a texture must not move an unchanged caster's shadow. Flat-shaded clusters with
-zero vertex normals retain their reconstructed face normal.
-Opting into `shadow_receiver_plane_bias` corrects each PCF tap for the receiver's
-geometric depth gradient, including the comparison sampler's subtexel-dependent
-bilinear footprint. On planar receivers it allows small offsets on thin contacts
-without coplanar self-shadowing. Coarse curved meshes can produce streaks or
-triangular light/shadow patches where the filter extrapolates across different
-facets; use conventional PCF for these. XC121 uses conventional PCF with depth 1
-and normal offset 1.5, supported by finer maps for thin cables. Derivatives for
-the optional correction are taken before the sun-facing branch and cascade selection/blending; the
-correction applies independently in each cascade. These are receiver uniforms:
-changing them updates shading while a valid cached depth map remains reusable.
-No additional texture or shadow pass is allocated. Local-light and moon bias
-settings are unchanged.
-
-A single-sided mesh casts with the faces it shows, toward the sun: for a
-closed mesh that is the same shadow as both sides for half the work, but a
-lone quad facing away from the sun (a ceiling seen from below) casts
-nothing. Make it `double_sided` to cast from both sides. `stats()` counts
-the shadow map's draw calls and the meshes drawn into it.
-
-**Cascades.** One map over a big area is coarse: its texels are the area's
-size over `shadow_resolution`, the same far and near. `lights.shadow_cascades`
-(1 by default: the single map above, the picture unchanged; 2 to 4, more is
-4) splits the camera's view by depth instead, nearer cascades covering less,
-and gives each its own `shadow_resolution` square map (a layer of one depth
-array, a shadow pass each). `lights.shadow_distance` (100 units by default,
-never past the camera's `z_far`) is how far from the camera they reach;
-the splits are a blend of logarithmic and linear (0.6 of the log one), so
-the first cascade covers a few metres and the last the rest. Each cascade's
-box is the sphere round its slice of the view, so it keeps its size as the
-camera turns, snapped to whole texels in the sun's space so edges don't
-shimmer as it moves; `shadow_area` still limits it, and is what casts and
-receives. `mesh.frag` picks the cascade by the depth of the pixel along the
-camera's forward, and fades into the next over the last tenth of each range
-(no visible seam), with 3x3 taps and a depth bias and normal offset that
-scale with the cascade's texel. A copy casts into each cascade whose slice its
-shadow may fall in (the same test as above, a cascade at a time), so a
-far-off thing isn't drawn into the near maps. Without a depth array to render
-into the renderer makes fewer layers (down to one: the single map), says so
-once in the log, and never fails. Costs more than one map: a pass and the
-casters of each cascade, a few more taps; use it where the area is
-much bigger than what the camera sees close up. `stats().shadow_cascades` counts
-the maps; `debug_stats().cascade_casters` counts copies drawn into each.
-
-**Kept while nothing moves.** `lights.cache_shadows` (off by default: a game that pauses or has photo mode turns it on) keeps the map(s) from one render to the next and does not draw them again
-when they would come out the same, to the byte: the sun, the area, the resolution, the **camera** (what casts into view, and the cascades' fit,
-depend on it), the levels of detail, and every caster's mesh, material and copies must all be as they were (a cut-out's texture too: written
-in place, it is seen; a render target as the texture is never cached). It pays for a paused game, a photo mode, a viewer at rest (the shadow pass
-is a quarter to a half of such a frame) and costs a moving scene nothing measurable (a key of a few hundred bytes and a sample of the copies; the
-copies are compared in full, stopping at the first difference, only once two renders agreed). `stats().shadow_cached` is true when it hit (the
-shadow draw counts are then 0). Set `scene.lights.cache_shadows = false` for a benchmark that renders one scene many times. See the plan's "Opt-in speedups, phase 1".
-
-### Ambient occlusion
-
-`scene.ambient_occlusion = {.enabled = true, .radius = 0.5f, .intensity = 1.0f,
-.half_resolution = false}` (off by default; off, the picture and the cost are
-those of a renderer without it). The opaque and cut-out meshes the camera
-sees are drawn first into a depth and world-normal pre-pass (one sample,
-whatever the view's MSAA; the main pass is not changed and does not reuse its
-depth); GTAO (2 slices, 8 steps a side, a thickness heuristic) runs in compute
-from it, then a depth-aware blur (R8 result). `mesh.frag` multiplies the
-ambient light and the environment's diffuse by it (Jimenez et al.'s
-multi-bounce fit, from the surface's colour) and the environment's reflections
-by a specular occlusion term; the sun, fill and point lights are not touched.
-`radius` is how far (units) something can still shut light off: a few tenths
-of the size of what you want creased (0.5 for props, several units for rooms);
-`intensity` is the power the result is raised to. Blended, additive and
-wireframe meshes read no occlusion (they would read what is behind them),
-nor does the first-person overlay, which is not in the pre-pass either: its
-own lighting stays as it was. Where the device lacks a sampled depth, a
-two-float colour target or an R8 storage texture, occlusion is off with one
-line in the log. `half_resolution` computes at half the view's size (about a
-third of the cost; a little softer at depth edges). `debug_stats()` has
-`ao_draws`, `ao_instances` and `ao_dispatches` (0 when off). Costs a second
-draw of every opaque copy and about 0.3 ms or more of compute at 1280 x 720:
-see the plan's G2b results.
-With contact shadows also on (and `half_resolution` off) the two blurs are one dispatch a direction (`debug_stats().blur_merged` is 2; the counts above
-still count each feature's own); the result is the same to the byte. The blur ends in the first target again (raw, across, raw), so a feature
-holds two R8 textures, not three.
-In views of 1.5 million pixels or more (about 1440 x 1040; 1920 x 1080 and up) the occlusion reads a **linear depth chain** instead of the depth: one
-compute dispatch writes the distance in front of the camera of every pre-pass pixel and four coarser levels (R32F, a weighted average of four texels
-that leans to the farthest, after XeGTAO), a tap picks its level by its distance from the pixel (the first level from 20 pixels, the next from 40, and
-so on) and the blurs read level 0, so the far taps of a wide search miss the cache far less and no tap divides to find its position. It gives the
-pictures of the old path to within 0.2 levels on the reference scenes (`debug_stats().ao_chain_built` is 1; the chain's own dispatch is not in
-`ao_dispatches`) and saves 0.2 to 0.5 ms of the 1.3 to 2 of the occlusion at 1080p and 25 to 30% of it at 4K, but costs a little more where the occlusion's
-reach is a few pixels (far views, the kiln at 1080p: +0.2 of 8 ms): the plan's "Opt-in speedups, phase 2". Below that size the old path runs and the
-picture is the old one to the byte.
-Contact shadows blurred on their own (no occlusion in the same view, or the occlusion at half resolution) get one blur pass, not two (-0.03 ms at 1280 x 720,
--0.1 at 1080p; the pictures differ by under 0.3 levels on average): `debug_stats().contact_dispatches` is then 2 (the march and the blur).
-
-### Contact shadows
-
-`scene.contact_shadows = {.enabled = true, .distance = 0.5f, .thickness = 0.1f,
-.intensity = 1.0f, .steps = 20}` (off by default; off, the picture and the cost
-are those of a renderer without it). For the small shadows a shadow map is too
-coarse for: the foot of a pole, a plate on the ground. A compute pass marches
-from each pixel toward the sun through the pre-pass's depth (the same pre-pass
-and targets as ambient occlusion, drawn once when both are on, so it works with
-occlusion off), starting a different amount along the first step at each pixel;
-a sample counts as blocking when the depth there is nearer the camera than the
-ray, but by no more than `thickness` (a thing that is further in front is taken
-to be a thin occluder the ray passes behind, so a distant plate in front casts
-nothing). The result fades over the last 40% of `distance` and near the
-screen's edge, goes through the occlusion's depth-aware blur, and is read by
-`mesh.frag`, which multiplies **only the sun's term** by it, after the shadow
-map's and faded with `Lights3D::sun_shadow_strength` as the map's shadow is (at
-0 the march does not run): the fill, ambient light, environment and point
-lights are untouched.
-`distance` (units) is how far toward the sun to look; `thickness` (units) how
-deep an occluder is assumed to be (smaller: fewer false shadows from near
-things, thin shadows may thin out; larger: the reverse); `intensity` 0..1;
-`steps` 4..64. Surfaces turned from the sun, blended, additive and wireframe
-meshes, the first-person overlay and meshes that do not receive shadows read
-none. Marched in compute rather than in `mesh.frag`: the main pass shades
-every fragment of the overdraw and the march would run in each, where compute
-runs once a pixel and `mesh.frag` stays one texture read. Without a sampled
-depth, an RG16F colour target or R8 storage it is off with one line in the log;
-with no sun it does nothing. `debug_stats()` has `contact_dispatches` (0 when off);
-the pre-pass shows in `ao_draws` and `ao_instances`. Custom shaders see a tenth
-sampler (`uContactShadow`) in kin's include; ones compiled before still work.
-Full size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
-
-### Temporal anti-aliasing
-
-`scene.taa = {.enabled = true, .blend = 0.9f, .sharpness = 0.0f,
-.jitter_scale = 1.0f, .jitter_samples = 8}` (off by
-default; off, the picture is bit-identical and nothing extra exists: no pass,
-no buffer). Each frame is drawn a Halton (2, 3) fraction of a pixel off
-(`kin::taa_jitter`, `kin/render3d/taa3d.hpp`), and a compute pass blends it into
-the picture of the frames before. **It replaces MSAA while on**: the view
-draws one sample a pixel whatever `ViewOptions3D::samples` asks
-(`stats().samples` says 1).
-
+  (Godot's with its TAA) to -1 (FSR 2's at native resolution) gives that back,
+  as `TemporalAA3D::sharpness` does within surfaces; the two together sharpen
+  textures most. Read as `anisotropy` is, in every pass. Where
+  `RendererCapabilities3D::texture_lod_bias`: SDL_GPU on Vulkan and Direct3D
+  12 (Metal's samplers have no bias; WebGL2 none either). `SceneEnvironment3D`
+  authors it as `texture_lod_bias`. Unlit materials use dedicated colour-only
+  or base-textured main-pass shaders, with separate cut-out variants. They
+  preserve vertex/material/tint colours, sRGB conversion, emission,
+  alpha/additive blending, HDR and MSAA, while omitting lighting resources and
+  unused normal/world-position outputs. Fog, skinned meshes, temporal AA and
+  custom materials use the general shaders. Shadow, picking and depth/normal
+  passes keep their existing shaders. `warmup()` prepares the selected unlit
+  pipeline too. `RenderDebugStats3D::unlit_draws` counts specialized main-pass
+  commands; `unlit_textured_draws` is its textured subset. Specialization is
+  selected automatically when the material and view support it. `wireframe`
+  draws only the mesh's triangles' edges, a pixel wide, unlit in the
+  material's colour, just in front of faces in the same place (a little depth
+  bias): a model's edges drawn over it, or lines on the ground made of
+  degenerate triangles (`a, b, b`). Wireframes cast no shadow and are not
+  picked. They need line fill, which desktop GPUs have; where the pipeline
+  can't be made they are not drawn. `blend`: `Opaque` (the default), `Alpha`
+  (over what is behind by its alpha; drawn after the opaque, furthest first)
+  or `Additive` (adds light: sparks, tracers, flashes, in any order).
+  Transparent draws are depth-tested but don't hide what is behind them.
+  Copies wholly outside the camera's view are skipped (`scene.cull`, on by
+  default): each is tested as its mesh's bounding sphere, moved and scaled
+  with it, and only the visible ones are sent to the GPU. `stats().culled`
+  counts the rest. `scene.overlay()` is a scene drawn over this one, in front
+  of everything in it, with its own camera and this scene's lights: a
+  first-person gun or hands, which then never sink into a wall. It is drawn in
+  the same pass, in its own slice of the depth range. Lights:
+  `scene.lights.sun` (`direction`, toward the light; `color`, linear, above 1
+  is brighter: what a white surface facing it shows, so a Lambert surface of
+  albedo a shows a times `color`; a glossy surface adds its highlight),
+  `scene.lights.fill` (a second sun that casts no shadow, black by default),
+  `scene.lights.ambient` (with `ground_ambient.enabled`, using
+  `ground_ambient.color` for light from below: faces between take a mix by how
+  far they face up), and point lights (`scene.add_point_light({position,
+  color, radius, size})`: muzzle flashes, explosions, lamps). A point light
+  falls off with the square of the distance, as light does: its `color` is
+  what a white surface facing it shows one unit away (twice as far, a
+  quarter), and the light is windowed to nothing at `radius` (`(1 -
+  (d/r)^4)^2`, as glTF's punctual lights). `size` is the light's own size (1
+  cm by default): nearer than that it is no brighter, as the light spreads
+  over a body that big. Give flashes and fireballs theirs, or what stands in
+  them blazes white. Before G1a the fall-off was `(1 - d^2/r^2)^2` without the
+  inverse square: colours of those days are about the old colour times the
+  square of the distance they were used at. At most 16 point lights light a
+  frame: those whose reach is in view, the strongest and nearest first; point
+  lights are cleared with the draws. Spot lights (`add_spot_light`, a cone of
+  a point light) and the shadows of lights that are not the sun are below
+  ("Spot lights and shadows from lights that are not the sun"). Light is added
+  in linear light; the result is stored as the 2D pipeline stores colour, or
+  kept HDR (see Views). The material shader skips a point light's shadow and
+  BRDF evaluation when its windowed attenuation is zero. Positive
+  contributions, however small, retain the same shading; this adds no light
+  lists, caches or GPU buffers. Image-based light: `scene.lights.environment`
+  is an `Environment3D`, an equirectangular HDR picture of the sky or a room
+  (`r3d.load_environment( "sky.hdr")` reads a Radiance `.hdr` through the
+  content folder or pack; `r3d.create_environment(size, rgb_floats)` takes
+  linear RGB floats, rows top to bottom, 2:1). With one set, surfaces take
+  their ambient light from it instead of `ambient`/`ground_ambient` (which are
+  then not used; the sun, fill and point lights go on): the diffuse from its
+  irradiance by the normal, the specular from a mip a roughness (GGX-filtered;
+  a NaN or infinite texel of the picture is filtered as black) along the
+  reflection, times the same split-sum fit as before. `environment_intensity`
+  scales it, `environment_rotation` (degrees) turns it about +y. The picture's
+  centre is +x, its top +y, and going right from the centre turns toward +z
+  (Blender's world texture in kin's axes). The filtered copies (a 7-level
+  equirect chain up to 1024 x 512 for the specular, 64 x 32 for the
+  irradiance, half floats) are made by compute shaders in the first render
+  that uses the environment, once (`debug_stats().environment_prefilters`);
+  that render needs `compute` and a float format that storage textures can
+  write, else the hemisphere stays. An environment is not drawn as a
+  background (the view's `background` colour is), and in the overlay it is
+  carried into the overlay's space. The sun casts shadows over
+  `scene.lights.shadow_area`, a box round what casts and receives them (the
+  level): one shadow map (`shadow_resolution`, 2048 texels by default) over
+  that box, filtered over 3x3 taps. Opaque meshes cast (`casts_shadow`);
+  copies culled from the camera still cast when their shadow may fall in view
+  (the copy swept down the light, through the area, reaches the camera's
+  view), and are left out otherwise. A smaller box is sharper. The overlay
+  gets no shadows. Sun receiver offsets are configurable in shadow texels:
+  `shadow_bias` (depth, 1 by default) and `shadow_normal_offset` (1.5 by
+  default). Sun receiver offsets use the mesh normal facing the viewer, rather
+  than normal-map relief: changing a texture must not move an unchanged
+  caster's shadow. Flat-shaded clusters with zero vertex normals retain their
+  reconstructed face normal. Opting into `shadow_receiver_plane_bias` corrects
+  each PCF tap for the receiver's geometric depth gradient, including the
+  comparison sampler's subtexel-dependent bilinear footprint. On planar
+  receivers it allows small offsets on thin contacts without coplanar
+  self-shadowing. Coarse curved meshes can produce streaks or triangular
+  light/shadow patches where the filter extrapolates across different facets;
+  use conventional PCF for these. XC121 uses conventional PCF with depth 1 and
+  normal offset 1.5, supported by finer maps for thin cables. Derivatives for
+  the optional correction are taken before the sun-facing branch and cascade
+  selection/blending; the correction applies independently in each cascade.
+  These are receiver uniforms: changing them updates shading while a valid
+  cached depth map remains reusable. No additional texture or shadow pass is
+  allocated. Local-light and moon bias settings are unchanged. A single-sided
+  mesh casts with the faces it shows, toward the sun: for a closed mesh that
+  is the same shadow as both sides for half the work, but a lone quad facing
+  away from the sun (a ceiling seen from below) casts nothing. Make it
+  `double_sided` to cast from both sides. `stats()` counts the shadow map's
+  draw calls and the meshes drawn into it. **Cascades.** One map over a big
+  area is coarse: its texels are the area's size over `shadow_resolution`, the
+  same far and near. `lights.shadow_cascades` (1 by default: the single map
+  above, the picture unchanged; 2 to 4, more is 4) splits the camera's view by
+  depth instead, nearer cascades covering less, and gives each its own
+  `shadow_resolution` square map (a layer of one depth array, a shadow pass
+  each). `lights.shadow_distance` (100 units by default, never past the
+  camera's `z_far`) is how far from the camera they reach; the splits are a
+  blend of logarithmic and linear (0.6 of the log one), so the first cascade
+  covers a few metres and the last the rest. Each cascade's box is the sphere
+  round its slice of the view, so it keeps its size as the camera turns,
+  snapped to whole texels in the sun's space so edges don't shimmer as it
+  moves; `shadow_area` still limits it, and is what casts and receives.
+  `mesh.frag` picks the cascade by the depth of the pixel along the camera's
+  forward, and fades into the next over the last tenth of each range (no
+  visible seam), with 3x3 taps and a depth bias and normal offset that scale
+  with the cascade's texel. A copy casts into each cascade whose slice its
+  shadow may fall in (the same test as above, a cascade at a time), so a
+  far-off thing isn't drawn into the near maps. Without a depth array to
+  render into the renderer makes fewer layers (down to one: the single map),
+  says so once in the log, and never fails. Costs more than one map: a pass
+  and the casters of each cascade, a few more taps; use it where the area is
+  much bigger than what the camera sees close up. `stats().shadow_cascades`
+  counts the maps; `debug_stats().cascade_casters` counts copies drawn into
+  each. **Kept while nothing moves.** `lights.cache_shadows` (off by default:
+  a game that pauses or has photo mode turns it on) keeps the map(s) from one
+  render to the next and does not draw them again when they would come out the
+  same, to the byte: the sun, the area, the resolution, the **camera** (what
+  casts into view, and the cascades' fit, depend on it), the levels of detail,
+  and every caster's mesh, material and copies must all be as they were (a
+  cut-out's texture too: written in place, it is seen; a render target as the
+  texture is never cached). It pays for a paused game, a photo mode, a viewer
+  at rest (the shadow pass is a quarter to a half of such a frame) and costs a
+  moving scene nothing measurable (a key of a few hundred bytes and a sample
+  of the copies; the copies are compared in full, stopping at the first
+  difference, only once two renders agreed). `stats().shadow_cached` is true
+  when it hit (the shadow draw counts are then 0). Set
+  `scene.lights.cache_shadows = false` for a benchmark that renders one scene
+  many times. See the plan's "Opt-in speedups, phase 1". ### Ambient occlusion
+  `scene.ambient_occlusion = {.enabled = true, .radius = 0.5f, .intensity =
+  1.0f, .half_resolution = false}` (off by default; off, the picture and the
+  cost are those of a renderer without it). The opaque and cut-out meshes the
+  camera sees are drawn first into a depth and world-normal pre-pass (one
+  sample, whatever the view's MSAA; the main pass is not changed and does not
+  reuse its depth); GTAO (2 slices, 8 steps a side, a thickness heuristic)
+  runs in compute from it, then a depth-aware blur (R8 result). `mesh.frag`
+  multiplies the ambient light and the environment's diffuse by it (Jimenez et
+  al.'s multi-bounce fit, from the surface's colour) and the environment's
+  reflections by a specular occlusion term; the sun, fill and point lights are
+  not touched. `radius` is how far (units) something can still shut light off:
+  a few tenths of the size of what you want creased (0.5 for props, several
+  units for rooms); `intensity` is the power the result is raised to. Blended,
+  additive and wireframe meshes read no occlusion (they would read what is
+  behind them), nor does the first-person overlay, which is not in the
+  pre-pass either: its own lighting stays as it was. Where the device lacks a
+  sampled depth, a two-float colour target or an R8 storage texture, occlusion
+  is off with one line in the log. `half_resolution` computes at half the
+  view's size (about a third of the cost; a little softer at depth edges).
+  `debug_stats()` has `ao_draws`, `ao_instances` and `ao_dispatches` (0 when
+  off). Costs a second draw of every opaque copy and about 0.3 ms or more of
+  compute at 1280 x 720: see the plan's G2b results. With contact shadows also
+  on (and `half_resolution` off) the two blurs are one dispatch a direction
+  (`debug_stats().blur_merged` is 2; the counts above still count each
+  feature's own); the result is the same to the byte. The blur ends in the
+  first target again (raw, across, raw), so a feature holds two R8 textures,
+  not three. In views of 1.5 million pixels or more (about 1440 x 1040; 1920 x
+  1080 and up) the occlusion reads a **linear depth chain** instead of the
+  depth: one compute dispatch writes the distance in front of the camera of
+  every pre-pass pixel and four coarser levels (R32F, a weighted average of
+  four texels that leans to the farthest, after XeGTAO), a tap picks its level
+  by its distance from the pixel (the first level from 20 pixels, the next
+  from 40, and so on) and the blurs read level 0, so the far taps of a wide
+  search miss the cache far less and no tap divides to find its position. It
+  gives the pictures of the old path to within 0.2 levels on the reference
+  scenes (`debug_stats().ao_chain_built` is 1; the chain's own dispatch is not
+  in `ao_dispatches`) and saves 0.2 to 0.5 ms of the 1.3 to 2 of the occlusion
+  at 1080p and 25 to 30% of it at 4K, but costs a little more where the
+  occlusion's reach is a few pixels (far views, the kiln at 1080p: +0.2 of 8
+  ms): the plan's "Opt-in speedups, phase 2". Below that size the old path
+  runs and the picture is the old one to the byte. Contact shadows blurred on
+  their own (no occlusion in the same view, or the occlusion at half
+  resolution) get one blur pass, not two (-0.03 ms at 1280 x 720, -0.1 at
+  1080p; the pictures differ by under 0.3 levels on average):
+  `debug_stats().contact_dispatches` is then 2 (the march and the blur). ###
+  Contact shadows `scene.contact_shadows = {.enabled = true, .distance = 0.5f,
+  .thickness = 0.1f, .intensity = 1.0f, .steps = 20}` (off by default; off,
+  the picture and the cost are those of a renderer without it). For the small
+  shadows a shadow map is too coarse for: the foot of a pole, a plate on the
+  ground. A compute pass marches from each pixel toward the sun through the
+  pre-pass's depth (the same pre-pass and targets as ambient occlusion, drawn
+  once when both are on, so it works with occlusion off), starting a different
+  amount along the first step at each pixel; a sample counts as blocking when
+  the depth there is nearer the camera than the ray, but by no more than
+  `thickness` (a thing that is further in front is taken to be a thin occluder
+  the ray passes behind, so a distant plate in front casts nothing). The
+  result fades over the last 40% of `distance` and near the screen's edge,
+  goes through the occlusion's depth-aware blur, and is read by `mesh.frag`,
+  which multiplies **only the sun's term** by it, after the shadow map's and
+  faded with `Lights3D::sun_shadow_strength` as the map's shadow is (at 0 the
+  march does not run): the fill, ambient light, environment and point lights
+  are untouched. `distance` (units) is how far toward the sun to look;
+  `thickness` (units) how deep an occluder is assumed to be (smaller: fewer
+  false shadows from near things, thin shadows may thin out; larger: the
+  reverse); `intensity` 0..1; `steps` 4..64. Surfaces turned from the sun,
+  blended, additive and wireframe meshes, the first-person overlay and meshes
+  that do not receive shadows read none. Marched in compute rather than in
+  `mesh.frag`: the main pass shades every fragment of the overdraw and the
+  march would run in each, where compute runs once a pixel and `mesh.frag`
+  stays one texture read. Without a sampled depth, an RG16F colour target or
+  R8 storage it is off with one line in the log; with no sun it does nothing.
+  `debug_stats()` has `contact_dispatches` (0 when off); the pre-pass shows in
+  `ao_draws` and `ao_instances`. Custom shaders see a tenth sampler
+  (`uContactShadow`) in kin's include; ones compiled before still work. Full
+  size only; about 0.15 to 0.3 ms at 1280 x 720 (see the plan's G2c results).
+  ### Temporal anti-aliasing `scene.taa = {.enabled = true, .blend = 0.9f,
+  .sharpness = 0.0f, .jitter_scale = 1.0f, .jitter_samples = 8}` (off by
+  default; off, the picture is bit-identical and nothing extra exists: no
+  pass, no buffer). Each frame is drawn a Halton (2, 3) fraction of a pixel
+  off (`kin::taa_jitter`, `kin/render3d/taa3d.hpp`), and a compute pass blends
+  it into the picture of the frames before. **It replaces MSAA while on**: the
+  view draws one sample a pixel whatever `ViewOptions3D::samples` asks
+  (`stats().samples` says 1).
 - **Where the settings live.** On the scene, like occlusion: it can be switched
   live without making the view again. What it keeps between frames, the
   history, belongs to the **view** (the scene is rebuilt every frame): made by
@@ -740,7 +740,11 @@ draws one sample a pixel whatever `ViewOptions3D::samples` asks
   wherever the last few jitters were (with the jitter at 0 it is the pixel's own).
   Light is compressed (`c / (1 + max c)`) for the clip and the mix. `sharpness` (0
   to 1) adds a local-contrast boost kept inside the neighbours' range, one more
-  dispatch.
+  dispatch, within surfaces: not where the depth bends across the pixel's cross (a
+  silhouette, the sky beside a roof, a crease; the depth runs straight across any
+  plane, however slanted), whose blended pixels the boost would push back into
+  steps. An outline's pixels keep the resolve's blend; the cells of a checkerboard
+  on one plane come out 29% steeper.
 - **Before the post chain**: bloom, exposure and the tonemap work on the
   resolved picture. An 8-bit view is drawn in linear float into a texture of its
   own, resolved, then clipped at white and encoded (`view_output.frag` mode 3);
