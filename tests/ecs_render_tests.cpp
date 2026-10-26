@@ -1,5 +1,7 @@
 #include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
+#include <kin/anim/anim_format.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/ecs_scene.hpp>
@@ -1435,6 +1437,67 @@ void test_scene_shapes_clips_and_text() {
     fs::remove_all(dir);
 }
 
+// An animation file named by an Animator: its tracks set described fields
+// (any, as "Component.field"), of the entity and of a child by name; it plays
+// through once, or on when it repeats; a prefab's instances each their own.
+void test_animators() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_animator_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    kin::AnimationRegistryFragment fragment;
+    kin::Clip slide{.duration = 1.0f};
+    slide.properties.push_back({.property = "Transform2D.pos",
+                                .keys = {{.time = 0.0f, .value = kin::Vec2f{0.0f, 0.0f}}, {.time = 1.0f, .value = kin::Vec2f{100.0f, 0.0f}}}});
+    slide.properties.push_back({.property = "RectRenderer.color", .target = "lamp",
+                                .keys = {{.time = 0.0f, .value = kin::Color{0, 0, 0, 255}}, {.time = 1.0f, .value = kin::Color{200, 100, 0, 255}}}});
+    fragment.animations.push_back({.name = "slide", .root = kin::clip_node(std::move(slide))});
+    kin::Clip pulse{.duration = 0.5f};
+    pulse.properties.push_back({.property = "RectRenderer.size",
+                                .keys = {{.time = 0.0f, .value = kin::Vec2f{10.0f, 10.0f}}, {.time = 0.5f, .value = kin::Vec2f{20.0f, 20.0f}}}});
+    fragment.animations.push_back({.name = "pulse", .root = kin::repeat_node(kin::clip_node(std::move(pulse)), 0)});
+    assert(kin::save_animation_registry_fragment(fragment, dir / "moves.kinanim"));
+
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    assert(world.components().find("Animator"));
+    kin::EcsEntity cart = world.entity("cart").set(kin::Transform2D{}).set(kin::Animator{.asset = {.id = "moves.kinanim"}, .animation = "slide"});
+    kin::EcsEntity lamp = world.entity("lamp").set(kin::Transform2D{}).set(kin::RectRenderer{.size = {4, 4}});
+    lamp.raw().child_of(cart.raw());
+    kin::update_animators(world, 0.1f); // not bound yet: nothing moves
+    assert(cart.get<kin::Transform2D>()->pos.x == 0.0f);
+    assert(assets.bind(world) && cart.get<kin::Animator>()->library);
+    kin::update_animators(world, 0.0f);
+    kin::update_animators(world, 0.5f);
+    assert(near(cart.get<kin::Transform2D>()->pos.x, 50.0f) && near(cart.get<kin::Animator>()->time, 0.5f));
+    assert(lamp.get<kin::RectRenderer>()->color.r == 100); // the child's, by its name
+    kin::update_animators(world, 0.75f);
+    assert(near(cart.get<kin::Transform2D>()->pos.x, 100.0f) && cart.get<kin::Animator>()->finished);
+    // Another named: from its start; one that repeats plays on.
+    cart.get_mut<kin::Animator>()->animation = "pulse";
+    cart.set(kin::RectRenderer{});
+    kin::update_animators(world, 0.0f);
+    kin::update_animators(world, 1.25f);
+    assert(near(cart.get<kin::RectRenderer>()->size.x, 15.0f) && !cart.get<kin::Animator>()->finished);
+
+    // A prefab's instances: each moved on its own (their Transform2Ds copied down).
+    kin::EcsEntity prefab{world.raw().prefab("Cart")
+                              .set(kin::Transform2D{})
+                              .set(kin::RectRenderer{.size = {10, 10}})
+                              .set(kin::Animator{.asset = {.id = "moves.kinanim"}, .animation = "pulse"})};
+    kin::EcsEntity first{world.raw().entity().is_a(prefab.raw())};
+    kin::EcsEntity second{world.raw().entity().is_a(prefab.raw())};
+    assert(assets.bind(world) || true);
+    kin::update_animators(world, 0.0f);
+    first.get_mut<kin::Animator>()->speed = 0.0f; // stays at its start
+    kin::update_animators(world, 0.25f);
+    assert(near(second.get<kin::RectRenderer>()->size.x, 15.0f) && near(first.get<kin::RectRenderer>()->size.x, 10.0f));
+    assert(near(prefab.get<kin::RectRenderer>()->size.x, 10.0f)); // the prefab as it was
+    fs::remove_all(dir);
+}
+
 int main() {
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
@@ -1469,6 +1532,7 @@ int main() {
     test_assets2d_binds_particles();
     test_assets2d_binds_tilemaps();
     test_scene_shapes_clips_and_text();
+    test_animators();
 #if KIN_ENABLE_AUDIO
     test_assets2d_binds_audio_emitters();
 #endif

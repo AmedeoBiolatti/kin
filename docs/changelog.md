@@ -32,6 +32,11 @@ releases may change APIs.
   or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
   the new `TextRenderer` (text in the world, in a content font or the system's)
   to scene files. Add `AssetType::Shape` (`.svg`).
+- Add `Animator`, which plays an animation of a `.kinanim` file on an entity
+  from scene files (`update_animators`; `Assets2D` reads the file), its tracks
+  setting any described field (`register_described_properties`,
+  `EcsComponentRegistry::field_access`); instances of prefabs animate their own
+  copies.
 - Give particle effects a direction and spread, an emission shape (point,
   circle, box), drag, rotation and spin, and a size and colour midway through
   their lives, written as optional `name=value` settings so older catalogs

@@ -400,6 +400,20 @@ const ComponentDescriptor* EcsComponentRegistry::find(std::string_view name) con
     return record ? &record->descriptor : nullptr;
 }
 
+std::optional<ComponentFieldAccess> EcsComponentRegistry::field_access(std::string_view component, std::string_view field) const {
+    const detail::ComponentRecord* record = find_record(component);
+    if (!record || record->descriptor.kind != ComponentKind::Native) {
+        return std::nullopt;
+    }
+    for (const detail::ComponentFieldRecord& found : record->fields) {
+        if (found.descriptor.name == field) {
+            return ComponentFieldAccess{.component = record->descriptor.id, .kind = found.descriptor.kind, .read = found.read,
+                                        .write = found.patch};
+        }
+    }
+    return std::nullopt;
+}
+
 std::vector<ComponentDescriptor> EcsComponentRegistry::descriptors() const {
     std::vector<const detail::ComponentRecord*> sorted;
     sorted.reserve(_records.size());

@@ -8,8 +8,8 @@
 // audio catalog; ParticleSystemComponent.asset and ParticleFieldComponent.asset:
 // a particle catalog; TilemapComponent.asset: a tilemap, with its tileset and
 // that's image; ShapeRenderer: its mesh, made of its shape or SVG file;
-// TextRenderer.font: a font), and a game adds one for each component of its
-// own that names an asset.
+// TextRenderer.font: a font; Animator.asset: an animation file), and a game
+// adds one for each component of its own that names an asset.
 //
 //     kin::Assets2D assets{renderer, kin::content_root()};
 //     assets.add_binder("Speaker", [](kin::EcsWorld& world, kin::Assets2D& assets) {
@@ -39,7 +39,9 @@
 
 namespace kin {
 
+class AnimationAssetLibrary;
 class AudioCatalog;
+class PropertyRegistry;
 class ParticleCatalog;
 class Renderer2D;
 class Shape;
@@ -86,6 +88,12 @@ public:
     // (sharp as it is scaled up) where the renderer can; `path` empty: the
     // system's UI font. Invalid when it cannot be read.
     ui2::Font font(std::string_view path, f32 size);
+    // An animation file (.kinanim): its animations and state machines. Null
+    // when it cannot be read.
+    std::shared_ptr<AnimationAssetLibrary> animations(std::string_view path);
+    // The fields animations can set in `world` (its described components'),
+    // made again when it describes more.
+    const PropertyRegistry& properties(EcsWorld& world);
 
     // A binder for a game's own component (by name; one of that name replaces it).
     void add_binder(std::string name, Binder binder);
@@ -140,6 +148,12 @@ private:
     std::unordered_map<std::string, Read<Shape>, PathHash, std::equal_to<>> _svgs;
     // By path and size ("path@size").
     std::unordered_map<std::string, Read<ui2::Font>, PathHash, std::equal_to<>> _fonts;
+    std::unordered_map<std::string, Read<AnimationAssetLibrary>, PathHash, std::equal_to<>> _animations;
+    struct Properties {
+        std::shared_ptr<PropertyRegistry> registry;
+        std::size_t described = 0; // the world's described components when made
+    };
+    std::unordered_map<const EcsWorld*, Properties> _properties;
     // Catalogs read again: kept, as components and voices may still point at them.
     std::vector<std::shared_ptr<const void>> _retired;
     // Other assets read through manager(), with their files' times then.
@@ -154,7 +168,7 @@ private:
 // catalog, an AudioEmitter's catalog, a particle system's catalog (and a
 // field's state made from its catalog's field), a TilemapComponent's map,
 // when they name one; a ShapeRenderer's mesh made again when its spec (or
-// its SVG file) changed; a TextRenderer's font.
+// its SVG file) changed; a TextRenderer's font; an Animator's animation file.
 void bind_texture_renderers(EcsWorld& world, Assets2D& assets);
 void bind_sprite_renderers(EcsWorld& world, Assets2D& assets);
 void bind_audio_emitters(EcsWorld& world, Assets2D& assets);
@@ -163,5 +177,6 @@ void bind_particle_fields(EcsWorld& world, Assets2D& assets);
 void bind_tilemaps(EcsWorld& world, Assets2D& assets);
 void bind_shape_renderers(EcsWorld& world, Assets2D& assets);
 void bind_text_renderers(EcsWorld& world, Assets2D& assets);
+void bind_animators(EcsWorld& world, Assets2D& assets);
 
 } // namespace kin

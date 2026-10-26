@@ -1,5 +1,9 @@
 #include <kin/ecs/assets2d.hpp>
 
+#include <kin/ecs/animator.hpp>
+
+#include <kin/anim/anim_format.hpp>
+#include <kin/anim/binding.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
@@ -263,6 +267,43 @@ ui2::Font Assets2D::font(std::string_view path, f32 size) {
     return made ? *made : ui2::Font{};
 }
 
+std::shared_ptr<AnimationAssetLibrary> Assets2D::animations(std::string_view path) {
+    if (path.empty()) {
+        return nullptr;
+    }
+    // Made here, not const: players resolve (and cache) their animations in it.
+    const auto mutable_of = [](const std::shared_ptr<const AnimationAssetLibrary>& library) {
+        return std::const_pointer_cast<AnimationAssetLibrary>(library);
+    };
+    if (const auto found = _animations.find(path); found != _animations.end()) {
+        return mutable_of(found->second.catalog);
+    }
+    std::string key(path);
+    Read<AnimationAssetLibrary> read{.catalog = nullptr, .files = {{key, file_time(path)}}};
+    try {
+        auto library = std::make_shared<AnimationAssetLibrary>();
+        library->merge(load_animation_registry_fragment(_manager.resolve(path)));
+        read.catalog = std::move(library);
+        _problems.erase(key);
+    } catch (const std::exception& error) {
+        tell(_problems, key, error.what());
+    }
+    ++_version;
+    return mutable_of(_animations.emplace(std::move(key), std::move(read)).first->second.catalog);
+}
+
+const PropertyRegistry& Assets2D::properties(EcsWorld& world) {
+    Properties& made = _properties[&world];
+    const std::size_t described = world.components().descriptors().size();
+    if (!made.registry || made.described != described) {
+        made.registry = std::make_shared<PropertyRegistry>();
+        register_builtin_properties(*made.registry, world);
+        register_described_properties(*made.registry, world);
+        made.described = described;
+    }
+    return *made.registry;
+}
+
 void Assets2D::add_binder(std::string name, Binder binder) {
     const auto found = std::ranges::find(_binders, name, &std::pair<std::string, Binder>::first);
     if (found != _binders.end()) {
@@ -282,6 +323,7 @@ bool Assets2D::bind(EcsWorld& world) {
     bind_tilemaps(world, *this);
     bind_shape_renderers(world, *this);
     bind_text_renderers(world, *this);
+    bind_animators(world, *this);
     for (auto& [name, binder] : _binders) {
         if (binder) {
             binder(world, *this);
@@ -321,6 +363,7 @@ std::vector<std::string> Assets2D::reload_changed() {
     reread(_tilemaps);
     reread(_svgs);
     reread(_fonts);
+    reread(_animations);
     // Those read through manager(): as they were when first seen here.
     for (const std::string& path : _manager.loaded_asset_paths()) {
         const std::optional<std::filesystem::file_time_type> now = file_time(path);
@@ -544,6 +587,37 @@ void bind_text_renderers(EcsWorld& world, Assets2D& assets) {
         EcsEntity owner{entity}; // one from a prefab gets its own copy first
         owner.get_mut<TextRenderer>()->face = std::move(face);
         owner.modified<TextRenderer>();
+    }
+    if (!rebound.empty()) {
+        assets.changed();
+    }
+}
+
+void bind_animators(EcsWorld& world, Assets2D& assets) {
+    struct Rebound {
+        flecs::entity entity;
+        std::shared_ptr<AnimationAssetLibrary> library;
+    };
+    std::vector<flecs::entity> animated;
+    world.raw().each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
+    if (animated.empty()) {
+        return;
+    }
+    // Made outside the walk: making it may register components.
+    const PropertyRegistry* properties = &assets.properties(world);
+    std::vector<Rebound> rebound;
+    for (const flecs::entity entity : animated) {
+        const Animator& animator = *entity.get<Animator>();
+        std::shared_ptr<AnimationAssetLibrary> library = assets.animations(animator.asset.id);
+        if (library != animator.library || animator.properties != properties) {
+            rebound.push_back({entity, std::move(library)});
+        }
+    }
+    for (Rebound& made : rebound) {
+        EcsEntity owner{made.entity}; // one from a prefab gets its own copy first
+        Animator& animator = *owner.get_mut<Animator>();
+        animator.library = std::move(made.library);
+        animator.properties = properties;
     }
     if (!rebound.empty()) {
         assets.changed();

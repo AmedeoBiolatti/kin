@@ -57,6 +57,7 @@ add_library(kin_engine STATIC
     src/ecs/ecs_scene.cpp
     src/ecs/particles.cpp
     src/ecs/render.cpp
+    src/ecs/animator.cpp
     src/ecs/camera.cpp
     src/ecs/sprite_animator.cpp
     src/ecs/text.cpp

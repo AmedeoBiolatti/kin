@@ -290,6 +290,15 @@ struct ComponentRecord {
 
 } // namespace detail
 
+// A field of a native component, read and written on the component's own
+// data: for code that walks components itself (animation tracks).
+struct ComponentFieldAccess {
+    ComponentId component = 0;
+    ComponentFieldKind kind = ComponentFieldKind::Bool;
+    std::function<ComponentFieldValue(const void*)> read;
+    std::function<bool(void*, const ComponentFieldValue&)> write;
+};
+
 class EcsComponentRegistry {
 public:
     using FieldVisitor = std::function<void(std::string_view,
@@ -387,6 +396,9 @@ public:
 
     bool patch_field(EcsEntity entity, ComponentId id, std::string_view field, const ComponentFieldValue& value);
     bool patch_field(EcsEntity entity, std::string_view component, std::string_view field, const ComponentFieldValue& value);
+    // A native component's field, to read and write on its data; none for a
+    // data component's, or one not described.
+    std::optional<ComponentFieldAccess> field_access(std::string_view component, std::string_view field) const;
     // Optional owner policy for live field edits (e.g. transactional asset and
     // physics updates). Installed only after scene construction. The handler
     // performs the edit and returns an error on failure; nullopt leaves normal

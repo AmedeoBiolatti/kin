@@ -4,6 +4,7 @@
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/tilemap.hpp>
@@ -571,6 +572,27 @@ void register_builtin_editor_components(EcsWorld& world) {
                            [](TilemapComponent&, const u32&) { return true; }) // as it is: nothing to set
             .readonly()
             .description("Its map's cells, once read (0: not read).");
+    }
+    if (!world.components().find("Animator")) {
+        // An animation of an animation file of the game's content played on
+        // the entity: its tracks set its components' fields (update_animators).
+        world.components().native<Animator>("Animator")
+            .field("asset", &Animator::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Animation)})
+            .field("animation", &Animator::animation)
+            .entry_of("asset")
+            .description("An animation of the file.")
+            .field("speed", &Animator::speed)
+            .range(0.0, 100.0)
+            .description("1: as the animation says; 2: twice as fast.")
+            .field("playing", &Animator::playing)
+            .property<f32>("time", [](const Animator& a) { return a.time; }, [](Animator&, const f32&) { return true; })
+            .readonly()
+            .units("seconds")
+            .description("Into the animation now.")
+            .property<bool>("finished", [](const Animator& a) { return a.finished; }, [](Animator&, const bool&) { return true; })
+            .readonly()
+            .description("One that ends has played through.");
     }
     if (!world.components().find("CameraComponent")) {
         // What the game sees of its world: EcsScene draws through the first

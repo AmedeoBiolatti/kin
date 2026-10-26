@@ -138,6 +138,7 @@ kin binds its own components' assets:
 | `SpriteAnimator` | (none: its `SpriteRenderer`'s catalog) | `animation` names one of the catalog's animations; `update_sprite_animators(world, dt)` sets the renderer's sprite to its frames in turn |
 | `TilemapComponent` | a tilemap (`.kintilemap`) | `tilemap`: the map, with the tileset file it names (`.kintileset`) and that tileset's image cut in frames (`sheet`); read again when any of them changes |
 | `ShapeRenderer` | an SVG-lite file (`.svg`), when its `shape` is `svg` | `mesh`, made from its `spec` (a box, rounded box, ellipse or polygon, or the file's shape) and made again when either changes |
+| `Animator` | an animation file (`.kinanim`) | `library`: its animations (and state machines), and `properties`: the fields its tracks can set; `update_animators(world, dt)` plays `animation` |
 | `TextRenderer` | a font file (`.ttf`, `.otf`) as `font`; empty: the system's UI font | `face`: the font at its `size` |
 
 Sounds still need a game's `AudioEngine`: `update_audio_emitters(world, audio)`

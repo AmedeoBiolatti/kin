@@ -9,6 +9,31 @@ editors use.
 The old ECS sprite/state animation API and frame-based renderer animation API
 have been retired from the engine build.
 
+## Animators: Animations In Scenes
+
+`kin::Animator` (`kin/ecs/animator.hpp`) plays an animation of an animation
+file of the game's content on an entity. Scene files name the file (`asset`, a
+`.kinanim`) and the animation (`animation`); `Assets2D` reads the file, and
+`update_animators(world, dt)` plays it each frame. That call also advances and
+samples every other `AnimationPlayer`, so call it instead of those two.
+- **What tracks set:** an Animator's property tracks can set any field of the
+  world's described native components that holds a number, a pair, a colour, a
+  whole number, a check or text (`register_described_properties`:
+  `"Transform2D.pos"`, `"TextRenderer.color"`, `"CameraComponent.zoom"`).
+- **Children:** a track's `target` names a child, by its name.
+- **Sprites:** sprite tracks set the entity's `SpriteRenderer` sprite, from its
+  catalog.
+- **Events:** go to the entity's `AnimationEventQueue`.
+- **Playing:** `speed` and `playing` control playback; `time` and `finished`
+  report it. Naming another animation starts it from the beginning.
+- **Prefabs:** an Animator on a prefab's instance gets its own copy, as do the
+  components its tracks set, so instances animate independently.
+
+```cpp
+door.set(kin::Animator{.asset = {"animations/door.kinanim"}, .animation = "open"});
+kin::update_animators(world, dt); // each frame
+```
+
 ## Definitions And Players
 
 Definitions are immutable and shared. Per-entity playback state lives on

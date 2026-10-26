@@ -78,6 +78,10 @@ audio emitters, and:
   `speed`, `playing`; and `frame` and `finished`, read-only): its sprite's
   frames shown in turn by `update_sprite_animators(world, dt)`. An `entry_of`
   of the form `Component.field` names another component's asset.
+- **Animators.** `Animator` (`asset`: an animation file; `animation`, an
+  animation of it, `entry_of("asset")`; `speed`, `playing`; and `time` and
+  `finished`, read-only): its animation's tracks set the entity's fields, and
+  its children's, in `update_animators(world, dt)`.
 - **Cameras.** `CameraComponent` (`current`, `zoom`, `smoothing`, `limited`,
   `limit_min`, `limit_max`): what the game shows, looking at where its entity
   is. `EcsScene` draws through the first current one; `update_cameras(world, dt)`
