@@ -1076,6 +1076,7 @@ struct SceneAppSession::Impl {
                 .renderer3d = scene_renderer3d,
                 .services = services,
                 .development = config.headless.development,
+                .step = static_cast<u64>(frames_run),
             };
         };
         // The system's app events (phones: background, foreground, low memory)
@@ -1108,6 +1109,7 @@ struct SceneAppSession::Impl {
 #endif
 
                 kin::SceneContext scene_ctx = make_scene_context(ctx);
+                scene_ctx.step = static_cast<u64>(frames_run - 1); // this update's index
                 if (scene_ctx.development) {
                     runtime_detail::advance_development(scenes, static_cast<u64>(frames_run),
                                                         window.mode != AppMode::Headless);

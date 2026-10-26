@@ -109,6 +109,8 @@ void write_lua_report_value(JsonWriter& json, const sol::object& value, i32 dept
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind, LuaRuntimeLimits limits)
     : _impl(std::make_unique<Impl>(limits)) {
     _impl->bind = bind;
+    // Lua seeds math.random from the clock and an address; a fixed seed until on_enter gives it the run's.
+    seed_random(RngKey{});
     sol::table package = _impl->lua().create_table();
     package["loaded"] = _impl->lua().create_table();
     package["path"] = "";
@@ -293,8 +295,18 @@ bool ScriptEngine::call_on_load(ScriptSceneBindings bindings) {
 }
 
 bool ScriptEngine::call_on_enter(SceneContext& ctx) {
+    // math.random follows the run's --seed: the same numbers in every run with it, on every peer.
+    seed_random(fold_in(ctx.rng, script_random_stream));
     return call_on_enter(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
+
+void ScriptEngine::seed_random(RngKey key) {
+    const sol::protected_function randomseed = _impl->lua()["math"]["randomseed"];
+    if (randomseed.valid()) {
+        randomseed(static_cast<lua_Integer>(key.lo), static_cast<lua_Integer>(key.hi));
+    }
+}
+
 bool ScriptEngine::call_on_exit(SceneContext& ctx) {
     return call_on_exit(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }

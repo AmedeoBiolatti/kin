@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+### Added
+
+- Determinism for networked and replayed games: `kin::dmath` (sin, cos, tan,
+  asin, acos, atan, atan2) gives the same bits with every compiler and CPU,
+  checked by a golden hash; `SceneContext::step` and `fold_in()` give every
+  update its own RNG key; Lua is built with a fixed string-hash seed, so
+  `pairs` over string keys walks in one order everywhere, and scene scripts'
+  `math.random` follows `--seed`; the ECS scheduler's rate and interval
+  counters can be saved and restored beside the world.
+
 ## [0.3.0] — 2026-11-10
 
 A release for 3D, for apps and for whole 2D games. The experimental 3D renderer gains physically based materials

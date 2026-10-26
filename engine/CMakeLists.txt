@@ -11,6 +11,7 @@ add_library(kin_foundation STATIC
     src/assets/file_watcher.cpp
     src/assets/content.cpp
     src/assets/asset_types.cpp
+    src/core/dmath.cpp
     src/core/json.cpp
     src/core/hash.cpp
     src/core/jobs.cpp
@@ -39,6 +40,10 @@ if(ANDROID)
     target_link_libraries(kin_foundation PUBLIC android)
 endif()
 kin_enable_release_optimizations(kin_foundation)
+# kin::dmath gives the same bits everywhere only if no compiler fuses its multiplies and adds, whatever the game's
+# own flags (docs/networking.md).
+set_source_files_properties(src/core/dmath.cpp PROPERTIES COMPILE_OPTIONS
+    "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-ffp-contract=off;-fno-fast-math>;$<$<CXX_COMPILER_ID:MSVC>:/fp:precise>")
 
 # Keep reflection/template instantiations out of scene parsing and distribute
 # them across smaller files without changing the public registration sequence.

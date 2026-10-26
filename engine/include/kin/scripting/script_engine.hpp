@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/rng.hpp>
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/scripting/lua_runtime.hpp>
@@ -93,6 +94,10 @@ public:
     LuaApiSurface api_surface() const;
     LuaRuntimeStats runtime_stats() const;
     void set_runtime_limits(LuaRuntimeLimits limits);
+    // Seeds the script's math.random. A new engine has a fixed seed; call_on_enter(SceneContext&) seeds it from the
+    // run's RngKey, so scripts draw the same numbers in every run with the same --seed.
+    void seed_random(RngKey key);
+    static constexpr u64 script_random_stream = 0x6d6174682e72616eull; // "math.ran": fold_in's data for it
 
     const std::string& last_error() const { return _last_error; }
     const std::vector<std::filesystem::path>& script_dependencies() const;

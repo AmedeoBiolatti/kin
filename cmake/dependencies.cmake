@@ -253,6 +253,12 @@ if(KIN_ENABLE_SCRIPTING)
         add_library(Lua::Lua ALIAS lua_static)
         target_include_directories(lua_static PUBLIC "${lua_SOURCE_DIR}/src")
         target_compile_definitions(lua_static PUBLIC LUA_COMPAT_5_3)
+        # A fixed string-hash seed instead of one made from the clock and addresses, so a table with string keys
+        # walks in the same order (pairs) in every run and on every peer (docs/networking.md). Lua calls
+        # luai_makeseed(L); an object-like macro keeps the definition portable to every build tool, and
+        # `0*sizeof(L)` turns the argument into nothing. The seed only guards against hash flooding by hostile
+        # strings, which game scripts do not see.
+        target_compile_definitions(lua_static PRIVATE "luai_makeseed=0x6b696e31u+0*sizeof")
     endif()
 
     FetchContent_Declare(sol2

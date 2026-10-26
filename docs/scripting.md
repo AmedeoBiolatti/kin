@@ -121,10 +121,16 @@ that reaches outside the script or makes up numbers:
 - `print` writes to kin's log (category `script`).
 
 With the same script and the same calls, a run comes out the same, so scripted
-rules can run inside a deterministic simulation. One trap remains: `pairs`
-walks a table in no fixed order, so use `ipairs`, or sort keys, where order
-matters. A host that wants randomness should bind its own, seeded from the
-run's `RngKey`.
+rules can run inside a deterministic simulation. kin builds Lua with a fixed
+string-hash seed, so a table with string or number keys walks (`pairs`) in the
+same order in every run and process. One trap remains: a table keyed by
+tables, functions or userdata walks in the order of their addresses, which
+differ between runs; use `ipairs`, or sort keys, where that order matters. A
+host that wants randomness should bind its own, seeded from the run's `RngKey`.
+
+Scene scripts (`ScriptEngine`, `ScriptScene`) keep `math.random`, seeded from
+the run's `--seed` when the scene enters (before that, from a fixed seed): the
+same numbers in every run with the same seed.
 
 Every load and call has an **instruction budget**
 (`LuaScriptOptions::limits.instruction_limit`, 50 million by default, checked every

@@ -377,6 +377,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
             -P "${CMAKE_CURRENT_SOURCE_DIR}/desktop_package_tests.cmake"
         CONFIGURATIONS Release RelWithDebInfo MinSizeRel)
 endif()
+kin_add_test(kin_dmath_tests kin-dmath SOURCES dmath_tests.cpp LINK_TARGET kin_foundation)
 kin_add_test(kin_save_tests kin-save SOURCES save_tests.cpp)
 kin_add_test(kin_texture_file_tests kin-texture-file SOURCES texture_file_tests.cpp)
 kin_add_test(kin_renderer_tests kin-renderer SOURCES renderer_tests.cpp)
