@@ -833,6 +833,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     // SDL makes its devices with anisotropic filtering (Vulkan's samplerAnisotropy, which promises 16; Direct3D 12's
     // and Metal's most is 16).
     _capabilities.max_anisotropy = 16;
+    // Metal's samplers have no mip bias (SDL drops it there).
+    _capabilities.texture_lod_bias = std::string_view(device.driver_name()) != "metal";
     // Shadow maps: a depth format that can also be sampled, as an array (a
     // layer a cascade; one layer is the single map).
     for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREFORMAT_D16_UNORM}) {
@@ -1337,7 +1339,7 @@ GpuRenderer3D::~GpuRenderer3D() {
     if (_point_sampler) {
         SDL_ReleaseGPUSampler(_device->handle(), _point_sampler);
     }
-    for (SDL_GPUSampler* sampler : _samplers) {
+    for (const auto& [key, sampler] : _samplers) {
         if (sampler) {
             SDL_ReleaseGPUSampler(_device->handle(), sampler);
         }
@@ -1347,15 +1349,16 @@ GpuRenderer3D::~GpuRenderer3D() {
 SDL_GPUSampler* GpuRenderer3D::sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v) {
     const ScaleMode scale =
         texture.scale_mode() == ScaleMode::Mipmapped && !texture.mipmapped() ? ScaleMode::Linear : texture.scale_mode();
-    const u32 anisotropy = scale == ScaleMode::Mipmapped ? _anisotropy : 1;
-    if (u == Wrap3D::Clamp && v == Wrap3D::Clamp && anisotropy == 1) {
+    const bool mipmapped = scale == ScaleMode::Mipmapped;
+    const u32 anisotropy = mipmapped ? _anisotropy : 1;
+    const i32 bias = mipmapped ? _lod_bias : 0;
+    if (u == Wrap3D::Clamp && v == Wrap3D::Clamp && anisotropy == 1 && bias == 0) {
         return _owner->sampler_for(texture); // as 2D draws it
     }
-    const std::size_t wrap = static_cast<std::size_t>(u) * 3 + static_cast<std::size_t>(v);
-    const std::size_t index =
-        anisotropy > 1 ? 27 + (anisotropy - 2) * 9 + wrap : static_cast<std::size_t>(scale) * 9 + wrap;
-    if (index < _samplers.size() && _samplers[index]) {
-        return _samplers[index];
+    const u32 key = static_cast<u32>(scale) | static_cast<u32>(u) << 2 | static_cast<u32>(v) << 4 | anisotropy << 6 |
+                    static_cast<u32>(bias + 64) << 11;
+    if (const auto found = _samplers.find(key); found != _samplers.end()) {
+        return found->second ? found->second : _owner->sampler_for(texture);
     }
     const auto mode = [](Wrap3D wrap) {
         return wrap == Wrap3D::Repeat   ? SDL_GPU_SAMPLERADDRESSMODE_REPEAT
@@ -1373,10 +1376,9 @@ SDL_GPUSampler* GpuRenderer3D::sampler_for(const GpuTextureBackend& texture, Wra
     info.max_lod = scale == ScaleMode::Mipmapped ? 1000.0f : 0.0f;
     info.enable_anisotropy = anisotropy > 1;
     info.max_anisotropy = static_cast<f32>(anisotropy);
+    info.mip_lod_bias = static_cast<f32>(bias) / 16.0f;
     SDL_GPUSampler* sampler = SDL_CreateGPUSampler(_device->handle(), &info);
-    if (index < _samplers.size()) {
-        _samplers[index] = sampler;
-    }
+    _samplers.emplace(key, sampler);
     return sampler ? sampler : _owner->sampler_for(texture);
 }
 
@@ -4121,8 +4123,11 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
             ctx.frustums[s] = frustum_of(ctx.view_projections[s]);
         }
     }
-    // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy.
+    // Every pass of this render, the overlay's too, reads mipmapped textures with the scene's anisotropy and mip bias.
     _anisotropy = std::clamp(scene.anisotropy, 1u, _capabilities.max_anisotropy);
+    _lod_bias = _capabilities.texture_lod_bias && std::isfinite(scene.texture_lod_bias)
+                    ? static_cast<i32>(std::lround(std::clamp(scene.texture_lod_bias, -2.0f, 2.0f) * 16.0f))
+                    : 0;
 
     // Temporal anti-aliasing (Scene3D::taa): every pass that draws the picture
     // uses a projection moved by this frame's sub-pixel jitter (`drawn`), while

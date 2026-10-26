@@ -637,6 +637,7 @@ private:
             samples.push_back(std::to_string(n));
         choice("msaa", "MSAA samples", s.msaa, samples);
         islider("anisotropy", "Anisotropic filtering (1: off)", s.anisotropy, 1, 16);
+        slider("texture_lod_bias", "Texture mip bias (negative: sharper)", s.texture_lod_bias, -2.0f, 2.0f);
         slider("bg_r", "Background red", s.background[0], 0.0f, 255.0f);
         slider("bg_g", "Background green", s.background[1], 0.0f, 255.0f);
         slider("bg_b", "Background blue", s.background[2], 0.0f, 255.0f);

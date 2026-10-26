@@ -12,6 +12,10 @@ releases may change APIs.
   `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with
   `EXT_texture_filter_anisotropic`; `RendererCapabilities3D::max_anisotropy`
   says how far it goes.
+- Add a texture mip bias for 3D materials (`Scene3D::texture_lod_bias`, -2 to
+  2, `RendererCapabilities3D::texture_lod_bias`; authored as
+  `SceneEnvironment3D`'s `texture_lod_bias`): with TAA, sharper textures
+  without sharpening edges.
 - Read 3D normal maps of two channels (BC5, or any whose blue reads 0) as x and
   y with z rebuilt; they were lit from behind (z read as -1). Maps of three
   channels are read as before.

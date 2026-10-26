@@ -739,11 +739,13 @@ private:
     std::vector<u32> _local_slot;   // each copy's place in the union (~0: none yet)
     std::vector<u8> _local_payload; // scratch
     bool _no_shadow_cleared = false;
-    // Samplers for materials' textures by filter and wrap, then the mipmapped ones' by anisotropy (2 to 16) and wrap
-    // (made on first use). The mipmapped ones read with _anisotropy: this render's Scene3D::anisotropy, clamped.
+    // Samplers for materials' textures by filter, wrap, anisotropy and mip bias (made on first use). The mipmapped ones
+    // read with _anisotropy and _lod_bias: this render's Scene3D::anisotropy and ::texture_lod_bias (in sixteenths of
+    // a level), clamped.
     SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v);
-    std::array<SDL_GPUSampler*, 27 + 15 * 9> _samplers{};
+    std::unordered_map<u32, SDL_GPUSampler*> _samplers;
     u32 _anisotropy = 1;
+    i32 _lod_bias = 0;
     std::vector<std::shared_ptr<GpuMaterialShader3D>> _material_shaders;
     std::shared_ptr<GpuBuffer> _instances;    // grows
     std::shared_ptr<GpuBuffer> _caster_lists; // the cascades' lists of copies (indices into _instances); grows

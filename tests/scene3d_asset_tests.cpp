@@ -174,7 +174,7 @@ void authorable_api_settings() {
         "sky_sun_size":1.2,"sky_sun_disc":12,"sky_moon":true,"sky_moon_direction":[0,1,0],
         "sky_moon_size":2,"sky_moon_light":0.1,"sky_moon_color":[0.6,0.7,0.8],
         "sky_light_threshold":0.02,"sky_light_interval":3,"fog_color":[2,3,4],
-        "lod_enabled":true,"lod_error_pixels":2,"lod_bias":1.5,"lod_max_cluster_triangles":12345,"anisotropy":8}}},
+        "lod_enabled":true,"lod_error_pixels":2,"lod_bias":1.5,"lod_max_cluster_triangles":12345,"anisotropy":8,"texture_lod_bias":-0.5}}},
       {"id":"lamp","components":{"Transform3D":{},"PointLight3D":{
         "color":[6,3,1],"shadow_enabled":true,"shadow_resolution":512,"shadow_bias":0.7,
         "shadow_normal_offset":0.8,"shadow_near_plane":0.1,"shadow_distance":4,"shadow_softness":1.2}}},
@@ -202,7 +202,7 @@ void authorable_api_settings() {
                   scene.sky.light_interval == 3 && scene.fog.colour.b == 4,
               "typed sky/fog settings lost");
         check(scene.lod.enabled && scene.lod.max_cluster_triangles == 12345 && scene.lod.bias == 1.5f &&
-                  scene.anisotropy == 8 && view.pick,
+                  scene.anisotropy == 8 && scene.texture_lod_bias == -0.5f && view.pick,
               "authored quality or game-owned picking lost");
         check(scene.lights.points.size() == 1 && scene.lights.points[0].shadow_resolution == 512 &&
                   scene.lights.points[0].shadow_bias == .7f && scene.lights.points[0].shadow_near_plane == .1f,
@@ -232,7 +232,7 @@ void authorable_api_settings() {
     check(loaded.ok(), "saved settings did not instantiate");
     const auto* env = loaded.by_authored_id.at("env").get<SceneEnvironment3D>();
     check(env->lights.ground_ambient.enabled && env->lights.ground_ambient.color.b == .3f &&
-              env->sky.moon_color.g == .7f && env->anisotropy == 8,
+              env->sky.moon_color.g == .7f && env->anisotropy == 8 && env->texture_lod_bias == -0.5f,
           "ground/sky colour or anisotropy changed in round trip");
     auto environment = instance.by_authored_id.at("env");
     check(world.components().patch_field(environment, "SceneEnvironment3D", "ground_ambient_enabled", false),

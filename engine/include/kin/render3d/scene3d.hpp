@@ -471,6 +471,12 @@ public:
     // material's textures alike (the cut-outs' in shadows, the pre-pass and picking; particles), so that a cut-out's
     // edge is the same in all of them; the overlay is drawn with the scene's.
     u32 anisotropy = 1;
+    // The mip level the materials' mipmapped textures are read from, moved by this many levels (-2 to 2): negative is
+    // finer and sharper, positive blurrier. With temporal anti-aliasing, which averages the shimmer of a finer level,
+    // a negative one gives back the sharpness its resolve takes from textures without sharpening the picture (whose
+    // boost steepens anti-aliased edges back into steps): Godot moves it -0.5 with its TAA. 0 (the default) is the
+    // picture as without it. Read as `anisotropy` is, in every pass. Where RendererCapabilities3D::texture_lod_bias.
+    f32 texture_lod_bias = 0.0f;
     Lod3D lod{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:

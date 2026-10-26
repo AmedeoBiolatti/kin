@@ -156,6 +156,7 @@ bool SceneFrame3D::collect_operation(Scene3D& scene, ViewOptions3D* view, f32 al
         scene.contact_shadows = {};
         scene.taa = {};
         scene.anisotropy = 1;
+        scene.texture_lod_bias = 0.0f;
         scene.lod = {};
         scene.cull = true;
         _rendering.propagate_transforms();

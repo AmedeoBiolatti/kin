@@ -25,7 +25,8 @@ struct SceneEnvironment3D {
     AmbientOcclusion3D ambient_occlusion;
     ContactShadows3D contact_shadows;
     TemporalAA3D taa;
-    u32 anisotropy = 1; // Scene3D::anisotropy (1 to 16)
+    u32 anisotropy = 1;          // Scene3D::anisotropy (1 to 16)
+    f32 texture_lod_bias = 0.0f; // Scene3D::texture_lod_bias (-2 to 2)
     Lod3D lod;
     // The picture (samples, background, hdr, exposure, bloom). `pick` is not
     // authored and never applied: picking is the game's (see scene3d_view_options).

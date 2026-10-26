@@ -33,6 +33,9 @@ struct RendererCapabilities3D {
     u32 max_samples_hdr = 1;
     // The most Scene3D::anisotropy can be (1: no anisotropic filtering).
     u32 max_anisotropy = 1;
+    // Whether Scene3D::texture_lod_bias moves the mip level here: the device's samplers take a bias (Vulkan's and
+    // Direct3D 12's; not Metal's, and WebGL2 has none).
+    bool texture_lod_bias = false;
     // Whether Scene3D::ambient_occlusion, ::contact_shadows and ::taa can work
     // here (the formats and compute they need); where not, they are off and a
     // line in the log says so the first time one is asked for.

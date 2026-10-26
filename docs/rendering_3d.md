@@ -451,6 +451,16 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   (SDL makes its devices with the feature), and on WebGL2 what
   `EXT_texture_filter_anisotropic` allows (1 without it). `SceneEnvironment3D`
   authors it as `anisotropy`.
+- `Scene3D::texture_lod_bias` (0 by default; -2 to 2): the mip level the
+  materials' mipmapped textures are read from, moved by that many levels;
+  negative is finer and sharper. Temporal anti-aliasing averages the shimmer
+  of a finer level, and its resolve softens textures a little: a bias of -0.5
+  (Godot's with its TAA) to -1 (FSR 2's at native resolution) gives that back
+  without `TemporalAA3D::sharpness`, whose boost also steepens the blended
+  pixels of anti-aliased edges back into steps. Read as `anisotropy` is, in
+  every pass. Where `RendererCapabilities3D::texture_lod_bias`: SDL_GPU on
+  Vulkan and Direct3D 12 (Metal's samplers have no bias; WebGL2 none either).
+  `SceneEnvironment3D` authors it as `texture_lod_bias`.
 
 Unlit materials use dedicated colour-only or base-textured main-pass shaders, with separate cut-out variants. They preserve
 vertex/material/tint colours, sRGB conversion, emission, alpha/additive blending, HDR and MSAA, while omitting lighting resources

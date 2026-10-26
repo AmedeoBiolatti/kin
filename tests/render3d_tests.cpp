@@ -520,7 +520,8 @@ void test_sdl_renderer_has_no_3d() {
     assert(!r3d.available());
     assert(&r3d.renderer() == &renderer);
     const kin::RendererCapabilities3D caps = r3d.capabilities();
-    assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1 && caps.max_anisotropy == 1);
+    assert(caps.depth_bits == 0 && caps.max_samples == 1 && caps.max_samples_hdr == 1 && caps.max_anisotropy == 1 &&
+           !caps.texture_lod_bias);
     assert(!r3d.create_mesh(kin::meshes::box({1.0f, 1.0f, 1.0f})).value_or({}).valid());
 
     kin::View3D view = r3d.create_view({40, 30}, {.background = Color::rgb(0, 128, 0)}).value_or({});
@@ -2883,6 +2884,70 @@ void test_gpu_anisotropy() {
 
         renderer.set_scale_mode(stripes, kin::ScaleMode::Nearest);
         assert(shoot(floor, low, 16).rgba == shoot(floor, low, 1).rgba);
+    });
+}
+
+// The texture mip bias (Scene3D::texture_lod_bias): a texture of 32 x 32 texels whose levels are olive, teal and
+// red (from 8 x 8 on) over 16 pixels reads its teal level 1; a bias of -1 reads olive, +1 red, -0.5 between olive and
+// teal. Without it the picture is as before.
+void test_gpu_texture_lod_bias() {
+    with_gpu("test_gpu_texture_lod_bias", [](kin::Renderer2D& renderer) {
+        namespace tf = texture_file_fixtures;
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().texture_lod_bias, "a texture mip bias")) {
+            return;
+        }
+        const kin::u16 olive = tf::rgb565(20, 40, 6), teal = tf::rgb565(2, 50, 25), red = tf::rgb565(28, 6, 4);
+        const auto colour = [](kin::u16 c) {
+            const auto e = tf::rgb565_expanded(c);
+            return Color::rgb(e[0], e[1], e[2]);
+        };
+        std::string error;
+        const auto image = kin::decode_ktx2(
+            tf::ktx2_file({.vk_format = 134, .width = 32, .height = 32},
+                          {tf::bc1_level(32, 32, olive), tf::bc1_level(16, 16, teal), tf::bc1_level(8, 8, red),
+                           tf::bc1_level(4, 4, red), tf::bc1_level(2, 2, red), tf::bc1_level(1, 1, red)}),
+            &error); // VK_FORMAT_BC1_RGBA_SRGB_BLOCK
+        assert(image && error.empty());
+        const kin::Texture texture = renderer.create_texture_compressed(*image);
+        assert(texture.valid());
+        renderer.set_scale_mode(texture, kin::ScaleMode::Mipmapped);
+        kin::MeshData3D square;
+        square.vertices = {{{-0.8f, -0.8f, 0}, {0, 0, 1}, {0, 1}},
+                           {{0.8f, -0.8f, 0}, {0, 0, 1}, {1, 1}},
+                           {{0.8f, 0.8f, 0}, {0, 0, 1}, {1, 0}},
+                           {{-0.8f, 0.8f, 0}, {0, 0, 1}, {0, 0}}};
+        square.indices = {0, 1, 2, 0, 2, 3};
+        const kin::Mesh3D quad = r3d.create_mesh(square).value_or({}); // 16 pixels across: two texels a pixel
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Camera3D camera; // looking down -z, 12 high over the view's 120 pixels: a tenth a pixel
+        camera.position = {0.0f, 0.0f, 5.0f};
+        camera.projection = kin::Projection3D::Orthographic;
+        camera.height = 12.0f;
+        camera.z_near = 0.1f;
+        camera.z_far = 20.0f;
+        const auto shoot = [&](float bias) {
+            kin::Scene3D scene;
+            scene.camera = camera;
+            scene.texture_lod_bias = bias;
+            (void)scene.draw(quad, Mat4f::identity(), {.unlit = true, .texture = texture});
+            const Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const Pixels plain = shoot(0.0f);
+        expect(plain.at(80, 60), colour(teal), "no bias: level 1", 6);
+        expect(shoot(-1.0f).at(80, 60), colour(olive), "a bias of -1: level 0", 6);
+        expect(shoot(1.0f).at(80, 60), colour(red), "a bias of +1: level 2", 6);
+        const Color half = shoot(-0.5f).at(80, 60), a = colour(olive), b = colour(teal);
+        std::cerr << "texture lod bias: -0.5 reads " << half << " between olive " << a << " and teal " << b << '\n';
+        assert(std::abs(int(half.g) - (int(a.g) + int(b.g)) / 2) < 24 &&
+               std::abs(int(half.b) - (int(a.b) + int(b.b)) / 2) < 24);
+        kin::Scene3D none;
+        none.camera = camera;
+        (void)none.draw(quad, Mat4f::identity(), {.unlit = true, .texture = texture});
+        assert(shoot_view(renderer, r3d, view, none).rgba == plain.rgba);
+        renderer.present();
     });
 }
 
@@ -21065,6 +21130,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_model_materials());
     RUN(test_gpu_wrap_modes());
     RUN(test_gpu_anisotropy());
+    RUN(test_gpu_texture_lod_bias());
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());
