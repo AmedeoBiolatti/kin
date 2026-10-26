@@ -1495,6 +1495,29 @@ void test_animators() {
     kin::update_animators(world, 0.25f);
     assert(near(second.get<kin::RectRenderer>()->size.x, 15.0f) && near(first.get<kin::RectRenderer>()->size.x, 10.0f));
     assert(near(prefab.get<kin::RectRenderer>()->size.x, 10.0f)); // the prefab as it was
+
+    // A state machine of the file: from its initial state, on to another as
+    // the game's parameters say (a trigger taken once), its state told.
+    fragment.state_machines["moves"] = {.initial = "still",
+                                        .states = {{"still", "pulse"}, {"going", "slide"}},
+                                        .transitions = {{.from = "still", .to = "going", .when = {{.param = "go", .op = kin::CondOp::TriggerSet}}},
+                                                        {.from = "going", .to = "still", .when = {{.op = kin::CondOp::Finished}}}}};
+    assert(kin::save_animation_registry_fragment(fragment, dir / "moves.kinanim"));
+    assets.reload_changed();
+    kin::EcsEntity walker = world.entity("walker").set(kin::Transform2D{}).set(kin::RectRenderer{})
+                                .set(kin::Animator{.asset = {.id = "moves.kinanim"}, .machine = "moves"});
+    assets.bind(world);
+    kin::update_animators(world, 0.0f);
+    kin::update_animators(world, 0.1f);
+    assert(walker.get<kin::Animator>()->state == "still");
+    walker.get_mut<kin::Animator>()->params.set_trigger("go");
+    kin::update_animators(world, 0.1f);
+    assert(walker.get<kin::Animator>()->state == "going" && walker.get<kin::Animator>()->params.triggers.empty());
+    kin::update_animators(world, 0.5f);
+    assert(near(walker.get<kin::Transform2D>()->pos.x, 60.0f)); // 0.1 s on the step it went, and 0.5 s
+    kin::update_animators(world, 0.6f); // slid through: back to still
+    kin::update_animators(world, 0.0f);
+    assert(walker.get<kin::Animator>()->state == "still");
     fs::remove_all(dir);
 }
 

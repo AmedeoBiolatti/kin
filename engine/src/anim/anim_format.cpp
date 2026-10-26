@@ -75,6 +75,9 @@ bool fail(const Line& line, std::string_view msg, std::string& error) {
 }
 
 Easing parse_easing(std::string_view value) {
+    if (value == "step") {
+        return Easing::Step;
+    }
     if (value == "easein") {
         return Easing::EaseIn;
     }
@@ -89,6 +92,7 @@ Easing parse_easing(std::string_view value) {
 
 std::string easing_text(Easing easing) {
     switch (easing) {
+    case Easing::Step: return "step";
     case Easing::Linear: return "linear";
     case Easing::EaseIn: return "easein";
     case Easing::EaseOut: return "easeout";
@@ -405,6 +409,9 @@ bool parse_transition(const Line& line, AnimationStateMachine& machine, std::str
                 return fail(line, "unknown float condition operator", error);
             }
             i += 3;
+        } else if (line.tok[i] == "finished") {
+            condition.op = CondOp::Finished;
+            ++i;
         } else if (line.tok[i].starts_with("trigger:")) {
             condition.param = line.tok[i].substr(8);
             condition.op = CondOp::TriggerSet;
@@ -460,6 +467,12 @@ bool parse_state_machine(const std::vector<Line>& lines, std::size_t& index, Ani
             if (!parse_transition(line, machine, error)) {
                 return false;
             }
+        } else if (line.tok[0] == "place") {
+            Vec2f at{};
+            if (line.tok.size() < 4 || !parse_number(line.tok[2], at.x) || !parse_number(line.tok[3], at.y)) {
+                return fail(line, "malformed place", error);
+            }
+            machine.places[line.tok[1]] = at;
         } else {
             return fail(line, "unknown state machine directive", error);
         }
@@ -612,6 +625,8 @@ std::string cond_text(const Condition& condition) {
         return "float:" + condition.param + " != " + std::to_string(condition.threshold);
     case CondOp::TriggerSet:
         return "trigger:" + condition.param;
+    case CondOp::Finished:
+        return "finished";
     }
     return {};
 }
@@ -770,6 +785,15 @@ std::string serialize_animation_registry_fragment(const AnimationRegistryFragmen
                     out << ' ' << cond_text(condition);
                 }
                 out << " mode " << (transition.mode == TransitionMode::PushOverride ? "push" : "replace") << '\n';
+            }
+            std::vector<std::string> placed;
+            for (const auto& [state, at] : machine.places) {
+                placed.push_back(state);
+            }
+            std::ranges::sort(placed);
+            for (const std::string& state : placed) {
+                const Vec2f at = machine.places.at(state);
+                out << "  place " << state << ' ' << at.x << ' ' << at.y << '\n';
             }
             out << '\n';
         }

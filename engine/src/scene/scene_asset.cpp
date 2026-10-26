@@ -582,6 +582,9 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("animation", &Animator::animation)
             .entry_of("asset")
             .description("An animation of the file.")
+            .field("machine", &Animator::machine)
+            .entry_of("asset")
+            .description("A state machine of the file: it plays in place of the animation.")
             .field("speed", &Animator::speed)
             .range(0.0, 100.0)
             .description("1: as the animation says; 2: twice as fast.")
@@ -592,7 +595,10 @@ void register_builtin_editor_components(EcsWorld& world) {
             .description("Into the animation now.")
             .property<bool>("finished", [](const Animator& a) { return a.finished; }, [](Animator&, const bool&) { return true; })
             .readonly()
-            .description("One that ends has played through.");
+            .description("One that ends has played through.")
+            .property<std::string>("state", [](const Animator& a) { return a.state; }, [](Animator&, const std::string&) { return true; })
+            .readonly()
+            .description("The machine's state now.");
     }
     if (!world.components().find("CameraComponent")) {
         // What the game sees of its world: EcsScene draws through the first

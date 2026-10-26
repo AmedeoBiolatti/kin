@@ -99,7 +99,7 @@ machine->states["run"] = "hero.run";
 machine->transitions.push_back({
     .from = "idle",
     .to = "run",
-    .conditions = {{.param = "moving", .op = kin::CondOp::BoolEqual, .bool_value = true}},
+    .when = {{.param = "moving", .op = kin::CondOp::IsTrue}},
 });
 
 player.machine = machine;
@@ -109,6 +109,37 @@ player.params.set_bool("moving", true);
 Empty transition `from` means any current state. `ReplaceBase` changes the base
 animation and current state. `PushOverride` pushes an override and leaves the
 current state unchanged.
+- **Order:** transitions are tried in order, and the first whose conditions
+  all hold is taken.
+- **Any-state into itself:** a transition from any state into the state already
+  running, replacing it, is not taken, since it would restart that state every
+  step.
+- **Finished:** `CondOp::Finished` (`finished` in a file) holds once the
+  state's animation has played through. Use it to go back to idle after an
+  attack or a jump.
+
+In a `.kinanim` file:
+
+```text
+statemachine hero
+  initial idle
+  state idle idle
+  state run run
+  state jump jump
+  transition idle -> run when bool:running == true mode replace
+  transition run -> idle when bool:running == false mode replace
+  transition any -> jump when trigger:jump mode replace
+  transition jump -> idle when finished mode replace
+  place idle 0 0
+```
+
+`place` lines say where an editor draws each state (and `any`, the any-state).
+Editors write them; nothing reads them when the machine plays.
+
+An `Animator` runs a machine of its file when it names one (`machine`, in place
+of `animation`). The game sets the parameters on the Animator
+(`animator.params.set_bool("running", true)`, `set_trigger("jump")`; a trigger
+is handed to the machine once). `state` reports the state it is in.
 
 ## Layers And Blending
 

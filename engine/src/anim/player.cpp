@@ -678,7 +678,8 @@ void run_state_machine(AnimationPlayer& player) {
     }
 
     AnimationParams evaluated_params = player.params;
-    const AnimTransition* transition = evaluate(machine, player.state, evaluated_params);
+    const bool finished = !player.layers.empty() && player.layers.front().cursor.finished;
+    const AnimTransition* transition = evaluate(machine, player.state, evaluated_params, finished);
     if (!transition) {
         return;
     }

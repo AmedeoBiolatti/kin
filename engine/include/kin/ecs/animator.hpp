@@ -13,8 +13,19 @@
 //     kin::update_animators(world, dt);
 //
 // An animation that repeats plays on; one that ends stays on its last frame
-// (`finished`). Frames only (a walk cycle of a sprite sheet) are a
-// SpriteAnimator's (kin/ecs/sprite_animator.hpp).
+// (`finished`).
+//
+// Or it runs a state machine of the file (`machine`, in place of `animation`):
+// from its initial state, each state playing its animation, moving to another
+// as its transitions' conditions hold, on parameters the game sets:
+//
+//     hero.set(kin::Animator{.asset = {"animations/hero.kinanim"}, .machine = "moves"});
+//     auto& animator = *hero.get_mut<kin::Animator>();
+//     animator.params.set_bool("running", speed > 1.0f);
+//     if (jumped) animator.params.set_trigger("jump"); // once: taken by the transition it fires
+//
+// Frames only (a walk cycle of a sprite sheet) are a SpriteAnimator's
+// (kin/ecs/sprite_animator.hpp).
 
 #include <kin/anim/anim_format.hpp>
 #include <kin/ecs/component.hpp>
@@ -30,6 +41,8 @@ class PropertyRegistry;
 struct Animator {
     ComponentAssetRef asset; // an animation file (.kinanim)
     std::string animation;   // of the file; empty: none plays
+    std::string machine;     // a state machine of the file: it plays in place of `animation`
+    AnimationParams params;  // the machine's parameters, as the game sets them
     f32 speed = 1.0f;        // 2: twice as fast
     bool playing = true;     // false: it stays where it is
 
@@ -38,6 +51,7 @@ struct Animator {
     f32 time = 0.0f;
     bool finished = false;
     std::string current;
+    std::string state; // the machine's state now
 
     // Set by Assets2D (bind_animators) from `asset`: the file's animations,
     // and the fields tracks can set.

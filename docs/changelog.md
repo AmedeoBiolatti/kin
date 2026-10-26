@@ -32,6 +32,12 @@ releases may change APIs.
   or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
   the new `TextRenderer` (text in the world, in a content font or the system's)
   to scene files. Add `AssetType::Shape` (`.svg`).
+- Let an `Animator` run a state machine of its file (`machine`, its `params`
+  set by the game, its `state` told). Add the `finished` condition (a state's
+  animation has played through) and `place` lines (where editors draw states).
+  An any-state transition into the state already running no longer restarts
+  it every step. `.kinanim` files keep a `step` easing (it was written as
+  linear).
 - Add `Animator`, which plays an animation of a `.kinanim` file on an entity
   from scene files (`update_animators`; `Assets2D` reads the file), its tracks
   setting any described field (`register_described_properties`,

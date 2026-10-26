@@ -99,23 +99,38 @@ void update_animators(EcsWorld& world, f32 dt) {
         if (!animator.library || !animator.properties) {
             continue; // its file not bound yet (Assets2D)
         }
-        const bool fresh = animator.animation != animator.current || animator.bound != animator.library.get() ||
-                           !found.has<AnimationPlayer>();
+        // What it plays: a machine (by its name, marked apart from an animation's), or an animation.
+        const std::string wanted = animator.machine.empty() ? animator.animation : "machine:" + animator.machine;
+        const bool fresh = wanted != animator.current || animator.bound != animator.library.get() || !found.has<AnimationPlayer>();
         if (fresh) {
             // Another animation, or the file read again: from its start.
-            animator.current = animator.animation;
+            animator.current = wanted;
             animator.bound = animator.library.get();
             animator.time = 0.0f;
             animator.finished = false;
-            AnimationPlayer player = make_animation_player({.registry = &animator.library->registry,
-                                                            .properties = animator.properties,
-                                                            .sprite_catalog = sprite_renderer_catalog(entity)});
-            if (!animator.current.empty()) {
-                set_base(player, animator.current);
+            animator.state.clear();
+            AnimationPlayerConfig config;
+            config.registry = &animator.library->registry;
+            config.properties = animator.properties;
+            config.sprite_catalog = sprite_renderer_catalog(entity);
+            AnimationPlayer player = make_animation_player(std::move(config));
+            const flecs::id_t sprites = raw.component<SpriteRenderer>().id();
+            if (!animator.machine.empty()) {
+                const auto machine = animator.library->state_machines.find(animator.machine);
+                if (machine != animator.library->state_machines.end()) {
+                    player.machine = machine->second;
+                    // What any of its states plays, owned.
+                    for (const auto& [state, played] : machine->second->states) {
+                        if (const std::shared_ptr<const Animation> animation = animator.library->registry.resolve(played)) {
+                            own_targets(found, animation->root, *animator.properties, sprites);
+                        }
+                    }
+                }
+            } else if (!animator.animation.empty()) {
+                set_base(player, animator.animation);
             }
             if (!player.layers.empty() && player.layers.front().animation) {
-                own_targets(found, player.layers.front().animation->root, *animator.properties,
-                            raw.component<SpriteRenderer>().id());
+                own_targets(found, player.layers.front().animation->root, *animator.properties, sprites);
             }
             found.set<AnimationPlayer>(std::move(player));
         }
@@ -123,7 +138,13 @@ void update_animators(EcsWorld& world, f32 dt) {
         if (!player) {
             continue;
         }
-        player->playing = animator.playing && !animator.finished;
+        // The game's parameters: its triggers handed over once (the machine takes them).
+        player->params.bools = animator.params.bools;
+        player->params.floats = animator.params.floats;
+        player->params.triggers.insert(animator.params.triggers.begin(), animator.params.triggers.end());
+        animator.params.triggers.clear();
+        // A machine plays on through its states; an animation stops once played through.
+        player->playing = animator.playing && (player->machine || !animator.finished);
         player->sprite_catalog = sprite_renderer_catalog(entity);
         if (!player->layers.empty()) {
             player->layers.front().speed = animator.speed;
@@ -143,6 +164,7 @@ void update_animators(EcsWorld& world, f32 dt) {
         const f32 length = node_length(base.animation->root);
         animator->time = std::min(base.cursor.time, length);
         animator->finished = base.cursor.time >= length;
+        animator->state = player->state;
     }
 }
 

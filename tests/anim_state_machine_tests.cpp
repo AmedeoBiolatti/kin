@@ -1,3 +1,4 @@
+#include <kin/anim/anim_format.hpp>
 #include <kin/anim/player.hpp>
 #include <kin/anim/state_machine.hpp>
 
@@ -280,9 +281,60 @@ void test_failed_bound_state_name_does_not_consume_trigger() {
     assert(player->params.triggers.contains("go"));
 }
 
+// A state left when its animation has played through ("finished"); an
+// any-state transition into the state it is in is not taken again and again.
+void test_finished_and_any_into_itself() {
+    kin::AnimationRegistry registry = registry_with_basic_animations();
+    auto machine = basic_machine();
+    machine->initial = "hurt"; // 0.2 s long
+    machine->transitions.push_back({.from = "hurt", .to = "idle", .when = {{.op = kin::CondOp::Finished}}});
+    machine->transitions.push_back({.from = "", .to = "idle", .when = {{.param = "calm", .op = kin::CondOp::IsTrue}}});
+
+    kin::EcsWorld world;
+    world.component<kin::AnimationPlayer>("AnimationPlayer");
+    kin::EcsEntity entity = world.entity("actor").set(player_for(registry, machine));
+    kin::advance_animation_players(world, 0.1f);
+    assert(entity.get<kin::AnimationPlayer>()->state == "hurt");
+    kin::advance_animation_players(world, 0.15f); // played through
+    kin::advance_animation_players(world, 0.0f);
+    assert(entity.get<kin::AnimationPlayer>()->state == "idle");
+
+    // Calm: idle already, so idle is not started again (its time goes on).
+    entity.get_mut<kin::AnimationPlayer>()->params.set_bool("calm", true);
+    kin::advance_animation_players(world, 0.3f);
+    kin::advance_animation_players(world, 0.3f);
+    assert(entity.get<kin::AnimationPlayer>()->layers.front().cursor.time > 0.5f);
+
+    // Written: "finished", and where an editor puts the states.
+    kin::AnimationRegistryFragment fragment;
+    kin::AnimationStateMachine written = *machine;
+    written.places = {{"idle", {10.0f, 20.0f}}, {"any", {-40.0f, 0.0f}}};
+    fragment.state_machines["moves"] = written;
+    const std::string text = kin::serialize_animation_registry_fragment(fragment);
+    assert(text.find("transition hurt -> idle when finished mode replace") != std::string::npos);
+    assert(text.find("  place any -40 0\n  place idle 10 20\n") != std::string::npos);
+    kin::AnimationRegistryFragment read;
+    std::string error;
+    assert(kin::parse_animation_registry_fragment(text, read, error));
+    const kin::AnimationStateMachine& back = read.state_machines.at("moves");
+    assert(back.transitions[0].when[0].op == kin::CondOp::Finished && back.places.at("idle").y == 20.0f);
+
+    // A key that holds, then jumps: written and read so.
+    kin::Clip held{.duration = 1.0f};
+    held.properties.push_back({.property = "Transform2D.rotation",
+                               .keys = {{.time = 0.0f, .value = 0.0f, .easing = kin::Easing::Step}, {.time = 1.0f, .value = 90.0f}}});
+    kin::AnimationRegistryFragment steps;
+    steps.animations.push_back({.name = "tick", .root = kin::clip_node(std::move(held))});
+    const std::string stepped = kin::serialize_animation_registry_fragment(steps);
+    assert(stepped.find("key 0 float 0 step") != std::string::npos);
+    assert(kin::parse_animation_registry_fragment(stepped, read, error));
+    assert(std::get<kin::Clip>(read.animations[0].root.value).properties[0].keys[0].easing == kin::Easing::Step);
+}
+
 } // namespace
 
 int main() {
+    test_finished_and_any_into_itself();
     test_bool_condition_replaces_base();
     test_float_conditions();
     test_trigger_consumption_only_when_taken();
