@@ -2465,6 +2465,105 @@ Trace view, converging toward Cycles); ray-traced shadows, occlusion and
 reflections for games, at reduced rate and accumulated. Checks: Cornell,
 Sponza and the kiln against Cycles by samples; rays a second.
 
+### G5 — Global illumination
+
+The user's direction (2026-10-26, branch `exp/realtime-lighting`): beat the
+original Bistro demo (Godot 4.4: SDFGI, SSIL, 15 reflection probes) with
+real-time techniques, and keep global illumination general: several
+strategies that can be used together. Today a surface's indirect light is the
+sky's or the environment's everywhere (times GTAO and the material's
+occlusion), so the shade of a street, an arch or a room has the open sky's
+light. The gallery's port measures it: the arch by day has 0.238 of light
+where Godot has 0.064, the day's picture 1.4 times Godot's light at the same
+exposure, and at night Godot's GI is 94% of the light (the lamps and windows
+bounced), so the port's night has about 6% of it. G0's distances to Cycles say
+the same: the Cornell box lacks bounced light, and Sponza (14.5 dB on the
+nave) has "kin's ambient everywhere".
+
+**How strategies compose.** Three layers, the lower two shared:
+
+1. *The GI scene*: the scene in voxels for tracing it. A distance to the
+   nearest surface in every voxel, and in each voxel a surface touches its
+   colour, normal and emission. Built in compute from the meshes the renderer
+   already holds (every opaque and cut-out copy in `area`, skinned copies in
+   their pose), in cascades round the camera.
+2. *The lit scene* (a radiance cache): the light leaving each surface voxel:
+   the sun, the lamps, emission, and the GI itself fed back, so bounces add up
+   from frame to frame. A ray that hits a surface reads its light there.
+3. *Strategies* gather light for a pixel (or any point). Each one reports the
+   light it found within its reach and the share of directions it found
+   blocked; the renderer stacks them nearest first, as alpha layers are, and
+   what no layer blocked sees the sky or environment. GTAO is already the
+   nearest layer (it blocks and finds no light); probes are the far one;
+   screen-space GI, cones traced through the distance field, a baked source
+   come in the same way. Reflections get their own stack by the same rule
+   (screen space, traced, probes, the sky).
+
+Tracing is one interface: rays in, a distance and light out. The distance
+field is the first tracer; a BVH in compute (G4) could stand in for it
+without the strategies changing.
+
+**The first strategy: probes traced through the GI scene** (DDGI: Majercik
+et al. 2019). A grid of probes in each cascade; each render a budget of them
+casts rays through the distance field (a hit reads the lit scene, a miss the
+sky), and each keeps its irradiance (octahedral, 8 x 8) and the moments of
+its rays' distances (16 x 16), blended over time. A pixel reads its 8 nearest
+probes, weighted by distance, by which way they face and by whether they can
+see it (Chebyshev, from the moments): what keeps light from leaking through
+walls. Probes inside a wall move out or switch off, those far from any
+surface sleep. The material shader reads them with its normal-mapped normal
+in place of the sky's diffuse; GTAO, kept shorter than the probes' spacing,
+and the occlusion maps still multiply it for contact detail. It is Godot's
+class of technique (SDFGI: probes through cascaded distance fields): this
+one's chances against it are the visibility test, probes out of walls, the
+normal maps, denser probes near the camera, and the scene's moving things in
+the GI scene (Godot's SDFGI takes static meshes only).
+
+Decided (2026-10-26): moving things feed the GI from the start, props and
+skinned characters alike (Godot's SDFGI takes neither); the budget is 2 ms
+of GPU a frame for all of it at 2844 x 1600 on the laptop's RTX 4080 (the
+port runs about 10 ms a frame by day there), with settings that go lower;
+off by default, and off the picture and the cost are as without it; compute
+only (WebGL2 keeps the sky's light).
+
+Steps, each with its checks:
+
+- **G5a — The GI scene in one box.** `Scene3D::global_illumination`
+  (`enabled`, `area`, `cell`): one level over `area`, voxels of `cell` (larger
+  where the box would take more than the level's voxels). Triangles to voxels
+  in compute: every voxel a triangle touches (conservative: no gap a ray can
+  pass), its owner the touching triangle drawn first (the same scene gives the
+  same voxels, to the byte, whatever order the GPU runs in); the owner writes
+  the voxel's colour (the material's texture at the voxel's nearest point of
+  it, at a mip the voxel's size), normal and emission; a cut-out's voxels only
+  where its texture is opaque enough. A jump flood gives each voxel its
+  distance to the nearest surface voxel. Built again when what it is made of
+  changes (meshes, materials, copies, poses), whole. A debug view
+  (`debug.gi_view`) shows it traced from the camera instead of the picture;
+  `read_gi_scene` gives it to tests and tools. Checks: distances to planes and
+  spheres; a thin wall, straight and slanted, that no ray passes; a skinned
+  copy in its pose; two builds the same to the byte; off, every picture as
+  before; the build's cost on Sponza and Bistro.
+- **G5b — Light and probes in that box.** The lit scene (the sun through its
+  shadow map where it reaches, else a ray through the field; lamps the same;
+  emission; probe light for the bounces), the probes and the shading. Checks:
+  the Cornell box and Sponza against Cycles; the furnace stays white; energy
+  conserved in a closed box; ECS settings.
+- **G5c — Cascades round the camera.** Scrolling as the camera moves (only
+  the new slabs voxelized), a moved prop or a posed character voxelized again
+  in its old and new box, the probes' and the lit scene's work spread over
+  frames within the budget. Checks: the Bistro against Godot (`compare.py`:
+  the arch by day, the night's light, the day's excess, the shade's colour),
+  the four times of day and their blends, the cost.
+- **G5d — Reflections and fog.** Reflections kept from the sky where the field
+  says something is in the way (the sky rim on the mannequin's head), and the
+  fog lit by the probes.
+
+Then other strategies on the same layers, as they are asked for: screen-space
+GI for the near field, cones traced through the field for occlusion between
+the probes' spacing and GTAO's reach, reflection probes and screen-space
+reflections, a baked source.
+
 ### Later, each on request
 
 Gamepad aiming (unless kin's gamepad input lands first, then in M2);
