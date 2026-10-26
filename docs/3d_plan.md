@@ -2669,6 +2669,52 @@ picture's size. The budget work is G5c's (fewer probes and voxels a render, casc
 is warmer, the arch's tunnel goes dark inside as the original's is, the night's lamps bounce onto the facades and the
 street; the same picture to the byte from run to run. Its comparison with Godot is G5c's, with the cascades.
 
+#### G5c — results so far
+
+`GlobalIllumination3D`'s `levels`, `side` and `height`: the GI scene in windows of `side` x `height` x `side` voxels
+(128 x 64 x 128), each level's voxels twice the last's, round the camera; the first level whose window holds the
+whole area stays over it. A window is stored wrapped round and moves a block of 8 x 8 x 8 at a time; the probes have a
+window in each level too. What is made again, and how:
+
+- **By blocks:** each render finds what changed from a hash and a box of each copy (its transform, tint, material,
+  pose); the blocks a change covers or covered (a voxel more), and the slabs a moving window gains, are emptied,
+  voxelized and flooded again (the flood over them and two blocks more, written over one more; at the side a window
+  left, the block along its new edge). The voxelizer counts voxels from the world's origin, not the window's, so a
+  voxel holds the same wherever its window stood: made again where it changed, or after the window moved or jumped,
+  the scene is to the byte the one built afresh (`test_gpu_gi_scene_builds`, `_scrolls`). The coarser levels take
+  what changed every 2^k renders.
+- **Fewer triangles:** each mesh keeps the box of each run of 64 of its triangles; the voxelizer takes only the runs
+  that reach a block being made (a workgroup a run), and clamps each triangle to the box round those blocks.
+- **Fewer passes:** the flood's seeding and its writing folded into its first and last rounds (five passes, not
+  seven), all its boxes a pass (boxes that overlap made one).
+- **The probes:** placed again only near where the distances were written; those new to a window traced first (a
+  queue: a level whose probes are not traced yet leaves the place to the next, `test_gpu_gi_probes_scroll`); the lit
+  scene lights the blocks made this render and a quarter of the others in turn.
+- **Their light on the view:** read once a texel at half the view's size after the pre-pass (`gi_resolve.comp`: the
+  light facing the surface's normal and a linear fit of its brightness round it), and by the main pass from the four
+  texels round each pixel, turned to the normal map's normal and the reflection.
+
+The Bistro at 2844 x 1600 (`--gi`, the RTX 4080 laptop, the mannequin posed anew each render; GPU times from kin's
+fences, each part timed in its own submission, and passes compared in alternating blocks of one run, the laptop
+throttling at 86-87 C): GI from about 24 ms a render to about 4.3.
+
+| Part | ms | What did it |
+|---|---|---|
+| The GI scene (the mannequin's blocks; the coarser levels in turn) | 1.3 | blocks, runs, passes; was 17 for a whole build |
+| The probes (placing, the lit scene, 4,096 traced and taken in) | 1.2 | placing near changes (was all 49,152 each render) |
+| Their light on the view | 0.5 | |
+| Reading it in the main pass | 0.9 | was 13: each fragment of the overdraw read the probes |
+| The light variants (with the probes on) | 0.3 | |
+
+Against Cycles, with as many probes a render as G5b (`--gi-per-render 0`) and `kin_reference` making one level over
+each scene (`max_gi_probes` now 65,536 a level, so the Cornell box keeps probes every 4 voxels): Cornell 7.65 (25.0
+dB, SSIM 0.978; G5b 7.61), the furnace 0.53 (44.1 dB; 0.27), Sponza's nave 7.09 (7.10), its roof 6.91 (6.50): the
+light read on the view loses nothing that shows.
+
+Left for G5c: the budget (2 ms: about 4.3 now; what is left to try is updating a posed character's blocks less often
+than each render, fewer probes a render, the main pass shading only what the pre-pass kept, and the coarser levels'
+probes less often), and the Bistro against Godot.
+
 ### Later, each on request
 
 Gamepad aiming (unless kin's gamepad input lands first, then in M2);

@@ -35,13 +35,12 @@ layout(set = 2, binding = 10) uniform sampler2DArrayShadow uLocalShadow; // dept
 layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // depth from the fill light (the moon), a layer a cascade, compared
 #endif
 #ifdef KIN_GI
-// Global illumination's probes (G5b; docs/3d_plan.md, G5): only the stock light variants (mesh_light*.frag) have them,
-// so that every other shader, and custom ones, keep their samplers.
-layout(set = 2, binding = 12) uniform sampler3D uGiIrradiance;
-layout(set = 2, binding = 13) uniform sampler3D uGiMoments;
-layout(set = 2, binding = 14) uniform sampler3D uGiProbes;
-#define KIN_GI_PROBES
-#include "kin_gi.inc.glsl"
+// Global illumination (G5; docs/3d_plan.md): only the stock light variants (mesh_light*.frag) have it, so that every
+// other shader, and custom ones, keep their samplers. The probes' light on what the pre-pass drew, read once a texel at
+// half the view's size (gi_resolve.comp).
+layout(set = 2, binding = 12) uniform sampler2D uGiLight; // rgb: the light facing the surface; a: its depth along the
+                                                          // view (less: the probes have none there; 0: no surface)
+layout(set = 2, binding = 13) uniform sampler2D uGiSlope; // the light facing way d is rgb * (w + xyz . d)
 #endif
 
 const float PI = 3.14159265358979;
@@ -236,6 +235,57 @@ vec3 kin_emissive(vec3 base) {
 // The light of the scene on a surface (linear, what leaves it toward the
 // camera): the sun through its shadow, the fill, the point lights, and the
 // ambient light or environment. Not the surface's own light (kin_emissive).
+#ifdef KIN_GI
+// The probes' light here, as gi_resolve.comp read it on what the pre-pass drew, from the four texels round this pixel
+// (at half its size): filtered where all four are within `near` of this fragment's `depth` along the view; else the
+// one of them most weighted that is, or where none is (a thin thing between texels, or a surface the pre-pass did not
+// draw: glass, in front of what it shows) the one nearest in depth. For the way `n` (this surface's normal, its normal
+// map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
+// (the sky's stands).
+bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced) {
+    const ivec2 size = textureSize(uGiLight, 0);
+    const vec2 uv = gl_FragCoord.xy * 0.5 / vec2(size);
+    // x, y, z, w: the texels at (0, 1), (1, 1), (1, 0) and (0, 0) from the footprint's first.
+    const vec4 depths = textureGather(uGiLight, uv, 3);
+    vec4 light, slope;
+    if (all(greaterThan(depths, vec4(0.0))) && all(lessThanEqual(abs(depths - depth), vec4(near)))) {
+        light = textureLod(uGiLight, uv, 0.0);
+        slope = textureLod(uGiSlope, uv, 0.0);
+    } else {
+        const vec2 at = uv * vec2(size) - 0.5;
+        const vec2 f = fract(at);
+        const vec4 weight = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
+        const ivec2 offsets[4] = ivec2[4](ivec2(0, 1), ivec2(1, 1), ivec2(1, 0), ivec2(0, 0));
+        int pick = -1, nearest_one = -1;
+        float most = -1.0, nearest = 1e30;
+        for (int i = 0; i < 4; ++i) {
+            if (depths[i] == 0.0) {
+                continue; // no surface
+            }
+            const float off = abs(abs(depths[i]) - depth);
+            if (off < nearest) {
+                nearest = off;
+                nearest_one = i;
+            }
+            if (depths[i] > 0.0 && off <= near && weight[i] > most) {
+                most = weight[i];
+                pick = i;
+            }
+        }
+        pick = pick >= 0 ? pick : nearest_one;
+        if (pick < 0 || depths[pick] <= 0.0) {
+            return false;
+        }
+        const ivec2 q = clamp(ivec2(floor(at)) + offsets[pick], ivec2(0), size - 1);
+        light = texelFetch(uGiLight, q, 0);
+        slope = texelFetch(uGiSlope, q, 0);
+    }
+    probed = light.rgb * clamp(slope.w + dot(slope.xyz, n), 0.0, 4.0);
+    traced = light.rgb * clamp(slope.w + dot(slope.xyz, r), 0.0, 4.0);
+    return true;
+}
+#endif
+
 vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
     const vec3 v = kin_view();
     Surface s;
@@ -358,18 +408,21 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
     // light along the reflection, blurred: what the probes see that way; a smooth surface keeps the sky's sharp
     // reflection, dimmed by how much of the sky's light the probes see that way (none in a closed room).
-    if (frame.gi_counts.w > 0.5) {
-        const KinGiProbes probes = KinGiProbes(frame.gi_origin, frame.gi_counts, frame.gi_bias);
-        around = kin_gi_irradiance(probes, vWorld, n, v) * frame.gi_bias.z;
+    if (frame.gi.x > 0.5) {
         const vec3 r = normalize(mix(reflect(-v, n), n, s.alpha));
-        const vec3 traced = kin_gi_irradiance(probes, vWorld, r, v) * frame.gi_bias.z;
-        const vec3 open = frame.environment.w > 0.5
-                              ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
-                              : mix(frame.ground_ambient.rgb, frame.ambient.rgb, r.y * 0.5 + 0.5);
-        const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
-        const float seen = clamp(dot(traced, luma) / max(dot(open, luma), 1e-6), 0.0, 1.0);
-        const float smooth_share = (1.0 - roughness) * (1.0 - roughness);
-        above = mix(traced, above * seen, smooth_share);
+        const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
+        const float near = 0.02 * depth + 4.0 * fwidth(depth);
+        vec3 probed, traced;
+        if (kin_gi_resolved(n, r, depth, near, probed, traced)) {
+            around = probed;
+            const vec3 open = frame.environment.w > 0.5
+                                  ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
+                                  : mix(frame.ground_ambient.rgb, frame.ambient.rgb, r.y * 0.5 + 0.5);
+            const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+            const float seen = clamp(dot(traced, luma) / max(dot(open, luma), 1e-6), 0.0, 1.0);
+            const float smooth_share = (1.0 - roughness) * (1.0 - roughness);
+            above = mix(traced, above * seen, smooth_share);
+        }
     }
 #endif
     const vec3 dielectric = sky_reflectance(vec3(0.04), ab);

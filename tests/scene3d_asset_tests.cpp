@@ -175,7 +175,7 @@ void authorable_api_settings() {
         "sky_moon_size":2,"sky_moon_light":0.1,"sky_moon_color":[0.6,0.7,0.8],
         "sky_light_threshold":0.02,"sky_light_interval":3,"fog_color":[2,3,4],
         "lod_enabled":true,"lod_error_pixels":2,"lod_bias":1.5,"lod_max_cluster_triangles":12345,"anisotropy":8,"texture_lod_bias":-0.5,
-        "gi_enabled":true,"gi_min":[-8,-1,-8],"gi_max":[8,6,8],"gi_cell":0.2,"gi_probe_spacing":3,"gi_probe_rays":96,
+        "gi_enabled":true,"gi_min":[-8,-1,-8],"gi_max":[8,6,8],"gi_cell":0.2,"gi_levels":2,"gi_side":96,"gi_height":48,"gi_probe_spacing":3,"gi_probe_rays":96,
         "gi_probes_per_render":512,"gi_hysteresis":0.9,"gi_intensity":1.5}}},
       {"id":"lamp","components":{"Transform3D":{},"PointLight3D":{
         "color":[6,3,1],"shadow_enabled":true,"shadow_resolution":512,"shadow_bias":0.7,
@@ -207,7 +207,8 @@ void authorable_api_settings() {
                   scene.anisotropy == 8 && scene.texture_lod_bias == -0.5f && view.pick,
               "authored quality or game-owned picking lost");
         const kin::GlobalIllumination3D& gi = scene.global_illumination;
-        check(gi.enabled && gi.area.min.x == -8 && gi.area.max.y == 6 && gi.cell == .2f && gi.probes.enabled &&
+        check(gi.enabled && gi.area.min.x == -8 && gi.area.max.y == 6 && gi.cell == .2f && gi.levels == 2 &&
+                  gi.side == 96 && gi.height == 48 && gi.probes.enabled &&
                   gi.probes.spacing == 3 && gi.probes.rays == 96 && gi.probes.per_render == 512 &&
                   gi.probes.hysteresis == .9f && gi.probes.intensity == 1.5f,
               "authored global illumination lost");
@@ -272,6 +273,12 @@ void authorable_api_settings() {
           "too few probe rays applied");
     check(world.components().patch_field(environment, "SceneEnvironment3D", "gi_probe_rays", u32{96}),
           "probe rays restore failed");
+    check(world.components().patch_field(environment, "SceneEnvironment3D", "gi_height", u32{512}),
+          "GI height edit failed");
+    check(!apply_scene3d_settings(world, scene).diagnostics.empty() && scene.global_illumination.height == 48,
+          "too many GI voxels applied");
+    check(world.components().patch_field(environment, "SceneEnvironment3D", "gi_height", u32{48}),
+          "GI height restore failed");
     const auto old = scene.sky;
     environment.get_mut<SceneEnvironment3D>()->sky.moon_color.r = std::numeric_limits<f32>::quiet_NaN();
     check(!apply_scene3d_settings(world, scene).diagnostics.empty() && scene.sky.moon_color == old.moon_color,

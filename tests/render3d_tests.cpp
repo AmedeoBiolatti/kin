@@ -2887,7 +2887,8 @@ void test_gpu_anisotropy() {
     });
 }
 
-// The GI scene (Scene3D::global_illumination, G5a) of a small level, read back: voxels of 0.1 over a box 8 x 4 x 8.
+// The GI scene (Scene3D::global_illumination, G5a) of a small level, read back: voxels of 0.1 over a box 8 x 4 x 8 (one
+// level: a window of 80 x 48 x 80 voxels holds it, from (-4, -0.8, -4)).
 struct GiLevel {
     explicit GiLevel(kin::Renderer3D& r3d, kin::Renderer2D& renderer)
         : plane(r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({})),
@@ -2977,21 +2978,23 @@ void test_gpu_gi_scene() {
         level.draw(scene);
         render_ok(r3d, view, scene);
         const kin::RenderDebugStats3D stats = r3d.debug_stats();
-        assert(stats.gi_voxels == 80u * 40u * 80u && stats.gi_built && stats.gi_copies == 6);
+        assert(stats.gi_voxels == 80u * 48u * 80u && stats.gi_levels == 1 && stats.gi_built &&
+               stats.gi_blocks == 10u * 6u * 10u && stats.gi_copies == 6);
         GiVoxels g;
         assert(r3d.read_gi_scene(view, g.s).value_or(false));
-        assert((g.s.size == std::array<kin::u32, 3>{80, 40, 80}));
+        assert((g.s.size == std::array<kin::u32, 3>{80, 48, 80}));
         assert(std::abs(g.s.cell - 0.1f) < 1e-6f);
+        assert(kin::length(g.s.origin - Vec3f{-4.0f, -0.8f, -4.0f}) < 1e-4f);
 
-        // The floor: layer 7 (0.27 is 0.77 above the area's floor), the layers either side empty, and above it the
-        // distances count the layers, far from everything else (x 3.2, z 1).
+        // The floor: layer 10 (0.27 is 1.07 above the window's floor), the layers either side empty, and above it the
+        // distances count the layers up to 8 (where they are kept), far from everything else (x 3.2, z 1).
         const auto [fx, fy, fz] = g.of({3.2f, 0.27f, 1.0f});
-        assert(fy == 7);
-        assert(g.full(fx, 7, fz) && !g.full(fx, 6, fz) && !g.full(fx, 8, fz));
-        for (int k = 0; k <= 10; ++k) {
-            assert(std::abs(g.distance(fx, 7 + k, fz) - static_cast<float>(k)) < 0.01f);
+        assert(fy == 10);
+        assert(g.full(fx, 10, fz) && !g.full(fx, 9, fz) && !g.full(fx, 11, fz));
+        for (int k = 0; k <= 12; ++k) {
+            assert(std::abs(g.distance(fx, 10 + k, fz) - static_cast<float>(std::min(k, 8))) < 0.01f);
         }
-        const std::size_t f = g.index(fx, 7, fz);
+        const std::size_t f = g.index(fx, 10, fz);
         const auto linear_byte = [](kin::u8 c) {
             return static_cast<int>(std::lround(kin::srgb_to_linear(static_cast<float>(c) / 255.0f) * 255.0f));
         };
@@ -3055,8 +3058,9 @@ void test_gpu_gi_scene() {
     });
 }
 
-// When the GI scene is built: once, and again only when something it is made of changes (a copy moving, a pose, a
-// material); two views of one scene build it to the byte alike; with it off nothing is built, and the picture is the
+// When the GI scene is built: once, and again only where something it is made of changes (a copy moving, a pose, a
+// material: the blocks round it, not all of them); two views of one scene build it to the byte alike, and a scene made
+// again where it changed is to the byte the one built afresh; with it off nothing is built, and the picture is the
 // same with it on and its probes off (the GI scene alone lights nothing).
 void test_gpu_gi_scene_builds() {
     with_gpu("test_gpu_gi_scene_builds", [](kin::Renderer2D& renderer) {
@@ -3089,20 +3093,30 @@ void test_gpu_gi_scene_builds() {
             assert(r3d.read_gi_scene(v, s).value_or(false));
             return s;
         };
-        assert(built(view, scene_of(true, 1.5f, ball)));
+        const auto blocks = [&] { return r3d.debug_stats().gi_blocks; };
+        assert(built(view, scene_of(true, 1.5f, ball)) && blocks() == 600);
         assert(!built(view, scene_of(true, 1.5f, ball)));
         const kin::GiScene3D first = voxels(view);
-        assert(built(view, scene_of(true, 1.0f, ball)));                           // a pose
+        assert(built(view, scene_of(true, 1.0f, ball))); // a pose
+        const kin::u32 posed = blocks();
         assert(built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f}))); // a copy moving
+        const kin::u32 moved = blocks();
+        std::cerr << "gi scene builds: a pose made " << posed << " blocks, the ball moving " << moved << '\n';
+        assert(posed > 0 && posed <= 16 && moved > 0 && moved <= 96);
         assert(!built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f})));
         level.floor_colour = Color::rgb(60, 60, 60); // a material
-        assert(built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f})));
+        assert(built(view, scene_of(true, 1.0f, ball + Vec3f{0.0f, 0.0f, 0.5f})) && blocks() < 600);
         level.floor_colour = Color::rgb(200, 100, 50);
         // Back where it began, in another view: the same voxels, to the byte.
         assert(built(other, scene_of(true, 1.5f, ball)));
         const kin::GiScene3D again = voxels(other);
         assert(again.distance == first.distance && again.albedo == first.albedo && again.normal == first.normal &&
                again.emission == first.emission);
+        // And in the first view, made again where it changed: the same voxels.
+        assert(built(view, scene_of(true, 1.5f, ball)));
+        const kin::GiScene3D back = voxels(view);
+        assert(back.distance == first.distance && back.albedo == first.albedo && back.normal == first.normal &&
+               back.emission == first.emission);
         // Off: nothing built or kept, and the picture as with it on.
         kin::View3D plain = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
         const Pixels without = shoot_view(renderer, r3d, plain, scene_of(false, 1.5f, ball));
@@ -3113,6 +3127,73 @@ void test_gpu_gi_scene_builds() {
         const Pixels with = shoot_view(renderer, r3d, view, scene_of(true, 1.5f, ball));
         renderer.present();
         assert(with.rgba == without.rgba);
+    });
+}
+
+// The GI scene's windows round the camera (G5c): a corridor 40 long, more than a window holds, in two levels whose
+// windows follow the camera. A step makes again only the slabs the windows gain; a jump past a window makes all of it;
+// staying put makes nothing; and each time the first level's window holds, to the byte, what a view built afresh
+// there holds.
+void test_gpu_gi_scene_scrolls() {
+    with_gpu("test_gpu_gi_scene_scrolls", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
+        const kin::Mesh3D pillar = r3d.create_mesh(kin::meshes::box({0.3f, 3.0f, 0.3f})).value_or({});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.6f, 32, 16)).value_or({});
+        const auto scene_of = [&](float x) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({x, 1.5f, 0.0f}, {x + 1.0f, 1.5f, 0.0f}, 60.0f);
+            scene.global_illumination = {.enabled = true,
+                                         .area = {{-20.0f, -0.5f, -3.0f}, {20.0f, 3.5f, 3.0f}},
+                                         .cell = 0.1f,
+                                         .levels = 2,
+                                         .probes = {.enabled = false}};
+            (void)scene.draw(plane, Mat4f::scaling({40.0f, 1.0f, 6.0f}), {.color = Color::rgb(180, 160, 140)});
+            for (int i = -9; i <= 9; ++i) {
+                for (const float z : {-2.0f, 2.0f}) {
+                    (void)scene.draw(pillar, Mat4f::translation({2.0f * static_cast<float>(i) + 0.37f, 1.5f, z}),
+                                     {.color = Color::rgb(90 + 8 * (i + 9), 120, 200)});
+                }
+            }
+            (void)scene.draw(ball, Mat4f::translation({4.1f, 0.9f, 0.4f}), {.color = Color::rgb(200, 60, 60)});
+            return scene;
+        };
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto step = [&](kin::View3D& v, float x) {
+            render_ok(r3d, v, scene_of(x));
+            renderer.present();
+            return r3d.debug_stats();
+        };
+        const auto same_as_afresh = [&](float x) {
+            kin::GiScene3D kept, afresh;
+            assert(r3d.read_gi_scene(view, kept).value_or(false));
+            kin::View3D other = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            assert(step(other, x).gi_built);
+            assert(r3d.read_gi_scene(other, afresh).value_or(false));
+            assert(kin::length(kept.origin - afresh.origin) < 1e-4f && kept.size == afresh.size);
+            assert(kept.distance == afresh.distance && kept.albedo == afresh.albedo && kept.normal == afresh.normal &&
+                   kept.emission == afresh.emission);
+            return kept;
+        };
+        // 128 x 64 x 128 voxels a level; the first of 0.1 from (-6.4, -1.6, -6.4), the second of 0.2.
+        kin::RenderDebugStats3D stats = step(view, 0.0f);
+        assert(stats.gi_built && stats.gi_levels == 2 && stats.gi_blocks == 2u * 16u * 8u * 16u);
+        const kin::GiScene3D at_start = same_as_afresh(0.0f);
+        assert(kin::length(at_start.origin - Vec3f{-6.4f, -1.6f, -6.4f}) < 1e-4f);
+        // 3.3 along: the first window 32 voxels on (4 blocks), the second 16 (2 blocks).
+        stats = step(view, 3.3f);
+        std::cerr << "gi scene scrolls: a step made " << stats.gi_blocks << " blocks\n";
+        assert(stats.gi_built && stats.gi_blocks == 4u * 8u * 16u + 2u * 8u * 16u);
+        (void)same_as_afresh(3.3f);
+        assert(!step(view, 3.31f).gi_built);
+        // 19 along: the first window 160 voxels on, past where it was (all of it again), the second 80 (10 blocks).
+        stats = step(view, 19.0f);
+        std::cerr << "gi scene scrolls: a jump made " << stats.gi_blocks << " blocks\n";
+        assert(stats.gi_built && stats.gi_blocks == 16u * 8u * 16u + 10u * 8u * 16u);
+        (void)same_as_afresh(19.0f);
     });
 }
 
@@ -3379,6 +3460,74 @@ void test_gpu_gi_tunnel() {
         assert(std::abs(in_plain - out_plain) < 3.0f);
         assert(linear(out_gi) > 0.8f * linear(out_plain));
         assert(linear(in_gi) < 0.25f * linear(out_gi)); // in light, not in the picture's levels
+    });
+}
+
+// The probes' windows round the camera (G5c): along a corridor lit only by panels in its ceiling, longer than the
+// windows, a camera that walks along it sees the floor ahead lit at once (the probes its windows gain are placed again
+// and traced before the others, a few hundred a render; with two levels near its light once settled, the next level
+// standing in for a probe not yet traced; with one, dimmer: the probes were traced at the window's edge, their rays
+// leaving it for nothing), and once settled as a view that started where it stops sees it.
+void test_gpu_gi_probes_scroll() {
+    with_gpu("test_gpu_gi_probes_scroll", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiRooms rooms{r3d};
+        const auto camera_at = [](float x) {
+            return kin::Camera3D::look_at({x, 1.0f, 0.0f}, {x + 1.0f, 0.0f, 0.0f}, 60.0f);
+        };
+        // `per_render` 0: every probe each render, each update a tenth (the light settles with little noise).
+        const auto scene_of = [&](float x, kin::u32 levels, kin::u32 per_render) {
+            kin::Scene3D scene = GiRooms::dark(camera_at(x));
+            kin::GlobalIllumination3D gi = GiRooms::settings({{-20.0f, -0.5f, -1.5f}, {20.0f, 2.5f, 1.5f}}, 0.1f);
+            gi.levels = levels;
+            gi.side = 64;
+            gi.height = 32;
+            gi.probes.rays = 256;
+            gi.probes.per_render = per_render;
+            gi.probes.hysteresis = per_render == 0 ? 0.9f : 0.5f;
+            scene.global_illumination = gi;
+            const kin::Material3D grey{.color = Color::rgb(180, 180, 180)};
+            rooms.quad(scene, {0.0f, 0.0f, 0.0f}, 'y', 40.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 2.0f, 0.0f}, 'Y', 40.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 1.0f, -1.0f}, 'z', 40.0f, 2.0f, grey);
+            rooms.quad(scene, {0.0f, 1.0f, 1.0f}, 'Z', 40.0f, 2.0f, grey);
+            for (int i = -9; i <= 9; ++i) {
+                rooms.quad(scene, {2.0f * static_cast<float>(i), 1.95f, 0.0f}, 'Y', 1.2f, 1.2f,
+                           {.color = kin::colors::white, .emissive = 3.0f});
+            }
+            return scene;
+        };
+        const float x = 6.0f;
+        const std::array<Vec3f, 3> points{Vec3f{x + 1.0f, 0.0f, 0.0f}, Vec3f{x + 2.0f, 0.0f, 0.5f},
+                                          Vec3f{x + 3.0f, 0.0f, -0.5f}};
+        const auto linear = [](float c) { return kin::srgb_to_linear(c / 255.0f); };
+        const auto floor_of = [&](const Pixels& p, int i) { return linear(block_at(p, camera_at(x), points[i])[1]); };
+        for (const kin::u32 levels : {1u, 2u}) {
+            kin::View3D other = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            const Pixels started = settle(renderer, r3d, other, scene_of(x, levels, 0), 64);
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            (void)settle(renderer, r3d, view, scene_of(0.0f, levels, 0), 64);
+            // Half a unit a render (the first window 5 voxels on, a block about every other render: 256 probes new to
+            // it), 256 probes traced a render (all of them in turn would take 16 renders with two levels, 8 with one).
+            for (int i = 1; i < 12; ++i) {
+                render_ok(r3d, view, scene_of(0.5f * static_cast<float>(i), levels, 256));
+                renderer.present();
+            }
+            const Pixels arrived = settle(renderer, r3d, view, scene_of(x, levels, 256), 2);
+            const Pixels walked = settle(renderer, r3d, view, scene_of(x, levels, 0), 64);
+            for (int i = 0; i < 3; ++i) {
+                const float now = floor_of(arrived, i), settled = floor_of(walked, i), reference = floor_of(started, i);
+                std::cerr << "gi probes scroll: " << levels << " levels, the floor at " << points[i].x << ' '
+                          << points[i].z << " on arriving " << now << ", settled " << settled << ", started there "
+                          << reference << '\n';
+                assert(reference > 0.05f);
+                assert(levels == 1 ? now > 0.4f * reference : std::abs(now - reference) < 0.35f * reference);
+                assert(std::abs(settled - reference) < 0.05f * reference);
+            }
+        }
     });
 }
 
@@ -21689,11 +21838,13 @@ int main(int argc, char** argv) {
     RUN(test_gpu_texture_lod_bias());
     RUN(test_gpu_gi_scene());
     RUN(test_gpu_gi_scene_builds());
+    RUN(test_gpu_gi_scene_scrolls());
     RUN(test_gpu_gi_view());
     RUN(test_gpu_gi_furnace());
     RUN(test_gpu_gi_rooms());
     RUN(test_gpu_gi_tunnel());
     RUN(test_gpu_gi_bleeding());
+    RUN(test_gpu_gi_probes_scroll());
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());

@@ -21,11 +21,10 @@ layout(set = 2, binding = 8) uniform sampler3D uRadianceBack;
 layout(std140, set = 3, binding = 0) uniform View {
     mat4 inverse_view_projection;
     vec4 camera;  // xyz: the eye; w: 1 orthographic
-    vec4 forward; // xyz: the way the camera looks
-    vec4 origin;  // xyz: voxel (0, 0, 0)'s low corner; w: voxels a unit
-    vec4 size;    // xyz: voxels a side; w: what is shown (GiView3D: 1 colour, 2 normal, 3 emission, 4 steps, 5 the
-                  // light leaving, 6 the probes' light)
+    vec4 forward; // xyz: the way the camera looks; w: what is shown (GiView3D: 1 colour, 2 normal, 3 emission, 4 steps,
+                  // 5 the light leaving, 6 the probes' light)
     vec4 target;  // xy: the picture's size; z: 1 to encode to sRGB; w: 1 with probes
+    KinGiScene scene;
     KinGiProbes probes;
 } u;
 
@@ -48,12 +47,13 @@ void main() {
         from = near.xyz / near.w;
         way = normalize(u.forward.xyz);
     }
-    const int mode = int(u.size.w + 0.5);
+    const int mode = int(u.forward.w + 0.5);
     vec3 c = vec3(0.04, 0.045, 0.06); // nothing hit
     int steps = 0;
     ivec3 voxel;
+    int level;
     float t;
-    if (kin_gi_march((from - u.origin.xyz) * u.origin.w, way, 1e30, u.size.xyz, 1024, voxel, t, steps)) {
+    if (kin_gi_march(u.scene, from, way, 1e30, 1024, voxel, level, t, steps)) {
         const vec4 albedo = texelFetch(uGiAlbedo, voxel, 0);
         const vec3 n = texelFetch(uNormal, voxel, 0).xyz * 2.0 - 1.0;
         if (mode == 1) {
@@ -67,8 +67,10 @@ void main() {
         } else if (mode == 6 && u.target.w > 0.5) {
             // On the side the camera sees.
             const vec3 facing = dot(n, way) > 0.0 ? -n : n;
-            const vec3 at = u.origin.xyz + (vec3(voxel) + 0.5) / u.origin.w;
-            c = kin_gi_irradiance(u.probes, at, facing, -way) * u.probes.bias.z;
+            vec3 light;
+            if (kin_gi_irradiance(u.probes, from + way * t, facing, -way, light)) {
+                c = light * u.probes.bias.z;
+            }
         }
     }
     if (mode == 4) {

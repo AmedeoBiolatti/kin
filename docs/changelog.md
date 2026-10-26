@@ -18,7 +18,13 @@ releases may change APIs.
   emission, none through walls, and reflections dimmed where the sky is hidden.
   Sponza against Cycles: from 50 levels off on average to 7.
   `RenderDebugOptions3D::gi_view` shows the voxels and `Renderer3D::read_gi_scene`
-  reads them back.
+  reads them back. The voxels are in `levels` windows round the camera
+  (`side` x `height` x `side` each, every level's voxels twice the last's; one
+  fixed over an area it holds), made again only where something changed or a
+  window moved, to the byte as if built afresh; the probes' light is read once a
+  pixel at half the view's size after the depth pre-pass (which global
+  illumination turns on). The Bistro at 2844 x 1600: about 4.3 ms of GPU a
+  render.
 - Add anisotropic filtering of 3D materials' mipmapped textures
   (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
   `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with

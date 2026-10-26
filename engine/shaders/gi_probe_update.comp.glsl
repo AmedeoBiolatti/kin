@@ -11,6 +11,9 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, set = 0, binding = 0) readonly buffer Rays {
     vec4 rays[];
 };
+layout(std430, set = 0, binding = 1) readonly buffer List {
+    uint list[]; // the batch: a probe's stored index in its level, its level in the top 8
+};
 layout(set = 1, binding = 0, rgba16f) uniform image3D uIrradiance; // a: 1 once the probe has had an update
 layout(set = 1, binding = 1, rg16f) uniform image3D uMoments;
 layout(set = 1, binding = 2, rgba16f) uniform image3D uProbeData;
@@ -19,9 +22,9 @@ layout(set = 1, binding = 2, rgba16f) uniform image3D uProbeData;
 
 layout(std140, set = 2, binding = 0) uniform Params {
     KinGiProbes probes;
-    uvec4 batch; // x: its first probe, y: its probes, z: rays a probe, w: all probes
+    uvec4 batch; // y: the batch's probes, z: rays a probe
     mat4 rotation;
-    vec4 misc;   // x: hysteresis, y: the farthest distance kept (world)
+    vec4 misc;   // x: hysteresis, y: the farthest distance kept (in spacings)
 } p;
 
 shared vec4 found[256];
@@ -68,9 +71,12 @@ void main() {
     if (b >= p.batch.y) {
         return;
     }
+    const uint entry = list[b];
+    const int k = int(entry >> 24u), index = int(entry & 0x7fffffu);
     const ivec3 counts = ivec3(p.probes.counts.xyz);
-    const int linear = int((p.batch.x + b) % p.batch.w);
-    const ivec3 probe = ivec3(linear % counts.x, (linear / counts.x) % counts.y, linear / (counts.x * counts.y));
+    const ivec3 st = ivec3(index % counts.x, (index / counts.x) % counts.y, index / (counts.x * counts.y));
+    const ivec3 probe = ivec3(st.xy, st.z + k * counts.z);
+    const float farthest = p.misc.y * p.probes.level[k].w;
     const vec4 data = imageLoad(uProbeData, probe);
     if (data.w == 0.0) {
         return; // asleep (the whole workgroup)
@@ -102,7 +108,7 @@ void main() {
         float total = 0.0;
         for (uint r = 0u; r < n; ++r) {
             const float w = pow(max(0.0, dot(dir, ways[r])), 50.0);
-            const float d = min(abs(found[r].w), p.misc.y);
+            const float d = min(abs(found[r].w), farthest);
             sum += w * vec2(d, d * d);
             total += w;
         }

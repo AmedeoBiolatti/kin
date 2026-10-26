@@ -14,7 +14,7 @@
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
 //                 [--bake-cache DIR]
-//                 [--gi] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H]
+//                 [--gi] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H] [--gi-per-render N]
 //
 // --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR
 // (Renderer3D::set_bake_cache), and reads them back on the next run with the same DIR instead of building them: the
@@ -1930,11 +1930,13 @@ struct Overrides {
     long particles = 0;        // --particles N: a system with N live particles in the scene's middle
     bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and
                                // the shadow pass would be timed once
-    // --gi: global illumination over the scene's bounds (a twentieth larger), voxels of --gi-cell (else a 128th of the
-    // bounds' longest side), probes every --gi-spacing voxels casting --gi-rays rays, keeping --gi-hysteresis.
+    // --gi: global illumination over the scene's bounds (a twentieth larger), in one level over all of it, voxels of
+    // --gi-cell (else a 128th of the bounds' longest side; larger where there would be too many), probes every
+    // --gi-spacing voxels casting --gi-rays rays, keeping --gi-hysteresis, --gi-per-render of them updated a render
+    // (0: all, up to a million rays).
     bool gi = false;
     double gi_cell = 0.0, gi_hysteresis = -1.0;
-    int gi_spacing = 0, gi_rays = 0;
+    int gi_spacing = 0, gi_rays = 0, gi_per_render = -1;
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -2605,6 +2607,9 @@ int main(int argc, char** argv) {
         } else if (a == "--gi-hysteresis") {
             over.gi = true;
             over.gi_hysteresis = std::atof(next().c_str());
+        } else if (a == "--gi-per-render") {
+            over.gi = true;
+            over.gi_per_render = std::max(0, std::atoi(next().c_str()));
         } else if (a == "--samples") {
             samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
         } else if (a == "--supersample") {
@@ -3083,14 +3088,35 @@ int main(int argc, char** argv) {
             scene.global_illumination = {};
             if (over.gi) {
                 const kin::Vec3f extent = bounds.size(), pad = extent * 0.05f + kin::Vec3f{0.05f, 0.05f, 0.05f};
+                const kin::Bounds3D area{bounds.min - pad, bounds.max + pad};
+                float cell = over.gi_cell > 0.0 ? static_cast<float>(over.gi_cell)
+                                                : std::max({extent.x, extent.y, extent.z}) / 128.0f;
+                // One level, a window over the whole area (a block more each way for where it starts), the voxels
+                // larger where it would have more than max_gi_voxels.
+                kin::u32 side = 0, height = 0;
+                for (;; cell *= 1.05f) {
+                    const kin::Vec3f size = area.size() / cell;
+                    side = std::min<kin::u32>((static_cast<kin::u32>(std::ceil(std::max(size.x, size.z))) + 15) / 8 * 8,
+                                              kin::max_gi_side);
+                    height =
+                        std::min<kin::u32>((static_cast<kin::u32>(std::ceil(size.y)) + 15) / 8 * 8, kin::max_gi_side);
+                    if (std::max(size.x, size.z) + 8.0f <= static_cast<float>(side) &&
+                        size.y + 8.0f <= static_cast<float>(height) &&
+                        static_cast<kin::u64>(side) * side * height <= kin::max_gi_voxels) {
+                        break;
+                    }
+                }
                 scene.global_illumination = {.enabled = true,
-                                             .area = {bounds.min - pad, bounds.max + pad},
-                                             .cell = over.gi_cell > 0.0
-                                                         ? static_cast<float>(over.gi_cell)
-                                                         : std::max({extent.x, extent.y, extent.z}) / 128.0f};
+                                             .area = area,
+                                             .cell = cell,
+                                             .levels = 1,
+                                             .side = std::max(side, 32u),
+                                             .height = std::max(height, 32u)};
                 kin::GiProbes3D& probes = scene.global_illumination.probes;
                 probes.spacing = over.gi_spacing > 0 ? static_cast<kin::u32>(over.gi_spacing) : probes.spacing;
                 probes.rays = over.gi_rays > 0 ? static_cast<kin::u32>(over.gi_rays) : probes.rays;
+                probes.per_render =
+                    over.gi_per_render >= 0 ? static_cast<kin::u32>(over.gi_per_render) : probes.per_render;
                 probes.hysteresis =
                     over.gi_hysteresis >= 0.0 ? static_cast<float>(over.gi_hysteresis) : probes.hysteresis;
             }

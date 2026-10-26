@@ -1,13 +1,18 @@
 // kin's GI scene (docs/3d_plan.md, G5a): one draw's triangles into the voxels they touch. Built twice from this file:
 // gi_voxelize.comp gives each touched voxel its owner, the least item touching it, an emissive one before any other
 // (an item is a copy's triangle, numbered in the order the scene draws them, so the same scene gives the same owners
-// whatever order the GPU runs in; a lamp's panel just under a ceiling keeps its voxels, and its light), and gi_voxelize_attributes.comp (KIN_GI_ATTRIBUTES) has each owner write its voxel's colour, normal and
-// emission. The first also marks, in a second word a voxel, which ways the faces in it look (a bit for each of the
-// six axis directions, the one nearest each face's normal): a voxel with faces looking both ways along an axis (a wall
-// thinner than a voxel) is taken as double-sided. A triangle touches a voxel when its plane passes through the voxel's box and the box's three axis-aligned
-// projections overlap the triangle's (Schwarz and Seidel's conservative surface voxelization, 2010): every voxel it
+// whatever order the GPU runs in; a lamp's panel just under a ceiling keeps its voxels, and its light), and
+// gi_voxelize_attributes.comp (KIN_GI_ATTRIBUTES) has each owner write its voxel's colour, normal and emission. The
+// first also marks, in a second word a voxel, which ways the faces in it look (a bit for each of the six axis
+// directions, the one nearest each face's normal): a voxel with faces looking both ways along an axis (a wall thinner
+// than a voxel) is taken as double-sided. A triangle touches a voxel when its plane passes through the voxel's box and
+// the box's three axis-aligned projections overlap the triangle's (Schwarz and Seidel's conservative surface
+// voxelization, 2010): every voxel it
 // passes through, so no ray gets between them. A thread an item; a triangle over more than a few columns of voxels
-// (along the axis its normal is nearest) is shared by its workgroup's threads, a column each.
+// (along the axis its normal is nearest) is shared by its workgroup's threads, a column each. One level's window at a
+// time, and only the voxels of its blocks of 8 x 8 x 8 marked to be made again (`Work`, a bit a stored block): the
+// rest keep what they have (G5c). A workgroup a run of 64 of a copy's triangles, those listed (`Work` too: the runs
+// that reach the blocks to make).
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 0) uniform sampler2D uBase;     // the material's base colour (white without)
@@ -33,11 +38,14 @@ struct Copy {
 layout(std430, set = 0, binding = 6) readonly buffer Copies {
     Copy copies[];
 };
+layout(std430, set = 0, binding = 7) readonly buffer Work {
+    uint work[]; // each level's bits, a stored block each, then the runs: a copy (of the draw's) and a run, each
+};
 #ifdef KIN_GI_ATTRIBUTES
-layout(std430, set = 0, binding = 7) readonly buffer Owners {
+layout(std430, set = 0, binding = 8) readonly buffer Owners {
     uint owners[];
 };
-layout(std430, set = 0, binding = 8) readonly buffer Sides {
+layout(std430, set = 0, binding = 9) readonly buffer Sides {
     uint sides[];
 };
 layout(set = 1, binding = 0, rgba8) uniform writeonly image3D uAlbedo;
@@ -53,17 +61,22 @@ layout(std430, set = 1, binding = 1) buffer Sides {
 #endif
 
 layout(std140, set = 2, binding = 0) uniform Params {
-    vec4 origin;   // xyz: voxel (0, 0, 0)'s low corner; w: voxels a unit (1 / cell)
-    uvec4 size;    // xyz: voxels a side; w: the draw's first item
+    vec4 origin;   // w: voxels a unit (1 / cell); xyz: 0 (the voxels are counted from the world's origin)
+    uvec4 size;    // xyz: voxels a window; w: the draw's first item
     uvec4 mesh;    // x: its first index in Indices, y: its triangles, z: its base vertex, w: its copies
     uvec4 flags;   // x: skinned, y: a cut-out, z: the textures hold sRGB bytes (decode them), w: an emissive map
     vec4 material; // x: emissive strength, y: alpha cutoff, z: 1 double-sided
-    uvec4 first;   // x: the draw's first copy in Copies
+    uvec4 first;   // x: the draw's first copy in Copies; y: the level's first word in Work; z: the draw's first run's,
+                   // w: its runs
+    ivec4 window;  // xyz: the window's first voxel (in the level's voxels); w: the level's offset along z
+    ivec4 low;     // xyz: the first voxel of the box round the blocks to make (the world's voxels)
+    ivec4 high;    // xyz: its last
 } p;
 
 #include "kin_srgb.inc.glsl"
 
-// A triangle in voxels (a unit a voxel, voxel (0, 0, 0) from the origin), with what the touch test needs: its normal
+// A triangle in voxels (a unit a voxel, voxel (0, 0, 0) from the world's origin: what a voxel holds does not depend on
+// where the window is, so a window that moves keeps what it made), with what the touch test needs: its normal
 // (not unit), the plane's offsets at the box's two critical corners, the edges' normals and offsets in each of the
 // three projections, the voxels its box covers, and the axis its normal is nearest (`w`) with the other two.
 struct Tri {
@@ -106,8 +119,8 @@ void corner(uint copy, uint index, out vec3 position, out vec3 normal, out vec2 
     normal = mat3(copies[copy].normal0.xyz, copies[copy].normal1.xyz, copies[copy].normal2.xyz) * normal;
 }
 
-// Item `id` (of this draw): its triangle in voxels and its corners. False when it touches no voxel (no area, or its
-// box is outside the scene).
+// Item `id` (of this draw): its triangle in voxels and its corners. False when it touches no voxel to make (no area,
+// or its box is outside the box round the blocks to make, in the window).
 bool load(uint id, out Tri t, out Corners k) {
     const uint nth = id / p.mesh.y;
     const uint triangle = id - nth * p.mesh.y;
@@ -116,7 +129,7 @@ bool load(uint id, out Tri t, out Corners k) {
     vec3 position[3];
     for (uint i = 0u; i < 3u; ++i) {
         corner(copy, indices[first + i], position[i], k.normal[i], k.uv[i], k.colour[i]);
-        position[i] = (position[i] - p.origin.xyz) * p.origin.w;
+        position[i] *= p.origin.w;
     }
     k.copy = copy;
     t.v0 = position[0];
@@ -128,11 +141,12 @@ bool load(uint id, out Tri t, out Corners k) {
         return false; // no area (or not finite)
     }
     const vec3 lo = min(t.v0, min(t.v1, t.v2)), hi = max(t.v0, max(t.v1, t.v2));
-    if (any(lessThan(hi, vec3(0.0))) || any(greaterThanEqual(lo, vec3(p.size.xyz)))) {
+    const ivec3 from = max(p.window.xyz, p.low.xyz), to = min(p.window.xyz + ivec3(p.size.xyz) - 1, p.high.xyz);
+    if (any(lessThan(hi, vec3(from))) || any(greaterThanEqual(lo, vec3(to + 1)))) {
         return false;
     }
-    t.lo = max(ivec3(floor(lo)), ivec3(0));
-    t.hi = min(ivec3(floor(hi)), ivec3(p.size.xyz) - 1);
+    t.lo = max(ivec3(floor(lo)), from);
+    t.hi = min(ivec3(floor(hi)), to);
     const vec3 critical = vec3(greaterThan(t.n, vec3(0.0)));
     t.d1 = dot(t.n, critical - t.v0);
     t.d2 = dot(t.n, (vec3(1.0) - critical) - t.v0);
@@ -228,8 +242,17 @@ vec4 base_at(Tri t, Corners k, vec3 b, vec2 uv) {
     return copies[k.copy].colour * vertex * tex;
 }
 
+// Voxel `voxel` (the world's voxels, in the window) touched by item `item`.
 void visit(Tri t, Corners k, ivec3 voxel, uint item) {
-    const uint at = uint(voxel.x) + p.size.x * (uint(voxel.y) + p.size.y * uint(voxel.z));
+    const ivec3 size = ivec3(p.size.xyz);
+    const ivec3 st = (voxel + size * 4096) % size;
+    const ivec3 bricks = size >> 3, brick = st >> 3;
+    const uint block = uint(brick.x + bricks.x * (brick.y + bricks.y * brick.z));
+    if ((work[p.first.y + (block >> 5u)] & (1u << (block & 31u))) == 0u) {
+        return; // kept as it is
+    }
+    const ivec3 stored = ivec3(st.xy, st.z + p.window.w);
+    const uint at = uint(stored.x) + p.size.x * (uint(stored.y) + p.size.y * uint(stored.z));
     item |= p.material.x > 0.0 ? 0u : 0x80000000u; // the emissive first
 #ifdef KIN_GI_ATTRIBUTES
     if (owners[at] != item) {
@@ -258,11 +281,11 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
     }
     // The base colour, metals' too: a metal reflects its colour's share of the light, here as if diffuse (the GI's
     // light is blurred), which keeps a furnace's metal as bright as its sky.
-    imageStore(uAlbedo, voxel, vec4(clamp(base.rgb, 0.0, 1.0), 1.0));
+    imageStore(uAlbedo, stored, vec4(clamp(base.rgb, 0.0, 1.0), 1.0));
     const uint ways = sides[at];
     const bool both_ways = ((ways & 0x15u) & ((ways >> 1u) & 0x15u)) != 0u;
-    imageStore(uNormal, voxel, vec4(n * 0.5 + 0.5, p.material.z > 0.5 || both_ways ? 1.0 : 128.0 / 255.0));
-    imageStore(uEmission, voxel, vec4(min(emission, vec3(65000.0)), 0.0));
+    imageStore(uNormal, stored, vec4(n * 0.5 + 0.5, p.material.z > 0.5 || both_ways ? 1.0 : 128.0 / 255.0));
+    imageStore(uEmission, stored, vec4(min(emission, vec3(65000.0)), 0.0));
 #else
     if (p.flags.y != 0u) {
         vec3 b;
@@ -316,13 +339,17 @@ shared uint shared_count;
 
 void main() {
     const uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-    const uint id = group * 64u + gl_LocalInvocationIndex;
+    if (group >= p.first.w) {
+        return; // the whole workgroup
+    }
+    const uint triangle = work[p.first.z + group * 2u + 1u] * 64u + gl_LocalInvocationIndex;
+    const uint id = work[p.first.z + group * 2u] * p.mesh.y + triangle;
     if (gl_LocalInvocationIndex == 0u) {
         shared_count = 0u;
     }
     memoryBarrierShared();
     barrier();
-    if (id < p.mesh.y * p.mesh.w) {
+    if (triangle < p.mesh.y) {
         Tri t;
         Corners k;
         if (load(id, t, k)) {

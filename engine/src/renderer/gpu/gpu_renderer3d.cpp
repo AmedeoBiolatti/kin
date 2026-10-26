@@ -208,11 +208,9 @@ struct FrameUniforms {
     f32 cascade_forward[4];                      // the camera's forward
     f32 occlusion[4];                            // 1 with ambient occlusion, 0, 1 / the view's size
     f32 lights[max_lights * 2 * 4];
-    f32 gi_origin[4]; // global illumination's probes (kin_gi.inc.glsl's KinGiProbes): probe 0's place, the spacing,
-    f32 gi_counts[4]; // probes a side, 1 when they light the scene,
-    f32 gi_bias[4];   // the look-up's offsets along the normal and toward the eye, their light's strength
+    f32 gi[4]; // x: 1 when global illumination's probes light the scene (gi_resolve.comp read their light on the view)
 };
-static_assert(sizeof(FrameUniforms) == 1168);
+static_assert(sizeof(FrameUniforms) == 1136);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1300,23 +1298,23 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     }
     // Spot lights and the shadows of lights that are not the sun (P3b): the light variants of the stock mesh shaders.
     // They sample two more depth arrays (the dummy `_no_shadow` where there is no map), and global illumination's
-    // three probe atlases (G5b; a dummy where there are none), so they need the shadow format;
+    // light on the view (G5; dummies where there is none), so they need the shadow format;
     // absent, and the features off (said once, when a scene asks).
-    if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow && _gi_none) {
+    if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow) {
         try {
             _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv",
                                                           /*uniform_buffers=*/3,
-                                                          /*samplers=*/15);
+                                                          /*samplers=*/14);
             _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                               "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
-                                                              /*samplers=*/15);
+                                                              /*samplers=*/14);
             if (_mesh_velocity_shader) {
                 _mesh_velocity_light_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
-                                             /*uniform_buffers=*/3, /*samplers=*/15);
+                                             /*uniform_buffers=*/3, /*samplers=*/14);
                 _mesh_velocity_light_fog_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
-                                             /*uniform_buffers=*/4, /*samplers=*/15);
+                                             /*uniform_buffers=*/4, /*samplers=*/14);
             }
             _lights_available = true;
             _capabilities.local_shadows = true;
@@ -1948,6 +1946,25 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                     }
                 },
                 static_cast<std::size_t>(table_first) * sizeof(GpuCluster));
+        }
+        // For global illumination: the box of each run of level 0's triangles.
+        if (_capabilities.global_illumination) {
+            const std::size_t triangles = level0_count / 3;
+            mesh->gi_runs.resize((triangles + gi_run_triangles - 1) / gi_run_triangles);
+            for (std::size_t r = 0; r < mesh->gi_runs.size(); ++r) {
+                constexpr f32 far = std::numeric_limits<f32>::max();
+                Bounds3D box{{far, far, far}, {-far, -far, -far}};
+                const std::size_t end = std::min<std::size_t>(level0_count, (r + 1) * gi_run_triangles * 3);
+                for (std::size_t i = r * gi_run_triangles * 3; i < end; ++i) {
+                    const std::size_t v = data.indices.empty() ? i : data.indices[i];
+                    if (v < vertex_count) {
+                        const Vec3f q = data.vertices[v].position;
+                        box.min = {std::min(box.min.x, q.x), std::min(box.min.y, q.y), std::min(box.min.z, q.z)};
+                        box.max = {std::max(box.max.x, q.x), std::max(box.max.y, q.y), std::max(box.max.z, q.z)};
+                    }
+                }
+                mesh->gi_runs[r] = box;
+            }
         }
         mesh->clusters = std::move(clusters);
         mesh->index_count = static_cast<u32>(level0_count);
@@ -2623,16 +2640,19 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
          {_gcb[1].scan, _gcb[1].blocks, _gcb[1].args, _gcb[1].list, _gcb[1].counts, _gcb[1].indices, _gc_job_history}) {
         bytes += b ? b->size() : 0u;
     }
-    // The GI scene: a half, two 8-bit texels and four halves a voxel, and the build's two words; the lit scene's four
-    // halves; the probes' atlases (8 x 8 of four halves, 16 x 16 of two, four halves of data a probe) and rays.
+    // The GI scene, every level's: a half, two 8-bit texels and four halves a voxel, and the build's two words (in
+    // owners and seeds); the lit scene's four halves on each side; the probes' atlases (8 x 8 of four halves, 16 x 16
+    // of two, four halves of data a probe), their rays and lists; their light on the view (four halves a texel, twice).
     const GpuView3D::Gi& gi = view._gi;
-    const u64 voxels = static_cast<u64>(gi.size[0]) * gi.size[1] * gi.size[2];
+    const u64 voxels = static_cast<u64>(gi.size[0]) * gi.size[1] * gi.size[2] * gi.levels;
     bytes += gi.distance ? voxels * (2 + 4 + 4 + 8) : 0u;
     bytes += gi.radiance ? voxels * 16 : 0u;
     bytes += gi.irradiance ? static_cast<u64>(gi.probe_counts[0]) * gi.probe_counts[1] * gi.probe_counts[2] *
-                                 (64 * 8 + 256 * 4 + 8)
+                                 gi.probe_levels * (64 * 8 + 256 * 4 + 8)
                            : 0u;
-    for (const std::shared_ptr<GpuBuffer>& b : {gi.owners, gi.seeds, gi.rays}) {
+    bytes += gi.light ? static_cast<u64>(gi.light.width()) * gi.light.height() * 16 : 0u;
+    for (const std::shared_ptr<GpuBuffer>& b :
+         {gi.owners, gi.seeds, gi.rays, gi.place_list, gi.batch_list, gi.light_list}) {
         bytes += b ? b->size() : 0u;
     }
     return bytes;
@@ -3172,8 +3192,9 @@ struct GpuRenderer3D::FrameCtx {
     // main pass.
     bool soft_particles = false;
     bool particles = false;
-    bool gi = false;     // the view has a GI scene for this render (Scene3D::global_illumination)
-    bool gi_lit = false; // and its probes light the scene (the light variants read them)
+    bool gi = false;          // the view has a GI scene for this render (Scene3D::global_illumination)
+    bool gi_lit = false;      // and its probes light the scene (the light variants read them)
+    bool gi_resolved = false; // and their light on what the pre-pass drew was read (gi_resolve)
 };
 
 void GpuRenderer3D::age_targets(FrameCtx& ctx) {
@@ -4179,8 +4200,11 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // Soft particles read the pre-pass's depth: it is made for them where nothing else needs it (and the velocity then
     // comes from it).
     ctx.soft_particles = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
-    const bool needs_prepass =
-        scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled || ctx.soft_particles;
+    // Global illumination's probes are read on what the pre-pass drew (gi_resolve).
+    const bool gi_wanted =
+        scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
+    const bool needs_prepass = scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled ||
+                               ctx.soft_particles || gi_wanted;
     if (ctx.taa &&
         !(ensure_taa_targets(*view, taa_settings.sharpness > 0.0f) &&
           (needs_prepass ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution,
@@ -7707,15 +7731,8 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         put_color(f.lights + i * 8 + 4, ctx.chosen[i].second->color, size * size);
     }
     // The probes are in the scene's world: the overlay keeps the sky's light.
-    if (ctx.gi_lit && s == 0) {
-        const GpuView3D::Gi& g = view->_gi;
-        put(f.gi_origin, g.probe_origin, g.spacing);
-        put(f.gi_counts,
-            {static_cast<f32>(g.probe_counts[0]), static_cast<f32>(g.probe_counts[1]),
-             static_cast<f32>(g.probe_counts[2])},
-            1.0f);
-        put(f.gi_bias, {0.3f * g.spacing, 0.1f * g.spacing, std::max(scene.global_illumination.probes.intensity, 0.0f)},
-            0.0f);
+    if (ctx.gi_resolved && s == 0) {
+        f.gi[0] = 1.0f;
     }
 
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &f, sizeof(f));
@@ -8524,11 +8541,12 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     // Only stock mesh shaders define the main pass's velocity output. Colour-only particle/custom shaders must
     // stay off that attachment: masking an undefined shader output does not preserve it on every backend.
     ctx.main_velocity = ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles &&
-                        _particle_batches.empty() && ctx.previous_storage && view->_ao_normals.format() == hdr_format &&
+                        !ctx.gi_lit && _particle_batches.empty() && ctx.previous_storage &&
+                        view->_ao_normals.format() == hdr_format &&
                         std::none_of(_refs.begin(), _refs.end(),
                                      [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
-    if (!ctx.main_velocity && (ao.enabled || want_contact || ctx.taa || ctx.soft_particles) && _ao_available &&
-        (storage || ctx.taa || stats.retained_instances) &&
+    if (!ctx.main_velocity && (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit) &&
+        _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
         target.texture = view->_ao_normals.handle();
@@ -8651,6 +8669,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
+            ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, stats);
         }
     }
 }
@@ -8797,7 +8816,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const SDL_GPUTextureSamplerBinding moon_binding{
         ctx.lights_variant && ctx.moon_cascades > 0 && _moon_map ? _moon_map.handle() : _no_shadow.handle(),
         _compare_sampler};
-    const std::array<SDL_GPUTextureSamplerBinding, 3> gi_binding = gi_bindings(*view, ctx.gi_lit);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> gi_binding = gi_bindings(*view, ctx.gi_resolved);
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
@@ -8897,7 +8916,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                     const auto base = texture_binding(material.texture, material.wrap_u, material.wrap_v);
                     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
                 } else if (unlit == Unlit::Off) {
-                    const std::array<SDL_GPUTextureSamplerBinding, 15> samplers{
+                    const std::array<SDL_GPUTextureSamplerBinding, 14> samplers{
                         texture_binding(material.texture, material.wrap_u, material.wrap_v),
                         shadow_binding,
                         texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v),
@@ -8911,10 +8930,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         local_binding,
                         moon_binding,
                         gi_binding[0],
-                        gi_binding[1],
-                        gi_binding[2]};
-                    // Custom shaders have twelve; the stock light variants fifteen (global illumination's probes).
-                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
+                        gi_binding[1]};
+                    // Custom shaders have twelve; the stock light variants fourteen (global illumination's light).
+                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 14u : 10u);
                 }
                 bound_textures = textures;
                 bound_wrap = wrap;
@@ -9327,13 +9345,15 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
     bool taa = scene.taa.enabled && _taa_available;
     const bool soft = _soft_particles_available && _ao_available && scene_has_soft_particles(scene);
     const bool particles = _particles_available && (!scene.particle_draws().empty() || scene.weather.active());
-    const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft;
+    const bool gi_wanted =
+        scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
+    const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft || gi_wanted;
     if (taa) {
         taa = ensure_taa_targets(*view, scene.taa.sharpness > 0.0f) &&
               (needs_prepass || custom_shader || particles
                    ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/true)
                    : ensure_velocity_target(*view));
-    } else if (ao || contact || soft) {
+    } else if (ao || contact || soft || gi_wanted) {
         ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/false);
     }
     if (shadows) {

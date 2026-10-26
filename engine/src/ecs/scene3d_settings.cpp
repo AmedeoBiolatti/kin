@@ -176,6 +176,9 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("gi_min", global_illumination.area.min);
         SETTING("gi_max", global_illumination.area.max);
         SETTING("gi_cell", global_illumination.cell);
+        SETTING("gi_levels", global_illumination.levels);
+        SETTING("gi_side", global_illumination.side);
+        SETTING("gi_height", global_illumination.height);
         SETTING("gi_probes", global_illumination.probes.enabled);
         SETTING("gi_probe_spacing", global_illumination.probes.spacing);
         SETTING("gi_probe_rays", global_illumination.probes.rays);
@@ -297,6 +300,12 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.taa.sharpness >= 0 && settings.taa.sharpness <= 1 && settings.anisotropy >= 1 &&
                  settings.anisotropy <= 16 && std::abs(settings.texture_lod_bias) <= 2 &&
                  std::isfinite(settings.global_illumination.cell) && settings.global_illumination.cell > 0 &&
+                 settings.global_illumination.levels >= 1 && settings.global_illumination.levels <= max_gi_levels &&
+                 settings.global_illumination.side >= 32 && settings.global_illumination.side <= max_gi_side &&
+                 settings.global_illumination.height >= 32 && settings.global_illumination.height <= max_gi_side &&
+                 static_cast<u64>(settings.global_illumination.side) * settings.global_illumination.side *
+                         settings.global_illumination.height <=
+                     max_gi_voxels &&
                  settings.global_illumination.probes.spacing >= 2 && settings.global_illumination.probes.rays >= 16 &&
                  settings.global_illumination.probes.rays <= 256 &&
                  settings.global_illumination.probes.hysteresis >= 0 &&

@@ -400,11 +400,12 @@ struct Lod3D {
     Occlusion3D occlusion{};
 };
 
-// The most voxels the GI scene has along a side, and in all (GlobalIllumination3D::cell grows to keep within them);
-// the most probes (GiProbes3D::spacing grows to keep within them, and within 128 along a side).
+// The GI scene's limits: levels, voxels a window's side and in all; probes a level (GiProbes3D::spacing grows to keep
+// within them).
+constexpr u32 max_gi_levels = 4;
 constexpr u32 max_gi_side = 256;
 constexpr u32 max_gi_voxels = 1u << 22;
-constexpr u32 max_gi_probes = 1u << 15;
+constexpr u32 max_gi_probes = 1u << 16;
 
 // Global illumination's first strategy (G5b): probes on a grid over the area, every `spacing` voxels, each casting
 // `rays` rays through the GI scene and keeping what it sees (DDGI). A surface takes its diffuse light from the eight
@@ -413,32 +414,40 @@ constexpr u32 max_gi_probes = 1u << 15;
 // them, and by the probes themselves: the bounces add up over frames), none through walls.
 struct GiProbes3D {
     bool enabled = true;
-    // Voxels between neighbouring probes (at least 2): the light's finest detail is about this. More where the area
-    // would need more than max_gi_probes.
+    // Voxels between neighbouring probes (2, 4 or 8; others are taken as the nearest): the light's finest detail is
+    // about this. More where a level would have more than max_gi_probes.
     u32 spacing = 4;
-    u32 rays = 128;         // rays a probe casts at each update (16 to 256)
-    u32 per_render = 0;     // probes updated each render, in turn (0: all of them)
+    u32 rays = 128; // rays a probe casts at each update (16 to 256)
+    // Probes updated each render: those new to their window first, then the others in turn (0: as many as a million
+    // rays allow).
+    u32 per_render = 4096;
     f32 hysteresis = 0.97f; // how much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower
     f32 intensity = 1.0f;   // their light's strength
 };
 
 // Global illumination (docs/rendering_3d.md, "Global illumination"; docs/3d_plan.md, G5): light that reaches a surface
 // off other surfaces, and the sky's light kept out of where walls hide it. Its layers: the GI scene, the scene in
-// voxels of `cell` over `area`, each holding its distance to the nearest surface, and each voxel a surface touches that
-// surface's colour, normal and emission (G5a); the lit scene, the light leaving each of those voxels; and `probes`, the
-// first strategy, which light the picture (G5b). The GI scene takes in every opaque and cut-out copy that reaches into
-// `area` (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay, blended,
-// additive, wireframe or unlit ones, and is built again, whole, in the render after any of them changes (a copy moving,
-// a pose, a mesh, a material). RenderDebugOptions3D::gi_view shows it and Renderer3D::read_gi_scene reads it back. Off
-// by default; off, the picture and the cost are as without it. Needs compute (RendererCapabilities3D::
-// global_illumination); else off, with a line in the log the first time it is asked for.
+// voxels, each holding its distance to the nearest surface, and each voxel a surface touches that surface's colour,
+// normal and emission (G5a); the lit scene, the light leaving each of those voxels; and `probes`, the first strategy,
+// which light the picture (G5b). The GI scene is in `levels` windows of `side` x `height` x `side` voxels round the
+// camera, the first's voxels `cell` wide and each next level's twice the last's (G5c); where one window holds the whole
+// `area`, it stays over it, and there are no more. It takes in every opaque and cut-out copy that reaches into `area`
+// (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay, blended, additive,
+// wireframe or unlit ones. Only what changes is made again: the blocks of 8 x 8 x 8 voxels a copy that moved, changed
+// or came or went leaves or enters, and those a window gains as the camera moves. RenderDebugOptions3D::gi_view shows
+// it and Renderer3D::read_gi_scene reads it back. Off by default; off, the picture and the cost are as without it.
+// Needs compute (RendererCapabilities3D::global_illumination); else off, with a line in the log the first time it is
+// asked for.
 struct GlobalIllumination3D {
     bool enabled = false;
     // The box it takes in (the level). Empty: nothing, and the feature is off.
     Bounds3D area{};
-    // A voxel's side (units): the finest detail it has. Larger where `area` would need more than max_gi_side voxels a
-    // side or max_gi_voxels in all.
-    f32 cell = 0.15f;
+    f32 cell = 0.15f; // the first level's voxel side (units): the finest detail it has
+    u32 levels = 3;   // 1 to max_gi_levels
+    // A window's voxels along x and z and along y: multiples of 8 from 32 to max_gi_side (others are rounded up),
+    // side x height x side at most max_gi_voxels.
+    u32 side = 128;
+    u32 height = 64;
     GiProbes3D probes{};
 };
 

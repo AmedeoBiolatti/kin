@@ -13,6 +13,9 @@ layout(set = 0, binding = 3) uniform sampler3D uRadiance;
 layout(set = 0, binding = 4) uniform sampler3D uGiProbes;
 layout(set = 0, binding = 5) uniform sampler2D uSky; // the environment's specular chain (any texture without)
 layout(set = 0, binding = 6) uniform sampler3D uRadianceBack;
+layout(std430, set = 0, binding = 7) readonly buffer List {
+    uint list[]; // the batch: a probe's stored index in its level, its level in the top 8
+};
 layout(std430, set = 1, binding = 0) writeonly buffer Rays {
     vec4 rays[]; // rgb: the light found, w: the distance (world; negative: a back; 1e4: nothing hit)
 };
@@ -21,10 +24,9 @@ layout(std430, set = 1, binding = 0) writeonly buffer Rays {
 #include "kin_gi.inc.glsl"
 
 layout(std140, set = 2, binding = 0) uniform Params {
-    vec4 origin; // xyz: voxel (0, 0, 0)'s low corner (world); w: voxels a unit
-    vec4 size;   // xyz: voxels a side; w: the most steps a ray takes
+    KinGiScene scene;
     KinGiProbes probes;
-    uvec4 batch; // x: its first probe (in order: x fastest), y: its probes, z: rays a probe, w: all probes
+    uvec4 batch; // x: the most steps a ray takes, y: the batch's probes, z: rays a probe
     mat4 rotation;
     vec4 sky;    // x: the environment's strength, y: the level of its chain to read, z: 1 with an environment
     mat4 environment_matrix;
@@ -56,25 +58,29 @@ void main() {
     if (b >= p.batch.y) {
         return;
     }
+    const uint entry = list[b];
+    const int k = int(entry >> 24u), index = int(entry & 0x7fffffu);
     const ivec3 counts = ivec3(p.probes.counts.xyz);
-    const int linear = int((p.batch.x + b) % p.batch.w);
-    const ivec3 probe = ivec3(linear % counts.x, (linear / counts.x) % counts.y, linear / (counts.x * counts.y));
-    const vec4 data = texelFetch(uGiProbes, probe, 0);
+    const ivec3 st = ivec3(index % counts.x, (index / counts.x) % counts.y, index / (counts.x * counts.y));
+    const vec4 data = texelFetch(uGiProbes, ivec3(st.xy, st.z + k * counts.z), 0);
     if (data.w == 0.0) {
         rays[id] = vec4(0.0); // asleep
         return;
     }
-    const vec3 at = p.probes.origin.xyz + vec3(probe) * p.probes.origin.w + data.xyz;
+    const ivec3 first = ivec3(p.probes.level[k].xyz);
+    const ivec3 world = first + (st - first + counts * 4096) % counts;
+    const vec3 at = vec3(world) * p.probes.level[k].w + data.xyz;
     const vec3 way = normalize(mat3(p.rotation) * fibonacci(r, p.batch.z));
     ivec3 hit;
+    int level;
     float t;
     int steps = 0;
-    const int most = int(p.size.w);
+    const int most = int(p.batch.x);
     vec4 found;
-    if (kin_gi_march((at - p.origin.xyz) * p.origin.w, way, 1e30, p.size.xyz, most, hit, t, steps)) {
+    if (kin_gi_march(p.scene, at, way, 1e30, most, hit, level, t, steps)) {
         const vec4 normal = texelFetch(uNormal, hit, 0);
         const vec3 n = normal.xyz * 2.0 - 1.0;
-        const float d = t / p.origin.w;
+        const float d = t;
         if (dot(way, n) <= 0.0) {
             found = vec4(texelFetch(uRadiance, hit, 0).rgb, d);
         } else if (normal.a > 0.75) {
