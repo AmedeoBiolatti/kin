@@ -451,6 +451,22 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   (SDL makes its devices with the feature), and on WebGL2 what
   `EXT_texture_filter_anisotropic` allows (1 without it). `SceneEnvironment3D`
   authors it as `anisotropy`.
+- `Scene3D::specular_aa` (0 by default, off; 0 to 1; Godot's is 0.25):
+  specular anti-aliasing (Tokuyoshi and Kaplanyan's, Godot's "roughness
+  limiter"). Where a surface's normal turns within a pixel (a normal map's
+  bevels, a curved edge, small things far away), a glossy highlight can be
+  thinner than the pixel and very bright: one frame's samples hit it and the
+  next miss it, so it glints and crawls as the view moves, and temporal
+  anti-aliasing, which keeps little history in motion, shows each frame's
+  glints as bright lines along the bevels. The lighting raises the roughness by
+  how much the normal turns across the pixel (alpha squared plus twice this
+  times the normal's change, at most 0.18 more), spreading the highlight over
+  the pixel. In kin's test a glossy sphere 15 pixels across, moved by quarter
+  pixels, swings 13 times its mean light without it and 1.9 times with 0.25; a
+  near satin one changes in a few rim pixels only. In the Bistro, walking at a
+  panelled door: bright-line pixels down from 170 to 61 a frame. Both backends;
+  the scene's for the overlay too. `SceneEnvironment3D` authors it as
+  `specular_aa`.
 - `Scene3D::texture_lod_bias` (0 by default; -2 to 2): the mip level the
   materials' mipmapped textures are read from, moved by that many levels;
   negative is finer and sharper. Temporal anti-aliasing averages the shimmer

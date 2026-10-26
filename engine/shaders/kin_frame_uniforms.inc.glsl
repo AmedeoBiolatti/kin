@@ -13,7 +13,8 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 fill_color;
     vec4 flags;         // x: encode to sRGB (a gamma target), y: decode the texture, z: shadows, w: point lights
     vec4 eye;           // xyz: the camera, in world space
-    vec4 environment;   // x: intensity, y: the specular's last level, w: 1 with an environment (else the hemisphere)
+    vec4 environment;   // x: intensity, y: the specular's last level, z: specular anti-aliasing (Scene3D::specular_aa),
+                        // w: 1 with an environment (else the hemisphere)
     mat4 environment_matrix; // world to the environment's space
     mat4 shadow_matrix[4]; // world to the shadow map's clip space, a cascade each
     vec4 shadow;        // x: cascades, y: receiver-plane PCF correction, z: a texel (uv)

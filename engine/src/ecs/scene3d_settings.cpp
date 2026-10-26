@@ -173,6 +173,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("taa_sharpness", taa.sharpness);
         SETTING("anisotropy", anisotropy);
         SETTING("texture_lod_bias", texture_lod_bias);
+        SETTING("specular_aa", specular_aa);
         SETTING("gi_enabled", global_illumination.enabled);
         SETTING("gi_min", global_illumination.area.min);
         SETTING("gi_max", global_illumination.area.max);
@@ -300,11 +301,11 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.contact_shadows.intensity >= 0 && settings.taa.blend >= 0 && settings.taa.blend <= .98f &&
                  settings.taa.still_blend >= 0 && settings.taa.still_blend <= .98f && settings.taa.sharpness >= 0 &&
                  settings.taa.sharpness <= 1 && settings.anisotropy >= 1 && settings.anisotropy <= 16 &&
-                 std::abs(settings.texture_lod_bias) <= 2 && std::isfinite(settings.global_illumination.cell) &&
-                 settings.global_illumination.cell > 0 && settings.global_illumination.levels >= 1 &&
-                 settings.global_illumination.levels <= max_gi_levels && settings.global_illumination.side >= 32 &&
-                 settings.global_illumination.side <= max_gi_side && settings.global_illumination.height >= 32 &&
-                 settings.global_illumination.height <= max_gi_side &&
+                 std::abs(settings.texture_lod_bias) <= 2 && settings.specular_aa >= 0 && settings.specular_aa <= 1 &&
+                 std::isfinite(settings.global_illumination.cell) && settings.global_illumination.cell > 0 &&
+                 settings.global_illumination.levels >= 1 && settings.global_illumination.levels <= max_gi_levels &&
+                 settings.global_illumination.side >= 32 && settings.global_illumination.side <= max_gi_side &&
+                 settings.global_illumination.height >= 32 && settings.global_illumination.height <= max_gi_side &&
                  static_cast<u64>(settings.global_illumination.side) * settings.global_illumination.side *
                          settings.global_illumination.height <=
                      max_gi_voxels &&
@@ -332,6 +333,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             scene.taa = settings.taa;
             scene.anisotropy = settings.anisotropy;
             scene.texture_lod_bias = settings.texture_lod_bias;
+            scene.specular_aa = settings.specular_aa;
             scene.lod = settings.lod;
             scene.global_illumination = settings.global_illumination;
             if (view)

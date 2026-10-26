@@ -7,6 +7,7 @@ uniform vec4 uColor;
 uniform vec3 uSunDirection, uSunColor, uFillDirection, uFillColor, uAmbient, uGround;
 uniform bool uUnlit, uHasNormal, uHasEmission;
 uniform float uEmissive, uAlphaCutoff, uMetallic, uRoughness, uNormalScale, uOcclusionStrength;
+uniform float uSpecularAa; // Scene3D::specular_aa
 uniform int uBlend, uPointCount;
 uniform vec4 uPoints[32];
 in vec3 vWorld;
@@ -49,6 +50,12 @@ vec3 normal_for_surface() {
     return normalize(front * (t * mapped.x - b * mapped.y) + n * mapped.z);
 }
 vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
+    // Specular anti-aliasing, as kin_lit's: the roughness raised by how much the normal turns across the pixel.
+    if (uSpecularAa > 0.0) {
+        vec3 dn_dx = dFdx(n), dn_dy = dFdy(n);
+        float widen = min(2.0 * uSpecularAa * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy)), 0.18);
+        roughness = sqrt(min(1.0, roughness * roughness + widen));
+    }
     vec3 v = normalize(uEye - vWorld);
     Surface s;
     s.n = n;

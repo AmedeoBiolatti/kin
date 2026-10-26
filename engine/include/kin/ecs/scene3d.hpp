@@ -27,6 +27,7 @@ struct SceneEnvironment3D {
     TemporalAA3D taa;
     u32 anisotropy = 1;          // Scene3D::anisotropy (1 to 16)
     f32 texture_lod_bias = 0.0f; // Scene3D::texture_lod_bias (-2 to 2)
+    f32 specular_aa = 0.0f;      // Scene3D::specular_aa (0 to 1)
     Lod3D lod;
     GlobalIllumination3D global_illumination; // Scene3D::global_illumination
     // The picture (samples, background, hdr, exposure, bloom). `pick` is not

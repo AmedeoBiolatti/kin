@@ -198,7 +198,7 @@ struct FrameUniforms {
     f32 fill_color[4];
     f32 flags[4];                                // encode to sRGB, decode textures, shadows, point lights
     f32 eye[4];                                  // the camera, in the scene's world space
-    f32 environment[4];                          // intensity, the specular's last level, 0, 1 with an environment
+    f32 environment[4];                          // intensity, last specular level, specular_aa, 1: environment
     f32 environment_matrix[16];                  // the scene's space to the environment's
     f32 shadow_matrix[max_shadow_cascades * 16]; // a cascade each (one map: the first)
     f32 shadow[4];                               // cascades, 0, a texel (uv)
@@ -7714,6 +7714,7 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         put(f.environment, {lights.environment_intensity, static_cast<f32>(ctx.environment->levels - 1), 0.0f}, 1.0f);
         std::memcpy(f.environment_matrix, to_environment.m, sizeof(f.environment_matrix));
     }
+    f.environment[2] = std::clamp(ctx.scene.specular_aa, 0.0f, 1.0f); // the overlay's too, as anisotropy
     // Receiver bias in each cascade's own texels; the shader optionally
     // corrects each PCF tap for the geometric receiver plane.
     put(f.shadow,

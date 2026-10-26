@@ -297,6 +297,15 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
 #endif
 
 vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
+    // Specular anti-aliasing (Scene3D::specular_aa; Tokuyoshi and Kaplanyan's, as Godot's roughness limiter): where
+    // the normal turns within the pixel, a highlight can be thinner than the pixel, very bright where a sample hits it
+    // and missed by the next; the roughness is raised by how much the normal turns across the pixel (at most to an
+    // alpha of 0.18 more), spreading the highlight over it.
+    if (frame.environment.z > 0.0) {
+        const vec3 dn_dx = dFdx(n), dn_dy = dFdy(n);
+        const float widen = min(2.0 * frame.environment.z * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy)), 0.18);
+        roughness = sqrt(min(1.0, roughness * roughness + widen));
+    }
     const vec3 v = kin_view();
     Surface s;
     s.n = n;

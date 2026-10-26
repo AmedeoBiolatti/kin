@@ -3757,6 +3757,82 @@ void test_gpu_environment() {
     });
 }
 
+// Specular anti-aliasing (Scene3D::specular_aa). A small glossy black sphere (15 pixels across) has its highlight
+// thinner than a pixel: moved by fractions of a pixel, the light it shows comes and goes as the highlight falls on a
+// pixel centre or between them. With it on, the roughness is raised where the normal turns within the pixel and the
+// highlight is spread: the light shown holds steadier. A large sphere, whose normal turns little within a pixel, looks
+// nearly as it did; 0, the default, is the picture as without it.
+void test_gpu_specular_aa() {
+    with_gpu("test_gpu_specular_aa", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 64, 32)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = Color::rgb(0, 0, 0)}).value_or({});
+        kin::Scene3D scene;
+        scene.lights.sun = {.direction = normalize(Vec3f{0.3f, 0.35f, 1.0f}), .color = {0.6f, 0.6f, 0.6f}};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        // Black: only the highlight shows (the outline, black on black, does not move the light measured).
+        const kin::Material3D gloss{.color = Color::rgb(0, 0, 0), .metallic = 0.0f, .roughness = 0.05f};
+        // The sphere's light (linear, summed) from `distance`, the camera moved by (dx, dy) of a pixel.
+        const auto shoot = [&](float distance, float dx, float dy, float amount, const kin::Material3D& material) {
+            const float pixel = 2.0f * distance * std::tan(15.0f * 3.14159265f / 180.0f) / 120.0f;
+            const Vec3f shift{dx * pixel, dy * pixel, 0.0f};
+            scene.clear();
+            scene.camera = kin::Camera3D::look_at(Vec3f{0.0f, 0.0f, distance} + shift, shift, 30.0f);
+            scene.specular_aa = amount;
+            (void)scene.draw(sphere, Mat4f::identity(), material);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const auto light = [](const Pixels& p) {
+            double sum = 0.0;
+            for (int y = 0; y < 120; ++y) {
+                for (int x = 0; x < 160; ++x) {
+                    sum += linear_level(p.at(x, y));
+                }
+            }
+            return sum;
+        };
+        // How far the light shown swings over sixteen places a quarter of a pixel apart, over its mean.
+        const auto swing = [&](float distance, float amount) {
+            double low = 1e30, high = 0.0, sum = 0.0;
+            for (int i = 0; i < 16; ++i) {
+                const double l = light(shoot(distance, 0.25f * static_cast<float>(i % 4),
+                                             0.25f * static_cast<float>(i / 4), amount, gloss));
+                low = std::min(low, l);
+                high = std::max(high, l);
+                sum += l;
+            }
+            return std::array<double, 2>{(high - low) / (sum / 16.0), sum / 16.0};
+        };
+        const auto [plain_swing, plain_mean] = swing(30.0f, 0.0f);
+        const auto [aa_swing, aa_mean] = swing(30.0f, 0.25f);
+        std::printf("    specular aa: small sphere's light swings %.3f of its mean, %.3f with it (mean %.2f, %.2f)\n",
+                    plain_swing, aa_swing, plain_mean, aa_mean);
+        assert(aa_swing < plain_swing * 0.5);
+        // Near and less glossy (a grey of roughness 0.3): the normal turns little within a pixel, so the picture is
+        // nearly the same (but at the rim, where it turns fastest across the screen: a few pixels).
+        const kin::Material3D satin{.color = Color::rgb(128, 128, 128), .metallic = 0.0f, .roughness = 0.3f};
+        scene.lights.ambient = {0.1f, 0.1f, 0.1f};
+        const Pixels near_plain = shoot(4.0f, 0.0f, 0.0f, 0.0f, satin), near_aa = shoot(4.0f, 0.0f, 0.0f, 0.25f, satin);
+        int worst = 0, changed = 0, lit = 0;
+        for (int y = 0; y < 120; ++y) {
+            for (int x = 0; x < 160; ++x) {
+                const int plain = near_plain.at(x, y).g, aa = near_aa.at(x, y).g, d = std::abs(plain - aa);
+                worst = std::max(worst, d);
+                changed += d > 2 ? 1 : 0;
+                lit += plain > 2 || aa > 2 ? 1 : 0;
+            }
+        }
+        std::printf("    specular aa: large sphere: %d of its %d lit pixels change by more than 2 levels, at most %d\n",
+                    changed, lit, worst);
+        assert(changed * 50 < lit && worst <= 20);
+        // Off: the default.
+        assert(shoot(30.0f, 0.0f, 0.0f, 0.0f, gloss).rgba ==
+               shoot(30.0f, 0.0f, 0.0f, kin::Scene3D{}.specular_aa, gloss).rgba);
+    });
+}
+
 // The green sky. An environment's picture is 2:1, and the GPU's mip chain (SDL's blits) never wrote its
 // last, 1 x 1 level, which the filter's widest lobes read, so the specular levels held whatever that
 // memory did (stale numbers, now and then a NaN, which the filter's `min(sample, 1e4)` turns into 1e4:
@@ -21867,6 +21943,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_taa_slow_motion());
     RUN(test_gpu_taa_over_detail());
     RUN(test_gpu_taa_still_detail());
+    RUN(test_gpu_specular_aa());
     RUN(test_gpu_taa_crowd());
     RUN(test_gpu_taa_overlay());
     RUN(test_gpu_taa_main_velocity());

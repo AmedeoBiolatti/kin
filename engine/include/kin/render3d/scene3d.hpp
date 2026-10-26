@@ -537,6 +537,13 @@ public:
     // boost steepens anti-aliased edges back into steps): Godot moves it -0.5 with its TAA. 0 (the default) is the
     // picture as without it. Read as `anisotropy` is, in every pass. Where RendererCapabilities3D::texture_lod_bias.
     f32 texture_lod_bias = 0.0f;
+    // Specular anti-aliasing (Tokuyoshi and Kaplanyan's, Godot's "roughness limiter"): where a surface's normal turns
+    // within a pixel (a normal map's bevels, a curved edge, small things far away), a highlight can be thinner than the
+    // pixel and very bright: some samples hit it and the next miss it, so it glints and crawls as the view moves, and
+    // temporal anti-aliasing gathers the glints into bright lines. The roughness is raised there by how much the
+    // normal turns across the pixel (this times its change, at most 0.18 of alpha more), spreading the highlight over
+    // the pixel. 0 (the default) is off: the picture as without it; Godot's is 0.25. The scene's, for the overlay too.
+    f32 specular_aa = 0.0f;
     Lod3D lod{};
     GlobalIllumination3D global_illumination{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default

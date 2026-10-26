@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add specular anti-aliasing for 3D materials (`Scene3D::specular_aa`, 0 to 1,
+  off by default, Godot's 0.25; authored as `SceneEnvironment3D`'s
+  `specular_aa`), on SDL_GPU and WebGL2: the roughness is raised where the
+  normal turns within a pixel, so a glossy highlight thinner than a pixel (a
+  door's bevels) no longer glints from frame to frame, which TAA in motion
+  showed as bright lines.
 - Steady TAA on detail finer than a pixel: still pixels (moving under half a
   pixel a frame) keep more of their history (`TemporalAA3D::still_blend`, 0.96
   by default, never below `blend`; authored as `SceneEnvironment3D`'s
