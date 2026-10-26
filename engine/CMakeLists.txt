@@ -61,6 +61,7 @@ add_library(kin_engine STATIC
     src/ecs/camera.cpp
     src/ecs/lighting.cpp
     src/ecs/shader_effect.cpp
+    src/ecs/ui_screens.cpp
     src/ecs/sprite_animator.cpp
     src/ecs/text.cpp
     src/ecs/system.cpp
@@ -129,6 +130,7 @@ add_library(kin_engine STATIC
     src/ui2/text_script.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
+    src/ui2/screen.cpp
     src/ui2/widget_internal.cpp
     src/ui2/widgets_core.cpp
     src/ui2/widgets_inputs.cpp

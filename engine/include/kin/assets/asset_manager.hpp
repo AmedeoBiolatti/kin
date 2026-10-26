@@ -52,6 +52,8 @@ enum class AssetType {
     Shape,   // .svg: a vector shape (SVG-lite)
     Shader,  // .glsl (.frag.glsl), .spv: a fragment shader
     ColorLut, // .cube: a colour look (a LUT image is an Image)
+    UiScreen, // .kinui: a UI screen
+    UiTheme,  // .kintheme: a UI look
 };
 
 enum class AssetStatus {

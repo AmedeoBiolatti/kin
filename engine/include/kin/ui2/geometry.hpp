@@ -51,6 +51,8 @@ struct UiPadding {
     f32 top = 0.0f;
     f32 right = 0.0f;
     f32 bottom = 0.0f;
+
+    friend constexpr bool operator==(const UiPadding&, const UiPadding&) = default;
 };
 
 struct UiRectPair {

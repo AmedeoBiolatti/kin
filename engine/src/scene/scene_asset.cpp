@@ -12,6 +12,7 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
 #if KIN_ENABLE_AUDIO
@@ -633,6 +634,17 @@ void register_builtin_editor_components(EcsWorld& world) {
             .property<std::string>("state", [](const Animator& a) { return a.state; }, [](Animator&, const std::string&) { return true; })
             .readonly()
             .description("The machine's state now.");
+    }
+    if (!world.components().find("UiScreenComponent")) {
+        // A UI screen (.kinui) shown over the world while the entity is there
+        // (SceneScreens draws it; kin/ecs/ui_screens.hpp).
+        world.components().native<UiScreenComponent>("UiScreenComponent")
+            .field("asset", &UiScreenComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::UiScreen)})
+            .description("A .kinui screen of the content.")
+            .field("visible", &UiScreenComponent::visible)
+            .field("order", &UiScreenComponent::order)
+            .description("Higher draws over lower.");
     }
     if (!world.components().find("LightComponent")) {
         // A light where its entity is: it brightens the world when the scene

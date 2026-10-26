@@ -395,6 +395,87 @@ const kin::Color water = look.color("water"); // the game's own colours
 - `[skin]` frames are GPU textures: let the `ThemeFile` (and themes copied from
   it) go before the renderer does.
 
+A theme can also use the game's own art and fonts:
+
+```ini
+[theme]
+font = fonts/game.ttf        # the text's font (a .ttf/.otf of the content)
+bold_font = fonts/game-bold.ttf
+font_size = 18
+
+[skin]
+button = image ui/button.png 12              # an image cut 12 px in from each edge
+button_hovered = image ui/button.png 12 0 48 96 48   # [x y w h]: part of it
+```
+
+`ThemeFile::build(renderer, content, problems, oversample, image)` reads them
+(its images through `image` when given, an `Assets2D`'s say), and applies the
+skin. Fonts are drawn `oversample` times as fine (the renderer's content scale).
+What can't be read is listed in `problems`, and that part keeps what it had.
+`theme_token_names()`, `theme_surface_names()`, `theme_skin_slot_names()` and
+the like list what a file can name, for tools.
+
+## Screens From Data
+
+A UI screen (a HUD, a menu, a title screen) can be a `.kinui` file
+(`kin/ui2/screen.hpp`): a tree of elements in the look of a `.kintheme`.
+
+```json
+{"schema": "kin.ui/1", "theme": "ui/game.kintheme", "size": {"x": 1280, "y": 720},
+ "root": {"kind": "box", "width": "grow", "height": "grow", "children": [
+   {"id": "score", "kind": "label", "text": "Score: 0", "style": "title", "anchor": "top_left", "offset": {"x": 24, "y": 16}},
+   {"id": "menu", "kind": "panel", "anchor": "center", "padding": 20, "gap": 10, "children": [
+     {"id": "play", "kind": "button", "text": "Play", "width": 200},
+     {"id": "volume", "kind": "slider", "value": 0.8, "width": 200}]}]}}
+```
+
+- **Containers:** a `box` holds elements in a column (or a `row`), with
+  `padding`, a `gap`, and alignment along it (`justify`) and across it
+  (`items`). It stands on a theme `surface` when it names one. A `panel` is a
+  box on the panel surface.
+- **Leaves:** `label`, `button`, `image` (a path in the content, with a
+  `tint`), `progress` (0..1), `toggle`, `slider` (`min`, `max`, `step`),
+  `text_input` (with a `hint`) and `spacer`.
+- **Sizes:** `width` and `height` are `"fit"`, `"grow"` (or `"grow 2"`),
+  points, or `"50%"`.
+- **Anchors:** an element with an `anchor` (`top_left` ... `bottom_right`, or
+  `center`) is placed over its parent at that point, moved by `offset`, out of
+  the flow of its siblings.
+- **Text:** text takes a theme text style (`title`, `small`, `muted`,
+  `emphasis` or `danger`). A `key` takes the language's text (`kin::tr`).
+
+`parse_screen` and `serialize_screen` read and write the files.
+`ui2::UiScreen` draws one with the composition API, inside a context's
+`begin()`/`end()`:
+
+```cpp
+kin::ui2::UiScreen hud{document};
+hud.set_text("score", "Score: " + std::to_string(score)); // kept until set again
+hud.draw(ui, {0, 0, width, height}, {.texture = load_image});
+if (hud.clicked("play")) start();
+const f32 volume = hud.value("volume");
+hud.clear_events();
+```
+
+- **Results:** `clicked`, `changed`, `value`, `checked` and `text` read what
+  the player did at the last draw.
+- **Changes:** `set_text`, `set_value`, `set_checked`, `set_visible`,
+  `set_image` and `set_enabled` change elements by id.
+- **For editors:** `placed()` gives where each element was laid out.
+
+In a scene, an entity with a `UiScreenComponent` (`asset`, `visible`, `order`)
+shows a screen, through `kin::SceneScreens` (`kin/ecs/ui_screens.hpp`):
+
+- **Drawing:** it reads the screens and their themes (fonts and art too),
+  reads them again when they change, and draws those shown in order over the
+  world.
+- **Access by id:** the game reaches any shown screen's elements by id:
+  `screens.clicked("pause")`, `screens.set_text("score", ...)`.
+- **Lua:** entity scripts reach them through `ui`
+  (`EntityScripts::set_screens`).
+
+Kin Studio edits both screens and themes.
+
 ## Menu Scenes
 
 Games that need a simple navigable menu should use `kin::ui2::MenuScene`. It keeps

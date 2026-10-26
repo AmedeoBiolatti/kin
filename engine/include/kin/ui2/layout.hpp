@@ -21,6 +21,8 @@ struct SizeAxis {
     f32 value = 0.0f; // Fixed: pixels; Grow: weight
     f32 min = 0.0f;
     f32 max = 0.0f; // 0 == unbounded
+
+    friend constexpr bool operator==(const SizeAxis&, const SizeAxis&) = default;
 };
 
 constexpr SizeAxis fixed(f32 px) { return {SizeMode::Fixed, px, 0.0f, 0.0f}; }

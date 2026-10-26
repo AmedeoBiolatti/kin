@@ -61,6 +61,18 @@ releases may change APIs.
   `serialize_input_map`. `App::open_gamepads` polls a controller with the
   window's events. `binding_held` and `axis_value` let editors try bindings
   that are not in the map.
+- Add UI screens as data: `.kinui` files are trees of boxes, panels, labels,
+  buttons, images, bars, toggles, sliders, text fields and spacers, with sizes,
+  anchors and a theme.
+  - `ui2::UiScreen` draws one, sets elements by id and reports clicks and
+    values.
+  - A `UiScreenComponent` shows a screen in a scene.
+  - `SceneScreens` reads screens and themes and reloads them when they change;
+    entity scripts reach them through `ui`.
+  - Add `AssetType::UiScreen` and `AssetType::UiTheme`.
+- Let `.kintheme` files name a font file (`font`, `bold_font`, `font_size`)
+  and image skins (`image <path> [margin] [x y w h]`), read by
+  `ThemeFile::build`. Add the theme name lists for tools.
 - Add lights to scenes: `LightComponent` lights from its entity, and
   `SceneLighting` (the ambient colour) makes `EcsScene` light the world, while
   the UI layer and above stay unlit. Add `scene_lights` and

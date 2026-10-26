@@ -3,6 +3,7 @@
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
+#include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
@@ -13,6 +14,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdio>
 #include <optional>
 #include <system_error>
 #include <unordered_map>
@@ -140,6 +142,17 @@ end
 
 } // namespace
 
+namespace {
+
+// A number as text: 12, not 12.000000.
+std::string format_number(double value) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "%g", value);
+    return text;
+}
+
+} // namespace
+
 struct EntityScripts::Impl {
     EntityScriptsConfig config;
 
@@ -165,6 +178,7 @@ struct EntityScripts::Impl {
     // What the bindings reach, during an update.
     EcsWorld* world = nullptr;
     Input* input = nullptr;
+    SceneScreens* screens = nullptr;
     std::string calling; // the script being called, for its problems
 
     void bind(sol::state& lua) {
@@ -278,6 +292,37 @@ struct EntityScripts::Impl {
             return std::make_tuple(at.x, at.y);
         };
 
+        sol::table ui_table = lua.create_named_table("ui");
+        ui_table["clicked"] = [this](const std::string& id) { return screens && screens->clicked(id); };
+        ui_table["changed"] = [this](const std::string& id) { return screens && screens->changed(id); };
+        ui_table["value"] = [this](const std::string& id) { return screens ? screens->value(id) : 0.0f; };
+        ui_table["checked"] = [this](const std::string& id) { return screens && screens->checked(id); };
+        ui_table["text"] = [this](const std::string& id) { return screens ? screens->text(id) : std::string(); };
+        ui_table["set_text"] = [this](const std::string& id, const sol::object& text) {
+            if (screens) {
+                screens->set_text(id, text.is<std::string>() ? text.as<std::string>()
+                                                            : text.is<double>() ? format_number(text.as<double>()) : std::string());
+            }
+        };
+        ui_table["set_value"] = [this](const std::string& id, f32 value) {
+            if (screens) screens->set_value(id, value);
+        };
+        ui_table["set_checked"] = [this](const std::string& id, bool checked) {
+            if (screens) screens->set_checked(id, checked);
+        };
+        ui_table["show"] = [this](const std::string& id, sol::optional<bool> shown) {
+            if (screens) screens->set_visible(id, shown.value_or(true));
+        };
+        ui_table["hide"] = [this](const std::string& id) {
+            if (screens) screens->set_visible(id, false);
+        };
+        ui_table["set_image"] = [this](const std::string& id, const std::string& path) {
+            if (screens) screens->set_image(id, path);
+        };
+        ui_table["set_enabled"] = [this](const std::string& id, bool enabled) {
+            if (screens) screens->set_enabled(id, enabled);
+        };
+
         sol::table world_table = lua.create_named_table("world");
         world_table["find"] = [this](const std::string& name) -> std::optional<ScriptEntity> {
             const EcsEntity found = world ? world->entities().find_by_name(name) : EcsEntity{};
@@ -368,6 +413,10 @@ std::size_t EntityScripts::running() const {
 
 void EntityScripts::restart() {
     _impl->running.clear();
+}
+
+void EntityScripts::set_screens(SceneScreens* screens) {
+    _impl->screens = screens;
 }
 
 void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {

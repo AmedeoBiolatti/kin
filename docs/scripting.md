@@ -188,6 +188,11 @@ scripts.update(world, ctx.input, ctx.dt);
   `axis` by name, and `mouse()` returns x and y ([input](input.md)).
 - The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
   the new prefab instance's root.
+- When the game gives the scripts its screens (`EntityScripts::set_screens`),
+  the `ui` table reaches their elements by id ([UI screens](ui.md#screens-from-data)):
+  - reading: `clicked`, `changed`, `value`, `checked` and `text`;
+  - changing: `set_text`, `set_value`, `set_checked`, `show`, `hide`,
+    `set_image` and `set_enabled`.
 - `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
 - `on_contact(self, other)` runs when the entity's body begins to touch
   another, when the world has a `PhysicsContactQueue`.

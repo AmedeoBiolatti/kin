@@ -8,6 +8,7 @@
 #include <kin/ecs/ui2_sync.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/ui2/context.hpp>
+#include <kin/ui2/screen.hpp>
 #include <kin/ui2/layout.hpp>
 #include <kin/ui2/radix_colors.hpp>
 #include <kin/ui2/state.hpp>
@@ -7216,7 +7217,88 @@ void test_text_rendering_modes() {
 
 } // namespace
 
+// A screen file read and written as it was; laid out, its button clicked,
+// what the game sets by id shown; files that do not read said why.
+void test_screen_files() {
+    const std::string text = R"json({
+  "schema": "kin.ui/1", "theme": "ui/look.kintheme", "size": {"x": 400, "y": 300},
+  "root": {"kind": "box", "width": "grow", "height": "grow", "children": [
+    {"id": "score", "kind": "label", "text": "Score", "anchor": "top_left", "offset": {"x": 10, "y": 8}},
+    {"id": "menu", "kind": "panel", "anchor": "center", "padding": [10, 8, 10, 8], "gap": 6, "items": "stretch", "children": [
+      {"id": "play", "kind": "button", "text": "Play", "width": 120, "height": 30},
+      {"id": "volume", "kind": "slider", "value": 0.5, "width": 120, "height": 20},
+      {"id": "hp", "kind": "progress", "value": 0.25, "width": "50%", "height": 10}]}]}})json";
+    ui2::ScreenDocument doc;
+    std::string error;
+    assert(ui2::parse_screen(text, doc, error));
+    assert(doc.theme == "ui/look.kintheme" && doc.size.x == 400.0f);
+    assert(doc.root.width.mode == ui2::SizeMode::Grow && doc.root.children.size() == 2);
+    const ui2::ScreenElement* menu = doc.find("menu");
+    assert(menu && menu->kind == ui2::ScreenKind::Panel && menu->anchor == ui2::UiAnchor::Center && menu->padding.top == 8.0f);
+    assert(doc.find("hp")->width.mode == ui2::SizeMode::Percent && doc.find("play")->width.value == 120.0f);
+    // Written and read again: the same.
+    ui2::ScreenDocument again;
+    assert(ui2::parse_screen(ui2::serialize_screen(doc), again, error) && again == doc);
+    assert(ui2::screen_size_text(ui2::percent(0.5f)) == "50%" && ui2::screen_size_from_text("grow 2")->value == 2.0f);
+    assert(!ui2::screen_size_from_text("big"));
+
+    // Not read: why, and where.
+    ui2::ScreenDocument bad;
+    assert(!ui2::parse_screen(R"({"root": {"kind": "box", "children": [{"id": "x", "kind": "knob"}]}})", bad, error));
+    assert(error.find("knob") != std::string::npos);
+    assert(!ui2::parse_screen(R"({"root": {"kind": "label", "children": [{"kind": "box"}]}})", bad, error));
+    assert(error.find("holds no elements") != std::string::npos);
+    assert(!ui2::parse_screen(R"({"root": {"kind": "box", "width": "huge"}})", bad, error));
+
+    // Drawn: laid out a frame late; the button clicked; values kept by id.
+    ui2::UiScreen screen{doc};
+    screen.set_text("score", "Score: 12");
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const auto frame = [&](Vec2f at, bool held) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_held(MouseButton::Left, held);
+        ui.begin(input, renderer);
+        screen.draw(ui, {0, 0, 400, 300});
+        ui.end();
+    };
+    frame({0, 0}, false);
+    frame({0, 0}, false);
+    const auto bounds_of = [&](std::string_view path) {
+        for (const ui2::UiScreen::Placed& placed : screen.placed()) {
+            if (placed.path == path) return placed.bounds;
+        }
+        return Rectf{};
+    };
+    const Rectf play = bounds_of("1/0");
+    const Rectf panel = bounds_of("1");
+    assert(play.w == 120.0f && play.h == 30.0f);
+    // The panel in the middle: as wide as its widest and its padding.
+    assert(std::abs((panel.x + panel.w * 0.5f) - 200.0f) < 1.0f && std::abs((panel.y + panel.h * 0.5f) - 150.0f) < 1.0f);
+    assert(rect_eq(bounds_of("0"), bounds_of("0").x, 8, bounds_of("0").w, bounds_of("0").h) && bounds_of("0").x == 10.0f);
+    const Vec2f middle{play.x + play.w * 0.5f, play.y + play.h * 0.5f};
+    frame(middle, false);
+    frame(middle, true);
+    frame(middle, false);
+    assert(screen.clicked("play") && screen.clicks() == std::vector<std::string>{"play"});
+    screen.clear_events();
+    assert(!screen.clicked("play"));
+    assert(screen.text("score") == "Score: 12" && screen.value("volume") == 0.5f);
+    screen.set_value("volume", 0.9f);
+    assert(screen.value("volume") == 0.9f);
+    // Hidden: not laid out.
+    screen.set_visible("menu", false);
+    frame({0, 0}, false);
+    assert(bounds_of("1").w == 0.0f && !screen.visible("menu"));
+    // A new version of the file: what was set stays.
+    screen.set_document(doc);
+    assert(screen.text("score") == "Score: 12" && !screen.visible("menu"));
+}
+
 int main() {
+    test_screen_files();
     test_text_rendering_modes();
     test_text_kerning_and_lines();
 #if defined(_MSC_VER)

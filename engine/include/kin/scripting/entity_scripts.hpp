@@ -26,6 +26,10 @@
 //   input.held(action), input.pressed(action), input.released(action), input.axis(name),
 //   input.mouse() -> x, y
 //   world.find(name) -> an entity or nil; world.spawn(prefab, x, y) -> its root, or nil
+// and, given the scene's screens (set_screens), its UI's elements by id:
+//   ui.clicked(id), ui.changed(id), ui.value(id), ui.checked(id), ui.text(id),
+//   ui.set_text(id, text), ui.set_value(id, v), ui.set_checked(id, b), ui.show(id[, b]),
+//   ui.hide(id), ui.set_image(id, path), ui.set_enabled(id, b)
 // Fields read and set as scene files have them: numbers, true/false, text,
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
@@ -40,6 +44,7 @@ namespace kin {
 
 class EcsWorld;
 class Input;
+class SceneScreens;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -61,6 +66,8 @@ public:
     std::size_t running() const;
     // Forgets every entity's self (all start over at the next update).
     void restart();
+    // The scene's UI screens, for the scripts' `ui` (null: none).
+    void set_screens(SceneScreens* screens);
 
 private:
     struct Impl;

@@ -116,6 +116,12 @@ AssetType infer_asset_type(const std::filesystem::path& path) {
     if (ext == ".cube") {
         return AssetType::ColorLut;
     }
+    if (ext == ".kinui") {
+        return AssetType::UiScreen;
+    }
+    if (ext == ".kintheme") {
+        return AssetType::UiTheme;
+    }
     return AssetType::Unknown;
 }
 
