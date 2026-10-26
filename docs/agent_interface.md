@@ -148,6 +148,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
 | `input.mouse` | `{x, y, button?, mode?, wheel?, space?, dx?, dy?}` | Move the pointer; optionally click or scroll. `dx`/`dy` (without `x`/`y` if wanted) move the mouse by that many window pixels, as relative mouse mode reports it: a first-person camera turns. |
 | `input.text` | `{text}` | Deliver text input for the next tick. |
+| `input.drop` | `{path, x?, y?, space?}` | Drop a file on the window at `x`, `y` (or where the pointer is), as from the desktop: `Input::take_dropped_files` has it at the next tick. |
 | `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
 | `frame.timing` | `{reset?}` | Update and render wall time over the last 600 ticks: `last`, `mean` and `max`, in ms. `reset` clears the history after reporting. |
@@ -160,9 +161,40 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 {"message":"ui.snapshot is unavailable after legacy kin/ui removal; use reports or world.snapshot"}
 ```
 
+## Inspecting A Game While It Is Played
+
+`--inspect` runs the game in its window as usual (real time, the player's
+input) and also answers the stdio server's requests between frames: a tool
+such as an editor watches it while it is played. The log stays on stderr, so
+stdout carries only the answers (and whatever the game prints itself).
+
+```text
+game --inspect
+{"id":1,"method":"world.snapshot","params":{"raw":false,"events":false,"animations":false}}
+{"id":2,"method":"sim.pause"}
+{"id":3,"method":"sim.step","params":{"count":1}}
+{"id":4,"method":"sim.resume"}
+```
+
+It answers what reads the game (`game.info`, `scene.stack`, `scene.current`,
+`scene.actions`, `world.snapshot`, `animation.diagnostics`, `ping`), and
+`server.status` with `paused`. Three methods hold its updates while it keeps
+drawing:
+
+| Method | Params | Effect |
+|---|---|---|
+| `sim.pause` | none | Hold the scenes' updates. Returns the status. |
+| `sim.resume` | none | Update again. |
+| `sim.step` | `{count?}` | Run N more updates (default 1), then hold. |
+
+`server.shutdown` quits the game. What drives a headless server (`sim.tick`,
+`sim.reset`, `input.*`, `view.screenshot`, `frame.timing`) is refused. When the
+tool closes its end of stdin the game goes on, never left paused. Headless
+runs and builds without the scene server ignore `--inspect`, with a warning.
+
 ## Input
 
-Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`) is queued and applied
+Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.drop`) is queued and applied
 on the next `sim.tick`, after `begin_frame`, so the scene observes it that frame.
 A `press` is a tap: held for that tick and released at the start of the next
 one, which sees the release, as with a real button. A ui2 click completes on that

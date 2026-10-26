@@ -833,6 +833,9 @@ private:
     void begin_compose(Id id, ComposeKind kind, const BoxStyle& style, LayoutStyle layout);
     BoxResult compose_interaction(Id id, const BoxStyle& style);
     i32 compose_z(const BoxStyle& style) const;
+    // How far a floating box lifts the hit depth of what is in it: its boxes
+    // (compose_z) and its widgets (end_layout() runs them with _region_z_base).
+    static constexpr i32 floating_hit_z = 100000;
     Rectf pixel_snap(Rectf rect) const;
     void scroll_thumbs(Id id, const ScrollBoxOptions& options, i32 z);
     void layout_compose();
@@ -860,6 +863,7 @@ private:
     bool _focus_moved = false;
     bool _any_press = false; // a mouse button went down this frame (before widgets took it)
     f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
+    i32 _region_z_base = 0;  // added to region()'s z while end_layout() runs a widget in floating boxes
     WindowChrome _chrome;    // the drags_window() boxes as last laid out, in layout units
     SystemCursor _cursor = SystemCursor::Default;
     bool _redraw = false;

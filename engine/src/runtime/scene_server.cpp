@@ -810,6 +810,33 @@ ServerResponse handle_input_key(ServerContext& ctx, const JsonValue& params) {
     return ok_result(out.str());
 }
 
+// A file dropped on the window, as from the desktop: Input::take_dropped_files
+// has it at the next tick. At `x`, `y` (logical, or "space": "window"), or
+// where the pointer is.
+ServerResponse handle_input_drop(ServerContext& ctx, const JsonValue& params) {
+    const JsonValue* path = params.find("path");
+    if (!path || !path->is_string() || path->as_string().empty()) {
+        return error_result("input.drop requires a string 'path'");
+    }
+    Vec2f pos = ctx.app().input().mouse_pos();
+    const JsonValue* x = params.find("x");
+    const JsonValue* y = params.find("y");
+    if (x && y && x->is_number() && y->is_number()) {
+        pos = {static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
+        if (params.string_at("space", "logical") != "window") {
+            pos = ctx.renderer().logical_to_window(pos);
+        }
+    }
+    ctx.queue_drop(path->as_string(), pos);
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "drop");
+    json.field("path", std::string_view{path->as_string()});
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_input_text(ServerContext& ctx, const JsonValue& params) {
     const JsonValue* text = params.find("text");
     if (!text || !text->is_string()) {
@@ -883,6 +910,10 @@ void ServerContext::queue_key(Key key, std::string mode, KeyModifiers modifiers)
     _pending.push_back({PendingInput::Kind::Key, {}, std::move(mode), {}, 0.0f, key, modifiers});
 }
 
+void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
+    _pending.push_back({PendingInput::Kind::Drop, std::move(path), {}, window_pos, 0.0f});
+}
+
 void ServerContext::step() {
     Input& input = _app.input();
     input.begin_frame();
@@ -938,6 +969,9 @@ void ServerContext::step() {
             break;
         case PendingInput::Kind::Text:
             input.set_text_input(in.text);
+            break;
+        case PendingInput::Kind::Drop:
+            input.add_dropped_file({.path = in.text, .pos = in.pos, .window = _window.id()});
             break;
         case PendingInput::Kind::Key:
             if (in.mode == "release") {
@@ -1060,6 +1094,9 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     }
     if (method == "input.text") {
         return handle_input_text(ctx, params);
+    }
+    if (method == "input.drop") {
+        return handle_input_drop(ctx, params);
     }
     if (method == "input.key") {
         return handle_input_key(ctx, params);
@@ -1515,6 +1552,138 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
     // after `renderer` — freeing GPU resources into a dead device.
     ctx.shutdown_scenes();
     return code;
+}
+
+struct LiveInspector::Shared {
+    std::mutex mutex;
+    std::deque<std::string> lines;
+    bool reading = true;
+};
+
+LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
+    : _shared(std::make_shared<Shared>()),
+      _out(out) {
+    // The reader holds the shared state, so it can outlive this when it is
+    // still blocked reading as the game ends (it is then left behind).
+    _reader = std::thread([shared = _shared, &in] {
+        std::string line;
+        while (std::getline(in, line)) {
+            std::lock_guard<std::mutex> lock(shared->mutex);
+            shared->lines.push_back(std::move(line));
+            line.clear();
+        }
+        std::lock_guard<std::mutex> lock(shared->mutex);
+        shared->reading = false;
+    });
+    KIN_LOG_INFO("server", "inspector listening on stdin");
+}
+
+LiveInspector::~LiveInspector() {
+    if (!_reader.joinable()) {
+        return;
+    }
+    bool reading = false;
+    {
+        std::lock_guard<std::mutex> lock(_shared->mutex);
+        reading = _shared->reading;
+    }
+    if (reading) {
+        _reader.detach();
+    } else {
+        _reader.join();
+    }
+}
+
+void LiveInspector::poll(ServerContext& ctx, const GameInfo* game) {
+    std::deque<std::string> lines;
+    bool reading = true;
+    {
+        std::lock_guard<std::mutex> lock(_shared->mutex);
+        lines.swap(_shared->lines);
+        reading = _shared->reading;
+    }
+    for (const std::string& line : lines) {
+        if (line.find_first_not_of(" \t\r\n") != std::string::npos) {
+            answer(ctx, game, line);
+        }
+    }
+    if (!reading && !_finished) {
+        // Nobody is left to resume it.
+        _finished = true;
+        _paused = false;
+        _steps = 0;
+        KIN_LOG_INFO("server", "inspector input closed");
+    }
+}
+
+bool LiveInspector::admit_update() {
+    if (_paused) {
+        if (_steps <= 0) {
+            return false;
+        }
+        --_steps;
+    }
+    ++_frame;
+    return true;
+}
+
+void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string_view line) {
+    const JsonParseResult parsed = parse_json(strip_bom(line));
+    if (!parsed.ok()) {
+        write_envelope(_out, nullptr, error_result("invalid JSON: " + parsed.error));
+        return;
+    }
+    const JsonValue& root = *parsed.value;
+    const JsonValue* id = root.find("id");
+    const std::string method = root.string_at("method");
+    static const JsonValue empty_params;
+    const JsonValue* given = root.find("params");
+    const JsonValue& params = given ? *given : empty_params;
+    const auto status = [&] {
+        std::ostringstream out;
+        JsonWriter json(out, false);
+        json.begin_object();
+        json.field("frame", _frame);
+        json.field("paused", _paused);
+        json.field("fixed_dt", static_cast<f64>(ctx.fixed_dt()));
+        json.field("scene_depth", ctx.scenes().depth());
+        json.end_object();
+        return ok_result(out.str());
+    };
+
+    ServerResponse response;
+    if (method.empty()) {
+        response = error_result("request missing 'method'");
+    } else if (method == "server.shutdown") {
+        KIN_LOG_INFO("server", "inspector asked the game to quit");
+        ctx.app().quit();
+        response = ok_result("{\"bye\":true}");
+    } else if (method == "server.status") {
+        response = status();
+    } else if (method == "sim.pause") {
+        _paused = true;
+        _steps = 0;
+        response = status();
+    } else if (method == "sim.resume") {
+        _paused = false;
+        _steps = 0;
+        response = status();
+    } else if (method == "sim.step") {
+        const i64 count = params.int_at("count", 1);
+        if (count < 0) {
+            response = error_result("count must be >= 0");
+        } else {
+            _paused = true;
+            _steps += std::min(count, MAX_TICKS_PER_CALL);
+            response = status();
+        }
+    } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
+               method == "view.screenshot" || method == "frame.timing" || method == "ui.snapshot") {
+        response = error_result(method + " drives a headless server (--server); this game runs in its window");
+    } else {
+        response = dispatch_server_command(ctx, game, method, params);
+    }
+    write_envelope(_out, id, response);
 }
 
 } // namespace kin

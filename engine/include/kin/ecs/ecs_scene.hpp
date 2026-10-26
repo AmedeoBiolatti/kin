@@ -1,13 +1,18 @@
 #pragma once
 
+#include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/renderer/render_profile.hpp>
 #include <kin/scene/scene.hpp>
 
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace kin {
 
@@ -19,6 +24,20 @@ struct EcsSceneRenderConfig {
     bool culling_enabled = true;
     bool static_cache_enabled = true;
     std::function<Camera2D(EcsWorld&, SceneContext&)> camera_callback;
+    // Without a camera_callback: the world drawn through its first current
+    // CameraComponent (kin/ecs/camera.hpp), when it has one, its viewport
+    // `view_size` (zero: the window's size, in points: the size a game that
+    // sets its logical size to the window's draws at).
+    bool scene_cameras = true;
+    Vec2f view_size{};
+    // The assets its components name (TextureRenderer.asset, and what binders
+    // added with add_asset_binder() give out): read from `asset_root` (empty:
+    // the game's content, content_root(), else the working folder) and bound
+    // before each frame is drawn. Files changed are read again every
+    // `asset_check_frames` drawn frames (0: never).
+    bool assets = true;
+    std::filesystem::path asset_root;
+    i32 asset_check_frames = 30;
 };
 
 class EcsScene : public Scene {
@@ -45,6 +64,13 @@ public:
     const StaticRenderCache& static_render_cache() const { return _static_render_cache; }
     void mark_render_cache_dirty(std::string_view reason = "explicit") { _static_render_cache.mark_dirty(reason); }
 
+    // The assets its world's components name, once it has drawn (it needs the
+    // renderer); nullptr before.
+    Assets2D* assets() { return _assets.get(); }
+    // A binder for a component of the game's own that names an asset (see
+    // Assets2D), kept for when the assets are made.
+    void add_asset_binder(std::string name, Assets2D::Binder binder);
+
     void render(SceneContext& ctx) override;
 
     EcsWorld* world() override {
@@ -53,6 +79,7 @@ public:
 
 private:
     WorldRenderState& render_state();
+    void bind_assets(SceneContext& ctx);
 
     EcsWorld _owned_world;
     EcsWorld* _shared_world = nullptr;
@@ -60,6 +87,9 @@ private:
     EcsSceneRenderConfig _render_config;
     StaticRenderCache _static_render_cache;
     RenderQueue _dynamic_render_queue{RenderSortMode::LayerThenY};
+    std::unique_ptr<Assets2D> _assets;
+    std::vector<std::pair<std::string, Assets2D::Binder>> _asset_binders;
+    i32 _asset_frames = 0;
 };
 
 } // namespace kin

@@ -48,6 +48,7 @@ add_library(kin_engine STATIC
     src/core/profile.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
+    src/ecs/assets2d.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -56,6 +57,9 @@ add_library(kin_engine STATIC
     src/ecs/ecs_scene.cpp
     src/ecs/particles.cpp
     src/ecs/render.cpp
+    src/ecs/camera.cpp
+    src/ecs/sprite_animator.cpp
+    src/ecs/text.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
     src/ecs/ui2.cpp

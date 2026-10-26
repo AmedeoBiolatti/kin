@@ -107,6 +107,89 @@ config.asset_server = &server;
 return kin::run_scene_app(config, scenes);
 ```
 
+## Assets named by components (2D)
+
+A component names an asset by its path in the game's content, with a
+`ComponentAssetRef` field: what a scene file writes (`"asset": "images/hero.png"`)
+and an editor offers. `kin::Assets2D` (`kin/ecs/assets2d.hpp`) gives components
+what they name: it reads each asset once from a content root, shares it, and
+reads it again when its file changes.
+
+```cpp
+// A scene file's entity:
+//   "components": {"Transform2D": {"pos": {"x": 320, "y": 180}},
+//                  "TextureRenderer": {"asset": "images/hero.png", "pivot": {"x": 0.5, "y": 0.5}}}
+```
+
+`EcsScene` does it for its world before each frame is drawn
+(`EcsSceneRenderConfig::assets`, on by default), from `content_root()` (or
+`asset_root`), checking for changed files every `asset_check_frames` frames: a
+scene that names an image shows it, and an image saved again shows at once.
+
+kin binds its own components' assets:
+
+| Component | `asset` names | It gets |
+| --- | --- | --- |
+| `TextureRenderer` | an image | `texture` |
+| `SpriteRenderer` | a sprite catalog (`.kinsprites`; its images named from the content root) | `sprite.catalog`; `sprite.id` (the `sprite` field) picks the sprite |
+| `AudioEmitter` | a sound file, or an audio catalog (`.kinaudio`) | `catalog`: a sound file's has one cue, named by its path, which an empty `cue` plays; a catalog's `cue` picks one |
+| `ParticleSystemComponent` | a particle catalog (`.kinparticles`) | `system`'s catalog; `effect` picks the effect it bursts (`sprites`, a sprite catalog, gives `sprites`) |
+| `ParticleFieldComponent` | a particle catalog | `state`, made from the catalog's field `field` (`name` in C++), its area moved by where the entity is |
+| `SpriteAnimator` | (none: its `SpriteRenderer`'s catalog) | `animation` names one of the catalog's animations; `update_sprite_animators(world, dt)` sets the renderer's sprite to its frames in turn |
+| `TilemapComponent` | a tilemap (`.kintilemap`) | `tilemap`: the map, with the tileset file it names (`.kintileset`) and that tileset's image cut in frames (`sheet`); read again when any of them changes |
+| `ShapeRenderer` | an SVG-lite file (`.svg`), when its `shape` is `svg` | `mesh`, made from its `spec` (a box, rounded box, ellipse or polygon, or the file's shape) and made again when either changes |
+| `TextRenderer` | a font file (`.ttf`, `.otf`) as `font`; empty: the system's UI font | `face`: the font at its `size` |
+
+Sounds still need a game's `AudioEngine`: `update_audio_emitters(world, audio)`
+plays the emitters whose catalogs are bound. Particles move in
+`update_particles(world, dt)`, which also bursts each emitter's `effect` where
+its entity is (`offset` from it): once as it starts (`burst_at_start`), and
+`rate` times a second while `emitting`. An emitter with no effect is the
+game's to emit from, in code, as before.
+
+Tilemaps draw with the rest (`WorldRenderState`), their top left where their
+entity is, on `RenderLayer::TileBack` unless their `layer` says otherwise. A
+map's cells are squares, or hexagons (`TileMap::grid`: pointy-top in rows or
+flat-top in columns, every other one shifted, kept as `HexLayout`'s offset
+cells), each box `tile_w` x `tile_h` bounding its hexagon; `world_to_map`,
+`tile_center`, `neighbor_cells` (six), collision, `find_path` and drawing
+follow the shape. A tileset kept in a file of its own (`.kintileset`, format
+`kin.tileset`: its tiles, and the image their `frame`s are cut from) is shared
+by the maps naming it (`"tileset": "tilesets/ground.kintileset"`, read from
+the content root by `load_tilemap(path, content_root)` and `Assets2D`).
+Terrain autotiling (four sides) stays square-only.
+
+A component of the game's own gets a binder, a function over the world:
+
+```cpp
+scene.add_asset_binder("Speaker", [](kin::EcsWorld& world, kin::Assets2D& assets) {
+    world.each([&](Speaker& speaker) {
+        if (!speaker.asset.id.empty() && !speaker.sound) {
+            speaker.sound = assets.manager().load<Sound>(speaker.asset.id);
+            assets.changed();
+        }
+    });
+});
+```
+
+- `texture(path)` makes an image a texture (PNG, JPEG, BMP, TGA, QOI, GIF; KTX2
+  and DDS as compressed textures), once. One that cannot be read is invalid, with
+  why in `problems()`, and is tried again when its file changes (or appears).
+  `sprite_catalog(path)` and `audio_catalog(path)` read catalogs the same way; a
+  catalog is read again when it or a file it was made of (a sprite catalog's
+  images) changes, and the one before is kept for what still points at it.
+- `manager()` is an `AssetManager` on the same root, for every other kind (its
+  loaders, and the game's). `reload_changed()` forgets what it read whose files
+  changed too, so the binder's next load reads them again.
+- `reload_changed()` compares each file's time with the one read: call it now
+  and then. Assets in a `.kinpak` never change.
+- A field says what kind of asset it names with `.asset_type("Image")` (a name
+  of `asset_type_name`, or several separated by commas), so editors offer only
+  those; `"asset_type"` in a `.kincomponents` schema. A field naming an entry of
+  that asset (a sprite of a catalog, a cue) says so with `.entry_of("asset")`,
+  the asset field's name, so editors offer the asset's entries. `infer_asset_type` gives a file's kind from its name,
+  among them `Image`, `Audio`, `Font`, `Scene`, `Prefab` and `Model`.
+
 ## Content and packs
 
 `AssetManager`'s root is usually the game's content root, from

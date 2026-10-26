@@ -124,9 +124,17 @@ void App::pump_events() {
         _input.process_native_event(&event);
 
         if (event.type == SDL_EVENT_QUIT) {
-            _running = false;
+            if (_hold_close) {
+                _close_asked = true;
+            } else {
+                _running = false;
+            }
         } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
-            handle_window_close(static_cast<WindowId>(event.window.windowID));
+            if (_hold_close && open_window_count() <= 1) {
+                _close_asked = true; // the last one: the app decides
+            } else {
+                handle_window_close(static_cast<WindowId>(event.window.windowID));
+            }
         }
     }
 }

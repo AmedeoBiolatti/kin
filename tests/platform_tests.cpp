@@ -205,6 +205,48 @@ void test_mouse_wheel_reaches_one_step() {
     assert((step_numbers == std::vector<int>{1, 2, 3, 1, 2, 3}));
 }
 
+void push_quit() {
+    SDL_Event event{};
+    event.type = SDL_EVENT_QUIT;
+    const bool pushed = SDL_PushEvent(&event);
+    assert(pushed);
+    (void)pushed;
+}
+
+// Asked to quit while the app holds closing: it goes on, told, until it quits
+// itself (or forgets the request); not held, it stops at once.
+void test_close_held() {
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        app.hold_close(true);
+        int frames = 0;
+        int asked_at = 0;
+        push_quit();
+        app.run([](float) {}, [&](float) {
+            ++frames;
+            if (app.close_asked() && asked_at == 0) {
+                asked_at = frames;
+                app.forget_close(); // stays: asked again below
+                push_quit();
+            } else if (app.close_asked()) {
+                app.quit();
+            }
+        });
+        assert(asked_at == 1 && frames == 2);
+    }
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        int frames = 0;
+        push_quit();
+        app.run([](float) {}, [&](float) {
+            if (++frames > 5) {
+                app.quit();
+            }
+        });
+        assert(frames == 0); // stopped by the request, before a frame is drawn
+    }
+}
+
 void push_motion(float dx, float dy) {
     SDL_Event event{};
     event.type = SDL_EVENT_MOUSE_MOTION;
@@ -285,6 +327,7 @@ int main() {
     test_window_area_at();
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
+    test_close_held();
     test_mouse_motion_reaches_one_step();
 
     kin::App app{{.mode = kin::AppMode::Headless}};

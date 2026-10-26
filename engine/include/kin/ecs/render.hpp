@@ -1,15 +1,18 @@
 #pragma once
 
 #include <kin/core/types.hpp>
+#include <kin/ecs/component.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/render_layer.hpp>
 #include <kin/renderer/render_queue.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shape.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -22,6 +25,8 @@ class JobSystem;
 
 struct ParticleSystemComponent;
 struct ParticleFieldComponent;
+struct TilemapComponent;
+struct TextRenderer;
 
 // Where an entity sits relative to its parent (flecs ChildOf), or to the world
 // without one: scaled, then turned (degrees, clockwise), then moved to `pos`.
@@ -49,8 +54,12 @@ WorldTransform compose(const WorldTransform& parent, const Transform2D& child);
 // scales to zero keeps the child at the parent's origin along it.
 Transform2D to_local(const WorldTransform& parent, const WorldTransform& world);
 
+// A sprite of a SpriteCatalog drawn at the entity. `sprite` is set from C++,
+// or by Assets2D from `asset`, a catalog's path in the game's content (a
+// .kinsprites file), keeping `sprite.id`: which of its sprites.
 struct SpriteRenderer {
     SpriteRef sprite;
+    ComponentAssetRef asset;
     Vec2f offset{};
     Vec2f size{};
     Vec2f pivot{-1.0f, -1.0f};
@@ -68,8 +77,13 @@ struct SpriteRenderer {
     bool flip_y = false;
 };
 
+// A texture, or a region of one (`source`; empty: all of it), drawn at the
+// entity. `texture` is set from C++, or by Assets2D from `asset`: an image's
+// path in the game's content, as a scene file names it (EcsScene binds it
+// before drawing; see kin/ecs/assets2d.hpp).
 struct TextureRenderer {
     Texture texture;
+    ComponentAssetRef asset;
     Rectf source{};
     Vec2f offset{};
     Vec2f size{};
@@ -111,12 +125,40 @@ struct LineRenderer {
     bool static_renderable = false;
 };
 
+// What a ShapeRenderer's mesh is made of, as scene files give it: a box, a
+// box with rounded corners, an ellipse, a regular polygon (`sides`), each
+// `size` big and centred on the entity, or an SVG-lite file of the content
+// (kin/renderer/svg.hpp; `size` zero: as big as it says, else fitted in it).
+// Filled with `fill`, and outlined `stroke_width` wide in `stroke`.
+enum class ShapeKind : u8 { None, Rect, RoundedRect, Ellipse, Polygon, Svg };
+
+struct ShapeSpec {
+    ShapeKind kind = ShapeKind::None; // None: `mesh` is set from C++
+    Vec2f size{32.0f, 32.0f};
+    f32 radius = 4.0f; // RoundedRect's corners
+    i32 sides = 6;     // Polygon's (3 or more)
+    Color fill = colors::white;
+    Color stroke = colors::transparent;
+    f32 stroke_width = 0.0f;
+
+    friend bool operator==(const ShapeSpec&, const ShapeSpec&) = default;
+};
+
+// "none", "rect", "rounded_rect", "ellipse", "polygon", "svg".
+std::string_view shape_kind_name(ShapeKind kind);
+std::optional<ShapeKind> shape_kind_named(std::string_view name);
+// The shape `spec` says (`svg`: the file's shape, for Svg), centred on (0, 0).
+Shape make_shape(const ShapeSpec& spec, const Shape* svg = nullptr);
+
 // A vector shape (kin/renderer/shape.hpp) drawn at the entity: its mesh is
 // placed by the entity's world transform (a negative scale mirrors it) and
 // `offset` in the entity's own units, and coloured by `tint`. Meshes are
-// shared: many entities can draw one.
+// shared: many entities can draw one. Set from C++, or made from `spec` (and
+// `asset`, an SVG file) by Assets2D as they change (bind_shape_renderers).
 struct ShapeRenderer {
     std::shared_ptr<const ShapeMesh> mesh;
+    ShapeSpec spec;
+    ComponentAssetRef asset; // spec.kind Svg: an .svg file of the content
     Vec2f offset{};
     Color tint = colors::white;
     i32 layer = layer_value(RenderLayer::World);
@@ -125,6 +167,10 @@ struct ShapeRenderer {
     f32 sort_y_offset = 0.0f;
     bool visible = true;
     bool static_renderable = false;
+
+    // What `mesh` was made from (kept by bind_shape_renderers).
+    ShapeSpec made{};
+    const void* made_from = nullptr; // the SVG's shape
 };
 
 // Cuts the renderers of its entity and of every entity below it (ChildOf) to
@@ -136,13 +182,27 @@ struct ShapeRenderer {
 //
 //     window.set(kin::ClipGroup{.clip = kin::ClipRegion::to_path(kin::Path::rounded_rect({-60, -40, 120, 80}, 12))});
 //     // the window's children only show inside its rounded frame
+//
+// Scene files give its clip as a shape (`shape`: a box, a rounded box or an
+// ellipse, `size` big, centred `offset` from the entity); reshape_clip()
+// makes `clip` of them, as the described fields change.
+enum class ClipShape : u8 { None, Rect, RoundedRect, Ellipse };
+
 struct ClipGroup {
     ClipRegion clip;
     i32 layer = layer_value(RenderLayer::World);
     i32 order = 0;
     bool y_sort = false;
     f32 sort_y_offset = 0.0f;
+
+    ClipShape shape = ClipShape::None; // None: `clip` is set from C++
+    Vec2f size{64.0f, 64.0f};
+    Vec2f offset{};
+    f32 radius = 8.0f; // RoundedRect's corners
 };
+
+// `group.clip` made of its shape (one of None cuts nothing).
+void reshape_clip(ClipGroup& group);
 
 struct StaticRenderable {
     i32 marker = 1;
@@ -235,6 +295,8 @@ private:
     flecs::query<const Transform2D, const WorldTransform, const ShapeRenderer, const ClipGroup*> _shapes;
     flecs::query<const ParticleSystemComponent, const ClipGroup*> _particle_systems;
     flecs::query<const ParticleFieldComponent, const ClipGroup*> _particle_fields;
+    flecs::query<const Transform2D, const WorldTransform, const TilemapComponent, const ClipGroup*> _tilemaps;
+    flecs::query<const Transform2D, const WorldTransform, const TextRenderer, const ClipGroup*> _texts;
     // Clip groups' queues by owner; those used by the current collect, in order.
     std::unordered_map<u64, std::shared_ptr<RenderQueue>> _group_queues;
     std::vector<u64> _groups_used;
@@ -310,8 +372,18 @@ bool submit_shape(RenderQueue& queue,
                   const WorldTransform& transform,
                   const ShapeRenderer& shape,
                   const RenderView* view = nullptr);
+// Text (kin/ecs/text.hpp) drawn through `view`'s camera, as the world is:
+// its callback puts the camera back on (text is drawn in screen space).
+bool submit_text(RenderQueue& queue,
+                 flecs::entity entity,
+                 const WorldTransform& transform,
+                 const TextRenderer& text,
+                 const RenderView* view = nullptr);
 bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particles);
 bool submit_particles(RenderQueue& queue, const ParticleFieldComponent& field);
+// A tilemap (kin/ecs/tilemap.hpp) with its top left at `world`'s position;
+// false when it has no map to draw, or is hidden.
+bool submit_tilemap(RenderQueue& queue, const WorldTransform& world, const TilemapComponent& tilemap, const RenderView* view = nullptr);
 void collect_world(flecs::world& world,
                    RenderQueue& queue,
                    const EcsRenderFilter& include = {},

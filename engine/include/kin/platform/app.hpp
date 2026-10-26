@@ -106,6 +106,14 @@ public:
                  std::function<void(f32 alpha)> render);
     void quit() { _running = false; }
 
+    // Closing the last window (or the system asking the app to quit) asks the
+    // app first while held: the app goes on, close_asked() turns true, and the
+    // app quits (quit()) or stays (forget_close()), e.g. after asking about
+    // unsaved work. Not held (the default), the app stops at once.
+    void hold_close(bool held) { _hold_close = held; }
+    bool close_asked() const { return _close_asked; }
+    void forget_close() { _close_asked = false; }
+
     bool running() const { return _running; }
     bool headless() const { return _config.mode == AppMode::Headless; }
     const AppFrameStats& frame_stats() const { return _frame_stats; }
@@ -149,6 +157,8 @@ private:
     void pace_frame(u64& next_frame_ns);
     bool wait_for_change();
     bool _running = false;
+    bool _hold_close = false;
+    bool _close_asked = false;
     bool _wait_for_events = false;
     f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none
     i32 _settle_frames = 0; // frames still to draw after an event before waiting again

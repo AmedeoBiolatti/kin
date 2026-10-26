@@ -7,6 +7,34 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Bind assets that components name by path in 2D scenes (`Assets2D`, run by
+  `EcsScene`): textures, sprite catalogs, sounds and audio catalogs, and
+  particle catalogs, read again when their files change. Particle emitters
+  burst an authored effect at a rate where their entity is.
+- Describe 2D physics and particle components to scene files and tools, with
+  `choices` for string fields and nested-member fields. Add
+  `PhysicsWorldDef::units_per_meter` for worlds in points. Give prefab
+  instances physics bodies of their own, and remove `EcsPhysicsBridge`'s
+  observers with it (they could reach a destroyed `PhysicsWorld`).
+- Add hex tilemaps (`TileMap::grid`: pointy- or flat-top hexagons in offset
+  cells), drawn, picked, collided, filled and pathed by their hexagons; tileset
+  files (`.kintileset`) that maps name to share, their tiles cut from an image
+  (`TileDefinition::frame`); `TilemapComponent`, bound by `Assets2D` and drawn
+  by `WorldRenderState` where its entity is (`TilemapRenderOptions::origin`).
+- Add sprite animations to sprite catalogs (`animation` lines: frames, frames
+  a second, loop, once or ping-pong, frames held longer), played on an entity
+  by `SpriteAnimator` (`update_sprite_animators`), described to scene files.
+  Add `parse_sprite_catalog`, `serialize_sprite_catalog` and removing from a
+  catalog. `entry_of` may name another component's asset (`SpriteRenderer.asset`).
+- Add scene cameras (`CameraComponent`: zoom, limits, smoothing), drawn
+  through by `EcsScene` (`scene_cameras`, `view_size`; `scene_camera`,
+  `update_cameras`). Describe `ShapeRenderer` (shapes made from a `ShapeSpec`
+  or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
+  the new `TextRenderer` (text in the world, in a content font or the system's)
+  to scene files. Add `AssetType::Shape` (`.svg`).
+- Write f32 field values in their shortest form (`0.2`, not `0.20000000298`).
+- Add `input.drop` to the scene server and `App::hold_close` for editors.
+
 - Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
   ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,
   fullscreen and persistent settings with a storage-denied fallback.

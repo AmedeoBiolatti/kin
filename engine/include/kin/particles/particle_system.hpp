@@ -66,13 +66,14 @@ public:
     void render(Renderer2D& renderer, ParticleRenderOptions options) const;
 
     std::size_t active_count() const { return _particles.size(); }
+    // The catalog its effects are from (set_catalog's); null when none is.
+    const ParticleCatalog* catalog() const;
     bool empty() const { return _particles.empty(); }
     const std::vector<Particle>& particles() const { return _particles; }
 
 private:
     RngKey split_key();
     f32 random_range(ParticleRange range);
-    const ParticleCatalog* catalog() const;
 
     std::vector<Particle> _particles;
     RngKey _key = make_key(1);

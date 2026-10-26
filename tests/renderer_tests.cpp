@@ -1222,8 +1222,19 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
         }
         renderer->set_logical_size(160, 100);
         const auto units = window.size();
+        const auto pixels = window.pixel_size();
+        // The window's middle is the logical middle within a window pixel: the
+        // letterboxed scene is whole pixels, on whole pixels, so where the
+        // logical size is not (a 480 x 360 window at 150% is 721 x 541 pixels,
+        // where 100 units are 450.6 of them) its middle is off by part of one.
+        const float pixel = std::max(160.0f / static_cast<float>(pixels.x), 100.0f / static_cast<float>(pixels.y));
         const auto center = renderer->window_to_logical({units.x * .5f, units.y * .5f});
-        assert(std::abs(center.x - 80) < .01f && std::abs(center.y - 50) < .01f);
+        assert(std::abs(center.x - 80) <= pixel && std::abs(center.y - 50) <= pixel);
+        // And the two mappings undo each other exactly, so a click lands where it is drawn.
+        for (const kin::Vec2f logical : {kin::Vec2f{80.0f, 50.0f}, kin::Vec2f{0.0f, 0.0f}, kin::Vec2f{160.0f, 100.0f}, kin::Vec2f{13.0f, 71.0f}}) {
+            const auto there = renderer->window_to_logical(renderer->logical_to_window(logical));
+            assert(std::abs(there.x - logical.x) < .01f && std::abs(there.y - logical.y) < .01f);
+        }
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) throw;
         skip_or_require_gpu_test(test_name, e.what());

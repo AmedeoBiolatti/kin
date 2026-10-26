@@ -5060,6 +5060,68 @@ void test_text_input_scrolls_long_text() {
     assert(!field.state.active && field.state.scroll_x == 0.0f);
 }
 
+// Text fields in a dialog (a floating box, itself a box that is hit): a click
+// in one takes it, and the next one the other, as anywhere else.
+void test_widgets_in_a_floating_dialog() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::TextStyle style{.font = ui2::bitmap_font(), .scale = 1.0f, .color = colors::white};
+    ui2::TextInput name{.id = ui2::make_id("name")};
+    ui2::TextInput place{.id = ui2::make_id("place")};
+    for (ui2::TextInput* field : {&name, &place}) {
+        field->text_style = style;
+    }
+    name.state.text = "New Game";
+    ui2::BoxResult dialog;
+    ui2::BoxResult under;
+    const auto frame = [&](Vec2f pointer, bool press, std::string_view typed = {}) {
+        input.begin_frame();
+        input.set_mouse_pos(pointer);
+        input.set_mouse_held(MouseButton::Left, press); // pressed, then released
+        if (!typed.empty()) {
+            input.set_text_input(typed);
+        }
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 400, 300});
+        {
+            auto window = ui.box(ui2::make_id("window"), ui2::vbox().fill().passive());
+            {
+                auto u = ui.box(ui2::make_id("under"), ui2::vbox().fill()); // what the dialog covers
+                under = u;
+            }
+            auto backdrop = ui.box(ui2::make_id("backdrop"), ui2::vbox().size(400, 300).center().floating(ui2::UiFloat::Point, {0, 0}));
+            auto d = ui.box(ui2::make_id("dialog"), ui2::vbox().w(200).pad(10).gap(10));
+            dialog = d;
+            ui.widget(name, {.width = ui2::grow(), .height = ui2::fixed(24)});
+            ui.widget(place, {.width = ui2::grow(), .height = ui2::fixed(24)});
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    // The dialog is centred, 200 by 78 (10 + 24 + 10 + 24 + 10) from (100, 111):
+    // the fields at y 121 and 155.
+    for (int i = 0; i < 3; ++i) {
+        frame({200, 160}, false);
+    }
+    const Vec2f in_place{150, 167};
+    const Vec2f in_name{150, 133};
+    frame(in_place, false);
+    frame(in_place, true);
+    frame(in_place, false);
+    assert(place.state.active && !name.state.active);
+    assert(!under.hovered);
+    frame(in_place, false, "Here");
+    assert(place.state.text == "Here");
+    frame(in_name, false);
+    frame(in_name, true);
+    frame(in_name, false);
+    assert(name.state.active && !place.state.active);
+    frame(in_name, false, "!");
+    assert(name.state.text.size() == 9 && name.state.text.find('!') != std::string::npos); // at the caret clicked
+    static_cast<void>(dialog);
+}
+
 void test_system_font_oversample() {
     if (!ui2::system_ui_font_available()) {
         return; // a machine without a system TTF: nothing to compare
@@ -7275,6 +7337,7 @@ int main() {
     test_compose_window_drag_areas();
     test_compose_coloured_runs();
     test_text_input_scrolls_long_text();
+    test_widgets_in_a_floating_dialog();
     test_system_font_oversample();
     test_pixel_snapping_under_a_content_scale();
     test_ecs_bridge_button_click();

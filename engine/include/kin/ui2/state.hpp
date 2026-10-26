@@ -89,6 +89,7 @@ public:
 
     u64 frame() const { return _frame; }
     Id hot() const { return _hot; }
+    i32 hot_z() const { return _hot_z; } // the depth hot() was hit at
     Id active() const { return _active; }
     Id focused() const { return _focused; }
 
@@ -120,6 +121,7 @@ public:
 private:
     u64 _frame = 0;
     Id _hot{};
+    i32 _hot_z = 0;
     Id _active{};
     MouseButton _active_button = MouseButton::Left; // button that called set_active()
     Id _focused{};

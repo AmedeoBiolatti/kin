@@ -18,6 +18,9 @@ struct ComponentSchemaField {
     std::string category;
     std::string description;
     std::string units;
+    std::string asset_type; // an asset reference's kind of asset ("Image"); empty: any
+    std::string entry_of;   // names an entry of the asset this field of the component names
+    std::vector<std::string> choices; // the values a string field takes; empty: any
     bool readonly = false;
     bool hidden = false;
     std::optional<f64> min_value;

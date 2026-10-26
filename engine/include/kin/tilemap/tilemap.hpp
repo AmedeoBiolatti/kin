@@ -1,14 +1,17 @@
 #pragma once
 
 #include <kin/assets/asset_manager.hpp>
+#include <kin/core/hex.hpp>
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/render_layer.hpp>
 #include <kin/renderer/render_queue.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
+#include <kin/renderer/sprite_sheet.hpp>
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -18,6 +21,8 @@
 #include <vector>
 
 namespace kin {
+
+struct ShapeMesh;
 
 using TileMetadataValue = std::variant<bool, i32, f32, std::string>;
 
@@ -41,6 +46,10 @@ struct TileDefinition {
     Color color = Color::rgb(90, 90, 90);
     Color top_edge_color = Color::rgb(120, 120, 120);
     std::string sprite_id;
+    // Its frame of its tileset's image (TileSet::image, cut as TileSet::sheet
+    // says), from 0 at the top left, along the rows; -1: none. A sprite (in
+    // TilemapRenderOptions::sprites) is drawn before it; else its colour.
+    i32 frame = -1;
     Vec2f render_offset_px{};
     Vec2f render_size_px{};
 
@@ -57,6 +66,11 @@ struct TerrainVariant {
 struct TileSet {
     std::vector<TileDefinition> tiles;
     std::vector<TerrainVariant> terrain_variants;
+    // The image its tiles' frames are cut from: a content path, as scenes name
+    // assets ("images/tiles.png"), in frames of sheet.tile_w x sheet.tile_h
+    // (sheet.margin around them, sheet.spacing between). Empty: none.
+    std::string image;
+    SpriteSheetGrid sheet{};
 
     void clear();
     void resize(std::size_t count);
@@ -70,6 +84,22 @@ struct TileSet {
     void add_terrain_variant(std::string_view terrain, u8 mask, u16 tile_id, bool fallback = false);
     u16 terrain_tile(std::string_view terrain, u8 mask) const;
     u16 terrain_fallback_tile(std::string_view terrain) const;
+};
+
+// The shape of a map's cells: squares in rows and columns; or hexagons,
+// pointy-top (in rows, every other one half a hex right or left) or flat-top
+// (in columns), kept as the cols x rows offset cells of HexLayout. A hex
+// cell's box (tile_w x tile_h, what map_to_world() and tile_rect() give)
+// bounds its hexagon, and its tile's image is drawn in it.
+enum class TileShape : u8 { Square, Hex };
+
+struct TileGrid {
+    TileShape shape = TileShape::Square;
+    HexOrientation orientation = HexOrientation::PointyTop;
+    HexOffset offset = HexOffset::Odd; // which rows (pointy) or columns (flat) sit half a hex further on
+
+    bool hex() const { return shape == TileShape::Hex; }
+    friend constexpr bool operator==(TileGrid, TileGrid) = default;
 };
 
 struct TileCell {
@@ -123,6 +153,10 @@ struct TilemapRenderOptions {
     i32 chunk_rows = 16;
     u64 pass_mask = render_pass_mask::world;
     const SpriteCatalog* sprites = nullptr;
+    // The tileset's image cut in frames (TileDefinition::frame), when it has one.
+    const SpriteSheet* sheet = nullptr;
+    // Where the map's top left is drawn (its cells' world positions plus this).
+    Vec2f origin{};
 };
 
 class TileMap {
@@ -131,7 +165,12 @@ public:
     i32 rows = 0;
     i32 tile_w = 16;
     i32 tile_h = 16;
+    TileGrid grid;
     TileSet tileset;
+    // The tileset file (.kintileset, a content path) its tiles are from,
+    // shared with other maps; empty when the map keeps its own. A map naming
+    // one is saved naming it (not with its tiles).
+    std::string tileset_source;
     std::vector<TileLayer> layers;
     std::vector<TilePattern> patterns;
     std::vector<std::string> terrain_diagnostics;
@@ -171,6 +210,7 @@ public:
     TileCell cell(std::string_view layer_id, Vec2i cell) const;
     std::vector<Vec2i> used_cells(std::string_view layer_id = {}) const;
     TileRect used_rect(std::string_view layer_id = {}) const;
+    // Its neighbours in the map: four (square cells) or six (hexes).
     std::vector<Vec2i> neighbor_cells(Vec2i cell) const;
     const std::vector<TileRect>& dirty_regions(std::string_view layer_id) const;
     bool layer_dirty(std::string_view layer_id) const;
@@ -197,15 +237,26 @@ public:
     const TileDefinition* tile(std::string_view id) const;
     u16 tile_id(std::string_view id) const;
 
+    // A square map's column and row at a world x and y (a hex map's cells are
+    // not in straight columns: world_to_map() finds them).
     i32 world_col(f32 wx) const;
     i32 world_row(f32 wy) const;
+    // The cell at a point (a hex map's: the hexagon it is in).
     Vec2i world_to_map(Vec2f world_pos) const;
+    // A cell's box: its top left, its centre, all of it.
     Vec2f map_to_world(Vec2i cell) const;
     Vec2f tile_center(Vec2i cell) const;
-    Vec2f world_size() const;
     Rectf tile_rect(i32 col, i32 row) const;
+    // A hex cell's hexagon's corners (a square cell's four).
+    std::vector<Vec2f> tile_outline(Vec2i cell) const;
+    // Around every cell, from (0, 0).
+    Vec2f world_size() const;
     bool in_bounds(i32 col, i32 row) const;
+    // How a hex map's cells are laid out (their centres, sizes, offsets).
+    HexLayout hex_layout() const;
 
+    // Drawn: each tile its sprite, its frame of the tileset's image, or its
+    // colour (a hex map's, its hexagon filled).
     void submit(RenderQueue& queue, TilemapRenderOptions options = {}) const;
     void submit(RenderQueue& queue, const RenderView& view, TilemapRenderOptions options = {}) const;
     void render(Renderer2D& renderer, TilemapRenderOptions options = {}) const;
@@ -218,6 +269,7 @@ private:
         bool draw_top_edge = true;
         u64 pass_mask = render_pass_mask::world;
         const SpriteCatalog* sprites = nullptr;
+        const SpriteSheet* sheet = nullptr;
 
         friend constexpr bool operator==(RenderCacheKey, RenderCacheKey) = default;
     };
@@ -244,8 +296,11 @@ private:
     Vec2i effective_render_chunk_size(TilemapRenderOptions options) const;
     void reset_render_cache_chunks(LayerRenderCache& cache, const RenderCacheKey& key, Vec2i chunk_size, i32 chunk_cols, i32 chunk_rows) const;
     void rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& layer, const RenderCacheKey& key) const;
-    void submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key) const;
+    void submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key,
+                               Vec2f origin) const;
     void submit_cached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key, TilemapRenderOptions options) const;
+    // A hexagon filling a hex cell's box (centred on the origin), shared by every colour tile.
+    std::shared_ptr<const ShapeMesh> hex_tile_mesh() const;
     LayerRenderCache* render_cache(std::string_view layer_id) const;
     LayerRenderCache& render_cache_for(std::string_view layer_id) const;
     void reset_render_cache(LayerRenderCache& cache) const;
@@ -253,10 +308,25 @@ private:
 
     Vec2i _render_chunk_size{16, 16};
     mutable std::vector<LayerRenderCache> _render_caches;
+    mutable std::shared_ptr<const ShapeMesh> _hex_mesh;
+    mutable Vec2i _hex_mesh_size{};
+    mutable HexOrientation _hex_mesh_orientation = HexOrientation::PointyTop;
 };
 
+// A map file (.kintilemap: JSON, format kin.tilemap; or the older text form).
+// A map naming a tileset file (tileset_source) is read without its tiles; the
+// second form reads them too, from `content_root`; `error`, when given, says
+// why either could not be read (an empty map then).
 TileMap load_tilemap(const std::filesystem::path& path);
+TileMap load_tilemap(const std::filesystem::path& path, const std::filesystem::path& content_root, std::string* error = nullptr);
 bool save_tilemap(const TileMap& map, const std::filesystem::path& path);
 void register_tilemap_loader(AssetManager& assets);
+
+// A tileset in a file of its own (.kintileset: JSON, format kin.tileset), which
+// maps name (TileMap::tileset_source) to share it: its tiles, its terrain
+// variants, the image its tiles' frames are cut from. Empty, and `error` says
+// why, when it can't be read.
+TileSet load_tileset(const std::filesystem::path& path, std::string* error = nullptr);
+bool save_tileset(const TileSet& tileset, const std::filesystem::path& path);
 
 } // namespace kin

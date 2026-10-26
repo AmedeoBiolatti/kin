@@ -46,6 +46,7 @@ Id make_id(Id parent, u64 value) {
 
 void State::begin_frame() {
     _hot = _has_hit ? _hit_id : Id{};
+    _hot_z = _has_hit ? _hit_z : 0;
     _has_hit = false;
     _hit_id = {};
     _hit_z = 0;
@@ -56,6 +57,7 @@ void State::begin_frame() {
 void State::clear() {
     _frame = 0;
     _hot = {};
+    _hot_z = 0;
     _active = {};
     _active_button = MouseButton::Left;
     _focused = {};

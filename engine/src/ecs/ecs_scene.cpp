@@ -1,10 +1,14 @@
 #include <kin/ecs/ecs_scene.hpp>
 
+#include <kin/assets/content.hpp>
+#include <kin/ecs/camera.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/runtime/debug_options.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <string>
 
 namespace kin {
@@ -57,9 +61,44 @@ WorldRenderState& EcsScene::render_state() {
     return *_render_state;
 }
 
+void EcsScene::add_asset_binder(std::string name, Assets2D::Binder binder) {
+    if (_assets) {
+        _assets->add_binder(name, binder);
+    }
+    const auto found = std::ranges::find(_asset_binders, name, &std::pair<std::string, Assets2D::Binder>::first);
+    if (found != _asset_binders.end()) {
+        found->second = std::move(binder);
+    } else {
+        _asset_binders.emplace_back(std::move(name), std::move(binder));
+    }
+}
+
+void EcsScene::bind_assets(SceneContext& ctx) {
+    if (!_assets) {
+        std::filesystem::path root = _render_config.asset_root;
+        if (root.empty()) {
+            root = content_root();
+        }
+        _assets = std::make_unique<Assets2D>(ctx.renderer, root.empty() ? std::filesystem::path(".") : root);
+        for (const auto& [name, binder] : _asset_binders) {
+            _assets->add_binder(name, binder);
+        }
+    }
+    if (_render_config.asset_check_frames > 0 && ++_asset_frames >= _render_config.asset_check_frames) {
+        _asset_frames = 0;
+        _assets->reload_changed();
+    }
+    if (_assets->bind(ecs())) {
+        _static_render_cache.mark_dirty("assets");
+    }
+}
+
 void EcsScene::render(SceneContext& ctx) {
     if (!_render_config.enabled) {
         return;
+    }
+    if (_render_config.assets) {
+        bind_assets(ctx);
     }
 
     RuntimeDebugOptions* debug = ctx.debug_options;
@@ -77,6 +116,17 @@ void EcsScene::render(SceneContext& ctx) {
         DebugStepTimer timer{timing_debug, "render.scene.camera"};
         camera = _render_config.camera_callback(ecs(), ctx);
         camera_ptr = &camera;
+    } else if (_render_config.scene_cameras) {
+        DebugStepTimer timer{timing_debug, "render.scene.camera"};
+        Vec2f size = _render_config.view_size;
+        if (size.x <= 0.0f || size.y <= 0.0f) {
+            const Vec2i points = ctx.window.size();
+            size = {static_cast<f32>(points.x), static_cast<f32>(points.y)};
+        }
+        if (std::optional<Camera2D> found = scene_camera(ecs(), size)) {
+            camera = *found;
+            camera_ptr = &camera;
+        }
     }
 
     RenderProfile profile;

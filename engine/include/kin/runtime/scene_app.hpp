@@ -45,6 +45,9 @@ struct HeadlessOptions {
     std::string server_mode = "driven";
     std::string server_transport = "stdio";
     i32 server_port = 8080;
+    // --inspect: played in its window as usual, and answering server commands
+    // on stdin/stdout between frames, for a tool watching it (LiveInspector).
+    bool inspect = false;
     std::string log_path;
     std::optional<LogLevel> log_level;
     std::optional<LogFormat> log_format;

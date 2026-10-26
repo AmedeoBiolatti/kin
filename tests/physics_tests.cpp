@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <ranges>
+#include <vector>
 
 namespace {
 
@@ -171,6 +173,55 @@ int main() {
 
         assert(near(world_a.position(body_a).x, world_b.position(body_b).x, 0.001f));
         assert(near(world_a.position(body_a).y, world_b.position(body_b).y, 0.001f));
+    }
+
+    {
+        // In points, 32 to the metre: Box2D sees a 1 m crate moving at 50 m/s,
+        // and everything given and given back is in points.
+        constexpr kin::f32 dt = 1.0f / 60.0f;
+        kin::PhysicsWorld world({.gravity = {0.0f, 9.8f * 32.0f}, .units_per_meter = 32.0f});
+        assert(world.units_per_meter() == 32.0f);
+        kin::PhysicsBody crate = world.create_body({
+            .type = kin::PhysicsBodyType::Dynamic,
+            .position = {64.0f, 32.0f},
+            .linear_velocity = {1600.0f, 0.0f},
+            .gravity_scale = 0.0f,
+        });
+        world.add_fixture(crate, {.shape = kin::PhysicsShape::box({16.0f, 16.0f})});
+        world.step(dt);
+        assert(near(world.position(crate).x, 64.0f + 1600.0f * dt, 0.1f));
+        assert(near(world.linear_velocity(crate).x, 1600.0f, 0.5f));
+
+        const std::vector<kin::PhysicsDebugShape> shapes = world.debug_shapes();
+        assert(shapes.size() == 1 && shapes[0].points.size() == 4);
+        const auto [left, right] = std::ranges::minmax(shapes[0].points | std::views::transform([](kin::Vec2f p) { return p.x; }));
+        assert(near(right - left, 32.0f, 0.1f));
+        const kin::Vec2f at = world.position(crate);
+        assert(!world.query_point(at).empty());
+        assert(world.query_point({at.x + 20.0f, at.y}).empty());
+        assert(!world.query_aabb({at.x + 10.0f, at.y - 2.0f, 20.0f, 4.0f}).empty());
+        const std::vector<kin::PhysicsRaycastHit> hits = world.raycast({0.0f, at.y}, {400.0f, at.y});
+        assert(!hits.empty() && near(hits[0].point.x, at.x - 16.0f, 0.1f));
+
+        kin::PhysicsBody ball = world.create_body({.type = kin::PhysicsBodyType::Dynamic, .position = {300.0f, 0.0f}});
+        world.add_fixture(ball, {.shape = kin::PhysicsShape::circle(8.0f)});
+        for (int i = 0; i < 60; ++i) {
+            world.step(dt);
+        }
+        assert(near(world.linear_velocity(ball).y, 9.8f * 32.0f, 1.0f)); // a second's fall
+        const std::vector<kin::PhysicsDebugShape> round = world.debug_shapes();
+        assert(std::ranges::any_of(round, [](const kin::PhysicsDebugShape& s) { return s.type == kin::PhysicsDebugShapeType::Circle && near(s.radius, 8.0f, 0.01f); }));
+
+        // A unit a metre (the default): no body moves more than 2 a step.
+        kin::PhysicsWorld metres;
+        assert(metres.units_per_meter() == 1.0f);
+        kin::PhysicsBody fast = metres.create_body({.type = kin::PhysicsBodyType::Dynamic, .linear_velocity = {1600.0f, 0.0f}});
+        metres.add_fixture(fast, {.shape = kin::PhysicsShape::box({16.0f, 16.0f})});
+        metres.step(dt);
+        assert(metres.position(fast).x <= 2.001f);
+
+        assert(kin::PhysicsWorld({.units_per_meter = 0.0f}).units_per_meter() == 1.0f);
+        assert(kin::PhysicsWorld({.units_per_meter = -4.0f}).units_per_meter() == 1.0f);
     }
 
     return 0;

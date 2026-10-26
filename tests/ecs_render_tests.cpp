@@ -1,15 +1,37 @@
+#include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
+#include <kin/ecs/assets2d.hpp>
+#include <kin/ecs/camera.hpp>
+#include <kin/ecs/ecs_scene.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/text.hpp>
+#include <kin/ecs/tilemap.hpp>
+#include <kin/scene/scene_asset.hpp>
+#include <kin/tilemap/tilemap.hpp>
+#include <kin/platform/app.hpp>
+#include <kin/platform/window.hpp>
+#include <kin/renderer/sprite_catalog.hpp>
+#include <kin/scene/scene_manager.hpp>
+#if KIN_ENABLE_AUDIO
+#include <kin/audio/audio_catalog.hpp>
+#include <kin/audio/backend.hpp>
+#include <kin/ecs/audio.hpp>
+#endif
 #include <kin/ecs/particles.hpp>
 #include <kin/platform/log.hpp>
 
+#include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #ifdef _MSC_VER
 #include <crtdbg.h>
 #endif
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -958,6 +980,461 @@ void test_one_shot_submit_reuses_scratch_queue_output() {
 
 } // namespace
 
+#if KIN_ENABLE_IMAGE_IO
+// Components naming images get them; a file saved again is read again; one
+// that could not be read is told, and read once it is there; a game's own
+// binders run too; textures set from C++ are left alone.
+void test_assets2d_binds_and_reloads_images() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_assets2d_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "images");
+    kin::Image image{.size = {2, 3}, .rgba = std::vector<kin::u8>(24, 255)};
+    assert(kin::save_image(image, dir / "images" / "hero.png"));
+
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::EcsEntity hero = world.entity().set(kin::Transform2D{}).set(kin::TextureRenderer{.asset = {.id = "images/hero.png"}});
+    kin::EcsEntity missing = world.entity().set(kin::Transform2D{}).set(kin::TextureRenderer{.asset = {.id = "images/later.png"}});
+    const std::vector<kin::u8> pixel(4, 255);
+    const kin::Texture own = renderer.create_texture_from_rgba(pixel.data(), {1, 1});
+    kin::EcsEntity drawn = world.entity().set(kin::Transform2D{}).set(kin::TextureRenderer{.texture = own});
+
+    assert(assets.bind(world));
+    assert(hero.get<kin::TextureRenderer>()->texture.size() == (kin::Vec2i{2, 3}));
+    assert(!missing.get<kin::TextureRenderer>()->texture && assets.problems().contains("images/later.png"));
+    assert(drawn.get<kin::TextureRenderer>()->texture == own);
+    assert(!assets.bind(world)); // nothing changed
+    // One texture for every component naming the image.
+    kin::EcsEntity twin = world.entity().set(kin::Transform2D{}).set(kin::TextureRenderer{.asset = {.id = "images/hero.png"}});
+    assert(assets.bind(world) && twin.get<kin::TextureRenderer>()->texture == hero.get<kin::TextureRenderer>()->texture);
+
+    // Saved again (another size), and the missing one made.
+    image = {.size = {4, 4}, .rgba = std::vector<kin::u8>(64, 128)};
+    assert(kin::save_image(image, dir / "images" / "hero.png"));
+    fs::last_write_time(dir / "images" / "hero.png", fs::last_write_time(dir / "images" / "hero.png") + std::chrono::seconds(2));
+    assert(kin::save_image(image, dir / "images" / "later.png"));
+    std::vector<std::string> changed = assets.reload_changed();
+    std::ranges::sort(changed);
+    assert((changed == std::vector<std::string>{"images/hero.png", "images/later.png"}));
+    assert(assets.bind(world));
+    assert(hero.get<kin::TextureRenderer>()->texture.size() == (kin::Vec2i{4, 4}));
+    assert(missing.get<kin::TextureRenderer>()->texture && assets.problems().empty());
+    assert(assets.reload_changed().empty());
+
+    // A game's own binder.
+    int binds = 0;
+    assets.add_binder("Counter", [&](kin::EcsWorld&, kin::Assets2D&) { ++binds; });
+    assets.add_binder("Counter", [&](kin::EcsWorld&, kin::Assets2D&) { binds += 10; }); // replaced
+    assets.bind(world);
+    assert(binds == 10);
+    fs::remove_all(dir);
+}
+
+// A sprite catalog named by SpriteRenderers: bound (each keeping its sprite's
+// id), drawn, and bound again when one of the catalog's images changes.
+void test_assets2d_binds_sprite_catalogs() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_assets2d_sprites_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "images");
+    fs::create_directories(dir / "sprites");
+    assert(kin::save_image({.size = {8, 4}, .rgba = std::vector<kin::u8>(128, 255)}, dir / "images" / "hero.png"));
+    {
+        std::ofstream out(dir / "sprites" / "hero.kinsprites");
+        out << "texture hero images/hero.png\nsprite idle hero 0 0 4 4\nsprite run hero 4 0 4 4\n";
+    }
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::SpriteRenderer idle{.asset = {.id = "sprites/hero.kinsprites"}};
+    idle.sprite.id = "idle";
+    kin::SpriteRenderer run = idle;
+    run.sprite.id = "run";
+    kin::EcsEntity a = world.entity().set(kin::Transform2D{}).set(idle);
+    kin::EcsEntity b = world.entity().set(kin::Transform2D{}).set(run);
+    assert(assets.bind(world));
+    const kin::SpriteCatalog* catalog = a.get<kin::SpriteRenderer>()->sprite.catalog;
+    assert(catalog && catalog == b.get<kin::SpriteRenderer>()->sprite.catalog);
+    assert(a.get<kin::SpriteRenderer>()->sprite.id == "idle" && b.get<kin::SpriteRenderer>()->sprite.valid());
+    kin::ResolvedSprite resolved;
+    assert(catalog->resolve("run", resolved) && resolved.sprite.source.x == 4.0f);
+
+    // An image of the catalog saved again: the catalog is read again, and given out.
+    assert(kin::save_image({.size = {8, 8}, .rgba = std::vector<kin::u8>(256, 9)}, dir / "images" / "hero.png"));
+    fs::last_write_time(dir / "images" / "hero.png", fs::last_write_time(dir / "images" / "hero.png") + std::chrono::seconds(2));
+    const std::vector<std::string> changed = assets.reload_changed();
+    assert(std::ranges::find(changed, std::string("sprites/hero.kinsprites")) != changed.end());
+    assert(assets.bind(world));
+    assert(a.get<kin::SpriteRenderer>()->sprite.catalog != catalog && a.get<kin::SpriteRenderer>()->sprite.valid());
+    // One that is not there: told, and none bound.
+    kin::SpriteRenderer lost{.asset = {.id = "sprites/lost.kinsprites"}};
+    kin::EcsEntity c = world.entity().set(kin::Transform2D{}).set(lost);
+    assets.bind(world);
+    assert(!c.get<kin::SpriteRenderer>()->sprite.catalog && assets.problems().contains("sprites/lost.kinsprites"));
+    fs::remove_all(dir);
+}
+
+void test_assets2d_binds_particles() {
+    // A particle catalog named by an emitter and a field: the emitter bursts
+    // its effect where its entity is (as it starts, then at its rate); the
+    // field is made from the catalog's, its area from its entity.
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_assets2d_particles_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "particles");
+    const auto write_catalog = [&](int sparks) {
+        std::ofstream out(dir / "particles" / "fx.kinparticles");
+        out << "effect spark " << sparks << " 10 20 1 1 2 0 255 255 255 255 255 255 255 0 0 0 100 0\n"
+            << "field stars 5 7 0 0 100 50 -1 1 -1 1 1 2 100 255 255 255 255 255 1 1 100 0\n";
+    };
+    write_catalog(4);
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::ParticleSystemComponent emitter;
+    emitter.asset = {.id = "particles/fx.kinparticles"};
+    emitter.effect = "spark";
+    emitter.rate = 10.0f;
+    emitter.burst_at_start = true;
+    emitter.offset = {5.0f, 0.0f};
+    kin::EcsEntity a = world.entity().set(kin::Transform2D{.pos = {100.0f, 50.0f}}).set(std::move(emitter));
+    kin::ParticleFieldComponent stars;
+    stars.asset = {.id = "particles/fx.kinparticles"};
+    stars.name = "stars";
+    kin::EcsEntity b = world.entity().set(kin::Transform2D{.pos = {200.0f, 300.0f}}).set(std::move(stars));
+
+    // Nothing bursts before its catalog is bound.
+    kin::update_particles(world, 0.01f);
+    assert(a.get<kin::ParticleSystemComponent>()->system.empty() && !a.get<kin::ParticleSystemComponent>()->started);
+    assert(assets.bind(world));
+    const kin::ParticleCatalog* catalog = a.get<kin::ParticleSystemComponent>()->system.catalog();
+    assert(catalog && catalog->has_effect("spark"));
+    const kin::ParticleFieldComponent* field = b.get<kin::ParticleFieldComponent>();
+    assert(field->bound && field->state.particles.size() == 5);
+    assert(field->state.definition.area.x == 200.0f && field->state.definition.area.y == 300.0f);
+    assert(!assets.bind(world)); // as bound: nothing changes
+
+    // As it starts, one burst where it is; the next a tenth of a second on.
+    kin::update_particles(world, 0.01f);
+    const kin::ParticleSystem& system = a.get<kin::ParticleSystemComponent>()->system;
+    assert(system.active_count() == 4);
+    assert((system.particles()[0].position == kin::Vec2f{105.0f, 50.0f}));
+    kin::update_particles(world, 0.05f);
+    assert(system.active_count() == 4);
+    kin::update_particles(world, 0.05f);
+    assert(system.active_count() == 8);
+    // Not emitting: none more.
+    a.get_mut<kin::ParticleSystemComponent>()->emitting = false;
+    kin::update_particles(world, 0.3f);
+    assert(a.get<kin::ParticleSystemComponent>()->system.active_count() == 8);
+
+    // The catalog saved again: read again, given out; its particles kept, the field made again.
+    const kin::ParticleField* first_field = field->bound;
+    write_catalog(6);
+    fs::last_write_time(dir / "particles" / "fx.kinparticles", fs::last_write_time(dir / "particles" / "fx.kinparticles") + std::chrono::seconds(2));
+    assert(!assets.reload_changed().empty());
+    assert(assets.bind(world));
+    assert(a.get<kin::ParticleSystemComponent>()->system.catalog() != catalog);
+    assert(a.get<kin::ParticleSystemComponent>()->system.active_count() == 8);
+    assert(b.get<kin::ParticleFieldComponent>()->bound && b.get<kin::ParticleFieldComponent>()->bound != first_field);
+    a.get_mut<kin::ParticleSystemComponent>()->emitting = true;
+    kin::update_particles(world, 0.1f);
+    assert(a.get<kin::ParticleSystemComponent>()->system.active_count() == 14);
+
+    // An effect or a field the catalog has not: nothing burst, no field made.
+    kin::ParticleSystemComponent missing;
+    missing.asset = {.id = "particles/fx.kinparticles"};
+    missing.effect = "nope";
+    missing.rate = 10.0f;
+    kin::EcsEntity c = world.entity().set(kin::Transform2D{}).set(std::move(missing));
+    kin::ParticleFieldComponent nowhere;
+    nowhere.asset = {.id = "particles/fx.kinparticles"};
+    nowhere.name = "nope";
+    kin::EcsEntity d = world.entity().set(kin::Transform2D{}).set(std::move(nowhere));
+    assets.bind(world);
+    kin::update_particles(world, 0.5f);
+    assert(c.get<kin::ParticleSystemComponent>()->system.empty());
+    assert(!d.get<kin::ParticleFieldComponent>()->bound && d.get<kin::ParticleFieldComponent>()->state.particles.empty());
+    fs::remove_all(dir);
+}
+
+void test_assets2d_binds_tilemaps() {
+    // A map naming a tileset file cut from an image: bound with its tiles and
+    // the image as a sheet, drawn with its top left where its entity is; read
+    // again when its tileset changes.
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_assets2d_tilemaps_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "images");
+    fs::create_directories(dir / "tilesets");
+    fs::create_directories(dir / "maps");
+    kin::Image image{.size = {32, 16}, .rgba = std::vector<kin::u8>(32 * 16 * 4, 255)};
+    assert(kin::save_image(image, dir / "images" / "tiles.png"));
+    kin::TileSet tiles;
+    tiles.image = "images/tiles.png";
+    tiles.sheet = {.tile_w = 16, .tile_h = 16, .spacing = 0, .margin = 0};
+    const kin::u16 grass = tiles.ensure_tile("grass");
+    tiles.tile(grass)->frame = 1;
+    assert(kin::save_tileset(tiles, dir / "tilesets" / "ground.kintileset"));
+    kin::TileMap map;
+    map.resize(3, 2);
+    map.tileset_source = "tilesets/ground.kintileset";
+    map.tileset = tiles;
+    map.set(0, 0, grass);
+    map.set(2, 1, grass);
+    assert(kin::save_tilemap(map, dir / "maps" / "level.kintilemap"));
+
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world); // as a scene file reads it: described
+    assert(world.components().find("TilemapComponent"));
+    kin::EcsEntity level = world.entity()
+                               .set(kin::Transform2D{.pos = {100.0f, 40.0f}})
+                               .set(kin::TilemapComponent{.asset = {.id = "maps/level.kintilemap"}});
+    assert(assets.bind(world));
+    const kin::TilemapComponent* bound = level.get<kin::TilemapComponent>();
+    assert(bound->tilemap && bound->tilemap->map.tile_id("grass") == grass && bound->tilemap->sheet.valid());
+    assert(bound->tilemap->sheet.cols() == 2);
+    assert(!assets.bind(world)); // as bound: nothing changes
+
+    kin::WorldRenderState state{world};
+    state.propagate_transforms();
+    kin::RenderQueue queue{kin::RenderSortMode::Submission};
+    state.collect_all(queue);
+    assert(queue.size() == 2);
+    assert(queue.commands()[0].type == kin::RenderCommandType::Sprite && queue.commands()[0].rect.x == 100.0f &&
+           queue.commands()[0].rect.y == 40.0f && queue.commands()[0].source.x == 16.0f);
+    assert(queue.commands()[1].rect.x == 132.0f && queue.commands()[1].rect.y == 56.0f);
+
+    // The tileset saved again (another frame): the map read again, given out.
+    const std::shared_ptr<const kin::TilemapAsset> first = bound->tilemap;
+    tiles.tile(grass)->frame = 0;
+    assert(kin::save_tileset(tiles, dir / "tilesets" / "ground.kintileset"));
+    fs::last_write_time(dir / "tilesets" / "ground.kintileset", fs::last_write_time(dir / "tilesets" / "ground.kintileset") + std::chrono::seconds(2));
+    assert(!assets.reload_changed().empty());
+    assert(assets.bind(world));
+    assert(level.get<kin::TilemapComponent>()->tilemap != first);
+    assert(level.get<kin::TilemapComponent>()->tilemap->map.tileset.tile(grass)->frame == 0);
+
+    // A map that is not there: told, nothing drawn.
+    kin::EcsEntity lost = world.entity().set(kin::Transform2D{}).set(kin::TilemapComponent{.asset = {.id = "maps/missing.kintilemap"}});
+    assets.bind(world);
+    assert(!lost.get<kin::TilemapComponent>()->tilemap && assets.problems().contains("maps/missing.kintilemap"));
+    fs::remove_all(dir);
+}
+
+#if KIN_ENABLE_AUDIO
+void write_test_wav(const std::filesystem::path& path) {
+    std::ofstream out(path, std::ios::binary);
+    const auto u32 = [&](kin::u32 v) { for (int i = 0; i < 4; ++i) out.put(static_cast<char>((v >> (8 * i)) & 0xff)); };
+    const auto u16 = [&](kin::u16 v) { for (int i = 0; i < 2; ++i) out.put(static_cast<char>((v >> (8 * i)) & 0xff)); };
+    const kin::u32 frames = 4800; // a tenth of a second, mono 16-bit at 48 kHz
+    out.write("RIFF", 4);
+    u32(36 + frames * 2);
+    out.write("WAVEfmt ", 8);
+    u32(16);
+    u16(1);
+    u16(1);
+    u32(48000);
+    u32(96000);
+    u16(2);
+    u16(16);
+    out.write("data", 4);
+    u32(frames * 2);
+    for (kin::u32 i = 0; i < frames; ++i) {
+        u16(static_cast<kin::u16>(i % 50 < 25 ? 6000 : -6000));
+    }
+}
+
+// AudioEmitters naming a sound file, or a cue of a catalog, play from their own
+// catalogs.
+void test_assets2d_binds_audio_emitters() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_assets2d_audio_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "audio");
+    write_test_wav(dir / "audio" / "hum.wav");
+    {
+        std::ofstream out(dir / "audio" / "sounds.kinaudio");
+        out << "bus master 1\nbus sfx 1 master\nclip hum hum.wav\ncue buzz sound sfx loop=true clips=hum\n";
+    }
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::EcsEntity file = world.entity().set(kin::Transform2D{}).set(kin::AudioEmitter{.asset = {.id = "audio/hum.wav"}});
+    kin::EcsEntity cue = world.entity().set(kin::Transform2D{}).set(kin::AudioEmitter{.cue = "buzz", .asset = {.id = "audio/sounds.kinaudio"}});
+    kin::EcsEntity none = world.entity().set(kin::Transform2D{}).set(kin::AudioEmitter{.cue = "buzz"});
+    assert(assets.bind(world));
+    const kin::AudioCatalog* own = file.get<kin::AudioEmitter>()->catalog;
+    assert(own && own->cue("audio/hum.wav") && cue.get<kin::AudioEmitter>()->catalog->cue("buzz"));
+    assert(!none.get<kin::AudioEmitter>()->catalog);
+
+    kin::AudioEngine audio{kin::create_null_audio_backend()};
+    kin::update_audio_emitters(world, audio);
+    assert(file.get<kin::AudioEmitter>()->playing && cue.get<kin::AudioEmitter>()->playing);
+    assert(!none.get<kin::AudioEmitter>()->playing); // no catalog of its own, none given
+    fs::remove_all(dir);
+}
+#endif
+
+// An EcsScene binds what its components name before it draws, from its asset
+// root: a scene file naming an image shows it, with no code of the game's.
+void test_ecs_scene_binds_assets() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_ecs_scene_assets_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const kin::Image image{.size = {5, 7}, .rgba = std::vector<kin::u8>(140, 200)};
+    assert(kin::save_image(image, dir / "hero.png"));
+
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "assets", .width = 32, .height = 32, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    kin::SceneContext ctx{.app = app, .window = window, .renderer = renderer, .input = app.input(), .scenes = scenes};
+    kin::EcsScene scene;
+    scene.render_config().enabled = true;
+    scene.render_config().asset_root = dir;
+    kin::EcsEntity hero = scene.ecs().entity().set(kin::Transform2D{}).set(kin::TextureRenderer{.asset = {.id = "hero.png"}});
+    int binds = 0;
+    scene.add_asset_binder("Counter", [&](kin::EcsWorld&, kin::Assets2D&) { ++binds; });
+    assert(!scene.assets());
+    scene.render(ctx);
+    assert(scene.assets() && scene.assets()->root() == dir && binds == 1);
+    assert(hero.get<kin::TextureRenderer>()->texture.size() == (kin::Vec2i{5, 7}));
+    scene.render_config().assets = false; // off: left as they are
+    scene.render(ctx);
+    assert(binds == 1);
+    fs::remove_all(dir);
+}
+#endif
+
+// A scene's camera: where its entity is, zoomed, kept within its limits, and
+// catching its entity up when it smooths.
+void test_scene_cameras() {
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    assert(!kin::scene_camera(world, {320.0f, 180.0f}));
+    kin::EcsEntity spare = world.entity().set(kin::Transform2D{.pos = {-50.0f, 0.0f}}).set(kin::CameraComponent{.current = false});
+    kin::EcsEntity player = world.entity().set(kin::Transform2D{.pos = {500.0f, 300.0f}});
+    kin::EcsEntity follow = world.entity().set(kin::Transform2D{.pos = {0.0f, -20.0f}, .rotation = 10.0f}).set(kin::CameraComponent{.zoom = 2.0f});
+    follow.raw().child_of(player.raw());
+    std::optional<kin::Camera2D> camera = kin::scene_camera(world, {320.0f, 180.0f});
+    assert(camera && near(camera->center(), {500.0f, 280.0f}) && near(camera->zoom, 2.0f) && near(camera->rotation, 10.0f));
+    assert(near(camera->world_to_screen({500.0f, 280.0f}), {160.0f, 90.0f}));
+    (void)spare;
+
+    // Limited to 0..400 x 0..200: a 320 x 180 view (zoom 1) stops 160 and 90 in.
+    follow.set(kin::CameraComponent{.limited = true, .limit_min = {0.0f, 0.0f}, .limit_max = {400.0f, 200.0f}});
+    camera = kin::scene_camera(world, {320.0f, 180.0f});
+    assert(near(camera->center(), {240.0f, 110.0f}));
+    // Narrower than the view: centred on them.
+    follow.set(kin::CameraComponent{.limited = true, .limit_min = {0.0f, 0.0f}, .limit_max = {100.0f, 1000.0f}});
+    assert(near(kin::scene_camera(world, {320.0f, 180.0f})->center().x, 50.0f));
+
+    // Smoothing: placed at once, then most of the way (63%) in its time.
+    follow.set(kin::Transform2D{}).set(kin::CameraComponent{.smoothing = 0.5f});
+    kin::update_cameras(world, 0.016f);
+    assert(near(kin::scene_camera(world, {320.0f, 180.0f})->center(), {500.0f, 300.0f}));
+    player.set(kin::Transform2D{.pos = {600.0f, 300.0f}});
+    kin::update_cameras(world, 0.5f);
+    const kin::Vec2f centre = kin::scene_camera(world, {320.0f, 180.0f})->center();
+    assert(std::abs(centre.x - (500.0f + 100.0f * (1.0f - std::exp(-1.0f)))) < 0.01f && near(centre.y, 300.0f));
+}
+
+// Shapes, clips and text as a scene file gives them: described fields, made
+// into meshes, clips and fonts; the text drawn through the camera.
+void test_scene_shapes_clips_and_text() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_scene_shapes_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        std::ofstream svg(dir / "star.svg");
+        svg << R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 20"><rect x="0" y="0" width="10" height="20" fill="#ff0000"/></svg>)";
+    }
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const std::string scene = R"json({
+  "schema": "kin.scene/1",
+  "name": "Parts",
+  "entities": [
+    {"id": "ball", "components": {"Transform2D": {"pos": {"x": 100, "y": 50}},
+      "ShapeRenderer": {"shape": "ellipse", "size": {"x": 40, "y": 20}, "stroke": {"r": 0, "g": 0, "b": 0, "a": 255}, "stroke_width": 2}}},
+    {"id": "badge", "components": {"Transform2D": {},
+      "ShapeRenderer": {"shape": "svg", "asset": "star.svg", "size": {"x": 20, "y": 20}}}},
+    {"id": "window", "components": {"Transform2D": {"pos": {"x": 10, "y": 10}},
+      "ClipGroup": {"shape": "rounded_rect", "size": {"x": 60, "y": 40}, "offset": {"x": 30, "y": 20}, "radius": 6}}},
+    {"id": "sign", "components": {"Transform2D": {"pos": {"x": 200, "y": 100}},
+      "TextRenderer": {"text": "Shop\nopen", "size": 12, "align": "left"}}}
+  ]
+})json";
+    kin::SceneLoadResult loaded = kin::parse_scene_asset(scene, world.components());
+    assert(loaded.ok());
+    kin::SceneInstance instance = kin::instantiate_scene_asset(world, *loaded.scene, dir, world.components());
+    assert(instance.ok());
+    kin::EcsEntity ball = instance.by_authored_id.at("ball");
+    kin::EcsEntity badge = instance.by_authored_id.at("badge");
+    kin::EcsEntity window = instance.by_authored_id.at("window");
+    kin::EcsEntity sign = instance.by_authored_id.at("sign");
+    assert(ball.get<kin::ShapeRenderer>()->spec.kind == kin::ShapeKind::Ellipse && !ball.get<kin::ShapeRenderer>()->mesh);
+
+    // The clip is made as its fields are set: a rounded box 60 x 40 from (0, 0).
+    const kin::ClipGroup* clip = window.get<kin::ClipGroup>();
+    assert(clip->shape == kin::ClipShape::RoundedRect && clip->clip.kind == kin::ClipRegion::Kind::Path);
+    assert(clip->clip.bounds() && near(*clip->clip.bounds(), {0.0f, 0.0f, 60.0f, 40.0f}));
+
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Assets2D assets{renderer, dir};
+    assert(assets.bind(world));
+    const kin::ShapeRenderer* ellipse = ball.get<kin::ShapeRenderer>();
+    assert(ellipse->mesh && !ellipse->mesh->empty());
+    // 40 x 20 about the entity, its 2-wide outline half outside.
+    assert(ellipse->mesh->bounds.w > 41.0f && ellipse->mesh->bounds.w < 48.0f);
+    const kin::ShapeMesh* first = ellipse->mesh.get();
+    // The SVG, 10 x 20, fitted in 20 x 20: 10 x 20 about the entity.
+    const kin::ShapeRenderer* svg = badge.get<kin::ShapeRenderer>();
+    assert(svg->mesh && !svg->mesh->empty() && svg->made_from);
+    assert(std::abs(svg->mesh->bounds.h - 20.0f) < 4.0f && std::abs(svg->mesh->bounds.y + 10.0f) < 2.0f);
+    assert(sign.get<kin::TextRenderer>()->face);
+    assert(!assets.bind(world)); // made: nothing changes
+    assert(ball.get<kin::ShapeRenderer>()->mesh.get() == first);
+    // A field changed: made again.
+    ball.get_mut<kin::ShapeRenderer>()->spec.size = {80.0f, 20.0f};
+    assert(assets.bind(world));
+    assert(ball.get<kin::ShapeRenderer>()->mesh->bounds.w > 80.0f);
+
+    // Two lines, left-aligned, centred on the entity.
+    const kin::TextLayout laid = kin::layout_text(*sign.get<kin::TextRenderer>());
+    assert(laid.lines.size() == 2 && laid.lines[0] == "Shop" && laid.lines[1] == "open");
+    assert(near(laid.at, {-laid.size.x * 0.5f, -laid.size.y * 0.5f}));
+
+    // Drawn through a zooming camera: the text's transform puts its entity
+    // where the camera shows it.
+    kin::Camera2D camera;
+    camera.viewport = {320.0f, 180.0f};
+    camera.zoom = 2.0f;
+    camera.look_at({200.0f, 100.0f});
+    kin::WorldRenderState state{world};
+    state.propagate_transforms();
+    kin::RenderQueue queue;
+    const kin::RenderView view{.projection = kin::RenderProjection::TopDown2D, .camera = &camera};
+    state.collect_all(queue, [&](flecs::entity e) { return e == sign.raw(); }, {.view = &view});
+    assert(queue.size() == 1);
+    raw->transforms.clear();
+    raw->draws.clear();
+    queue.flush(renderer, view);
+    assert(!raw->draws.empty()); // its glyphs
+    const bool placed = std::ranges::any_of(raw->transforms, [](const kin::Affine2& t) { return near(t.apply({0.0f, 0.0f}), {160.0f, 90.0f}); });
+    assert(placed);
+    fs::remove_all(dir);
+}
+
 int main() {
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
@@ -984,5 +1461,17 @@ int main() {
     test_static_render_cache_merges_with_dynamic_queue();
     test_world_render_state_collect_dynamic_excludes_static_renderables();
     test_one_shot_submit_reuses_scratch_queue_output();
+    test_scene_cameras();
+#if KIN_ENABLE_IMAGE_IO
+    test_assets2d_binds_and_reloads_images();
+    test_ecs_scene_binds_assets();
+    test_assets2d_binds_sprite_catalogs();
+    test_assets2d_binds_particles();
+    test_assets2d_binds_tilemaps();
+    test_scene_shapes_clips_and_text();
+#if KIN_ENABLE_AUDIO
+    test_assets2d_binds_audio_emitters();
+#endif
+#endif
     return 0;
 }

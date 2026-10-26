@@ -2,6 +2,10 @@
 
 The engine animation surface is `kin::anim`: `AnimationRegistry`,
 `AnimationPlayer`, `AnimationStateMachine`, and `AnimationEventDispatch`.
+Frames only (a walk cycle of a sprite sheet) need none of it: a sprite
+catalog's `animation` lines, played by `SpriteAnimator`
+([Sprite animations](rendering.md#sprite-animations)), are what scene files and
+editors use.
 The old ECS sprite/state animation API and frame-based renderer animation API
 have been retired from the engine build.
 

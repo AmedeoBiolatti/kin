@@ -174,12 +174,18 @@ void update_audio_emitters_raw(flecs::world& world, AudioEngine& audio, const Au
             }
             return; // Keep: stays silent until the game clears `handle` or sets a new cue
         }
-        if (!emitter.auto_start || emitter.cue.empty() || !place.valid) {
+        // Its own catalog when bound, and a sound file's only cue when it names none.
+        const AudioCatalog& source = emitter.catalog ? *emitter.catalog : catalog;
+        std::string_view cue = emitter.cue;
+        if (cue.empty() && emitter.catalog && emitter.catalog->cues().size() == 1) {
+            cue = emitter.catalog->cues().begin()->first;
+        }
+        if (!emitter.auto_start || cue.empty() || !place.valid) {
             return; // nowhere to sound from yet: it starts once its transform places it
         }
 
-        emitter.handle = audio.play(catalog, {
-            .cue = emitter.cue,
+        emitter.handle = audio.play(source, {
+            .cue = std::string(cue),
             .position = place.position,
             .has_position = !place.is_3d,
             .position_3d = place.position_3d,
@@ -248,6 +254,11 @@ void update_audio_listeners(EcsWorld& world, AudioEngine& audio) {
 
 void update_audio_emitters(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog) {
     update_audio_emitters_raw(world.raw(), audio, catalog);
+}
+
+void update_audio_emitters(EcsWorld& world, AudioEngine& audio) {
+    static const AudioCatalog none;
+    update_audio_emitters_raw(world.raw(), audio, none);
 }
 
 void consume_audio_one_shots(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog) {

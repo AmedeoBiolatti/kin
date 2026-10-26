@@ -11,9 +11,11 @@
 #include <deque>
 #include <functional>
 #include <iosfwd>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -119,6 +121,8 @@ public:
     // Queue a key for the next step, with modifiers held alongside it. mode is
     // "press" (a tap), "hold" or "release", as for actions.
     void queue_key(Key key, std::string mode, KeyModifiers modifiers);
+    // Queue a file dropped on the window at window-space pos, as from the desktop.
+    void queue_drop(std::string path, Vec2f window_pos);
 
     // Wall time of the scene update and render in recent steps, oldest first.
     struct FrameTiming {
@@ -131,9 +135,9 @@ public:
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion, Drop };
         Kind kind;
-        std::string text;  // action name / button name / text input
+        std::string text;  // action name / button name / text input / dropped file
         std::string mode;  // press / hold / release
         Vec2f pos{};       // window-space pointer position
         f32 value = 0.0f;  // wheel delta
@@ -194,5 +198,50 @@ struct ServerConfig {
 
 // Runs the game as a long-lived command server. Returns a process exit code.
 int run_scene_server(const ServerConfig& config, SceneManager& scenes);
+
+// A game played in its window that also answers server commands, between
+// frames (--inspect): a tool such as an editor watches it while it runs.
+// Requests and responses are the stdio server's, one JSON line each; the log
+// stays on the error stream.
+//
+// It answers what reads the game (game.info, scene.stack, scene.current,
+// scene.actions, world.snapshot, animation.diagnostics, ping), server.status
+// (with "paused"), and holds or advances its updates: sim.pause, sim.resume,
+// sim.step {count} (the game keeps drawing meanwhile). server.shutdown quits
+// the game. What drives a headless server (sim.tick, sim.reset, input.*,
+// view.screenshot) is refused: the player drives this one.
+class LiveInspector {
+public:
+    // Reads requests from `in` on a thread of its own; answers on `out`.
+    LiveInspector(std::istream& in, std::ostream& out);
+    ~LiveInspector();
+    LiveInspector(const LiveInspector&) = delete;
+    LiveInspector& operator=(const LiveInspector&) = delete;
+
+    // Answers the requests that have arrived, on the calling (main) thread:
+    // once a frame, outside the scenes' update and render.
+    void poll(ServerContext& ctx, const GameInfo* game);
+    // Whether the next update runs (false while paused with no step left);
+    // counts those that do.
+    bool admit_update();
+
+    bool paused() const { return _paused; }
+    i64 frame() const { return _frame; }
+    // The tool closed its end: nothing more comes, and nothing holds the game.
+    bool finished() const { return _finished; }
+
+private:
+    struct Shared;
+
+    void answer(ServerContext& ctx, const GameInfo* game, std::string_view line);
+
+    std::shared_ptr<Shared> _shared;
+    std::thread _reader;
+    std::ostream& _out;
+    bool _paused = false;
+    i64 _steps = 0; // updates to run while paused
+    i64 _frame = 0;
+    bool _finished = false;
+};
 
 } // namespace kin

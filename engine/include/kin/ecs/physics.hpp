@@ -47,16 +47,22 @@ struct PhysicsOverlapSet {
     std::vector<PhysicsContact> contacts;
 };
 
+// Destroys an entity's body and fixtures when it, or its component, goes.
+// Made after both worlds, gone before either: its observers go with it (so
+// none is left to reach a physics world that has gone).
 class EcsPhysicsBridge {
 public:
     EcsPhysicsBridge(EcsWorld& world, PhysicsWorld& physics);
+    ~EcsPhysicsBridge();
 
     EcsPhysicsBridge(const EcsPhysicsBridge&) = delete;
     EcsPhysicsBridge& operator=(const EcsPhysicsBridge&) = delete;
-    EcsPhysicsBridge(EcsPhysicsBridge&&) noexcept = default;
-    EcsPhysicsBridge& operator=(EcsPhysicsBridge&&) noexcept = default;
+    EcsPhysicsBridge(EcsPhysicsBridge&& other) noexcept;
+    EcsPhysicsBridge& operator=(EcsPhysicsBridge&& other) noexcept;
 
 private:
+    void release();
+
     flecs::observer _remove_body_observer;
     flecs::observer _remove_collider_observer;
 };

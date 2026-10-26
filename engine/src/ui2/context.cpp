@@ -581,6 +581,7 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
         }
     }
 
+    z += _region_z_base;
     const Vec2f p = pointer();
     if (contains(bounds, p)) {
         _state.register_hit(id, z);
@@ -2133,12 +2134,17 @@ void Context::end_layout() {
     // A floating node lifts its subtree this far above whatever it hangs off.
     constexpr i32 floating_layer = 1000;
     std::vector<i32> effective_layer(_nodes.size(), 0);
+    // And is hit above it: a widget in a floating box (a field in a dialog) is
+    // hit at the box's depth, not under it (see compose_z).
+    std::vector<i32> floats_around(_nodes.size(), 0);
     for (std::size_t i = 0; i < _nodes.size(); ++i) {
         const i32 parent = _nodes[i].parent;
         const i32 base = parent >= 0 ? effective_layer[static_cast<std::size_t>(parent)] : 0;
         effective_layer[i] = std::max(_nodes[i].style.layer, base);
+        floats_around[i] = parent >= 0 ? floats_around[static_cast<std::size_t>(parent)] : 0;
         if (_nodes[i].style.floats) {
             effective_layer[i] = base + floating_layer + std::max(0, _nodes[i].style.layer);
+            ++floats_around[i];
         }
     }
 
@@ -2234,7 +2240,9 @@ void Context::end_layout() {
         }
         const i32 p = node_pending[static_cast<std::size_t>(entry.node)];
         if (p >= 0 && _pending[static_cast<std::size_t>(p)].finalize) {
+            _region_z_base = floats_around[static_cast<std::size_t>(entry.node)] * floating_hit_z;
             _pending[static_cast<std::size_t>(p)].finalize(*this, node.solved);
+            _region_z_base = 0;
         }
     }
     if (!clip_of.empty()) {

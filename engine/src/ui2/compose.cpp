@@ -156,11 +156,15 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
         return out;
     }
     // Over the box. It is hovered unless last frame's topmost region was another
-    // recorded box that is not inside this one (a sibling, or a box on top).
+    // recorded box that is not inside this one (a sibling, or a box on top), or a
+    // widget hit above it (a field in a dialog over it).
     out.hovered = true;
     const Id hot = _state.hot();
     if (hot && hot != id) {
         auto it = _compose_records.find(hot.value);
+        if (it == _compose_records.end() && _state.hot_z() > compose_z(style)) {
+            out.hovered = false;
+        }
         if (it != _compose_records.end()) {
             out.hovered = false;
             for (std::size_t guard = 0; it != _compose_records.end() && guard < 256; ++guard) {
@@ -178,11 +182,10 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
 // Hit order: a floating box, and everything in it, above what is not floating
 // (and a box floating in a floating box above that).
 i32 Context::compose_z(const BoxStyle& style) const {
-    constexpr i32 per_float = 100000;
-    i32 z = style.z + (style.layout.floats ? per_float : 0);
+    i32 z = style.z + (style.layout.floats ? floating_hit_z : 0);
     for (const i32 open : _stack) {
         if (_nodes[static_cast<std::size_t>(open)].style.floats) {
-            z += per_float;
+            z += floating_hit_z;
         }
     }
     return z;

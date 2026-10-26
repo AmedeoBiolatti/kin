@@ -44,6 +44,12 @@ enum class AssetType {
     TileMap,
     Dialogue,
     Prefab,
+    Scene,  // .kinscene
+    Audio,  // a sound: .wav, .ogg, .mp3, .flac
+    Font,   // .ttf, .otf
+    Model,  // a 3D model: .glb, .gltf
+    TileSet, // .kintileset: tiles maps share
+    Shape,   // .svg: a vector shape (SVG-lite)
 };
 
 enum class AssetStatus {
