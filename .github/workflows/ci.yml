@@ -167,17 +167,17 @@ jobs:
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
-            options: -DKIN_EXPERIMENTAL_3D=ON
+            options: -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_NET=ON
           - name: Linux Clang
             os: ubuntu-24.04
             cc: clang-18
             cxx: clang++-18
             options: >-
-              -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON
+              -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON -DKIN_ENABLE_NET=ON
               -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
           - name: Windows MSVC
             os: windows-2022
-            options: -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON
+            options: -DKIN_EXPERIMENTAL_3D=ON -DKIN_ENABLE_PCH=ON -DKIN_ENABLE_WIDGET_PCH=ON -DKIN_ENABLE_NET=ON
           - name: Linux minimal shipping
             profile: config
             os: ubuntu-24.04
