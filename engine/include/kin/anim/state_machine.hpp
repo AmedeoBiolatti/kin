@@ -50,6 +50,9 @@ struct AnimTransition {
     std::string to;
     std::vector<Condition> when;
     TransitionMode mode = TransitionMode::ReplaceBase;
+    // Seconds the state it leaves fades out over as the one it enters fades
+    // in (an override pushed fades in over them); 0: at once.
+    f32 blend = 0.0f;
 };
 
 struct AnimationStateMachine {

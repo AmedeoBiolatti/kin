@@ -32,6 +32,10 @@ releases may change APIs.
   or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
   the new `TextRenderer` (text in the world, in a content font or the system's)
   to scene files. Add `AssetType::Shape` (`.svg`).
+- Add blend spaces (`blendspace` blocks: animations mixed by a float
+  parameter, kept in step), played by states and `set_base`, and transition
+  blends (`blend` seconds: the state left fades into the next;
+  `AnimationPlayer::fading`).
 - Let an `Animator` run a state machine of its file (`machine`, its `params`
   set by the game, its `state` told). Add the `finished` condition (a state's
   animation has played through) and `place` lines (where editors draw states).

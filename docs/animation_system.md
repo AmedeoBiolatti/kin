@@ -133,6 +133,38 @@ statemachine hero
   place idle 0 0
 ```
 
+A transition's `blend` (seconds; `... mode replace blend 0.2` in a file) fades
+the state it leaves into the one it enters. The old base goes to
+`AnimationPlayer::fading` and fades out while the new base fades in; numeric
+fields are mixed by their weights, and the new state's sprite shows at once.
+A push with a blend fades its override in over that time.
+
+### Blend spaces
+
+A blend space (`blend_space.hpp`) mixes animations by a float parameter. Each
+animation sits at a position along it, and the two either side of the value
+are mixed by nearness. Their clips are kept in step: each goes through its loop
+in the same share of a turn, so a walk's and a run's steps land together. Only
+the heaviest sends events and sets the sprite. A state plays a blend space by
+its name, as it plays an animation; `set_base` does too.
+
+```text
+blendspace locomotion speed
+  at 0 walk
+  at 1.5 jog
+  at 4 run
+
+statemachine hero
+  initial ground
+  state ground locomotion
+  state jump jump
+  transition any -> jump when trigger:jump mode replace blend 0.15
+  transition jump -> ground when finished mode replace blend 0.25
+```
+
+`AnimationRegistry::add_blend_space`, `blend_space` and `blend_weights` give
+the same from code.
+
 `place` lines say where an editor draws each state (and `any`, the any-state).
 Editors write them; nothing reads them when the machine plays.
 

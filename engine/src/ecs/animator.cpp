@@ -87,6 +87,18 @@ void own_targets(flecs::entity root, const AnimationNode& node, const PropertyRe
     }
 }
 
+// What an animation, or a blend space's animations, by that name write: owned.
+void own_named(flecs::entity root, AnimationRegistry& registry, const std::string& name, const PropertyRegistry& properties,
+               flecs::id_t sprites) {
+    if (const std::shared_ptr<const AnimationBlendSpace> space = registry.blend_space(name)) {
+        for (const BlendSpaceEntry& entry : space->entries) {
+            own_named(root, registry, entry.animation, properties, sprites);
+        }
+    } else if (const std::shared_ptr<const Animation> animation = registry.resolve(name)) {
+        own_targets(root, animation->root, properties, sprites);
+    }
+}
+
 } // namespace
 
 void update_animators(EcsWorld& world, f32 dt) {
@@ -121,16 +133,12 @@ void update_animators(EcsWorld& world, f32 dt) {
                     player.machine = machine->second;
                     // What any of its states plays, owned.
                     for (const auto& [state, played] : machine->second->states) {
-                        if (const std::shared_ptr<const Animation> animation = animator.library->registry.resolve(played)) {
-                            own_targets(found, animation->root, *animator.properties, sprites);
-                        }
+                        own_named(found, animator.library->registry, played, *animator.properties, sprites);
                     }
                 }
             } else if (!animator.animation.empty()) {
                 set_base(player, animator.animation);
-            }
-            if (!player.layers.empty() && player.layers.front().animation) {
-                own_targets(found, player.layers.front().animation->root, *animator.properties, sprites);
+                own_named(found, animator.library->registry, animator.animation, *animator.properties, sprites);
             }
             found.set<AnimationPlayer>(std::move(player));
         }
