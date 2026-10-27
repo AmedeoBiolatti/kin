@@ -331,6 +331,35 @@ bool Renderer2D::read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& ou
     return _backend->read_rgba(logical_region, out, out_size);
 }
 
+u64 Renderer2D::request_read_rgba(Rectf logical_region) {
+    if (const u64 ticket = _backend->request_read_rgba(logical_region)) {
+        return ticket;
+    }
+    WaitedRead read{.ticket = waited_read | _next_waited_read++};
+    if (!_backend->read_rgba(logical_region, read.pixels, read.size)) {
+        read.pixels.clear();
+        read.size = {};
+    }
+    _waited_reads.push_back(std::move(read));
+    return _waited_reads.back().ticket;
+}
+
+bool Renderer2D::take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait) {
+    if ((ticket & waited_read) == 0) {
+        return _backend->take_read_rgba(ticket, out, out_size, wait);
+    }
+    out.clear();
+    out_size = {};
+    const auto it = std::find_if(_waited_reads.begin(), _waited_reads.end(),
+                                 [ticket](const WaitedRead& r) { return r.ticket == ticket; });
+    if (it != _waited_reads.end()) {
+        out = std::move(it->pixels);
+        out_size = it->size;
+        _waited_reads.erase(it);
+    }
+    return true;
+}
+
 void Renderer2D::set_logical_size(i32 width, i32 height) {
     set_logical_size(Vec2i{width, height});
 }

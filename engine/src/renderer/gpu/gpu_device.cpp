@@ -159,13 +159,21 @@ GpuDevice::GpuDevice(Window& window, GpuDeviceOptions options)
         throw sdl_error("SDL_ClaimWindowForGPUDevice failed");
     }
 
-    // Non-fatal: some (notably visible/resizable) windows reject explicit swapchain
-    // params; the default swapchain from ClaimWindow (SDR + VSYNC) works fine.
-    if (!SDL_SetGPUSwapchainParameters(_device, _window,
-                                       SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
-                                       _present_mode)) {
+    // The present mode asked for if the window's swapchain takes it. Without vsync (IMMEDIATE) MAILBOX comes next: it
+    // does not wait for the screen either (a finished frame replaces one still waiting to be shown) and does not tear;
+    // NVIDIA's Vulkan on Wayland has no IMMEDIATE, and VSYNC there held frames to whole refreshes. Non-fatal: some
+    // (notably visible/resizable) windows reject explicit swapchain params; the default swapchain from ClaimWindow
+    // (SDR + VSYNC) works fine.
+    const SDL_GPUPresentMode asked = _present_mode;
+    _present_mode = SDL_GPU_PRESENTMODE_VSYNC;
+    for (const SDL_GPUPresentMode mode :
+         {asked, asked == SDL_GPU_PRESENTMODE_IMMEDIATE ? SDL_GPU_PRESENTMODE_MAILBOX : asked}) {
+        if (SDL_WindowSupportsGPUPresentMode(_device, _window, mode) &&
+            SDL_SetGPUSwapchainParameters(_device, _window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode)) {
+            _present_mode = mode;
+            break;
+        }
         SDL_ClearError();
-        _present_mode = SDL_GPU_PRESENTMODE_VSYNC;
     }
 
     _swapchain_format = SDL_GetGPUSwapchainTextureFormat(_device, _window);
@@ -919,6 +927,22 @@ bool GpuDevice::read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rg
 }
 
 bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out) {
+    PendingRead read;
+    if (!begin_read_texture_region(src, x, y, w, h, texel_bytes, read)) {
+        return false;
+    }
+    std::vector<u8> pixels;
+    (void)finish_read(read, pixels, true);
+    if (pixels.empty()) {
+        return false;
+    }
+    out = std::move(pixels);
+    return true;
+}
+
+bool GpuDevice::begin_read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes,
+                                          PendingRead& read) {
+    read = {};
     if (!_device || !src.handle() || w == 0 || h == 0 || x + w > src.width() || y + h > src.height()) {
         return false;
     }
@@ -954,19 +978,36 @@ bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, 
     SDL_DownloadFromGPUTexture(copy, &region, &dst);
     SDL_EndGPUCopyPass(copy);
 
-    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-    // No fence (the submit failed) or a failed wait: the copy may not have run, so the transfer buffer is not read.
-    const bool arrived = fence && wait_for_readback(_device, fence);
+    // No fence (the submit failed): the copy may not have run, and finish_read gives nothing.
+    read = {.transfer = tb, .fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd), .bytes = bytes};
+    return true;
+}
 
-    bool ok = false;
-    if (void* mapped = arrived ? SDL_MapGPUTransferBuffer(_device, tb, false) : nullptr) {
-        out.resize(bytes);
-        std::memcpy(out.data(), mapped, bytes);
-        SDL_UnmapGPUTransferBuffer(_device, tb);
-        ok = true;
+bool GpuDevice::finish_read(PendingRead& read, std::vector<u8>& out, bool wait) {
+    out.clear();
+    if (!read.transfer) {
+        return true;
     }
-    SDL_ReleaseGPUTransferBuffer(_device, tb);
-    return ok;
+    bool arrived = false;
+    if (read.fence) {
+        if (wait) {
+            // (A failed wait keeps its fence: SDL must not reuse one the GPU may still signal.)
+            arrived = wait_for_readback(_device, read.fence);
+        } else if (SDL_QueryGPUFence(_device, read.fence)) {
+            SDL_ReleaseGPUFence(_device, read.fence);
+            arrived = true;
+        } else {
+            return false;
+        }
+    }
+    if (void* mapped = arrived ? SDL_MapGPUTransferBuffer(_device, read.transfer, false) : nullptr) {
+        out.resize(read.bytes);
+        std::memcpy(out.data(), mapped, read.bytes);
+        SDL_UnmapGPUTransferBuffer(_device, read.transfer);
+    }
+    SDL_ReleaseGPUTransferBuffer(_device, read.transfer);
+    read = {};
+    return true;
 }
 
 bool GpuDevice::read_volume(const GpuTexture& src, u32 depth, u32 texel_bytes, std::vector<u8>& out) {

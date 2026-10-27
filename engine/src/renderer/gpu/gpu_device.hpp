@@ -157,6 +157,19 @@ public:
     bool read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rgba);
     // A region of `src` (`texel_bytes` a texel), tightly packed (waits for the GPU).
     bool read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out);
+    // A read under way (begin_read_texture_region): a command buffer of its own copies the region into `transfer` once
+    // the GPU has done the work submitted before it, and `fence` signals when it has.
+    struct PendingRead {
+        SDL_GPUTransferBuffer* transfer = nullptr;
+        SDL_GPUFence* fence = nullptr;
+        u32 bytes = 0;
+    };
+    // Starts reading a region of `src`, as read_texture_region does, without waiting. False when it could not start.
+    bool begin_read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes,
+                                   PendingRead& read);
+    // Whether `read` has finished (`wait`: waits until it has): its pixels are then in `out` (empty when the GPU could
+    // not copy them) and it is released. False while the GPU has yet to copy them.
+    bool finish_read(PendingRead& read, std::vector<u8>& out, bool wait);
     // All of a 3D texture made by create_volume, `depth` slices of its width x height, tightly packed (waits for the GPU).
     bool read_volume(const GpuTexture& src, u32 depth, u32 texel_bytes, std::vector<u8>& out);
     // `bytes` of `src` from `offset` (waits for the GPU, on a fence of its own that it releases once signalled).

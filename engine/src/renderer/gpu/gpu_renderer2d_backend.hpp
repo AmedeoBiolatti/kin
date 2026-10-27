@@ -123,6 +123,8 @@ public:
     void present() override;
     bool save_png(const char* path) override;
     bool read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size) override;
+    u64 request_read_rgba(Rectf logical_region) override;
+    bool take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait) override;
     bool blit_region_to_target(Rectf region, const RenderTarget& dst) override;
     Vec2i region_pixel_size(Rectf region) const override;
 
@@ -371,6 +373,16 @@ private:
     // up frames (and the render targets they cycle) without bound.
     static constexpr std::size_t max_unshown_in_flight = 2;
     std::deque<SDL_GPUFence*> _unshown_fences;
+    // Reads under way (request_read_rgba), each to be taken once its copy is done.
+    struct PendingRgbaRead {
+        u64 ticket = 0;
+        Vec2i size{};
+        gpu::GpuDevice::PendingRead read{};
+    };
+    std::vector<PendingRgbaRead> _pending_reads;
+    u64 _next_read_ticket = 1;
+    // A logical-space region of a target `target_size` big, in its native pixels.
+    SDL_Rect native_rect(Rectf logical_region, Vec2i target_size) const;
     void hold_back_unshown_frame();
     void release_unshown_fences(bool wait);
     // The open gpu_scope(): its name, and whether it is timed (the timer had room).

@@ -881,6 +881,16 @@ Things that change in linear light:
   clipped at white), before tonemapping and grading; `save_png` of the screen
   returns what is displayed.
 
+`read_rgba` waits for the GPU to draw everything submitted before it: in a
+frame, the CPU stops until the GPU has caught up, and the frame is as long as
+the two together. `request_read_rgba(region)` submits what is drawn so far and
+returns a ticket without waiting; `take_read_rgba(ticket, out, size)` gives the
+pixels once the GPU has copied them (true; the ticket is then spent) and false
+until then, and with `wait` it waits for them. Taking them a set number of
+frames after the request (two or three: by then the GPU has drawn them) keeps a
+deterministic run the same whatever the GPU's speed. A backend that cannot read
+without waiting reads at the request (SDL_GPU can; the others wait).
+
 SDL's renderer keeps its gamma pipeline: `set_color_space(Linear)` returns
 false and changes nothing.
 

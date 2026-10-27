@@ -257,6 +257,13 @@ public:
     virtual bool read_rgba(Rectf, std::vector<u8>&, Vec2i&) {
         return false;
     }
+    // Starts reading a logical-space region of the current render target without waiting for the GPU (what is drawn so
+    // far is submitted; the pixels arrive once the GPU has drawn it): the read's ticket for take_read_rgba, 0 when the
+    // backend cannot (Renderer2D then reads with read_rgba, which waits).
+    virtual u64 request_read_rgba(Rectf) { return 0; }
+    // The pixels of the read `ticket` once they have arrived (true: the ticket is spent; `out` empty when the read
+    // failed), false until then; `wait`: waits for them.
+    virtual bool take_read_rgba(u64, std::vector<u8>&, Vec2i&, bool /*wait*/) { return false; }
 
     // Copy a logical-space region of the current render target into `dst` entirely on
     // the GPU (no CPU round-trip) — the fast path for backdrop capture / refraction.

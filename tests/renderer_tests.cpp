@@ -444,6 +444,14 @@ void test_facade_with_fake_backend() {
     assert(renderer.read_rgba({5.0f, 6.0f, 7.0f, 8.0f}, read_pixels, read_size));
     assert(read_size == raw->readback_size);
     assert(read_pixels == raw->readback_pixels);
+    // A backend that can only wait: request_read_rgba reads at once, and the pixels are taken once.
+    const kin::u64 ticket = renderer.request_read_rgba({5.0f, 6.0f, 7.0f, 8.0f});
+    assert(ticket != 0);
+    assert(renderer.take_read_rgba(ticket, read_pixels, read_size));
+    assert(read_size == raw->readback_size);
+    assert(read_pixels == raw->readback_pixels);
+    assert(renderer.take_read_rgba(ticket, read_pixels, read_size));
+    assert(read_pixels.empty());
 
     {
         auto viewport = renderer.scoped_viewport({1.0f, 2.0f, 3.0f, 4.0f});
@@ -916,6 +924,71 @@ void test_gpu_texture_released_before_flush() {
             renderer->present();
         }
         renderer->set_gpu_timing_enabled(false);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
+// request_read_rgba reads what was drawn before it, without waiting: the pixels arrive with a later frame (what is
+// drawn after the request is not in them), from the window's picture and from a render target, each ticket once.
+void test_gpu_read_without_waiting() {
+    constexpr std::string_view test_name = "test_gpu_read_without_waiting";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-read-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const std::vector<kin::u8> white(8u * 8u * 4u, 255);
+        kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
+        renderer->clear(kin::Color::rgb(0, 0, 0));
+        renderer->draw_texture(texture, kin::Rectf{8.0f, 8.0f, 16.0f, 16.0f});
+        const kin::u64 screen = renderer->request_read_rgba(kin::Rectf{0.0f, 0.0f, 64.0f, 64.0f});
+        renderer->draw_texture(texture, kin::Rectf{36.0f, 36.0f, 16.0f, 16.0f}); // after the request
+        kin::RenderTarget target = renderer->create_render_target({8, 4});
+        renderer->push_render_target(target);
+        renderer->clear(kin::Color::rgb(200, 30, 60));
+        const kin::u64 small = renderer->request_read_rgba(kin::Rectf{0.0f, 0.0f, 8.0f, 4.0f});
+        renderer->pop_render_target();
+        renderer->present();
+        assert(screen != 0 && small != 0 && screen != small);
+        // Waited for, a read is there whenever it is taken.
+        renderer->clear(kin::Color::rgb(20, 180, 90));
+        const kin::u64 waited = renderer->request_read_rgba(kin::Rectf{0.0f, 0.0f, 64.0f, 64.0f});
+        renderer->present();
+        std::vector<kin::u8> waited_pixels;
+        kin::Vec2i waited_size{};
+        assert(renderer->take_read_rgba(waited, waited_pixels, waited_size, true));
+        assert(waited_size == (kin::Vec2i{64, 64}));
+        assert(pixel_near(waited_pixels, waited_size, 16, 16, kin::Color::rgb(20, 180, 90)));
+
+        std::vector<kin::u8> pixels, target_pixels;
+        kin::Vec2i size{}, target_size{};
+        bool got_screen = false, got_small = false;
+        for (int frame = 0; frame < 200 && !(got_screen && got_small); ++frame) {
+            got_screen = got_screen || renderer->take_read_rgba(screen, pixels, size);
+            got_small = got_small || renderer->take_read_rgba(small, target_pixels, target_size);
+            renderer->clear(kin::Color::rgb(0, 0, 255));
+            renderer->present();
+        }
+        assert(got_screen && got_small);
+        assert(size == (kin::Vec2i{64, 64}));
+        assert(pixel_near(pixels, size, 16, 16, kin::Color::rgb(255, 255, 255)));
+        assert(pixel_near(pixels, size, 44, 44, kin::Color::rgb(0, 0, 0)));
+        assert(target_size == (kin::Vec2i{8, 4}));
+        assert(pixel_near(target_pixels, target_size, 3, 2, kin::Color::rgb(200, 30, 60)));
+        std::vector<kin::u8> again;
+        kin::Vec2i again_size{};
+        assert(renderer->take_read_rgba(screen, again, again_size) && again.empty());
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) {
             throw;
@@ -4004,6 +4077,7 @@ int main(int argc, char** argv) {
 #endif
 #if KIN_HAS_GPU_RENDERER
     test_gpu_timing_survives_a_gpu_behind();
+    test_gpu_read_without_waiting();
 #endif
 #if KIN_HAS_GPU_RENDERER
     test_gpu_native_coordinates_disable_logical_presentation();

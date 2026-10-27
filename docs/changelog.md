@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add `Renderer2D::request_read_rgba` and `take_read_rgba`: a read of the
+  current target that does not wait for the GPU (SDL_GPU; the other backends
+  read at the request). `read_rgba` stops the CPU until the GPU has drawn
+  everything before it: a game reading a small copy of its picture every sixth
+  frame (an auto exposure's) lost a third of its frame rate, and that frame
+  showed as a hitch.
+- Present without vsync on MAILBOX where the swapchain has no IMMEDIATE
+  (NVIDIA's Vulkan on Wayland) instead of falling back to VSYNC, which held
+  frames to whole refreshes of the screen; the log's `gpu backend created`
+  line names the present mode obtained.
 - Settle 3D global illumination's probes faster: a young probe takes the mean
   of its updates so far until `GiProbes3D::hysteresis` weighs as much, and the
   windows round the camera share each render's updates 4 : 2 : 1 from the

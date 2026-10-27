@@ -35,6 +35,18 @@ const gpu::GpuTextureBackend* as_gpu(const ITextureBackend* backend) {
                : nullptr;
 }
 
+// The swapchain's present mode as the log names it.
+std::string_view present_mode_name(SDL_GPUPresentMode mode) {
+    switch (mode) {
+    case SDL_GPU_PRESENTMODE_IMMEDIATE:
+        return "immediate";
+    case SDL_GPU_PRESENTMODE_MAILBOX:
+        return "mailbox";
+    default:
+        return "vsync";
+    }
+}
+
 gpu::GpuDeviceOptions device_options(bool vsync) {
     gpu::GpuDeviceOptions options;
     options.present_mode = vsync ? SDL_GPU_PRESENTMODE_VSYNC : SDL_GPU_PRESENTMODE_IMMEDIATE;
@@ -219,9 +231,11 @@ GpuRenderer2DBackend::GpuRenderer2DBackend(Window& window, bool vsync)
     warm_pipelines();
     ensure_scene();
 
-    KIN_LOG_INFO_F("render", "gpu backend created",
-                   (LogFields{{.name = "driver", .value = std::string{_device.driver_name()}},
-                              {.name = "vsync", .value = vsync ? "true" : "false"}}));
+    KIN_LOG_INFO_F(
+        "render", "gpu backend created",
+        (LogFields{{.name = "driver", .value = std::string{_device.driver_name()}},
+                   {.name = "vsync", .value = vsync ? "true" : "false"},
+                   {.name = "present_mode", .value = std::string{present_mode_name(_device.present_mode())}}}));
 }
 
 SDL_FColor GpuRenderer2DBackend::stored_color(Color color) const {
@@ -393,6 +407,10 @@ GpuRenderer2DBackend::~GpuRenderer2DBackend() {
     }
     _device.wait_idle();
     release_unshown_fences(true);
+    std::vector<u8> dropped;
+    for (PendingRgbaRead& pending : _pending_reads) {
+        (void)_device.finish_read(pending.read, dropped, true);
+    }
     _gpu_timer.reset();
     _pipelines.destroy();
     for (const ComputePipeline& compute : _compute_pipelines) {
@@ -1639,13 +1657,7 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
         return false;
     }
     const int sw = target_size.x;
-    const int sh = target_size.y;
-    // Under logical presentation the scene texture is native-res; scale the
-    // logical-space region up to native pixels before reading.
-    const f32 sc = coordinates_to_pixels();
-    const Rectf native_region{logical_region.x * sc, logical_region.y * sc,
-                              logical_region.w * sc, logical_region.h * sc};
-    SDL_Rect r = intersect(to_sdl_rect(native_region), SDL_Rect{0, 0, sw, sh});
+    const SDL_Rect r = native_rect(logical_region, target_size);
     if (r.w <= 0 || r.h <= 0) {
         return false;
     }
@@ -1659,6 +1671,59 @@ bool GpuRenderer2DBackend::read_rgba(Rectf logical_region, std::vector<u8>& out,
                         static_cast<std::size_t>(r.x) * 4u,
                     dst_pitch);
     }
+    return true;
+}
+
+SDL_Rect GpuRenderer2DBackend::native_rect(Rectf logical_region, Vec2i target_size) const {
+    // Under logical presentation the scene texture is native-res; scale the
+    // logical-space region up to native pixels before reading.
+    const f32 sc = coordinates_to_pixels();
+    const Rectf native_region{logical_region.x * sc, logical_region.y * sc, logical_region.w * sc,
+                              logical_region.h * sc};
+    return intersect(to_sdl_rect(native_region), SDL_Rect{0, 0, target_size.x, target_size.y});
+}
+
+u64 GpuRenderer2DBackend::request_read_rgba(Rectf logical_region) {
+    if (logical_region.w <= 0.0f || logical_region.h <= 0.0f) {
+        return 0;
+    }
+    // As read_rgba: render everything so far, then copy the region, here on a command buffer of its own that nothing
+    // waits for.
+    ensure_frame();
+    const gpu::GpuTexture& target = current_target();
+    const SDL_Rect r = native_rect(logical_region, current_size());
+    if (r.w <= 0 || r.h <= 0) {
+        return 0;
+    }
+    flush_to_frame();
+    gpu::GpuTexture encoded;
+    const gpu::GpuTexture* read = readable(&target, encoded);
+    _frame->submit();
+    end_frame();
+    PendingRgbaRead pending{.ticket = _next_read_ticket, .size = {r.w, r.h}};
+    if (!_device.begin_read_texture_region(*read, static_cast<u32>(r.x), static_cast<u32>(r.y), static_cast<u32>(r.w),
+                                           static_cast<u32>(r.h), 4, pending.read)) {
+        return 0;
+    }
+    _pending_reads.push_back(pending);
+    return _next_read_ticket++;
+}
+
+bool GpuRenderer2DBackend::take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait) {
+    out.clear();
+    out_size = {};
+    const auto it = std::find_if(_pending_reads.begin(), _pending_reads.end(),
+                                 [ticket](const PendingRgbaRead& r) { return r.ticket == ticket; });
+    if (it == _pending_reads.end()) {
+        return true; // spent, or never asked for: nothing will come
+    }
+    if (!_device.finish_read(it->read, out, wait)) {
+        return false;
+    }
+    if (!out.empty()) {
+        out_size = it->size;
+    }
+    _pending_reads.erase(it);
     return true;
 }
 

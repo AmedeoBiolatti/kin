@@ -256,6 +256,14 @@ public:
     // backend cannot read back pixels.
     bool save_png(const std::string& path);
     bool read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size);
+    // read_rgba without waiting for the GPU: what is drawn so far is submitted, and take_read_rgba gives the pixels
+    // once the GPU has drawn it, a frame or two later (a backend that can only wait reads them here, with read_rgba).
+    // Returns the read's ticket.
+    u64 request_read_rgba(Rectf logical_region);
+    // The pixels of `ticket`'s read once they have arrived (true: the ticket is spent; `out` empty when the read
+    // failed), false until then. `wait`: waits for them (taken a fixed number of frames after the request, a
+    // deterministic run gets them at the same frame whatever the GPU's speed; two or three frames on, they are there).
+    bool take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait = false);
 
     void set_logical_size(i32 width, i32 height);
     void set_logical_size(Vec2i size);
@@ -533,6 +541,16 @@ public:
 
 private:
     JobSystem* _jobs = nullptr;
+    // request_read_rgba's reads on a backend that can only wait: read at once, kept until taken. Their tickets have the
+    // top bit set, apart from the backend's own.
+    static constexpr u64 waited_read = u64{1} << 63;
+    struct WaitedRead {
+        u64 ticket = 0;
+        std::vector<u8> pixels;
+        Vec2i size{};
+    };
+    std::vector<WaitedRead> _waited_reads;
+    u64 _next_waited_read = 1;
     friend class ViewportGuard;
     friend class PooledTarget;
 
