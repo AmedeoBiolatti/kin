@@ -2,6 +2,7 @@
 
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
+#include <kin/core/utf8.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/ui2/theme.hpp>
 
@@ -15,7 +16,7 @@
 namespace kin::ui2 {
 namespace {
 
-constexpr std::array kind_names{"box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer"};
+constexpr std::array kind_names{"box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer", "dialogue"};
 
 struct NamedAnchor {
     std::string_view name;
@@ -123,7 +124,7 @@ struct Reader {
         const std::optional<ScreenKind> kind = screen_kind_named(json.string_at("kind", "box"));
         if (!kind) {
             return fail(label, "no kind '" + json.string_at("kind") + "' (box, panel, label, button, image, progress, toggle, slider, "
-                               "text_input, spacer)");
+                               "text_input, spacer, dialogue)");
         }
         out.kind = *kind;
         for (const auto& [key, value] : json.members()) {
@@ -295,6 +296,42 @@ Element* find_in(Element& element, std::string_view id) {
 }
 
 } // namespace
+
+std::string screen_text_key(std::string_view screen, const ScreenElement& element, bool hint) {
+    if (element.id.empty()) {
+        return {};
+    }
+    return "ui." + std::string(screen) + "." + element.id + (hint ? ".hint" : "");
+}
+
+std::string screen_name(std::string_view path) {
+    std::string name(std::filesystem::path(path).filename().string());
+    if (const std::size_t dot = name.find('.'); dot != std::string::npos) {
+        name.erase(dot);
+    }
+    return name;
+}
+
+LanguageFile screen_language_file(std::string_view screen, const ScreenDocument& doc, std::string_view locale) {
+    LanguageFile file;
+    file.locale = normalize_locale(locale);
+    file.name = file.locale;
+    const auto add = [&](auto& self, const ScreenElement& e) -> void {
+        // Texts it shows of its own (a text field's text is the player's, not translated).
+        const bool says = e.kind == ScreenKind::Label || e.kind == ScreenKind::Button || e.kind == ScreenKind::Toggle;
+        if (!e.id.empty() && e.key.empty() && says && !e.text.empty()) {
+            file.strings.insert_or_assign(screen_text_key(screen, e), e.text);
+        }
+        if (!e.id.empty() && e.kind == ScreenKind::TextInput && !e.hint.empty()) {
+            file.strings.insert_or_assign(screen_text_key(screen, e, true), e.hint);
+        }
+        for (const ScreenElement& child : e.children) {
+            self(self, child);
+        }
+    };
+    add(add, doc.root);
+    return file;
+}
 
 std::string_view screen_kind_name(ScreenKind kind) {
     return kind_names[static_cast<std::size_t>(kind)];
@@ -495,6 +532,13 @@ void UiScreen::clear_events() {
         s.clicked = false;
         s.changed = false;
     }
+    _dialogue_advanced = false;
+    _dialogue_choice.clear();
+}
+
+void UiScreen::set_dialogue(const DialogueViewModel* view, std::size_t revealed) {
+    _dialogue = view;
+    _revealed = revealed;
 }
 
 f32 UiScreen::value(std::string_view id) const {
@@ -531,6 +575,7 @@ bool UiScreen::visible(std::string_view id) const {
 
 void UiScreen::draw(Context& ctx, Rectf bounds, const ScreenAssets& assets) {
     _live.clear();
+    _choices.clear();
     _placing.clear();
     ctx.begin_layout(bounds);
     element(ctx, _document.root, "", assets);
@@ -569,6 +614,12 @@ void UiScreen::draw(Context& ctx, Rectf bounds, const ScreenAssets& assets) {
             break;
         }
     }
+    for (const auto& [choice, button] : _choices) {
+        if (button->clicked) {
+            _dialogue_choice = choice;
+            _dialogue_advanced = false;
+        }
+    }
     _placed = std::move(_placing);
 }
 
@@ -578,6 +629,10 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
         return;
     }
     const Id id = make_id(Id{_seed}, std::string_view(path.empty() ? std::string_view("root") : std::string_view(path)));
+    if (e.kind == ScreenKind::Dialogue) {
+        dialogue_element(ctx, e, id, path, assets);
+        return;
+    }
     BoxStyle box;
     box.layout.width = e.width;
     box.layout.height = e.height;
@@ -618,20 +673,36 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     // The leaf fills its box where the element has a size, and is as big as it needs where it fits.
     const LayoutStyle inside{.width = e.width.mode == SizeMode::Fit ? fit() : grow(),
                              .height = e.height.mode == SizeMode::Fit ? fit() : grow()};
+    // What it says: what the game set, else its explicit key's text, else
+    // its own key's (screen_text_key) where the language has it, else its text.
+    const auto translated = [&](bool hint, const std::string& own) -> std::string {
+        if (!hint && !e.key.empty()) {
+            return assets.translate ? assets.translate(e.key) : tr(e.key);
+        }
+        if (!_name.empty() && !e.id.empty()) {
+            const std::string key = screen_text_key(_name, e, hint);
+            if (assets.translate) {
+                const std::string got = assets.translate(key);
+                return got == key ? own : got;
+            }
+            if (const Localization* l10n = active_localization(); l10n && l10n->has(key)) {
+                return l10n->tr(key);
+            }
+        }
+        return own;
+    };
     const auto shown_text = [&]() -> std::string {
         if (s && s->text) {
             return *s->text;
         }
-        if (!e.key.empty()) {
-            return assets.translate ? assets.translate(e.key) : tr(e.key);
-        }
-        return e.text;
+        return translated(false, e.text);
     };
     const bool enabled = !(s && s->enabled) || *s->enabled;
     TextStyle text_style = theme_text(ctx.theme(), e.style);
     switch (e.kind) {
     case ScreenKind::Box:
     case ScreenKind::Panel:
+    case ScreenKind::Dialogue: // drawn by dialogue_element()
         break;
     case ScreenKind::Label: {
         Label label{.id = make_id(id, "label"), .text = shown_text(), .text_style = text_style, .horizontal = e.align};
@@ -707,7 +778,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
             // Its hint, over it while it is empty.
             TextStyle faint = ctx.theme().muted_text;
             const f32 left = ctx.theme().preset.padding_x;
-            ctx.add(Label{.id = make_id(id, "hint"), .text = e.hint, .text_style = faint},
+            ctx.add(Label{.id = make_id(id, "hint"), .text = translated(true, e.hint), .text_style = faint},
                     LayoutStyle{.width = fit(), .height = grow(), .overlay = true, .anchor = UiAnchor::CenterLeft, .anchor_offset = {left, 0.0f}});
         }
         break;
@@ -715,6 +786,136 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     case ScreenKind::Spacer:
         ctx.spacer(inside);
         break;
+    }
+}
+
+namespace {
+
+// Markup without its tags ("[b]Yes[/b]": "Yes").
+std::string plain_text(std::string_view markup) {
+    std::string text;
+    for (std::size_t i = 0; i < markup.size();) {
+        if (markup[i] != '[') {
+            text.push_back(markup[i++]);
+        } else if (i + 1 < markup.size() && markup[i + 1] == '[') {
+            text.push_back('[');
+            i += 2;
+        } else if (const std::size_t close = markup.find(']', i + 1); close != std::string_view::npos) {
+            i = close + 1;
+        } else {
+            text.push_back(markup[i++]);
+        }
+    }
+    return text;
+}
+
+// The first `letters` code points of `content`'s text (icons count one each).
+AdvancedTextContent first_letters(AdvancedTextContent content, std::size_t letters) {
+    AdvancedTextContent out;
+    for (AdvancedTextRun& run : content.runs) {
+        if (letters == 0) {
+            break;
+        }
+        if (TextRun* text = std::get_if<TextRun>(&run)) {
+            std::size_t end = 0;
+            while (end < text->text.size() && letters > 0) {
+                end = utf8_next(text->text, end);
+                --letters;
+            }
+            text->text.resize(end);
+        } else {
+            --letters;
+        }
+        out.runs.push_back(std::move(run));
+    }
+    return out;
+}
+
+} // namespace
+
+void UiScreen::dialogue_element(Context& ctx, const ScreenElement& e, Id id, const std::string& path, const ScreenAssets& assets) {
+    // What it shows: the game's dialogue, or (for an editor) a sample.
+    DialogueViewModel sample;
+    const DialogueViewModel* view = _dialogue;
+    if (!view || !view->active) {
+        if (!_dialogue_sample) {
+            return; // no dialogue running: nothing to show
+        }
+        sample.active = true;
+        sample.speaker_name = "Speaker";
+        sample.speaker_color = ctx.theme().colors.solid_accent;
+        sample.text_markup = "What they say, revealed as it is said. It wraps when it runs out of room.";
+        sample.choices = {{.id = "a", .text_markup = "A choice", .enabled = true, .visited = false},
+                          {.id = "b", .text_markup = "Another", .enabled = true, .visited = false}};
+        view = &sample;
+    }
+    BoxStyle box;
+    box.layout.width = e.width.mode == SizeMode::Fit ? fixed(560.0f) : e.width;
+    box.layout.height = e.height;
+    if (e.anchor) {
+        box.layout.overlay = true;
+        box.layout.anchor = *e.anchor;
+        box.layout.anchor_offset = e.offset;
+    }
+    box.layout.axis = UiLayoutAxis::Horizontal;
+    box.layout.padding = e.padding;
+    box.layout.spacing = e.gap;
+    box.layout.cross = UiAlign::Start;
+    const std::string_view surface = e.surface.empty() ? std::string_view("panel") : std::string_view(e.surface);
+    if (const SurfaceStyle* look = theme_surface(ctx.theme(), surface)) {
+        box.surface = {.normal = *look, .hovered = *look, .pressed = *look, .focused = *look, .disabled = *look, .selected = *look};
+        box.draw_surface = true;
+    }
+    box.interactive = true; // clicked: on to the next line
+    const Context::BoxScope scope = ctx.box(id, box);
+    _placing.push_back({.path = path, .bounds = scope.bounds, .hovered = scope.hovered});
+    if (scope.clicked && view == _dialogue && view->choices.empty()) {
+        _dialogue_advanced = true;
+    }
+    // Its portrait.
+    if (!view->speaker_portrait.empty() && assets.texture) {
+        if (const Texture portrait = assets.texture(view->speaker_portrait)) {
+            const Vec2i size = portrait.size();
+            ctx.add(Image{.texture = portrait,
+                          .sprite = {.texture = portrait, .source = {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)}},
+                          .size = {72.0f, 72.0f},
+                          .tint = colors::white,
+                          .fit = ImageFit::Contain},
+                    LayoutStyle{.width = fixed(72.0f), .height = fixed(72.0f)});
+        }
+    }
+    // Who speaks, what they say, the choices.
+    BoxStyle column;
+    column.layout.width = grow();
+    column.layout.axis = UiLayoutAxis::Vertical;
+    column.layout.spacing = std::max(4.0f, e.gap * 0.5f);
+    column.layout.cross = UiAlign::Stretch;
+    column.interactive = false;
+    const Context::BoxScope words = ctx.box(make_id(id, "words"), column);
+    if (!view->speaker_name.empty()) {
+        TextStyle name = ctx.theme().emphasis_text;
+        name.color = view->speaker_color == colors::white ? name.color : view->speaker_color;
+        ctx.add(Label{.id = make_id(id, "speaker"), .text = view->speaker_name, .text_style = name}, LayoutStyle{.width = fit(), .height = fit()});
+    }
+    // The width the text wraps in: the box's, less its padding (and the portrait's).
+    const f32 room = std::max(80.0f, (scope.bounds.w > 0.0f ? scope.bounds.w : (box.layout.width.mode == SizeMode::Fixed ? box.layout.width.value : 560.0f)) -
+                                         e.padding.left - e.padding.right - (view->speaker_portrait.empty() ? 0.0f : 72.0f + e.gap));
+    AdvancedText text;
+    text.id = make_id(id, "text");
+    text.content = parse_advanced_text(view->text_markup, {.base_style = ctx.theme().body_text, .icon_resolver = {}, .font_resolver = {},
+                                                           .bold_font = ctx.theme().emphasis_text.font, .italic_font = {}});
+    if (view == _dialogue && _revealed != static_cast<std::size_t>(-1)) {
+        text.content = first_letters(std::move(text.content), _revealed);
+    }
+    text.layout_options.max_width = room;
+    ctx.add(std::move(text), LayoutStyle{.width = grow(), .height = fit()});
+    for (const DialogueChoiceView& choice : view->choices) {
+        auto& [choice_id, button] = _choices.emplace_back(choice.id, std::make_unique<Button>());
+        button->id = make_id(id, std::string_view(choice.id));
+        button->label = plain_text(choice.text_markup);
+        button->enabled = choice.enabled && view == _dialogue;
+        ctx.widget(*button, LayoutStyle{.width = grow(), .height = fit()});
+        (void)choice_id;
     }
 }
 

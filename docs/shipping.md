@@ -33,6 +33,7 @@ kin_game(my_game TITLE "My Game")   # content/ beside this CMakeLists.txt
 | `VERSION <x.y.z>` | the project's | Version info, and the package's name |
 | `ICON <file.ico>` | none | The Windows executable's icon |
 | `FILES <file>...` | none | More files to ship beside the executable (a readme) |
+| `INFO <file>` | none | A game info file (`project.kin`): `TITLE`, `VERSION` and `ICON` default to its `title`, `version` and `icon` |
 | `NO_CONTENT` | | The game has no content folder |
 
 In the game, `find_content_root` finds the content and gives the folder to read
@@ -52,6 +53,21 @@ int main(int argc, char** argv) {
     ...
 }
 ```
+
+`kin_game` also defines `KIN_GAME_TITLE`, `KIN_GAME_VERSION` and
+`KIN_GAME_ICON` on the game's target, as string literals, so the game's
+`GameInfo` can come from the same place as its package's name:
+
+```cpp
+kin::GameInfo game{.id = "my_game", .title = KIN_GAME_TITLE, .version = KIN_GAME_VERSION, .icon = KIN_GAME_ICON};
+kin::WindowedAppConfig window = kin::window_config(game, root); // the window's icon from the content
+```
+
+A game info's `icon` is a PNG in the content (`icon icon.png`). The window
+shows it (`WindowedAppConfig::icon`, read through the content layer, so from
+the pack too). With `INFO`, a `.ico` of the same name beside it
+(`content/icon.ico`) becomes the Windows executable's icon. Kin Studio writes
+that file when it exports.
 
 `KIN_GAME_CONTENT` is defined by `kin_game` on the game's target. The first of
 these that exists is used:
@@ -243,7 +259,7 @@ If a dependency moves a license file, configuring fails and names it.
 - Compressed or encrypted packs (images and sounds are already compressed; a
   pack only gathers them).
 - A pack appended to the executable, for a single-file game.
-- Installers, code signing, a Linux `.desktop` file and icon, macOS bundles.
+- Installers, code signing, a Linux `.desktop` file, macOS bundles.
 
 ## Optional components and release optimization
 

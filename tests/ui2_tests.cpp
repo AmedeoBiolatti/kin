@@ -4014,6 +4014,13 @@ void test_advanced_text_parse_layout_and_draw() {
     assert(icon->sprite.valid());
     assert(rect_eq({0, 0, icon->size.x, icon->size.y}, 0, 0, 8, 8));
 
+    // [b] and [i]: their fonts when given; their text, never the tags, either way.
+    std::string said;
+    for (const ui2::AdvancedTextRun& run : ui2::parse_advanced_text("a [b]bold[/b] and [i]it[/i]", markup_options).runs) {
+        said += std::get<ui2::TextRun>(run).text;
+    }
+    assert(said == "a bold and it");
+
     ui2::AdvancedTextContent invalid = ui2::parse_advanced_text("[color=#FF0000]plain", markup_options);
     assert(invalid.runs.size() == 1);
     assert(std::get<ui2::TextRun>(invalid.runs[0]).text == "[color=#FF0000]plain");
@@ -7297,7 +7304,71 @@ void test_screen_files() {
     assert(screen.text("score") == "Score: 12" && !screen.visible("menu"));
 }
 
+// A screen's dialogue element: nothing without a dialogue; its choices
+// clicked, told; its box clicked, on.
+void test_screen_dialogue() {
+    ui2::ScreenDocument doc;
+    std::string error;
+    assert(ui2::parse_screen(R"({"root": {"kind": "box", "width": "grow", "height": "grow", "children": [
+        {"id": "talk", "kind": "dialogue", "width": 300, "padding": 10, "gap": 6, "anchor": "bottom"}]}})", doc, error));
+    ui2::UiScreen screen{doc};
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const auto frame = [&](Vec2f at, bool held) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_held(MouseButton::Left, held);
+        ui.begin(input, renderer);
+        screen.draw(ui, {0, 0, 400, 300});
+        ui.end();
+    };
+    frame({0, 0}, false);
+    assert(screen.placed().size() == 1); // the root only: no dialogue, nothing
+    DialogueViewModel view;
+    view.active = true;
+    view.speaker_name = "Guide";
+    view.text_markup = "Hello [b]there[/b]";
+    view.choices = {{.id = "yes", .text_markup = "Yes", .enabled = true, .visited = false},
+                    {.id = "no", .text_markup = "No", .enabled = true, .visited = false}};
+    screen.set_dialogue(&view, 3);
+    frame({0, 0}, false);
+    frame({0, 0}, false);
+    Rectf box{};
+    for (const ui2::UiScreen::Placed& placed : screen.placed()) {
+        if (placed.path == "0") box = placed.bounds;
+    }
+    assert(box.w == 300.0f && std::abs(box.y + box.h - 300.0f) < 1.0f); // at the bottom
+    // The last choice is the lowest thing in it: a click there chooses "no".
+    const Vec2f no{box.x + box.w * 0.5f, box.y + box.h - 10.0f - 4.0f};
+    frame(no, false);
+    frame(no, true);
+    frame(no, false);
+    assert(screen.dialogue_choice() == "no" && !screen.dialogue_advanced());
+    screen.take_dialogue_events();
+    assert(screen.dialogue_choice().empty());
+}
+
+// A screen's texts under their own keys: what translators start from.
+void test_screen_text_keys() {
+    ui2::ScreenDocument doc;
+    std::string error;
+    assert(ui2::parse_screen(R"({"root": {"kind": "box", "children": [
+        {"id": "play", "kind": "button", "text": "Play"},
+        {"id": "own", "kind": "label", "text": "Own", "key": "menu.own"},
+        {"kind": "label", "text": "No id"},
+        {"id": "name", "kind": "text_input", "text": "typed", "hint": "Your name"}]}})", doc, error));
+    assert(ui2::screen_name("ui/hud.kinui") == "hud" && ui2::screen_name("menus/pause.kinui") == "pause");
+    assert(ui2::screen_text_key("hud", doc.root.children[0]) == "ui.hud.play");
+    assert(ui2::screen_text_key("hud", doc.root.children[3], true) == "ui.hud.name.hint");
+    const LanguageFile file = ui2::screen_language_file("hud", doc);
+    // Its button and its field's hint; not one with a key of its own, nor without an id, nor the player's text.
+    assert(file.strings.size() == 2 && file.strings.at("ui.hud.play") == "Play" && file.strings.at("ui.hud.name.hint") == "Your name");
+}
+
 int main() {
+    test_screen_text_keys();
+    test_screen_dialogue();
     test_screen_files();
     test_text_rendering_modes();
     test_text_kerning_and_lines();

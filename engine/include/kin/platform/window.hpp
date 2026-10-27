@@ -12,6 +12,7 @@ namespace kin {
 using WindowId = u32;
 
 class SdlRenderer2DBackend;
+struct Image;
 namespace gpu {
 class GpuDevice;
 }
@@ -109,6 +110,8 @@ public:
     bool borderless() const;
     // Desktop (borderless, display-sized) fullscreen, toggled at runtime.
     bool fullscreen() const;
+    // The icon the system shows for it (its title bar, the task bar); RGBA.
+    void set_icon(const Image& image);
     void set_fullscreen(bool enabled);
 
     bool close_requested() const { return _close_requested; }

@@ -40,6 +40,9 @@ struct GameInfo {
     std::string version{};
     std::string description{};
     std::string author{};
+    // Its icon: a PNG in its content (the window's; kin_game makes the Windows
+    // executable's from <name>.ico beside it).
+    std::string icon{};
     GameWindowInfo window{};
     bool headless_supported = true;
     std::vector<std::string> tags{};
@@ -47,7 +50,8 @@ struct GameInfo {
     std::optional<InputMap> input_map{};
 };
 
-WindowedAppConfig window_config(const GameInfo& info);
+// Its window; with `content` (its content root), its icon too.
+WindowedAppConfig window_config(const GameInfo& info, const std::filesystem::path& content = {});
 
 void set_field(GameInfo& info, std::string_view key, std::string_view value);
 const std::string* field(const GameInfo& info, std::string_view key);

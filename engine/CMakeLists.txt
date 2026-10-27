@@ -62,6 +62,7 @@ add_library(kin_engine STATIC
     src/ecs/lighting.cpp
     src/ecs/shader_effect.cpp
     src/ecs/ui_screens.cpp
+    src/ecs/dialogue.cpp
     src/ecs/sprite_animator.cpp
     src/ecs/text.cpp
     src/ecs/system.cpp

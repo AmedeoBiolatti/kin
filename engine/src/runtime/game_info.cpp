@@ -50,7 +50,7 @@ void write_bool(std::ostream& out, bool value) {
 
 } // namespace
 
-WindowedAppConfig window_config(const GameInfo& info) {
+WindowedAppConfig window_config(const GameInfo& info, const std::filesystem::path& content) {
     return {
         .title = info.title,
         .width = info.window.width,
@@ -64,6 +64,7 @@ WindowedAppConfig window_config(const GameInfo& info) {
         .borderless = info.window.borderless,
         .wait_for_events = info.window.wait_for_events,
         .input_map = info.input_map,
+        .icon = content.empty() || info.icon.empty() ? std::filesystem::path{} : content / info.icon,
     };
 }
 
@@ -128,6 +129,10 @@ GameInfo load_game_info(const std::filesystem::path& path) {
         }
         if (kind == "version") {
             info.version = read_rest();
+            continue;
+        }
+        if (kind == "icon") {
+            info.icon = read_rest();
             continue;
         }
         if (kind == "description") {
@@ -200,6 +205,9 @@ bool save_game_info(const GameInfo& info, const std::filesystem::path& path) {
     out << "title " << info.title << '\n';
     if (!info.version.empty()) {
         out << "version " << info.version << '\n';
+    }
+    if (!info.icon.empty()) {
+        out << "icon " << info.icon << '\n';
     }
     if (!info.description.empty()) {
         out << "description " << info.description << '\n';

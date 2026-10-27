@@ -863,10 +863,13 @@ bool submit_text(RenderQueue& queue,
                  const TextRenderer& text,
                  const RenderView* view) {
     KIN_DRAW_ENTITY(entity, "TextRenderer");
-    if (!text.visible || text.text.empty() || !text.face) {
+    if (!text.visible || !text.face) {
         return false;
     }
-    TextLayout laid = layout_text(text);
+    TextLayout laid = layout_text(text); // its text, translated
+    if (laid.lines.empty()) {
+        return false;
+    }
     const Affine2 place = Affine2::trs(transform.pos, transform.rotation, transform.scale);
     const Rectf box{laid.at.x - text.outline, laid.at.y - text.outline, laid.size.x + text.outline * 2.0f,
                     laid.size.y + text.outline * 2.0f};

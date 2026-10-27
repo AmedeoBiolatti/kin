@@ -3,8 +3,10 @@
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
+#include <kin/ecs/dialogue.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/prefab/prefab_asset.hpp>
@@ -179,6 +181,7 @@ struct EntityScripts::Impl {
     EcsWorld* world = nullptr;
     Input* input = nullptr;
     SceneScreens* screens = nullptr;
+    SceneDialogue* dialogue = nullptr;
     std::string calling; // the script being called, for its problems
 
     void bind(sol::state& lua) {
@@ -292,6 +295,14 @@ struct EntityScripts::Impl {
             return std::make_tuple(at.x, at.y);
         };
 
+        // The language, which game scripts may change (a language menu's).
+        if (sol::optional<sol::table> l10n = lua["l10n"]) {
+            (*l10n)["set_locale"] = [](const std::string& tag) -> std::string {
+                Localization* active = active_localization();
+                return active ? active->set_locale(tag) : std::string{};
+            };
+        }
+
         sol::table ui_table = lua.create_named_table("ui");
         ui_table["clicked"] = [this](const std::string& id) { return screens && screens->clicked(id); };
         ui_table["changed"] = [this](const std::string& id) { return screens && screens->changed(id); };
@@ -321,6 +332,37 @@ struct EntityScripts::Impl {
         };
         ui_table["set_enabled"] = [this](const std::string& id, bool enabled) {
             if (screens) screens->set_enabled(id, enabled);
+        };
+
+        sol::table dialogue_table = lua.create_named_table("dialogue");
+        dialogue_table["start"] = [this](const std::string& path, sol::optional<std::string> node) {
+            return dialogue && dialogue->start(path, node.value_or(""));
+        };
+        dialogue_table["stop"] = [this]() {
+            if (dialogue) dialogue->stop();
+        };
+        dialogue_table["active"] = [this]() { return dialogue && dialogue->active(); };
+        dialogue_table["advance"] = [this]() {
+            if (dialogue) dialogue->advance();
+        };
+        dialogue_table["choose"] = [this](const sol::object& which) {
+            if (!dialogue) return false;
+            if (which.is<std::string>()) return dialogue->choose(std::string_view(which.as<std::string>()));
+            return which.is<double>() && dialogue->choose(static_cast<i32>(which.as<double>()) - 1); // Lua counts from 1
+        };
+        dialogue_table["node"] = [this]() { return dialogue && dialogue->active() ? dialogue->view().node_id : std::string(); };
+        dialogue_table["get"] = [this](sol::this_state state, const std::string& name) -> sol::object {
+            if (!dialogue) return sol::make_object(state, sol::lua_nil);
+            const DialogueVariable value = dialogue->variable(name);
+            if (const auto* b = std::get_if<bool>(&value.value)) return sol::make_object(state, *b);
+            if (const auto* n = std::get_if<f64>(&value.value)) return sol::make_object(state, *n);
+            return sol::make_object(state, std::get<std::string>(value.value));
+        };
+        dialogue_table["set"] = [this](const std::string& name, const sol::object& value) {
+            if (!dialogue) return;
+            if (value.is<bool>()) dialogue->set_variable(name, {.value = value.as<bool>()});
+            else if (value.is<double>()) dialogue->set_variable(name, {.value = value.as<double>()});
+            else if (value.is<std::string>()) dialogue->set_variable(name, {.value = value.as<std::string>()});
         };
 
         sol::table world_table = lua.create_named_table("world");
@@ -419,6 +461,10 @@ void EntityScripts::set_screens(SceneScreens* screens) {
     _impl->screens = screens;
 }
 
+void EntityScripts::set_dialogue(SceneDialogue* dialogue) {
+    _impl->dialogue = dialogue;
+}
+
 void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     Impl& impl = *_impl;
     impl.world = &world;
@@ -465,6 +511,14 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         }
         if (entity.is_alive()) {
             file.script->call("on_update", run.self, dt);
+        }
+        // What the dialogue told this step (the game clears them once the step has seen them).
+        if (impl.dialogue && entity.is_alive() && file.script->has("on_dialogue_event")) {
+            const std::vector<DialogueEvent> told = impl.dialogue->events();
+            for (const DialogueEvent& event : told) {
+                if (!entity.is_alive()) break;
+                file.script->call("on_dialogue_event", run.self, event.id, event.node_id);
+            }
         }
 #if KIN_ENABLE_PHYSICS
         // What its body began touching this step.

@@ -1097,6 +1097,12 @@ std::string closing_tag_for(std::string_view tag) {
     if (tag == "u") {
         return "[/u]";
     }
+    if (tag == "b") {
+        return "[/b]";
+    }
+    if (tag == "i") {
+        return "[/i]";
+    }
     if (tag == "s") {
         return "[/s]";
     }
@@ -1131,6 +1137,12 @@ bool apply_markup_tag(std::string_view tag, AdvancedTextParseState& state, const
     }
     if (tag == "u") {
         state.underline = true;
+        return true;
+    }
+    if (tag == "b" || tag == "i") {
+        if (const Font& font = tag == "b" ? options.bold_font : options.italic_font; font) {
+            state.style.font = font;
+        }
         return true;
     }
     if (tag == "s") {

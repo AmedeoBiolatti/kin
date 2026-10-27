@@ -1,5 +1,7 @@
 #include <kin/platform/window.hpp>
 
+#include <kin/assets/image.hpp>
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -242,6 +244,18 @@ bool Window::borderless() const {
 
 bool Window::fullscreen() const {
     return _handle && ((SDL_GetWindowFlags(to_sdl_window(_handle)) & SDL_WINDOW_FULLSCREEN) != 0);
+}
+
+void Window::set_icon(const Image& image) {
+    if (!_handle || !image.valid()) {
+        return;
+    }
+    SDL_Surface* surface = SDL_CreateSurfaceFrom(image.size.x, image.size.y, SDL_PIXELFORMAT_RGBA32,
+                                                 const_cast<u8*>(image.rgba.data()), image.size.x * 4);
+    if (surface) {
+        SDL_SetWindowIcon(to_sdl_window(_handle), surface);
+        SDL_DestroySurface(surface);
+    }
 }
 
 void Window::set_fullscreen(bool enabled) {

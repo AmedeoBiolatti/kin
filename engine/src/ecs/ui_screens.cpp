@@ -2,6 +2,7 @@
 
 #include <kin/assets/content.hpp>
 #include <kin/ecs/assets2d.hpp>
+#include <kin/ecs/dialogue.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/renderer2d.hpp>
 
@@ -53,6 +54,7 @@ SceneScreens::Read* SceneScreens::read(const std::string& path) {
         found = _screens.emplace(path, std::make_unique<Read>()).first;
         found->second->time = std::nullopt;
         found->second->screen.set_seed(std::hash<std::string>{}(path));
+        found->second->screen.set_name(ui2::screen_name(path)); // its texts translated under ui.<name>.<id>
     }
     Read& r = *found->second;
     const std::filesystem::path file = _content / path;
@@ -189,7 +191,18 @@ void SceneScreens::draw(EcsWorld& world, ui2::Context& ui, Renderer2D& renderer,
             }
         }
         ui.set_theme(t ? t->file.theme : was);
+        const bool talking = _dialogue && _dialogue->active();
+        r->screen.set_dialogue(talking ? &_dialogue->view() : nullptr, talking ? _dialogue->revealed() : 0);
         r->screen.draw(ui, bounds, with);
+        // The player's clicks on the dialogue: given to it.
+        if (talking) {
+            if (!r->screen.dialogue_choice().empty()) {
+                _dialogue->choose(std::string_view(r->screen.dialogue_choice()));
+            } else if (r->screen.dialogue_advanced()) {
+                _dialogue->advance();
+            }
+        }
+        r->screen.take_dialogue_events();
         _shown.push_back(&r->screen);
     }
     ui.set_theme(was);

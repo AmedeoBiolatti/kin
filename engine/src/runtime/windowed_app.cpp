@@ -1,3 +1,4 @@
+#include <kin/assets/image.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/runtime/windowed_app.hpp>
 #include <string>
@@ -48,6 +49,15 @@ struct WindowedAppSession::Impl {
         config.title = title;
         if (config.color_space != ColorSpace::Gamma || config.hdr)
             renderer.set_color_space(config.color_space, config.hdr);
+        if (!config.icon.empty() && !app.headless()) {
+            try {
+                const Image icon = load_image(config.icon); // logs why when it can't
+                if (icon.valid())
+                    window.set_icon(icon);
+            } catch (const std::exception& error) {
+                KIN_LOG_WARN("runtime", std::string("window icon: ") + error.what());
+            }
+        }
         if (!(config.hidden || app.headless()))
             window.show();
         if (config.logical_width > 0 && config.logical_height > 0) {

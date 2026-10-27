@@ -15,7 +15,10 @@
 // Elements: box (a container: its children in a column, or a row; a theme
 // surface behind them when it names one), panel (a box on the theme's panel
 // surface), label, button, image, progress, toggle, slider, text_input and
-// spacer. Each may have an id the game reaches it by (UiScreen::set_text,
+// spacer, and dialogue (the dialogue running, when the game gives it one:
+// who speaks, their portrait, what they say revealed as it is said, the
+// choices; on the theme's panel, `padding` and `gap` its own, drawn only while
+// a dialogue runs). Each may have an id the game reaches it by (UiScreen::set_text,
 // clicked, ...). A size is "fit" (as big as what is in it), "grow" (the room
 // left, shared), a number (points) or "50%" (of its parent's). An element
 // with an anchor is placed over its parent at that corner (or middle),
@@ -29,6 +32,8 @@
 //     hud.draw(ui, {0, 0, 1280, 720});
 //     if (hud.clicked("play")) start();   // after drawing: this frame's results
 
+#include <kin/dialogue/dialogue.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/texture.hpp>
 #include <kin/ui2/context.hpp>
@@ -45,9 +50,9 @@
 
 namespace kin::ui2 {
 
-enum class ScreenKind : u8 { Box, Panel, Label, Button, Image, Progress, Toggle, Slider, TextInput, Spacer };
+enum class ScreenKind : u8 { Box, Panel, Label, Button, Image, Progress, Toggle, Slider, TextInput, Spacer, Dialogue };
 
-// "box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer".
+// "box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer", "dialogue".
 std::string_view screen_kind_name(ScreenKind kind);
 std::optional<ScreenKind> screen_kind_named(std::string_view name);
 // Whether elements of `kind` hold others (box, panel).
@@ -111,6 +116,14 @@ struct ScreenDocument {
     friend bool operator==(const ScreenDocument&, const ScreenDocument&) = default;
 };
 
+// The key an element's text is translated under: "ui.<screen>.<id>" (its
+// hint's, with ".hint"); empty for an element with no id. `screen` is its
+// file's name ("hud" for ui/hud.kinui: screen_name()).
+std::string screen_text_key(std::string_view screen, const ScreenElement& element, bool hint = false);
+std::string screen_name(std::string_view path);
+// A screen's own texts under their keys, as a language: what translators start from.
+LanguageFile screen_language_file(std::string_view screen, const ScreenDocument& doc, std::string_view locale = "en");
+
 // A .kinui file's text read (false: `error` says where and why), and written.
 bool parse_screen(std::string_view text, ScreenDocument& out, std::string& error);
 std::string serialize_screen(const ScreenDocument& screen);
@@ -167,6 +180,24 @@ public:
     const std::vector<Placed>& placed() const { return _placed; }
     // The id seed of its ui2 boxes (screens drawn in one context differ in it).
     void set_seed(u64 seed) { _seed = seed; }
+    // Its name, for its texts' keys (screen_text_key): translated where the
+    // active localization has them. Empty: only explicit keys are.
+    void set_name(std::string name) { _name = std::move(name); }
+    const std::string& name() const { return _name; }
+
+    // The dialogue its `dialogue` elements show (null: none, and they hide),
+    // `revealed` letters of its text; or, for an editor, a sample line.
+    void set_dialogue(const DialogueViewModel* view, std::size_t revealed = static_cast<std::size_t>(-1));
+    void show_dialogue_sample(bool sample) { _dialogue_sample = sample; }
+    // What the player did to it at the last draw: clicked it on (the line),
+    // or a choice (its id); cleared by clear_events().
+    bool dialogue_advanced() const { return _dialogue_advanced; }
+    const std::string& dialogue_choice() const { return _dialogue_choice; }
+    // Those taken (given to the dialogue), so they are not given again.
+    void take_dialogue_events() {
+        _dialogue_advanced = false;
+        _dialogue_choice.clear();
+    }
 
 private:
     struct State {
@@ -201,6 +232,15 @@ private:
     std::vector<Placed> _placed;
     std::vector<Placed> _placing;
     u64 _seed = 0x6b696e7569; // "kinui"
+    std::string _name;
+    const DialogueViewModel* _dialogue = nullptr;
+    std::size_t _revealed = static_cast<std::size_t>(-1);
+    bool _dialogue_sample = false;
+    bool _dialogue_advanced = false;
+    std::string _dialogue_choice;
+    // The dialogue's choices drawn, until end_layout() writes their clicks back.
+    std::deque<std::pair<std::string, std::unique_ptr<Button>>> _choices;
+    void dialogue_element(Context& ctx, const ScreenElement& element, Id id, const std::string& path, const ScreenAssets& assets);
 };
 
 } // namespace kin::ui2

@@ -28,6 +28,10 @@ enum class TextAlign : u8 { Left, Center, Right };
 
 struct TextRenderer {
     std::string text;
+    // Translated (kin/l10n): the active localization's text under `key`, else
+    // under `auto_key` (a scene sets it: scene_text_key()), else `text`.
+    std::string key;
+    std::string auto_key;
     ComponentAssetRef font; // a .ttf or .otf of the content; empty: the system's UI font
     f32 size = 16.0f;       // points
     Color color = colors::white;
@@ -61,6 +65,11 @@ struct TextLayout {
     Vec2f at{};
 };
 TextLayout layout_text(const TextRenderer& text);
+// What it shows: its text, translated where the active localization has its key.
+std::string shown_text(const TextRenderer& text);
+// The key a scene's text is translated under: "scene.<scene>.<entity id>"
+// (the scene's name lower case, its spaces '_').
+std::string scene_text_key(std::string_view scene_name, std::string_view entity_id);
 // Its lines drawn as laid out, through the renderer's transform.
 void draw_text_layout(Renderer2D& renderer, const TextRenderer& text, const TextLayout& layout);
 // Its box (outline included), in the entity's own units; empty with no face.

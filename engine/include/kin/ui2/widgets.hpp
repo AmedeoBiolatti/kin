@@ -819,10 +819,17 @@ struct AdvancedTextLayoutOptions {
     AdvancedTextOverflow overflow = AdvancedTextOverflow::Visible;
 };
 
+// Markup: [b]bold[/b], [i]italic[/i], [u]underlined[/u], [s]struck[/s],
+// [color=ff8800]...[/color], [scale=1.5]...[/scale], [font=name]...[/font],
+// [link=id]...[/link], [icon=name]; [[ is a [. A tag without its closing one
+// stays as text.
 struct AdvancedTextMarkupOptions {
     TextStyle base_style{};
     std::function<Sprite(std::string_view)> icon_resolver;
     std::function<Font(std::string_view)> font_resolver;
+    // The fonts [b] and [i] draw in; without one, the text inside keeps its font.
+    Font bold_font{};
+    Font italic_font{};
 };
 
 struct AdvancedTextBox {

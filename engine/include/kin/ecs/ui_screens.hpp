@@ -36,6 +36,7 @@ namespace kin {
 
 class Assets2D;
 class Renderer2D;
+class SceneDialogue;
 
 struct UiScreenComponent {
     ComponentAssetRef asset{}; // a .kinui file of the content
@@ -73,6 +74,10 @@ public:
     // Every screen's clicks and changes forgotten (the game has seen them).
     void clear_events();
 
+    // The dialogue their `dialogue` elements show, and which the player's
+    // clicks on them move on (null: none).
+    void set_dialogue(SceneDialogue* dialogue) { _dialogue = dialogue; }
+
     // Screens and themes that could not be read, by path, with why.
     const std::map<std::string, std::string>& problems() const { return _problems; }
 
@@ -101,6 +106,7 @@ private:
     };
     std::map<std::string, Pending, std::less<>> _pending;
     std::map<std::string, std::string> _problems;
+    SceneDialogue* _dialogue = nullptr;
 };
 
 } // namespace kin

@@ -30,6 +30,11 @@
 //   ui.clicked(id), ui.changed(id), ui.value(id), ui.checked(id), ui.text(id),
 //   ui.set_text(id, text), ui.set_value(id, v), ui.set_checked(id, b), ui.show(id[, b]),
 //   ui.hide(id), ui.set_image(id, path), ui.set_enabled(id, b)
+// and, given the scene's dialogue (set_dialogue): dialogue.start(path[, node]),
+// dialogue.stop(), dialogue.active(), dialogue.advance(), dialogue.choose(i or id),
+// dialogue.node(), dialogue.get(name), dialogue.set(name, value); and each
+// entity's on_dialogue_event(self, id, node) for what the dialogue told
+// (its events, "dialogue.started", "dialogue.ended") this step.
 // Fields read and set as scene files have them: numbers, true/false, text,
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
@@ -45,6 +50,7 @@ namespace kin {
 class EcsWorld;
 class Input;
 class SceneScreens;
+class SceneDialogue;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -68,6 +74,8 @@ public:
     void restart();
     // The scene's UI screens, for the scripts' `ui` (null: none).
     void set_screens(SceneScreens* screens);
+    // The scene's dialogue, for the scripts' `dialogue` and on_dialogue_event (null: none).
+    void set_dialogue(SceneDialogue* dialogue);
 
 private:
     struct Impl;

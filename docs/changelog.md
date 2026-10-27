@@ -61,6 +61,39 @@ releases may change APIs.
   `serialize_input_map`. `App::open_gamepads` polls a controller with the
   window's events. `binding_held` and `axis_value` let editors try bindings
   that are not in the map.
+- Rich text (`parse_advanced_text`, the dialogue element) reads `[b]` and
+  `[i]`: in `AdvancedTextMarkupOptions::bold_font` and `italic_font` when
+  given. Before, they showed as text, and a dialogue's line was cut short by
+  their length while it was revealed.
+- Add game icons and project info to games' builds:
+  - `GameInfo::icon` (`icon <png>` in a game info file) and
+    `WindowedAppConfig::icon` set the window's icon; `window_config(info,
+    content)` fills it in. `Window::set_icon` takes an `Image`.
+  - `kin_game(... INFO project.kin)` takes the title, version and icon from a
+    game info file, and uses `<icon>.ico` in the content as the Windows icon.
+  - `kin_game` defines `KIN_GAME_TITLE`, `KIN_GAME_VERSION` and
+    `KIN_GAME_ICON` for the game's code.
+- Translate UI screens and scene text without code:
+  - A `.kinui` label, button or toggle with an id, and no `key` of its own, is
+    translated under `ui.<screen>.<id>` (a text field's hint under
+    `ui.<screen>.<id>.hint`) when the active localization has that key.
+    `screen_name`, `screen_text_key` and `screen_language_file` give the
+    names and a file to start from.
+  - A scene's `TextRenderer` is translated under `scene.<scene>.<entity>`, or
+    its own `key`. `shown_text` and `scene_text_key` give the text and key.
+  - Lua's `l10n` table gets `set_locale()` in scene scripts too.
+- Add dialogue in scenes:
+  - `SceneDialogue` runs one dialogue at a time. It reveals text letter by
+    letter, keeps the game's variables between dialogues, reports events, and
+    saves with snapshots.
+  - `TalkComponent` and `Talker`, with `update_talk`, start a dialogue when
+    the talk action is pressed nearby.
+  - A `dialogue` element in UI screens shows the running dialogue and passes
+    on clicks.
+  - Lua scripts get a `dialogue` table and `on_dialogue_event`.
+  - `.kindialogue` files keep node places, speaker colours and line tags,
+    and list the nodes a game also starts at (`entries`).
+  - Add `dialogue_problems` and `dialogue_targets`.
 - Add UI screens as data: `.kinui` files are trees of boxes, panels, labels,
   buttons, images, bars, toggles, sliders, text fields and spacers, with sizes,
   anchors and a theme.

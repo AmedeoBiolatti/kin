@@ -6,6 +6,7 @@
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/ecs_scene.hpp>
 #include <kin/ecs/lighting.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/text.hpp>
@@ -1522,6 +1523,33 @@ void test_lights_blends_and_shader_effects() {
     fs::remove_all(dir);
 }
 
+// A scene's text translated under its own key, or an explicit one, while a
+// language has it.
+void test_scene_text_translated() {
+    assert(kin::scene_text_key("Main Hall", "sign") == "scene.main_hall.sign");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const kin::SceneLoadResult loaded = kin::parse_scene_asset(R"json({"schema": "kin.scene/1", "name": "Main", "entities": [
+        {"id": "sign", "components": {"Transform2D": {}, "TextRenderer": {"text": "Shop"}}},
+        {"id": "door", "components": {"Transform2D": {}, "TextRenderer": {"text": "Door", "key": "doors.front"}}}]})json", world.components());
+    assert(loaded.ok());
+    kin::SceneInstance instance = kin::instantiate_scene_asset(world, *loaded.scene, std::filesystem::temp_directory_path(), world.components());
+    const kin::TextRenderer* sign = instance.by_authored_id.at("sign").get<kin::TextRenderer>();
+    const kin::TextRenderer* door = instance.by_authored_id.at("door").get<kin::TextRenderer>();
+    assert(sign->auto_key == "scene.main.sign" && kin::shown_text(*sign) == "Shop"); // no language: its text
+    kin::Localization l10n;
+    kin::LanguageFile fr{.locale = "fr", .name = "Français", .direction = {}, .strings = {}};
+    fr.strings["scene.main.sign"] = "Boutique";
+    fr.strings["doors.front"] = "Porte";
+    l10n.add("test", fr);
+    l10n.set_locale("fr");
+    kin::set_active_localization(&l10n);
+    assert(kin::shown_text(*sign) == "Boutique" && kin::shown_text(*door) == "Porte");
+    l10n.set_locale("en");
+    assert(kin::shown_text(*sign) == "Shop"); // English has no key: its text
+    kin::set_active_localization(nullptr);
+}
+
 // An animation file named by an Animator: its tracks set described fields
 // (any, as "Component.field"), of the entity and of a child by name; it plays
 // through once, or on when it repeats; a prefab's instances each their own.
@@ -1641,6 +1669,7 @@ int main() {
     test_assets2d_binds_tilemaps();
     test_scene_shapes_clips_and_text();
     test_lights_blends_and_shader_effects();
+    test_scene_text_translated();
     test_animators();
 #if KIN_ENABLE_AUDIO
     test_assets2d_binds_audio_emitters();

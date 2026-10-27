@@ -1,6 +1,9 @@
 #include <kin/ecs/text.hpp>
 
+#include <kin/l10n/localization.hpp>
+
 #include <algorithm>
+#include <cctype>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -8,14 +11,34 @@
 
 namespace kin {
 
+std::string shown_text(const TextRenderer& text) {
+    if (const Localization* l10n = active_localization()) {
+        for (const std::string* key : {&text.key, &text.auto_key}) {
+            if (!key->empty() && l10n->has(*key)) {
+                return l10n->tr(*key);
+            }
+        }
+    }
+    return text.text;
+}
+
+std::string scene_text_key(std::string_view scene_name, std::string_view entity_id) {
+    std::string scene;
+    for (const char c : scene_name) {
+        scene += c == ' ' ? '_' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return "scene." + scene + "." + std::string(entity_id);
+}
+
 TextLayout layout_text(const TextRenderer& text) {
     TextLayout laid;
-    if (!text.face || text.text.empty()) {
+    const std::string shown = shown_text(text);
+    if (!text.face || shown.empty()) {
         return laid;
     }
     // Broken at '\n', and past `wrap` (the spaces at a break dropped).
-    for (const ui2::TextRange range : ui2::wrap_text_ranges(text.face, text.text, {.max_width = std::max(text.wrap, 0.0f)})) {
-        std::string_view line = std::string_view(text.text).substr(range.begin, range.end - range.begin);
+    for (const ui2::TextRange range : ui2::wrap_text_ranges(text.face, shown, {.max_width = std::max(text.wrap, 0.0f)})) {
+        std::string_view line = std::string_view(shown).substr(range.begin, range.end - range.begin);
         while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) {
             line.remove_suffix(1);
         }

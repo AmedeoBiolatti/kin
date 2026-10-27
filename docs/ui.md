@@ -436,6 +436,8 @@ A UI screen (a HUD, a menu, a title screen) can be a `.kinui` file
 - **Leaves:** `label`, `button`, `image` (a path in the content, with a
   `tint`), `progress` (0..1), `toggle`, `slider` (`min`, `max`, `step`),
   `text_input` (with a `hint`) and `spacer`.
+- **Dialogue:** a `dialogue` element shows the dialogue the game runs, while
+  one runs. See [dialogue](dialogue.md).
 - **Sizes:** `width` and `height` are `"fit"`, `"grow"` (or `"grow 2"`),
   points, or `"50%"`.
 - **Anchors:** an element with an `anchor` (`top_left` ... `bottom_right`, or

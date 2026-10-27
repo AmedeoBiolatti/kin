@@ -193,6 +193,13 @@ scripts.update(world, ctx.input, ctx.dt);
   - reading: `clicked`, `changed`, `value`, `checked` and `text`;
   - changing: `set_text`, `set_value`, `set_checked`, `show`, `hide`,
     `set_image` and `set_enabled`.
+- When the game gives the scripts its dialogue (`EntityScripts::set_dialogue`),
+  they reach it through the `dialogue` table ([dialogue](dialogue.md)):
+  - `start(path[, node])`, `stop()`, `active()`, `advance()`;
+  - `choose(i or id)` (counting from 1), `node()`;
+  - `get(name)` and `set(name, value)` for its variables.
+
+  Each entity's `on_dialogue_event(self, id, node)` hears what it tells.
 - `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
 - `on_contact(self, other)` runs when the entity's body begins to touch
   another, when the world has a `PhysicsContactQueue`.

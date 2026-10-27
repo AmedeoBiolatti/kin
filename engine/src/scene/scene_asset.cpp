@@ -12,6 +12,7 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/dialogue.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
@@ -635,6 +636,25 @@ void register_builtin_editor_components(EcsWorld& world) {
             .readonly()
             .description("The machine's state now.");
     }
+    if (!world.components().find("TalkComponent")) {
+        // A character the player talks to: its dialogue starts when the
+        // Talker, near it, presses the talk action (update_talk).
+        world.components().native<TalkComponent>("TalkComponent")
+            .field("asset", &TalkComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Dialogue)})
+            .description("A .kindialogue of the content.")
+            .field("start", &TalkComponent::start)
+            .description("The node it starts at; empty: the file's start.")
+            .field("radius", &TalkComponent::radius)
+            .range(0.0, 100000.0)
+            .description("How near the Talker must be.")
+            .field("prompt", &TalkComponent::prompt)
+            .field("enabled", &TalkComponent::enabled);
+    }
+    if (!world.components().find("Talker")) {
+        // The one who talks (the player): TalkComponents are measured from it.
+        world.components().native<Talker>("Talker").field("enabled", &Talker::enabled);
+    }
     if (!world.components().find("UiScreenComponent")) {
         // A UI screen (.kinui) shown over the world while the entity is there
         // (SceneScreens draws it; kin/ecs/ui_screens.hpp).
@@ -826,6 +846,8 @@ void register_builtin_editor_components(EcsWorld& world) {
         // reads it) or the system's.
         world.components().native<TextRenderer>("TextRenderer")
             .field("text", &TextRenderer::text)
+            .field("key", &TextRenderer::key)
+            .description("A translation key; empty: scene.<scene>.<entity>, where a language has it.")
             .field("font", &TextRenderer::font)
             .asset_type(std::string{asset_type_name(AssetType::Font)})
             .description("A font file of the content; empty: the system's.")
@@ -1055,6 +1077,10 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
             if (!apply_component(world, runtime, component, instance.diagnostics)) {
                 return instance;
             }
+        }
+        // Its text translated under its own key (scene.<scene>.<entity>), where a language has it.
+        if (const TextRenderer* text = runtime.get<TextRenderer>(); text && text->auto_key.empty()) {
+            runtime.get_mut<TextRenderer>()->auto_key = scene_text_key(scene.name, entity.id);
         }
     }
 
