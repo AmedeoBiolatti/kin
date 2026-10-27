@@ -184,7 +184,10 @@ void main() {
         const float opacity = kin_fog_opacity(draw.fog, tau);
         if (opacity > 0.0) {
             const vec3 colour = draw.fog.colour.w > 0.5 ? particle_fog_sky(dir) : draw.fog.colour.rgb;
-            vFog = vec4(kin_fog_sun(draw.fog, colour, dir, draw.sun_direction.xyz, draw.sun_light.rgb), opacity);
+            // (With Fog3D::sun_shadows the sun's share is added after the main pass: fog_sun_apply.frag.)
+            vFog = vec4(draw.fog.view.z > 0.5 ? colour
+                                              : kin_fog_sun(draw.fog, colour, dir, draw.sun_direction.xyz, draw.sun_light.rgb),
+                        opacity);
         }
     }
 }

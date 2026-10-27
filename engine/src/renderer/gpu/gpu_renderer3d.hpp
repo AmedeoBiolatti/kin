@@ -189,6 +189,9 @@ private:
     // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
     // normals are shared): the march, blurred across, blurred down; R8, the view's size.
     GpuTexture _contact_raw, _contact_across; // and the contact shadows' in _contact_raw
+    // With Fog3D::sun_shadows: the share of the fog's air the sun reaches along each ray (fog_sun.comp), RGBA16F at
+    // half the view's size; made by the first render that asks, dropped by the first that does not.
+    GpuTexture _fog_sun;
     // With Scene3D::taa, made by the first render that asks and dropped by the
     // first that does not: one-sample depth for the main pass (the view's own
     // may be multisampled), the 8-bit view's float picture before the resolve
@@ -367,6 +370,8 @@ private:
     // The camera's turn into the pre-pass's velocity target, over the pre-pass's depth.
     SDL_GPUGraphicsPipeline* sky_velocity_pipeline(SDL_GPUTextureFormat depth) const;
     SDL_GPUGraphicsPipeline* fullscreen(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
+    // The same, adding to the target (premultiplied: the target's alpha kept).
+    SDL_GPUGraphicsPipeline* fullscreen_additive(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
     SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
@@ -495,6 +500,11 @@ private:
     // from the render before evens out); true when it was read.
     bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
                     bool jittered, RenderDebugStats3D& stats);
+    // Fog3D::sun_shadows: the share of the fog's air the sun reaches along each ray, walked through the sun's shadow
+    // map on what the pre-pass drew (fog_sun.comp), after it; true when it was.
+    bool fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
+    // And its light added to the main pass's picture, once a pixel (fog_sun_apply.frag).
+    void fog_sun_apply(FrameCtx& ctx);
     // The view's GI scene and probes as the shaders read them (kin_gi.inc.glsl's KinGiScene, 5 vec4s, into `scene`;
     // KinGiProbes, 6, into `probes`; either may be null).
     void gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const;
@@ -727,6 +737,8 @@ private:
     bool _ao_warned = false;
     bool _contact_warned = false;
     SDL_GPUComputePipeline* _contact_pipeline = nullptr;            // contact.comp
+    SDL_GPUComputePipeline* _fog_sun_pipeline = nullptr;            // fog_sun.comp (Fog3D::sun_shadows)
+    GpuShader _fog_sun_apply_shader;                                // fog_sun_apply.frag
     SDL_GPUComputePipeline* _gtao_pipeline = nullptr;               // gtao.comp
     SDL_GPUComputePipeline* _gtao_chain_pipeline = nullptr;         // gtao_chain.comp (optional: gtao.comp without)
     SDL_GPUComputePipeline* _ao_chain_pipeline = nullptr;           // ao_depth_chain.comp

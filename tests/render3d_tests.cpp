@@ -12696,6 +12696,71 @@ void test_gpu_fog_matches_formula() {
     });
 }
 
+// The fog's sun through its shadows (Fog3D::sun_shadows). A black wall 60 m off in a fog whose only light is the sun's
+// in-scattering, a roof (a slab from 5 m up) over the air in front of the view's left half, the sun high behind the
+// camera: lit as before, the fog glows evenly; through the shadows, the air under the roof is dark and the left of the
+// view (seen through it) loses most of its glow, the right keeps nearly all of it. Without the sun's shadows the
+// setting changes nothing, to the byte; a float picture (HDR here) is needed.
+void test_gpu_fog_sun_shadows() {
+    with_gpu("test_gpu_fog_sun_shadows", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .hdr = true}).value_or({});
+        const kin::Material3D black{.color = Color::rgb(0, 0, 0), .unlit = true};
+        const auto shoot = [&](bool sun_shadows, bool shadows) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {0.0f, 1.0f, -1.0f}, 60.0f);
+            scene.lights.sun = {.direction = normalize(Vec3f{0.0f, 1.0f, 0.35f}), .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.lights.shadow_area =
+                shadows ? kin::Bounds3D{{-40.0f, -1.0f, -80.0f}, {40.0f, 10.0f, 10.0f}} : kin::Bounds3D{};
+            scene.lights.shadow_resolution = 1024;
+            scene.fog = {.enabled = true,
+                         .density = 0.02f,
+                         .colour = {0.0f, 0.0f, 0.0f},
+                         .sun_scatter = 0.5f,
+                         .sun_anisotropy = 0.0f,
+                         .sun_shadows = sun_shadows};
+            (void)scene.draw(box, Mat4f::translation({0.0f, 0.0f, -60.5f}) * Mat4f::scaling({400.0f, 400.0f, 1.0f}),
+                             black);
+            // The roof: over x < 0, from the camera to the wall.
+            (void)scene.draw(box, Mat4f::translation({-20.0f, 5.5f, -30.0f}) * Mat4f::scaling({40.0f, 1.0f, 70.0f}),
+                             black);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        // The mean light of a block of the lower half (under the roof's edge, seen through the air below it).
+        const auto mean = [](const Pixels& p, int x0, int x1) {
+            double sum = 0.0;
+            int n = 0;
+            for (int y = 70; y < 110; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    sum += linear_level(p.at(x, y));
+                    ++n;
+                }
+            }
+            return sum / n;
+        };
+        const Pixels plain = shoot(false, true);
+        const Pixels shadowed = shoot(true, true);
+        if (!r3d.debug_stats().fog_sun_shadowed) {
+            std::cerr << "no shadowed fog: skipped\n";
+            return;
+        }
+        const double plain_left = mean(plain, 10, 60), plain_right = mean(plain, 100, 150);
+        const double left = mean(shadowed, 10, 60), right = mean(shadowed, 100, 150);
+        std::printf("    fog sun shadows: left %.3f (%.3f lit as before), right %.3f (%.3f)\n", left, plain_left, right,
+                    plain_right);
+        assert(std::abs(plain_left - plain_right) < 0.1 * plain_right);   // unshadowed: even
+        assert(left < 0.4 * plain_left);                                  // the air under the roof is dark
+        assert(right > 0.85 * plain_right && right < 1.05 * plain_right); // the sunlit air is as it was
+        // Without the sun's shadows there is nothing to go by: as before, to the byte.
+        assert(shoot(true, false).rgba == shoot(false, false).rgba);
+        assert(!r3d.debug_stats().fog_sun_shadowed);
+    });
+}
+
 // Blended and additive meshes are fogged too, as particles will be: a glass of alpha a shows a*fogged colour over the
 // window's black; an additive glow dims by the opacity (what it lies over has the fog already). A custom material
 // shader using kin_output receives the same fog as a stock material.
@@ -22062,6 +22127,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_sky_stays_behind_geometry());
     RUN(test_gpu_sky_and_fog_off_are_unchanged());
     RUN(test_gpu_fog_matches_formula());
+    RUN(test_gpu_fog_sun_shadows());
     RUN(test_gpu_fog_blended_and_custom());
     RUN(test_gpu_fog_melts_into_the_sky());
     RUN(test_gpu_sky_under_taa());

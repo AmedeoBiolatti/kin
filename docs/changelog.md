@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add the fog's sun through the shadows (`Fog3D::sun_shadows`, off by default;
+  `SceneEnvironment3D`'s `fog_sun_shadows`): the sun's in-scattering only
+  where the fog's air is in sunlight, walked along each ray through the sun's
+  shadow map at half the view's size and added once a pixel after the main
+  pass. Fog in shade no longer veils it, and light shafts show where shadows
+  cross the air. The Bistro's daytime views: fine detail from 85% of Godot's
+  to 91% on average. About 0.45 ms at 2404 x 1352; needs a float picture (HDR
+  or TAA) and SDL_GPU.
 - Add specular anti-aliasing for 3D materials (`Scene3D::specular_aa`, 0 to 1,
   off by default, Godot's 0.25; authored as `SceneEnvironment3D`'s
   `specular_aa`), on SDL_GPU and WebGL2: the roughness is raised where the

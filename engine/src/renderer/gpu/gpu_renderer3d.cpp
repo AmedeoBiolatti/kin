@@ -295,9 +295,28 @@ struct FogParamUniforms {
     f32 colour[4];  // the fixed colour, 1 to take it from the sky
     f32 density[4]; // per unit of distance, the height fog's at its base, its fall-off, the base height
     f32 limits[4];  // the start, the greatest opacity, the sun's in-scattering and its anisotropy
-    f32 view[4];    // 1 for an orthographic camera
+    f32 view[4];    // 1 for an orthographic camera, 1 for a custom shader's, 1 to read the fog's sunlit share (fog_sun)
 };
 static_assert(sizeof(FogParamUniforms) == 64);
+// fog_sun.comp's Params.
+struct FogSunUniforms {
+    f32 to_world[16];
+    f32 unproject_xy[4];
+    f32 unproject_zw[4];
+    f32 sizes[4];
+    f32 eye[4];
+    f32 forward[4]; // w: the sun's shadows' strength
+    FogParamUniforms fog;
+    f32 shadow_matrix[4 * 16];
+    f32 cascade_end[4];
+    f32 cascade_bias[4];
+    f32 shadow[4];    // cascades, the view depth the shadows reach, the walk's offset this frame, steps
+    f32 sun[4];       // toward the sun (fog_sun_apply.frag's)
+    f32 sun_light[4]; // its light
+};
+static_assert(sizeof(FogSunUniforms) == 544);
+// The stretches each ray of the fog's sunlit share is walked in (closer together near the camera).
+constexpr u32 fog_sun_steps = 16;
 // mesh_fog.frag's slot 2.
 struct FogBlockUniforms {
     FogParamUniforms fog;
@@ -1016,6 +1035,19 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         KIN_LOG_INFO_F("render", "3D: ambient occlusion and contact shadows not available",
                        (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    // The fog's sunlight through the sun's shadows (Fog3D::sun_shadows), on what the pre-pass drew: without it, the
+    // sun's in-scattering stays unshadowed.
+    if (_ao_available) {
+        try {
+            _fog_sun_apply_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                                             "fog_sun_apply.frag.spv", /*uniform_buffers=*/1,
+                                                             /*samplers=*/2);
+            _fog_sun_pipeline = make_compute(handle, "fog_sun.comp.spv", {.samplers = 2});
+        } catch (const std::exception& e) {
+            KIN_LOG_INFO_F("render", "3D: the fog's shadowed sunlight not available",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+        }
+    }
     // Temporal anti-aliasing: the velocity pre-pass, four-float colour targets
     // to draw it into and a float storage texture for the history, over what
     // the pre-pass already needs.
@@ -1337,8 +1369,9 @@ GpuRenderer3D::~GpuRenderer3D() {
     }
     for (SDL_GPUComputePipeline* compute :
          {_filter_pipeline, _ao_blur_chain_pipeline, _ao_blur_both_chain_pipeline, _gtao_pipeline, _gtao_chain_pipeline,
-          _ao_chain_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _contact_pipeline, _taa_pipeline, _gc_cull,
-          _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline, _hiz_reduce_pipeline}) {
+          _ao_chain_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _contact_pipeline, _fog_sun_pipeline,
+          _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline,
+          _hiz_reduce_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
         }
@@ -1642,6 +1675,15 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen(SDL_GPUShader* fragment, SDL_
     return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
                                                  .fragment = fragment,
                                                  .blend = GpuBlendMode::Replace,
+                                                 .format = format,
+                                                 .layout = GpuVertexLayout::None});
+}
+
+SDL_GPUGraphicsPipeline* GpuRenderer3D::fullscreen_additive(SDL_GPUShader* fragment,
+                                                            SDL_GPUTextureFormat format) const {
+    return _owner->_pipelines.get(GpuPipelineKey{.vertex = _fullscreen_shader.handle(),
+                                                 .fragment = fragment,
+                                                 .blend = GpuBlendMode::PremultipliedAdditive,
                                                  .format = format,
                                                  .layout = GpuVertexLayout::None});
 }
@@ -2626,10 +2668,11 @@ u64 texture_bytes(const GpuTexture& t) {
 
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
-    for (const GpuTexture* t : {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across,
-                                &view._contact_raw, &view._contact_across, &view._taa_depth, &view._taa_in,
-                                &view._taa_sharp, &view._taa_motion, &view._taa_history[0], &view._taa_history[1],
-                                &view._taa_dilated[0], &view._taa_dilated[1], &view._occ_depth}) {
+    for (const GpuTexture* t :
+         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw,
+          &view._contact_across, &view._fog_sun, &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion,
+          &view._taa_history[0], &view._taa_history[1], &view._taa_dilated[0], &view._taa_dilated[1],
+          &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
     for (const GpuTexture& t : view._hiz) {
@@ -3193,7 +3236,10 @@ struct GpuRenderer3D::FrameCtx {
     bool contacted = false;      // and contact shadows
     bool velocity_drawn = false; // the pre-pass (or the main pass) began, so _ao_normals holds this frame's velocity
     bool prepass_ran = false;    // the depth and normal pre-pass began this render
-    bool main_velocity = false;  // the main pass writes the velocity (taa with nothing else to need a pre-pass)
+    bool fog_sun_wanted = false; // Fog3D::sun_shadows asks for the fog's sunlit share (which needs the pre-pass)
+    bool fog_sun = false;        // and it was walked this render (fog_sun): the main pass leaves the sun's out
+    FogSunUniforms fog_sun_uniforms{}; // what fog_sun walked with, for fog_sun_apply
+    bool main_velocity = false;        // the main pass writes the velocity (taa with nothing else to need a pre-pass)
     const GpuTexture* shown = nullptr; // the picture after the temporal resolve
     std::array<LodView, 2> lod{};      // Scene3D::lod's choosing, for the scene and the overlay
     bool gpu_clusters = false;         // clustered meshes are cut in compute this render
@@ -4032,6 +4078,7 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     put_color(v.sun_light, scene.lights.sun.color, 0.0f);
     if (ctx.fog) {
         fill_fog(v.fog, scene.fog, scene.sky, orthographic);
+        v.fog.view[2] = ctx.fog_sun ? 1.0f : 0.0f; // the sun's share added after the main pass
         fill_atmosphere(v.sky, scene.sky, scene.lights.sun.direction);
         if (v.fog.colour[3] > 0.5f)
             _fog_table.update(scene.sky, scene.lights.sun.direction);
@@ -4219,8 +4266,18 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     // Global illumination's probes are read on what the pre-pass drew (gi_resolve).
     const bool gi_wanted =
         scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
+    // The fog's sunlit share (Fog3D::sun_shadows) is walked on what the pre-pass drew.
+    const Fog3D& asked_fog = scene.fog;
+    ctx.fog_sun_wanted = _fog_sun_pipeline && _fog_available && asked_fog.enabled && asked_fog.sun_shadows &&
+                         asked_fog.sun_scatter > 0.0f && asked_fog.max_opacity > 0.0f &&
+                         (asked_fog.density > 0.0f || asked_fog.height_density > 0.0f) &&
+                         scene.camera.projection == Projection3D::Perspective &&
+                         scene.lights.sun_shadow_strength > 0.0f && scene.lights.shadow_area.size().x > 0.0f;
+    if (!ctx.fog_sun_wanted && view->_fog_sun) {
+        view->_fog_sun = {};
+    }
     const bool needs_prepass = scene.ambient_occlusion.enabled || ctx.contact_wanted || scene.lod.occlusion.enabled ||
-                               ctx.soft_particles || gi_wanted;
+                               ctx.soft_particles || gi_wanted || ctx.fog_sun_wanted;
     if (ctx.taa &&
         !(ensure_taa_targets(*view, taa_settings.sharpness > 0.0f) &&
           (needs_prepass ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution,
@@ -7876,6 +7933,7 @@ void GpuRenderer3D::draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode) {
     fill_atmosphere(u.atmosphere, sky, scene.lights.sun.direction);
     if (ctx.fog) {
         fill_fog(u.fog, scene.fog, sky, orthographic);
+        u.fog.view[2] = ctx.fog_sun ? 1.0f : 0.0f;
     }
     if (mode != 2) {
         const SDL_GPUTextureSamplerBinding environment =
@@ -8558,11 +8616,12 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
     // Only stock mesh shaders define the main pass's velocity output. Colour-only particle/custom shaders must
     // stay off that attachment: masking an undefined shader output does not preserve it on every backend.
     ctx.main_velocity = ctx.taa && !ao.enabled && !want_contact && !ctx.occlusion && !ctx.soft_particles &&
-                        !ctx.gi_lit && _particle_batches.empty() && ctx.previous_storage &&
+                        !ctx.gi_lit && !ctx.fog_sun_wanted && _particle_batches.empty() && ctx.previous_storage &&
                         view->_ao_normals.format() == hdr_format &&
                         std::none_of(_refs.begin(), _refs.end(),
                                      [](const DrawRef& ref) { return ref.draw->material.shader.backend() != nullptr; });
-    if (!ctx.main_velocity && (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit) &&
+    if (!ctx.main_velocity &&
+        (ao.enabled || want_contact || ctx.taa || ctx.soft_particles || ctx.gi_lit || ctx.fog_sun_wanted) &&
         _ao_available && (storage || ctx.taa || stats.retained_instances) &&
         ensure_ao_targets(*view, ao.half_resolution, ao.enabled, want_contact, ctx.taa)) {
         SDL_GPUColorTargetInfo target{};
@@ -8687,6 +8746,9 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
             ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, ctx.taa, stats);
+            // (Added to a float picture after the main pass: an HDR view's or temporal anti-aliasing's.)
+            ctx.fog_sun =
+                ctx.fog_sun_wanted && ctx.fog && (view->_hdr || ctx.taa) && fog_sun(commands, *view, ctx, stats);
         }
     }
 }
@@ -8780,6 +8842,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     if (ctx.fog) {
         const bool orthographic = ctx.scene.camera.projection == Projection3D::Orthographic;
         fill_fog(fog_blocks[0].fog, ctx.scene.fog, ctx.scene.sky, orthographic);
+        fog_blocks[0].fog.view[2] = ctx.fog_sun ? 1.0f : 0.0f;
         fill_atmosphere(fog_blocks[0].sky, ctx.scene.sky, ctx.scene.lights.sun.direction);
         if (fog_blocks[0].fog.colour[3] > 0.5f) {
             // The sky's colour, from the table (made again only when the sky or the sun's height has changed).
@@ -9082,6 +9145,106 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     return true;
 }
 
+bool GpuRenderer3D::fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats) {
+    if (!_fog_sun_pipeline || !_fog_sun_apply_shader || !ctx.shadows || !view._ao_depth || !_point_sampler) {
+        return false;
+    }
+    const u32 hw = std::max(1u, (static_cast<u32>(view._size.x) + 1) / 2),
+              hh = std::max(1u, (static_cast<u32>(view._size.y) + 1) / 2);
+    try {
+        if (!view._fog_sun || view._fog_sun.width() != hw || view._fog_sun.height() != hh) {
+            view._fog_sun =
+                _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                       SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the fog's sunlit share could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        view._fog_sun = {};
+        return false;
+    }
+    const Scene3D& scene = ctx.scene;
+    const Lights3D& lights = scene.lights;
+    const Camera3D& camera = scene.camera;
+    FogSunUniforms u{};
+    std::memcpy(u.to_world, camera.view().inverse().m, sizeof(u.to_world));
+    // The inverse of the projection the pre-pass drew with, as gtao.comp reads it.
+    const Mat4f inverse = ctx.main_projection.inverse();
+    const f32 xy[4] = {inverse.at(0, 0), inverse.at(1, 1), inverse.at(0, 3), inverse.at(1, 3)};
+    const f32 zw[4] = {inverse.at(2, 2), inverse.at(2, 3), inverse.at(3, 2), inverse.at(3, 3)};
+    std::memcpy(u.unproject_xy, xy, sizeof(xy));
+    std::memcpy(u.unproject_zw, zw, sizeof(zw));
+    put(u.sizes, {static_cast<f32>(hw), static_cast<f32>(hh), static_cast<f32>(view._ao_depth.width())},
+        static_cast<f32>(view._ao_depth.height()));
+    put(u.eye, camera.position, 0.0f);
+    put(u.forward, camera.forward(), std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f));
+    fill_fog(u.fog, scene.fog, scene.sky, false);
+    // The cascades as the main pass has them; one map is cascade 0 over the whole area.
+    u32 count = 1;
+    f32 reach = lights.shadow_distance > 0.0f ? lights.shadow_distance : 100.0f;
+    if (ctx.cascades > 1) {
+        count = ctx.cascades;
+        for (u32 k = 0; k < count; ++k) {
+            const ShadowCascade3D& c = ctx.plan.cascade[k];
+            std::memcpy(u.shadow_matrix + 16 * k, c.view_projection.m, 16 * sizeof(f32));
+            u.cascade_end[k] = c.slice_far;
+            u.cascade_bias[k] = std::max(lights.shadow_bias, 0.0f) * c.texel_world / c.depth_range;
+        }
+        reach = ctx.plan.cascade[count - 1].slice_far;
+    } else {
+        std::memcpy(u.shadow_matrix, ctx.light_vp.m, 16 * sizeof(f32));
+        u.cascade_bias[0] = std::max(lights.shadow_bias, 0.0f) * ctx.texel_world / ctx.depth_range;
+    }
+    // Each frame's walk offset by the golden ratio under temporal anti-aliasing (which averages them), else fixed.
+    const f32 offset = ctx.taa ? std::fmod(static_cast<f32>(view._taa_frame) * 0.618034f, 1.0f) : 0.0f;
+    put(u.shadow, {static_cast<f32>(count), reach, offset}, static_cast<f32>(fog_sun_steps));
+    put(u.sun, normalize(lights.sun.direction), 0.0f);
+    put_color(u.sun_light, lights.sun.color, 0.0f);
+    ctx.fog_sun_uniforms = u;
+    const SDL_GPUStorageTextureReadWriteBinding out{.texture = view._fog_sun.handle(), .cycle = true};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+    if (!pass) {
+        return false;
+    }
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{_shadow_map.handle(), _compare_sampler}};
+    SDL_BindGPUComputePipeline(pass, _fog_sun_pipeline);
+    SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    SDL_DispatchGPUCompute(pass, (hw + 7) / 8, (hh + 7) / 8, 1);
+    SDL_EndGPUComputePass(pass);
+    stats.fog_sun_shadowed = true;
+    return true;
+}
+
+void GpuRenderer3D::fog_sun_apply(FrameCtx& ctx) {
+    GpuView3D* view = ctx.view;
+    // The picture the main pass drew (a float one: see fog_sun's caller), resolved from its samples.
+    SDL_GPUTexture* picture = view->_hdr ? view->_scene.handle() : ctx.taa ? view->_taa_in.handle() : nullptr;
+    SDL_GPUGraphicsPipeline* p = fullscreen_additive(_fog_sun_apply_shader.handle(), hdr_format);
+    if (!picture || !p) {
+        return;
+    }
+    SDL_GPUColorTargetInfo target{};
+    target.texture = picture;
+    target.load_op = SDL_GPU_LOADOP_LOAD;
+    target.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(ctx.commands, &target, 1, nullptr);
+    if (!pass) {
+        return;
+    }
+    set_viewport(pass, view->_size.x, view->_size.y);
+    SDL_BindGPUGraphicsPipeline(pass, p);
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{view->_ao_depth.handle(), _point_sampler},
+        SDL_GPUTextureSamplerBinding{view->_fog_sun.handle(), _owner->_sampler_linear}};
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), 2);
+    SDL_PushGPUFragmentUniformData(ctx.commands, 0, &ctx.fog_sun_uniforms, sizeof(ctx.fog_sun_uniforms));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+}
+
 void GpuRenderer3D::resolve_history(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     RenderDebugStats3D& stats = ctx.stats;
@@ -9288,6 +9451,10 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
         if (!main_pass(ctx))
             return false;
     }
+    if (ctx.fog_sun) {
+        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.fog_sun"};
+        fog_sun_apply(ctx);
+    }
     {
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.temporal_resolve"};
         resolve_history(ctx);
@@ -9364,13 +9531,15 @@ bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
     const bool particles = _particles_available && (!scene.particle_draws().empty() || scene.weather.active());
     const bool gi_wanted =
         scene.global_illumination.enabled && scene.global_illumination.probes.enabled && _gi_available;
-    const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft || gi_wanted;
+    const bool fog_sun_wanted = _fog_sun_pipeline && scene.fog.enabled && scene.fog.sun_shadows &&
+                                scene.fog.sun_scatter > 0.0f && scene.camera.projection == Projection3D::Perspective;
+    const bool needs_prepass = ao || contact || scene.lod.occlusion.enabled || soft || gi_wanted || fog_sun_wanted;
     if (taa) {
         taa = ensure_taa_targets(*view, scene.taa.sharpness > 0.0f) &&
               (needs_prepass || custom_shader || particles
                    ? ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/true)
                    : ensure_velocity_target(*view));
-    } else if (ao || contact || soft || gi_wanted) {
+    } else if (ao || contact || soft || gi_wanted || fog_sun_wanted) {
         ensure_ao_targets(*view, scene.ambient_occlusion.half_resolution, ao, contact, /*velocity=*/false);
     }
     if (shadows) {

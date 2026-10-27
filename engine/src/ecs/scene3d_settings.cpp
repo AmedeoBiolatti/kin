@@ -151,6 +151,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("fog_color_from_sky", fog.colour_from_sky);
         SETTING("fog_sun_scatter", fog.sun_scatter);
         SETTING("fog_sun_anisotropy", fog.sun_anisotropy);
+        SETTING("fog_sun_shadows", fog.sun_shadows);
         SETTING("ao_enabled", ambient_occlusion.enabled);
         SETTING("ao_radius", ambient_occlusion.radius);
         SETTING("ao_intensity", ambient_occlusion.intensity);

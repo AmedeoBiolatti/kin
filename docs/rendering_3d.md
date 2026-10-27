@@ -985,6 +985,25 @@ The sky gets the height fog from `start` to infinity (the limit of a mesh's as i
 ray would make total. With `SkyMode3D::Image`, `colour_from_sky` takes `colour` everywhere (the panorama is not read for the fog):
 set it to the panorama's horizon. `kin_fog.inc.glsl` holds the fog for a pass of your own. `debug_stats().fog_applied`.
 
+**The fog's sun through the shadows** (`Fog3D::sun_shadows`, off by default): the sun's in-scattering only where the fog's
+air is in sunlight. Lit everywhere, the fog in a street's shade (the air between the camera and a wall, all in the
+buildings' shadow) shone with the sun as in the open and veiled the shade: in the Bistro, the fog alone took 18% of the
+fine detail away against 9% for Godot's, whose volumetric fog is shadowed. After the depth pre-pass (which it turns on),
+`fog_sun.comp` walks each ray at half the view's size in 16 stretches (closer together near the camera, each moved along
+itself per pixel and per frame for temporal anti-aliasing to average), weighing each stretch's share of the fog's opacity
+(the closed integral) by one filtered comparison against the sun's shadow map (the cascade whose slice holds it; lit
+outside its map, past the cascades' reach or the one map's `shadow_distance`, by `sun_shadow_strength`), to the surface
+or, for the sky, to the end of the height fog. Then the main pass, the sky pass and the particles leave the sun's
+in-scattering out of their fog, and `fog_sun_apply.frag` adds it once a pixel after the main pass: the lobe toward the
+pixel's ray times the opacity to what the pre-pass drew times the share, read from the four texels round it where their
+rays' lengths agree with the pixel's (else weighed by how near they are). Read in the main pass instead, the share cost
+every fragment drawn, the hidden ones too (0.35 ms more in the Bistro). With no shadows to go by, the picture is as without
+it. A blended surface takes the light of the ray to what is behind it; a custom shader's fog leaves the sun's out too.
+Needs a float picture (an HDR view or temporal anti-aliasing), a perspective camera and SDL_GPU; elsewhere the
+in-scattering stays unshadowed. About 0.45 ms at 2404 x 1352 on the RTX 4080 Laptop (the walk 0.25 to 0.3, the
+adding 0.15). Light shafts where shadows cross the air come with it. `debug_stats().fog_sun_shadowed`; authored as
+`SceneEnvironment3D`'s `fog_sun_shadows`.
+
 **Time of day** (`TimeOfDay3D`): `hours` (solar time), `day_of_year`, `latitude`, `axial_tilt`, `moon_phase`, `speed` (game seconds a
 second for `advance(day, dt)`; the clock is summed exactly behind the f32 `hours`, so an hour of frames is an hour at any frame rate,
 and setting `hours` yourself is noticed and continued from). `evaluate()` is a pure function of them (and the sky's haze and sun intensity): sun and moon

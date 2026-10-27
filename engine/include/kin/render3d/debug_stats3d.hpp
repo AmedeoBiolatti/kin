@@ -123,6 +123,7 @@ struct RenderDebugStats3D : RenderStats3D {
     // and the CPU time spent recording the last one.
     bool sky_drawn = false;
     bool fog_applied = false;
+    bool fog_sun_shadowed = false; // Fog3D::sun_shadows: the share of the fog's air the sun reaches was walked
     bool sky_env_regenerated = false;
     u32 sky_env_generations = 0;
     f64 sky_env_cpu_ms = 0.0;

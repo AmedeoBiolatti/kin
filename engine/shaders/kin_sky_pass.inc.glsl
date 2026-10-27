@@ -159,7 +159,9 @@ void main() {
     const vec3 sun_dir = frame.sun_direction.xyz;
     const float opacity = kin_fog_opacity(sky.fog, kin_fog_optical_depth(sky.fog, sky.camera.xyz, d, 0.0, true));
     if (sky.fog.limits.y > 0.0 && opacity > 0.0 && (sky.fog.density.y > 0.0)) {
-        c = mix(c, kin_fog_sun(sky.fog, sky.fog.colour.w > 0.5 ? scattered : sky.fog.colour.rgb, d, sun_dir, frame.sun_color.rgb), opacity);
+        // (With Fog3D::sun_shadows the sun's share is added after the main pass: fog_sun_apply.frag.)
+        const vec3 sun = sky.fog.view.z > 0.5 ? vec3(0.0) : kin_fog_sun_light(sky.fog, d, sun_dir, frame.sun_color.rgb);
+        c = mix(c, (sky.fog.colour.w > 0.5 ? scattered : sky.fog.colour.rgb) + sun, opacity);
     }
     if (frame.flags.x > 0.5) {
         c = kin_encode(c);

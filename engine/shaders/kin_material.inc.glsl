@@ -499,7 +499,12 @@ vec3 kin_fog_apply(vec3 colour) {
     if (fog_params.fog.colour.w > 0.5) {
         fog_colour = kin_fog_sky(dir);
     }
-    return mix(colour, kin_fog_sun(fog_params.fog, fog_colour, dir, frame.sun_direction.xyz, frame.sun_color.rgb), opacity);
+    // With Fog3D::sun_shadows (fog.view.z) the sun's in-scattering is added after the main pass, through the shadows
+    // (fog_sun_apply.frag), once a pixel.
+    const vec3 sun = fog_params.fog.view.z > 0.5
+                         ? vec3(0.0)
+                         : kin_fog_sun_light(fog_params.fog, dir, frame.sun_direction.xyz, frame.sun_color.rgb);
+    return mix(colour, fog_colour + sun, opacity);
 }
 #endif
 
