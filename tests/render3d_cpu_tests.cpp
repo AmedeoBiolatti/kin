@@ -4,11 +4,14 @@
 // ParticleSystem3D: the wind a system's particles feel is Wind3D::velocity's field, whatever the number of particles.
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <kin/render3d/mesh_clusters3d.hpp>
 #include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 #include <kin/render3d/timeofday3d.hpp>
 #include <limits>
 #include <memory>
@@ -51,6 +54,71 @@ MeshInstance3D random_instance(Lcg& rng, u32 id) {
     const Vec3f at{rng.unit() * 100.0f - 50.0f, rng.unit() * 20.0f, rng.unit() * 100.0f - 50.0f};
     return {Mat4f::trs(at, Quatf::axis_angle({0.0f, 1.0f, 0.0f}, rng.unit() * 360.0f), {scale, scale, scale}),
             colors::white, id};
+}
+
+// Ordinary parent/child TRS can produce shear. The bounds must enclose transformed geometry, not just match another
+// use of the same sphere formula. A long, rotated child used to extend beyond its group's reported box.
+void test_affine_bounds() {
+    struct Fake final : IMeshBackend3D {};
+    const Mesh3D mesh{std::make_shared<Fake>(), 8, 36, {{-1, -1, -1}, {1, 1, 1}}};
+    const auto check_corners = [&](const Bounds3D& bounds, const Mat4f& transform) {
+        for (u32 corner = 0; corner < 8; ++corner) {
+            const Vec3f p =
+                transform.apply({corner & 1 ? 1.0f : -1.0f, corner & 2 ? 1.0f : -1.0f, corner & 4 ? 1.0f : -1.0f});
+            assert(p.x >= bounds.min.x && p.x <= bounds.max.x && p.y >= bounds.min.y && p.y <= bounds.max.y &&
+                   p.z >= bounds.min.z && p.z <= bounds.max.z);
+        }
+    };
+    const Mat4f shear = Mat4f::translation({3, -4, 2}) * Mat4f::scaling({8, 1, .5f}) * Mat4f::rotation_z(45);
+    const std::array<Mat4f, 1> transforms{shear};
+    check_corners(instance_bounds(mesh, transforms), shear);
+    const MeshInstance3D copy{shear};
+    check_corners(instance_bounds(mesh, {&copy, 1}), shear);
+    auto batch = InstanceBatch3D::create(mesh, {{Mat4f::identity()}}, {{0, 1}}).value_or({});
+    assert(batch && batch.update(0, {&copy, 1}));
+    check_corners(batch.groups()[0].world_bounds, shear);
+
+    Lcg rng;
+    for (u32 i = 0; i < 2000; ++i) {
+        const Vec3f scale{rng.unit() * 12 - 6, rng.unit() * 12 - 6, rng.unit() * 12 - 6};
+        const Mat4f parent =
+            Mat4f::trs({rng.unit() * 20, -3, 1}, Quatf::axis_angle({1, 2, 3}, rng.unit() * 360), scale);
+        Mat4f transform = parent * Mat4f::rotation(Quatf::axis_angle({2, -1, 3}, rng.unit() * 360));
+        if (i % 4 == 0) {
+            transform.at(0, 1) += 3; // explicit shear in addition to the hierarchy's
+            transform.at(2, 0) -= 2;
+        }
+        const MeshInstance3D record{transform};
+        check_corners(instance_bounds(mesh, {&record, 1}), transform);
+        assert(batch.update(0, {&record, 1}));
+        check_corners(batch.groups()[0].world_bounds, transform);
+        const f32 scale_bound = cluster_scale_of(transform);
+        assert(scale_bound == stretch_bound(transform));
+        for (u32 sample = 0; sample < 32; ++sample) {
+            const Vec3f v{rng.unit() * 2 - 1, rng.unit() * 2 - 1, rng.unit() * 2 - 1};
+            f64 squared = 0;
+            for (int row = 0; row < 3; ++row) {
+                const f64 value =
+                    f64(transform.at(row, 0)) * v.x + f64(transform.at(row, 1)) * v.y + f64(transform.at(row, 2)) * v.z;
+                squared += value * value;
+            }
+            const f64 length_squared = f64(v.x) * v.x + f64(v.y) * v.y + f64(v.z) * v.z;
+            assert(squared <= f64(scale_bound) * scale_bound * length_squared);
+        }
+    }
+    assert(stretch_bound(Mat4f::scaling({0, 0, 0})) == 0);
+    for (const f32 size : {1e-30f, 1e30f}) {
+        const f32 bound = stretch_bound(Mat4f::scaling({size, -size, size}));
+        assert(std::isfinite(bound) && bound >= size && bound <= size * 1.00001f);
+    }
+    for (const f32 bad : {std::numeric_limits<f32>::quiet_NaN(), std::numeric_limits<f32>::infinity()}) {
+        Mat4f transform;
+        transform.at(0, 1) = bad;
+        assert(std::isinf(stretch_bound(transform)));
+        const MeshInstance3D record{transform};
+        assert(!valid(instance_bounds(mesh, {&record, 1})));
+    }
+    std::cout << "affine bounds: sheared hierarchy, retained groups and 64,000 directional stretch checks\n";
 }
 
 // Every group's bounds against measuring the group's copies again.
@@ -613,6 +681,7 @@ void test_sun_times_at_the_poles() {
 } // namespace
 
 int main() {
+    test_affine_bounds();
     test_bounds_follow_edits();
     test_changed_ranges();
     test_layout_revision();

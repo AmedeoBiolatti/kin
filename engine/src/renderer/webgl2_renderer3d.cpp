@@ -9,6 +9,7 @@
 #include <cstring>
 #include <emscripten/html5.h>
 #include <kin/platform/log.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 #include <numeric>
 #include <optional>
 #include <stdexcept>
@@ -208,12 +209,7 @@ u32 level_for(const Scene3D& scene, const Scene3D::Draw& draw, const MeshInstanc
     if (!scene.lod.enabled || count <= 1)
         return 0;
     const Mat4f& m = copy.transform;
-    // Frobenius norm conservatively bounds even sheared transforms.
-    f32 squared = 0;
-    for (int c = 0; c < 3; ++c)
-        for (int r = 0; r < 3; ++r)
-            squared += m.at(r, c) * m.at(r, c);
-    const f32 scale = std::sqrt(squared), radius = draw.mesh.bounds().radius() * scale;
+    const f32 scale = stretch_bound(m), radius = draw.mesh.bounds().radius() * scale;
     const Vec3f center = m.apply(draw.mesh.bounds().center());
     const bool ortho = scene.camera.projection == Projection3D::Orthographic;
     const f32 distance = std::max(0.0f, dot(center - scene.camera.position, scene.camera.forward()) - radius);

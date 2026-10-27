@@ -544,13 +544,10 @@ f32 to_leave(const Bounds3D& box, Vec3f c, Vec3f down) {
     return std::max(t, 0.0f);
 }
 
-// A copy's bounding sphere: its mesh's, moved and scaled with it. Returns the scale (its largest axis').
+// A copy's bounding sphere: its mesh's, moved and conservatively scaled, including shear from nested TRS.
 f32 sphere_of(const Mat4f& t, Vec3f center, f32 radius, Vec3f& c, f32& r) {
     c = t.apply(center);
-    const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
-    const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
-    const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
-    const f32 scale = std::sqrt(std::max({sx, sy, sz}));
+    const f32 scale = stretch_bound(t);
     r = radius * scale;
     return scale;
 }

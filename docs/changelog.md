@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Bound 3D instances and cluster LOD errors conservatively under shear, including a nonuniformly scaled parent with a
+  rotated child. Camera/shadow culling, spatial groups, retained bounds and browser LOD now share the affine stretch
+  bound used by skinned meshes and GI. Finite very small/large scales avoid squared-length underflow/overflow;
+  nonfinite linear transforms produce an unbounded result rather than an undersized sphere.
+
 - 3D global illumination lights its voxels by the sun through a sun map of its own (4096 a side over the GI's area,
   drawn with the local lights' maps before the GI, kept while nothing in it changes), not by their march toward the
   sun, which the voxels' conservative, coarser-further-out cover makes close the narrow gaps the sun comes through.

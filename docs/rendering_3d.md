@@ -208,7 +208,7 @@ per-copy tests, fully contained cells skip their plane tests, and intersecting c
 Camera rejection alone never removes an offscreen shadow caster. Ungrouped ranges interspersed with cells keep per-copy culling.
 
 Calculate `world_bounds` with `instance_bounds(mesh, instances)` when the mesh/transforms change, then cache it. It encloses
-the renderer's transformed culling spheres (including rotated/nonuniform/negative scales), rather than only the geometry's
+the renderer's transformed culling spheres (including shear from a scaled parent and rotated child), rather than only the geometry's
 tighter box. Bounds use the coordinate space of their own scene, including an overlay's. Supplying stale or undersized valid
 bounds can incorrectly cull copies; invalid/nonfinite boxes fall back to per-copy tests. These calls submit plain instances;
 `draw_skinned` continues to use its posed bounds. `clear()` also clears group metadata while retaining its capacity.
