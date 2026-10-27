@@ -16,19 +16,20 @@ layout(set = 0, binding = 3) uniform sampler3D uEmission;
 layout(set = 0, binding = 4) uniform sampler3D uGiIrradiance;
 layout(set = 0, binding = 5) uniform sampler3D uGiMoments;
 layout(set = 0, binding = 6) uniform sampler3D uGiProbes;
+layout(set = 0, binding = 7) uniform sampler2DArrayShadow uSunMap; // the GI's sun map (layer 0), reverse Z
 struct Light {
     vec4 at;     // xyz: the light's place (world); w: its reach
     vec4 colour; // rgb: linear (irradiance over pi a unit away); w: the square of its size
     vec4 axis;   // xyz: a spot's way (unit); w: the cosine of its outer angle (a point light: -2, all round)
     vec4 cone;   // x: 1 / (cos inner - cos outer)
 };
-layout(std430, set = 0, binding = 7) readonly buffer Lights {
+layout(std430, set = 0, binding = 8) readonly buffer Lights {
     Light lights[];
 };
-layout(std430, set = 0, binding = 8) readonly buffer Blocks {
+layout(std430, set = 0, binding = 9) readonly buffer Blocks {
     uint blocks[]; // a stored block: x, y and z (8 bits each), and its level (the top 8)
 };
-layout(std430, set = 0, binding = 9) readonly buffer Emitters {
+layout(std430, set = 0, binding = 10) readonly buffer Emitters {
     float strengths[]; // each emitter's emissive strength this render (an emissive voxel's alpha: its number, from 1)
 };
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D uRadiance;     // the light leaving its front
@@ -46,6 +47,8 @@ layout(std140, set = 2, binding = 0) uniform Params {
     vec4 fill_direction; // xyz: toward the fill light (unit)
     vec4 fill_colour;    // rgb; w: 1 with a fill light
     KinGiProbes probes;  // counts.w: 1 when the probes have light to give
+    mat4 sun_matrix;     // the GI's sun map's view and projection
+    vec4 sun_map;        // x: 1 with the map, y: its depth bias, z: a texel (uv), w: a texel (world)
 } p;
 
 // How much of a light along `l` (unit) reaches the side facing `n` of the voxel at `at` (world) of a level whose voxels
@@ -83,11 +86,42 @@ float reaches_point(vec3 at, float cell, vec3 n, vec3 light) {
     return kin_gi_march(p.scene, start, to / d, d - 1.5 * cell, 512, hit, level, t, steps) ? 0.0 : c;
 }
 
+// How much of the sun's light reaches the side facing `n` of the voxel at `world` (its cosine times the share of it
+// the GI's sun map lets through), from the map: the voxel's face sampled at four points a third of a voxel from its
+// middle, each a voxel out along the normal (a surface in the voxel lies within its half diagonal of the middle), the
+// depth compared with a bias of two texels. The map is the sun's own view of the meshes, as the main pass's
+// shadows, where the voxels' march (conservative: every voxel a surface touches is full, and the coarser windows'
+// more so) closes the narrow gaps the sun comes through. -1 where the voxel is outside the map.
+float sun_seen(vec3 world, float cell, vec3 n, vec3 l) {
+    const float c = dot(n, l);
+    if (c <= 0.0) {
+        return 0.0;
+    }
+    const vec3 a = normalize(abs(n.y) < 0.9 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+    const vec3 b = cross(n, a);
+    float lit = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        const vec2 o = vec2(i & 1, i >> 1) * 2.0 - 1.0;
+        const vec3 q = world + n * cell + (a * o.x + b * o.y) * (cell / 3.0);
+        const vec4 clip = p.sun_matrix * vec4(q, 1.0);
+        const vec3 ndc = clip.xyz / clip.w;
+        const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+            return -1.0;
+        }
+        lit += texture(uSunMap, vec4(uv, 0.0, ndc.z + p.sun_map.y));
+    }
+    return c * lit * 0.25;
+}
+
 // The light reaching the side facing `n` of the voxel at `world`, over pi.
 vec3 reaching(vec3 world, float cell, vec3 n) {
     vec3 light = vec3(0.0);
     if (p.sun_colour.w > 0.5) {
-        const float seen = reaches(world, cell, n, p.sun_direction.xyz);
+        float seen = p.sun_map.x > 0.5 ? sun_seen(world, cell, n, p.sun_direction.xyz) : -1.0;
+        if (seen < 0.0) {
+            seen = reaches(world, cell, n, p.sun_direction.xyz);
+        }
         light += p.sun_colour.rgb * mix(max(dot(n, p.sun_direction.xyz), 0.0), seen, p.sun_direction.w);
     }
     if (p.fill_colour.w > 0.5) {

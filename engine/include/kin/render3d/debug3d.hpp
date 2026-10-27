@@ -25,6 +25,7 @@ struct RenderDebugOptions3D {
                                    // before the light grid (to compare with it)
     bool prepass_depth = true;     // false: the main pass clears its depth and draws it all again, instead of starting
                                    // from the pre-pass's (to compare with it)
+    bool gi_sun_map = true;        // false: the GI's voxels take the sun's light by their own march, not its sun map
     GiView3D gi_view = GiView3D::Off;
 };
 

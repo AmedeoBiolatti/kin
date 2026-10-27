@@ -109,6 +109,9 @@ constexpr u32 gi_run_triangles = 64;
 // The GI scene's emitters: an emissive voxel holds its colour and, in its alpha (half float: whole numbers to 2048
 // exact), its emitter's number, whose strength the GI's light takes each render from a list.
 constexpr u32 max_gi_emitters = 2048;
+// The GI's sun map: its side, and its slot in the local shadow cache (after the local lights' and the moon's).
+constexpr u32 gi_sun_map_side = 4096;
+constexpr u32 gi_sun_cache = max_local_shadow_layers + max_shadow_cascades;
 
 // A cluster as the GPU cut reads it (cluster_cull.comp's Cluster, std430): 80 bytes.
 struct GpuCluster {
@@ -475,6 +478,7 @@ private:
     // made).
     bool ensure_local_map(u32 side, u32 spot_layers, u32 point_slots);
     u32 ensure_moon_map(u32 side, u32 layers);
+    bool ensure_gi_sun_map(); // the GI's sun map (made once); false where there can be none
     void upload_joints(FrameCtx& ctx);
     void begin_commands(FrameCtx& ctx); // flushes 2D; environment and empty-shadow set-up
     void shadow_pass(FrameCtx& ctx);
@@ -804,6 +808,15 @@ private:
     GpuTexture _moon_map;
     u32 _moon_side = 0, _moon_layers = 0;
     u64 _moon_generation = 0;
+    // The GI's sun map (gi_sun_map_side a side, one layer): an orthographic view along the sun over the GI's area,
+    // drawn as a local view (its own cache slot, gi_sun_cache), that the GI's light reads for its voxels' sunlight; its
+    // matrix, depth bias (the map's depth units) and texel (world) for this render, and whether there is one.
+    GpuTexture _gi_sun_map;
+    u32 _gi_sun_side = 0;
+    u64 _gi_sun_generation = 0;
+    Mat4f _gi_sun_matrix{};
+    f32 _gi_sun_bias = 0.0f, _gi_sun_texel = 0.0f;
+    bool _gi_sun_on = false;
     u32 _moon_idle = 0;
     // Which light holds which slot, across renders.
     ShadowSlots3D _spot_slots, _point_slots;
@@ -816,7 +829,7 @@ private:
         bool fingerprinted = false;
         bool valid = false;
     };
-    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades> _local_cache;
+    std::array<LocalCache, max_local_shadow_layers + max_shadow_cascades + 1> _local_cache; // (+1: the GI's sun map)
     // The local views' casters of this render: the union of their copies as GpuInstance3D, each view's lists of them
     // (u32), and the joint offsets of the posed ones.
     std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;
@@ -841,6 +854,7 @@ private:
         u32 cache = 0; // its _local_cache index
         u32 size = 0;  // the viewport's side
         bool moon = false;
+        bool gi_sun = false;     // the GI's sun map: every caster over the GI's area, whatever the camera sees
         bool single_map = false; // a moon's lone map over the whole area (no slice test)
         Vec3f down{};            // the moon's light's way
         Vec3f centre{};          // a sphere that holds all that can cast into it (a spot's or point light's reach)
@@ -1003,7 +1017,7 @@ private:
         u8 sun_mask = 0, sun_inside = 0;
         std::array<u8, max_shadow_cascades> sun_reach_planes{}, moon_reach_planes{};
         u32 local_mask = 0, local_radius_inside = 0;
-        std::array<u8, max_local_shadow_layers + max_shadow_cascades> local_planes{};
+        std::array<u8, max_local_shadow_layers + max_shadow_cascades + 1> local_planes{};
     };
     struct Piece {
         u32 ref = 0;

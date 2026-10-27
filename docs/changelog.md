@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D global illumination lights its voxels by the sun through a sun map of its own (4096 a side over the GI's area,
+  drawn with the local lights' maps before the GI, kept while nothing in it changes), not by their march toward the
+  sun, which the voxels' conservative, coarser-further-out cover makes close the narrow gaps the sun comes through.
+  Bistro's afternoon (against Cycles): the sun's bounce into the shade from 0.54 of Cycles' to 0.68. The local
+  lights' maps are now drawn before the GI. `debug_stats().gi_sun_map`; `Scene3D::debug.gi_sun_map`.
 - The main pass begins from a copy of the pre-pass's depth (where a pre-pass ran, with one sample a pixel and no
   overlay) instead of clearing its own, so the fragments the nearest surfaces hide are not shaded. Every mesh vertex
   shader's position is now `invariant`, which keeps the two passes' depths equal to the bit (the pictures of the two

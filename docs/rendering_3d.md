@@ -876,6 +876,17 @@ the plan's G5b results.
   voxel has each side's own light, so a wall between a lit room and a dark one is dark on the dark side. Each render
   lights the blocks it made and an eighth of all the others in turn (a light that changes is in all of it within eight
   renders).
+- **The GI's sun map:** the sun's light reaches a voxel through the sun's own view of the meshes, as the main pass's
+  shadows, not through the voxels: an orthographic map (`gi_sun_map_side`, 4096, a side) along the sun over the whole
+  of `area` (whatever the camera sees), drawn as the local lights' maps are, before the GI, and kept while nothing in
+  it changes (always, whatever `Lights3D::cache_shadows` says: what is kept is what would be drawn). A voxel's side
+  reads it at four points a third of a voxel from its middle, a voxel out along its normal, so a voxel half in the sun
+  is half lit. The voxels' own march, whose cover is conservative (every voxel a surface touches full) and coarser in
+  each window further out, closes the narrow gaps the sun comes through: in Bistro's afternoon the sunlit voxels gave
+  a median 0.49 of the light the main pass shows there (a quarter of them near none), and the shade got 0.54 of the
+  sun's bounce Cycles gives it; with the map 0.76 and 0.68. The march stays for the fill light, the point and spot
+  lights, and a voxel outside the map. `debug_stats().gi_sun_map`; `Scene3D::debug.gi_sun_map = false` marches the sun
+  too. Memory: 64 MB (D32).
 - **The probes** (`global_illumination.probes`, a `GiProbes3D`): on a grid every `spacing` voxels (2, 4 or 8: 4; further
   apart where a level would have more than `max_gi_probes`, 65,536), a window of them in each level, moving with the
   voxels'. A probe more than 1.8 spacings from every surface sleeps (at most 7.9 voxels: the distances are kept to 8),

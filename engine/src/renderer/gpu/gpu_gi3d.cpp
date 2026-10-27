@@ -94,6 +94,8 @@ struct GiLightUniforms {
     f32 fill_direction[4];
     f32 fill_colour[4];
     GiProbeUniforms probes;
+    f32 sun_matrix[16]; // the GI's sun map's view and projection (GpuRenderer3D::_gi_sun_matrix)
+    f32 sun_map[4];     // x: 1 with the map, y: its depth bias, z: a texel (uv), w: a texel (world)
 };
 struct GiLight {
     f32 at[4];     // place, reach
@@ -389,7 +391,7 @@ void GpuRenderer3D::make_gi() {
         _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 2, 6, 0, 2);
         _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 3, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
-        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 7, 3, 2, 0);
+        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 8, 3, 2, 0);
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
@@ -1570,6 +1572,10 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         put4(u.fill_direction, to_fill.x, to_fill.y, to_fill.z, 0.0f);
         put4(u.fill_colour, fill.r, fill.g, fill.b, fill_shines ? 1.0f : 0.0f);
         u.probes = probes_u;
+        if (_gi_sun_on && _gi_sun_map) {
+            std::memcpy(u.sun_matrix, _gi_sun_matrix.m, sizeof(u.sun_matrix));
+            put4(u.sun_map, 1.0f, _gi_sun_bias, 1.0f / static_cast<f32>(_gi_sun_side), _gi_sun_texel);
+        }
         const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> radiance{
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance.handle()},
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance_back.handle()}};
@@ -1578,14 +1584,16 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             return false;
         }
         const std::array<SDL_GPUTextureSamplerBinding, 3> probes = gi_atlases(view, g.lit);
-        const std::array<SDL_GPUTextureSamplerBinding, 7> samplers{
+        const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
             SDL_GPUTextureSamplerBinding{g.distance.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.albedo.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.normal.handle(), _gi_sampler},
             SDL_GPUTextureSamplerBinding{g.emission.handle(), _gi_sampler},
             probes[0],
             probes[1],
-            probes[2]};
+            probes[2],
+            SDL_GPUTextureSamplerBinding{_gi_sun_on && _gi_sun_map ? _gi_sun_map.handle() : _no_shadow.handle(),
+                                         _compare_sampler}};
         const std::array<SDL_GPUBuffer*, 3> buffers{_gi_lights->handle(), g.light_list->handle(),
                                                     _gi_emitters ? _gi_emitters->handle() : _gi_empty->handle()};
         SDL_BindGPUComputePipeline(pass, _gi_light);

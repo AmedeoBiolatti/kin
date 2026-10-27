@@ -4457,6 +4457,30 @@ u32 GpuRenderer3D::ensure_moon_map(u32 side, u32 layers) {
     return 0;
 }
 
+bool GpuRenderer3D::ensure_gi_sun_map() {
+    if (_shadow_format == SDL_GPU_TEXTUREFORMAT_INVALID) {
+        return false;
+    }
+    if (_gi_sun_map) {
+        return true;
+    }
+    try {
+        _gi_sun_map =
+            _device->create_target_array(gi_sun_map_side, gi_sun_map_side, 1, _shadow_format,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+        _gi_sun_side = gi_sun_map_side;
+        ++_gi_sun_generation;
+        return true;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: no sun map for global illumination: its voxels' sunlight marched instead",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
+    _gi_sun_map = {};
+    _gi_sun_side = 0;
+    ++_gi_sun_generation;
+    return false;
+}
+
 namespace {
 
 // A shadow-casting light's map side: its own, or the default; at most what the array is made for.
@@ -4784,6 +4808,42 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         }
     }
     stats.moon_cascades = ctx.moon_cascades;
+
+    // The GI's sun map: the sun's view over the GI's whole area (not only what the camera sees: the GI's voxels are
+    // all round it), drawn and kept as the moon's, for the GI's light to read its voxels' sunlight by (gi_light.comp);
+    // the voxels' own march, which their conservative cover makes close narrow gaps, is left for what it misses.
+    _gi_sun_on = false;
+    const GlobalIllumination3D& gi = scene.global_illumination;
+    const Bounds3D& gi_area = gi.area;
+    if (maps_possible && scene.debug.gi_sun_map && gi.enabled && gi.probes.enabled && _gi_available && ctx.sun_shines &&
+        lights.sun_shadow_strength > 0.0f && length_squared(lights.sun.direction) > 0.0f && gi_area.size().x > 0 &&
+        gi_area.size().y > 0 && gi_area.size().z > 0 && ensure_gi_sun_map()) {
+        const Vec3f to_sun = normalize(lights.sun.direction);
+        const SunBox3D box = fit_sun_box(gi_area, to_sun);
+        const Mat4f vp =
+            Mat4f::orthographic(box.lo.x, box.hi.x, box.lo.y, box.hi.y, box.z_near, box.z_far) * box.light_view;
+        const f32 texel = std::max(box.hi.x - box.lo.x, box.hi.y - box.lo.y) / static_cast<f32>(_gi_sun_side);
+        _gi_sun_matrix = vp;
+        _gi_sun_texel = texel;
+        _gi_sun_bias = 2.0f * texel / std::max(box.z_far - box.z_near, 0.01f);
+        _gi_sun_on = true;
+        LocalView view;
+        view.view_projection = vp;
+        view.frustum = frustum_of(vp);
+        view.texture = _gi_sun_map.handle();
+        view.layer = 0;
+        view.cache = gi_sun_cache;
+        view.size = _gi_sun_side;
+        view.gi_sun = true;
+        view.single_map = true;
+        view.down = to_sun * -1.0f;
+        view.axis = view.down;
+        view.eye = scene.camera.position;
+        view.per_unit = 1.0f / std::max(texel, 1e-6f);
+        view.kind = 2;
+        _local_views.push_back(std::move(view));
+    }
+    stats.gi_sun_map = _gi_sun_on;
     lu.counts[0] = static_cast<f32>(std::min<std::size_t>(ctx.spots.size(), max_spot_lights));
     lu.counts[3] = std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f);
     // (More point lights than the plain shaders loop over: the grid's, in the light variants, draws them all.)
@@ -5379,7 +5439,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     find_copies();
 
     // Exact: the bytes a view's draw is a function of. The same bytes as in the cache, the same picture.
-    const u64 generation_local = _local_generation, generation_moon = _moon_generation;
+    const u64 generation_local = _local_generation, generation_moon = _moon_generation,
+              generation_gi = _gi_sun_generation;
     u32 drawing = 0;
     for (u32 v = 0; v < _local_views.size(); ++v) {
         LocalView& view = _local_views[v];
@@ -5389,12 +5450,13 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
         LocalCache& cache = _local_cache[view.cache];
         const auto* particles = particle_cast_view(view.view_projection);
-        bool cacheable = (cache_on || ctx.shadow_history) && (!particles || !particles->unstable);
+        // (The GI's sun map always: the GI's own, and the map kept is the one it would draw again.)
+        bool cacheable = (cache_on || ctx.shadow_history || view.gi_sun) && (!particles || !particles->unstable);
         if (cacheable) {
             std::vector<u8>& bytes = _local_payload;
             bytes.clear();
             CacheBytes payload{bytes};
-            payload.value(view.moon ? generation_moon : generation_local);
+            payload.value(view.moon ? generation_moon : view.gi_sun ? generation_gi : generation_local);
             payload.value(view.layer);
             payload.value(view.size);
             payload.value(particles ? particles->key : u64{0});
@@ -5481,7 +5543,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 cv.transform = ref.instances[i].transform;
                 cv.eye = view.eye;
                 cv.forward = view.axis;
-                cv.orthographic = view.moon;
+                cv.orthographic = view.moon || view.gi_sun;
                 cv.per_unit = view.per_unit;
                 cv.pixels = lv.pixels;
                 cv.nearest = view.near_plane;
@@ -9654,6 +9716,11 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
         cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
     }
     {
+        // Before the GI: its light reads the GI's sun map, drawn with the local lights' maps.
+        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.local_shadows"};
+        local_shadow_pass(ctx);
+    }
+    {
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.gi_scene"};
         ctx.gi = gi_scene(ctx.commands, *view, scene, stats);
     }
@@ -9667,10 +9734,6 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     {
         const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.sun_shadow"};
         shadow_pass(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.local_shadows"};
-        local_shadow_pass(ctx);
     }
     stats.lights_variant = ctx.lights_variant;
     {

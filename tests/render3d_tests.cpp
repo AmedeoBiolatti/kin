@@ -3432,6 +3432,57 @@ void test_gpu_gi_emitter_strength() {
     });
 }
 
+// The GI's sun map: the GI's voxels take the sun's light through the sun's own view of the meshes, as the main pass's
+// shadows do, not through their own march, whose far, coarse windows close narrow gaps. A low sun (nothing else
+// lighting) through a slit 0.3 wide in a tall wall 20 away, where the GI's third window's voxels are 0.4: the floor
+// under the camera is lit in a strip along the slit's light; its voxels are lit with the map, dark by the march; beside
+// the strip, dark either way.
+void test_gpu_gi_sun_map() {
+    with_gpu("test_gpu_gi_sun_map", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const kin::Mesh3D floor = make_box(r3d, {50.0f, 0.2f, 50.0f});
+        const kin::Mesh3D wall = make_box(r3d, {0.4f, 14.0f, 19.85f});
+        const kin::Bounds3D area{{-25.0f, -1.0f, -25.0f}, {25.0f, 15.0f, 25.0f}};
+        // A view each (a view keeps its GI scene's light from render to render, a share of it lit again in each).
+        const auto shoot = [&](bool map) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.6f, 0.0f}, {0.01f, 0.0f, 0.0f}, 60.0f);
+            scene.lights.sun.direction = {1.0f, 0.5f, 0.0f};
+            scene.lights.sun.color = {1.0f, 1.0f, 1.0f};
+            scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+            scene.lights.shadow_area = area;
+            scene.global_illumination = {.enabled = true, .area = area, .cell = 0.1f};
+            scene.debug.gi_view = kin::GiView3D::Radiance;
+            scene.debug.gi_sun_map = map;
+            (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, 0.0f}), {.color = Color::rgb(188, 188, 188)});
+            for (const float side : {-1.0f, 1.0f}) {
+                (void)scene.draw(wall, Mat4f::translation({20.0f, 7.0f, side * (0.15f + 19.85f / 2.0f)}),
+                                 {.color = Color::rgb(188, 188, 188)});
+            }
+            Pixels seen;
+            for (int i = 0; i < 3; ++i) {
+                seen = shoot_view(renderer, r3d, view, scene);
+                renderer.present();
+            }
+            return std::pair{seen, r3d.debug_stats().gi_sun_map};
+        };
+        const auto [with_map, used] = shoot(true);
+        const auto [marched, unused] = shoot(false);
+        // The middle of the view: the floor at z 0, in the slit's light (its voxels across the strip's edges half lit);
+        // 60 pixels to a side (z 0.35 or so): in the wall's shadow. (The view looks down, its rows along z.)
+        const int strip = with_map.at(80, 60).g, strip_marched = marched.at(80, 60).g;
+        const int beside = std::max(with_map.at(20, 60).g, with_map.at(140, 60).g);
+        std::cerr << "gi sun map: the strip " << strip << " (marched " << strip_marched << "), beside " << beside
+                  << '\n';
+        assert(used && !unused);
+        assert(strip > 100 && strip_marched < 40 && beside < 40);
+    });
+}
+
 // Skinned copies left out of the GI scene (GlobalIllumination3D::skinned off): the posed box is in no voxel, and its
 // pose changing makes nothing again; turned on, it is made where the box stands.
 void test_gpu_gi_without_skinned() {
@@ -22401,6 +22452,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_scene_builds());
     RUN(test_gpu_gi_emitter_strength());
     RUN(test_gpu_gi_without_skinned());
+    RUN(test_gpu_gi_sun_map());
     RUN(test_gpu_gi_scene_scrolls());
     RUN(test_gpu_gi_view());
     RUN(test_gpu_gi_furnace());

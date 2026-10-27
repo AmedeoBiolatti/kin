@@ -93,6 +93,7 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 gi_probes = 0, gi_probes_updated = 0;
     u32 gi_rays = 0;
     bool gi_lit = false;
+    bool gi_sun_map = false; // the GI's voxels took the sun's light through its own sun map (else their march)
     bool gi_resolved = false;
     // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal
     // anti-aliasing and occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered
