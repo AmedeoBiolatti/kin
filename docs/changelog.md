@@ -43,6 +43,12 @@ releases may change APIs.
 
 ### Fixed
 
+- Keep `world.snapshot`'s raw world valid JSON when an entity's name holds a
+  dot (kin names the second entity called `gem` `gem.<id>`): flecs wrote its
+  children's parent paths with the dot escaped (`gem\.<id>`), which no JSON
+  reader takes. That backslash is now escaped too, so the path reads back as
+  flecs wrote it.
+
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
   history stable across views, and restore Windows compilation of Summit, the

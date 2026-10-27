@@ -202,6 +202,26 @@ private:
     kin::AnimationAssetLibrary _library;
 };
 
+// Two entities named alike, as kin names them ("gem", then "gem.<id>"), the
+// second with a child: flecs writes the child's parent path with the dot in
+// that name escaped ("gem\.<id>").
+class DottedNameScene final : public kin::Scene {
+public:
+    DottedNameScene() {
+        _world.entities().create({.name = "gem"});
+        _second = _world.entities().create({.name = "gem"});
+        _world.entities().create({.name = "stone", .parent = _second});
+    }
+
+    std::string_view name() const override { return "DottedName"; }
+    kin::EcsWorld* world() override { return &_world; }
+    kin::u64 second_id() const { return _second.id(); }
+
+private:
+    kin::EcsWorld _world;
+    kin::EcsEntity _second;
+};
+
 class KinSnapshotScene final : public kin::Scene {
 public:
     KinSnapshotScene() {
@@ -394,6 +414,37 @@ void test_world_snapshot_reports_animation_players() {
     assert(second_layers->items()[0].number_at("time") > first_time);
     assert(second_layers->items()[1].number_at("time") > first_override_time);
     assert(second_layers->items()[1].number_at("weight") > first_override_weight);
+}
+
+void test_world_snapshot_escapes_flecs_paths() {
+    kin::SceneManager scenes;
+    auto scene = std::make_unique<DottedNameScene>();
+    const std::string second = std::to_string(scene->second_id());
+    scenes.push(std::move(scene));
+
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"world.snapshot"})" "\n"
+        R"({"id":2,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "server", .width = 64, .height = 64},
+        .mode = kin::ServerMode::Driven,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+
+    // The whole answer is JSON (response_result parses it), the child's
+    // parent flecs's path as it wrote it, the dot in the name still escaped.
+    const kin::JsonValue* snapshot = response_result(out.str(), 1);
+    assert(snapshot != nullptr);
+    const kin::JsonValue* results = snapshot->find("world")->find("results");
+    assert(results != nullptr);
+    const auto stone = std::ranges::find_if(results->items(), [](const kin::JsonValue& entity) {
+        return entity.string_at("name") == "stone";
+    });
+    assert(stone != results->items().end());
+    assert(stone->string_at("parent") == "gem\\." + second);
 }
 
 void test_world_snapshot_reports_kin_metadata_and_payload_switches() {
@@ -856,6 +907,7 @@ int main() {
     test_json_parser();
     test_driven_server();
     test_world_snapshot_reports_animation_players();
+    test_world_snapshot_escapes_flecs_paths();
     test_world_snapshot_reports_kin_metadata_and_payload_switches();
     test_animation_diagnostics_endpoint();
     test_animation_diagnostics_endpoint_missing_provider_errors();

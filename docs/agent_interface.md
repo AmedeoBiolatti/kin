@@ -139,7 +139,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `scene.stack` | none | All scenes with index, name, flags, and `has_world`. |
 | `scene.current` | none | Top scene name plus its `write_report` state. |
 | `scene.actions` | none | Available input actions and bindings. |
-| `world.snapshot` | `{scene?, animations?}` | Flecs world JSON plus animation snapshots unless `animations:false`. ECS scenes only. |
+| `world.snapshot` | `{scene?, animations?}` | Flecs world JSON (its paths escape a `.` inside a name: `gem\.12`) plus animation snapshots unless `animations:false`. ECS scenes only. |
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
 | `ui.snapshot` | `{scene?}` | Unavailable after legacy `kin/ui` removal; use reports or `world.snapshot`. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
