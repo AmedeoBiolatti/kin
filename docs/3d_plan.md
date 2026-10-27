@@ -480,7 +480,9 @@ The plan as it was:
 
 - **Bloom** on the view's HDR texture: glowing shots and enemies.
 - **Point lights**: muzzle flashes and explosions, at most 16 a frame,
-  forward shaded, chosen by distance and strength; no clustering.
+  forward shaded, chosen by distance and strength; no clustering. (Since
+  2026-10-27 the light variants shade through a light grid, up to 256 of each
+  kind: see rendering_3d.md, "The light grid".)
 - **Transparency**: sparks and explosion particles drawn additively, tested
   against depth but not writing it; alpha-blended draws sorted back to
   front. `render.overdraw` watched, since this is where it grows.

@@ -518,9 +518,10 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   over a body that big. Give flashes and fireballs theirs, or what stands in
   them blazes white. Before G1a the fall-off was `(1 - d^2/r^2)^2` without the
   inverse square: colours of those days are about the old colour times the
-  square of the distance they were used at. At most 16 point lights light a
-  frame: those whose reach is in view, the strongest and nearest first; point
-  lights are cleared with the draws. Spot lights (`add_spot_light`, a cone of
+  square of the distance they were used at. The point lights whose reach is in
+  view light a frame, the strongest and nearest first: up to 256 through the
+  light grid (below), else 16 (`RendererCapabilities3D::max_point_lights`);
+  point lights are cleared with the draws. Spot lights (`add_spot_light`, a cone of
   a point light) and the shadows of lights that are not the sun are below
   ("Spot lights and shadows from lights that are not the sun"). Light is added
   in linear light; the result is stored as the 2D pipeline stores colour, or
@@ -1060,8 +1061,20 @@ scene.lights.fill_shadow = {.enabled = true, .cascades = 2};           // the fi
 **A spot light** is a point light inside a cone: the same photometry (`color` is what a white surface in the middle of the cone shows
 one unit away), `radius` and `size`, and a smooth falloff between `inner_angle` (full light) and `outer_angle` (none), by glTF's punctual
 spot curve: `t = clamp((cos a - cos outer) / (cos inner - cos outer), 0, 1)`, light times `t * t`. Exactly zero from the outer angle
-on, exactly full inside the inner one. At most 16 reach the view a frame (the cone's bounding sphere in view, the strongest and nearest
-first, as the point lights). `kin::spot_attenuation(light, point)` is the same number on the CPU.
+on, exactly full inside the inner one. Up to 256 that reach the view light a frame through the light grid, else 16 (the cone's
+bounding sphere in view, the strongest and nearest first, as the point lights; `RendererCapabilities3D::max_spot_lights`).
+`kin::spot_attenuation(light, point)` is the same number on the CPU.
+
+**The light grid.** Where the light shaders are made (`capabilities().local_shadows`), the main pass's light variants shade each
+fragment with the point and spot lights whose reach touches its cell of the view only, not with every light: the view is cut into
+tiles of 64 pixels by 32 slices of the depth along the camera's forward (each slice farther than the last by the same ratio, from 0.1
+to where the farthest light's reach ends), and each frame the CPU lists, for each cell, the lights whose bounding sphere's box covers
+it, in the order the lights were chosen (so the light adds up as a loop over them all would). The lights and the lists go to two
+storage buffers the light variants read. With more than 16 point lights in view the light variant draws (the plain shaders keep their
+loop over 16); the overlay, particles, custom material shaders and WebGL2 keep the fixed blocks of the 16 strongest of each kind.
+`Scene3D::debug.light_grid = false` turns it off (every fragment looping over the 16 strongest of each, as before it): the same lights
+give the same picture either way. In Bistro's night (2404 x 1352, 40 to 60 lights in view) the grid took 1.6 ms off the GPU's frame
+at Normal and 3.4 ms at High, drawing every light where the loops drew 16 of each.
 
 **Shadows.** A light's `shadow.enabled` asks for a map; of the spots in view that ask, the `max_shadowed_spots` most important have one,
 and of the point lights the `max_shadowed_points`. A map is a perspective depth map over the cone (a point light's: six 90-degree faces

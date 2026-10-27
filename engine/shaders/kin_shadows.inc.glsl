@@ -124,9 +124,9 @@ float local_shadow(int layer, vec3 offset_normal, vec3 l, float distance) {
     return mix(lit, 1.0, smoothstep(0.8 * end, end, distance));
 }
 
-// A point light's: the face its direction from the light falls in (the axis it is longest along), its layer.
-float point_light_shadow(int i, vec3 offset_normal, vec3 toward, float distance) {
-    const float first = locals.point_shadow[i].x;
+// A point light's: the face its direction from the light falls in (the axis it is longest along), its layer of the
+// cube whose first is `first` (-1: no shadow).
+float point_light_shadow_from(float first, vec3 offset_normal, vec3 toward, float distance) {
     if (first < 0.0) {
         return 1.0;
     }
@@ -141,6 +141,11 @@ float point_light_shadow(int i, vec3 offset_normal, vec3 toward, float distance)
         face = from_light.z < 0.0 ? 5 : 4;
     }
     return local_shadow(int(first) + face, offset_normal, toward, distance);
+}
+
+// The point light `i` of frame.lights'.
+float point_light_shadow(int i, vec3 offset_normal, vec3 toward, float distance) {
+    return point_light_shadow_from(locals.point_shadow[i].x, offset_normal, toward, distance);
 }
 
 // One of the moon's cascades, as cascade_light is the sun's; -1 outside its map.

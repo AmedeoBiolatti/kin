@@ -392,6 +392,7 @@ struct WebGLRenderer3D::Impl {
         for (u32 unit = 0; unit < names.size(); ++unit)
             glUniform1i(uniform(names[unit]), GLint(unit));
         caps.depth_bits = 24;
+        caps.max_spot_lights = 0; // the initial mesh path draws no spot lights (and the first 16 point lights)
         const bool unmasked =
             emscripten_webgl_enable_extension(emscripten_webgl_get_current_context(), "WEBGL_debug_renderer_info");
         const auto* driver = reinterpret_cast<const char*>(glGetString(unmasked ? 0x9246 : GL_RENDERER));

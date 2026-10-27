@@ -42,6 +42,20 @@ layout(set = 2, binding = 12) uniform sampler2D uGiLight; // rgb: the light faci
                                                           // view (less: the probes have none there; 0: no surface)
 layout(set = 2, binding = 13) uniform sampler2D uGiSlope; // the light facing way d is rgb * (w + xyz . d)
 #endif
+#ifdef KIN_LIGHT_GRID
+// The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
+// the view (frame.grid: tiles of pixels by slices of view depth) those whose reach touches it, so that a fragment
+// loops over its cell's lights only; where frame.grid.x is 0 (the overlay) the fixed blocks' loops light it.
+struct KinGridLight {
+    vec4 at;     // position, radius
+    vec4 colour; // linear rgb, the square of the light's size
+    vec4 axis;   // a spot's way and the cosine of its outer angle (a point light: w is -2)
+    vec4 cone;   // x: 1 / (cos inner - cos outer), y: its shadow's layer (a point light's cube's first; -1: none)
+};
+layout(std430, set = 2, binding = 14) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+// A cell (slice by row by column): the first of its list << 12 | its count; the lists after the cells.
+layout(std430, set = 2, binding = 15) readonly buffer KinGridCells { uint grid_cells[]; };
+#endif
 
 const float PI = 3.14159265358979;
 #include "kin_material_uniforms.inc.glsl"
@@ -296,6 +310,50 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
 }
 #endif
 
+#ifdef KIN_LIGHTS
+// A point light's light on the surface: the inverse square, windowed to nothing at the radius (Karis' fall-off, as
+// glTF's punctual lights), no brighter than at the light's own size (colour.w: its square), so a surface inside a
+// flash is lit as at its edge, not without bound; its shadow from its cube (`first`: the cube's first layer, -1:
+// none). Zero attenuation contributes nothing, including to the specular BRDF.
+vec3 kin_point_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour, float first) {
+    const vec3 to = at.xyz - vWorld;
+    const float d2 = dot(to, to);
+    const float r2 = d2 / (at.w * at.w);
+    const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+    const float k = window * window / max(d2, colour.w);
+    if (k <= 0.0) {
+        return vec3(0.0);
+    }
+    const vec3 toward = to * inversesqrt(max(d2, 1e-8));
+    float seen = 1.0;
+    if (material.params.z > 0.5 && dot(n, toward) > 0.0) {
+        seen = point_light_shadow_from(first, offset_normal, toward, sqrt(d2));
+    }
+    return shade(s, toward, colour.rgb * (k * seen));
+}
+
+// A spot light's: a point light's falloff inside a cone (glTF's punctual spot: the square of the linear step of the
+// cosine between the inner and the outer angle; axis.w the outer's, more.x 1 / (cos inner - cos outer)), its shadow
+// from its layer of the local array (more.y, -1: none).
+vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour, vec4 axis, vec4 more) {
+    const vec3 to = at.xyz - vWorld;
+    const float d2 = dot(to, to);
+    const float r2 = d2 / (at.w * at.w);
+    const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+    const vec3 toward = to * inversesqrt(max(d2, 1e-8));
+    const float step_in_cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
+    const float k = window * window * step_in_cone * step_in_cone / max(d2, colour.w);
+    if (k <= 0.0) {
+        return vec3(0.0);
+    }
+    float seen = 1.0;
+    if (more.y >= 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
+        seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
+    }
+    return shade(s, toward, colour.rgb * (k * seen));
+}
+#endif
+
 vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
     // Specular anti-aliasing (Scene3D::specular_aa; Tokuyoshi and Kaplanyan's, as Godot's roughness limiter): where
     // the normal turns within the pixel, a highlight can be thinner than the pixel, very bright where a sample hits it
@@ -353,9 +411,29 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb);
 #endif
     }
+#ifdef KIN_LIGHT_GRID
+    if (frame.grid.x > 0.5) {
+        // The cell: the fragment's tile, and its slice of the view depth (as the cascades measure it).
+        const uvec3 size = uvec3(frame.grid_size.xyz);
+        const uvec2 tile = min(uvec2(gl_FragCoord.xy / frame.grid.y), size.xy - 1u);
+        const float depth = max(dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz), frame.grid.z);
+        const uint slice = min(uint(log(depth / frame.grid.z) * frame.grid.w), size.z - 1u);
+        const uint cell = grid_cells[(slice * size.y + tile.y) * size.x + tile.x];
+        const uint first = uint(frame.grid_size.w) + (cell >> 12);
+        const uint count = cell & 0xfffu;
+        for (uint j = 0u; j < count; ++j) {
+            const KinGridLight g = grid_lights[grid_cells[first + j]];
+            light += g.axis.w < -1.5 ? kin_point_light(s, n, offset_normal, g.at, g.colour, g.cone.y)
+                                     : kin_spot_light(s, n, offset_normal, g.at, g.colour, g.axis, g.cone);
+        }
+    } else {
+#endif
     const int count = int(frame.flags.w);
     for (int i = 0; i < count; ++i) {
-
+#ifdef KIN_LIGHTS
+        light += kin_point_light(s, n, offset_normal, frame.lights[2 * i], frame.lights[2 * i + 1],
+                                 locals.point_shadow[i].x);
+#else
         const vec4 at = frame.lights[2 * i];
         const vec3 to = at.xyz - vWorld;
         const float d2 = dot(to, to);
@@ -370,41 +448,18 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         if (k <= 0.0) {
             continue;
         }
-#ifdef KIN_LIGHTS
-        const vec3 toward = to * inversesqrt(max(d2, 1e-8));
-        float seen = 1.0;
-        if (k > 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
-            seen = point_light_shadow(i, offset_normal, toward, sqrt(d2));
-        }
-        light += shade(s, toward, frame.lights[2 * i + 1].rgb * (k * seen));
-#else
         light += shade(s, to * inversesqrt(max(d2, 1e-8)), frame.lights[2 * i + 1].rgb * k);
 #endif
     }
 #ifdef KIN_LIGHTS
-    // Spot lights: a point light's falloff inside a cone (glTF's punctual spot: the square of the linear step of the
-    // cosine between the inner and the outer angle), its shadow from its layer of the local array.
+    // Spot lights (the fixed block's): kin_spot_light.
     const int spot_count = int(locals.counts.x);
     for (int i = 0; i < spot_count; ++i) {
-        const vec4 at = locals.spots[4 * i];
-        const vec4 colour = locals.spots[4 * i + 1];
-        const vec4 axis = locals.spots[4 * i + 2];
-        const vec4 more = locals.spots[4 * i + 3];
-        const vec3 to = at.xyz - vWorld;
-        const float d2 = dot(to, to);
-        const float r2 = d2 / (at.w * at.w);
-        const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
-        const vec3 toward = to * inversesqrt(max(d2, 1e-8));
-        const float step_in_cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
-        const float k = window * window * step_in_cone * step_in_cone / max(d2, colour.w);
-        if (k <= 0.0) {
-            continue;
-        }
-        float seen = 1.0;
-        if (more.y >= 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
-            seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
-        }
-        light += shade(s, toward, colour.rgb * (k * seen));
+        light += kin_spot_light(s, n, offset_normal, locals.spots[4 * i], locals.spots[4 * i + 1],
+                                locals.spots[4 * i + 2], locals.spots[4 * i + 3]);
+    }
+#endif
+#ifdef KIN_LIGHT_GRID
     }
 #endif
 

@@ -860,8 +860,8 @@ int brightness(Color c) {
     return int(c.r) + int(c.g) + int(c.b);
 }
 
-// A point light lights what is near it and nothing past its radius; at most
-// 16 are used, the strongest and nearest.
+// A point light lights what is near it and nothing past its radius; all of those in view are used with the light
+// grid (the light variant), the 16 strongest and nearest without it.
 void test_gpu_point_lights() {
     with_gpu("test_gpu_point_lights", [](kin::Renderer2D& renderer) {
         kin::Renderer3D r3d{renderer};
@@ -881,7 +881,7 @@ void test_gpu_point_lights() {
         expect(at({2.0f, 0.0f, 0.1f}), kin::colors::black, "past its radius");
         renderer.present();
 
-        // Twenty lights all over: sixteen used.
+        // Twenty lights all over: all used with the light grid, sixteen without.
         scene.lights.points.clear();
         for (int i = 0; i < 20; ++i) {
             scene.add_point_light({.position = {float(i % 5) - 2.0f, float(i / 5) - 1.5f, 1.0f},
@@ -891,7 +891,134 @@ void test_gpu_point_lights() {
         scene.add_point_light({.position = {0.0f, 0.0f, 40.0f}, .radius = 2.0f}); // behind the camera: none of the view
         renderer.clear(kin::colors::black);
         render_ok(r3d, view, scene);
-        assert(r3d.debug_stats().lights == 16);
+        const bool grid = r3d.capabilities().local_shadows; // the light variants made
+        assert(r3d.debug_stats().lights == (grid ? 20u : 16u));
+        assert(r3d.debug_stats().lights_variant == grid);
+        renderer.present();
+        scene.debug.light_grid = false;
+        renderer.clear(kin::colors::black);
+        render_ok(r3d, view, scene);
+        assert(r3d.debug_stats().lights == 16 && !r3d.debug_stats().lights_variant);
+        renderer.present();
+    });
+}
+
+// The light grid lights the view as the fixed loops do: the same point and spot lights (sixteen of each, all the loops
+// take), along a floor into the distance and up a far wall, beside and above the middle of the view, one round the
+// camera (its box partly behind it), some with shadows, give the same picture with and without it.
+void test_gpu_light_grid_matches_loops() {
+    with_gpu("test_gpu_light_grid_matches_loops", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!r3d.capabilities().local_shadows) {
+            return; // no light variants: no grid
+        }
+        const kin::Mesh3D floor = make_box(r3d, {30.0f, 0.2f, 60.0f});
+        const kin::Mesh3D wall = make_box(r3d, {30.0f, 12.0f, 0.2f});
+        const kin::Mesh3D post = make_box(r3d, {0.4f, 3.0f, 0.4f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, -10.0f}, 60.0f);
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.02f, 0.02f, 0.02f};
+        scene.lights.max_shadowed_spots = 8;
+        scene.lights.max_shadowed_points = 2;
+        (void)scene.draw(floor, Mat4f::translation({0.0f, -0.1f, -20.0f}),
+                         {.color = Color::rgb(200, 200, 200), .roughness = 0.6f});
+        (void)scene.draw(wall, Mat4f::translation({0.0f, 6.0f, -40.0f}), {.color = Color::rgb(180, 190, 200)});
+        for (int i = 0; i < 6; ++i) {
+            (void)scene.draw(post, Mat4f::translation({float(i % 3) * 3.0f - 3.0f, 1.5f, -4.0f - 6.0f * float(i)}),
+                             {.color = Color::rgb(150, 120, 90)});
+        }
+        for (int i = 0; i < 16; ++i) {
+            scene.add_point_light(
+                {.position = {float(i % 4) * 3.0f - 4.5f, 0.6f + float(i % 3) * 1.5f, 6.5f - 2.6f * float(i)},
+                 .color = {1.5f, 1.2f, 0.8f},
+                 .radius = 3.0f + float(i % 5),
+                 .shadow_enabled = i % 7 == 0});
+        }
+        for (int i = 0; i < 16; ++i) {
+            scene.add_spot_light({.position = {float(i % 4) * 3.0f - 4.5f, 4.0f, 2.0f - 2.4f * float(i)},
+                                  .direction = {0.2f * float(i % 3 - 1), -1.0f, -0.3f},
+                                  .color = {0.6f, 0.9f, 1.4f},
+                                  .radius = 8.0f,
+                                  .shadow_enabled = i % 5 == 0});
+        }
+        const Pixels with = shoot_view(renderer, r3d, view, scene);
+        const kin::RenderDebugStats3D grid_stats = r3d.debug_stats();
+        renderer.present();
+        scene.debug.light_grid = false;
+        const Pixels without = shoot_view(renderer, r3d, view, scene);
+        const kin::RenderDebugStats3D loop_stats = r3d.debug_stats();
+        renderer.present();
+        assert(grid_stats.lights == loop_stats.lights && grid_stats.spots == loop_stats.spots);
+        assert(grid_stats.lights >= 12 && grid_stats.spots >= 12 && grid_stats.lights_variant);
+        int differing = 0, lit = 0;
+        for (std::size_t i = 0; i < with.rgba.size(); ++i) {
+            differing += std::abs(int(with.rgba[i]) - int(without.rgba[i])) > 1 ? 1 : 0;
+            lit += i % 4 != 3 && with.rgba[i] > 100 ? 1 : 0;
+        }
+        assert(differing == 0);
+        assert(lit > 1000); // the lights light it (1,642 channels over 100 of 57,600)
+    });
+}
+
+// More lights than the fixed blocks take: forty point lights and then twenty-four spots, each lighting its own patch of
+// a wall. The light grid draws them all (the light variant, for point lights alone too); without it, the sixteen
+// strongest of each.
+void test_gpu_light_grid_many_lights() {
+    with_gpu("test_gpu_light_grid_many_lights", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!r3d.capabilities().local_shadows) {
+            return;
+        }
+        const kin::Mesh3D wall = make_box(r3d, {20.0f, 20.0f, 0.2f});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 8.0f}, {0.0f, 0.0f, 0.0f}, 60.0f);
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        (void)scene.draw(wall, Mat4f::identity(), {.color = Color::rgb(200, 200, 200)});
+        std::vector<Vec3f> patches;
+        const auto count_lit = [&](const Pixels& p) {
+            int n = 0;
+            for (const Vec3f at : patches) {
+                n += brightness(p.at(scene.camera.project({at.x, at.y, 0.1f}, screen)->pos)) > 60 ? 1 : 0;
+            }
+            return n;
+        };
+        for (int i = 0; i < 40; ++i) {
+            const Vec3f at{float(i % 8) - 3.5f, float(i / 8) - 2.0f, 0.25f};
+            scene.add_point_light({.position = at, .color = {1.0f, 1.0f, 1.0f}, .radius = 0.45f});
+            patches.push_back(at);
+        }
+        Pixels p = shoot_view(renderer, r3d, view, scene);
+        assert(r3d.debug_stats().lights == 40 && r3d.debug_stats().lights_variant);
+        assert(count_lit(p) == 40);
+        renderer.present();
+        scene.debug.light_grid = false;
+        p = shoot_view(renderer, r3d, view, scene);
+        assert(r3d.debug_stats().lights == 16 && count_lit(p) == 16);
+        renderer.present();
+
+        scene.debug.light_grid = true;
+        scene.lights.points.clear();
+        patches.clear();
+        for (int i = 0; i < 24; ++i) {
+            const Vec3f at{float(i % 6) * 1.2f - 3.0f, float(i / 6) * 1.2f - 1.8f, 1.0f};
+            scene.add_spot_light({.position = at,
+                                  .direction = {0.0f, 0.0f, -1.0f},
+                                  .color = {1.0f, 1.0f, 1.0f},
+                                  .radius = 2.0f,
+                                  .inner_angle = 8.0f,
+                                  .outer_angle = 15.0f});
+            patches.push_back(at);
+        }
+        p = shoot_view(renderer, r3d, view, scene);
+        assert(r3d.debug_stats().spots == 24 && count_lit(p) == 24);
+        renderer.present();
+        scene.debug.light_grid = false;
+        p = shoot_view(renderer, r3d, view, scene);
+        assert(r3d.debug_stats().spots == 16 && count_lit(p) == 16);
         renderer.present();
     });
 }
@@ -21978,6 +22105,8 @@ int main(int argc, char** argv) {
 
     RUN(test_gpu_point_lights());
     RUN(test_gpu_point_light_zero_attenuation());
+    RUN(test_gpu_light_grid_matches_loops());
+    RUN(test_gpu_light_grid_many_lights());
     RUN(test_gpu_shadows());
     RUN(test_gpu_blending());
     RUN(test_gpu_additive_over_transparent());

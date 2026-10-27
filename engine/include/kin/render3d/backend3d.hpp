@@ -54,6 +54,10 @@ struct RendererCapabilities3D {
     // shaders and a depth format that can be sampled; P3b); where not, they are off and a line in the log says so the
     // first time one is asked for.
     bool local_shadows = false;
+    // The most point and spot lights a frame can draw (Lights3D::points and ::spots: the strongest and nearest of those
+    // that reach the view): the light grid's 256 of each where the light shaders are made (local_shadows), else 16.
+    u32 max_point_lights = 16;
+    u32 max_spot_lights = 16;
     // Whether particles and weather can be drawn (P3c: the billboard shaders could be made), and whether soft particles
     // can (the depth-reading variant and the pre-pass's targets); where not, they are not drawn and a line in the log
     // says so once.

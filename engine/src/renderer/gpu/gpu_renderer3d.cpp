@@ -156,6 +156,16 @@ constexpr u64 ao_chain_min_pixels =
 constexpr u32 ao_chain_levels = 5;                                           // the occlusion's linear depth chain
 constexpr SDL_GPUTextureFormat hiz_format = SDL_GPU_TEXTUREFORMAT_R32_FLOAT; // the depth pyramid (Lod3D::occlusion)
 constexpr u32 max_lights = 16;
+// The light grid (the light variants'): at most this many point and as many spot lights a frame, each fragment looping
+// over those of its cell only, a tile of grid_tile pixels by one of grid_slices slices of view depth (a slice farther
+// than the last by a constant ratio, from grid_near). The fixed blocks (frame.lights, locals.spots: the plain and
+// custom shaders, the overlay, particles) keep the 16 strongest of each.
+constexpr u32 max_grid_lights = 256;
+constexpr u32 grid_tile = 64;
+constexpr u32 grid_slices = 32;
+constexpr f32 grid_near = 0.1f;
+constexpr u32 grid_max_count = 0xfff;      // a cell's lights: 12 bits
+constexpr u32 grid_max_indices = 1u << 20; // all cells' lists: 20 bits of offset
 // Storage buffers' smallest sizes, so that the first frames of a growing scene don't each remake them.
 constexpr u32 min_instance_buffer = 64 * 1024;
 constexpr u32 min_previous_buffer = 32 * 1024;
@@ -209,8 +219,21 @@ struct FrameUniforms {
     f32 occlusion[4];                            // 1 with ambient occlusion, 0, 1 / the view's size
     f32 lights[max_lights * 2 * 4];
     f32 gi[4]; // x: 1 when global illumination's probes light the scene (gi_resolve.comp read their light on the view)
+    f32 grid[4];      // x: 1 when the light grid lights this pass, y: a tile's side (pixels), z: the first slice's near
+                      // depth, w: slices per unit of the log of depth
+    f32 grid_size[4]; // x, y: tiles across and down, z: slices, w: cells (where the lists start)
 };
-static_assert(sizeof(FrameUniforms) == 1136);
+static_assert(sizeof(FrameUniforms) == 1168);
+// A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
+// the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
+// light's cube's first; -1: none).
+struct GridLight {
+    f32 at[4];
+    f32 colour[4];
+    f32 axis[4];
+    f32 cone[4];
+};
+static_assert(sizeof(GridLight) == 64);
 // A custom material shader's: kin_param(0..3).
 struct CustomUniforms {
     f32 values[16];
@@ -1336,22 +1359,24 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     // absent, and the features off (said once, when a scene asks).
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow) {
         try {
+            // (And the light grid's two storage buffers: its lights, its cells and their lists.)
             _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv",
                                                           /*uniform_buffers=*/3,
-                                                          /*samplers=*/14);
+                                                          /*samplers=*/14, /*storage_buffers=*/2);
             _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                               "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
-                                                              /*samplers=*/14);
+                                                              /*samplers=*/14, /*storage_buffers=*/2);
             if (_mesh_velocity_shader) {
                 _mesh_velocity_light_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
-                                             /*uniform_buffers=*/3, /*samplers=*/14);
+                                             /*uniform_buffers=*/3, /*samplers=*/14, /*storage_buffers=*/2);
                 _mesh_velocity_light_fog_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
-                                             /*uniform_buffers=*/4, /*samplers=*/14);
+                                             /*uniform_buffers=*/4, /*samplers=*/14, /*storage_buffers=*/2);
             }
             _lights_available = true;
             _capabilities.local_shadows = true;
+            _capabilities.max_point_lights = _capabilities.max_spot_lights = max_grid_lights;
         } catch (const std::exception& e) {
             KIN_LOG_INFO_F("render", "3D: spot lights and local shadows not available",
                            (LogFields{{.name = "reason", .value = e.what()}}));
@@ -3208,6 +3233,14 @@ struct GpuRenderer3D::FrameCtx {
     // local views' skinned casters).
     std::vector<u32> spots;
     bool lights_variant = false;
+    // The light grid: possible (the light variants made, Scene3D::debug.light_grid), and then every point and spot
+    // light in view is chosen (up to max_grid_lights each) and build_light_grid lists them by cell. Their shadows'
+    // layers (-1: none), as ctx.chosen and ctx.spots. The grid's slicing, for the frame block.
+    bool grid_possible = false;
+    std::vector<f32> point_layers, spot_layers;
+    std::array<u32, 3> grid_tiles{}; // across, down, slices
+    u32 grid_cells = 0;
+    f32 grid_scale = 0.0f;
     LocalLightUniforms lu{};
     u32 moon_cascades = 0;
     ShadowCascades3D moon_plan;
@@ -4058,9 +4091,10 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     local_lights.counts[0] = local_lights.counts[1] = 0;
     if (any_local) {
         local_lights = {};
-        local_lights.counts[0] = static_cast<f32>(ctx.chosen.size());
+        const std::size_t points = std::min<std::size_t>(ctx.chosen.size(), max_lights);
+        local_lights.counts[0] = static_cast<f32>(points);
         local_lights.counts[1] = ctx.lu.counts[0];
-        for (std::size_t i = 0; i < ctx.chosen.size(); ++i) {
+        for (std::size_t i = 0; i < points; ++i) {
             const auto& light = *ctx.chosen[i].second;
             put(local_lights.points + i * 8, light.position, light.radius);
             const f32 size = std::max(light.size, .01f);
@@ -4496,7 +4530,7 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         }
         std::stable_sort(reaching.begin(), reaching.end(),
                          [](const auto& a, const auto& b) { return a.first > b.first; });
-        reaching.resize(std::min<std::size_t>(reaching.size(), max_spot_lights));
+        reaching.resize(std::min<std::size_t>(reaching.size(), ctx.grid_possible ? max_grid_lights : max_spot_lights));
         for (const auto& [strength, i] : reaching) {
             ctx.spots.push_back(i);
         }
@@ -4596,15 +4630,19 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
     // The shader's block: the spots, and each layer's matrix and numbers.
     const f32 side_f = static_cast<f32>(std::max(_local_side, 1u));
     lu.local[0] = any_spot_map || any_point_map ? 1.0f / side_f : 0.0f;
+    ctx.spot_layers.assign(ctx.spots.size(), -1.0f);
     for (u32 k = 0; k < ctx.spots.size(); ++k) {
-        const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
-        const SpotCone3D cone = spot_cone(l);
-        f32* o = lu.spots + 16 * k;
-        put(o, l.position, l.radius);
-        const f32 size = std::max(l.size, 0.01f);
-        put_color(o + 4, l.color, size * size);
-        put(o + 8, cone.axis, cone.cos_outer);
-        put(o + 12, {cone.scale, static_cast<f32>(spot_slot_of[k]), 0.0f}, 0.0f);
+        ctx.spot_layers[k] = static_cast<f32>(spot_slot_of[k]);
+        if (k < max_spot_lights) {
+            const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
+            const SpotCone3D cone = spot_cone(l);
+            f32* o = lu.spots + 16 * k;
+            put(o, l.position, l.radius);
+            const f32 size = std::max(l.size, 0.01f);
+            put_color(o + 4, l.color, size * size);
+            put(o + 8, cone.axis, cone.cos_outer);
+            put(o + 12, {cone.scale, static_cast<f32>(spot_slot_of[k]), 0.0f}, 0.0f);
+        }
         if (ctx.spots[k] < RenderDebugStats3D::max_reported_lights) {
             stats.spot_slot[ctx.spots[k]] = spot_slot_of[k];
         }
@@ -4612,6 +4650,7 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
     for (u32 i = 0; i < max_lights; ++i) {
         lu.point_shadow[4 * i] = -1.0f;
     }
+    ctx.point_layers.assign(ctx.chosen.size(), -1.0f);
     const auto set_layer = [&](u32 layer, const LocalShadowView3D& v, u32 res, const auto& light, f32 radius) {
         std::memcpy(lu.local_matrix + 16 * layer, v.view_projection.m, 16 * sizeof(f32));
         const f32 r = static_cast<f32>(res);
@@ -4665,7 +4704,10 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         const u32 index = static_cast<u32>(&l - lights.points.data());
         const u32 res = std::min(local_resolution(l, lights), _local_side);
         const u32 base = _local_spot_layers + cube_faces * static_cast<u32>(point_slot_of[j]);
-        lu.point_shadow[4 * j] = static_cast<f32>(base);
+        ctx.point_layers[j] = static_cast<f32>(base);
+        if (j < max_lights) {
+            lu.point_shadow[4 * j] = static_cast<f32>(base);
+        }
         if (index < RenderDebugStats3D::max_reported_lights) {
             stats.point_slot[index] = point_slot_of[j];
         }
@@ -4742,11 +4784,13 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
         }
     }
     stats.moon_cascades = ctx.moon_cascades;
-    lu.counts[0] = static_cast<f32>(ctx.spots.size());
+    lu.counts[0] = static_cast<f32>(std::min<std::size_t>(ctx.spots.size(), max_spot_lights));
     lu.counts[3] = std::clamp(lights.sun_shadow_strength, 0.0f, 1.0f);
+    // (More point lights than the plain shaders loop over: the grid's, in the light variants, draws them all.)
     ctx.lights_variant =
-        _lights_available && (!ctx.spots.empty() || any_spot_map || any_point_map || ctx.moon_cascades > 0 ||
-                              (lights.sun_shadow_strength < 1.0f && lights.sun_shadow_strength > 0.0f));
+        _lights_available &&
+        (!ctx.spots.empty() || any_spot_map || any_point_map || ctx.moon_cascades > 0 ||
+         (lights.sun_shadow_strength < 1.0f && lights.sun_shadow_strength > 0.0f) || ctx.chosen.size() > max_lights);
 
     // Idle arrays go back after a while, as the view's targets do.
     const bool local_used = any_spot_map || any_point_map;
@@ -4791,6 +4835,166 @@ void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
 // face, a moon cascade as the sun's are tested), the exact bytes each draw is a function of when the cache is on (a
 // view whose bytes are those of the render before is not drawn again), and what the others draw: the union of their
 // copies as instances, a list of them for each (view, draw, level), and the posed ones' joint offsets.
+void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
+    ctx.grid_cells = 0;
+    if (!_lights_available) {
+        return;
+    }
+    const Scene3D& scene = ctx.scene;
+    const Lights3D& lights = scene.lights;
+    // The lights: the points, then the spots, as the fixed blocks have them (a cell's list in that order adds up their
+    // light as the fixed loops do), each with its bounding sphere.
+    std::vector<GridLight> list;
+    std::vector<std::pair<Vec3f, f32>> spheres;
+    if (ctx.grid_possible) {
+        list.reserve(ctx.chosen.size() + ctx.spots.size());
+        spheres.reserve(list.capacity());
+        for (std::size_t j = 0; j < ctx.chosen.size(); ++j) {
+            const PointLightSource3D& l = *ctx.chosen[j].second;
+            GridLight g{};
+            put(g.at, l.position, l.radius);
+            const f32 size = std::max(l.size, 0.01f);
+            put_color(g.colour, l.color, size * size);
+            put(g.axis, {}, -2.0f);
+            put(g.cone, {0.0f, ctx.point_layers[j], 0.0f}, 0.0f);
+            list.push_back(g);
+            spheres.push_back({l.position, l.radius});
+        }
+        for (std::size_t k = 0; k < ctx.spots.size(); ++k) {
+            const SpotLightSource3D& l = lights.spots[ctx.spots[k]];
+            const SpotCone3D cone = spot_cone(l);
+            GridLight g{};
+            put(g.at, l.position, l.radius);
+            const f32 size = std::max(l.size, 0.01f);
+            put_color(g.colour, l.color, size * size);
+            put(g.axis, cone.axis, cone.cos_outer);
+            put(g.cone, {cone.scale, ctx.spot_layers[k], 0.0f}, 0.0f);
+            list.push_back(g);
+            Vec3f c;
+            f32 r;
+            spot_bounding_sphere(l, c, r);
+            spheres.push_back({c, r});
+        }
+    }
+
+    // The cells: tiles of the view by slices of the depth along the camera's forward (as the fragment measures it),
+    // the last slice ending where the farthest light's reach does. A light's cells are those of the box round its
+    // sphere: the tiles its corners fall in (with the jittered matrix the pass draws with, a pixel more each way; all
+    // of them when a corner is behind the camera) by the slices its depth spans. The lists are filled in the lights'
+    // order.
+    const Vec2i size = ctx.view->_size;
+    const u32 across = (static_cast<u32>(std::max(size.x, 1)) + grid_tile - 1) / grid_tile;
+    const u32 down = (static_cast<u32>(std::max(size.y, 1)) + grid_tile - 1) / grid_tile;
+    const u32 cells = across * down * grid_slices;
+    const Vec3f eye = scene.camera.position, forward = scene.camera.forward();
+    f32 far = 2.0f * grid_near;
+    for (const auto& [c, r] : spheres) {
+        far = std::max(far, dot(c - eye, forward) + r);
+    }
+    const f32 scale = static_cast<f32>(grid_slices) / std::log(far / grid_near);
+    const auto slice = [&](f32 depth) {
+        const f32 x = std::log(std::max(depth, grid_near) / grid_near) * scale;
+        return std::min(static_cast<u32>(std::max(x, 0.0f)), grid_slices - 1);
+    };
+    struct Box {
+        u32 x0, x1, y0, y1, z0, z1;
+    };
+    std::vector<Box> boxes(list.size(), Box{1, 0, 1, 0, 1, 0}); // empty: x0 > x1
+    const Mat4f& vp = ctx.drawn[0];
+    for (std::size_t i = 0; i < spheres.size(); ++i) {
+        const auto& [c, r] = spheres[i];
+        const f32 depth = dot(c - eye, forward);
+        if (depth + r <= 0.0f) {
+            continue;
+        }
+        f32 px0 = 0.0f, px1 = static_cast<f32>(size.x), py0 = 0.0f, py1 = static_cast<f32>(size.y);
+        bool behind = false;
+        f32 lo_x = std::numeric_limits<f32>::max(), hi_x = -lo_x, lo_y = lo_x, hi_y = -lo_x;
+        for (u32 corner = 0; corner < 8 && !behind; ++corner) {
+            const Vec4f p = vp * Vec4f{c.x + ((corner & 1) ? r : -r), c.y + ((corner & 2) ? r : -r),
+                                       c.z + ((corner & 4) ? r : -r), 1.0f};
+            if (p.w <= 1e-6f) {
+                behind = true;
+                break;
+            }
+            // SDL_GPU's clip space has +Y up; the window's pixels, as gl_FragCoord, count down from the top.
+            const f32 x = (p.x / p.w * 0.5f + 0.5f) * static_cast<f32>(size.x);
+            const f32 y = (0.5f - p.y / p.w * 0.5f) * static_cast<f32>(size.y);
+            lo_x = std::min(lo_x, x);
+            hi_x = std::max(hi_x, x);
+            lo_y = std::min(lo_y, y);
+            hi_y = std::max(hi_y, y);
+        }
+        if (!behind) {
+            px0 = std::max(px0, lo_x - 1.0f);
+            px1 = std::min(px1, hi_x + 1.0f);
+            py0 = std::max(py0, lo_y - 1.0f);
+            py1 = std::min(py1, hi_y + 1.0f);
+            if (px0 >= px1 || py0 >= py1) {
+                continue; // beside the view
+            }
+        }
+        const auto tile = [](f32 p, u32 n) { return std::min(static_cast<u32>(std::max(p, 0.0f)) / grid_tile, n - 1); };
+        boxes[i] = {tile(px0, across), tile(px1, across), tile(py0, down),
+                    tile(py1, down),   slice(depth - r),  slice(depth + r)};
+    }
+    std::vector<u32>& data = _grid_scratch;
+    data.assign(cells, 0);
+    u64 total = 0;
+    for (const Box& b : boxes) {
+        for (u32 z = b.z0; z <= b.z1 && b.x0 <= b.x1; ++z) {
+            for (u32 y = b.y0; y <= b.y1; ++y) {
+                for (u32 x = b.x0; x <= b.x1; ++x) {
+                    u32& count = data[(z * down + y) * across + x];
+                    count = std::min(count + 1, grid_max_count);
+                    ++total;
+                }
+            }
+        }
+    }
+    const bool fits = total < grid_max_indices;
+    if (!fits) {
+        warn_once(_grid_warned, "3D: the light grid's lists overflowed: the 16 strongest of each kind light the view");
+    }
+    if (fits && !list.empty()) {
+        // Each cell: the first of its list << 12 | its count; then the lists.
+        u32 offset = 0;
+        for (u32 c = 0; c < cells; ++c) {
+            const u32 count = data[c];
+            data[c] = offset << 12 | count;
+            offset += count;
+        }
+        data.resize(cells + offset);
+        std::vector<u32> filled(cells, 0);
+        for (u32 i = 0; i < boxes.size(); ++i) {
+            const Box& b = boxes[i];
+            for (u32 z = b.z0; z <= b.z1 && b.x0 <= b.x1; ++z) {
+                for (u32 y = b.y0; y <= b.y1; ++y) {
+                    for (u32 x = b.x0; x <= b.x1; ++x) {
+                        const u32 c = (z * down + y) * across + x;
+                        if (filled[c] < (data[c] & grid_max_count)) {
+                            data[cells + (data[c] >> 12) + filled[c]++] = i;
+                        }
+                    }
+                }
+            }
+        }
+        ctx.grid_tiles = {across, down, grid_slices};
+        ctx.grid_cells = cells;
+        ctx.grid_scale = scale;
+    } else {
+        data.assign(1, 0);
+        list.assign(1, GridLight{});
+    }
+    // The light variants read both whether the grid lights the pass or not (bound with their samplers).
+    const u32 light_bytes = static_cast<u32>(list.size() * sizeof(GridLight));
+    ensure_buffer(_grid_lights, light_bytes, 64 * sizeof(GridLight), SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+    _device->upload_storage_buffer(_grid_lights->handle(), 0, light_bytes, list.data(), /*cycle=*/true);
+    const u32 cell_bytes = static_cast<u32>(data.size() * sizeof(u32));
+    ensure_buffer(_grid_cells, cell_bytes, 64 * 1024, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+    _device->upload_storage_buffer(_grid_cells->handle(), 0, cell_bytes, data.data(), /*cycle=*/true);
+}
+
 void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     const Lights3D& lights = ctx.scene.lights;
@@ -7735,7 +7939,8 @@ void GpuRenderer3D::choose_point_lights(FrameCtx& ctx) {
         ctx.chosen.push_back({strength / (distance * distance), &light});
     }
     std::sort(ctx.chosen.begin(), ctx.chosen.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-    ctx.chosen.resize(std::min<std::size_t>(ctx.chosen.size(), max_lights));
+    ctx.grid_possible = _lights_available && scene.debug.light_grid;
+    ctx.chosen.resize(std::min<std::size_t>(ctx.chosen.size(), ctx.grid_possible ? max_grid_lights : max_lights));
     stats.lights = static_cast<u32>(ctx.chosen.size());
 }
 
@@ -7760,8 +7965,17 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     put(f.fill_direction, fill ? normalize(to_space.apply_vector(normalize(lights.fill.direction))) : Vec3f{}, 0.0f);
     put_color(f.fill_color, fill ? lights.fill.color : LinearRgb{}, 0.0f);
     const bool lit_by_sun_shadow = ctx.shadows && s == 0;
+    const std::size_t points = std::min<std::size_t>(ctx.chosen.size(), max_lights);
     put(f.flags, {encode ? 1.0f : 0.0f, decode ? 1.0f : 0.0f, lit_by_sun_shadow ? 1.0f : 0.0f},
-        static_cast<f32>(ctx.chosen.size()));
+        static_cast<f32>(points));
+    // The light grid lights the scene's own pass (the overlay's lights are carried into its space: its fixed blocks).
+    if (s == 0 && ctx.grid_cells > 0) {
+        put(f.grid, {1.0f, static_cast<f32>(grid_tile), grid_near}, ctx.grid_scale);
+        put(f.grid_size,
+            {static_cast<f32>(ctx.grid_tiles[0]), static_cast<f32>(ctx.grid_tiles[1]),
+             static_cast<f32>(ctx.grid_tiles[2])},
+            static_cast<f32>(ctx.grid_cells));
+    }
     put(f.eye, ctx.scenes[s]->camera.position, 1.0f);
     if (ctx.environment) {
         // The picture turned by the light's rotation; in the overlay's space the
@@ -7799,7 +8013,7 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
         f.cascade_bias[0] = std::max(lights.shadow_bias, 0.0f) * ctx.texel_world / ctx.depth_range;
         f.cascade_bias[1] = std::max(lights.shadow_normal_offset, 0.0f) * ctx.texel_world;
     }
-    for (std::size_t i = 0; i < ctx.chosen.size(); ++i) {
+    for (std::size_t i = 0; i < points; ++i) {
         put(f.lights + i * 8, to_space.apply(ctx.chosen[i].second->position), ctx.chosen[i].second->radius);
         const f32 size = std::max(ctx.chosen[i].second->size, 0.01f);
         put_color(f.lights + i * 8 + 4, ctx.chosen[i].second->color, size * size);
@@ -8856,6 +9070,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // parameters take as well (pushed again before the first stock draw after one).
     const u32 lights_slot = ctx.fog ? 3u : 2u;
     bool lights_bound = false;
+    // The light grid's buffers, bound with the light variants' samplers (build_light_grid made them).
+    const std::array<SDL_GPUBuffer*, 2> grid_buffers{_grid_lights ? _grid_lights->handle() : nullptr,
+                                                     _grid_cells ? _grid_cells->handle() : nullptr};
     bool custom_lights_bound = false;
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && ctx.overlaid ? overlay_split : 1.0f;
@@ -9013,6 +9230,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         gi_binding[1]};
                     // Custom shaders have twelve; the stock light variants fourteen (global illumination's light).
                     SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 14u : 10u);
+                    if (lit_variant) {
+                        SDL_BindGPUFragmentStorageBuffers(pass, 0, grid_buffers.data(), 2);
+                    }
                 }
                 bound_textures = textures;
                 bound_wrap = wrap;
@@ -9385,6 +9605,7 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     fit_sun_shadow(ctx);
     choose_point_lights(ctx);
     choose_local_lights(ctx);
+    build_light_grid(ctx);
     cull_and_upload(ctx);
     prepare_particles(ctx);
     ctx.shadow_history = ctx.taa && std::ranges::any_of(_particle_batches, [](const auto& batch) {

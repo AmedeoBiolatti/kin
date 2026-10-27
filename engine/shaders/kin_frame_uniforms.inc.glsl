@@ -25,4 +25,7 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 occlusion;     // x: 1 with ambient occlusion, y: 1 with contact shadows, zw: 1 / the view's size
     vec4 lights[MAX_LIGHTS * 2]; // position.xyz and radius; colour.rgb (linear)
     vec4 gi;            // x: 1 when global illumination's probes light the scene (their light on the view, uGiLight)
+    vec4 grid;          // x: 1 when the light grid lights this pass (KIN_LIGHT_GRID), y: a tile's side (pixels), z: the
+                        // first slice's near depth, w: slices per unit of the log of depth
+    vec4 grid_size;     // x, y: tiles across and down, z: slices, w: cells (where the lists start)
 } frame;

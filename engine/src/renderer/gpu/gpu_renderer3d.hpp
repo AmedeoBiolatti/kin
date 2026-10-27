@@ -454,6 +454,9 @@ private:
     // each view on the CPU, decides which maps are kept from last render (the cache) and uploads what the others draw;
     // `local_shadow_pass` records them.
     void choose_local_lights(FrameCtx& ctx);
+    // The light grid (the light variants'): the point and spot lights chosen, and for each cell of the view (tiles of
+    // grid_tile pixels by slices of view depth) those whose reach touches it, uploaded for the main pass.
+    void build_light_grid(FrameCtx& ctx);
     void build_local_shadows(FrameCtx& ctx);
     void local_shadow_pass(FrameCtx& ctx);
     void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
@@ -805,6 +808,10 @@ private:
     // The local views' casters of this render: the union of their copies as GpuInstance3D, each view's lists of them
     // (u32), and the joint offsets of the posed ones.
     std::shared_ptr<GpuBuffer> _local_instances, _local_lists, _local_joint_offsets;
+    // The light grid's buffers (build_light_grid): the lights (GridLight), and the cells then their lists of lights.
+    std::shared_ptr<GpuBuffer> _grid_lights, _grid_cells;
+    std::vector<u32> _grid_scratch; // the cells' counts, then their lists, as they are filled
+    bool _grid_warned = false;
     struct LocalEntry {
         u32 ref = 0, level = 0;
         u32 list_first = 0, count = 0;

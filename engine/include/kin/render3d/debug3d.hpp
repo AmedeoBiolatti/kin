@@ -21,6 +21,8 @@ struct RenderDebugOptions3D {
     bool stats_readback = false;   // waits for GPU cluster counters: profiling only
     bool gpu_pass_markers = false; // labels for external GPU profilers, no readback
     bool freeze_jitter = false;    // hold the first TAA jitter sample
+    bool light_grid = true;        // false: every fragment loops over the 16 strongest point and spot lights, as
+                                   // before the light grid (to compare with it)
     GiView3D gi_view = GiView3D::Off;
 };
 

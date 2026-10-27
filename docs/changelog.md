@@ -7,6 +7,13 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add the light grid: the main pass's light variants shade a fragment with the point and spot lights whose reach
+  touches its cell of the view (64-pixel tiles by 32 slices of view depth, listed on the CPU each frame and read
+  from two storage buffers), and draw every light in view, up to 256 of each kind a frame where it was 16
+  (`RendererCapabilities3D::max_point_lights` and `::max_spot_lights`). More than 16 point lights in view choose the
+  light variant. The overlay, particles, custom shaders and WebGL2 keep the 16 strongest of each.
+  `Scene3D::debug.light_grid = false` turns it off. Bistro's night: 1.6 ms less GPU a frame at Normal, 3.4 at
+  High (2404 x 1352), with all of its 40 to 60 lights in view drawn.
 - Add `Renderer2D::request_read_rgba` and `take_read_rgba`: a read of the
   current target that does not wait for the GPU (SDL_GPU; the other backends
   read at the request). `read_rgba` stops the CPU until the GPU has drawn
