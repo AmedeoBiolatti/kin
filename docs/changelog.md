@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D global illumination no longer makes its scene again when an emissive material's strength changes: the voxels
+  keep the emission at a strength of one and their emitter's number (`max_gi_emitters`, 2048), and the GI's light
+  takes each emitter's strength every render. A game that scaled its emissives by its exposure every frame had every
+  lamp's surroundings voxelized again on each level's turn (in nearly half its frames, about 4.9 ms of GPU a frame on
+  average in Bistro's night at 2404 x 1352, 9 ms in those frames). Whether a material emits is still a change.
 - Add the light grid: the main pass's light variants shade a fragment with the point and spot lights whose reach
   touches its cell of the view (64-pixel tiles by 32 slices of view depth, listed on the CPU each frame and read
   from two storage buffers), and draw every light in view, up to 256 of each kind a frame where it was 16

@@ -3036,7 +3036,7 @@ struct GiLevel {
         (void)scene.draw(plane, Mat4f::translation({0.0f, 0.27f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}),
                          {.color = floor_colour});
         (void)scene.draw(plane, wall(), {.color = Color::rgb(220, 220, 220)});
-        (void)scene.draw(plane, slanted(), {.color = Color::rgb(0, 200, 0), .emissive = 2.0f});
+        (void)scene.draw(plane, slanted(), {.color = Color::rgb(0, 200, 0), .emissive = glow});
         (void)scene.draw(ball, Mat4f::translation(ball_at), {.color = Color::rgb(90, 90, 200)});
         const std::array<Mat4f, 1> pose{Mat4f::translation({0.0f, lift, 0.0f})};
         (void)scene.draw_skinned(box, pose, Mat4f::translation({2.5f, 0.83f, -2.5f}));
@@ -3063,6 +3063,7 @@ struct GiLevel {
     kin::Mesh3D plane, ball, box;
     kin::Texture halves_texture;
     Color floor_colour = Color::rgb(200, 100, 50);
+    float glow = 2.0f; // the green wall's emissive strength
 };
 
 // Reads a GI scene's voxels by index or by the point they hold.
@@ -3273,6 +3274,94 @@ void test_gpu_gi_scene_builds() {
         const Pixels with = shoot_view(renderer, r3d, view, scene_of(true, 1.5f, ball));
         renderer.present();
         assert(with.rgba == without.rgba);
+    });
+}
+
+// An emissive material's strength changing (a lamp dimmed, a game's exposure on its emissives) makes nothing of the GI
+// scene again: its voxels keep its colour, the GI's light takes the strength each render, and read back they hold the
+// new strength, to the bit as the scene built afresh with it; its view shows it. Emissive or not is a change still (an
+// emissive item owns its voxels first), and a second draw alike but for its strength keeps its own, in its voxels.
+void test_gpu_gi_emitter_strength() {
+    with_gpu("test_gpu_gi_emitter_strength", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        GiLevel level{r3d, renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::View3D afresh = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        // The green wall's twin, 2 m along x and 0.5 along z, as strong as `twin`.
+        const Mat4f twin_at = Mat4f::translation({2.0f, 0.0f, 0.5f}) * GiLevel::slanted();
+        float twin = 0.0f;
+        const auto scene_of = [&] {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.27f, 1.4f, 0.23f}, {-1.5f, 1.4f, 2.0f}, 60.0f);
+            scene.lights.sun.direction = {-0.4f, 1.0f, 0.3f};
+            scene.global_illumination = GiLevel::settings();
+            level.draw(scene);
+            if (twin > 0.0f) {
+                (void)scene.draw(level.plane, twin_at, {.color = Color::rgb(0, 200, 0), .emissive = twin});
+            }
+            return scene;
+        };
+        const auto built = [&](kin::View3D& v) {
+            render_ok(r3d, v, scene_of());
+            renderer.present();
+            return r3d.debug_stats().gi_built;
+        };
+        // A change goes in at once, or (one following another) within four renders: eight, and whether any built.
+        const auto made_within = [&](kin::View3D& v) {
+            bool any = false;
+            for (int i = 0; i < 8; ++i) {
+                any = built(v) || any;
+            }
+            return any;
+        };
+        const auto voxels = [&](kin::View3D& v) {
+            GiVoxels g;
+            assert(r3d.read_gi_scene(v, g.s).value_or(false));
+            return g;
+        };
+        const auto green_at = [](const GiVoxels& g, Vec3f p) {
+            const auto v = g.of(p);
+            return g.s.emission[g.index(v[0], v[1], v[2]) * 3 + 1];
+        };
+        const Vec3f wall = GiLevel::slanted().apply({0.0f, 0.0f, 0.0f}), other = twin_at.apply({0.0f, 0.0f, 0.0f});
+        const float green = kin::srgb_to_linear(200.0f / 255.0f);
+        assert(built(view));
+        assert(std::abs(green_at(voxels(view), wall) - green * 2.0f) < green * 0.02f);
+        level.glow = 5.0f;
+        assert(!built(view));
+        const GiVoxels brighter = voxels(view);
+        std::cerr << "gi emitter: the wall at 5 " << green_at(brighter, wall) << " (" << green * 5.0f << ")\n";
+        assert(std::abs(green_at(brighter, wall) - green * 5.0f) < green * 0.05f);
+        assert(built(afresh) && voxels(afresh).s.emission == brighter.s.emission);
+        // Its view: the colour times the strength.
+        for (const float strength : {0.5f, 1.0f}) {
+            level.glow = strength;
+            kin::Scene3D scene = scene_of();
+            scene.debug.gi_view = kin::GiView3D::Emission;
+            const Pixels seen = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            const int want = static_cast<int>(std::lround(kin::linear_to_srgb(green * strength) * 255.0f));
+            std::cerr << "gi emitter: its view at " << strength << ": green " << int(seen.at(80, 60).g) << " (" << want
+                      << ")\n";
+            assert(std::abs(seen.at(80, 60).g - want) <= 3 && seen.at(80, 60).r <= 3);
+        }
+        // Not emissive: made again; emissive again: made again.
+        level.glow = 0.0f;
+        assert(made_within(view) && green_at(voxels(view), wall) == 0.0f);
+        level.glow = 5.0f;
+        assert(made_within(view) && voxels(view).s.emission == brighter.s.emission);
+        // The twin: alike but for its strength, its own in its voxels, a change of it made again.
+        twin = 3.0f;
+        assert(made_within(view));
+        const GiVoxels both = voxels(view);
+        std::cerr << "gi emitter: the wall " << green_at(both, wall) << ", its twin " << green_at(both, other) << '\n';
+        assert(std::abs(green_at(both, wall) - green * 5.0f) < green * 0.05f &&
+               std::abs(green_at(both, other) - green * 3.0f) < green * 0.05f);
+        twin = 4.0f;
+        assert(made_within(view) && std::abs(green_at(voxels(view), other) - green * 4.0f) < green * 0.05f);
     });
 }
 
@@ -22207,6 +22296,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_texture_lod_bias());
     RUN(test_gpu_gi_scene());
     RUN(test_gpu_gi_scene_builds());
+    RUN(test_gpu_gi_emitter_strength());
     RUN(test_gpu_gi_scene_scrolls());
     RUN(test_gpu_gi_view());
     RUN(test_gpu_gi_furnace());

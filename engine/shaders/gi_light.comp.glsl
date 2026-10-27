@@ -28,6 +28,9 @@ layout(std430, set = 0, binding = 7) readonly buffer Lights {
 layout(std430, set = 0, binding = 8) readonly buffer Blocks {
     uint blocks[]; // a stored block: x, y and z (8 bits each), and its level (the top 8)
 };
+layout(std430, set = 0, binding = 9) readonly buffer Emitters {
+    float strengths[]; // each emitter's emissive strength this render (an emissive voxel's alpha: its number, from 1)
+};
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D uRadiance;     // the light leaving its front
 layout(set = 1, binding = 1, rgba16f) uniform writeonly image3D uRadianceBack; // and its back, if it has one
 
@@ -146,7 +149,8 @@ void main() {
     const vec3 world = (vec3(first + local) + 0.5) * cell;
     const vec4 normal = texelFetch(uNormal, voxel, 0);
     const vec3 n = normalize(normal.xyz * 2.0 - 1.0);
-    const vec3 emission = texelFetch(uEmission, voxel, 0).rgb;
+    const vec4 glow = texelFetch(uEmission, voxel, 0);
+    const vec3 emission = glow.a > 0.5 ? glow.rgb * strengths[uint(glow.a + 0.5) - 1u] : glow.rgb;
     imageStore(uRadiance, voxel, vec4(min(albedo.rgb * reaching(world, cell, n) + emission, vec3(65000.0)), 1.0));
     // A voxel with faces both ways (a double-sided material, a wall thinner than a voxel): its back's own light.
     imageStore(uRadianceBack, voxel,

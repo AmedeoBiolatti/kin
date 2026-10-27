@@ -106,6 +106,9 @@ public:
     std::vector<Bounds3D> gi_runs;
 };
 constexpr u32 gi_run_triangles = 64;
+// The GI scene's emitters: an emissive voxel holds its colour and, in its alpha (half float: whole numbers to 2048
+// exact), its emitter's number, whose strength the GI's light takes each render from a list.
+constexpr u32 max_gi_emitters = 2048;
 
 // A cluster as the GPU cut reads it (cluster_cull.comp's Cluster, std430): 80 bytes.
 struct GpuCluster {
@@ -267,6 +270,12 @@ private:
         std::vector<std::pair<u64, Bounds3D>> copies;
         std::vector<u32> made;
         std::vector<std::array<i32, 7>> rewritten;
+        // The emitters (an emissive draw's material, its strength left out): each one's number (from 1, in the voxels'
+        // alpha), its strength this render, and the tick it was last given one (two draws alike but for their strength
+        // in one render: the second keeps its strength in its voxels instead).
+        std::unordered_map<u64, u32> emitter_of;
+        std::vector<f32> emitter_strength;
+        std::vector<u32> emitter_tick;
         std::array<std::vector<Bounds3D>, max_gi_levels> waiting_changes; // what changed, each level's, not yet made
         std::vector<Bounds3D> last_changes; // what changed in the last render something did, and its tick
         u32 last_change_tick = 0;
@@ -534,6 +543,9 @@ private:
     // A build's copies (each draw's in a run: placing, normals, colour, first joint) and their joint matrices, a small
     // buffer bound where a draw has no skin, the lights, the blocks to make (a list, and a bit each); grow.
     std::shared_ptr<GpuBuffer> _gi_copies, _gi_joints, _gi_empty, _gi_lights, _gi_blocks, _gi_dirty;
+    // The emitters' strengths (GpuView3D::Gi::emitter_strength) of the last GI scene made: the GI's light and its view
+    // read them.
+    std::shared_ptr<GpuBuffer> _gi_emitters;
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to

@@ -841,8 +841,8 @@ the plan's G5b results.
   writes its colour, normal and emission, is the touching triangle drawn first, an emissive one before any other (a
   lamp's panel a millimetre under a ceiling keeps its light). A jump flood (Rong and Tan) gives the distances. Made
   again only where something changed, by blocks of 8 x 8 x 8 voxels: those a copy that came, went, moved or changed (a
-  pose, a mesh, a material's colour, textures or emission, a tint) covers or covered, a voxel more each way, and the
-  slabs a window gains when it moves (all of a window that jumps past where it was; all of every level when the
+  pose, a mesh, a material's colour, textures, or whether it emits, a tint) covers or covered, a voxel more each way,
+  and the slabs a window gains when it moves (all of a window that jumps past where it was; all of every level when the
   settings change). A block made again is emptied, voxelized from the copies that reach into it, and its distances
   flooded again with a margin; the rest keep theirs. A voxel holds the same whether it was made with the rest or
   alone, and wherever its window stood: the same scene gives the same voxels to the byte however it got there. What
@@ -850,6 +850,13 @@ the plan's G5b results.
   keeps moving: an animated character, a falling prop) every fourth render; in level k every 4 x 2^k renders, the
   levels in different renders (the light it bounces is low and slow, the probes' kept over many renders).
   `debug_stats()`: `gi_built` (anything made this render), `gi_blocks`.
+- **Emitters:** how strongly a material emits is not part of its voxels. An emissive draw's voxels hold its emission at
+  a strength of one and the number of its emitter (the draw's material, its strength left out: up to
+  `max_gi_emitters`, 2048, numbered afresh with each whole build), and the GI's light multiplies by the emitter's
+  strength of the render. A strength that changes from render to render (a lamp dimmed, a game that scales its
+  emissives by its exposure) makes nothing again; the light follows within the eight renders the lit scene's blocks
+  take in turn. A draw that differs from one already numbered only by its strength (in the same render), or that finds
+  no number left, keeps its strength in its voxels, and a change of it is a change of what they are made of.
 - **The lit scene:** each surface voxel's light: its colour times the sun's and the fill light's, each point and spot
   light's within reach (kin_lit's fall-off and cones) through a ray walked toward the light through the voxels (a
   surface in the way: none), and the probes' light (the bounce of the render before), plus its emission. A double-sided

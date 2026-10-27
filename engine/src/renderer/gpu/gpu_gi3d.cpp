@@ -389,7 +389,7 @@ void GpuRenderer3D::make_gi() {
         _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 2, 6, 0, 2);
         _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 3, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
-        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 7, 2, 2, 0);
+        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 7, 3, 2, 0);
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
@@ -399,7 +399,7 @@ void GpuRenderer3D::make_gi() {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
         }
         _gi_view_shader = GpuShader::from_embedded(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "gi_view.frag.spv",
-                                                   /*uniform_buffers=*/1, /*samplers=*/9);
+                                                   /*uniform_buffers=*/1, /*samplers=*/9, /*storage_buffers=*/1);
         SDL_GPUSamplerCreateInfo sampler{};
         sampler.min_filter = SDL_GPU_FILTER_NEAREST;
         sampler.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -597,6 +597,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         const GpuMesh3D* mesh;
         u32 triangles, index_first, base_vertex;
         bool skinned;
+        u32 emitter; // its emitter's number, 0: none (its emission's strength is in its voxels)
     };
     struct Copy {
         u32 job;
@@ -607,6 +608,34 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     };
     std::vector<Job> jobs;
     std::vector<Copy> copies;
+    // The emitters: numbered afresh with a whole build (every voxel is made again), else kept.
+    if (whole) {
+        g.emitter_of.clear();
+        g.emitter_strength.clear();
+        g.emitter_tick.clear();
+    }
+    // A draw's emitter (its material's, `key`), given `strength` this render; 0 when another draw already gave it
+    // another strength this render, or there is no number left.
+    const auto emitter_for = [&](u64 key, f32 strength) -> u32 {
+        const auto [it, fresh] = g.emitter_of.try_emplace(key, 0u);
+        if (fresh) {
+            if (g.emitter_strength.size() >= max_gi_emitters) {
+                g.emitter_of.erase(it);
+                return 0u;
+            }
+            g.emitter_strength.push_back(strength);
+            g.emitter_tick.push_back(g.ticks);
+            it->second = static_cast<u32>(g.emitter_strength.size());
+            return it->second;
+        }
+        const u32 slot = it->second - 1;
+        if (g.emitter_tick[slot] == g.ticks && g.emitter_strength[slot] != strength) {
+            return 0u;
+        }
+        g.emitter_strength[slot] = strength;
+        g.emitter_tick[slot] = g.ticks;
+        return it->second;
+    };
     const std::span<const Mat4f> joints = scene.joint_matrices();
     const std::span<const u32> skin_offsets = scene.skin_offsets();
     bool any_skinned = false;
@@ -627,13 +656,21 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         material.add(m.color);
         material.add(m.blend);
         material.add(m.alpha_cutoff);
-        material.add(m.emissive);
+        material.add(m.emissive > 0.0f); // emissive or not (an emissive item owns its voxels first), not how strongly
         material.add(m.double_sided);
         for (const Texture* texture : {&m.texture, &m.emissive_texture}) {
             material.add(texture->backend().get());
         }
         material.add(m.wrap_u);
         material.add(m.wrap_v);
+        // An emissive draw's voxels hold its emission at a strength of one, and its emitter's number: the GI's light
+        // takes the strength from the emitters' list each render, so a strength that changes (a lamp dimmed, a game's
+        // exposure applied to its emissives) makes nothing again. Without a number to give, its strength stays in its
+        // voxels, and a change of it is a change of what they are made of.
+        const u32 emitter = m.emissive > 0.0f ? emitter_for(material.value, m.emissive) : 0u;
+        if (m.emissive > 0.0f && emitter == 0) {
+            material.add(m.emissive);
+        }
         const u32 job = static_cast<u32>(jobs.size());
         const Bounds3D rest = draw.mesh.bounds();
         bool used = false;
@@ -681,7 +718,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             any_skinned = any_skinned || skinned;
             jobs.push_back({&draw, mesh, mesh->levels[0].index_count / 3,
                             static_cast<u32>(mesh->index_offset / sizeof(u32)) + mesh->levels[0].first_index,
-                            static_cast<u32>(mesh->vertex_offset / sizeof(GpuMeshVertex)), skinned});
+                            static_cast<u32>(mesh->vertex_offset / sizeof(GpuMeshVertex)), skinned, emitter});
         }
     }
     // A copy as the voxelizer reads it (made only for those voxelized).
@@ -851,6 +888,15 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     g.cell = cell;
     g.key = settings.value;
     g.copies = std::move(now);
+    // The emitters' strengths this render, for the GI's light and its view.
+    {
+        const u32 bytes = static_cast<u32>(std::max<std::size_t>(g.emitter_strength.size(), 1) * sizeof(f32));
+        ensure_buffer(_gi_emitters, bytes, 256 * sizeof(f32),
+                      SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+        if (!g.emitter_strength.empty()) {
+            _device->upload_storage_buffer(_gi_emitters->handle(), 0, bytes, g.emitter_strength.data(), /*cycle=*/true);
+        }
+    }
     if (made.empty()) {
         g.valid = true;
         return true; // nothing it is made of changed, and the windows stayed
@@ -1038,6 +1084,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 u.flags[2] = decode ? 1u : 0u;
                 u.flags[3] = m.emissive_texture.backend() ? 1u : 0u;
                 u.material[0] = std::max(m.emissive, 0.0f);
+                u.material[3] = static_cast<f32>(job.emitter);
                 u.material[1] = m.alpha_cutoff;
                 u.material[2] = m.double_sided ? 1.0f : 0.0f;
                 u.first[0] = lj.copy_first;
@@ -1538,10 +1585,11 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             probes[0],
             probes[1],
             probes[2]};
-        const std::array<SDL_GPUBuffer*, 2> buffers{_gi_lights->handle(), g.light_list->handle()};
+        const std::array<SDL_GPUBuffer*, 3> buffers{_gi_lights->handle(), g.light_list->handle(),
+                                                    _gi_emitters ? _gi_emitters->handle() : _gi_empty->handle()};
         SDL_BindGPUComputePipeline(pass, _gi_light);
         SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
-        SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), 2);
+        SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), static_cast<u32>(buffers.size()));
         SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
         const std::array<u32, 2> groups = gi_groups(static_cast<u64>(lit_blocks.size()) * 512);
         SDL_DispatchGPUCompute(pass, groups[0], groups[1], 1);
@@ -1680,7 +1728,7 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
 void GpuRenderer3D::draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
                                  const Scene3D& scene, const Mat4f& view_projection, SDL_GPUTextureFormat format,
                                  u32 samples, SDL_GPUTextureFormat velocity_format, bool encode) {
-    if (!view._gi.valid || !_gi_view_shader || scene.debug.gi_view == GiView3D::Off) {
+    if (!view._gi.valid || !_gi_view_shader || !_gi_emitters || scene.debug.gi_view == GiView3D::Off) {
         return;
     }
     const SDL_GPUSampleCount count = samples >= 8   ? SDL_GPU_SAMPLECOUNT_8
@@ -1733,6 +1781,8 @@ void GpuRenderer3D::draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPa
                                      _gi_sampler}};
     SDL_BindGPUGraphicsPipeline(pass, p);
     SDL_BindGPUFragmentSamplers(pass, 0, textures.data(), static_cast<u32>(textures.size()));
+    SDL_GPUBuffer* emitters = _gi_emitters->handle();
+    SDL_BindGPUFragmentStorageBuffers(pass, 0, &emitters, 1);
     SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
     SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
 }
@@ -1781,9 +1831,14 @@ bool GpuRenderer3D::read_gi_scene(IViewBackend3D& base, GiScene3D& out) {
                 out.distance[i] = half_to_float(h);
                 std::memcpy(&out.albedo[i], albedo.data() + from * 4, sizeof(u32));
                 std::memcpy(&out.normal[i], normal.data() + from * 4, sizeof(u32));
+                // An emitter's voxel: its colour times its emitter's strength (the alpha its number).
+                std::memcpy(&h, emission.data() + from * 8 + 6, sizeof(h));
+                const u32 emitter = static_cast<u32>(std::lround(half_to_float(h)));
+                const f32 strength =
+                    emitter > 0 && emitter <= gi.emitter_strength.size() ? gi.emitter_strength[emitter - 1] : 1.0f;
                 for (std::size_t c = 0; c < 3; ++c) {
                     std::memcpy(&h, emission.data() + from * 8 + c * 2, sizeof(h));
-                    out.emission[i * 3 + c] = half_to_float(h);
+                    out.emission[i * 3 + c] = half_to_float(h) * strength;
                 }
             }
         }

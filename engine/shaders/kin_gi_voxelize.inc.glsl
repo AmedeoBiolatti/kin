@@ -65,7 +65,8 @@ layout(std140, set = 2, binding = 0) uniform Params {
     uvec4 size;    // xyz: voxels a window; w: the draw's first item
     uvec4 mesh;    // x: its first index in Indices, y: its triangles, z: its base vertex, w: its copies
     uvec4 flags;   // x: skinned, y: a cut-out, z: the textures hold sRGB bytes (decode them), w: an emissive map
-    vec4 material; // x: emissive strength, y: alpha cutoff, z: 1 double-sided
+    vec4 material; // x: emissive strength, y: alpha cutoff, z: 1 double-sided, w: its emitter's number (0: none: the
+                   // strength is in the voxel)
     uvec4 first;   // x: the draw's first copy in Copies; y: the level's first word in Work; z: the draw's first run's,
                    // w: its runs
     ivec4 window;  // xyz: the window's first voxel (in the level's voxels); w: the level's offset along z
@@ -277,7 +278,8 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
                 own = decode(own);
             }
         }
-        emission = own * p.material.x;
+        // With an emitter, the colour alone: the GI's light takes the strength from the emitter's (gi_light.comp).
+        emission = p.material.w > 0.5 ? own : own * p.material.x;
     }
     // The base colour, metals' too: a metal reflects its colour's share of the light, here as if diffuse (the GI's
     // light is blurred), which keeps a furnace's metal as bright as its sky.
@@ -285,7 +287,7 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
     const uint ways = sides[at];
     const bool both_ways = ((ways & 0x15u) & ((ways >> 1u) & 0x15u)) != 0u;
     imageStore(uNormal, stored, vec4(n * 0.5 + 0.5, p.material.z > 0.5 || both_ways ? 1.0 : 128.0 / 255.0));
-    imageStore(uEmission, stored, vec4(min(emission, vec3(65000.0)), 0.0));
+    imageStore(uEmission, stored, vec4(min(emission, vec3(65000.0)), p.material.w));
 #else
     if (p.flags.y != 0u) {
         vec3 b;

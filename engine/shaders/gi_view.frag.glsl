@@ -13,6 +13,9 @@ layout(set = 2, binding = 5) uniform sampler3D uGiIrradiance;
 layout(set = 2, binding = 6) uniform sampler3D uGiMoments;
 layout(set = 2, binding = 7) uniform sampler3D uGiProbes;
 layout(set = 2, binding = 8) uniform sampler3D uRadianceBack;
+layout(std430, set = 2, binding = 9) readonly buffer Emitters {
+    float strengths[]; // each emitter's emissive strength (gi_light.comp's)
+};
 
 #define KIN_GI_SCENE
 #define KIN_GI_PROBES
@@ -61,7 +64,8 @@ void main() {
         } else if (mode == 2) {
             c = n * 0.5 + 0.5;
         } else if (mode == 3) {
-            c = texelFetch(uEmission, voxel, 0).rgb;
+            const vec4 glow = texelFetch(uEmission, voxel, 0);
+            c = glow.a > 0.5 ? glow.rgb * strengths[uint(glow.a + 0.5) - 1u] : glow.rgb;
         } else if (mode == 5) {
             c = (dot(n, way) <= 0.0 ? texelFetch(uRadiance, voxel, 0) : texelFetch(uRadianceBack, voxel, 0)).rgb;
         } else if (mode == 6 && u.target.w > 0.5) {
