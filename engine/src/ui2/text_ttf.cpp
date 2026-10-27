@@ -546,8 +546,8 @@ TextKind classify(std::string_view text) {
     for (std::size_t k = 0; k < text.size();) {
         const auto byte = static_cast<unsigned char>(text[k]);
         if (byte < 0x80) {
-            if (byte < first_glyph && byte != '\n' && byte != '\r' && byte != '\t') {
-                kind = TextKind::Simple; // a control character: drawn as nothing
+            if (!printable(byte) && byte != '\n' && byte != '\r' && byte != '\t') {
+                kind = TextKind::Simple; // a control character (DEL too): drawn as nothing
             }
             ++k;
             continue;
@@ -1692,7 +1692,14 @@ private:
                                               .tint = color});
             });
         };
-        std::vector<std::pair<const CachedTextTexture*, Rectf>> shaped;
+        // The shaped runs' textures, kept (not the cache's entries: making the
+        // next run's may move or drop them).
+        struct ShapedRun {
+            Texture texture;
+            Vec2i size{};
+            Rectf dest{};
+        };
+        std::vector<ShapedRun> shaped;
         if (kind == TextKind::Shaped) {
             for (const Segment& segment : layout(*face, text).segments) {
                 const std::string_view part = text.substr(segment.begin, segment.end - segment.begin);
@@ -1701,8 +1708,10 @@ private:
                 if (!segment.shaped) {
                     add_quads(part, origin);
                 } else if (const CachedTextTexture* cached = shaped_texture(renderer, *face, part, segment.rtl, scale, true)) {
-                    shaped.emplace_back(cached, Rectf{origin.x, origin.y, static_cast<f32>(cached->size.x) * face_s,
-                                                      static_cast<f32>(cached->size.y) * face_s});
+                    shaped.push_back({.texture = cached->texture,
+                                      .size = cached->size,
+                                      .dest = {origin.x, origin.y, static_cast<f32>(cached->size.x) * face_s,
+                                               static_cast<f32>(cached->size.y) * face_s}});
                 }
             }
         } else {
@@ -1720,15 +1729,16 @@ private:
             }
         }
         // Shaped runs are plain textures: their outline is stamped round them.
-        for (const auto& [cached, dest] : shaped) {
-            const Rectf source{0, 0, static_cast<f32>(cached->size.x), static_cast<f32>(cached->size.y)};
+        for (const ShapedRun& run : shaped) {
+            const Rectf source{0, 0, static_cast<f32>(run.size.x), static_cast<f32>(run.size.y)};
+            const Rectf& dest = run.dest;
             if (outline > 0.0f && outline_color.a > 0) {
                 for (const Vec2f off : {Vec2f{-outline, 0}, Vec2f{outline, 0}, Vec2f{0, -outline}, Vec2f{0, outline}}) {
-                    renderer.draw_texture(cached->texture, source, {dest.x + off.x, dest.y + off.y, dest.w, dest.h},
+                    renderer.draw_texture(run.texture, source, {dest.x + off.x, dest.y + off.y, dest.w, dest.h},
                                           outline_color);
                 }
             }
-            renderer.draw_texture(cached->texture, source, dest, color);
+            renderer.draw_texture(run.texture, source, dest, color);
         }
         return drawn;
     }

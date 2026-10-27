@@ -67,15 +67,14 @@ void State::clear() {
     _has_hit = false;
 }
 
-bool State::register_click(Id id, Vec2f pos) {
-    constexpr u64 double_click_frames = 30;
+bool State::register_click(Id id, Vec2f pos, f64 now) {
     constexpr f32 double_click_distance = 4.0f;
-    const bool repeat = id && _last_click_id == id && _frame - _last_click_frame <= double_click_frames &&
+    const bool repeat = id && _last_click_id == id && now - _last_click_time <= double_click_seconds &&
                         std::abs(pos.x - _last_click_pos.x) <= double_click_distance &&
                         std::abs(pos.y - _last_click_pos.y) <= double_click_distance;
     // A double click starts afresh, so a third click is not a second double.
     _last_click_id = repeat ? Id{} : id;
-    _last_click_frame = _frame;
+    _last_click_time = now;
     _last_click_pos = pos;
     return repeat;
 }

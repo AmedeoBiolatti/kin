@@ -2,6 +2,7 @@
 
 #include <kin/core/utf8.hpp>
 
+#include <cmath>
 #include <functional>
 
 namespace kin::ui2 {
@@ -17,9 +18,8 @@ enum class EditKind : u8 {
     Other,
 };
 
-constexpr u64 double_click_frames = 30;
 constexpr f32 double_click_distance = 4.0f;
-constexpr u64 caret_blink_frames = 32;
+constexpr f64 caret_blink_seconds = 0.53; // shown, then hidden, as long
 
 // Per-frame geometry of an editor.
 struct EditView {
@@ -33,7 +33,7 @@ struct EditView {
 class Editor {
 public:
     Editor(Context& ctx, TextEdit& widget, UiTextEditState& state)
-        : _ctx(ctx), _w(widget), _s(state), _frame(ctx.state().frame()) {}
+        : _ctx(ctx), _w(widget), _s(state), _now(ctx.now()) {}
 
     void run();
 
@@ -76,7 +76,7 @@ private:
     Context& _ctx;
     TextEdit& _w;
     UiTextEditState& _s;
-    u64 _frame = 0;
+    f64 _now = 0.0;
     UiPadding _padding{};
     EditView _view{};
     bool _reveal = false;
@@ -237,7 +237,7 @@ void Editor::move_caret(std::size_t offset, bool select, bool keep_column) {
         _s.preferred_x = -1.0f;
     }
     _s.last_edit = static_cast<u8>(EditKind::None);
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
 }
 
@@ -289,7 +289,7 @@ bool Editor::edit(std::size_t from, std::size_t to, std::string_view insert, Edi
     _s.preferred_x = -1.0f;
     _s.last_edit = static_cast<u8>(kind);
     _s.last_edit_caret = _s.caret;
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
     _w.result.changed = true;
     return true;
@@ -310,7 +310,7 @@ bool Editor::undo() {
     _s.caret = step.caret;
     _s.selection_anchor = step.selection_anchor;
     _s.last_edit = static_cast<u8>(EditKind::None);
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
     _w.result.changed = true;
     return true;
@@ -327,7 +327,7 @@ bool Editor::redo() {
     _s.caret = step.caret;
     _s.selection_anchor = step.selection_anchor;
     _s.last_edit = static_cast<u8>(EditKind::None);
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
     _w.result.changed = true;
     return true;
@@ -337,11 +337,11 @@ void Editor::handle_mouse(const Interaction& it) {
     const Vec2f pointer = _ctx.pointer();
     if (it.pressed && _w.enabled) {
         _s.active = true;
-        const bool repeat = _frame - _s.last_click_frame <= double_click_frames &&
+        const bool repeat = _now - _s.last_click_time <= State::double_click_seconds &&
                             std::abs(pointer.x - _s.last_click_position.x) <= double_click_distance &&
                             std::abs(pointer.y - _s.last_click_position.y) <= double_click_distance;
         _s.click_count = repeat ? std::min(_s.click_count + 1, 3) : 1;
-        _s.last_click_frame = _frame;
+        _s.last_click_time = _now;
         _s.last_click_position = pointer;
         const std::size_t at = offset_at(pointer);
         if (_s.click_count == 2) {
@@ -611,9 +611,11 @@ void Editor::draw(const Interaction& it) {
         hint.color = alpha_scaled(hint.color, 0.45f);
         _ctx.text(_w.placeholder, {x0, vp.y - _s.scroll.y}, hint);
     }
-    const bool blink_on = ((_frame - _s.caret_frame) / caret_blink_frames) % 2 == 0;
+    const f64 since = std::max(0.0, _now - _s.caret_time);
+    const bool blink_on = std::fmod(since, 2.0 * caret_blink_seconds) < caret_blink_seconds;
     if (_s.active && _w.enabled && !_w.read_only) {
-        _ctx.request_redraw(); // the caret blinks
+        // The caret blinks: a frame when it next shows or hides.
+        _ctx.request_redraw(static_cast<f32>(caret_blink_seconds - std::fmod(since, caret_blink_seconds)));
     }
     if (_s.active && _w.enabled && !_w.read_only && blink_on) {
         const std::size_t line = line_of(_s.caret);

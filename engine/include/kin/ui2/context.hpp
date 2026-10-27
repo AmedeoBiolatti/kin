@@ -10,10 +10,14 @@
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <memory>
+#include <new>
 #include <optional>
+#include <type_traits>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -124,8 +128,16 @@ struct SvgOptions {
     bool mask = false;     // only its shape counts, in the tint: a one-colour glyph (gpui's svg())
 };
 
-inline BoxStyle hbox() { return BoxStyle{}.row(); } // children side by side
-inline BoxStyle vbox() { return BoxStyle{}.col(); } // children top to bottom
+inline BoxStyle hbox() { // children side by side
+    BoxStyle style;
+    style.row();
+    return style;
+}
+inline BoxStyle vbox() { // children top to bottom
+    BoxStyle style;
+    style.col();
+    return style;
+}
 
 struct BoxResult : Interaction {
     // The pointer is over the box, including over its children. `hot` is exclusive
@@ -212,10 +224,10 @@ public:
     };
 
     struct TooltipOptions {
-        u64 delay_frames = 30;
+        f32 delay = 0.5f; // seconds the pointer rests before it shows
         // Once a tooltip has shown, another shows at once if hovered within this
-        // many frames, so moving along a row of controls does not wait each time.
-        u64 warm_frames = 20;
+        // many seconds, so moving along a row of controls does not wait each time.
+        f32 warm = 0.35f;
         UiPadding padding{8.0f, 5.0f, 8.0f, 5.0f};
         Vec2f offset{8.0f, 8.0f};
         TextStyle text_style{};
@@ -464,9 +476,16 @@ public:
     void set_cursor(SystemCursor cursor) { _cursor = cursor; }
     SystemCursor cursor() const { return _cursor; }
     // Something drawn this frame is still changing (a state transition, a
-    // blinking caret), so the next frame should be drawn though nothing happens.
-    void request_redraw() { _redraw = true; }
-    bool wants_redraw() const { return _redraw; }
+    // blinking caret), so a frame should be drawn in `seconds` (0: the next)
+    // though nothing happens; the soonest asked this frame is kept.
+    void request_redraw(f32 seconds = 0.0f) { _redraw_in = _redraw_in < 0.0f ? seconds : std::min(_redraw_in, seconds); }
+    bool wants_redraw() const { return _redraw_in >= 0.0f; }
+    f32 redraw_in() const { return _redraw_in; } // < 0: none asked
+    // The time, in seconds, double clicks, tooltips and a caret's blinking are
+    // timed by: the steady clock's, read once a frame at begin(), unless a
+    // clock is set (a test's own, stepped by hand).
+    void set_clock(std::function<f64()> clock) { _clock = std::move(clock); }
+    f64 now() const { return _now; }
 
     // State that belongs to a part of the UI rather than to the app (whether a
     // section is open, a panel's filter text): a T kept for `id`, made with
@@ -562,14 +581,31 @@ public:
 
     // `w` must outlive end_layout() (the write-back `w = snap` at that point is the only
     // remaining lifetime requirement; the run itself works from a copy taken here).
+    // A widget with a comparable `state` (a TextInput's) that the app changes
+    // after declaring it this frame (a field emptied, its text set) keeps the
+    // app's state: the run's results are written back, its state is not.
     template <typename W>
     void widget(W& w, LayoutStyle style = {}) {
         const i32 index = add_node(style, measure(w));
-        _pending.push_back({index, [&w, snap = w](Context& ctx, Rectf solved) mutable {
-                                snap.bounds = solved;
-                                run(ctx, snap);
-                                w = snap; // write results (clicked, interaction, …) back
-                            }});
+        if constexpr (requires { w.state == w.state; }) {
+            _pending.add(index, [&w, snap = w, declared = w.state](Context& ctx, Rectf solved) mutable {
+                                    snap.bounds = solved;
+                                    run(ctx, snap);
+                                    if (w.state == declared) {
+                                        w = std::move(snap); // results (clicked, interaction, …) and state
+                                    } else {
+                                        auto changed = std::move(w.state);
+                                        w = std::move(snap);
+                                        w.state = std::move(changed);
+                                    }
+                                });
+        } else {
+            _pending.add(index, [&w, snap = w](Context& ctx, Rectf solved) mutable {
+                                    snap.bounds = solved;
+                                    run(ctx, snap);
+                                    w = std::move(snap); // write results (clicked, interaction, …) back
+                                });
+        }
     }
 
     void end_layout();
@@ -579,10 +615,10 @@ public:
     template <typename W>
     void add(W w, LayoutStyle style = {}) {
         const i32 index = add_node(style, measure(w));
-        _pending.push_back({index, [w = std::move(w)](Context& ctx, Rectf solved) mutable {
+        _pending.add(index, [w = std::move(w)](Context& ctx, Rectf solved) mutable {
                                 w.bounds = solved;
                                 run(ctx, w);
-                            }});
+                            });
     }
     void label(std::string_view text, LayoutStyle style = {});
     // With `overflow` Ellipsis (or Shrink) a label shrinks (LayoutStyle::shrink): as
@@ -698,12 +734,52 @@ public:
     bool action_triggered(std::string_view action) const;
 
 private:
-    struct Pending {
-        i32 node = -1;
-        std::function<void(Context&, Rectf)> finalize;
+    // What end_layout() runs for the frame's nodes (a widget's run and
+    // write-back, a box's surface): closures kept in blocks reused frame after
+    // frame, not a heap allocation each. clear() destroys them (begin(),
+    // begin_layout()); the blocks stay.
+    class PendingRuns {
+    public:
+        struct Run {
+            i32 node = -1;
+            void* closure = nullptr;
+            void (*call)(void*, Context&, Rectf) = nullptr;
+            void (*destroy)(void*) = nullptr;
+        };
+        PendingRuns() = default;
+        PendingRuns(PendingRuns&& other) noexcept { *this = std::move(other); }
+        PendingRuns& operator=(PendingRuns&& other) noexcept;
+        PendingRuns(const PendingRuns&) = delete;
+        PendingRuns& operator=(const PendingRuns&) = delete;
+        ~PendingRuns() { clear(); }
+
+        template <typename F>
+        void add(i32 node, F&& f) {
+            using Fn = std::decay_t<F>;
+            static_assert(alignof(Fn) <= alignof(std::max_align_t), "a block is only aligned as new[] aligns");
+            void* at = allocate(sizeof(Fn), alignof(Fn));
+            ::new (at) Fn(std::forward<F>(f));
+            _runs.push_back({.node = node,
+                             .closure = at,
+                             .call = [](void* c, Context& ctx, Rectf bounds) { (*static_cast<Fn*>(c))(ctx, bounds); },
+                             .destroy = std::is_trivially_destructible_v<Fn> ? nullptr
+                                                                             : +[](void* c) { static_cast<Fn*>(c)->~Fn(); }});
+        }
+        void clear();
+        std::size_t size() const { return _runs.size(); }
+        const Run& operator[](std::size_t i) const { return _runs[i]; }
+
+    private:
+        void* allocate(std::size_t size, std::size_t align);
+        std::vector<Run> _runs;
+        std::vector<std::unique_ptr<std::byte[]>> _blocks;
+        std::vector<std::size_t> _block_sizes;
+        std::size_t _block = 0; // the block being filled
+        std::size_t _used = 0;  // bytes of it taken
     };
 
-    i32 add_node(LayoutStyle style, Vec2f intrinsic);
+    i32 add_node(const LayoutStyle& style, Vec2f intrinsic);
+    void clear_nodes();
     void begin_container(LayoutStyle style);
 
     // Lazily bake (and cache) a normalized premultiplied soft-shadow coverage mask
@@ -776,8 +852,9 @@ private:
     i32 _text_input_cursor = 0;
 
     std::vector<LayoutNode> _nodes;
+    std::vector<std::vector<i32>> _child_lists; // the last frame's nodes' child lists, emptied, for this frame's
     std::vector<i32> _stack;
-    std::vector<Pending> _pending;
+    PendingRuns _pending;
     LayoutScratch _layout_scratch; // reused across end_layout() calls, avoids per-frame alloc
     Rectf _root{};
 
@@ -795,18 +872,21 @@ private:
         ScrollBoxOptions scroll{};
         bool interactive = false;
         bool window_drag = false;
+        i32 z = 0; // hit depth (compose_z)
     };
     struct ComposeRecord {
         Rectf rect{};
         Rectf visible{}; // rect within its clips: where it can be hit
         Id parent{};     // the enclosing recorded box
         bool scroll = false;
+        i32 z = 0;       // hit depth (compose_z)
         f32 row_height = 0.0f; // lists
         std::string key_context{};
         u64 frame = 0;
     };
     struct ScrollRecord {
         Vec2f offset{};
+        Vec2f laid_out{}; // the offset last frame's content was placed at
         Vec2f content{};  // content size, padding included
         Vec2f viewport{}; // box size
         std::array<Rectf, 2> track{};       // scrollbars as last drawn: [0] vertical, [1] horizontal
@@ -823,7 +903,7 @@ private:
         Id id{};
         Id box{};        // the enclosing box, for key contexts
         i32 tab_index = 0;
-        u32 order = 0;
+        i32 order = 0;          // its layout node (document order), boxes' and fields' alike
         bool box_entry = false; // a focusable box (opts the Context into Tab)
     };
     struct Reveal {
@@ -853,7 +933,6 @@ private:
     std::unordered_map<u64, ComposeRecord> _compose_records;
     std::unordered_map<u64, ScrollRecord> _scroll_records;
     std::unordered_map<u64, f32> _split_ratios;
-    std::vector<Reveal> _reveals;    // applied at the next end_layout()
     std::vector<FocusEntry> _focus_order; // this frame's, as registered
     std::unordered_map<u64, Id> _focus_boxes; // last frame: focusable id -> enclosing box
     std::optional<std::pair<Id, i32>> _focus_move;
@@ -864,9 +943,12 @@ private:
     bool _any_press = false; // a mouse button went down this frame (before widgets took it)
     f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
     i32 _region_z_base = 0;  // added to region()'s z while end_layout() runs a widget in floating boxes
+    i32 _running_node = -1;  // the layout node whose widget end_layout() runs
     WindowChrome _chrome;    // the drags_window() boxes as last laid out, in layout units
     SystemCursor _cursor = SystemCursor::Default;
-    bool _redraw = false;
+    f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none
+    std::function<f64()> _clock;
+    f64 _now = 0.0;
 
     struct StateSlot {
         std::unique_ptr<void, void (*)(void*)> value{nullptr, nullptr};
@@ -896,8 +978,8 @@ private:
     std::vector<Rectf> _modal_stack;
 
     Id _tooltip_candidate{};
-    u64 _tooltip_first_frame = 0;
-    std::optional<u64> _tooltip_shown_frame; // last frame any tooltip was visible
+    f64 _tooltip_first_time = 0.0;
+    std::optional<f64> _tooltip_shown_time; // the last time any tooltip was visible
     bool _tooltip_warm = false;              // the candidate skips the delay
 
     struct DragState {

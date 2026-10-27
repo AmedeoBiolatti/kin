@@ -9,6 +9,7 @@
 #include "mirror_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <iterator>
 #include <array>
 #include <cmath>
@@ -328,7 +329,8 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _dt = dt;
     _state.begin_frame();
     _cursor = SystemCursor::Default;
-    _redraw = false;
+    _redraw_in = -1.0f;
+    _now = _clock ? _clock() : std::chrono::duration<f64>(std::chrono::steady_clock::now().time_since_epoch()).count();
     _pixel_scale = renderer.content_scale();
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
                  input.mouse_frame_pressed(MouseButton::Middle);
@@ -346,7 +348,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
             return kv.second.last_frame + 4 < frame;
         });
     }
-    _nodes.clear();
+    clear_nodes();
     _stack.clear();
     _pending.clear();
     _compose.clear();
@@ -426,7 +428,7 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
         std::abs(current.glow_size - target.glow_size) < 0.01f && std::abs(current.opacity - target.opacity) < 0.01f) {
         current = target;
     } else {
-        _redraw = true; // still on the way
+        request_redraw(); // still on the way
     }
 
     // Everything else (radius, fill_kind, gradient, shadow, skin, ...) snaps to target.
@@ -583,7 +585,8 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
 
     z += _region_z_base;
     const Vec2f p = pointer();
-    if (contains(bounds, p)) {
+    // Not where the clips it draws under hide it (a field scrolled out of its panel).
+    if (contains(bounds, p) && (_clip_stack.empty() || contains(_clip_stack.back(), screen_pointer()))) {
         _state.register_hit(id, z);
     }
 
@@ -766,16 +769,15 @@ Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view va
 
     if (_tooltip_candidate != id) {
         _tooltip_candidate = id;
-        _tooltip_first_frame = _state.frame();
-        _tooltip_warm = _tooltip_shown_frame && _state.frame() <= *_tooltip_shown_frame + options.warm_frames;
-        if (!_tooltip_warm) {
-            return result;
-        }
+        _tooltip_first_time = _now;
+        _tooltip_warm = _tooltip_shown_time && _now <= *_tooltip_shown_time + options.warm;
     }
-    if (!_tooltip_warm && _state.frame() < _tooltip_first_frame + options.delay_frames) {
+    if (!_tooltip_warm && _now < _tooltip_first_time + options.delay) {
+        // A frame when it is due, though the pointer rests.
+        request_redraw(static_cast<f32>(_tooltip_first_time + options.delay - _now));
         return result;
     }
-    _tooltip_shown_frame = _state.frame();
+    _tooltip_shown_time = _now;
 
     const Vec2f text_size = measure_text(options.text_style.font, value, options.text_style.scale);
     const Vec2f size{
@@ -1029,8 +1031,8 @@ void Context::apply_text_input(Window& window) const {
 void Context::apply(App& app, Window& window) const {
     apply_text_input(window);
     window.set_cursor(_cursor);
-    if (_redraw) {
-        app.request_redraw();
+    if (_redraw_in >= 0.0f) {
+        app.request_redraw(_redraw_in);
     }
     // A window drawing its own title bar: what its drags_window() boxes are, in
     // window coordinates, and edges to resize it by.
@@ -1858,7 +1860,8 @@ void Context::surface(Rectf rect, const SurfaceStyle& style) {
             if (!_in_shadow) {
                 _surface_fill_under = style.fill; // best-effort for contrast checks
             }
-            _renderer->draw_shader_surface(fill_rect_value, style.shader, style.shader_params);
+            static const ShaderParams no_params{};
+            _renderer->draw_shader_surface(fill_rect_value, style.shader, style.shader_params ? *style.shader_params : no_params);
         } else if (kind == SurfaceFill::Glass) {
             bool drew_glass = false;
             if (caps.render_targets && ensure_glass_backdrop()) {
@@ -2033,20 +2036,81 @@ void Context::text(std::string_view value, Vec2f pos, const TextStyle& style) {
     }
 }
 
-i32 Context::add_node(LayoutStyle style, Vec2f intrinsic) {
+Context::PendingRuns& Context::PendingRuns::operator=(PendingRuns&& other) noexcept {
+    if (this != &other) {
+        clear();
+        _runs = std::move(other._runs);
+        _blocks = std::move(other._blocks);
+        _block_sizes = std::move(other._block_sizes);
+        _block = std::exchange(other._block, 0);
+        _used = std::exchange(other._used, 0);
+        other._runs.clear();
+        other._blocks.clear();
+        other._block_sizes.clear();
+    }
+    return *this;
+}
+
+void Context::PendingRuns::clear() {
+    for (const Run& run : _runs) {
+        if (run.destroy) {
+            run.destroy(run.closure);
+        }
+    }
+    _runs.clear();
+    _block = 0;
+    _used = 0;
+}
+
+void* Context::PendingRuns::allocate(std::size_t size, std::size_t align) {
+    constexpr std::size_t block_size = 64 * 1024;
+    for (;;) {
+        if (_block < _blocks.size()) {
+            const std::size_t at = (_used + align - 1) / align * align;
+            if (at + size <= _block_sizes[_block]) {
+                _used = at + size;
+                return _blocks[_block].get() + at;
+            }
+            ++_block; // the next block, from its start
+            _used = 0;
+            continue;
+        }
+        // A new block: most closures share one; a big one has its own.
+        const std::size_t bytes = std::max(block_size, size + alignof(std::max_align_t));
+        _blocks.push_back(std::make_unique<std::byte[]>(bytes));
+        _block_sizes.push_back(bytes);
+    }
+}
+
+i32 Context::add_node(const LayoutStyle& style, Vec2f intrinsic) {
     const i32 index = static_cast<i32>(_nodes.size());
     const i32 parent = _stack.empty() ? -1 : _stack.back();
 
-    LayoutNode node;
+    LayoutNode& node = _nodes.emplace_back();
     node.style = style;
     node.intrinsic = intrinsic;
     node.parent = parent;
-    _nodes.push_back(std::move(node));
 
     if (parent >= 0) {
-        _nodes[static_cast<std::size_t>(parent)].children.push_back(index);
+        std::vector<i32>& children = _nodes[static_cast<std::size_t>(parent)].children;
+        if (children.capacity() == 0 && !_child_lists.empty()) {
+            children = std::move(_child_lists.back()); // a list kept from last frame
+            _child_lists.pop_back();
+        }
+        children.push_back(index);
     }
     return index;
+}
+
+// Last frame's nodes gone; their child lists kept (emptied) for this frame's.
+void Context::clear_nodes() {
+    for (LayoutNode& node : _nodes) {
+        if (node.children.capacity() > 0) {
+            node.children.clear();
+            _child_lists.push_back(std::move(node.children));
+        }
+    }
+    _nodes.clear();
 }
 
 void Context::begin_container(LayoutStyle style) {
@@ -2055,7 +2119,7 @@ void Context::begin_container(LayoutStyle style) {
 }
 
 void Context::begin_layout(Rectf root) {
-    _nodes.clear();
+    clear_nodes();
     _stack.clear();
     _pending.clear();
     _compose.clear();
@@ -2239,9 +2303,12 @@ void Context::end_layout() {
             continue;
         }
         const i32 p = node_pending[static_cast<std::size_t>(entry.node)];
-        if (p >= 0 && _pending[static_cast<std::size_t>(p)].finalize) {
+        if (p >= 0) {
+            const PendingRuns::Run& run = _pending[static_cast<std::size_t>(p)];
             _region_z_base = floats_around[static_cast<std::size_t>(entry.node)] * floating_hit_z;
-            _pending[static_cast<std::size_t>(p)].finalize(*this, node.solved);
+            _running_node = entry.node;
+            run.call(run.closure, *this, node.solved);
+            _running_node = -1;
             _region_z_base = 0;
         }
     }

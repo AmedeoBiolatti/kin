@@ -3824,20 +3824,30 @@ void test_tooltip_delay_and_bounds() {
     Input input;
     Renderer2D renderer = make_renderer();
     ui2::Context ui;
+    f64 now = 0.0;
+    ui.set_clock([&] { return now; });
     const ui2::Id tip = ui2::make_id("tip");
     ui2::Context::TooltipOptions options;
-    options.delay_frames = 2;
+    options.delay = 0.5f;
     options.offset = {4, 4};
 
     ui2::Context::TooltipResult result;
-    for (i32 frame = 0; frame < 3; ++frame) {
+    const auto frame = [&] {
         input.begin_frame();
         input.set_mouse_pos({10, 10});
         ui.begin(input, renderer);
         result = ui.tooltip(tip, {0, 0, 30, 30}, "Hello", options);
         ui.end();
-    }
-
+    };
+    // Waiting, it asks for a frame when it is due: few frames come while the
+    // pointer rests in a window that waits for events.
+    frame();
+    assert(!result.visible && ui.wants_redraw() && std::abs(ui.redraw_in() - 0.5f) < 1e-4f);
+    now = 0.3;
+    frame();
+    assert(!result.visible && std::abs(ui.redraw_in() - 0.2f) < 1e-4f);
+    now = 0.5;
+    frame();
     assert(result.visible);
     assert(result.bounds.x >= 14.0f);
     assert(result.bounds.y >= 14.0f);
@@ -3849,12 +3859,15 @@ void test_tooltip_warm_up() {
     Input input;
     Renderer2D renderer = make_renderer();
     ui2::Context ui;
+    f64 now = 0.0;
+    ui.set_clock([&] { return now; });
     const ui2::Id first = ui2::make_id("first");
     const ui2::Id second = ui2::make_id("second");
     ui2::Context::TooltipOptions options;
-    options.delay_frames = 5;
-    options.warm_frames = 3;
+    options.delay = 0.5f;
+    options.warm = 0.3f;
     const auto frame = [&](Vec2f pointer, ui2::Id id, Rectf anchor) {
+        now += 0.1; // a frame each tenth of a second
         input.begin_frame();
         input.set_mouse_pos(pointer);
         ui.begin(input, renderer);
@@ -3875,7 +3888,7 @@ void test_tooltip_warm_up() {
     assert(shown && frames > 5);
     // Moving straight to the next control shows its tooltip at once.
     assert(frame({50, 10}, second, b));
-    // After the pointer rests elsewhere past warm_frames, the delay is back.
+    // After the pointer rests elsewhere past the warm time, the delay is back.
     for (int i = 0; i < 4; ++i) {
         frame({200, 200}, second, b);
     }
@@ -4352,12 +4365,19 @@ void test_compose_lazy_list() {
     // Far down: the content is still 100000 rows tall, and only rows near the view are built.
     ui.set_scroll_offset(scroll, {0.0f, 20.0f * 50000.0f});
     input.begin_frame();
-    build(); // places the list at the new offset
+    build(); // the rows near the new offset at once: none blank for a frame
+    assert(built.size() <= 12);
+    assert(built.front() >= 49995 && built.back() <= 50010);
     input.begin_frame();
     build();
     assert(approx(ui.scroll_offset(scroll).y, 20.0f * 50000.0f));
     assert(built.size() <= 12);
     assert(built.front() >= 49995 && built.back() <= 50010);
+    // A row asked for: there in the same frame too.
+    ui.scroll_to_row(ui2::make_id("rows"), 200);
+    input.begin_frame();
+    build();
+    assert(std::ranges::find(built, 200) != built.end());
 }
 
 void test_compose_split() {
@@ -4414,8 +4434,11 @@ void test_compose_clicks_double_and_secondary() {
     Input input;
     Renderer2D renderer = make_renderer();
     ui2::Context ui;
+    f64 now = 0.0;
+    ui.set_clock([&] { return now; });
     ui2::BoxResult box;
     const auto frame = [&](Vec2f pos, MouseButton button, bool held) {
+        now += 0.02;
         input.begin_frame();
         input.set_mouse_pos(pos);
         input.set_mouse_held(button, held);
@@ -4439,6 +4462,16 @@ void test_compose_clicks_double_and_secondary() {
     frame({11, 10}, MouseButton::Left, true);
     frame({11, 10}, MouseButton::Left, false);
     assert(box.clicked && !box.double_clicked); // a third click starts afresh
+    // Timed, not counted in frames: clicks a second apart, with no frame between
+    // them (a window waiting for events draws none), are single clicks.
+    now += 1.0;
+    frame({11, 10}, MouseButton::Left, true);
+    frame({11, 10}, MouseButton::Left, false);
+    assert(box.clicked && !box.double_clicked);
+    now += 0.3;
+    frame({11, 10}, MouseButton::Left, true);
+    frame({11, 10}, MouseButton::Left, false);
+    assert(box.clicked && box.double_clicked);
 
     frame({10, 10}, MouseButton::Right, true);
     assert(!box.secondary_clicked);
@@ -4541,6 +4574,183 @@ void test_compose_rounded_and_nested_clips_balance() {
             assert(d.kind != ui2::Context::DiagnosticKind::UnbalancedStack);
         }
     }
+}
+
+// A widget in a clipped box is not hit where the clip hides it (a field
+// scrolled out of its panel), though its rect is there.
+void test_compose_clipped_widgets_are_not_hit() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::TextInput field{.id = ui2::make_id("field")};
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto panel = ui.box(ui2::make_id("panel"), ui2::vbox().size(200, 40).clipped().passive());
+            ui.spacer({.height = ui2::fixed(50)});
+            ui.widget(field, {.width = ui2::grow(), .height = ui2::fixed(24)});
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    input.begin_frame();
+    input.set_mouse_pos({20, 60});
+    build();
+    input.begin_frame();
+    input.set_mouse_pos({20, 60});
+    input.set_mouse_held(MouseButton::Left, true);
+    build();
+    assert(approx(field.bounds.y, 50.0f));
+    assert(!field.interaction.hot && !field.state.active);
+}
+
+// Tab goes through boxes and text fields as they are laid out, not all the
+// boxes first (the fields register later, as end_layout() runs them).
+void test_compose_tab_order_mixes_boxes_and_fields() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::BoxResult first, last;
+    ui2::TextInput field{.id = ui2::make_id("name")};
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto column = ui.box(ui2::make_id("column"), ui2::vbox().fill().passive());
+            first = ui.box(ui2::make_id("first"), ui2::hbox().size(100, 20).tab_stop());
+            ui.widget(field, {.width = ui2::grow(), .height = ui2::fixed(24)});
+            last = ui.box(ui2::make_id("last"), ui2::hbox().size(100, 20).tab_stop());
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    const auto tab = [&]() {
+        input.begin_frame();
+        input.set_key_pressed(Key::Tab);
+        build();
+        input.set_key_released(Key::Tab);
+        input.begin_frame();
+        build();
+    };
+    input.begin_frame();
+    build();
+    tab();
+    assert(first.focused);
+    tab();
+    assert(ui.state().is_focused(field.id) && field.state.active && !last.focused);
+    tab();
+    assert(last.focused && !field.state.active);
+}
+
+// The wheel scrolls the box under what is on top: not the one under a dialog.
+void test_compose_wheel_skips_covered_scroll_boxes() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id behind = ui2::make_id("behind");
+    const ui2::Id inside = ui2::make_id("inside");
+    bool dialog = false;
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto s = ui.scroll(behind, {.layout = {.width = ui2::grow(), .height = ui2::fixed(200)}});
+            ui.spacer({.width = ui2::grow(), .height = ui2::fixed(1000)});
+        }
+        if (dialog) {
+            auto d = ui.box(ui2::make_id("dialog"), ui2::vbox().size(150, 150).floating(ui2::UiFloat::Point, {10, 10}));
+            ui.spacer({.height = ui2::fixed(50)});
+            auto s = ui.scroll(inside, {.layout = {.width = ui2::grow(), .height = ui2::fixed(60)}});
+            ui.spacer({.width = ui2::grow(), .height = ui2::fixed(500)});
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    const auto wheel = [&](Vec2f at) {
+        for (int frame = 0; frame < 2; ++frame) { // a box new this frame is hit from the next
+            input.begin_frame();
+            input.set_mouse_pos(at);
+            build();
+        }
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_wheel_y(-1.0f);
+        build();
+    };
+    wheel({50, 30});
+    assert(ui.scroll_offset(behind).y > 0.0f);
+    ui.set_scroll_offset(behind, {});
+    dialog = true;
+    wheel({50, 30}); // over the dialog, not its scroll box
+    assert(ui.scroll_offset(behind).y == 0.0f && ui.scroll_offset(inside).y == 0.0f);
+    wheel({50, 90}); // over the dialog's scroll box
+    assert(ui.scroll_offset(behind).y == 0.0f && ui.scroll_offset(inside).y > 0.0f);
+}
+
+// Esc or Enter leaves a text field for good: it does not take the keys back
+// the next frame (its focus went with it).
+void test_text_input_leaves_on_escape_and_enter() {
+    Input input;
+    input.bind("accept", Key::Enter);
+    input.bind("quit", Key::Escape);
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::TextInput field{.id = ui2::make_id("field")};
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        ui.widget(field, {.width = ui2::grow(), .height = ui2::fixed(24)});
+        ui.end_layout();
+        ui.end();
+    };
+    for (const Key leave : {Key::Escape, Key::Enter}) {
+        input.begin_frame();
+        input.set_mouse_pos({20, 10});
+        build();
+        input.begin_frame();
+        input.set_mouse_held(MouseButton::Left, true);
+        build();
+        input.begin_frame();
+        input.set_mouse_held(MouseButton::Left, false);
+        build();
+        assert(field.state.active);
+        input.begin_frame();
+        input.set_key_pressed(leave);
+        build();
+        input.set_key_released(leave);
+        assert(!field.state.active && (leave == Key::Escape ? field.result.cancelled : field.result.committed));
+        for (int frame = 0; frame < 3; ++frame) {
+            input.begin_frame();
+            build();
+            assert(!field.state.active && !ui.state().is_focused(field.id));
+        }
+    }
+}
+
+// The app's change to a field's state made after declaring it this frame (the
+// field emptied, picked from a menu) is kept, not undone by the widget's run.
+void test_widget_keeps_state_changed_after_it_was_declared() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui2::TextInput field{.id = ui2::make_id("field")};
+    field.state.text = "before";
+    ui.begin(input, renderer);
+    ui.begin_layout({0, 0, 200, 300});
+    ui.widget(field, {.width = ui2::grow(), .height = ui2::fixed(24)});
+    field.state.text = "after"; // later in the frame
+    ui.end_layout();
+    ui.end();
+    assert(field.state.text == "after" && field.bounds.w > 0.0f); // and its results written back
+    // Unchanged, the run's state is written back as before.
+    input.begin_frame();
+    ui.begin(input, renderer);
+    ui.begin_layout({0, 0, 200, 300});
+    ui.widget(field, {.width = ui2::grow(), .height = ui2::fixed(24)});
+    ui.end_layout();
+    ui.end();
+    assert(field.state.text == "after");
 }
 
 void test_compose_focus_tab_and_keys() {
@@ -7476,6 +7686,11 @@ int main() {
     test_compose_lazy_list();
     test_compose_split();
     test_compose_clicks_double_and_secondary();
+    test_compose_clipped_widgets_are_not_hit();
+    test_compose_tab_order_mixes_boxes_and_fields();
+    test_compose_wheel_skips_covered_scroll_boxes();
+    test_text_input_leaves_on_escape_and_enter();
+    test_widget_keeps_state_changed_after_it_was_declared();
     test_compose_scroll_thumb_and_horizontal();
     test_compose_rounded_and_nested_clips_balance();
     test_compose_focus_tab_and_keys();

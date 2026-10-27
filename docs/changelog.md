@@ -164,6 +164,23 @@ releases may change APIs.
 
 ### Fixed
 
+- ui2 text: a DEL byte (0x7F) in otherwise plain text read and wrote past the
+  ASCII kerning table (a heap overflow); it is a control character now, as the
+  others. Shaped runs drawn with distance-field fonts kept pointers into a
+  cache that drawing the next run could move (a use after free).
+- ui2: a double click, a tooltip's delay and a caret's blinking are timed in
+  seconds, not frames (a window that waits for events draws few frames: two
+  clicks seconds apart counted as a double click). A widget hidden by the clips
+  it draws under (a field scrolled out of its panel) is no longer hit there.
+  Tab goes through boxes and text fields in layout order (fields came after
+  every box). The wheel scrolls the box under what is on top, not one under a
+  dialog or a menu. A virtualized list builds the rows for this frame's scroll
+  offset (a thumb dragged, `set_scroll_offset`, `scroll_to_row`), not last
+  frame's (rows were blank for a frame). Enter or Esc leaves a text field and
+  its focus (it took the keys back the next frame). A widget's `state` the app
+  changes after declaring the widget that frame is kept, not undone by the
+  widget's run.
+
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
   history stable across views, and restore Windows compilation of Summit, the
@@ -380,6 +397,20 @@ releases may change APIs.
   GPU when more than two are pending.
 
 ### Changed
+
+- ui2 timing in seconds: `Context::now()` (the steady clock, or one given to
+  `set_clock`, read at `begin()`), `TooltipOptions::delay`/`warm` (were
+  `delay_frames`/`warm_frames`), `UiTextEditState::last_click_time` and
+  `caret_time`, `State::register_click(id, pos, now)`.
+  `Context::request_redraw(seconds)` keeps the soonest asked and `apply()`
+  passes it on (`redraw_in()`): a focused editor asks for the frame its caret
+  blinks, not every frame.
+- ui2 allocates far less per frame (a studio frame: 6,600 heap allocations to
+  1,500): `SurfaceStyle::shader_params` is a `shared_ptr<const ShaderParams>`
+  (every surface allocated its 16 floats, and a `BoxStyle` holds one a state), the
+  layout nodes' child lists are kept from frame to frame, and what
+  `end_layout()` runs for each node is kept in reused blocks, not a
+  `std::function` each.
 
 - Separate mesh temporal `history_id` from picking `id`; assign generation- and
   pooled-lease-aware identities during ECS collection and distinct model-part IDs.

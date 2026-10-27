@@ -1150,10 +1150,10 @@ struct UiTextEditState {
     std::vector<Snapshot> redo_steps;
     u8 last_edit = 0;                 // kind of the last edit, for grouping undo steps
     std::size_t last_edit_caret = 0;
-    u64 last_click_frame = 0;
+    f64 last_click_time = -1.0e9; // Context::now() of the last press (seconds)
     Vec2f last_click_position{};
     i32 click_count = 0;
-    u64 caret_frame = 0;              // the caret last moved: its blink restarts
+    f64 caret_time = 0.0;             // the caret last moved (Context::now()): its blink restarts
     bool scrollbar = false;
     f32 scrollbar_grab = 0.0f;
     struct Layout {

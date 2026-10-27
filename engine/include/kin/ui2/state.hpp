@@ -52,6 +52,7 @@ struct UiTextInputState {
     std::size_t selection_start() const { return !has_selection() ? caret : (selection_anchor < caret ? selection_anchor : caret); }
     std::size_t selection_end() const { return !has_selection() ? caret : (selection_anchor < caret ? caret : selection_anchor); }
     void clear_selection() { selection_anchor = caret; }
+    bool operator==(const UiTextInputState&) const = default;
 };
 
 struct UiTextInputResult {
@@ -114,9 +115,12 @@ public:
     // The topmost recorded region becomes next frame's hot.
     void register_hit(Id id, i32 z);
 
-    // A click on `id` at `pos`: true when it follows a click on the same id within
-    // half a second's worth of frames and a few pixels (a double click).
-    bool register_click(Id id, Vec2f pos);
+    // A click on `id` at `pos` at `now` (seconds, Context::now()): true when it
+    // follows a click on the same id within double_click_seconds and a few
+    // pixels (a double click). Timed, not counted in frames: a window that
+    // waits for events draws few.
+    static constexpr f64 double_click_seconds = 0.45;
+    bool register_click(Id id, Vec2f pos, f64 now);
 
 private:
     u64 _frame = 0;
@@ -130,7 +134,7 @@ private:
     i32 _hit_z = 0;
     bool _has_hit = false;
     Id _last_click_id{};
-    u64 _last_click_frame = 0;
+    f64 _last_click_time = 0.0;
     Vec2f _last_click_pos{};
 };
 

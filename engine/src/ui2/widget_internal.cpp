@@ -334,14 +334,21 @@ UiTextInputResult edit_text_input(Context& ctx,
                 result.changed = true;
             }
         }
+        // Leaving it drops keyboard focus too, so it does not take the keys again.
         if (was_active && ctx.action_pressed("accept")) {
             state.active = false;
             state.clear_selection();
             result.committed = true;
+            if (it.focused) {
+                ctx.state().clear_focused();
+            }
         } else if (was_active && ctx.action_pressed("quit")) {
             state.active = false;
             state.clear_selection();
             result.cancelled = true;
+            if (it.focused) {
+                ctx.state().clear_focused();
+            }
         }
     }
     // Text longer than the field slides so the caret stays in it; an idle field

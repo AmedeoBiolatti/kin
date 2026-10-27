@@ -135,7 +135,7 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
     }
     static_cast<Interaction&>(out) = region(id, visible, compose_z(style));
     if (out.clicked) {
-        out.double_clicked = _state.register_click(id, pointer());
+        out.double_clicked = _state.register_click(id, pointer(), _now);
     }
     if (out.hot && pointer_released(MouseButton::Right)) {
         out.secondary_clicked = true;
@@ -265,6 +265,7 @@ void Context::begin_compose(Id id, ComposeKind kind, const BoxStyle& style, Layo
         .key_context = std::string(style.key_context),
         .interactive = style.interactive,
         .window_drag = style.window_drag,
+        .z = compose_z(style),
     });
     _compose_ids.push_back(id);
 }
@@ -280,9 +281,9 @@ BoxResult Context::begin_box(Id id, const BoxStyle& style) {
         // (the interaction is known) so the draw keeps one SurfaceStyle, not six.
         Interaction look = result;
         look.hot = result.hovered;
-        _pending.push_back({_stack.back(),
-                            [surface = resolve_animated(id, style.surface, look, style.selected, style.enabled)](
-                                Context& ctx, Rectf bounds) { ctx.surface(bounds, surface); }});
+        _pending.add(_stack.back(),
+                     [surface = resolve_animated(id, style.surface, look, style.selected, style.enabled)](
+                         Context& ctx, Rectf bounds) { ctx.surface(bounds, surface); });
     }
     return result;
 }
@@ -368,9 +369,9 @@ void Context::end_scroll() {
         const auto add_bar = [&](ComposeKind kind, i32 axis, LayoutStyle bar) {
             const i32 index = add_node(bar, {});
             _compose.push_back({.node = index, .id = id, .kind = kind, .scroll = options});
-            _pending.push_back({index, [id, axis, options](Context& ctx, Rectf track) {
-                                    ctx.draw_scrollbar(id, track, axis, options);
-                                }});
+            _pending.add(index, [id, axis, options](Context& ctx, Rectf track) {
+                ctx.draw_scrollbar(id, track, axis, options);
+            });
         };
         if (options.vertical) {
             add_bar(ComposeKind::ScrollbarY, 0, {
@@ -441,10 +442,16 @@ ListRange Context::begin_list(Id id, i32 count, f32 row_height, LayoutStyle styl
     // both as of last frame. A wheel turn this frame is covered by overscan.
     Rectf view = _root;
     f32 wheel_step = 48.0f;
+    Vec2f moved{}; // how far the scroll box's offset moved since its content was placed
     if (!_scroll_ids.empty()) {
         const Id scroll = _scroll_ids.back();
         if (const auto it = _compose_records.find(scroll.value); it != _compose_records.end()) {
             view = it->second.visible;
+        }
+        // A thumb dragged, set_scroll_offset(), a row revealed: this frame's rows
+        // are where the new offset puts them.
+        if (const auto it = _scroll_records.find(scroll.value); it != _scroll_records.end()) {
+            moved = {it->second.offset.x - it->second.laid_out.x, it->second.offset.y - it->second.laid_out.y};
         }
         for (auto node = _compose.rbegin(); node != _compose.rend(); ++node) {
             if (node->kind == ComposeKind::Scroll && node->id == scroll) {
@@ -456,7 +463,7 @@ ListRange Context::begin_list(Id id, i32 count, f32 row_height, LayoutStyle styl
     const i32 overscan = 2 + static_cast<i32>(std::ceil(std::abs(mouse_wheel_y()) * wheel_step / row_height));
     ListRange range{0, std::min(count, static_cast<i32>(std::ceil(view.h / row_height)) + overscan)};
     if (const auto it = _compose_records.find(id.value); it != _compose_records.end()) {
-        const f32 top = it->second.rect.y;
+        const f32 top = it->second.rect.y - moved.y;
         range.first = static_cast<i32>(std::floor((view.y - top) / row_height)) - overscan;
         range.last = static_cast<i32>(std::ceil((view.y + view.h - top) / row_height)) + overscan;
         range.first = std::clamp(range.first, 0, count);
@@ -485,7 +492,7 @@ void Context::end_list() {
 }
 
 void Context::scroll_to_row(Id list, i32 row) {
-    _reveals.push_back({list, row});
+    reveal({list, row});
 }
 
 // --- splits --------------------------------------------------------------------------
@@ -540,13 +547,13 @@ void Context::split_next() {
     (across ? bar.height : bar.width) = grow();
     const i32 index = add_node(bar, {});
     _compose.push_back({.node = index, .id = make_id(split.id, "handle"), .kind = ComposeKind::SplitHandle});
-    _pending.push_back({index, [it = split.handle](Context& ctx, Rectf bounds) {
+    _pending.add(index, [it = split.handle](Context& ctx, Rectf bounds) {
                             SurfaceStyle look = ctx.theme().scrollbar_track_surface;
                             if (it.hot || it.active) {
                                 look = ctx.theme().scrollbar_thumb_surface;
                             }
                             ctx.surface(bounds, look);
-                        }});
+                        });
 
     LayoutStyle second;
     second.width = grow();
@@ -641,13 +648,28 @@ void Context::layout_compose() {
         record.frame = _state.frame();
     }
 
-    for (const Reveal& target : _reveals) {
-        reveal(target);
-    }
-    _reveals.clear();
-
     // The wheel goes to the innermost scroll box under the pointer (where it was
-    // last frame) that can move that way. Shift turns a vertical wheel sideways.
+    // last frame) that can move that way, and that what was on top there last
+    // frame is in: not one under a dialog or a menu. Shift turns a vertical
+    // wheel sideways.
+    const Id hot = _state.hot();
+    const auto hot_record = hot ? _compose_records.find(hot.value) : _compose_records.end();
+    const auto under_top = [&](const ComposeNode& c, const ComposeRecord& record) {
+        if (!hot || hot == c.id || hot == make_id(c.id, "thumb_y") || hot == make_id(c.id, "thumb_x")) {
+            return true;
+        }
+        if (hot_record == _compose_records.end()) {
+            return _state.hot_z() <= record.z; // a field's, a row's: not above the box
+        }
+        auto it = hot_record;
+        for (std::size_t guard = 0; it != _compose_records.end() && guard < 256; ++guard) {
+            if (it->second.parent == c.id) {
+                return true;
+            }
+            it = it->second.parent ? _compose_records.find(it->second.parent.value) : _compose_records.end();
+        }
+        return false;
+    };
     Vec2f wheel{_input ? mouse_wheel_x() : 0.0f, _input ? mouse_wheel_y() : 0.0f};
     if (wheel.x == 0.0f && wheel.y != 0.0f && modifier_held(KeyModifiers::Shift)) {
         wheel = {-wheel.y, 0.0f};
@@ -665,7 +687,7 @@ void Context::layout_compose() {
             const auto record = _compose_records.find(c.id.value);
             const ScrollRecord& scroll = _scroll_records[c.id.value];
             if (record != _compose_records.end() && contains(record->second.visible, pointer()) &&
-                along(scroll.content, axis) > along(scroll.viewport, axis) + 0.5f) {
+                along(scroll.content, axis) > along(scroll.viewport, axis) + 0.5f && under_top(c, record->second)) {
                 target = &c; // pre-order: later is deeper
             }
         }
@@ -685,6 +707,7 @@ void Context::layout_compose() {
         ScrollRecord& record = _scroll_records[c.id.value];
         record.offset.x = std::clamp(record.offset.x, 0.0f, std::max(0.0f, record.content.x - record.viewport.x));
         record.offset.y = std::clamp(record.offset.y, 0.0f, std::max(0.0f, record.content.y - record.viewport.y));
+        record.laid_out = record.offset;
         if (record.offset.x == 0.0f && record.offset.y == 0.0f) {
             continue;
         }
@@ -740,6 +763,7 @@ void Context::record_compose(const std::vector<i32>& clip_of, const std::vector<
         }
         record.parent = parent;
         record.scroll = c.kind == ComposeKind::Scroll;
+        record.z = c.z;
         record.row_height = c.row_height;
         record.key_context = c.key_context;
         record.frame = frame;
@@ -764,7 +788,9 @@ void Context::add_focusable(Id id, i32 tab_index, bool box_entry) {
         .id = id,
         .box = !_compose_ids.empty() ? _compose_ids.back() : Id{},
         .tab_index = tab_index,
-        .order = static_cast<u32>(_focus_order.size()),
+        // A widget registers as end_layout() runs it, after every box: its node
+        // places it among them. A box registers before its node is added.
+        .order = _running_node >= 0 ? _running_node : static_cast<i32>(_nodes.size()),
         .box_entry = box_entry,
     });
 }
@@ -777,7 +803,7 @@ void Context::request_focus_move(Id from, i32 direction) {
 // into view next frame.
 void Context::finish_focus() {
     std::stable_sort(_focus_order.begin(), _focus_order.end(), [](const FocusEntry& a, const FocusEntry& b) {
-        return a.tab_index < b.tab_index;
+        return a.tab_index != b.tab_index ? a.tab_index < b.tab_index : a.order < b.order;
     });
     const bool opted_in = std::ranges::any_of(_focus_order, [](const FocusEntry& e) { return e.box_entry; });
     const auto position = [&](Id id) {
@@ -797,7 +823,7 @@ void Context::finish_focus() {
         const Id to = _focus_order[static_cast<std::size_t>(next)].id;
         if (to != from) { // alone in the order, Tab just leaves it
             _state.set_focused(to);
-            _reveals.push_back({to, -1});
+            reveal({to, -1});
             _focus_moved = true;
         }
     }
