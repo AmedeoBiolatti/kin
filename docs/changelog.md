@@ -189,6 +189,9 @@ releases may change APIs.
 - ui2: a `TextInput`, `NumberInput` or `TextEdit` being typed in keeps its
   focused frame under the pointer (it showed the hover colour instead); other
   controls show the focused frame for the keys' focus only.
+- `rasterize_svg` refuses text without an `<svg>` element before SDL_image
+  parses it, as SDL_image does for files: SDL_image does not free a parse that
+  comes out empty (16 bytes lost per call).
 
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow

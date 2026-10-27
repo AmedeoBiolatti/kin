@@ -61,6 +61,13 @@ Image rasterize_svg(std::string_view svg, Vec2i size, std::string_view name) {
     if (size.x <= 0 || size.y <= 0) {
         return {};
     }
+    // Text without an <svg> element is refused here, as IMG_isSVG does for
+    // files: SDL_image's parse of one comes out empty, and it does not free it.
+    if (svg.find("<svg") == std::string_view::npos) {
+        KIN_LOG_ERROR_F("asset", "svg rasterize failed",
+                        (LogFields{{.name = "name", .value = std::string{name}}, {.name = "error", .value = "no <svg> element"}}));
+        return {};
+    }
     SDL_IOStream* stream = SDL_IOFromConstMem(svg.data(), svg.size());
     SDL_Surface* loaded = stream ? IMG_LoadSizedSVG_IO(stream, size.x, size.y) : nullptr;
     if (stream) {
