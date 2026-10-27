@@ -962,6 +962,73 @@ void test_gpu_light_grid_matches_loops() {
     });
 }
 
+// The main pass started from the pre-pass's depth (RenderDebugOptions3D::prepass_depth) gives the picture it gives
+// clearing its own, to the bit: boxes hiding one another, a cut-out half clear in front of them, a posed skinned box
+// and a blended pane, with ambient occlusion (the pre-pass) and with temporal anti-aliasing too (its velocity pre-pass,
+// five renders of history). Not with an overlay (whose depths the main pass keeps in a range of their own), nor with
+// several samples a pixel.
+void test_gpu_main_depth_from_prepass() {
+    with_gpu("test_gpu_main_depth_from_prepass", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
+        MeshData3D skinned_data = kin::meshes::box({0.6f, 0.6f, 0.6f});
+        skinned_data.skin.assign(skinned_data.vertices.size(),
+                                 kin::MeshSkinVertex3D{{0, 0, 0, 0}, {1.0f, 0.0f, 0.0f, 0.0f}});
+        const kin::Mesh3D skinned = r3d.create_mesh(skinned_data).value_or({});
+        const kin::u8 halves[8] = {255, 255, 255, 0, 255, 255, 255, 255};
+        const kin::Texture halves_texture = renderer.create_texture_from_rgba(halves, {2, 1});
+        const auto scene_of = [&](bool taa, bool from_prepass, bool overlay) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.5f, 6.0f}, {0.0f, 0.8f, 0.0f}, 55.0f);
+            scene.lights.sun.direction = {-0.4f, 1.0f, 0.3f};
+            scene.ambient_occlusion = {.enabled = true, .radius = 1.0f};
+            scene.taa = {.enabled = taa};
+            scene.debug.prepass_depth = from_prepass;
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 8.0f}),
+                             {.color = Color::rgb(160, 150, 140)});
+            for (int i = 0; i < 5; ++i) {
+                (void)scene.draw(box, Mat4f::translation({-1.2f + 0.6f * float(i), 0.5f, 1.0f - 1.2f * float(i)}),
+                                 {.color = Color::rgb(60 + 35 * i, 200 - 30 * i, 90)});
+            }
+            (void)scene.draw(plane, Mat4f::translation({0.0f, 1.0f, 2.2f}) * Mat4f::rotation_x(90.0f),
+                             {.double_sided = true, .blend = kin::Blend3D::Mask, .texture = halves_texture});
+            const std::array<Mat4f, 1> pose{Mat4f::translation({0.0f, 0.4f, 0.0f})};
+            (void)scene.draw_skinned(skinned, pose, Mat4f::translation({1.6f, 0.3f, 1.5f}));
+            (void)scene.draw(
+                plane, Mat4f::translation({-1.5f, 1.2f, 2.5f}) * Mat4f::rotation_x(90.0f),
+                {.color = Color::rgba(80, 120, 255, 120), .double_sided = true, .blend = kin::Blend3D::Alpha});
+            if (overlay) {
+                scene.overlay().camera = scene.camera;
+                (void)scene.overlay().draw(box,
+                                           Mat4f::translation({0.8f, 0.6f, 3.5f}) * Mat4f::scaling({0.3f, 0.3f, 0.3f}),
+                                           {.color = Color::rgb(200, 200, 60)});
+            }
+            return scene;
+        };
+        const auto shoot = [&](bool taa, bool from_prepass, bool overlay, kin::u32 samples = 1) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = samples}).value_or({});
+            Pixels last;
+            for (int i = 0; i < (taa ? 5 : 1); ++i) {
+                last = shoot_view(renderer, r3d, view, scene_of(taa, from_prepass, overlay));
+                renderer.present();
+            }
+            return std::pair{last, r3d.debug_stats().main_depth_from_prepass};
+        };
+        for (const bool taa : {false, true}) {
+            const auto [from, used] = shoot(taa, true, false);
+            const auto [cleared, unused] = shoot(taa, false, false);
+            int differing = 0;
+            for (std::size_t i = 0; i < from.rgba.size(); ++i) {
+                differing += from.rgba[i] != cleared.rgba[i] ? 1 : 0;
+            }
+            std::cerr << "main depth from the pre-pass (taa " << taa << "): " << differing << " channels differ\n";
+            assert(used && !unused && differing == 0);
+        }
+        assert(!shoot(true, true, true).second && !shoot(false, true, false, 4).second);
+    });
+}
+
 // More lights than the fixed blocks take: forty point lights and then twenty-four spots, each lighting its own patch of
 // a wall. The light grid draws them all (the light variant, for point lights alone too); without it, the sixteen
 // strongest of each.
@@ -22230,6 +22297,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_point_lights());
     RUN(test_gpu_point_light_zero_attenuation());
     RUN(test_gpu_light_grid_matches_loops());
+    RUN(test_gpu_main_depth_from_prepass());
     RUN(test_gpu_light_grid_many_lights());
     RUN(test_gpu_shadows());
     RUN(test_gpu_blending());

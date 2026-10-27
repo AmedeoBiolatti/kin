@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- The main pass begins from a copy of the pre-pass's depth (where a pre-pass ran, with one sample a pixel and no
+  overlay) instead of clearing its own, so the fragments the nearest surfaces hide are not shaded. Every mesh vertex
+  shader's position is now `invariant`, which keeps the two passes' depths equal to the bit (the pictures of the two
+  ways are identical; positions may round differently from before by a last bit, which moves a few edge pixels).
+  `debug_stats().main_depth_from_prepass`; `Scene3D::debug.prepass_depth = false` to compare. Bistro at 2404 x 1352
+  (GI, AO, TAA): about 1.4 ms of GPU a frame less at night, 0.75 by day.
 - Add `GlobalIllumination3D::skinned` (`gi_skinned`), on by default: off, the GI scene leaves skinned copies out, as
   Godot's SDFGI holds static geometry only. An animated character is then lit by the GI but neither shades nor lights
   it, and its pose no longer makes the blocks round it again every few renders (Bistro's idle mannequin: 0.4 ms of

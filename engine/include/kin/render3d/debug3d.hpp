@@ -23,6 +23,8 @@ struct RenderDebugOptions3D {
     bool freeze_jitter = false;    // hold the first TAA jitter sample
     bool light_grid = true;        // false: every fragment loops over the 16 strongest point and spot lights, as
                                    // before the light grid (to compare with it)
+    bool prepass_depth = true;     // false: the main pass clears its depth and draws it all again, instead of starting
+                                   // from the pre-pass's (to compare with it)
     GiView3D gi_view = GiView3D::Off;
 };
 

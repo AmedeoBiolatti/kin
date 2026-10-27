@@ -9026,10 +9026,29 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         });
     ctx.taa_reactive = ctx.taa && (!_particle_batches.empty() || ctx.mesh_coverage);
     // Reverse Z: the far plane.
+    const GpuTexture& main_depth = ctx.taa ? view->_taa_depth : view->_depth;
     SDL_GPUDepthStencilTargetInfo depth = depth_target(
-        ctx.taa ? view->_taa_depth.handle() : view->_depth.handle(),
+        main_depth.handle(),
         ctx.taa_reactive || (ctx.taa && _taa_depth_sampled) ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE,
         /*cycle=*/true);
+    // Or the pre-pass's depth, where it has one alike (a sample a pixel, the view's size, the same format; no overlay,
+    // whose depths the main pass puts in a range of their own): the main pass starts from the scene's nearest surfaces,
+    // and the fragments they hide fail the depth test before they are shaded. The pre-pass's copies are drawn again
+    // over them at the same depths (the vertex shaders' positions are invariant); what it left out (blended, custom,
+    // unlit, the overlay) is drawn as before.
+    if (ctx.scene.debug.prepass_depth && ctx.prepass_ran && !ctx.overlaid && main_depth && view->_ao_depth &&
+        _ao_depth_format == _depth_format && (ctx.taa || view->_samples <= 1) &&
+        main_depth.width() == view->_ao_depth.width() && main_depth.height() == view->_ao_depth.height()) {
+        if (SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands)) {
+            const SDL_GPUTextureLocation from{.texture = view->_ao_depth.handle()};
+            const SDL_GPUTextureLocation to{.texture = main_depth.handle()};
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, main_depth.width(), main_depth.height(), 1, /*cycle=*/true);
+            SDL_EndGPUCopyPass(copy);
+            depth.load_op = SDL_GPU_LOADOP_LOAD;
+            depth.cycle = false;
+            stats.main_depth_from_prepass = true;
+        }
+    }
 
     // With the velocity written here: a second colour target, cleared to no motion as the pre-pass clears it.
     std::array<SDL_GPUColorTargetInfo, 2> targets{colour, SDL_GPUColorTargetInfo{}};

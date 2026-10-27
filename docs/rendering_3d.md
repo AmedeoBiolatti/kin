@@ -619,8 +619,9 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   1.0f, .half_resolution = false}` (off by default; off, the picture and the
   cost are those of a renderer without it). The opaque and cut-out meshes the
   camera sees are drawn first into a depth and world-normal pre-pass (one
-  sample, whatever the view's MSAA; the main pass is not changed and does not
-  reuse its depth); GTAO (2 slices, 8 steps a side, a thickness heuristic)
+  sample, whatever the view's MSAA; where the main pass has one sample too, as
+  with temporal anti-aliasing, it starts from a copy of the pre-pass's depth,
+  below); GTAO (2 slices, 8 steps a side, a thickness heuristic)
   runs in compute from it, then a depth-aware blur (R8 result). `mesh.frag`
   multiplies the ambient light and the environment's diffuse by it (Jimenez et
   al.'s multi-bounce fit, from the surface's colour) and the environment's
@@ -724,6 +725,16 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   pictures of the two ways are identical to the byte. The first-person overlay has its own pass
   and its own previous camera, so a gun is neither smeared by the world behind
   it nor trailed.
+- **The main pass from the pre-pass's depth:** wherever a pre-pass ran (any of the features above) and the main pass
+  has one sample a pixel at the view's size (temporal anti-aliasing, or a view without MSAA) and no overlay (whose
+  depths the main pass keeps in a range of their own), the main pass begins from a copy of the pre-pass's depth
+  instead of clearing its own. The fragments the scene's nearest surfaces hide then fail the depth test before they
+  are shaded: the light variants' shading runs about once a pixel instead of once a fragment of the overdraw. The
+  pre-pass's copies are drawn again over themselves at the same depths: every mesh vertex shader's position is
+  `invariant`, so the two passes' depths agree to the bit; what the pre-pass leaves out is drawn as before. The
+  picture is the one clearing the depth gives, to the byte. `debug_stats().main_depth_from_prepass` says when;
+  `scene.debug.prepass_depth = false` clears it as before. Bistro at 2404 x 1352 (GI, AO, TAA): about 1.4 ms of GPU
+  a frame less at night, 0.75 by day.
 - **Matching copies from frame to frame** (the scene is rebuilt, so nothing
   says which copy is which): by `MeshInstance3D::id` when it isn't 0 (give moving
   things stable ids to get the best); else by place in the mesh's copies in

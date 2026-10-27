@@ -72,6 +72,9 @@ struct RenderDebugStats3D : RenderStats3D {
     // geometry pass for it: ao_draws is 0); false with the pre-pass (ambient occlusion, contact shadows, occlusion
     // culling, an opaque mesh with a custom shader) or without temporal anti-aliasing.
     bool taa_main_velocity = false;
+    // The main pass began from the pre-pass's depth (copied: a sample a pixel, no overlay), so that what the pre-pass's
+    // surfaces hide is not shaded.
+    bool main_depth_from_prepass = false;
     u32 taa_reactive_draws = 0; // transient coverage draws; no extra targets, zero without TAA/effects
     // The GI scene (Scene3D::global_illumination): its voxels (all its levels', 0 without one this render) and levels,
     // whether this render made any of it again (else it was kept: nothing it is made of changed and its windows
