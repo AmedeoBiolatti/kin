@@ -3,8 +3,11 @@
 // and a thread a texel inside a tile (the borders copied after). Irradiance (8 x 8): each texel's direction, the
 // cosine-weighted mean of the rays' light (the light a surface facing that way receives, over pi). Moments (16 x 16):
 // the mean of the rays' distances and their squares, weighted by the cosine to the 50th (each texel sees a narrow
-// cone). Each is blended with what the texel
-// held, keeping `hysteresis` of it (none in a probe's first update). The border texels hold their octahedral
+// cone). Each is blended with what the texel held, keeping `hysteresis` of it, or less while the probe is young: the
+// mean of its updates so far (none in its first, half in its second...) until that weighs as much, so that a probe new
+// to its window, or the bounced light building up from render to render, is caught in a few updates rather than at a
+// few hundredths an update (each probe is updated only every so many renders). The irradiance's alpha counts the
+// updates (1 once traced). The border texels hold their octahedral
 // neighbours, so that filtering across a tile's edge reads the other side of the sphere. A probe whose rays meet
 // more than a quarter backs is inside something: it gives nothing until that changes.
 layout(local_size_x = 16, local_size_y = 16) in;
@@ -31,7 +34,7 @@ layout(std140, set = 2, binding = 0) uniform Params {
 shared vec4 found[256];
 shared vec3 ways[256];
 shared uint backs;
-shared uint fresh;
+shared float updates; // the probe's updates so far
 shared vec2 moments_inside[196];   // the moments' tile inside its border, after this update
 shared vec4 irradiance_inside[36]; // the irradiance's
 
@@ -101,7 +104,7 @@ void main() {
     const uint n = p.batch.z;
     if (local == 0u) {
         backs = 0u;
-        fresh = imageLoad(uIrradiance, ivec3(probe.xy * 8 + 1, probe.z)).a > 0.5 ? 0u : 1u;
+        updates = imageLoad(uIrradiance, ivec3(probe.xy * 8 + 1, probe.z)).a;
     }
     barrier();
     for (uint r = local; r < n; r += 256u) {
@@ -114,7 +117,8 @@ void main() {
     }
     memoryBarrierShared();
     barrier();
-    const float keep = fresh != 0u ? 0.0 : p.misc.x;
+    const float keep = min(p.misc.x, updates / (updates + 1.0));
+    const float counted = min(updates + 1.0, 1024.0);
 
     // Each thread one texel inside a tile: the moments' 14 x 14 first, then the irradiance's 6 x 6, each one walk over
     // the rays; then the borders copy them.
@@ -151,7 +155,7 @@ void main() {
         const ivec3 at = ivec3(probe.xy * 8 + t, probe.z);
         vec4 value = imageLoad(uIrradiance, at);
         if (total > 1e-6) {
-            value = vec4(mix(sum / total, value.rgb, keep), 1.0);
+            value = vec4(mix(sum / total, value.rgb, keep), counted);
             imageStore(uIrradiance, at, value);
         }
         irradiance_inside[i] = value;

@@ -865,13 +865,20 @@ the plan's G5b results.
   at most a million rays) each casts `rays` rays (128, a spherical Fibonacci set turned each render) through the
   voxels, from the finest window that holds it on to the coarser ones: a hit reads the lit scene, a miss the sky (the
   environment's specular chain, or the ambient and ground ambient). The probes new to their windows go first, the
-  others in turn. Each keeps its irradiance (octahedral, 6 x 6 texels) and the mean and mean square of its rays'
-  distances (14 x 14), keeping `hysteresis` (0.97) of what it had (none at its first update). One whose rays meet more
+  others in turn, each level its share of the rest: 4 of 7 to the first (round the camera, most of the picture), 2 to
+  the next and 1 to the third. Each keeps its irradiance (octahedral, 6 x 6 texels) and the mean and mean square of its
+  rays' distances (14 x 14), keeping `hysteresis` (0.97) of what it had, or less while the probe is young: the mean of
+  its updates so far (none at its first, half at its second...) until that weighs as much (the irradiance's alpha
+  counts them). With three windows' 49,152 probes and 2,048 updated a render, a probe is updated only every 14 to 56
+  renders, and at 0.97 an update a new probe, or the bounced light building up, took most of a minute to settle (in
+  `canyon`, a street against Cycles, the shade was 21% short after 480 renders; now 9%, 7% when settled; in the
+  Bistro, the shade 5 to 7% short for ten seconds after a walk, now settled within one). One whose rays meet more
   than a quarter backs of one-sided surfaces is inside something and gives nothing.
 - **What a surface reads:** the probes of the finest level whose window holds it: the eight round it, each weighted by
   distance, by whether it is in front of the surface, and by whether it can see it (Chebyshev's inequality on its
   distances that way), the look-up moved out three tenths of a spacing along the normal and a tenth toward the eye;
-  times `intensity`. Over a window's last cell of probes it fades into the next level's; a level none of whose eight
+  times `intensity`. Over a window's last three cells of probes it fades into the next level's (over one, the step
+  between the levels' light showed as a seam where a window ends); a level none of whose eight
   has light to give (asleep, in a wall, not yet traced) leaves the place to the next, and where no level has any the
   surface keeps the sky's light. They are read once a texel at half the view's size, after the depth and normal
   pre-pass (which global illumination brings with it), on the surface each texel stands for (the nearest of its 2 x

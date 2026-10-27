@@ -180,8 +180,8 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
 
 // The light a surface at `p` facing `n` receives from the probes (irradiance over pi), read the ways `ways` (`count` of
 // them, up to 4: `n` for its diffuse light), seen from `to_eye` (unit, toward the camera; zero where there is none):
-// from the finest level whose probes surround it, blended into the next one up over the last probe cell of its
-// window. Each level's: the eight probes round it, each weighted by how near it is (trilinear), by whether it is in
+// from the finest level whose probes surround it, blended into the next one up over the last three probe cells of its
+// window (over one, the step from one level's light to the next showed as a seam where the windows end). Each level's: the eight probes round it, each weighted by how near it is (trilinear), by whether it is in
 // front of the surface (a wrapped cosine) and by whether it can see the surface (Chebyshev's inequality on its
 // distances that way: a wall between them keeps its light out). A probe asleep, in a wall or not yet traced (its
 // data's w under 0.5) gives nothing; a level none of whose eight gives anything leaves it to the next. False where no
@@ -205,9 +205,9 @@ bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int 
             continue;
         }
         const vec3 edge = min(grid, last - grid);
-        const float inside = clamp(min(min(edge.x, edge.y), edge.z), 0.0, 1.0);
+        const float inside = clamp(min(min(edge.x, edge.y), edge.z) / 3.0, 0.0, 1.0);
         if (have) {
-            // The level below faded into this one over its window's last cell.
+            // The level below faded into this one over its window's last cells.
             for (int j = 0; j < 4; ++j) {
                 light[j] = mix(here[j], below[j], share);
             }
@@ -217,7 +217,7 @@ bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int 
             light = here;
             return true;
         }
-        // Over its window's last cell, into the next level up (none: its own all the way).
+        // Over its window's last cells, into the next level up (none: its own all the way).
         have = true;
         below = here;
         share = inside;

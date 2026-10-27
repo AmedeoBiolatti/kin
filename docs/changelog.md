@@ -7,6 +7,17 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Settle 3D global illumination's probes faster: a young probe takes the mean
+  of its updates so far until `GiProbes3D::hysteresis` weighs as much, and the
+  windows round the camera share each render's updates 4 : 2 : 1 from the
+  nearest. With a game's three windows, a probe is updated only every so many
+  renders, and new probes and the bounced light building up took most of a
+  minute to settle (the shade 21% short after 480 renders in the `canyon`
+  reference against Cycles; now 9%). And fade a window's probes into the next
+  level's over three probe cells, not one: the step showed as a seam.
+- Add the `canyon` reference scene (a shaded street between warm walls: the
+  bounce against Cycles) and `kin_reference --gi-windows` (global illumination
+  in a game's windows round the camera instead of one level over the scene).
 - Add the fog's sun through the shadows (`Fog3D::sun_shadows`, off by default;
   `SceneEnvironment3D`'s `fog_sun_shadows`): the sun's in-scattering only
   where the fog's air is in sunlight, walked along each ray through the sun's

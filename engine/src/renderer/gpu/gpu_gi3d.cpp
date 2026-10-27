@@ -1320,7 +1320,7 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             g.probe_counts = counts;
             g.spacing = spacing;
             g.probe_levels = levels;
-            g.next = 0;
+            g.next = {};
             g.updates = 0;
             g.lit = false;
             g.waiting.assign(total, 0);
@@ -1550,7 +1550,10 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
     }
 
     // 3. This render's batch casts its rays: the probes waiting first (new to their windows: the nearest level's
-    // first), then the others in turn (none twice in a batch: they would race for their tiles).
+    // first), then the others in turn, each level its share: 4 of 7 to the first, 2 to the next, 1 to the third (and
+    // likewise with other counts), so that the probes round the camera, which light most of the picture, are updated
+    // more often than the far, coarse ones, whose light changes less across the view (none twice in a batch: they would
+    // race for their tiles).
     const u32 rays = std::clamp(settings.rays, 16u, 256u);
     const u32 most = std::max(1u, max_gi_rays / rays);
     const u32 batch_size = std::min(settings.per_render == 0 ? most : std::min(settings.per_render, most), total);
@@ -1563,11 +1566,26 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
         g.waiting[(entry >> 24) * per_level + (entry & 0xffffffu)] = 2;
     }
     g.pending.erase(g.pending.begin(), g.pending.begin() + static_cast<std::ptrdiff_t>(taken));
-    for (u32 tried = 0; batch.size() < batch_size && tried < total; ++tried) {
-        const u32 i = g.next;
-        g.next = (g.next + 1) % total;
-        if (g.waiting[i] == 0) {
-            batch.push_back((i % per_level) | ((i / per_level) << 24));
+    {
+        const u32 room = static_cast<u32>(batch_size - batch.size());
+        u32 weights = 0;
+        for (u32 k = 0; k < levels; ++k) {
+            weights += 1u << (levels - 1 - k);
+        }
+        u32 given = 0;
+        for (u32 k = 0; k < levels; ++k) {
+            // The last level takes what the others' rounding left.
+            const u32 share = k + 1 == levels ? room - given : room * (1u << (levels - 1 - k)) / weights;
+            given += share;
+            const u32 until = static_cast<u32>(batch.size()) + share;
+            u32& next = g.next[k];
+            for (u32 tried = 0; batch.size() < until && tried < per_level; ++tried) {
+                const u32 i = next;
+                next = (next + 1) % per_level;
+                if (g.waiting[k * per_level + i] == 0) {
+                    batch.push_back(i | (k << 24));
+                }
+            }
         }
     }
     for (const u32 entry : batch) {

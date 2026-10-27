@@ -286,7 +286,7 @@ private:
         std::vector<u32> pending; // probes to trace before the others (a stored index, the level in the top 8 bits)
         std::vector<u8> waiting;  // a probe each (level by level): 1 while it is in `pending`
         bool probes_valid = false;
-        u32 next = 0;
+        std::array<u32, max_gi_levels> next{}; // each level's turn: the probe it updates next
         u64 updates = 0;
         bool lit = false;
     } _gi;

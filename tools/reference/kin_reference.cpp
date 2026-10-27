@@ -14,7 +14,8 @@
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
 //                 [--bake-cache DIR]
-//                 [--gi] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H] [--gi-per-render N]
+//                 [--gi] [--gi-windows] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H]
+//                 [--gi-per-render N]
 //
 // --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR
 // (Renderer3D::set_bake_cache), and reads them back on the next run with the same DIR instead of building them: the
@@ -1935,6 +1936,8 @@ struct Overrides {
     // --gi-spacing voxels casting --gi-rays rays, keeping --gi-hysteresis, --gi-per-render of them updated a render
     // (0: all, up to a million rays).
     bool gi = false;
+    bool gi_windows = false; // --gi-windows: GlobalIllumination3D's default windows round the camera, as a game has
+                             // them (--gi-cell their first level's voxel, 0.15 else), instead of the one level
     double gi_cell = 0.0, gi_hysteresis = -1.0;
     int gi_spacing = 0, gi_rays = 0, gi_per_render = -1;
 };
@@ -2593,6 +2596,9 @@ int main(int argc, char** argv) {
             over.readback = true;
         } else if (a == "--lod-room") {
             over.lod_room = std::atol(next().c_str());
+        } else if (a == "--gi-windows") {
+            over.gi = true;
+            over.gi_windows = true;
         } else if (a == "--gi") {
             over.gi = true;
         } else if (a == "--gi-cell") {
@@ -3112,6 +3118,11 @@ int main(int argc, char** argv) {
                                              .levels = 1,
                                              .side = std::max(side, 32u),
                                              .height = std::max(height, 32u)};
+                if (over.gi_windows) {
+                    scene.global_illumination = {.enabled = true,
+                                                 .area = area,
+                                                 .cell = over.gi_cell > 0.0 ? static_cast<float>(over.gi_cell) : 0.15f};
+                }
                 kin::GiProbes3D& probes = scene.global_illumination.probes;
                 probes.spacing = over.gi_spacing > 0 ? static_cast<kin::u32>(over.gi_spacing) : probes.spacing;
                 probes.rays = over.gi_rays > 0 ? static_cast<kin::u32>(over.gi_rays) : probes.rays;

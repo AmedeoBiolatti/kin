@@ -425,11 +425,13 @@ struct GiProbes3D {
     // about this. More where a level would have more than max_gi_probes.
     u32 spacing = 4;
     u32 rays = 128; // rays a probe casts at each update (16 to 256)
-    // Probes updated each render: those new to their window first, then the others in turn (0: as many as a million
-    // rays allow).
+    // Probes updated each render: those new to their window first, then the others in turn, the levels sharing them
+    // 4 : 2 : 1 from the nearest (0: as many as a million rays allow).
     u32 per_render = 2048;
-    f32 hysteresis = 0.97f; // how much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower
-    f32 intensity = 1.0f;   // their light's strength
+    // How much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower. A young probe keeps
+    // less: the mean of its updates so far, until that weighs as much.
+    f32 hysteresis = 0.97f;
+    f32 intensity = 1.0f; // their light's strength
 };
 
 // Global illumination (docs/rendering_3d.md, "Global illumination"; docs/3d_plan.md, G5): light that reaches a surface
