@@ -833,9 +833,11 @@ the plan's G5b results.
   voxel's nearest point of the surface, read at the mip whose texels are the voxel's size), its normal (the face's, on
   the side its vertices' normals are; a voxel with faces looking both ways, a wall thinner than a voxel, counts as
   double-sided) and its emission (as `mesh.frag` makes it). It takes in every opaque and cut-out copy that reaches
-  into `area` (a copy's box; a skinned copy's from its joints' spheres in its pose), skinned copies in their pose, a
-  cut-out only where its texture's alpha at the voxel's size passes its cutoff; not the overlay, nor blended, additive,
-  wireframe or unlit draws. Beyond the last window there is nothing (rays that leave it see the sky).
+  into `area` (a copy's box; a skinned copy's from its joints' spheres in its pose), skinned copies in their pose (none
+  with `skinned` off: an animated character's pose makes the blocks round it again every few renders; off, it is lit
+  by the GI but neither shades nor lights it, as Godot's SDFGI holds static geometry only), a cut-out only where its
+  texture's alpha at the voxel's size passes its cutoff; not the overlay, nor blended, additive, wireframe or unlit
+  draws. Beyond the last window there is nothing (rays that leave it see the sky).
 - **How it is built:** in compute, before the passes that draw. Every voxel a triangle touches (Schwarz and Seidel's
   conservative surface voxelization), so a wall of no thickness has no gap a ray can pass. A voxel's owner, which
   writes its colour, normal and emission, is the touching triangle drawn first, an emissive one before any other (a
@@ -914,8 +916,8 @@ the plan's G5b results.
   view (16 bytes a pixel at half the view's size), counted in `debug_stats().feature_bytes` and given back after 120
   renders without it, as the other features'.
 - **Authored:** `SceneEnvironment3D`'s `gi_enabled`, `gi_min`, `gi_max`, `gi_cell`, `gi_levels`, `gi_side`,
-  `gi_height`, `gi_probes`, `gi_probe_spacing`, `gi_probe_rays`, `gi_probes_per_render`, `gi_hysteresis` and
-  `gi_intensity`.
+  `gi_height`, `gi_skinned`, `gi_probes`, `gi_probe_spacing`, `gi_probe_rays`, `gi_probes_per_render`,
+  `gi_hysteresis` and `gi_intensity`.
 - **Seeing it:** `scene.debug.gi_view` (`GiView3D::Albedo`, `Normal`, `Emission`, `Steps`, `Radiance`, `Irradiance`)
   shows the GI scene traced from the camera instead of the picture: each pixel walks the voxels its ray passes, in
   jumps the distances allow, to the first one a surface is in; `Radiance` is the light leaving it, `Irradiance` the

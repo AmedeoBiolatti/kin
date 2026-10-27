@@ -3365,6 +3365,41 @@ void test_gpu_gi_emitter_strength() {
     });
 }
 
+// Skinned copies left out of the GI scene (GlobalIllumination3D::skinned off): the posed box is in no voxel, and its
+// pose changing makes nothing again; turned on, it is made where the box stands.
+void test_gpu_gi_without_skinned() {
+    with_gpu("test_gpu_gi_without_skinned", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiLevel level{r3d, renderer};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto built = [&](bool skinned, float lift) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
+            scene.global_illumination = GiLevel::settings();
+            scene.global_illumination.skinned = skinned;
+            level.draw(scene, lift);
+            render_ok(r3d, view, scene);
+            renderer.present();
+            return r3d.debug_stats().gi_built;
+        };
+        const auto box_top = [&] {
+            GiVoxels g;
+            assert(r3d.read_gi_scene(view, g.s).value_or(false));
+            return g.full({2.5f, 2.53f, -2.5f});
+        };
+        assert(built(false, 1.5f) && r3d.debug_stats().gi_copies == 5 && !box_top());
+        assert(!built(false, 1.0f) && !built(false, 1.5f));
+        bool made = false;
+        for (int i = 0; i < 4; ++i) {
+            made = built(true, 1.5f) || made;
+        }
+        assert(made && box_top());
+    });
+}
+
 // The GI scene's windows round the camera (G5c): a corridor 40 long, more than a window holds, in two levels whose
 // windows follow the camera. A step makes again only the slabs the windows gain; a jump past a window makes all of it;
 // staying put makes nothing; and each time the first level's window holds, to the byte, what a view built afresh
@@ -22297,6 +22332,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_scene());
     RUN(test_gpu_gi_scene_builds());
     RUN(test_gpu_gi_emitter_strength());
+    RUN(test_gpu_gi_without_skinned());
     RUN(test_gpu_gi_scene_scrolls());
     RUN(test_gpu_gi_view());
     RUN(test_gpu_gi_furnace());

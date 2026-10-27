@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add `GlobalIllumination3D::skinned` (`gi_skinned`), on by default: off, the GI scene leaves skinned copies out, as
+  Godot's SDFGI holds static geometry only. An animated character is then lit by the GI but neither shades nor lights
+  it, and its pose no longer makes the blocks round it again every few renders (Bistro's idle mannequin: 0.4 ms of
+  GPU a frame on average).
 - 3D global illumination no longer makes its scene again when an emissive material's strength changes: the voxels
   keep the emission at a strength of one and their emitter's number (`max_gi_emitters`, 2048), and the GI's light
   takes each emitter's strength every render. A game that scaled its emissives by its exposure every frame had every

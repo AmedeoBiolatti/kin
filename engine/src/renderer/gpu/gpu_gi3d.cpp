@@ -641,7 +641,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     bool any_skinned = false;
     for (const Scene3D::Draw& draw : scene.draws()) {
         const Material3D& m = draw.material;
-        if (draw.count == 0 || m.unlit || m.wireframe || (m.blend != Blend3D::Opaque && m.blend != Blend3D::Mask)) {
+        if (draw.count == 0 || m.unlit || m.wireframe || (m.blend != Blend3D::Opaque && m.blend != Blend3D::Mask) ||
+            (draw.skinned && !gi.skinned)) {
             continue;
         }
         const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());

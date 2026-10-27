@@ -457,6 +457,10 @@ struct GlobalIllumination3D {
     // side x height x side at most max_gi_voxels.
     u32 side = 128;
     u32 height = 64;
+    // Skinned copies (animated characters) in the GI scene: a pose that keeps changing makes the blocks round it again
+    // every few renders. Off, it holds only what does not bend (as Godot's SDFGI holds static geometry only): the
+    // characters are lit by it, but neither shade nor light it.
+    bool skinned = true;
     GiProbes3D probes{};
 };
 

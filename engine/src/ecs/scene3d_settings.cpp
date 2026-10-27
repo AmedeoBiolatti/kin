@@ -182,6 +182,7 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("gi_levels", global_illumination.levels);
         SETTING("gi_side", global_illumination.side);
         SETTING("gi_height", global_illumination.height);
+        SETTING("gi_skinned", global_illumination.skinned);
         SETTING("gi_probes", global_illumination.probes.enabled);
         SETTING("gi_probe_spacing", global_illumination.probes.spacing);
         SETTING("gi_probe_rays", global_illumination.probes.rays);
