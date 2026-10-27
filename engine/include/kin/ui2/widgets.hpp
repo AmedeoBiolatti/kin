@@ -13,6 +13,9 @@
 #include <kin/ui2/tree.hpp>
 
 #include <functional>
+#include <limits>
+#include <optional>
+#include <concepts>
 #include <string>
 #include <variant>
 #include <vector>
@@ -31,6 +34,9 @@ struct TextStyle {
     Vec2f shadow_offset{0.0f, 0.0f};
     Color outline_color = colors::transparent; // 4-way outline when outline_width > 0
     f32 outline_width = 0.0f;
+    // Fields at their defaults take the theme's (a widget's text); false: used
+    // as it is, defaults too (the default colour, scale 2).
+    bool inherit = true;
 };
 
 // Shared palette for interactive widgets.
@@ -44,6 +50,10 @@ struct WidgetStyle {
     // this value so they line up in a row, and still grow past it for large content.
     // Themed factories set it to the theme's compact control height; raw styles leave 0.
     f32 min_height = 0.0f;
+    // Fields at their defaults take the theme's; false: used as it is, defaults
+    // too (square corners, no border, no fill): copy the theme's
+    // (Context::theme().button) and change what differs.
+    bool inherit = true;
 };
 
 enum class ImageFit {
@@ -363,6 +373,8 @@ struct MenuList {
     f32 wheel_step = 48.0f;
     f32 scrollbar_thickness = 8.0f;
     bool enabled = true;
+    bool keys_without_focus = true; // a game's menu: the keys while nothing else has focus too
+    bool popup_keys = false;        // set by popup_menu(): the topmost open popup's menu takes the keys
     TextStyle text_style{};
     WidgetStyle style{};
     i32 z = 0;
@@ -392,7 +404,9 @@ struct MenuBar {
     Id id{};
     Rectf bounds{};
     std::vector<MenuBarItem> items;
-    i32 selected = 0;
+    i32 selected = -1; // the title the keys are on (-1: none: idle)
+    bool keys_without_focus = false; // the keys only while it has focus (a click or Tab gives it); true: also while nothing has
+    Vec2f pointer{};   // where the pointer was last frame: a title it moves onto switches an open menu
     f32 item_gap = 2.0f;
     TextStyle text_style{};
     WidgetStyle style{};
@@ -425,6 +439,7 @@ struct TabBar {
     f32 gap = 2.0f;
     bool wrap = false;
     bool enabled = true;
+    bool keys_without_focus = false; // the keys only while it has focus (a click or Tab gives it); true: also while nothing has
     TextStyle text_style{};
     WidgetStyle style{};
     i32 z = 0;
@@ -729,6 +744,7 @@ struct NodeGraphEdge {
 
 struct NodeGraph {
     Id id{};
+    bool keys_without_focus = false; // the keys only while it has focus (a click or Tab gives it); true: also while nothing has
     Rectf bounds{};
     std::vector<NodeGraphNode> nodes;
     std::vector<NodeGraphEdge> edges;
@@ -928,6 +944,7 @@ struct DialogueView {
     WidgetStyle style{};
     UiPadding padding{12.0f, 8.0f, 12.0f, 8.0f};
     i32 z = 0;
+    bool keys_without_focus = true; // advanced by Enter while nothing else has focus too
     bool advance_requested = false;
     bool skip_requested = false;
     bool history_requested = false;
@@ -1218,20 +1235,24 @@ struct TextEdit {
     UiTextEditResult result{};
 };
 
+// A number typed in: it shows `value` unless typed in; what was typed is the
+// value (clamped) once it is left (Enter, Tab, a press elsewhere), and Esc
+// shows the value again. Up and Down step it by `step`.
 struct NumberInput {
     Id id{};
     Rectf bounds{};
     UiTextInputState text{};
     f32 value = 0.0f;
-    f32 min = 0.0f;
-    f32 max = 1.0f;
+    f32 min = -std::numeric_limits<f32>::max();
+    f32 max = std::numeric_limits<f32>::max();
     f32 step = 1.0f;
     TextStyle text_style{};
     WidgetStyle style{};
     bool enabled = true;
     i32 z = 0;
     Interaction interaction{};
-    bool changed = false;
+    bool changed = false; // `value` changed this frame (left, or stepped)
+    bool invalid = false; // what is typed is not a number in range
 };
 
 struct ComboBox {
@@ -1301,6 +1322,7 @@ struct IconGrid {
     f32 wheel_step = 48.0f;
     bool wrap = true;
     bool enabled = true;
+    bool keys_without_focus = false; // the keys only while it has focus (a click or Tab gives it); true: also while nothing has
     TextStyle text_style{};
     WidgetStyle style{};
     Color icon_tint = colors::white;
@@ -1334,6 +1356,7 @@ struct ListView {
     f32 wheel_step = 48.0f;
     bool wrap = true;
     bool enabled = true;
+    bool keys_without_focus = false; // the keys only while it has focus (a click or Tab gives it); true: also while nothing has
     TextStyle text_style{};
     WidgetStyle style{};
     i32 z = 0;
@@ -1381,6 +1404,7 @@ struct TreeView {
     f32 disclosure_width = 16.0f;
     bool wrap = true;
     bool enabled = true;
+    bool keys_without_focus = false; // the keys only while it has focus (a click or Tab gives it); true: also while nothing has
     TextStyle text_style{};
     WidgetStyle style{};
     i32 z = 0;
@@ -1605,5 +1629,90 @@ AdvancedTextLayout layout_advanced_text(const AdvancedTextContent& content, Adva
 Vec2f measure_advanced_text(const AdvancedTextContent& content, AdvancedTextLayoutOptions options = {});
 void draw_advanced_text(Context& ctx, const AdvancedTextLayout& layout, Rectf bounds, AdvancedTextLayoutOptions options = {});
 bool step_animated_value(AnimatedValue& widget, f32 dt);
+
+struct Theme;
+
+// A widget as the theme makes it look: its styles (those at their defaults,
+// unless `inherit` is false) merged with the theme's. Its run does this for
+// itself; Context::measured() does it to measure it as it is laid out.
+// (apply_theme, in theme.hpp, is another thing: a theme's sizes, set once.)
+void theme_styles(const Theme& theme, AssetBrowser& widget);
+void theme_styles(const Theme& theme, StatusBar& widget);
+void theme_styles(const Theme& theme, LogConsole& widget);
+void theme_styles(const Theme& theme, IconGrid& widget);
+void theme_styles(const Theme& theme, ListView& widget);
+void theme_styles(const Theme& theme, Table& widget);
+void theme_styles(const Theme& theme, TreeView& widget);
+void theme_styles(const Theme& theme, WrappedText& widget);
+void theme_styles(const Theme& theme, Button& widget);
+void theme_styles(const Theme& theme, Toggle& widget);
+void theme_styles(const Theme& theme, Slider& widget);
+void theme_styles(const Theme& theme, IconButton& widget);
+void theme_styles(const Theme& theme, IconSlot& widget);
+void theme_styles(const Theme& theme, DialogueView& widget);
+void theme_styles(const Theme& theme, ResourceRow& widget);
+void theme_styles(const Theme& theme, LabeledBar& widget);
+void theme_styles(const Theme& theme, RichTextLine& widget);
+void theme_styles(const Theme& theme, TextArea& widget);
+void theme_styles(const Theme& theme, ToastStack& widget);
+void theme_styles(const Theme& theme, FloatingText& widget);
+void theme_styles(const Theme& theme, AnimatedValue& widget);
+void theme_styles(const Theme& theme, DockPanel& widget);
+void theme_styles(const Theme& theme, BreadcrumbBar& widget);
+void theme_styles(const Theme& theme, PropertyInspector& widget);
+void theme_styles(const Theme& theme, NodeGraph& widget);
+void theme_styles(const Theme& theme, PropertyGrid& widget);
+void theme_styles(const Theme& theme, TextInput& widget);
+void theme_styles(const Theme& theme, NumberInput& widget);
+void theme_styles(const Theme& theme, ComboBox& widget);
+void theme_styles(const Theme& theme, ColorPicker& widget);
+void theme_styles(const Theme& theme, MenuList& widget);
+void theme_styles(const Theme& theme, MenuBar& widget);
+void theme_styles(const Theme& theme, TabBar& widget);
+
+// A widget's styles, put back as they were when the scope ends: what a run
+// (or a measure) themes for itself is not left in the caller's widget, so the
+// next frame themes the same style again (and a new theme shows).
+template <typename W>
+class KeepStyles {
+public:
+    explicit KeepStyles(W& widget) : _widget(widget) {
+        if constexpr (requires { requires std::same_as<decltype(widget.style), WidgetStyle>; }) {
+            _style = widget.style;
+        }
+        if constexpr (requires { requires std::same_as<decltype(widget.text_style), TextStyle>; }) {
+            _text_style = widget.text_style;
+        }
+        if constexpr (requires { requires std::same_as<decltype(widget.label_style), TextStyle>; }) {
+            _label_style = widget.label_style;
+        }
+        if constexpr (requires { requires std::same_as<decltype(widget.value_style), TextStyle>; }) {
+            _value_style = widget.value_style;
+        }
+    }
+    ~KeepStyles() {
+        if constexpr (requires { requires std::same_as<decltype(_widget.style), WidgetStyle>; }) {
+            _widget.style = std::move(*_style);
+        }
+        if constexpr (requires { requires std::same_as<decltype(_widget.text_style), TextStyle>; }) {
+            _widget.text_style = std::move(*_text_style);
+        }
+        if constexpr (requires { requires std::same_as<decltype(_widget.label_style), TextStyle>; }) {
+            _widget.label_style = std::move(*_label_style);
+        }
+        if constexpr (requires { requires std::same_as<decltype(_widget.value_style), TextStyle>; }) {
+            _widget.value_style = std::move(*_value_style);
+        }
+    }
+    KeepStyles(const KeepStyles&) = delete;
+    KeepStyles& operator=(const KeepStyles&) = delete;
+
+private:
+    W& _widget;
+    std::optional<WidgetStyle> _style;
+    std::optional<TextStyle> _text_style;
+    std::optional<TextStyle> _label_style;
+    std::optional<TextStyle> _value_style;
+};
 
 } // namespace kin::ui2

@@ -3,6 +3,8 @@
 #include <kin/core/types.hpp>
 #include <kin/platform/input.hpp> // MouseButton
 
+#include <concepts>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -20,6 +22,17 @@ struct Id {
 Id make_id(std::string_view label);
 Id make_id(Id parent, std::string_view label);
 Id make_id(Id parent, u64 value);
+// A part of a labelled group: a row by its name or index ("file", name).
+Id make_id(std::string_view label, std::string_view part);
+Id make_id(std::string_view label, u64 part);
+// By a path (a file's row): its UTF-8 text with '/' between its parts, so
+// the same file has the same id on every system.
+Id make_path_id(Id parent, const std::filesystem::path& path);
+template <typename P>
+    requires std::same_as<P, std::filesystem::path>
+Id make_id(Id parent, const P& path) {
+    return make_path_id(parent, path);
+}
 
 struct Interaction {
     bool hot = false;      // pointer is over this region (resolved from last frame)
@@ -28,6 +41,7 @@ struct Interaction {
     bool pressed = false;  // press began over this region this frame
     bool released = false; // release happened while active this frame
     bool clicked = false;  // press + release completed over this region (activation)
+    bool quiet_focus = false; // focused by a pointer press: no focus ring (the keys' focus shows one)
 };
 
 enum class UiButtonState {
@@ -104,7 +118,14 @@ public:
 
     void set_active(Id id, MouseButton button) { _active = id; _active_button = button; }
     void clear_active() { _active = {}; _active_button = MouseButton::Left; }
-    void set_focused(Id id) { _focused = id; _focused_this_frame = true; }
+    // Focus given by the keys (Tab) or the app shows its ring; by a press
+    // (`visible` false) it does not.
+    void set_focused(Id id, bool visible = true) {
+        _focused = id;
+        _focus_visible = visible;
+        _focused_this_frame = true;
+    }
+    bool focus_visible() const { return _focus_visible; }
     void clear_focused() { _focused = {}; }
 
     // True if set_focused() was called at least once this frame (reset by begin_frame()).
@@ -130,6 +151,7 @@ private:
     MouseButton _active_button = MouseButton::Left; // button that called set_active()
     Id _focused{};
     bool _focused_this_frame = false; // cleared each begin_frame(); guards the focus-clear in end()
+    bool _focus_visible = false;
     Id _hit_id{};
     i32 _hit_z = 0;
     bool _has_hit = false;

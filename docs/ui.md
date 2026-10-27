@@ -82,7 +82,11 @@ ui.end_layout();
   `scroll_offset(id)` and `set_scroll_offset(id, offset)` read and set it.
 - `list(id, count, row_height, row)` calls `row(i)` only for the rows visible in
   the enclosing scroll box, plus a few either side; `scroll_to_row(list, i)`
-  brings a row into view next frame, built or not.
+  brings a row into view this frame, built or not, and `scroll_into_view(id)`
+  a box (or a widget, by the box around it). With
+  `ScrollBoxOptions::stick_to_end` a scroll box at its end stays there as its
+  content grows (a log); scrolled up, it stays put. PageUp, PageDown, Home and
+  End scroll the box the focus is in, else the one under the pointer.
 - `begin_split()` / `split_next()` / `end_split()` make two clipped panes and a
   handle that drags the ratio, kept by id.
 - `label()`, `image()`, `spacer()` and `add(widget)` add leaves the layout
@@ -157,6 +161,54 @@ if (open) {
 `pressed_outside` is true when a mouse button went down this frame away from the
 box (as it was last frame): what closes a popup.
 
+`popup(id, style, place)` does the rest: open (`open_popup(id)`, or
+`open_popup_at(id, point)` for a context menu), it is a box under
+`PopupPlace::anchor` (or at its point), closed by a press outside it and its
+`opener`, or by Esc while it is the one on top (`popup_on_top(id)`):
+
+```cpp
+auto button = ui.box(ui::make_id("add"), ui::hbox().pad(8, 2).hover_bg(hover));
+ui.label("Add", text);
+if (button.clicked) ui.open_popup(ui::make_id("add_menu"));
+if (auto menu = ui.popup(ui::make_id("add_menu"), ui::vbox().w(200).pad(4).bg(panel),
+                         {.anchor = button.bounds, .opener = ui::make_id("add")})) {
+    // rows
+}
+```
+
+A box's `tooltip(text)` shows after the pointer rests on it (`TooltipOptions`:
+the delay, and a shorter one while another tooltip was just up;
+`set_tooltip_style()` for the look). `draggable(type, text, value)` makes a
+press that moves a drag carrying `drag_payload()`, its text by the pointer;
+a box that `accepts_drop(type)` is `drop_hovered` under it and `dropped` when
+it is let go there. Tooltips and the drag's text are drawn after the layout,
+over everything; `overlay(draw)` adds an app's own.
+
+`kin/ui2/composed.hpp` has widgets made this way, in the theme's colours or a
+`ComposedLook`: `menu_bar()` (a window's menus: Alt and a title's letter, the
+arrows, submenus, their keys shown), `pick_list()` (a searchable list under a
+button) and `breadcrumbs()`.
+
+### Values typed in
+
+`value_field(id, shown, options, valid)` is a text field for a value kept
+elsewhere: it shows `shown` until clicked or tabbed into, then what is typed;
+Enter, Tab or a press elsewhere commits it (`committed`, once), Esc goes back
+to `shown`. What `valid` turns down is outlined and not committed. `live`
+commits as it is typed, and Esc commits the value from before the typing. `number_field(id, value, {.min, .max, .whole})` does
+this for numbers, and `edit_value(id)` starts typing in one (a rename from a
+menu). `NumberInput` and `PropertyInspector` rows behave the same way.
+
+```cpp
+if (auto name = ui.value_field(ui::make_id("name"), entity.name, {.placeholder = "Name"},
+                               [](std::string_view text) { return !text.empty(); }).committed) {
+    rename(entity, *name);
+}
+if (const auto speed = ui.number_field(ui::make_id("speed"), mover.speed, {.min = 0})) {
+    mover.speed = static_cast<f32>(*speed);
+}
+```
+
 ### Text that runs out of room
 
 A label given `TextOverflow::Ellipsis` is as wide as its text while its line has
@@ -188,7 +240,8 @@ ui.add(std::move(line));
 embedded in the program or read from a file; it is drawn into a texture once per
 document, size and options, and kept as long as the Context. With `.mask` only
 its shape counts, in the tint: one-colour glyphs. `.oversample` is texels per
-layout unit, for a display with more pixels than the layout has units.
+layout unit; left 0, it is the renderer's content scale, so icons are as sharp
+as the text on a display with more pixels than the layout has units.
 `rasterize_svg()` (`kin/assets/image.hpp`) draws one into an `Image`.
 
 ### A window's own title bar
@@ -207,7 +260,12 @@ and so do `TextInput`s and `TextEdit`s that leave on Tab. Once any box is
 focusable, or focus is already in the order, Tab and Shift+Tab move along it
 (at `end()`) and the box focused is scrolled into view; Enter or Space clicks the
 focused box. A text field hands Tab on itself, and stops editing when Tab takes
-focus elsewhere.
+focus elsewhere; Enter or Esc leave it. A box with `focus_trap()` (a dialog)
+keeps Tab and the focus inside it while it is built. The focus ring shows for
+focus the keys gave, not a click's. Widgets that move a selection with the
+arrows (`ListView`, `TreeView`, `IconGrid`, `TabBar`, `MenuBar`, `NodeGraph`)
+take the keys only while focused; `keys_without_focus` lets one have them while
+nothing else is focused too, as `MenuList` and `DialogueView` do.
 
 Key bindings fire from where focus is. A box's `key_context` names a scope;
 a binding with that context applies while focus is inside the box, and the

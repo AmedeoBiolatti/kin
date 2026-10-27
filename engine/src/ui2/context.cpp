@@ -304,7 +304,7 @@ SurfaceStyle resolve(const InteractiveSurfaceStyle& style, const Interaction& it
     } else if (it.hot) {
         out = style.hovered;
     }
-    if (enabled && it.focused) {
+    if (enabled && it.focused && !it.quiet_focus) {
         out.border = style.focused.border;
         out.border_width = std::max(out.border_width, style.focused.border_width);
         out.border_mode = style.focused.border_mode;
@@ -330,6 +330,8 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _state.begin_frame();
     _cursor = SystemCursor::Default;
     _redraw_in = -1.0f;
+    _focus_trap = {};
+    _overlays.clear();
     _now = _clock ? _clock() : std::chrono::duration<f64>(std::chrono::steady_clock::now().time_since_epoch()).count();
     _pixel_scale = renderer.content_scale();
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
@@ -444,6 +446,7 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
 }
 
 void Context::end() {
+    draw_overlays(); // those asked after end_layout() (or without a layout)
     if (_drag.released_this_frame || (!_input || !_input->mouse_held(MouseButton::Left))) {
         _drag = {};
     }
@@ -592,13 +595,14 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
 
     out.hot = _state.is_hot(id);
     out.focused = _state.is_focused(id);
+    out.quiet_focus = out.focused && !_state.focus_visible();
 
     const bool press = pointer_pressed(button);
     const bool release = pointer_released(button);
 
     if (press && out.hot && !_state.active()) {
         _state.set_active(id, button);
-        _state.set_focused(id);
+        _state.set_focused(id, false);
         // Claim the press so it does not persist past this frame (it survives 0-step
         // frames until read, but once a widget owns it, re-reading on later persisted
         // frames must not re-fire `pressed` — e.g. re-capturing a drag/grab origin).
@@ -704,6 +708,33 @@ bool Context::popup_open(Id id) const {
     return static_cast<bool>(id) && (_open_popup == id || _open_subpopup == id);
 }
 
+void Context::draw_overlays() {
+    // A box's drag: its text by the pointer.
+    if (_drag.dragging && _drag.label && !_drag.payload.text.empty()) {
+        const TooltipOptions look = tooltip_style();
+        const Vec2f size = measure_text(look.text_style.font, _drag.payload.text, look.text_style.scale);
+        const Rectf bounds{pointer().x + 12.0f, pointer().y + 6.0f, size.x + look.padding.left + look.padding.right,
+                           size.y + look.padding.top + look.padding.bottom};
+        fill_rect(bounds, look.fill);
+        outline_rect(bounds, look.border);
+        text(_drag.payload.text, {bounds.x + look.padding.left, bounds.y + look.padding.top}, look.text_style);
+    }
+    for (std::size_t i = 0; i < _overlays.size(); ++i) {
+        const PendingRuns::Run& run = _overlays[i];
+        run.call(run.closure, *this, {});
+    }
+    _overlays.clear();
+}
+
+void Context::open_popup_at(Id id, Vec2f point) {
+    open_popup(id);
+    _popup_point = point;
+}
+
+bool Context::popup_on_top(Id id) const {
+    return static_cast<bool>(id) && (_open_subpopup ? _open_subpopup == id : _open_popup == id);
+}
+
 bool Context::popup_hovered_or_open(Id id) const {
     // Popup bounds are kept on screen (a mirrored widget's popup is reflected).
     return popup_open(id) ||
@@ -758,9 +789,29 @@ void Context::end_popup() {
     }
 }
 
+Context::TooltipOptions Context::tooltip_style() const {
+    if (_tooltip_style) {
+        return *_tooltip_style;
+    }
+    TooltipOptions options;
+    options.text_style = _theme.body_text;
+    if (_theme.tooltip_surface.fill.a > 0) {
+        options.fill = _theme.tooltip_surface.fill;
+    }
+    if (_theme.tooltip_surface.border.a > 0) {
+        options.border = _theme.tooltip_surface.border;
+    }
+    return options;
+}
+
 Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view value, TooltipOptions options) {
+    return show_tooltip(id, _input && contains(anchor, pointer()), anchor, value, options);
+}
+
+Context::TooltipResult Context::show_tooltip(Id id, bool over, Rectf anchor, std::string_view value, const TooltipOptions& options) {
+    static_cast<void>(anchor);
     TooltipResult result;
-    if (!_input || value.empty() || !contains(anchor, pointer())) {
+    if (!_input || value.empty() || !over) {
         if (_tooltip_candidate == id) {
             _tooltip_candidate = {};
         }
@@ -791,9 +842,13 @@ Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view va
     }
 
     region(id, bounds, options.z);
-    fill_rect(bounds, options.fill);
-    outline_rect(bounds, options.border);
-    text(value, {bounds.x + options.padding.left, bounds.y + options.padding.top}, options.text_style);
+    // Over everything: drawn once the frame is laid out.
+    overlay([bounds, fill = options.fill, border = options.border, words = std::string(value),
+             at = Vec2f{bounds.x + options.padding.left, bounds.y + options.padding.top}, style = options.text_style](Context& ctx) {
+        ctx.fill_rect(bounds, fill);
+        ctx.outline_rect(bounds, border);
+        ctx.text(words, at, style);
+    });
     result.visible = true;
     result.bounds = bounds;
     return result;
@@ -2173,6 +2228,20 @@ void Context::end_layout() {
         layout_compose();
     }
 
+    // Each node's enclosing box (a box's own): a widget taking focus is in it.
+    _node_owner.assign(_nodes.size(), Id{});
+    for (const ComposeNode& c : _compose) {
+        if (c.id && c.node >= 0 && c.node < static_cast<i32>(_nodes.size())) {
+            _node_owner[static_cast<std::size_t>(c.node)] = c.id;
+        }
+    }
+    for (std::size_t i = 0; i < _nodes.size(); ++i) {
+        const i32 parent = _nodes[i].parent;
+        if (!_node_owner[i] && parent >= 0) {
+            _node_owner[i] = _node_owner[static_cast<std::size_t>(parent)];
+        }
+    }
+
     // Map each node to its widget (at most one per node; widget() makes a dedicated node).
     std::vector<i32> node_pending(_nodes.size(), -1);
     for (std::size_t p = 0; p < _pending.size(); ++p) {
@@ -2315,6 +2384,7 @@ void Context::end_layout() {
     if (!clip_of.empty()) {
         use_clip(-1);
     }
+    draw_overlays();
 
     if (!_compose.empty()) {
         record_compose(clip_of, visible);

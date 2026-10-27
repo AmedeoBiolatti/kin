@@ -124,6 +124,8 @@ add_library(kin_engine STATIC
     src/ui2/state.cpp
     src/ui2/context.cpp
     src/ui2/compose.cpp
+    src/ui2/composed.cpp
+    src/ui2/value_field.cpp
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
     src/ui2/text_baked.cpp

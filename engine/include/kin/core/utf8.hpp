@@ -18,6 +18,13 @@ namespace kin {
 std::size_t utf8_next(std::string_view text, std::size_t pos);
 // The previous boundary before `pos` (0 at least).
 std::size_t utf8_prev(std::string_view text, std::size_t pos);
+// Stepping by what a reader takes for one character (a grapheme, roughly as
+// Unicode's extended grapheme clusters): a base with the marks on it
+// (combining accents, variation selectors, emoji skin tones and tags, a keycap's
+// frame), emoji joined by ZWJ (a family), a flag's two regional indicators,
+// "\r\n". Editors move the caret and delete by these.
+std::size_t utf8_next_grapheme(std::string_view text, std::size_t pos);
+std::size_t utf8_prev_grapheme(std::string_view text, std::size_t pos);
 // `pos` moved back to a boundary if it is inside a character; clamped to the text.
 std::size_t utf8_floor(std::string_view text, std::size_t pos);
 // The code point starting at `pos` (U+FFFD for malformed bytes, 0 at the end).

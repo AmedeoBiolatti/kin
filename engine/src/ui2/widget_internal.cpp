@@ -176,19 +176,21 @@ TextInputLayoutMetrics text_input_layout_metrics(const TextStyle& text_style, co
     };
 }
 
-Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled) {
+Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled, bool typing) {
     // Text inputs intentionally use hover/press fill tokens as the frame color.
     if (!enabled) {
         return widget_fill(style, WidgetColorState::Disabled);
+    }
+    // Typed in, it keeps the focused frame under the pointer too (an invalid
+    // value's outline is that frame); another control shows it for the keys' focus.
+    if (it.focused && (typing || !it.quiet_focus)) {
+        return widget_border(style, WidgetColorState::Focused);
     }
     if (it.active) {
         return widget_fill(style, WidgetColorState::Pressed);
     }
     if (it.hot) {
         return widget_fill(style, WidgetColorState::Hovered);
-    }
-    if (it.focused) {
-        return widget_border(style, WidgetColorState::Focused);
     }
     return widget_border(style, WidgetColorState::Normal);
 }
@@ -202,6 +204,20 @@ void normalize_text_state(UiTextInputState& state) {
     }
     if (!state.active) {
         state.clear_selection();
+    }
+}
+
+bool takes_keys(Context& ctx, Id id, bool without_focus) {
+    if (id) {
+        ctx.register_focusable(id);
+    }
+    const Id focused = ctx.state().focused();
+    return (id && focused == id) || (without_focus && !focused);
+}
+
+void focus_on_press(Context& ctx, Id id, bool pressed) {
+    if (pressed && id) {
+        ctx.state().set_focused(id, false);
     }
 }
 
@@ -299,12 +315,12 @@ UiTextInputResult edit_text_input(Context& ctx,
         if (ctx.key_typed(Key::Left) && !ctrl) {
             move_text_caret(state, visual(-1), select_left);
         } else if ((ctrl && ctx.key_typed(left_key)) || ctx.action_pressed("text_left")) {
-            move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret), select_left);
+            move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev_grapheme(state.text, state.caret), select_left);
         }
         if (ctx.key_typed(Key::Right) && !ctrl) {
             move_text_caret(state, visual(1), select_right);
         } else if ((ctrl && ctx.key_typed(right_key)) || ctx.action_pressed("text_right")) {
-            move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret), select_right);
+            move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next_grapheme(state.text, state.caret), select_right);
         }
         if (ctx.key_pressed(Key::Home) || ctx.action_pressed("text_home")) {
             move_text_caret(state, 0, select_home);
@@ -317,7 +333,7 @@ UiTextInputResult edit_text_input(Context& ctx,
             if (erase_selection(state)) {
                 result.changed = true;
             } else if (state.caret > 0) {
-                const std::size_t from = ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret);
+                const std::size_t from = ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev_grapheme(state.text, state.caret);
                 state.text.erase(from, state.caret - from);
                 state.caret = from;
                 state.clear_selection();
@@ -328,7 +344,7 @@ UiTextInputResult edit_text_input(Context& ctx,
             if (erase_selection(state)) {
                 result.changed = true;
             } else if (state.caret < state.text.size()) {
-                const std::size_t to = ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret);
+                const std::size_t to = ctrl ? utf8_word_right(state.text, state.caret) : utf8_next_grapheme(state.text, state.caret);
                 state.text.erase(state.caret, to - state.caret);
                 state.clear_selection();
                 result.changed = true;

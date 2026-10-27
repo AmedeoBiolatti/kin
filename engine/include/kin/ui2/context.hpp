@@ -14,6 +14,7 @@
 #include <array>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -67,6 +68,17 @@ struct BoxStyle {
     bool enabled = true;
     // In the Tab order (by tab_index, then as built); Enter or Space while focused clicks it.
     bool focusable = false;
+    bool traps_focus = false; // focus_trap()
+    // Shown by the pointer resting on the box (tooltip()), in the Context's
+    // tooltip style. Read while the box is built: a view is enough.
+    std::string_view tooltip_text{};
+    // Dragged (draggable()): a press moved 4 units starts a drag carrying these
+    // (DragPayload: type, text, value), its text shown by the pointer. A box
+    // that accepts_drop() the type is told when it is over it and let go.
+    std::string_view drag_type{};
+    std::string_view drag_text{};
+    u64 drag_value = 0;
+    std::string_view drop_type{};
     i32 tab_index = 0;
     // Key bindings with this context apply while focus is in the box (see Context::bind).
     std::string_view key_context{};
@@ -116,6 +128,17 @@ struct BoxStyle {
     BoxStyle& selected_if(bool value) { selected = value; return *this; }
     BoxStyle& disabled_if(bool value) { enabled = !value; return *this; }
     BoxStyle& tab_stop(i32 index = 0) { focusable = true; tab_index = index; return *this; }
+    // A dialog: while it is built, Tab goes round what is in it, and focus left
+    // behind it is dropped (Enter does not click a button under it).
+    BoxStyle& focus_trap() { traps_focus = true; return *this; }
+    BoxStyle& tooltip(std::string_view text) { tooltip_text = text; return *this; }
+    BoxStyle& draggable(std::string_view type, std::string_view text = {}, u64 value = 0) {
+        drag_type = type;
+        drag_text = text;
+        drag_value = value;
+        return *this;
+    }
+    BoxStyle& accepts_drop(std::string_view type) { drop_type = type; return *this; }
     BoxStyle& key_scope(std::string_view context) { key_context = context; return *this; }
     BoxStyle& cursor_shape(SystemCursor shape) { cursor = shape; return *this; }
     BoxStyle& depth(i32 value) { z = value; return *this; }
@@ -124,7 +147,9 @@ struct BoxStyle {
 
 // How Context::svg() draws an icon.
 struct SvgOptions {
-    f32 oversample = 1.0f; // texels per unit: Window::display_scale() on a high-density display
+    // Texels per unit; 0: the renderer's content scale (its pixels per unit),
+    // so an icon is as sharp as the text on a high-density display.
+    f32 oversample = 0.0f;
     bool mask = false;     // only its shape counts, in the tint: a one-colour glyph (gpui's svg())
 };
 
@@ -145,8 +170,62 @@ struct BoxResult : Interaction {
     bool hovered = false;
     bool double_clicked = false;    // a second click soon after the first, in the same place
     bool secondary_clicked = false; // the right button released over the box
-    bool pressed_outside = false;   // a button went down this frame away from the box: close a popup
+    bool pressed_outside = false;   // a button went down this frame away from the box (and the boxes in it): close a popup
     Rectf bounds{};                 // where the box was last frame; empty on its first frame
+    // draggable(): a drag from it began this frame / is on (not a click then).
+    bool drag_started = false;
+    bool dragging = false;
+    // accepts_drop(): a drag of its type is over it / was let go over it this
+    // frame (Context::drag_payload() has what it carries).
+    bool drop_hovered = false;
+    bool dropped = false;
+};
+
+// A field editing a value as text (Context::value_field).
+struct ValueFieldOptions {
+    std::string_view placeholder{}; // shown while it is empty
+    std::string_view prefix{};      // inside it, at its left: an axis's letter
+    std::string_view suffix{};      // at its right: its units ("px/s")
+    // Committed as it is typed (each change that validates), not only when
+    // it is left: a colour, a search. Esc commits the value from before the
+    // typing again (when it validates).
+    bool live = false;
+    // Its look: the theme's input (and body text) unless given; given, used
+    // as it is.
+    std::optional<WidgetStyle> style{};
+    std::optional<TextStyle> text_style{};
+    std::optional<TextStyle> faint_style{}; // the placeholder's, prefix's, suffix's: the text's in the theme's muted colour unless given
+    LayoutStyle layout{.width = grow()};
+};
+struct ValueFieldResult {
+    std::optional<std::string> committed; // what was typed, once: when it was left (or as typed, `live`)
+    bool editing = false;                 // being typed in
+    bool invalid = false;                 // what is typed does not validate: not committed, outlined
+    bool left = false;                    // left this frame (by Enter, Tab, a press elsewhere, or Esc)
+    bool cancelled = false;               // by Esc: what it shows is the value again
+};
+// A number's field (Context::number_field): what it takes, how it shows it.
+struct NumberFieldOptions {
+    f64 min = -std::numeric_limits<f64>::infinity();
+    f64 max = std::numeric_limits<f64>::infinity();
+    bool whole = false; // an integer
+    i32 digits = 7;     // significant digits shown (a float's)
+    ValueFieldOptions field{};
+};
+// A value as a field shows it: `digits` significant digits, never "-0".
+std::string number_text(f64 value, i32 digits = 7, bool whole = false);
+// What a field's text says, if it is a number within [min, max] (whole: an integer).
+std::optional<f64> parse_number(std::string_view text, f64 min, f64 max, bool whole);
+
+// Where a popup box shows (Context::popup).
+struct PopupPlace {
+    Rectf anchor{};                // under it (or right of it): a button's bounds, last frame's
+    UiFloat side = UiFloat::Below; // Below or Right of the anchor
+    Vec2f offset{};
+    // With no anchor: at this point (a context menu's), or where open_popup_at() put it.
+    std::optional<Vec2f> point{};
+    Id opener{};           // a press on it does not close the popup (its own click toggles it)
+    Rectf opener_bounds{}; // nor one here (an opener known by where it is)
 };
 
 struct ScrollBoxOptions {
@@ -156,6 +235,9 @@ struct ScrollBoxOptions {
     bool show_scrollbar = true;
     bool vertical = true;
     bool horizontal = false; // children keep their width and scroll sideways (wheel x, or Shift+wheel)
+    // Kept at the end while it is there, as the content grows (a log's last
+    // lines in view); scrolled up, it stays where it was put.
+    bool stick_to_end = false;
 };
 
 // A key, with exactly these modifiers, fires `action` while focus is inside a box
@@ -415,13 +497,29 @@ public:
     void open_subpopup(Id parent, Id id);
     void close_popup(Id id);
     bool popup_open(Id id) const;
+    // Open, and no popup of its own open over it: the one the keys are for.
+    bool popup_on_top(Id id) const;
     bool popup_hovered_or_open(Id id) const;
     PopupResult begin_popup(Id id, Rectf anchor, PopupOptions options);
     void end_popup();
 
+    // A tooltip by `anchor` while the pointer rests on it, drawn over everything
+    // once the frame is laid out (the overlay pass).
     TooltipResult tooltip(Id id, Rectf anchor, std::string_view text, TooltipOptions options);
     TooltipResult tooltip(Id id, Rectf anchor, std::string_view text) {
-        return tooltip(id, anchor, text, TooltipOptions{});
+        return tooltip(id, anchor, text, tooltip_style());
+    }
+    // How boxes' tooltips look (BoxStyle::tooltip, and tooltip() without
+    // options): the theme's tooltip surface and body text unless set.
+    void set_tooltip_style(TooltipOptions options) { _tooltip_style = std::move(options); }
+    TooltipOptions tooltip_style() const;
+
+
+    // Drawn over everything once the frame is laid out (after end_layout()'s
+    // drawing, or at end()): tooltips, a drag's label, an app's own.
+    template <typename F>
+    void overlay(F&& draw) {
+        _overlays.add(-1, [draw = std::forward<F>(draw)](Context& ctx, Rectf) mutable { draw(ctx); });
     }
 
     DragSourceResult drag_source(Id id, Rectf bounds, DragPayload payload, i32 z = 0);
@@ -573,6 +671,10 @@ public:
     // Immediate-mode layout scope builder. Widgets handed to widget() must stay alive
     // until end_layout(), which solves the tree, assigns bounds, and runs each widget.
     void begin_layout(Rectf root);
+    Rectf layout_root() const { return _root; } // what begin_layout() was given
+    // A text field is typed in (it was last frame): an app's own single keys
+    // (Delete, the arrows, letters) wait.
+    bool typing() const { return _wants_text_input_last; }
     void begin_row(LayoutStyle style = {});
     void begin_wrap_row(LayoutStyle style = {});
     void begin_column(LayoutStyle style = {});
@@ -584,9 +686,22 @@ public:
     // A widget with a comparable `state` (a TextInput's) that the app changes
     // after declaring it this frame (a field emptied, its text set) keeps the
     // app's state: the run's results are written back, its state is not.
+    // measure(w) as it is laid out here: in this context's theme (the styles
+    // left at their defaults take the theme's), as its run draws it.
+    template <typename W>
+    Vec2f measured(W& w) const {
+        if constexpr (requires(W& x, const Theme& t) { theme_styles(t, x); }) {
+            const KeepStyles keep(w);
+            theme_styles(_theme, w);
+            return measure(w);
+        } else {
+            return measure(w);
+        }
+    }
+
     template <typename W>
     void widget(W& w, LayoutStyle style = {}) {
-        const i32 index = add_node(style, measure(w));
+        const i32 index = add_node(style, measured(w));
         if constexpr (requires { w.state == w.state; }) {
             _pending.add(index, [&w, snap = w, declared = w.state](Context& ctx, Rectf solved) mutable {
                                     snap.bounds = solved;
@@ -614,7 +729,7 @@ public:
     // are not needed (labels, images, spacers), so they can be temporaries.
     template <typename W>
     void add(W w, LayoutStyle style = {}) {
-        const i32 index = add_node(style, measure(w));
+        const i32 index = add_node(style, measured(w));
         _pending.add(index, [w = std::move(w)](Context& ctx, Rectf solved) mutable {
                                 w.bounds = solved;
                                 run(ctx, w);
@@ -671,6 +786,36 @@ public:
         Context* _ctx = nullptr;
         void (Context::*_end)() = nullptr;
     };
+    // The box of an open popup (open_popup(id), or open_subpopup for a submenu):
+    // floating over everything where `place` says, closed by a press outside it
+    // and outside the popups opened from inside it (not on `place.opener`), or
+    // by Esc while it is on top. Empty while closed:
+    //   if (auto menu = ui.popup(id, ui2::vbox().w(200), {.anchor = button.bounds})) { ...rows... }
+    std::optional<BoxScope> popup(Id id, BoxStyle style, const PopupPlace& place);
+    void open_popup_at(Id id, Vec2f point); // open_popup(), placed at `point` (a context menu)
+
+    // A field editing a value as text: it shows `shown` (the value now)
+    // while not typed in; typed in, it is left by Enter, Tab or a press
+    // elsewhere, and what was typed comes back once (`committed`), or by Esc,
+    // which shows the value again. A text `valid` does not take is not
+    // committed, and the field is outlined in the theme's danger colour.
+    template <typename Valid>
+    ValueFieldResult value_field(Id id, std::string_view shown, const ValueFieldOptions& options, const Valid& valid) {
+        return checked_value_field(id, shown, options, &valid, [](const void* check, std::string_view text) {
+            return static_cast<bool>((*static_cast<const Valid*>(check))(text));
+        });
+    }
+    ValueFieldResult value_field(Id id, std::string_view shown, const ValueFieldOptions& options = {}) {
+        return checked_value_field(id, shown, options, nullptr, nullptr);
+    }
+    // A number's field: the value typed, once it is left (within [min, max]).
+    std::optional<f64> number_field(Id id, f64 value, const NumberFieldOptions& options = {});
+    // Typing in a value field starts (a rename asked for): its text selected,
+    // from its next value_field().
+    void edit_value(Id id);
+    // No value field is typed in any more: each shows its value again (what it
+    // shows changed: an undo, another thing picked).
+    void stop_value_fields();
     [[nodiscard]] BoxScope box(Id id, const BoxStyle& style) {
         return BoxScope(this, begin_box(id, style), &Context::end_box);
     }
@@ -707,8 +852,12 @@ public:
     ListRange begin_list(Id id, i32 count, f32 row_height, LayoutStyle style = {.width = grow()});
     void begin_list_row();
     void end_list();
-    // Scrolls the list's scroll box, next frame, so that row is in view (built or not).
+    // Scrolls the list's scroll box so that row is in view (built or not):
+    // rows built after it, this frame, are there.
     void scroll_to_row(Id list, i32 row);
+    // Scrolls the scroll boxes around a box, or a widget that takes focus (a
+    // text field), so it is in view (as it was laid out last frame).
+    void scroll_into_view(Id id);
 
     // Two panes and a draggable handle between them:
     //   ui.begin_split(id, opts); ...first pane...; ui.split_next(); ...second...; ui.end_split();
@@ -887,6 +1036,7 @@ private:
     struct ScrollRecord {
         Vec2f offset{};
         Vec2f laid_out{}; // the offset last frame's content was placed at
+        bool at_end = true; // last frame, scrolled to the end (stick_to_end keeps it there)
         Vec2f content{};  // content size, padding included
         Vec2f viewport{}; // box size
         std::array<Rectf, 2> track{};       // scrollbars as last drawn: [0] vertical, [1] horizontal
@@ -944,6 +1094,8 @@ private:
     f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
     i32 _region_z_base = 0;  // added to region()'s z while end_layout() runs a widget in floating boxes
     i32 _running_node = -1;  // the layout node whose widget end_layout() runs
+    std::vector<Id> _node_owner; // while end_layout() runs: each node's enclosing box (a box's own)
+    Id _focus_trap{};            // the last box built this frame that keeps the focus in it
     WindowChrome _chrome;    // the drags_window() boxes as last laid out, in layout units
     SystemCursor _cursor = SystemCursor::Default;
     f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none
@@ -977,6 +1129,23 @@ private:
     bool _modal_blocking = false;
     std::vector<Rectf> _modal_stack;
 
+    PendingRuns _overlays; // overlay(): drawn once the frame is laid out, then dropped
+    // value_field(): each one's text input, and whether it was typed in when last seen.
+    struct ValueEdit {
+        TextInput input{};
+        bool was_active = false;
+        bool start = false; // edit_value(): typed in from its next call, its text selected
+        std::string before; // the value when typing began: what Esc puts back on a live field
+        u64 frame = 0;
+    };
+    std::unordered_map<u64, ValueEdit> _value_edits;
+    ValueFieldResult checked_value_field(Id id, std::string_view shown, const ValueFieldOptions& options, const void* check,
+                                         bool (*valid)(const void*, std::string_view));
+    std::optional<TooltipOptions> _tooltip_style;
+    std::optional<Vec2f> _popup_point; // open_popup_at()
+    void draw_overlays();
+    TooltipResult show_tooltip(Id id, bool over, Rectf anchor, std::string_view text, const TooltipOptions& options);
+    bool press_inside(Id box) const;   // last frame's top hit is the box or in it (a box nested in it, a submenu)
     Id _tooltip_candidate{};
     f64 _tooltip_first_time = 0.0;
     std::optional<f64> _tooltip_shown_time; // the last time any tooltip was visible
@@ -989,6 +1158,7 @@ private:
         bool dragging = false;
         bool started_this_frame = false;
         bool released_this_frame = false;
+        bool label = false; // a box's drag: its text shown by the pointer
     };
     DragState _drag;
 };

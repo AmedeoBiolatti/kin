@@ -44,6 +44,19 @@ Id make_id(Id parent, u64 value) {
     return non_zero(mix_u64(parent.value != 0 ? parent.value : fnv_offset, value));
 }
 
+Id make_id(std::string_view label, std::string_view part) {
+    return make_id(make_id(label), part);
+}
+
+Id make_id(std::string_view label, u64 part) {
+    return make_id(make_id(label), part);
+}
+
+Id make_path_id(Id parent, const std::filesystem::path& path) {
+    const std::u8string text = path.generic_u8string();
+    return make_id(parent, std::string_view(reinterpret_cast<const char*>(text.data()), text.size()));
+}
+
 void State::begin_frame() {
     _hot = _has_hit ? _hit_id : Id{};
     _hot_z = _has_hit ? _hit_z : 0;

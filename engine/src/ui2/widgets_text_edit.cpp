@@ -187,7 +187,7 @@ std::size_t Editor::visual_step(i32 step, bool forward) {
     if (moved) {
         return std::min(range.begin + *moved, line_last_offset(line));
     }
-    return forward ? utf8_next(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret);
+    return forward ? utf8_next_grapheme(_s.text, _s.caret) : utf8_prev_grapheme(_s.text, _s.caret);
 }
 
 f32 Editor::line_start(std::size_t line) {
@@ -484,7 +484,7 @@ void Editor::handle_keys() {
         if (_s.has_selection()) {
             replace_selection({}, EditKind::Other);
         } else if (_s.caret > 0) {
-            const std::size_t from = ctrl ? utf8_word_left(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret);
+            const std::size_t from = ctrl ? utf8_word_left(_s.text, _s.caret) : utf8_prev_grapheme(_s.text, _s.caret);
             edit(from, _s.caret, {}, ctrl ? EditKind::Other : EditKind::Deleting);
         }
     }
@@ -492,7 +492,7 @@ void Editor::handle_keys() {
         if (_s.has_selection()) {
             replace_selection({}, EditKind::Other);
         } else if (_s.caret < _s.text.size()) {
-            const std::size_t to = ctrl ? utf8_word_right(_s.text, _s.caret) : utf8_next(_s.text, _s.caret);
+            const std::size_t to = ctrl ? utf8_word_right(_s.text, _s.caret) : utf8_next_grapheme(_s.text, _s.caret);
             edit(_s.caret, to, {}, ctrl ? EditKind::Other : EditKind::Deleting);
         }
     }
@@ -567,7 +567,7 @@ void Editor::run_scrollbar() {
 }
 
 void Editor::draw(const Interaction& it) {
-    const SurfaceStyle surface = with_fill_border(_ctx.theme().input_surface, _w.style.track, frame_color(_w.style, it, _w.enabled));
+    const SurfaceStyle surface = with_fill_border(_ctx.theme().input_surface, _w.style.track, frame_color(_w.style, it, _w.enabled, _s.active));
     _ctx.surface(_w.bounds, surface);
     if (_s.active && _w.enabled) {
         _ctx.outline_rounded_rect(_w.bounds, surface.radius, widget_border(_w.style, WidgetColorState::Focused), 2.0f);

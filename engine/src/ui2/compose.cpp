@@ -83,6 +83,9 @@ void Context::svg(std::string_view svg, Vec2f size, Color tint, SvgOptions optio
 
 const Sprite& Context::svg_sprite(std::string_view svg, Vec2f size, SvgOptions options) {
     static const Sprite none{};
+    if (options.oversample <= 0.0f) {
+        options.oversample = _pixel_scale > 0.0f ? _pixel_scale : 1.0f; // the renderer's pixels per unit
+    }
     const Vec2i pixels{static_cast<i32>(std::lround(size.x * options.oversample)),
                        static_cast<i32>(std::lround(size.y * options.oversample))};
     if (!_renderer || svg.empty() || pixels.x <= 0 || pixels.y <= 0) {
@@ -129,11 +132,32 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
     }
     out.bounds = record->second.rect;
     const Rectf visible = record->second.visible;
-    out.pressed_outside = _any_press && !contains(visible, pointer());
+    out.pressed_outside = _any_press && !contains(visible, pointer()) && !press_inside(id);
     if (!style.interactive || !style.enabled || !_input) {
         return out;
     }
     static_cast<Interaction&>(out) = region(id, visible, compose_z(style));
+    if (!style.drag_type.empty()) {
+        if (out.pressed) {
+            _drag = {.source = id,
+                     .start = pointer(),
+                     .payload = {.type = std::string(style.drag_type), .text = std::string(style.drag_text), .value = style.drag_value},
+                     .label = true};
+        }
+        const Vec2f moved{pointer().x - _drag.start.x, pointer().y - _drag.start.y};
+        if (_drag.source == id && pointer_held() && !_drag.dragging && moved.x * moved.x + moved.y * moved.y >= 16.0f) {
+            _drag.dragging = true;
+            _drag.started_this_frame = true;
+        }
+        if (_drag.source == id && pointer_released()) {
+            _drag.released_this_frame = true;
+        }
+        out.drag_started = _drag.source == id && _drag.started_this_frame;
+        out.dragging = _drag.source == id && _drag.dragging;
+        if (out.dragging) {
+            out.clicked = false; // let go where it began: still a drag, not a click
+        }
+    }
     if (out.clicked) {
         out.double_clicked = _state.register_click(id, pointer(), _now);
     }
@@ -165,6 +189,11 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
         if (it == _compose_records.end() && _state.hot_z() > compose_z(style)) {
             out.hovered = false;
         }
+        // A box hit last frame that the pointer has left since (it moved to
+        // this one, its neighbour) is not over this one: no frame unlit between.
+        if (it != _compose_records.end() && !contains(it->second.visible, pointer())) {
+            it = _compose_records.end();
+        }
         if (it != _compose_records.end()) {
             out.hovered = false;
             for (std::size_t guard = 0; it != _compose_records.end() && guard < 256; ++guard) {
@@ -175,6 +204,17 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
                 it = it->second.parent ? _compose_records.find(it->second.parent.value) : _compose_records.end();
             }
         }
+    }
+    if (!style.drop_type.empty() && _drag.dragging && (style.drop_type == "*" || _drag.payload.type == style.drop_type) && out.hovered) {
+        out.drop_hovered = true;
+        if (pointer_released()) {
+            out.dropped = true;
+            _drag.released_this_frame = true;
+        }
+    }
+    if (!style.tooltip_text.empty()) {
+        show_tooltip(make_id(id, "tooltip"), out.hovered && !_drag.dragging && !_state.active(), visible, style.tooltip_text,
+                     tooltip_style());
     }
     return out;
 }
@@ -268,6 +308,9 @@ void Context::begin_compose(Id id, ComposeKind kind, const BoxStyle& style, Layo
         .z = compose_z(style),
     });
     _compose_ids.push_back(id);
+    if (style.traps_focus && id) {
+        _focus_trap = id;
+    }
 }
 
 BoxResult Context::begin_box(Id id, const BoxStyle& style) {
@@ -286,6 +329,48 @@ BoxResult Context::begin_box(Id id, const BoxStyle& style) {
                          Context& ctx, Rectf bounds) { ctx.surface(bounds, surface); });
     }
     return result;
+}
+
+bool Context::press_inside(Id box) const {
+    auto it = _compose_records.find(_state.hot().value);
+    for (std::size_t guard = 0; it != _compose_records.end() && guard < 256; ++guard) {
+        if (it->first == box.value) {
+            return true;
+        }
+        it = it->second.parent ? _compose_records.find(it->second.parent.value) : _compose_records.end();
+    }
+    return false;
+}
+
+std::optional<Context::BoxScope> Context::popup(Id id, BoxStyle style, const PopupPlace& place) {
+    if (!popup_open(id)) {
+        return std::nullopt;
+    }
+    // Closed by a press outside it, its submenu and its opener; by Esc on top.
+    const auto inside = [&](Id box) {
+        if (!box) {
+            return false;
+        }
+        const auto record = _compose_records.find(box.value);
+        return (record != _compose_records.end() && contains(record->second.visible, pointer())) || press_inside(box);
+    };
+    const bool submenu_of_it = _open_popup == id && _open_subpopup;
+    const bool on_opener = inside(place.opener) || (place.opener_bounds.w > 0.0f && contains(place.opener_bounds, pointer()));
+    if (_any_press && _popup_opened_this_frame != id && !inside(id) && !on_opener && !(submenu_of_it && inside(_open_subpopup))) {
+        close_popup(id);
+        return std::nullopt;
+    }
+    if (popup_on_top(id) && (key_pressed(Key::Escape) || action_pressed("quit"))) {
+        close_popup(id);
+        return std::nullopt;
+    }
+    Vec2f at = place.point ? *place.point : _popup_point.value_or(pointer());
+    if (place.anchor.w > 0.0f || place.anchor.h > 0.0f) {
+        at = place.side == UiFloat::Right ? Vec2f{place.anchor.x + place.anchor.w, place.anchor.y}
+                                          : Vec2f{place.anchor.x, place.anchor.y + place.anchor.h};
+    }
+    style.floating(UiFloat::Point, {at.x + place.offset.x, at.y + place.offset.y});
+    return BoxScope(this, begin_box(id, style), &Context::end_box);
 }
 
 void Context::end_box() {
@@ -495,6 +580,10 @@ void Context::scroll_to_row(Id list, i32 row) {
     reveal({list, row});
 }
 
+void Context::scroll_into_view(Id id) {
+    reveal({id, -1});
+}
+
 // --- splits --------------------------------------------------------------------------
 
 void Context::begin_split(Id id, SplitOptions options) {
@@ -577,9 +666,15 @@ f32 Context::split_ratio(Id id) const {
 
 // --- end_layout: scrolling and records -----------------------------------------------
 
-// Scrolls the nearest scroll box around `target` (as of last frame) so it is in view.
+// Scrolls the nearest scroll box around `target` (as of last frame) so it is in view:
+// a box, or a widget that takes focus (by the box around it).
 void Context::reveal(const Reveal& target) {
-    const auto found = _compose_records.find(target.id.value);
+    auto found = _compose_records.find(target.id.value);
+    if (found == _compose_records.end()) {
+        if (const auto box = _focus_boxes.find(target.id.value); box != _focus_boxes.end() && box->second) {
+            found = _compose_records.find(box->second.value);
+        }
+    }
     if (found == _compose_records.end()) {
         return;
     }
@@ -674,11 +769,7 @@ void Context::layout_compose() {
     if (wheel.x == 0.0f && wheel.y != 0.0f && modifier_held(KeyModifiers::Shift)) {
         wheel = {-wheel.y, 0.0f};
     }
-    for (i32 axis = 0; axis < 2; ++axis) {
-        const f32 turn = along(wheel, axis);
-        if (turn == 0.0f) {
-            continue;
-        }
+    const auto under_pointer = [&](i32 axis) {
         const ComposeNode* target = nullptr;
         for (const ComposeNode& c : _compose) {
             if (c.kind != ComposeKind::Scroll || !(axis == 0 ? c.scroll.vertical : c.scroll.horizontal)) {
@@ -691,22 +782,76 @@ void Context::layout_compose() {
                 target = &c; // pre-order: later is deeper
             }
         }
-        if (target) {
+        return target;
+    };
+    for (i32 axis = 0; axis < 2; ++axis) {
+        const f32 turn = along(wheel, axis);
+        if (turn == 0.0f) {
+            continue;
+        }
+        if (const ComposeNode* target = under_pointer(axis)) {
             // Wheel y is positive away from the player (content moves down); x positive to the right.
             along(_scroll_records[target->id.value].offset, axis) += axis == 0 ? -turn * target->scroll.wheel_step
                                                                               : turn * target->scroll.wheel_step;
         }
     }
 
+    // PageUp and PageDown a page, Home and End to either end: the scroll box the
+    // focus is in, else the one under the pointer (not while a text field
+    // takes the keys).
+    if (_input && !_wants_text_input_last) {
+        const bool up = key_typed(Key::PageUp);
+        const bool down = key_typed(Key::PageDown);
+        const bool home = key_pressed(Key::Home);
+        const bool end = key_pressed(Key::End);
+        if (up || down || home || end) {
+            const ComposeNode* target = nullptr;
+            Id at = _state.focused();
+            if (const auto box = _focus_boxes.find(at.value); box != _focus_boxes.end() && !_compose_records.contains(at.value)) {
+                at = box->second;
+            }
+            for (std::size_t guard = 0; at && !target && guard < 256; ++guard) {
+                const auto record = _compose_records.find(at.value);
+                if (record == _compose_records.end()) {
+                    break;
+                }
+                if (record->second.scroll) {
+                    for (const ComposeNode& c : _compose) {
+                        const ScrollRecord& scroll = _scroll_records[c.id.value];
+                        if (c.kind == ComposeKind::Scroll && c.id == at && c.scroll.vertical &&
+                            scroll.content.y > scroll.viewport.y + 0.5f) {
+                            target = &c;
+                        }
+                    }
+                }
+                at = record->second.parent;
+            }
+            if (!target) {
+                target = under_pointer(0);
+            }
+            if (target) {
+                ScrollRecord& scroll = _scroll_records[target->id.value];
+                const f32 page = std::max(scroll.viewport.y - target->scroll.wheel_step, scroll.viewport.y * 0.5f);
+                scroll.offset.y = home ? 0.0f : end ? scroll.content.y : scroll.offset.y + (down ? page : -page);
+            }
+        }
+    }
+
     // Clamp, then move each scroll box's content (outer boxes first, so nested
-    // content is moved by both).
+    // content is moved by both). One that sticks to its end and was there
+    // stays there, unless it was scrolled this frame.
     for (const ComposeNode& c : _compose) {
         if (c.kind != ComposeKind::Scroll) {
             continue;
         }
         ScrollRecord& record = _scroll_records[c.id.value];
+        const f32 end_y = std::max(0.0f, record.content.y - record.viewport.y);
+        if (c.scroll.stick_to_end && record.at_end && record.offset.y == record.laid_out.y) {
+            record.offset.y = end_y;
+        }
         record.offset.x = std::clamp(record.offset.x, 0.0f, std::max(0.0f, record.content.x - record.viewport.x));
-        record.offset.y = std::clamp(record.offset.y, 0.0f, std::max(0.0f, record.content.y - record.viewport.y));
+        record.offset.y = std::clamp(record.offset.y, 0.0f, end_y);
+        record.at_end = record.offset.y >= end_y - 0.5f;
         record.laid_out = record.offset;
         if (record.offset.x == 0.0f && record.offset.y == 0.0f) {
             continue;
@@ -784,9 +929,10 @@ void Context::add_focusable(Id id, i32 tab_index, bool box_entry) {
     if (!id) {
         return;
     }
+    const bool running = _running_node >= 0 && _running_node < static_cast<i32>(_node_owner.size());
     _focus_order.push_back({
         .id = id,
-        .box = !_compose_ids.empty() ? _compose_ids.back() : Id{},
+        .box = running ? _node_owner[static_cast<std::size_t>(_running_node)] : !_compose_ids.empty() ? _compose_ids.back() : Id{},
         .tab_index = tab_index,
         // A widget registers as end_layout() runs it, after every box: its node
         // places it among them. A box registers before its node is added.
@@ -805,13 +951,41 @@ void Context::finish_focus() {
     std::stable_sort(_focus_order.begin(), _focus_order.end(), [](const FocusEntry& a, const FocusEntry& b) {
         return a.tab_index != b.tab_index ? a.tab_index < b.tab_index : a.order < b.order;
     });
+    // A focus trap built this frame (a dialog): Tab goes round what is in it,
+    // and focus left behind it is dropped.
+    if (_focus_trap) {
+        const auto in_trap = [&](Id at) {
+            for (std::size_t guard = 0; at && guard < 256; ++guard) {
+                if (at == _focus_trap) {
+                    return true;
+                }
+                const auto record = _compose_records.find(at.value);
+                if (record == _compose_records.end()) {
+                    return false;
+                }
+                at = record->second.parent;
+            }
+            return false;
+        };
+        std::erase_if(_focus_order, [&](const FocusEntry& e) { return e.id != _focus_trap && !in_trap(e.box); });
+        const Id focused = _state.focused();
+        if (focused) {
+            const auto entry = std::ranges::find(_focus_order, focused, &FocusEntry::id);
+            const auto box = _focus_boxes.find(focused.value);
+            const bool inside = entry != _focus_order.end() || in_trap(focused) ||
+                                (box != _focus_boxes.end() && in_trap(box->second));
+            if (!inside) {
+                _state.clear_focused();
+            }
+        }
+    }
     const bool opted_in = std::ranges::any_of(_focus_order, [](const FocusEntry& e) { return e.box_entry; });
     const auto position = [&](Id id) {
         const auto it = std::ranges::find_if(_focus_order, [&](const FocusEntry& e) { return e.id == id; });
         return it != _focus_order.end() ? static_cast<i32>(it - _focus_order.begin()) : -1;
     };
     if (!_focus_move && _input && !_wants_text_input && key_typed(Key::Tab) &&
-        (opted_in || position(_state.focused()) >= 0)) {
+        (opted_in || _focus_trap || position(_state.focused()) >= 0)) {
         _focus_move = std::pair{_state.focused(), modifier_held(KeyModifiers::Shift) ? -1 : 1};
     }
     _focus_moved = false;
@@ -822,7 +996,7 @@ void Context::finish_focus() {
         const i32 next = at < 0 ? (direction > 0 ? 0 : n - 1) : ((at + direction) % n + n) % n;
         const Id to = _focus_order[static_cast<std::size_t>(next)].id;
         if (to != from) { // alone in the order, Tab just leaves it
-            _state.set_focused(to);
+            _state.set_focused(to); // by the keys: its ring shows
             reveal({to, -1});
             _focus_moved = true;
         }

@@ -180,6 +180,15 @@ releases may change APIs.
   its focus (it took the keys back the next frame). A widget's `state` the app
   changes after declaring the widget that frame is kept, not undone by the
   widget's run.
+- ui2: a box that was hovered last frame under a box no longer there was not
+  hovered (a drop target, right after the pointer moved). `MenuBar` no longer
+  highlights a title while idle, and switches an open menu only when the
+  pointer moves onto another title (one resting there took over the menu the
+  keys opened). A virtualized `ListView` scrolls to keep its selection in view
+  only when the keys moved it.
+- ui2: a `TextInput`, `NumberInput` or `TextEdit` being typed in keeps its
+  focused frame under the pointer (it showed the hover colour instead); other
+  controls show the focused frame for the keys' focus only.
 
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
@@ -411,6 +420,22 @@ releases may change APIs.
   layout nodes' child lists are kept from frame to frame, and what
   `end_layout()` runs for each node is kept in reused blocks, not a
   `std::function` each.
+- ui2 keys go only to the focused widget: `ListView`, `TreeView`, `IconGrid`,
+  `TabBar`, `MenuBar` and `NodeGraph` take them while they have focus (a click
+  or Tab gives it; `keys_without_focus` for the old way), `MenuList` and
+  `DialogueView` also while nothing else has focus. The focus ring shows for
+  the keys' focus only, not a click's (`Interaction::quiet_focus`,
+  `State::focus_visible()`).
+- `NumberInput` shows its value until typed in, commits on Enter or leaving,
+  goes back on Esc, steps with Up and Down, and outlines what is not a number
+  in range (`invalid`). Its range defaults to every float (was 0 to 1).
+  `PropertyInspector`'s text rows commit on leaving and go back on Esc.
+- `SvgOptions::oversample` defaults to 0: the renderer's content scale (was 1,
+  blurred icons on high-density displays unless given).
+- `TextStyle::inherit` and `WidgetStyle::inherit` (default true): false keeps a
+  style as given, its default values too, instead of filling them from the
+  theme. Widgets are measured in their themed styles, as they are drawn.
+- `TooltipOptions` tooltips are drawn after layout, over everything.
 
 - Separate mesh temporal `history_id` from picking `id`; assign generation- and
   pooled-lease-aware identities during ECS collection and distinct model-part IDs.
@@ -520,6 +545,45 @@ releases may change APIs.
     `kin_render3d_bench` (batch edits, wind) and `kin_physics3d_bench ecs` are added.
 
 ### Added
+
+- ui2 boxes with tooltips, drags and drops, drawn in an overlay pass after
+  layout (`Context::overlay`): `BoxStyle::tooltip(text)`,
+  `draggable(type, text, value)` and `accepts_drop(type)` (`BoxResult::drag_started`,
+  `dragging`, `drop_hovered`, `dropped`, the payload in `drag_payload()`).
+  `Context::popup(id, style, PopupPlace)` is a box that opens under an anchor
+  or at a point (`open_popup_at`), closes on a press outside it and its opener,
+  or Esc while on top (`popup_on_top`). `set_tooltip_style` sets every
+  tooltip's look.
+- ui2 value fields: `Context::value_field(id, shown, options, valid)` shows a
+  value until it is typed in, commits on Enter or leaving
+  (`ValueFieldResult::committed`), goes back to the value on Esc (a `live`
+  field commits the value from before the typing again), and outlines what
+  does not validate; `number_field` for numbers in a range (`number_text`,
+  `parse_number`), `edit_value(id)` to start typing in one (a rename),
+  `stop_value_fields()`.
+- ui2 focus traps: `BoxStyle::focus_trap()` keeps Tab and the focus inside a
+  dialog while it is open.
+- ui2 scrolling: `Context::scroll_into_view(id)` (a box, or a widget by the box
+  around it), `ScrollBoxOptions::stick_to_end` (a log follows its last lines
+  while it is at its end), PageUp, PageDown, Home and End in the scroll box
+  the focus is in, else the one under the pointer.
+- ui2 ids from text and paths: `make_id(label, part)` for a part named by text
+  or a number, `make_id(parent, path)` (`make_path_id`) for a file's.
+- `kin/ui2/composed.hpp`: widgets built from boxes, in the look of
+  `ComposedLook` (the theme's colours by default): `menu_bar` (Alt and a
+  title's letter, the arrows, submenus, keys shown), `pick_list` (a searchable
+  list under an anchor; with `free_text`, Enter takes what is typed when
+  nothing matches) and
+  `breadcrumbs`.
+- `Context::measured(widget)`, a widget's size in its themed styles;
+  `theme_styles(theme, widget)` gives a widget its theme's styles where it
+  inherits them; `layout_root()`, `typing()`.
+- ui2 text: Left, Right, Backspace and Delete step over whole graphemes
+  (`utf8_next_grapheme`, `utf8_prev_grapheme`: combining marks, emoji with
+  modifiers and joiners, flags, CR LF). Segoe UI Emoji is a fallback font on
+  Windows. A full bitmap glyph atlas starts over with the text being drawn
+  instead of leaving its new glyphs out; `TtfFontOptions::atlas_pages` caps
+  its pages.
 
 - Tested `kin-gltf/1` export profile with CPU/GPU asset acceptance regressions.
   Reject distinct skin palettes, oversized/unsupported skins, morphs, mixed poses

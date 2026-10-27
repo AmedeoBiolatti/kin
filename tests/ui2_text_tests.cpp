@@ -31,6 +31,7 @@ struct Draw {
     Texture texture;
     Rectf source{};
     Rectf dest{};
+    Color tint = colors::white;
 };
 
 // Makes textures (without pixels) and records what is drawn from them. It
@@ -67,6 +68,9 @@ public:
     void draw_texture(const Texture& texture, Rectf dest) override { draws.push_back({texture, {}, dest}); }
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override {
         draws.push_back({texture, source, dest});
+    }
+    void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override {
+        draws.push_back({texture, source, dest, tint});
     }
     void fill_rect(Rectf, Color) override {}
     void draw_rect(Rectf, Color) override {}
@@ -255,6 +259,54 @@ void test_distance_field_shaped_runs() {
     }
 }
 
+// An emoji: from a fallback that has it, an em or so wide, drawn (no bitmap
+// colour font among the fallbacks: SDL_ttf would lay its glyphs out at 136
+// pixels and draw nothing).
+void test_emoji_from_fallbacks() {
+    const std::filesystem::path path = plain_system_font();
+    if (path.empty()) {
+        return;
+    }
+    const auto& fallbacks = ui2::system_fallback_fonts();
+    for (const ui2::FontSource& font : fallbacks) {
+        assert(font.path.filename().string().find("ColorEmoji") == std::string::npos &&
+               font.path.filename().string().find("Color Emoji") == std::string::npos);
+    }
+    const ui2::Font font = ui2::load_ttf_font(path, 16.0f, ui2::TtfFontOptions{.fallbacks = fallbacks});
+    const std::string grin = "\xF0\x9F\x98\x80"; // 😀
+    const f32 width = ui2::measure_text(font, grin).x;
+    if (width <= 0.0f) {
+        return; // no font here has it
+    }
+    assert(width > 8.0f && width < 40.0f);
+    Recording rec = make_recording();
+    ui2::draw_text(rec.renderer, font, "a" + grin, {0, 0}, 1.0f, Color::rgb(200, 30, 30));
+    assert(rec.backend->draws.size() == 2 && rec.backend->draws[1].dest.h < 40.0f);
+    assert(rec.backend->draws[0].tint == Color::rgb(200, 30, 30)); // a glyph without colours of its own: the text's
+}
+
+// A glyph atlas that fills (large text in a script of many characters) starts
+// over: what is drawn after still is.
+void test_atlas_starts_over_when_full() {
+    const std::filesystem::path path = plain_system_font();
+    const ui2::FontSource cjk = cjk_fallback();
+    if (path.empty() || cjk.path.empty()) {
+        return;
+    }
+    // At 12 points a page (16 ASCII cells a side, to a power of two) holds some
+    // 1000 ideographs: one page, fewer than these 1300.
+    const ui2::Font font = ui2::load_ttf_font(path, 12.0f, ui2::TtfFontOptions{.fallbacks = {cjk}, .atlas_pages = 1});
+    Recording rec = make_recording();
+    constexpr i32 count = 1300;
+    i32 drawn = 0;
+    for (u32 c = 0x4E00; c < 0x4E00 + count; ++c) {
+        rec.backend->draws.clear();
+        ui2::draw_text(rec.renderer, font, u8s({c}), {0, 0}, 1.0f, colors::white);
+        drawn += rec.backend->draws.empty() ? 0 : 1;
+    }
+    assert(drawn == count);
+}
+
 void test_fallback_fonts() {
     const std::filesystem::path path = plain_system_font();
     const ui2::FontSource cjk = cjk_fallback();
@@ -410,6 +462,8 @@ int main() {
     test_control_characters();
     test_fallback_fonts();
     test_distance_field_shaped_runs();
+    test_emoji_from_fallbacks();
+    test_atlas_starts_over_when_full();
     test_right_to_left_runs();
     test_fitting_text();
     test_language_fonts();

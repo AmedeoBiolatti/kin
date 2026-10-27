@@ -102,6 +102,9 @@ struct TtfFontOptions {
     // language: the right font for Japanese, Chinese or Korean. The font
     // follows a change of language, as do themes made with it.
     std::vector<LanguageFont> language_fallbacks;
+    // At most this many pages of glyphs (each some 16 ASCII cells a side) before
+    // the atlas starts over (with what the text drawn then needs): a memory budget.
+    i32 atlas_pages = 4;
 };
 
 // A TrueType or OpenType font. Text is laid out glyph by glyph from an atlas

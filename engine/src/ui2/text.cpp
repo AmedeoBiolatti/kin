@@ -390,6 +390,10 @@ const std::vector<FontSource>& system_fallback_fonts() {
             {"/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
              "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/opentype/freefont/FreeSerif.otf",
              "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"},
+            // Emoji. Only a scalable font: SDL_ttf draws Noto Color Emoji's and
+            // Apple Color Emoji's bitmaps at their one size (136 pixels), not
+            // the text's. Where there is none, DejaVu Sans has the emoticons.
+            {"C:/Windows/Fonts/seguiemj.ttf"},
         };
         std::vector<FontSource> found;
         for (const auto& candidates : scripts) {
@@ -859,7 +863,7 @@ std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale) 
     for (const VisualRun& run : visual_runs(font, line, scale)) {
         // The stops caret_x gives: a run's end only where the line ends (elsewhere
         // that offset belongs to the run after it).
-        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+        for (std::size_t k = run.begin;; k = utf8_next_grapheme(line, k)) {
             if (k >= run.end && k < line.size()) {
                 break;
             }
@@ -883,7 +887,7 @@ std::optional<std::size_t> caret_move(const Font& font, std::string_view line, s
     std::optional<std::size_t> best;
     f32 best_x = 0.0f;
     for (const VisualRun& run : visual_runs(font, line, scale)) {
-        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+        for (std::size_t k = run.begin;; k = utf8_next_grapheme(line, k)) {
             if (k >= run.end && k < line.size()) {
                 break; // that offset belongs to the next run (as in caret_x)
             }

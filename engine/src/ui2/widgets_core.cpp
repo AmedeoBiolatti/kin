@@ -863,6 +863,11 @@ void run(Context& ctx, Label& widget) {
     }
 }
 
+// WrappedText as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, WrappedText& widget) {
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, WrappedText& widget) {
     const TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
     const TextWrapOptions wrap{
@@ -908,6 +913,12 @@ void run(Context& ctx, Separator& widget) {
     }
     const Separator defaults{};
     ctx.fill_rect(rect, widget.color == defaults.color ? ctx.theme().colors.border : widget.color);
+}
+
+// Button as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, Button& widget) {
+    widget.style = themed_widget_style(widget.style, theme.button);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
 }
 
 void run(Context& ctx, Button& widget) {
@@ -1007,6 +1018,12 @@ void draw_check(Context& ctx, Rectf box, f32 thickness, Color color) {
     draw_stroke(ctx, low, tip, thickness, color);
 }
 
+// Toggle as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, Toggle& widget) {
+    widget.style = themed_widget_style(widget.style, theme.input);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, Toggle& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
@@ -1035,6 +1052,11 @@ void run(Context& ctx, Toggle& widget) {
     ctx.text(widget.label,
              {box_rect.x + box + 8.0f, widget.bounds.y + (widget.bounds.h - text.y) * 0.5f},
              text_style);
+}
+
+// Slider as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, Slider& widget) {
+    widget.style = themed_widget_style(widget.style, theme.input);
 }
 
 void run(Context& ctx, Slider& widget) {
@@ -1141,10 +1163,16 @@ void run(Context& ctx, NineSlicePanel& widget) {
 void run(Context&, Spacer&) {
 }
 
+// IconButton as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, IconButton& widget) {
+    widget.style = themed_widget_style(widget.style, theme.button);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, IconButton& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
-    widget.style = themed_widget_style(widget.style, ctx.theme().button);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.clicked = it.clicked && widget.enabled;
@@ -1180,9 +1208,15 @@ void run(Context& ctx, IconButton& widget) {
     }
 }
 
+// IconSlot as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, IconSlot& widget) {
+    widget.style = themed_widget_style(widget.style, theme.button);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, IconSlot& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().button);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const IconSlotLayoutMetrics metrics = icon_slot_layout_metrics(widget, ctx.theme().preset);
     widget.clicked = false;
     widget.drag_started = false;
@@ -1467,6 +1501,11 @@ void run(Context& ctx, DialogBox& widget) {
     }
 }
 
+// DialogueView as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, DialogueView& widget) {
+    widget.style = themed_widget_style(widget.style, theme.panel);
+}
+
 void run(Context& ctx, DialogueView& widget) {
     widget.advance_requested = false;
     widget.skip_requested = false;
@@ -1588,12 +1627,13 @@ void run(Context& ctx, DialogueView& widget) {
         run(ctx, widget.prompts);
     }
 
+    const bool keys = takes_keys(ctx, widget.id, widget.keys_without_focus);
     if (widget.model.choices.empty() && widget.model.active && !widget.model.ended) {
         const Interaction it = ctx.region(make_id(widget.id, "advance"), body.w > 0.0f && body.h > 0.0f ? body : content, widget.z);
-        widget.advance_requested = it.clicked || ctx.action_pressed("accept");
+        widget.advance_requested = it.clicked || (keys && ctx.action_pressed("accept"));
     }
-    widget.skip_requested = ctx.action_pressed("menu_right");
-    widget.closed_requested = widget.closed_requested || ctx.action_pressed("quit");
+    widget.skip_requested = keys && ctx.action_pressed("menu_right");
+    widget.closed_requested = widget.closed_requested || (keys && ctx.action_pressed("quit"));
 }
 
 void run(Context& ctx, Nameplate& widget) {
@@ -1709,10 +1749,16 @@ void run(Context& ctx, ScrollView& widget) {
     }
 }
 
+// ResourceRow as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, ResourceRow& widget) {
+    widget.style = themed_widget_style(widget.style, theme.panel);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, ResourceRow& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
-    widget.style = themed_widget_style(widget.style, ctx.theme().panel);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     f32 x = widget.bounds.x;
     for (const ResourceItem& item : widget.items) {
         Vec2f icon_size = widget.icon_size;
@@ -1748,13 +1794,19 @@ void run(Context& ctx, ResourceRow& widget) {
     }
 }
 
+// LabeledBar as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, LabeledBar& widget) {
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, LabeledBar& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const LabeledBar defaults{};
     const Color background = widget.background == defaults.background ? ctx.theme().progress_background : widget.background;
     const Color fill = widget.fill == defaults.fill ? ctx.theme().progress_fill : widget.fill;
     const Color border = widget.border == defaults.border ? ctx.theme().colors.border : widget.border;
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const LabeledBarLayoutMetrics metrics = labeled_bar_layout_metrics(widget, ctx.theme().preset);
     const SurfaceStyle track_surface = with_fill_border(ctx.theme().subtle_surface, background, border);
     ctx.surface(widget.bounds, track_surface);
@@ -1812,8 +1864,14 @@ void run(Context& ctx, IconMeter& widget) {
     }
 }
 
+// RichTextLine as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, RichTextLine& widget) {
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, RichTextLine& widget) {
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     f32 x = widget.bounds.x;
     for (const RichTextSpan& span : widget.spans) {
         TextStyle style = widget.text_style;
@@ -1823,9 +1881,15 @@ void run(Context& ctx, RichTextLine& widget) {
     }
 }
 
+// TextArea as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, TextArea& widget) {
+    widget.style = themed_widget_style(widget.style, theme.panel);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, TextArea& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().panel);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const UiPadding padding = intrinsic_padding(widget.style);
     if (widget.draw_background) {
         ctx.fill_rect(widget.bounds, widget.style.track);
@@ -1889,9 +1953,15 @@ void run(Context& ctx, AdvancedText& widget) {
     draw_advanced_text(ctx, widget.layout, widget.bounds, options);
 }
 
+// ToastStack as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, ToastStack& widget) {
+    widget.style = themed_widget_style(widget.style, theme.panel);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, ToastStack& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().panel);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     widget.visible = 0;
     std::vector<std::size_t> visible;
     visible.reserve(widget.items.size());
@@ -1937,8 +2007,14 @@ void run(Context& ctx, ToastStack& widget) {
     }
 }
 
+// FloatingText as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, FloatingText& widget) {
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, FloatingText& widget) {
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     widget.rendered_position = {
         widget.position.x + widget.velocity.x * widget.age,
         widget.position.y + widget.velocity.y * widget.age,
@@ -1955,8 +2031,14 @@ void run(Context& ctx, FloatingText& widget) {
     widget.bounds = {widget.rendered_position.x, widget.rendered_position.y, size.x, size.y};
 }
 
+// AnimatedValue as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, AnimatedValue& widget) {
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, AnimatedValue& widget) {
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     widget.rendered_text = widget.prefix + format_value(widget.display, widget.decimals) + widget.suffix;
     const Vec2f size = measure_text(widget.text_style.font, widget.rendered_text, widget.text_style.scale);
     const Rectf aligned = align_rect(widget.bounds, size, widget.horizontal, widget.vertical);
