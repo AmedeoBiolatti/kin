@@ -124,14 +124,21 @@ public:
     // Queue a file dropped on the window at window-space pos, as from the desktop.
     void queue_drop(std::string path, Vec2f window_pos);
 
-    // Wall time of the scene update and render in recent steps, oldest first.
+    // Wall time of recent frames, oldest first: a driven server's steps, or the
+    // frames a game run with --inspect draws (frame.timing reports them).
     struct FrameTiming {
-        f64 update_ms = 0.0;
-        f64 render_ms = 0.0;
+        f64 update_ms = 0.0;   // the scenes' updates (every fixed step run for it)
+        f64 render_ms = 0.0;   // drawing it
+        f64 present_ms = 0.0;  // presenting it (with any wait for the display)
+        f64 interval_ms = 0.0; // since the frame before began: what a player sees (0: not known)
+        i64 frame = 0;         // its number among those recorded
     };
     static constexpr std::size_t frame_timing_window = 600;
     const std::deque<FrameTiming>& frame_timings() const { return _timings; }
     void clear_frame_timings() { _timings.clear(); }
+    // Keeps a frame's times, numbered after the last (the last
+    // frame_timing_window of them).
+    void record_frame_timing(FrameTiming timing);
 
 private:
     struct PendingInput {
@@ -165,6 +172,7 @@ private:
     std::vector<MouseButton> _tapped_buttons;
     std::vector<std::pair<Key, KeyModifiers>> _tapped_keys;
     std::deque<FrameTiming> _timings;
+    i64 _timed_frames = 0; // frames recorded, the forgotten too
     std::function<void(SceneManager&)> _reset_scenes;
 };
 
@@ -205,14 +213,18 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes);
 // stays on the error stream.
 //
 // It answers what reads the game (game.info, scene.stack, scene.current,
-// scene.actions, world.snapshot, animation.diagnostics, ping), server.status
-// (with "paused"), and holds or advances its updates: sim.pause, sim.resume,
-// sim.step {count} (the game keeps drawing meanwhile). server.shutdown quits
-// the game. What drives a headless server (sim.tick, sim.reset, input.*,
-// view.screenshot) is refused: the player drives this one.
+// scene.actions, world.snapshot, animation.diagnostics, frame.timing, ping),
+// server.status (with "paused"), and holds or advances its updates:
+// sim.pause, sim.resume, sim.step {count} (the game keeps drawing meanwhile).
+// server.shutdown quits the game. What drives a headless server (sim.tick,
+// sim.reset, input.*, view.screenshot) is refused: the player drives this one.
 class LiveInspector {
 public:
-    // Reads requests from `in` on a thread of its own; answers on `out`.
+    // Reads requests from `in` on a thread of its own; answers on `out`, from
+    // another: a tool slow to read a large answer (a world's snapshot) holds
+    // that thread, never the game. On std::cout (in step with stdio, as it is
+    // unless a game turns that off) an answer is written under stdout's lock,
+    // so the game's own prints do not land inside it.
     LiveInspector(std::istream& in, std::ostream& out);
     ~LiveInspector();
     LiveInspector(const LiveInspector&) = delete;
@@ -229,14 +241,20 @@ public:
     i64 frame() const { return _frame; }
     // The tool closed its end: nothing more comes, and nothing holds the game.
     bool finished() const { return _finished; }
+    // Waits until the answers given so far are written (a test reading `out`).
+    void flush();
 
 private:
     struct Shared;
+    struct Outbox;
 
     void answer(ServerContext& ctx, const GameInfo* game, std::string_view line);
+    void send(const JsonValue* id, const ServerResponse& response);
 
     std::shared_ptr<Shared> _shared;
     std::thread _reader;
+    std::shared_ptr<Outbox> _outbox;
+    std::thread _writer;
     std::ostream& _out;
     bool _paused = false;
     i64 _steps = 0; // updates to run while paused

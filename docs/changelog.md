@@ -164,6 +164,11 @@ releases may change APIs.
 
 ### Fixed
 
+- A game run with `--inspect` writes its answers on a thread of its own, so a
+  tool slow to read a large one (a world's snapshot, 219 KB in Lantern Vale)
+  no longer holds the game: watched by the studio, it lost a frame of up to
+  150 ms to each snapshot (31 in 8 s) and now loses none. Its own prints to
+  stdout still never land inside an answer.
 - The SDL_Renderer backend updates textures in place (`update_texture`,
   `write_texture`): it returned false, and callers made the whole texture
   again. Draws queued before an update show what the texture held.
@@ -569,6 +574,11 @@ releases may change APIs.
   grows, a plot moves on with them. Series take `chart_color()`, eight colours
   in an order checked for colour-blind readers; `map_color()` has Magma,
   Viridis and Gray. `games/charts_demo` shows them, with a dial.
+- A game run with `--inspect` records each frame's update, render and present
+  times and the interval since the frame before, and answers `frame.timing`
+  (it was refused); `frame.timing {since}` lists each frame after `since`
+  (`history`), for a profiler to plot. `ServerContext::FrameTiming` has
+  `present_ms`, `interval_ms` and `frame`; `record_frame_timing()` keeps one.
 - `kin/ui2/scale.hpp`: `Scale` (linear or log), `ticks()` (round values to mark,
   labelled), `tick_label()` ("10k", "1 kHz", "40 ms") and `nice_scale()`.
 - ui2 draws anti-aliased shapes through the Context (`line()` with a width,

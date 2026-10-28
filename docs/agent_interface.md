@@ -151,7 +151,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.drop` | `{path, x?, y?, space?}` | Drop a file on the window at `x`, `y` (or where the pointer is), as from the desktop: `Input::take_dropped_files` has it at the next tick. |
 | `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
-| `frame.timing` | `{reset?}` | Update and render wall time over the last 600 ticks: `last`, `mean` and `max`, in ms. `reset` clears the history after reporting. |
+| `frame.timing` | `{since?, reset?}` | Update, render and present wall time over the last 600 ticks (or frames drawn, inspected): `last`, `mean` and `max`, in ms. With `since` (a frame number; -1 for all kept), `history` lists each frame after it, oldest first: `frame`, `update_ms`, `render_ms`, `present_ms`, `interval_ms` (since the frame before began; 0 when ticked). `reset` clears the history after reporting. |
 | `ping` | none | `{"pong": true}`. |
 | `server.shutdown` | none | `{"bye": true}` and stop the server. |
 
@@ -177,7 +177,8 @@ game --inspect
 ```
 
 It answers what reads the game (`game.info`, `scene.stack`, `scene.current`,
-`scene.actions`, `world.snapshot`, `animation.diagnostics`, `ping`), and
+`scene.actions`, `world.snapshot`, `animation.diagnostics`, `ping`),
+`frame.timing` for the frames it draws (a profiler asks with `since`), and
 `server.status` with `paused`. Three methods hold its updates while it keeps
 drawing:
 
@@ -187,8 +188,11 @@ drawing:
 | `sim.resume` | none | Update again. |
 | `sim.step` | `{count?}` | Run N more updates (default 1), then hold. |
 
+Answers are written on a thread of their own, in order: a tool slow to read
+a large one holds that thread, not the game.
+
 `server.shutdown` quits the game. What drives a headless server (`sim.tick`,
-`sim.reset`, `input.*`, `view.screenshot`, `frame.timing`) is refused. When the
+`sim.reset`, `input.*`, `view.screenshot`) is refused. When the
 tool closes its end of stdin the game goes on, never left paused. Headless
 runs and builds without the scene server ignore `--inspect`, with a warning.
 

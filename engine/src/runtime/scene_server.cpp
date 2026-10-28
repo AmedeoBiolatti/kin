@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <deque>
 #include <filesystem>
 #include <iostream>
@@ -659,15 +661,18 @@ ServerResponse handle_server_status(ServerContext& ctx) {
 
 ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) {
     const std::deque<ServerContext::FrameTiming>& timings = ctx.frame_timings();
+    const auto total = [](const ServerContext::FrameTiming& t) { return t.update_ms + t.render_ms + t.present_ms; };
     ServerContext::FrameTiming sum{};
     ServerContext::FrameTiming max{};
+    f64 sum_total = 0.0;
     f64 max_total = 0.0;
     for (const ServerContext::FrameTiming& t : timings) {
         sum.update_ms += t.update_ms;
         sum.render_ms += t.render_ms;
+        sum_total += total(t);
         max.update_ms = std::max(max.update_ms, t.update_ms);
         max.render_ms = std::max(max.render_ms, t.render_ms);
-        max_total = std::max(max_total, t.update_ms + t.render_ms);
+        max_total = std::max(max_total, total(t));
     }
     const f64 n = timings.empty() ? 1.0 : static_cast<f64>(timings.size());
     const ServerContext::FrameTiming last = timings.empty() ? ServerContext::FrameTiming{} : timings.back();
@@ -684,9 +689,27 @@ ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) 
     json.begin_object();
     json.field("frames", static_cast<u64>(timings.size()));
     json.field("window", static_cast<u64>(ServerContext::frame_timing_window));
-    write(json, "last", last.update_ms, last.render_ms, last.update_ms + last.render_ms);
-    write(json, "mean", sum.update_ms / n, sum.render_ms / n, (sum.update_ms + sum.render_ms) / n);
+    write(json, "last", last.update_ms, last.render_ms, total(last));
+    write(json, "mean", sum.update_ms / n, sum.render_ms / n, sum_total / n);
     write(json, "max", max.update_ms, max.render_ms, max_total);
+    // Each frame after `since` (a frame number; -1: all kept), oldest first:
+    // what a tool plots, asking again with the last it has.
+    if (const JsonValue* since = params.find("since")) {
+        const i64 after = static_cast<i64>(since->as_number());
+        json.key("history").begin_array();
+        for (const ServerContext::FrameTiming& t : timings) {
+            if (t.frame > after) {
+                json.begin_object();
+                json.field("frame", t.frame);
+                json.field("update_ms", t.update_ms);
+                json.field("render_ms", t.render_ms);
+                json.field("present_ms", t.present_ms);
+                json.field("interval_ms", t.interval_ms);
+                json.end_object();
+            }
+        }
+        json.end_array();
+    }
     json.end_object();
     if (const JsonValue* reset = params.find("reset"); reset && reset->as_bool()) {
         ctx.clear_frame_timings();
@@ -995,19 +1018,28 @@ void ServerContext::step() {
     const auto update_start = clock::now();
     _scenes.update(scene_ctx);
     const auto render_start = clock::now();
+    auto present_start = render_start;
     if (_render) {
         _scenes.render(scene_ctx);
+        present_start = clock::now();
         _renderer.present();
     }
     const auto end = clock::now();
-    _timings.push_back({
-        .update_ms = std::chrono::duration<f64, std::milli>(render_start - update_start).count(),
-        .render_ms = std::chrono::duration<f64, std::milli>(end - render_start).count(),
+    const auto ms = [](clock::duration d) { return std::chrono::duration<f64, std::milli>(d).count(); };
+    record_frame_timing({
+        .update_ms = ms(render_start - update_start),
+        .render_ms = ms(present_start - render_start),
+        .present_ms = ms(end - present_start),
     });
+    ++_frame;
+}
+
+void ServerContext::record_frame_timing(FrameTiming timing) {
+    timing.frame = _timed_frames++;
+    _timings.push_back(timing);
     if (_timings.size() > frame_timing_window) {
         _timings.pop_front();
     }
-    ++_frame;
 }
 
 SceneContext ServerContext::make_context() {
@@ -1560,8 +1592,51 @@ struct LiveInspector::Shared {
     bool reading = true;
 };
 
+// Answers on their way to the tool, in order.
+struct LiveInspector::Outbox {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::deque<std::string> answers;
+    bool writing = false; // one is being written
+    bool closing = false;
+};
+
+namespace {
+
+// stdout's lock while an answer is written to std::cout: the game's own prints
+// to it (through stdio, as std::cout's are) wait, not landing inside the answer.
+class StdoutLock {
+public:
+    explicit StdoutLock(bool lock) : _locked(lock) {
+        if (_locked) {
+#if defined(_WIN32)
+            _lock_file(stdout);
+#else
+            flockfile(stdout);
+#endif
+        }
+    }
+    ~StdoutLock() {
+        if (_locked) {
+#if defined(_WIN32)
+            _unlock_file(stdout);
+#else
+            funlockfile(stdout);
+#endif
+        }
+    }
+    StdoutLock(const StdoutLock&) = delete;
+    StdoutLock& operator=(const StdoutLock&) = delete;
+
+private:
+    bool _locked;
+};
+
+} // namespace
+
 LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
     : _shared(std::make_shared<Shared>()),
+      _outbox(std::make_shared<Outbox>()),
       _out(out) {
     // The reader holds the shared state, so it can outlive this when it is
     // still blocked reading as the game ends (it is then left behind).
@@ -1575,10 +1650,49 @@ LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
         std::lock_guard<std::mutex> lock(shared->mutex);
         shared->reading = false;
     });
+    // The writer, too, holds what it shares: blocked by a tool that stopped
+    // reading as the game ends, it is left behind.
+    _writer = std::thread([outbox = _outbox, &out = _out] {
+        const bool to_stdout = &out == &std::cout;
+        std::unique_lock<std::mutex> lock(outbox->mutex);
+        for (;;) {
+            outbox->changed.wait(lock, [&] { return !outbox->answers.empty() || outbox->closing; });
+            if (outbox->answers.empty()) {
+                return; // closing, all written
+            }
+            const std::string answer = std::move(outbox->answers.front());
+            outbox->answers.pop_front();
+            outbox->writing = true;
+            lock.unlock();
+            {
+                const StdoutLock stdout_lock{to_stdout};
+                out << answer;
+                out.flush();
+            }
+            lock.lock();
+            outbox->writing = false;
+            outbox->changed.notify_all();
+        }
+    });
     KIN_LOG_INFO("server", "inspector listening on stdin");
 }
 
 LiveInspector::~LiveInspector() {
+    if (_writer.joinable()) {
+        // What is left goes out, unless the tool has stopped reading.
+        std::unique_lock<std::mutex> lock(_outbox->mutex);
+        _outbox->closing = true;
+        _outbox->changed.notify_all();
+        const bool written = _outbox->changed.wait_for(lock, std::chrono::seconds(2), [&] {
+            return _outbox->answers.empty() && !_outbox->writing;
+        });
+        lock.unlock();
+        if (written) {
+            _writer.join();
+        } else {
+            _writer.detach();
+        }
+    }
     if (!_reader.joinable()) {
         return;
     }
@@ -1616,6 +1730,21 @@ void LiveInspector::poll(ServerContext& ctx, const GameInfo* game) {
     }
 }
 
+void LiveInspector::flush() {
+    std::unique_lock<std::mutex> lock(_outbox->mutex);
+    _outbox->changed.wait(lock, [&] { return _outbox->answers.empty() && !_outbox->writing; });
+}
+
+void LiveInspector::send(const JsonValue* id, const ServerResponse& response) {
+    std::ostringstream line;
+    write_envelope(line, id, response);
+    {
+        std::lock_guard<std::mutex> lock(_outbox->mutex);
+        _outbox->answers.push_back(std::move(line).str());
+    }
+    _outbox->changed.notify_all();
+}
+
 bool LiveInspector::admit_update() {
     if (_paused) {
         if (_steps <= 0) {
@@ -1630,7 +1759,7 @@ bool LiveInspector::admit_update() {
 void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string_view line) {
     const JsonParseResult parsed = parse_json(strip_bom(line));
     if (!parsed.ok()) {
-        write_envelope(_out, nullptr, error_result("invalid JSON: " + parsed.error));
+        send(nullptr, error_result("invalid JSON: " + parsed.error));
         return;
     }
     const JsonValue& root = *parsed.value;
@@ -1678,12 +1807,12 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
             response = status();
         }
     } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
-               method == "view.screenshot" || method == "frame.timing" || method == "ui.snapshot") {
+               method == "view.screenshot" || method == "ui.snapshot") {
         response = error_result(method + " drives a headless server (--server); this game runs in its window");
     } else {
         response = dispatch_server_command(ctx, game, method, params);
     }
-    write_envelope(_out, id, response);
+    send(id, response);
 }
 
 } // namespace kin

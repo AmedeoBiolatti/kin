@@ -1105,6 +1105,14 @@ struct SceneAppSession::Impl {
                 const f64 accounted_ms = frame_update_total_ms + render_total_ms;
                 const f64 unaccounted_ms = std::max(0.0, frame_ms - accounted_ms);
                 const AppFrameStats& app_frame = ctx.app.frame_stats();
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector_context) { // the tool watching it reads these (frame.timing)
+                    inspector_context->record_frame_timing({.update_ms = frame_update_total_ms,
+                                                            .render_ms = render_scene_ms + overlay_ms,
+                                                            .present_ms = present_ms,
+                                                            .interval_ms = static_cast<f64>(app_frame.raw_frame_time) * 1000.0});
+                }
+#endif
                 debug_overlay.record("frame.update_total", frame_update_total_ms);
                 debug_overlay.record("frame.update_steps", static_cast<f64>(frame_update_steps));
                 debug_overlay.record("app.raw_frame", static_cast<f64>(app_frame.raw_frame_time) * 1000.0);

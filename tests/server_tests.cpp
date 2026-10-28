@@ -21,6 +21,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -609,6 +611,7 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
         R"({"id":6,"method":"scene.current"})" "\n"
         R"({"id":7,"method":"sim.tick","params":{"count":1}})" "\n"
         R"({"id":8,"method":"scene.current"})" "\n"
+        R"({"id":12,"method":"frame.timing","params":{"since":0}})" "\n"
         R"({"id":9,"method":"frame.timing","params":{"reset":true}})" "\n"
         R"({"id":10,"method":"frame.timing"})" "\n"
         R"({"id":11,"method":"server.shutdown"})" "\n");
@@ -636,8 +639,15 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
     assert(timing->int_at("window") == 600);
     assert(timing->find("mean")->find("total_ms")->as_number() >= 0.0);
     assert(timing->find("max")->find("update_ms")->as_number() >= timing->find("mean")->find("update_ms")->as_number());
+    assert(!timing->contains("history")); // not asked for
     const kin::JsonValue* after_reset = response_result(text, 10);
     assert(after_reset != nullptr && after_reset->int_at("frames") == 0);
+    // The frames after the first, each.
+    const kin::JsonValue* since = response_result(text, 12);
+    assert(since != nullptr); // (response_result's value is shared: `timing` is this now)
+    const auto& history = since->find("history")->items();
+    assert(history.size() == 2 && history[0].int_at("frame") == 1 && history[1].int_at("frame") == 2);
+    assert(history[1].find("render_ms")->as_number() >= 0.0 && history[1].find("interval_ms")->as_number() == 0.0);
 }
 
 void test_input_key_drives_a_text_edit() {
@@ -910,8 +920,12 @@ void test_live_inspector() {
     ctx.realize_scenes();
     kin::GameInfo game;
     game.title = "Inspected";
+    // Two frames drawn: their times, as scene_app records them.
+    ctx.record_frame_timing({.update_ms = 1.0, .render_ms = 2.0, .present_ms = 0.5, .interval_ms = 16.5});
+    ctx.record_frame_timing({.update_ms = 1.5, .render_ms = 3.0, .present_ms = 0.25, .interval_ms = 17.0});
 
     std::istringstream in(
+        R"({"id":10,"method":"frame.timing","params":{"since":-1}})" "\n"
         R"({"id":1,"method":"game.info"})" "\n"
         R"({"id":2,"method":"world.snapshot","params":{"raw":false,"events":false,"animations":false}})" "\n"
         R"({"id":3,"method":"sim.pause"})" "\n"
@@ -930,8 +944,13 @@ void test_live_inspector() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     assert(inspector.finished());
+    inspector.flush(); // answers are written on a thread of their own
     const std::string text = out.str();
     assert(response_result(text, 1)->string_at("title") == "Inspected");
+    const kin::JsonValue* frames = response_result(text, 10);
+    assert(frames && frames->int_at("frames") == 2 && frames->find("max")->find("total_ms")->as_number() == 4.75);
+    const auto& history = frames->find("history")->items();
+    assert(history.size() == 2 && history[0].int_at("frame") == 0 && history[1].find("interval_ms")->as_number() == 17.0);
     const kin::JsonValue* snapshot = response_result(text, 2);
     assert(snapshot && !snapshot->contains("world") && snapshot->contains("kin"));
     assert(text.find("server.actor") != std::string::npos);
@@ -954,6 +973,7 @@ void test_live_inspector() {
     kin::LiveInspector held{more, answers};
     for (int i = 0; i < 2000 && answers.str().find("bye") == std::string::npos; ++i) {
         held.poll(ctx, &game);
+        held.flush();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     assert(!app.running()); // server.shutdown quits the game
@@ -965,6 +985,59 @@ void test_live_inspector() {
     }
 }
 
+// A tool slow to read (a large answer filling the pipe) holds the inspector's
+// writer, not the game: poll() returns at once, and the answers follow, in
+// order, once the tool reads again.
+void test_live_inspector_slow_tool() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "slow", .width = 32, .height = 32, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<KinSnapshotScene>());
+    kin::ServerContext ctx{app, window, renderer, scenes, {.title = "slow"}, kin::make_key(1), 1.0f / 60.0f, false};
+    ctx.realize_scenes();
+
+    // A stream whose flush waits until the tool reads.
+    struct Gate : std::stringbuf {
+        std::mutex mutex;
+        std::condition_variable opened;
+        bool open = false;
+        int sync() override {
+            std::unique_lock<std::mutex> lock(mutex);
+            opened.wait(lock, [this] { return open; });
+            return std::stringbuf::sync();
+        }
+    } gate;
+    std::ostream out(&gate);
+    // The tool reads at last after 1.5 s (so a held game fails below, not hangs).
+    std::thread reads_late([&gate] {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        gate.opened.wait_for(lock, std::chrono::milliseconds(1500), [&gate] { return gate.open; });
+        gate.open = true;
+        gate.opened.notify_all();
+    });
+    std::istringstream in(R"({"id":1,"method":"ping"})" "\n"
+                          R"({"id":2,"method":"server.status"})" "\n");
+    kin::LiveInspector inspector{in, out};
+    for (int i = 0; i < 2000 && !inspector.finished(); ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        inspector.poll(ctx, nullptr);
+        assert(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500)); // never held
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(inspector.finished());
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        gate.open = true;
+    }
+    gate.opened.notify_all();
+    reads_late.join();
+    inspector.flush();
+    const std::string text = gate.str();
+    assert(response_result(text, 1) && response_result(text, 2));
+    assert(text.find("\"id\":1") < text.find("\"id\":2"));
+}
+
 int main() {
     test_json_parser();
     test_driven_server();
@@ -974,6 +1047,7 @@ int main() {
     test_animation_diagnostics_endpoint_missing_provider_errors();
     test_ui_snapshot_and_pointer_input();
     test_press_completes_a_ui2_click_and_frame_timing();
+    test_live_inspector_slow_tool();
     test_input_key_drives_a_text_edit();
     test_input_drop();
     test_sim_reset();
