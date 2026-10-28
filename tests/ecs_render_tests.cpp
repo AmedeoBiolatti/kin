@@ -1635,6 +1635,33 @@ void test_animators() {
     fs::remove_all(dir);
 }
 
+// Animators started in one update each play as their own say: starting one
+// gives its entity a player, which moves it out of the others' table.
+void test_animators_started_together() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_animators_together_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    kin::AnimationRegistryFragment fragment;
+    kin::Clip slide{.duration = 1.0f};
+    slide.properties.push_back({.property = "Transform2D.pos",
+                                .keys = {{.time = 0.0f, .value = kin::Vec2f{0.0f, 0.0f}}, {.time = 1.0f, .value = kin::Vec2f{100.0f, 0.0f}}}});
+    fragment.animations.push_back({.name = "slide", .root = kin::clip_node(std::move(slide))});
+    assert(kin::save_animation_registry_fragment(fragment, dir / "moves.kinanim"));
+
+    kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+    kin::Assets2D assets{renderer, dir};
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::EcsEntity moving = world.entity("moving").set(kin::Transform2D{}).set(kin::Animator{.asset = {.id = "moves.kinanim"}, .animation = "slide"});
+    kin::EcsEntity held = world.entity("held").set(kin::Transform2D{}).set(
+        kin::Animator{.asset = {.id = "moves.kinanim"}, .animation = "slide", .speed = 0.0f});
+    assert(assets.bind(world));
+    kin::update_animators(world, 0.5f);
+    assert(near(moving.get<kin::Transform2D>()->pos.x, 50.0f) && near(held.get<kin::Transform2D>()->pos.x, 0.0f));
+    fs::remove_all(dir);
+}
+
 int main() {
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
@@ -1672,6 +1699,7 @@ int main() {
     test_lights_blends_and_shader_effects();
     test_scene_text_translated();
     test_animators();
+    test_animators_started_together();
 #if KIN_ENABLE_AUDIO
     test_assets2d_binds_audio_emitters();
 #endif

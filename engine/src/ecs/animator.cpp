@@ -107,55 +107,62 @@ void update_animators(EcsWorld& world, f32 dt) {
     raw.each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
     for (const flecs::entity found : animated) {
         EcsEntity entity{found};
-        Animator& animator = *entity.get_mut<Animator>(); // its own, when it is a prefab's
-        if (!animator.library || !animator.properties) {
+        Animator* animator = entity.get_mut<Animator>(); // its own, when it is a prefab's
+        if (!animator->library || !animator->properties) {
             continue; // its file not bound yet (Assets2D)
         }
         // What it plays: a machine (by its name, marked apart from an animation's), or an animation.
-        const std::string wanted = animator.machine.empty() ? animator.animation : "machine:" + animator.machine;
-        const bool fresh = wanted != animator.current || animator.bound != animator.library.get() || !found.has<AnimationPlayer>();
+        const std::string wanted = animator->machine.empty() ? animator->animation : "machine:" + animator->machine;
+        const bool fresh = wanted != animator->current || animator->bound != animator->library.get() || !found.has<AnimationPlayer>();
         if (fresh) {
             // Another animation, or the file read again: from its start.
-            animator.current = wanted;
-            animator.bound = animator.library.get();
-            animator.time = 0.0f;
-            animator.finished = false;
-            animator.state.clear();
+            animator->current = wanted;
+            animator->bound = animator->library.get();
+            animator->time = 0.0f;
+            animator->finished = false;
+            animator->state.clear();
+            // Owning what it writes, and its player, move the entity to other
+            // tables and its Animator with them: what is needed meanwhile, kept here.
+            const std::shared_ptr<AnimationAssetLibrary> library = animator->library;
+            const PropertyRegistry* properties = animator->properties;
+            const std::string machine_name = animator->machine;
+            const std::string animation = animator->animation;
             AnimationPlayerConfig config;
-            config.registry = &animator.library->registry;
-            config.properties = animator.properties;
+            config.registry = &library->registry;
+            config.properties = properties;
             config.sprite_catalog = sprite_renderer_catalog(entity);
             AnimationPlayer player = make_animation_player(std::move(config));
             const flecs::id_t sprites = raw.component<SpriteRenderer>().id();
-            if (!animator.machine.empty()) {
-                const auto machine = animator.library->state_machines.find(animator.machine);
-                if (machine != animator.library->state_machines.end()) {
+            if (!machine_name.empty()) {
+                const auto machine = library->state_machines.find(machine_name);
+                if (machine != library->state_machines.end()) {
                     player.machine = machine->second;
                     // What any of its states plays, owned.
                     for (const auto& [state, played] : machine->second->states) {
-                        own_named(found, animator.library->registry, played, *animator.properties, sprites);
+                        own_named(found, library->registry, played, *properties, sprites);
                     }
                 }
-            } else if (!animator.animation.empty()) {
-                set_base(player, animator.animation);
-                own_named(found, animator.library->registry, animator.animation, *animator.properties, sprites);
+            } else if (!animation.empty()) {
+                set_base(player, animation);
+                own_named(found, library->registry, animation, *properties, sprites);
             }
             found.set<AnimationPlayer>(std::move(player));
+            animator = entity.get_mut<Animator>(); // where it is now
         }
         AnimationPlayer* player = found.get_mut<AnimationPlayer>();
         if (!player) {
             continue;
         }
         // The game's parameters: its triggers handed over once (the machine takes them).
-        player->params.bools = animator.params.bools;
-        player->params.floats = animator.params.floats;
-        player->params.triggers.insert(animator.params.triggers.begin(), animator.params.triggers.end());
-        animator.params.triggers.clear();
+        player->params.bools = animator->params.bools;
+        player->params.floats = animator->params.floats;
+        player->params.triggers.insert(animator->params.triggers.begin(), animator->params.triggers.end());
+        animator->params.triggers.clear();
         // A machine plays on through its states; an animation stops once played through.
-        player->playing = animator.playing && (player->machine || !animator.finished);
+        player->playing = animator->playing && (player->machine || !animator->finished);
         player->sprite_catalog = sprite_renderer_catalog(entity);
         if (!player->layers.empty()) {
-            player->layers.front().speed = animator.speed;
+            player->layers.front().speed = animator->speed;
         }
     }
 
