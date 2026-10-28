@@ -133,7 +133,7 @@ Native SDL_GPU exposes `render_sun_shadow()` and `render_surface()` as independe
 
 `GraphResourceDesc::array_layers` defaults to zero (a 2D texture). A positive count declares an explicit 2D array, including a one-layer array. Arrays require `GraphResourceKind::RenderAttachment` and `graph_feature::attachment_arrays` / `Renderer2D::capabilities().render_attachment_arrays`. Direct allocation uses `create_render_attachment(size, format, layers)`. Payload budgets multiply by the layer count; slot compatibility and imports distinguish 2D textures from one-layer arrays. Custom shaders must declare the corresponding sampler type. Ordinary 2D uploads and the twelve reserved 3D material texture slots do not accept arrays; extra material inputs below accept sampled 2D arrays.
 
-A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun/local depth and a compute-produced lighting texture/palette → mesh colour/depth with a toon lighting hook → GPU ASCII → output, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
+A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun/local depth and compute lighting data → HDR mesh shading → stock bloom/view output → GPU ASCII → presentation, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
 
 ```cpp
 // Resources: sun = D32F array, colour = working-colour target, depth = D32F 2D.
@@ -155,7 +155,7 @@ return bool(r3d.render_surface(
 
 The returned `SunShadow3D` holds the texture plus `ShadowCascades3D` projection/bias-scale metadata. It is a binding to mutable texture contents. Keep projection and depth versions together; use distinct persistent or ping-pong resources for history. A developer may supply a custom projection/map by constructing the same value. Finite matrices, positive texel/depth scales, valid cascade ranges, sampler format and ownership are checked before recording. Stock shading uses the comparison/PCF material interface; custom shaders can implement other algorithms through the material inputs below.
 
-`render_surface()` clears single-sample colour/depth and shades scene meshes with the exact unjittered camera projection. It includes stock materials/custom material shaders, opaque and masked draws, ordered transparency, wireframes, overlays, explicit environment lighting and point/spot lights with optional supplied local shadows. Colour uses the current Renderer2D working format (including linear HDR); it performs no view tonemapping. Depth is stored for later graph consumers. Overlay depth uses the stock split range; blended materials test depth without writing it.
+`render_surface()` clears single-sample colour/depth and shades scene meshes with the exact unjittered camera projection. It includes stock materials/custom material shaders, opaque and masked draws, ordered transparency, wireframes, overlays, explicit environment lighting and point/spot lights with optional supplied local shadows. Colour uses the current Renderer2D working format, or an explicit linear RGBA16F `linear_colour` attachment as described below; surface recording performs no view tonemapping. Depth is stored for later graph consumers. Overlay depth uses the stock split range; blended materials test depth without writing it.
 
 Pass `sun_shadow = nullptr` to shade without sun shadows. No shadow map is generated implicitly. Scene switches for shadow generation, sky, fog, particles, AO, GI, TAA and postprocessing do not add work to this operation. Procedural sky lighting is also omitted; an explicitly supplied environment may be filtered on first use. Fill-shadow inputs and these effects remain future public operations. Geometry/surface culling disables temporal occlusion, and neither operation advances a stock view's history or modifies its private shadow maps.
 
@@ -240,3 +240,33 @@ The example keeps 121 fixed-size snapshots at 30 Hz, spanning at most four secon
 A compute pass writes both transport fields into one 384 x 192 RGBA16F texture. Custom materials read that field and the imported history buffer to draw two ground-plane views. Every access is declared in the graph. The history buffer is 3,872 bytes and is uploaded before material preparation; bindings are reused while physical handles stay unchanged. There is no CPU readback in the live rendering path. Explicit test/capture modes use readback.
 
 This is a classical, restricted transport demonstration. It does not render delayed images of arbitrary moving meshes, occlude the eye leg, or model bounces, scattering, special relativity, Doppler, aberration or radiometric ground truth. Energy uses a simple cosine factor and softened inverse-square falloff in arbitrary units; a constant display fill keeps the diagram readable. The instantaneous comparison uses the same appearance model. These approximation choices belong to the example.
+
+## Bloom and view output
+
+Native `Renderer3D::render_bloom()` and `render_output()` expose the stock finishing operations independently of a `View3D`. Check `RendererCapabilities3D::bloom_pass` / `output_pass`; unsupported backends return owned diagnostics. Both operations use the same recording code as stock views. They do not render geometry, advance temporal history, generate implicit effects or allocate their own render targets.
+
+`SurfaceTargets3D::linear_colour` optionally selects a sampled RGBA16F render attachment instead of the working-format `colour` target. Set exactly one of them, with matching D32F depth. This keeps scene radiance linear and premultiplied, including values above one, regardless of the 2D renderer's working format. Existing `colour` calls keep their working-format behavior. The explicit HDR target participates in the same ownership, feedback, revision, culling and prepared-scene rules.
+
+```cpp
+// HDR colour/result/scratch: GraphResourceKind::RenderAttachment, RGBA16F.
+// Output: GraphResourceKind::ColorTarget, matching renderer.hdr().
+// surface writes {hdr, depth}; bloom reads {hdr}, writes {glow, scratch};
+// finish reads {hdr, glow}, writes {output}.
+if (!r3d.render_surface({.depth = resources.texture(depth),
+                         .linear_colour = resources.texture(hdr)}, prepared)) return false;
+if (!r3d.render_bloom({resources.texture(glow), resources.texture(scratch)},
+                      resources.texture(hdr), {.threshold = 1.f})) return false;
+return bool(r3d.render_output(resources.target(output), resources.texture(hdr),
+                              {.bloom = resources.texture(glow),
+                               .bloom_strength = .3f, .exposure = 1.1f}));
+```
+
+Bloom takes linear premultiplied RGBA16F input plus two distinct, matching RGBA16F render attachments. HDR working render targets are also accepted. The result and scratch may have a different extent from the source; stock parity uses `max(1, source_extent / 2)` per axis. The operation extracts luminance above a finite nonnegative threshold, then records two separable nine-tap Gaussian blur rounds at increasing tap spacing. Five draws leave the final bloom in `targets.result`. Extraction precedes exposure. Both intermediates are internal reads/writes of this atomic operation; declare them as writes of its graph pass rather than graph-level feedback reads. The graph must keep both live through the operation.
+
+Output reads linear premultiplied RGBA16F colour and optional bloom, replacing the entire supplied working-format `RenderTarget` without blending. Bloom strength and exposure must be finite and nonnegative; positive strength requires a bloom input. Sources can differ in size from the output and are sampled with the stock linear sampler. Gamma SDR output applies ACES/exposure and encodes to sRGB; linear SDR output applies ACES/exposure and uses the target's automatic sRGB storage. `tone_map_sdr=false` selects encoding without tone mapping or exposure. HDR working output remains linear and unexposed for the 2D frame's finishing stage, so it is not tone-mapped twice. `dither=true` requests the stock stable one-step noise when explicitly encoding gamma SDR, with the same available-shader fallback as stock skies.
+
+The stock alpha contract is preserved: covered colour is unpremultiplied for ACES/exposure and premultiplied again, additive colour can survive zero coverage, and bloom can extend coverage over a transparent background. Input values must follow that contract; the operation does not scan GPU pixels to infer their colour encoding or alpha convention.
+
+Validation rejects incompatible formats/usages, arrays, foreign devices, mismatched bloom intermediates and any active output feedback before recording. Queued resources are retained; CPU uploads after a recorded public post-process read/write or surface write submit earlier work before updating, expiring frame-scoped preparation without an explicit device-idle wait. GPU producers remain in-frame. Written texture revisions invalidate material-input history as usual. A recording failure can leave partial output; stop subsequent graph operations. `debug_stats().bloom_draws` / `output_draws` report these fullscreen draws for both stock and public paths, separate from mesh counts.
+
+The [surface graph example](../tools/surface3d/main.cpp) now records explicit HDR toon shading → stock bloom/output → GPU ASCII. Its reference/optimized pictures, cached plans, warmed GPU allocations and working-space transitions are checked by `kin_surface3d --test`. Public sky/fog/particles, screen-space effects and temporal resolve remain separate migration work.

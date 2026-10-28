@@ -76,6 +76,7 @@ struct RendererCapabilities3D {
     bool shared_preparation = false;
     bool material_inputs = false;
     bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
+    bool bloom_pass = false, output_pass = false;
 };
 
 struct ViewOptions3D {
@@ -138,6 +139,23 @@ struct LocalShadows3D {
 struct SurfaceTargets3D {
     RenderTarget colour; // current Renderer2D working colour format
     Texture depth;       // sampled D32F 2D, same extent; stores reverse-Z depth
+    // Alternative to colour: explicit linear, premultiplied RGBA16F attachment.
+    // Set exactly one colour target. Independent of the 2D working format.
+    Texture linear_colour;
+};
+struct BloomTargets3D {
+    Texture result, scratch; // distinct sampled RGBA16F render attachments, matching extents
+};
+struct BloomOptions3D {
+    f32 threshold = 1; // linear luminance, before exposure
+};
+struct OutputOptions3D {
+    Texture bloom; // optional linear RGBA16F input; required with positive strength
+    f32 bloom_strength = 0, exposure = 1;
+    // ACES and exposure for 8-bit output. HDR working output remains linear,
+    // unexposed, for the 2D frame's own output stage. False: encode only.
+    bool tone_map_sdr = true;
+    bool dither = false; // stable pixel noise when encoding to a gamma 8-bit target
 };
 struct SurfaceOptions3D {
     Color background = colors::transparent;
@@ -262,6 +280,12 @@ public:
     }
     virtual bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
                                 RenderDebugStats3D&) {
+        return false;
+    }
+    virtual bool render_bloom(const BloomTargets3D&, const Texture&, const BloomOptions3D&, RenderDebugStats3D&) {
+        return false;
+    }
+    virtual bool render_output(const RenderTarget&, const Texture&, const OutputOptions3D&, RenderDebugStats3D&) {
         return false;
     }
     // What `pixel` of the view's last render shows; waits for the GPU.

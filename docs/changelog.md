@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Expose stock bloom and view output as native graph operations with explicit inputs, intermediate/output targets,
+  exposure/ACES, alpha handling and output encoding. Allow independent linear HDR surface attachments, share recording
+  with stock views, and extend the surface graph with HDR toon → bloom/output → ASCII.
+
 - Add a standalone slow-light prototype comparing instantaneous and delayed direct illumination, with moving-source
   and photon-time occluder history, fixed memory bounds, interactive controls and deterministic GPU/CPU checks.
   Simulation and shaders stay in the example; the engine and stock renderer are unchanged.

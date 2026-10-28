@@ -120,3 +120,13 @@ See [the model and run instructions](render_graph.md#standalone-slow-light-proto
 
 
 Validation: analytic CPU checks and GPU/CPU transport probes pass on hardware and software Vulkan, together with the existing surface/material-input regressions. Optimized/reference images match exactly, bounded history and warmed GPU resource reuse pass, the 90-frame live loop exits, CPU sanitizers pass and all 196 formatted 3D files pass. Illumination, delay and exhausted-history captures have been inspected; artifact paths and scope are recorded in [prototype measurements](rendering_measurements.md#standalone-slow-light-prototype).
+
+
+## Stage 10: public bloom and view output
+
+Native `render_bloom()` and `render_output()` share the stock five-draw bloom recorder and view finishing recorder. Graphs own the linear colour, bloom/scratch and working-format output targets; optional explicit `SurfaceTargets3D::linear_colour` supports HDR shading independently of global 2D colour space. Existing surface/view calls retain their behavior. Both public operations preserve premultiplied/additive coverage, SDR ACES/exposure, HDR linear passthrough and stable gamma dithering, with explicit validation, resource retention and content revisions. Stock views now report these fullscreen draws separately and propagate recording failures.
+
+The surface graph example records HDR toon → bloom/output → ASCII, with cached plans, stable allocations and exact-format attachments retained through working-space changes. Public sky/fog/particles, screen-space effects and temporal resolve remain subsequent work. See [the API contract](render_graph.md#bloom-and-view-output).
+
+
+Validation: complete native 3D dispatch, eighteen focused hardware checks (three inherited live-device lifecycle skips), all sixteen software Vulkan checks, browser smoke, four unchanged stock captures, 2D-only graph compilation and the 197-file formatting gate pass. New coverage includes exact stock/public output across working spaces, independent alpha/exposure/HDR/dither checks, transparent bloom coverage, queued CPU read/write ordering, resource ownership/lifetime, TAA interleaving/revisions and warmed allocation reuse. Artifact paths and the temporary-workspace recovery are recorded in [the measurements](rendering_measurements.md#public-bloom-and-view-output).

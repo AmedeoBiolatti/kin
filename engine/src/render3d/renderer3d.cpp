@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <kin/assets/bake_cache.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/log.hpp>
@@ -472,14 +473,51 @@ Status3D Renderer3D::render_surface(const SurfaceTargets3D& targets, const Prepa
         return status3d(false, _errors);
     }
     const auto start = std::chrono::steady_clock::now();
-    const bool ok = prepared.backend() && targets.colour && targets.depth &&
-                    targets.depth.format() == TextureFormat::Depth32Float && !targets.depth.array_layers() &&
-                    targets.colour.size() == targets.depth.size() &&
+    const auto& colour = targets.linear_colour ? targets.linear_colour : targets.colour.texture();
+    const bool ok = prepared.backend() && bool(targets.colour) != bool(targets.linear_colour) && colour &&
+                    (!targets.linear_colour || targets.linear_colour.format() == TextureFormat::Rgba16Float) &&
+                    targets.depth && targets.depth.format() == TextureFormat::Depth32Float &&
+                    !targets.depth.array_layers() && colour.size() == targets.depth.size() &&
                     _backend->render_surface(targets, *prepared.backend(), options, _stats);
     _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (!ok)
         fail3d(_errors, "Renderer3D::render_surface", "incompatible/expired inputs or GPU surface recording failed");
     return status3d(ok, _errors);
+}
+
+Status3D Renderer3D::render_bloom(const BloomTargets3D& targets, const Texture& source, const BloomOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::render_bloom", reason);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().bloom_pass)
+        return fail("bloom operation unavailable on this backend");
+    if (!std::isfinite(options.threshold) || options.threshold < 0)
+        return fail("threshold must be finite and nonnegative");
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend->render_bloom(targets, source, options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return ok ? status3d(true, _errors) : fail("incompatible bloom inputs/attachments or GPU recording failed");
+}
+
+Status3D Renderer3D::render_output(const RenderTarget& target, const Texture& source, const OutputOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* reason) {
+        fail3d(_errors, "Renderer3D::render_output", reason);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().output_pass)
+        return fail("output operation unavailable on this backend");
+    if (!std::isfinite(options.exposure) || options.exposure < 0 || !std::isfinite(options.bloom_strength) ||
+        options.bloom_strength < 0 || (options.bloom_strength > 0 && !options.bloom))
+        return fail("requires finite nonnegative exposure/bloom strength and bloom for positive strength");
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend->render_output(target, source, options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return ok ? status3d(true, _errors) : fail("incompatible output inputs/target or GPU recording failed");
 }
 
 bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {

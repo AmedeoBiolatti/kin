@@ -23,6 +23,7 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 graph_passes = 0, graph_culled_passes = 0;
     f64 graph_compile_ms = 0, graph_record_ms = 0;  // CPU, never GPU timestamps
     bool geometry_graph_reused = false;             // stock prepass geometry subgraph cache
+    u32 bloom_draws = 0, output_draws = 0;          // shared stock/public fullscreen recorders
     u32 geometry_draws = 0, geometry_instances = 0; // standalone geometry; stock prepass also keeps ao_* counters
     // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
     u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;

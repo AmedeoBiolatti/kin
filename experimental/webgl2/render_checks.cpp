@@ -131,6 +131,9 @@ void check_webgl_instances(Renderer2D& r, Renderer3D& r3d) {
             "Unsupported material inputs must fail explicitly");
     require(!r3d.capabilities().local_shadow_pass && !r3d.render_local_shadows({}, {}, {}, {64, 64}),
             "Unsupported local shadow operation must fail explicitly");
+    require(!r3d.capabilities().bloom_pass && !r3d.capabilities().output_pass && !r3d.render_bloom({}, {}) &&
+                !r3d.render_output({}, {}),
+            "Unsupported bloom/output operations must fail explicitly");
     const auto unsupported = r3d.render_geometry({}, {});
     require(!unsupported && !unsupported.diagnostics.empty(), "Unsupported geometry must return diagnostics");
     require(!r.create_render_attachment({64, 64}, TextureFormat::Depth32Float),

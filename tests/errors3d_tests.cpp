@@ -104,6 +104,10 @@ void resources() {
     }
     if (!renderer.capabilities().surface_pass)
         assert(!renderer.render_surface({}, {}));
+    if (!renderer.capabilities().bloom_pass)
+        assert(!renderer.render_bloom({}, {}));
+    if (!renderer.capabilities().output_pass)
+        assert(!renderer.render_output({}, {}));
     const auto root = std::filesystem::temp_directory_path() /
                       ("kin-errors3d-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);

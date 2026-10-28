@@ -1,4 +1,4 @@
-// Public graph: shadows + compute lighting data -> toon material -> GPU ASCII -> presentation.
+// Public graph: shadows + compute data -> HDR toon -> bloom/output -> ASCII -> presentation.
 #include "surface3d_shader.hpp"
 
 #include <algorithm>
@@ -28,6 +28,7 @@ int main(int argc, char** argv) {
         const auto features = available_graph_features(renderer);
         if (!r3d.capabilities().surface_pass || !r3d.capabilities().sun_shadow_pass ||
             !r3d.capabilities().local_shadow_pass || !r3d.capabilities().material_inputs ||
+            !r3d.capabilities().bloom_pass || !r3d.capabilities().output_pass ||
             !(features & graph_feature::attachment_arrays) || !(features & graph_feature::compute) ||
             !(features & graph_feature::buffers)) {
             std::cerr
@@ -49,7 +50,10 @@ int main(int argc, char** argv) {
                             .format = TextureFormat::Depth32Float,
                             .size = {512, 512},
                             .array_layers = 4},
-                           {.name = "colour", .kind = GraphResourceKind::ColorTarget, .size = size},
+                           {.name = "colour",
+                            .kind = GraphResourceKind::RenderAttachment,
+                            .format = TextureFormat::Rgba16Float,
+                            .size = size},
                            {.name = "depth",
                             .kind = GraphResourceKind::RenderAttachment,
                             .format = TextureFormat::Depth32Float,
@@ -65,22 +69,37 @@ int main(int argc, char** argv) {
                            {.name = "light_pattern",
                             .kind = GraphResourceKind::StorageTexture,
                             .format = TextureFormat::Rgba16Float,
-                            .size = {64, 64}}};
-        graph.passes = {{.name = "material_data",
-                         .writes = {6, 7},
-                         .required_features = graph_feature::compute | graph_feature::buffers},
-                        {.name = "sun",
-                         .writes = {0},
-                         .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
-                        {.name = "local",
-                         .writes = {5},
-                         .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
-                        {.name = "surface",
-                         .reads = {0, 5, 6, 7},
-                         .writes = {1, 2},
-                         .required_features = graph_feature::rendering3d},
-                        {.name = "ascii", .reads = {1}, .writes = {3}, .required_features = graph_feature::shaders},
-                        {.name = "output", .reads = {3}, .writes = {4}, .required_features = graph_feature::raster}};
+                            .size = {64, 64}},
+                           {.name = "bloom",
+                            .kind = GraphResourceKind::RenderAttachment,
+                            .format = TextureFormat::Rgba16Float,
+                            .size = {320, 224}},
+                           {.name = "bloom_scratch",
+                            .kind = GraphResourceKind::RenderAttachment,
+                            .format = TextureFormat::Rgba16Float,
+                            .size = {320, 224}},
+                           {.name = "finished", .kind = GraphResourceKind::ColorTarget, .size = size}};
+        graph.passes = {
+            {.name = "material_data",
+             .writes = {6, 7},
+             .required_features = graph_feature::compute | graph_feature::buffers},
+            {.name = "sun",
+             .writes = {0},
+             .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
+            {.name = "local",
+             .writes = {5},
+             .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
+            {.name = "surface",
+             .reads = {0, 5, 6, 7},
+             .writes = {1, 2},
+             .required_features = graph_feature::rendering3d},
+            {.name = "bloom",
+             .reads = {1},
+             .writes = {8, 9},
+             .required_features = graph_feature::attachments | graph_feature::rendering3d},
+            {.name = "finish", .reads = {1, 8}, .writes = {10}, .required_features = graph_feature::rendering3d},
+            {.name = "ascii", .reads = {10}, .writes = {3}, .required_features = graph_feature::shaders},
+            {.name = "output", .reads = {3}, .writes = {4}, .required_features = graph_feature::raster}};
         ResourceGraphCompiler compiler;
         GraphResources resources;
         Scene3D scene;
@@ -126,7 +145,7 @@ int main(int argc, char** argv) {
             check(bool(prepared), "scene preparation failed");
             SunShadow3D shadow;
             LocalShadows3D local;
-            const std::array<std::function<bool()>, 6> operations{
+            const std::array<std::function<bool()>, 8> operations{
                 [&] {
                     const std::array outputs{resources.texture(7)};
                     const std::array buffers{resources.buffer(6)};
@@ -151,13 +170,22 @@ int main(int argc, char** argv) {
                 },
                 [&] {
                     return bool(r3d.render_surface(
-                        {resources.target(1), resources.texture(2)}, prepared,
+                        {.depth = resources.texture(2), .linear_colour = resources.texture(1)}, prepared,
                         {.background = Color::rgb(20, 25, 35), .sun_shadow = &shadow, .local_shadows = &local}));
+                },
+                [&] {
+                    return bool(r3d.render_bloom({resources.texture(8), resources.texture(9)}, resources.texture(1),
+                                                 {.threshold = .8f}));
+                },
+                [&] {
+                    return bool(
+                        r3d.render_output(resources.target(10), resources.texture(1),
+                                          {.bloom = resources.texture(8), .bloom_strength = .3f, .exposure = 1.1f}));
                 },
                 [&] {
                     auto target = renderer.scoped_render_target(resources.target(3));
                     renderer.clear(colors::black);
-                    renderer.draw_shader_surface(rect, ascii, params, resources.texture(1));
+                    renderer.draw_shader_surface(rect, ascii, params, resources.texture(10));
                     return true;
                 },
                 [&] {
@@ -195,16 +223,17 @@ int main(int argc, char** argv) {
             check(stats.device_waits == 0 && stats.shadow_draws == 0 && stats.taa_dispatches == 0 &&
                       stats.gi_dispatches == 0,
                   "surface recorded implicit effects or waited");
-            const auto array = resources.texture(0);
+            const auto array = resources.texture(0), hdr_colour = resources.texture(1);
             check(renderer.set_color_space(ColorSpace::Linear, true), "HDR unavailable");
             for (auto& resource : graph.resources)
                 if (resource.kind == GraphResourceKind::ColorTarget)
                     resource.hdr = true;
             picture(false);
             renderer.present();
-            check(resources.texture(0) == array, "HDR transition replaced data array");
+            check(resources.texture(0) == array && resources.texture(1) == hdr_colour,
+                  "HDR working transition replaced exact-format data attachments");
             std::cout << "Surface graph: exact reference pixels, cached plans, stable allocations, HDR, explicit "
-                         "sun/local shadows, GPU material texture/buffer inputs, toon lighting and ASCII\n";
+                         "sun/local shadows, GPU material inputs, HDR toon, stock bloom/output and ASCII\n";
         } else
             app.run([&](f32 dt) { angle += dt * 20; },
                     [&](f32) {

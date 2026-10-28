@@ -1350,8 +1350,7 @@ too, and skips `*.inc.glsl`; see `examples/CMakeLists.txt`);
 `r3d.compile_material_shader(path)` compiles GLSL at run time with glslc, for
 development. Resource layouts are reflected and validated; automatic 3D shader hot reload is not provided.
 Signal Breach's hit shields (`examples/shaders/shield.frag.glsl`: Fresnel rim
-and climbing lines, additive) are one. Passes of your own on an HDR view are
-not offered: draw into the view's texture with the 2D renderer's shaders.
+and climbing lines, additive) are one. For a custom HDR pipeline, use explicit surface attachments and the public bloom/output operations below.
 
 ### Custom lighting responses
 
@@ -1406,6 +1405,12 @@ Use `std::array<Texture, N>` / `std::array<DataBuffer, N>` or spans at the facto
 Sampled inputs support float or unsigned 2D and explicit 2D-array images, including raw depth and depth-comparison samplers. An explicit one-layer array still needs an array sampler. RGBA8/compressed colour textures use their texture scale mode; float data, integer and raw-depth inputs use nearest filtering. Depth-comparison inputs use the native reverse-Z comparison sampler. Separate sampler-state overrides for these extra inputs are not exposed. Descriptor arrays, cube/3D/MSAA/signed-integer images, storage images and writable fragment buffers are outside this profile. Custom light blocks still select up to sixteen points and sixteen spots.
 
 A set owns its allocations and shader, while queued work retains bound resources through submission. Observing/releasing handles after renderer destruction is safe; shader/input `valid()` becomes false. Recording and mutation remain ordered on the renderer thread. Surface/view feedback is rejected. For graph dependencies, ping-pong history, CPU-upload frame boundaries and TAA revision handling, see [graph resources in materials](render_graph.md#graph-resources-in-materials). Materials files and ECS reflection do not serialize runtime binding sets; the application assigns them after resolving graph resources.
+
+### Bloom and output in custom graphs
+
+Native `render_bloom()` and `render_output()` expose the same bloom, exposure/ACES, alpha handling and output encoding used by stock views. Their render targets and intermediate storage belong to the caller/graph; no view or private history is required. `render_surface()` can select an explicit linear RGBA16F `linear_colour` attachment, independently of the 2D working format, so a custom graph can shade in HDR and finish into an SDR target without changing global renderer state.
+
+Check `capabilities().bloom_pass` / `output_pass`. Bloom uses a threshold extraction plus two separable blur rounds and leaves its result in the first of two supplied RGBA16F attachments. Output combines optional bloom and encodes to the current working target; exposure/ACES apply to SDR, while HDR stays linear for the 2D frame's final tone mapping. Covered and additive alpha follow the stock contract. See [the complete contract and example](render_graph.md#bloom-and-view-output) for graph accesses, typed targets, validation, lifetime and counters.
 
 ## Models
 

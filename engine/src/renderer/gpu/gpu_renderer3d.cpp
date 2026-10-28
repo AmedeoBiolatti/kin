@@ -1416,6 +1416,12 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _shadow_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT && _shadow_shader && _shadow_vertex_shader;
     _capabilities.local_shadow_pass = _capabilities.sun_shadow_pass && _lights_available;
     _capabilities.material_inputs = bool(_vertex_shader && _fragment_shader);
+    _capabilities.bloom_pass =
+        _bloom_shader && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                                      SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    _capabilities.output_pass =
+        _output_shader && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
+                                                       SDL_GPU_TEXTUREUSAGE_SAMPLER);
 }
 
 GpuRenderer3D::~GpuRenderer3D() {
@@ -2793,69 +2799,152 @@ void GpuRenderer3D::blur_screen_space_both(SDL_GPUCommandBuffer* commands, GpuVi
     dispatch(view._ao_raw, view._ao_across, view._contact_raw, view._contact_across);
 }
 
-void GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
-                                bool dither) {
-    const auto pass_into = [&](const GpuTexture& target, SDL_GPUGraphicsPipeline* p,
-                               std::span<const SDL_GPUTexture* const> sources, const f32(&params)[4]) {
-        if (!p) {
-            return;
-        }
-        SDL_GPUColorTargetInfo colour{};
-        colour.texture = target.handle();
-        colour.load_op = SDL_GPU_LOADOP_DONT_CARE; // all of it is written
-        colour.store_op = SDL_GPU_STOREOP_STORE;
-        colour.cycle = true;
-        SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
-        if (!pass) {
-            return;
-        }
-        set_viewport(pass, target.width(), target.height());
-        SDL_BindGPUGraphicsPipeline(pass, p);
-        std::array<SDL_GPUTextureSamplerBinding, 2> bindings{};
-        for (std::size_t i = 0; i < sources.size(); ++i) {
-            bindings[i] = {.texture = const_cast<SDL_GPUTexture*>(sources[i]), .sampler = _owner->_sampler_linear};
-        }
-        SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(sources.size()));
-        SDL_PushGPUFragmentUniformData(commands, 0, params, sizeof(params));
-        SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
-        SDL_EndGPURenderPass(pass);
+bool GpuRenderer3D::post_pass(SDL_GPUCommandBuffer* commands, const GpuTexture& target, SDL_GPUShader* shader,
+                              std::span<const SDL_GPUTexture* const> sources, const std::array<f32, 4>& params) {
+    auto* pipeline = fullscreen(shader, target.format());
+    if (!pipeline)
+        return false;
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = target.handle();
+    colour.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    auto* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+    if (!pass)
+        return false;
+    set_viewport(pass, target.width(), target.height());
+    SDL_BindGPUGraphicsPipeline(pass, pipeline);
+    std::array<SDL_GPUTextureSamplerBinding, 2> bindings{};
+    for (std::size_t i = 0; i < sources.size(); ++i)
+        bindings[i] = {.texture = const_cast<SDL_GPUTexture*>(sources[i]), .sampler = _owner->_sampler_linear};
+    SDL_BindGPUFragmentSamplers(pass, 0, bindings.data(), static_cast<u32>(sources.size()));
+    SDL_PushGPUFragmentUniformData(commands, 0, params.data(), sizeof(params));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    return true;
+}
+
+bool GpuRenderer3D::record_bloom(SDL_GPUCommandBuffer* commands, const GpuTexture& source, const GpuTexture& result,
+                                 const GpuTexture& scratch, f32 threshold, RenderDebugStats3D& stats) {
+    const auto pass = [&](const GpuTexture& target, const GpuTexture& from, const std::array<f32, 4>& params) {
+        const SDL_GPUTexture* image = from.handle();
+        if (!post_pass(commands, target, _bloom_shader.handle(), std::span{&image, 1}, params))
+            return false;
+        ++stats.bloom_draws;
+        return true;
     };
-    const bool bloom = !plain && view._options.bloom > 0.0f && view._bloom_a && view._bloom_b;
-    if (bloom) {
-        SDL_GPUGraphicsPipeline* p = fullscreen(_bloom_shader.handle(), hdr_format);
-        const SDL_GPUTexture* scene = source.handle();
-        const SDL_GPUTexture* a = view._bloom_a.handle();
-        const SDL_GPUTexture* b = view._bloom_b.handle();
-        const f32 w = static_cast<f32>(view._bloom_a.width()), h = static_cast<f32>(view._bloom_a.height());
-        const f32 extract[4] = {0.0f, view._options.bloom_threshold, 1.0f / static_cast<f32>(view._size.x),
-                                1.0f / static_cast<f32>(view._size.y)};
-        pass_into(view._bloom_a, p, std::span{&scene, 1}, extract);
-        // Twice across and down, the second with taps twice as far apart: a
-        // wider, smoother glow for little more work.
-        for (int i = 0; i < 2; ++i) {
-            const f32 step = static_cast<f32>(i + 1);
-            const f32 across[4] = {1.0f, 0.0f, step / w, 0.0f};
-            const f32 down[4] = {1.0f, 0.0f, 0.0f, step / h};
-            pass_into(view._bloom_b, p, std::span{&a, 1}, across);
-            pass_into(view._bloom_a, p, std::span{&b, 1}, down);
-        }
+    const f32 w = static_cast<f32>(result.width()), h = static_cast<f32>(result.height());
+    if (!pass(result, source, {0, threshold, 1.f / source.width(), 1.f / source.height()}))
+        return false;
+    // Exactly the stock extraction plus two across/down Gaussian rounds.
+    for (int i = 0; i < 2; ++i) {
+        const f32 step = static_cast<f32>(i + 1);
+        if (!pass(scratch, result, {1, 0, step / w, 0}) || !pass(result, scratch, {1, 0, 0, step / h}))
+            return false;
     }
-    // Out to the 2D pipeline's format: tonemapped and encoded for a gamma
-    // one, tonemapped for an sRGB-stored one, left HDR for a float one.
-    const SDL_GPUTextureFormat output = view._output_format;
-    // A plain (8-bit) view has no exposure or tonemap: its light is cut off at white, as drawn without
-    // temporal anti-aliasing, and only encoded for a gamma target.
-    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.0f : 2.0f)
-                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM      ? 0.0f
-                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.0f
-                                                                           : 2.0f;
-    const std::array<const SDL_GPUTexture*, 2> sources{source.handle(),
-                                                       bloom ? view._bloom_a.handle() : source.handle()};
-    const f32 params[4] = {bloom ? view._options.bloom : 0.0f, plain ? 1.0f : view._options.exposure, mode, 0.0f};
-    pass_into(
-        view._resolved->texture(),
-        fullscreen(dither && _output_dither_shader ? _output_dither_shader.handle() : _output_shader.handle(), output),
-        sources, params);
+    return true;
+}
+
+bool GpuRenderer3D::record_output(SDL_GPUCommandBuffer* commands, const GpuTexture& source, const GpuTexture& target,
+                                  const GpuTexture* bloom, const OutputOptions3D& options, RenderDebugStats3D& stats) {
+    const auto output = target.format();
+    const bool plain = !options.tone_map_sdr;
+    const f32 mode = plain ? (output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 3.f : 2.f)
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM      ? 0.f
+                     : output == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB ? 1.f
+                                                                           : 2.f;
+    const std::array<const SDL_GPUTexture*, 2> sources{source.handle(), bloom ? bloom->handle() : source.handle()};
+    if (!post_pass(commands, target,
+                   options.dither && _output_dither_shader ? _output_dither_shader.handle() : _output_shader.handle(),
+                   sources, {bloom ? options.bloom_strength : 0.f, plain ? 1.f : options.exposure, mode, 0}))
+        return false;
+    ++stats.output_draws;
+    return true;
+}
+
+bool GpuRenderer3D::finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
+                                bool dither, RenderDebugStats3D& stats) {
+    const bool bloom = !plain && view._options.bloom > 0 && view._bloom_a && view._bloom_b;
+    if (bloom && !record_bloom(commands, source, view._bloom_a, view._bloom_b, view._options.bloom_threshold, stats))
+        return false;
+    return record_output(commands, source, view._resolved->texture(), bloom ? &view._bloom_a : nullptr,
+                         {.bloom_strength = bloom ? view._options.bloom : 0.f,
+                          .exposure = view._options.exposure,
+                          .tone_map_sdr = !plain,
+                          .dither = dither},
+                         stats);
+}
+
+const GpuTextureBackend* GpuRenderer3D::post_texture(const Texture& texture, bool attachment) const {
+    const auto* gpu = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+    const auto usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | (attachment ? SDL_GPU_TEXTUREUSAGE_COLOR_TARGET : 0);
+    return gpu && gpu->texture() && gpu->texture().belongs_to(_device->handle()) && !texture.array_layers() &&
+                   gpu->texture().format() == hdr_format && (gpu->texture().usage() & usage) == usage
+               ? gpu
+               : nullptr;
+}
+
+bool GpuRenderer3D::render_bloom(const BloomTargets3D& targets, const Texture& source, const BloomOptions3D& options,
+                                 RenderDebugStats3D& stats) {
+    const auto* input = post_texture(source, false);
+    const auto* result = post_texture(targets.result, true);
+    const auto* scratch = post_texture(targets.scratch, true);
+    if (!_capabilities.bloom_pass || !input || !result || !scratch || result->size() != scratch->size() ||
+        source == targets.result || source == targets.scratch || targets.result == targets.scratch ||
+        !std::isfinite(options.threshold) || options.threshold < 0)
+        return false;
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    for (const auto& t : {source, targets.result, targets.scratch})
+        _owner->retain(t);
+    input->mark_material_read(_owner->_frame_serial);
+    // Both intermediates are read as well as written within the operation.
+    result->mark_material_read(_owner->_frame_serial);
+    scratch->mark_material_read(_owner->_frame_serial);
+    const bool ok = record_bloom(_owner->_frame->command_buffer(), input->texture(), result->texture(),
+                                 scratch->texture(), options.threshold, stats);
+    result->bump_version();
+    scratch->bump_version(); // conservative after a recording failure/partial write too
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return ok;
+}
+
+bool GpuRenderer3D::render_output(const RenderTarget& target, const Texture& source, const OutputOptions3D& options,
+                                  RenderDebugStats3D& stats) {
+    const auto* input = post_texture(source, false);
+    const auto* bloom = options.bloom ? post_texture(options.bloom, false) : nullptr;
+    const auto* output = dynamic_cast<const GpuTextureBackend*>(target.texture().backend().get());
+    if (!_capabilities.output_pass || !input || !output || !output->texture() ||
+        !output->texture().belongs_to(_device->handle()) || output->texture().format() != _owner->_target_format ||
+        !(output->texture().usage() & SDL_GPU_TEXTUREUSAGE_COLOR_TARGET) || source == target.texture() ||
+        (options.bloom && (!bloom || options.bloom == target.texture())) || !std::isfinite(options.exposure) ||
+        options.exposure < 0 || !std::isfinite(options.bloom_strength) || options.bloom_strength < 0 ||
+        (options.bloom_strength > 0 && !bloom))
+        return false;
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    _owner->retain(source);
+    _owner->retain(target.texture());
+    // A later CPU upload must not overtake this queued write, either.
+    output->mark_material_read(_owner->_frame_serial);
+    input->mark_material_read(_owner->_frame_serial);
+    if (options.bloom_strength > 0) {
+        _owner->retain(options.bloom);
+        bloom->mark_material_read(_owner->_frame_serial);
+    }
+    const bool ok = record_output(_owner->_frame->command_buffer(), input->texture(), output->texture(),
+                                  options.bloom_strength > 0 ? &bloom->texture() : nullptr, options, stats);
+    output->bump_version();
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return ok;
 }
 
 void GpuRenderer3D::suspend_taa(GpuView3D& view) {
@@ -3865,21 +3954,24 @@ Result3D<LocalShadows3D> GpuRenderer3D::render_local_shadows(const Texture& targ
 bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSceneBackend3D& input,
                                    const SurfaceOptions3D& options, RenderDebugStats3D& stats) {
     auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
-    const auto* colour = dynamic_cast<const GpuTextureBackend*>(targets.colour.texture().backend().get());
+    const auto& colour_texture = targets.linear_colour ? targets.linear_colour : targets.colour.texture();
+    const auto* colour = dynamic_cast<const GpuTextureBackend*>(colour_texture.backend().get());
     const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
     const auto valid = [&](const GpuTextureBackend* t, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage) {
         return t && t->texture() && t->texture().belongs_to(_device->handle()) && t->texture().format() == format &&
                (t->texture().usage() & usage) == usage;
     };
     if (!_capabilities.surface_pass || !prepared || prepared->owner != this || !prepared->valid() ||
-        targets.depth.array_layers() || targets.colour.texture().array_layers() ||
-        !valid(colour, _owner->_target_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        bool(targets.colour) == bool(targets.linear_colour) || targets.depth.array_layers() ||
+        colour_texture.array_layers() ||
+        !valid(colour, targets.linear_colour ? hdr_format : _owner->_target_format,
+               SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
         !valid(depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
                SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
         colour->size() != depth->size())
         return false;
     const auto& scene = *prepared->sources[0].scene;
-    const std::array material_outputs{targets.colour.texture(), targets.depth};
+    const std::array material_outputs{colour_texture, targets.depth};
     if (!validate_material_inputs(scene, material_outputs))
         return false;
     if (!_lights_available && !scene.lights.spots.empty())
@@ -3893,7 +3985,7 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
             for (const auto& draw : source.scene->draws())
                 for (const auto* t : {&draw.material.texture, &draw.material.metallic_roughness, &draw.material.normal,
                                       &draw.material.occlusion, &draw.material.emissive_texture})
-                    if (*t && (*t == targets.colour.texture() || *t == targets.depth))
+                    if (*t && (*t == colour_texture || *t == targets.depth))
                         return false;
     const auto* shadow = options.sun_shadow;
     const GpuTextureBackend* shadow_depth = nullptr;
@@ -3940,7 +4032,7 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     scratch._size = colour->size();
     scratch._options.background = options.background;
     scratch._format = scratch._output_format = colour->texture().format();
-    scratch._resolved = std::static_pointer_cast<GpuTextureBackend>(targets.colour.texture().backend());
+    scratch._resolved = std::static_pointer_cast<GpuTextureBackend>(colour_texture.backend());
     FrameCtx ctx{&scratch, scene, stats};
     ctx.prepared = prepared;
     ctx.surface_only = true;
@@ -3987,8 +4079,10 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     cull_and_upload(ctx);
     order_draws(ctx);
     begin_commands(ctx);
-    _owner->retain(targets.colour.texture());
+    _owner->retain(colour_texture);
     _owner->retain(targets.depth);
+    colour->mark_material_read(_owner->_frame_serial);
+    depth->mark_material_read(_owner->_frame_serial);
     if (local_depth)
         _owner->retain(local->depth);
     // The surface culls only its camera. Shadow membership was already recorded
@@ -10977,9 +11071,9 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
          },
          [&] {
              if (ctx.taa)
-                 finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass);
+                 return finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass, stats);
              else if (view->_hdr)
-                 finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass);
+                 return finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass, stats);
              return true;
          }}};
     static constexpr std::array<const char*, 13> markers{
@@ -10990,8 +11084,10 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     for (u32 i = 0; i < plan.order.size(); ++i) {
         const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
         const PassMarker marker{ctx.commands, _gpu_markers, markers[pass]};
-        if (!operations[pass]())
+        if (!operations[pass]()) {
+            resume_2d();
             return false;
+        }
     }
     stats.graph_record_ms =
         std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - record_start).count();

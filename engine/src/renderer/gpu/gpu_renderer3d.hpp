@@ -389,6 +389,8 @@ public:
                                                   RenderDebugStats3D&) override;
     bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
                         RenderDebugStats3D&) override;
+    bool render_bloom(const BloomTargets3D&, const Texture&, const BloomOptions3D&, RenderDebugStats3D&) override;
+    bool render_output(const RenderTarget&, const Texture&, const OutputOptions3D&, RenderDebugStats3D&) override;
     Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
     bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
 
@@ -494,8 +496,15 @@ private:
     // `plain` is an 8-bit view's resolved picture (temporal anti-aliasing), which only needs encoding.
     // `dither`: the output shader with a dither of an 8-bit step (a view with a sky; falls back to the plain one
     // without it).
-    void finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain,
-                     bool dither = false);
+    bool finish_view(SDL_GPUCommandBuffer* commands, GpuView3D& view, const GpuTexture& source, bool plain, bool dither,
+                     RenderDebugStats3D&);
+    bool post_pass(SDL_GPUCommandBuffer*, const GpuTexture&, SDL_GPUShader*, std::span<const SDL_GPUTexture* const>,
+                   const std::array<f32, 4>&);
+    bool record_bloom(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& result,
+                      const GpuTexture& scratch, f32 threshold, RenderDebugStats3D&);
+    bool record_output(SDL_GPUCommandBuffer*, const GpuTexture& source, const GpuTexture& target,
+                       const GpuTexture* bloom, const OutputOptions3D&, RenderDebugStats3D&);
+    const GpuTextureBackend* post_texture(const Texture&, bool attachment) const;
     // Temporal anti-aliasing's targets for the view, made or kept; false if they can't be.
     bool ensure_taa_targets(GpuView3D& view, bool sharpen);
     void release_taa(GpuView3D& view);

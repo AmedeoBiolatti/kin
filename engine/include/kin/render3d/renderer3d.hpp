@@ -175,6 +175,13 @@ public:
     // Meshes/overlays, environment, point/spot lights and optional supplied sun
     // and local shadows; no implicit maps, sky/fog/particles, AO/GI/TAA or postproc.
     Status3D render_surface(const SurfaceTargets3D&, const PreparedScene3D&, const SurfaceOptions3D& = {});
+    // Stock bloom extraction and two separable blur rounds into caller-owned
+    // attachments. Source is linear premultiplied RGBA16F; no view/history or
+    // implicit resource allocation. Final bloom is in targets.result.
+    Status3D render_bloom(const BloomTargets3D&, const Texture& linear_colour, const BloomOptions3D& = {});
+    // Stock bloom composition, exposure/ACES and output encoding, replacing the
+    // whole current-working-format target. No blend, history or implicit bloom.
+    Status3D render_output(const RenderTarget&, const Texture& linear_colour, const OutputOptions3D& = {});
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
     // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a
