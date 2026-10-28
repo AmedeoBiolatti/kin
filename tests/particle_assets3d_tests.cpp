@@ -201,9 +201,17 @@ void particle_gpu(Renderer2D& renderer) {
     auto a = emitter(*session.instance(), "left"), b = emitter(*session.instance(), "right");
     auto texture = a.get<ParticleEmitter3D>()->system.desc.look.texture;
     auto model = assets.load_model("shared-a.gltf").value_or({}).shared();
-    check(texture && texture == b.get<ParticleEmitter3D>()->system.desc.look.texture &&
-              texture == model->parts[0].material.texture && texture != model->parts[0].material.normal,
-          "particle/glTF texture sharing ignored role/filter");
+    check(model && !model->parts.empty(), "particle/glTF sharing fixture failed to load");
+    const auto nearest = assets.load_texture("shared pixel.png", true, true).value_or(Texture{});
+    const auto mipmapped = assets.load_texture("shared pixel.png", false, true).value_or(Texture{});
+    const auto& material = model->parts[0].material;
+    check(texture && texture == b.get<ParticleEmitter3D>()->system.desc.look.texture && texture == nearest &&
+              texture != mipmapped && mipmapped == material.texture && texture != material.normal &&
+              mipmapped != material.normal,
+          "particle/glTF texture sharing ignored colour role or legacy filtering");
+    check(material.texture_samplers[u32(MaterialMap3D::BaseColor)] &&
+              material.texture_samplers[u32(MaterialMap3D::BaseColor)]->mag == TextureFilter3D::Nearest,
+          "imported per-map nearest sampling was lost");
     for (int i = 0; i < 60; ++i)
         ok(session.step(1.f / 60), "particle stepping failed");
     const auto time = a.get<ParticleEmitter3D>()->system.time();

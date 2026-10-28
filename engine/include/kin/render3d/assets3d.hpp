@@ -57,7 +57,8 @@ public:
     // own file is a source (its images are not decoded).
     Result3D<AssetHandle<Model3D>> load_model(const std::filesystem::path& path);
     Result3D<AssetHandle<Model3D>> load_model(const std::filesystem::path& path, const MeshOptions3D& options);
-    // Shares the same role/filter-aware texture cache as imported glTF maps.
+    // Shares the colour/data image cache with imported glTF maps. This legacy API
+    // also keys on nearest: glTF maps use full-mip images and independent samplers.
     Result3D<Texture> load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true);
     // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials
     // naming a shader still bind.
