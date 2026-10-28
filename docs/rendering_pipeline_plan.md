@@ -487,12 +487,14 @@ Allow a pass to choose compatible stock visibility tests, supply conservative bo
 
 ### Extensibility examples
 
+The finite-speed lighting experiment is a standalone prototype/example, not an engine feature. Keep its propagation model, bounded history, simulation settings, shaders and diagnostics in the example, using the public graph/material APIs. It must not add a slow-light mode, simulation policy or history solver to the engine or stock renderer. Any reusable engine extension should have a separate, general rendering use case; start the prototype with the APIs already available.
+
 | Example | Required extension surface | Acceptance |
 | --- | --- | --- |
 | ASCII renderer | Colour, optional depth/normals, glyph atlas, reduced-resolution processing and optional history. | Stable glyphs, sharp final output, correct cell aspect and independent UI; no synchronous readback. |
 | Alternative shadow technique | Geometry rendering from a light, custom targets, optional filtering and a material lighting hook. | Animated/masked geometry and offscreen casters remain correct through all required passes. |
 | Wind or dissolve material | Shared vertex deformation/coverage and previous-state data. | Colour, depth, shadows, picking and motion agree. |
-| Slow-light experiment | Custom camera/geometry or tracer, explicit time and motion/history inputs, replaceable lighting. | Analytic cases agree with delayed visibility; history use is bounded and reported. |
+| Slow-light prototype (example only) | Custom camera/geometry or tracer, explicit time and motion/history inputs, replaceable lighting. | Analytic cases agree with delayed visibility; history use is bounded and reported. |
 
 Start slow light with stationary/constant-velocity geometry so past positions can be evaluated analytically. At a simulated light speed of 100 km/h, 10 metres corresponds to 0.36 seconds of propagation delay. Verify delayed visibility, spawn/despawn times and a moving occluder within the declared model. A later history-backed variant needs retention, interpolation, discontinuity and insufficient-history policies.
 
