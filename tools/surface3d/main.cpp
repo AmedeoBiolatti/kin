@@ -95,11 +95,14 @@ int main(int argc, char** argv) {
              .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
             {.name = "opaque",
              .reads = {0, 5, 6, 7},
-             .writes = {1, 2},
+             .attachments = {{.resource = 1}, {.resource = 2}},
              .required_features = graph_feature::rendering3d},
             {.name = "transparent",
-             .reads = {0, 1, 2, 5},
-             .writes = {11},
+             .reads = {0, 5},
+             .attachments = {{.resource = 11, .previous = 1, .load = GraphAttachmentLoad::Load},
+                             {.resource = 2,
+                              .load = GraphAttachmentLoad::Load,
+                              .access = GraphAttachmentAccess::ReadOnlyDepth}},
              .required_features = graph_feature::rendering3d},
             {.name = "bloom",
              .reads = {11},
@@ -193,15 +196,14 @@ int main(int argc, char** argv) {
                          .stage = SurfaceStage3D::Opaque}));
                 },
                 [&] {
-                    // Distinct logical colour versions keep the compiler's single-writer rule.
-                    // This path copies opaque colour once; manual pipelines may load it in place.
+                    // The bound executor initializes colour: a safe in-place handoff,
+                    // or an exact copy when an older version must remain available.
                     return bool(r3d.render_surface(
                         {.depth = resources.texture(2), .linear_colour = resources.texture(11)}, prepared,
                         {.sun_shadow = &shadow,
                          .local_shadows = &local,
                          .stage = SurfaceStage3D::Transparent,
-                         .particles = true,
-                         .colour_input = resources.texture(1)}));
+                         .particles = true}));
                 },
                 [&] {
                     return bool(r3d.render_bloom({resources.texture(8), resources.texture(9)}, resources.texture(11),
@@ -224,7 +226,17 @@ int main(int argc, char** argv) {
                     renderer.draw_texture(resources.texture(3), rect);
                     return true;
                 }};
-            check(execute_resource_graph(plan, operations), "graph recording failed");
+            const auto copies = renderer.backend_stats().texture_copies;
+            check(resources.execute(plan, operations), "graph recording failed");
+            if (test) {
+                check(plan.attachment_copies.size() == std::size_t(reference) &&
+                          plan.attachment_reuses == u32(!reference),
+                      "unexpected attachment plan");
+                check((resources.texture(1) == resources.texture(11)) == !reference,
+                      "unexpected physical version bindings");
+                check(renderer.backend_stats().texture_copies - copies == std::size_t(reference),
+                      "attachment copy recorder disagrees with plan");
+            }
             renderer.draw_texture(resources.texture(4), rect);
         };
         if (test) {
@@ -266,7 +278,8 @@ int main(int argc, char** argv) {
                   "HDR working transition replaced exact-format data attachments");
             std::cout << "Surface graph: exact reference pixels, cached plans, stable allocations, HDR, explicit "
                          "sun/local shadows, GPU material inputs, opaque HDR toon, ordered glass/sprites, stock "
-                         "bloom/output and ASCII\n";
+                         "bloom/output and ASCII; zero-copy attachment handoff saves "
+                      << graph_resource_payload(graph.resources[11]) << " payload bytes\n";
         } else
             app.run([&](f32 dt) { angle += dt * 20; },
                     [&](f32) {

@@ -30,7 +30,7 @@ const std::array<std::function<bool()>, 1> operations{{[&] {
     renderer.draw_shader_surface({0, 0, 640, 360}, shader, params, resources.texture(0));
     return true;
 }}};
-if (execute_resource_graph(plan, operations))
+if (resources.execute(plan, operations))
     renderer.draw_texture(resources.texture(1), {0, 0, 640, 360});
 ```
 
@@ -40,19 +40,56 @@ The compiler diagnoses duplicate names, invalid IDs, multiple writers, missing i
 
 The optional `max_slot_payload_bytes` compile limit rejects a graph before allocation if its managed slots exceed the requested payload budget. Imports, backend-owned tokens and hidden driver storage are outside this limit; callers choose an explicit fallback.
 
-The plan contains a stable topological order, first/last use intervals, compatible physical slots, planned payload and culling counts. Exported and persistent resources receive pinned slots. Transient slots can share SDL resource objects only after the previous value's last use. This is object reuse, not overlapping native heap allocations. SDL may allocate hidden cycle backings; use the device ledger and external telemetry when assessing memory.
+The plan contains a stable topological order, first/last use intervals, compatible physical slots, planned payload and culling counts. Exports pin their final contents; persistent resources retain dedicated slots. Transient slots can share SDL resource objects after the previous value's last use, or through a validated attachment-version handoff below. This is object reuse, not overlapping native heap allocations. SDL may allocate hidden cycle backings; use the device ledger and external telemetry when assessing memory.
 
 `GraphResources::prepare()` validates the exact definition/plan and imported dimensions/formats, then stages allocations before publishing new bindings. Failure keeps the previous bindings. Keep resources on one renderer and use handles created by that renderer. Imports retain their supplied handles. Exports are current-frame textures/buffers, not immutable snapshots across later executions. Release a pipeline with `clear()` when its retained capacity is no longer useful.
 
 Public colour targets use the renderer's working format. Set `GraphResourceDesc::hdr` to match `renderer.hdr()`; HDR target payload is RGBA16F. A working-colour-space change recreates managed targets. Storage textures use the declared `TextureFormat`; buffers use `bytes`. Tokens describe dependencies between backend-owned operations and have no graph-managed allocation. Explicit float/depth render attachments are described below. MSAA resources and full stock allocation migration remain future extensions; tokens have no allocatable texture storage.
 
-Stable plans update imported bindings without allocating new CPU/GPU storage. Exact descriptor/feature/compile-option comparison caches the plan; camera, time, callback parameters and imported contents do not invalidate it. Resize or topology/feature changes do. Use a compiler/resource set per retained pipeline variant to avoid replacing one cached variant with another every frame. `compiler.stats()` reports compilation count, hits and CPU compilation time.
+Stable plans update non-overlapping imported bindings without allocating new CPU/GPU storage. Re-importing a managed output as history detaches any matching managed allocation to preserve that input; use explicit ping-pong history allocations/resource sets for stable temporal storage. Exact descriptor/feature/compile-option comparison caches the plan; camera, time, callback parameters and imported contents do not invalidate it. Resize or topology/feature changes do. Use a compiler/resource set per retained pipeline variant to avoid replacing one cached variant with another every frame. `compiler.stats()` reports compilation count, hits and CPU compilation time.
 
 Build and run `kin_ascii3d` for the public-API 3D → ASCII → output example. Its GPU shader samples one scene colour per cell and selects compact glyph strokes. `kin_ascii3d --test` compares optimized/reference pixels, verifies target reuse, tests HDR declarations and checks stable allocations. It currently requires native custom shader support; capability checks reject unsupported backends before execution. The rendering path performs no CPU readback.
 
 The legacy 2D `RenderGraph` caches its dependency order through this compiler. Missing dependencies and cycles now throw an actionable error before any callback, instead of silently ignoring a dependency or recursing indefinitely. Toggle behaviour and pass statistics remain available.
 
 The native 3D migration currently exposes thirteen backend operations as dependency tokens. Their existing internal depth, shadow, GI, temporal and output work remains atomic and owns its resources. `Scene3D::debug.graph_reference` runs the original fixed order for parity testing. `RenderDebugStats3D` reports pass counts, cache reuse and CPU compilation/recording time. Stock transient allocation aliasing, complete stock composition from public operations and a general finite-propagation simulation remain separate work. Standalone geometry, sun-shadow and mesh-surface operations are available below.
+
+## Attachment loads and logical versions
+
+`GraphPassDesc::attachments` distinguishes attachment accesses from sampled shader reads. Each `GraphAttachment` declares a target `resource`, `load` (`Clear`, `Discard`, or `Load`), `store` (`Store` or `Discard`) and `access` (`Write` or `ReadOnlyDepth`). Writable attachments implicitly declare a writer; do not repeat them in `writes`. `Load` requires a distinct, compatible `previous` resource and implicitly depends on its producer. A read-only depth attachment names the existing depth in `resource`, requires `Load`/`Store`, has no `previous`, and declares a reader without a new writer.
+
+```cpp
+// Resources: opaque_colour and composed_colour are compatible RGBA16F attachments;
+// depth is D32F. Sampled sun/local/soft-depth inputs, if used, remain in reads.
+graph.passes = {
+    {.name = "opaque", .attachments = {{.resource = opaque_colour}, {.resource = depth}}},
+    {.name = "transparent", .attachments = {
+        {.resource = composed_colour, .previous = opaque_colour, .load = GraphAttachmentLoad::Load},
+        {.resource = depth, .load = GraphAttachmentLoad::Load,
+         .access = GraphAttachmentAccess::ReadOnlyDepth}}},
+};
+// Opaque callback clears/stores its colour/depth using SurfaceStage3D::Opaque.
+// Transparent callback uses composed_colour and depth with SurfaceStage3D::Transparent.
+// Leave SurfaceOptions3D::colour_input empty: the bound executor initializes colour.
+if (!resources.prepare(renderer, graph, plan)) return false;
+return resources.execute(plan, operations);
+```
+
+Declarations cover the entire single-sample image, including all declared array layers. Callbacks still record the actual raster passes, clear values, blending and depth-write state. They must honour load/store declarations and initialize stored results. The compiler does not inspect C++ callbacks, merge arbitrary raster passes, or turn metadata into a different shader/render pipeline. Clear colours and ordinary callback parameters remain outside structural compilation.
+
+The compiler hands a predecessor's physical texture to the new version when the descriptors match, the predecessor's last use is the loading pass, its slot is still available, and that pass does not sample the predecessor. Imported, exported or persistent predecessor contents must survive; persistent destinations remain dedicated too. An exported *new* version may inherit a transient predecessor's texture and pins the final contents. Other readers later in the retained schedule force separate storage. The compiler does not reschedule readers merely to enable reuse. Culled readers do not extend a retained value's lifetime.
+
+When a handoff is unsafe, the plan allocates compatible separate storage and inserts an exact copy before the loading callback. Two outputs loading one predecessor can inherit at most one copy of its slot; all other initializations happen before the callback changes any attachments. Explicitly sampling the predecessor via `reads` is legal with this copy path. Sampling an attached output or a read-only depth target is rejected: attachment access does not permit shader feedback. Use separate sampled depth for soft particles under the current SDL GPU interface. Reading or exporting discarded attachment contents, malformed operations, duplicate bindings and incompatible versions are rejected before recording.
+
+`GraphResources::execute(plan, operations)` records all planned copies and callbacks for its exact prepared plan and working colour space. An invalid/incomplete callback table performs no copies or callbacks. Failure during execution stops later work without rolling back earlier commands. The backend-independent `execute_resource_graph()` accepts an explicit copy recorder; without one it refuses plans containing copies before invoking callbacks. Existing graphs without attachment declarations retain their behavior.
+
+Copy admission uses `graph_feature::texture_copies` / `RendererBackendCapabilities::texture_copies`. Native SDL_GPU supplies exact GPU copies through `Renderer2D::copy_texture(source, destination)`: same extent/native format/array shape/device, distinct textures, base mip across all layers, no blending or colour conversion. Compressed formats and mipmapped destinations are rejected. Handles and pending reads/writes remain valid until queued recording is submitted; later CPU uploads submit preceding copy accesses first. GPU copy writes publish content revisions. WebGL2/SDL_Renderer currently lack this copy capability; safe handoffs can still run there, while a plan requiring a copy fails compilation explicitly. Browser smoke checks a loaded 2D colour handoff and this refusal.
+
+`CompiledResourceGraph::attachment_loads` reports each load's `in_place` decision and reason. `attachment_reuses`, `attachment_copies` and `attachment_copy_bytes` report handoffs and fallback work; `slot_payload_bytes` estimates graph-owned allocated image/buffer payload. `peak_live_payload_bytes` counts **logical versions**, so it can count two views of the same physical texture at the transition; it is not physical residency. Backend `texture_copies` / `texture_copy_bytes` count actual explicit whole-image copy requests and texel payload, not measured bandwidth. The older `surface_colour_copies` counter applies only to manually requested `SurfaceOptions3D::colour_input` copies.
+
+Texture handles refer to physical storage, not immutable logical snapshots. Only access a transient version during its compiled lifetime; declare a later reader or export the old version when it must survive. Extra material bindings must follow the actual logical reads and be rebuilt if physical allocations change. Re-imported prior outputs are protected from managed-slot recycling, including with a cached plan, but this detach path can allocate a replacement each frame. Bounded ping-pong histories remain application-owned policy. This implementation reuses resource objects; it does not alias native GPU heaps or measure SDL/driver cycle backings. `reuse_slots = false` produces the separate-storage/copy reference path.
+
+The [surface example](../tools/surface3d/main.cpp) now uses a colour handoff and read-only depth for opaque → glass/sprites. Its normal path records zero colour copies and saves one 640 × 448 RGBA16F allocation (2.1875 MiB of texture payload) relative to its separate-version reference. Reference/optimized images, working-space transitions, cached compilation and warmed resource handles are checked automatically.
 
 ## Geometry operations and data attachments
 
@@ -178,7 +215,7 @@ return bool(r3d.render_surface({.depth = depth, .linear_colour = colour}, prepar
 
 `particles = true` enables world `Scene3D::draw_particles()` sources and procedural weather in `All` or `Transparent`; it is rejected with `Opaque`. Sprites share the existing per-copy mesh/sprite camera-depth order, blending, atlas/facing, culling and budget policy. `ParticleLook3D::sort = false` keeps a source as one run at its mean depth. This retains stock approximate transparency; intersecting geometry does not become order independent. Overlays retain the stock camera/depth-range rules. Particles/weather are live inputs at each surface call, independent of prepared mesh revisions. Submit/update them before the transparent consumer; the mesh source, pose, retained-batch and frame lifetime rules still apply.
 
-For a compiled resource graph, declare distinct logical colour resources: opaque writes `opaque_colour` and `depth`; transparent reads both, writes `composited_colour`, and passes `colour_input = opaque_colour`. Optional `colour_input` copies an exact-format, same-size, distinct source into the transparent colour target before blending. Declare all supplied shadow maps and soft depth as reads, then feed `composited_colour` to bloom/output. This preserves the compiler's single-writer and no-read/write-feedback rules. It costs one full colour copy and overlapping colour allocations; `surface_colour_copies` reports the copy. Manual in-place composition avoids it. The compiler does not yet model attachment load/write versions or eliminate this copy. Neither path allocates a hidden view or adds an implicit render operation.
+For a compiled resource graph, use the [attachment version contract](#attachment-loads-and-logical-versions): opaque writes colour/depth attachments; transparent loads a new colour version from opaque colour and tests existing depth through `ReadOnlyDepth`. Declare supplied shadow maps and sampled soft depth as `reads`, then feed the composed version to bloom/output. `GraphResources::execute()` selects an in-place handoff or a preservation copy automatically; leave `colour_input` empty. For manually initialized pipelines, optional `colour_input` still copies a distinct, exact-format same-size source before transparent blending and reports `surface_colour_copies`. Both paths preserve single-writer and shader-feedback rules without a hidden view or prepass.
 
 Soft intersections need a separate sampled, two-dimensional D32F `soft_depth`, matching size and the unjittered world camera, without overlay depth splitting. For example, declare a geometry callback writing `GeometryTargets3D::depth` and normals, then pass that depth to the transparent consumer. It cannot be the active surface depth attachment: the current SDL GPU interface cannot sample that texture while it is attached for depth testing. If an enabled source requests soft intersections without compatible depth, the call fails before recording. There is no silent soft-particle fallback or implicit prepass; omit this extra producer for hard particles. A soft depth input without `particles = true` is rejected.
 

@@ -2,7 +2,201 @@
 #include <iostream>
 #include <kin/renderer/resource_graph.hpp>
 using namespace kin;
+namespace {
+ResourceGraphDesc versions() {
+    ResourceGraphDesc g;
+    for (auto name : {"opaque", "transparent", "final"})
+        g.resources.push_back({.name = name,
+                               .kind = GraphResourceKind::RenderAttachment,
+                               .format = TextureFormat::Rgba16Float,
+                               .size = {64, 32}});
+    g.resources.back().exported = true;
+    g.passes = {
+        {.name = "opaque", .attachments = {{.resource = 0}}},
+        {.name = "transparent", .attachments = {{.resource = 1, .previous = 0, .load = GraphAttachmentLoad::Load}}},
+        {.name = "final", .attachments = {{.resource = 2, .previous = 1, .load = GraphAttachmentLoad::Load}}}};
+    return g;
+}
+constexpr auto attachment_features = graph_feature::attachments | graph_feature::texture_copies;
+std::vector<u64> simulate(const CompiledResourceGraph& p) {
+    assert(p);
+    std::vector<u64> slots(p.slots.size()), observed;
+    std::vector<std::function<bool()>> operations;
+    for (u32 i = 0; i < p.source.passes.size(); ++i)
+        operations.push_back([&, i] {
+            const auto& pass = p.source.passes[i];
+            u64 sampled = 0;
+            for (auto r : pass.reads) {
+                const auto v = slots[p.lifetimes[r].slot];
+                observed.push_back(v);
+                sampled = sampled * 17 + v;
+            }
+            for (const auto& a : pass.attachments) {
+                auto& value = slots[p.lifetimes[a.resource].slot];
+                if (a.access == GraphAttachmentAccess::ReadOnlyDepth) {
+                    observed.push_back(value);
+                    continue;
+                }
+                if (a.load != GraphAttachmentLoad::Load)
+                    value = 7;
+                value = value * 31 + i + sampled;
+                observed.push_back(value);
+            }
+            return true;
+        });
+    assert(execute_resource_graph(p, operations, [&](const GraphAttachmentCopy& c) {
+        assert(c.bytes == graph_resource_payload(p.source.resources[c.to]));
+        slots[p.lifetimes[c.to].slot] = slots[p.lifetimes[c.from].slot];
+        return true;
+    }));
+    return observed;
+}
+void attachment_versions() {
+    ResourceGraphCompiler c;
+    auto g = versions();
+    const auto fast = c.compile(g, graph_feature::attachments);
+    assert(fast && fast.slots.size() == 1 && fast.attachment_reuses == 2 && fast.attachment_copies.empty());
+    assert(fast.slot_payload_bytes == 64 * 32 * 8);
+    const auto slow = c.compile(g, attachment_features, {.reuse_slots = false});
+    assert(slow && slow.slots.size() == 3 && slow.attachment_copies.size() == 2 &&
+           slow.attachment_copy_bytes == 2 * 64 * 32 * 8);
+    assert(simulate(fast) == simulate(slow));
+    std::vector<std::function<bool()>> ops(g.passes.size(), [] {
+        assert(false);
+        return true;
+    });
+    assert(!execute_resource_graph(slow, ops)); // no copy recorder: no operation runs
+    ops[2] = {};
+    assert(!execute_resource_graph(slow, ops, [](const auto&) {
+        assert(false);
+        return true;
+    }));
+    assert(c.compile(g, attachment_features, {.max_slot_payload_bytes = fast.slot_payload_bytes}));
+    assert(
+        !c.compile(g, attachment_features, {.reuse_slots = false, .max_slot_payload_bytes = fast.slot_payload_bytes}));
+    // A later reader needs the old value. A culled reader does not.
+    g.passes.push_back({.name = "inspect", .reads = {0}, .after = {"final"}, .side_effect = true});
+    auto branch = c.compile(g, attachment_features);
+    assert(branch && branch.attachment_copies.size() == 1 &&
+           simulate(branch) == simulate(c.compile(g, attachment_features, {.reuse_slots = false})));
+    assert(!c.compile(g, graph_feature::attachments));
+    g.passes.back().side_effect = false;
+    assert(c.compile(g, graph_feature::attachments).attachment_copies.empty());
+    g = versions();
+    g.passes[1].reads = {0}; // sampling the previous image forces distinct storage even at last use
+    auto sampled = c.compile(g, attachment_features);
+    assert(sampled && sampled.attachment_copies.size() == 1 &&
+           simulate(sampled) == simulate(c.compile(g, attachment_features, {.reuse_slots = false})));
+    for (int pin = 0; pin < 3; ++pin) {
+        g = versions();
+        g.resources[0].exported = pin == 0;
+        g.resources[0].persistent = pin == 1;
+        g.resources[1].persistent = pin == 2;
+        const auto p = c.compile(g, attachment_features);
+        assert(p && !p.attachment_copies.empty() &&
+               simulate(p) == simulate(c.compile(g, attachment_features, {.reuse_slots = false})));
+    }
+    g = versions();
+    g.resources[0].imported = true;
+    g.passes.erase(g.passes.begin());
+    const auto imported = c.compile(g, attachment_features);
+    assert(imported && imported.attachment_copies.size() == 1 && imported.lifetimes[0].slot == graph_no_slot);
+    // Two loads of the same old version in one pass: at most one can own its slot.
+    g = versions();
+    g.passes.resize(2);
+    g.passes[1].attachments.push_back({.resource = 2, .previous = 0, .load = GraphAttachmentLoad::Load});
+    const auto fork = c.compile(g, attachment_features);
+    assert(fork && fork.attachment_reuses == 1 && fork.attachment_copies.size() == 1 &&
+           fork.lifetimes[1].slot != fork.lifetimes[2].slot &&
+           simulate(fork) == simulate(c.compile(g, attachment_features, {.reuse_slots = false})));
+    auto invalid = [&](auto change) {
+        auto bad = versions();
+        change(bad);
+        const auto& p = c.compile(bad, ~u64{0});
+        assert(!p && !p.diagnostics.empty());
+    };
+    invalid([](auto& x) { x.passes[1].attachments[0].previous = 1; });
+    invalid([](auto& x) { x.passes[1].attachments[0].previous = graph_no_slot; });
+    invalid([](auto& x) { x.passes[1].attachments[0].load = GraphAttachmentLoad::Clear; });
+    invalid([](auto& x) { x.passes[0].attachments[0].load = GraphAttachmentLoad(99); });
+    invalid([](auto& x) { x.passes[0].attachments[0].store = GraphAttachmentStore(99); });
+    invalid([](auto& x) { x.passes[0].attachments[0].access = GraphAttachmentAccess(99); });
+    invalid([](auto& x) { x.passes[0].attachments[0].resource = 99; });
+    invalid([](auto& x) { x.resources[1].size.x *= 2; });
+    invalid([](auto& x) { x.resources[1].array_layers = 1; });
+    invalid([](auto& x) { x.resources[1].format = TextureFormat::Rg16Float; });
+    invalid([](auto& x) { x.resources[1].kind = GraphResourceKind::StorageTexture; });
+    invalid([](auto& x) { x.passes[0].writes = {0}; });
+    invalid([](auto& x) { x.passes[0].reads = {0}; });
+    invalid([](auto& x) { x.passes[0].attachments[0].store = GraphAttachmentStore::Discard; });
+    invalid([](auto& x) { x.passes[2].attachments[0].store = GraphAttachmentStore::Discard; });
+    invalid([](auto& x) { x.passes[0].attachments[0].access = GraphAttachmentAccess::ReadOnlyDepth; });
+    g = versions();
+    g.resources.push_back({.name = "depth",
+                           .kind = GraphResourceKind::RenderAttachment,
+                           .format = TextureFormat::Depth32Float,
+                           .size = {64, 32}});
+    g.passes[0].attachments.push_back({.resource = 3});
+    g.passes[1].attachments.push_back(
+        {.resource = 3, .load = GraphAttachmentLoad::Load, .access = GraphAttachmentAccess::ReadOnlyDepth});
+    assert(c.compile(g, graph_feature::attachments));
+    g.passes[1].reads = {3};
+    assert(!c.compile(g, attachment_features)); // depth test attachment is not a shader sample
+    g.passes[1].reads.clear();
+    g.passes[1].attachments.back().load = GraphAttachmentLoad::Clear;
+    assert(!c.compile(g, attachment_features));
+    // Load/store and access are part of structural cache identity.
+    g = versions();
+    const auto compiled = c.stats().compilations;
+    assert(c.compile(g, attachment_features));
+    assert(c.compile(g, attachment_features));
+    assert(c.stats().compilations == compiled + 1);
+    g.passes[0].attachments[0].load = GraphAttachmentLoad::Discard;
+    assert(c.compile(g, attachment_features) && c.stats().compilations == compiled + 2);
+    g = versions();
+    for (auto& r : g.resources)
+        r.size = {1 << 30, 1 << 30};
+    assert(!c.compile(g, attachment_features)); // logical live-byte arithmetic cannot wrap after a handoff
+    // Reproducible branching graphs compare all observed contents with unaliased execution.
+    u32 rng = 0x213a7;
+    auto random = [&] {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        return rng;
+    };
+    for (u32 trial = 0; trial < 300; ++trial) {
+        g = {};
+        for (u32 i = 0; i < 30; ++i) {
+            g.resources.push_back({.name = std::to_string(i),
+                                   .kind = GraphResourceKind::RenderAttachment,
+                                   .format = TextureFormat::Rgba16Float,
+                                   .size = {8, 8},
+                                   .exported = random() % 7 == 0});
+            GraphPassDesc pass{.name = std::to_string(i), .side_effect = true};
+            GraphAttachment a{.resource = i};
+            if (i) {
+                a.previous = random() % i;
+                a.load = GraphAttachmentLoad::Load;
+                if (random() % 4 == 0)
+                    pass.reads.push_back(a.previous);
+                if (random() % 3 == 0 && (pass.reads.empty() || pass.reads[0] != 0))
+                    pass.reads.push_back(0);
+            }
+            pass.attachments.push_back(a);
+            g.passes.push_back(std::move(pass));
+        }
+        const auto optimized = c.compile(g, attachment_features);
+        const auto reference = c.compile(g, attachment_features, {.reuse_slots = false});
+        assert(optimized && reference && simulate(optimized) == simulate(reference));
+    }
+    std::cout << "attachments: version handoffs, branches, pinned/imported/sample preservation, depth access, failure "
+                 "admission and 300 reference graphs\n";
+}
+} // namespace
+
 int main() {
+    attachment_versions();
     ResourceGraphDesc graph;
     for (auto name : {"a", "b", "c", "output", "unused"})
         graph.resources.push_back({.name = name, .kind = GraphResourceKind::ColorTarget, .size = {64, 32}});

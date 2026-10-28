@@ -67,6 +67,13 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
     }
     std::unordered_map<std::string, u32> names;
     std::vector<u32> writer(resources, graph_no_slot);
+    std::vector<bool> discarded(resources);
+    std::vector<std::vector<u32>> reads(count), writes(count);
+    std::vector<u32> load_previous(resources, graph_no_slot), load_pass(resources, graph_no_slot);
+    const auto is_depth = [](const GraphResourceDesc& r) {
+        return r.kind == GraphResourceKind::RenderAttachment &&
+               (r.format == TextureFormat::Depth32Float || r.format == TextureFormat::Depth24Unorm);
+    };
     std::vector<std::vector<u32>> dependencies(count), consumers(count);
     for (u32 i = 0; i < count; ++i) {
         const auto& pass = graph.passes[i];
@@ -74,8 +81,55 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
             error("empty or duplicate pass name: " + pass.name);
         if (!pass.enabled)
             continue;
+        reads[i] = pass.reads;
+        writes[i] = pass.writes;
+        std::unordered_set<u32> attached;
+        u32 depth_count = 0;
+        for (const auto& a : pass.attachments) {
+            if (a.resource >= resources) {
+                error(pass.name + ": invalid attachment resource");
+                continue;
+            }
+            const auto& r = graph.resources[a.resource];
+            if (r.kind != GraphResourceKind::ColorTarget && r.kind != GraphResourceKind::RenderAttachment)
+                error(pass.name + ": attachments require colour/depth targets");
+            if (!attached.insert(a.resource).second)
+                error(pass.name + ": duplicate attachment");
+            if (is_depth(r) && ++depth_count > 1)
+                error(pass.name + ": multiple depth attachments");
+            if (std::ranges::find(pass.reads, a.resource) != pass.reads.end())
+                error(pass.name + ": attached resource cannot also be sampled");
+            if (a.load != GraphAttachmentLoad::Clear && a.load != GraphAttachmentLoad::Discard &&
+                a.load != GraphAttachmentLoad::Load)
+                error(pass.name + ": invalid attachment load operation");
+            if (a.store != GraphAttachmentStore::Store && a.store != GraphAttachmentStore::Discard)
+                error(pass.name + ": invalid attachment store operation");
+            if (a.access == GraphAttachmentAccess::ReadOnlyDepth) {
+                if (!is_depth(r) || a.load != GraphAttachmentLoad::Load || a.store != GraphAttachmentStore::Store ||
+                    a.previous != graph_no_slot)
+                    error(pass.name + ": read-only depth requires existing stored depth, Load and no previous version");
+                reads[i].push_back(a.resource);
+                continue;
+            }
+            if (a.access != GraphAttachmentAccess::Write)
+                error(pass.name + ": invalid attachment access");
+            writes[i].push_back(a.resource);
+            discarded[a.resource] = a.store == GraphAttachmentStore::Discard;
+            if (a.load == GraphAttachmentLoad::Load) {
+                if (a.previous >= resources || a.previous == a.resource) {
+                    error(pass.name + ": attachment Load requires a distinct previous resource");
+                    continue;
+                }
+                if (!compatible(r, graph.resources[a.previous]))
+                    error(pass.name + ": incompatible attachment versions");
+                reads[i].push_back(a.previous);
+                load_previous[a.resource] = a.previous;
+                load_pass[a.resource] = i;
+            } else if (a.previous != graph_no_slot)
+                error(pass.name + ": previous version requires attachment Load");
+        }
         std::unordered_set<u32> used;
-        for (auto id : pass.writes) {
+        for (auto id : writes[i]) {
             if (id >= resources) {
                 error(pass.name + ": invalid write resource");
                 continue;
@@ -89,14 +143,16 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
             writer[id] = i;
         }
         used.clear();
-        for (auto id : pass.reads) {
+        for (auto id : reads[i]) {
             if (id >= resources) {
                 error(pass.name + ": invalid read resource");
                 continue;
             }
-            if (!used.insert(id).second)
+            // Loading an attachment may also sample its previous version. That
+            // is legal with a copy, but never with in-place storage.
+            if (!used.insert(id).second && std::ranges::count(pass.reads, id) > 1)
                 error(pass.name + ": duplicate read declaration");
-            if (std::ranges::find(pass.writes, id) != pass.writes.end())
+            if (std::ranges::find(writes[i], id) != writes[i].end())
                 error(pass.name + ": feedback requires ping-pong resources");
         }
     }
@@ -112,7 +168,9 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
         const auto& pass = graph.passes[i];
         if (!pass.enabled)
             continue;
-        for (auto id : pass.reads) {
+        for (auto id : reads[i]) {
+            if (discarded[id])
+                error(pass.name + ": reading discarded attachment contents: " + graph.resources[id].name);
             if (writer[id] != graph_no_slot)
                 edge(writer[id], i);
             else if (!graph.resources[id].imported)
@@ -126,9 +184,12 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
                 edge(found->second, i);
         }
     }
-    for (u32 id = 0; id < resources; ++id)
+    for (u32 id = 0; id < resources; ++id) {
+        if (graph.resources[id].exported && discarded[id])
+            error(graph.resources[id].name + ": cannot export discarded attachment contents");
         if (graph.resources[id].exported && !graph.resources[id].imported && writer[id] == graph_no_slot)
             error(graph.resources[id].name + ": exported value has no writer");
+    }
     if (!plan)
         return plan;
     // Iterative traversal and Kahn sorting keep deep user graphs off the C++ stack.
@@ -186,9 +247,9 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
             life.first = std::min(life.first, position);
             life.last = position;
         };
-        for (auto id : pass.reads)
+        for (auto id : reads[plan.order[position]])
             touch(id);
-        for (auto id : pass.writes)
+        for (auto id : writes[plan.order[position]])
             touch(id);
     }
     for (u32 id = 0; id < resources; ++id)
@@ -203,7 +264,7 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
         }
     std::stable_sort(ordered.begin(), ordered.end(),
                      [&](u32 a, u32 b) { return plan.lifetimes[a].first < plan.lifetimes[b].first; });
-    std::vector<u32> last;
+    std::vector<u32> last, owner;
     std::vector<bool> pinned;
     for (auto id : ordered) {
         const auto& desc = graph.resources[id];
@@ -217,7 +278,42 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
         if ((features & needed) != needed)
             error(desc.name + ": resource kind unavailable on backend");
         u32 slot = graph_no_slot;
-        if (options.reuse_slots && !desc.exported && !desc.persistent)
+        const auto previous = load_previous[id];
+        if (previous != graph_no_slot) {
+            const auto& source = graph.resources[previous];
+            const auto& old = plan.lifetimes[previous];
+            const auto& pass = graph.passes[load_pass[id]];
+            std::string reason;
+            if (!options.reuse_slots)
+                reason = "slot reuse disabled";
+            else if (source.imported)
+                reason = "previous version is imported";
+            else if (source.exported || source.persistent || desc.persistent)
+                reason = "version is pinned";
+            else if (std::ranges::find(pass.reads, previous) != pass.reads.end())
+                reason = "previous version is sampled by this pass";
+            else if (old.last != life.first)
+                reason = "previous version has later readers";
+            else if (old.slot == graph_no_slot || owner[old.slot] != previous || pinned[old.slot])
+                reason = "previous slot is unavailable for handoff";
+            else {
+                slot = old.slot;
+                reason = "last attachment use; storage handed to next version";
+                ++plan.attachment_reuses;
+            }
+            plan.attachment_loads.push_back({load_pass[id], id, previous, slot != graph_no_slot, std::move(reason)});
+            if (slot == graph_no_slot) {
+                if (!(features & graph_feature::texture_copies))
+                    error(desc.name + ": attachment Load requires texture copy support for preserved versions");
+                const auto bytes = graph_resource_payload(desc);
+                if (bytes > ~u64{0} - plan.attachment_copy_bytes)
+                    error("attachment copy payload overflows the planner");
+                else
+                    plan.attachment_copy_bytes += bytes;
+                plan.attachment_copies.push_back({load_pass[id], previous, id, bytes});
+            }
+        }
+        if (slot == graph_no_slot && options.reuse_slots && !desc.exported && !desc.persistent)
             for (u32 s = 0; s < plan.slots.size(); ++s)
                 if (!pinned[s] && last[s] < life.first && compatible(plan.slots[s], desc)) {
                     slot = s;
@@ -227,6 +323,7 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
             slot = static_cast<u32>(plan.slots.size());
             plan.slots.push_back(desc);
             last.push_back(0);
+            owner.push_back(graph_no_slot);
             pinned.push_back(desc.exported || desc.persistent);
             const u64 bytes = graph_resource_payload(desc);
             if (bytes > std::numeric_limits<u64>::max() - plan.slot_payload_bytes)
@@ -236,7 +333,14 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
         }
         life.slot = slot;
         last[slot] = life.last;
+        owner[slot] = id;
+        pinned[slot] = pinned[slot] || desc.exported || desc.persistent;
     }
+    std::vector<u32> position(count, graph_no_slot);
+    for (u32 i = 0; i < plan.order.size(); ++i)
+        position[plan.order[i]] = i;
+    std::stable_sort(plan.attachment_copies.begin(), plan.attachment_copies.end(),
+                     [&](const auto& a, const auto& b) { return position[a.before_pass] < position[b.before_pass]; });
     if (plan.slot_payload_bytes > options.max_slot_payload_bytes)
         error("graph-managed resource payload exceeds the requested budget");
     if (!plan)
@@ -245,12 +349,22 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
     for (auto id : ordered)
         if (!graph.resources[id].imported) {
             const auto bytes = graph_resource_payload(graph.resources[id]);
-            begins[plan.lifetimes[id].first] += bytes;
-            ends[plan.lifetimes[id].last + 1] += bytes;
+            auto& begin = begins[plan.lifetimes[id].first];
+            auto& end = ends[plan.lifetimes[id].last + 1];
+            if (bytes > ~u64{0} - begin || bytes > ~u64{0} - end) {
+                error("logical graph payload overflows the planner");
+                return plan;
+            }
+            begin += bytes;
+            end += bytes;
         }
     u64 live = 0;
     for (u32 position = 0; position <= plan.order.size(); ++position) {
         live -= ends[position];
+        if (begins[position] > ~u64{0} - live) {
+            error("logical graph payload overflows the planner");
+            return plan;
+        }
         live += begins[position];
         plan.peak_live_payload_bytes = std::max(plan.peak_live_payload_bytes, live);
     }
@@ -275,15 +389,21 @@ const CompiledResourceGraph& ResourceGraphCompiler::compile(const ResourceGraphD
     _stats.last_compile_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
     return _plan;
 }
-bool execute_resource_graph(const CompiledResourceGraph& plan, std::span<const std::function<bool()>> operations) {
-    if (!plan)
+bool execute_resource_graph(const CompiledResourceGraph& plan, std::span<const std::function<bool()>> operations,
+                            const std::function<bool(const GraphAttachmentCopy&)>& copy) {
+    if (!plan || (!plan.attachment_copies.empty() && !copy))
         return false;
     for (auto pass : plan.order)
         if (pass >= operations.size() || !operations[pass])
             return false;
-    for (auto pass : plan.order)
+    std::size_t next_copy = 0;
+    for (auto pass : plan.order) {
+        while (next_copy < plan.attachment_copies.size() && plan.attachment_copies[next_copy].before_pass == pass)
+            if (!copy(plan.attachment_copies[next_copy++]))
+                return false;
         if (!operations[pass]())
             return false;
+    }
     return true;
 }
 } // namespace kin

@@ -473,6 +473,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
             SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
+        .texture_copies = true,
     };
 }
 
@@ -2324,6 +2325,48 @@ ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv
     }
     _compute_pipelines.push_back(ComputePipeline{.pipeline = pipeline, .samplers = layout.samplers});
     return ComputeShaderHandle{static_cast<u64>(_compute_pipelines.size())};
+}
+
+bool GpuRenderer2DBackend::copy_texture(const Texture& source, const Texture& destination) {
+    const auto* src = as_gpu(source.backend().get());
+    const auto* dst = as_gpu(destination.backend().get());
+    if (!src || !dst || !src->texture() || !dst->texture() || source == destination ||
+        !src->texture().belongs_to(_device.handle()) || !dst->texture().belongs_to(_device.handle()) ||
+        src->size() != dst->size() || src->texture().format() != dst->texture().format() ||
+        source.array_layers() != destination.array_layers() || texture_format_compressed(source.format()) ||
+        dst->mipmapped())
+        return false;
+    ensure_frame();
+    flush_to_frame(); // order queued 2D draws/clears before reading or replacing either image
+    auto* pass = SDL_BeginGPUCopyPass(_frame->command_buffer());
+    if (!pass) {
+        _batch.begin(current_target(), _clear_color, false);
+        return false;
+    }
+    retain(source);
+    retain(destination);
+    src->mark_material_read(_frame_serial);
+    dst->mark_material_read(_frame_serial); // subsequent CPU uploads must also respect pending writes
+    const u32 layers = std::max(1u, source.array_layers());
+    for (u32 layer = 0; layer < layers; ++layer) {
+        const SDL_GPUTextureLocation from{.texture = src->texture().handle(), .layer = layer};
+        const SDL_GPUTextureLocation to{.texture = dst->texture().handle(), .layer = layer};
+        SDL_CopyGPUTextureToTexture(pass, &from, &to, src->texture().width(), src->texture().height(), 1,
+                                    layer == 0); // cycle once for the entire destination, not once per layer
+    }
+    SDL_EndGPUCopyPass(pass);
+    dst->bump_version();
+    SDL_GPUTextureCreateInfo info{};
+    info.type = source.array_layers() ? SDL_GPU_TEXTURETYPE_2D_ARRAY : SDL_GPU_TEXTURETYPE_2D;
+    info.format = src->texture().format();
+    info.width = src->texture().width();
+    info.height = src->texture().height();
+    info.layer_count_or_depth = layers;
+    info.num_levels = 1;
+    ++_stats.texture_copies;
+    _stats.texture_copy_bytes += gpu::texture_payload_bytes(info);
+    _batch.begin(current_target(), _clear_color, false);
+    return true;
 }
 
 Texture GpuRenderer2DBackend::create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers) {

@@ -143,3 +143,14 @@ Regression checks cover exact stock/combined/in-place/versioned pixels across wo
 A stronger history check also exposed a stock TAA bug: globally ordered colour runs can split a particle source around glass, while coverage replays that source once. Comparing the two draw counts falsely rejected coverage and reset history. The check now validates against source batches; the regression requires real accumulation in both stock views across interleaved public particle calls.
 
 Validation: complete native stock dispatch, nineteen focused hardware checks (four inherited live-device lifecycle skips), all eighteen software Vulkan checks, browser smoke, four unchanged stock captures, standalone 2D-only graph compilation and the 198-file formatting gate pass. See [the measurements and build limitations](rendering_measurements.md#opaquetransparent-surfaces-and-particles).
+
+
+## Stage 12: compiled attachment versions
+
+Graph attachment declarations now express clear/discard/load, store/discard and read-only depth testing separately from sampled reads. The compiler hands compatible transient storage to a loaded output version at the predecessor's last use. Later readers, sampling during the same pass and imported/exported/persistent contents receive separate storage with a planned pre-callback copy. Per-load reasons, copy counts/bytes and slot payload are inspectable. Existing single-writer graphs remain compatible; shader feedback is still rejected.
+
+The bound executor records exact native texture copies, including depth arrays, with resource retention, CPU upload ordering and content revisions. Cached resource preparation protects a re-imported previous output from managed-slot recycling. Explicit ping-pong histories remain the stable-allocation path. Safe handoffs also work for browser 2D targets; unsupported copy plans fail capability admission. This is resource-object reuse, not native heap aliasing or automatic compilation of callback internals.
+
+The [surface graph](../tools/surface3d/main.cpp) now declares opaque colour/depth, loaded composed colour and read-only depth. Its normal path eliminates the colour copy and one full-size RGBA16F texture, saving 2.1875 MiB payload at 640 × 448. It still compares exact pixels with the separate-copy reference and checks cached plans, warmed handles and HDR transitions. The earlier stage's manual `colour_input` path remains available. See [the contract](render_graph.md#attachment-loads-and-logical-versions).
+
+Validation: full native stock 3D dispatch, twenty focused hardware checks (five inherited live-device lifecycle skips), all twenty-one software Vulkan checks, browser 2D handoff/stock 3D smoke, 300 compiler reference graphs, compiler sanitizers, standalone 2D-only compilation, four unchanged stock captures and the 199-file formatting gate pass. See [the measurements](rendering_measurements.md#compiled-attachment-versions) for scope and artifact paths.

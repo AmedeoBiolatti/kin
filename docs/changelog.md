@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Compile attachment load/store declarations and logical colour/depth versions into safe storage handoffs or explicit
+  preservation copies. Distinguish depth testing from shader sampling, report copy/reuse decisions and payload,
+  protect re-imported history, and execute copies through public GPU texture-copy APIs. Remove the normal surface
+  graph's opaque-to-transparent colour copy and second full-size HDR colour allocation.
+
 - Split native public surfaces into opaque and transparent stages with opt-in ordered sprites/weather, explicit
   soft-depth and sun/local sprite-shadow inputs. Support in-place attachment loads or versioned graph colour copies;
   retain queued sprite textures and CPU upload ordering. Fix linear HDR surface background clears and extend the

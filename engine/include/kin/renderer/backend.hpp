@@ -107,6 +107,7 @@ struct RendererBackendCapabilities {
     bool data_textures = false;
     bool render_attachments = false; // sampled RG16F/RGBA16F colour and D32F depth targets
     bool render_attachment_arrays = false; // the same formats as explicit 2D arrays
+    bool texture_copies = false; // exact base-level copies of compatible textures, including attachment arrays
 };
 
 // A named part of a frame's GPU work (Renderer2D::gpu_scope) and its GPU time.
@@ -162,6 +163,7 @@ struct RendererBackendStats {
     f64 last_overdraw = 0.0;
     // SDL_GPU: texture uploads (create_texture, update_texture) so far, and the
     // command buffers that carried them (batched: many uploads, one submit).
+    u64 texture_copies = 0, texture_copy_bytes = 0; // explicit whole-image base-level copies (all layers)
     u64 texture_uploads = 0;
     u64 texture_upload_submits = 0;
     // SDL_GPU shared upload staging: current single-handle capacity and allocations
@@ -419,6 +421,7 @@ public:
     }
     virtual Texture create_storage_texture(Vec2i /*size*/, TextureFormat /*format*/) { return {}; }
     virtual Texture create_render_attachment(Vec2i /*size*/, TextureFormat /*format*/, u32 /*array_layers*/ = 0) { return {}; }
+    virtual bool copy_texture(const Texture& /*source*/, const Texture& /*destination*/) { return false; }
     virtual bool dispatch_compute(ComputeShaderHandle, Vec2i /*groups*/, const ComputeBindings&) { return false; }
 
     // Storage buffers for shaders (capabilities().data_buffers). `data` (or

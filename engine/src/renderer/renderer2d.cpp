@@ -1382,6 +1382,19 @@ Texture Renderer2D::create_render_attachment(Vec2i size, TextureFormat format, u
     }
 }
 
+bool Renderer2D::copy_texture(const Texture& source, const Texture& destination) {
+    if (!source || !destination || source == destination || source.size() != destination.size() ||
+        source.format() != destination.format() || source.array_layers() != destination.array_layers() ||
+        texture_format_compressed(source.format()) || !_backend->capabilities().texture_copies)
+        return false;
+    try {
+        return _backend->copy_texture(source, destination);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "copy_texture failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
+}
+
 RenderTarget Renderer2D::create_render_target(Vec2i size, ScaleMode mode) {
     return _backend->create_render_target(size, mode);
 }

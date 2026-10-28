@@ -425,6 +425,10 @@ public:
     // 2D colour target. array_layers > 0 requests an explicit 2D array (including
     // one layer); check render_attachment_arrays. Retained handles own the allocation.
     Texture create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers = 0);
+    // Exact GPU copy of base-level texels across every layer, without blending or
+    // colour conversion. Same extent/format/array shape/device, distinct handles;
+    // no compressed formats or mipmapped destinations. Unsupported backends fail.
+    bool copy_texture(const Texture& source, const Texture& destination);
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings);
 
     // Storage buffers for shaders (capabilities().data_buffers; elsewhere an

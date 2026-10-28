@@ -17,6 +17,8 @@ class GraphResources {
 public:
     bool prepare(Renderer2D&, const ResourceGraphDesc&, const CompiledResourceGraph&,
                  std::span<const GraphImport> imports = {});
+    // Executes the exact prepared plan, including pre-pass attachment copies.
+    bool execute(const CompiledResourceGraph&, std::span<const std::function<bool()>> operations);
     const Texture& texture(GraphResource) const;
     const RenderTarget& target(GraphResource) const;
     const DataBuffer& buffer(GraphResource) const;
