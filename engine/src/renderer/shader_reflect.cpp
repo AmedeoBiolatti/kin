@@ -1,7 +1,7 @@
-#include <kin/renderer/shader_reflect.hpp>
-
 #include <algorithm>
 #include <cstring>
+#include <kin/renderer/shader_reflect.hpp>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -12,6 +12,7 @@ namespace {
 // The few SPIR-V opcodes, decorations and storage classes this reads.
 enum Op : u32 {
     OpName = 5,
+    OpEntryPoint = 15,
     OpExecutionMode = 16,
     OpMemberName = 6,
     OpTypeInt = 21,
@@ -37,6 +38,7 @@ enum Decoration : u32 {
     Binding = 33,
     DescriptorSet = 34,
     Offset = 35,
+    NonWritable = 24,
 };
 enum StorageClass : u32 {
     UniformConstant = 0,
@@ -86,6 +88,10 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
     std::unordered_map<u32, std::unordered_map<u32, u32>> decorations; // id -> decoration -> value
     std::unordered_map<u32, std::unordered_map<u32, u32>> member_offsets; // struct -> member -> offset
     std::unordered_map<u32, std::unordered_map<u32, std::string>> member_names;
+    std::unordered_map<u32, std::unordered_set<u32>> non_writable_members;
+    u32 execution_model = ~u32{0};
+    std::unordered_map<u32, std::unordered_map<u32, u32>> matrix_strides;
+    std::unordered_map<u32, std::unordered_set<u32>> row_major;
     struct Variable {
         u32 type = 0; // a pointer type
         u32 storage = 0;
@@ -101,6 +107,12 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
         }
         const u32* w = &words[at];
         switch (op) {
+        case OpEntryPoint:
+            if (count < 4)
+                return fail("invalid SPIR-V entry point");
+            if (read_string(w + 3, count - 3) == "main")
+                execution_model = w[1];
+            break;
         case OpExecutionMode:
             if (count >= 6 && w[2] == 17) { // LocalSize x y z
                 layout_local_size[0] = w[3];
@@ -109,11 +121,15 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
             }
             break;
         case OpMemberName:
+            if (count < 4)
+                return fail("invalid SPIR-V member name");
             member_names[w[1]][w[2]] = read_string(w + 3, count - 3);
             break;
         case OpTypeInt: case OpTypeFloat: case OpTypeVector: case OpTypeMatrix: case OpTypeImage:
         case OpTypeSampledImage: case OpTypeArray: case OpTypeRuntimeArray: case OpTypeStruct:
         case OpTypePointer:
+            if (count < 3)
+                return fail("invalid SPIR-V type");
             types[w[1]] = Type{op, std::vector<u32>(w + 2, w + count)};
             break;
         case OpConstant:
@@ -122,12 +138,24 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
             }
             break;
         case OpVariable:
+            if (count < 4)
+                return fail("invalid SPIR-V variable");
             variables[w[2]] = Variable{w[1], w[3]};
             break;
         case OpDecorate:
+            if (count < 3)
+                return fail("invalid SPIR-V decoration");
             decorations[w[1]][w[2]] = count > 3 ? w[3] : 1;
             break;
         case OpMemberDecorate:
+            if (count < 4)
+                return fail("invalid SPIR-V member decoration");
+            if (w[3] == NonWritable)
+                non_writable_members[w[1]].insert(w[2]);
+            if (w[3] == MatrixStride && count > 4)
+                matrix_strides[w[1]][w[2]] = w[4];
+            if (w[3] == 4)
+                row_major[w[1]].insert(w[2]);
             if (w[3] == Offset && count > 4) {
                 member_offsets[w[1]][w[2]] = w[4];
             }
@@ -150,31 +178,56 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
         const auto d = it->second.find(which);
         return d == it->second.end() ? std::nullopt : std::optional<u32>{d->second};
     };
+    const auto saturated = [](u64 value) {
+        return static_cast<u32>(std::min<u64>(value, std::numeric_limits<u32>::max()));
+    };
     // A type's size in a std140/std430 block, when it can be known.
-    const auto size_of = [&](const auto& self, u32 id) -> u32 {
+    const auto size_of = [&](const auto& self, u32 id, u32 depth = 0) -> u32 {
+        if (depth > 64)
+            return 0;
         const Type* t = type_of(id);
         if (!t) {
             return 0;
         }
         switch (t->op) {
-        case OpTypeInt: case OpTypeFloat:
+        case OpTypeInt:
+        case OpTypeFloat:
             return t->operands.empty() ? 4 : t->operands[0] / 8;
         case OpTypeVector:
-            return self(self, t->operands[0]) * t->operands[1];
+            return t->operands.size() < 2 ? 0 : saturated(u64(self(self, t->operands[0], depth + 1)) * t->operands[1]);
         case OpTypeMatrix: {
+            if (t->operands.size() < 2)
+                return 0;
             const u32 stride = decoration(id, MatrixStride).value_or(16);
-            return stride * t->operands[1];
+            return saturated(u64(stride) * t->operands[1]);
         }
         case OpTypeArray: {
+            if (t->operands.size() < 2)
+                return 0;
             const u32 length = constants.contains(t->operands[1]) ? constants[t->operands[1]] : 0;
-            const u32 stride = decoration(id, ArrayStride).value_or(self(self, t->operands[0]));
-            return stride * length;
+            const u32 stride = decoration(id, ArrayStride).value_or(self(self, t->operands[0], depth + 1));
+            return saturated(u64(stride) * length);
         }
+        case OpTypeRuntimeArray:
+            return t->operands.empty() ? 0
+                                       : decoration(id, ArrayStride).value_or(self(self, t->operands[0], depth + 1));
         case OpTypeStruct: {
             u32 end = 0;
             for (u32 m = 0; m < t->operands.size(); ++m) {
                 const u32 offset = member_offsets[id].contains(m) ? member_offsets[id][m] : end;
-                end = std::max(end, offset + self(self, t->operands[m]));
+                u32 bytes = self(self, t->operands[m], depth + 1);
+                const Type* member = type_of(t->operands[m]);
+                if (member && member->op == OpTypeMatrix && member->operands.size() >= 2 &&
+                    matrix_strides[id].contains(m)) {
+                    u32 vectors = member->operands[1];
+                    if (row_major[id].contains(m)) {
+                        const Type* column = type_of(member->operands[0]);
+                        if (column && column->operands.size() >= 2)
+                            vectors = column->operands[1];
+                    }
+                    bytes = saturated(u64(matrix_strides[id][m]) * vectors);
+                }
+                end = std::max(end, saturated(u64(offset) + bytes));
             }
             return end;
         }
@@ -184,6 +237,7 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
     };
 
     ShaderLayout layout;
+    layout.execution_model = execution_model;
     std::unordered_set<u32> sampler_bindings, storage_texture_bindings, storage_buffer_bindings, uniform_bindings;
     std::unordered_set<u32> rw_texture_bindings, rw_buffer_bindings;
     for (const auto& [id, variable] : variables) {
@@ -196,6 +250,8 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
         // Arrays of resources count as one slot per element.
         u32 elements = 1;
         if (t && t->op == OpTypeArray) {
+            if (t->operands.size() < 2)
+                return fail("invalid SPIR-V descriptor array");
             elements = constants.contains(t->operands[1]) ? constants[t->operands[1]] : 1;
             pointee = t->operands[0];
             t = type_of(pointee);
@@ -203,7 +259,47 @@ std::optional<ShaderLayout> reflect_spirv(ShaderBlob spirv, std::string* error) 
         if (!t) {
             continue;
         }
+        if (decoration(id, DescriptorSet) && (!elements || elements > MaxShaderSamplers))
+            return fail("resource descriptor array exceeds supported limits");
         const u32 binding = decoration(id, Binding).value_or(0);
+        if (decoration(id, DescriptorSet)) {
+            ShaderResourceInfo resource;
+            resource.set = *decoration(id, DescriptorSet);
+            resource.binding = binding;
+            resource.elements = elements;
+            if (variable.storage == UniformConstant && t->op == OpTypeSampledImage && !t->operands.empty()) {
+                resource.kind = ShaderResourceKind::SampledTexture;
+                const Type* image = type_of(t->operands[0]);
+                if (image && image->op == OpTypeImage && image->operands.size() >= 6) {
+                    const auto& image_type = image->operands;
+                    resource.dimensions = image_type[1] <= 2 ? image_type[1] + 1 : 0;
+                    resource.comparison = image_type[2] == 1;
+                    resource.arrayed = image_type[3] != 0;
+                    resource.multisampled = image_type[4] != 0;
+                    const Type* scalar = type_of(image_type[0]);
+                    if (scalar && !scalar->operands.empty() && scalar->operands[0] == 32) {
+                        if (scalar->op == OpTypeFloat)
+                            resource.sample_type = ShaderSampleType::Float;
+                        else if (scalar->op == OpTypeInt && scalar->operands.size() >= 2)
+                            resource.sample_type =
+                                scalar->operands[1] ? ShaderSampleType::Sint : ShaderSampleType::Uint;
+                    }
+                }
+            } else if (variable.storage == StorageBuffer ||
+                       (variable.storage == Uniform && decoration(pointee, BufferBlock))) {
+                resource.kind = ShaderResourceKind::StorageBuffer;
+                resource.min_bytes = size_of(size_of, pointee);
+                resource.read_only = bool(decoration(id, NonWritable)) || bool(decoration(pointee, NonWritable)) ||
+                                     (t->op == OpTypeStruct && !t->operands.empty() &&
+                                      non_writable_members[pointee].size() == t->operands.size());
+            } else if (variable.storage == Uniform && t->op == OpTypeStruct) {
+                resource.kind = ShaderResourceKind::UniformBuffer;
+                resource.min_bytes = size_of(size_of, pointee);
+            } else if (variable.storage == UniformConstant && t->op == OpTypeImage)
+                resource.kind = ShaderResourceKind::StorageTexture;
+            layout.resources.push_back(resource);
+        }
+
         // Set 1 holds what a compute shader writes (SDL_GPU's layout).
         const bool writes = decoration(id, DescriptorSet).value_or(0) == 1;
         if (variable.storage == UniformConstant) {

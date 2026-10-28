@@ -228,6 +228,24 @@ bool Renderer3D::resize_operation(View3D& view, Vec2i size) {
     return fail3d(_errors, "Renderer3D::resize", "device refused view resize");
 }
 
+Result3D<MaterialInputs3D> Renderer3D::create_material_inputs(const MaterialShader3D& shader,
+                                                              std::span<const Texture> textures,
+                                                              std::span<const DataBuffer> buffers) {
+    _errors.clear();
+    if (!_backend || !_backend->capabilities().material_inputs) {
+        fail3d(_errors, "Renderer3D::create_material_inputs", "material inputs unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!shader || textures.size() > max_material_input_textures3d || buffers.size() > max_material_input_buffers3d) {
+        fail3d(_errors, "Renderer3D::create_material_inputs", "invalid shader or excessive input count");
+        return {std::nullopt, _errors};
+    }
+    auto result = _backend->create_material_inputs(shader, textures, buffers);
+    if (!result)
+        _errors = result.diagnostics;
+    return result;
+}
+
 Result3D<PickResult3D> Renderer3D::pick(View3D& view, Vec2i pixel) {
     auto value = pick_operation(view, pixel);
     return result3d(std::move(value), _errors);

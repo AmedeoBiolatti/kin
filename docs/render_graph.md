@@ -44,7 +44,7 @@ The plan contains a stable topological order, first/last use intervals, compatib
 
 `GraphResources::prepare()` validates the exact definition/plan and imported dimensions/formats, then stages allocations before publishing new bindings. Failure keeps the previous bindings. Keep resources on one renderer and use handles created by that renderer. Imports retain their supplied handles. Exports are current-frame textures/buffers, not immutable snapshots across later executions. Release a pipeline with `clear()` when its retained capacity is no longer useful.
 
-Public colour targets use the renderer's working format. Set `GraphResourceDesc::hdr` to match `renderer.hdr()`; HDR target payload is RGBA16F. A working-colour-space change recreates managed targets. Storage textures use the declared `TextureFormat`; buffers use `bytes`. Tokens describe dependencies between backend-owned operations and have no graph-managed allocation. Explicit float/depth render attachments are described below. MSAA/array resources and full stock allocation migration remain future extensions; tokens have no allocatable texture storage.
+Public colour targets use the renderer's working format. Set `GraphResourceDesc::hdr` to match `renderer.hdr()`; HDR target payload is RGBA16F. A working-colour-space change recreates managed targets. Storage textures use the declared `TextureFormat`; buffers use `bytes`. Tokens describe dependencies between backend-owned operations and have no graph-managed allocation. Explicit float/depth render attachments are described below. MSAA resources and full stock allocation migration remain future extensions; tokens have no allocatable texture storage.
 
 Stable plans update imported bindings without allocating new CPU/GPU storage. Exact descriptor/feature/compile-option comparison caches the plan; camera, time, callback parameters and imported contents do not invalidate it. Resize or topology/feature changes do. Use a compiler/resource set per retained pipeline variant to avoid replacing one cached variant with another every frame. `compiler.stats()` reports compilation count, hits and CPU compilation time.
 
@@ -131,9 +131,9 @@ Preparation has an up-front CPU/memory cost and includes copies that may later b
 
 Native SDL_GPU exposes `render_sun_shadow()` and `render_surface()` as independent graph callbacks. Check `RendererCapabilities3D::sun_shadow_pass` / `surface_pass`. WebGL2 and SDL_Renderer reject these operations with owned diagnostics; they retain their existing stock renderer.
 
-`GraphResourceDesc::array_layers` defaults to zero (a 2D texture). A positive count declares an explicit 2D array, including a one-layer array. Arrays require `GraphResourceKind::RenderAttachment` and `graph_feature::attachment_arrays` / `Renderer2D::capabilities().render_attachment_arrays`. Direct allocation uses `create_render_attachment(size, format, layers)`. Payload budgets multiply by the layer count; slot compatibility and imports distinguish 2D textures from one-layer arrays. Custom shaders must declare the corresponding sampler type. Ordinary 2D uploads and 3D material texture slots do not accept arrays.
+`GraphResourceDesc::array_layers` defaults to zero (a 2D texture). A positive count declares an explicit 2D array, including a one-layer array. Arrays require `GraphResourceKind::RenderAttachment` and `graph_feature::attachment_arrays` / `Renderer2D::capabilities().render_attachment_arrays`. Direct allocation uses `create_render_attachment(size, format, layers)`. Payload budgets multiply by the layer count; slot compatibility and imports distinguish 2D textures from one-layer arrays. Custom shaders must declare the corresponding sampler type. Ordinary 2D uploads and the twelve reserved 3D material texture slots do not accept arrays; extra material inputs below accept sampled 2D arrays.
 
-A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun/local depth → mesh colour/depth with a toon lighting hook → GPU ASCII → output, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
+A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun/local depth and a compute-produced lighting texture/palette → mesh colour/depth with a toon lighting hook → GPU ASCII → output, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
 
 ```cpp
 // Resources: sun = D32F array, colour = working-colour target, depth = D32F 2D.
@@ -153,7 +153,7 @@ return bool(r3d.render_surface(
 
 `render_sun_shadow()` clears and writes a square, sampled D32F array with 1–4 layers. It fits the scene's sun against `shadow_area`; `receiver_size` supplies the camera aspect for cascades. The requested cascade count is limited by the supplied array capacity. The target's extent sets shadow resolution. Opaque/masked world casters, off-camera casters, skinning, retained instances and CPU/GPU LOD cuts use stock recording. Overlays and particle casters are excluded. Unused layers, including every layer of an inactive sun, clear to reverse-Z zero. This operation deliberately redraws rather than consulting the stock view's private shadow cache.
 
-The returned `SunShadow3D` holds the texture plus `ShadowCascades3D` projection/bias-scale metadata. It is a binding to mutable texture contents. Keep projection and depth versions together; use distinct persistent or ping-pong resources for history. A developer may supply a custom projection/map by constructing the same value. Finite matrices, positive texel/depth scales, valid cascade ranges, sampler format and ownership are checked before recording. Shadows use the stock comparison/PCF material interface; arbitrary lighting algorithms still require additional material hooks.
+The returned `SunShadow3D` holds the texture plus `ShadowCascades3D` projection/bias-scale metadata. It is a binding to mutable texture contents. Keep projection and depth versions together; use distinct persistent or ping-pong resources for history. A developer may supply a custom projection/map by constructing the same value. Finite matrices, positive texel/depth scales, valid cascade ranges, sampler format and ownership are checked before recording. Stock shading uses the comparison/PCF material interface; custom shaders can implement other algorithms through the material inputs below.
 
 `render_surface()` clears single-sample colour/depth and shades scene meshes with the exact unjittered camera projection. It includes stock materials/custom material shaders, opaque and masked draws, ordered transparency, wireframes, overlays, explicit environment lighting and point/spot lights with optional supplied local shadows. Colour uses the current Renderer2D working format (including linear HDR); it performs no view tonemapping. Depth is stored for later graph consumers. Overlay depth uses the stock split range; blended materials test depth without writing it.
 
@@ -192,4 +192,29 @@ Casters use stock mask samplers, skinning, retained instances, conservative boun
 
 Before recording, the backend rejects wrong devices/formats/usages, expired preparation, invalid light indices/kinds/settings, overlapping/out-of-range layers, excessive requests, oversized viewports, invalid projection/scaling values and invalid filter ranges. Errors own their diagnostics. Unsupported backends fail explicitly. Recording failure can leave partial contents, as with other graph operations.
 
-The [surface example](../tools/surface3d/main.cpp) includes both producers and a [toon response shader](../tools/surface3d/toon.frag.glsl). See [custom lighting responses](rendering_3d.md#custom-lighting-responses) for replacing the direct BRDF/visibility response. Arbitrary graph texture/buffer bindings for materials, alternate shadow representations and fill-shadow operations remain separate work.
+The [surface example](../tools/surface3d/main.cpp) includes both producers and a [toon response shader](../tools/surface3d/toon.frag.glsl). See [custom lighting responses](rendering_3d.md#custom-lighting-responses) for replacing the direct BRDF/visibility response. Materials can consume additional graph textures/buffers through the interface below. A stock fill-shadow operation remains separate work.
+
+
+## Graph resources in materials
+
+Check `RendererCapabilities3D::material_inputs` on native SDL_GPU. `create_material_inputs(shader, textures, buffers)` creates an immutable, shader-specific `MaterialInputs3D` binding set. Assign it to `Material3D::inputs`. Both stock rendering and `render_surface()` bind these resources for custom fragment shaders. Geometry, shadow, picking and GI voxelization keep their existing material/coverage contracts; custom fragment inputs do not deform geometry or alter those passes.
+
+```cpp
+// After resources.prepare(), rebuild only when a physical binding or shader changes.
+const std::array textures{resources.texture(light_field)};
+const std::array buffers{resources.buffer(palette)};
+auto inputs = r3d.create_material_inputs(toon_shader, textures, buffers);
+if (!inputs) return; // owned diagnostics describe layout/device/type errors
+Material3D material{.shader = toon_shader, .inputs = *inputs};
+// Submit with this material, then prepare the scene once for all consumers.
+```
+
+Declare `light_field` and `palette` in the surface pass's `reads`, and give their compute producer the corresponding `writes`. The compiler cannot discover hidden reads inside a material or callback. Declared lifetimes must cover every draw using the bindings, including overlays. Allocate persistent/imported history explicitly and ping-pong distinct logical resources for updates. A binding set retains its physical handles, but does not preserve old contents after an aliased slot is reused. Rebuild it after resize, a graph allocation change or shader replacement. Updating contents on the same handles does not require rebuilding.
+
+The [surface example](../tools/surface3d/main.cpp) caches bindings by physical identity and adds a [compute producer](../tools/surface3d/field.comp.glsl) for an RGBA16F cloud-lighting field plus a palette buffer. Its [toon fragment shader](../tools/surface3d/toon.frag.glsl) consumes both. Shadow producers and the material-data producer can share one prepared scene's subsequent surface consumer without repeating world-bound transformations. Optimized/reference execution and warmed GPU allocation reuse are checked by `kin_surface3d --test`.
+
+The bounded native profile allows four extra sampled textures and eight read-only storage buffers. [The shader ABI](rendering_3d.md#extra-material-textures-and-buffers) specifies bindings, types and filtering. Validation rejects wrong counts, devices, shader identity, numeric/array types, short buffers and sampling the active surface/view output. Shader reflection rejects writable buffers and unsupported layouts before pipeline creation. WebGL2 and fallback renderers return unsupported diagnostics.
+
+GPU compute writes remain ordered in the current frame. CPU texture/buffer uploads after a recorded material read submit earlier work before uploading, without an explicit device-idle wait. This is a frame boundary: create fresh prepared handles for subsequent consumers. Prefer GPU producers or upload before preparation when sharing world data. Queued draws retain inputs until submission; a temporary 2D target on the render-target stack also remains owned across such boundaries.
+
+Native content revisions include CPU uploads, compute outputs, 2D target writes and stock/public 3D outputs. Changing extra input contents or sampler state conservatively resets a stock view's TAA history. An identical write can still reset it; there is no shader-level proof of whether an update affects appearance. Standalone surfaces have no implicit temporal history. A finite-speed lighting model still needs its own bounded light/scene history, solver, units and occluder policy; these bindings provide its material-consumption path.

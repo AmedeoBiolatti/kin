@@ -94,6 +94,10 @@ void resources() {
         const auto refused = renderer.render_sun_shadow({}, {}, {64, 64});
         assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
     }
+    if (!renderer.capabilities().material_inputs) {
+        const auto refused = renderer.create_material_inputs({});
+        assert(!refused && !refused.diagnostics.empty());
+    }
     if (!renderer.capabilities().local_shadow_pass) {
         const auto refused = renderer.render_local_shadows({}, {}, {}, {64, 64});
         assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);

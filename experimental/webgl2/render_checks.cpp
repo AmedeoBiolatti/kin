@@ -127,6 +127,8 @@ void check_webgl_instances(Renderer2D& r, Renderer3D& r3d) {
                 !r.capabilities().render_attachment_arrays && !r3d.render_sun_shadow({}, {}, {64, 64}) &&
                 !r3d.render_surface({}, {}),
             "Unsupported public shadow/surface operations must fail explicitly");
+    require(!r3d.capabilities().material_inputs && !r3d.create_material_inputs({}),
+            "Unsupported material inputs must fail explicitly");
     require(!r3d.capabilities().local_shadow_pass && !r3d.render_local_shadows({}, {}, {}, {64, 64}),
             "Unsupported local shadow operation must fail explicitly");
     const auto unsupported = r3d.render_geometry({}, {});

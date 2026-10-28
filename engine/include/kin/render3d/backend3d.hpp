@@ -74,6 +74,7 @@ struct RendererCapabilities3D {
     // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
     bool geometry_pass = false;
     bool shared_preparation = false;
+    bool material_inputs = false;
     bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
 };
 
@@ -232,6 +233,10 @@ public:
     virtual std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) = 0;
     // Null when the SPIR-V can't be made into a fragment shader.
     virtual std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) = 0;
+    virtual Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
+                                                              std::span<const DataBuffer>) {
+        return {std::nullopt, {"material inputs unavailable"}};
+    }
     virtual std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) = 0;
     virtual bool resize_view(IViewBackend3D& view, Vec2i size) = 0;
     // Records `scene` into `view`, after the 2D draws so far and before those

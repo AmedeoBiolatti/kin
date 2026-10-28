@@ -21,7 +21,7 @@ if(KIN_EXPERIMENTAL_3D)
     add_executable(kin_surface3d surface3d/main.cpp)
     target_link_libraries(kin_surface3d PRIVATE kin::engine)
     kin_compile_glsl(_surface_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/surface3d/shaders"
-        SOURCES surface3d/toon.frag.glsl)
+        SOURCES surface3d/toon.frag.glsl surface3d/field.comp.glsl)
     kin_embed_files(kin_surface3d NAME surface3d_shader FILES ${_surface_spv})
     if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER)
         add_test(NAME kin-surface3d-graph COMMAND kin_surface3d --test)

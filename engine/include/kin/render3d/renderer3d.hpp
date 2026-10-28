@@ -138,6 +138,13 @@ public:
     // kin/renderer/shader_compiler.hpp; shipped games load SPIR-V). Empty,
     // with glslc's messages in the result when it doesn't compile.
     Result3D<MaterialShader3D> compile_material_shader(const std::filesystem::path& source);
+    // Shader-specific immutable extra resource bindings. Sampled textures occupy
+    // fragment set 2 slots 12..15; read-only storage follows the shader's sampler
+    // count. Shapes/types/counts/ownership are validated once here. GPU contents
+    // can change; graph resize or shader reload requires a new binding set.
+    Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D& shader,
+                                                      std::span<const Texture> textures = {},
+                                                      std::span<const DataBuffer> buffers = {});
     // Gives `view` a new size (its texture changes); false when it can't.
     Status3D resize(View3D& view, Vec2i size);
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and

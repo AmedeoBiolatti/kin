@@ -21,6 +21,7 @@ public:
 
     SDL_GPUBuffer* handle() const { return _buffer; }
     u32 size() const { return _size; }
+    bool belongs_to(SDL_GPUDevice* device) const { return _device && *_device == device; }
 
     explicit operator bool() const { return _buffer != nullptr; }
 

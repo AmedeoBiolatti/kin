@@ -15,6 +15,7 @@
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
 #include <kin/renderer/resource_graph.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -168,6 +169,20 @@ public:
 class GpuMaterialShader3D final : public IMaterialShaderBackend3D {
 public:
     GpuShader shader;
+    SharedDevice device;
+    std::vector<ShaderResourceInfo> textures, buffers;
+    bool valid() const override { return bool(shader); }
+};
+class GpuMaterialInputs3D final : public IMaterialInputsBackend3D {
+public:
+    SharedDevice device;
+    std::shared_ptr<GpuMaterialShader3D> shader;
+    std::vector<Texture> input_textures;
+    std::vector<DataBuffer> input_buffers;
+    mutable u64 validation_epoch = 0, signature = 0;
+    bool valid() const override { return device && *device && shader && shader->valid(); }
+    std::span<const Texture> textures() const override { return input_textures; }
+    std::span<const DataBuffer> buffers() const override { return input_buffers; }
 };
 
 // Where last frame's copies were, for the velocity of this frame's (Scene3D::taa):
@@ -208,6 +223,7 @@ private:
     Vec2i _size{};
     u32 _samples = 1; // as made: what the device has for the format
     ViewOptions3D _options{};
+    u64 _taa_material_inputs = 0;
     bool _hdr = false;                                                   // drawn in float, then out through view_output
     SDL_GPUTextureFormat _format = SDL_GPU_TEXTUREFORMAT_INVALID;        // the scene's colour (float when HDR)
     SDL_GPUTextureFormat _output_format = SDL_GPU_TEXTUREFORMAT_INVALID; // the 2D pipeline's, followed
@@ -356,6 +372,8 @@ public:
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
+    Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
+                                                      std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
@@ -381,6 +399,9 @@ public:
 private:
     friend class GpuPreparedScene3D;
     bool preparation_live(u64 frame) const;
+    bool validate_material_inputs(const Scene3D&, std::span<const Texture> outputs = {},
+                                  u64* signature = nullptr) const;
+    mutable u64 _input_validation_epoch = 0;
     bool render_scene(IViewBackend3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
     bool render_geometry_scene(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).

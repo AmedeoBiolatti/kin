@@ -19,6 +19,7 @@
 #include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/data_buffer.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
@@ -74,6 +75,7 @@ inline TextureSampler3D legacy_sampler3d(ScaleMode mode, Wrap3D u, Wrap3D v) {
 class IMaterialShaderBackend3D {
 public:
     virtual ~IMaterialShaderBackend3D() = default;
+    virtual bool valid() const { return true; }
 };
 
 // A fragment shader of a material's own, made by Renderer3D::create_material_shader
@@ -83,7 +85,7 @@ public:
     MaterialShader3D() = default;
     explicit MaterialShader3D(std::shared_ptr<IMaterialShaderBackend3D> backend) : _backend(std::move(backend)) {}
 
-    bool valid() const { return _backend != nullptr; }
+    bool valid() const { return _backend && _backend->valid(); }
     explicit operator bool() const { return valid(); }
     const std::shared_ptr<IMaterialShaderBackend3D>& backend() const { return _backend; }
 
@@ -91,6 +93,34 @@ public:
 
 private:
     std::shared_ptr<IMaterialShaderBackend3D> _backend;
+};
+
+inline constexpr u32 max_material_input_textures3d = 4, max_material_input_buffers3d = 8;
+class IMaterialInputsBackend3D {
+public:
+    virtual ~IMaterialInputsBackend3D() = default;
+    virtual bool valid() const = 0;
+    virtual std::span<const Texture> textures() const = 0;
+    virtual std::span<const DataBuffer> buffers() const = 0;
+};
+// Immutable shader-specific resource bindings. Handles own allocations, while
+// their GPU contents remain mutable. Recreate bindings after graph reallocation
+// or shader replacement; declare matching graph reads in consuming passes.
+class MaterialInputs3D {
+public:
+    MaterialInputs3D() = default;
+    explicit MaterialInputs3D(std::shared_ptr<const IMaterialInputsBackend3D> backend) : _backend(std::move(backend)) {}
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    std::span<const Texture> textures() const { return _backend ? _backend->textures() : std::span<const Texture>{}; }
+    std::span<const DataBuffer> buffers() const {
+        return _backend ? _backend->buffers() : std::span<const DataBuffer>{};
+    }
+    const std::shared_ptr<const IMaterialInputsBackend3D>& backend() const { return _backend; }
+    friend bool operator==(const MaterialInputs3D&, const MaterialInputs3D&) = default;
+
+private:
+    std::shared_ptr<const IMaterialInputsBackend3D> _backend;
 };
 
 struct Material3D {
@@ -146,6 +176,7 @@ struct Material3D {
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
     std::array<f32, 16> shader_params{};
+    MaterialInputs3D inputs{}; // optional extra sampled textures/read-only buffers for shader
 
     LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
     EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;

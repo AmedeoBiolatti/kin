@@ -66,6 +66,8 @@ public:
     void bump_version() const { ++_version; }
     void set_scale_mode(ScaleMode mode) const { _scale = mode; }
     // The backend's frame serial when a draw last used it (see retain()).
+    u64 material_read_frame() const { return _material_read_frame; }
+    void mark_material_read(u64 frame) const { _material_read_frame = frame; }
     u64 used_in_frame() const { return _used_in_frame; }
     void mark_used(u64 frame) const { _used_in_frame = frame; }
 
@@ -77,7 +79,7 @@ private:
     mutable ScaleMode _scale = ScaleMode::Nearest;
     TextureFormat _format = TextureFormat::Rgba8;
     u32 _array_layers = 0;
-    mutable u64 _used_in_frame = 0;
+    mutable u64 _used_in_frame = 0, _material_read_frame = 0;
 };
 // A storage buffer (kin/renderer/data_buffer.hpp).
 class GpuDataBuffer : public IDataBufferBackend {
@@ -85,12 +87,17 @@ public:
     explicit GpuDataBuffer(GpuBuffer buffer) : _buffer(std::move(buffer)) {}
     std::size_t size() const override { return _buffer.size(); }
     const GpuBuffer& buffer() const { return _buffer; }
+    u64 version() const override { return _version; }
+    void bump_version() const { ++_version; }
+    u64 material_read_frame() const { return _material_read_frame; }
+    void mark_material_read(u64 frame) const { _material_read_frame = frame; }
     u64 used_in_frame() const { return _used_in_frame; }
     void mark_used(u64 frame) const { _used_in_frame = frame; }
 
 private:
     GpuBuffer _buffer;
-    mutable u64 _used_in_frame = 0;
+    mutable u64 _version = 1;
+    mutable u64 _used_in_frame = 0, _material_read_frame = 0;
 };
 } // namespace gpu
 
@@ -436,6 +443,7 @@ private:
     void open_stencil_clip(StencilClip clip);
     struct TargetEntry {
         const gpu::GpuTexture* texture = nullptr;
+        std::shared_ptr<const gpu::GpuTextureBackend> backend;
         Vec2f coords{}; // a layer's coordinate size; 0: the target's own pixels
         StencilState stencil;
     };

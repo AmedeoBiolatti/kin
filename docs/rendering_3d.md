@@ -1348,7 +1348,7 @@ pick passes draw the material as if it had no shader.
 `kin_compile_glsl`, which adds the include path; `cmake/kin_spirv.cmake` does
 too, and skips `*.inc.glsl`; see `examples/CMakeLists.txt`);
 `r3d.compile_material_shader(path)` compiles GLSL at run time with glslc, for
-development. Unlike 2D shaders there is no hot reload or reflection yet.
+development. Resource layouts are reflected and validated; automatic 3D shader hot reload is not provided.
 Signal Breach's hit shields (`examples/shaders/shield.frag.glsl`: Fresnel rim
 and climbing lines, additive) are one. Passes of your own on an HDR view are
 not offered: draw into the view's texture with the 2D renderer's shaders.
@@ -1377,9 +1377,35 @@ void main() {
 
 `KinLight` supplies a unit direction toward the light, attenuated linear irradiance, separate shadow/contact visibility, the light kind (`KIN_LIGHT_SUN`, `KIN_LIGHT_FILL`, `KIN_LIGHT_POINT`, `KIN_LIGHT_SPOT`), and a position/distance for local lights in the same world space as `kin_position()` (the overlay's own space when drawing it). Directionals use zero position/distance. Irradiance already includes the point radius window, inverse-square/size limit and spot-cone attenuation, but excludes the BRDF and visibility. Return outgoing linear radiance; the stock response is `shade(surface, light.direction, light.irradiance * light.visibility)`. A callback can use visibility differently or replace it analytically. Direct lights with zero range/cone attenuation are skipped. Directional callbacks can shade the back-facing hemisphere too, allowing wrapped responses.
 
-The callback runs from `kin_lit()`. Ambient/IBL and emission remain separate; it does not change geometry, mask coverage, shadow casters, alpha or depth. Custom materials retain their existing fixed light blocks (up to 16 selected points and 16 spots); this does not add light-grid storage bindings to custom shaders. Stock grid rendering consumes explicit local maps normally. Alternative shadow representations, extra graph-resource bindings and a complete finite-propagation lighting solver require additional interfaces/history management. The position/distance fields alone do not implement physical light travel.
+The callback runs from `kin_lit()`. Ambient/IBL and emission remain separate; it does not change geometry, mask coverage, shadow casters, alpha or depth. Custom materials retain their existing fixed light blocks (up to 16 selected points and 16 spots); this does not add light-grid storage bindings to custom shaders. Stock grid rendering consumes explicit local maps normally. Extra material inputs below allow custom shadow representations and other graph-produced lighting data. A complete finite-propagation solver still requires bounded scene/light history and explicit simulation policy. The position/distance fields alone do not implement physical light travel.
 
 Build/run `kin_surface3d` for explicit sun/local graph shadows, this [toon shader](../tools/surface3d/toon.frag.glsl), and GPU ASCII postprocessing. See the [local-shadow graph contract](render_graph.md#explicit-local-shadows) for map ownership, light-index/version rules and capabilities.
+
+
+### Extra material textures and buffers
+
+Native `RendererCapabilities3D::material_inputs` supports immutable `MaterialInputs3D` sets created with `r3d.create_material_inputs(shader, textures, buffers)` and assigned to `Material3D::inputs`. The factory returns owned diagnostics. Create sets outside hot draw loops and share them across draws; the handle uses shared ownership, with resource vectors owned once per set. Stock materials carry an empty handle. Sets belong to one exact shader and device. Replacement shaders or different graph allocations require a new set; uploads into existing handles do not.
+
+The twelve existing sampled slots remain reserved. Extra textures use consecutive SPIR-V set 2 bindings 12–15, with no gaps. Read-only storage buffers follow **all** sampled slots in that set: binding `12 + extra_texture_count` for the first, then consecutive bindings, up to eight buffers. SDL fragment storage slots start at zero; GLSL descriptor bindings include the sampler offset. Uniform buffers remain set 3 bindings 0–3, with their existing layouts.
+
+```glsl
+#version 450 core
+#include "kin_material.inc.glsl"
+layout(set=2, binding=12) uniform sampler2D lighting_field;
+// One extra sampled texture means the first storage binding is thirteen.
+layout(std430, set=2, binding=13) readonly buffer Palette { vec4 tint; } palette;
+void main() {
+    vec4 base = kin_base_color();
+    vec3 field = texture(lighting_field, kin_uv()).rgb;
+    FragColor = kin_output(base.rgb * field * palette.tint.rgb, base.a);
+}
+```
+
+Use `std::array<Texture, N>` / `std::array<DataBuffer, N>` or spans at the factory. Reflection requires exact resource counts, supported dense bindings, a fragment `main`, read-only buffers, and sufficient buffer bytes for the fixed block plus one runtime-array element. A runtime array's complete indexing range remains the shader author's responsibility. Layout checks do not prove arbitrary shader memory accesses safe.
+
+Sampled inputs support float or unsigned 2D and explicit 2D-array images, including raw depth and depth-comparison samplers. An explicit one-layer array still needs an array sampler. RGBA8/compressed colour textures use their texture scale mode; float data, integer and raw-depth inputs use nearest filtering. Depth-comparison inputs use the native reverse-Z comparison sampler. Separate sampler-state overrides for these extra inputs are not exposed. Descriptor arrays, cube/3D/MSAA/signed-integer images, storage images and writable fragment buffers are outside this profile. Custom light blocks still select up to sixteen points and sixteen spots.
+
+A set owns its allocations and shader, while queued work retains bound resources through submission. Observing/releasing handles after renderer destruction is safe; shader/input `valid()` becomes false. Recording and mutation remain ordered on the renderer thread. Surface/view feedback is rejected. For graph dependencies, ping-pong history, CPU-upload frame boundaries and TAA revision handling, see [graph resources in materials](render_graph.md#graph-resources-in-materials). Materials files and ECS reflection do not serialize runtime binding sets; the application assigns them after resolving graph resources.
 
 ## Models
 

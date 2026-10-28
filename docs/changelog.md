@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Bind graph-produced textures and read-only buffers to native custom 3D materials through immutable, reflected input
+  sets. Validate shader/device/types/layouts and output feedback; preserve CPU upload ordering and GPU-produced input
+  revisions, reset affected TAA history, and guard resources that outlive the renderer. Extend the surface graph with
+  compute-generated lighting/palette data feeding its toon material.
+
 - Add explicit spot/point mesh-shadow graph operations, complete point cubes and surface-local shadow bindings,
   preserving stock selection/cache/history ownership. Add an opt-in direct-light material response with separate
   irradiance/visibility and light position/distance, plus a toon-lighting graph example.

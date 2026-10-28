@@ -21,6 +21,7 @@ class IDataBufferBackend {
 public:
     virtual ~IDataBufferBackend() = default;
     virtual std::size_t size() const = 0;
+    virtual u64 version() const { return 0; } // zero: content revisions are not tracked
 };
 
 class DataBuffer {

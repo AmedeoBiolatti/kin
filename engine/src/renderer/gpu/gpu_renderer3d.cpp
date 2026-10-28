@@ -88,6 +88,8 @@ bool taa_material_hash(u64& key, const Material3D& material, const ITextureBacke
     taa_hash(key, material.wrap_v);
     const auto shader = material.shader.backend().get();
     taa_hash(key, shader);
+    if (const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(material.inputs.backend().get()))
+        taa_hash(key, inputs->signature);
     return taa_texture_hash(key, texture);
 }
 
@@ -1413,6 +1415,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     _capabilities.sun_shadow_pass =
         _shadow_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT && _shadow_shader && _shadow_vertex_shader;
     _capabilities.local_shadow_pass = _capabilities.sun_shadow_pass && _lights_available;
+    _capabilities.material_inputs = bool(_vertex_shader && _fragment_shader);
 }
 
 GpuRenderer3D::~GpuRenderer3D() {
@@ -2122,17 +2125,161 @@ constexpr u32 irradiance_samples = 512;
 std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(std::span<const u8> spirv) {
     try {
         auto shader = std::make_shared<GpuMaterialShader3D>();
-        // Frame, material, custom parameters with fog, and local lights;
-        // all twelve material samplers (kin_material.inc.glsl).
-        shader->shader =
-            GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv,
-                                  /*uniform_buffers=*/4, /*samplers=*/12);
+        std::string error;
+        const auto layout = reflect_spirv({spirv.data(), static_cast<u32>(spirv.size())}, &error);
+        if (!layout || layout->execution_model != 4)
+            throw std::runtime_error("material shader must be a reflected fragment module: " + error);
+        u32 samplers = 12;
+        for (const auto& r : layout->resources)
+            if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2) {
+                if (r.binding >= 16)
+                    throw std::runtime_error("material sampled binding exceeds fifteen");
+                samplers = std::max(samplers, r.binding + 1);
+            }
+        if (samplers > 16)
+            throw std::runtime_error("material sampler limit is sixteen (twelve reserved)");
+        shader->textures.resize(samplers - 12);
+        std::array<bool, 4> texture_slots{};
+        std::array<bool, 16> sampled_bindings{};
+        std::array<bool, 8> buffer_slots{};
+        u32 buffer_count = 0;
+        for (const auto& r : layout->resources) {
+            if (r.elements != 1)
+                throw std::runtime_error("material descriptor arrays unsupported; use individual bindings");
+            if (r.kind == ShaderResourceKind::SampledTexture && r.set == 2) {
+                if (sampled_bindings[r.binding])
+                    throw std::runtime_error("duplicate sampled material binding");
+                sampled_bindings[r.binding] = true;
+                if (r.dimensions != 2 || r.multisampled || r.sample_type == ShaderSampleType::Unknown ||
+                    r.sample_type == ShaderSampleType::Sint)
+                    throw std::runtime_error("material sampled inputs require float/unsigned 2D or 2D-array images");
+                if (r.binding < 12) {
+                    const bool shadow = r.binding == 1 || r.binding == 10 || r.binding == 11;
+                    if (r.arrayed != shadow || r.comparison != shadow || r.sample_type != ShaderSampleType::Float)
+                        throw std::runtime_error("reserved material sampler layout mismatch");
+                } else {
+                    texture_slots[r.binding - 12] = true;
+                    shader->textures[r.binding - 12] = r;
+                }
+            } else if (r.kind == ShaderResourceKind::StorageBuffer && r.set == 2) {
+                if (r.binding < samplers || r.binding >= samplers + 8 || !r.read_only || !r.min_bytes)
+                    throw std::runtime_error("material buffers must be read-only, bounded, and follow all samplers");
+                if (buffer_slots[r.binding - samplers])
+                    throw std::runtime_error("duplicate material storage binding");
+                buffer_slots[r.binding - samplers] = true;
+                buffer_count = std::max(buffer_count, r.binding - samplers + 1);
+            } else if (r.kind == ShaderResourceKind::UniformBuffer && r.set == 3 && r.binding < 4 &&
+                       r.min_bytes <= 4096) {
+                // Existing frame/material/custom+fog/local blocks, including legacy prefixes.
+            } else
+                throw std::runtime_error("unsupported material descriptor set, kind or uniform slot");
+        }
+        for (u32 i = 0; i < samplers - 12; ++i)
+            if (!texture_slots[i])
+                throw std::runtime_error("extra sampled texture bindings must be dense from twelve");
+        shader->buffers.resize(buffer_count);
+        for (u32 i = 0; i < buffer_count; ++i)
+            if (!buffer_slots[i])
+                throw std::runtime_error("material storage bindings must be dense after samplers");
+        for (const auto& r : layout->resources)
+            if (r.kind == ShaderResourceKind::StorageBuffer)
+                shader->buffers[r.binding - samplers] = r;
+        shader->device = _device->shared();
+        shader->shader = GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV,
+                                               spirv, 4, samplers, buffer_count);
         _material_shaders.push_back(shader); // kept: pipelines name it for good
         return shader;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: material shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
         return {};
     }
+}
+
+Result3D<MaterialInputs3D> GpuRenderer3D::create_material_inputs(const MaterialShader3D& source,
+                                                                 std::span<const Texture> textures,
+                                                                 std::span<const DataBuffer> buffers) {
+    const auto fail = [](const char* reason) { return Result3D<MaterialInputs3D>{std::nullopt, {reason}}; };
+    const auto shader = std::dynamic_pointer_cast<GpuMaterialShader3D>(source.backend());
+    if (!shader || !shader->valid() || !shader->shader.belongs_to(_device->handle()))
+        return fail("shader belongs to another backend/device or expired");
+    if (textures.size() != shader->textures.size() || buffers.size() != shader->buffers.size())
+        return fail("material input counts differ from shader layout");
+    for (std::size_t i = 0; i < textures.size(); ++i) {
+        const auto& texture = textures[i];
+        const auto* gpu = dynamic_cast<const GpuTextureBackend*>(texture.backend().get());
+        const auto& type = shader->textures[i];
+        if (!gpu || !gpu->texture() || !gpu->texture().belongs_to(_device->handle()) ||
+            !(gpu->texture().usage() & SDL_GPU_TEXTUREUSAGE_SAMPLER))
+            return fail("sampled input is not a texture of this device");
+        const bool integer = texture.format() == TextureFormat::R16Uint || texture.format() == TextureFormat::Rg16Uint;
+        const bool depth =
+            texture.format() == TextureFormat::Depth32Float || texture.format() == TextureFormat::Depth24Unorm;
+        if (type.arrayed != bool(texture.array_layers()) || integer != (type.sample_type == ShaderSampleType::Uint) ||
+            (type.comparison && (!depth || !_compare_sampler)))
+            return fail("material sampled input array/numeric/comparison type mismatch");
+    }
+    for (std::size_t i = 0; i < buffers.size(); ++i) {
+        const auto* gpu = dynamic_cast<const GpuDataBuffer*>(buffers[i].backend().get());
+        if (!gpu || !gpu->buffer() || !gpu->buffer().belongs_to(_device->handle()) ||
+            buffers[i].size() < shader->buffers[i].min_bytes)
+            return fail("material buffer is foreign, invalid or smaller than its reflected block");
+    }
+    auto inputs = std::make_shared<GpuMaterialInputs3D>();
+    inputs->device = _device->shared();
+    inputs->shader = shader;
+    inputs->input_textures.assign(textures.begin(), textures.end());
+    inputs->input_buffers.assign(buffers.begin(), buffers.end());
+    return {MaterialInputs3D{std::move(inputs)}, {}};
+}
+
+bool GpuRenderer3D::validate_material_inputs(const Scene3D& scene, std::span<const Texture> outputs,
+                                             u64* signature) const {
+    const u64 epoch = ++_input_validation_epoch;
+    u64 key = 0;
+    for (const auto* source : {&scene, scene.overlay_if_any()})
+        if (source)
+            for (const auto& draw : source->draws()) {
+                const auto* shader = dynamic_cast<const GpuMaterialShader3D*>(draw.material.shader.backend().get());
+                const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(draw.material.inputs.backend().get());
+                if (draw.material.shader.backend() &&
+                    (!shader || !shader->valid() || !shader->shader.belongs_to(_device->handle())))
+                    return false;
+                if (draw.material.inputs.backend() && (!inputs || !inputs->valid() || inputs->shader.get() != shader ||
+                                                       *inputs->device != _device->handle()))
+                    return false;
+                if (shader && (!shader->textures.empty() || !shader->buffers.empty()) && !inputs)
+                    return false;
+                if (!inputs || inputs->validation_epoch == epoch)
+                    continue;
+                inputs->validation_epoch = epoch;
+                // Pending 2D target writes must publish their content revisions
+                // before the stock temporal signature observes these inputs.
+                if (signature && _owner->_frame && _owner->_batch.has_writes())
+                    _owner->flush_to_frame();
+                u64 value = 1469598103934665603ull;
+                taa_hash(value, shader);
+                for (const auto& texture : inputs->input_textures) {
+                    for (const auto& output : outputs)
+                        if (texture == output)
+                            return false;
+                    const auto* backend = static_cast<const GpuTextureBackend*>(texture.backend().get());
+                    taa_hash(value, backend);
+                    taa_hash(value, backend->version());
+                    taa_hash(value, backend->scale_mode());
+                }
+                for (const auto& buffer : inputs->input_buffers) {
+                    const auto* backend = buffer.backend().get();
+                    taa_hash(value, backend);
+                    taa_hash(value, backend->version());
+                }
+                inputs->signature = value;
+                if (key == 0)
+                    key = 1469598103934665603ull;
+                taa_hash(key, value);
+            }
+    if (signature)
+        *signature = key;
+    return true;
 }
 
 std::shared_ptr<GpuEnvironment3D> GpuRenderer3D::allocate_environment(u32 w, u32 h) {
@@ -3234,6 +3381,7 @@ struct GpuRenderer3D::FrameCtx {
     u32 sun_size = 0, sun_layers = 0;
     const GpuTexture* surface_depth = nullptr;
     const GpuTexture* local_depth = nullptr;
+    u64 input_signature = 0;
     const Scene3D& scene;
     RenderDebugStats3D& stats;
 
@@ -3369,6 +3517,8 @@ u64 GpuPreparedScene3D::cpu_bytes() const {
 }
 std::shared_ptr<IPreparedSceneBackend3D> GpuRenderer3D::prepare(const Scene3D& scene, const PrepareOptions3D& options,
                                                                 RenderDebugStats3D& stats) {
+    if (!validate_material_inputs(scene))
+        return {};
     const std::array sources{&scene, scene.overlay_if_any()};
     u64 count = 0, draws = 0, joints = 0;
     for (const auto* source : sources)
@@ -3729,6 +3879,9 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
         colour->size() != depth->size())
         return false;
     const auto& scene = *prepared->sources[0].scene;
+    const std::array material_outputs{targets.colour.texture(), targets.depth};
+    if (!validate_material_inputs(scene, material_outputs))
+        return false;
     if (!_lights_available && !scene.lights.spots.empty())
         return false;
     if (const auto* env = dynamic_cast<const GpuEnvironment3D*>(scene.lights.environment.backend().get());
@@ -4908,6 +5061,8 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
         // (its pixels no longer line up).
         const bool ortho = scene.camera.projection == Projection3D::Orthographic;
         ctx.taa_reset = !view->_taa_valid || view->_taa_reset_asked || ortho != view->_taa_ortho;
+        ctx.taa_reset = ctx.taa_reset || view->_taa_material_inputs != ctx.input_signature;
+        view->_taa_material_inputs = ctx.input_signature;
         view->_taa_ortho = ortho;
         view->_taa_reset_asked = false;
     }
@@ -10093,6 +10248,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     Textures unbound;
     unbound.fill(reinterpret_cast<const ITextureBackend*>(1)); // none yet
     Textures bound_textures = unbound;
+    const GpuMaterialInputs3D* bound_inputs = nullptr;
     std::pair<Wrap3D, Wrap3D> bound_wrap{};
     decltype(Material3D::texture_samplers) bound_sampling{};
     u32 current_scene = 0;
@@ -10120,6 +10276,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 draw_particles(ctx, pass, false, item.ref, item.first, item.count);
                 binder.reset();
                 bound_textures = unbound;
+                bound_inputs = nullptr;
                 begin_scene(current_scene);
                 fill_uniforms(draw_uniforms, current_scene);
                 continue;
@@ -10175,6 +10332,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                      : ctx.main_velocity && !custom ? 2
                                                                     : 1)) {
                 bound_textures = unbound;
+                bound_inputs = nullptr;
             }
             const std::pair<Wrap3D, Wrap3D> wrap{material.wrap_u, material.wrap_v};
             if (textures != bound_textures || wrap != bound_wrap || bound_sampling != material.texture_samplers) {
@@ -10213,6 +10371,38 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 bound_wrap = wrap;
                 bound_sampling = material.texture_samplers;
             }
+            if (custom)
+                if (const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(material.inputs.backend().get());
+                    inputs && inputs != bound_inputs) {
+                    std::array<SDL_GPUTextureSamplerBinding, 4> extra{};
+                    for (u32 i = 0; i < inputs->input_textures.size(); ++i) {
+                        const auto& texture = inputs->input_textures[i];
+                        const auto* gpu = static_cast<const GpuTextureBackend*>(texture.backend().get());
+                        _owner->retain(texture);
+                        gpu->mark_material_read(_owner->_frame_serial);
+                        extra[i] = {gpu->texture().handle(), custom->textures[i].comparison ? _compare_sampler
+                                                             : texture.format() == TextureFormat::Rgba8 ||
+                                                                     texture_format_compressed(texture.format())
+                                                                 ? _owner->sampler_for(*gpu)
+                                                                 : _owner->_sampler_nearest};
+                    }
+                    if (!inputs->input_textures.empty())
+                        SDL_BindGPUFragmentSamplers(pass, 12, extra.data(),
+                                                    static_cast<u32>(inputs->input_textures.size()));
+                    std::array<SDL_GPUBuffer*, 8> storage_inputs{};
+                    for (u32 i = 0; i < inputs->input_buffers.size(); ++i) {
+                        const auto& buffer = inputs->input_buffers[i];
+                        const auto* gpu = static_cast<const GpuDataBuffer*>(buffer.backend().get());
+                        gpu->mark_used(_owner->_frame_serial);
+                        gpu->mark_material_read(_owner->_frame_serial);
+                        _owner->_retained_buffers.push_back(buffer.backend());
+                        storage_inputs[i] = gpu->buffer().handle();
+                    }
+                    if (!inputs->input_buffers.empty())
+                        SDL_BindGPUFragmentStorageBuffers(pass, 0, storage_inputs.data(),
+                                                          static_cast<u32>(inputs->input_buffers.size()));
+                    bound_inputs = inputs;
+                }
             if (ref.clustered && !cluster_index) {
                 continue;
             }
@@ -10659,7 +10849,12 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
         return false;
     }
     const std::size_t pipelines_before = _owner->_pipelines.size();
+    u64 input_signature = 0;
+    const std::array material_outputs{view->texture()};
+    if (!validate_material_inputs(scene, material_outputs, &input_signature))
+        return false;
     FrameCtx ctx{view, scene, stats};
+    ctx.input_signature = input_signature;
     ctx.prepared = prepared;
     if (prepared && !preparation_live(prepared->frame))
         return false;
@@ -10802,6 +10997,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
         std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - record_start).count();
     age_targets(ctx);
     stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines_before);
+    view->_resolved->bump_version();
     resume_2d();
     if (ctx.occlusion && ctx.occlusion_second) {
         view->_occ_read ^= 1; // what the second pass wrote is what the next render's first pass reads
@@ -10822,6 +11018,8 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
 }
 
 bool GpuRenderer3D::warm_up(IViewBackend3D& base, const Scene3D& scene) {
+    if (!validate_material_inputs(scene))
+        return false;
     auto* view = dynamic_cast<GpuView3D*>(&base);
     if (!view || !_vertex_shader || !_fragment_shader) {
         return false;

@@ -376,6 +376,8 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_output_pass(const gpu::GpuTextu
     ctx.view.scale[1] = 2.0f / std::max(1.0f, h);
     ctx.view.translate[0] = -1.0f;
     ctx.view.translate[1] = -1.0f;
+    if (!_rt_stack.empty() && _rt_stack.back().backend && _batch.has_writes())
+        _rt_stack.back().backend->bump_version();
     _batch.flush(*_frame, _device, _pipelines, ctx);
     return &_output;
 }
@@ -610,6 +612,8 @@ void GpuRenderer2DBackend::flush_to_frame() {
         ctx.depth_stencil_format = _stencil_format;
         ctx.clear_stencil = !stencil.loaded;
     }
+    if (!_rt_stack.empty() && _rt_stack.back().backend && _batch.has_writes())
+        _rt_stack.back().backend->bump_version();
     _batch.flush(*_frame, _device, _pipelines, ctx);
     if (ctx.depth_stencil) {
         stencil.loaded = true;
@@ -1389,6 +1393,11 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
         texture_format_compressed(backend->format())) {
         return false;
     }
+    if (_frame && backend->material_read_frame() == _frame_serial) {
+        flush_to_frame();
+        _frame->submit();
+        end_frame();
+    }
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                            static_cast<u32>(size.x), static_cast<u32>(size.y), pixels,
                            texture_format_bytes(backend->format()), may_cycle(*backend, at, size));
@@ -1406,6 +1415,11 @@ bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i
         backend->format() == TextureFormat::Depth32Float || backend->format() == TextureFormat::Depth24Unorm ||
         texture_format_compressed(backend->format())) {
         return false;
+    }
+    if (_frame && backend->material_read_frame() == _frame_serial) {
+        flush_to_frame();
+        _frame->submit();
+        end_frame();
     }
     _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
                           static_cast<u32>(size.x), static_cast<u32>(size.y), texture_format_bytes(backend->format()),
@@ -1939,7 +1953,9 @@ void GpuRenderer2DBackend::push_render_target(const RenderTarget& target) {
     _view_offset = {0.0f, 0.0f}; // RT-internal draws use the target's native origin
     _saved_transforms.push_back(_transform);
     set_transform({});
-    _rt_stack.push_back(TargetEntry{.texture = &backend->texture()});
+    _rt_stack.push_back(
+        TargetEntry{.texture = &backend->texture(),
+                    .backend = std::static_pointer_cast<const gpu::GpuTextureBackend>(target.texture().backend())});
     if (_frame) {
         _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
     }
@@ -1960,7 +1976,10 @@ bool GpuRenderer2DBackend::push_layer_target(const RenderTarget& target) {
     _saved_clip_stacks.push_back(_clip_stack);
     _saved_view_offsets.push_back(_view_offset);
     _saved_transforms.push_back(_transform);
-    _rt_stack.push_back(TargetEntry{.texture = &backend->texture(), .coords = coords});
+    _rt_stack.push_back(
+        TargetEntry{.texture = &backend->texture(),
+                    .backend = std::static_pointer_cast<const gpu::GpuTextureBackend>(target.texture().backend()),
+                    .coords = coords});
     _batch.begin(current_target(), SDL_FColor{0.0f, 0.0f, 0.0f, 0.0f}, /*do_clear=*/true);
     _batch.begin_bounds();
     sync_stencil();
@@ -2241,7 +2260,7 @@ std::optional<std::span<SDL_GPUBuffer* const>> GpuRenderer2DBackend::bind_buffer
     _storage_scratch.clear();
     for (const DataBuffer& buffer : buffers.first(shader.storage_buffers())) {
         const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
-        if (!gpu || !gpu->buffer()) {
+        if (!gpu || !gpu->buffer() || !gpu->buffer().belongs_to(_device.handle())) {
             KIN_LOG_ERROR("render", "shader draw skipped: a data buffer from another backend or invalid");
             return std::nullopt;
         }
@@ -2347,7 +2366,7 @@ bool GpuRenderer2DBackend::dispatch_compute(ComputeShaderHandle handle, Vec2i gr
     std::vector<SDL_GPUStorageTextureReadWriteBinding> outputs;
     for (const Texture& output : bindings.outputs) {
         const auto* backend = as_gpu(output.backend().get());
-        if (!backend || !backend->texture()) {
+        if (!backend || !backend->texture() || !backend->texture().belongs_to(_device.handle())) {
             KIN_LOG_ERROR("render", "dispatch_compute: an output is not a storage texture of this renderer");
             return false;
         }
@@ -2360,7 +2379,7 @@ bool GpuRenderer2DBackend::dispatch_compute(ComputeShaderHandle handle, Vec2i gr
     for (const auto* list : {&bindings.output_buffers, &bindings.buffers}) {
         for (const DataBuffer& buffer : *list) {
             const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
-            if (!gpu || !gpu->buffer()) {
+            if (!gpu || !gpu->buffer() || !gpu->buffer().belongs_to(_device.handle())) {
                 KIN_LOG_ERROR("render", "dispatch_compute: a data buffer is not of this renderer");
                 return false;
             }
@@ -2402,6 +2421,8 @@ bool GpuRenderer2DBackend::dispatch_compute(ComputeShaderHandle handle, Vec2i gr
     }
     SDL_DispatchGPUCompute(pass, static_cast<u32>(groups.x), static_cast<u32>(groups.y), 1);
     SDL_EndGPUComputePass(pass);
+    for (const auto& output : bindings.output_buffers)
+        static_cast<const gpu::GpuDataBuffer*>(output.backend().get())->bump_version();
     _batch.begin(current_target(), _clear_color, /*do_clear=*/false);
     return true;
 }
@@ -2418,25 +2439,37 @@ DataBuffer GpuRenderer2DBackend::create_data_buffer(std::size_t bytes, const voi
 bool GpuRenderer2DBackend::update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
                                               const void* data) {
     const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
-    if (!gpu || !gpu->buffer()) {
+    if (!gpu || !gpu->buffer() || !gpu->buffer().belongs_to(_device.handle())) {
         return false;
+    }
+    if (_frame && gpu->material_read_frame() == _frame_serial) {
+        flush_to_frame();
+        _frame->submit();
+        end_frame();
     }
     // Replacing all of one this frame hasn't drawn with lets it cycle, as textures do.
     const bool whole = offset == 0 && bytes == gpu->size() && gpu->used_in_frame() != _frame_serial;
     _device.upload_storage_buffer(gpu->buffer().handle(), static_cast<u32>(offset), static_cast<u32>(bytes), data,
                                   whole);
+    gpu->bump_version();
     return true;
 }
 
 bool GpuRenderer2DBackend::write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
                                              const std::function<void(std::span<u8>)>& fill) {
     const auto* gpu = dynamic_cast<const gpu::GpuDataBuffer*>(buffer.backend().get());
-    if (!gpu || !gpu->buffer()) {
+    if (!gpu || !gpu->buffer() || !gpu->buffer().belongs_to(_device.handle())) {
         return false;
+    }
+    if (_frame && gpu->material_read_frame() == _frame_serial) {
+        flush_to_frame();
+        _frame->submit();
+        end_frame();
     }
     const bool whole = offset == 0 && bytes == gpu->size() && gpu->used_in_frame() != _frame_serial;
     _device.upload_storage_buffer(gpu->buffer().handle(), static_cast<u32>(offset), static_cast<u32>(bytes), nullptr,
                                   whole, &fill);
+    gpu->bump_version();
     return true;
 }
 
@@ -2604,6 +2637,8 @@ const gpu::GpuTexture* GpuRenderer2DBackend::run_post_chain() {
         ctx.view.scale[1] = 2.0f / std::max(1.0f, h);
         ctx.view.translate[0] = -1.0f;
         ctx.view.translate[1] = -1.0f;
+        if (!_rt_stack.empty() && _rt_stack.back().backend && _batch.has_writes())
+            _rt_stack.back().backend->bump_version();
         _batch.flush(*_frame, _device, _pipelines, ctx);
 
         read = write;
