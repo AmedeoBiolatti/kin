@@ -3461,7 +3461,9 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
         draw();
         assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
     };
-    // What the screen shows (through the output pass): a screenshot's pixel.
+    // Displayed-output checks use the optional PNG codec; target readbacks below
+    // still exercise linear blending, HDR, gradients and masks without image I/O.
+#if KIN_ENABLE_IMAGE_IO
     kin::Image shot;
     const auto on_screen = [&](const std::function<void()>& draw) {
         renderer.clear(kin::Color::rgb(0, 0, 0));
@@ -3476,6 +3478,7 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
         const std::size_t i = (static_cast<std::size_t>(y) * shot.size.x + x) * 4;
         return kin::Color::rgb(shot.rgba[i], shot.rgba[i + 1], shot.rgba[i + 2]);
     };
+#endif
     (void)window;
     const std::array<kin::u8, 4> texel{128, 64, 200, 255};
     const kin::Gradient ramp{.start = kin::colors::black, .end = kin::colors::white, .direction = kin::GradientDirection::Horizontal};
@@ -3525,12 +3528,15 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
             fail(mode + "a clipped half white is " + std::to_string(grey_at(32, 32)));
         }
         // The screen: encoded on the way out.
+#if KIN_ENABLE_IMAGE_IO
         on_screen([&] { renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 255, 255, 128)); });
         if (std::abs(int(shot_at(8, 8).r) - 188) > 2) {
             fail(mode + "the screen shows " + std::to_string(shot_at(8, 8).r));
         }
+#endif
     }
 
+#if KIN_ENABLE_IMAGE_IO
     // HDR: twice white, added, brought down by each tonemapper and by exposure.
     assert(renderer.set_color_space(kin::ColorSpace::Linear, true));
     const auto twice_white = [&] {
@@ -3591,6 +3597,7 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
         fail("dithered, a colour between steps stays one value");
     }
     renderer.set_color_output({});
+#endif
     assert(renderer.set_color_space(kin::ColorSpace::Gamma));
 }
 
