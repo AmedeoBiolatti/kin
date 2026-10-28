@@ -2,6 +2,8 @@
 
 `kin/renderer/resource_graph.hpp` is a backend-independent compiler. `kin/renderer/graph_resources.hpp` binds its resources through public renderer APIs. Both are usable without experimental 3D. The stock native 3D renderer uses the same compiler for its coarse phase schedule; ordinary games still call `Renderer3D::render()`.
 
+Graph compilation is separate from shader compilation, GPU pipeline creation and temporal/asset caches.
+
 A definition contains named logical resources and passes. A resource has one writer; reads depend on that writer regardless of declaration order. Imported values are initialized and read-only. Write another logical version for a result, and import last frame's history separately from this frame's output. Reading and writing the same logical resource in a pass is rejected: feedback needs ping-pong resources.
 
 ```cpp
