@@ -597,6 +597,40 @@ void test_sdl_backend_smoke() {
     assert(renderer.output_size().y > 0);
 }
 
+// The SDL backend replaces part of a texture in place (a spectrogram's newest
+// column), as SDL_GPU does; it said it could not, and callers made the texture
+// again. A draw queued before the update shows what the texture held.
+void test_sdl_update_texture() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "update-texture", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{kin::make_render_backend(window, false, false)};
+    std::vector<kin::u8> black(4 * 4 * 4, 0);
+    for (std::size_t i = 3; i < black.size(); i += 4) {
+        black[i] = 255;
+    }
+    const kin::Texture texture = renderer.create_texture_from_rgba(black.data(), {4, 4});
+    const std::array<kin::u8, 8> red{255, 0, 0, 255, 255, 0, 0, 255};
+    auto target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    std::vector<kin::u8> image;
+    kin::Vec2i size;
+    {
+        auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::colors::black);
+        renderer.draw_texture(texture, {0.0f, 0.0f, 32.0f, 64.0f}); // before: all black
+        assert(renderer.update_texture(texture, {2, 1}, {1, 2}, red.data()));
+        assert(!renderer.update_texture(texture, {3, 3}, {2, 1}, red.data())); // past its edge
+        renderer.draw_texture(texture, {32.0f, 0.0f, 32.0f, 64.0f});
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, image, size));
+    }
+    renderer.present();
+    const kin::Color red_pixel = kin::Color::rgb(255, 0, 0);
+    assert(pixel_near(image, size, 32 + 20, 24, red_pixel));          // texel (2, 1)
+    assert(pixel_near(image, size, 32 + 20, 40, red_pixel));          // (2, 2)
+    assert(pixel_near(image, size, 32 + 12, 24, kin::colors::black)); // (1, 1): as it was
+    assert(pixel_near(image, size, 32 + 20, 56, kin::colors::black)); // (2, 3)
+    assert(pixel_near(image, size, 20, 24, kin::colors::black));      // drawn before the update
+}
+
 void test_sdl_render_targets_and_gradients() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({
@@ -4028,6 +4062,7 @@ int main(int argc, char** argv) {
     test_sprite_catalog_resolves_refs_and_sheets();
 #if KIN_HAS_SDL_RENDERER
     test_sdl_backend_smoke();
+    test_sdl_update_texture();
 #endif
 #if KIN_HAS_SDL_RENDERER
     test_sdl_logical_size_follows_window_size();

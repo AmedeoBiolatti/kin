@@ -332,6 +332,8 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _redraw_in = -1.0f;
     _focus_trap = {};
     _overlays.clear();
+    _wheel_takers.swap(_wheel_takers_next);
+    _wheel_takers_next.clear();
     _now = _clock ? _clock() : std::chrono::duration<f64>(std::chrono::steady_clock::now().time_since_epoch()).count();
     _pixel_scale = renderer.content_scale();
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
@@ -1027,6 +1029,16 @@ bool Context::pointer_released(MouseButton button) const {
     return _input && _input->mouse_frame_released(button);
 }
 
+void Context::take_wheel(Id id) {
+    if (id && std::ranges::find(_wheel_takers_next, id.value) == _wheel_takers_next.end()) {
+        _wheel_takers_next.push_back(id.value);
+    }
+}
+
+bool Context::double_click(Id id) {
+    return _state.register_click(id, pointer(), _now);
+}
+
 f32 Context::mouse_wheel_y() const {
     return _input ? _input->frame_mouse_wheel_y() : 0.0f;
 }
@@ -1289,6 +1301,7 @@ bool draw_op_contains(const Context::DrawOp& op, Vec2f p) {
     case Kind::Sprite:
     case Kind::Texture:
     case Kind::Text:
+    case Kind::Shape: // the box around it
         return contains(op.rect, p);
     case Kind::RoundedFill:
         return rounded_contains(op.rect, op.radius, p);
@@ -1344,6 +1357,7 @@ std::string_view draw_op_role(const Context::DrawOp& op) {
     case Kind::Texture: return "texture";
     case Kind::Gradient: return "gradient";
     case Kind::Line: return "line";
+    case Kind::Shape: return "shape";
     default: return "fill";
     }
 }
@@ -1998,6 +2012,120 @@ void Context::line(Vec2f a, Vec2f b, Color color) {
         check_draw("line", {std::min(a.x, b.x), std::min(a.y, b.y), std::abs(b.x - a.x), std::abs(b.y - a.y)});
         record_draw(DrawOp::Kind::Line, {a.x, a.y, b.x - a.x, b.y - a.y}, 0.0f, 1.0f, color);
         _renderer->draw_line(a, b, color);
+    }
+}
+
+namespace {
+
+// The box around `points`, grown by `pad` on every side.
+Rectf points_box(std::span<const Vec2f> points, f32 pad) {
+    if (points.empty()) {
+        return {};
+    }
+    f32 x0 = points[0].x, y0 = points[0].y, x1 = x0, y1 = y0;
+    for (const Vec2f& p : points) {
+        x0 = std::min(x0, p.x);
+        y0 = std::min(y0, p.y);
+        x1 = std::max(x1, p.x);
+        y1 = std::max(y1, p.y);
+    }
+    return {x0 - pad, y0 - pad, x1 - x0 + pad * 2.0f, y1 - y0 + pad * 2.0f};
+}
+
+Rectf circle_box(Vec2f center, f32 radius) {
+    return {center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f};
+}
+
+// Half a stroke and the pixel of soft edge past it.
+f32 stroke_pad(f32 width) {
+    return width * 0.5f + 1.0f;
+}
+
+// A stroke's pad where its joins may be mitred (out to the miter limit).
+f32 stroke_pad(const StrokeStyle& style) {
+    return stroke_pad(style.join == LineJoin::Miter ? style.width * std::max(1.0f, style.miter_limit) : style.width);
+}
+
+} // namespace
+
+bool Context::shape_drawn(std::string_view kind, Rectf box, f32 width, Color color) {
+    if (!_renderer || color.a == 0) {
+        return false;
+    }
+    // The box says where a shape may paint, not where it does: only the
+    // rectangle is checked, not the draw scope's corners.
+    check_draw(kind, box, true);
+    record_draw(DrawOp::Kind::Shape, box, 0.0f, width, color);
+    return true;
+}
+
+void Context::line(Vec2f a, Vec2f b, Color color, f32 width, LineCap cap) {
+    const std::array<Vec2f, 2> ends{a, b};
+    if (width > 0.0f && shape_drawn("line", points_box(ends, stroke_pad(width)), width, color)) {
+        _renderer->draw_line(a, b, color, width, cap);
+    }
+}
+
+void Context::polyline(std::span<const Vec2f> points, Color color, StrokeStyle style) {
+    if (points.size() >= 2 && style.width > 0.0f &&
+        shape_drawn("polyline", points_box(points, stroke_pad(style)), style.width, color)) {
+        _renderer->draw_polyline(points, color, style);
+    }
+}
+
+void Context::fill_polygon(std::span<const Vec2f> points, Color color) {
+    if (points.size() >= 3 && shape_drawn("fill_polygon", points_box(points, 1.0f), 0.0f, color)) {
+        _renderer->fill_polygon(points, color);
+    }
+}
+
+void Context::fill_circle(Vec2f center, f32 radius, Color color) {
+    if (radius > 0.0f && shape_drawn("fill_circle", circle_box(center, radius + 1.0f), 0.0f, color)) {
+        _renderer->fill_circle(center, radius, color);
+    }
+}
+
+void Context::outline_circle(Vec2f center, f32 radius, Color color, f32 width) {
+    if (radius > 0.0f && width > 0.0f && shape_drawn("outline_circle", circle_box(center, radius + stroke_pad(width)), width, color)) {
+        _renderer->draw_circle(center, radius, color, width);
+    }
+}
+
+void Context::arc(Vec2f center, f32 radius, f32 start, f32 end, Color color, StrokeStyle style) {
+    if (radius > 0.0f && style.width > 0.0f &&
+        shape_drawn("arc", circle_box(center, radius + stroke_pad(style.width)), style.width, color)) {
+        _renderer->draw_arc(center, radius, start, end, color, style);
+    }
+}
+
+void Context::fill_pie(Vec2f center, f32 radius, f32 start, f32 end, Color color) {
+    if (radius > 0.0f && shape_drawn("fill_pie", circle_box(center, radius + 1.0f), 0.0f, color)) {
+        _renderer->fill_pie(center, radius, start, end, color);
+    }
+}
+
+void Context::fill_path(const Path& path, Color color, FillRule rule) {
+    if (!path.empty() && shape_drawn("fill_path", outset(path.bounds(), 1.0f), 0.0f, color)) {
+        _renderer->fill_path(path, color, rule);
+    }
+}
+
+void Context::stroke_path(const Path& path, Color color, StrokeStyle style) {
+    if (!path.empty() && style.width > 0.0f &&
+        shape_drawn("stroke_path", outset(path.bounds(), stroke_pad(style)), style.width, color)) {
+        _renderer->stroke_path(path, color, style);
+    }
+}
+
+void Context::shape(const ShapeMesh& mesh, const Affine2& transform, Color tint) {
+    if (mesh.empty()) {
+        return;
+    }
+    const Rectf b = mesh.bounds;
+    const std::array<Vec2f, 4> corners{transform.apply({b.x, b.y}), transform.apply({b.x + b.w, b.y}),
+                                       transform.apply({b.x + b.w, b.y + b.h}), transform.apply({b.x, b.y + b.h})};
+    if (shape_drawn("shape", points_box(corners, 0.0f), 0.0f, tint)) {
+        _renderer->draw_shape(mesh, transform, tint);
     }
 }
 

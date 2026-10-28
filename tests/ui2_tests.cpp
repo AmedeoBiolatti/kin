@@ -7,6 +7,7 @@
 #include <kin/ecs/ui2.hpp>
 #include <kin/ecs/ui2_sync.hpp>
 #include <kin/l10n/localization.hpp>
+#include <kin/ui2/charts.hpp>
 #include <kin/ui2/composed.hpp>
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/screen.hpp>
@@ -2175,6 +2176,499 @@ void test_value_field_frame_under_pointer() {
     frame(false);
     const Color danger = ui.theme().colors.solid_danger;
     assert(std::ranges::any_of(colors, [&](Color c) { return c.r == danger.r && c.g == danger.g && c.b == danger.b && c.a == danger.a; }));
+}
+
+// Shapes drawn through the Context are checked against the draw scope and
+// recorded, by the box around them; a transparent one draws nothing.
+void test_ui2_shapes_are_checked_and_recorded() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui.set_debug_options({.detect_draw_overflow = true, .log_draw_overflow = false, .record_draws = true});
+    const std::array<Vec2f, 3> points{{{10, 10}, {50, 30}, {90, 10}}};
+    input.begin_frame();
+    ui.begin(input, renderer);
+    {
+        auto scope = ui.draw_scope("Chart", {0, 0, 100, 60});
+        ui.polyline(points, Color::rgb(255, 0, 0), {.width = 2.0f});
+        ui.fill_circle({50, 40}, 6.0f, Color::rgb(0, 255, 0));
+        ui.arc({50, 40}, 10.0f, 0.0f, 90.0f, colors::transparent, {.width = 2.0f});
+    }
+    ui.end();
+    const auto overflows = [&] {
+        return std::ranges::count_if(ui.diagnostics(), [](const ui2::Context::Diagnostic& d) {
+            return d.kind == ui2::Context::DiagnosticKind::DrawOverflow;
+        });
+    };
+    assert(overflows() == 0);
+    const ui2::Context::PixelCausation on_line = ui.pixel_causation({50, 20});
+    assert(on_line.layers.size() == 1);
+    assert(on_line.layers[0].widget == "Chart" && on_line.layers[0].role == "shape");
+    assert(ui.pixel_causation({50, 34}).layers.size() == 2); // the line's box and the circle
+    assert(ui.pixel_causation({50, 58}).layers.empty());     // below both (the arc drew nothing)
+
+    // A line past the scope trips the overflow check.
+    input.begin_frame();
+    ui.begin(input, renderer);
+    {
+        auto scope = ui.draw_scope("Chart", {0, 0, 100, 60});
+        ui.line({10, 30}, {150, 30}, Color::rgb(255, 255, 255), 2.0f);
+    }
+    ui.end();
+    assert(overflows() == 1);
+}
+
+// A widget that takes the wheel keeps it from the scroll box it is in, from
+// the frame after it asks (where the wheel goes is settled before widgets run).
+struct WheelProbe {
+    ui2::Id id{};
+    Rectf bounds{};
+    bool takes = true;
+    f32 turned = 0.0f;
+};
+Vec2f measure(const WheelProbe&) { return {100.0f, 40.0f}; }
+void run(ui2::Context& ctx, WheelProbe& w) {
+    if (ctx.region(w.id, w.bounds).hot) {
+        w.turned += ctx.mouse_wheel_y();
+    }
+    if (w.takes) {
+        ctx.take_wheel(w.id);
+    }
+}
+
+void test_ui2_take_wheel_keeps_it_from_scroll_boxes() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const ui2::Id box = ui2::make_id("scroll");
+    WheelProbe probe{.id = ui2::make_id("probe")};
+    std::vector<ui2::Spacer> rows(10);
+    const auto frame = [&](Vec2f at, f32 wheel) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_wheel_y(wheel);
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 300});
+        {
+            auto s = ui.scroll(box, {.layout = {.width = ui2::grow(), .height = ui2::fixed(100)}});
+            ui.widget(probe, {.width = ui2::grow(), .height = ui2::fixed(40)});
+            for (ui2::Spacer& row : rows) {
+                ui.widget(row, {.width = ui2::grow(), .height = ui2::fixed(30)});
+            }
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    frame({50, 20}, 0.0f);
+    frame({50, 20}, 0.0f);
+    frame({50, 20}, -1.0f); // over the probe: it turns, the box stays
+    assert(probe.turned == -1.0f);
+    assert(ui.scroll_offset(box).y == 0.0f);
+    frame({50, 80}, 0.0f);
+    frame({50, 80}, -1.0f); // over a row: the box scrolls
+    assert(approx(ui.scroll_offset(box).y, 48.0f));
+
+    // One that stops asking gives it back the frame after.
+    ui.set_scroll_offset(box, {});
+    probe.turned = 0.0f;
+    probe.takes = false;
+    frame({50, 20}, 0.0f);
+    frame({50, 20}, 0.0f);
+    frame({50, 20}, -1.0f);
+    assert(approx(ui.scroll_offset(box).y, 48.0f));
+}
+
+// Any region's clicks make double clicks: the second soon after the first,
+// in the same place; the third starts over.
+void test_ui2_double_click_of_a_region() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    f64 now = 10.0;
+    ui.set_clock([&] { return now; });
+    const ui2::Id id = ui2::make_id("cell");
+    bool twice = false;
+    const auto frame = [&](Vec2f at, bool held) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_held(MouseButton::Left, held);
+        ui.begin(input, renderer);
+        const ui2::Interaction it = ui.region(id, {0, 0, 50, 50});
+        twice = it.clicked && ui.double_click(id);
+        ui.end();
+    };
+    const auto click = [&](Vec2f at) {
+        frame(at, false);
+        frame(at, true);
+        frame(at, false);
+        return twice;
+    };
+    assert(!click({10, 10}));
+    now += 0.2;
+    assert(click({11, 10}));
+    now += 0.2;
+    assert(!click({11, 10})); // a third: a first again
+    now += 1.0;
+    assert(!click({11, 10})); // too late
+    now += 0.2;
+    assert(!click({30, 30})); // elsewhere
+}
+
+// drag_value: up raises it (Shift: a tenth as far), past the ends it stops
+// and comes straight back, steps round it, the wheel and the arrows nudge it
+// (at least a step), a double click resets it, a drag let go is no click.
+void test_ui2_drag_value() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    f64 now = 5.0;
+    ui.set_clock([&] { return now; });
+    const ui2::Id id = ui2::make_id("gain");
+    const Rectf dial{0, 0, 40, 40};
+    f64 value = 0.5;
+    ui2::DragValueOptions options{.reset = 0.25};
+    ui2::DragValueResult result;
+    const auto frame = [&](Vec2f at, bool held, f32 wheel = 0.0f, Key key = Key::Unknown) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_held(MouseButton::Left, held);
+        input.set_mouse_wheel_y(wheel);
+        if (key != Key::Unknown) {
+            input.set_key_pressed(key);
+        }
+        ui.begin(input, renderer);
+        result = ui.drag_value(id, dial, value, options);
+        ui.end();
+        if (key != Key::Unknown) {
+            input.set_key_released(key);
+        }
+    };
+    frame({20, 20}, false);
+    frame({20, 20}, true);
+    frame({20, 0}, true); // up 20 of 200: a tenth of the range
+    assert(approx(static_cast<f32>(value), 0.6f) && result.changed && result.dragging);
+    assert(ui.cursor() == SystemCursor::ResizeNS);
+    input.set_modifier_held(KeyModifiers::Shift, true);
+    frame({20, -20}, true); // finely: a hundredth
+    assert(approx(static_cast<f32>(value), 0.61f));
+    input.set_modifier_held(KeyModifiers::Shift, false);
+    frame({20, -500}, true); // well past the top: 1
+    assert(value == 1.0);
+    frame({20, -480}, true); // and straight back down
+    assert(approx(static_cast<f32>(value), 0.9f));
+    frame({20, -480}, false); // let go: a drag, not a click
+    assert(!result.dragging);
+
+    // Steps: kept to whole steps, a slow drag still gets there.
+    options.step = 0.25;
+    value = 0.5;
+    frame({20, 20}, false);
+    frame({20, 20}, true);
+    for (i32 y = 19; y >= 6; --y) { // up 14: 0.07
+        frame({20, static_cast<f32>(y)}, true);
+    }
+    assert(value == 0.5);
+    for (i32 y = 5; y >= -10; --y) { // up 30 in all: 0.15, nearer 0.75
+        frame({20, static_cast<f32>(y)}, true);
+    }
+    assert(value == 0.75);
+    frame({20, -10}, false);
+
+    // The wheel: a fiftieth of the range a turn, at least a step.
+    frame({20, 20}, false);
+    frame({20, 20}, false, -1.0f);
+    assert(value == 0.5);
+    options.step = 0.0;
+    frame({20, 20}, false, 1.0f);
+    assert(approx(static_cast<f32>(value), 0.52f));
+
+    // A double click resets it; the click focused it, and the arrows step it.
+    frame({20, 20}, true);
+    frame({20, 20}, false);
+    now += 0.2;
+    frame({20, 20}, true);
+    frame({20, 20}, false);
+    assert(value == 0.25 && result.changed);
+    frame({60, 60}, false, 0.0f, Key::Up);
+    assert(result.focused && approx(static_cast<f32>(value), 0.26f));
+    frame({60, 60}, false, 0.0f, Key::Left);
+    assert(approx(static_cast<f32>(value), 0.25f));
+
+    // A log scale: an even drag multiplies it.
+    options = {.scale = {.min = 20.0, .max = 20000.0, .kind = ui2::ScaleKind::Log}, .travel = 300.0f};
+    value = 200.0;
+    frame({20, 20}, false);
+    frame({20, 20}, true);
+    frame({20, -80}, true); // up 100 of 300: a tenfold step
+    assert(std::abs(value - 2000.0) < 0.5);
+    frame({20, -80}, false);
+}
+
+void test_ui2_scale_and_ticks() {
+    const auto labels = [](const std::vector<ui2::Tick>& ticks) {
+        std::string out;
+        for (const ui2::Tick& tick : ticks) {
+            out += (out.empty() ? "" : " ") + tick.label;
+        }
+        return out;
+    };
+    assert(labels(ui2::ticks({.min = 0.0, .max = 1.0})) == "0.0 0.2 0.4 0.6 0.8 1.0");
+    assert(labels(ui2::ticks({.min = 0.0, .max = 48000.0})) == "0 10k 20k 30k 40k");
+    assert(labels(ui2::ticks({.min = -3.0, .max = 3.0}, 4)) == "-2 0 2");
+    assert(labels(ui2::ticks({.min = 0.0, .max = 50.0}, 6, "ms")) == "0 ms 10 ms 20 ms 30 ms 40 ms 50 ms");
+    assert(labels(ui2::ticks({.min = 20.0, .max = 20000.0, .kind = ui2::ScaleKind::Log}, 6, "Hz")) == "100 Hz 1 kHz 10 kHz");
+    assert(labels(ui2::ticks({.min = 1.0, .max = 100.0, .kind = ui2::ScaleKind::Log}, 8)) == "1 2 5 10 20 50 100");
+    assert(labels(ui2::ticks({.min = 1e-3, .max = 1e9, .kind = ui2::ScaleKind::Log}, 5)) == "0.001 1 1k 1M 1G");
+    assert(labels(ui2::ticks({.min = 20.0, .max = 80.0, .kind = ui2::ScaleKind::Log}, 4)) == "20 50");
+    assert(ui2::ticks({.min = 1.0, .max = 1.0}).empty());
+    assert(ui2::tick_label(1500.0, 500.0) == "1.5k");
+    assert(ui2::tick_label(1000.0, 500.0) == "1k");
+    assert(ui2::tick_label(-0.0001, 0.1) == "0.0");
+    assert(ui2::tick_label(2500000.0, 500000.0, "B") == "2.5 MB");
+    assert(ui2::tick_label(1500.0, 500.0, "ms") == "1500 ms"); // a unit that has its prefix already
+    assert(ui2::tick_label(2000.0, 1000.0, "Hz") == "2 kHz");
+    assert(ui2::tick_label(5620.0, 1.0, {}, false) == "5620");
+
+    const ui2::Scale log{.min = 10.0, .max = 1000.0, .kind = ui2::ScaleKind::Log};
+    assert(std::abs(log.fraction(100.0) - 0.5) < 1e-9);
+    assert(std::abs(log.value(0.75) - std::pow(10.0, 2.5)) < 1e-6);
+    assert(!ui2::Scale({.min = 0.0, .max = 10.0, .kind = ui2::ScaleKind::Log}).valid());
+    assert((ui2::nice_scale(0.13, 0.88) == ui2::Scale{.min = 0.0, .max = 1.0}));
+    assert((ui2::nice_scale(-7.0, 93.0) == ui2::Scale{.min = -20.0, .max = 100.0}));
+    const ui2::Scale flat = ui2::nice_scale(5.0, 5.0);
+    assert(flat.min < 5.0 && flat.max > 5.0);
+    assert((ui2::nice_scale(3.0, 700.0, ui2::ScaleKind::Log) == ui2::Scale{.min = 1.0, .max = 1000.0, .kind = ui2::ScaleKind::Log}));
+}
+
+// A plot fits its axes to the data, zooms x around the pointer with the
+// wheel (keeping the wheel from scroll boxes), pans with a drag but not past
+// the ends, shows all of it again on a double click, and reads out the
+// sample nearest the pointer.
+void test_ui2_plot_zoom_pan_and_readout() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    f64 now = 1.0;
+    ui.set_clock([&] { return now; });
+    std::vector<f32> wave(101);
+    for (std::size_t i = 0; i < wave.size(); ++i) {
+        wave[i] = 0.9f * std::sin(static_cast<f32>(i) * 0.2f);
+    }
+    const std::array<ui2::Series, 1> series{{{.name = "wave", .y = wave}}};
+    ui2::Plot plot{.id = ui2::make_id("plot"), .bounds = {0, 0, 320, 200}, .series = series};
+    const auto frame = [&](Vec2f at, bool held, f32 wheel = 0.0f) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_held(MouseButton::Left, held);
+        input.set_mouse_wheel_y(wheel);
+        ui.begin(input, renderer);
+        ui2::run(ui, plot);
+        ui.end();
+    };
+    frame({0, 0}, false);
+    assert((plot.view_x == ui2::Scale{.min = 0.0, .max = 100.0}));
+    assert((plot.view_y == ui2::Scale{.min = -1.0, .max = 1.0}));
+    const Rectf a = plot.area;
+    assert(a.x > 0.0f && a.y > 0.0f && a.x + a.w < 320.0f && a.y + a.h < 200.0f);
+    const auto px = [&](f64 x) { return a.x + static_cast<f32>(plot.view_x.fraction(x)) * a.w; };
+
+    // The readout: the sample nearest the pointer.
+    const Vec2f over{px(30.2), a.y + a.h * 0.5f};
+    frame(over, false);
+    frame(over, false);
+    assert(plot.hovered && plot.hovered->index == 30 && plot.pointer_x && std::abs(*plot.pointer_x - 30.2) < 0.05);
+
+    // The wheel zooms around the pointer: what is under it stays there.
+    frame(over, false, 2.0f);
+    assert(std::abs(plot.view_x.max - plot.view_x.min - 64.0) < 1e-6);
+    frame(over, false);
+    assert(std::abs(*plot.pointer_x - 30.2) < 0.05);
+
+    // A drag pans by as much as the pointer moved; not past the start.
+    const f64 before = plot.view_x.min;
+    frame(over, true);
+    frame({over.x + a.w * 0.125f, over.y}, true); // an eighth of the width: 8 to the left
+    assert(before > 8.0 && std::abs(plot.view_x.min - (before - 8.0)) < 1e-3);
+    frame({over.x + a.w * 2.0f, over.y}, true);
+    assert(plot.view_x.min == 0.0 && std::abs(plot.view_x.max - 64.0) < 1e-6);
+    frame({over.x + a.w * 2.0f, over.y}, false);
+
+    // A double click: all of it.
+    frame(over, false);
+    frame(over, true);
+    frame(over, false);
+    now += 0.2;
+    frame(over, true);
+    frame(over, false);
+    assert((plot.view_x == ui2::Scale{.min = 0.0, .max = 100.0}));
+
+    // Not zoomable: the wheel does nothing.
+    plot.zoom = false;
+    frame(over, false, 2.0f);
+    assert((plot.view_x == ui2::Scale{.min = 0.0, .max = 100.0}));
+}
+
+// Zoomed in at the end of data that grows (a live chart), a plot moves on with
+// the newest samples; panned back from them, it stays where it was.
+void test_ui2_plot_follows_growing_data() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    std::vector<f32> values(100, 1.0f);
+    std::array<ui2::Series, 1> series{{{.y = values}}};
+    ui2::Plot plot{.id = ui2::make_id("live"), .bounds = {0, 0, 320, 200}, .series = series};
+    const auto frame = [&](Vec2f at, bool held, f32 wheel = 0.0f) {
+        series[0].y = values;
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        input.set_mouse_held(MouseButton::Left, held);
+        input.set_mouse_wheel_y(wheel);
+        ui.begin(input, renderer);
+        ui2::run(ui, plot);
+        ui.end();
+    };
+    frame({0, 0}, false);
+    const Vec2f end{plot.area.x + plot.area.w - 1.0f, plot.area.y + 10.0f};
+    frame(end, false);
+    frame(end, false, 3.0f); // zoomed in on the newest
+    const f64 span = plot.view_x.max - plot.view_x.min;
+    assert(span < 60.0 && std::abs(plot.view_x.max - 99.0) < 1.0);
+    values.resize(150, 1.0f);
+    frame({0, 0}, false);
+    assert(std::abs(plot.view_x.max - 149.0) < 1.0 && std::abs(plot.view_x.max - plot.view_x.min - span) < 1e-6);
+
+    // Panned back: it stays as the data grows.
+    const Vec2f mid{plot.area.x + plot.area.w * 0.5f, plot.area.y + 10.0f};
+    frame(mid, false);
+    frame(mid, true);
+    frame({mid.x + 40.0f, mid.y}, true);
+    frame({mid.x + 40.0f, mid.y}, false);
+    const f64 left = plot.view_x.min;
+    values.resize(200, 1.0f);
+    frame({0, 0}, false);
+    assert(plot.view_x.min == left);
+}
+
+// Bars grow from 0 with room for the end ones, a bar answers the pointer
+// only when it is on it, and two named series get a legend above the data.
+void test_ui2_plot_bars_and_legend() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    const std::array<f32, 5> counts{3, 5, 2, 4, 1};
+    std::array<ui2::Series, 1> one{{{.name = "count", .y = counts, .kind = ui2::SeriesKind::Bars}}};
+    ui2::Plot plot{.id = ui2::make_id("bars"), .bounds = {0, 0, 300, 200}, .series = one};
+    const auto frame = [&](Vec2f at) {
+        input.begin_frame();
+        input.set_mouse_pos(at);
+        ui.begin(input, renderer);
+        ui2::run(ui, plot);
+        ui.end();
+    };
+    frame({0, 0});
+    assert((plot.view_x == ui2::Scale{.min = -0.5, .max = 4.5}));
+    assert((plot.view_y == ui2::Scale{.min = 0.0, .max = 5.0}));
+    const Rectf a = plot.area;
+    const f32 x1 = a.x + 1.5f / 5.0f * a.w;
+    const f32 top1 = a.y + a.h * (1.0f - 5.0f / 5.0f);
+    frame({x1, top1 + 20.0f});
+    frame({x1, top1 + 20.0f});
+    assert((plot.hovered == ui2::PlotPoint{0, 1}));
+    const f32 x4 = a.x + 4.5f / 5.0f * a.w;
+    const f32 top4 = a.y + a.h * (1.0f - 1.0f / 5.0f);
+    frame({x4, top4 - 20.0f}); // above the short bar: nothing
+    frame({x4, top4 - 20.0f});
+    assert(!plot.hovered && plot.pointer_x);
+
+    const std::array<f32, 5> other{1, 1, 1, 1, 1};
+    const std::array<ui2::Series, 2> two{{{.name = "count", .y = counts}, {.name = "base", .y = other}}};
+    plot.series = two;
+    frame({0, 0});
+    assert(plot.area.y > a.y + 8.0f); // a row for the legend
+
+    // A mark: a line across at its value (one outside the range: none).
+    const std::array<ui2::PlotMark, 2> marks{{{.value = 2.5, .label = "limit"}, {.value = 9.0, .label = "off"}}};
+    plot.y.marks = marks;
+    ui.set_debug_options({.record_draws = true});
+    frame({0, 0});
+    const Rectf b = plot.area;
+    const f32 at = std::round(b.y + b.h * 0.5f) + 0.5f;
+    const auto across = [&](f32 y) {
+        return std::ranges::count_if(ui.draw_ops(), [&](const ui2::Context::DrawOp& op) {
+            return op.kind == ui2::Context::DrawOp::Kind::Line && std::abs(op.rect.y - y) < 0.01f && approx(op.rect.w, b.w);
+        });
+    };
+    assert(across(at) == 1);
+}
+
+// A heat map's image scrolls as columns are pushed in at the right, keeps
+// cells where they are shown, and draws in one piece or, wrapped, two.
+void test_ui2_heatmap_image_scrolls() {
+    ui2::HeatmapImage image({4, 3}, ui2::ColorMap::Gray, {.min = 0.0, .max = 10.0});
+    assert(image.at(0, 0) == 0.0f && image.at(3, 2) == 0.0f);
+    const std::array<f32, 3> a{1, 2, 3};
+    const std::array<f32, 3> b{4, 5, 6};
+    image.push_column(a);
+    assert(image.at(3, 0) == 1.0f && image.at(3, 2) == 3.0f && image.at(2, 0) == 0.0f);
+    image.push_column(b);
+    assert(image.at(3, 1) == 5.0f && image.at(2, 1) == 2.0f);
+    image.set(0, 0, 9.0f);
+    assert(image.at(0, 0) == 9.0f);
+    const std::array<f32, 1> short_column{7};
+    image.push_column(short_column); // the rows not given: the lowest value
+    assert(image.at(3, 0) == 7.0f && image.at(3, 2) == 0.0f && image.at(1, 1) == 2.0f);
+    assert(image.at(4, 0) == 0.0f && image.at(-1, 0) == 0.0f);
+
+    Input input;
+    Renderer2D renderer{std::make_unique<TexturingBackend>()};
+    ui2::Context ui;
+    ui.set_debug_options({.record_draws = true});
+    const auto sprites = [&](ui2::HeatmapImage& drawn) {
+        input.begin_frame();
+        ui.begin(input, renderer);
+        drawn.draw(ui, {0, 0, 40, 30});
+        ui.end();
+        return std::ranges::count_if(ui.draw_ops(), [](const ui2::Context::DrawOp& op) { return op.kind == ui2::Context::DrawOp::Kind::Sprite; });
+    };
+    assert(sprites(image) == 2); // wrapped: the oldest columns, then the newest
+    ui2::HeatmapImage still({4, 3});
+    assert(sprites(still) == 1);
+}
+
+void test_ui2_chart_colors() {
+    assert((ui2::chart_color(0) == Color::rgb(0x39, 0x87, 0xe5)));
+    assert((ui2::chart_color(0, false) == Color::rgb(0x2a, 0x78, 0xd6)));
+    assert((ui2::chart_color(7) == Color::rgb(0xe6, 0x67, 0x67)));
+    assert((ui2::chart_color(8) == ui2::chart_color(-1))); // past the eight: one grey
+    assert((ui2::map_color(ui2::ColorMap::Magma, 0.0f) == Color::rgb(0x00, 0x00, 0x04)));
+    assert((ui2::map_color(ui2::ColorMap::Magma, 1.0f) == Color::rgb(0xfc, 0xfd, 0xbf)));
+    assert((ui2::map_color(ui2::ColorMap::Viridis, 2.0f) == Color::rgb(0xfd, 0xe7, 0x25)));
+    assert((ui2::map_color(ui2::ColorMap::Gray, std::nanf("")) == Color::rgb(0, 0, 0)));
+    assert(ui2::map_color(ui2::ColorMap::Gray, 0.5f).r == 128);
+}
+
+// A sparkline draws one line (and its wash), inside its bounds.
+void test_ui2_sparkline() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    ui.set_debug_options({.detect_draw_overflow = true, .log_draw_overflow = false, .record_draws = true});
+    std::vector<f32> times(500);
+    for (std::size_t i = 0; i < times.size(); ++i) {
+        times[i] = 16.0f + static_cast<f32>(i % 7);
+    }
+    ui2::Sparkline line{.bounds = {10, 10, 80, 20}, .values = times};
+    input.begin_frame();
+    ui.begin(input, renderer);
+    {
+        auto scope = ui.draw_scope("Spark", line.bounds);
+        ui2::run(ui, line);
+    }
+    ui.end();
+    assert(std::ranges::count_if(ui.draw_ops(), [](const ui2::Context::DrawOp& op) { return op.kind == ui2::Context::DrawOp::Kind::Shape; }) == 2);
+    assert(std::ranges::none_of(ui.diagnostics(), [](const ui2::Context::Diagnostic& d) {
+        return d.kind == ui2::Context::DiagnosticKind::DrawOverflow;
+    }));
 }
 
 // Widgets in a theme: measured as they are drawn (in its text), their styles
@@ -8506,6 +9000,17 @@ int main() {
     test_compose_drag_and_drop();
     test_value_fields();
     test_value_field_frame_under_pointer();
+    test_ui2_shapes_are_checked_and_recorded();
+    test_ui2_take_wheel_keeps_it_from_scroll_boxes();
+    test_ui2_double_click_of_a_region();
+    test_ui2_drag_value();
+    test_ui2_scale_and_ticks();
+    test_ui2_plot_zoom_pan_and_readout();
+    test_ui2_plot_follows_growing_data();
+    test_ui2_plot_bars_and_legend();
+    test_ui2_heatmap_image_scrolls();
+    test_ui2_chart_colors();
+    test_ui2_sparkline();
     test_theme_styles();
     test_composed_menu_bar();
     test_composed_pick_list();

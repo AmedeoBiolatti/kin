@@ -164,6 +164,9 @@ releases may change APIs.
 
 ### Fixed
 
+- The SDL_Renderer backend updates textures in place (`update_texture`,
+  `write_texture`): it returned false, and callers made the whole texture
+  again. Draws queued before an update show what the texture held.
 - ui2 text: a DEL byte (0x7F) in otherwise plain text read and wrote past the
   ASCII kerning table (a heap overflow); it is a control character now, as the
   others. Shaped runs drawn with distance-field fonts kept pointers into a
@@ -410,6 +413,12 @@ releases may change APIs.
 
 ### Changed
 
+- `kin/ui2/widgets.hpp`'s editor widgets (docks, splitters, breadcrumbs, the
+  asset browser, log console, status bar, property inspectors and grids, node
+  graphs) are declared in `kin/ui2/editor.hpp`, and its game screen widgets
+  (prompts, dialogue, nameplates, the reticle and selection rectangle, resource
+  rows, bars and meters, slots, floating text) in `kin/ui2/hud.hpp`.
+  `widgets.hpp` includes both, so code that includes it is unchanged.
 - ui2 timing in seconds: `Context::now()` (the steady clock, or one given to
   `set_clock`, read at `begin()`), `TooltipOptions::delay`/`warm` (were
   `delay_frames`/`warm_frames`), `UiTextEditState::last_click_time` and
@@ -549,6 +558,28 @@ releases may change APIs.
 
 ### Added
 
+- `kin/ui2/charts.hpp`: `Plot` (series as lines, areas, grouped bars or points
+  on fitted or given axes, linear or log; the wheel zooms x around the pointer,
+  a drag pans, a double click shows all of it; a readout of every series at
+  the nearest sample, or a bar's value on the bar; a legend for two or more
+  named series; lines of more samples than pixels drawn as each column's
+  lowest and highest), `Sparkline`, and `HeatmapImage` with `Heatmap` (a grid
+  of values as colours in a texture updated where it changed; `push_column()`
+  scrolls it, for a spectrogram). Zoomed in on the newest samples of data that
+  grows, a plot moves on with them. Series take `chart_color()`, eight colours
+  in an order checked for colour-blind readers; `map_color()` has Magma,
+  Viridis and Gray. `games/charts_demo` shows them, with a dial.
+- `kin/ui2/scale.hpp`: `Scale` (linear or log), `ticks()` (round values to mark,
+  labelled), `tick_label()` ("10k", "1 kHz", "40 ms") and `nice_scale()`.
+- ui2 draws anti-aliased shapes through the Context (`line()` with a width,
+  `polyline`, `fill_polygon`, `fill_circle`, `outline_circle`, `arc`,
+  `fill_pie`, `fill_path`, `stroke_path`, `shape()` for a `ShapeMesh`),
+  checked against draw scopes and recorded (`DrawOp::Kind::Shape`,
+  `Context::draw_ops()`) as the rest. `Context::drag_value()` changes a value by
+  a drag (Shift: finely), the wheel, the arrows and a double click (to a reset
+  value), along a linear or log `Scale`: what a dial or fader is built on.
+  `take_wheel(id)` keeps the wheel from the scroll boxes under a widget that
+  reads it; `double_click(id)` makes any region's clicks double clicks.
 - ui2 boxes with tooltips, drags and drops, drawn in an overlay pass after
   layout (`Context::overlay`): `BoxStyle::tooltip(text)`,
   `draggable(type, text, value)` and `accepts_drop(type)` (`BoxResult::drag_started`,

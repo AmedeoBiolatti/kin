@@ -8,8 +8,15 @@ snapshot path have been removed, so new and existing UI code should include
 
 - `kin/ui2/context.hpp` for immediate-mode UI context, drawing, clipping, input,
   and interaction state.
-- `kin/ui2/widgets.hpp` for controls, lists, tables, editor widgets, text inputs,
-  scroll views, overlays, and game HUD widgets.
+- `kin/ui2/widgets.hpp` for controls, lists, tables, text inputs, scroll views
+  and overlays. It brings `kin/ui2/editor.hpp` (docks, splitters, breadcrumbs,
+  an asset browser, a log console, property inspectors and grids, node graphs)
+  and `kin/ui2/hud.hpp` (input prompts, dialogue, nameplates, a target reticle,
+  resource rows, bars and meters, inventory slots, floating text); each of those
+  can be included alone.
+- `kin/ui2/charts.hpp` for plots, sparklines and heat maps (spectrograms), and
+  `kin/ui2/scale.hpp` for linear and log scales and the round values to mark on
+  them.
 - `kin/ui2/theme.hpp` for themes and palette presets; `kin/ui2/theme_file.hpp` for
   themes in `.kintheme` data files.
 - `kin/ui2/geometry.hpp` for layout geometry helpers.
@@ -209,6 +216,44 @@ if (const auto speed = ui.number_field(ui::make_id("speed"), mover.speed, {.min 
 }
 ```
 
+### Widgets drawn by hand
+
+A widget of your own is a struct with `bounds`, a `measure()` and a `run()`
+that `ui.widget()` finds (by argument-dependent lookup), as the built-in ones
+are. Its run draws with the Context: rectangles and text, and anti-aliased
+shapes (`line(a, b, color, width)`, `polyline`, `fill_polygon`, `fill_circle`,
+`outline_circle`, `arc`, `fill_pie`, `fill_path`, `stroke_path`, and `shape()`
+for a `ShapeMesh` made once). They are mirrored, clipped, checked against the
+draw scope and recorded as everything else the Context draws.
+
+`drag_value(id, bounds, value, options)` is the behaviour of a dial, a fader or
+a number scrubbed: a drag up (or right) changes `value` across `options.scale`
+over `travel` units, finely with Shift, past the ends and straight back; the
+wheel nudges it; focused, the arrows step it; a double click sets `reset`.
+The widget draws itself round it:
+
+```cpp
+struct Dial {
+    ui::Id id{};
+    kin::Rectf bounds{};
+    double* value = nullptr;
+    ui::DragValueOptions options{.scale = {.min = -24.0, .max = 12.0}, .reset = 0.0};
+};
+kin::Vec2f measure(const Dial&) { return {64.0f, 64.0f}; }
+void run(ui::Context& ctx, Dial& dial) {
+    ctx.drag_value(dial.id, dial.bounds, *dial.value, dial.options);
+    const kin::Vec2f center{dial.bounds.x + 32.0f, dial.bounds.y + 32.0f};
+    const float along = static_cast<float>(dial.options.scale.fraction(*dial.value));
+    ctx.arc(center, 26.0f, 135.0f, 405.0f, ctx.theme().palette.surface_alt, {.width = 4.0f, .cap = kin::LineCap::Round});
+    ctx.arc(center, 26.0f, 135.0f, 135.0f + 270.0f * along, ctx.theme().palette.accent, {.width = 4.0f, .cap = kin::LineCap::Round});
+}
+```
+
+A widget that reads the wheel itself calls `take_wheel(id)` each frame, so the
+scroll box it sits in does not scroll while the pointer is on it.
+`double_click(id)`, called with each click of a region, says whether it was
+the second of a double click.
+
 ### Text that runs out of room
 
 A label given `TextOverflow::Ellipsis` is as wide as its text while its line has
@@ -283,6 +328,51 @@ text field has the keys, so typing is not taken for commands.
 
 `games/studio_demo` is an editor-style window built this way, and
 `games/nextcode_look` rebuilds next_code's window (menus, icons, title bar).
+
+## Charts
+
+`kin/ui2/charts.hpp` plots numbers the app keeps: a widget holds spans of them
+and draws them as they are each frame.
+
+```cpp
+std::array<ui::Series, 2> series{{
+    {.name = "update", .y = update_ms},
+    {.name = "render", .y = render_ms},
+}};
+ui::Plot plot{.id = ui::make_id("times"), .series = series, .y = {.unit = "ms"}};
+ui.widget(plot, ui::LayoutStyle{}.w(ui::grow()).h(200));
+```
+
+- `Plot`: series as lines, areas, bars (grouped at each x) or points, with x at
+  `x0 + i * dx` or given. Axes fit the data (y rounded out to round values)
+  unless given a `Scale`, linear or log. The wheel zooms x around the pointer, a
+  drag pans, a double click shows all of it (`zoom`); the readout lists every
+  series at the sample nearest the pointer, or a bar's value on the bar. Lines
+  of more samples than pixels are drawn as each pixel column's lowest and
+  highest. Results: `area`, `view_x` and `view_y` (where the data is, for the
+  app's own marks), `pointer_x` and `hovered`.
+- `Sparkline`: recent values as a small line, no axes.
+- `HeatmapImage` and `Heatmap`: a grid of values as colours (`ColorMap`: Magma,
+  Viridis, Gray), kept in a texture updated where it changed. `push_column()`
+  scrolls it from the right, a column a frame for a spectrogram:
+
+```cpp
+ui::HeatmapImage spectrum{{360, 128}, ui::ColorMap::Magma, {.min = -90.0, .max = 0.0}};
+ui::Heatmap view{.id = ui::make_id("spectrum"), .image = &spectrum,
+                 .x = {.scale = {.min = -6.0, .max = 0.0}, .unit = "s"},
+                 .y = {.scale = {.min = 0.0, .max = 22050.0}, .unit = "Hz"}, .unit = "dB"};
+spectrum.push_column(levels_db); // each frame, before the widget draws
+ui.widget(view, ui::LayoutStyle{}.fill());
+```
+
+Their look follows a data-visualisation method: series take `chart_color(i)`,
+eight colours in an order checked for colour-blind readers (stepped for dark
+and light surfaces; past eight, one grey: fold the rest into "other"); lines
+2 wide with round joins; an area a faint wash of its colour; bars at most 24
+wide with a rounded end and a gap between them; hairline grids; text in the
+theme's text colours, never a series'; a legend for two or more named series.
+`scale.hpp`'s `ticks()` and `tick_label()` give the values axes mark ("0 10k
+20k", "100 Hz 1 kHz 10 kHz"). `games/charts_demo` shows them all.
 
 ## Text That Scales
 

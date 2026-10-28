@@ -6,6 +6,7 @@
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/layout.hpp>
+#include <kin/ui2/scale.hpp>
 #include <kin/ui2/state.hpp>
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
@@ -18,6 +19,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <string>
 #include <string_view>
@@ -217,6 +219,28 @@ std::string number_text(f64 value, i32 digits = 7, bool whole = false);
 // What a field's text says, if it is a number within [min, max] (whole: an integer).
 std::optional<f64> parse_number(std::string_view text, f64 min, f64 max, bool whole);
 
+// A value changed by dragging over a widget (Context::drag_value): a dial's,
+// a fader's, a number scrubbed.
+struct DragValueOptions {
+    Scale scale{};       // its range, spread along the drag (Log: a frequency)
+    f64 step = 0.0;      // above 0: kept to min plus a whole number of steps
+    f32 travel = 200.0f; // how far a drag goes for the whole range
+    f32 fine = 0.1f;     // with Shift held, a drag (or a key) goes this much as far
+    UiLayoutAxis axis = UiLayoutAxis::Vertical; // Vertical: up raises it; Horizontal: right does
+    f32 wheel = 0.02f;   // how far along a turn of the wheel moves it (0: the wheel does not)
+    // What a double click sets it to (none: a double click does nothing).
+    std::optional<f64> reset{};
+    // In the Tab order: focused, Up and Right raise it, Down and Left lower
+    // it, by a step (or a hundredth of the range; Shift: finely).
+    bool focusable = true;
+    i32 tab_index = 0;
+    i32 z = 0;
+};
+struct DragValueResult : Interaction {
+    bool changed = false;  // the value changed this frame
+    bool dragging = false; // pressed and moved since: not a click when let go
+};
+
 // Where a popup box shows (Context::popup).
 struct PopupPlace {
     Rectf anchor{};                // under it (or right of it): a button's bounds, last frame's
@@ -391,9 +415,10 @@ public:
     };
 
     // One recorded draw primitive (see DebugOptions::record_draws). For Line, `rect` stores the
-    // segment as start (x,y) and delta (w,h); for everything else it is the draw rectangle.
+    // segment as start (x,y) and delta (w,h); for Shape (the shapes: polylines, arcs, circles,
+    // paths, meshes) the box around it; for everything else it is the draw rectangle.
     struct DrawOp {
-        enum class Kind { Fill, RoundedFill, Outline, RoundedOutline, Line, Sprite, Texture, Text, Gradient };
+        enum class Kind { Fill, RoundedFill, Outline, RoundedOutline, Line, Sprite, Texture, Text, Gradient, Shape };
         Kind kind = Kind::Fill;
         Rectf rect{};
         f32 radius = 0.0f;
@@ -409,7 +434,7 @@ public:
     // colour; `composite` is the running src-over result after applying it.
     struct PixelLayer {
         std::string widget;
-        std::string role; // "fill" | "shadow" | "border" | "text" | "sprite" | "texture" | "gradient" | "line"
+        std::string role; // "fill" | "shadow" | "border" | "text" | "sprite" | "texture" | "gradient" | "line" | "shape"
         Color source{};
         Color composite{};
     };
@@ -423,6 +448,9 @@ public:
     // frame to have been drawn with debug_options().record_draws set; query after end() and
     // before the next begin() (which clears the recording).
     PixelCausation pixel_causation(Vec2f point) const;
+    // What the frame drew, in order (DebugOptions::record_draws): after end()
+    // and before the next begin().
+    const std::vector<DrawOp>& draw_ops() const { return _draw_ops; }
 
     // RAII scope declaring that everything drawn while it is alive belongs to `bounds`.
     // While debug_options().detect_draw_overflow is set, any primitive whose painted region
@@ -529,6 +557,16 @@ public:
     std::string prompt_for_action(std::string_view action, const PromptOptions& options) const;
     bool dragging() const { return _drag.dragging; }
     const DragPayload& drag_payload() const { return _drag.payload; }
+
+    // The wheel is `id`'s while the pointer is on it (a plot it zooms, a dial
+    // it turns): scroll boxes under it do not scroll. Ask each frame `id`
+    // reads the wheel; it holds from the next (where the wheel goes is settled
+    // before widgets run, by where the pointer was).
+    void take_wheel(Id id);
+    // Call with each click on `id` (a region's `clicked`, or a press a widget
+    // counts as one): true when it is the second of a double click, soon
+    // after the first and in the same place. Boxes have BoxResult::double_clicked.
+    bool double_click(Id id);
 
     // Pointer / input access in logical space.
     Vec2f pointer() const;
@@ -660,6 +698,23 @@ public:
     // Shared by both front-ends so a container draws identically immediate vs ECS.
     void draw_layout_surface(Rectf bounds, const LayoutStyle& style);
     void line(Vec2f a, Vec2f b, Color color);
+    // Shapes, anti-aliased (Renderer2D's): for charts, dials and the like.
+    // Widths are in layout units; angles in degrees, 0 at +x, clockwise. A
+    // mirror scope reflects them as it does everything else, and they are
+    // checked against the draw scope (by the box around them) and recorded
+    // (DrawOp::Kind::Shape) as the rest are.
+    void line(Vec2f a, Vec2f b, Color color, f32 width, LineCap cap = LineCap::Butt);
+    void polyline(std::span<const Vec2f> points, Color color, StrokeStyle style = {});
+    void fill_polygon(std::span<const Vec2f> points, Color color);
+    void fill_circle(Vec2f center, f32 radius, Color color);
+    void outline_circle(Vec2f center, f32 radius, Color color, f32 width = 1.0f);
+    void arc(Vec2f center, f32 radius, f32 start, f32 end, Color color, StrokeStyle style = {});
+    void fill_pie(Vec2f center, f32 radius, f32 start, f32 end, Color color);
+    void fill_path(const Path& path, Color color, FillRule rule = FillRule::NonZero);
+    void stroke_path(const Path& path, Color color, StrokeStyle style = {});
+    // A mesh made once (or each frame, by hand: the triangles under a chart's
+    // line), placed by `transform` and tinted.
+    void shape(const ShapeMesh& mesh, const Affine2& transform = {}, Color tint = colors::white);
     void texture(const Texture& texture, Rectf bounds, Color tint = colors::white);
     // corner_exempt: skip the per-corner overflow test (set when the sprite is the fill
     // of a rounded surface, e.g. the frosted-glass backdrop, where the rect sprite
@@ -810,6 +865,11 @@ public:
     }
     // A number's field: the value typed, once it is left (within [min, max]).
     std::optional<f64> number_field(Id id, f64 value, const NumberFieldOptions& options = {});
+    // `value` changed by a drag over `bounds` (up, or right), the wheel, the
+    // keys while focused, and a double click (to `reset`). The press is held
+    // wherever the pointer goes; a widget draws itself around it (a dial, a
+    // fader, a scrubbed number). The pointer is the axis's resize shape there.
+    DragValueResult drag_value(Id id, Rectf bounds, f64& value, const DragValueOptions& options = {});
     // Typing in a value field starts (a rename asked for): its text selected,
     // from its next value_field().
     void edit_value(Id id);
@@ -949,6 +1009,9 @@ private:
     void check_draw(std::string_view kind, Rectf rect, bool corner_exempt = false);
     Color debug_fill_color(Rectf rect);                       // stable wireframe color for a fill
     void record_draw(DrawOp::Kind kind, Rectf rect, f32 radius, f32 width, Color color);
+    // A shape about to be drawn in `box`: checked and recorded; false when
+    // there is nothing to draw (no renderer, a transparent colour).
+    bool shape_drawn(std::string_view kind, Rectf box, f32 width, Color color);
     void check_degenerate(std::string_view kind, Rectf rect); // NaN/inf draw coordinates
     void check_region_id(Id id);                              // duplicate interaction id this frame
     void emit_diagnostic(DiagnosticKind kind, std::string_view widget, std::string detail, bool log);
@@ -1099,6 +1162,8 @@ private:
     WindowChrome _chrome;    // the drags_window() boxes as last laid out, in layout units
     SystemCursor _cursor = SystemCursor::Default;
     f32 _redraw_in = -1.0f; // the soonest request_redraw() this frame; < 0: none
+    std::vector<u64> _wheel_takers;      // take_wheel() last frame: where the wheel does not scroll
+    std::vector<u64> _wheel_takers_next; // and this frame
     std::function<f64()> _clock;
     f64 _now = 0.0;
 

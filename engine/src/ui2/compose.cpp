@@ -769,6 +769,10 @@ void Context::layout_compose() {
     if (wheel.x == 0.0f && wheel.y != 0.0f && modifier_held(KeyModifiers::Shift)) {
         wheel = {-wheel.y, 0.0f};
     }
+    // Not from under a widget that turns the wheel itself (take_wheel()).
+    if (hot && std::ranges::find(_wheel_takers, hot.value) != _wheel_takers.end()) {
+        wheel = {};
+    }
     const auto under_pointer = [&](i32 axis) {
         const ComposeNode* target = nullptr;
         for (const ComposeNode& c : _compose) {
