@@ -81,6 +81,8 @@ add_library(kin_engine STATIC
     src/renderer/animation_import.cpp
     src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
+    src/renderer/resource_graph.cpp
+    src/renderer/graph_resources.cpp
     src/renderer/render_profile.cpp
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp

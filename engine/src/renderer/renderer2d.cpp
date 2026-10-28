@@ -1088,6 +1088,7 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         const char* file = nullptr;
         u32 samplers = 1;
         switch (id) {
+        case BuiltinShader::Ascii: file = "pp_ascii.frag.spv"; break;
         case BuiltinShader::Vignette: file = "pp_vignette.frag.spv"; break;
         case BuiltinShader::ColorGrade: file = "pp_color_grade.frag.spv"; break;
         case BuiltinShader::Scanline: file = "pp_scanline.frag.spv"; break;

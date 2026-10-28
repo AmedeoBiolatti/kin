@@ -3,7 +3,7 @@
 set(_kin_gpu_shader_names_2D
     textured_quad.vert textured_quad.frag sprite_instanced.vert shader_geometry.vert overdraw_count.frag
     overdraw_heat.frag shape.frag shape.vert sdf_shape.frag sdf_shape.vert distance_field.frag mask_composite.frag
-    mask_stencil.frag color_output.frag pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag
+    mask_stencil.frag color_output.frag pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag pp_ascii.frag
     pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag transition_dissolve.frag
     transition_pixelate.frag transition_wipe.frag transition_iris.frag transition_crossfade.frag)
 set(_kin_gpu_shader_names_3D

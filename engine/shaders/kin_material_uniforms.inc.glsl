@@ -1,3 +1,4 @@
+#define KIN_MATERIAL_INTERFACE_VERSION 2
 // Shared ABI for stock and unlit material shaders: FrameUniforms and MaterialUniforms.
 #include "kin_frame_uniforms.inc.glsl"
 // The draw's.

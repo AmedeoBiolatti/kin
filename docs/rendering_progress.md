@@ -38,4 +38,12 @@ Particle configuration validation is cached only in tracked mode, including fail
 
 `kin_scene_work_bench` emits CPU timings with actual scan/update counters. Final before/after results are recorded below once validated.
 
-Static model parts, shared prefab renderer fields and native asset/material/particle-texture resolver changes now participate in tracking. Bindings retain part indices rather than duplicate local matrices. Tests cover sparse multi-part edits and material binding/reset invalidation.
+## Stage 3: compiled graph and GPU ASCII
+
+The backend-independent `ResourceGraphCompiler` validates single writers, initialization, feedback, dependencies, cycles and required features before execution. It provides stable scheduling, unused-pass culling, resource lifetimes, compatible allocation slots, export/history pins and exact descriptor caching. Reference options disable culling and reuse. `GraphResources` allocates public colour targets, storage textures and buffers transactionally and validates imports. Reuse concerns SDL objects; it does not imply arbitrary native heap aliasing.
+
+`kin_ascii3d --test` passes on hardware and software Vulkan: optimized/reference pictures match exactly, four logical targets use three compatible physical slots, repeated frames reuse plans and allocate no new resource handles. The live tool is an example using public APIs and a GPU glyph shader with no CPU readback in its rendering path. Native custom shader support is required; WebGL2 capability rejection is explicit.
+
+The existing 2D `RenderGraph` also uses compiled scheduling and diagnoses cycles/missing dependencies before callbacks. CPU graph and existing rendering tests pass.
+
+The ASCII executable uses explicit Release runtime checks, stack operation/import tables and cached binding storage. Tests cover HDR working-format validation and real slot reuse, in addition to image parity and allocation stability. Graph-managed payload budgets reject oversized plans before allocation.
