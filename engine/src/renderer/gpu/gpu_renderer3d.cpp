@@ -1,3 +1,4 @@
+#include "gpu_memory.hpp"
 #include "gpu_renderer3d.hpp"
 
 #include "embedded_gpu_shader.hpp"
@@ -855,7 +856,7 @@ GpuClusterChunk::~GpuClusterChunk() {
     if (device && *device) {
         for (SDL_GPUBuffer* buffer : {indices, table}) {
             if (buffer) {
-                SDL_ReleaseGPUBuffer(*device, buffer);
+                tracked_release_buffer(*device, buffer);
             }
         }
     }
@@ -868,7 +869,7 @@ GpuMesh3D::~GpuMesh3D() {
         for (SDL_GPUBuffer* buffer :
              {buffer_pool ? nullptr : vertices, skin, chunk || buffer_pool ? nullptr : indices}) {
             if (buffer) {
-                SDL_ReleaseGPUBuffer(*device, buffer); // freed once the GPU is done with it
+                tracked_release_buffer(*device, buffer); // freed once the GPU is done with it
             }
         }
     }
@@ -1273,8 +1274,8 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                   SDL_GPU_BUFFERUSAGE_INDEX | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
                   SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ}) {
                 const SDL_GPUBufferCreateInfo probe{.usage = usage, .size = 256, .props = 0};
-                if (SDL_GPUBuffer* buffer = SDL_CreateGPUBuffer(handle, &probe)) {
-                    SDL_ReleaseGPUBuffer(handle, buffer);
+                if (SDL_GPUBuffer* buffer = tracked_create_buffer(handle, &probe)) {
+                    tracked_release_buffer(handle, buffer);
                 } else {
                     usable = false;
                 }
@@ -1765,8 +1766,8 @@ std::shared_ptr<GpuClusterChunk> GpuRenderer3D::allocate_cluster_range(u32 indic
         .usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ,
         .size = static_cast<u32>(static_cast<u64>(chunk->table_capacity) * sizeof(GpuCluster)),
         .props = 0};
-    chunk->indices = SDL_CreateGPUBuffer(_device->handle(), &index_info);
-    chunk->table = SDL_CreateGPUBuffer(_device->handle(), &table_info);
+    chunk->indices = tracked_create_buffer(_device->handle(), &index_info);
+    chunk->table = tracked_create_buffer(_device->handle(), &table_info);
     if (!chunk->indices || !chunk->table) {
         throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
     }
@@ -1882,8 +1883,8 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
             }
         }
         if (!mesh->buffer_pool) {
-            mesh->vertices = SDL_CreateGPUBuffer(_device->handle(), &vertex_info);
-            mesh->indices = mesh->chunk ? mesh->chunk->indices : SDL_CreateGPUBuffer(_device->handle(), &index_info);
+            mesh->vertices = tracked_create_buffer(_device->handle(), &vertex_info);
+            mesh->indices = mesh->chunk ? mesh->chunk->indices : tracked_create_buffer(_device->handle(), &index_info);
         }
         if (!mesh->vertices || !mesh->indices) {
             throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
@@ -1938,7 +1939,7 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
             const SDL_GPUBufferCreateInfo skin_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX | gi_read,
                                                     .size = static_cast<u32>(vertex_count * sizeof(GpuSkinVertex)),
                                                     .props = 0};
-            mesh->skin = SDL_CreateGPUBuffer(_device->handle(), &skin_info);
+            mesh->skin = tracked_create_buffer(_device->handle(), &skin_info);
             if (!mesh->skin) {
                 throw std::runtime_error(std::string{"SDL_CreateGPUBuffer failed: "} + SDL_GetError());
             }
@@ -2134,7 +2135,7 @@ std::shared_ptr<GpuEnvironment3D> GpuRenderer3D::allocate_environment(u32 w, u32
         info.layer_count_or_depth = 1;
         info.num_levels = levels;
         info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-        SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device->handle(), &info);
+        SDL_GPUTexture* texture = tracked_create_texture(_device->handle(), &info);
         if (!texture) {
             throw std::runtime_error(std::string{"SDL_CreateGPUTexture failed: "} + SDL_GetError());
         }

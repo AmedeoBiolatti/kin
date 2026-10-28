@@ -161,6 +161,7 @@ if(KIN_HAS_GPU_RENDERER)
         src/renderer/shader_reflect.cpp
         src/renderer/gpu/gpu_buffer.cpp
         src/renderer/gpu/gpu_device.cpp
+        src/renderer/gpu/gpu_memory.cpp
         src/renderer/gpu/gpu_frame_timer.cpp
         src/renderer/gpu/gpu_geometry_batch.cpp
         src/renderer/gpu/gpu_pipeline_cache.cpp

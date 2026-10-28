@@ -1,9 +1,9 @@
 #pragma once
 // Ported from v0 engine/renderer_gpu. RAII wrapper over an SDL_GPUBuffer.
-#include <kin/core/types.hpp>
+#include "gpu_texture.hpp"
 
 #include <SDL3/SDL.h>
-
+#include <kin/core/types.hpp>
 #include <utility>
 
 namespace kin::gpu {
@@ -11,7 +11,7 @@ namespace kin::gpu {
 class GpuBuffer {
 public:
     GpuBuffer() = default;
-    GpuBuffer(SDL_GPUDevice* device, SDL_GPUBuffer* buffer, u32 size);
+    GpuBuffer(SharedDevice device, SDL_GPUBuffer* buffer, u32 size);
     ~GpuBuffer();
 
     GpuBuffer(const GpuBuffer&) = delete;
@@ -27,7 +27,7 @@ public:
 private:
     void release();
 
-    SDL_GPUDevice* _device = nullptr;
+    SharedDevice _device;
     SDL_GPUBuffer* _buffer = nullptr;
     u32 _size = 0;
 };

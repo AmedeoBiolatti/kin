@@ -22,7 +22,14 @@ SceneFrame3D::SceneFrame3D(EcsWorld& world, WorldRenderState3D& rendering, Scene
 }
 
 bool SceneFrame3D::validate() {
-    _errors = validate_particles3d(_world, _options.particles).diagnostics;
+    const u64 revision = _rendering.particle_configuration_revision();
+    const bool reused = _rendering.mutation_mode() == SceneMutationMode3D::Tracked && revision == _particle_revision;
+    _rendering.note_particle_validation(reused);
+    if (!reused) {
+        _particle_diagnostics = validate_particles3d(_world, _options.particles).diagnostics;
+        _particle_revision = revision;
+    }
+    _errors = _particle_diagnostics;
     return _errors.empty();
 }
 

@@ -1,11 +1,13 @@
 #include "gpu_mesh_pool.hpp"
 
+#include "gpu_memory.hpp"
+
 #include <algorithm>
 
 namespace kin::gpu {
 GpuMeshBufferPage::~GpuMeshBufferPage() {
     if (buffer && device && *device)
-        SDL_ReleaseGPUBuffer(*device, buffer);
+        tracked_release_buffer(*device, buffer);
 }
 GpuMeshBufferPool::~GpuMeshBufferPool() {
     if (_device && *_device) {
@@ -44,7 +46,7 @@ GpuMeshBufferSlice GpuMeshBufferPool::allocate_slice(u32 bytes, SDL_GPUBufferUsa
         return {};
     auto page = std::make_shared<GpuMeshBufferPage>(_device);
     const SDL_GPUBufferCreateInfo info{.usage = usage, .size = capacity, .props = 0};
-    page->buffer = SDL_CreateGPUBuffer(*_device, &info);
+    page->buffer = tracked_create_buffer(*_device, &info);
     if (!page->buffer)
         return {};
     page->usage = usage;

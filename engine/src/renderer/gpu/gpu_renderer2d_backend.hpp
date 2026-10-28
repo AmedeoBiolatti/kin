@@ -1,18 +1,19 @@
 #pragma once
+#include "gpu_memory.hpp"
 // Thin IRenderer2DBackend adapter over the modular kin::gpu layer (device +
 // pipeline cache + geometry batch). Renders the frame into a "scene" render
 // texture and blits it to the swapchain on present (logical-presentation model).
 // G1a: frame/pass lifecycle + the unified white-texture pipeline + solid/line/
 // texture primitives. Rounded/gradient/AA (G1b), clip/render-target stacks +
 // read_rgba (G1c), and shader materials (G3) build on this without rewrites.
-#include <kin/platform/window.hpp>
-#include <kin/renderer/backend.hpp>
-#include <kin/renderer/texture.hpp>
-
 #include "gpu_device.hpp"
 #include "gpu_frame_timer.hpp"
 #include "gpu_geometry_batch.hpp"
 #include "gpu_pipeline_cache.hpp"
+
+#include <kin/platform/window.hpp>
+#include <kin/renderer/backend.hpp>
+#include <kin/renderer/texture.hpp>
 #if defined(KIN_EXPERIMENTAL_3D)
 #include "gpu_renderer3d.hpp"
 #endif
@@ -20,13 +21,12 @@
 #include "gpu_texture.hpp"
 
 #include <SDL3/SDL.h>
-
 #include <deque>
 #include <memory>
-#include <tuple>
 #include <optional>
-#include <unordered_map>
 #include <span>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace kin {
@@ -36,15 +36,11 @@ namespace gpu {
 class GpuTextureBackend : public ITextureBackend {
 public:
     // `mipmapped`: the texture has its mip chain already (a compressed one's levels).
-    explicit GpuTextureBackend(GpuTexture texture, bool premultiplied = false,
-                               ScaleMode scale = ScaleMode::Nearest,
+    explicit GpuTextureBackend(GpuTexture texture, bool premultiplied = false, ScaleMode scale = ScaleMode::Nearest,
                                TextureFormat format = TextureFormat::Rgba8, bool mipmapped = false)
-        : ITextureBackend(ITextureBackend::Kind::Gpu),
-          _texture(std::move(texture)), _mipmapped(mipmapped), _premultiplied(premultiplied), _scale(scale),
-          _format(format) {}
-    Vec2i size() const override {
-        return {static_cast<i32>(_texture.width()), static_cast<i32>(_texture.height())};
-    }
+        : ITextureBackend(ITextureBackend::Kind::Gpu), _texture(std::move(texture)), _mipmapped(mipmapped),
+          _premultiplied(premultiplied), _scale(scale), _format(format) {}
+    Vec2i size() const override { return {static_cast<i32>(_texture.width()), static_cast<i32>(_texture.height())}; }
     TextureFormat format() const override { return _format; }
     const GpuTexture& texture() const { return _texture; }
     // Puts `texture` in place of the current one (made mipmapped), returning
@@ -62,8 +58,9 @@ public:
     // create_texture_from_rgba (crisp bitmap fonts / pixel art); render targets use
     // Linear (blur). Mutable so set_scale_mode works through a const Texture&.
     ScaleMode scale_mode() const { return _scale; }
-    // Bumped whenever the texels are replaced from outside (update_texture, write_texture, a new mip chain): the 3D shadow cache
-    // keys a cut-out's texture on it. A render target (premultiplied) is drawn into without a bump: such a texture is never cached on.
+    // Bumped whenever the texels are replaced from outside (update_texture, write_texture, a new mip chain): the 3D
+    // shadow cache keys a cut-out's texture on it. A render target (premultiplied) is drawn into without a bump: such a
+    // texture is never cached on.
     u64 version() const { return _version; }
     void bump_version() const { ++_version; }
     void set_scale_mode(ScaleMode mode) const { _scale = mode; }
@@ -107,6 +104,7 @@ public:
     RendererBackendCapabilities capabilities() const override;
     RendererBackendStats stats() const override {
         RendererBackendStats stats = _stats;
+        stats.gpu_memory = gpu::gpu_memory_stats(_device.handle());
         std::tie(stats.texture_uploads, stats.texture_upload_submits) = _device.upload_counts();
         std::tie(stats.upload_staging_bytes, stats.upload_staging_allocations) = _device.staging_stats();
         return stats;
@@ -198,22 +196,21 @@ public:
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params) override;
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                              const Texture& source) override;
-    void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
-                             const Texture& source0, const Texture& source1) override;
+    void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params, const Texture& source0,
+                             const Texture& source1) override;
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                              std::span<const Texture> sources) override;
     void draw_shader_surface(Rectf rect, ShaderHandle handle, const ShaderParams& params,
                              std::span<const Texture> sources, std::span<const DataBuffer> buffers) override;
-    void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
-                              ShaderHandle handle, const ShaderParams& params,
-                              std::span<const Texture> sources, std::span<const DataBuffer> buffers) override;
+    void draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices, ShaderHandle handle,
+                              const ShaderParams& params, std::span<const Texture> sources,
+                              std::span<const DataBuffer> buffers) override;
     bool reload_shader(ShaderHandle handle, const ShaderDesc& desc) override;
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) override;
     Texture create_storage_texture(Vec2i size, TextureFormat format) override;
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i groups, const ComputeBindings& bindings) override;
     DataBuffer create_data_buffer(std::size_t bytes, const void* data) override;
-    bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
-                            const void* data) override;
+    bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data) override;
     bool write_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes,
                            const std::function<void(std::span<u8>)>& fill) override;
 
@@ -228,10 +225,10 @@ private:
     gpu::GpuBlendMode resolve_blend(gpu::GpuBlendMode natural) const;
     BlendMode _blend = BlendMode::Alpha;
 
-    void ensure_scene();          // (re)create the scene texture to the window size
-    void ensure_frame();          // lazily begin a frame + batch on the active target
-    void flush_to_frame();        // emit the current batch's pass into the frame
-    void end_frame();             // after the frame is submitted: drop it and what it retained
+    void ensure_scene();   // (re)create the scene texture to the window size
+    void ensure_frame();   // lazily begin a frame + batch on the active target
+    void flush_to_frame(); // emit the current batch's pass into the frame
+    void end_frame();      // after the frame is submitted: drop it and what it retained
     // Keeps `texture` alive until the frame is submitted. Queued draws hold only
     // its SDL handle, which SDL frees as soon as the texture is released, so a
     // texture dropped right after a draw would leave the batch a dangling handle
@@ -263,12 +260,10 @@ private:
     };
     mutable std::optional<std::pair<ScissorKey, SDL_Rect>> _scissor_cache;
     void push_quad(Rectf dest, Rectf uv, Color color, SDL_GPUTexture* texture,
-                   gpu::GpuBlendMode blend = gpu::GpuBlendMode::Alpha,
-                   SDL_GPUSampler* sampler = nullptr);
+                   gpu::GpuBlendMode blend = gpu::GpuBlendMode::Alpha, SDL_GPUSampler* sampler = nullptr);
     // Applies the active viewport offset in place on `tris` (a caller-owned scratch
     // span) and pushes it into the batch — no allocation or copy on the caller side.
-    void push_triangles(std::span<gpu::GpuVertex> tris, SDL_GPUTexture* texture,
-                        gpu::GpuBlendMode blend);
+    void push_triangles(std::span<gpu::GpuVertex> tris, SDL_GPUTexture* texture, gpu::GpuBlendMode blend);
     // Maps vertices by the transform (set_transform), then shifts them by the
     // active viewport origin (SDL_SetRenderViewport semantics: draw coords are
     // viewport-relative). No-op with neither.
@@ -287,14 +282,14 @@ private:
     gpu::GpuDevice _device;
     gpu::GpuShader _vertex_shader;
     gpu::GpuShader _fragment_shader;
-    gpu::GpuShader _instance_shader; // sprite_instanced.vert; without it draw_sprites draws quad by quad
-    gpu::GpuShader _shader_vertex_shader; // shader_geometry.vert; without it draw_shader_geometry draws nothing
+    gpu::GpuShader _instance_shader;       // sprite_instanced.vert; without it draw_sprites draws quad by quad
+    gpu::GpuShader _shader_vertex_shader;  // shader_geometry.vert; without it draw_shader_geometry draws nothing
     gpu::GpuShader _overdraw_count_shader; // the overdraw view's: one layer a draw
     gpu::GpuShader _shape_shader;          // shape.frag: anti-aliased shapes (draw_shape_mesh)
     gpu::GpuShader _shape_vertex_shader;   // shape.vert: their indexed vertices
     std::vector<gpu::GpuShapeVertex> _shape_scratch;
-    gpu::GpuShader _sdf_shader;            // sdf_shape.frag: primitives drawn whole
-    gpu::GpuShader _sdf_vertex_shader;     // sdf_shape.vert: one instance each
+    gpu::GpuShader _sdf_shader;        // sdf_shape.frag: primitives drawn whole
+    gpu::GpuShader _sdf_vertex_shader; // sdf_shape.vert: one instance each
     std::vector<gpu::GpuSdfInstance> _sdf_scratch;
     gpu::GpuShader _distance_field_shader; // distance_field.frag: scalable text and icons
     gpu::GpuShader _mask_shader;           // mask_composite.frag: a layer laid over through a mask
@@ -318,25 +313,25 @@ private:
     SDL_FColor stored_color(Color color) const;
     // The built-in pipelines for the target format, made ahead of their first draw.
     void warm_pipelines();
-    ShaderHandle _overdraw_heat{};         // its last pass: counts to colours (made on first use)
+    ShaderHandle _overdraw_heat{}; // its last pass: counts to colours (made on first use)
     bool _overdraw_view = false;
     std::vector<gpu::GpuShaderVertex> _shader_vertex_scratch;
     std::vector<gpu::GpuSpriteInstance> _instance_scratch;
-    JobSystem* _jobs = nullptr; // splits large draw_sprites() batches when set
+    JobSystem* _jobs = nullptr;                 // splits large draw_sprites() batches when set
     SDL_GPUSampler* _sampler_linear = nullptr;  // render targets / blur
     SDL_GPUSampler* _sampler_nearest = nullptr; // default for uploaded textures (crisp text/pixel art)
-    bool _data_textures = false; // the device can sample R16_UINT, R16G16_UINT and R32_FLOAT
+    bool _data_textures = false;                // the device can sample R16_UINT, R16G16_UINT and R32_FLOAT
     gpu::GpuTexture _white;
     gpu::GpuTexture _scene;
     Vec2i _scene_size{};
-    gpu::GpuTexture _post_a;        // post-process ping-pong scratch (sized to _scene)
+    gpu::GpuTexture _post_a; // post-process ping-pong scratch (sized to _scene)
     gpu::GpuTexture _post_b;
     Vec2i _post_size{};
     std::vector<PostProcessPass> _post_passes; // full-scene post-fx chain (empty = none)
     gpu::GpuPipelineCache _pipelines;
     gpu::GpuGeometryBatch _batch;
     std::optional<gpu::GpuFrame> _frame;
-    std::vector<std::shared_ptr<ITextureBackend>> _retained; // textures the frame's draws use
+    std::vector<std::shared_ptr<ITextureBackend>> _retained;            // textures the frame's draws use
     std::vector<std::shared_ptr<IDataBufferBackend>> _retained_buffers; // and data buffers
     std::vector<gpu::GpuTexture> _retired_textures; // replaced this frame (made mipmapped), kept till submit
     SDL_GPUSampler* _sampler_mipmapped = nullptr;   // trilinear, for ScaleMode::Mipmapped
@@ -351,9 +346,9 @@ private:
     // the shader wants more than it was given (the draw is skipped).
     std::optional<std::span<SDL_GPUBuffer* const>> bind_buffers(const gpu::GpuShader& shader,
                                                                 std::span<const DataBuffer> buffers);
-    const ITextureBackend* _last_retained = nullptr;         // skips repeats of the same texture
-    u64 _frame_serial = 1; // counts end_frame(): which frame a texture was last drawn in
-    std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer; // set while GPU timing is on
+    const ITextureBackend* _last_retained = nullptr; // skips repeats of the same texture
+    u64 _frame_serial = 1;                           // counts end_frame(): which frame a texture was last drawn in
+    std::unique_ptr<gpu::GpuFrameTimer> _gpu_timer;  // set while GPU timing is on
     // Pipelines to make ahead: a shader is known across runs by its SPIR-V's
     // hash (0: the engine's default fragment shader).
     struct PipelineHint {
@@ -388,16 +383,16 @@ private:
     // The open gpu_scope(): its name, and whether it is timed (the timer had room).
     std::optional<std::string> _scope;
     bool _scope_timed = false;
-    f64 _scope_pixels = 0.0; // the batch's pixel count when the scope began
+    f64 _scope_pixels = 0.0;                    // the batch's pixel count when the scope began
     std::vector<GpuScopeTiming> _scope_timings; // finished, not yet taken
     // Submits what is recorded so far (the frame's batch included) with a fence
     // for the timer; the next draw starts a new command buffer.
     SDL_GPUFence* submit_for_scope();
-    RendererBackendStats _stats;                    // present timings only
+    RendererBackendStats _stats; // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec2i _logical_size{0, 0}; // 0 = render at window size (no logical presentation)
     bool _integer_scale = false;
-    f32 _view_scale = 1.0f;    // logical -> native (scene texture) scale under logical presentation
+    f32 _view_scale = 1.0f; // logical -> native (scene texture) scale under logical presentation
     struct NativeState {
         Vec2i logical_size{};
         bool integer_scale = false;
@@ -445,19 +440,19 @@ private:
     // The draw coordinates' extent on the current target: a layer's, the
     // logical size for a logical scene, else the target's pixels.
     Vec2f coordinate_size() const;
-    Vec2i coordinate_extent() const; // the same, in whole units
-    f32 coordinates_to_pixels() const; // the current target's pixels per draw unit
+    Vec2i coordinate_extent() const;                       // the same, in whole units
+    f32 coordinates_to_pixels() const;                     // the current target's pixels per draw unit
     std::vector<std::vector<SDL_Rect>> _saved_clip_stacks; // clip per pushed target
 #if defined(KIN_EXPERIMENTAL_3D)
     std::unique_ptr<gpu::GpuRenderer3D> _renderer_3d; // made when a Renderer3D first asks
 #endif
-    std::vector<gpu::GpuShader> _shaders;                // custom material fragment shaders (handle = index+1)
-    Vec2f _view_offset{0.0f, 0.0f};                      // active viewport origin (coord space); added to all verts
-    std::vector<Vec2f> _view_offset_stack;              // saved offsets for push/pop_viewport
-    std::vector<Vec2f> _saved_view_offsets;             // saved viewport origin per pushed render target
-    Affine2 _transform{};                               // set_transform's; applied before the view offset
-    bool _transformed = false;                          // _transform is not the identity
-    std::vector<Affine2> _saved_transforms;             // the transform outside each pushed render target
+    std::vector<gpu::GpuShader> _shaders;   // custom material fragment shaders (handle = index+1)
+    Vec2f _view_offset{0.0f, 0.0f};         // active viewport origin (coord space); added to all verts
+    std::vector<Vec2f> _view_offset_stack;  // saved offsets for push/pop_viewport
+    std::vector<Vec2f> _saved_view_offsets; // saved viewport origin per pushed render target
+    Affine2 _transform{};                   // set_transform's; applied before the view offset
+    bool _transformed = false;              // _transform is not the identity
+    std::vector<Affine2> _saved_transforms; // the transform outside each pushed render target
     // Reusable scratch for the rounded-rect / gradient geometry path — cleared (not
     // freed) each call so the per-frame UI rebuild doesn't churn the heap. The render
     // path is single-threaded and each builder fully consumes these before returning.

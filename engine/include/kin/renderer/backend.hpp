@@ -1,23 +1,23 @@
 #pragma once
 
+#include <cstddef>
+#include <functional>
 #include <kin/core/affine.hpp>
 #include <kin/core/types.hpp>
-#include <kin/renderer/data_buffer.hpp>
-#include <kin/renderer/material.hpp>
-#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/color_grading.hpp>
+#include <kin/renderer/data_buffer.hpp>
+#include <kin/renderer/gpu_memory_stats.hpp>
 #include <kin/renderer/gradient.hpp>
 #include <kin/renderer/mask.hpp>
+#include <kin/renderer/material.hpp>
 #include <kin/renderer/post_process.hpp>
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/shader.hpp>
+#include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/shape.hpp>
 #include <kin/renderer/texture.hpp>
-
 #include <memory>
-#include <functional>
-#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -33,11 +33,21 @@ struct CompressedImage;
 // Mirroring a sprite within its rectangle, left-right (X) and/or upside
 // down (Y), before it turns about its pivot.
 enum class Flip : u8 { None = 0, X = 1, Y = 2, XY = 3 };
-constexpr Flip operator|(Flip a, Flip b) { return static_cast<Flip>(static_cast<u8>(a) | static_cast<u8>(b)); }
-constexpr Flip operator^(Flip a, Flip b) { return static_cast<Flip>(static_cast<u8>(a) ^ static_cast<u8>(b)); }
-constexpr bool flips_x(Flip f) { return (static_cast<u8>(f) & 1u) != 0; }
-constexpr bool flips_y(Flip f) { return (static_cast<u8>(f) & 2u) != 0; }
-constexpr Flip flip_of(bool x, bool y) { return static_cast<Flip>((x ? 1u : 0u) | (y ? 2u : 0u)); }
+constexpr Flip operator|(Flip a, Flip b) {
+    return static_cast<Flip>(static_cast<u8>(a) | static_cast<u8>(b));
+}
+constexpr Flip operator^(Flip a, Flip b) {
+    return static_cast<Flip>(static_cast<u8>(a) ^ static_cast<u8>(b));
+}
+constexpr bool flips_x(Flip f) {
+    return (static_cast<u8>(f) & 1u) != 0;
+}
+constexpr bool flips_y(Flip f) {
+    return (static_cast<u8>(f) & 2u) != 0;
+}
+constexpr Flip flip_of(bool x, bool y) {
+    return static_cast<Flip>((x ? 1u : 0u) | (y ? 2u : 0u));
+}
 // `source` (texture pixels) read the other way round: what backends are given
 // for a flipped draw (a negative width or height reads right to left or bottom
 // to top).
@@ -55,10 +65,10 @@ constexpr Rectf mirrored(Rectf source, Flip flip) {
 // tint, rotation, pivot, flip) would draw.
 struct SpriteInstance {
     Rectf dest{};
-    Rectf source{};             // texture pixels; empty means the whole texture
+    Rectf source{}; // texture pixels; empty means the whole texture
     Color tint = colors::white;
-    f32 rotation = 0.0f;        // degrees, clockwise, about the pivot
-    Vec2f pivot{0.5f, 0.5f};    // normalized within dest
+    f32 rotation = 0.0f;     // degrees, clockwise, about the pivot
+    Vec2f pivot{0.5f, 0.5f}; // normalized within dest
     Flip flip = Flip::None;
 };
 
@@ -76,12 +86,12 @@ struct RendererBackendCapabilities {
     bool queued_2d = false;
     bool render_targets = false;
     bool blend_modes = false;
-    bool min_max_blend = false; // BlendMode::Max and Min honoured
-    bool shader_geometry = false; // draw_shader_geometry() draws
-    bool data_buffers = false;    // create_data_buffer() and shaders reading them
-    bool compute = false;         // compute shaders (Renderer2D::dispatch_compute)
-    bool transforms = false;      // set_transform() honoured (Renderer2D::push_transform)
-    bool shapes = false;          // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
+    bool min_max_blend = false;    // BlendMode::Max and Min honoured
+    bool shader_geometry = false;  // draw_shader_geometry() draws
+    bool data_buffers = false;     // create_data_buffer() and shaders reading them
+    bool compute = false;          // compute shaders (Renderer2D::dispatch_compute)
+    bool transforms = false;       // set_transform() honoured (Renderer2D::push_transform)
+    bool shapes = false;           // draw_shape_mesh() draws (Renderer2D::draw_shape and friends)
     bool shape_primitives = false; // draw_shape_primitives() draws primitives whole
     bool distance_fields = false;  // draw_distance_field() draws
     bool masks = false;            // layers, and draw_masked() lays one over through another
@@ -120,6 +130,7 @@ struct ComputeBindings {
 };
 
 struct RendererBackendStats {
+    GpuMemoryStats gpu_memory{};
     u64 texture_draws_submitted = 0;
     u64 texture_batch_flushes = 0;
     u64 texture_batch_breaks = 0;
@@ -167,12 +178,8 @@ public:
     virtual ~IRenderer2DBackend() = default;
 
     virtual std::string_view name() const = 0;
-    virtual RendererBackendCapabilities capabilities() const {
-        return {};
-    }
-    virtual RendererBackendStats stats() const {
-        return {};
-    }
+    virtual RendererBackendCapabilities capabilities() const { return {}; }
+    virtual RendererBackendStats stats() const { return {}; }
     virtual void reset_stats() {}
     // Measures each frame's GPU time (stats().last_gpu_frame_ms) where supported.
     virtual void set_gpu_timing_enabled(bool) {}
@@ -239,24 +246,18 @@ public:
     // The scopes that finished on the GPU since the last call.
     virtual std::vector<GpuScopeTiming> take_gpu_scope_timings() { return {}; }
     virtual void set_texture_batching_enabled(bool) {}
-    virtual bool texture_batching_enabled() const {
-        return false;
-    }
+    virtual bool texture_batching_enabled() const { return false; }
 
     virtual void clear(Color color) = 0;
     virtual void present() = 0;
 
     // Captures the current render target to a PNG file. Returns false if the
     // backend cannot read back pixels (e.g. fake/test backends).
-    virtual bool save_png(const char*) {
-        return false;
-    }
+    virtual bool save_png(const char*) { return false; }
 
     // Reads a logical-space region from the current render target as tightly
     // packed RGBA pixels. Returns false when readback is unsupported or empty.
-    virtual bool read_rgba(Rectf, std::vector<u8>&, Vec2i&) {
-        return false;
-    }
+    virtual bool read_rgba(Rectf, std::vector<u8>&, Vec2i&) { return false; }
     // Starts reading a logical-space region of the current render target without waiting for the GPU (what is drawn so
     // far is submitted; the pixels arrive once the GPU has drawn it): the read's ticket for take_read_rgba, 0 when the
     // backend cannot (Renderer2D then reads with read_rgba, which waits).
@@ -268,9 +269,7 @@ public:
     // Copy a logical-space region of the current render target into `dst` entirely on
     // the GPU (no CPU round-trip) — the fast path for backdrop capture / refraction.
     // Default returns false so callers fall back to read_rgba + re-upload.
-    virtual bool blit_region_to_target(Rectf /*region*/, const RenderTarget& /*dst*/) {
-        return false;
-    }
+    virtual bool blit_region_to_target(Rectf /*region*/, const RenderTarget& /*dst*/) { return false; }
 
     // Native pixel dimensions a capture of `region` (logical) would have. Default = the
     // logical size (1:1); a backend whose internal target is higher-res (e.g. native
@@ -305,9 +304,7 @@ public:
     // (kin/assets/texture_file.hpp; the caller has checked image.valid()), never
     // given generated mips. Default: an invalid texture, for a backend without
     // compressed textures.
-    virtual Texture create_texture_compressed(const CompressedImage& /*image*/) {
-        return {};
-    }
+    virtual Texture create_texture_compressed(const CompressedImage& /*image*/) { return {}; }
     // Replace the texels of a `size` region at `at` of `texture` with `pixels`
     // (RGBA8, tightly packed, row by row). False when the backend cannot update a
     // texture in place: the caller then makes a new one. Default: false.
@@ -339,21 +336,18 @@ public:
         const Vec2i size = texture.size();
         for (const SpriteInstance& sprite : sprites) {
             const Rectf source = sprite.source.w > 0.0f && sprite.source.h > 0.0f
-                ? sprite.source
-                : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
-            draw_texture(texture, mirrored(source, sprite.flip), sprite.dest, sprite.tint, sprite.rotation, sprite.pivot);
+                                     ? sprite.source
+                                     : Rectf{0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)};
+            draw_texture(texture, mirrored(source, sprite.flip), sprite.dest, sprite.tint, sprite.rotation,
+                         sprite.pivot);
         }
     }
 
     virtual void fill_rect(Rectf rect, Color color) = 0;
     virtual void draw_rect(Rectf rect, Color color) = 0;
     virtual void draw_line(Vec2f a, Vec2f b, Color color) = 0;
-    virtual void fill_rounded_rect(Rectf rect, f32, Color color) {
-        fill_rect(rect, color);
-    }
-    virtual void draw_rounded_rect(Rectf rect, f32, Color color, f32 = 1.0f) {
-        draw_rect(rect, color);
-    }
+    virtual void fill_rounded_rect(Rectf rect, f32, Color color) { fill_rect(rect, color); }
+    virtual void draw_rounded_rect(Rectf rect, f32, Color color, f32 = 1.0f) { draw_rect(rect, color); }
 
     // Linear gradient fill. Default degrades to a flat fill of the mid color, so
     // the call is always valid; a backend that reports capabilities().gradients
@@ -476,12 +470,8 @@ public:
     virtual void reset_viewport() = 0;
     virtual void push_viewport(Rectf rect) = 0;
     virtual void pop_viewport() = 0;
-    virtual void push_clip(Rectf rect) {
-        push_viewport(rect);
-    }
-    virtual void pop_clip() {
-        pop_viewport();
-    }
+    virtual void push_clip(Rectf rect) { push_viewport(rect); }
+    virtual void pop_clip() { pop_viewport(); }
 
     // Render targets. Defaults report "unsupported": create returns an empty
     // target, push/pop are no-ops. A backend that reports
@@ -489,9 +479,7 @@ public:
     // drawing uses the target's native pixel space (1:1, origin top-left);
     // push must save and pop must restore the prior target, viewport, clip, and
     // logical-presentation state. Calls nest (stack-based).
-    virtual RenderTarget create_render_target(Vec2i /*size_px*/, ScaleMode = ScaleMode::Linear) {
-        return {};
-    }
+    virtual RenderTarget create_render_target(Vec2i /*size_px*/, ScaleMode = ScaleMode::Linear) { return {}; }
     virtual void push_render_target(const RenderTarget&) {}
     virtual void pop_render_target() {}
 

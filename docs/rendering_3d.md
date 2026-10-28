@@ -4011,3 +4011,17 @@ automatically includes entity generation, collection scope and prefab lease,
 so changing picking IDs does not reset history and a recycled lease starts fresh.
 See [the migration guide](3d_api_migration.md#final-presentation-api-adjustments)
 for the named particle modes, read-only interpolation and physics debug settings.
+
+### Tracked scene extraction
+
+`WorldRenderState3D` defaults to `SceneMutationMode3D::Conservative`, which sees raw mutable component edits at every transform barrier and collection. An owner that publishes its edits can opt into `state.mutation_mode(SceneMutationMode3D::Tracked)` (or use `session.rendering()` after loading). Use `set<T>()`, or call `modified<T>()` after editing a mutable component. Call `state.invalidate()` after external bulk changes that cannot publish notifications. World mutations and rendering must follow the world's owner-thread/deferred-merge contract.
+
+Tracked mode caches hierarchy topology and inherited transform sources, then updates dirty entities and descendants. Static mesh-only collection reuses retained instance batches; transform edits update their affected slots. Previously collected scenes retain their snapshots. Models, skinned animation, lights, particles, joint attachments and presentation callbacks currently use the full collection path. Structural/material changes conservatively rebuild extraction. This mode is an explicit mutation contract: an escaped pointer edited without notification can remain stale until invalidation.
+
+`state.work_stats()` exposes transform visits/recomputations, mesh/model collection visits, sparse record updates, collection fallback/reuse, particle validation runs/reuse and estimated tracking capacity. `reset_work_stats()` clears counters. `SceneFrame3D` reuses particle validation only in tracked mode and invalidates it on configuration/structural edits, including disabled retained emitters. Native physics and root motion publish actual transform edits.
+
+The `kin_scene_work_bench` target emits CSV for 10,000/100,000 entities, four transform barriers and static/1-percent-edit cases. Its defaults are exploratory (50 warm-up/150 measured frames, five repeats); use `--warmup`, `--frames` and `--runs` for the longer comparison protocol.
+
+### GPU resource payload
+
+`renderer.backend_stats().gpu_memory` reports native SDL_GPU texture, buffer and transfer payload, pooled idle texture payload, peaks, handle counts and allocation/release/failure events. Format block dimensions, mip levels, layers/depth and samples are included. Pooled texture bytes are a subset of texture bytes. These numbers describe Kin-owned handles; they exclude hidden SDL cycle backings, driver alignment, GPU retirement and physical residency. Existing per-view feature and mesh-pool counters provide additional attribution.

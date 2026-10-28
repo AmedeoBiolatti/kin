@@ -471,10 +471,32 @@ class AnimationEventDispatch;
 // the number of unhandled events; these are discarded, never kept in a queue.
 u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& dispatch);
 
+enum class SceneMutationMode3D : u8 { Conservative, Tracked };
+
+struct SceneWorkStats3D {
+    u64 transform_flushes = 0, transform_visits = 0, transforms_recomputed = 0, transforms_reused = 0;
+    u64 topology_rebuilds = 0, collection_visits = 0, collection_updates = 0, collection_reuses = 0;
+    u64 collection_fallbacks = 0, tracking_bytes = 0;
+    u64 particle_validation_runs = 0, particle_validation_reuses = 0;
+};
+
 class WorldRenderState3D {
 public:
     explicit WorldRenderState3D(flecs::world& world);
     explicit WorldRenderState3D(EcsWorld& world) : WorldRenderState3D(world.raw()) { _ecs = &world; }
+    ~WorldRenderState3D();
+    WorldRenderState3D(const WorldRenderState3D&) = delete;
+    WorldRenderState3D& operator=(const WorldRenderState3D&) = delete;
+
+    // Conservative preserves escaped raw writes. Tracked requires set/modified
+    // for component writes, or explicit invalidation after external changes.
+    void mutation_mode(SceneMutationMode3D mode);
+    SceneMutationMode3D mutation_mode() const;
+    void invalidate();
+    // Configuration revision for particle validation (tracked writes only).
+    u64 particle_configuration_revision() const;
+    SceneWorkStats3D work_stats() const;
+    void reset_work_stats();
 
     // Every WorldTransform3D from its Transform3D and its parent's, parents first.
     void propagate_transforms();
@@ -520,6 +542,10 @@ public:
     bool apply_weather(Scene3D& scene, const Fog3D& base_fog) const;
 
 private:
+    friend class SceneFrame3D;
+    void note_particle_validation(bool reused);
+    struct Tracking;
+    std::unique_ptr<Tracking> _tracking;
     u64 history_id(flecs::entity entity) const;
     u64 _history_identity; // collection scope, separate from simulation/rollback state
     const PosePresentation3D* _pose_presentation = nullptr;
