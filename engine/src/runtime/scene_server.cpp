@@ -455,6 +455,39 @@ ServerResponse handle_scene_actions(ServerContext& ctx) {
     return ok_result(out.str());
 }
 
+// flecs writes entity paths into its JSON as it prints them: a separator
+// inside a name escaped with a backslash ("Gem\.747", the second entity kin
+// names "Gem"), which is no JSON escape, so the snapshot would not parse.
+// Inside strings, a backslash that starts no JSON escape is escaped itself:
+// the path reads back as flecs wrote it.
+std::string with_json_escapes(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    bool in_string = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (!in_string) {
+            in_string = c == '"';
+            out += c;
+            continue;
+        }
+        if (c == '\\') {
+            const char next = i + 1 < text.size() ? text[i + 1] : '\0';
+            if (next != '\0' && std::string_view{"\"\\/bfnrtu"}.find(next) != std::string_view::npos) {
+                out += c;
+                out += next;
+                ++i;
+            } else {
+                out += "\\\\";
+            }
+            continue;
+        }
+        in_string = c != '"';
+        out += c;
+    }
+    return out;
+}
+
 ServerResponse handle_world_snapshot(ServerContext& ctx, const JsonValue& params) {
     SceneManager& scenes = ctx.scenes();
     i32 index = scenes.depth() - 1;
@@ -476,7 +509,7 @@ ServerResponse handle_world_snapshot(ServerContext& ctx, const JsonValue& params
     if (params.bool_at("raw", true)) {
         const flecs::string serialized = world->raw().to_json();
         const char* world_json = serialized.c_str();
-        json.key("world").raw(world_json ? std::string_view{world_json} : std::string_view{"null"});
+        json.key("world").raw(world_json ? with_json_escapes(world_json) : std::string("null"));
     }
     if (params.bool_at("kin", true)) {
         json.key("kin");
