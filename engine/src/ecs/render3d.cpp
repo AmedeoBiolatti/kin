@@ -111,7 +111,7 @@ struct WorldRenderState3D::Tracking {
         bool dirty = false, collected = false;
     };
     struct Binding {
-        u32 bucket = 0, slot = 0;
+        u32 bucket = 0, slot = 0, part = ~u32{0}, next = ~u32{0};
     };
     flecs::world_t* world = nullptr;
     SceneMutationMode3D mode = SceneMutationMode3D::Conservative;
@@ -124,6 +124,7 @@ struct WorldRenderState3D::Tracking {
     std::vector<flecs::entity_t> pending, changed;
     std::vector<u32> dirty;
     std::unordered_map<flecs::entity_t, Binding> bindings;
+    std::vector<Binding> extra_bindings;
     std::vector<flecs::observer> observers;
     ~Tracking() {
         for (auto& observer : observers)
@@ -142,6 +143,7 @@ void WorldRenderState3D::mutation_mode(SceneMutationMode3D mode) {
             decltype(t.indices){}.swap(t.indices);
             decltype(t.sources){}.swap(t.sources);
             decltype(t.bindings){}.swap(t.bindings);
+            decltype(t.extra_bindings){}.swap(t.extra_bindings);
             decltype(t.pending){}.swap(t.pending);
             decltype(t.changed){}.swap(t.changed);
             decltype(t.dirty){}.swap(t.dirty);
@@ -165,7 +167,8 @@ SceneWorkStats3D WorldRenderState3D::work_stats() const {
         (t.pending.capacity() + t.changed.capacity()) * sizeof(flecs::entity_t) + t.dirty.capacity() * sizeof(u32) +
         t.indices.size() * sizeof(decltype(t.indices)::value_type) + t.indices.bucket_count() * sizeof(void*) +
         t.sources.size() * sizeof(decltype(t.sources)::value_type) + t.sources.bucket_count() * sizeof(void*) +
-        t.bindings.size() * sizeof(decltype(t.bindings)::value_type) + t.bindings.bucket_count() * sizeof(void*);
+        t.bindings.size() * sizeof(decltype(t.bindings)::value_type) + t.bindings.bucket_count() * sizeof(void*) +
+        t.extra_bindings.capacity() * sizeof(Tracking::Binding);
     for (const auto& [id, uses] : t.sources)
         stats.tracking_bytes += uses.capacity() * sizeof(u32);
     return stats;
@@ -854,6 +857,7 @@ void WorldRenderState3D::propagate_transforms() {
         t.sources.clear();
         t.changed.clear();
         t.bindings.clear();
+        t.extra_bindings.clear();
         t.collection = false;
         ++t.stats.topology_rebuilds;
         _transforms.run([&](flecs::iter& it) {
@@ -961,6 +965,7 @@ void WorldRenderState3D::propagate_transforms() {
 void WorldRenderState3D::clear_collection_cache() {
     _tracking->collection = false;
     _tracking->bindings.clear();
+    _tracking->extra_bindings.clear();
     _buckets.clear();
     _bucket_lookup.clear();
     _bucket_lookup_dirty = false;
@@ -1073,7 +1078,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
     _ik_presentation = &ik;
     auto& tracking = *_tracking;
     const bool tracked = tracking.mode == SceneMutationMode3D::Tracked;
-    const bool simple = tracked && !presentation && !poses && !ik && _models.count() == 0 && _skinned.count() == 0 &&
+    const bool simple = tracked && !presentation && _animators.count() == 0 && _skinned.count() == 0 &&
                         _attachments.count() == 0 && _point_lights.count() == 0 && _spot_lights.count() == 0 &&
                         _emitters.count() == 0;
     if (simple && tracking.collection && !tracking.topology) {
@@ -1089,10 +1094,24 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
                 tracking.collection = false;
                 break;
             }
-            auto& bucket = _buckets[binding->second.bucket];
-            bucket.instances[binding->second.slot].transform = *placement;
-            edits[binding->second.bucket].push_back(binding->second.slot);
-            ++tracking.stats.collection_updates;
+            const auto* record = &binding->second;
+            const auto* model =
+                record->part == ~u32{0} && record->next == ~u32{0} ? nullptr : entity.get<ModelRenderer3D>();
+            while (record) {
+                if (record->part != ~u32{0} &&
+                    (!model || !model->model || record->part >= model->model->parts.size())) {
+                    tracking.collection = false;
+                    break;
+                }
+                auto& bucket = _buckets[record->bucket];
+                bucket.instances[record->slot].transform =
+                    record->part == ~u32{0} ? *placement : *placement * model->model->parts[record->part].transform;
+                edits[record->bucket].push_back(record->slot);
+                ++tracking.stats.collection_updates;
+                record = record->next == ~u32{0} ? nullptr : &tracking.extra_bindings[record->next];
+            }
+            if (!tracking.collection)
+                break;
         }
         if (tracking.collection) {
             for (auto& [index, slots] : edits) {
@@ -1133,6 +1152,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
     ++tracking.stats.collection_fallbacks;
     tracking.collection = false;
     tracking.bindings.clear();
+    tracking.extra_bindings.clear();
     prepare_joint_attachments();
     auto& by_mesh = _bucket_lookup;
     if (_bucket_lookup_dirty) {
@@ -1149,6 +1169,18 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         candidates.push_back(_buckets.size());
         return _buckets.emplace_back(Bucket{mesh, material, {}, {}});
     };
+    const auto bind = [&](flecs::entity_t id, Bucket& bucket, u32 part = ~u32{0}) {
+        if (!simple)
+            return;
+        Tracking::Binding record{static_cast<u32>(&bucket - _buckets.data()), static_cast<u32>(bucket.instances.size()),
+                                 part};
+        auto [entry, inserted] = tracking.bindings.try_emplace(id, record);
+        if (!inserted) {
+            record.next = entry->second.next;
+            entry->second.next = static_cast<u32>(tracking.extra_bindings.size());
+            tracking.extra_bindings.push_back(record);
+        }
+    };
     for (Bucket& bucket : _buckets) {
         bucket.instances.clear();
     }
@@ -1157,24 +1189,23 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             const auto world = it.field<const WorldTransform3D>(0);
             const auto renderers = it.field<const MeshRenderer3D>(1);
             const auto presentation = it.field<const RenderTransform3D>(2);
+            const bool own_world = it.is_self(0), own_renderer = it.is_self(1), own_presentation = it.is_self(2);
             Bucket* last = nullptr; // entities of a table mostly share a mesh
             for (const auto i : it) {
                 ++tracking.stats.collection_visits;
-                const MeshRenderer3D& r = renderers[i];
+                const MeshRenderer3D& r = renderers[own_renderer ? i : 0];
                 if (!r.visible || !r.mesh.valid()) {
                     continue;
                 }
-                const auto placement =
-                    draw_placement(it.entity(i), world[i], it.is_set(2) ? &presentation[i] : nullptr);
+                const auto placement = draw_placement(it.entity(i), world[own_world ? i : 0],
+                                                      it.is_set(2) ? &presentation[own_presentation ? i : 0] : nullptr);
                 if (!placement)
                     continue;
                 if (!last || !(last->mesh == r.mesh) || !(last->material == r.material)) {
                     last = &bucket_for(r.mesh, r.material);
                 }
                 // Picking retains the low entity index; history includes generation, scope and lease.
-                if (simple)
-                    tracking.bindings[it.entity(i).id()] = {static_cast<u32>(last - _buckets.data()),
-                                                            static_cast<u32>(last->instances.size())};
+                bind(it.entity(i).id(), *last);
                 last->instances.push_back(
                     {*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu), history_id(it.entity(i))});
             }
@@ -1222,10 +1253,11 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             const auto& material = binding ? binding->materials[index] : part.material;
             if (!part.mesh || part.mesh.skinned() || part.skin >= 0)
                 continue;
-            bucket_for(part.mesh, material)
-                .instances.push_back(
-                    {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint,
-                     id, detail::part_history3d(history_id(entity), index)});
+            auto& bucket = bucket_for(part.mesh, material);
+            bind(entity.id(), bucket, static_cast<u32>(index));
+            bucket.instances.push_back(
+                {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint, id,
+                 detail::part_history3d(history_id(entity), index)});
         }
     });
     const bool empty_buckets =

@@ -39,6 +39,28 @@ int main() {
     assert(old_records[0].transform.m[13] == 0);
     assert(scene.draws()[0].batch.instances()[0].transform.m[13] == 2);
     old.clear();
+    // Static imported-style model parts share the incremental path and preserve part transforms.
+    auto model = std::make_shared<Model3D>();
+    model->parts.push_back({.mesh = mesh, .transform = Mat4f::translation({1, 0, 0})});
+    model->parts.push_back({.mesh = mesh, .transform = Mat4f::translation({0, 2, 0})});
+    auto prop = world.raw().entity().set(Transform3D{}).set(ModelRenderer3D{.model = model});
+    scene.clear();
+    state.propagate_transforms();
+    state.collect(scene);
+    state.reset_work_stats();
+    prop.set(Transform3D{.position = {0, 5, 0}});
+    state.propagate_transforms();
+    scene.clear();
+    state.collect(scene);
+    assert(state.work_stats().collection_visits == 0 && state.work_stats().collection_updates == 2);
+    u32 parts = 0;
+    for (const auto& draw : scene.draws())
+        for (const auto& record : draw.batch.instances())
+            if (record.id == u32(prop.id())) {
+                assert(record.transform.m[13] == 5 || record.transform.m[13] == 7);
+                ++parts;
+            }
+    assert(parts == 2);
     // Hierarchy changes rebuild topology; an ancestor edit reaches every descendant once.
     auto parent = world.raw().entity().set(Transform3D{.position = {0, 3, 0}});
     entities[0].child_of(parent);
@@ -74,12 +96,18 @@ int main() {
     assert(entities[1].get<WorldTransform3D>()->position().y == 20);
     kin::EcsWorld inherited;
     inherited.raw().component<Transform3D>().add(flecs::OnInstantiate, flecs::Inherit);
+    inherited.raw().component<MeshRenderer3D>().add(flecs::OnInstantiate, flecs::Inherit);
     WorldRenderState3D inherited_state{inherited};
     inherited_state.mutation_mode(SceneMutationMode3D::Tracked);
     auto prefab = inherited.raw().prefab().set(Transform3D{.position = {0, 1, 0}});
+    prefab.set(MeshRenderer3D{.mesh = mesh});
     auto instance = inherited.raw().entity().is_a(prefab);
+    auto another = inherited.raw().entity().is_a(prefab);
     inherited_state.propagate_transforms();
     assert(instance.get<WorldTransform3D>()->position().y == 1);
+    Scene3D inherited_scene;
+    inherited_state.collect(inherited_scene);
+    assert(inherited_scene.draws().size() == 1 && inherited_scene.draws()[0].count == 2);
     prefab.set(Transform3D{.position = {0, 6, 0}});
     inherited_state.propagate_transforms();
     assert(instance.get<WorldTransform3D>()->position().y == 6);
