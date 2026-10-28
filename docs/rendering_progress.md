@@ -2,6 +2,12 @@
 
 Work proceeds on `exp/rendering-foundations`, from committed lighting work `77b76c8`. The active GI subvoxel edits and main's planning changes are separate. See the [pipeline plan](rendering_pipeline_plan.md) for scope and acceptance gates.
 
+## Main-readiness validation — 2026-10-28/29
+
+The [readiness report](rendering_readiness_2026-10-28.md) records the frozen native candidate, full configured test inventory, minimal GCC 13 and browser checks, nine-scene measurements, two-seed Cycles scores, and persistent resource replays. This pass fixes fractional-DPI pointer mapping and applies the sol2/GCC 15 compatibility option to all dependency consumers; it also repairs stale sampler and optional-codec test assumptions.
+
+All 214 measurement jobs complete without input drift. Unaffected views/clips preserve their pixels; Yard explicitly selects half AO and changes with the reconstruction fix. Eight resize/AO/TAA cycles and four full Yard/Bistro traversals show stable tracked GPU payloads. The earlier settled-GI quality preset is measured separately from ambient-only fixtures. Thermal/power throttling prevents performance signoff; hardware cross-device and additional-platform coverage remain as documented. Main has not been merged, and its local planning edits remain untouched. The report includes frozen-binary launch commands for manual testing.
+
 ## Stage 1: correctness and material fidelity
 
 - `50c5e32`: conservative affine bounds across visibility, spatial groups, retained caches and LOD. Native image comparisons cover shear, mirrors, shadows, picking, skinning, retained instances and CPU/GPU clusters.
