@@ -218,3 +218,25 @@ The bounded native profile allows four extra sampled textures and eight read-onl
 GPU compute writes remain ordered in the current frame. CPU texture/buffer uploads after a recorded material read submit earlier work before uploading, without an explicit device-idle wait. This is a frame boundary: create fresh prepared handles for subsequent consumers. Prefer GPU producers or upload before preparation when sharing world data. Queued draws retain inputs until submission; a temporary 2D target on the render-target stack also remains owned across such boundaries.
 
 Native content revisions include CPU uploads, compute outputs, 2D target writes and stock/public 3D outputs. Changing extra input contents or sampler state conservatively resets a stock view's TAA history. An identical write can still reset it; there is no shader-level proof of whether an update affects appearance. Standalone surfaces have no implicit temporal history. The finite-speed lighting prototype owns its bounded light/scene history, solver, units and occluder policy in a standalone example, outside the engine and stock renderer; these public bindings provide its material-consumption path.
+
+### Standalone slow-light prototype
+
+`kin_slowlight3d` is an example under [tools/slowlight3d](../tools/slowlight3d/main.cpp). Its solver, sampled history, simulation settings, shaders and diagnostics live entirely there. It uses the existing public graph/material APIs and adds no engine mode or stock-renderer behavior.
+
+```sh
+cmake --build <native-build> --target kin_slowlight3d kin_slowlight3d_tests
+<native-build>/bin/kin_slowlight3d
+<native-build>/bin/kin_slowlight3d --time 1.5 --speed 100 --capture slow-light.png
+<native-build>/bin/kin_slowlight3d --delay --time 8 --capture delay.png
+ctest --test-dir <native-build> --output-on-failure -R '^kin-slowlight3d-'
+```
+
+Build with experimental 3D, tools and glslc; native compute, sampled data attachments and material inputs are required. WebGL2/fallback support is outside the prototype. Capture requires image I/O; `--help` lists options and `--frames N` runs a bounded live-loop smoke check. SPACE pauses, UP/DOWN select 25/50/100/200/400 km/h, D toggles the delay map, R restarts with empty past history, and ESC exits. The fixed camera compares delayed lighting with an instantaneous control at the same observer time. The one-metre grid and current-position rings are diagram guides. Pink stripes mean missing history; delay mode maps zero to two seconds from blue to orange and darkens incoming occlusion.
+
+The model is direct illumination of a static plane by one moving, pulsed point emitter and one moving opaque spherical occluder. Coordinates are metres and time is seconds. At 100 km/h, ten metres takes 0.36 seconds. For observer time `t`, receiver `P` and eye `E`, the surface event is `t_surface = t - |P-E|/c`. A bounded bisection solves `t_emit + |L(t_emit)-P|/c = t_surface` for a subluminal sampled emitter path. Each overlapping history interval tests the incoming photon's continuous worldline against the sphere's linearly moving centre. Occlusion therefore uses the sphere at the photon's time, rather than its current or emission-time position. The observer leg contributes delay but is unoccluded.
+
+The example keeps 121 fixed-size snapshots at 30 Hz, spanning at most four seconds. Positions interpolate linearly; emitter power and sphere presence/radius hold from the left sample until the next tick. Pausing preserves samples; reset/rewind discards future history; large jumps reconstruct at most 121 samples from the deterministic example trajectory. Evaluation uses time relative to the latest tick to preserve GPU float precision over long runs. Missing emission/surface history returns unknown, rather than clamping to the oldest state or silently substituting instantaneous lighting. At 25 km/h the fixed camera can require more than four seconds even after warm-up; increasing light speed restores coverage within the same memory budget.
+
+A compute pass writes both transport fields into one 384 x 192 RGBA16F texture. Custom materials read that field and the imported history buffer to draw two ground-plane views. Every access is declared in the graph. The history buffer is 3,872 bytes and is uploaded before material preparation; bindings are reused while physical handles stay unchanged. There is no CPU readback in the live rendering path. Explicit test/capture modes use readback.
+
+This is a classical, restricted transport demonstration. It does not render delayed images of arbitrary moving meshes, occlude the eye leg, or model bounces, scattering, special relativity, Doppler, aberration or radiometric ground truth. Energy uses a simple cosine factor and softened inverse-square falloff in arbitrary units; a constant display fill keeps the diagram readable. The instantaneous comparison uses the same appearance model. These approximation choices belong to the example.

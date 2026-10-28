@@ -9,6 +9,21 @@ target_compile_options(kin_pack PRIVATE
 kin_enable_release_optimizations(kin_pack)
 
 if(KIN_EXPERIMENTAL_3D)
+    # Standalone experiment: solver/history/shaders stay under tools/slowlight3d.
+    add_executable(kin_slowlight3d slowlight3d/main.cpp)
+    target_link_libraries(kin_slowlight3d PRIVATE kin::engine)
+    kin_compile_glsl(_slowlight_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/slowlight3d/shaders"
+        SOURCES slowlight3d/transport.comp.glsl slowlight3d/receiver.frag.glsl slowlight3d/probe.frag.glsl)
+    kin_embed_files(kin_slowlight3d NAME slowlight3d_shader FILES ${_slowlight_spv})
+    if(BUILD_TESTING)
+        add_executable(kin_slowlight3d_tests slowlight3d/simulation_tests.cpp)
+        target_compile_features(kin_slowlight3d_tests PRIVATE cxx_std_23)
+        add_test(NAME kin-slowlight3d-cpu COMMAND kin_slowlight3d_tests)
+        if(KIN_HAS_GPU_RENDERER AND _slowlight_spv)
+            add_test(NAME kin-slowlight3d-graph COMMAND kin_slowlight3d --test)
+            set_tests_properties(kin-slowlight3d-graph PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+        endif()
+    endif()
     add_executable(kin_outline3d outline3d/main.cpp)
     target_link_libraries(kin_outline3d PRIVATE kin::engine)
     kin_compile_glsl(_outline_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/outline3d/shaders"

@@ -487,7 +487,7 @@ Allow a pass to choose compatible stock visibility tests, supply conservative bo
 
 ### Extensibility examples
 
-The finite-speed lighting experiment is a standalone prototype/example, not an engine feature. Keep its propagation model, bounded history, simulation settings, shaders and diagnostics in the example, using the public graph/material APIs. It must not add a slow-light mode, simulation policy or history solver to the engine or stock renderer. Any reusable engine extension should have a separate, general rendering use case; start the prototype with the APIs already available.
+The finite-speed lighting experiment is a standalone prototype/example, not an engine feature. The first direct-light prototype is now implemented as `kin_slowlight3d`; see [its model, controls and run instructions](render_graph.md#standalone-slow-light-prototype). Keep its propagation model, bounded history, simulation settings, shaders and diagnostics in the example, using the public graph/material APIs. It must not add a slow-light mode, simulation policy or history solver to the engine or stock renderer. Any reusable engine extension should have a separate, general rendering use case; start the prototype with the APIs already available.
 
 | Example | Required extension surface | Acceptance |
 | --- | --- | --- |

@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add a standalone slow-light prototype comparing instantaneous and delayed direct illumination, with moving-source
+  and photon-time occluder history, fixed memory bounds, interactive controls and deterministic GPU/CPU checks.
+  Simulation and shaders stay in the example; the engine and stock renderer are unchanged.
+
 - Bind graph-produced textures and read-only buffers to native custom 3D materials through immutable, reflected input
   sets. Validate shader/device/types/layouts and output feedback; preserve CPU upload ordering and GPU-produced input
   revisions, reset affected TAA history, and guard resources that outlive the renderer. Extend the surface graph with
