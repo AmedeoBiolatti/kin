@@ -164,6 +164,11 @@ releases may change APIs.
 
 ### Fixed
 
+- Preserve transparent TAA motion on software GPUs by routing colour-only particle
+  and custom material shaders through the velocity pre-pass. Keep particle-shadow
+  history stable across views, and restore Windows compilation of Summit, the
+  renderer tests and the reference tool.
+
 - A game run with `--inspect` writes its answers on a thread of its own, so a
   tool slow to read a large one (a world's snapshot, 219 KB in Lantern Vale)
   no longer holds the game: watched by the studio, it lost a frame of up to
@@ -200,11 +205,6 @@ releases may change APIs.
 - `rasterize_svg` refuses text without an `<svg>` element before SDL_image
   parses it, as SDL_image does for files: SDL_image does not free a parse that
   comes out empty (16 bytes lost per call).
-
-- Preserve transparent TAA motion on software GPUs by routing colour-only particle
-  and custom material shaders through the velocity pre-pass. Keep particle-shadow
-  history stable across views, and restore Windows compilation of Summit, the
-  renderer tests and the reference tool.
 
 - Bound navmesh boundary-rejection diagnostics to eight face examples plus one
   count/bounds summary per build, including when refinement rejects many faces.
