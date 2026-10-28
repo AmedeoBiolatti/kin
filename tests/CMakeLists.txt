@@ -328,6 +328,13 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-render3d PROPERTIES TIMEOUT 1800)
 endif()
 if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
+    kin_add_test(kin_render3d_geometry_tests kin-render3d-geometry SOURCES render3d_geometry_tests.cpp)
+    kin_compile_glsl(_geometry_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/geometry/shaders"
+        SOURCES shaders/geometry_probe.frag.glsl)
+    kin_embed_files(kin_render3d_geometry_tests NAME geometry_probe FILES ${_geometry_spv})
+    add_test(NAME kin-render3d-geometry-foreign COMMAND kin_render3d_geometry_tests --foreign-device)
+    set_tests_properties(kin-render3d-geometry kin-render3d-geometry-foreign
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_bounds_tests kin-render3d-bounds SOURCES render3d_bounds_tests.cpp)
     set_tests_properties(kin-render3d-bounds PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_fidelity_tests kin-render3d-fidelity SOURCES render3d_fidelity_tests.cpp

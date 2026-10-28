@@ -9,6 +9,15 @@ target_compile_options(kin_pack PRIVATE
 kin_enable_release_optimizations(kin_pack)
 
 if(KIN_EXPERIMENTAL_3D)
+    add_executable(kin_outline3d outline3d/main.cpp)
+    target_link_libraries(kin_outline3d PRIVATE kin::engine)
+    kin_compile_glsl(_outline_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/outline3d/shaders"
+        SOURCES outline3d/outline.frag.glsl)
+    kin_embed_files(kin_outline3d NAME outline3d_shader FILES ${_outline_spv})
+    if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER AND _outline_spv)
+        add_test(NAME kin-outline3d-graph COMMAND kin_outline3d --test)
+        set_tests_properties(kin-outline3d-graph PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
     add_executable(kin_ascii3d ascii3d/main.cpp)
     target_link_libraries(kin_ascii3d PRIVATE kin::engine)
     if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER)

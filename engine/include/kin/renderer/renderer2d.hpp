@@ -419,6 +419,11 @@ public:
     // bindings fall short of what the shader declares (logged).
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv);
     Texture create_storage_texture(Vec2i size, TextureFormat format = TextureFormat::Rgba8);
+    // Single-sample linear data target, also sampled by shaders. Supports RG16F,
+    // RGBA16F and D32F where capabilities().render_attachments is true. Cleared
+    // and written by an operation such as Renderer3D::render_geometry; never a
+    // 2D colour target. Retained Texture handles keep their allocation alive.
+    Texture create_render_attachment(Vec2i size, TextureFormat format);
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings);
 
     // Storage buffers for shaders (capabilities().data_buffers; elsewhere an

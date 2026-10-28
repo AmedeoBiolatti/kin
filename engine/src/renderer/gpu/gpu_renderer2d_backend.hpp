@@ -208,6 +208,7 @@ public:
     bool reload_shader(ShaderHandle handle, const ShaderDesc& desc) override;
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) override;
     Texture create_storage_texture(Vec2i size, TextureFormat format) override;
+    Texture create_render_attachment(Vec2i size, TextureFormat format) override;
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i groups, const ComputeBindings& bindings) override;
     DataBuffer create_data_buffer(std::size_t bytes, const void* data) override;
     bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data) override;

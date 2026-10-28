@@ -456,6 +456,14 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .rendering_3d = false,
 #endif
         .data_textures = _data_textures,
+        .render_attachments =
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                         SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
     };
 }
 
@@ -1318,10 +1326,24 @@ u64 spirv_id(ShaderBlob spirv) {
 
 SDL_GPUTextureFormat sdl_format(TextureFormat format) {
     switch (format) {
-    case TextureFormat::Rgba8: return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    case TextureFormat::R16Uint: return SDL_GPU_TEXTUREFORMAT_R16_UINT;
-    case TextureFormat::Rg16Uint: return SDL_GPU_TEXTUREFORMAT_R16G16_UINT;
-    case TextureFormat::R32Float: return SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+    case TextureFormat::Rgba8:
+        return SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    case TextureFormat::R16Uint:
+        return SDL_GPU_TEXTUREFORMAT_R16_UINT;
+    case TextureFormat::Rg16Uint:
+        return SDL_GPU_TEXTUREFORMAT_R16G16_UINT;
+    case TextureFormat::R32Float:
+        return SDL_GPU_TEXTUREFORMAT_R32_FLOAT;
+    case TextureFormat::Rg16Float:
+        return SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT;
+    case TextureFormat::Rgba16Float:
+        return SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    case TextureFormat::Depth32Float:
+        return SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
+    case TextureFormat::Depth24Unorm:
+        return SDL_GPU_TEXTUREFORMAT_D24_UNORM;
+    default:
+        return SDL_GPU_TEXTUREFORMAT_INVALID;
     }
     return SDL_GPU_TEXTUREFORMAT_INVALID;
 }
@@ -1330,7 +1352,9 @@ SDL_GPUTextureFormat sdl_format(TextureFormat format) {
 
 Texture GpuRenderer2DBackend::create_texture(Vec2i size, TextureFormat format, const void* pixels) {
     if (size.x <= 0 || size.y <= 0 || (format != TextureFormat::Rgba8 && !_data_textures) ||
-        texture_format_compressed(format)) { // compressed ones come whole: create_texture_compressed
+        (texture_format_compressed(format) ||
+         (format == TextureFormat::Depth32Float ||
+          format == TextureFormat::Depth24Unorm))) { // compressed ones come whole: create_texture_compressed
         return {};
     }
     gpu::GpuTexture tex = _device.create_texture(pixels, static_cast<u32>(size.x), static_cast<u32>(size.y),
@@ -2272,13 +2296,30 @@ ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv
     return ComputeShaderHandle{static_cast<u64>(_compute_pipelines.size())};
 }
 
+Texture GpuRenderer2DBackend::create_render_attachment(Vec2i size, TextureFormat format) {
+    if (size.x <= 0 || size.y <= 0 ||
+        (format != TextureFormat::Rg16Float && format != TextureFormat::Rgba16Float &&
+         format != TextureFormat::Depth32Float && format != TextureFormat::Depth24Unorm))
+        return {};
+    const auto usage =
+        SDL_GPU_TEXTUREUSAGE_SAMPLER | ((format == TextureFormat::Depth32Float || format == TextureFormat::Depth24Unorm)
+                                            ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET
+                                            : SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
+    const auto native = sdl_format(format);
+    if (!SDL_GPUTextureSupportsFormat(_device.handle(), native, SDL_GPU_TEXTURETYPE_2D, usage))
+        return {};
+    auto texture = _device.create_target(static_cast<u32>(size.x), static_cast<u32>(size.y), native, usage);
+    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(texture), false, ScaleMode::Nearest, format)};
+}
+
 Texture GpuRenderer2DBackend::create_storage_texture(Vec2i size, TextureFormat format) {
-    if (texture_format_compressed(format)) {
-        return {}; // shaders cannot write blocks
+    if (size.x <= 0 || size.y <= 0 || texture_format_compressed(format) ||
+        (format == TextureFormat::Depth32Float || format == TextureFormat::Depth24Unorm)) {
+        return {}; // shaders cannot write blocks or depth
     }
-    gpu::GpuTexture tex = _device.create_texture(nullptr, static_cast<u32>(size.x), static_cast<u32>(size.y),
-                                                 sdl_format(format), texture_format_bytes(format),
-                                                 SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+    gpu::GpuTexture tex =
+        _device.create_texture(nullptr, static_cast<u32>(size.x), static_cast<u32>(size.y), sdl_format(format),
+                               texture_format_bytes(format), SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
     return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(tex), false, ScaleMode::Nearest, format)};
 }
 

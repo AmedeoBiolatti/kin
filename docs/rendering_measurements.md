@@ -72,3 +72,36 @@ The GI/control captures use identical binary/source hashes, the same three scene
 GI's memory cost depends on voxel/probe dimensions and scene bounds. The initial six-scene baseline also reached about 861 MiB peak owned payload, with roughly 252 MiB idle sampled textures and 65 MiB transfer capacity at one Sponza capture. Comparing unmatched run peaks would confuse pool expiry and staging with GI's cost. The next allocator experiments should separate active feature data, idle retention and large-upload staging before changing defaults.
 
 Full PNGs, both truth seeds, manifests, comparison HTML/Markdown and `scores.json` remain in sibling artifact directories `kin-quality-foundations-v1`, `kin-quality-foundations-gi-v1` and `kin-quality-foundations-no-gi-v1`. Source/content identities are preserved there; the report commits no large image assets.
+
+## Standalone geometry migration
+
+The standalone depth/normal operation and stock shared recorder preserve all four RGBA captures from predecessor `5944084`: Cornell/front and the motion scene's still, pan and close cameras. They are byte-identical at 320 x 240 with AO, contact shadows and TAA enabled. Reproduce against a saved predecessor executable with:
+
+```sh
+kin_reference tests/reference/scenes/cornell.json tests/reference/scenes/motion.json \
+  --out OUTPUT --width 320 --height 240 --frames 4 --warmup 4 --repeat 1 \
+  --ao --contact-shadows --taa
+```
+
+Session captures are `/tmp/kin-geometry-before` and `/tmp/kin-geometry-after`; comparison checks decoded RGBA bytes. This is a correctness comparison, not a performance benchmark. The outline example measures stable GPU handle allocation during ordinary recording; readback is outside that interval because it allocates transfer resources. Driver cycling/backing storage remains outside Kin's payload ledger.
+
+### Separate device-lifecycle finding
+
+Two live SDL_GPU renderers on this NVIDIA 580.178.04/X11 system crash during window release. The debugger stack enters `VULKAN_ReleaseWindow` and NVIDIA's `libnvidia-glcore`; the failing call is outside geometry recording. A separate executable reproduces it with only `App`, two windows, two ordinary `Renderer2D` objects, clear/present and scope exit—no `Renderer3D`, graph or geometry operation. Initializing/presenting both swapchains does not resolve it. The root cause is not established, and this change does not repair the broader device/window lifecycle.
+
+The foreign-device geometry test is separate from ordinary geometry acceptance. Software Vulkan exercises live foreign targets, meshes and cutout textures. Hardware runs skip this lifecycle probe by default; `KIN_TEST_LIVE_GPU_DEVICES=1 kin_render3d_geometry_tests --foreign-device` opts in for diagnosis/platform validation. Core geometry, graph reuse, resize/HDR lifetime and interleaved stock-history checks run on hardware normally.
+
+Minimal reproduction inside an application entry point:
+
+```cpp
+App app;
+auto& first = app.create_window({.width = 160, .height = 120, .hidden = true});
+auto& second = app.create_window({.width = 160, .height = 120, .hidden = true});
+Renderer2D a{make_render_backend(first, false, true)};
+Renderer2D b{make_render_backend(second, false, true)};
+a.clear(colors::black); a.present();
+b.clear(colors::black); b.present();
+// Crash on scope exit on the tested NVIDIA/X11 configuration.
+```
+
+The completed native renderer dispatch is logged at `/tmp/kin-geometry-full-renderer.log`. Final focused results are `/tmp/kin-geometry-final-hardware-ctest.log` (ten passes, one documented lifecycle skip) and `/tmp/kin-geometry-final-software-ctest.log` (six passes, including live foreign-device rejection). Web smoke output is `/tmp/kin-geometry-web-verified-smoke.log`. These include projection/depth, signed/flat normals, cutouts, skinning, retained batches, CPU/GPU LOD cuts, target validation/feedback, allocation/plan reuse, resize/HDR lifetime and exact stock-history interleaving. The native full suite was run once after the implementation changes; subsequent edits separated the ownership test's device-lifecycle probe.

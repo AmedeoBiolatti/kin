@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Expose standalone opaque/cutout geometry passes with sampled reverse-Z depth and signed world normals. Add explicit
+  float/depth graph attachments, a cached typed stock prepass subgraph and a public-API outline renderer. Stable
+  attachments survive working-colour changes; stock lighting and temporal history remain compatible.
+
 - Preserve glTF linear RGB emission and strength, independently of base/vertex/instance colour, through stock/custom
   shaders, browser rendering, material files and GI. Legacy base-relative glow remains explicit and compatible.
 - Preserve independent wrap, min, mag and mip filters per imported/material map while sharing images by colour/data

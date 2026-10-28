@@ -174,6 +174,8 @@ public:
 private:
     friend class GpuRenderer3D;
     ResourceGraphCompiler _graph_compiler;
+    ResourceGraphCompiler _geometry_compiler;
+    ResourceGraphDesc _geometry_recipe;
     Vec2i _size{};
     u32 _samples = 1; // as made: what the device has for the format
     ViewOptions3D _options{};
@@ -328,6 +330,7 @@ public:
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
+    bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) override;
     Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
     bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
 
@@ -487,6 +490,9 @@ private:
     // End of a render: counts the renders each feature's targets went unused and releases those unused for
     // `_release_after`; fills RenderDebugStats3D::feature_bytes.
     void age_targets(FrameCtx& ctx);
+    SDL_GPUGraphicsPipeline* geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned,
+                                               bool indexed) const;
+    bool draw_geometry(FrameCtx&, SDL_GPURenderPass*, SDL_GPUTextureFormat depth, bool second);
     void prepass(FrameCtx& ctx); // depth and normals (or velocity), then the occlusion and contact shadows
     void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
     void overlay_velocity(FrameCtx& ctx);

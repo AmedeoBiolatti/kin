@@ -70,6 +70,8 @@ struct RendererCapabilities3D {
     // The device is a software rasteriser (Mesa's llvmpipe/lavapipe, SwiftShader, Direct3D's WARP): every picture is
     // right, no timing means anything. Tests compare milliseconds only where this is false.
     bool software = false;
+    // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
+    bool geometry_pass = false;
 };
 
 struct ViewOptions3D {
@@ -92,6 +94,15 @@ struct ViewOptions3D {
     // What is under each pixel kept too (Renderer3D::pick): one more pass
     // over the scene's opaque meshes.
     bool pick = false;
+};
+
+// Single-sample data attachments. Depth is reverse Z (0 background/far, 1 near),
+// with the scene camera's exact, unjittered projection. Normals are world-space
+// unit vectors encoded octahedrally in signed RG16F [-1,1]; depth distinguishes
+// background from a valid normal. No material normal maps or custom displacement.
+struct GeometryTargets3D {
+    Texture depth;   // TextureFormat::Depth32Float
+    Texture normals; // TextureFormat::Rg16Float; same extent and device as depth
 };
 
 // What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
@@ -176,6 +187,7 @@ public:
     // Records `scene` into `view`, after the 2D draws so far and before those
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
+    virtual bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) { return false; }
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) = 0;
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False

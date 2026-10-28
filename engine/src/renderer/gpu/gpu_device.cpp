@@ -262,7 +262,7 @@ GpuTexture GpuDevice::create_render_texture(u32 width, u32 height, SDL_GPUTextur
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
-    return GpuTexture{_shared, texture, width, height, format};
+    return GpuTexture{_shared, texture, width, height, format, info.usage};
 }
 
 GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
@@ -281,7 +281,7 @@ GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat 
         throw sdl_error("SDL_CreateGPUTexture (target) failed");
     }
     poison_texture(texture, format, width, height, 1, levels, usage, samples);
-    return GpuTexture{_shared, texture, width, height, format};
+    return GpuTexture{_shared, texture, width, height, format, usage};
 }
 
 GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,

@@ -77,6 +77,13 @@ void resources() {
     auto& window = app.create_window({.width = 64, .height = 64, .hidden = true});
     Renderer2D r2d{window};
     Renderer3D renderer{r2d};
+    if (!renderer.capabilities().geometry_pass) {
+        const auto refused = renderer.render_geometry({}, {});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+        const auto saved = refused.diagnostics;
+        renderer.capabilities();
+        assert(refused.diagnostics == saved);
+    }
     const auto root = std::filesystem::temp_directory_path() /
                       ("kin-errors3d-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);

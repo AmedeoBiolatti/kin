@@ -32,6 +32,9 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
     for (const auto& r : graph.resources) {
         if (r.name.empty() || !resource_names.insert(r.name).second)
             error("empty or duplicate resource name: " + r.name);
+        if (r.kind != GraphResourceKind::Token && r.kind != GraphResourceKind::Buffer &&
+            texture_level_bytes(r.format, r.size) == ~u64{0})
+            error(r.name + ": texture payload overflows the planner");
         if (r.hdr && r.kind != GraphResourceKind::ColorTarget)
             error(r.name + ": HDR applies to colour targets only");
         if (r.hdr && texture_level_bytes(r.format, r.size) > std::numeric_limits<u64>::max() / 2)
@@ -45,6 +48,13 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
             error(r.name + ": buffer capacity must fit a nonzero SDL_GPU buffer");
         if (r.kind == GraphResourceKind::StorageTexture && texture_format_compressed(r.format))
             error(r.name + ": compressed storage textures are unsupported");
+        if (r.kind == GraphResourceKind::StorageTexture &&
+            (r.format == TextureFormat::Depth32Float || r.format == TextureFormat::Depth24Unorm))
+            error(r.name + ": depth storage textures are unsupported");
+        if (r.kind == GraphResourceKind::RenderAttachment && r.format != TextureFormat::Rg16Float &&
+            r.format != TextureFormat::Rgba16Float && r.format != TextureFormat::Depth32Float &&
+            r.format != TextureFormat::Depth24Unorm)
+            error(r.name + ": render attachments require RG16F, RGBA16F, D32F or D24");
     }
     std::unordered_map<std::string, u32> names;
     std::vector<u32> writer(resources, graph_no_slot);
@@ -191,9 +201,10 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
         auto& life = plan.lifetimes[id];
         if (desc.imported || desc.kind == GraphResourceKind::Token)
             continue;
-        const u64 needed = desc.kind == GraphResourceKind::ColorTarget ? graph_feature::raster
-                           : desc.kind == GraphResourceKind::Buffer    ? graph_feature::buffers
-                                                                       : graph_feature::compute;
+        const u64 needed = desc.kind == GraphResourceKind::ColorTarget        ? graph_feature::raster
+                           : desc.kind == GraphResourceKind::Buffer           ? graph_feature::buffers
+                           : desc.kind == GraphResourceKind::RenderAttachment ? graph_feature::attachments
+                                                                              : graph_feature::compute;
         if ((features & needed) != needed)
             error(desc.name + ": resource kind unavailable on backend");
         u32 slot = graph_no_slot;

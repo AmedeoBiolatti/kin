@@ -39,6 +39,8 @@ if (session.render())
 
 `SceneFrame3D` integrates the same stages with a game-owned ECS world. The direct `Scene3D::draw` and
 `Renderer3D::render` APIs support embedded views, renderer tools and the benchmark examples below.
+`Renderer3D::render_geometry` also records standalone opaque/cutout depth and world normals for custom pipelines;
+see the [geometry graph contract and outline example](render_graph.md#geometry-operations-and-data-attachments).
 Configure with `cmake --preset 3d` to include the experimental engine; ordinary and shipping builds leave it out.
 
 Fallible native 3D operations return `Result3D<T>` or `Status3D`. Check the result

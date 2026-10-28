@@ -8,7 +8,8 @@ u64 available_graph_features(const Renderer2D& renderer) {
     const auto caps = renderer.capabilities();
     return (caps.render_targets ? graph_feature::raster : 0) | (caps.compute ? graph_feature::compute : 0) |
            (caps.data_buffers ? graph_feature::buffers : 0) | (caps.rendering_3d ? graph_feature::rendering3d : 0) |
-           (caps.materials_2d ? graph_feature::shaders : 0);
+           (caps.materials_2d ? graph_feature::shaders : 0) |
+           (caps.render_attachments ? graph_feature::attachments : 0);
 }
 bool GraphResources::prepare(Renderer2D& renderer, const ResourceGraphDesc& desc, const CompiledResourceGraph& plan,
                              std::span<const GraphImport> imports) {
@@ -89,6 +90,9 @@ bool GraphResources::prepare(Renderer2D& renderer, const ResourceGraphDesc& desc
                 break;
             case GraphResourceKind::StorageTexture:
                 slot.texture = renderer.create_storage_texture(r.size, r.format);
+                break;
+            case GraphResourceKind::RenderAttachment:
+                slot.texture = renderer.create_render_attachment(r.size, r.format);
                 break;
             case GraphResourceKind::Buffer:
                 slot.buffer = renderer.create_data_buffer(r.bytes);

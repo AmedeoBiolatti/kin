@@ -1043,6 +1043,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
                                           SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
             throw std::runtime_error("no two-float colour target");
         }
+        _capabilities.geometry_pass =
+            SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
         if (!SDL_GPUTextureSupportsFormat(handle, ao_format, SDL_GPU_TEXTURETYPE_2D,
                                           SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE)) {
             throw std::runtime_error("no R8 storage texture");
@@ -1480,6 +1483,24 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
+SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
+                                                          bool skinned, bool indexed) const {
+    if (skinned && !_skinning_available)
+        return nullptr;
+    return _owner->_pipelines.get(
+        GpuPipelineKey{.vertex = (indexed   ? _indexed_prepass_vertex
+                                  : skinned ? _prepass_skinned_vertex_shader
+                                            : _prepass_vertex_shader)
+                                     .handle(),
+                       .fragment = (mask ? _prepass_mask_shader : _prepass_shader).handle(),
+                       .blend = GpuBlendMode::Replace,
+                       .format = ao_normal_format,
+                       .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
+                       .depth_stencil = depth,
+                       .depth = GpuDepthTest::TestWrite,
+                       .cull = cull ? GpuCull::Back : GpuCull::None});
+}
+
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass,
                                                  bool mask, SDL_GPUShader* custom, bool velocity, bool skinned,
                                                  bool fog, bool lights, Unlit unlit, bool indexed) const {
@@ -1536,21 +1557,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .cull = cull ? GpuCull::Back : GpuCull::None,
             .depth_only = true});
     }
-    if (pass == Pass::Prepass) {
-        // Depth and the world normal, one sample, in the occlusion's own targets.
-        return _owner->_pipelines.get(
-            GpuPipelineKey{.vertex = (indexed   ? _indexed_prepass_vertex
-                                      : skinned ? _prepass_skinned_vertex_shader
-                                                : _prepass_vertex_shader)
-                                         .handle(),
-                           .fragment = (mask ? _prepass_mask_shader : _prepass_shader).handle(),
-                           .blend = GpuBlendMode::Replace,
-                           .format = ao_normal_format,
-                           .layout = layout,
-                           .depth_stencil = _ao_depth_format,
-                           .depth = GpuDepthTest::TestWrite,
-                           .cull = cull ? GpuCull::Back : GpuCull::None});
-    }
+    if (pass == Pass::Prepass)
+        return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed);
     if (pass == Pass::Pick) {
         // The pick fragment shaders read vWorld and vId, which mesh.vert and mesh_skinned.vert both write.
         return _owner->_pipelines.get(GpuPipelineKey{.vertex = (indexed   ? _indexed_vertex
@@ -3215,6 +3223,7 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
 struct GpuRenderer3D::FrameCtx {
     FrameCtx(GpuView3D* v, const Scene3D& s, RenderDebugStats3D& st) : view(v), scene(s), stats(st) {}
     GpuView3D* view;
+    bool geometry_only = false;
     const Scene3D& scene;
     RenderDebugStats3D& stats;
 
@@ -4274,7 +4283,7 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     ctx.aspect = static_cast<f32>(view->_size.x) / static_cast<f32>(view->_size.y);
     const Scene3D* overlay = scene.overlay_if_any();
-    ctx.scenes = {&scene, overlay && !overlay->draws().empty() ? overlay : nullptr};
+    ctx.scenes = {&scene, !ctx.geometry_only && overlay && !overlay->draws().empty() ? overlay : nullptr};
     for (u32 s = 0; s < 2; ++s) {
         if (ctx.scenes[s]) {
             ctx.view_projections[s] = ctx.scenes[s]->camera.view_projection(ctx.aspect);
@@ -4286,6 +4295,13 @@ void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
     _lod_bias = _capabilities.texture_lod_bias && std::isfinite(scene.texture_lod_bias)
                     ? static_cast<i32>(std::lround(std::clamp(scene.texture_lod_bias, -2.0f, 2.0f) * 16.0f))
                     : 0;
+
+    if (ctx.geometry_only) {
+        ctx.drawn = ctx.view_projections;
+        ctx.main_projection = scene.camera.projection_matrix(ctx.aspect);
+        stats.samples = 1;
+        return;
+    }
 
     // Temporal anti-aliasing (Scene3D::taa): every pass that draws the picture
     // uses a projection moved by this frame's sub-pixel jitter (`drawn`), while
@@ -6822,13 +6838,14 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
     }
     if (any_clusters) {
         ctx.gpu_clusters = _gpu_clusters && ctx.scene.debug.gpu_culling;
-        ctx.occlusion = ctx.gpu_clusters && ctx.scene.lod.occlusion.enabled && _occlusion_available;
+        ctx.occlusion =
+            !ctx.geometry_only && ctx.gpu_clusters && ctx.scene.lod.occlusion.enabled && _occlusion_available;
         cut_clusters(ctx, _owner->_jobs);
         if (!ctx.gpu_clusters) {
             ctx.occlusion = false;
         }
     }
-    if (ctx.scene.lod.occlusion.enabled && !ctx.occlusion && !ctx.occlusion_said) {
+    if (!ctx.geometry_only && ctx.scene.lod.occlusion.enabled && !ctx.occlusion && !ctx.occlusion_said) {
         warn_once(_occlusion_warned, "3D: occlusion culling asked for, but it needs Lod3D::enabled and gpu_culling, "
                                      "clustered meshes, and a device that can: off");
     }
@@ -8011,6 +8028,8 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
     });
     for (std::size_t i = 0; i < sorted.size(); ++i)
         _order[i] = sorted[i].ref;
+    if (ctx.geometry_only)
+        return;
     const auto composition_started = std::chrono::steady_clock::now();
     for (const u32 r : _order) {
         const auto& ref = _refs[r];
@@ -8939,6 +8958,85 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     return particles_ok;
 }
 
+bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL_GPUTextureFormat depth, bool second) {
+    GpuView3D* view = ctx.view;
+    auto& stats = ctx.stats;
+    auto* commands = ctx.commands;
+    auto* storage = ctx.storage;
+    bool complete = true;
+    const u32 draws_before = stats.ao_draws, instances_before = stats.ao_instances;
+    set_viewport(prepass, view->_size.x, view->_size.y);
+    DrawUniforms u{};
+    std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
+    SDL_GPUBuffer* cluster_index = cluster_index_buffer();
+    DrawBinder binder{prepass};
+    _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
+    if (ctx.taa) {
+        draw_velocity(ctx, prepass, 0, depth);
+    }
+    for (const u32 index : _order) {
+        const DrawRef& ref = _refs[index];
+        if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
+            continue;
+        }
+        if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
+            continue;
+        }
+        const Material3D& occluder = ref.draw->material;
+        const bool cutout = occluder.blend == Blend3D::Mask;
+        SDL_GPUGraphicsPipeline* p =
+            geometry_pipeline(depth, !occluder.double_sided, cutout, ref.skinned, ref.retained != ~0u);
+        if (!p) {
+            complete = false;
+            continue;
+        }
+        const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+        const std::array<SDL_GPUBuffer*, 2> retained_buffers{
+            ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
+            _retained_indices ? _retained_indices->handle() : nullptr};
+        binder.bind_pipeline(p,
+                             ref.retained != ~0u ? retained_buffers.data()
+                             : ref.skinned       ? skinned_buffers.data()
+                                                 : &storage,
+                             ref.retained != ~0u ? 2
+                             : ref.skinned       ? 3
+                                                 : 1);
+        if (ref.clustered && !cluster_index) {
+            continue;
+        }
+        binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+        if (ref.skinned) {
+            binder.bind_skin(ref.mesh);
+        }
+        if (cutout) {
+            bind_cutout(commands, prepass, occluder);
+        }
+        if (ref.clustered) {
+            draw_cluster_copies(ref, commands, prepass, binder, u, &stats);
+            continue;
+        }
+        for (u32 l = 0; l < ref.levels; ++l) {
+            if (ref.level_seen[l] == 0) {
+                continue;
+            }
+            u.first[0] = ref.level_first[l];
+            SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+            (void)binder.draw(ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index);
+            ++stats.ao_draws;
+            stats.ao_instances += ref.level_seen[l];
+        }
+    }
+    // The camera's turn over the pixels nothing was drawn on (the far depth), so that the resolve reprojects
+    // the sky.
+    if (ctx.taa && ctx.sky_pass && (!ctx.occlusion || second)) {
+        draw_sky(ctx, prepass, 2);
+    }
+    _phase = Phase::All;
+    stats.geometry_draws += stats.ao_draws - draws_before;
+    stats.geometry_instances += stats.ao_instances - instances_before;
+    return complete;
+}
+
 void GpuRenderer3D::prepass(FrameCtx& ctx) {
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
@@ -8990,80 +9088,42 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
         // With Lod3D::occlusion the pre-pass is two passes: the opaque meshes and the first pass's clusters, then (once
         // the depth pyramid is built from that and the second pass has tested the rest against it) the second pass's
         // clusters.
-        const auto draw_all = [&](SDL_GPURenderPass* prepass, bool second) {
-            set_viewport(prepass, view->_size.x, view->_size.y);
-            DrawUniforms u{};
-            std::memcpy(u.view_projection, ctx.drawn[0].m, sizeof(u.view_projection));
-            SDL_GPUBuffer* cluster_index = cluster_index_buffer();
-            DrawBinder binder{prepass};
-            _phase = !ctx.occlusion ? Phase::All : second ? Phase::Second : Phase::First;
-            if (ctx.taa) {
-                draw_velocity(ctx, prepass, 0, _ao_depth_format);
-            }
-            for (const u32 index : _order) {
-                const DrawRef& ref = _refs[index];
-                if (ctx.taa || ref.scene != 0 || pass_of(ref.draw->material) != Pass::Opaque || phase_skips(ref)) {
-                    continue;
-                }
-                if (ref.skinned && (!ctx.joints || !ctx.joint_offsets)) {
-                    continue;
-                }
-                const Material3D& occluder = ref.draw->material;
-                const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p =
-                    pipeline(ao_normal_format, 1, !occluder.double_sided, Pass::Prepass, cutout, nullptr, false,
-                             ref.skinned, false, false, Unlit::Off, ref.retained != ~0u);
-                if (!p) {
-                    continue;
-                }
-                const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
-                const std::array<SDL_GPUBuffer*, 2> retained_buffers{
-                    ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
-                    _retained_indices ? _retained_indices->handle() : nullptr};
-                binder.bind_pipeline(p,
-                                     ref.retained != ~0u ? retained_buffers.data()
-                                     : ref.skinned       ? skinned_buffers.data()
-                                                         : &storage,
-                                     ref.retained != ~0u ? 2
-                                     : ref.skinned       ? 3
-                                                         : 1);
-                if (ref.clustered && !cluster_index) {
-                    continue;
-                }
-                binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
-                if (ref.skinned) {
-                    binder.bind_skin(ref.mesh);
-                }
-                if (cutout) {
-                    bind_cutout(commands, prepass, occluder);
-                }
-                if (ref.clustered) {
-                    draw_cluster_copies(ref, commands, prepass, binder, u, &stats);
-                    continue;
-                }
-                for (u32 l = 0; l < ref.levels; ++l) {
-                    if (ref.level_seen[l] == 0) {
-                        continue;
-                    }
-                    u.first[0] = ref.level_first[l];
-                    SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
-                    (void)binder.draw(ref.mesh->levels[l].index_count, ref.level_seen[l],
-                                      ref.mesh->levels[l].first_index);
-                    ++stats.ao_draws;
-                    stats.ao_instances += ref.level_seen[l];
-                }
-            }
-            // The camera's turn over the pixels nothing was drawn on (the far depth), so that the resolve reprojects
-            // the sky.
-            if (ctx.taa && ctx.sky_pass && (!ctx.occlusion || second)) {
-                draw_sky(ctx, prepass, 2);
-            }
-            _phase = Phase::All;
+        const auto draw_all = [&](SDL_GPURenderPass* pass, bool second) {
+            return draw_geometry(ctx, pass, _ao_depth_format, second);
         };
-        if (SDL_GPURenderPass* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth)) {
+        const auto depth_format = _ao_depth_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT ? TextureFormat::Depth32Float
+                                                                                      : TextureFormat::Depth24Unorm;
+        const auto normal_format = ctx.taa ? TextureFormat::Rgba16Float : TextureFormat::Rg16Float;
+        auto& recipe = view->_geometry_recipe;
+        if (recipe.resources.empty() || recipe.resources[0].size != view->_size ||
+            recipe.resources[0].format != depth_format || recipe.resources[1].format != normal_format) {
+            // These are view-owned, pinned targets, not transient heap aliases.
+            // The stock velocity mode packs motion/flags alongside its normal.
+            recipe.resources = {{.name = "geometry_depth",
+                                 .kind = GraphResourceKind::RenderAttachment,
+                                 .format = depth_format,
+                                 .size = view->_size,
+                                 .exported = true,
+                                 .persistent = true},
+                                {.name = ctx.taa ? "geometry_normal_motion" : "geometry_normals",
+                                 .kind = GraphResourceKind::RenderAttachment,
+                                 .format = normal_format,
+                                 .size = view->_size,
+                                 .exported = true,
+                                 .persistent = true}};
+            recipe.passes = {{.name = "geometry", .writes = {0, 1}, .required_features = graph_feature::attachments}};
+        }
+        auto& compiler = view->_geometry_compiler;
+        const auto compilations = compiler.stats().compilations;
+        const auto& geometry_plan = compiler.compile(recipe, graph_feature::attachments);
+        stats.geometry_graph_reused = compilations == compiler.stats().compilations;
+        const auto record = [&] {
+            auto* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth);
+            if (!prepass)
+                return false;
             ctx.velocity_drawn = true;
             ctx.prepass_ran = true;
-            draw_all(prepass, /*second=*/false);
+            bool complete = draw_all(prepass, /*second=*/false);
             SDL_EndGPURenderPass(prepass);
             if (ctx.occlusion) {
                 build_depth_pyramid(ctx, view->_ao_depth);
@@ -9075,13 +9135,19 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                 keep_depth.load_op = SDL_GPU_LOADOP_LOAD;
                 keep_depth.cycle = false;
                 if (SDL_GPURenderPass* rest = SDL_BeginGPURenderPass(commands, &keep, 1, &keep_depth)) {
-                    draw_all(rest, /*second=*/true);
+                    complete = draw_all(rest, /*second=*/true) && complete;
                     SDL_EndGPURenderPass(rest);
+                } else {
+                    complete = false;
                 }
             }
             if (!ctx.taa) {
                 ctx.main_projection = scene.camera.projection_matrix(ctx.aspect);
             }
+            return complete;
+        };
+        const std::array<std::function<bool()>, 1> operations{[&] { return record(); }};
+        if (execute_resource_graph(geometry_plan, operations)) {
             // Both of them, at one size (the occlusion not at half): one blur serves both.
             const bool merge = ao.enabled && want_contact && _ao_blur_both_pipeline &&
                                view->_ao_raw.width() == view->_contact_raw.width() &&
@@ -9744,6 +9810,75 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             view->_pick_valid = true;
         }
     }
+}
+
+bool GpuRenderer3D::render_geometry(const GeometryTargets3D& targets, const Scene3D& scene, RenderDebugStats3D& stats) {
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
+    const auto* normals = dynamic_cast<const GpuTextureBackend*>(targets.normals.backend().get());
+    const auto valid = [&](const GpuTextureBackend* texture, SDL_GPUTextureFormat format,
+                           SDL_GPUTextureUsageFlags usage) {
+        return texture && texture->texture() && texture->texture().belongs_to(_device->handle()) &&
+               texture->texture().format() == format && (texture->texture().usage() & usage) == usage;
+    };
+    if (!_capabilities.geometry_pass ||
+        !valid(depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        !valid(normals, ao_normal_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        depth->size() != normals->size())
+        return false;
+    for (const auto& draw : scene.draws()) {
+        if (pass_of(draw.material) != Pass::Opaque)
+            continue;
+        const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+        if (!mesh || !mesh->device || *mesh->device != _device->handle() || (draw.skinned && !_skinning_available))
+            return false;
+        if (draw.material.blend == Blend3D::Mask && draw.material.texture) {
+            if (draw.material.texture == targets.depth || draw.material.texture == targets.normals)
+                return false; // an attachment cannot be sampled while this pass writes it
+            const auto* texture = dynamic_cast<const GpuTextureBackend*>(draw.material.texture.backend().get());
+            if (!texture || !texture->texture().belongs_to(_device->handle()))
+                return false;
+        }
+    }
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    GpuView3D scratch;
+    scratch._size = depth->size();
+    FrameCtx ctx{&scratch, scene, stats};
+    ctx.geometry_only = true;
+    _local_views.clear();
+    _particle_batches.clear();
+    setup_frame(ctx);
+    cull_and_upload(ctx);
+    order_draws(ctx);
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.storage = _instances ? _instances->handle() : nullptr;
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
+    _owner->retain(targets.depth);
+    _owner->retain(targets.normals);
+    cluster_pass_gpu(ctx, 0);
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = normals->texture().handle();
+    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    const auto depth_info = depth_target(depth->texture().handle(), SDL_GPU_STOREOP_STORE, true);
+    bool complete = false;
+    if (auto* pass = SDL_BeginGPURenderPass(ctx.commands, &colour, 1, &depth_info)) {
+        complete = draw_geometry(ctx, pass, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, false);
+        SDL_EndGPURenderPass(pass);
+        normals->bump_version();
+        depth->bump_version();
+    }
+    resume_2d();
+    stats.ao_draws = stats.ao_instances = 0;
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return complete;
 }
 
 bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDebugStats3D& stats) {

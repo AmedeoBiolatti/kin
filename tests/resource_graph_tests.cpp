@@ -72,5 +72,40 @@ int main() {
     assert(imported && imported.order.empty() && imported.lifetimes[0].first == 0 && imported.slots.empty());
     GraphResourceDesc hdr{.name = "hdr", .kind = GraphResourceKind::ColorTarget, .size = {64, 32}, .hdr = true};
     assert(graph_resource_payload(hdr) == 64 * 32 * 8);
+    // Explicit data attachments have exact payloads, separate compatible slots,
+    // capability admission and no working-colour/HDR interpretation.
+    ResourceGraphDesc geometry;
+    geometry.resources = {{.name = "depth",
+                           .kind = GraphResourceKind::RenderAttachment,
+                           .format = TextureFormat::Depth32Float,
+                           .size = {64, 32}},
+                          {.name = "normal",
+                           .kind = GraphResourceKind::RenderAttachment,
+                           .format = TextureFormat::Rg16Float,
+                           .size = {64, 32}},
+                          {.name = "motion",
+                           .kind = GraphResourceKind::RenderAttachment,
+                           .format = TextureFormat::Rgba16Float,
+                           .size = {64, 32},
+                           .exported = true}};
+    geometry.passes = {{.name = "geometry", .writes = {0, 1}}, {.name = "motion", .reads = {0, 1}, .writes = {2}}};
+    const auto typed = compiler.compile(geometry, graph_feature::attachments);
+    assert(typed && typed.slots.size() == 3 && typed.slot_payload_bytes == 64 * 32 * 16);
+    assert(typed.peak_live_payload_bytes == typed.slot_payload_bytes);
+    assert(!compiler.compile(geometry, 0));
+    auto oversized = geometry;
+    oversized.resources[2].size = {0x7fffffff, 0x7fffffff};
+    assert(texture_level_bytes(TextureFormat::Rgba16Float, oversized.resources[2].size) == ~u64{0});
+    assert(!compiler.compile(oversized, graph_feature::attachments));
+    geometry.resources[1].hdr = true;
+    assert(!compiler.compile(geometry, graph_feature::attachments));
+    geometry.resources[1].hdr = false;
+    geometry.resources[1].format = TextureFormat::Rgba8;
+    assert(!compiler.compile(geometry, graph_feature::attachments));
+    assert(texture_format_compressed(TextureFormat::Bc1RgbaUnorm));
+    assert(texture_format_compressed(TextureFormat::Astc4x4RgbaSrgb));
+    for (auto format : {TextureFormat::Rg16Float, TextureFormat::Rgba16Float, TextureFormat::Depth32Float,
+                        TextureFormat::Depth24Unorm})
+        assert(!texture_format_compressed(format));
     std::cout << "resource graph: validation, stable scheduling, cache invalidation, culling and lifetime slots\n";
 }

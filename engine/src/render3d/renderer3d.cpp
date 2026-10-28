@@ -322,6 +322,31 @@ Status3D Renderer3D::render(View3D& view, const Scene3D& scene) {
     return status3d(std::move(value), _errors);
 }
 
+Status3D Renderer3D::render_geometry(const GeometryTargets3D& targets, const Scene3D& scene) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* message) {
+        fail3d(_errors, "Renderer3D::render_geometry", message);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().geometry_pass)
+        return fail("standalone geometry passes are unavailable on this backend");
+    if (!targets.depth || !targets.normals || targets.depth.format() != TextureFormat::Depth32Float ||
+        targets.normals.format() != TextureFormat::Rg16Float || targets.depth.size() != targets.normals.size() ||
+        targets.depth.size().x <= 0 || targets.depth.size().y <= 0)
+        return fail("requires matching D32F depth and RG16F normal render attachments");
+    if (!scene.diagnostics().empty()) {
+        _errors = scene.diagnostics();
+        return status3d(false, _errors);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool drawn = _backend->render_geometry(targets, scene, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!drawn)
+        return fail("geometry inputs are incompatible with this renderer, or GPU recording failed");
+    return status3d(true, _errors);
+}
+
 bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
     _errors.clear();
     _stats = {};

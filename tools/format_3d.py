@@ -54,6 +54,7 @@ PATTERNS = (
     "examples/projectile_range/*.*pp",
     "examples/lua_range/*.*pp",
     "tools/asset_preview/*.*pp",
+    "tools/outline3d/*.*pp",
     "tools/reference/kin_reference.cpp",
 )
 

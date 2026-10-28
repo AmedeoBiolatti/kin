@@ -119,6 +119,12 @@ void check_webgl_geometry2d(Renderer2D& r) {
 }
 
 void check_webgl_instances(Renderer2D& r, Renderer3D& r3d) {
+    require(!r3d.capabilities().geometry_pass && !r.capabilities().render_attachments,
+            "WebGL must report unsupported standalone geometry attachments");
+    const auto unsupported = r3d.render_geometry({}, {});
+    require(!unsupported && !unsupported.diagnostics.empty(), "Unsupported geometry must return diagnostics");
+    require(!r.create_render_attachment({64, 64}, TextureFormat::Depth32Float),
+            "Unsupported depth attachment allocation must fail explicitly");
     auto view = r3d.create_view({64, 64}, {.samples = 1, .background = colors::black}).value_or({});
     const auto target = r.create_render_target({64, 64}, ScaleMode::Nearest);
     const auto mesh = r3d.create_mesh(quad()).value_or({});

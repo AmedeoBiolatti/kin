@@ -128,6 +128,13 @@ public:
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     Status3D render(View3D& view, const Scene3D& scene);
+    // Clears and writes caller-owned depth/normals, without a stock view or any
+    // lighting, shadows, particles, postprocessing or temporal history. Opaque
+    // and masked world meshes use stock culling, skinning, retained batches and
+    // LOD selection. Blended/wireframe meshes and overlays are excluded. No
+    // occlusion history or jitter. Suitable as a graph callback; targets may be
+    // GraphResourceKind::RenderAttachment resources. Unsupported backends fail.
+    Status3D render_geometry(const GeometryTargets3D& targets, const Scene3D& scene);
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
     // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a

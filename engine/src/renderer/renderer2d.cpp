@@ -1368,6 +1368,18 @@ Renderer2D::ClipGuard Renderer2D::scoped_mask(const Texture& mask, Rectf dest, M
     return ClipGuard{this};
 }
 
+Texture Renderer2D::create_render_attachment(Vec2i size, TextureFormat format) {
+    if (size.x <= 0 || size.y <= 0)
+        return {};
+    try {
+        return _backend->create_render_attachment(size, format);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "create_render_attachment failed",
+                        (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+}
+
 RenderTarget Renderer2D::create_render_target(Vec2i size, ScaleMode mode) {
     return _backend->create_render_target(size, mode);
 }

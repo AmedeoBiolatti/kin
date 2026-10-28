@@ -76,8 +76,9 @@ void GpuTexturePool::release_locked(std::size_t index) {
     _entries.erase(_entries.begin() + static_cast<std::ptrdiff_t>(index));
 }
 
-GpuTexture::GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format)
-    : _device(std::move(device)), _texture(texture), _width(width), _height(height), _format(format) {}
+GpuTexture::GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
+                       SDL_GPUTextureUsageFlags usage)
+    : _device(std::move(device)), _usage(usage), _texture(texture), _width(width), _height(height), _format(format) {}
 
 GpuTexture::GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
                        std::shared_ptr<GpuTexturePool> pool, u64 bytes, SDL_GPUTextureUsageFlags usage, u32 levels)

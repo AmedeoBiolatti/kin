@@ -10,7 +10,7 @@ namespace kin {
 using GraphResource = u32;
 inline constexpr u32 graph_no_slot = ~u32{0};
 // Tokens describe backend-owned operations with no graph-managed allocation.
-enum class GraphResourceKind : u8 { Token, ColorTarget, StorageTexture, Buffer };
+enum class GraphResourceKind : u8 { Token, ColorTarget, StorageTexture, Buffer, RenderAttachment };
 struct GraphResourceDesc {
     std::string name;
     GraphResourceKind kind = GraphResourceKind::Token;
@@ -23,7 +23,8 @@ struct GraphResourceDesc {
 };
 namespace graph_feature {
 inline constexpr u64 raster = 1, compute = 2, buffers = 4, rendering3d = 8, shaders = 16;
-}
+inline constexpr u64 attachments = 32; // explicit linear float/depth render attachments
+} // namespace graph_feature
 struct GraphPassDesc {
     std::string name;
     std::vector<GraphResource> reads, writes;

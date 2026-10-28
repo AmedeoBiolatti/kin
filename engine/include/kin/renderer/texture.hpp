@@ -16,7 +16,7 @@ class GpuRenderer3D;
 // they are never filtered, and draw_texture refuses them. In GLSL, R16Uint and
 // Rg16Uint are `usampler2D`, R32Float a `sampler2D`.
 //
-// The rest are block-compressed: each block of 4 x 4 texels is 8 or 16 bytes,
+// The BC/ASTC formats are block-compressed: each block of 4 x 4 texels is 8 or 16 bytes,
 // decoded by the GPU as it samples, so a texture takes a quarter to an eighth of
 // the memory RGBA8 does. They come already compressed, with their own mip chain,
 // from KTX2 or DDS files (kin/assets/texture_file.hpp, made with
@@ -40,17 +40,25 @@ enum class TextureFormat : u8 {
     Bc7RgbaSrgb,
     Astc4x4RgbaUnorm, // 16 bytes a block: phones' and tablets' format (few desktop GPUs sample it)
     Astc4x4RgbaSrgb,
+    // Linear data attachments, independent of the renderer's colour space.
+    Rg16Float,    // two half floats (4 bytes)
+    Rgba16Float,  // four half floats (8 bytes)
+    Depth32Float, // sampled reverse-Z depth (4 bytes)
+    Depth24Unorm, // backend fallback depth, stored in 4 bytes
 };
 
 // True for the block-compressed formats.
 constexpr bool texture_format_compressed(TextureFormat format) {
-    return format >= TextureFormat::Bc1RgbaUnorm;
+    return format >= TextureFormat::Bc1RgbaUnorm && format <= TextureFormat::Astc4x4RgbaSrgb;
 }
 
 // Bytes of one texel: 0 for the block-compressed formats, which have no bytes of
 // their own (see texture_format_block_size).
 constexpr u32 texture_format_bytes(TextureFormat format) {
-    return format == TextureFormat::R16Uint ? 2u : texture_format_compressed(format) ? 0u : 4u;
+    return format == TextureFormat::R16Uint       ? 2u
+           : format == TextureFormat::Rgba16Float ? 8u
+           : texture_format_compressed(format)    ? 0u
+                                                  : 4u;
 }
 
 // A format's unit of storage: `width` x `height` texels in `bytes`. 1 x 1 and
@@ -78,14 +86,16 @@ constexpr TextureBlock texture_format_block_size(TextureFormat format) {
 }
 
 // The bytes of a level of `size` texels in `format`: whole blocks, those at the
-// right and bottom edges partly outside it. 0 for an empty size.
+// right and bottom edges partly outside it. 0 for an empty size; saturates at
+// the u64 maximum when the descriptor payload cannot be represented.
 constexpr u64 texture_level_bytes(TextureFormat format, Vec2i size) {
     if (size.x <= 0 || size.y <= 0) {
         return 0;
     }
     const TextureBlock block = texture_format_block_size(format);
-    return static_cast<u64>((static_cast<u32>(size.x) + block.width - 1) / block.width) *
-           ((static_cast<u32>(size.y) + block.height - 1) / block.height) * block.bytes;
+    const u64 blocks = static_cast<u64>((static_cast<u32>(size.x) + block.width - 1) / block.width) *
+                       ((static_cast<u32>(size.y) + block.height - 1) / block.height);
+    return blocks > ~u64{0} / block.bytes ? ~u64{0} : blocks * block.bytes;
 }
 
 // True for the compressed formats that hold sRGB colour (decoded to linear light
