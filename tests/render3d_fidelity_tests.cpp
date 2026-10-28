@@ -62,6 +62,33 @@ std::vector<u8> shoot(Renderer2D& renderer, Renderer3D& r3d, View3D& view, const
     renderer.present();
     return pixels;
 }
+void stock_graph_parity(Renderer2D& renderer) {
+    Renderer3D r3d{renderer};
+    auto compiled = r3d.create_view({160, 120}, {.samples = 1, .hdr = true, .pick = true}).value_or({});
+    auto reference = r3d.create_view({160, 120}, {.samples = 1, .hdr = true, .pick = true}).value_or({});
+    const auto mesh = r3d.create_mesh(meshes::box({2, 2, 2})).value_or({});
+    assert(compiled && reference && mesh);
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({3, 2, 5}, {});
+    scene.lights.shadow_area = {{-4, -4, -4}, {4, 4, 4}};
+    scene.lights.shadow_resolution = 128;
+    scene.ambient_occlusion.enabled = true;
+    scene.contact_shadows.enabled = true;
+    scene.taa.enabled = true;
+    assert(scene.draw(mesh, {}, {.color = Color::rgb(170, 90, 40)}, colors::white, 42));
+    std::vector<u8> a, b;
+    for (int frame = 0; frame < 16; ++frame) {
+        scene.debug.graph_reference = false;
+        a = shoot(renderer, r3d, compiled, scene);
+        assert(r3d.debug_stats().graph_passes == 13 && (frame == 0 || r3d.debug_stats().graph_reused));
+        scene.debug.graph_reference = true;
+        b = shoot(renderer, r3d, reference, scene);
+    }
+    assert(a == b);
+    const auto hit_a = r3d.pick(compiled, {80, 60}), hit_b = r3d.pick(reference, {80, 60});
+    assert(hit_a && hit_b && hit_a->hit && hit_b->hit && hit_a->id == hit_b->id);
+    std::cout << "stock graph: exact fixed-order parity with HDR, TAA, AO, contact/sun shadows and picking\n";
+}
 void check_gpu(Renderer2D& renderer) {
     Renderer3D r3d{renderer};
     auto made = r3d.create_view({160, 120}, {.samples = 1, .background = colors::black});
@@ -374,6 +401,7 @@ int main() {
         Renderer2D renderer{std::move(backend)};
         ready = true;
         check_gpu(renderer);
+        stock_graph_parity(renderer);
         return 0;
     } catch (const std::exception& e) {
         const bool fail = ready || (require && require[0] && require[0] != '0');

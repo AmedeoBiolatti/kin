@@ -1,8 +1,8 @@
-#include "gpu_memory.hpp"
 #include "gpu_renderer3d.hpp"
 
 #include "embedded_gpu_shader.hpp"
 #include "gpu_device.hpp"
+#include "gpu_memory.hpp"
 #include "gpu_renderer2d_backend.hpp"
 #include "gpu_shadow_cull.hpp"
 #include "gpu_shadow_reach.hpp"
@@ -9793,68 +9793,117 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
                 SDL_PopGPUDebugGroup(commands);
         }
     };
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.clusters"};
-        cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
-    }
-    {
-        // Before the GI: its light reads the GI's sun map, drawn with the local lights' maps.
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.local_shadows"};
-        local_shadow_pass(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.gi_scene"};
-        ctx.gi = gi_scene(ctx.commands, *view, scene, stats);
-    }
-    if (ctx.gi) {
-        // The probes' light is read by the light variants of the stock shaders: where it is on, they draw.
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.gi_probes"};
-        const Mat4f to_environment = Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -scene.lights.environment_rotation);
-        ctx.gi_lit = _lights_available && gi_probes(ctx.commands, *view, scene, ctx.environment, to_environment, stats);
-        ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.sun_shadow"};
-        shadow_pass(ctx);
-    }
-    stats.lights_variant = ctx.lights_variant;
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.prepass"};
-        prepass(ctx);
-    }
-    stats.taa_main_velocity = ctx.main_velocity;
-    if (ctx.occlusion && !ctx.occlusion_second) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.occluders"};
-        occluder_pass(ctx); // no pre-pass made the depth: a pass of its own
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.overlay_velocity"};
-        overlay_velocity(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.main"};
-        if (!main_pass(ctx))
+    // Coarse stock operations use the public compiler. Tokens cover backend-owned
+    // resources; their existing allocation/history ownership stays explicit. Inner
+    // prepass/main subpasses remain atomic operations in this first migration.
+    static const ResourceGraphDesc recipe = [] {
+        ResourceGraphDesc graph;
+        for (const auto* name :
+             {"geometry", "clusters", "local_shadows", "gi_attributes", "gi_probes", "sun_shadow", "prepass",
+              "occlusion", "overlay_velocity", "colour", "fog_colour", "resolved", "pick", "output"})
+            graph.resources.push_back({.name = name});
+        graph.resources[0].imported = true;
+        graph.resources[13].exported = true;
+        graph.passes = {{.name = "clusters", .reads = {0}, .writes = {1}},
+                        {.name = "local_shadows", .reads = {0, 1}, .writes = {2}},
+                        {.name = "gi_scene", .reads = {0, 2}, .writes = {3}},
+                        {.name = "gi_probes", .reads = {3}, .writes = {4}},
+                        {.name = "sun_shadow", .reads = {0, 1}, .writes = {5}},
+                        {.name = "prepass", .reads = {1, 4, 5}, .writes = {6}},
+                        {.name = "occluders", .reads = {6}, .writes = {7}},
+                        {.name = "overlay_velocity", .reads = {6, 7}, .writes = {8}},
+                        {.name = "main", .reads = {1, 2, 4, 5, 6, 7, 8}, .writes = {9}},
+                        {.name = "fog_sun", .reads = {9, 5}, .writes = {10}},
+                        {.name = "temporal_resolve", .reads = {10, 8}, .writes = {11}},
+                        {.name = "picking", .reads = {0, 1}, .writes = {12}, .after = {"temporal_resolve"}},
+                        {.name = "output", .reads = {11, 12}, .writes = {13}}};
+        return graph;
+    }();
+    auto& compiler = view->_graph_compiler;
+    const auto before = compiler.stats().compilations;
+    const auto& plan = compiler.compile(recipe, ~u64{0});
+    if (!plan)
+        return false;
+    stats.graph_reused = compiler.stats().compilations == before;
+    stats.graph_compile_ms = stats.graph_reused ? 0 : compiler.stats().last_compile_ms;
+    stats.graph_passes = static_cast<u32>(plan.order.size());
+    stats.graph_culled_passes = plan.culled_passes;
+    const std::array<std::function<bool()>, 13> operations{
+        {[&] {
+             cluster_pass_gpu(ctx, ctx.occlusion ? 1 : 0);
+             return true;
+         },
+         [&] {
+             local_shadow_pass(ctx);
+             return true;
+         },
+         [&] {
+             ctx.gi = gi_scene(ctx.commands, *view, scene, stats);
+             return true;
+         },
+         [&] {
+             if (ctx.gi) {
+                 const Mat4f to_environment =
+                     Mat4f::rotation_y(ctx.sky_env_used ? 0.0f : -scene.lights.environment_rotation);
+                 ctx.gi_lit =
+                     _lights_available && gi_probes(ctx.commands, *view, scene, ctx.environment, to_environment, stats);
+                 ctx.lights_variant = ctx.lights_variant || ctx.gi_lit;
+             }
+             return true;
+         },
+         [&] {
+             shadow_pass(ctx);
+             stats.lights_variant = ctx.lights_variant;
+             return true;
+         },
+         [&] {
+             prepass(ctx);
+             stats.taa_main_velocity = ctx.main_velocity;
+             return true;
+         },
+         [&] {
+             if (ctx.occlusion && !ctx.occlusion_second)
+                 occluder_pass(ctx);
+             return true;
+         },
+         [&] {
+             overlay_velocity(ctx);
+             return true;
+         },
+         [&] { return main_pass(ctx); },
+         [&] {
+             if (ctx.fog_sun)
+                 fog_sun_apply(ctx);
+             return true;
+         },
+         [&] {
+             resolve_history(ctx);
+             return true;
+         },
+         [&] {
+             pick_pass(ctx);
+             return true;
+         },
+         [&] {
+             if (ctx.taa)
+                 finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass);
+             else if (view->_hdr)
+                 finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass);
+             return true;
+         }}};
+    static constexpr std::array<const char*, 13> markers{
+        {"kin3d.clusters", "kin3d.local_shadows", "kin3d.gi_scene", "kin3d.gi_probes", "kin3d.sun_shadow",
+         "kin3d.prepass", "kin3d.occluders", "kin3d.overlay_velocity", "kin3d.main", "kin3d.fog_sun",
+         "kin3d.temporal_resolve", "kin3d.picking", "kin3d.output"}};
+    const auto record_start = std::chrono::steady_clock::now();
+    for (u32 i = 0; i < plan.order.size(); ++i) {
+        const u32 pass = scene.debug.graph_reference ? i : plan.order[i];
+        const PassMarker marker{ctx.commands, _gpu_markers, markers[pass]};
+        if (!operations[pass]())
             return false;
     }
-    if (ctx.fog_sun) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.fog_sun"};
-        fog_sun_apply(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.temporal_resolve"};
-        resolve_history(ctx);
-    }
-    {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.picking"};
-        pick_pass(ctx);
-    }
-    if (ctx.taa) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.output"};
-        finish_view(ctx.commands, *view, *ctx.shown, /*plain=*/!view->_hdr, ctx.sky_pass);
-    } else if (view->_hdr) {
-        const PassMarker marker{ctx.commands, _gpu_markers, "kin3d.output"};
-        finish_view(ctx.commands, *view, view->_scene, /*plain=*/false, ctx.sky_pass);
-    }
+    stats.graph_record_ms =
+        std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - record_start).count();
     age_targets(ctx);
     stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines_before);
     resume_2d();

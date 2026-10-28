@@ -46,4 +46,16 @@ The backend-independent `ResourceGraphCompiler` validates single writers, initia
 
 The existing 2D `RenderGraph` also uses compiled scheduling and diagnoses cycles/missing dependencies before callbacks. CPU graph and existing rendering tests pass.
 
-The ASCII executable uses explicit Release runtime checks, stack operation/import tables and cached binding storage. Tests cover HDR working-format validation and real slot reuse, in addition to image parity and allocation stability. Graph-managed payload budgets reject oversized plans before allocation.
+## Stage 4: stock operations and quality calibration
+
+The native stock renderer now schedules 13 coarse operations through the same public compiler, with cached plans per view and CPU compilation/recording counters. Their backend-owned resources are represented by dependency tokens; internal pre-pass, main-pass, GI/history allocation and synchronization remain within those operations. Fine-grained resource migration and stock transient aliasing remain later work. `debug.graph_reference` executes the original fixed order for comparison. A two-view HDR/TAA/AO/contact-shadow/sun-shadow/picking regression matches the fixed order exactly. The complete native renderer suite passes.
+
+The reference tool accepts explicit filtering, mip-bias and specular-AA candidates and records effective settings, graph counters and memory payload. `quality_matrix.py` records source, binary and content identities, alternates candidate order, preserves logs and optionally compares with Cycles. Candidate version 1 is not an engine preset. Ground truth now supports independent seeds and defaults to no denoising, adaptive sampling or sample clamping. Moving-camera calibration and the active lighting work's final GI snapshot are still required before selecting new defaults.
+
+Imported `KHR_materials_unlit` now ignores PBR emission fallback data. Native unlit emission retains legacy glow and supports independent RGB; both generic and specialized paths are checked. In-place emissive texture updates invalidate GI attributes without changing the texture handle.
+
+The static incremental path also covers model parts, including multiple parts in a shared material bucket and shared prefab renderers. Bindings retain part indices rather than duplicate part matrices. Asset/model/material/particle-texture resolvers publish changed runtime bindings, so native reload helpers invalidate extraction and validation caches. Regression coverage includes these resolver changes.
+
+ASCII checks use explicit runtime validation in Release builds, including optimized/reference equality, actual target handle reuse and HDR working-format transitions. The example uses stack operation/import tables and cached binding storage to avoid steady preparation allocations.
+
+The graph and memory examples pass with Release checks enabled on hardware/software Vulkan. WebGL2 has also been rebuilt and its smoke fixture passes after graph integration. Quality results and calibration limits are recorded in [rendering measurements](rendering_measurements.md).

@@ -20,6 +20,7 @@ struct RenderDebugOptions3D {
     bool gpu_culling = true;       // false: compare with the CPU cluster cut
     bool stats_readback = false;   // waits for GPU cluster counters: profiling only
     bool gpu_pass_markers = false; // labels for external GPU profilers, no readback
+    bool graph_reference = false;  // execute stock phases in fixed reference order for graph parity checks
     bool freeze_jitter = false;    // hold the first TAA jitter sample
     bool light_grid = true;        // false: every fragment loops over the 16 strongest point and spot lights, as
                                    // before the light grid (to compare with it)

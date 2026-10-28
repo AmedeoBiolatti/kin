@@ -13,6 +13,9 @@ namespace kin {
 // Implementation counters can change as the renderer changes. Reading this
 // snapshot never triggers a GPU readback.
 struct RenderDebugStats3D : RenderStats3D {
+    bool graph_reused = false;
+    u32 graph_passes = 0, graph_culled_passes = 0;
+    f64 graph_compile_ms = 0, graph_record_ms = 0; // CPU, never GPU timestamps
     // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
     u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;
     u64 shared_mesh_range_reuses = 0;

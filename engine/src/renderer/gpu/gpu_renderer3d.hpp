@@ -14,6 +14,7 @@
 #include <kin/render3d/local_lights3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/render3d/skeleton3d.hpp>
+#include <kin/renderer/resource_graph.hpp>
 #include <memory>
 #include <span>
 #include <unordered_map>
@@ -172,6 +173,7 @@ public:
 
 private:
     friend class GpuRenderer3D;
+    ResourceGraphCompiler _graph_compiler;
     Vec2i _size{};
     u32 _samples = 1; // as made: what the device has for the format
     ViewOptions3D _options{};

@@ -2118,3 +2118,16 @@ First public release.
 [0.2.1]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AmedeoBiolatti/kin/releases/tag/v0.1.0
+
+### Rendering foundations
+
+- Add an explicit tracked-mutation mode with dirty hierarchy updates, retained static mesh/model extraction, particle
+  validation revisions and CPU work counters. Keep raw mutable access compatible by default, and publish native
+  physics/root-motion and asset binding changes. Protect deferred observer callbacks during state destruction.
+- Account for Kin-owned SDL_GPU texture, buffer and transfer payload, idle texture pools, peaks and allocation events.
+  Guard buffers that outlive their device, as textures already do.
+- Compile public resource graphs with validation, cached schedules, lifetime slots, payload admission limits and
+  transactional resource binding. Add a GPU ASCII example with Release runtime checks and HDR support.
+- Schedule the native stock renderer's coarse phases with the same compiler and expose fixed-order parity checks.
+  Add reproducible quality-candidate captures, requested/effective settings and independently seeded Cycles references.
+  Quality candidates do not change engine defaults.

@@ -1887,8 +1887,10 @@ struct Overrides {
     bool contact = false;
     double contact_distance = 0.0, contact_thickness = 0.0;
     int contact_steps = 0;
+    std::optional<float> anisotropy, texture_lod_bias, specular_aa;
+    bool graph_reference = false;
     bool taa = false;
-    double taa_blend = 0.0, taa_sharpness = 0.0;
+    double taa_blend = 0.0, taa_sharpness = -1.0;
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -1997,7 +1999,7 @@ void merge_taa(kin::TemporalAA3D& taa, const kin::JsonValue* doc, const Override
         if (over.taa_blend > 0.0) {
             taa.blend = static_cast<float>(over.taa_blend);
         }
-        if (over.taa_sharpness > 0.0) {
+        if (over.taa_sharpness >= 0.0) {
             taa.sharpness = static_cast<float>(over.taa_sharpness);
         }
     }
@@ -2561,6 +2563,25 @@ int main(int argc, char** argv) {
             over.fog_fixed = true;
         } else if (a == "--time") {
             over.time_hours = std::atof(next().c_str());
+        } else if (a == "--anisotropy" || a == "--texture-lod-bias" || a == "--specular-aa") {
+            const auto text = next();
+            char* end = nullptr;
+            const float value = std::strtof(text.c_str(), &end);
+            const float low = a == "--anisotropy" ? 1.0f : a == "--texture-lod-bias" ? -4.0f : 0.0f;
+            const float high = a == "--anisotropy" ? 16.0f : a == "--texture-lod-bias" ? 4.0f : 1.0f;
+            if (text.empty() || *end || !std::isfinite(value) || value < low || value > high ||
+                (a == "--anisotropy" && std::floor(value) != value)) {
+                std::fprintf(stderr, "invalid value for %s\n", a.c_str());
+                return 2;
+            }
+            if (a == "--anisotropy")
+                over.anisotropy = value;
+            else if (a == "--texture-lod-bias")
+                over.texture_lod_bias = value;
+            else
+                over.specular_aa = value;
+        } else if (a == "--graph-reference") {
+            over.graph_reference = true;
         } else if (a == "--taa") {
             over.taa = true;
         } else if (a == "--taa-blend") {
@@ -3091,6 +3112,13 @@ int main(int argc, char** argv) {
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;
+            scene.debug.graph_reference = over.graph_reference;
+            scene.anisotropy =
+                over.anisotropy.value_or(static_cast<float>(doc.number_at("anisotropy", scene.anisotropy)));
+            scene.texture_lod_bias = over.texture_lod_bias.value_or(
+                static_cast<float>(doc.number_at("texture_lod_bias", scene.texture_lod_bias)));
+            scene.specular_aa =
+                over.specular_aa.value_or(static_cast<float>(doc.number_at("specular_aa", scene.specular_aa)));
             scene.global_illumination = {};
             if (over.gi) {
                 const kin::Vec3f extent = bounds.size(), pad = extent * 0.05f + kin::Vec3f{0.05f, 0.05f, 0.05f};
@@ -3735,6 +3763,36 @@ int main(int argc, char** argv) {
                    << ", \"ao_dispatches\": " << stats.ao_dispatches
                    << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
+            const auto memory = renderer.backend_stats().gpu_memory;
+            const auto capabilities = r3d.capabilities();
+            const auto effective_anisotropy = std::clamp(scene.anisotropy, 1u, capabilities.max_anisotropy);
+            const float effective_bias = capabilities.texture_lod_bias
+                                             ? std::round(std::clamp(scene.texture_lod_bias, -2.0f, 2.0f) * 16) / 16
+                                             : 0;
+            const bool taa_active = stats.taa_dispatches > 0;
+
+            report << ", \"quality\": {\"anisotropy\": " << scene.anisotropy
+                   << ", \"texture_lod_bias\": " << scene.texture_lod_bias << ", \"specular_aa\": " << scene.specular_aa
+                   << ", \"taa\": " << (scene.taa.enabled ? "true" : "false")
+                   << ", \"taa_sharpness\": " << scene.taa.sharpness
+                   << ", \"effective\": {\"eligible_map_anisotropy\": " << effective_anisotropy
+                   << ", \"texture_lod_bias\": " << effective_bias
+                   << ", \"specular_aa\": " << std::clamp(scene.specular_aa, 0.0f, 1.0f)
+                   << ", \"taa\": " << (taa_active ? "true" : "false")
+                   << ", \"main_samples\": " << (taa_active ? 1u : view.samples()) << ", \"fallback\": "
+                   << quoted(scene.taa.enabled && !taa_active ? "TAA did not execute; inspect backend diagnostics"
+                             : effective_anisotropy != scene.anisotropy ? "anisotropy limited by device"
+                             : effective_bias != scene.texture_lod_bias ? "mip bias limited or quantized by backend"
+                                                                        : "")
+                   << "}}"
+                   << ", \"graph\": {\"passes\": " << stats.graph_passes
+                   << ", \"reused\": " << (stats.graph_reused ? "true" : "false")
+                   << ", \"record_cpu_ms\": " << stats.graph_record_ms << "}"
+                   << ", \"memory\": {\"logical_payload_bytes\": " << memory.payload_bytes()
+                   << ", \"pooled_texture_bytes\": " << memory.pooled_texture_bytes
+                   << ", \"transfer_bytes\": " << memory.transfer_bytes
+                   << ", \"peak_payload_bytes\": " << memory.peak_payload_bytes
+                   << ", \"allocations\": " << memory.allocations << "}";
             if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
                 report << ", \"spots\": " << stats.spots << ", \"local_shadow_maps\": " << stats.local_shadow_maps
                        << ", \"local_shadow_drawn\": " << stats.local_shadow_drawn
