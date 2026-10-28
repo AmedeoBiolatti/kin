@@ -6423,6 +6423,7 @@ void test_compose_svg_icons() {
     const std::string_view svg =
         R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect x="0" y="0" width="8" height="16" fill="#000"/></svg>)";
 
+#if KIN_ENABLE_IMAGE_IO
     const Image image = rasterize_svg(svg, {32, 32});
     assert(image.valid() && image.size == Vec2i(32, 32));
     const auto alpha = [&](i32 x, i32 y) { return image.rgba[static_cast<std::size_t>((y * 32 + x) * 4 + 3)]; };
@@ -6451,6 +6452,15 @@ void test_compose_svg_icons() {
     ui.begin(input, renderer);
     assert(ui.svg_sprite(svg, {16, 16}).texture.size() == Vec2i(24, 24));
     ui.end();
+#else
+    // A build that cannot rasterize SVG draws its icons as nothing.
+    ui.begin(input, renderer);
+    ui.begin_layout({0, 0, 100, 100});
+    assert(!ui.svg_sprite(svg, {16, 16}, {.oversample = 2.0f}).valid());
+    ui.svg(svg, {16, 16}, Color::rgb(200, 100, 0), {.mask = true});
+    ui.end_layout();
+    ui.end();
+#endif
 }
 
 void test_ids_from_text_and_paths() {

@@ -287,7 +287,9 @@ document, size and options, and kept as long as the Context. With `.mask` only
 its shape counts, in the tint: one-colour glyphs. `.oversample` is texels per
 layout unit; left 0, it is the renderer's content scale, so icons are as sharp
 as the text on a display with more pixels than the layout has units.
-`rasterize_svg()` (`kin/assets/image.hpp`) draws one into an `Image`.
+`rasterize_svg()` (`kin/assets/image.hpp`) draws one into an `Image`. A build
+without image files (`KIN_ENABLE_IMAGE_IO` off) cannot rasterize SVG: its icons,
+the composed menus' checks and chevrons too, are drawn as nothing.
 
 ### A window's own title bar
 

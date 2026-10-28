@@ -1,3 +1,9 @@
+# next_code's look is in its fonts: a build without font files
+# (KIN_ENABLE_TTF off) leaves it out.
+if(NOT KIN_ENABLE_TTF)
+    return()
+endif()
+
 add_executable(nextcode_look
     src/main.cpp
 )

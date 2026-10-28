@@ -99,7 +99,11 @@ const Sprite& Context::svg_sprite(std::string_view svg, Vec2f size, SvgOptions o
     if (found != _svg_sprites.end()) {
         return found->second;
     }
+#if KIN_ENABLE_IMAGE_IO
     kin::Image image = rasterize_svg(svg, pixels); // not ui2::Image, the widget
+#else
+    kin::Image image; // a build without SVG rasterizing draws icons as nothing, as unreadable ones
+#endif
     Sprite& sprite = _svg_sprites[key]; // an unreadable one is remembered too, empty
     if (image.valid()) {
         if (options.mask) {

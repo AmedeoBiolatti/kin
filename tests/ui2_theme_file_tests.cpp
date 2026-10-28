@@ -157,7 +157,9 @@ void test_image_skins_and_fonts() {
     const fs::path dir = fs::temp_directory_path() / "kin_theme_art_test";
     fs::remove_all(dir);
     fs::create_directories(dir / "ui");
+#if KIN_ENABLE_IMAGE_IO
     assert(kin::ColorLut::neutral(4).save_png(dir / "ui" / "button.png")); // any image: a 16 x 4 one
+#endif
     kin::ui2::ThemeFile file;
     std::vector<std::string> errors;
     assert(kin::ui2::parse_theme_file("[theme]\nfont = fonts/missing.ttf\nfont_size = 18\n"
@@ -178,8 +180,13 @@ void test_image_skins_and_fonts() {
                                           built, errors));
         std::vector<std::string> problems;
         built.build(renderer, dir, problems);
+#if KIN_ENABLE_IMAGE_IO
         assert(built.theme.button.surface.normal.use_skin); // the image
         assert(problems.size() == 2);                         // the font, and the image that is not there
+#else
+        assert(!built.theme.button.surface.normal.use_skin); // a build without image files reads none
+        assert(problems.size() == 3);                          // the font, and both images
+#endif
     }
     const std::vector<std::string_view> slots = kin::ui2::theme_skin_slot_names();
     assert(std::ranges::find(slots, std::string_view("button_hovered")) != slots.end());
