@@ -71,6 +71,21 @@ private:
     std::shared_ptr<IViewBackend3D> _backend;
 };
 
+// Frame-scoped preparation, borrowing its scene. Edits to mesh commands, batch
+// records or poses, moving/destroying the source, and submission/readback/present
+// invalidate it. Camera, light and quality settings remain operation-specific.
+class PreparedScene3D {
+public:
+    PreparedScene3D() = default;
+    explicit PreparedScene3D(std::shared_ptr<IPreparedSceneBackend3D> backend) : _backend(std::move(backend)) {}
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    IPreparedSceneBackend3D* backend() const { return _backend.get(); }
+
+private:
+    std::shared_ptr<IPreparedSceneBackend3D> _backend;
+};
+
 class Renderer3D {
 public:
     // Draws through `renderer`, which must outlive it.
@@ -135,6 +150,12 @@ public:
     // occlusion history or jitter. Suitable as a graph callback; targets may be
     // GraphResourceKind::RenderAttachment resources. Unsupported backends fail.
     Status3D render_geometry(const GeometryTargets3D& targets, const Scene3D& scene);
+    // Builds world bounds and packed instance data once for multiple passes in
+    // this GPU frame. Culling and LOD remain per camera/shadow view. No GPU wait,
+    // history advance or implicit retention after the handle is released.
+    Result3D<PreparedScene3D> prepare(const Scene3D& scene, const PrepareOptions3D& options = {});
+    Status3D render_prepared(View3D& view, const PreparedScene3D& prepared);
+    Status3D render_geometry_prepared(const GeometryTargets3D& targets, const PreparedScene3D& prepared);
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
     // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a

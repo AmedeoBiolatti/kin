@@ -13,6 +13,12 @@ namespace kin {
 // Implementation counters can change as the renderer changes. Reading this
 // snapshot never triggers a GPU readback.
 struct RenderDebugStats3D : RenderStats3D {
+    // Explicit shared preparation: build counts belong to prepare(); reused
+    // records and upload savings belong to a consuming operation.
+    u64 preparation_records = 0, preparation_skin_bounds = 0, preparation_cpu_bytes = 0;
+    u64 shared_records = 0, shared_instance_bytes = 0, shared_joint_bytes = 0;
+    u64 joint_upload_bytes = 0, preparation_scratch_bytes = 0;
+    u32 shared_uploads = 0, shared_joint_uploads = 0;
     bool graph_reused = false;
     u32 graph_passes = 0, graph_culled_passes = 0;
     f64 graph_compile_ms = 0, graph_record_ms = 0;  // CPU, never GPU timestamps

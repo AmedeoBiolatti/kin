@@ -347,6 +347,58 @@ Status3D Renderer3D::render_geometry(const GeometryTargets3D& targets, const Sce
     return status3d(true, _errors);
 }
 
+Result3D<PreparedScene3D> Renderer3D::prepare(const Scene3D& scene, const PrepareOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().shared_preparation) {
+        fail3d(_errors, "Renderer3D::prepare", "shared preparation is unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!scene.diagnostics().empty()) {
+        _errors = scene.diagnostics();
+        return {std::nullopt, _errors};
+    }
+    if (const auto* overlay = scene.overlay_if_any(); overlay && !overlay->diagnostics().empty()) {
+        _errors = overlay->diagnostics();
+        return {std::nullopt, _errors};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto prepared = _backend->prepare(scene, options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!prepared) {
+        fail3d(_errors, "Renderer3D::prepare", "incompatible scene inputs or preparation CPU budget exceeded");
+        return {std::nullopt, _errors};
+    }
+    return result3d(PreparedScene3D{std::move(prepared)});
+}
+Status3D Renderer3D::render_prepared(View3D& view, const PreparedScene3D& prepared) {
+    _errors.clear();
+    _stats = {};
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend && view && prepared.backend() &&
+                    _backend->render_prepared(*view.backend(), *prepared.backend(), _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        fail3d(_errors, "Renderer3D::render",
+               "invalid, edited, expired or foreign prepared submission, or GPU recording failed");
+    return status3d(ok, _errors);
+}
+Status3D Renderer3D::render_geometry_prepared(const GeometryTargets3D& targets, const PreparedScene3D& prepared) {
+    _errors.clear();
+    _stats = {};
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = _backend && prepared.backend() && targets.depth && targets.normals &&
+                    targets.depth.format() == TextureFormat::Depth32Float &&
+                    targets.normals.format() == TextureFormat::Rg16Float &&
+                    targets.depth.size() == targets.normals.size() &&
+                    _backend->render_geometry_prepared(targets, *prepared.backend(), _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        fail3d(_errors, "Renderer3D::render_geometry",
+               "invalid, edited, expired or foreign prepared submission/targets, or GPU recording failed");
+    return status3d(ok, _errors);
+}
+
 bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
     _errors.clear();
     _stats = {};

@@ -333,7 +333,8 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
         SOURCES shaders/geometry_probe.frag.glsl)
     kin_embed_files(kin_render3d_geometry_tests NAME geometry_probe FILES ${_geometry_spv})
     add_test(NAME kin-render3d-geometry-foreign COMMAND kin_render3d_geometry_tests --foreign-device)
-    set_tests_properties(kin-render3d-geometry kin-render3d-geometry-foreign
+    add_test(NAME kin-render3d-preparation-lifetime COMMAND kin_render3d_geometry_tests --lifetime)
+    set_tests_properties(kin-render3d-geometry kin-render3d-geometry-foreign kin-render3d-preparation-lifetime
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_bounds_tests kin-render3d-bounds SOURCES render3d_bounds_tests.cpp)
     set_tests_properties(kin-render3d-bounds PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)

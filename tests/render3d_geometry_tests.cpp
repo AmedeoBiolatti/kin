@@ -282,8 +282,301 @@ void history(Fixture& f) {
     }
     std::cout << "geometry interleaving: exact stock pixels and unchanged temporal history\n";
 }
+std::vector<u8> prepared_picture(Fixture& f, View3D& view, const Scene3D& scene, bool shared) {
+    f.renderer.clear(colors::black);
+    if (shared) {
+        auto prepared = f.r3d.prepare(scene).value_or({});
+        assert(prepared);
+        assert(f.r3d.render_geometry_prepared(f.targets, prepared));
+        assert(f.r3d.debug_stats().bounds_instance_tests == 0);
+        assert(f.r3d.render_prepared(view, prepared));
+        assert(f.r3d.debug_stats().bounds_instance_tests == 0 && f.r3d.debug_stats().device_waits == 0);
+    } else
+        assert(f.r3d.render(view, scene));
+    f.renderer.draw_texture(view.texture(), rect);
+    std::vector<u8> pixels;
+    Vec2i size;
+    assert(f.renderer.read_rgba(rect, pixels, size));
+    f.renderer.present();
+    return pixels;
+}
+void prepared_work(Fixture& f) {
+    constexpr u32 count = 10'000;
+    Scene3D scene;
+    auto rows = scene.add_instances(f.mesh, count).value_or({});
+    assert(rows.size() == count);
+    for (u32 i = 0; i < count; ++i)
+        rows[i].transform = Mat4f::translation({(f32(i % 100) - 50) * .02f, (f32(i / 100) - 50) * .02f, 0}) *
+                            Mat4f::scaling({.005f, .005f, .005f});
+    const auto gpu_allocations = f.renderer.backend_stats().gpu_memory.allocations;
+    auto p = f.r3d.prepare(scene, {.max_cpu_bytes = 2 * 1024 * 1024}).value_or({});
+    assert(p && f.r3d.debug_stats().preparation_records == count &&
+           f.renderer.backend_stats().gpu_memory.allocations == gpu_allocations);
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    const auto first = f.r3d.debug_stats();
+    assert(first.instance_upload_bytes == count * 128 && first.bounds_instance_tests == 0 && first.device_waits == 0);
+    const auto allocations = f.renderer.backend_stats().gpu_memory.allocations;
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    const auto second = f.r3d.debug_stats();
+    assert(second.instance_upload_bytes == 0 && second.shared_instance_bytes == count * 128 &&
+           second.bounds_instance_tests == 0 && f.renderer.backend_stats().gpu_memory.allocations == allocations);
+    // A large renderer scratch array must not inflate a later small handle's payload.
+    Scene3D small;
+    assert(small.draw(f.mesh, {}));
+    auto tiny = f.r3d.prepare(small, {.max_cpu_bytes = 2048}).value_or({});
+    assert(tiny);
+    assert(f.r3d.render_geometry_prepared(f.targets, tiny) && f.r3d.debug_stats().preparation_cpu_bytes <= 2048);
+    f.renderer.present();
+    std::cout << "shared preparation 10000 copies: 1.28 MB instance upload reused, zero repeated bounds/packing or GPU "
+                 "allocations\n";
+}
+void shared_preparation(Fixture& f) {
+    Scene3D scene;
+    assert(scene.draw(f.mesh, {}));
+    assert(scene.draw(f.mesh, Mat4f::translation({100, 0, 0})));
+    auto view = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    assert(view && f.r3d.capabilities().shared_preparation);
+    const auto ordinary = prepared_picture(f, view, scene, false);
+    f.renderer.clear(colors::black);
+    auto p = f.r3d.prepare(scene).value_or({});
+    assert(p && f.r3d.debug_stats().preparation_records == 2 &&
+           f.r3d.debug_stats().preparation_cpu_bytes <= 32 * 1024 * 1024);
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    assert(f.r3d.debug_stats().instance_upload_bytes == 128 && f.r3d.debug_stats().bounds_instance_tests == 0);
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    assert(f.r3d.debug_stats().shared_uploads == 1 && f.r3d.debug_stats().shared_instance_bytes == 128 &&
+           f.r3d.debug_stats().instance_upload_bytes == 0 && f.r3d.debug_stats().device_waits == 0);
+    assert(f.r3d.render_prepared(view, p));
+    assert(f.r3d.debug_stats().shared_uploads == 1 && f.r3d.debug_stats().instance_upload_bytes == 0);
+    // A different camera must still cull independently, even with the same world data.
+    scene.camera.position = {200, 0, 5};
+    assert(p && f.r3d.render_geometry_prepared(f.targets, p));
+    assert(f.r3d.debug_stats().geometry_instances == 0 && f.r3d.debug_stats().culled == 2);
+    scene.camera.position = {0, 0, 5};
+    assert(f.r3d.render_prepared(view, p) && f.r3d.debug_stats().shared_uploads == 1);
+    f.renderer.draw_texture(view.texture(), rect);
+    std::vector<u8> pixels;
+    Vec2i size;
+    assert(f.renderer.read_rgba(rect, pixels, size) && pixels == ordinary);
+    assert(!p && !f.r3d.render_prepared(view, p)); // readback/submission ended the frame
+    f.renderer.present();
+    // An intervening ordinary upload must prevent stale reuse, then reuse can resume.
+    p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    Scene3D other;
+    assert(other.draw(f.mesh, Mat4f::translation({.5f, 0, 0})));
+    assert(f.r3d.render_geometry(f.targets, other));
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    assert(f.r3d.debug_stats().shared_uploads == 0 && f.r3d.debug_stats().instance_upload_bytes == 128);
+    assert(f.r3d.render_geometry_prepared(f.targets, p) && f.r3d.debug_stats().shared_uploads == 1);
+    f.renderer.present();
+    assert(!p);
+    assert(!f.r3d.prepare(scene, {.max_cpu_bytes = 1}) && !f.r3d.diagnostics().empty());
+    // Resize changes visibility/projection, without invalidating world preparation.
+    p = f.r3d.prepare(scene).value_or({});
+    assert(p && f.r3d.resize(view, {80, 120}));
+    assert(f.r3d.render_prepared(view, p) && f.r3d.debug_stats().bounds_instance_tests == 0);
+    assert(f.r3d.resize(view, extent));
+    scene.clear();
+    assert(!p && !f.r3d.render_prepared(view, p));
+    auto instances = scene.add_instances(f.mesh, 1).value_or({});
+    assert(instances.size() == 1);
+    p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    instances[0].transform = Mat4f::translation({1, 0, 0});
+    scene.modified_instances();
+    assert(!p);
+    auto batch = InstanceBatch3D::create(f.mesh, std::vector<MeshInstance3D>(1)).value_or({});
+    scene.clear();
+    assert(scene.draw_instanced(batch));
+    p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    MeshInstance3D changed;
+    changed.transform = Mat4f::translation({1, 0, 0});
+    assert(batch.update(0, {&changed, 1}) && !p);
+    // Borrowed source lifetime is checked before touching its address, even if a
+    // caller keeps the weak identity token locked across destruction or movement.
+    auto source = std::make_unique<Scene3D>();
+    assert(source->draw(f.mesh, {}));
+    auto stamp = source->draw_lifetime().lock();
+    p = f.r3d.prepare(*source).value_or({});
+    assert(p);
+    source.reset();
+    assert(stamp && *stamp == 0 && !p && !f.r3d.render_prepared(view, p));
+    source = std::make_unique<Scene3D>();
+    assert(source->draw(f.mesh, {}));
+    p = f.r3d.prepare(*source).value_or({});
+    assert(p);
+    Scene3D moved = std::move(*source);
+    source.reset();
+    assert(!p);
+    std::cout << "shared preparation: exact pixels, independent cameras/resize, upload generations, budgets, edits and "
+                 "lifetimes\n";
+}
+void prepared_shadows(Fixture& f) {
+    const auto ground = f.r3d.create_mesh(meshes::box({8, .1f, 6})).value_or({});
+    const auto box = f.r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    auto a = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    auto b = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 2.5f, 6}, {0, .3f, 0}, 45);
+    scene.lights.sun.direction = {2, 1, 0};
+    scene.lights.shadow_area = {{-8, -2, -5}, {8, 6, 5}};
+    scene.lights.shadow_resolution = 128;
+    assert(ground && box && a && b && scene.draw(ground, Mat4f::translation({0, -.1f, 0})) &&
+           scene.draw(box, Mat4f::translation({6, 3, 0})));
+    const auto expected = prepared_picture(f, a, scene, false);
+    f.renderer.clear(colors::black);
+    auto p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    assert(f.r3d.debug_stats().geometry_instances == 1);
+    assert(f.r3d.render_prepared(b, p));
+    assert(f.r3d.debug_stats().shadow_casters >= 2 && f.r3d.stats().culled == 1 &&
+           f.r3d.debug_stats().bounds_instance_tests == 0 && f.r3d.debug_stats().instance_upload_bytes > 0);
+    assert(f.r3d.render_prepared(b, p) && f.r3d.debug_stats().shared_uploads == 1);
+    f.renderer.draw_texture(b.texture(), rect);
+    std::vector<u8> pixels;
+    Vec2i size;
+    assert(f.renderer.read_rgba(rect, pixels, size) && pixels == expected);
+    f.renderer.present();
+    std::cout
+        << "shared preparation: off-camera sun casters preserved; view-dependent layouts and stock pixels agree\n";
+}
+void prepared_local_shadows(Fixture& f) {
+    const auto ground = f.r3d.create_mesh(meshes::box({8, .1f, 6})).value_or({});
+    const auto box = f.r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    auto a = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    auto b = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({0, 2.5f, 6}, {0, .3f, 0}, 45);
+    scene.lights.sun.color = {};
+    scene.lights.local_shadow_resolution = 128;
+    scene.lights.points.push_back({.position = {0, 4, 2}, .color = {5, 4, 3}, .radius = 10, .shadow_enabled = true});
+    assert(ground && box && a && b && scene.draw(ground, Mat4f::translation({0, -.1f, 0})) &&
+           scene.draw(box, Mat4f::translation({0, .5f, 0})));
+    const auto expected = prepared_picture(f, a, scene, false);
+    f.renderer.clear(colors::black);
+    auto p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    assert(f.r3d.render_geometry_prepared(f.targets, p));
+    assert(f.r3d.render_prepared(b, p));
+    assert(f.r3d.debug_stats().local_shadow_casters > 0 && f.r3d.debug_stats().bounds_instance_tests == 0);
+    assert(f.r3d.render_prepared(b, p));
+    assert(f.r3d.debug_stats().instance_upload_bytes == 0 && f.r3d.debug_stats().shared_instance_bytes > 0);
+    f.renderer.draw_texture(b.texture(), rect);
+    std::vector<u8> pixels;
+    Vec2i size;
+    assert(f.renderer.read_rgba(rect, pixels, size) && pixels == expected);
+    f.renderer.present();
+    const auto frame = [&] {
+        f.renderer.clear(colors::black);
+        auto shared = f.r3d.prepare(scene).value_or({});
+        assert(shared);
+        assert(f.r3d.render_geometry_prepared(f.targets, shared) && f.r3d.render_prepared(b, shared));
+        f.renderer.present();
+    };
+    for (int i = 0; i < 3; ++i)
+        frame();
+    const auto allocations = f.renderer.backend_stats().gpu_memory.allocations;
+    for (int i = 0; i < 4; ++i)
+        frame();
+    assert(f.renderer.backend_stats().gpu_memory.allocations == allocations);
+    std::cout
+        << "shared preparation: local shadow union parity, shared input buffers and stable allocations across frames\n";
+}
+void prepared_skin_history(Fixture& f) {
+    auto data = quad();
+    data.skin.assign(data.vertices.size(), {});
+    const auto mesh = f.r3d.create_mesh(data).value_or({});
+    auto a = f.r3d.create_view(extent, {.samples = 1, .hdr = true}).value_or({});
+    auto b = f.r3d.create_view(extent, {.samples = 1, .hdr = true}).value_or({});
+    Scene3D scene;
+    scene.taa.enabled = true;
+    scene.ambient_occlusion.enabled = true;
+    assert(mesh && a && b);
+    for (int frame = 0; frame < 8; ++frame) {
+        scene.clear();
+        const std::array pose{Mat4f::translation({f32(frame) * .02f, 0, 0})};
+        assert(scene.draw_skinned(mesh, pose, {}));
+        const auto expected = prepared_picture(f, a, scene, false);
+        f.renderer.clear(colors::black);
+        auto p = f.r3d.prepare(scene).value_or({});
+        assert(p && f.r3d.debug_stats().preparation_skin_bounds == 1);
+        assert(f.r3d.render_geometry_prepared(f.targets, p));
+        assert(f.r3d.debug_stats().joint_upload_bytes == sizeof(Mat4f));
+        assert(f.r3d.render_prepared(b, p));
+        assert(f.r3d.debug_stats().shared_uploads == 1 && f.r3d.debug_stats().joint_upload_bytes == 0 &&
+               f.r3d.debug_stats().shared_joint_uploads == 1 && f.r3d.debug_stats().bounds_instance_tests == 0);
+        f.renderer.draw_texture(b.texture(), rect);
+        std::vector<u8> pixels;
+        Vec2i size;
+        assert(f.renderer.read_rgba(rect, pixels, size) && pixels == expected);
+        f.renderer.present();
+    }
+    auto p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    const auto revision = scene.draw_revision();
+    const std::array pose{Mat4f::translation({1, 0, 0})};
+    assert(scene.update_joint_matrices(0, pose));
+    assert(scene.draw_revision() == revision && !p && !f.r3d.render_prepared(b, p));
+    std::cout << "shared preparation: current joint upload reused, posed bounds built once; exact independent TAA "
+                 "histories\n";
+}
+void prepared_variants(Fixture& f) {
+    auto a = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    auto b = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    const auto data = meshes::sphere(1, 24, 12);
+    for (bool clusters : {false, true}) {
+        const auto mesh = f.r3d.create_mesh(data, {.levels = 3, .clusters = clusters}).value_or({});
+        assert(mesh);
+        for (bool gpu : {false, true}) {
+            Scene3D scene;
+            scene.lod.enabled = true;
+            scene.debug.gpu_culling = gpu;
+            scene.debug.force_level = 0;
+            assert(scene.draw(mesh, Mat4f::scaling({1.5f, .7f, 1})));
+            assert(prepared_picture(f, a, scene, false) == prepared_picture(f, b, scene, true));
+        }
+    }
+    Scene3D scene;
+    assert(scene.draw(f.mesh, Mat4f::translation({0, 0, -1}), {.color = Color::rgb(50, 100, 200)}));
+    assert(scene.draw(f.mesh, {}, {.color = Color::rgba(255, 40, 20, 100), .blend = Blend3D::Alpha}));
+    assert(scene.draw(f.mesh, Mat4f::translation({0, 0, -.5f}),
+                      {.color = Color::rgba(10, 100, 40, 70), .blend = Blend3D::Additive}));
+    assert(scene.overlay().draw(f.mesh, Mat4f::translation({1, 1, 0}) * Mat4f::scaling({.2f, .2f, .2f}),
+                                {.color = colors::white}));
+    assert(prepared_picture(f, a, scene, false) == prepared_picture(f, b, scene, true));
+    auto p = f.r3d.prepare(scene).value_or({});
+    assert(p);
+    assert(scene.overlay().draw(f.mesh, {}));
+    assert(!p);
+    std::cout << "shared preparation: LOD/CPU-GPU clusters, transparent composition and overlay parity\n";
+}
+int prepared_device_lifetime() {
+    PreparedScene3D prepared;
+    Scene3D source;
+    {
+        App app;
+        auto& window = app.create_window({.title = "preparation lifetime", .width = 64, .height = 64, .hidden = true});
+        Renderer2D renderer{make_render_backend(window, false, true)};
+        Renderer3D r3d{renderer};
+        if (!r3d.capabilities().shared_preparation)
+            return std::getenv("KIN_REQUIRE_GPU_TESTS") ? 1 : 77;
+        auto mesh = r3d.create_mesh(quad()).value_or({});
+        assert(mesh && source.draw(mesh, {}));
+        prepared = r3d.prepare(source).value_or({});
+        assert(prepared);
+    }
+    assert(!prepared);
+    std::cout << "shared preparation: safe observation/release after renderer and device destruction\n";
+    return 0;
+}
 } // namespace
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--lifetime")
+        return prepared_device_lifetime();
     const bool foreign_device = argc > 1 && std::string_view(argv[1]) == "--foreign-device";
     App app;
     auto& window = app.create_window({.title = "geometry tests", .width = 160, .height = 120, .hidden = true});
@@ -301,6 +594,12 @@ int main(int argc, char** argv) {
         geometry(f);
         graph(f);
         history(f);
+        prepared_work(f);
+        shared_preparation(f);
+        prepared_shadows(f);
+        prepared_local_shadows(f);
+        prepared_skin_history(f);
+        prepared_variants(f);
         return 0;
     }
     auto& other_window = app.create_window({.title = "foreign geometry", .width = 160, .height = 120, .hidden = true});
@@ -316,6 +615,13 @@ int main(int argc, char** argv) {
     const auto foreign_mesh = other3d.create_mesh(quad()).value_or({});
     assert(foreign_mesh && scene.draw(foreign_mesh, {}));
     assert(!f.r3d.render_geometry(f.targets, scene));
+    auto foreign_prepared = other3d.prepare(scene).value_or({});
+    assert(foreign_prepared);
+    auto own_view = f.r3d.create_view(extent, {.samples = 1}).value_or({});
+    assert(own_view);
+    assert(!f.r3d.render_prepared(own_view, foreign_prepared));
+    assert(!f.r3d.render_geometry_prepared(f.targets, foreign_prepared));
+    assert(!other3d.render_prepared(own_view, foreign_prepared)); // view belongs to the other device
     scene.clear();
     const u8 white[]{255, 255, 255, 255};
     const auto foreign_texture = other.create_texture_from_rgba(white, {1, 1});

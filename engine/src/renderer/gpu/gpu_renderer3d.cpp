@@ -884,6 +884,7 @@ bool GpuRenderer3D::supported(SDL_GPUDevice* device) {
 }
 
 GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _owner(&owner), _device(&device) {
+    _capabilities.shared_preparation = true;
     for (std::size_t i = 0; i < _srgb_to_linear.size(); ++i) {
         _srgb_to_linear[i] = srgb_to_linear(static_cast<f32>(i) / 255.0f);
     }
@@ -3223,6 +3224,7 @@ const GpuTexture* GpuRenderer3D::resolve_taa(SDL_GPUCommandBuffer* commands, Gpu
 struct GpuRenderer3D::FrameCtx {
     FrameCtx(GpuView3D* v, const Scene3D& s, RenderDebugStats3D& st) : view(v), scene(s), stats(st) {}
     GpuView3D* view;
+    GpuPreparedScene3D* prepared = nullptr;
     bool geometry_only = false;
     const Scene3D& scene;
     RenderDebugStats3D& stats;
@@ -3325,6 +3327,141 @@ struct GpuRenderer3D::FrameCtx {
     bool gi_lit = false;      // and its probes light the scene (the light variants read them)
     bool gi_resolved = false; // and their light on what the pre-pass drew was read (gi_resolve)
 };
+
+bool GpuRenderer3D::preparation_live(u64 frame) const {
+    return frame == _owner->_frame_serial;
+}
+bool GpuPreparedScene3D::valid() const {
+    if (!device || !*device || !owner || !owner->preparation_live(frame))
+        return false;
+    for (const auto& source : sources) {
+        if (!source.scene)
+            continue;
+        const auto stamp = source.lifetime.lock();
+        if (!stamp || *stamp != source.identity || source.scene->draw_identity() != source.identity ||
+            source.scene->draw_revision() != source.revision || source.scene->pose_revision() != source.pose ||
+            !source.scene->diagnostics().empty())
+            return false;
+    }
+    if (sources[0].scene->overlay_if_any() != sources[1].scene)
+        return false;
+    for (const auto& batch : batches)
+        if (batch.batch->revision() != batch.revision)
+            return false;
+    return true;
+}
+u64 GpuPreparedScene3D::cpu_bytes() const {
+    u64 bytes = sizeof(*this) + records.capacity() * sizeof(GpuInstance3D) + spheres.capacity() * sizeof(Vec4f) +
+                scales.capacity() * sizeof(f32) +
+                (uploaded_rows.capacity() + uploaded_local_rows.capacity()) * sizeof(u32) +
+                batches.capacity() * sizeof(Batch);
+    for (const auto& source : sources)
+        bytes += source.first.capacity() * sizeof(u32);
+    return bytes;
+}
+std::shared_ptr<IPreparedSceneBackend3D> GpuRenderer3D::prepare(const Scene3D& scene, const PrepareOptions3D& options,
+                                                                RenderDebugStats3D& stats) {
+    const std::array sources{&scene, scene.overlay_if_any()};
+    u64 count = 0, draws = 0, joints = 0;
+    for (const auto* source : sources)
+        if (source) {
+            constexpr u64 max_joints = std::numeric_limits<u32>::max() / sizeof(Mat4f);
+            if (source->joint_matrices().size() > max_joints - joints)
+                return {};
+            joints += source->joint_matrices().size();
+            draws += source->draws().size();
+            for (const auto& draw : source->draws()) {
+                const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+                if (!mesh || !mesh->device || *mesh->device != _device->handle() ||
+                    (draw.skinned && !_skinning_available))
+                    return {};
+                for (const auto* value :
+                     {&draw.material.texture, &draw.material.metallic_roughness, &draw.material.normal,
+                      &draw.material.occlusion, &draw.material.emissive_texture}) {
+                    if (!*value)
+                        continue;
+                    const auto* texture = dynamic_cast<const GpuTextureBackend*>(value->backend().get());
+                    if (!texture || !texture->texture() || !texture->texture().belongs_to(_device->handle()))
+                        return {};
+                }
+                count += draw.count;
+            }
+        }
+    constexpr u64 row_bytes = sizeof(GpuInstance3D) + sizeof(Vec4f) + sizeof(f32) + 3 * sizeof(u32);
+    if (count > std::numeric_limits<u32>::max() / sizeof(GpuInstance3D) || draws > std::numeric_limits<u32>::max() ||
+        sizeof(GpuPreparedScene3D) + count * row_bytes + draws * (sizeof(u32) + sizeof(GpuPreparedScene3D::Batch)) >
+            options.max_cpu_bytes)
+        return {};
+    auto prepared = std::make_shared<GpuPreparedScene3D>();
+    prepared->owner = this;
+    prepared->device = _device->shared();
+    prepared->frame = _owner->_frame_serial;
+    prepared->records.resize(count);
+    prepared->spheres.resize(count);
+    prepared->scales.resize(count);
+    prepared->batches.reserve(draws);
+    u32 first = 0;
+    for (u32 s = 0; s < 2; ++s) {
+        if (!sources[s])
+            continue;
+        const auto& source = *sources[s];
+        auto& captured = prepared->sources[s];
+        captured.scene = &source;
+        captured.lifetime = source.draw_lifetime();
+        captured.identity = source.draw_identity();
+        captured.revision = source.draw_revision();
+        captured.pose = source.pose_revision();
+        captured.first.reserve(source.draws().size());
+        for (const auto& draw : source.draws()) {
+            captured.first.push_back(first);
+            if (draw.batch)
+                prepared->batches.push_back({&draw.batch, draw.batch.revision()});
+            const auto* mesh = static_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+            const auto instances =
+                draw.batch ? draw.batch.instances() : source.instances().subspan(draw.first, draw.count);
+            const auto bounds = draw.mesh.bounds();
+            const auto fill = [&](u32 begin, u32 end) {
+                for (u32 i = begin; i < end; ++i) {
+                    const auto& instance = instances[i];
+                    Vec3f centre = bounds.center(), world{};
+                    f32 radius = bounds.radius(), world_radius = 0;
+                    if (draw.skinned)
+                        skin_sphere(mesh->skin_bounds,
+                                    source.joint_matrices().subspan(source.skin_offsets()[draw.skin_first + i],
+                                                                    mesh->skin_bounds.size()),
+                                    centre, radius);
+                    prepared->scales[first + i] = sphere_of(instance.transform, centre, radius, world, world_radius);
+                    prepared->spheres[first + i] = {world.x, world.y, world.z, world_radius};
+                    prepared->records[first + i] = pack_instance(instance, draw.material.color);
+                }
+            };
+            constexpr u32 chunk = 1024;
+            if (_owner->_jobs && draw.count >= 2048) {
+                _owner->_jobs->parallel_for(static_cast<i32>((draw.count + chunk - 1) / chunk), [&](i32 part) {
+                    const u32 begin = static_cast<u32>(part) * chunk;
+                    fill(begin, std::min(begin + chunk, draw.count));
+                });
+            } else
+                fill(0, draw.count);
+            first += draw.count;
+            stats.preparation_skin_bounds += draw.skinned ? draw.count : 0;
+        }
+    }
+    stats.preparation_records = count;
+    stats.preparation_cpu_bytes = prepared->cpu_bytes();
+    return prepared;
+}
+bool GpuRenderer3D::render_prepared(IViewBackend3D& view, IPreparedSceneBackend3D& input, RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    return prepared && prepared->owner == this && prepared->valid() &&
+           render_scene(view, *prepared->sources[0].scene, stats, prepared);
+}
+bool GpuRenderer3D::render_geometry_prepared(const GeometryTargets3D& targets, IPreparedSceneBackend3D& input,
+                                             RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    return prepared && prepared->owner == this && prepared->valid() &&
+           render_geometry_scene(targets, *prepared->sources[0].scene, stats, prepared);
+}
 
 void GpuRenderer3D::age_targets(FrameCtx& ctx) {
     GpuView3D& v = *ctx.view;
@@ -4907,6 +5044,14 @@ void GpuRenderer3D::choose_local_lights(FrameCtx& ctx) {
 
 void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
     const u32 joint_bytes = ctx.joint_total * static_cast<u32>(sizeof(Mat4f));
+    const u32 mask = (ctx.scenes[0] ? 1u : 0u) | (ctx.scenes[1] ? 2u : 0u);
+    if (ctx.prepared && ctx.prepared->joints_generation && ctx.prepared->joints_generation == _joints_generation &&
+        ctx.prepared->joint_mask == mask && _joints && _joints->size() >= joint_bytes) {
+        ctx.joints_uploaded = true;
+        ++ctx.stats.shared_joint_uploads;
+        ctx.stats.shared_joint_bytes += joint_bytes;
+        return;
+    }
     ensure_buffer(_joints, joint_bytes, min_joint_buffer);
     const std::function<void(std::span<u8>)> fill_joints = [&](std::span<u8> out) {
         for (u32 s = 0; s < 2; ++s) {
@@ -4918,6 +5063,12 @@ void GpuRenderer3D::upload_joints(FrameCtx& ctx) {
         }
     };
     _device->upload_storage_buffer(_joints->handle(), 0, joint_bytes, nullptr, /*cycle=*/true, &fill_joints);
+    ++_joints_generation;
+    if (ctx.prepared) {
+        ctx.prepared->joints_generation = _joints_generation;
+        ctx.prepared->joint_mask = mask;
+    }
+    ctx.stats.joint_upload_bytes += joint_bytes;
     ctx.joints_uploaded = true;
 }
 
@@ -5774,13 +5925,17 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                              sizeof(u32);
     if (union_count > 0) {
         const u32 instance_bytes = union_count * static_cast<u32>(sizeof(GpuInstance3D));
-        ensure_buffer(_local_instances, instance_bytes, min_instance_buffer);
         // No CPU mirror of the 128-byte GPU records: build each once in disjoint staging ranges.
         const std::function<void(std::span<u8>)> fill_instances = [&](std::span<u8> out) {
             const auto fill = [&](u32 begin, u32 end) {
                 for (u32 slot = begin; slot < end; ++slot) {
                     const auto [r, i] = _local_copies[slot];
                     const DrawRef& ref = _refs[r];
+                    if (ref.prepared_records) {
+                        std::memcpy(out.data() + std::size_t(slot) * sizeof(GpuInstance3D), &ref.prepared_records[i],
+                                    sizeof(GpuInstance3D));
+                        continue;
+                    }
                     GpuInstance3D g{};
                     std::memcpy(g.model, ref.instances[i].transform.m, sizeof(g.model));
                     const Color m = ref.draw->material.color, tint = ref.instances[i].tint;
@@ -5797,9 +5952,56 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 fill(0, union_count);
             }
         };
-        _device->upload_storage_buffer(_local_instances->handle(), 0, instance_bytes, nullptr, /*cycle=*/true,
-                                       &fill_instances);
-        stats.instance_upload_bytes += instance_bytes;
+        bool reused = false;
+        if (ctx.prepared) {
+            _preparation_rows.resize(union_count);
+            for (u32 slot = 0; slot < union_count; ++slot) {
+                const auto [r, i] = _local_copies[slot];
+                _preparation_rows[slot] = _refs[r].prepared_first + i;
+            }
+            reused = ctx.prepared->local_upload_generation &&
+                     ctx.prepared->local_upload_generation == _local_instance_generation &&
+                     ctx.prepared->uploaded_local_rows == _preparation_rows;
+            if (!reused && ctx.prepared->upload_generation && ctx.prepared->upload_generation == _instance_generation &&
+                ctx.prepared->uploaded_rows == _preparation_rows) {
+                // The camera already uploaded this exact union. Both roles can
+                // read that buffer; writers detach before replacing its bytes.
+                if (_local_instances && _local_instances != _instances &&
+                    (!_spare_instances || _spare_instances->size() < _local_instances->size()))
+                    _spare_instances = _local_instances;
+                _local_instances = _instances;
+                ++_local_instance_generation;
+                ctx.prepared->local_upload_generation = _local_instance_generation;
+                ctx.prepared->uploaded_local_rows.assign(_preparation_rows.begin(), _preparation_rows.end());
+                reused = true;
+            }
+        }
+        if (reused) {
+            ++stats.shared_uploads;
+            stats.shared_instance_bytes += instance_bytes;
+        } else {
+            if (_local_instances == _instances)
+                _local_instances = std::move(_spare_instances);
+            ensure_buffer(_local_instances, instance_bytes, min_instance_buffer,
+                          SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+                              (_gpu_clusters ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0u));
+            _device->upload_storage_buffer(_local_instances->handle(), 0, instance_bytes, nullptr, true,
+                                           &fill_instances);
+            ++_local_instance_generation;
+            stats.instance_upload_bytes += instance_bytes;
+            if (ctx.prepared) {
+                auto& prepared = *ctx.prepared;
+                prepared.local_upload_generation = _local_instance_generation;
+                if (_preparation_rows.capacity() <= prepared.records.size())
+                    prepared.uploaded_local_rows.swap(_preparation_rows);
+                else
+                    prepared.uploaded_local_rows.assign(_preparation_rows.begin(), _preparation_rows.end());
+            }
+        }
+        if (ctx.prepared) {
+            stats.preparation_cpu_bytes = ctx.prepared->cpu_bytes();
+            stats.preparation_scratch_bytes = _preparation_rows.capacity() * sizeof(u32);
+        }
     }
     const u32 list_bytes = static_cast<u32>(_local_list.size() * sizeof(u32));
     ensure_buffer(_local_lists, std::max(list_bytes, 4u), min_caster_list_buffer);
@@ -6037,7 +6239,8 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
             const auto pack = [&](u32 first, u32 end) {
                 if (!partial) {
                     for (u32 i = first; i < end; ++i) {
-                        const auto record = pack_instance(ref.instances[i], color);
+                        const auto record =
+                            ref.prepared_records ? ref.prepared_records[i] : pack_instance(ref.instances[i], color);
                         std::memcpy(out.data() + static_cast<std::size_t>(i) * sizeof(record), &record, sizeof(record));
                     }
                     return;
@@ -6050,7 +6253,10 @@ void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
                     while (r + 1 < _retained_starts.size() && _retained_starts[r + 1] <= k)
                         ++r;
                     const auto record =
-                        pack_instance(ref.instances[_retained_ranges[r].first + (k - _retained_starts[r])], color);
+                        ref.prepared_records
+                            ? ref.prepared_records[_retained_ranges[r].first + (k - _retained_starts[r])]
+                            : pack_instance(ref.instances[_retained_ranges[r].first + (k - _retained_starts[r])],
+                                            color);
                     std::memcpy(out.data() + static_cast<std::size_t>(k) * sizeof(record), &record, sizeof(record));
                 }
             };
@@ -6357,6 +6563,17 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
         }
         ref.group_count = static_cast<u32>(_cull_groups.size()) - ref.group_first;
     };
+    const auto bind_prepared = [&](DrawRef& ref) {
+        if (!ctx.prepared)
+            return;
+        const auto draw = static_cast<std::size_t>(ref.draw - ctx.scenes[ref.scene]->draws().data());
+        ref.prepared_first = ctx.prepared->sources[ref.scene].first[draw];
+        ref.prepared_records = ctx.prepared->records.data() + ref.prepared_first;
+        ref.cached_spheres = ctx.prepared->spheres.data() + ref.prepared_first;
+        ref.prepared_scales = ctx.prepared->scales.data() + ref.prepared_first;
+        stats.shared_records += ref.draw->count;
+        stats.preparation_cpu_bytes = ctx.prepared->cpu_bytes();
+    };
     bool any_levels = false, any_clusters = false, any_skinned = false;
     // Reserve the complete finest cut's upper bound before choosing the cluster path. A draw that cannot fit uses
     // its full level-zero mesh in every dependent pass. This conservative policy needs no GPU readback and cannot
@@ -6423,6 +6640,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
                 if (!draw.skinned && ((has_groups && draw.group_count) || (draw.batch && !draw.batch.groups().empty())))
                     classify_groups(_refs.back());
+                bind_prepared(_refs.back());
                 if (draw.batch) {
                     if (eligible) {
                         if (_prepared_batches.size() < 128)
@@ -6432,7 +6650,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                             eligible = false;
                     }
                     retain_instances(_refs.back(), ctx);
-                    cache_instance_bounds(_refs.back(), stats);
+                    if (!ctx.prepared)
+                        cache_instance_bounds(_refs.back(), stats);
                 }
             }
     }
@@ -6444,6 +6663,9 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                          ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
             ref.retained = ~0u;
             ref.cached_spheres = nullptr;
+            ref.prepared_records = nullptr;
+            ref.prepared_scales = nullptr;
+            bind_prepared(ref);
             if (ref.skinned) {
                 // Only the command layout is reused. Poses, bounds, shadow membership
                 // and current/previous GPU joint tables are refreshed every render.
@@ -6456,7 +6678,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 classify_groups(ref);
             if (ref.draw->batch) {
                 retain_instances(ref, ctx);
-                cache_instance_bounds(ref, stats);
+                if (!ctx.prepared)
+                    cache_instance_bounds(ref, stats);
             }
         }
 
@@ -6668,11 +6891,16 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                                                   group->sun_reach_planes[k]);
         }
         const bool transform_bounds = camera == 1 || (ref.caster && sun_mask) || ref.levels > 1 || save_bounds;
-        piece.bounds_tests = ref.skinned || (transform_bounds && !ref.cached_spheres) ? piece.end - piece.begin : 0;
+        piece.bounds_tests = !ref.cached_spheres && (ref.skinned || transform_bounds) ? piece.end - piece.begin : 0;
         for (u32 i = piece.begin; i < piece.end; ++i) {
             Vec3f c{};
             f32 r = 0.0f, scale = 1.0f;
-            if (ref.skinned) {
+            if (ref.prepared_scales) {
+                const auto& sphere = ref.cached_spheres[i];
+                c = {sphere.x, sphere.y, sphere.z};
+                r = sphere.w;
+                scale = ref.prepared_scales[i];
+            } else if (ref.skinned) {
                 // A posed copy's bound is the sphere round its joints' moved spheres, never smaller than the mesh posed
                 // (skin_sphere): the pose, not the mesh at rest. If no joint can be bounded, the rest bound stands.
                 Vec3f centre = ref.center;
@@ -6888,6 +7116,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 _skin_prev_ordered.resize(written);
             }
         }
+        if (ctx.prepared)
+            _preparation_rows.resize(written);
         const auto write = [&](const DrawRef& ref, const MeshInstance3D& instance, u8* out, u32 at, u32 flat) {
             if (ctx.taa) {
                 _taa_ordered[at] = _taa_prev[flat]; // each copy's own slot: safe from the workers
@@ -6900,8 +7130,12 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                     _skin_prev_ordered[at] = ref.skinned ? _taa_prev_joint[flat] : ~0u;
                 }
             }
-            const GpuInstance3D g = pack_instance(instance, ref.draw->material.color);
-            std::memcpy(out + static_cast<std::size_t>(at) * sizeof(GpuInstance3D), &g, sizeof(g));
+            if (ctx.prepared) {
+                _preparation_rows[at] = ref.prepared_first + static_cast<u32>(&instance - ref.instances);
+            } else {
+                const GpuInstance3D g = pack_instance(instance, ref.draw->material.color);
+                std::memcpy(out + static_cast<std::size_t>(at) * sizeof(GpuInstance3D), &g, sizeof(g));
+            }
         };
         const std::function<void(std::span<u8>)> fill = [&](std::span<u8> out) {
             each_task([&](Piece& piece) {
@@ -6950,31 +7184,73 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                 }
             }
         };
-        // Cycled: a view rendered earlier this frame keeps the instances it drew.
-        _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, /*cycle=*/true, &fill);
-        stats.instance_upload_bytes += bytes;
+        const auto detach_instances = [&] {
+            if (_instances == _local_instances) {
+                _instances = std::move(_spare_instances);
+                ensure_buffer(_instances, bytes, min_instance_buffer,
+                              SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ |
+                                  (_gpu_clusters ? SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ : 0u));
+            }
+        };
+        bool reused_upload = false;
+        if (ctx.prepared) {
+            fill({}); // mapping, sorting and per-view history offsets only
+            auto& prepared = *ctx.prepared;
+            reused_upload = prepared.upload_generation && prepared.upload_generation == _instance_generation &&
+                            prepared.uploaded_rows == _preparation_rows;
+            if (reused_upload) {
+                ++stats.shared_uploads;
+                stats.shared_instance_bytes += bytes;
+            } else {
+                const std::function<void(std::span<u8>)> copy = [&](std::span<u8> out) {
+                    const auto part = [&](u32 begin, u32 end) {
+                        for (u32 at = begin; at < end; ++at)
+                            std::memcpy(out.data() + std::size_t(at) * sizeof(GpuInstance3D),
+                                        &prepared.records[_preparation_rows[at]], sizeof(GpuInstance3D));
+                    };
+                    constexpr u32 chunk = 1024;
+                    if (jobs && written >= 2048)
+                        jobs->parallel_for(static_cast<i32>((written + chunk - 1) / chunk), [&](i32 n) {
+                            const u32 begin = static_cast<u32>(n) * chunk;
+                            part(begin, std::min(begin + chunk, written));
+                        });
+                    else
+                        part(0, written);
+                };
+                detach_instances();
+                _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, true, &copy);
+                ++_instance_generation;
+                stats.instance_upload_bytes += bytes;
+                prepared.upload_generation = _instance_generation;
+                if (_preparation_rows.capacity() <= prepared.records.size())
+                    prepared.uploaded_rows.swap(_preparation_rows);
+                else
+                    prepared.uploaded_rows.assign(_preparation_rows.begin(), _preparation_rows.end());
+            }
+            stats.preparation_cpu_bytes = prepared.cpu_bytes();
+            stats.preparation_scratch_bytes = _preparation_rows.capacity() * sizeof(u32);
+        } else {
+            // Cycled: earlier draws retain their own backing storage.
+            detach_instances();
+            _device->upload_storage_buffer(_instances->handle(), 0, bytes, nullptr, true, &fill);
+            ++_instance_generation;
+            stats.instance_upload_bytes += bytes;
+        }
 
         // Skinned copies: the frame's joint matrices (both scenes', straight into the upload memory) and each copy's
         // first one, in the places the instances are. One buffer each for the frame, grown as the previous ones are: no
         // upload per draw.
         if (any_skinned) {
-            const u32 joint_bytes = joint_total * static_cast<u32>(sizeof(Mat4f));
-            ensure_buffer(_joints, joint_bytes, min_joint_buffer);
-            const std::function<void(std::span<u8>)> fill_joints = [&](std::span<u8> out) {
-                for (u32 s = 0; s < 2; ++s) {
-                    if (ctx.scenes[s] && !ctx.scenes[s]->joint_matrices().empty()) {
-                        std::memcpy(out.data() + static_cast<std::size_t>(joint_base[s]) * sizeof(Mat4f),
-                                    ctx.scenes[s]->joint_matrices().data(),
-                                    ctx.scenes[s]->joint_matrices().size() * sizeof(Mat4f));
-                    }
-                }
-            };
-            _device->upload_storage_buffer(_joints->handle(), 0, joint_bytes, nullptr, /*cycle=*/true, &fill_joints);
-            ctx.joints_uploaded = true;
+            upload_joints(ctx);
             const u32 offset_bytes = written * static_cast<u32>(sizeof(u32));
             ensure_buffer(_joint_offsets, offset_bytes, min_caster_list_buffer);
-            _device->upload_storage_buffer(_joint_offsets->handle(), 0, offset_bytes, _skin_ordered.data(),
-                                           /*cycle=*/true);
+            if (!reused_upload || !ctx.prepared || !ctx.prepared->offsets_generation ||
+                ctx.prepared->offsets_generation != _offsets_generation) {
+                _device->upload_storage_buffer(_joint_offsets->handle(), 0, offset_bytes, _skin_ordered.data(), true);
+                ++_offsets_generation;
+                if (ctx.prepared)
+                    ctx.prepared->offsets_generation = _offsets_generation;
+            }
             if (ctx.taa) {
                 // Last frame's matrices, as the record holds them (whole), and where each copy's own start in them.
                 const std::vector<Mat4f>& past = view->_taa_last.joints;
@@ -9813,6 +10089,10 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
 }
 
 bool GpuRenderer3D::render_geometry(const GeometryTargets3D& targets, const Scene3D& scene, RenderDebugStats3D& stats) {
+    return render_geometry_scene(targets, scene, stats, nullptr);
+}
+bool GpuRenderer3D::render_geometry_scene(const GeometryTargets3D& targets, const Scene3D& scene,
+                                          RenderDebugStats3D& stats, GpuPreparedScene3D* prepared) {
     const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
     const auto* normals = dynamic_cast<const GpuTextureBackend*>(targets.normals.backend().get());
     const auto valid = [&](const GpuTextureBackend* texture, SDL_GPUTextureFormat format,
@@ -9826,26 +10106,30 @@ bool GpuRenderer3D::render_geometry(const GeometryTargets3D& targets, const Scen
         !valid(normals, ao_normal_format, SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
         depth->size() != normals->size())
         return false;
-    for (const auto& draw : scene.draws()) {
-        if (pass_of(draw.material) != Pass::Opaque)
-            continue;
-        const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
-        if (!mesh || !mesh->device || *mesh->device != _device->handle() || (draw.skinned && !_skinning_available))
-            return false;
-        if (draw.material.blend == Blend3D::Mask && draw.material.texture) {
-            if (draw.material.texture == targets.depth || draw.material.texture == targets.normals)
-                return false; // an attachment cannot be sampled while this pass writes it
-            const auto* texture = dynamic_cast<const GpuTextureBackend*>(draw.material.texture.backend().get());
-            if (!texture || !texture->texture().belongs_to(_device->handle()))
+    if (!prepared)
+        for (const auto& draw : scene.draws()) {
+            if (pass_of(draw.material) != Pass::Opaque)
+                continue;
+            const auto* mesh = dynamic_cast<const GpuMesh3D*>(draw.mesh.backend().get());
+            if (!mesh || !mesh->device || *mesh->device != _device->handle() || (draw.skinned && !_skinning_available))
                 return false;
+            if (draw.material.blend == Blend3D::Mask && draw.material.texture) {
+                if (draw.material.texture == targets.depth || draw.material.texture == targets.normals)
+                    return false; // an attachment cannot be sampled while this pass writes it
+                const auto* texture = dynamic_cast<const GpuTextureBackend*>(draw.material.texture.backend().get());
+                if (!texture || !texture->texture().belongs_to(_device->handle()))
+                    return false;
+            }
         }
-    }
     const auto waits = _device->idle_waits();
     const auto pipelines = _owner->_pipelines.size();
     collect_mesh_buffers();
     GpuView3D scratch;
     scratch._size = depth->size();
     FrameCtx ctx{&scratch, scene, stats};
+    ctx.prepared = prepared;
+    if (prepared && !preparation_live(prepared->frame))
+        return false;
     ctx.geometry_only = true;
     _local_views.clear();
     _particle_batches.clear();
@@ -9882,6 +10166,10 @@ bool GpuRenderer3D::render_geometry(const GeometryTargets3D& targets, const Scen
 }
 
 bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDebugStats3D& stats) {
+    return render_scene(base, scene, stats, nullptr);
+}
+bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, RenderDebugStats3D& stats,
+                                 GpuPreparedScene3D* prepared) {
     struct CountWaits { // on every way out
         RenderDebugStats3D& stats;
         const GpuDevice& device;
@@ -9890,7 +10178,8 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     } count_waits{stats, *_device};
     collect_mesh_buffers();
     auto* view = dynamic_cast<GpuView3D*>(&base);
-    if (!view || !_vertex_shader || !_fragment_shader) {
+    if (!view || !view->_resolved || !view->_resolved->texture().belongs_to(_device->handle()) || !_vertex_shader ||
+        !_fragment_shader) {
         return false;
     }
     // The 2D pipeline's colour format changed (set_color_space): the view follows.
@@ -9899,6 +10188,9 @@ bool GpuRenderer3D::render(IViewBackend3D& base, const Scene3D& scene, RenderDeb
     }
     const std::size_t pipelines_before = _owner->_pipelines.size();
     FrameCtx ctx{view, scene, stats};
+    ctx.prepared = prepared;
+    if (prepared && !preparation_live(prepared->frame))
+        return false;
     setup_frame(ctx);
     fit_sun_shadow(ctx);
     choose_point_lights(ctx);

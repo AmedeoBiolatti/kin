@@ -407,9 +407,13 @@ Scene3D::DrawStamp::DrawStamp() {
     identity = next.fetch_add(1, std::memory_order_relaxed);
 }
 Scene3D::DrawStamp::DrawStamp(DrawStamp&& other) noexcept : DrawStamp() {
+    other.invalidate();
     ++other.revision;
 }
 Scene3D::DrawStamp& Scene3D::DrawStamp::operator=(DrawStamp&& other) noexcept {
+    invalidate();
+    other.invalidate();
+    pose = 0;
     DrawStamp fresh;
     identity = fresh.identity;
     revision = 0;
@@ -770,8 +774,10 @@ bool Scene3D::update_joint_matrices_operation(u32 first, std::span<const Mat4f> 
         return false;
     if (first > _joints.size() || matrices.size() > _joints.size() - first)
         return fail_submission("joint matrix update outside submitted poses");
-    if (!matrices.empty())
+    if (!matrices.empty()) {
         std::memmove(_joints.data() + first, matrices.data(), matrices.size_bytes());
+        ++_draw_stamp.pose;
+    }
     return _errors.empty();
 }
 

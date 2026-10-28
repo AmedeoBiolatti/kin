@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add frame-scoped shared 3D preparation for standalone geometry and stock rendering, with bounded CPU payload,
+  explicit source/pose/batch/frame invalidation, reusable instance/joint uploads and shared local-shadow inputs.
+  Preserve separate camera/shadow visibility and view history; expose preparation/reuse counters and raw-span edit
+  notification. Keep the ordinary streaming path available.
+
 - Expose standalone opaque/cutout geometry passes with sampled reverse-Z depth and signed world normals. Add explicit
   float/depth graph attachments, a cached typed stock prepass subgraph and a public-API outline renderer. Stable
   attachments survive working-colour changes; stock lighting and temporal history remain compatible.

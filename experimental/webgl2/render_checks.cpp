@@ -121,6 +121,8 @@ void check_webgl_geometry2d(Renderer2D& r) {
 void check_webgl_instances(Renderer2D& r, Renderer3D& r3d) {
     require(!r3d.capabilities().geometry_pass && !r.capabilities().render_attachments,
             "WebGL must report unsupported standalone geometry attachments");
+    require(!r3d.capabilities().shared_preparation && !r3d.prepare({}),
+            "Unsupported shared preparation must return diagnostics");
     const auto unsupported = r3d.render_geometry({}, {});
     require(!unsupported && !unsupported.diagnostics.empty(), "Unsupported geometry must return diagnostics");
     require(!r.create_render_attachment({64, 64}, TextureFormat::Depth32Float),

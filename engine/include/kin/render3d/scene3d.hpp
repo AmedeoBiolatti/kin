@@ -718,7 +718,19 @@ public:
     // A move gives its destination a fresh identity and invalidates the source revision.
     u64 draw_identity() const { return _draw_stamp.identity; }
     u64 draw_revision() const { return _draw_stamp.revision; }
+    u64 pose_revision() const { return _draw_stamp.pose; }
+    // Weak identity token: becomes zero on destruction or move, even if a reader
+    // holds it locked. Prepared submissions never keep a source scene alive.
+    std::weak_ptr<const u64> draw_lifetime() const {
+        if (!_draw_stamp.lifetime)
+            _draw_stamp.lifetime = std::make_shared<u64>(_draw_stamp.identity);
+        return _draw_stamp.lifetime;
+    }
     std::span<const MeshInstance3D> instances() const { return _instances; }
+    // After editing a previously returned add_instances() span, invalidate any
+    // prepared submission. Fill new spans before prepare(); ordinary rendering
+    // continues to read their current values without this notification.
+    void modified_instances() { touch_draws(); }
     std::span<const InstanceGroup> instance_groups() const { return _instance_groups; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned
     // draw).
@@ -775,9 +787,16 @@ private:
 
     struct DrawStamp {
         DrawStamp();
+        ~DrawStamp() { invalidate(); }
+        void invalidate() {
+            if (lifetime)
+                *lifetime = 0;
+            lifetime.reset();
+        }
         DrawStamp(DrawStamp&& other) noexcept;
         DrawStamp& operator=(DrawStamp&& other) noexcept;
-        u64 identity = 0, revision = 0;
+        u64 identity = 0, revision = 0, pose = 0;
+        mutable std::shared_ptr<u64> lifetime;
     } _draw_stamp;
     void touch_draws() { ++_draw_stamp.revision; }
     std::vector<Draw> _draws;

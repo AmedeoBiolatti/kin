@@ -84,6 +84,12 @@ void resources() {
         renderer.capabilities();
         assert(refused.diagnostics == saved);
     }
+    if (!renderer.capabilities().shared_preparation) {
+        const auto refused = renderer.prepare({});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+        View3D absent;
+        assert(!renderer.render_prepared(absent, {}) && !renderer.render_geometry_prepared({}, {}));
+    }
     const auto root = std::filesystem::temp_directory_path() /
                       ("kin-errors3d-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);

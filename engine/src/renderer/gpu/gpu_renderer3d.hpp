@@ -45,6 +45,35 @@ struct GpuInstance3D {
 };
 static_assert(sizeof(GpuInstance3D) == 128);
 
+class GpuRenderer3D;
+class GpuPreparedScene3D final : public IPreparedSceneBackend3D {
+public:
+    bool valid() const override;
+    GpuRenderer3D* owner = nullptr;
+    SharedDevice device;
+    u64 frame = 0;
+    struct Source {
+        const Scene3D* scene = nullptr;
+        std::weak_ptr<const u64> lifetime;
+        u64 identity = 0, revision = 0, pose = 0;
+        std::vector<u32> first;
+    };
+    std::array<Source, 2> sources;
+    struct Batch {
+        const InstanceBatch3D* batch;
+        u64 revision;
+    };
+    std::vector<Batch> batches;
+    std::vector<GpuInstance3D> records;
+    std::vector<Vec4f> spheres;
+    std::vector<f32> scales;
+    std::vector<u32> uploaded_rows, uploaded_local_rows;
+    u64 local_upload_generation = 0;
+    u64 upload_generation = 0, joints_generation = 0, offsets_generation = 0;
+    u32 joint_mask = 0;
+    u64 cpu_bytes() const;
+};
+
 // Meshes the GPU cuts (MeshOptions3D::clusters, on a device that can) share big buffers, so that one dispatch of the
 // cut covers many meshes (a barrier for every buffer bound is what a dispatch a mesh costs: Sponza's hundred meshes
 // took a millisecond of it): a chunk is an index buffer holding each of its meshes' indices (the leaves', then every
@@ -331,6 +360,10 @@ public:
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
     bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) override;
+    std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
+                                                     RenderDebugStats3D&) override;
+    bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
+    bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
     Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
     bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
 
@@ -339,6 +372,10 @@ public:
     SDL_GPUTextureFormat depth_format() const { return _depth_format; }
 
 private:
+    friend class GpuPreparedScene3D;
+    bool preparation_live(u64 frame) const;
+    bool render_scene(IViewBackend3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
+    bool render_geometry_scene(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
     enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder, Reactive, ReactiveWire };
     enum class Unlit : u8 { Off, Colour, Textured };
@@ -942,8 +979,11 @@ private:
         const u32* skin_first = nullptr;
         const Mat4f* joints = nullptr;
         u32 joint_base = 0;
-        u32 group_first = 0, group_count = 0;  // in _cull_groups, preserved through draw merging
-        u32 retained = ~0u;                    // bounded retained-table cache entry, or immediate path
+        u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
+        u32 retained = ~0u;                   // bounded retained-table cache entry, or immediate path
+        u32 prepared_first = 0;
+        const GpuInstance3D* prepared_records = nullptr;
+        const f32* prepared_scales = nullptr;
         const Vec4f* cached_spheres = nullptr; // stable CPU bounds from a resident table, one level only
         u32 sphere_first = 0;                  // uncached local casters' start in _world_spheres
     };
@@ -1016,6 +1056,9 @@ private:
     bool _bounds_cache_grew = false;
     bool _gpu_markers = false; // external GPU profiler labels, no fence scopes
     u32 _bounds_cache_bytes = 0;
+    std::shared_ptr<GpuBuffer> _spare_instances; // one recycled input buffer for copy-on-write roles
+    std::vector<u32> _preparation_rows;
+    u64 _instance_generation = 0, _local_instance_generation = 0, _joints_generation = 0, _offsets_generation = 0;
     std::vector<u32> _retained_visible;
     std::shared_ptr<GpuBuffer> _retained_indices;
     GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material) const;

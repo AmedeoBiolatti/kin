@@ -94,3 +94,37 @@ Opaque and masked world meshes share the stock prepass recorder, including UV/ve
 Targets must match in extent and belong to the renderer. They must have been allocated as render attachments: a sampled-only RG16F data texture is insufficient. Validation precedes command recording. A later GPU recording failure can leave partial output, consistent with graph execution's existing no-rollback contract. Retained `Texture` handles keep their allocations alive after graph resize/clear; rendering into the same handles replaces their contents.
 
 The native stock prepass uses the shared geometry recorder within a cached typed geometry subgraph. Its depth and normals are pinned, view-owned allocations; the outer thirteen-phase graph still uses tokens for coarse dependencies. TAA's stock variant has its existing packed normal/motion/flag RGBA16F encoding and jitter, which is separate from the standalone RG16F contract. This migration does not expose stock history buffers or add stock transient reuse. `debug_stats().geometry_draws`, `geometry_instances` and `geometry_graph_reused` report the shared geometry work/cache; the existing stock `ao_*` counters remain compatible.
+
+## Shared draw preparation
+
+On native SDL_GPU, `Renderer3D::prepare(scene)` builds the source's packed instance records, conservative world bounds, affine LOD scales and posed skin bounds once. Both standalone geometry and the complete stock renderer can consume the resulting `PreparedScene3D`:
+
+```cpp
+const auto result = r3d.prepare(scene, {.max_cpu_bytes = 32ull * 1024 * 1024});
+if (!result)
+    return; // result.diagnostics explains refusal
+const PreparedScene3D prepared = *result;
+
+// These can be separate graph callbacks. Keep the handle/source alive through
+// recording, and finish all consumers before readback or presentation.
+if (!r3d.render_geometry_prepared({resources.texture(depth), resources.texture(normals)}, prepared))
+    return;
+if (!r3d.render_prepared(view, prepared))
+    return;
+renderer.draw_texture(view.texture(), output_rect);
+renderer.present();
+```
+
+Check `Renderer3D::capabilities().shared_preparation` before requiring this operation. The existing scene-taking `render` and `render_geometry` APIs retain their streaming paths. WebGL2 and fallback backends return unsupported diagnostics for explicit preparation. Graph compilation and callbacks remain independent: refreshing a frame's prepared handle does not invalidate a structural execution plan.
+
+Preparation shares world data; every consumer still evaluates its own camera/shadow visibility and LOD cut. Main/geometry uploads are reused only when the exact source-row ordering and current GPU write generation agree. This includes transparent sorting, overlay placement and off-camera sun casters. Different layouts stream the required records from the prepared CPU data. Current joint palettes can be shared, while previous poses, velocity and TAA history remain view-specific. Local shadow unions reuse their own layouts and can read the camera buffer directly when its rows match. Writers detach using one recycled spare buffer, so sharing does not allocate a new GPU handle each frame. This reuses ordinary SDL buffers, without native heap aliasing.
+
+The handle borrows the source scene and expires at a GPU frame boundary: presentation, readback, submission or another operation that ends the frame. Source destruction/movement, command changes, batch edits, pose edits and overlay changes invalidate it before recording. `valid()` remains safe after scene or renderer destruction. Camera, lighting and quality settings can change between consumers; they do not change the prepared world data. View resizing gets fresh per-view culling. Recording and source mutation must remain ordered on the renderer thread.
+
+Fill `add_instances()` spans before preparing. If an already-returned mutable span is edited afterward, call `scene.modified_instances()` before using a prepared handle again. Raw memory writes cannot be detected without scanning. Ordinary scene-taking rendering continues to read current values. Use `update_joint_matrices()` and `InstanceBatch3D::update()` for poses and batches; their revisions invalidate preparation automatically. Source diagnostics and incompatible renderer inputs also prevent consumption.
+
+The default admission limit is 32 MiB of preparation payload per handle. Packed records/bounds/scales cost 148 bytes per submitted copy, plus metadata and compact row maps. Admission reserves room for maps and checks the GPU record-count limit; it precedes large allocations. `preparation_cpu_bytes` reports the handle's vector payload and `preparation_scratch_bytes` reports renderer mapping capacity. Allocator overhead and existing scene/assets are excluded. One spare instance buffer can remain resident and is included in the device GPU ledger. Release stale handles when finished; their CPU data remains owned until release even though they have expired.
+
+Preparation has an up-front CPU/memory cost and includes copies that may later be culled. It is useful when several consumers share a submission. A retained-only scene may already benefit from incremental caches and need no extra preparation. Measure total time including `prepare()`, separately from consumer recording. `preparation_records`/`preparation_skin_bounds` count build work; `shared_records`, `shared_uploads`, `shared_instance_bytes`, `shared_joint_uploads` and `shared_joint_bytes` describe reuse. `instance_upload_bytes`, `joint_upload_bytes` and `bounds_instance_tests` expose the work still performed. `shared_records` counts source records bound for culling/drawing, including subsequently culled copies; byte counters measure actual skipped uploads. Reading these counters does not trigger GPU readback.
+
+Separate public shadow and main-surface operations remain the next migration. `render_prepared()` currently consumes the whole stock pipeline, including its existing shadow, lighting and temporal operations.

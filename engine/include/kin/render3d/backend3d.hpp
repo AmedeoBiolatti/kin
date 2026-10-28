@@ -72,6 +72,7 @@ struct RendererCapabilities3D {
     bool software = false;
     // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
     bool geometry_pass = false;
+    bool shared_preparation = false;
 };
 
 struct ViewOptions3D {
@@ -164,6 +165,17 @@ public:
     virtual void reset_history() {}
 };
 
+// Backend-owned frame preparation. Source lifetime/edits and frame boundaries
+// invalidate it. valid() must be safe after source/renderer destruction.
+class IPreparedSceneBackend3D {
+public:
+    virtual ~IPreparedSceneBackend3D() = default;
+    virtual bool valid() const = 0;
+};
+struct PrepareOptions3D {
+    u64 max_cpu_bytes = 32ull * 1024 * 1024; // payload admission limit per handle
+};
+
 class IRendererBackend3D {
 public:
     virtual ~IRendererBackend3D() = default;
@@ -188,6 +200,14 @@ public:
     // to come.
     virtual bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) = 0;
     virtual bool render_geometry(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&) { return false; }
+    virtual std::shared_ptr<IPreparedSceneBackend3D> prepare(const Scene3D&, const PrepareOptions3D&,
+                                                             RenderDebugStats3D&) {
+        return {};
+    }
+    virtual bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) { return false; }
+    virtual bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) {
+        return false;
+    }
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) = 0;
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False
