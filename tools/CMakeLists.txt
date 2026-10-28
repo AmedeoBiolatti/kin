@@ -66,3 +66,27 @@ if(KIN_EXPERIMENTAL_3D)
         endif()
     endif()
 endif()
+
+# Evaluation workload: also available in audio-free tool builds.
+if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME AND NOT TARGET industrial_yard)
+    add_executable(kin_eval_yard ../examples/industrial_yard/main.cpp)
+    target_link_libraries(kin_eval_yard PRIVATE kin::engine)
+endif()
+
+# Optional external game adapter, compiled against the same engine as the tools.
+# Content remains outside this repository and is selected with --content at run time.
+set(KIN_EVAL_BISTRO_SOURCE "" CACHE PATH "Existing gallery/bistro source for the evaluation workload")
+if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME AND KIN_EVAL_BISTRO_SOURCE)
+    if(NOT KIN_ENABLE_AUDIO OR NOT KIN_ENABLE_TTF)
+        message(FATAL_ERROR "KIN_EVAL_BISTRO_SOURCE requires KIN_ENABLE_AUDIO and KIN_ENABLE_TTF")
+    endif()
+    set(_bistro_sources
+        src/core/camera_path.cpp src/core/human.cpp src/core/level.cpp src/core/light_budget.cpp
+        src/core/lighting.cpp src/core/physics.cpp src/core/prop_audio.cpp src/core/sky.cpp src/core/tour.cpp
+        src/main.cpp src/game/audio.cpp src/game/bistro_scene.cpp src/game/level_view.cpp src/game/panel.cpp src/game/player_view.cpp)
+    list(TRANSFORM _bistro_sources PREPEND "${KIN_EVAL_BISTRO_SOURCE}/")
+    add_executable(kin_eval_bistro ${_bistro_sources})
+    target_include_directories(kin_eval_bistro PRIVATE "${KIN_EVAL_BISTRO_SOURCE}/src")
+    target_link_libraries(kin_eval_bistro PRIVATE kin::engine)
+    kin_game(kin_eval_bistro TITLE "Bistro evaluation" NO_CONTENT)
+endif()

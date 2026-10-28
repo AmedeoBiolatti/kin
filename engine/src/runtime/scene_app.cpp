@@ -1,4 +1,5 @@
 #include <kin/runtime/scene_app.hpp>
+#include "eval_telemetry.hpp"
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/renderer3d.hpp>
 #endif
@@ -467,6 +468,9 @@ struct SceneAppSession::Impl {
     bool want_report = false;
     std::string report_snapshot;
     i32 frames_run = 0;
+    detail::EvalTelemetry eval_telemetry;
+    i64 eval_frame = 0;
+    std::chrono::steady_clock::time_point eval_previous{};
     bool log_frame_stats = false;
     i32 logged_frames = 0;
     i32 windowed_frame_limit = 0;
@@ -1021,7 +1025,7 @@ struct SceneAppSession::Impl {
 
                     // GPU frame timing costs a fence and a waiting thread, so only when
                     // someone reads it.
-                    ctx.renderer.set_gpu_timing_enabled(profile_enabled || log_frame_stats ||
+                    ctx.renderer.set_gpu_timing_enabled(profile_enabled || log_frame_stats || bool(eval_telemetry) ||
                                                         config.headless.profile_render || debug_overlay.visible());
                     const auto present_start = std::chrono::steady_clock::now();
                     ctx.renderer.present();
@@ -1068,6 +1072,14 @@ struct SceneAppSession::Impl {
                 const f64 accounted_ms = frame_update_total_ms + render_total_ms;
                 const f64 unaccounted_ms = std::max(0.0, frame_ms - accounted_ms);
                 const AppFrameStats& app_frame = ctx.app.frame_stats();
+                if (eval_telemetry) {
+                    const auto now = std::chrono::steady_clock::now();
+                    const auto interval = eval_previous.time_since_epoch().count()
+                        ? std::chrono::duration<double, std::milli>(now - eval_previous).count() : 0.0;
+                    eval_previous = now;
+                    eval_telemetry.record("main", eval_frame++, interval, frame_ms, frame_update_total_ms,
+                                          render_scene_ms, present_ms, ctx.renderer.backend_stats());
+                }
                 debug_overlay.record("frame.update_total", frame_update_total_ms);
                 debug_overlay.record("frame.update_steps", static_cast<f64>(frame_update_steps));
                 debug_overlay.record("app.raw_frame", static_cast<f64>(app_frame.raw_frame_time) * 1000.0);

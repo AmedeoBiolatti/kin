@@ -221,3 +221,57 @@ Native GPU tests compare optimized/copy colour and depth versions, later readers
 The native full stock 3D dispatch passes in `/tmp/kin-attachment-versions-full3d-final.log` (164 seconds). Focused hardware results are twenty passes and five inherited NVIDIA/X11 live-device lifecycle skips (`/tmp/kin-attachment-versions-hardware-final.log`). All twenty-one selected software Vulkan tests pass, including the foreign-device probes (`/tmp/kin-attachment-versions-software-final.log`). Browser smoke passes a loaded 2D colour handoff, preserved pixels and explicit rejection of copy-dependent plans, alongside the stock 3D profile (`/tmp/kin-attachment-versions-web-smoke2.log`). The 199-file 3D formatting gate and whitespace checks pass; touched graph compiler/binding and compiler test files were also formatted with clang-format 18.
 
 Four decoded stock RGBA captures remain byte-identical to predecessor `5cc8a4e`: Cornell/front and motion/still, pan and close at 320 x 240 with AO, contact shadows and TAA, using the reference command above. Captures are `/home/bamedeo/kin-build/rendering-foundations-native/attachment-versions-captures/{before,after}`. Build and validation logs are preserved under `/home/bamedeo/kin-build/rendering-foundations-native/attachment-versions-logs`. The earlier unrelated sol2/GCC 15 all-target build and full-2D DPI limitations remain documented; no full-project build or full-2D pass is claimed.
+
+## Automated multi-scene evaluation
+
+The new [evaluation tools](../tools/eval/README.md) were exercised with the native
+Release/GCC 15.2 build on the RTX 4080 Laptop GPU. Audio and TTF were enabled for the
+optional Bistro target; the existing local sol2/GCC compatibility hook remained
+outside the repository. Both labels deliberately used the same binary: this is
+measurement-system acceptance, not an engine speedup comparison.
+
+A 160x96 smoke suite covers Sponza/nave, a four-frame moving Sponza/TAA clip,
+Industrial Yard's three-frame replay, and a two-frame static Bistro clip after
+600 settle frames. Performance uses three warm-up/six measured frames; Cycles uses
+two independent eight-sample seeds. All 27 jobs pass, including per-frame CPU
+records, captures, reviewed Sponza/Bistro references and FLIP/JOD scoring. Yard's
+reference is explicitly its baseline capture, not Cycles. These short runs and
+noisy references establish tool operation, not calibrated quality or speed.
+The shared cache reuses all three reviewed references after the native binary
+changes. Complete job inventories and frozen inputs are retained with the report.
+
+Direct numerical compatibility checks against the existing Bistro scorer pass
+for both display transforms (exact RGB8 output), FLIP means, still/clip JOD,
+detail, static shimmer/stepping and moving temporal error. Scalar FLIP maps are
+requested explicitly rather than interpreting the library's default colourized
+map as error values. Linear EXR input without a reviewed display transform is
+rejected. A virtual-environment interpreter retains its symlink path; resolving
+it to the system interpreter would silently bypass the metric environment.
+
+Persistent Sponza stress prewarms features for 130 frames, settles base rendering
+for 600 frames, exercises two resize/TAA/AO phases of 130 frames, then restores
+and settles for 600 frames: 1590 measured records per variant. Initial and final
+owned payload plateaus are stable and equal at 410,974,752 bytes, with a 4096-byte
+tolerance. This excludes hidden driver backing/residency and does not cover reload
+or multiview lifetime tests. An earlier unconditioned baseline contained about
+330 MB of expiring staging/pool slack; the final preconditioned test removes that
+allowance before comparison.
+
+Acceptance artifacts live outside Git at
+`/home/bamedeo/kin-build/rendering-foundations-native/evaluation-validation/`:
+`acceptance/report/index.html`, `final-stress/report/index.html`, and
+`compatibility/result.json`. Run manifests record exact binaries, provider/code
+hashes, camera/frame IDs, display assumptions, packages and render context.
+Missing middle-frame repair, interrupted/incomplete-stage recovery, changed-input
+resume refusal, arbitrary command adapters and shared truth reuse are covered by
+the Python contract tests. Prior job records are replaced by their logical stage
+when repaired, so stale unsupported results and duplicate scores cannot poison a
+successful resumed report.
+
+The full native stock 3D dispatch passes (`/tmp/kin-eval-full3d.log`, 142 seconds),
+as do runtime, owned-session and scene checks. Browser rebuild/package and the
+stock WebGL2 smoke pass (`/tmp/kin-eval-web-smoke.log`, Chromium/SwiftShader).
+Four ordinary Cornell/motion RGBA captures match the preceding attachment-version
+captures byte for byte. Benchmark mode separately verifies exact configured
+warm-up/frame counts with TAA, avoiding the legacy capture settling extension.
+The 199-file 3D format gate passes. This is not a full-project/all-target build.

@@ -7,6 +7,7 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -18,6 +19,8 @@ using Clock = std::chrono::steady_clock;
 constexpr int default_warmup = 300;
 struct Options {
     std::string recipe, metrics;
+    std::string capture;
+    int width = 1280, height = 720, capture_from = 0, capture_count = 1;
     int warmup = default_warmup, frames = 1440, scale = 1, workers = 4, points = -1, actors = -1, smoke = -1,
         props = -1, offset = 0;
     bool gpu_pass_markers = false, receives = true, validate = false, animation = true, motion = true, glass = true,
@@ -110,7 +113,7 @@ public:
         const auto main_ms = _o.profile ? cpu(false) - main : 0, process_ms = _o.profile ? cpu(true) - process : 0;
         const double submit_ms = std::chrono::duration<double, std::milli>(Clock::now() - submitted).count();
         ctx.renderer.clear(Color::rgb(15, 22, 35));
-        ctx.renderer.draw_texture(_view.texture(), {0, 0, 1280, 720});
+        ctx.renderer.draw_texture(_view.texture(), {0, 0, f32(_o.width), f32(_o.height)});
         if (_frame > _o.warmup) {
             const auto& st = _r->debug_stats();
             _csv << std::fixed << std::setprecision(6) << _frame << ',' << _route << ',' << interval << ','
@@ -123,6 +126,16 @@ public:
                  << st.feature_bytes << ',' << st.local_shadow_bytes << ',' << _sums[0] << ',' << _sums[1] << ','
                  << _sums[2] << ',' << std::chrono::duration<double, std::milli>(begin.time_since_epoch()).count()
                  << '\n';
+        }
+        if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
+            _frame < _o.warmup + _o.capture_from + _o.capture_count) {
+            kin::Image image;
+            if (!ctx.renderer.read_rgba({0, 0, f32(_o.width), f32(_o.height)}, image.rgba, image.size))
+                throw std::runtime_error("yard evaluation capture failed");
+            std::filesystem::create_directories(_o.capture);
+            if (!kin::save_image(image, std::filesystem::path(_o.capture) /
+                                            ("frame_" + std::to_string(_frame - _o.warmup) + ".png")))
+                throw std::runtime_error("yard evaluation image write failed");
         }
         ++_frame;
         if (_o.visible && !_o.preview && _frame > _o.warmup + _o.frames)
@@ -150,8 +163,8 @@ public:
             .field("shadow_resolution", 1024)
             .field("shadow_near_plane", .025)
             .field("shadow_depth_bits", 32)
-            .field("render_width", 1280 * _o.scale)
-            .field("render_height", 720 * _o.scale)
+            .field("render_width", _o.width * _o.scale)
+            .field("render_height", _o.height * _o.scale)
             .field("route_frame", _route)
             .field("route_offset", _o.offset)
             .field("measured_frames", _o.frames)
@@ -238,7 +251,7 @@ private:
             throw std::runtime_error("yard skinning unavailable");
         if (_o.shadows && !_r->capabilities().local_shadows)
             throw std::runtime_error("yard local shadows unavailable");
-        _view = _r->create_view({1280 * _o.scale, 720 * _o.scale}, {.hdr = true}).value_or({});
+        _view = _r->create_view({_o.width * _o.scale, _o.height * _o.scale}, {.hdr = true}).value_or({});
         for (const auto& data : _data.meshes) {
             auto mesh = _r->create_mesh(data).value_or({});
             if (!mesh)
@@ -367,6 +380,16 @@ int main(int argc, char** argv) {
                 o.warmup = std::stoi(value());
             else if (a == "--measured")
                 o.frames = std::stoi(value());
+            else if (a == "--size") {
+                const auto v = value();
+                if (std::sscanf(v.c_str(), "%dx%d", &o.width, &o.height) != 2)
+                    throw std::runtime_error("yard size requires WIDTHxHEIGHT");
+            } else if (a == "--eval-capture")
+                o.capture = value();
+            else if (a == "--eval-capture-from")
+                o.capture_from = std::stoi(value());
+            else if (a == "--eval-capture-count")
+                o.capture_count = std::stoi(value());
             else if (a == "--resolution-scale")
                 o.scale = std::stoi(value());
             else if (a == "--point-lights")
@@ -418,9 +441,11 @@ int main(int argc, char** argv) {
                       << " source triangles\n";
             return 0;
         }
-        if (o.recipe.empty() || o.metrics.empty() || o.warmup < 0 || o.warmup > 300 || o.frames < 1 ||
-            o.frames > 6000 || (o.scale != 1 && o.scale != 2) || o.points < -1 || o.points > 16 || o.workers < 0 ||
-            o.workers > 4 || o.actors < -1 || o.smoke < -1 || o.props < -1 || o.offset < 0 || o.offset >= 1440)
+        if (o.width < 16 || o.height < 16 || o.width > 8192 || o.height > 8192 || o.capture_from < 0 ||
+            o.capture_count < 1 || o.capture_count > 6000 || o.recipe.empty() || o.metrics.empty() || o.warmup < 0 ||
+            o.warmup > 300 || o.frames < 1 || o.frames > 6000 || (o.scale != 1 && o.scale != 2) || o.points < -1 ||
+            o.points > 16 || o.workers < 0 || o.workers > 4 || o.actors < -1 || o.smoke < -1 || o.props < -1 ||
+            o.offset < 0 || o.offset >= 1440)
             throw std::runtime_error("invalid yard options");
         auto headless = parse_headless_options(int(runtime.size()), runtime.data());
         headless.enabled = !o.preview && !o.visible;
@@ -431,8 +456,8 @@ int main(int argc, char** argv) {
         SceneManager scenes;
         scenes.push(std::make_unique<Yard>(o, jobs.get()));
         return run_scene_app({.window = {.title = "Industrial yard",
-                                         .width = 1280,
-                                         .height = 720,
+                                         .width = o.width,
+                                         .height = o.height,
                                          .vsync = false,
                                          .max_fps = o.preview ? 60.f : 0.f,
                                          .high_pixel_density = false},

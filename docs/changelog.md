@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add scene-independent rendering evaluation jobs for raw performance, captures,
+  Cycles references, perceptual/temporal scoring and persistent-view memory stress.
+  Include Sponza, Yard, optional external Bistro and custom command adapters;
+  preserve provenance, verified resume, shared truth caching and offline reports.
+  Label baseline-only comparisons and unavailable measurements explicitly.
+
 - Compile attachment load/store declarations and logical colour/depth versions into safe storage handoffs or explicit
   preservation copies. Distinguish depth testing from shader sampling, report copy/reuse decisions and payload,
   protect re-imported history, and execute copies through public GPU texture-copy APIs. Remove the normal surface

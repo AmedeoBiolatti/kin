@@ -1,0 +1,18 @@
+{
+  "schema": "kin.eval-scene/1",
+  "id": "industrial_yard",
+  "adapter": "yard",
+  "tier": "small",
+  "capture": {
+    "from": 0,
+    "count": 12
+  },
+  "args": [
+    "--workers",
+    "4"
+  ],
+  "reference": {
+    "provider": "baseline",
+    "reason": "YRD1 procedural/posed materials have no reviewed Cycles provider. Scores here are image regressions against the selected baseline, not path-tracing accuracy."
+  }
+}

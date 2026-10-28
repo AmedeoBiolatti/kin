@@ -8,6 +8,9 @@ add_compile_options(
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME kin-eval-python
+        COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/eval" -v)
+    set_tests_properties(kin-eval-python PROPERTIES TIMEOUT 120)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_GENERATOR STREQUAL "Ninja")
         get_property(component_manifest GLOBAL PROPERTY KIN_COMPONENT_MANIFEST)
         add_test(NAME kin-component-targets

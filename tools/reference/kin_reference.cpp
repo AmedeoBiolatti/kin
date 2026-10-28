@@ -1,3 +1,5 @@
+#include "../../engine/src/runtime/eval_telemetry.hpp"
+
 #include <stdexcept>
 // Renders the reference scenes (docs/3d_plan.md, G0): each camera of each
 // scene to a PNG, timed, with what was drawn, into a folder a later run (or
@@ -2461,6 +2463,15 @@ int main(int argc, char** argv) {
     fs::path cache = cache_env ? fs::path{cache_env} : fs::path{home ? home : "."} / ".cache" / "kin" / "reference";
     int frames = 60, warmup = 10, repeat = 8, width = 1280, height = 720;
     bool gpu_timing = true;
+    bool eval_bench = false;
+    kin::detail::EvalTelemetry eval_telemetry;
+    std::ofstream eval_captures;
+    if (const auto* path = std::getenv("KIN_EVAL_CAPTURE_LOG"); path && *path) {
+        eval_captures.open(path);
+        eval_captures << std::setprecision(9);
+        if (!eval_captures)
+            throw std::runtime_error("cannot open KIN_EVAL_CAPTURE_LOG");
+    }
     int cascades_override = 0; // 0: the scene's own
     double distance_override = 0.0;
     Overrides over;
@@ -2469,7 +2480,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
-        if (a == "--out") {
+        if (a == "--eval-bench") {
+            eval_bench = true;
+        } else if (a == "--out") {
             out = next();
         } else if (a == "--cache") {
             cache = next();
@@ -3429,8 +3442,36 @@ int main(int argc, char** argv) {
                     }
                 }
             };
+            const auto* eval_frames = c.find("eval_frames");
+            const auto* eval_capture = c.find("eval_capture");
+            if (eval_frames && (eval_frames->items().empty() || !eval_capture || !eval_captures))
+                throw std::runtime_error("evaluation sequence requires frames, capture indices and capture log");
             const auto pose = [&](int time) {
-                fill_scene(time);
+                fill_scene(eval_frames ? std::max(0, time) : time);
+                if (eval_frames) {
+                    const auto& step =
+                        eval_frames->items()[std::clamp<int>(time, 0, int(eval_frames->items().size()) - 1)];
+                    scene.camera = kin::Camera3D::look_at(vec3(step.find("eye")), vec3(step.find("target")),
+                                                          float(step.number_at("fov", fov)));
+                    scene.camera.z_near = float(c.number_at("near", .05));
+                    if (time >= 0) {
+                        if (step.bool_at("cut"))
+                            view.reset_history();
+                        if (const auto* size = step.find("resize")) {
+                            if (size->items().size() != 2)
+                                throw std::runtime_error("evaluation resize needs width,height");
+                            const int w = int(size->items()[0].as_number()), h = int(size->items()[1].as_number());
+                            if (w < 16 || h < 16 || w > 8192 || h > 8192 || !r3d.resize(view, {w, h}))
+                                throw std::runtime_error("evaluation view resize failed");
+                        }
+                        if (const auto* value = step.find("taa"))
+                            scene.taa.enabled = value->as_bool();
+                        if (const auto* value = step.find("ao"))
+                            scene.ambient_occlusion.enabled = value->as_bool();
+                    }
+                    attach();
+                    return;
+                }
                 const Vec3f moved = pan * static_cast<float>(time);
                 if (is_walker || is_climber) {
                     // `follow: {eye, target}`: offsets from the character's feet (the camera goes where it goes).
@@ -3529,7 +3570,10 @@ int main(int argc, char** argv) {
             // A temporal history starts afresh at each camera, and runs long enough to settle.
             view.reset_history();
             pose(0); // for what the scene asks of temporal anti-aliasing
-            const int run = warmup + frames + (scene.taa.enabled ? std::max(0, taa_frames - warmup - frames) : 0);
+            const int run =
+                eval_frames ? warmup + int(eval_frames->items().size())
+                            : warmup + frames +
+                                  (!eval_bench && scene.taa.enabled ? std::max(0, taa_frames - warmup - frames) : 0);
             const int each = animated ? 1 : repeat;
 
             // The first picture: pipelines and targets made, the GPU waited for.
@@ -3539,21 +3583,54 @@ int main(int argc, char** argv) {
             if (auto rendered = r3d.render(view, scene); !rendered)
                 throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
             renderer.draw_texture(view.texture(), full);
-            wait_for_gpu();
+            if (!eval_bench)
+                wait_for_gpu();
             const double first_ms = ms_since(first_start);
             renderer.present();
 
             std::vector<double> cpu, gpu, cut_ms, cut_upload_ms;
+            auto eval_previous = std::chrono::steady_clock::now();
             for (int f = 0; f < run; ++f) {
-
-                pose(f - run);
+                const auto eval_begin =
+                    eval_telemetry ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                const int eval_index = f - warmup;
+                pose(eval_frames ? eval_index : f - run);
+                const auto eval_pose_ms = eval_telemetry ? ms_since(eval_begin) : 0.0;
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 for (int k = 0; k < each; ++k) {
                     if (auto rendered = r3d.render(view, scene); !rendered)
                         throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                 }
                 renderer.draw_texture(view.texture(), full);
+                if (!eval_bench && eval_frames && eval_index >= 0 &&
+                    std::any_of(eval_capture->items().begin(), eval_capture->items().end(),
+                                [&](const auto& value) { return value.as_number() == eval_index; })) {
+                    kin::Image captured;
+                    if (!renderer.read_rgba(full, captured.rgba, captured.size))
+                        throw std::runtime_error("evaluation sequence readback failed");
+                    const auto folder = out / name / camera_name;
+                    fs::create_directories(folder);
+                    const auto path = folder / ("frame_" + std::to_string(eval_index) + ".png");
+                    if (!kin::save_image(captured, path))
+                        throw std::runtime_error("evaluation sequence save failed");
+                    const auto e = scene.camera.position;
+                    const auto t = vec3(eval_frames->items()[eval_index].find("target"));
+                    eval_captures << "{\"view\":" << quoted(camera_name) << ",\"frame\":" << eval_index
+                                  << ",\"image\":" << quoted(fs::relative(path, out).generic_string()) << ",\"eye\":["
+                                  << e.x << ',' << e.y << ',' << e.z << "],\"target\":[" << t.x << ',' << t.y << ','
+                                  << t.z << "],\"fov\":" << scene.camera.fov << "}\n";
+                }
+                const auto eval_present =
+                    eval_telemetry ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 renderer.present();
+                if (eval_telemetry) {
+                    const auto now = std::chrono::steady_clock::now();
+                    eval_telemetry.record(camera_name, f,
+                                          std::chrono::duration<double, std::milli>(now - eval_previous).count(),
+                                          ms_since(eval_begin), eval_pose_ms, r3d.debug_stats().cpu_ms,
+                                          ms_since(eval_present), renderer.backend_stats());
+                    eval_previous = now;
+                }
                 if (f >= run - frames) {
                     cpu.push_back(r3d.debug_stats().cpu_ms);
                     cut_ms.push_back(r3d.debug_stats().cluster_ms);
@@ -3561,116 +3638,122 @@ int main(int argc, char** argv) {
                     gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
                 }
             }
-            wait_for_gpu();
-
-            // The picture.
-            pose(0);
-            renderer.clear(kin::Color::rgb(0, 0, 0));
-            scene.debug.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
-            if (auto rendered = r3d.render(view, scene); !rendered)
-                throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
-            scene.debug.stats_readback = false;
-            const kin::RenderDebugStats3D stats = r3d.debug_stats();
-            renderer.draw_texture(view.texture(), full);
-            kin::Image image;
-            if (!renderer.read_rgba(full, image.rgba, image.size)) {
-                std::fprintf(stderr, "  %s: could not read the picture back\n", camera_name.c_str());
-                ++failures;
-            }
-            renderer.present();
-            for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
-                image.rgba[i] = 255;
-            }
-            const fs::path png = out / name / (camera_name + ".png");
-            kin::save_image(image, png);
-            if (over.flicker > 0) {
-                // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change from
-                // one to the next?
-                std::vector<kin::u8> previous = image.rgba;
-                double sum_mean = 0, worst = 0, over8 = 0;
-                for (int k = 1; k <= over.flicker; ++k) {
-                    pose(k);
-                    renderer.clear(kin::Color::rgb(0, 0, 0));
-                    if (auto rendered = r3d.render(view, scene); !rendered)
-                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
-                    renderer.draw_texture(view.texture(), full);
-                    kin::Image next_image;
-                    renderer.read_rgba(full, next_image.rgba, next_image.size);
-                    renderer.present();
-                    if (k > 1) {
-                        double sum = 0;
-                        std::size_t count = 0, big = 0;
-                        for (std::size_t i = 0; i < next_image.rgba.size(); i += 4) {
-                            for (std::size_t c = 0; c < 3; ++c) {
-                                const int d = std::abs(int(next_image.rgba[i + c]) - int(previous[i + c]));
-                                sum += d;
-                                worst = std::max(worst, double(d));
-                                big += d > 8;
-                                ++count;
-                            }
-                        }
-                        sum_mean += sum / double(count);
-                        over8 += 100.0 * double(big) / double(count);
-                    }
-                    previous = next_image.rgba;
-                }
-                std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(),
-                            sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
-            }
-            if (over.vram_cycle) {
-                const double on_mb = gpu_used_mb();
-                const double on_bytes = static_cast<double>(stats.feature_bytes);
-                pose(0);
-                scene.ambient_occlusion.enabled = false;
-                scene.contact_shadows.enabled = false;
-                scene.taa.enabled = false;
-                scene.lod.occlusion.enabled = false;
-                kin::u64 released = 0;
-                for (int f = 0; f < 130; ++f) {
-                    renderer.clear(kin::Color::rgb(0, 0, 0));
-                    if (auto rendered = r3d.render(view, scene); !rendered)
-                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
-                    renderer.draw_texture(view.texture(), full);
-                    renderer.present();
-                    released += r3d.debug_stats().targets_released;
-                }
+            if (!eval_bench)
                 wait_for_gpu();
-                std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with "
-                            "them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
-                            name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
-                            static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0,
-                            static_cast<unsigned long long>(released));
+
+            kin::RenderDebugStats3D stats = r3d.debug_stats();
+            const fs::path png = out / name / (camera_name + ".png");
+            if (!eval_bench && !eval_frames) {
+                // The picture.
                 pose(0);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
+                scene.debug.stats_readback =
+                    over.readback; // waits for the GPU: only for this render, not the timed ones
                 if (auto rendered = r3d.render(view, scene); !rendered)
                     throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
+                scene.debug.stats_readback = false;
+                stats = r3d.debug_stats();
+                renderer.draw_texture(view.texture(), full);
+                kin::Image image;
+                if (!renderer.read_rgba(full, image.rgba, image.size)) {
+                    std::fprintf(stderr, "  %s: could not read the picture back\n", camera_name.c_str());
+                    ++failures;
+                }
                 renderer.present();
-            }
-            // The same moment drawn large and averaged down, with temporal anti-aliasing off.
-            if (supersample > 1) {
-                const kin::Vec2i big_size{width * supersample, height * supersample};
-                kin::View3D big = make_view(big_size, 4);
-                kin::RenderTarget target = renderer.create_render_target(big_size);
-                pose(0);
-                scene.taa.enabled = false;
-                kin::Image large;
-                if (big && target.valid()) {
-                    renderer.push_render_target(target);
+                for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
+                    image.rgba[i] = 255;
+                }
+
+                kin::save_image(image, png);
+                if (over.flicker > 0) {
+                    // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change
+                    // from one to the next?
+                    std::vector<kin::u8> previous = image.rgba;
+                    double sum_mean = 0, worst = 0, over8 = 0;
+                    for (int k = 1; k <= over.flicker; ++k) {
+                        pose(k);
+                        renderer.clear(kin::Color::rgb(0, 0, 0));
+                        if (auto rendered = r3d.render(view, scene); !rendered)
+                            throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
+                        renderer.draw_texture(view.texture(), full);
+                        kin::Image next_image;
+                        renderer.read_rgba(full, next_image.rgba, next_image.size);
+                        renderer.present();
+                        if (k > 1) {
+                            double sum = 0;
+                            std::size_t count = 0, big = 0;
+                            for (std::size_t i = 0; i < next_image.rgba.size(); i += 4) {
+                                for (std::size_t c = 0; c < 3; ++c) {
+                                    const int d = std::abs(int(next_image.rgba[i + c]) - int(previous[i + c]));
+                                    sum += d;
+                                    worst = std::max(worst, double(d));
+                                    big += d > 8;
+                                    ++count;
+                                }
+                            }
+                            sum_mean += sum / double(count);
+                            over8 += 100.0 * double(big) / double(count);
+                        }
+                        previous = next_image.rgba;
+                    }
+                    std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(),
+                                sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
+                }
+                if (over.vram_cycle) {
+                    const double on_mb = gpu_used_mb();
+                    const double on_bytes = static_cast<double>(stats.feature_bytes);
+                    pose(0);
+                    scene.ambient_occlusion.enabled = false;
+                    scene.contact_shadows.enabled = false;
+                    scene.taa.enabled = false;
+                    scene.lod.occlusion.enabled = false;
+                    kin::u64 released = 0;
+                    for (int f = 0; f < 130; ++f) {
+                        renderer.clear(kin::Color::rgb(0, 0, 0));
+                        if (auto rendered = r3d.render(view, scene); !rendered)
+                            throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
+                        renderer.draw_texture(view.texture(), full);
+                        renderer.present();
+                        released += r3d.debug_stats().targets_released;
+                    }
+                    wait_for_gpu();
+                    std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with "
+                                "them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
+                                name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
+                                static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0,
+                                static_cast<unsigned long long>(released));
+                    pose(0);
                     renderer.clear(kin::Color::rgb(0, 0, 0));
-                    if (auto result = r3d.render(big, scene); !result)
-                        throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
-                    const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x),
-                                              static_cast<float>(big_size.y)};
-                    renderer.draw_texture(big.texture(), big_rect);
-                    renderer.read_rgba(big_rect, large.rgba, large.size);
-                    renderer.pop_render_target();
+                    if (auto rendered = r3d.render(view, scene); !rendered)
+                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                     renderer.present();
                 }
-                if (large.size.x == big_size.x && large.size.y == big_size.y) {
-                    const kin::Image small = supersample_average(large, {width, height}, supersample);
-                    kin::save_image(small, out / name / (camera_name + "_ss.png"));
-                } else {
-                    std::fprintf(stderr, "  %s: could not draw the supersampled picture\n", camera_name.c_str());
+                // The same moment drawn large and averaged down, with temporal anti-aliasing off.
+                if (supersample > 1) {
+                    const kin::Vec2i big_size{width * supersample, height * supersample};
+                    kin::View3D big = make_view(big_size, 4);
+                    kin::RenderTarget target = renderer.create_render_target(big_size);
+                    pose(0);
+                    scene.taa.enabled = false;
+                    kin::Image large;
+                    if (big && target.valid()) {
+                        renderer.push_render_target(target);
+                        renderer.clear(kin::Color::rgb(0, 0, 0));
+                        if (auto result = r3d.render(big, scene); !result)
+                            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
+                        const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x),
+                                                  static_cast<float>(big_size.y)};
+                        renderer.draw_texture(big.texture(), big_rect);
+                        renderer.read_rgba(big_rect, large.rgba, large.size);
+                        renderer.pop_render_target();
+                        renderer.present();
+                    }
+                    if (large.size.x == big_size.x && large.size.y == big_size.y) {
+                        const kin::Image small = supersample_average(large, {width, height}, supersample);
+                        kin::save_image(small, out / name / (camera_name + "_ss.png"));
+                    } else {
+                        std::fprintf(stderr, "  %s: could not draw the supersampled picture\n", camera_name.c_str());
+                    }
                 }
             }
             const Summary cpu_s = summarize(cpu), gpu_s = summarize(gpu);

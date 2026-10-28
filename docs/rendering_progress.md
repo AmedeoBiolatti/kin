@@ -154,3 +154,27 @@ The bound executor records exact native texture copies, including depth arrays, 
 The [surface graph](../tools/surface3d/main.cpp) now declares opaque colour/depth, loaded composed colour and read-only depth. Its normal path eliminates the colour copy and one full-size RGBA16F texture, saving 2.1875 MiB payload at 640 × 448. It still compares exact pixels with the separate-copy reference and checks cached plans, warmed handles and HDR transitions. The earlier stage's manual `colour_input` path remains available. See [the contract](render_graph.md#attachment-loads-and-logical-versions).
 
 Validation: full native stock 3D dispatch, twenty focused hardware checks (five inherited live-device lifecycle skips), all twenty-one software Vulkan checks, browser 2D handoff/stock 3D smoke, 300 compiler reference graphs, compiler sanitizers, standalone 2D-only compilation, four unchanged stock captures and the 199-file formatting gate pass. See [the measurements](rendering_measurements.md#compiled-attachment-versions) for scope and artifact paths.
+
+## Scene-independent rendering evaluation
+
+`tools/eval/eval.py` adds manifest-driven benchmark, capture, Cycles truth, scoring,
+stress and offline report stages. Sponza, deterministic Industrial Yard and the
+external Bistro game are registered adapters; a JSON command protocol supports
+other applications without engine-specific scene conversion. See the
+[evaluator guide](../tools/eval/README.md) and [adapter protocol](../tools/eval/protocol.md).
+
+The runtime exposes opt-in raw CPU/frame, descriptor-memory, copy and fence-estimate
+records through `KIN_EVAL_FRAME_LOG`. Throughput processes avoid capture and
+synchronized diagnostics. Repeats alternate build order; reports distinguish CPU
+percentiles from unassigned GPU fence observations, owned payload from device-wide
+residency observations, and baseline image regression from reviewed Cycles accuracy.
+Frozen provenance, complete artifact inventories, dependency-aware resume and a
+shared truth cache prevent stale/missing frames from silently passing.
+
+Scoring reproduces the previous Bistro display transforms, FLIP, image/video JOD,
+bias/detail and temporal definitions, adds Kin SSIM, and reports two-seed Cycles
+noise. Yard remains baseline regression only until a reviewed procedural exporter
+exists. Lifecycle stress currently covers persistent reference-view resize/TAA/AO;
+asset/shader reload, scene load/unload and multiple views are explicitly unexercised.
+The stress baseline is established after feature prewarming and upload/pool expiry,
+so startup slack cannot serve as a hidden allowance for later retained growth.
