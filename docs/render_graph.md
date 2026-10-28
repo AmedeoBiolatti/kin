@@ -133,7 +133,7 @@ Native SDL_GPU exposes `render_sun_shadow()` and `render_surface()` as independe
 
 `GraphResourceDesc::array_layers` defaults to zero (a 2D texture). A positive count declares an explicit 2D array, including a one-layer array. Arrays require `GraphResourceKind::RenderAttachment` and `graph_feature::attachment_arrays` / `Renderer2D::capabilities().render_attachment_arrays`. Direct allocation uses `create_render_attachment(size, format, layers)`. Payload budgets multiply by the layer count; slot compatibility and imports distinguish 2D textures from one-layer arrays. Custom shaders must declare the corresponding sampler type. Ordinary 2D uploads and 3D material texture slots do not accept arrays.
 
-A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun depth → mesh colour/depth → GPU ASCII → output, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
+A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun/local depth → mesh colour/depth with a toon lighting hook → GPU ASCII → output, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
 
 ```cpp
 // Resources: sun = D32F array, colour = working-colour target, depth = D32F 2D.
@@ -155,8 +155,41 @@ return bool(r3d.render_surface(
 
 The returned `SunShadow3D` holds the texture plus `ShadowCascades3D` projection/bias-scale metadata. It is a binding to mutable texture contents. Keep projection and depth versions together; use distinct persistent or ping-pong resources for history. A developer may supply a custom projection/map by constructing the same value. Finite matrices, positive texel/depth scales, valid cascade ranges, sampler format and ownership are checked before recording. Shadows use the stock comparison/PCF material interface; arbitrary lighting algorithms still require additional material hooks.
 
-`render_surface()` clears single-sample colour/depth and shades scene meshes with the exact unjittered camera projection. It includes stock materials/custom material shaders, opaque and masked draws, ordered transparency, wireframes, overlays, explicit environment lighting and unshadowed point/spot lights. Colour uses the current Renderer2D working format (including linear HDR); it performs no view tonemapping. Depth is stored for later graph consumers. Overlay depth uses the stock split range; blended materials test depth without writing it.
+`render_surface()` clears single-sample colour/depth and shades scene meshes with the exact unjittered camera projection. It includes stock materials/custom material shaders, opaque and masked draws, ordered transparency, wireframes, overlays, explicit environment lighting and point/spot lights with optional supplied local shadows. Colour uses the current Renderer2D working format (including linear HDR); it performs no view tonemapping. Depth is stored for later graph consumers. Overlay depth uses the stock split range; blended materials test depth without writing it.
 
-Pass `sun_shadow = nullptr` to shade without sun shadows. No shadow map is generated implicitly. Scene switches for local/fill shadows, sky, fog, particles, AO, GI, TAA and postprocessing do not add work to this operation. Procedural sky lighting is also omitted; an explicitly supplied environment may be filtered on first use. These features and local-shadow inputs remain future public operations. Geometry/surface culling disables temporal occlusion, and neither operation advances a stock view's history or modifies its private shadow maps.
+Pass `sun_shadow = nullptr` to shade without sun shadows. No shadow map is generated implicitly. Scene switches for shadow generation, sky, fog, particles, AO, GI, TAA and postprocessing do not add work to this operation. Procedural sky lighting is also omitted; an explicitly supplied environment may be filtered on first use. Fill-shadow inputs and these effects remain future public operations. Geometry/surface culling disables temporal occlusion, and neither operation advances a stock view's history or modifies its private shadow maps.
 
 Both operations consume the prepared handle's frame and source-lifetime contract. Targets/maps must belong to the renderer; surface attachment feedback through any material map is rejected before recording. Allocation or recording failure follows the graph's no-rollback contract. Keep all declared graph reads live through their consumers; projection metadata is ordinary callback data, while the graph tracks the matching depth texture. A finite-propagation light simulation needs explicit scene/light history and a bounded solver in addition to these rendering operations.
+
+
+## Explicit local shadows
+
+`Renderer3D::render_local_shadows(depth_array, prepared, requests, receiver_size)` renders explicitly requested point/spot mesh shadows on native SDL_GPU. Check `capabilities().local_shadow_pass`. The target is a square sampled D32F array with at most `max_local_shadow_layers` (20) layers. At most eight spots and two points may be requested. Each request specifies a light's index in the prepared source scene, a first layer, and a viewport resolution (zero uses the full array side). A spot occupies one layer; a point occupies six consecutive layers in +x, −x, +y, −y, +z, −z order. Occupied ranges must not overlap, and each light can appear only once.
+
+```cpp
+// Submit local lights after scene.clear(), which clears those lists too.
+scene.lights.spots.push_back(spot);
+scene.lights.points.push_back(point);
+const std::array requests{
+    LocalShadowRequest3D{.kind = LocalShadowKind3D::Spot, .light = 0, .first_layer = 0},
+    LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .light = 0, .first_layer = 1},
+};
+auto prepared = r3d.prepare(scene).value_or({});
+// Local-shadow graph callback (declares a write of the seven-layer array):
+auto result = r3d.render_local_shadows(resources.texture(local), prepared, requests, size);
+if (!result) return false;
+LocalShadows3D shadows = std::move(*result);
+// Surface callback declares a read of that array, alongside any sun depth:
+return bool(r3d.render_surface({resources.target(colour), resources.texture(depth)}, prepared,
+    {.sun_shadow = &sun_shadow, .local_shadows = &shadows}));
+```
+
+Requests select their lights independently of `shadow_enabled`, stock importance/hysteresis, shadow-slot budgets and private caches. The supplied target and request resolutions determine storage/viewport size; per-light bias, normal offset, softness and distance settings determine fitting/filter metadata. All six requested point faces are rendered, including faces outside the current camera. This makes the output complete and reusable for another camera; it can cost more than the stock camera-pruned cube path. Unused layers and unused texels of smaller viewports are cleared to reverse-Z far. Empty requests clear the entire declared array.
+
+The result stores the depth texture plus `LocalShadowMap3D` values: normalized source requests, projection matrices/near/far/scales, bias/filter settings and fade distance. `SurfaceOptions3D::local_shadows` explicitly binds them to the selected lights, including the stock light grid. Null supplies unshadowed local lighting. A developer may edit projection/filter metadata before consumption; keep the corresponding map contents and scene light indices aligned. Lighting settings can change without invalidating prepared geometry, so moved/removed/reordered lights require an intentional metadata update. Historical maps need distinct persistent targets and their matching projection/light metadata. The values are mutable bindings, not snapshots of a texture's old contents.
+
+Casters use stock mask samplers, skinning, retained instances, conservative bounds and light-specific LOD/cluster cuts. Overlays and particles are excluded. The operation redraws its requested maps without updating private stock arrays, slot ownership, cache revisions or per-view TAA/AO history. CPU world/posed bounds come from the prepared handle; camera/caster membership and local cut selection still run per consumer. No local-shadow array is silently generated by `render_surface()`.
+
+Before recording, the backend rejects wrong devices/formats/usages, expired preparation, invalid light indices/kinds/settings, overlapping/out-of-range layers, excessive requests, oversized viewports, invalid projection/scaling values and invalid filter ranges. Errors own their diagnostics. Unsupported backends fail explicitly. Recording failure can leave partial contents, as with other graph operations.
+
+The [surface example](../tools/surface3d/main.cpp) includes both producers and a [toon response shader](../tools/surface3d/toon.frag.glsl). See [custom lighting responses](rendering_3d.md#custom-lighting-responses) for replacing the direct BRDF/visibility response. Arbitrary graph texture/buffer bindings for materials, alternate shadow representations and fill-shadow operations remain separate work.

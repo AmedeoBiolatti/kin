@@ -927,6 +927,7 @@ int main(int argc, char** argv) {
     const auto own_array = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 1);
     assert(!f.r3d.render_surface(surface, foreign_prepared));
     assert(!f.r3d.render_sun_shadow(own_array, foreign_prepared, extent));
+    assert(!f.r3d.render_local_shadows(own_array, foreign_prepared, {}, extent));
     Scene3D own_scene;
     assert(own_scene.draw(f.mesh, {}));
     const auto own_prepared = f.r3d.prepare(own_scene).value_or({});
@@ -934,6 +935,12 @@ int main(int argc, char** argv) {
     const auto foreign_depth = other.create_render_attachment(extent, TextureFormat::Depth32Float);
     const auto foreign_colour = other.create_render_target(extent);
     assert(own_prepared && !f.r3d.render_sun_shadow(foreign_array, own_prepared, extent));
+    assert(!f.r3d.render_local_shadows(foreign_array, own_prepared, {}, extent));
+    own_scene.lights.spots.push_back({.position = {0, 2, 2}, .direction = {0, -1, 0}});
+    LocalShadows3D foreign_local{foreign_array,
+                                 {LocalShadowMap3D{.source = {.resolution = 128},
+                                                   .projection = {spot_shadow_view(own_scene.lights.spots[0], 128)}}}};
+    assert(!f.r3d.render_surface(surface, own_prepared, {.local_shadows = &foreign_local}));
     assert(!f.r3d.render_surface({surface.colour, foreign_depth}, own_prepared));
     assert(!f.r3d.render_surface({foreign_colour, surface.depth}, own_prepared));
 

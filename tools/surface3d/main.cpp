@@ -1,4 +1,6 @@
-// Public graph: sun shadow -> mesh surface -> GPU ASCII -> presentation.
+// Public graph: sun + explicit spot/point shadows -> toon material -> GPU ASCII -> presentation.
+#include "surface3d_shader.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdlib>
@@ -25,14 +27,16 @@ int main(int argc, char** argv) {
         Renderer3D r3d{renderer};
         const auto features = available_graph_features(renderer);
         if (!r3d.capabilities().surface_pass || !r3d.capabilities().sun_shadow_pass ||
-            !(features & graph_feature::attachment_arrays)) {
+            !r3d.capabilities().local_shadow_pass || !(features & graph_feature::attachment_arrays)) {
             std::cerr << "Surface graph requires native surface, sun-shadow and array attachment support\n";
             return std::getenv("KIN_REQUIRE_GPU_TESTS") ? 1 : 77;
         }
         const auto cube = r3d.create_mesh(meshes::box({2, 2, 2})).value_or({});
         const auto ground = r3d.create_mesh(meshes::box({12, .1f, 12})).value_or({});
         const auto ascii = renderer.builtin_shader(BuiltinShader::Ascii);
-        check(cube && ground && ascii, "surface graph resources unavailable");
+        const auto bytes = surface3d_shader("toon.frag.spv");
+        const auto toon = r3d.create_material_shader(bytes).value_or({});
+        check(cube && ground && ascii && toon, "surface graph resources unavailable");
         ResourceGraphDesc graph;
         graph.resources = {{.name = "sun",
                             .kind = GraphResourceKind::RenderAttachment,
@@ -45,12 +49,20 @@ int main(int argc, char** argv) {
                             .format = TextureFormat::Depth32Float,
                             .size = size},
                            {.name = "glyphs", .kind = GraphResourceKind::ColorTarget, .size = size},
-                           {.name = "output", .kind = GraphResourceKind::ColorTarget, .size = size, .exported = true}};
+                           {.name = "output", .kind = GraphResourceKind::ColorTarget, .size = size, .exported = true},
+                           {.name = "local",
+                            .kind = GraphResourceKind::RenderAttachment,
+                            .format = TextureFormat::Depth32Float,
+                            .size = {256, 256},
+                            .array_layers = 7}};
         graph.passes = {
             {.name = "sun",
              .writes = {0},
              .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
-            {.name = "surface", .reads = {0}, .writes = {1, 2}, .required_features = graph_feature::rendering3d},
+            {.name = "local",
+             .writes = {5},
+             .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
+            {.name = "surface", .reads = {0, 5}, .writes = {1, 2}, .required_features = graph_feature::rendering3d},
             {.name = "ascii", .reads = {1}, .writes = {3}, .required_features = graph_feature::shaders},
             {.name = "output", .reads = {3}, .writes = {4}, .required_features = graph_feature::raster}};
         ResourceGraphCompiler compiler;
@@ -59,6 +71,10 @@ int main(int argc, char** argv) {
         scene.camera = Camera3D::look_at({4, 3, 6}, {});
         scene.lights.shadow_cascades = 4;
         scene.lights.shadow_area = {{-8, -2, -8}, {8, 6, 8}};
+        const std::array local_requests{LocalShadowRequest3D{.kind = LocalShadowKind3D::Spot, .first_layer = 0},
+                                        LocalShadowRequest3D{.kind = LocalShadowKind3D::Point, .first_layer = 1}};
+        const Material3D ground_material{.shader = toon, .shader_params = {4}};
+        const Material3D cube_material{.color = Color::rgb(230, 140, 60), .shader = toon, .shader_params = {4}};
         ShaderParams params;
         params.uniforms[0] = 80;
         params.uniforms[1] = 32;
@@ -67,9 +83,12 @@ int main(int argc, char** argv) {
         f32 angle = 20;
         const auto picture = [&](bool reference) {
             scene.clear();
-            check(bool(scene.draw(ground, Mat4f::translation({0, -1.1f, 0}))), "ground rejected");
-            check(bool(scene.draw(cube, Mat4f::rotation_y(angle), {.color = Color::rgb(230, 140, 60)})),
-                  "cube rejected");
+            scene.lights.points.push_back({.position = {-2, 3, 2}, .color = {8, 4, 2}, .radius = 12});
+            scene.lights.spots.push_back(
+                {.position = {3, 4, 2}, .direction = {-.5f, -1, -.5f}, .color = {4, 6, 10}, .radius = 12});
+
+            check(bool(scene.draw(ground, Mat4f::translation({0, -1.1f, 0}), ground_material)), "ground rejected");
+            check(bool(scene.draw(cube, Mat4f::rotation_y(angle), cube_material)), "cube rejected");
             renderer.clear(colors::black);
             const auto& plan =
                 compiler.compile(graph, features, {.cull_unused = !reference, .reuse_slots = !reference});
@@ -77,7 +96,8 @@ int main(int argc, char** argv) {
             auto prepared = r3d.prepare(scene).value_or({});
             check(bool(prepared), "scene preparation failed");
             SunShadow3D shadow;
-            const std::array<std::function<bool()>, 4> operations{
+            LocalShadows3D local;
+            const std::array<std::function<bool()>, 5> operations{
                 [&] {
                     auto result = r3d.render_sun_shadow(resources.texture(0), prepared, size);
                     if (!result)
@@ -86,8 +106,16 @@ int main(int argc, char** argv) {
                     return true;
                 },
                 [&] {
-                    return bool(r3d.render_surface({resources.target(1), resources.texture(2)}, prepared,
-                                                   {.background = Color::rgb(20, 25, 35), .sun_shadow = &shadow}));
+                    auto result = r3d.render_local_shadows(resources.texture(5), prepared, local_requests, size);
+                    if (!result)
+                        return false;
+                    local = std::move(*result);
+                    return true;
+                },
+                [&] {
+                    return bool(r3d.render_surface(
+                        {resources.target(1), resources.texture(2)}, prepared,
+                        {.background = Color::rgb(20, 25, 35), .sun_shadow = &shadow, .local_shadows = &local}));
                 },
                 [&] {
                     auto target = renderer.scoped_render_target(resources.target(3));
@@ -139,7 +167,7 @@ int main(int argc, char** argv) {
             renderer.present();
             check(resources.texture(0) == array, "HDR transition replaced data array");
             std::cout << "Surface graph: exact reference pixels, cached plans, stable allocations, HDR, explicit "
-                         "shadow/surface/ASCII\n";
+                         "sun/local shadows, toon lighting and ASCII\n";
         } else
             app.run([&](f32 dt) { angle += dt * 20; },
                     [&](f32) {

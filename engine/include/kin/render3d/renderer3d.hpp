@@ -159,9 +159,14 @@ public:
     // Directional shadow rasterization into graph-owned D32F array layers. The
     // receiver extent controls cascade fitting; no colour or history is rendered.
     Result3D<SunShadow3D> render_sun_shadow(const Texture& depth_array, const PreparedScene3D&, Vec2i receiver_size);
+    // Explicit point/spot mesh casters into caller-owned D32F array layers.
+    // Writes all six faces of requested points and clears every unused layer.
+    // At most eight spots/two points; no implicit selection, particles or cache.
+    Result3D<LocalShadows3D> render_local_shadows(const Texture& depth_array, const PreparedScene3D&,
+                                                  std::span<const LocalShadowRequest3D> requests, Vec2i receiver_size);
     // Single-sample material shading into explicit colour/depth attachments.
     // Meshes/overlays, environment, point/spot lights and optional supplied sun
-    // shadow; no implicit shadow maps, sky/fog/particles, AO/GI/TAA or postproc.
+    // and local shadows; no implicit maps, sky/fog/particles, AO/GI/TAA or postproc.
     Status3D render_surface(const SurfaceTargets3D&, const PreparedScene3D&, const SurfaceOptions3D& = {});
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,

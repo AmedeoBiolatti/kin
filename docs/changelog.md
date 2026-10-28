@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Add explicit spot/point mesh-shadow graph operations, complete point cubes and surface-local shadow bindings,
+  preserving stock selection/cache/history ownership. Add an opt-in direct-light material response with separate
+  irradiance/visibility and light position/distance, plus a toon-lighting graph example.
+
 - Expose explicit sun-shadow and mesh-surface operations for custom native 3D graphs, reusing prepared scene data.
   Add typed array attachments and a shadow → surface → ASCII example, with explicit shadow inputs, stored depth,
   HDR working colour and independent stock view history/cache ownership.

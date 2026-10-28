@@ -1353,6 +1353,34 @@ Signal Breach's hit shields (`examples/shaders/shield.frag.glsl`: Fresnel rim
 and climbing lines, additive) are one. Passes of your own on an HDR view are
 not offered: draw into the view's texture with the 2D renderer's shaders.
 
+### Custom lighting responses
+
+A custom native material can replace the direct-light response while retaining stock material sampling, ambient/IBL, emission and output handling. Define `KIN_DIRECT_LIGHT` before including `kin_material.inc.glsl`, then implement the named function with signature `vec3 response(Surface surface, KinLight light)`. No new sampler or uniform slots are required. Existing custom shaders and stock shaders keep their original path when the macro is absent.
+
+```glsl
+#version 450 core
+#define KIN_DIRECT_LIGHT toon_response
+#include "kin_material.inc.glsl"
+vec3 toon_response(Surface surface, KinLight light) {
+    float bands = 4.0;
+    float cosine = max(dot(surface.n, light.direction), 0.0);
+    float stepped = floor(cosine * bands + 0.5) / bands;
+    return surface.diffuse * light.irradiance * (stepped * light.visibility);
+}
+void main() {
+    vec4 base = kin_base_color();
+    vec2 mr = kin_metallic_roughness();
+    vec3 lit = kin_lit(base.rgb, kin_normal(), mr.x, mr.y, kin_occlusion());
+    FragColor = kin_output(lit + kin_emissive(base.rgb), base.a);
+}
+```
+
+`KinLight` supplies a unit direction toward the light, attenuated linear irradiance, separate shadow/contact visibility, the light kind (`KIN_LIGHT_SUN`, `KIN_LIGHT_FILL`, `KIN_LIGHT_POINT`, `KIN_LIGHT_SPOT`), and a position/distance for local lights in the same world space as `kin_position()` (the overlay's own space when drawing it). Directionals use zero position/distance. Irradiance already includes the point radius window, inverse-square/size limit and spot-cone attenuation, but excludes the BRDF and visibility. Return outgoing linear radiance; the stock response is `shade(surface, light.direction, light.irradiance * light.visibility)`. A callback can use visibility differently or replace it analytically. Direct lights with zero range/cone attenuation are skipped. Directional callbacks can shade the back-facing hemisphere too, allowing wrapped responses.
+
+The callback runs from `kin_lit()`. Ambient/IBL and emission remain separate; it does not change geometry, mask coverage, shadow casters, alpha or depth. Custom materials retain their existing fixed light blocks (up to 16 selected points and 16 spots); this does not add light-grid storage bindings to custom shaders. Stock grid rendering consumes explicit local maps normally. Alternative shadow representations, extra graph-resource bindings and a complete finite-propagation lighting solver require additional interfaces/history management. The position/distance fields alone do not implement physical light travel.
+
+Build/run `kin_surface3d` for explicit sun/local graph shadows, this [toon shader](../tools/surface3d/toon.frag.glsl), and GPU ASCII postprocessing. See the [local-shadow graph contract](render_graph.md#explicit-local-shadows) for map ownership, light-index/version rules and capabilities.
+
 ## Models
 
 For an isolated asset turntable, material/normal/UV inspection, explicit reload

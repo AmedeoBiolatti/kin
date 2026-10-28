@@ -421,6 +421,30 @@ Result3D<SunShadow3D> Renderer3D::render_sun_shadow(const Texture& depth, const 
         _errors = result.diagnostics;
     return result;
 }
+Result3D<LocalShadows3D> Renderer3D::render_local_shadows(const Texture& depth, const PreparedScene3D& prepared,
+                                                          std::span<const LocalShadowRequest3D> requests,
+                                                          Vec2i receiver) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().local_shadow_pass) {
+        fail3d(_errors, "Renderer3D::render_local_shadows", "local shadow operation unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!prepared.backend() || !depth || depth.format() != TextureFormat::Depth32Float || !depth.array_layers() ||
+        depth.array_layers() > max_local_shadow_layers || depth.size().x != depth.size().y || receiver.x <= 0 ||
+        receiver.y <= 0 || requests.size() > max_spot_shadow_maps + max_point_shadow_maps) {
+        fail3d(_errors, "Renderer3D::render_local_shadows",
+               "requires prepared data, a square D32F array, bounded requests and positive receiver extent");
+        return {std::nullopt, _errors};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto result = _backend->render_local_shadows(depth, *prepared.backend(), requests, receiver, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!result)
+        _errors = result.diagnostics;
+    return result;
+}
+
 Status3D Renderer3D::render_surface(const SurfaceTargets3D& targets, const PreparedScene3D& prepared,
                                     const SurfaceOptions3D& options) {
     _errors.clear();

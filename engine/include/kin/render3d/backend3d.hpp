@@ -74,7 +74,7 @@ struct RendererCapabilities3D {
     // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
     bool geometry_pass = false;
     bool shared_preparation = false;
-    bool surface_pass = false, sun_shadow_pass = false;
+    bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
 };
 
 struct ViewOptions3D {
@@ -114,13 +114,34 @@ struct SunShadow3D {
     Texture depth; // sampled D32F 2D array, 1..max_shadow_cascades layers
     ShadowCascades3D projection;
 };
+enum class LocalShadowKind3D { Spot, Point };
+// Explicit selection, independent of the stock shadow-slot allocator. A point
+// occupies six consecutive layers (+x,-x,+y,-y,+z,-z); a spot occupies one.
+struct LocalShadowRequest3D {
+    LocalShadowKind3D kind = LocalShadowKind3D::Spot;
+    u32 light = 0; // index in the source scene's spots/points
+    u32 first_layer = 0;
+    u32 resolution = 0; // 0: full array side; otherwise a viewport at its top left
+};
+struct LocalShadowMap3D {
+    LocalShadowRequest3D source;
+    std::array<LocalShadowView3D, cube_faces> projection{};
+    f32 bias = 1, normal_offset = 1.5f, softness = 1, fade_distance = 10;
+};
+// Mutable bindings, like SunShadow3D. Keep map/projection/light-index versions
+// aligned, and use distinct persistent targets for historical snapshots.
+struct LocalShadows3D {
+    Texture depth; // sampled square D32F array, up to max_local_shadow_layers
+    std::vector<LocalShadowMap3D> maps;
+};
 struct SurfaceTargets3D {
     RenderTarget colour; // current Renderer2D working colour format
     Texture depth;       // sampled D32F 2D, same extent; stores reverse-Z depth
 };
 struct SurfaceOptions3D {
     Color background = colors::transparent;
-    const SunShadow3D* sun_shadow = nullptr; // null: no sun shadow; never generates maps implicitly
+    const SunShadow3D* sun_shadow = nullptr;       // null: no sun shadow; never generates maps implicitly
+    const LocalShadows3D* local_shadows = nullptr; // null: unshadowed point/spot lights
 };
 
 // What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
@@ -228,6 +249,11 @@ public:
     virtual Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
                                                     RenderDebugStats3D&) {
         return {std::nullopt, {"sun shadow operation unavailable"}};
+    }
+    virtual Result3D<LocalShadows3D> render_local_shadows(const Texture&, IPreparedSceneBackend3D&,
+                                                          std::span<const LocalShadowRequest3D>, Vec2i,
+                                                          RenderDebugStats3D&) {
+        return {std::nullopt, {"local shadow operation unavailable"}};
     }
     virtual bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
                                 RenderDebugStats3D&) {

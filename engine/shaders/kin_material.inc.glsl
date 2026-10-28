@@ -152,6 +152,7 @@ vec3 mapped_normal(vec3 n, float front) {
 }
 
 #include "kin_brdf.inc.glsl"
+#include "kin_light_response.inc.glsl"
 
 // The ambient occlusion of the pixel (1: none, or this surface has none).
 // Only what the pre-pass drew has it: a blended surface would read what is behind it.
@@ -326,10 +327,18 @@ vec3 kin_point_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour
     }
     const vec3 toward = to * inversesqrt(max(d2, 1e-8));
     float seen = 1.0;
-    if (material.params.z > 0.5 && dot(n, toward) > 0.0) {
+    if (material.params.z > 0.5
+#ifndef KIN_DIRECT_LIGHT
+        && dot(n, toward) > 0.0
+#endif
+    ) {
         seen = point_light_shadow_from(first, offset_normal, toward, sqrt(d2));
     }
+#ifdef KIN_DIRECT_LIGHT
+    return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_POINT, at.xyz, sqrt(d2));
+#else
     return shade(s, toward, colour.rgb * (k * seen));
+#endif
 }
 
 // A spot light's: a point light's falloff inside a cone (glTF's punctual spot: the square of the linear step of the
@@ -347,10 +356,18 @@ vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour,
         return vec3(0.0);
     }
     float seen = 1.0;
-    if (more.y >= 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
+    if (more.y >= 0.0 && material.params.z > 0.5
+#ifndef KIN_DIRECT_LIGHT
+        && dot(n, toward) > 0.0
+#endif
+    ) {
         seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
     }
+#ifdef KIN_DIRECT_LIGHT
+    return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_SPOT, at.xyz, sqrt(d2));
+#else
     return shade(s, toward, colour.rgb * (k * seen));
+#endif
 }
 #endif
 
@@ -388,7 +405,11 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     const vec3 offset_normal = shadow_offset_normal(n); // the moon's and the local lights' shadows, as the sun's
 #endif
     const float sun = dot(n, frame.sun_direction.xyz);
+#ifdef KIN_DIRECT_LIGHT
+    if (dot(frame.sun_color.rgb, vec3(1.0)) > 0.0) {
+#else
     if (sun > 0.0) {
+#endif
         float lit = sunlight(n, world_dx, world_dy);
 #ifdef KIN_LIGHTS
         lit = mix(1.0, lit, locals.counts.w);
@@ -402,10 +423,16 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
             lit *= contact_shadow();
 #endif
         }
+#ifdef KIN_DIRECT_LIGHT
+        light += kin_direct_light(s, frame.sun_direction.xyz, frame.sun_color.rgb, lit, KIN_LIGHT_SUN, vec3(0.0), 0.0);
+#else
         light += shade(s, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
+#endif
     }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {
-#ifdef KIN_LIGHTS
+#ifdef KIN_DIRECT_LIGHT
+        light += kin_direct_light(s, frame.fill_direction.xyz, frame.fill_color.rgb, moonlight(offset_normal), KIN_LIGHT_FILL, vec3(0.0), 0.0);
+#elif defined(KIN_LIGHTS)
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb * moonlight(offset_normal));
 #else
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb);

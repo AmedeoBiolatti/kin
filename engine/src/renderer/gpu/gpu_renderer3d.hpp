@@ -366,6 +366,9 @@ public:
     bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
     Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
                                             RenderDebugStats3D&) override;
+    Result3D<LocalShadows3D> render_local_shadows(const Texture&, IPreparedSceneBackend3D&,
+                                                  std::span<const LocalShadowRequest3D>, Vec2i,
+                                                  RenderDebugStats3D&) override;
     bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
                         RenderDebugStats3D&) override;
     Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
@@ -516,7 +519,7 @@ private:
     // grid_tile pixels by slices of view depth) those whose reach touches it, uploaded for the main pass.
     void build_light_grid(FrameCtx& ctx);
     void build_local_shadows(FrameCtx& ctx);
-    void local_shadow_pass(FrameCtx& ctx);
+    bool local_shadow_pass(FrameCtx& ctx);
     void push_local_lights(const FrameCtx& ctx, u32 s, u32 slot);
     // The local array made or kept (`side` x `side`, a layer for each of `spot_layers` spots then six for each of
     // `point_slots` point lights: only ever more, until it has been idle for _release_after renders; false where it
