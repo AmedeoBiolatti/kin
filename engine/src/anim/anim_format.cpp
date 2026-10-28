@@ -59,7 +59,7 @@ std::vector<Line> read_lines(std::string_view text) {
 }
 
 bool is_header(const std::string& token) {
-    return token == "animation" || token == "statemachine";
+    return token == "animation" || token == "statemachine" || token == "blendspace";
 }
 
 template <typename T>
@@ -75,6 +75,9 @@ bool fail(const Line& line, std::string_view msg, std::string& error) {
 }
 
 Easing parse_easing(std::string_view value) {
+    if (value == "step") {
+        return Easing::Step;
+    }
     if (value == "easein") {
         return Easing::EaseIn;
     }
@@ -89,6 +92,7 @@ Easing parse_easing(std::string_view value) {
 
 std::string easing_text(Easing easing) {
     switch (easing) {
+    case Easing::Step: return "step";
     case Easing::Linear: return "linear";
     case Easing::EaseIn: return "easein";
     case Easing::EaseOut: return "easeout";
@@ -405,6 +409,9 @@ bool parse_transition(const Line& line, AnimationStateMachine& machine, std::str
                 return fail(line, "unknown float condition operator", error);
             }
             i += 3;
+        } else if (line.tok[i] == "finished") {
+            condition.op = CondOp::Finished;
+            ++i;
         } else if (line.tok[i].starts_with("trigger:")) {
             condition.param = line.tok[i].substr(8);
             condition.op = CondOp::TriggerSet;
@@ -421,9 +428,6 @@ bool parse_transition(const Line& line, AnimationStateMachine& machine, std::str
         if (i + 1 >= line.tok.size()) {
             return fail(line, "malformed transition mode", error);
         }
-        if (i + 2 != line.tok.size()) {
-            return fail(line, "unexpected transition token", error);
-        }
         if (line.tok[i + 1] == "push") {
             transition.mode = TransitionMode::PushOverride;
         } else if (line.tok[i + 1] == "replace") {
@@ -431,8 +435,36 @@ bool parse_transition(const Line& line, AnimationStateMachine& machine, std::str
         } else {
             return fail(line, "unknown transition mode", error);
         }
+        i += 2;
+        // Then, maybe, how long it blends: "blend 0.2".
+        if (i < line.tok.size()) {
+            if (line.tok[i] != "blend" || i + 2 != line.tok.size() || !parse_number(line.tok[i + 1], transition.blend) ||
+                transition.blend < 0.0f) {
+                return fail(line, "unexpected transition token", error);
+            }
+        }
     }
     machine.transitions.push_back(std::move(transition));
+    return true;
+}
+
+bool parse_blend_space(const std::vector<Line>& lines, std::size_t& index, AnimationRegistryFragment& out, std::string& error) {
+    const Line& header = lines[index++];
+    if (header.tok.size() != 3) {
+        return fail(header, "expected blendspace <name> <parameter>", error);
+    }
+    AnimationBlendSpace space;
+    space.parameter = header.tok[2];
+    while (index < lines.size() && lines[index].indent > header.indent && !is_header(lines[index].tok[0])) {
+        const Line& line = lines[index++];
+        BlendSpaceEntry entry;
+        if (line.tok[0] != "at" || line.tok.size() != 3 || !parse_number(line.tok[1], entry.position)) {
+            return fail(line, "expected at <position> <animation>", error);
+        }
+        entry.animation = line.tok[2];
+        space.entries.push_back(std::move(entry));
+    }
+    out.blend_spaces[header.tok[1]] = std::move(space);
     return true;
 }
 
@@ -460,6 +492,12 @@ bool parse_state_machine(const std::vector<Line>& lines, std::size_t& index, Ani
             if (!parse_transition(line, machine, error)) {
                 return false;
             }
+        } else if (line.tok[0] == "place") {
+            Vec2f at{};
+            if (line.tok.size() < 4 || !parse_number(line.tok[2], at.x) || !parse_number(line.tok[3], at.y)) {
+                return fail(line, "malformed place", error);
+            }
+            machine.places[line.tok[1]] = at;
         } else {
             return fail(line, "unknown state machine directive", error);
         }
@@ -612,6 +650,8 @@ std::string cond_text(const Condition& condition) {
         return "float:" + condition.param + " != " + std::to_string(condition.threshold);
     case CondOp::TriggerSet:
         return "trigger:" + condition.param;
+    case CondOp::Finished:
+        return "finished";
     }
     return {};
 }
@@ -640,6 +680,9 @@ void collect_animation_names(const AnimationRegistryFragment& fragment, std::uno
     }
     for (const Animation& animation : fragment.animation_templates) {
         names.insert(animation.name);
+    }
+    for (const auto& [name, space] : fragment.blend_spaces) {
+        names.insert(name); // a state plays one by its name
     }
 }
 
@@ -725,8 +768,12 @@ bool parse_animation_registry_fragment(std::string_view text, AnimationRegistryF
             if (!parse_state_machine(lines, index, out, error)) {
                 return false;
             }
+        } else if (lines[index].tok[0] == "blendspace") {
+            if (!parse_blend_space(lines, index, out, error)) {
+                return false;
+            }
         } else {
-            return fail(lines[index], "expected animation or statemachine", error);
+            return fail(lines[index], "expected animation, statemachine or blendspace", error);
         }
     }
     return true;
@@ -769,13 +816,39 @@ std::string serialize_animation_registry_fragment(const AnimationRegistryFragmen
                 for (const Condition& condition : transition.when) {
                     out << ' ' << cond_text(condition);
                 }
-                out << " mode " << (transition.mode == TransitionMode::PushOverride ? "push" : "replace") << '\n';
+                out << " mode " << (transition.mode == TransitionMode::PushOverride ? "push" : "replace");
+                if (transition.blend > 0.0f) {
+                    out << " blend " << transition.blend;
+                }
+                out << '\n';
+            }
+            std::vector<std::string> placed;
+            for (const auto& [state, at] : machine.places) {
+                placed.push_back(state);
+            }
+            std::ranges::sort(placed);
+            for (const std::string& state : placed) {
+                const Vec2f at = machine.places.at(state);
+                out << "  place " << state << ' ' << at.x << ' ' << at.y << '\n';
             }
             out << '\n';
         }
     };
     write_machine(fragment.state_machines, false);
     write_machine(fragment.state_machine_templates, true);
+    std::vector<std::string> spaces;
+    for (const auto& [name, space] : fragment.blend_spaces) {
+        spaces.push_back(name);
+    }
+    std::ranges::sort(spaces);
+    for (const std::string& name : spaces) {
+        const AnimationBlendSpace& space = fragment.blend_spaces.at(name);
+        out << "blendspace " << name << ' ' << space.parameter << '\n';
+        for (const BlendSpaceEntry& entry : space.entries) {
+            out << "  at " << entry.position << ' ' << entry.animation << '\n';
+        }
+        out << '\n';
+    }
     return out.str();
 }
 
@@ -796,6 +869,16 @@ std::vector<AnimationDiagnostic> validate_animation_registry_fragment(const Anim
     }
     for (const auto& [name, machine] : fragment.state_machine_templates) {
         validate_machine(machine, names, "statemachine_template." + name, diagnostics);
+    }
+    for (const auto& [name, space] : fragment.blend_spaces) {
+        if (space.entries.empty()) {
+            add_diag(diagnostics, "blendspace." + name, "blend space has no animations");
+        }
+        for (const BlendSpaceEntry& entry : space.entries) {
+            if (!has_placeholder(entry.animation) && !names.contains(entry.animation)) {
+                add_diag(diagnostics, "blendspace." + name, "missing blend space animation '" + entry.animation + "'");
+            }
+        }
     }
     return diagnostics;
 }

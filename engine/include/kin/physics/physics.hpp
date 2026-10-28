@@ -47,8 +47,15 @@ struct PhysicsFixture {
     friend constexpr bool operator==(PhysicsFixture, PhysicsFixture) = default;
 };
 
+// Lengths, positions, velocities, forces and impulses given to a PhysicsWorld,
+// and those it gives back, are in the game's units (gravity in units/s²);
+// masses in kilograms, densities in kilograms per square metre. Box2D is
+// tuned for bodies of 0.1 to 10 metres and moves none more than 2 metres a
+// step: a game whose units are points (a 32 point crate) says how many make a
+// metre, and the world converts. One (the default): the units are metres.
 struct PhysicsWorldDef {
     Vec2f gravity{};
+    f32 units_per_meter = 1.0f;
 };
 
 struct PhysicsBodyDef {
@@ -173,6 +180,9 @@ public:
     std::vector<PhysicsFixture> query_aabb(Rectf rect, PhysicsFilter filter = {}) const;
     std::vector<PhysicsRaycastHit> raycast(Vec2f from, Vec2f to, PhysicsFilter filter = {}) const;
     std::vector<PhysicsDebugShape> debug_shapes(PhysicsFilter filter = {}) const;
+
+    // As the def said (above zero; one when it was not).
+    f32 units_per_meter() const;
 
 private:
     struct Impl;

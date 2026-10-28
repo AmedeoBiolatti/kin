@@ -46,6 +46,36 @@ struct SpriteDefinition {
     Vec2f pivot{};
 };
 
+// How an animation goes on once at its last frame: from its first again
+// (Loop); not (Once: its last stays); back to its first, and so on (PingPong).
+enum class SpritePlayback : u8 {
+    Loop,
+    Once,
+    PingPong,
+};
+
+struct SpriteAnimationFrame {
+    std::string sprite; // a sprite of the catalog
+    f32 hold = 1.0f;    // how long it shows, in frames (of 1/fps seconds)
+};
+
+// An animation of a catalog's sprites: its frames shown in turn, `fps` a
+// second (one held longer for its `hold`). SpriteAnimator plays one on an
+// entity (kin/ecs/sprite_animator.hpp).
+struct SpriteAnimationDefinition {
+    std::string id;
+    std::vector<SpriteAnimationFrame> frames;
+    f32 fps = 10.0f;
+    SpritePlayback playback = SpritePlayback::Loop;
+};
+
+// How long it plays before it starts again (a PingPong one: there and back),
+// in seconds; 0 without frames.
+f32 sprite_animation_length(const SpriteAnimationDefinition& animation);
+// The frame (its index) shown `time` seconds into it: a Once one stays on
+// its last, and says it `finished` (when asked). -1 when it has no frames.
+i32 sprite_animation_frame(const SpriteAnimationDefinition& animation, f32 time, bool* finished = nullptr);
+
 struct ResolvedSprite {
     Sprite sprite;
     Vec2f offset{};
@@ -69,6 +99,13 @@ public:
                           Vec2f size = {},
                           Vec2f pivot = {},
                           Vec2f offset = {});
+    void add_animation(SpriteAnimationDefinition animation);
+    // Gone: false when there was none of that id. A sprite removed leaves the
+    // animations showing it as they are (resolve() fails for it).
+    bool remove_texture(std::string_view id);
+    bool remove_sheet(std::string_view id);
+    bool remove(std::string_view sprite_id);
+    bool remove_animation(std::string_view id);
 
     SpriteRef ref(std::string_view id) const;
     bool contains(std::string_view id) const;
@@ -77,16 +114,27 @@ public:
     const TextureAssetRef* texture(std::string_view id) const;
     const SpriteSheetDefinition* sheet(std::string_view id) const;
     const SpriteDefinition* sprite(std::string_view id) const;
+    const SpriteAnimationDefinition* animation(std::string_view id) const;
     std::vector<std::string> sprite_ids() const;
+    std::vector<std::string> animation_ids() const;
     const std::unordered_map<std::string, TextureAssetRef>& textures() const { return _textures; }
     const std::unordered_map<std::string, SpriteSheetDefinition>& sheets() const { return _sheets; }
     const std::unordered_map<std::string, SpriteDefinition>& sprites() const { return _sprites; }
+    const std::unordered_map<std::string, SpriteAnimationDefinition>& animations() const { return _animations; }
 
 private:
     std::unordered_map<std::string, TextureAssetRef> _textures;
     std::unordered_map<std::string, SpriteSheetDefinition> _sheets;
     std::unordered_map<std::string, SpriteDefinition> _sprites;
+    std::unordered_map<std::string, SpriteAnimationDefinition> _animations;
 };
+
+// A catalog from the text of a .kinsprites file (textures not made): false,
+// and why in `error` ("line 3: malformed sheet"), when it does not read. One
+// with no sprites reads (load_sprite_catalog() refuses it).
+bool parse_sprite_catalog(std::string_view text, SpriteCatalog& out, std::string& error);
+// Its text, as save_sprite_catalog() writes it (each kind in its ids' order).
+std::string serialize_sprite_catalog(const SpriteCatalog& catalog);
 
 SpriteCatalog load_sprite_catalog(const std::filesystem::path& path);
 SpriteCatalog load_sprite_catalog(AssetManager& assets, Renderer2D& renderer, const std::filesystem::path& path);

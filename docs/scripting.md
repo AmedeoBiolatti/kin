@@ -9,11 +9,14 @@ Kin runs Lua 5.4 (through sol2) in these hosts:
   frame stages, with checked physics, prepared prefab pools, animation/IK, and
   traversal, ragdoll and rope controls. See the
   [3D Lua workflow](rendering_3d.md#lua-gameplay-in-a-3d-scene) and `examples/lua_range`.
+- **`EntityScripts`** (`kin/scripting/entity_scripts.hpp`): scripts on a
+  scene's entities, named by their `ScriptComponent` (see
+  [below](#scripts-on-entities)).
 - **`LuaScript`** (`kin/scripting/lua_script.hpp`): a script for code that does
   not live in the ECS, such as a game's rules, AI, balance formulas or level
   logic, run by plain C++. It knows nothing of scenes or entities: the host
-  binds what a script may ask and do, and calls the functions it defines. This
-  page is about `LuaScript`.
+  binds what a script may ask and do, and calls the functions it defines. Most
+  of this page is about `LuaScript`.
 
 ## A rules script
 
@@ -135,13 +138,87 @@ good version if the new one fails; fixing the file reloads it. The watcher and
 the script may be destroyed in either order. See
 [hot-reloading game data](assets.md#hot-reloading-game-data).
 
+## Scripts on entities
+
+A scene file gives an entity a script with a `ScriptComponent`:
+
+```json
+"ScriptComponent": {"asset": "scripts/player.lua"}
+```
+
+```lua
+function on_start(self)
+    self.speed = 200
+end
+
+function on_update(self, dt)
+    self:move(input.axis("move_x") * self.speed * dt, 0)
+    if input.pressed("jump") then
+        self:trigger("jump") -- its Animator's state machine
+    end
+end
+
+function on_contact(self, other)
+    if other:name() == "Coin" then other:destroy() end
+end
+```
+
+`EntityScripts` runs them. Call `update` each frame after physics:
+
+```cpp
+kin::EntityScripts scripts{kin::EntityScriptsConfig{.content = kin::content_root()}};
+scripts.update(world, ctx.input, ctx.dt);
+```
+
+- Each script file gets one sandboxed `LuaScript` state, which every entity
+  running it shares.
+- Each entity gets a `self` table of its own. The script keeps its own values
+  there, and `self` also has the entity's methods:
+  - `id()`, `name()`, `alive()`, `parent()`, `child(name)`;
+  - `get(component)`, `set(component, {field = value})` (adds the component when
+    it is missing), `has`, `add`, `remove`;
+  - `position()`, `set_position(x, y)`, `move(dx, dy)`, `rotation()`,
+    `set_rotation(degrees)`;
+  - `destroy()`;
+  - and, for its `Animator`, `play(animation)`, `set_param(name, value)`,
+    `trigger(name)` and `state()`.
+- Fields are read and written the way scene files write them: numbers,
+  booleans, strings, `{x, y}` and `{r, g, b, a}` tables.
+- The `input` table reads the input map: `held`, `pressed`, `released` and
+  `axis` by name, and `mouse()` returns x and y ([input](input.md)).
+- The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
+  the new prefab instance's root.
+- When the game gives the scripts its screens (`EntityScripts::set_screens`),
+  the `ui` table reaches their elements by id ([UI screens](ui.md#screens-from-data)):
+  - reading: `clicked`, `changed`, `value`, `checked` and `text`;
+  - changing: `set_text`, `set_value`, `set_checked`, `show`, `hide`,
+    `set_image` and `set_enabled`.
+- When the game gives the scripts its dialogue (`EntityScripts::set_dialogue`),
+  they reach it through the `dialogue` table ([dialogue](dialogue.md)):
+  - `start(path[, node])`, `stop()`, `active()`, `advance()`;
+  - `choose(i or id)` (counting from 1), `node()`;
+  - `get(name)` and `set(name, value)` for its variables.
+
+  Each entity's `on_dialogue_event(self, id, node)` hears what it tells.
+- `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
+- `on_contact(self, other)` runs when the entity's body begins to touch
+  another, when the world has a `PhysicsContactQueue`.
+- Script files are checked for changes every `check_frames` updates. A changed
+  file is read again and its entities start over. If the new version does not
+  read, the last good one keeps running.
+- An error never stops the game. The failed call is skipped, the error is
+  logged, and `problems()` keeps it by path until the script runs cleanly again.
+
+`check_lua_syntax(code, name, error)` checks whether a script reads, without
+running it. Kin Studio uses it to put scripts that do not read in its Problems
+panel.
 
 ## Optional build targets
 
 `KIN_ENABLE_SCRIPTING` defaults to ON. Link `kin::scripting` for plain `LuaScript`
 sandboxes, including module loading and localization; this target does not link
 ECS or the engine base. Link `kin::scripting_scenes` for `ScriptEngine`,
-`ScriptScene` and scene/editor reload integration. `kin::engine` retains both
+`ScriptScene`, `EntityScripts` and scene/editor reload integration. `kin::engine` retains both
 when enabled. Scripting OFF creates neither target and does not fetch Lua/sol2.
 `<kin/components.hpp>` exposes `KIN_HAS_SCRIPTING` and
 `kin::components::scripting`. See [component configuration](shipping.md#component-registry-and-optional-libraries).

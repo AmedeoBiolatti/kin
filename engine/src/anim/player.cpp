@@ -38,6 +38,7 @@ struct PropertySample {
     std::size_t index = 0;
     const PlayerLayer* layer = nullptr;
     flecs::entity target_entity;
+    f32 weight = 1.0f; // its layer's, times its share of a blend space
 };
 
 struct PropertySampleStack {
@@ -56,16 +57,32 @@ struct QueuedAnimationEvent {
     AnimationEvent event;
 };
 
-bool replace_base(AnimationPlayer& player, std::shared_ptr<const Animation> animation) {
-    if (!animation) {
+// A base layer playing `layer` in place of the one there; the one there fading
+// out over `fade` seconds as this fades in (0: at once).
+bool replace_base(AnimationPlayer& player, PlayerLayer layer, f32 fade) {
+    if (!layer.animation && !layer.blend) {
         return false;
     }
-    PlayerLayer layer;
     layer.kind = LayerKind::Base;
-    layer.animation = std::move(animation);
+    if (fade > 0.0f && !player.layers.empty() && (player.layers.front().animation || player.layers.front().blend)) {
+        PlayerLayer left = std::move(player.layers.front());
+        left.age = 0.0f;
+        left.blend_in = 0.0f;
+        left.fade_out = fade;
+        player.fading.push_back(std::move(left));
+        layer.blend_in = fade;
+    } else {
+        player.fading.clear();
+    }
     player.layers.clear();
     player.layers.push_back(std::move(layer));
     return true;
+}
+
+bool replace_base(AnimationPlayer& player, std::shared_ptr<const Animation> animation) {
+    PlayerLayer layer;
+    layer.animation = std::move(animation);
+    return replace_base(player, std::move(layer), 0.0f);
 }
 
 const std::string* state_animation_name(const AnimationStateMachine& machine, std::string_view state) {
@@ -85,8 +102,30 @@ std::shared_ptr<const Animation> resolve_bound_animation(AnimationPlayer& player
     return player.registry->resolve(resolved_name, player.bindings);
 }
 
-bool replace_base_by_name(AnimationPlayer& player, std::string_view animation_name) {
-    return replace_base(player, resolve_bound_animation(player, animation_name));
+// What a base playing `name` is: a blend space of that name (its
+// animations resolved), else the animation.
+PlayerLayer base_layer_named(AnimationPlayer& player, std::string_view name) {
+    PlayerLayer layer;
+    std::string resolved;
+    std::string error;
+    if (player.registry && substitute(name, player.bindings, resolved, error)) {
+        if (std::shared_ptr<const AnimationBlendSpace> space = player.registry->blend_space(resolved)) {
+            layer.blend = space;
+            layer.blend_name = resolved;
+            for (const BlendSpaceEntry& entry : space->entries) {
+                layer.blend_animations.push_back(resolve_bound_animation(player, entry.animation));
+            }
+            layer.blend_cursors.resize(space->entries.size());
+            layer.blend_weights = blend_weights(*space, player.params.get_float(space->parameter));
+            return layer;
+        }
+    }
+    layer.animation = resolve_bound_animation(player, name);
+    return layer;
+}
+
+bool replace_base_by_name(AnimationPlayer& player, std::string_view animation_name, f32 fade = 0.0f) {
+    return replace_base(player, base_layer_named(player, animation_name), fade);
 }
 
 bool enter_state(AnimationPlayer& player, const AnimationStateMachine& machine, std::string_view state) {
@@ -238,11 +277,14 @@ bool is_blendable(const AnimValue& value) {
 }
 
 f32 effective_weight(const PlayerLayer& layer) {
-    const f32 target = std::max(0.0f, layer.target_weight);
-    if (layer.kind != LayerKind::Override || layer.blend_in <= 0.0f) {
-        return target;
+    f32 weight = std::max(0.0f, layer.target_weight);
+    if (layer.blend_in > 0.0f) {
+        weight *= std::clamp(layer.age / layer.blend_in, 0.0f, 1.0f); // fading in: an override, or a base entered with a blend
     }
-    return target * std::clamp(layer.age / layer.blend_in, 0.0f, 1.0f);
+    if (layer.fade_out > 0.0f) {
+        weight *= 1.0f - std::clamp(layer.age / layer.fade_out, 0.0f, 1.0f);
+    }
+    return weight;
 }
 
 bool blend_values(const std::vector<AnimValue>& values, const std::vector<f32>& weights, AnimValue& out) {
@@ -665,6 +707,64 @@ AnimValue sampled_value(const PropertyTrack& track, NodeCursor& cursor, std::siz
 // update_animation_state_machines() (for isolated stepping/tests) and by
 // advance_animation_players(), which runs it inline so the per-frame pipeline is
 // a single pass over AnimationPlayer rather than two.
+// How long one turn of a node plays (a repeated one's: its child's once).
+f32 cycle_length(const AnimationNode& node) {
+    if (const auto* clip = std::get_if<Clip>(&node.value)) {
+        return clip->duration;
+    }
+    if (const auto* sequence = std::get_if<Sequence>(&node.value)) {
+        f32 total = 0.0f;
+        for (const AnimationNode& child : sequence->children) {
+            total += cycle_length(child);
+        }
+        return total;
+    }
+    if (const auto* parallel = std::get_if<Parallel>(&node.value)) {
+        f32 longest = 0.0f;
+        for (const AnimationNode& child : parallel->children) {
+            longest = std::max(longest, cycle_length(child));
+        }
+        return longest;
+    }
+    if (const auto* repeat = std::get_if<Repeat>(&node.value)) {
+        return repeat->child ? cycle_length(*repeat->child) : 0.0f;
+    }
+    return 0.0f; // a reference: not known here
+}
+
+// A blend space's animations moved on in step: the space goes through a turn
+// in the weighted mean of their lengths, and each through its own in that
+// time. Only the one weighing most sends its events. True once all ended.
+bool advance_blend(PlayerLayer& layer, AnimationPlayer& player, f32 dt, AdvanceContext& ctx) {
+    const AnimationBlendSpace& space = *layer.blend;
+    layer.blend_weights = blend_weights(space, player.params.get_float(space.parameter));
+    f32 mixed = 0.0f;
+    std::size_t heaviest = 0;
+    for (std::size_t i = 0; i < layer.blend_animations.size(); ++i) {
+        if (layer.blend_animations[i]) {
+            mixed += layer.blend_weights[i] * cycle_length(layer.blend_animations[i]->root);
+        }
+        if (layer.blend_weights[i] > layer.blend_weights[heaviest]) {
+            heaviest = i;
+        }
+    }
+    std::vector<AnimationEvent>* events = ctx.events;
+    bool all_ended = true;
+    for (std::size_t i = 0; i < layer.blend_animations.size(); ++i) {
+        if (!layer.blend_animations[i]) {
+            continue;
+        }
+        const f32 own = cycle_length(layer.blend_animations[i]->root);
+        const f32 step = mixed > 0.0f && own > 0.0f ? dt * own / mixed : dt;
+        ctx.events = i == heaviest ? events : nullptr;
+        all_ended = advance_node(layer.blend_animations[i]->root, layer.blend_cursors[i], step, ctx) && all_ended;
+    }
+    ctx.events = events;
+    layer.cursor.time += std::max(0.0f, dt);
+    layer.cursor.finished = all_ended;
+    return all_ended;
+}
+
 void run_state_machine(AnimationPlayer& player) {
     if (!player.machine) {
         return;
@@ -678,7 +778,8 @@ void run_state_machine(AnimationPlayer& player) {
     }
 
     AnimationParams evaluated_params = player.params;
-    const AnimTransition* transition = evaluate(machine, player.state, evaluated_params);
+    const bool finished = !player.layers.empty() && player.layers.front().cursor.finished;
+    const AnimTransition* transition = evaluate(machine, player.state, evaluated_params, finished);
     if (!transition) {
         return;
     }
@@ -690,14 +791,14 @@ void run_state_machine(AnimationPlayer& player) {
 
     switch (transition->mode) {
     case TransitionMode::ReplaceBase:
-        if (replace_base_by_name(player, *animation_name)) {
+        if (replace_base_by_name(player, *animation_name, transition->blend)) {
             player.state = transition->to;
             player.params = std::move(evaluated_params);
         }
         break;
     case TransitionMode::PushOverride: {
         const std::size_t before = player.layers.size();
-        push(player, *animation_name);
+        push(player, *animation_name, {.blend_in = transition->blend});
         if (player.layers.size() > before) {
             player.params = std::move(evaluated_params);
         }
@@ -736,7 +837,7 @@ AnimationPlayerSnapshot snapshot(const AnimationPlayer& player) {
     for (const PlayerLayer& layer : player.layers) {
         out.layers.push_back(AnimationLayerSnapshot{
             .kind = layer.kind,
-            .animation = layer.animation ? layer.animation->name : std::string{},
+            .animation = layer.animation ? layer.animation->name : layer.blend_name,
             .time = layer.cursor.time,
             .speed = layer.speed,
             .weight = effective_weight(layer),
@@ -782,7 +883,7 @@ void set_base(AnimationPlayer& player, std::string_view animation_name) {
         player.layers.clear();
         return;
     }
-    if (!replace_base(player, resolve_bound_animation(player, animation_name))) {
+    if (!replace_base_by_name(player, animation_name)) {
         player.layers.clear();
     }
 }
@@ -833,12 +934,13 @@ void advance_animation_players(EcsWorld& world, f32 dt) {
         }
 
         for (PlayerLayer& layer : player.layers) {
-            if (!layer.animation || layer.done) {
+            if ((!layer.animation && !layer.blend) || layer.done) {
                 continue;
             }
             std::vector<AnimationEvent> layer_events;
             AdvanceContext ctx{.entity = entity, .player = player, .events = &layer_events};
-            const bool finished = advance_node(layer.animation->root, layer.cursor, dt * layer.speed, ctx);
+            const bool finished = layer.blend ? advance_blend(layer, player, dt * layer.speed, ctx)
+                                              : advance_node(layer.animation->root, layer.cursor, dt * layer.speed, ctx);
             layer.age += std::max(0.0f, dt);
             layer.weight = effective_weight(layer);
             for (AnimationEvent& event : layer_events) {
@@ -852,6 +954,19 @@ void advance_animation_players(EcsWorld& world, f32 dt) {
         while (player.layers.size() > 1 && player.layers.back().done) {
             player.layers.pop_back();
         }
+
+        // Bases left with a blend: on as they were, their events not sent, gone once faded.
+        for (PlayerLayer& layer : player.fading) {
+            AdvanceContext ctx{.entity = entity, .player = player, .events = nullptr};
+            if (layer.blend) {
+                advance_blend(layer, player, dt * layer.speed, ctx);
+            } else if (layer.animation) {
+                advance_node(layer.animation->root, layer.cursor, dt * layer.speed, ctx);
+            }
+            layer.age += std::max(0.0f, dt);
+            layer.weight = effective_weight(layer);
+        }
+        std::erase_if(player.fading, [](const PlayerLayer& layer) { return layer.age >= layer.fade_out; });
     });
 
     for (QueuedAnimationEvent& queued : queued_events) {
@@ -879,7 +994,7 @@ void sample_animation_players(EcsWorld& world) {
         // target with no grouping maps or per-property vectors. Multiple active
         // clips (a Parallel base) are processed in order, so a later clip writing
         // the same property wins -- matching the slow path's topmost-wins.
-        if (player.layers.size() == 1 && player.layers.front().mask.empty()) {
+        if (player.layers.size() == 1 && player.layers.front().mask.empty() && player.fading.empty() && !player.layers.front().blend) {
             PlayerLayer& layer = player.layers.front();
             if (!layer.animation || layer.done) {
                 return;
@@ -926,11 +1041,11 @@ void sample_animation_players(EcsWorld& world) {
         property_samples.clear();
         sprite_samples.clear();
 
-        for (PlayerLayer& layer : player.layers) {
+        // Each source of samples, lowest first: bases fading out, then the
+        // layers; a blend space's animations each by its share.
+        const auto collect = [&](PlayerLayer& layer, const AnimationNode& root, NodeCursor& cursor, f32 weight, bool sprites) {
             clips.clear();
-            if (layer.animation && !layer.done) {
-                collect_active_clips(layer.animation->root, layer.cursor, clips);
-            }
+            collect_active_clips(root, cursor, clips);
             for (const ActiveClip& active : clips) {
                 for (std::size_t i = 0; i < active.clip->properties.size(); ++i) {
                     const PropertyTrack& track = active.clip->properties[i];
@@ -947,9 +1062,10 @@ void sample_animation_players(EcsWorld& world) {
                         .index = i,
                         .layer = &layer,
                         .target_entity = target_entity,
+                        .weight = weight,
                     });
                 }
-                if (layer.mask.empty()) {
+                if (sprites && layer.mask.empty()) {
                     for (const SpriteTrack& track : active.clip->sprites) {
                         if (active_sprite_key(track, active.cursor->time) >= 0) {
                             flecs::entity target_entity = resolve_animation_target_raw(entity, player, track.target);
@@ -966,6 +1082,34 @@ void sample_animation_players(EcsWorld& world) {
                     }
                 }
             }
+        };
+        const auto collect_layer = [&](PlayerLayer& layer) {
+            if (layer.done) {
+                return;
+            }
+            const f32 weight = effective_weight(layer);
+            if (layer.blend) {
+                // Its sprite: the heaviest one's.
+                std::size_t heaviest = 0;
+                for (std::size_t i = 0; i < layer.blend_weights.size(); ++i) {
+                    if (layer.blend_weights[i] > layer.blend_weights[heaviest]) {
+                        heaviest = i;
+                    }
+                }
+                for (std::size_t i = 0; i < layer.blend_animations.size() && i < layer.blend_weights.size(); ++i) {
+                    if (layer.blend_animations[i] && layer.blend_weights[i] > 0.0f) {
+                        collect(layer, layer.blend_animations[i]->root, layer.blend_cursors[i], weight * layer.blend_weights[i], i == heaviest);
+                    }
+                }
+            } else if (layer.animation) {
+                collect(layer, layer.animation->root, layer.cursor, weight, true);
+            }
+        };
+        for (PlayerLayer& layer : player.fading) {
+            collect_layer(layer);
+        }
+        for (PlayerLayer& layer : player.layers) {
+            collect_layer(layer);
         }
 
         for (const auto& [property, stack] : property_samples) {
@@ -994,7 +1138,7 @@ void sample_animation_players(EcsWorld& world) {
                     break;
                 }
                 values.push_back(std::move(value));
-                weights.push_back(effective_weight(*sample_entry.layer));
+                weights.push_back(sample_entry.weight);
             }
             AnimValue blended;
             if (!values.empty() && blend_values(values, weights, blended)) {

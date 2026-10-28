@@ -102,6 +102,9 @@ struct TtfFontOptions {
     // language: the right font for Japanese, Chinese or Korean. The font
     // follows a change of language, as do themes made with it.
     std::vector<LanguageFont> language_fallbacks;
+    // At most this many pages of glyphs (each some 16 ASCII cells a side) before
+    // the atlas starts over (with what the text drawn then needs): a memory budget.
+    i32 atlas_pages = 4;
 };
 
 // A TrueType or OpenType font. Text is laid out glyph by glyph from an atlas
@@ -178,8 +181,11 @@ std::vector<std::pair<f32, f32>> selection_spans(const Font& font, std::string_v
 // falling back to bitmap_font() when no TTF is found. `_bold` returns the
 // matching bold cut (for title/emphasis tiers); falls back to the regular cut,
 // then to the bitmap font. Sizes are clamped to [8, 32]pt.
-Font system_ui_font(f32 point_size, TextRendering rendering = TextRendering::Bitmap);
-Font system_ui_font_bold(f32 point_size, TextRendering rendering = TextRendering::Bitmap);
+// `oversample` is TtfFontOptions::oversample: on a display with more pixels than
+// the layout has units (Window::display_scale(), or the renderer's output over
+// logical size), pass that ratio and text is drawn from glyphs that size.
+Font system_ui_font(f32 point_size, TextRendering rendering = TextRendering::Bitmap, f32 oversample = 1.0f);
+Font system_ui_font_bold(f32 point_size, TextRendering rendering = TextRendering::Bitmap, f32 oversample = 1.0f);
 bool system_ui_font_available(); // true when a real TTF backs system_ui_font
 
 struct TextWrapOptions {

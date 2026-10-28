@@ -84,6 +84,19 @@ struct ComponentFieldDescriptor {
     std::string category;
     std::string description;
     std::string units;
+    // An asset reference's kind of asset, as asset_type_name() names it
+    // ("Image"), or kinds, separated by commas: what tools offer for it. Empty: any.
+    std::string asset_type;
+    // A field naming an entry of the asset another field of the component
+    // names (a sprite of a sprite catalog, a cue of an audio catalog): that
+    // field's name; or, the asset another component of the entity names,
+    // "Component.field" ("SpriteRenderer.asset"). Tools offer the asset's
+    // entries (those of the kind the field's name says, when it holds more
+    // than one: an "animation" field, a catalog's animations).
+    std::string entry_of;
+    // The values a string field takes, when it takes only some ("static",
+    // "dynamic", "kinematic"): what tools offer for it. Empty: any.
+    std::vector<std::string> choices;
     bool readonly = false;
     bool hidden = false;
     std::optional<f64> min_value;
@@ -277,6 +290,15 @@ struct ComponentRecord {
 
 } // namespace detail
 
+// A field of a native component, read and written on the component's own
+// data: for code that walks components itself (animation tracks).
+struct ComponentFieldAccess {
+    ComponentId component = 0;
+    ComponentFieldKind kind = ComponentFieldKind::Bool;
+    std::function<ComponentFieldValue(const void*)> read;
+    std::function<bool(void*, const ComponentFieldValue&)> write;
+};
+
 class EcsComponentRegistry {
 public:
     using FieldVisitor = std::function<void(std::string_view,
@@ -310,6 +332,7 @@ public:
             .id = static_cast<ComponentId>(component.id()),
             .name = std::move(name),
             .kind = ComponentKind::Native,
+            .fields = {},
         };
         record->type = typeid(T);
         record->has = [](EcsEntity entity) {
@@ -373,6 +396,9 @@ public:
 
     bool patch_field(EcsEntity entity, ComponentId id, std::string_view field, const ComponentFieldValue& value);
     bool patch_field(EcsEntity entity, std::string_view component, std::string_view field, const ComponentFieldValue& value);
+    // A native component's field, to read and write on its data; none for a
+    // data component's, or one not described.
+    std::optional<ComponentFieldAccess> field_access(std::string_view component, std::string_view field) const;
     // Optional owner policy for live field edits (e.g. transactional asset and
     // physics updates). Installed only after scene construction. The handler
     // performs the edit and returns an error on failure; nullopt leaves normal
@@ -443,6 +469,16 @@ public:
                                [member](T& component, const Field& value) { component.*member = value; return true; });
     }
 
+    // A member of a member (a body's def's damping), by its own name.
+    template <typename Outer, typename Field>
+    NativeComponentBuilder& field(std::string name, Outer T::* outer, Field Outer::* member) {
+        return property<Field>(std::move(name), [outer, member](const T& component) { return (component.*outer).*member; },
+                               [outer, member](T& component, const Field& value) {
+                                   (component.*outer).*member = value;
+                                   return true;
+                               });
+    }
+
     // A reflected authored property can adapt nested members or enum names
     // without serializing runtime handles or introducing another field format.
     // A setter returning false rejects the patch through the normal registry.
@@ -503,6 +539,15 @@ public:
     NativeComponentBuilder& units(std::string value) {
         return update_last_field([&](ComponentFieldDescriptor& field) { field.units = std::move(value); });
     }
+    NativeComponentBuilder& asset_type(std::string value) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.asset_type = std::move(value); });
+    }
+    NativeComponentBuilder& entry_of(std::string field_name) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.entry_of = std::move(field_name); });
+    }
+    NativeComponentBuilder& choices(std::vector<std::string> values) {
+        return update_last_field([&](ComponentFieldDescriptor& field) { field.choices = std::move(values); });
+    }
     NativeComponentBuilder& readonly(bool value = true) {
         return update_last_field([&](ComponentFieldDescriptor& field) { field.readonly = value; });
     }
@@ -547,6 +592,9 @@ public:
     DataComponentBuilder& category(std::string value);
     DataComponentBuilder& description(std::string value);
     DataComponentBuilder& units(std::string value);
+    DataComponentBuilder& asset_type(std::string value);
+    DataComponentBuilder& entry_of(std::string field_name);
+    DataComponentBuilder& choices(std::vector<std::string> values);
     DataComponentBuilder& readonly(bool value = true);
     DataComponentBuilder& hidden(bool value = true);
     DataComponentBuilder& range(f64 min, f64 max);

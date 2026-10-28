@@ -212,10 +212,16 @@ void run(Context& ctx, Splitter& widget) {
     }
 }
 
+// DockPanel as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, DockPanel& widget) {
+    widget.style = themed_widget_style(widget.style, theme.panel);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, DockPanel& widget) {
     const auto _draw_scope = ctx.draw_scope("DockPanel", widget.bounds, ctx.theme().card_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().panel);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const DockPanelLayoutMetrics metrics = dock_panel_layout_metrics(widget);
     widget.toggled = false;
     widget.close_requested = false;
@@ -288,9 +294,15 @@ void run(Context& ctx, DockPanel& widget) {
     collection_outline(ctx, widget.bounds, outer_surface);
 }
 
+// BreadcrumbBar as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, BreadcrumbBar& widget) {
+    widget.style = themed_widget_style(widget.style, theme.menu);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, BreadcrumbBar& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().menu);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const BreadcrumbBarLayoutMetrics metrics = breadcrumb_bar_layout_metrics(widget);
     widget.activated = -1;
     widget.activated_id.clear();
@@ -359,10 +371,16 @@ void run(Context& ctx, BreadcrumbBar& widget) {
     }
 }
 
+// PropertyInspector as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, PropertyInspector& widget) {
+    widget.style = themed_widget_style(widget.style, theme.inspector);
+    widget.label_style = themed_text_style(widget.label_style, theme.body_text);
+    widget.value_style = themed_text_style(widget.value_style, theme.body_text);
+}
+
 void run(Context& ctx, PropertyInspector& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().inspector);
-    widget.label_style = themed_text_style(widget.label_style, ctx.theme().body_text);
-    widget.value_style = themed_text_style(widget.value_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const PropertyInspectorLayoutMetrics metrics = property_inspector_layout_metrics(widget);
     widget.changed_row = -1;
     widget.changed_id.clear();
@@ -543,12 +561,18 @@ void run(Context& ctx, PropertyInspector& widget) {
             break;
         }
         case PropertyInspectorRowKind::Text: {
+            // Committed when left (Enter, Tab, a press elsewhere); Esc puts the value back.
             UiTextInputState& state = ctx.text_input_state(row_id, row.text_value);
+            const bool was_active = state.active;
             TextInput text{.id = row_id, .bounds = control, .state = state, .text_style = value_style, .style = widget.style, .enabled = interactive, .z = widget.z};
             run(ctx, text);
             state = text.state;
-            if (text.result.changed || text.result.committed || text.result.cancelled) {
-                row.text_value = text.state.text;
+            if (text.result.cancelled) {
+                state.text = row.text_value;
+                state.caret = state.text.size();
+                state.clear_selection();
+            } else if (was_active && !state.active && state.text != row.text_value) {
+                row.text_value = state.text;
                 row.changed = true;
             }
             break;
@@ -729,9 +753,15 @@ void run(Context& ctx, PropertyInspector& widget) {
     }
 }
 
+// NodeGraph as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, NodeGraph& widget) {
+    widget.style = themed_widget_style(widget.style, theme.graph_node);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, NodeGraph& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().graph_node);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     widget.clicked_node_id.clear();
     widget.activated_node_id.clear();
     widget.moved_node_id.clear();
@@ -969,7 +999,10 @@ void run(Context& ctx, NodeGraph& widget) {
             widget.active_drag_from_port_id.clear();
         }
     }
-    if (!widget.selected_edge_id.empty() && (ctx.key_pressed(Key::Delete) || ctx.key_pressed(Key::Backspace))) {
+    // A press on its background, a node, a port or an edge: the keys are its.
+    focus_on_press(ctx, graph_id, ctx.state().focused_this_frame() && ctx.state().active() && contains(widget.bounds, ctx.pointer()));
+    if (!widget.selected_edge_id.empty() && takes_keys(ctx, graph_id, widget.keys_without_focus) &&
+        (ctx.key_pressed(Key::Delete) || ctx.key_pressed(Key::Backspace))) {
         widget.disconnect_requested_edge_id = widget.selected_edge_id;
     }
     if (bg.clicked) {
@@ -978,10 +1011,16 @@ void run(Context& ctx, NodeGraph& widget) {
     ctx.pop_clip();
 }
 
+// PropertyGrid as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, PropertyGrid& widget) {
+    widget.style = themed_widget_style(widget.style, theme.inspector);
+    widget.label_style = themed_text_style(widget.label_style, theme.body_text);
+    widget.value_style = themed_text_style(widget.value_style, theme.body_text);
+}
+
 void run(Context& ctx, PropertyGrid& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().inspector);
-    widget.label_style = themed_text_style(widget.label_style, ctx.theme().body_text);
-    widget.value_style = themed_text_style(widget.value_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const PropertyGridLayoutMetrics metrics = property_grid_layout_metrics(widget);
     widget.changed = false;
     const i32 count = static_cast<i32>(widget.rows.size());

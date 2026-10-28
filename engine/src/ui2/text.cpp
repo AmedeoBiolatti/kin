@@ -317,23 +317,26 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
     return bold ? paths.bold : paths.regular;
 }
 
-Font cached_system_font(f32 point_size, bool bold, TextRendering rendering) {
+Font cached_system_font(f32 point_size, bool bold, TextRendering rendering, f32 oversample) {
     struct Key {
         i32 size;
         bool bold;
         TextRendering rendering;
+        i32 oversample; // hundredths
         auto operator<=>(const Key&) const = default;
     };
     static std::map<Key, Font> cache;
     const i32 clamped = static_cast<i32>(std::clamp(point_size, 8.0f, 32.0f));
-    const Key key{clamped, bold, rendering};
+    oversample = std::clamp(oversample, 1.0f, 8.0f);
+    const Key key{clamped, bold, rendering, static_cast<i32>(std::lround(oversample * 100.0f))};
     if (const auto it = cache.find(key); it != cache.end()) {
         return it->second;
     }
     const std::filesystem::path& path = system_ui_font_path(bold);
     Font font = path.empty() ? bitmap_font()
                              : load_ttf_font(path, static_cast<f32>(clamped),
-                                             TtfFontOptions{.rendering = rendering,
+                                             TtfFontOptions{.oversample = oversample,
+                                                            .rendering = rendering,
                                                             .fallbacks = system_fallback_fonts(),
                                                             .language_fallbacks = system_language_fonts()});
     cache.emplace(key, font);
@@ -342,12 +345,12 @@ Font cached_system_font(f32 point_size, bool bold, TextRendering rendering) {
 
 } // namespace
 
-Font system_ui_font(f32 point_size, TextRendering rendering) {
-    return cached_system_font(point_size, false, rendering);
+Font system_ui_font(f32 point_size, TextRendering rendering, f32 oversample) {
+    return cached_system_font(point_size, false, rendering, oversample);
 }
 
-Font system_ui_font_bold(f32 point_size, TextRendering rendering) {
-    return cached_system_font(point_size, true, rendering);
+Font system_ui_font_bold(f32 point_size, TextRendering rendering, f32 oversample) {
+    return cached_system_font(point_size, true, rendering, oversample);
 }
 
 bool system_ui_font_available() {
@@ -380,6 +383,17 @@ const std::vector<FontSource>& system_fallback_fonts() {
             {"C:/Windows/Fonts/Nirmala.ttf", "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
              "/usr/share/fonts/truetype/lohit-devanagari/Lohit-Devanagari.ttf",
              "/System/Library/Fonts/Kohinoor.ttc"},
+            // Symbols UI text uses that UI fonts often lack: technical (⌕ ⎇ ⏎),
+            // arrows, shapes, dingbats
+            {"C:/Windows/Fonts/seguisym.ttf", "/usr/share/fonts/truetype/noto/NotoSansSymbols-Regular.ttf",
+             "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf", "/System/Library/Fonts/Apple Symbols.ttf"},
+            {"/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+             "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf", "/usr/share/fonts/opentype/freefont/FreeSerif.otf",
+             "/usr/share/fonts/truetype/freefont/FreeSerif.ttf"},
+            // Emoji. Only a scalable font: SDL_ttf draws Noto Color Emoji's and
+            // Apple Color Emoji's bitmaps at their one size (136 pixels), not
+            // the text's. Where there is none, DejaVu Sans has the emoticons.
+            {"C:/Windows/Fonts/seguiemj.ttf"},
         };
         std::vector<FontSource> found;
         for (const auto& candidates : scripts) {
@@ -487,8 +501,8 @@ std::optional<TextDirection> text_base_direction() {
     const std::scoped_lock lock(text_settings_mutex);
     return selected_direction;
 }
-Font system_ui_font(f32, TextRendering) { return bitmap_font(); }
-Font system_ui_font_bold(f32, TextRendering) { return bitmap_font(); }
+Font system_ui_font(f32, TextRendering, f32) { return bitmap_font(); }
+Font system_ui_font_bold(f32, TextRendering, f32) { return bitmap_font(); }
 bool system_ui_font_available() { return false; }
 const std::vector<FontSource>& system_fallback_fonts() {
     static const std::vector<FontSource> empty;
@@ -849,7 +863,7 @@ std::size_t caret_at(const Font& font, std::string_view line, f32 x, f32 scale) 
     for (const VisualRun& run : visual_runs(font, line, scale)) {
         // The stops caret_x gives: a run's end only where the line ends (elsewhere
         // that offset belongs to the run after it).
-        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+        for (std::size_t k = run.begin;; k = utf8_next_grapheme(line, k)) {
             if (k >= run.end && k < line.size()) {
                 break;
             }
@@ -873,7 +887,7 @@ std::optional<std::size_t> caret_move(const Font& font, std::string_view line, s
     std::optional<std::size_t> best;
     f32 best_x = 0.0f;
     for (const VisualRun& run : visual_runs(font, line, scale)) {
-        for (std::size_t k = run.begin;; k = utf8_next(line, k)) {
+        for (std::size_t k = run.begin;; k = utf8_next_grapheme(line, k)) {
             if (k >= run.end && k < line.size()) {
                 break; // that offset belongs to the next run (as in caret_x)
             }

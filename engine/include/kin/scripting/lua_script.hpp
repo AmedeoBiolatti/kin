@@ -48,6 +48,10 @@ struct LuaScriptOptions {
     std::function<void(std::string_view message)> on_error;
 };
 
+// Whether `code` is Lua that reads (it is not run): false, and `error` says
+// where (name:line) and why, when it does not.
+bool check_lua_syntax(std::string_view code, std::string_view name, std::string& error);
+
 class LuaScript {
 public:
     explicit LuaScript(LuaScriptOptions options = {});

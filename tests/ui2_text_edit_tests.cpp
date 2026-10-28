@@ -257,6 +257,37 @@ void test_typing_and_deleting_multibyte_text() {
     assert(h.text().empty());
 }
 
+// What a reader takes for one character: a base and its marks, emoji joined by
+// ZWJ, a flag's pair, "\r\n".
+void test_grapheme_stepping() {
+    const std::string accent = "e\xCC\x81x";                    // e + combining acute, x
+    assert(kin::utf8_next_grapheme(accent, 0) == 3 && kin::utf8_prev_grapheme(accent, 3) == 0);
+    const std::string heart = "a\xE2\x9D\xA4\xEF\xB8\x8F" "b";  // a, ❤ + VS16, b
+    assert(kin::utf8_next_grapheme(heart, 1) == 7 && kin::utf8_prev_grapheme(heart, 7) == 1);
+    const std::string flags = "\xF0\x9F\x87\xAE\xF0\x9F\x87\xB9\xF0\x9F\x87\xAB\xF0\x9F\x87\xB7"; // 🇮🇹🇫🇷
+    assert(kin::utf8_next_grapheme(flags, 0) == 8 && kin::utf8_next_grapheme(flags, 8) == 16);
+    assert(kin::utf8_prev_grapheme(flags, 16) == 8);
+    // 👩‍👧 (woman, ZWJ, girl) with a skin tone on the woman: one.
+    const std::string family = "x\xF0\x9F\x91\xA9\xF0\x9F\x8F\xBD\xE2\x80\x8D\xF0\x9F\x91\xA7" "y";
+    assert(kin::utf8_next_grapheme(family, 1) == family.size() - 1);
+    assert(kin::utf8_prev_grapheme(family, family.size() - 1) == 1);
+    assert(kin::utf8_next_grapheme("a\r\nb", 1) == 3 && kin::utf8_prev_grapheme("a\r\nb", 3) == 1);
+    assert(kin::utf8_next_grapheme("ab", 2) == 2 && kin::utf8_prev_grapheme("ab", 0) == 0);
+
+    // The editor moves over them and deletes them whole: Backspace takes the
+    // heart and its selector, not the invisible selector alone.
+    Harness h{editor()};
+    h.activate();
+    h.type(heart);
+    h.key(Key::Left);
+    assert(h.edit.state.caret == 7);
+    h.key(Key::Left);
+    assert(h.edit.state.caret == 1);
+    h.key(Key::Right);
+    h.key(Key::Backspace);
+    assert(h.text() == "ab");
+}
+
 void test_up_down_keep_the_column() {
     Harness h{editor("abcdef\nab\nabcdef")};
     h.activate();
@@ -639,6 +670,7 @@ int main() {
     test_key_repeat_events();
     test_text_input_steps_over_multibyte_characters();
     test_typing_and_deleting_multibyte_text();
+    test_grapheme_stepping();
     test_up_down_keep_the_column();
     test_mouse_selection();
     test_undo_groups_typing();

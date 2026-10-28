@@ -10,12 +10,14 @@ Vec2f measure(const TextInput& widget) {
 
 Vec2f measure(const NumberInput& widget) {
     const TextInputLayoutMetrics metrics = text_input_layout_metrics(widget.text_style, widget.style);
-    const std::string current = widget.text.text.empty() ? format_f32(widget.value) : widget.text.text;
-    const std::string min_text = format_f32(widget.min);
-    const std::string max_text = format_f32(widget.max);
+    const std::string current = widget.text.text.empty() ? number_text(widget.value) : widget.text.text;
     f32 text_w = measure_text(widget.text_style.font, current, widget.text_style.scale).x;
-    text_w = std::max(text_w, measure_text(widget.text_style.font, min_text, widget.text_style.scale).x);
-    text_w = std::max(text_w, measure_text(widget.text_style.font, max_text, widget.text_style.scale).x);
+    // Wide enough for the ends of its range, when it has one.
+    for (const f32 end : {widget.min, widget.max}) {
+        if (std::abs(end) < 1.0e9f) {
+            text_w = std::max(text_w, measure_text(widget.text_style.font, number_text(end), widget.text_style.scale).x);
+        }
+    }
     return {std::max(96.0f, text_w + metrics.padding.left + metrics.padding.right), metrics.height};
 }
 
@@ -90,51 +92,77 @@ Vec2f measure(const ColorPicker& widget) {
             color_picker_natural_height(widget, metrics)};
 }
 
+// TextInput as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, TextInput& widget) {
+    widget.style = themed_widget_style(widget.style, theme.input);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, TextInput& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().input);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.result = edit_text_input(ctx, widget.state, widget.bounds, widget.text_style, widget.style, it, widget.enabled);
-    draw_text_input(ctx, widget.bounds, widget.state, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled));
+    if (widget.enabled) {
+        if (it.hot || it.active) {
+            ctx.set_cursor(SystemCursor::Text);
+        }
+        ctx.register_focusable(widget.id);
+        if (widget.state.active && ctx.key_typed(Key::Tab)) {
+            ctx.request_focus_move(widget.id, ctx.modifier_held(KeyModifiers::Shift) ? -1 : 1);
+        }
+    }
+    draw_text_input(ctx, widget.bounds, widget.state, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.state.active));
+}
+
+// NumberInput as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, NumberInput& widget) {
+    widget.style = themed_widget_style(widget.style, theme.input);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
 }
 
 void run(Context& ctx, NumberInput& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().input);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
-    if (widget.text.text.empty() && !widget.text.active) {
-        widget.text.text = format_f32(widget.value);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
+    const auto show = [&] {
+        widget.text.text = number_text(widget.value);
         widget.text.caret = widget.text.text.size();
         widget.text.clear_selection();
+    };
+    if (!widget.text.active && widget.text.text != number_text(widget.value)) {
+        show(); // the value, unless typed in (an undo, another pick changed it)
     }
 
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
-    UiTextInputResult result = edit_text_input(ctx, widget.text, widget.bounds, widget.text_style, widget.style, it, widget.enabled);
+    const bool was_active = widget.text.active;
+    const UiTextInputResult result = edit_text_input(ctx, widget.text, widget.bounds, widget.text_style, widget.style, it, widget.enabled);
 
-    f32 parsed = widget.value;
     widget.changed = false;
-    if (result.changed && parse_f32(widget.text.text, parsed)) {
-        parsed = std::clamp(parsed, widget.min, widget.max);
-        widget.changed = parsed != widget.value;
-        widget.value = parsed;
+    const std::optional<f64> typed = parse_number(widget.text.text, widget.min, widget.max, false);
+    widget.invalid = widget.text.active && !typed;
+    if (result.cancelled) {
+        show(); // Esc: the value again
+    } else if (was_active && !widget.text.active) {
+        if (typed && static_cast<f32>(*typed) != widget.value) {
+            widget.value = static_cast<f32>(*typed);
+            widget.changed = true;
+        }
+        show();
     }
-    if (widget.enabled && it.focused && (ctx.action_pressed("menu_left") || ctx.key_pressed(Key::Left))) {
-        widget.value = std::clamp(widget.value - widget.step, widget.min, widget.max);
-        widget.text.text = format_f32(widget.value);
-        widget.text.caret = widget.text.text.size();
-        widget.text.clear_selection();
+    const i32 steps = (ctx.key_typed(Key::Up) ? 1 : 0) - (ctx.key_typed(Key::Down) ? 1 : 0);
+    if (widget.enabled && steps != 0 && (it.focused || widget.text.active)) {
+        widget.value = std::clamp(widget.value + static_cast<f32>(steps) * widget.step, widget.min, widget.max);
         widget.changed = true;
+        show();
     }
-    if (widget.enabled && it.focused && (ctx.action_pressed("menu_right") || ctx.key_pressed(Key::Right))) {
-        widget.value = std::clamp(widget.value + widget.step, widget.min, widget.max);
-        widget.text.text = format_f32(widget.value);
-        widget.text.caret = widget.text.text.size();
-        widget.text.clear_selection();
-        widget.changed = true;
+    if (widget.invalid) {
+        widget.style.surface.normal.border = ctx.theme().colors.solid_danger;
+        widget.style.surface.focused.border = ctx.theme().colors.solid_danger;
     }
 
-    draw_text_input(ctx, widget.bounds, widget.text, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled));
+    draw_text_input(ctx, widget.bounds, widget.text, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.text.active));
 }
 
 void run_combo_popup(Context& ctx, ComboBox& widget) {
@@ -186,10 +214,16 @@ void run_combo_popup(Context& ctx, ComboBox& widget) {
     ctx.end_popup();
 }
 
+// ComboBox as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, ComboBox& widget) {
+    widget.style = themed_widget_style(widget.style, theme.input);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, ComboBox& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
-    widget.style = themed_widget_style(widget.style, ctx.theme().input);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const TextInputLayoutMetrics metrics = text_input_layout_metrics(widget.text_style, widget.style);
     widget.result = {};
     widget.result.selected = widget.state.selected;
@@ -237,9 +271,15 @@ void run(Context& ctx, ComboBox& widget) {
     }
 }
 
+// ColorPicker as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, ColorPicker& widget) {
+    widget.style = themed_widget_style(widget.style, theme.input);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, ColorPicker& widget) {
-    widget.style = themed_widget_style(widget.style, ctx.theme().input);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const ColorPickerLayoutMetrics metrics = color_picker_layout_metrics(widget);
     ColorPicker effective = widget;
     effective.row_height = metrics.row_height;

@@ -54,10 +54,13 @@ endfunction()
 #       [TITLE <text>]         # the product name in the Windows version info (default: <name>)
 #       [VERSION <x.y.z>]      # (default: the project's version)
 #       [ICON <file.ico>]      # the Windows executable's icon
+#       [INFO <project.kin>]   # its game info: TITLE, VERSION and ICON default to its title,
+#                              # version and icon (the .ico beside its icon PNG, in the content)
 #       [FILES <file> ...]     # more files to ship beside the executable (a readme, ...)
 #       [NO_CONTENT])          # the game has no content folder
 #
-# On the target it sets KIN_GAME_CONTENT_NAME and, outside shipping builds,
+# On the target it sets KIN_GAME_TITLE, KIN_GAME_VERSION, KIN_GAME_ICON (the
+# game info's icon, else "") and KIN_GAME_CONTENT_NAME and, outside shipping builds,
 # KIN_GAME_CONTENT_DIR, so the game finds its content with
 #   kin::find_content_root(KIN_GAME_CONTENT, argc, argv)
 # in its source folder while it is made, and beside the executable once it
@@ -129,7 +132,7 @@ END
 endfunction()
 
 function(kin_game target)
-    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST" "FILES;RUNTIME_TARGETS" ${ARGN})
+    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO" "FILES;RUNTIME_TARGETS" ${ARGN})
     if(NOT ARG_NAME)
         set(ARG_NAME "${target}")
     endif()
@@ -137,6 +140,30 @@ function(kin_game target)
         set(ARG_CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/content")
     endif()
     get_filename_component(content "${ARG_CONTENT}" ABSOLUTE)
+    set(icon_png "")
+    if(ARG_INFO)
+        # The game info's lines ("title My Game", "version 1.2.0", "icon icon.png"),
+        # read again when it changes.
+        get_filename_component(info "${ARG_INFO}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        if(NOT EXISTS "${info}")
+            message(FATAL_ERROR "kin_game(${target}): no game info at ${info}")
+        endif()
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${info}")
+        file(STRINGS "${info}" info_lines ENCODING UTF-8)
+        foreach(line IN LISTS info_lines)
+            if(line MATCHES "^title[ \t]+(.+)$" AND NOT ARG_TITLE)
+                string(STRIP "${CMAKE_MATCH_1}" ARG_TITLE)
+            elseif(line MATCHES "^version[ \t]+(.+)$" AND NOT ARG_VERSION)
+                string(STRIP "${CMAKE_MATCH_1}" ARG_VERSION)
+            elseif(line MATCHES "^icon[ \t]+(.+)$")
+                string(STRIP "${CMAKE_MATCH_1}" icon_png)
+                string(REGEX REPLACE "\\.[^.]*$" ".ico" icon_ico "${content}/${icon_png}")
+                if(EXISTS "${icon_ico}" AND NOT ARG_ICON)
+                    set(ARG_ICON "${icon_ico}")
+                endif()
+            endif()
+        endforeach()
+    endif()
     if(NOT ARG_TITLE)
         set(ARG_TITLE "${ARG_NAME}")
     endif()
@@ -151,6 +178,18 @@ function(kin_game target)
     kin_enable_release_link_optimizations(${target})
 
     target_compile_definitions(${target} PRIVATE KIN_GAME_CONTENT_NAME="${ARG_NAME}")
+    # Its title, version and icon (a path in its content, from INFO) for its
+    # code: KIN_GAME_TITLE, KIN_GAME_VERSION and KIN_GAME_ICON, string literals.
+    foreach(key IN ITEMS TITLE VERSION ICON)
+        if(key STREQUAL "ICON")
+            set(value "${icon_png}")
+        else()
+            set(value "${ARG_${key}}")
+        endif()
+        string(REPLACE "\\" "\\\\" value "${value}")
+        string(REPLACE "\"" "\\\"" value "${value}")
+        target_compile_definitions(${target} PRIVATE "KIN_GAME_${key}=\"${value}\"")
+    endforeach()
     if(ARG_NO_CONTENT)
         set(content "")
     elseif(NOT KIN_SHIPPING AND NOT EMSCRIPTEN)

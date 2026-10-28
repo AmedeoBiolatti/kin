@@ -43,6 +43,15 @@ ComponentSchemaField parse_field(const JsonValue& json, std::vector<std::string>
     field.category = json.string_at("category");
     field.description = json.string_at("description");
     field.units = json.string_at("units");
+    field.asset_type = json.string_at("asset_type");
+    field.entry_of = json.string_at("entry_of");
+    if (const JsonValue* choices = json.find("choices"); choices && choices->is_array()) {
+        for (const JsonValue& choice : choices->items()) {
+            if (choice.is_string()) {
+                field.choices.push_back(choice.as_string());
+            }
+        }
+    }
     field.readonly = json.bool_at("readonly", false);
     field.hidden = json.bool_at("hidden", false);
     if (const JsonValue* min = json.find("min"); min && min->is_number()) {
@@ -84,6 +93,15 @@ void apply_metadata(EcsComponentRegistry::DataComponentBuilder& builder, const C
     }
     if (!field.units.empty()) {
         builder.units(field.units);
+    }
+    if (!field.asset_type.empty()) {
+        builder.asset_type(field.asset_type);
+    }
+    if (!field.entry_of.empty()) {
+        builder.entry_of(field.entry_of);
+    }
+    if (!field.choices.empty()) {
+        builder.choices(field.choices);
     }
     if (field.readonly) {
         builder.readonly();

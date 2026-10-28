@@ -5,7 +5,10 @@
 #include <kin/ecs/world.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/core/rng.hpp>
+#include <kin/platform/app.hpp>
+#include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/renderer/renderer2d.hpp>
 #include <kin/runtime/scene_server.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <kin/ui2/context.hpp>
@@ -18,6 +21,9 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -152,6 +158,24 @@ private:
         .submit = kin::ui2::UiSubmitKey::Enter,
     };
     kin::i32 _submits = 0;
+};
+
+// The files dropped on its window, as it takes them in update().
+class DropProbeScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "DropProbe"; }
+
+    void update(kin::SceneContext& ctx) override {
+        for (const kin::DroppedFile& file : ctx.input.take_dropped_files()) {
+            _dropped += (_dropped.empty() ? "" : ";") + file.path.generic_string() + "@" +
+                        std::to_string(static_cast<int>(ctx.renderer.window_to_logical(file.pos).x));
+        }
+    }
+
+    void write_report(kin::JsonWriter& json) const override { json.field("dropped", std::string_view{_dropped}); }
+
+private:
+    std::string _dropped;
 };
 
 kin::Animation make_server_animation(std::string name) {
@@ -587,6 +611,7 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
         R"({"id":6,"method":"scene.current"})" "\n"
         R"({"id":7,"method":"sim.tick","params":{"count":1}})" "\n"
         R"({"id":8,"method":"scene.current"})" "\n"
+        R"({"id":12,"method":"frame.timing","params":{"since":0}})" "\n"
         R"({"id":9,"method":"frame.timing","params":{"reset":true}})" "\n"
         R"({"id":10,"method":"frame.timing"})" "\n"
         R"({"id":11,"method":"server.shutdown"})" "\n");
@@ -614,8 +639,15 @@ void test_press_completes_a_ui2_click_and_frame_timing() {
     assert(timing->int_at("window") == 600);
     assert(timing->find("mean")->find("total_ms")->as_number() >= 0.0);
     assert(timing->find("max")->find("update_ms")->as_number() >= timing->find("mean")->find("update_ms")->as_number());
+    assert(!timing->contains("history")); // not asked for
     const kin::JsonValue* after_reset = response_result(text, 10);
     assert(after_reset != nullptr && after_reset->int_at("frames") == 0);
+    // The frames after the first, each.
+    const kin::JsonValue* since = response_result(text, 12);
+    assert(since != nullptr); // (response_result's value is shared: `timing` is this now)
+    const auto& history = since->find("history")->items();
+    assert(history.size() == 2 && history[0].int_at("frame") == 1 && history[1].int_at("frame") == 2);
+    assert(history[1].find("render_ms")->as_number() >= 0.0 && history[1].find("interval_ms")->as_number() == 0.0);
 }
 
 void test_input_key_drives_a_text_edit() {
@@ -681,6 +713,31 @@ void test_input_key_drives_a_text_edit() {
     assert(is_error(19));
     assert(is_error(20));
     assert(!is_error(14));
+}
+
+// input.drop: a file dropped on the window at a logical point, as from the desktop.
+void test_input_drop() {
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<DropProbeScene>());
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"input.drop","params":{"path":"art/hero.png","x":40,"y":20}})" "\n"
+        R"({"id":2,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":3,"method":"input.drop","params":{"path":""}})" "\n"
+        R"({"id":4,"method":"scene.current"})" "\n"
+        R"({"id":5,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "drops", .width = 120, .height = 80},
+        .mode = kin::ServerMode::Driven,
+        .render = true,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    const std::string text = out.str();
+    const kin::JsonValue* state = response_result(text, 4);
+    assert(state && state->find("state")->string_at("dropped") == "art/hero.png@40");
+    assert(!response_result(text, 3)); // a path is needed
 }
 
 void test_sim_reset() {
@@ -852,6 +909,135 @@ void test_server_tears_down_scenes_before_returning() {
     assert(scenes.depth() == 0);
 }
 
+// --inspect: a windowed game answers between frames, and is held and stepped.
+void test_live_inspector() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "inspected", .width = 32, .height = 32, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<KinSnapshotScene>());
+    kin::ServerContext ctx{app, window, renderer, scenes, {.title = "inspected"}, kin::make_key(1), 1.0f / 60.0f, false};
+    ctx.realize_scenes();
+    kin::GameInfo game;
+    game.title = "Inspected";
+    // Two frames drawn: their times, as scene_app records them.
+    ctx.record_frame_timing({.update_ms = 1.0, .render_ms = 2.0, .present_ms = 0.5, .interval_ms = 16.5});
+    ctx.record_frame_timing({.update_ms = 1.5, .render_ms = 3.0, .present_ms = 0.25, .interval_ms = 17.0});
+
+    std::istringstream in(
+        R"({"id":10,"method":"frame.timing","params":{"since":-1}})" "\n"
+        R"({"id":1,"method":"game.info"})" "\n"
+        R"({"id":2,"method":"world.snapshot","params":{"raw":false,"events":false,"animations":false}})" "\n"
+        R"({"id":3,"method":"sim.pause"})" "\n"
+        R"({"id":4,"method":"sim.tick"})" "\n"
+        R"({"id":5,"method":"input.key","params":{"name":"A"}})" "\n"
+        R"({"id":6,"method":"sim.step","params":{"count":2}})" "\n"
+        "\n"
+        "not json\n");
+    std::ostringstream out;
+    kin::LiveInspector inspector{in, out};
+    assert(inspector.admit_update() && inspector.frame() == 1); // running: every update
+
+    // Requests are read on a thread: poll until all of them are answered.
+    for (int i = 0; i < 2000 && !inspector.finished(); ++i) {
+        inspector.poll(ctx, &game);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(inspector.finished());
+    inspector.flush(); // answers are written on a thread of their own
+    const std::string text = out.str();
+    assert(response_result(text, 1)->string_at("title") == "Inspected");
+    const kin::JsonValue* frames = response_result(text, 10);
+    assert(frames && frames->int_at("frames") == 2 && frames->find("max")->find("total_ms")->as_number() == 4.75);
+    const auto& history = frames->find("history")->items();
+    assert(history.size() == 2 && history[0].int_at("frame") == 0 && history[1].find("interval_ms")->as_number() == 17.0);
+    const kin::JsonValue* snapshot = response_result(text, 2);
+    assert(snapshot && !snapshot->contains("world") && snapshot->contains("kin"));
+    assert(text.find("server.actor") != std::string::npos);
+    const kin::JsonValue* paused = response_result(text, 3);
+    assert(paused && paused->bool_at("paused") && paused->int_at("frame") == 1);
+    assert(!response_result(text, 4) && text.find("sim.tick drives a headless server") != std::string::npos);
+    assert(!response_result(text, 5)); // input belongs to the player
+    assert(response_result(text, 6)->bool_at("paused"));
+    assert(text.find("invalid JSON") != std::string::npos);
+
+    // The input ended, so nothing could resume it: it runs again (the steps with it).
+    assert(!inspector.paused());
+    assert(inspector.admit_update() && inspector.admit_update() && inspector.frame() == 3);
+
+    // Held: no updates but the steps asked for.
+    std::istringstream more(R"({"id":7,"method":"sim.step","params":{"count":2}})" "\n"
+                            R"({"id":8,"method":"server.status"})" "\n"
+                            R"({"id":9,"method":"server.shutdown"})" "\n");
+    std::ostringstream answers;
+    kin::LiveInspector held{more, answers};
+    for (int i = 0; i < 2000 && answers.str().find("bye") == std::string::npos; ++i) {
+        held.poll(ctx, &game);
+        held.flush();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(!app.running()); // server.shutdown quits the game
+    assert(response_result(answers.str(), 8)->bool_at("paused"));
+    // finished() came with the same poll as the shutdown, so the hold may be
+    // lifted already; held only if the input is still open.
+    if (held.paused()) {
+        assert(held.admit_update() && held.admit_update() && !held.admit_update());
+    }
+}
+
+// A tool slow to read (a large answer filling the pipe) holds the inspector's
+// writer, not the game: poll() returns at once, and the answers follow, in
+// order, once the tool reads again.
+void test_live_inspector_slow_tool() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "slow", .width = 32, .height = 32, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<KinSnapshotScene>());
+    kin::ServerContext ctx{app, window, renderer, scenes, {.title = "slow"}, kin::make_key(1), 1.0f / 60.0f, false};
+    ctx.realize_scenes();
+
+    // A stream whose flush waits until the tool reads.
+    struct Gate : std::stringbuf {
+        std::mutex mutex;
+        std::condition_variable opened;
+        bool open = false;
+        int sync() override {
+            std::unique_lock<std::mutex> lock(mutex);
+            opened.wait(lock, [this] { return open; });
+            return std::stringbuf::sync();
+        }
+    } gate;
+    std::ostream out(&gate);
+    // The tool reads at last after 1.5 s (so a held game fails below, not hangs).
+    std::thread reads_late([&gate] {
+        std::unique_lock<std::mutex> lock(gate.mutex);
+        gate.opened.wait_for(lock, std::chrono::milliseconds(1500), [&gate] { return gate.open; });
+        gate.open = true;
+        gate.opened.notify_all();
+    });
+    std::istringstream in(R"({"id":1,"method":"ping"})" "\n"
+                          R"({"id":2,"method":"server.status"})" "\n");
+    kin::LiveInspector inspector{in, out};
+    for (int i = 0; i < 2000 && !inspector.finished(); ++i) {
+        const auto start = std::chrono::steady_clock::now();
+        inspector.poll(ctx, nullptr);
+        assert(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500)); // never held
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(inspector.finished());
+    {
+        std::lock_guard<std::mutex> lock(gate.mutex);
+        gate.open = true;
+    }
+    gate.opened.notify_all();
+    reads_late.join();
+    inspector.flush();
+    const std::string text = gate.str();
+    assert(response_result(text, 1) && response_result(text, 2));
+    assert(text.find("\"id\":1") < text.find("\"id\":2"));
+}
+
 int main() {
     test_json_parser();
     test_driven_server();
@@ -861,10 +1047,13 @@ int main() {
     test_animation_diagnostics_endpoint_missing_provider_errors();
     test_ui_snapshot_and_pointer_input();
     test_press_completes_a_ui2_click_and_frame_timing();
+    test_live_inspector_slow_tool();
     test_input_key_drives_a_text_edit();
+    test_input_drop();
     test_sim_reset();
     test_sim_reset_unsupported_without_factory();
     test_view_screenshot();
     test_server_tears_down_scenes_before_returning();
+    test_live_inspector();
     return 0;
 }

@@ -338,6 +338,9 @@ void AnimationRegistry::merge(const AnimationRegistryFragment& fragment) {
         const std::string name = copied.name;
         _templates[name] = std::make_shared<Animation>(std::move(copied));
     }
+    for (const auto& [name, space] : fragment.blend_spaces) {
+        _blend_spaces[name] = std::make_shared<const AnimationBlendSpace>(space);
+    }
     if (!fragment.animations.empty() || !fragment.animation_templates.empty()) {
         KIN_LOG_INFO_F("animation",
                        "animation registry fragment merged",
@@ -355,6 +358,44 @@ void AnimationRegistry::bump_generation() {
                     "animation registry generation bumped",
                     (LogFields{{.name = "generation", .value = std::to_string(_generation)},
                                {.name = "reason", .value = "registry_changed"}}));
+}
+
+void AnimationRegistry::add_blend_space(std::string name, AnimationBlendSpace space) {
+    _blend_spaces[std::move(name)] = std::make_shared<const AnimationBlendSpace>(std::move(space));
+}
+
+std::shared_ptr<const AnimationBlendSpace> AnimationRegistry::blend_space(std::string_view name) const {
+    const auto found = _blend_spaces.find(std::string{name});
+    return found == _blend_spaces.end() ? nullptr : found->second;
+}
+
+std::vector<f32> blend_weights(const AnimationBlendSpace& space, f32 value) {
+    std::vector<f32> weights(space.entries.size(), 0.0f);
+    if (space.entries.empty()) {
+        return weights;
+    }
+    // The nearest below (or at) the value, and the nearest above it.
+    i32 below = -1;
+    i32 above = -1;
+    for (i32 i = 0; i < static_cast<i32>(space.entries.size()); ++i) {
+        const f32 at = space.entries[static_cast<std::size_t>(i)].position;
+        if (at <= value && (below < 0 || at > space.entries[static_cast<std::size_t>(below)].position)) {
+            below = i;
+        }
+        if (at > value && (above < 0 || at < space.entries[static_cast<std::size_t>(above)].position)) {
+            above = i;
+        }
+    }
+    if (below < 0 || above < 0) {
+        weights[static_cast<std::size_t>(below >= 0 ? below : above)] = 1.0f; // past an end
+        return weights;
+    }
+    const f32 from = space.entries[static_cast<std::size_t>(below)].position;
+    const f32 to = space.entries[static_cast<std::size_t>(above)].position;
+    const f32 t = to > from ? (value - from) / (to - from) : 0.0f;
+    weights[static_cast<std::size_t>(below)] = 1.0f - t;
+    weights[static_cast<std::size_t>(above)] = t;
+    return weights;
 }
 
 } // namespace kin

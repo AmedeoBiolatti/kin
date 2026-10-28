@@ -4,8 +4,9 @@ For the experimental browser runtime and its current platform limitations, see
 [WebGL2 builds](web.md).
 
 What a game or tool built on kin needs from the desktop beyond windows and
-input, without calling SDL itself: files dropped on a window, the system's file
-dialogs, child processes, and where to keep the user's data.
+input, without calling SDL itself: closing asked about first, files dropped on a
+window, the system's file dialogs, child processes, and where to keep the
+user's data.
 
 For read-only game resources use `find_content_root` in `kin/assets/content.hpp`,
 which finds the content folder or `.kinpak` beside the executable independently
@@ -13,6 +14,26 @@ of the working directory. `game_assets_dir` in `kin/platform/resource_paths.hpp`
 retains the older loose `assets/<game>` layout for compatibility. See
 [shipping](shipping.md). Keep saves in the user data directory below, not beside
 the executable.
+
+## Closing, asked about first
+
+```cpp
+ctx.app.hold_close(true);
+if (ctx.app.close_asked()) {
+    ctx.app.forget_close();
+    if (unsaved()) {
+        show_save_dialog(); // its Quit button calls ctx.app.quit()
+    } else {
+        ctx.app.quit();
+    }
+}
+```
+
+Closing the last window, or the system asking the app to quit, stops the app at
+once unless it holds closing (`App::hold_close(true)`). Held, the app goes on,
+`close_asked()` turns true, and the app decides: `quit()`, or `forget_close()`
+to stay (an editor asking about unsaved work). Closing one of several windows is
+not held.
 
 ## Dropped files
 

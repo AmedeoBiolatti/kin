@@ -1,6 +1,8 @@
 #include <kin/ecs/component.hpp>
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <map>
 #include <limits>
 #include <optional>
@@ -396,6 +398,20 @@ const ComponentDescriptor* EcsComponentRegistry::find(ComponentId id) const {
 const ComponentDescriptor* EcsComponentRegistry::find(std::string_view name) const {
     const detail::ComponentRecord* record = find_record(name);
     return record ? &record->descriptor : nullptr;
+}
+
+std::optional<ComponentFieldAccess> EcsComponentRegistry::field_access(std::string_view component, std::string_view field) const {
+    const detail::ComponentRecord* record = find_record(component);
+    if (!record || record->descriptor.kind != ComponentKind::Native) {
+        return std::nullopt;
+    }
+    for (const detail::ComponentFieldRecord& found : record->fields) {
+        if (found.descriptor.name == field) {
+            return ComponentFieldAccess{.component = record->descriptor.id, .kind = found.descriptor.kind, .read = found.read,
+                                        .write = found.patch};
+        }
+    }
+    return std::nullopt;
 }
 
 std::vector<ComponentDescriptor> EcsComponentRegistry::descriptors() const {
@@ -973,6 +989,18 @@ EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentB
     return update_last_field([&](ComponentFieldDescriptor& field) { field.units = std::move(value); });
 }
 
+EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::asset_type(std::string value) {
+    return update_last_field([&](ComponentFieldDescriptor& field) { field.asset_type = std::move(value); });
+}
+
+EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::entry_of(std::string field_name) {
+    return update_last_field([&](ComponentFieldDescriptor& field) { field.entry_of = std::move(field_name); });
+}
+
+EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::choices(std::vector<std::string> values) {
+    return update_last_field([&](ComponentFieldDescriptor& field) { field.choices = std::move(values); });
+}
+
 EcsComponentRegistry::DataComponentBuilder& EcsComponentRegistry::DataComponentBuilder::readonly(bool value) {
     return update_last_field([&](ComponentFieldDescriptor& field) { field.readonly = value; });
 }
@@ -1124,14 +1152,30 @@ std::vector<EcsEntity> EcsWorld::query_entities(const EcsQueryPlan& plan) const 
     return result;
 }
 
+namespace {
+
+// An f32 as the shortest number that reads back as it: 0.2f as 0.2, not as
+// the double it widens to (0.20000000298023224).
+f64 as_written(f32 value) {
+    std::array<char, 32> text{};
+    const auto [end, error] = std::to_chars(text.data(), text.data() + text.size(), value);
+    f64 out = value;
+    if (error == std::errc{}) {
+        std::from_chars(text.data(), end, out);
+    }
+    return out;
+}
+
+} // namespace
+
 void write_component_field_value_json(JsonWriter& json, const ComponentFieldValue& value) {
     std::visit([&](const auto& typed) {
         using T = std::decay_t<decltype(typed)>;
         if constexpr (std::is_same_v<T, Vec2f>) {
-            json.begin_object().field("x", static_cast<f64>(typed.x)).field("y", static_cast<f64>(typed.y)).end_object();
+            json.begin_object().field("x", as_written(typed.x)).field("y", as_written(typed.y)).end_object();
         } else if constexpr (std::is_same_v<T, Vec3f> || std::is_same_v<T, Quatf>) {
-            json.begin_object().field("x", f64(typed.x)).field("y", f64(typed.y)).field("z", f64(typed.z));
-            if constexpr (std::is_same_v<T, Quatf>) json.field("w", f64(typed.w));
+            json.begin_object().field("x", as_written(typed.x)).field("y", as_written(typed.y)).field("z", as_written(typed.z));
+            if constexpr (std::is_same_v<T, Quatf>) json.field("w", as_written(typed.w));
             json.end_object();
         } else if constexpr (std::is_same_v<T, Vec2i>) {
             json.begin_object().field("x", typed.x).field("y", typed.y).end_object();
@@ -1153,7 +1197,7 @@ void write_component_field_value_json(JsonWriter& json, const ComponentFieldValu
         } else if constexpr (std::is_same_v<T, std::string>) {
             json.value(std::string_view{typed});
         } else if constexpr (std::is_same_v<T, f32>) {
-            json.value(static_cast<f64>(typed));
+            json.value(as_written(typed));
         } else {
             json.value(typed);
         }
@@ -1212,6 +1256,13 @@ void write_world_snapshot_json(JsonWriter& json, const WorldSnapshot& snapshot) 
             if (!field.category.empty()) json.field("category", std::string_view{field.category});
             if (!field.description.empty()) json.field("description", std::string_view{field.description});
             if (!field.units.empty()) json.field("units", std::string_view{field.units});
+            if (!field.asset_type.empty()) json.field("asset_type", std::string_view{field.asset_type});
+            if (!field.entry_of.empty()) json.field("entry_of", std::string_view{field.entry_of});
+            if (!field.choices.empty()) {
+                json.key("choices").begin_array();
+                for (const std::string& choice : field.choices) json.value(std::string_view{choice});
+                json.end_array();
+            }
             if (field.readonly) json.field("readonly", field.readonly);
             if (field.hidden) json.field("hidden", field.hidden);
             if (field.min_value) json.field("min", *field.min_value);

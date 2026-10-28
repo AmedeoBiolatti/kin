@@ -58,7 +58,7 @@ public:
     void submit(std::span<const RenderCommand> commands);
     void clear_color(Color color);
     void fill_rect(RenderKey key, Rectf rect, Color color, MaterialRef material = {});
-    void draw_rect(RenderKey key, Rectf rect, Color color);
+    void draw_rect(RenderKey key, Rectf rect, Color color, MaterialRef material = {});
     void draw_line(RenderKey key, Vec2f a, Vec2f b, Color color);
     // `flip` mirrors the image within `dest` before it turns.
     void draw_texture(RenderKey key, const Texture& texture, Rectf dest, Color tint = colors::white, MaterialRef material = {}, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, Flip flip = Flip::None);
@@ -83,7 +83,7 @@ public:
     // and a source given for a Sprite.
     void write_sprite(const SpriteBlock& block, std::size_t index, u32 texture, const PreparedSprite& sprite);
     // A Texture command drawing `source` (texture pixels) of `texture`.
-    void draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint = colors::white, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, Flip flip = Flip::None);
+    void draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint = colors::white, f32 rotation = 0.0f, Vec2f pivot = {0.5f, 0.5f}, Flip flip = Flip::None, MaterialRef material = {});
     void draw_text(RenderKey key, std::string text, Vec2f pos, Rectf bounds, f32 scale, Color color, std::function<void(Renderer2D&)> callback);
     void push_viewport(Rectf rect);
     void pop_viewport();
@@ -98,7 +98,7 @@ public:
     // A shape mesh, placed by `transform` and coloured by `tint`. The queue
     // keeps the mesh alive until it is cleared.
     void draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mesh, const Affine2& transform = {},
-                    Color tint = colors::white);
+                    Color tint = colors::white, MaterialRef material = {});
 
     // Reorders the commands into draw order, so commands() and the presorted
     // flushes see them sorted. Does nothing when nothing changed since the last sort.

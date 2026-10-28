@@ -195,4 +195,91 @@ std::string normalize_newlines(std::string_view text) {
     return out;
 }
 
+namespace {
+
+// A code point that goes on the one before it: a combining mark (the common
+// blocks, and the marks of the scripts UI text meets most), a variation
+// selector, a skin tone, a tag, a keycap's frame.
+bool extends(u32 cp) {
+    struct Range {
+        u32 first;
+        u32 last;
+    };
+    static constexpr Range ranges[] = {
+        {0x0300, 0x036F}, {0x0483, 0x0489}, {0x0591, 0x05BD}, {0x05BF, 0x05BF}, {0x05C1, 0x05C2}, {0x05C4, 0x05C5},
+        {0x05C7, 0x05C7}, {0x0610, 0x061A}, {0x064B, 0x065F}, {0x0670, 0x0670}, {0x06D6, 0x06DC}, {0x06DF, 0x06E4},
+        {0x06E7, 0x06E8}, {0x06EA, 0x06ED}, {0x0900, 0x0903}, {0x093A, 0x094F}, {0x0951, 0x0957}, {0x0962, 0x0963},
+        {0x0981, 0x0983}, {0x09BC, 0x09D7}, {0x0E31, 0x0E31}, {0x0E34, 0x0E3A}, {0x0E47, 0x0E4E}, {0x1AB0, 0x1AFF},
+        {0x1DC0, 0x1DFF}, {0x20D0, 0x20FF}, {0xFE00, 0xFE0F}, {0xFE20, 0xFE2F}, {0x1F3FB, 0x1F3FF}, {0xE0020, 0xE007F},
+        {0xE0100, 0xE01EF},
+    };
+    return std::ranges::any_of(ranges, [cp](const Range& r) { return cp >= r.first && cp <= r.last; });
+}
+
+bool regional_indicator(u32 cp) {
+    return cp >= 0x1F1E6 && cp <= 0x1F1FF;
+}
+
+constexpr u32 zwj = 0x200D;
+
+} // namespace
+
+std::size_t utf8_next_grapheme(std::string_view text, std::size_t pos) {
+    if (pos >= text.size()) {
+        return text.size();
+    }
+    if (text[pos] == '\r' && pos + 1 < text.size() && text[pos + 1] == '\n') {
+        return pos + 2;
+    }
+    const u32 first = utf8_decode(text, pos);
+    std::size_t at = utf8_next(text, pos);
+    if (first == '\n' || first == '\r') {
+        return at;
+    }
+    if (regional_indicator(first) && at < text.size() && regional_indicator(utf8_decode(text, at))) {
+        return utf8_next(text, at); // a flag
+    }
+    while (at < text.size()) {
+        const u32 cp = utf8_decode(text, at);
+        if (cp == zwj) {
+            at = utf8_next(text, at);
+            if (at < text.size()) {
+                at = utf8_next(text, at); // what it joins on
+            }
+            continue;
+        }
+        if (!extends(cp)) {
+            break;
+        }
+        at = utf8_next(text, at);
+    }
+    return at;
+}
+
+std::size_t utf8_prev_grapheme(std::string_view text, std::size_t pos) {
+    pos = std::min(pos, text.size());
+    if (pos == 0) {
+        return 0;
+    }
+    // From a boundary surely before it (an ASCII character not joined on to the
+    // one before it, or the text's start), forward to the last one before `pos`.
+    std::size_t start = utf8_prev(text, pos);
+    for (int steps = 0; start > 0 && steps < 64; ++steps) {
+        const auto byte = static_cast<unsigned char>(text[start]);
+        const std::size_t before = utf8_prev(text, start);
+        if (byte < 0x80 && byte != '\n' && utf8_decode(text, before) != zwj) {
+            break;
+        }
+        start = before;
+    }
+    std::size_t at = start;
+    for (;;) {
+        const std::size_t next = utf8_next_grapheme(text, at);
+        if (next >= pos || next == at) {
+            return at;
+        }
+        at = next;
+    }
+}
+
 } // namespace kin

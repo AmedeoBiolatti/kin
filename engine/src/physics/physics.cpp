@@ -3,16 +3,13 @@
 #include <box2d/box2d.h>
 
 #include <algorithm>
+#include <cmath>
 #include <set>
 
 namespace kin {
 namespace {
 
 constexpr u32 invalid_index = UINT32_MAX;
-
-b2Vec2 to_b2(Vec2f value) {
-    return {value.x, value.y};
-}
 
 Vec2f from_b2(const b2Vec2& value) {
     return {value.x, value.y};
@@ -105,10 +102,30 @@ struct PhysicsWorld::Impl : b2ContactListener {
     };
 
     explicit Impl(PhysicsWorldDef def)
-        : world(to_b2(def.gravity)) {
+        : scale(std::isfinite(def.units_per_meter) && def.units_per_meter > 0.0f ? def.units_per_meter : 1.0f),
+          world(meters(def.gravity)) {
         world.SetContactListener(this);
     }
 
+    // The game's units to Box2D's metres, and back (lengths, positions,
+    // velocities, forces: each has one length in it).
+    b2Vec2 meters(Vec2f value) const {
+        return {value.x / scale, value.y / scale};
+    }
+
+    f32 meters(f32 length) const {
+        return length / scale;
+    }
+
+    Vec2f units(const b2Vec2& value) const {
+        return {value.x * scale, value.y * scale};
+    }
+
+    f32 units(f32 length) const {
+        return length * scale;
+    }
+
+    f32 scale = 1.0f; // units per metre
     b2World world;
     std::vector<BodySlot> bodies;
     std::vector<u32> free_bodies;
@@ -223,7 +240,7 @@ struct PhysicsWorld::Impl : b2ContactListener {
         contact->GetWorldManifold(&manifold);
         if (contact->GetManifold()->pointCount > 0) {
             event.has_point = true;
-            event.point = from_b2(manifold.points[0]);
+            event.point = units(manifold.points[0]);
             event.normal = from_b2(manifold.normal);
         }
         events.push_back(event);
@@ -259,9 +276,9 @@ PhysicsWorld& PhysicsWorld::operator=(PhysicsWorld&&) noexcept = default;
 PhysicsBody PhysicsWorld::create_body(const PhysicsBodyDef& def) {
     b2BodyDef body_def;
     body_def.type = to_b2(def.type);
-    body_def.position = to_b2(def.position);
+    body_def.position = _impl->meters(def.position);
     body_def.angle = def.rotation;
-    body_def.linearVelocity = to_b2(def.linear_velocity);
+    body_def.linearVelocity = _impl->meters(def.linear_velocity);
     body_def.angularVelocity = def.angular_velocity;
     body_def.linearDamping = def.linear_damping;
     body_def.angularDamping = def.angular_damping;
@@ -324,12 +341,13 @@ PhysicsFixture PhysicsWorld::add_fixture(PhysicsBody body, const PhysicsFixtureD
     b2FixtureDef fixture_def;
     switch (def.shape.type) {
     case PhysicsShapeType::Box:
-        box_shape.SetAsBox(def.shape.half_extents.x, def.shape.half_extents.y, to_b2(def.shape.offset), 0.0f);
+        box_shape.SetAsBox(_impl->meters(def.shape.half_extents.x), _impl->meters(def.shape.half_extents.y),
+                           _impl->meters(def.shape.offset), 0.0f);
         fixture_def.shape = &box_shape;
         break;
     case PhysicsShapeType::Circle:
-        circle_shape.m_radius = def.shape.radius;
-        circle_shape.m_p = to_b2(def.shape.offset);
+        circle_shape.m_radius = _impl->meters(def.shape.radius);
+        circle_shape.m_p = _impl->meters(def.shape.offset);
         fixture_def.shape = &circle_shape;
         break;
     }
@@ -413,13 +431,13 @@ u64 PhysicsWorld::fixture_tag(PhysicsFixture fixture) const {
 
 void PhysicsWorld::set_transform(PhysicsBody body, Vec2f position, f32 rotation) {
     if (b2Body* body_ptr = _impl->body_ptr(body)) {
-        body_ptr->SetTransform(to_b2(position), rotation);
+        body_ptr->SetTransform(_impl->meters(position), rotation);
     }
 }
 
 Vec2f PhysicsWorld::position(PhysicsBody body) const {
     if (b2Body* body_ptr = _impl->body_ptr(body)) {
-        return from_b2(body_ptr->GetPosition());
+        return _impl->units(body_ptr->GetPosition());
     }
     return {};
 }
@@ -433,26 +451,26 @@ f32 PhysicsWorld::rotation(PhysicsBody body) const {
 
 void PhysicsWorld::set_linear_velocity(PhysicsBody body, Vec2f velocity) {
     if (b2Body* body_ptr = _impl->body_ptr(body)) {
-        body_ptr->SetLinearVelocity(to_b2(velocity));
+        body_ptr->SetLinearVelocity(_impl->meters(velocity));
     }
 }
 
 Vec2f PhysicsWorld::linear_velocity(PhysicsBody body) const {
     if (b2Body* body_ptr = _impl->body_ptr(body)) {
-        return from_b2(body_ptr->GetLinearVelocity());
+        return _impl->units(body_ptr->GetLinearVelocity());
     }
     return {};
 }
 
 void PhysicsWorld::apply_force(PhysicsBody body, Vec2f force) {
     if (b2Body* body_ptr = _impl->body_ptr(body)) {
-        body_ptr->ApplyForceToCenter(to_b2(force), true);
+        body_ptr->ApplyForceToCenter(_impl->meters(force), true);
     }
 }
 
 void PhysicsWorld::apply_impulse(PhysicsBody body, Vec2f impulse) {
     if (b2Body* body_ptr = _impl->body_ptr(body)) {
-        body_ptr->ApplyLinearImpulseToCenter(to_b2(impulse), true);
+        body_ptr->ApplyLinearImpulseToCenter(_impl->meters(impulse), true);
     }
 }
 
@@ -488,7 +506,7 @@ std::vector<PhysicsFixture> PhysicsWorld::query_point(Vec2f point, PhysicsFilter
         }
 
         bool ReportFixture(b2Fixture* fixture) override {
-            if (filter_matches(*fixture, filter) && fixture->TestPoint(to_b2(point))) {
+            if (filter_matches(*fixture, filter) && fixture->TestPoint(impl.meters(point))) {
                 results.push_back(impl.handle_for(fixture));
             }
             return true;
@@ -496,7 +514,8 @@ std::vector<PhysicsFixture> PhysicsWorld::query_point(Vec2f point, PhysicsFilter
     };
 
     Callback callback{*_impl, point, filter};
-    const b2AABB aabb{{point.x - 0.001f, point.y - 0.001f}, {point.x + 0.001f, point.y + 0.001f}};
+    const b2Vec2 at = _impl->meters(point);
+    const b2AABB aabb{{at.x - 0.001f, at.y - 0.001f}, {at.x + 0.001f, at.y + 0.001f}};
     _impl->world.QueryAABB(&callback, aabb);
     return callback.results;
 }
@@ -521,7 +540,7 @@ std::vector<PhysicsFixture> PhysicsWorld::query_aabb(Rectf rect, PhysicsFilter f
     };
 
     Callback callback{*_impl, filter};
-    const b2AABB aabb{{rect.x, rect.y}, {rect.x + rect.w, rect.y + rect.h}};
+    const b2AABB aabb{_impl->meters(Vec2f{rect.x, rect.y}), _impl->meters(Vec2f{rect.x + rect.w, rect.y + rect.h})};
     _impl->world.QueryAABB(&callback, aabb);
     return callback.results;
 }
@@ -544,7 +563,7 @@ std::vector<PhysicsRaycastHit> PhysicsWorld::raycast(Vec2f from, Vec2f to, Physi
             hits.push_back({
                 .body = impl.handle_for(fixture->GetBody()),
                 .fixture = impl.handle_for(fixture),
-                .point = from_b2(point),
+                .point = impl.units(point),
                 .normal = from_b2(normal),
                 .fraction = fraction,
             });
@@ -553,7 +572,7 @@ std::vector<PhysicsRaycastHit> PhysicsWorld::raycast(Vec2f from, Vec2f to, Physi
     };
 
     Callback callback{*_impl, filter};
-    _impl->world.RayCast(&callback, to_b2(from), to_b2(to));
+    _impl->world.RayCast(&callback, _impl->meters(from), _impl->meters(to));
     std::ranges::sort(callback.hits, [](const PhysicsRaycastHit& a, const PhysicsRaycastHit& b) {
         return a.fraction < b.fraction;
     });
@@ -584,15 +603,15 @@ std::vector<PhysicsDebugShape> PhysicsWorld::debug_shapes(PhysicsFilter filter) 
             const auto* polygon = static_cast<const b2PolygonShape*>(shape);
             debug.points.reserve(static_cast<std::size_t>(polygon->m_count));
             for (int32 i = 0; i < polygon->m_count; ++i) {
-                debug.points.push_back(from_b2(body->GetWorldPoint(polygon->m_vertices[i])));
+                debug.points.push_back(_impl->units(body->GetWorldPoint(polygon->m_vertices[i])));
             }
             break;
         }
         case b2Shape::e_circle: {
             debug.type = PhysicsDebugShapeType::Circle;
             const auto* circle = static_cast<const b2CircleShape*>(shape);
-            debug.center = from_b2(body->GetWorldPoint(circle->m_p));
-            debug.radius = circle->m_radius;
+            debug.center = _impl->units(body->GetWorldPoint(circle->m_p));
+            debug.radius = _impl->units(circle->m_radius);
             break;
         }
         default:
@@ -602,6 +621,10 @@ std::vector<PhysicsDebugShape> PhysicsWorld::debug_shapes(PhysicsFilter filter) 
         shapes.push_back(std::move(debug));
     }
     return shapes;
+}
+
+f32 PhysicsWorld::units_per_meter() const {
+    return _impl->scale;
 }
 
 } // namespace kin

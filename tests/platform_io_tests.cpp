@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -26,7 +27,8 @@ using namespace std::chrono_literals;
 
 // This program is also the child the process tests start: `--echo` answers
 // each line with "echo:<line>" and exits with N on "exit N" (0 at end of
-// input); `--burst N` writes N numbered lines; `--complain` writes to stderr.
+// input); `--burst N` writes N numbered lines; `--complain` writes to stderr;
+// `--both` writes to each, in turns; `--touch FILE` makes FILE.
 int child_main(int argc, char** argv) {
     const std::string mode = argv[1];
     if (mode == "--echo") {
@@ -53,6 +55,18 @@ int child_main(int argc, char** argv) {
     if (mode == "--complain") {
         std::cerr << "oops" << std::endl;
         return 2;
+    }
+    if (mode == "--touch" && argc > 2) {
+        std::ofstream(argv[2]) << "touched\n";
+        return 0;
+    }
+    if (mode == "--both") {
+        for (int i = 0; i < 3; ++i) {
+            std::cout << "said " << i << std::endl;
+            std::cerr << "logged " << i << std::endl;
+        }
+        std::cerr << "last" << std::flush;
+        return 0;
     }
     return 99;
 }
@@ -137,6 +151,39 @@ void test_process_kill_and_errors() {
     assert((lines_from(moved, 1) == std::vector<std::string>{"echo:still here"}));
 }
 
+// Output and errors read apart: an answer on one, a log on the other.
+void test_process_errors_apart() {
+    kin::Process child;
+    assert(child.start({.args = {self, "--both"}, .pipe_input = false, .capture_errors = true}));
+    assert(child.wait(10s) && child.exit_code() == 0);
+    std::vector<std::string> said;
+    while (auto line = child.read_line()) {
+        said.push_back(std::move(*line));
+    }
+    std::vector<std::string> logged;
+    while (auto line = child.read_error_line()) {
+        logged.push_back(std::move(*line));
+    }
+    assert((said == std::vector<std::string>{"said 0", "said 1", "said 2"}));
+    assert((logged == std::vector<std::string>{"logged 0", "logged 1", "logged 2", "last"}));
+    assert(child.read_errors().empty());
+}
+
+// Launched and left: it runs on its own (and would after this program ends).
+void test_launch() {
+    const std::filesystem::path mark = std::filesystem::temp_directory_path() / "kin_launch_test_mark.txt";
+    std::filesystem::remove(mark);
+    std::string error;
+    assert(kin::launch({self, "--touch", mark.string()}, {}, &error) && error.empty());
+    const auto until = std::chrono::steady_clock::now() + 10s;
+    while (!std::filesystem::exists(mark) && std::chrono::steady_clock::now() < until) {
+        SDL_Delay(5);
+    }
+    assert(std::filesystem::exists(mark));
+    std::filesystem::remove(mark);
+    assert(!kin::launch({}, {}, &error) && !error.empty());
+}
+
 void test_dropped_files() {
     kin::Input input;
     assert(!input.has_dropped_files() && !input.drop_position());
@@ -206,6 +253,8 @@ int main(int argc, char** argv) {
     test_process_end_of_input();
     test_process_burst_and_last_words();
     test_process_kill_and_errors();
+    test_process_errors_apart();
+    test_launch();
     test_dropped_files();
     test_file_dialogs();
     return 0;

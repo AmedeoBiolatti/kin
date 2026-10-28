@@ -229,6 +229,9 @@ public:
         f32 lut_strength = 1.0f;
     };
     virtual bool set_color_output(const ColorOutputState&) { return false; }
+    // `scene` drawn into `dest` (through the transform) as the output pass
+    // would show it (Renderer2D::draw_color_output).
+    virtual bool draw_color_output(const Texture&, Rectf, Rectf, const ColorOutputState&, bool) { return false; }
     // The current target's size in pixels (a layer's resolution is a share of it).
     virtual Vec2i current_target_pixels() const { return {}; }
     // Draws show how many times each pixel is shaded instead of themselves.
@@ -274,6 +277,13 @@ public:
 
     virtual void set_logical_size(Vec2i size) = 0;
     virtual void set_integer_logical_size(Vec2i size) = 0;
+    // Native presentation at a uniform scale (see Renderer2D::set_content_scale).
+    // False when the backend can't present so.
+    virtual bool set_content_scale(f32 scale) {
+        static_cast<void>(scale);
+        return false;
+    }
+    virtual f32 content_scale() const { return 0.0f; }
     virtual void push_native_coordinates() {}
     virtual void pop_native_coordinates() {}
     virtual Vec2i output_size() const = 0;

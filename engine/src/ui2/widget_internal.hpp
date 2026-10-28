@@ -12,6 +12,7 @@
 
 namespace kin::ui2 {
 
+
 // Implemented by widgets_core.cpp. The helper implementation uses these
 // operations without depending on another widget translation unit's include
 // order.
@@ -35,6 +36,14 @@ void draw_panel_body_fill(Context& ctx, Rectf body, f32 inner_radius, Color fill
 void run_combo_popup(Context& ctx, ComboBox& widget);
 
 namespace detail {
+// Whether a widget takes the navigation keys (the menu_* actions, accept,
+// quit) this frame: the focus is on it, or, `without_focus` (a game's only
+// menu), nothing has the focus. It joins the Tab order.
+bool takes_keys(Context& ctx, Id id, bool without_focus);
+// A press on one of a widget's parts (a row) gives the widget the focus,
+// without a focus ring.
+void focus_on_press(Context& ctx, Id id, bool pressed);
+
 
 f32 clamp_margin(f32 margin, f32 limit);
 Sprite image_sprite(const Image& widget);
@@ -51,7 +60,7 @@ struct TextInputLayoutMetrics {
     f32 height = 0.0f;
 };
 TextInputLayoutMetrics text_input_layout_metrics(const TextStyle& text_style, const WidgetStyle& style);
-Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled);
+Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled, bool typing = false);
 UiTextInputResult edit_text_input(Context& ctx,
                                   UiTextInputState& state,
                                   Rectf bounds,

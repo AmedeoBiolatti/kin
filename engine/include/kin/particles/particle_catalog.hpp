@@ -35,6 +35,17 @@ struct ParticleRenderStyle {
     f32 sort_y_offset = 0.0f;
 };
 
+// Where a burst's particles start: at its position, anywhere in an ellipse
+// `shape_size` across about it, or in a box `shape_size` big about it.
+enum class ParticleShape : u8 { Point, Circle, Box };
+
+// A burst of `count` particles. Each goes `speed` units a second, `direction`
+// degrees (clockwise from right: 90 is down) give or take half of `spread`
+// (360: any way), and lives `lifetime` seconds; it is pushed by
+// `acceleration` (gravity) and slowed by `drag` (the part of its speed it
+// loses each second, about), turned `rotation` degrees and spun `spin`
+// degrees a second. Its size and colour go from start to end over its life,
+// through mid (at `mid_at` of it) when `use_mid`.
 struct ParticleBurst {
     Vec2f position{};
     i32 count = 8;
@@ -46,6 +57,17 @@ struct ParticleBurst {
     Color end_color{255, 255, 255, 0};
     Vec2f acceleration{};
     ParticleRenderStyle render{};
+    f32 direction = 0.0f;
+    f32 spread = 360.0f;
+    ParticleShape shape = ParticleShape::Point;
+    Vec2f shape_size{};
+    f32 drag = 0.0f;
+    ParticleRange rotation{};
+    ParticleRange spin{};
+    bool use_mid = false;
+    f32 mid_at = 0.5f;
+    f32 mid_size = 2.0f;
+    Color mid_color{255, 255, 255, 255};
 };
 
 struct ParticleEffect {
@@ -71,6 +93,8 @@ public:
     void clear();
     void set_effect(std::string name, ParticleEffect effect);
     void set_field(std::string name, ParticleField field);
+    bool remove_effect(std::string_view name);
+    bool remove_field(std::string_view name);
 
     const ParticleEffect* effect(std::string_view name) const;
     const ParticleField* field(std::string_view name) const;
@@ -88,6 +112,16 @@ private:
 ParticleCatalog default_particle_catalog();
 ParticleCatalog load_particle_catalog(const std::filesystem::path& path);
 bool save_particle_catalog(const ParticleCatalog& catalog, const std::filesystem::path& path);
+// A catalog's text read (false, and `error` says where and why, when it is not
+// one), and written: an `effect` line of each effect and a `field` line of
+// each field, by name. An effect's settings past kin's first ones follow its
+// line as `name=value` (only those not at their defaults), so older readers
+// still read it.
+bool parse_particle_catalog(std::string_view text, ParticleCatalog& out, std::string& error);
+std::string serialize_particle_catalog(const ParticleCatalog& catalog);
+
+std::string_view particle_shape_name(ParticleShape shape); // "point", "circle", "box"
+std::optional<ParticleShape> particle_shape_named(std::string_view name);
 void register_particle_catalog_loader(AssetManager& assets);
 
 std::string_view particle_pixel_policy_name(ParticlePixelPolicy policy);

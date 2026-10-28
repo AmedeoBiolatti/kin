@@ -361,6 +361,27 @@ void Renderer2D::set_integer_logical_size(Vec2i size) {
                    }));
 }
 
+bool Renderer2D::set_content_scale(f32 scale) {
+    if (!(scale >= 0.0f) || !std::isfinite(scale)) {
+        return false;
+    }
+    if (scale == _backend->content_scale()) {
+        return true;
+    }
+    const bool done = _backend->set_content_scale(scale);
+    KIN_LOG_INFO_F("render",
+                   "content scale set",
+                   (LogFields{
+                       {.name = "scale", .value = std::to_string(scale)},
+                       {.name = "supported", .value = done ? "true" : "false"},
+                   }));
+    return done;
+}
+
+f32 Renderer2D::content_scale() const {
+    return _backend->content_scale();
+}
+
 Vec2i Renderer2D::output_size() const {
     return _backend->output_size();
 }
@@ -698,6 +719,31 @@ void Renderer2D::set_color_output(ColorOutput output) {
     }
 }
 
+bool Renderer2D::draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutput& output, bool linear) {
+    if (!scene || dest.w <= 0.0f || dest.h <= 0.0f) {
+        return false;
+    }
+    if (output.lut != _preview_lut || (output.lut && !_preview_lut_texture)) {
+        _preview_lut = output.lut;
+        _preview_lut_texture = output.lut ? create_texture({output.lut->size() * output.lut->size(), output.lut->size()}, TextureFormat::Rgba8,
+                                                           output.lut->strip().data())
+                                          : Texture{};
+    }
+    return _backend->draw_color_output(scene, source, dest,
+                                       {
+                                           .exposure = output.exposure,
+                                           .tonemap = output.tonemap,
+                                           .dither = output.dither,
+                                           .lut = _preview_lut_texture,
+                                           .lut_size = output.lut ? output.lut->size() : 0,
+                                           .lut_to = {},
+                                           .lut_to_size = 0,
+                                           .lut_mix = 0.0f,
+                                           .lut_strength = output.lut_strength,
+                                       },
+                                       linear);
+}
+
 ShaderHandle Renderer2D::create_shader(const ShaderDesc& desc) {
 #if KIN_HAS_GPU_RENDERER
     ShaderDesc used = desc;
@@ -869,6 +915,17 @@ void Renderer2D::end_layer() {
     // bounds are where the transformed draws landed: laid over untransformed.
     // (Colours are decoded in a linear pipeline, alpha is not: its colour
     // channels carry the opacity encoded, so they decode to it.)
+    if (layer->options.grade) {
+        const Affine2 transform = _transform;
+        apply_transform({});
+        const bool drawn = draw_color_output(layer->target.texture(), bounds->source, bounds->dest, *layer->options.grade,
+                                             _color_space == ColorSpace::Linear);
+        if (!drawn) {
+            draw_texture(layer->target.texture(), bounds->source, bounds->dest);
+        }
+        apply_transform(transform);
+        return;
+    }
     const f32 opacity = std::clamp(layer->options.opacity, 0.0f, 1.0f);
     const auto o = static_cast<u8>(opacity * 255.0f + 0.5f);
     const auto c = _color_space == ColorSpace::Linear ? static_cast<u8>(linear_to_srgb(opacity) * 255.0f + 0.5f) : o;

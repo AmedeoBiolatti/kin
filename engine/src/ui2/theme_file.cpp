@@ -1,8 +1,11 @@
 #include <kin/ui2/theme_file.hpp>
 
+#include <kin/assets/asset_manager.hpp>
 #include <kin/assets/file_watcher.hpp>
+#include <kin/ui2/text.hpp>
 #include <kin/ui2/skin_loader.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <optional>
@@ -359,18 +362,116 @@ Color ThemeFile::color(std::string_view name, Color fallback) const {
 }
 
 void ThemeFile::build_skin(Renderer2D& renderer) {
+    std::vector<std::string> problems;
+    build(renderer, {}, problems);
+}
+
+void ThemeFile::build(Renderer2D& renderer, const std::filesystem::path& content, std::vector<std::string>& problems, f32 oversample,
+                      const std::function<Texture(std::string_view)>& image) {
+    // The fonts: every text style in the file's, at its sizes (as system_font sets them).
+    if (!font.empty()) {
+        const f32 base = font_size > 0.0f ? font_size : 16.0f;
+        std::vector<std::string> failed_files; // said once each
+        const auto load = [&](const std::string& path, f32 size) -> std::optional<Font> {
+            if (std::ranges::find(failed_files, path) != failed_files.end()) {
+                return std::nullopt;
+            }
+            try {
+                return load_ttf_font(content / path, size, TtfFontOptions{.oversample = std::max(1.0f, oversample)});
+            } catch (const std::exception& failed) {
+                failed_files.push_back(path);
+                problems.push_back(path + ": " + failed.what());
+                return std::nullopt;
+            }
+        };
+        const std::string& bold = bold_font.empty() ? font : bold_font;
+        const std::optional<Font> body = load(font, base);
+        const std::optional<Font> small = load(font, std::max(8.0f, base * 0.8f));
+        const std::optional<Font> strong = load(bold, base);
+        const std::optional<Font> title = load(bold, base * 1.35f);
+        const auto set = [](TextStyle& style, const std::optional<Font>& with) {
+            if (with) {
+                style.font = *with;
+                style.scale = 1.0f;
+            }
+        };
+        set(theme.body_text, body);
+        set(theme.muted_text, body);
+        set(theme.danger_text, body);
+        set(theme.disabled_text, body);
+        set(theme.small_text, small);
+        set(theme.emphasis_text, strong);
+        set(theme.title_text, title);
+    }
     if (skin.empty()) {
         return;
     }
     SkinPack pack;
     pack.skin_tint = skin_tint;
     for (const auto& [slot, frame] : skin) {
-        if (const auto* entry = find(skin_slots, slot)) {
+        const auto* entry = find(skin_slots, slot);
+        if (!entry) {
+            continue;
+        }
+        if (frame.image.empty()) {
             pack.*(entry->field) = make_frame_skin(renderer, frame.size, frame.border, frame.fill, frame.radius,
                                                    frame.border_width);
+            continue;
         }
+        Texture texture = image ? image(frame.image) : Texture{};
+        if (!texture && !image) {
+            AssetManager assets{content};
+            try {
+                texture = load_texture(assets, renderer, frame.image);
+            } catch (const std::exception&) {
+                texture = {};
+            }
+        }
+        if (!texture) {
+            problems.push_back(frame.image + ": the image could not be read");
+            continue;
+        }
+        pack.*(entry->field) = nine_slice(texture, frame.margin, frame.source);
     }
     apply_skin_pack(theme, pack);
+}
+
+std::vector<std::string_view> theme_token_names() {
+    std::vector<std::string_view> out;
+    for (const auto& entry : token_fields) out.push_back(entry.name);
+    return out;
+}
+
+std::vector<std::string_view> theme_style_number_names() {
+    std::vector<std::string_view> out;
+    for (const auto& entry : style_numbers) out.push_back(entry.name);
+    return out;
+}
+
+std::vector<std::string_view> theme_style_flag_names() {
+    std::vector<std::string_view> out;
+    for (const auto& entry : style_flags) out.push_back(entry.name);
+    return out;
+}
+
+std::vector<std::string_view> theme_surface_names() {
+    std::vector<std::string_view> out;
+    for (const auto& entry : surfaces) out.push_back(entry.name);
+    return out;
+}
+
+std::vector<std::string_view> theme_surface_keys() {
+    return {"like", "fill", "gradient", "border", "border_width", "radius", "shadow", "opacity"};
+}
+
+std::vector<std::string_view> theme_skin_slot_names() {
+    std::vector<std::string_view> out;
+    for (const auto& entry : skin_slots) out.push_back(entry.name);
+    return out;
+}
+
+std::vector<std::string_view> theme_keys() {
+    return {"base", "palette", "system_font", "transition", "font", "bold_font", "font_size"};
 }
 
 bool parse_theme_file(std::string_view text, ThemeFile& out, std::vector<std::string>& errors) {
@@ -406,6 +507,9 @@ bool parse_theme_file(std::string_view text, ThemeFile& out, std::vector<std::st
     PalettePreset palette_preset = PalettePreset::Default;
     std::optional<f32> system_font;
     std::optional<f32> transition;
+    std::string font_file;
+    std::string bold_font_file;
+    std::optional<f32> font_size;
     for (const Section& section : sections) {
         if (section.name != "theme") {
             continue;
@@ -428,8 +532,15 @@ bool parse_theme_file(std::string_view text, ThemeFile& out, std::vector<std::st
                 system_font = real(entry);
             } else if (entry.key == "transition") {
                 transition = real(entry);
+            } else if (entry.key == "font") {
+                font_file = entry.value;
+            } else if (entry.key == "bold_font") {
+                bold_font_file = entry.value;
+            } else if (entry.key == "font_size") {
+                font_size = real(entry);
             } else {
-                error(errors, entry.line, "no key '" + entry.key + "' in [theme] (base, palette, system_font, transition)");
+                error(errors, entry.line, "no key '" + entry.key + "' in [theme] (base, palette, system_font, transition, font, "
+                                          "bold_font, font_size)");
             }
         }
     }
@@ -469,6 +580,9 @@ bool parse_theme_file(std::string_view text, ThemeFile& out, std::vector<std::st
     if (transition) {
         built.theme.transition_duration = *transition;
     }
+    built.font = font_file;
+    built.bold_font = bold_font_file;
+    built.font_size = font_size.value_or(system_font.value_or(16.0f));
 
     // [surface.<name>], in file order, over the built theme.
     for (const Section& section : sections) {
@@ -571,8 +685,27 @@ bool parse_theme_file(std::string_view text, ThemeFile& out, std::vector<std::st
                 continue;
             }
             const std::vector<std::string_view> parts = words(entry.value);
+            if (!parts.empty() && parts[0] == "image") {
+                // image <path> [margin] [x y w h]
+                ThemeSkinFrame frame;
+                std::optional<f32> margin = parts.size() >= 3 ? number(parts[2]) : std::optional<f32>{8.0f};
+                std::array<std::optional<f32>, 4> rect{0.0f, 0.0f, 0.0f, 0.0f};
+                if (parts.size() == 7) {
+                    rect = {number(parts[3]), number(parts[4]), number(parts[5]), number(parts[6])};
+                }
+                if (parts.size() < 2 || (parts.size() != 2 && parts.size() != 3 && parts.size() != 7) || !margin || !rect[0] ||
+                    !rect[1] || !rect[2] || !rect[3]) {
+                    error(errors, entry.line, entry.key + ": image <path> [margin] [x y w h]");
+                    continue;
+                }
+                frame.image = std::string(parts[1]);
+                frame.margin = *margin;
+                frame.source = {*rect[0], *rect[1], *rect[2], *rect[3]};
+                built.skin.emplace_back(entry.key, std::move(frame));
+                continue;
+            }
             if (parts.size() < 4 || parts.size() > 5) {
-                error(errors, entry.line, entry.key + ": border, fill, radius, border width [, size]");
+                error(errors, entry.line, entry.key + ": border, fill, radius, border width [, size] (or image <path> [margin])");
                 continue;
             }
             std::string why;
@@ -585,7 +718,13 @@ bool parse_theme_file(std::string_view text, ThemeFile& out, std::vector<std::st
                 error(errors, entry.line, entry.key + ": " + (fill ? std::string("expected numbers") : why));
                 continue;
             }
-            built.skin.emplace_back(entry.key, ThemeSkinFrame{*border, *fill, *radius, *width, static_cast<i32>(*size)});
+            ThemeSkinFrame frame;
+            frame.border = *border;
+            frame.fill = *fill;
+            frame.radius = *radius;
+            frame.border_width = *width;
+            frame.size = static_cast<i32>(*size);
+            built.skin.emplace_back(entry.key, std::move(frame));
         }
     }
 

@@ -6,6 +6,8 @@
 #include <kin/renderer/shader.hpp>
 #include <kin/ui2/image.hpp>
 
+#include <memory>
+
 namespace kin::ui2 {
 
 enum class BorderMode {
@@ -64,7 +66,9 @@ struct SurfaceStyle {
     f32 glass_blur = 0.0f;
     f32 glass_highlight = 0.0f;
     ShaderHandle shader{};                          // fill_kind == Shader
-    ShaderParams shader_params{};
+    // Its uniforms (Renderer2D::shader_params makes them); none: all zero. Shared
+    // and kept out of line: a surface is copied often and allocates nothing.
+    std::shared_ptr<const ShaderParams> shader_params{};
     BevelStyle bevel{};
     InnerShadowStyle inner_shadow{};
     Color glow_color = colors::transparent;         // focus/accent outset glow

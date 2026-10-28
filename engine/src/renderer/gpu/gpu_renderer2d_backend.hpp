@@ -128,6 +128,8 @@ public:
 
     void set_logical_size(Vec2i size) override;
     void set_integer_logical_size(Vec2i size) override;
+    bool set_content_scale(f32 scale) override;
+    f32 content_scale() const override { return _content_scale; }
     void push_native_coordinates() override;
     void pop_native_coordinates() override;
     Vec2i output_size() const override;
@@ -167,6 +169,7 @@ public:
                      const MaskOptions& options) override;
     bool set_color_space(ColorSpace space, bool hdr) override;
     bool set_color_output(const ColorOutputState& output) override;
+    bool draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutputState& output, bool linear) override;
     bool push_stencil_clip(std::span<const Vec2f> triangles) override;
     bool push_stencil_mask(const Texture& mask, Rectf source, Rectf dest, const MaskOptions& options) override;
     void pop_stencil_clip() override;
@@ -384,11 +387,13 @@ private:
     RendererBackendStats _stats;                    // present timings only
     SDL_FColor _clear_color{0.0f, 0.0f, 0.0f, 1.0f};
     Vec2i _logical_size{0, 0}; // 0 = render at window size (no logical presentation)
+    f32 _content_scale = 0.0f; // > 0: the scene is the window's pixels, a coordinate unit this many of them
     bool _integer_scale = false;
     f32 _view_scale = 1.0f;    // logical -> native (scene texture) scale under logical presentation
     struct NativeState {
         Vec2i logical_size{};
         bool integer_scale = false;
+        f32 content_scale = 0.0f;
         f32 view_scale = 1.0f;
         std::vector<SDL_Rect> clip_stack;
         Vec2f view_offset{0.0f, 0.0f};

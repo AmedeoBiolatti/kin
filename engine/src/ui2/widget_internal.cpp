@@ -176,19 +176,21 @@ TextInputLayoutMetrics text_input_layout_metrics(const TextStyle& text_style, co
     };
 }
 
-Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled) {
+Color frame_color(const WidgetStyle& style, const Interaction& it, bool enabled, bool typing) {
     // Text inputs intentionally use hover/press fill tokens as the frame color.
     if (!enabled) {
         return widget_fill(style, WidgetColorState::Disabled);
+    }
+    // Typed in, it keeps the focused frame under the pointer too (an invalid
+    // value's outline is that frame); another control shows it for the keys' focus.
+    if (it.focused && (typing || !it.quiet_focus)) {
+        return widget_border(style, WidgetColorState::Focused);
     }
     if (it.active) {
         return widget_fill(style, WidgetColorState::Pressed);
     }
     if (it.hot) {
         return widget_fill(style, WidgetColorState::Hovered);
-    }
-    if (it.focused) {
-        return widget_border(style, WidgetColorState::Focused);
     }
     return widget_border(style, WidgetColorState::Normal);
 }
@@ -202,6 +204,20 @@ void normalize_text_state(UiTextInputState& state) {
     }
     if (!state.active) {
         state.clear_selection();
+    }
+}
+
+bool takes_keys(Context& ctx, Id id, bool without_focus) {
+    if (id) {
+        ctx.register_focusable(id);
+    }
+    const Id focused = ctx.state().focused();
+    return (id && focused == id) || (without_focus && !focused);
+}
+
+void focus_on_press(Context& ctx, Id id, bool pressed) {
+    if (pressed && id) {
+        ctx.state().set_focused(id, false);
     }
 }
 
@@ -220,7 +236,7 @@ UiTextInputResult edit_text_input(Context& ctx,
     if ((it.pressed || it.focused) && enabled) {
         state.active = true;
         if (it.pressed) {
-            const f32 text_x = text_input_text_x(bounds, metrics, state.text, text_style);
+            const f32 text_x = text_input_text_x(bounds, metrics, state.text, text_style) - state.scroll_x;
             move_text_caret(state,
                             caret_from_text_pos(state, ctx.pointer().x, text_x, text_style.font, text_style.scale),
                             false);
@@ -230,8 +246,8 @@ UiTextInputResult edit_text_input(Context& ctx,
         state.active = false;
         state.clear_selection();
     }
-    if (!enabled) {
-        state.active = false;
+    if (!enabled || (state.active && !it.focused && !it.pressed && ctx.focus_moved())) {
+        state.active = false; // disabled, or Tab took focus elsewhere
     }
 
     // While an input method composes, the keys are its own.
@@ -299,12 +315,12 @@ UiTextInputResult edit_text_input(Context& ctx,
         if (ctx.key_typed(Key::Left) && !ctrl) {
             move_text_caret(state, visual(-1), select_left);
         } else if ((ctrl && ctx.key_typed(left_key)) || ctx.action_pressed("text_left")) {
-            move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret), select_left);
+            move_text_caret(state, ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev_grapheme(state.text, state.caret), select_left);
         }
         if (ctx.key_typed(Key::Right) && !ctrl) {
             move_text_caret(state, visual(1), select_right);
         } else if ((ctrl && ctx.key_typed(right_key)) || ctx.action_pressed("text_right")) {
-            move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret), select_right);
+            move_text_caret(state, ctrl ? utf8_word_right(state.text, state.caret) : utf8_next_grapheme(state.text, state.caret), select_right);
         }
         if (ctx.key_pressed(Key::Home) || ctx.action_pressed("text_home")) {
             move_text_caret(state, 0, select_home);
@@ -317,7 +333,7 @@ UiTextInputResult edit_text_input(Context& ctx,
             if (erase_selection(state)) {
                 result.changed = true;
             } else if (state.caret > 0) {
-                const std::size_t from = ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev(state.text, state.caret);
+                const std::size_t from = ctrl ? utf8_word_left(state.text, state.caret) : utf8_prev_grapheme(state.text, state.caret);
                 state.text.erase(from, state.caret - from);
                 state.caret = from;
                 state.clear_selection();
@@ -328,21 +344,44 @@ UiTextInputResult edit_text_input(Context& ctx,
             if (erase_selection(state)) {
                 result.changed = true;
             } else if (state.caret < state.text.size()) {
-                const std::size_t to = ctrl ? utf8_word_right(state.text, state.caret) : utf8_next(state.text, state.caret);
+                const std::size_t to = ctrl ? utf8_word_right(state.text, state.caret) : utf8_next_grapheme(state.text, state.caret);
                 state.text.erase(state.caret, to - state.caret);
                 state.clear_selection();
                 result.changed = true;
             }
         }
+        // Leaving it drops keyboard focus too, so it does not take the keys again.
         if (was_active && ctx.action_pressed("accept")) {
             state.active = false;
             state.clear_selection();
             result.committed = true;
+            if (it.focused) {
+                ctx.state().clear_focused();
+            }
         } else if (was_active && ctx.action_pressed("quit")) {
             state.active = false;
             state.clear_selection();
             result.cancelled = true;
+            if (it.focused) {
+                ctx.state().clear_focused();
+            }
         }
+    }
+    // Text longer than the field slides so the caret stays in it; an idle field
+    // shows the text's start.
+    const f32 room = std::max(0.0f, bounds.w - metrics.padding.left - metrics.padding.right);
+    if (!state.active || paragraph_direction(state.text) == TextDirection::RightToLeft) {
+        state.scroll_x = 0.0f;
+    } else {
+        const f32 caret = caret_x(text_style.font, state.text, state.caret, text_style.scale);
+        const f32 width = measure_text(text_style.font, state.text, text_style.scale).x + 1.0f; // and the caret after it
+        if (caret - state.scroll_x > room - 1.0f) {
+            state.scroll_x = caret - room + 1.0f;
+        }
+        if (caret < state.scroll_x) {
+            state.scroll_x = caret;
+        }
+        state.scroll_x = std::clamp(state.scroll_x, 0.0f, std::max(0.0f, width - room));
     }
     return result;
 }
@@ -361,9 +400,13 @@ void draw_text_input(Context& ctx, Rectf bounds, const UiTextInputState& state, 
     }
     const std::string_view text = composition.empty() ? std::string_view{state.text} : std::string_view{shown};
     const Vec2f text_size = measure_text(text_style.font, text.empty() ? "Mg" : text, text_style.scale);
-    const Vec2f text_pos{text_input_text_x(bounds, metrics, text, text_style), bounds.y + (bounds.h - text_size.y) * 0.5f};
+    const Vec2f text_pos{text_input_text_x(bounds, metrics, text, text_style) - state.scroll_x,
+                         bounds.y + (bounds.h - text_size.y) * 0.5f};
     const f32 top = bounds.y + metrics.padding.top * 0.5f;
     const f32 height = std::max(0.0f, bounds.h - metrics.padding.top * 0.5f - metrics.padding.bottom * 0.5f);
+    // The text stays inside the field (between its paddings, the caret at either end too).
+    ctx.push_clip({bounds.x + metrics.padding.left - 1.0f, bounds.y,
+                   std::max(0.0f, bounds.w - metrics.padding.left - metrics.padding.right + 2.0f), bounds.h});
     if (state.has_selection() && composition.empty()) {
         const auto [start, end] = selection_range(state);
         for (const auto& [x0, x1] : selection_spans(text_style.font, text, start, end, text_style.scale)) {
@@ -382,6 +425,7 @@ void draw_text_input(Context& ctx, Rectf bounds, const UiTextInputState& state, 
         ctx.fill_rect({caret_x, top, 1.0f, height}, text_style.color);
         ctx.set_text_input_area({bounds.x, top, bounds.w, height}, caret_x);
     }
+    ctx.pop_clip();
 }
 
 bool parse_f32(std::string_view text, f32& out) {
@@ -1076,6 +1120,12 @@ std::string closing_tag_for(std::string_view tag) {
     if (tag == "u") {
         return "[/u]";
     }
+    if (tag == "b") {
+        return "[/b]";
+    }
+    if (tag == "i") {
+        return "[/i]";
+    }
     if (tag == "s") {
         return "[/s]";
     }
@@ -1110,6 +1160,12 @@ bool apply_markup_tag(std::string_view tag, AdvancedTextParseState& state, const
     }
     if (tag == "u") {
         state.underline = true;
+        return true;
+    }
+    if (tag == "b" || tag == "i") {
+        if (const Font& font = tag == "b" ? options.bold_font : options.italic_font; font) {
+            state.style.font = font;
+        }
         return true;
     }
     if (tag == "s") {

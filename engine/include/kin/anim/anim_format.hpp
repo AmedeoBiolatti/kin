@@ -19,6 +19,7 @@ struct AnimationRegistryFragment {
     std::vector<Animation> animation_templates;
     std::unordered_map<std::string, AnimationStateMachine> state_machines;
     std::unordered_map<std::string, AnimationStateMachine> state_machine_templates;
+    std::unordered_map<std::string, AnimationBlendSpace> blend_spaces;
     std::filesystem::path source_path;
     u64 generation = 0;
 };

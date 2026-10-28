@@ -86,6 +86,7 @@ kin_add_test(kin_ecs_editor_tests kin-ecs-editor SOURCES ecs_editor_tests.cpp)
 kin_add_test(kin_ecs_system_tests kin-ecs-system SOURCES ecs_system_tests.cpp)
 kin_add_test(kin_ecs_render_tests kin-ecs-render SOURCES ecs_render_tests.cpp)
 kin_add_test(kin_ecs_animation_tests kin-ecs-animation SOURCES ecs_animation_tests.cpp)
+kin_add_test(kin_sprite_animation_tests kin-sprite-animation SOURCES sprite_animation_tests.cpp)
 kin_add_test(kin_particle_tests kin-particles SOURCES particle_tests.cpp)
 kin_add_test(kin_pathfinding_tests kin-pathfinding SOURCES pathfinding_tests.cpp)
 kin_add_test(kin_navmesh3d_tests kin-navmesh3d SOURCES navmesh3d_tests.cpp)
@@ -419,6 +420,7 @@ target_link_libraries(kin_scene_asset_tests PRIVATE
 
 add_test(NAME kin-scene-asset COMMAND kin_scene_asset_tests)
 
+kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
 kin_add_component_test(SCRIPTING kin_scripting_tests kin-scripting
     SOURCES scripting_tests.cpp LINK_TARGET kin::scripting_scenes
     DEFINITIONS KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)

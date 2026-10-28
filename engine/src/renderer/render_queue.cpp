@@ -166,6 +166,10 @@ Color command_color(const RenderCommand& command) {
 
 void execute_resolved(Renderer2D& renderer, const RenderCommand& command, Rectf rect, Vec2f a, Vec2f b) {
     const Color color = command_color(command);
+    // A material's blend mode (a renderer's `blend` field), for this command.
+    const Renderer2D::BlendModeGuard blend = command.material && command.material->blend != BlendMode::Alpha
+                                                 ? renderer.scoped_blend_mode(command.material->blend)
+                                                 : Renderer2D::BlendModeGuard{};
 
     switch (command.type) {
     case RenderCommandType::Clear:
@@ -569,8 +573,8 @@ void RenderQueue::fill_rect(RenderKey key, Rectf rect, Color color, MaterialRef 
     submit({.type = RenderCommandType::FillRect, .key = key, .rect = rect, .color = color, .material = material.material});
 }
 
-void RenderQueue::draw_rect(RenderKey key, Rectf rect, Color color) {
-    submit({.type = RenderCommandType::DrawRect, .key = key, .rect = rect, .color = color});
+void RenderQueue::draw_rect(RenderKey key, Rectf rect, Color color, MaterialRef material) {
+    submit({.type = RenderCommandType::DrawRect, .key = key, .rect = rect, .color = color, .material = material.material});
 }
 
 void RenderQueue::draw_line(RenderKey key, Vec2f a, Vec2f b, Color color) {
@@ -593,12 +597,12 @@ void RenderQueue::draw_sprite(RenderKey key, const Sprite& sprite, Rectf dest, C
     submit({.type = RenderCommandType::Sprite, .key = key, .rect = dest, .flip = flip, .source = sprite.source, .color = tint, .texture = sprite.texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
-void RenderQueue::draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot, Flip flip) {
-    if (texture) {
+void RenderQueue::draw_texture_region(RenderKey key, const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot, Flip flip, MaterialRef material) {
+    if (texture && !material.material) {
         queue_sprite(RenderCommandType::Texture, key, texture, source, dest, tint, rotation, pivot, flip);
         return;
     }
-    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .flip = flip, .source = source, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot});
+    submit({.type = RenderCommandType::Texture, .key = key, .rect = dest, .flip = flip, .source = source, .color = tint, .texture = texture, .rotation = rotation, .pivot = pivot, .material = material.material});
 }
 
 void RenderQueue::append_sprites(std::span<const PreparedSprite> sprites) {
@@ -789,7 +793,7 @@ void RenderQueue::pop_viewport() {
 }
 
 void RenderQueue::draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mesh, const Affine2& transform,
-                             Color tint) {
+                             Color tint, MaterialRef material) {
     if (!mesh || mesh->empty()) {
         return;
     }
@@ -798,6 +802,7 @@ void RenderQueue::draw_shape(RenderKey key, std::shared_ptr<const ShapeMesh> mes
         .key = key,
         .rect = transformed_bounds(transform, mesh->bounds),
         .color = tint,
+        .material = material.material,
     };
     command.detail = std::make_shared<RenderCommandDetail>(RenderCommandDetail{.shape = std::move(mesh), .transform = transform});
     submit(std::move(command));

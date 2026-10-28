@@ -597,6 +597,40 @@ void test_sdl_backend_smoke() {
     assert(renderer.output_size().y > 0);
 }
 
+// The SDL backend replaces part of a texture in place (a spectrogram's newest
+// column), as SDL_GPU does; it said it could not, and callers made the texture
+// again. A draw queued before the update shows what the texture held.
+void test_sdl_update_texture() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "update-texture", .width = 64, .height = 64, .hidden = true});
+    kin::Renderer2D renderer{kin::make_render_backend(window, false, false)};
+    std::vector<kin::u8> black(4 * 4 * 4, 0);
+    for (std::size_t i = 3; i < black.size(); i += 4) {
+        black[i] = 255;
+    }
+    const kin::Texture texture = renderer.create_texture_from_rgba(black.data(), {4, 4});
+    const std::array<kin::u8, 8> red{255, 0, 0, 255, 255, 0, 0, 255};
+    auto target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    std::vector<kin::u8> image;
+    kin::Vec2i size;
+    {
+        auto bind = renderer.scoped_render_target(target);
+        renderer.clear(kin::colors::black);
+        renderer.draw_texture(texture, {0.0f, 0.0f, 32.0f, 64.0f}); // before: all black
+        assert(renderer.update_texture(texture, {2, 1}, {1, 2}, red.data()));
+        assert(!renderer.update_texture(texture, {3, 3}, {2, 1}, red.data())); // past its edge
+        renderer.draw_texture(texture, {32.0f, 0.0f, 32.0f, 64.0f});
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, image, size));
+    }
+    renderer.present();
+    const kin::Color red_pixel = kin::Color::rgb(255, 0, 0);
+    assert(pixel_near(image, size, 32 + 20, 24, red_pixel));          // texel (2, 1)
+    assert(pixel_near(image, size, 32 + 20, 40, red_pixel));          // (2, 2)
+    assert(pixel_near(image, size, 32 + 12, 24, kin::colors::black)); // (1, 1): as it was
+    assert(pixel_near(image, size, 32 + 20, 56, kin::colors::black)); // (2, 3)
+    assert(pixel_near(image, size, 20, 24, kin::colors::black));      // drawn before the update
+}
+
 void test_sdl_render_targets_and_gradients() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({
@@ -1158,6 +1192,43 @@ void test_gpu_resources_outlive_renderer() {
     }
 }
 
+void test_gpu_content_scale() {
+    constexpr std::string_view test_name = "test_gpu_content_scale";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        auto& window = app.create_window({.title = "gpu-content-scale", .width = 320, .height = 240,
+                                          .hidden = true, .high_pixel_density = true});
+        std::string reason;
+        auto renderer = try_create_gpu_renderer(window, reason);
+        if (!renderer) { skip_or_require_gpu_test(test_name, reason); return; }
+        gpu_ready = true;
+        renderer->clear();
+        const auto pixels = window.pixel_size();
+        // A unit is 1.5 pixels: the frame is the window's pixels, coordinates fit it.
+        assert(renderer->set_content_scale(1.5f));
+        assert(renderer->content_scale() == 1.5f);
+        renderer->clear();
+        assert(renderer->output_size() == kin::Vec2i(static_cast<int>(pixels.x / 1.5f), static_cast<int>(pixels.y / 1.5f)));
+        const auto units = window.size();
+        const kin::Vec2f center{units.x * .5f, units.y * .5f};
+        const auto logical = renderer->window_to_logical(center);
+        assert(std::abs(logical.x - pixels.x * .5f / 1.5f) < .01f && std::abs(logical.y - pixels.y * .5f / 1.5f) < .01f);
+        const auto back = renderer->logical_to_window(logical);
+        assert(std::abs(back.x - center.x) < .01f && std::abs(back.y - center.y) < .01f);
+        renderer->present();
+        // A logical size takes over again, and 0 turns it off.
+        renderer->set_logical_size(160, 100);
+        assert(renderer->content_scale() == 0.0f && renderer->output_size() == kin::Vec2i(160, 100));
+        assert(renderer->set_content_scale(2.0f) && renderer->set_content_scale(0.0f));
+        renderer->clear();
+        assert(renderer->content_scale() == 0.0f && renderer->output_size() == pixels);
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) throw;
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 void test_gpu_native_pixel_size_and_pointer_mapping() {
     constexpr std::string_view test_name = "test_gpu_native_pixel_size_and_pointer_mapping";
     bool gpu_ready = false;
@@ -1185,8 +1256,19 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
         }
         renderer->set_logical_size(160, 100);
         const auto units = window.size();
+        const auto pixels = window.pixel_size();
+        // The window's middle is the logical middle within a window pixel: the
+        // letterboxed scene is whole pixels, on whole pixels, so where the
+        // logical size is not (a 480 x 360 window at 150% is 721 x 541 pixels,
+        // where 100 units are 450.6 of them) its middle is off by part of one.
+        const float pixel = std::max(160.0f / static_cast<float>(pixels.x), 100.0f / static_cast<float>(pixels.y));
         const auto center = renderer->window_to_logical({units.x * .5f, units.y * .5f});
-        assert(std::abs(center.x - 80) < .01f && std::abs(center.y - 50) < .01f);
+        assert(std::abs(center.x - 80) <= pixel && std::abs(center.y - 50) <= pixel);
+        // And the two mappings undo each other exactly, so a click lands where it is drawn.
+        for (const kin::Vec2f logical : {kin::Vec2f{80.0f, 50.0f}, kin::Vec2f{0.0f, 0.0f}, kin::Vec2f{160.0f, 100.0f}, kin::Vec2f{13.0f, 71.0f}}) {
+            const auto there = renderer->window_to_logical(renderer->logical_to_window(logical));
+            assert(std::abs(there.x - logical.x) < .01f && std::abs(there.y - logical.y) < .01f);
+        }
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) throw;
         skip_or_require_gpu_test(test_name, e.what());
@@ -3980,6 +4062,7 @@ int main(int argc, char** argv) {
     test_sprite_catalog_resolves_refs_and_sheets();
 #if KIN_HAS_SDL_RENDERER
     test_sdl_backend_smoke();
+    test_sdl_update_texture();
 #endif
 #if KIN_HAS_SDL_RENDERER
     test_sdl_logical_size_follows_window_size();
@@ -4015,6 +4098,7 @@ int main(int argc, char** argv) {
     test_gpu_logical_transforms_are_immediate();
 #endif
 #if KIN_HAS_GPU_RENDERER
+    test_gpu_content_scale();
     test_gpu_native_pixel_size_and_pointer_mapping();
 #endif
 #if KIN_HAS_GPU_RENDERER

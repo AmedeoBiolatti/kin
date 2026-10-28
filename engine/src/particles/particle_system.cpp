@@ -57,7 +57,8 @@ void submit_particle(RenderQueue& queue,
                      Rectf rect,
                      Color color,
                      const SpriteCatalog* sprites,
-                     bool output_pixel_rect) {
+                     bool output_pixel_rect,
+                     const Material2D* material) {
     const RenderKey key = key_for(particle);
     ResolvedSprite resolved;
     if (sprites &&
@@ -71,6 +72,8 @@ void submit_particle(RenderQueue& queue,
             .source = resolved.sprite.source,
             .color = color,
             .texture = resolved.sprite.texture,
+            .rotation = particle.rotation,
+            .material = material,
         });
     } else {
         queue.submit({
@@ -79,6 +82,8 @@ void submit_particle(RenderQueue& queue,
             .rect = rect,
             .output_pixel_rect = output_pixel_rect,
             .color = color,
+            .rotation = particle.rotation,
+            .material = material,
         });
     }
 }
@@ -202,11 +207,26 @@ const ParticleCatalog* ParticleSystem::catalog() const {
 
 void ParticleSystem::burst(const ParticleBurst& burst) {
     const i32 count = std::max(0, burst.count);
+    constexpr f32 radians = tau / 360.0f;
+    const f32 spread = std::clamp(burst.spread, 0.0f, 360.0f) * radians;
     for (i32 i = 0; i < count; ++i) {
-        const f32 angle = rng_f32(split_key(), 0.0f, tau);
+        // All round: any angle (as kin always did); else within the spread.
+        const f32 angle = spread >= tau ? rng_f32(split_key(), 0.0f, tau)
+                                        : burst.direction * radians + rng_f32(split_key(), -0.5f, 0.5f) * spread;
         const f32 speed = random_range(burst.speed);
+        Vec2f at = burst.position;
+        if (burst.shape == ParticleShape::Circle) {
+            // Even over the ellipse: the square root of an even fraction out.
+            const f32 out = std::sqrt(rng_f32(split_key(), 0.0f, 1.0f));
+            const f32 around = rng_f32(split_key(), 0.0f, tau);
+            at.x += std::cos(around) * out * burst.shape_size.x * 0.5f;
+            at.y += std::sin(around) * out * burst.shape_size.y * 0.5f;
+        } else if (burst.shape == ParticleShape::Box) {
+            at.x += rng_f32(split_key(), -0.5f, 0.5f) * burst.shape_size.x;
+            at.y += rng_f32(split_key(), -0.5f, 0.5f) * burst.shape_size.y;
+        }
         Particle particle{
-            .position = burst.position,
+            .position = at,
             .velocity = {std::cos(angle) * speed, std::sin(angle) * speed},
             .acceleration = burst.acceleration,
             .lifetime = std::max(0.001f, random_range(burst.lifetime)),
@@ -215,6 +235,13 @@ void ParticleSystem::burst(const ParticleBurst& burst) {
             .start_color = burst.start_color,
             .end_color = burst.end_color,
             .render = burst.render,
+            .drag = std::max(0.0f, burst.drag),
+            .rotation = random_range(burst.rotation),
+            .spin = random_range(burst.spin),
+            .use_mid = burst.use_mid,
+            .mid_at = std::clamp(burst.mid_at, 0.001f, 0.999f),
+            .mid_size = burst.mid_size,
+            .mid_color = burst.mid_color,
         };
         emit(particle);
     }
@@ -249,6 +276,12 @@ void ParticleSystem::update(f32 dt) {
         particle.age += dt;
         particle.velocity.x += particle.acceleration.x * dt;
         particle.velocity.y += particle.acceleration.y * dt;
+        if (particle.drag > 0.0f) {
+            const f32 kept = std::exp(-particle.drag * dt);
+            particle.velocity.x *= kept;
+            particle.velocity.y *= kept;
+        }
+        particle.rotation += particle.spin * dt;
         particle.position.x += particle.velocity.x * dt;
         particle.position.y += particle.velocity.y * dt;
     }
@@ -268,11 +301,20 @@ void ParticleSystem::render(Renderer2D& renderer, ParticleRenderOptions options)
 
 Color particle_color_at(const Particle& particle) {
     const f32 t = particle.lifetime > 0.0f ? std::clamp(particle.age / particle.lifetime, 0.0f, 1.0f) : 1.0f;
+    if (particle.use_mid) {
+        return t < particle.mid_at ? lerp_color(particle.start_color, particle.mid_color, t / particle.mid_at)
+                                   : lerp_color(particle.mid_color, particle.end_color, (t - particle.mid_at) / (1.0f - particle.mid_at));
+    }
     return lerp_color(particle.start_color, particle.end_color, t);
 }
 
 f32 particle_size_at(const Particle& particle) {
     const f32 t = particle.lifetime > 0.0f ? std::clamp(particle.age / particle.lifetime, 0.0f, 1.0f) : 1.0f;
+    if (particle.use_mid) {
+        return t < particle.mid_at
+                   ? particle.start_size + (particle.mid_size - particle.start_size) * (t / particle.mid_at)
+                   : particle.mid_size + (particle.end_size - particle.mid_size) * ((t - particle.mid_at) / (1.0f - particle.mid_at));
+    }
     return particle.start_size + (particle.end_size - particle.start_size) * t;
 }
 
@@ -319,7 +361,8 @@ bool submit_particles(RenderQueue& queue,
                         rect,
                         particle_color_at(particle),
                         options.sprites,
-                        options.pixel_policy == ParticlePixelPolicy::Output);
+                        options.pixel_policy == ParticlePixelPolicy::Output,
+                        blend_material(options.blend));
         submitted = true;
     }
     return submitted;

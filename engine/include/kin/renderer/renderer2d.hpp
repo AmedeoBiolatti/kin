@@ -220,6 +220,9 @@ public:
         f32 opacity = 1.0f;
         f32 resolution = 1.0f; // of the current target's pixels, each way
         BlendMode blend = BlendMode::Alpha;
+        // Laid over as this colour output shows it (draw_color_output), in
+        // place of `opacity` and `blend`: an editor's view of a graded game.
+        std::optional<ColorOutput> grade{};
     };
     [[nodiscard]] LayerGuard begin_layer(LayerOptions options);
     [[nodiscard]] LayerGuard begin_layer() { return begin_layer(LayerOptions{}); }
@@ -240,6 +243,12 @@ public:
     // (capabilities().color_output); elsewhere kept but not applied.
     void set_color_output(ColorOutput output);
     const ColorOutput& color_output() const { return _color_output; }
+    // `scene` (a picture of one: a render target's texture) drawn into `dest`
+    // as `output` would show it on the display: exposed and tonemapped when
+    // `linear` (the picture holds linear light), graded, dithered. For an
+    // editor's view of a game graded otherwise than itself. False (nothing
+    // drawn) where the backend can't (capabilities().color_output).
+    bool draw_color_output(const Texture& scene, Rectf source, Rectf dest, const ColorOutput& output, bool linear);
 
     // Overdraw view (SDL_GPU; the debug overlay's toggle): instead of itself,
     // every draw adds one layer where it covers, and the screen shows the counts
@@ -261,6 +270,14 @@ public:
     void set_logical_size(Vec2i size);
     void set_integer_logical_size(i32 width, i32 height);
     void set_integer_logical_size(Vec2i size);
+    // Native presentation at a uniform scale, for UI on a high-density display: the
+    // frame is the window's own pixels, a coordinate unit is `scale` of them (1.5 on
+    // a display at 150%), and nothing is resampled on the way to the screen. Draw
+    // text with fonts oversampled by the same scale and it lands on whole pixels.
+    // Replaces a logical size, as set_logical_size replaces it. False when this
+    // backend can't (then use a logical size); 0 turns it off.
+    bool set_content_scale(f32 scale);
+    f32 content_scale() const; // 0 when off
     Vec2i output_size() const;
     Vec2f window_to_logical(Vec2f window_px) const;
     Vec2f logical_to_window(Vec2f logical) const;
@@ -579,6 +596,9 @@ private:
     ColorOutput _color_output;
     Texture _lut_texture;    // _color_output.lut's, uploaded
     Texture _lut_to_texture; // and lut_to's
+    // draw_color_output()'s LUT, and the one it was made from.
+    Texture _preview_lut_texture;
+    std::shared_ptr<const ColorLut> _preview_lut;
     // The shapes drawn as they are called: reused buffers, and how finely to
     // tessellate under the current transform.
     ShapeMesh _shape_scratch;

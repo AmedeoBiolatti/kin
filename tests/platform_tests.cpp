@@ -205,6 +205,48 @@ void test_mouse_wheel_reaches_one_step() {
     assert((step_numbers == std::vector<int>{1, 2, 3, 1, 2, 3}));
 }
 
+void push_quit() {
+    SDL_Event event{};
+    event.type = SDL_EVENT_QUIT;
+    const bool pushed = SDL_PushEvent(&event);
+    assert(pushed);
+    (void)pushed;
+}
+
+// Asked to quit while the app holds closing: it goes on, told, until it quits
+// itself (or forgets the request); not held, it stops at once.
+void test_close_held() {
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        app.hold_close(true);
+        int frames = 0;
+        int asked_at = 0;
+        push_quit();
+        app.run([](float) {}, [&](float) {
+            ++frames;
+            if (app.close_asked() && asked_at == 0) {
+                asked_at = frames;
+                app.forget_close(); // stays: asked again below
+                push_quit();
+            } else if (app.close_asked()) {
+                app.quit();
+            }
+        });
+        assert(asked_at == 1 && frames == 2);
+    }
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        int frames = 0;
+        push_quit();
+        app.run([](float) {}, [&](float) {
+            if (++frames > 5) {
+                app.quit();
+            }
+        });
+        assert(frames == 0); // stopped by the request, before a frame is drawn
+    }
+}
+
 void push_motion(float dx, float dy) {
     SDL_Event event{};
     event.type = SDL_EVENT_MOUSE_MOTION;
@@ -253,7 +295,84 @@ void test_mouse_motion_reaches_one_step() {
     assert(app.input().frame_mouse_motion() == V{} && app.input().mouse_motion() == (V{1.0f, 2.0f}));
 }
 
+void test_window_area_at() {
+    using kin::WindowArea;
+    // A 300x200 window: a 30 high title bar with a button in it, 4 point edges.
+    const kin::WindowChrome chrome{.drag = {{0, 0, 300, 30}}, .exclude = {{250, 0, 50, 30}}, .resize_border = 4};
+    const kin::Vec2f size{300, 200};
+    const auto at = [&](float x, float y, bool resizable = true) { return kin::window_area_at(chrome, {x, y}, size, resizable); };
+    assert(at(100, 15) == WindowArea::Drag);
+    assert(at(260, 15) == WindowArea::Client); // the button
+    assert(at(100, 100) == WindowArea::Client);
+    assert(at(100, 2) == WindowArea::ResizeTop);
+    assert(at(1, 1) == WindowArea::ResizeTopLeft);
+    assert(at(299, 1) == WindowArea::ResizeTopRight);
+    assert(at(1, 100) == WindowArea::ResizeLeft);
+    assert(at(299, 100) == WindowArea::ResizeRight);
+    assert(at(1, 199) == WindowArea::ResizeBottomLeft);
+    assert(at(150, 199) == WindowArea::ResizeBottom);
+    assert(at(299, 199) == WindowArea::ResizeBottomRight);
+    assert(at(100, 2, false) == WindowArea::Drag); // not resizable (or maximized): no edges
+    assert(at(260, 2, false) == WindowArea::Client);
+}
+
+// Actions bound to a controller's buttons and sticks' ways; axes from keys
+// and sticks, less a dead zone; all of it written and read back.
+void test_gamepad_bindings_and_axes() {
+    kin::InputMap map;
+    map.bind("jump", kin::Key::Space);
+    map.bind("jump", kin::PadControl::A);
+    map.bind("left", kin::PadControl::LeftStickLeft);
+    map.set_axis({.name = "move_x",
+                  .negative = {*kin::parse_binding_text("key:A")},
+                  .positive = {*kin::parse_binding_text("key:D"), *kin::parse_binding_text("pad:dpad_right")},
+                  .sticks = {{.axis = kin::PadAxis::LeftX}},
+                  .dead_zone = 0.2f});
+    map.set_axis({.name = "move_y", .sticks = {{.axis = kin::PadAxis::LeftY, .inverted = true}}});
+
+    kin::Input input;
+    input.set_map(map);
+    assert(input.axis("move_x") == 0.0f && input.axis("nothing") == 0.0f);
+    kin::GamepadState pad{.connected = true};
+    pad.set_button(kin::GamepadButton::A, true);
+    pad.left_x = -0.6f;
+    pad.left_y = 0.6f; // up
+    input.set_gamepad(pad);
+    assert(input.pressed("jump") && input.held("jump") && input.frame_pressed("jump") && input.held("left"));
+    // Past the dead zone (0.2): (0.6 - 0.2) / 0.8 = 0.5 of the way; down positive once inverted.
+    assert(std::abs(input.axis("move_x") + 0.5f) < 1e-4f && std::abs(input.axis("move_y") + 0.5f) < 1e-4f);
+    input.advance_step_edges();
+    assert(!input.pressed("jump") && input.held("jump"));
+    pad.set_button(kin::GamepadButton::A, false);
+    pad.left_x = 0.1f; // in the dead zone
+    input.set_gamepad(pad);
+    assert(input.released("jump") && !input.held("left") && input.axis("move_x") == 0.0f);
+    // A key held: all the way, pushed further than the stick.
+    input.set_action_held("jump", true); // Space; and D through an action bound to it
+    kin::InputMap with_right = map;
+    with_right.bind("right", kin::Key::D);
+    input.set_map(with_right);
+    input.set_action_held("right", true);
+    assert(input.axis("move_x") == 1.0f);
+    // No controller: its sticks read nothing.
+    input.set_action_held("right", false);
+    input.set_gamepad({});
+    assert(input.axis("move_x") == 0.0f && !input.held("left"));
+
+    const std::string text = kin::serialize_input_map(map);
+    assert(text.find("pad jump a\n") != std::string::npos && text.find("pad left left_stick_left\n") != std::string::npos);
+    assert(text.find("axis move_x - key:A\naxis move_x + key:D\naxis move_x + pad:dpad_right\naxis move_x stick left_x\n") != std::string::npos);
+    assert(text.find("axis move_y stick -left_y\n") != std::string::npos);
+    kin::InputMap read;
+    std::string error;
+    assert(kin::parse_input_map(text, read, error) && read == map);
+    assert(!kin::parse_input_map("axis move_x sideways key:A\n", read, error) && error.find("line 1") != std::string::npos);
+    assert(!kin::parse_input_map("pad jump z\n", read, error));
+    assert(kin::pad_control_name(kin::PadControl::RightTrigger) == "right_trigger");
+}
+
 int main() {
+    test_gamepad_bindings_and_axes();
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process
     // environment even when GPU CI exports X11 for the separate 3D tests.
@@ -261,8 +380,10 @@ int main() {
     assert(driver_set == 0);
     test_logging();
     test_frame_time_snapper();
+    test_window_area_at();
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
+    test_close_held();
     test_mouse_motion_reaches_one_step();
 
     kin::App app{{.mode = kin::AppMode::Headless}};
@@ -288,6 +409,8 @@ int main() {
     assert(second.id() != 0);
     assert(first.id() != second.id());
     assert(first.borderless());
+    first.set_chrome({.drag = {{0, 0, 320, 30}}, .exclude = {}, .resize_border = 4});
+    first.set_chrome({.drag = {}, .exclude = {}, .resize_border = 0}); // replaced, hit test kept
     assert(!second.borderless());
     assert((first.pixel_size() == kin::Vec2i{320, 180}));
     assert(first.display_scale() > 0);

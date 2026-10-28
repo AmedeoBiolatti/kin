@@ -31,6 +31,7 @@ struct Draw {
     Texture texture;
     Rectf source{};
     Rectf dest{};
+    Color tint = colors::white;
 };
 
 // Makes textures (without pixels) and records what is drawn from them. It
@@ -39,7 +40,9 @@ class TextureBackend final : public IRenderer2DBackend {
 public:
     std::vector<Draw> draws;
     i32 textures_made = 0;
-    u64 last_pixels = 0; // a hash of the last texture's pixels
+    u64 last_pixels = 0;          // a hash of the last texture's pixels
+    bool distance_fields = false; // draws distance fields (counting their quads)
+    i32 field_quads = 0;
 
     std::string_view name() const override { return "texture-recording"; }
     void clear(Color) override {}
@@ -57,9 +60,17 @@ public:
         }
         return Texture{std::make_shared<FakeTexture>(size)};
     }
+    RendererBackendCapabilities capabilities() const override { return {.distance_fields = distance_fields}; }
+    bool draw_distance_field(const Texture&, std::span<const SpriteInstance> quads, const DistanceFieldStyle&) override {
+        field_quads += static_cast<i32>(quads.size());
+        return distance_fields;
+    }
     void draw_texture(const Texture& texture, Rectf dest) override { draws.push_back({texture, {}, dest}); }
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override {
         draws.push_back({texture, source, dest});
+    }
+    void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override {
+        draws.push_back({texture, source, dest, tint});
     }
     void fill_rect(Rectf, Color) override {}
     void draw_rect(Rectf, Color) override {}
@@ -203,6 +214,97 @@ void test_atlas_grows_with_new_characters() {
         ui2::draw_text(rec.renderer, font, privet + " Privet", {10, 20}, 1.0f, colors::white);
         assert(rec.backend->textures_made == made && rec.backend->draws.size() == 12);
     }
+}
+
+// DEL is a control character as the others are: measured and drawn as they
+// are, between the letters (and never looked up among the printable ones).
+void test_control_characters() {
+    const std::filesystem::path path = plain_system_font();
+    if (path.empty()) {
+        return;
+    }
+    const ui2::Font font = ui2::load_ttf_font(path, 16.0f);
+    const auto spelled = [](char control) { return std::string("a") + control + "b" + control + control + "~" + control; };
+    const f32 width = ui2::measure_text(font, spelled('\x01')).x;
+    Recording first = make_recording();
+    ui2::draw_text(first.renderer, font, spelled('\x01'), {0, 0}, 1.0f, colors::white);
+    assert(width >= ui2::measure_text(font, "ab~").x && first.backend->draws.size() >= 3);
+    for (const char control : {'\x1B', '\x7F'}) {
+        assert(ui2::measure_text(font, spelled(control)).x == width);
+        Recording rec = make_recording();
+        ui2::draw_text(rec.renderer, font, spelled(control), {0, 0}, 1.0f, colors::white);
+        assert(rec.backend->draws.size() == first.backend->draws.size());
+    }
+}
+
+// Shaped runs drawn with distance fields: each run's texture stays drawable
+// while the next runs' are made (and the cache moves).
+void test_distance_field_shaped_runs() {
+    const std::filesystem::path path = plain_system_font();
+    if (path.empty()) {
+        return;
+    }
+    const ui2::Font font = ui2::load_ttf_font(
+        path, 16.0f, ui2::TtfFontOptions{.rendering = ui2::TextRendering::Sdf, .fallbacks = ui2::system_fallback_fonts()});
+    Recording rec = make_recording();
+    rec.backend->distance_fields = true;
+    const std::string text = shalom + " a " + salam + " b " + shalom + shalom + " c " + salam + salam;
+    ui2::draw_text(rec.renderer, font, text, {0, 0}, 1.0f, colors::white);
+    const auto& draws = rec.backend->draws;
+    assert(rec.backend->field_quads == 3); // a, b and c from the atlas
+    assert(draws.size() == 4);             // the four right-to-left words, each its texture
+    for (std::size_t i = 0; i < draws.size(); ++i) {
+        assert(draws[i].texture && draws[i].dest.w > 0.0f && draws[i].source.w > 0.0f);
+        assert(i == 0 || draws[i].dest.x > draws[i - 1].dest.x);
+    }
+}
+
+// An emoji: from a fallback that has it, an em or so wide, drawn (no bitmap
+// colour font among the fallbacks: SDL_ttf would lay its glyphs out at 136
+// pixels and draw nothing).
+void test_emoji_from_fallbacks() {
+    const std::filesystem::path path = plain_system_font();
+    if (path.empty()) {
+        return;
+    }
+    const auto& fallbacks = ui2::system_fallback_fonts();
+    for (const ui2::FontSource& font : fallbacks) {
+        assert(font.path.filename().string().find("ColorEmoji") == std::string::npos &&
+               font.path.filename().string().find("Color Emoji") == std::string::npos);
+    }
+    const ui2::Font font = ui2::load_ttf_font(path, 16.0f, ui2::TtfFontOptions{.fallbacks = fallbacks});
+    const std::string grin = "\xF0\x9F\x98\x80"; // 😀
+    const f32 width = ui2::measure_text(font, grin).x;
+    if (width <= 0.0f) {
+        return; // no font here has it
+    }
+    assert(width > 8.0f && width < 40.0f);
+    Recording rec = make_recording();
+    ui2::draw_text(rec.renderer, font, "a" + grin, {0, 0}, 1.0f, Color::rgb(200, 30, 30));
+    assert(rec.backend->draws.size() == 2 && rec.backend->draws[1].dest.h < 40.0f);
+    assert(rec.backend->draws[0].tint == Color::rgb(200, 30, 30)); // a glyph without colours of its own: the text's
+}
+
+// A glyph atlas that fills (large text in a script of many characters) starts
+// over: what is drawn after still is.
+void test_atlas_starts_over_when_full() {
+    const std::filesystem::path path = plain_system_font();
+    const ui2::FontSource cjk = cjk_fallback();
+    if (path.empty() || cjk.path.empty()) {
+        return;
+    }
+    // At 12 points a page (16 ASCII cells a side, to a power of two) holds some
+    // 1000 ideographs: one page, fewer than these 1300.
+    const ui2::Font font = ui2::load_ttf_font(path, 12.0f, ui2::TtfFontOptions{.fallbacks = {cjk}, .atlas_pages = 1});
+    Recording rec = make_recording();
+    constexpr i32 count = 1300;
+    i32 drawn = 0;
+    for (u32 c = 0x4E00; c < 0x4E00 + count; ++c) {
+        rec.backend->draws.clear();
+        ui2::draw_text(rec.renderer, font, u8s({c}), {0, 0}, 1.0f, colors::white);
+        drawn += rec.backend->draws.empty() ? 0 : 1;
+    }
+    assert(drawn == count);
 }
 
 void test_fallback_fonts() {
@@ -357,7 +459,11 @@ int main() {
     test_bitmap_font_accents();
     test_cjk_wrapping();
     test_atlas_grows_with_new_characters();
+    test_control_characters();
     test_fallback_fonts();
+    test_distance_field_shaped_runs();
+    test_emoji_from_fallbacks();
+    test_atlas_starts_over_when_full();
     test_right_to_left_runs();
     test_fitting_text();
     test_language_fonts();
