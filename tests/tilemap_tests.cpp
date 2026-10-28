@@ -1170,8 +1170,11 @@ void test_tileset_files_and_hex_roundtrip() {
     map.tileset = read;
     map.set(1, 1, grass);
     assert(kin::save_tilemap(map, root / "maps" / "level.kintilemap"));
-    std::ifstream in(root / "maps" / "level.kintilemap");
-    const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    std::string text;
+    {
+        std::ifstream in(root / "maps" / "level.kintilemap"); // closed again: Windows removes no open file
+        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
     assert(text.find("\"tileset\": \"tilesets/terrain.kintileset\"") != std::string::npos);
     assert(text.find("\"grass\"") == std::string::npos); // its tiles are the tileset's
 

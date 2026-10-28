@@ -859,6 +859,7 @@ void test_top_down_render_applies_camera_and_culling() {
 }
 
 void test_static_render_cache_merges_with_dynamic_queue() {
+    const auto previous = kin::logger_config();
     std::vector<kin::LogEvent> events;
     kin::set_logger_config({
         .min_level = kin::LogLevel::Debug,
@@ -923,7 +924,7 @@ void test_static_render_cache_merges_with_dynamic_queue() {
     }
     assert(saw_rebuild);
     assert(saw_dirty);
-    kin::set_logger_config({.sdl_sink = false});
+    kin::set_logger_config(previous); // the later tests' logs show again
 }
 
 void test_world_render_state_collect_dynamic_excludes_static_renderables() {
