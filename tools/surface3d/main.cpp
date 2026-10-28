@@ -1,4 +1,4 @@
-// Public graph: shadows + compute data -> HDR toon -> bloom/output -> ASCII -> presentation.
+// Public graph: shadows + compute -> opaque HDR toon -> glass/sprites -> bloom/output -> ASCII.
 #include "surface3d_shader.hpp"
 
 #include <algorithm>
@@ -26,9 +26,9 @@ int main(int argc, char** argv) {
         Renderer2D renderer{make_render_backend(window, false, true)};
         Renderer3D r3d{renderer};
         const auto features = available_graph_features(renderer);
-        if (!r3d.capabilities().surface_pass || !r3d.capabilities().sun_shadow_pass ||
-            !r3d.capabilities().local_shadow_pass || !r3d.capabilities().material_inputs ||
-            !r3d.capabilities().bloom_pass || !r3d.capabilities().output_pass ||
+        if (!r3d.capabilities().surface_stages || !r3d.capabilities().surface_particles ||
+            !r3d.capabilities().sun_shadow_pass || !r3d.capabilities().local_shadow_pass ||
+            !r3d.capabilities().material_inputs || !r3d.capabilities().bloom_pass || !r3d.capabilities().output_pass ||
             !(features & graph_feature::attachment_arrays) || !(features & graph_feature::compute) ||
             !(features & graph_feature::buffers)) {
             std::cerr
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
                             .format = TextureFormat::Depth32Float,
                             .size = {512, 512},
                             .array_layers = 4},
-                           {.name = "colour",
+                           {.name = "opaque_colour",
                             .kind = GraphResourceKind::RenderAttachment,
                             .format = TextureFormat::Rgba16Float,
                             .size = size},
@@ -78,7 +78,11 @@ int main(int argc, char** argv) {
                             .kind = GraphResourceKind::RenderAttachment,
                             .format = TextureFormat::Rgba16Float,
                             .size = {320, 224}},
-                           {.name = "finished", .kind = GraphResourceKind::ColorTarget, .size = size}};
+                           {.name = "finished", .kind = GraphResourceKind::ColorTarget, .size = size},
+                           {.name = "composited",
+                            .kind = GraphResourceKind::RenderAttachment,
+                            .format = TextureFormat::Rgba16Float,
+                            .size = size}};
         graph.passes = {
             {.name = "material_data",
              .writes = {6, 7},
@@ -89,15 +93,19 @@ int main(int argc, char** argv) {
             {.name = "local",
              .writes = {5},
              .required_features = graph_feature::rendering3d | graph_feature::attachment_arrays},
-            {.name = "surface",
+            {.name = "opaque",
              .reads = {0, 5, 6, 7},
              .writes = {1, 2},
              .required_features = graph_feature::rendering3d},
+            {.name = "transparent",
+             .reads = {0, 1, 2, 5},
+             .writes = {11},
+             .required_features = graph_feature::rendering3d},
             {.name = "bloom",
-             .reads = {1},
+             .reads = {11},
              .writes = {8, 9},
              .required_features = graph_feature::attachments | graph_feature::rendering3d},
-            {.name = "finish", .reads = {1, 8}, .writes = {10}, .required_features = graph_feature::rendering3d},
+            {.name = "finish", .reads = {11, 8}, .writes = {10}, .required_features = graph_feature::rendering3d},
             {.name = "ascii", .reads = {10}, .writes = {3}, .required_features = graph_feature::shaders},
             {.name = "output", .reads = {3}, .writes = {4}, .required_features = graph_feature::raster}};
         ResourceGraphCompiler compiler;
@@ -141,11 +149,19 @@ int main(int argc, char** argv) {
             check(bool(scene.draw(ground, Mat4f::translation({0, -1.1f, 0}), ground_material)), "ground rejected");
             check(bool(scene.draw(cube, Mat4f::rotation_y(angle), cube_material)), "cube rejected");
 
+            check(bool(scene.draw(cube, Mat4f::translation({-1.5f, .2f, .8f}) * Mat4f::scaling({.55f, .55f, .55f}),
+                                  {.color = Color::rgba(80, 180, 240, 110), .blend = Blend3D::Alpha})),
+                  "glass rejected");
+            const std::array sprites{ParticleSprite3D{{-1.5f, .3f, 1.8f}, 1.2f, 0, {1, .3f, .1f}, .6f},
+                                     ParticleSprite3D{{-1.5f, .3f, -.5f}, 1.5f, 0, {.2f, .5f, 1}, .5f}};
+            check(bool(scene.draw_particles({.softness = .25f, .lit = .5f, .receives_shadow = true}, sprites)),
+                  "sprites rejected");
+
             auto prepared = r3d.prepare(scene).value_or({});
             check(bool(prepared), "scene preparation failed");
             SunShadow3D shadow;
             LocalShadows3D local;
-            const std::array<std::function<bool()>, 8> operations{
+            const std::array<std::function<bool()>, 9> operations{
                 [&] {
                     const std::array outputs{resources.texture(7)};
                     const std::array buffers{resources.buffer(6)};
@@ -171,15 +187,29 @@ int main(int argc, char** argv) {
                 [&] {
                     return bool(r3d.render_surface(
                         {.depth = resources.texture(2), .linear_colour = resources.texture(1)}, prepared,
-                        {.background = Color::rgb(20, 25, 35), .sun_shadow = &shadow, .local_shadows = &local}));
+                        {.background = Color::rgb(20, 25, 35),
+                         .sun_shadow = &shadow,
+                         .local_shadows = &local,
+                         .stage = SurfaceStage3D::Opaque}));
                 },
                 [&] {
-                    return bool(r3d.render_bloom({resources.texture(8), resources.texture(9)}, resources.texture(1),
+                    // Distinct logical colour versions keep the compiler's single-writer rule.
+                    // This path copies opaque colour once; manual pipelines may load it in place.
+                    return bool(r3d.render_surface(
+                        {.depth = resources.texture(2), .linear_colour = resources.texture(11)}, prepared,
+                        {.sun_shadow = &shadow,
+                         .local_shadows = &local,
+                         .stage = SurfaceStage3D::Transparent,
+                         .particles = true,
+                         .colour_input = resources.texture(1)}));
+                },
+                [&] {
+                    return bool(r3d.render_bloom({resources.texture(8), resources.texture(9)}, resources.texture(11),
                                                  {.threshold = .8f}));
                 },
                 [&] {
                     return bool(
-                        r3d.render_output(resources.target(10), resources.texture(1),
+                        r3d.render_output(resources.target(10), resources.texture(11),
                                           {.bloom = resources.texture(8), .bloom_strength = .3f, .exposure = 1.1f}));
                 },
                 [&] {
@@ -223,17 +253,20 @@ int main(int argc, char** argv) {
             check(stats.device_waits == 0 && stats.shadow_draws == 0 && stats.taa_dispatches == 0 &&
                       stats.gi_dispatches == 0,
                   "surface recorded implicit effects or waited");
-            const auto array = resources.texture(0), hdr_colour = resources.texture(1);
+            const auto array = resources.texture(0), hdr_colour = resources.texture(1),
+                       composed = resources.texture(11);
             check(renderer.set_color_space(ColorSpace::Linear, true), "HDR unavailable");
             for (auto& resource : graph.resources)
                 if (resource.kind == GraphResourceKind::ColorTarget)
                     resource.hdr = true;
             picture(false);
             renderer.present();
-            check(resources.texture(0) == array && resources.texture(1) == hdr_colour,
+            check(resources.texture(0) == array && resources.texture(1) == hdr_colour &&
+                      resources.texture(11) == composed,
                   "HDR working transition replaced exact-format data attachments");
             std::cout << "Surface graph: exact reference pixels, cached plans, stable allocations, HDR, explicit "
-                         "sun/local shadows, GPU material inputs, HDR toon, stock bloom/output and ASCII\n";
+                         "sun/local shadows, GPU material inputs, opaque HDR toon, ordered glass/sprites, stock "
+                         "bloom/output and ASCII\n";
         } else
             app.run([&](f32 dt) { angle += dt * 20; },
                     [&](f32) {

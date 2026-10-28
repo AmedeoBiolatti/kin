@@ -1416,6 +1416,9 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _shadow_format == SDL_GPU_TEXTUREFORMAT_D32_FLOAT && _shadow_shader && _shadow_vertex_shader;
     _capabilities.local_shadow_pass = _capabilities.sun_shadow_pass && _lights_available;
     _capabilities.material_inputs = bool(_vertex_shader && _fragment_shader);
+    _capabilities.surface_stages = _capabilities.surface_pass;
+    _capabilities.surface_particles = _capabilities.surface_pass && _particles_available;
+    _capabilities.surface_soft_particles = _capabilities.surface_particles && _soft_particles_available;
     _capabilities.bloom_pass =
         _bloom_shader && SDL_GPUTextureSupportsFormat(_device->handle(), hdr_format, SDL_GPU_TEXTURETYPE_2D,
                                                       SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
@@ -3466,6 +3469,8 @@ struct GpuRenderer3D::FrameCtx {
     GpuView3D* view;
     GpuPreparedScene3D* prepared = nullptr;
     bool geometry_only = false, surface_only = false, public_shadow = false, public_local = false;
+    SurfaceStage3D surface_stage = SurfaceStage3D::All;
+    const GpuTexture* particle_depth = nullptr;
     const GpuTexture* sun_depth = nullptr;
     u32 sun_size = 0, sun_layers = 0;
     const GpuTexture* surface_depth = nullptr;
@@ -3951,6 +3956,10 @@ Result3D<LocalShadows3D> GpuRenderer3D::render_local_shadows(const Texture& targ
     return {std::move(result), {}};
 }
 
+namespace {
+bool scene_has_soft_particles(const Scene3D& scene);
+}
+
 bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSceneBackend3D& input,
                                    const SurfaceOptions3D& options, RenderDebugStats3D& stats) {
     auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
@@ -4023,6 +4032,41 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
             !valid_local_maps(*local, scene))
             return false;
     }
+    const auto* colour_input =
+        options.colour_input ? dynamic_cast<const GpuTextureBackend*>(options.colour_input.backend().get()) : nullptr;
+    if (options.colour_input && (options.stage != SurfaceStage3D::Transparent ||
+                                 options.colour_input == colour_texture || options.colour_input.array_layers() ||
+                                 !valid(colour_input, colour->texture().format(), SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+                                 colour_input->size() != colour->size()))
+        return false;
+    const auto* soft_depth =
+        options.soft_depth ? dynamic_cast<const GpuTextureBackend*>(options.soft_depth.backend().get()) : nullptr;
+    if (options.soft_depth &&
+        (!options.particles || options.soft_depth == targets.depth || options.soft_depth.array_layers() ||
+         !valid(soft_depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+         soft_depth->size() != colour->size()))
+        return false;
+    if (options.particles) {
+        if (!_capabilities.surface_particles || options.stage == SurfaceStage3D::Opaque ||
+            (scene_has_soft_particles(scene) && (!soft_depth || !_capabilities.surface_soft_particles)))
+            return false;
+        const auto particle_texture = [&](const ParticleLook3D& look) {
+            if (!look.texture)
+                return true;
+            const auto* image = dynamic_cast<const GpuTextureBackend*>(look.texture.backend().get());
+            return image && image->texture() && image->texture().belongs_to(_device->handle()) &&
+                   (image->texture().usage() & SDL_GPU_TEXTUREUSAGE_SAMPLER) && !look.texture.array_layers() &&
+                   (look.texture.format() == TextureFormat::Rgba8 ||
+                    texture_format_compressed(look.texture.format())) &&
+                   look.texture != colour_texture && look.texture != targets.depth;
+        };
+        for (const auto& draw : scene.particle_draws())
+            if (!particle_texture(draw.look))
+                return false;
+        for (const auto* layer : {&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist})
+            if (layer->intensity > 0 && !particle_texture(layer->look))
+                return false;
+    }
     const auto waits = _device->idle_waits();
     const auto pipelines = _owner->_pipelines.size();
     collect_mesh_buffers();
@@ -4036,6 +4080,8 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     FrameCtx ctx{&scratch, scene, stats};
     ctx.prepared = prepared;
     ctx.surface_only = true;
+    ctx.surface_stage = options.stage;
+    ctx.particle_depth = soft_depth ? &soft_depth->texture() : nullptr;
     ctx.surface_depth = &depth->texture();
     _particle_batches.clear();
     setup_frame(ctx);
@@ -4077,6 +4123,8 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     }
     build_light_grid(ctx);
     cull_and_upload(ctx);
+    if (options.particles)
+        prepare_particles(ctx);
     order_draws(ctx);
     begin_commands(ctx);
     _owner->retain(colour_texture);
@@ -4085,6 +4133,14 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
     depth->mark_material_read(_owner->_frame_serial);
     if (local_depth)
         _owner->retain(local->depth);
+    if (soft_depth) {
+        _owner->retain(options.soft_depth);
+        soft_depth->mark_material_read(_owner->_frame_serial);
+    }
+    if (colour_input) {
+        _owner->retain(options.colour_input);
+        colour_input->mark_material_read(_owner->_frame_serial);
+    }
     // The surface culls only its camera. Shadow membership was already recorded
     // by its producer; injecting the supplied projection must not add GPU views.
     cluster_pass_gpu(ctx, 0);
@@ -4101,12 +4157,24 @@ bool GpuRenderer3D::render_surface(const SurfaceTargets3D& targets, IPreparedSce
         ctx.shadows = ctx.sun_shines && scene.lights.sun_shadow_strength > 0;
     }
     stats.lights_variant = ctx.lights_variant;
-    const bool complete = main_pass(ctx);
-    if (complete) {
-        colour->bump_version();
-        depth->bump_version();
-        resume_2d();
+    bool complete = true;
+    if (colour_input) {
+        if (auto* copy = SDL_BeginGPUCopyPass(ctx.commands)) {
+            const SDL_GPUTextureLocation from{.texture = colour_input->texture().handle()};
+            const SDL_GPUTextureLocation to{.texture = colour->texture().handle()};
+            SDL_CopyGPUTextureToTexture(copy, &from, &to, colour->texture().width(), colour->texture().height(), 1,
+                                        true);
+            SDL_EndGPUCopyPass(copy);
+            ++stats.surface_colour_copies;
+        } else
+            complete = false;
     }
+    if (complete)
+        complete = main_pass(ctx);
+    colour->bump_version(); // conservatively publish partial recording too
+    if (options.stage != SurfaceStage3D::Transparent)
+        depth->bump_version();
+    resume_2d();
     stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
     stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
     return complete;
@@ -4299,9 +4367,9 @@ void GpuRenderer3D::prepare_weather(FrameCtx& ctx) {
         }
     }
     const std::array weather_layers{&scene.weather.rain, &scene.weather.snow, &scene.weather.dust, &scene.weather.mist};
-    const bool weather_casts =
-        has_weather && std::any_of(weather_layers.begin(), weather_layers.end(),
-                                   [](const auto* l) { return l->intensity > 0 && l->look.casts_shadow; });
+    const bool weather_casts = !ctx.surface_only && has_weather &&
+                               std::any_of(weather_layers.begin(), weather_layers.end(),
+                                           [](const auto* l) { return l->intensity > 0 && l->look.casts_shadow; });
     std::vector<GpuFrustum> caster_frustums;
     if (weather_casts && scene.cull) {
         const auto map = [&](const Mat4f& matrix) {
@@ -4645,23 +4713,25 @@ void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
     _particle_batches.clear();
-    _particle_history_now.clear();
-    if (++_particle_taa_idle >= _release_after) {
-        _particle_previous.reset();
-        std::vector<u32>().swap(_particle_history_lookup);
-        decltype(_particle_history_now)().swap(_particle_history_now);
-        _particle_taa_idle = _release_after;
+    if (!ctx.surface_only) {
+        _particle_history_now.clear();
+        if (++_particle_taa_idle >= _release_after) {
+            _particle_previous.reset();
+            std::vector<u32>().swap(_particle_history_lookup);
+            decltype(_particle_history_now)().swap(_particle_history_now);
+            _particle_taa_idle = _release_after;
+        }
+        _particle_cast_batches.clear();
+        _particle_cast_views.clear();
+        _particle_cast_sprites.clear();
+        _particle_cast_order.clear();
+        if (_particle_cast_buffer && ++_particle_cast_idle >= _release_after) {
+            _particle_cast_buffer.reset();
+            std::vector<ParticleSprite3D>().swap(_particle_cast_sprites);
+            std::vector<u32>().swap(_particle_cast_order);
+        }
+        stats.particle_shadow_bytes = _particle_cast_buffer ? _particle_cast_buffer->size() : 0;
     }
-    _particle_cast_batches.clear();
-    _particle_cast_views.clear();
-    _particle_cast_sprites.clear();
-    _particle_cast_order.clear();
-    if (_particle_cast_buffer && ++_particle_cast_idle >= _release_after) {
-        _particle_cast_buffer.reset();
-        std::vector<ParticleSprite3D>().swap(_particle_cast_sprites);
-        std::vector<u32>().swap(_particle_cast_order);
-    }
-    stats.particle_shadow_bytes = _particle_cast_buffer ? _particle_cast_buffer->size() : 0;
     ctx.particles = false;
     if (scene.particle_draws().empty() && !scene.weather.active()) {
         ctx.view->_taa_particles.clear();
@@ -4675,7 +4745,8 @@ void GpuRenderer3D::prepare_particles(FrameCtx& ctx) {
     const auto started = std::chrono::steady_clock::now();
     prepare_weather(ctx);
     const auto sources = particle_sources(scene);
-    prepare_particle_casts(ctx, sources);
+    if (!ctx.surface_only)
+        prepare_particle_casts(ctx, sources);
     const u32 total = select_particles(ctx, sources);
     if (total == 0) {
         ctx.view->_taa_particles.clear();
@@ -4876,7 +4947,10 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     const bool orthographic = scene.camera.projection == Projection3D::Orthographic;
     const bool encode = !ctx.taa && view->_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     const bool decode = _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
-    const bool depth_ready = ctx.prepass_ran && view->_ao_depth && _soft_particles_available;
+    const GpuTexture* soft_depth = ctx.particle_depth                   ? ctx.particle_depth
+                                   : ctx.prepass_ran && view->_ao_depth ? &view->_ao_depth
+                                                                        : nullptr;
+    const bool depth_ready = soft_depth && _soft_particles_available;
     const LinearRgb light_tint = particle_light_tint(scene.lights);
     const Camera3D& camera = scene.camera;
     const Unprojection un = unproject_coefficients(camera.projection_matrix(ctx.aspect));
@@ -4884,8 +4958,8 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
     const bool any_local =
         (!ctx.chosen.empty() || ctx.lu.counts[0] > 0) &&
         std::any_of(_particle_batches.begin(), _particle_batches.end(), [](const auto& b) { return b.look.lit > 0; });
-    const bool maps =
-        ctx.shadows || ctx.moon_cascades > 0 || (ctx.lights_variant && _local_map && !_local_views.empty());
+    const bool maps = ctx.shadows || ctx.moon_cascades > 0 || ctx.local_depth ||
+                      (!ctx.surface_only && ctx.lights_variant && _local_map && !_local_views.empty());
     const bool wants_shadows = std::any_of(_particle_batches.begin(), _particle_batches.end(),
                                            [](const auto& b) { return b.look.receives_shadow && b.look.lit > 0; });
     if (wants_shadows && !_capabilities.particle_shadows)
@@ -4968,6 +5042,12 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         v.first[0] = selected_batch == ~0u ? batch.first : first;
         v.first[1] = ctx.fog && look.fogged ? 1u : 0u;
         SDL_PushGPUVertexUniformData(commands, 0, &v, sizeof(v));
+        if (const auto* image = dynamic_cast<const GpuTextureBackend*>(batch.texture.backend().get());
+            image && image->texture().belongs_to(_device->handle())) {
+            if (image->used_in_frame() != _owner->_frame_serial)
+                _owner->retain(batch.texture);
+            image->mark_material_read(_owner->_frame_serial);
+        }
         const SDL_GPUTextureSamplerBinding picture = texture_binding(batch.texture, Wrap3D::Clamp, Wrap3D::Clamp);
         const bool textured = picture.texture != _owner->_white.handle();
         ParticleFragUniforms f{};
@@ -4981,13 +5061,15 @@ void GpuRenderer3D::draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool 
         SDL_PushGPUFragmentUniformData(commands, 0, &f, sizeof(f));
         const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
             picture,
-            SDL_GPUTextureSamplerBinding{soft ? view->_ao_depth.handle() : _owner->_white.handle(), _point_sampler}};
+            SDL_GPUTextureSamplerBinding{soft ? soft_depth->handle() : _owner->_white.handle(), _point_sampler}};
         if (receive) {
             const std::array<SDL_GPUTextureSamplerBinding, 5> shadow_samplers{
                 samplers[0], samplers[1],
                 SDL_GPUTextureSamplerBinding{ctx.shadows ? ctx.sun_depth->handle() : _no_shadow.handle(),
                                              _compare_sampler},
-                SDL_GPUTextureSamplerBinding{ctx.lights_variant && _local_map && !_local_views.empty()
+                SDL_GPUTextureSamplerBinding{ctx.local_depth ? ctx.local_depth->handle()
+                                             : !ctx.surface_only && ctx.lights_variant && _local_map &&
+                                                     !_local_views.empty()
                                                  ? _local_map.handle()
                                                  : _no_shadow.handle(),
                                              _compare_sampler},
@@ -7880,7 +7962,8 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                                  [](const auto& a, const auto& b) { return a.first > b.first; });
                 u32 at = ref.out_first;
                 for (const auto& [d, i] : _sorted) {
-                    _main_order.push_back({first.ref, at, 1, ref.scene, d, false, true});
+                    if (ctx.surface_stage != SurfaceStage3D::Opaque)
+                        _main_order.push_back({first.ref, at, 1, ref.scene, d, false, true});
                     write(ref, ref.instances[i], out.data(), at++, flat + i);
                 }
             }
@@ -9011,6 +9094,9 @@ void GpuRenderer3D::order_draws(FrameCtx& ctx) {
     for (const u32 r : _order) {
         const auto& ref = _refs[r];
         const auto pass = pass_of(ref.draw->material);
+        if ((ctx.surface_stage == SurfaceStage3D::Opaque && pass != Pass::Opaque) ||
+            (ctx.surface_stage == SurfaceStage3D::Transparent && pass == Pass::Opaque))
+            continue;
         if (ref.draw->material.blend != Blend3D::Alpha && ref.draw->material.blend != Blend3D::Additive)
             _main_order.push_back({r, 0, 0, ref.scene, 0, false, false});
     }
@@ -9861,7 +9947,9 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
     const auto particles = [&] {
         const auto before = ctx.stats.taa_reactive_draws;
         draw_particles(ctx, pass, true);
-        particles_ok = ctx.stats.taa_reactive_draws - before == ctx.stats.particle_batches;
+        // Colour composition can split one source around glass or other sprites.
+        // Coverage replays each source once, so compare against source batches.
+        particles_ok = ctx.stats.taa_reactive_draws - before == _particle_batches.size();
     };
     DrawBinder binder{pass};
     _phase = Phase::All;
@@ -10199,7 +10287,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // anti-aliasing: one sample, into the float picture the resolve reads.
     // An HDR view holds linear light whatever the 2D pipeline stores.
     SDL_FColor clear = _owner->stored_color(view->_options.background);
-    if (view->_hdr || ctx.taa) {
+    if (view->_hdr || ctx.taa || view->_format == hdr_format) {
         const LinearColor l = to_linear(view->_options.background);
         clear = {l.r, l.g, l.b, l.a};
     }
@@ -10209,8 +10297,9 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                             : view->_resolved->texture().handle();
     SDL_GPUColorTargetInfo colour{};
     colour.clear_color = clear;
-    colour.load_op = SDL_GPU_LOADOP_CLEAR;
-    colour.cycle = true; // a frame still reading the last picture keeps it
+    const bool load_surface = ctx.surface_stage == SurfaceStage3D::Transparent;
+    colour.load_op = load_surface ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    colour.cycle = !load_surface; // a frame still reading the last picture keeps it
     if (view->_colour && !ctx.taa) {
         colour.texture = view->_colour.handle();
         colour.store_op = SDL_GPU_STOREOP_RESOLVE;
@@ -10231,6 +10320,10 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
         ctx.surface_only || ctx.taa_reactive || (ctx.taa && _taa_depth_sampled) ? SDL_GPU_STOREOP_STORE
                                                                                 : SDL_GPU_STOREOP_DONT_CARE,
         /*cycle=*/true);
+    if (load_surface) {
+        depth.load_op = SDL_GPU_LOADOP_LOAD;
+        depth.cycle = false;
+    }
     // Or the pre-pass's depth, where it has one alike (a sample a pixel, the view's size, the same format; no overlay,
     // whose depths the main pass puts in a range of their own): the main pass starts from the scene's nearest surfaces,
     // and the fragments they hide fail the depth test before they are shaded. The pre-pass's copies are drawn again

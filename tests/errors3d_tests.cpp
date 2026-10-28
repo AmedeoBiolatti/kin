@@ -104,6 +104,10 @@ void resources() {
     }
     if (!renderer.capabilities().surface_pass)
         assert(!renderer.render_surface({}, {}));
+    if (!renderer.capabilities().surface_stages)
+        assert(!renderer.render_surface({}, {}, {.stage = SurfaceStage3D::Transparent}));
+    if (!renderer.capabilities().surface_particles)
+        assert(!renderer.render_surface({}, {}, {.particles = true}));
     if (!renderer.capabilities().bloom_pass)
         assert(!renderer.render_bloom({}, {}));
     if (!renderer.capabilities().output_pass)

@@ -130,3 +130,16 @@ The surface graph example records HDR toon → bloom/output → ASCII, with cach
 
 
 Validation: complete native 3D dispatch, eighteen focused hardware checks (three inherited live-device lifecycle skips), all sixteen software Vulkan checks, browser smoke, four unchanged stock captures, 2D-only graph compilation and the 197-file formatting gate pass. New coverage includes exact stock/public output across working spaces, independent alpha/exposure/HDR/dither checks, transparent bloom coverage, queued CPU read/write ordering, resource ownership/lifetime, TAA interleaving/revisions and warmed allocation reuse. Artifact paths and the temporary-workspace recovery are recorded in [the measurements](rendering_measurements.md#public-bloom-and-view-output).
+
+
+## Stage 11: opaque/transparent surfaces and particles
+
+Native public surfaces now expose an opaque stage and a transparent stage with optional world sprites/weather sharing stock mesh/sprite composition. The existing combined mesh-only API remains the default. Transparent consumers load initialized colour/depth without writing depth; optional distinct `colour_input` supplies a versioned graph path with one explicit full colour copy. Soft intersections consume a separate unjittered world-depth input. Public sprite lighting consumes supplied sun/local maps and never borrows private maps or advances stock particle history/caster state. Public shadow producers remain mesh-only.
+
+The surface graph now records opaque HDR toon → glass/sprites → bloom/output → ASCII, using distinct colour versions under the existing compiler rules. This is not yet copy-free graph attachment versioning. Prepared world bounds and compatible uploads remain shared; per-consumer visibility, LOD and composition work remain. The [API contract](render_graph.md#opaque-and-transparent-surface-stages) describes depth, ownership, live particle inputs and feature limits.
+
+Regression checks cover exact stock/combined/in-place/versioned pixels across working spaces, glass/sprite blend modes, overlays/weather, masked skinning, retained transparency, wireframes, orthographic cameras, CPU/GPU cluster paths, explicit sun/spot/point sprite reception, soft fades, resource lifetime, CPU upload ordering, stock TAA isolation and warmed resource reuse. Independent linear HDR clears are corrected after a coloured-background comparison exposed gamma-encoded clear values.
+
+A stronger history check also exposed a stock TAA bug: globally ordered colour runs can split a particle source around glass, while coverage replays that source once. Comparing the two draw counts falsely rejected coverage and reset history. The check now validates against source batches; the regression requires real accumulation in both stock views across interleaved public particle calls.
+
+Validation: complete native stock dispatch, nineteen focused hardware checks (four inherited live-device lifecycle skips), all eighteen software Vulkan checks, browser smoke, four unchanged stock captures, standalone 2D-only graph compilation and the 198-file formatting gate pass. See [the measurements and build limitations](rendering_measurements.md#opaquetransparent-surfaces-and-particles).

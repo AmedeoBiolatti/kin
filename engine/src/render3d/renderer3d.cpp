@@ -472,6 +472,23 @@ Status3D Renderer3D::render_surface(const SurfaceTargets3D& targets, const Prepa
         fail3d(_errors, "Renderer3D::render_surface", "surface operation unavailable on this backend");
         return status3d(false, _errors);
     }
+    if (options.stage != SurfaceStage3D::All && options.stage != SurfaceStage3D::Opaque &&
+        options.stage != SurfaceStage3D::Transparent) {
+        fail3d(_errors, "Renderer3D::render_surface", "invalid surface stage");
+        return status3d(false, _errors);
+    }
+    if ((options.stage != SurfaceStage3D::All && !_backend->capabilities().surface_stages) ||
+        (options.particles && !_backend->capabilities().surface_particles) ||
+        (options.soft_depth && !_backend->capabilities().surface_soft_particles)) {
+        fail3d(_errors, "Renderer3D::render_surface", "requested surface stage/particle feature unavailable");
+        return status3d(false, _errors);
+    }
+    if ((options.particles && options.stage == SurfaceStage3D::Opaque) || (options.soft_depth && !options.particles) ||
+        (options.colour_input && options.stage != SurfaceStage3D::Transparent)) {
+        fail3d(_errors, "Renderer3D::render_surface",
+               "particles require All/Transparent; colour_input requires Transparent; soft_depth requires particles");
+        return status3d(false, _errors);
+    }
     const auto start = std::chrono::steady_clock::now();
     const auto& colour = targets.linear_colour ? targets.linear_colour : targets.colour.texture();
     const bool ok = prepared.backend() && bool(targets.colour) != bool(targets.linear_colour) && colour &&
@@ -481,7 +498,9 @@ Status3D Renderer3D::render_surface(const SurfaceTargets3D& targets, const Prepa
                     _backend->render_surface(targets, *prepared.backend(), options, _stats);
     _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
     if (!ok)
-        fail3d(_errors, "Renderer3D::render_surface", "incompatible/expired inputs or GPU surface recording failed");
+        fail3d(
+            _errors, "Renderer3D::render_surface",
+            "incompatible/expired inputs, missing separate depth for soft particles, or GPU surface recording failed");
     return status3d(ok, _errors);
 }
 

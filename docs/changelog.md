@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Split native public surfaces into opaque and transparent stages with opt-in ordered sprites/weather, explicit
+  soft-depth and sun/local sprite-shadow inputs. Support in-place attachment loads or versioned graph colour copies;
+  retain queued sprite textures and CPU upload ordering. Fix linear HDR surface background clears and extend the
+  surface graph with ordered glass/sprites before bloom/output and ASCII. Preserve stock TAA history when glass
+  splits one sprite source into multiple colour draws.
+
 - Expose stock bloom and view output as native graph operations with explicit inputs, intermediate/output targets,
   exposure/ACES, alpha handling and output encoding. Allow independent linear HDR surface attachments, share recording
   with stock views, and extend the surface graph with HDR toon → bloom/output → ASCII.

@@ -172,8 +172,11 @@ public:
     Result3D<LocalShadows3D> render_local_shadows(const Texture& depth_array, const PreparedScene3D&,
                                                   std::span<const LocalShadowRequest3D> requests, Vec2i receiver_size);
     // Single-sample material shading into explicit colour/depth attachments.
-    // Meshes/overlays, environment, point/spot lights and optional supplied sun
-    // and local shadows; no implicit maps, sky/fog/particles, AO/GI/TAA or postproc.
+    // Meshes/overlays, environment, point/spot lights and optional supplied sun/local
+    // shadows. Default All preserves combined mesh-only rendering. Opaque clears;
+    // Transparent loads existing attachments or copies colour_input first. Opt-in
+    // particles/weather share the transparent mesh order; soft particles need a
+    // separate sampled soft_depth. No implicit maps, sky/fog, AO/GI/TAA or postproc.
     Status3D render_surface(const SurfaceTargets3D&, const PreparedScene3D&, const SurfaceOptions3D& = {});
     // Stock bloom extraction and two separable blur rounds into caller-owned
     // attachments. Source is linear premultiplied RGBA16F; no view/history or

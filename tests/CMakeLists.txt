@@ -328,6 +328,12 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-render3d PROPERTIES TIMEOUT 1800)
 endif()
 if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
+    kin_add_test(kin_render3d_surface_stages_tests kin-render3d-surface-stages SOURCES render3d_surface_stages_tests.cpp)
+    kin_compile_glsl(_surface_stage_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/surface_stages/shaders"
+        SOURCES shaders/surface_stages/depth.frag.glsl)
+    kin_embed_files(kin_render3d_surface_stages_tests NAME surface_stage_shaders FILES ${_surface_stage_spv})
+    add_test(NAME kin-render3d-surface-stages-foreign COMMAND kin_render3d_surface_stages_tests --foreign-device)
+    set_tests_properties(kin-render3d-surface-stages kin-render3d-surface-stages-foreign PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_postprocess_tests kin-render3d-postprocess SOURCES render3d_postprocess_tests.cpp)
     kin_compile_glsl(_postprocess_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/postprocess/shaders"
         SOURCES shaders/postprocess/fill.comp.glsl shaders/postprocess/input.frag.glsl shaders/postprocess/probe.frag.glsl)

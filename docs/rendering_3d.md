@@ -43,7 +43,7 @@ if (session.render())
 see the [geometry graph contract and outline example](render_graph.md#geometry-operations-and-data-attachments).
 For explicit native shadow → material shading → custom postprocessing, use
 [`render_sun_shadow()` and `render_surface()`](render_graph.md#explicit-sun-shadows-and-mesh-surfaces).
-The [surface graph example](../tools/surface3d/main.cpp) composes these with GPU ASCII without a stock view.
+The [surface graph example](../tools/surface3d/main.cpp) composes opaque HDR shading, ordered glass/sprites, bloom/output and GPU ASCII without a stock view. See [surface stages and soft-depth inputs](render_graph.md#opaque-and-transparent-surface-stages) for explicit composition.
 For several consumers of the same scene, [explicit shared preparation](render_graph.md#shared-draw-preparation)
 reuses world data and compatible GPU uploads while keeping visibility and temporal history per view.
 Configure with `cmake --preset 3d` to include the experimental engine; ordinary and shipping builds leave it out.

@@ -77,6 +77,7 @@ struct RendererCapabilities3D {
     bool material_inputs = false;
     bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
     bool bloom_pass = false, output_pass = false;
+    bool surface_stages = false, surface_particles = false, surface_soft_particles = false;
 };
 
 struct ViewOptions3D {
@@ -157,10 +158,19 @@ struct OutputOptions3D {
     bool tone_map_sdr = true;
     bool dither = false; // stable pixel noise when encoding to a gamma 8-bit target
 };
+enum class SurfaceStage3D { All, Opaque, Transparent };
 struct SurfaceOptions3D {
     Color background = colors::transparent;
     const SunShadow3D* sun_shadow = nullptr;       // null: no sun shadow; never generates maps implicitly
     const LocalShadows3D* local_shadows = nullptr; // null: unshadowed point/spot lights
+    SurfaceStage3D stage = SurfaceStage3D::All;    // All/Opaque clear; Transparent loads colour/depth
+    bool particles = false; // world sprites/weather, merged with transparent meshes; not valid for Opaque
+    // Transparent only: optional distinct source copied to colour before blending.
+    // Use separate logical resource versions in compiled graphs; omit for an in-place load.
+    Texture colour_input;
+    // Separate sampled D32F world depth, same size/camera, unjittered, without overlay depth splitting.
+    // Required when enabled particles request soft intersections; cannot be the active depth attachment.
+    Texture soft_depth;
 };
 
 // What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
