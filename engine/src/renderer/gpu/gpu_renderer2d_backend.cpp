@@ -1907,13 +1907,13 @@ Vec2f GpuRenderer2DBackend::window_to_logical(Vec2f window_px) const {
         return physical;
     }
     const Rectf d = letterbox_rect(_scene_size, pixels, _integer_scale);
-    if (d.w <= 0.0f || d.h <= 0.0f || _view_scale <= 0.0f) {
+    if (d.w <= 0.0f || d.h <= 0.0f) {
         return window_px;
     }
-    // window -> native scene pixels (present blit) -> logical (/ _view_scale).
-    const f32 scene_x = (physical.x - d.x) * static_cast<f32>(_scene_size.x) / d.w;
-    const f32 scene_y = (physical.y - d.y) * static_cast<f32>(_scene_size.y) / d.h;
-    return {scene_x / _view_scale, scene_y / _view_scale};
+    // The raster projection fits each logical axis to the rounded scene extent.
+    // A shared scale drifts on one axis at fractional DPI (e.g. 721 x 451).
+    return {(physical.x - d.x) * static_cast<f32>(_logical_size.x) / d.w,
+            (physical.y - d.y) * static_cast<f32>(_logical_size.y) / d.h};
 }
 
 Vec2f GpuRenderer2DBackend::logical_to_window(Vec2f logical) const {
@@ -1924,11 +1924,8 @@ Vec2f GpuRenderer2DBackend::logical_to_window(Vec2f logical) const {
         return {logical.x * win.x / pixels.x, logical.y * win.y / pixels.y};
     }
     const Rectf d = letterbox_rect(_scene_size, pixels, _integer_scale);
-    // logical -> native scene pixels (* _view_scale) -> window (present blit).
-    const f32 scene_x = logical.x * _view_scale;
-    const f32 scene_y = logical.y * _view_scale;
-    return {(d.x + scene_x * d.w / static_cast<f32>(_scene_size.x)) * win.x / pixels.x,
-            (d.y + scene_y * d.h / static_cast<f32>(_scene_size.y)) * win.y / pixels.y};
+    return {(d.x + logical.x * d.w / static_cast<f32>(_logical_size.x)) * win.x / pixels.x,
+            (d.y + logical.y * d.h / static_cast<f32>(_logical_size.y)) * win.y / pixels.y};
 }
 
 RenderTarget GpuRenderer2DBackend::create_render_target(Vec2i size, ScaleMode mode) {

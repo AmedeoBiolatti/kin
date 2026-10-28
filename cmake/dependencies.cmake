@@ -230,6 +230,12 @@ if(KIN_ENABLE_SCRIPTING)
     )
 
     FetchContent_MakeAvailable(sol2)
+    # sol2 3.3.1 contains an unused optional<T&>::emplace body that GCC 15
+    # diagnoses before instantiation (upstream ThePhD/sol2#1695). Preserve the
+    # diagnostic as a warning for every consumer, including public-header users.
+    # Remove this compatibility option when updating sol2 to a fixed release.
+    target_compile_options(sol2 INTERFACE
+        "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,15>>:-Wno-error=template-body>")
 endif()
 
 if(KIN_ENABLE_AUDIO)

@@ -1242,7 +1242,8 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
         auto renderer = try_create_gpu_renderer(window, reason);
         if (!renderer) { skip_or_require_gpu_test(test_name, reason); return; }
         gpu_ready = true;
-        for (kin::Vec2i requested : {kin::Vec2i{320, 240}, kin::Vec2i{480, 360}}) {
+        for (kin::Vec2i requested : {kin::Vec2i{320, 240}, kin::Vec2i{480, 360}, kin::Vec2i{481, 361}}) {
+            renderer->set_logical_size(0, 0);
             window.set_size(requested);
             SDL_SyncWindow(SDL_GetWindowFromID(window.id()));
             renderer->clear();
@@ -1255,11 +1256,22 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
             const auto back = renderer->logical_to_window(native);
             assert(std::abs(back.x - center.x) < .01f && std::abs(back.y - center.y) < .01f);
             renderer->present();
+            for (bool integer : {false, true}) {
+                for (kin::Vec2i logical : {kin::Vec2i{160, 100}, kin::Vec2i{173, 97}}) {
+                    if (integer) renderer->set_integer_logical_size(logical);
+                    else renderer->set_logical_size(logical);
+                    const auto mapped = renderer->window_to_logical(center);
+                    assert(std::abs(mapped.x - logical.x * .5f) < .01f);
+                    assert(std::abs(mapped.y - logical.y * .5f) < .01f);
+                    const auto restored = renderer->logical_to_window(mapped);
+                    assert(std::abs(restored.x - center.x) < .01f && std::abs(restored.y - center.y) < .01f);
+                    // Off-centre coordinates must also survive both directions.
+                    const kin::Vec2f point{logical.x * .25f, logical.y * .75f};
+                    const auto roundtrip = renderer->window_to_logical(renderer->logical_to_window(point));
+                    assert(std::abs(roundtrip.x - point.x) < .01f && std::abs(roundtrip.y - point.y) < .01f);
+                }
+            }
         }
-        renderer->set_logical_size(160, 100);
-        const auto units = window.size();
-        const auto center = renderer->window_to_logical({units.x * .5f, units.y * .5f});
-        assert(std::abs(center.x - 80) < .01f && std::abs(center.y - 50) < .01f);
     } catch (const std::exception& e) {
         if (gpu_ready || gpu_tests_required()) throw;
         skip_or_require_gpu_test(test_name, e.what());
