@@ -116,6 +116,16 @@ int main() {
     instance.enable();
     inherited_state.propagate_transforms();
     assert(instance.get<WorldTransform3D>()->position().y == 6);
+    // Pending events can outlive a render state whose observer deletion is deferred.
+    auto transient = std::make_unique<WorldRenderState3D>(world);
+    transient->mutation_mode(SceneMutationMode3D::Tracked);
+    transient->propagate_transforms();
+    world.raw().defer_begin();
+    entities[2].set(Transform3D{.position = {0, 30, 0}});
+    transient.reset();
+    world.raw().defer_end();
+    state.propagate_transforms();
+    assert(entities[2].get<WorldTransform3D>()->position().y == 30);
     // Validation reuses both success and failure, including disabled retained emitters.
     kin::EcsWorld particles;
     WorldRenderState3D particle_state{particles};

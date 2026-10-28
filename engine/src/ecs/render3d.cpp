@@ -102,6 +102,12 @@ struct Wanted {
 
 // Stable callback storage; observers never capture the movable Flecs table data.
 struct WorldRenderState3D::Tracking {
+    // Observer entity deletion may be deferred. Their callbacks retain this
+    // small liveness token, never a dangling pointer to destroyed state.
+    struct Callbacks {
+        Tracking* state = nullptr;
+    };
+    std::shared_ptr<Callbacks> callbacks = std::make_shared<Callbacks>(Callbacks{this});
     struct Node {
         flecs::entity_t id = 0, parent = 0, source = 0;
         u32 parent_index = ~u32{0};
@@ -127,6 +133,7 @@ struct WorldRenderState3D::Tracking {
     std::vector<Binding> extra_bindings;
     std::vector<flecs::observer> observers;
     ~Tracking() {
+        callbacks->state = nullptr;
         for (auto& observer : observers)
             observer.destruct();
     }
@@ -239,8 +246,11 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
     tracking->world = world.c_ptr();
     const auto transform_id = world.id<Transform3D>(), world_id = world.id<WorldTransform3D>();
     const auto emitter_id = world.id<ParticleEmitter3D>();
-    const auto structural = [tracking, transform_id, world_id, emitter_id](flecs::iter& it) {
+    const auto structural = [callbacks = tracking->callbacks, transform_id, world_id, emitter_id](flecs::iter& it) {
         while (it.next()) {
+            auto* tracking = callbacks->state;
+            if (!tracking)
+                continue;
             const auto id = it.event_id();
             const bool hierarchy = id.is_pair() && (id.first() == flecs::ChildOf || id.first() == flecs::IsA);
             const bool configuration = id == emitter_id || id == transform_id || id == flecs::Disabled || hierarchy;
@@ -268,27 +278,30 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
                                       .event(flecs::OnAdd)
                                       .event(flecs::OnRemove)
                                       .run(structural));
-    tracking->observers.push_back(world.observer()
-                                      .with(flecs::Wildcard)
-                                      .query_flags(EcsQueryMatchDisabled | EcsQueryMatchPrefab)
-                                      .event(flecs::OnSet)
-                                      .run([tracking, transform = transform_id, world_id, emitter_id](flecs::iter& it) {
-                                          while (it.next()) {
-                                              if (it.event_id() == transform) {
-                                                  if (tracking->mode == SceneMutationMode3D::Tracked &&
-                                                      !tracking->topology)
-                                                      for (auto row : it)
-                                                          tracking->pending.push_back(it.entity(row).id());
-                                              } else {
-                                                  if (it.event_id() == emitter_id)
-                                                      ++tracking->particle_revision;
-                                                  tracking->collection = false;
-                                                  // An explicitly edited derived parent may affect children.
-                                                  if (it.event_id() == world_id)
-                                                      tracking->topology = true;
-                                              }
-                                          }
-                                      }));
+    tracking->observers.push_back(
+        world.observer()
+            .with(flecs::Wildcard)
+            .query_flags(EcsQueryMatchDisabled | EcsQueryMatchPrefab)
+            .event(flecs::OnSet)
+            .run([callbacks = tracking->callbacks, transform = transform_id, world_id, emitter_id](flecs::iter& it) {
+                while (it.next()) {
+                    auto* tracking = callbacks->state;
+                    if (!tracking)
+                        continue;
+                    if (it.event_id() == transform) {
+                        if (tracking->mode == SceneMutationMode3D::Tracked && !tracking->topology)
+                            for (auto row : it)
+                                tracking->pending.push_back(it.entity(row).id());
+                    } else {
+                        if (it.event_id() == emitter_id)
+                            ++tracking->particle_revision;
+                        tracking->collection = false;
+                        // An explicitly edited derived parent may affect children.
+                        if (it.event_id() == world_id)
+                            tracking->topology = true;
+                    }
+                }
+            }));
 }
 
 void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
