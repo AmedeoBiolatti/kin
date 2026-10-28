@@ -34,6 +34,8 @@ template <class T> struct CachedUniform {
             glUniform1f(location, next);
         else if constexpr (std::is_same_v<T, Color>)
             glUniform4f(location, next.r / 255.0f, next.g / 255.0f, next.b / 255.0f, next.a / 255.0f);
+        else if constexpr (std::is_same_v<T, LinearRgb>)
+            glUniform3f(location, next.r, next.g, next.b);
         else {
             static_assert(std::is_same_v<T, std::array<GLint, 5>>);
             glUniform1iv(location, GLsizei(next.size()), next.data());
@@ -234,6 +236,8 @@ struct WebGLRenderer3D::Impl {
         CachedUniform<GLfloat> emissive;
         CachedUniform<GLint> blend;
         CachedUniform<GLfloat> alpha_cutoff;
+        CachedUniform<LinearRgb> emission_color;
+        CachedUniform<GLint> independent_emission;
     } draw_uniforms{};
     struct MaterialBinding {
         GLuint texture = 0, sampler = 0;
@@ -248,7 +252,7 @@ struct WebGLRenderer3D::Impl {
     sky_model::FogTable3D fog_table;
     // By wrap and filter, then the mipmapped ones' by anisotropy (2 to 16) and wrap; the mipmapped ones read with
     // `anisotropy`, this render's Scene3D::anisotropy, clamped.
-    std::array<GLuint, 27 + 15 * 9> samplers{};
+    std::unordered_map<u32, GLuint> samplers;
     u32 anisotropy = 1;
     std::array<MaterialBinding, 5> material_bindings{};
     std::shared_ptr<InstanceBudget> instance_budget = std::make_shared<InstanceBudget>();
@@ -376,11 +380,23 @@ struct WebGLRenderer3D::Impl {
         glGenBuffers(1, &instances);
         const std::array<u8, 4> pixels{255, 255, 255, 255};
         white = device.create_texture(pixels.data(), {1, 1});
-        draw_uniforms = {uniform("uShadowPass"),        uniform("uReceivesShadow"), uniform("uFlip[0]"),
-                         uniform("uSkinned"),           uniform("uHasNormal"),      uniform("uHasEmission"),
-                         uniform("uMetallic"),          uniform("uRoughness"),      uniform("uNormalScale"),
-                         uniform("uOcclusionStrength"), uniform("uColor"),          uniform("uUnlit"),
-                         uniform("uEmissive"),          uniform("uBlend"),          uniform("uAlphaCutoff")};
+        draw_uniforms = {uniform("uShadowPass"),
+                         uniform("uReceivesShadow"),
+                         uniform("uFlip[0]"),
+                         uniform("uSkinned"),
+                         uniform("uHasNormal"),
+                         uniform("uHasEmission"),
+                         uniform("uMetallic"),
+                         uniform("uRoughness"),
+                         uniform("uNormalScale"),
+                         uniform("uOcclusionStrength"),
+                         uniform("uColor"),
+                         uniform("uUnlit"),
+                         uniform("uEmissive"),
+                         uniform("uBlend"),
+                         uniform("uAlphaCutoff"),
+                         uniform("uEmissionColor"),
+                         uniform("uIndependentEmission")};
         // Sampler units belong to the linked program, not individual draws.
         glUseProgram(program);
         constexpr std::array names{"uTexture",  "uNormal", "uMetalRough", "uOcclusion",
@@ -402,7 +418,8 @@ struct WebGLRenderer3D::Impl {
         }
     }
     ~Impl() {
-        glDeleteSamplers(GLsizei(samplers.size()), samplers.data());
+        for (const auto& [key, sampler] : samplers)
+            glDeleteSamplers(1, &sampler);
         glDeleteBuffers(1, &instances);
         glDeleteTextures(1, &joints);
         glDeleteTextures(1, &fog_texture);
@@ -419,20 +436,27 @@ struct WebGLRenderer3D::Impl {
         return cache.emplace(name, glGetUniformLocation(handle, name)).first->second;
     }
     GLint uniform(const char* name) { return location(program, name); }
-    GLuint sampler(Wrap3D u, Wrap3D v, ScaleMode mode) {
-        const u32 filter = mode == ScaleMode::Nearest ? 0 : mode == ScaleMode::Mipmapped ? 2 : 1;
-        const u32 slant = filter == 2 ? anisotropy : 1;
-        auto& value =
-            samplers[slant > 1 ? 27 + (slant - 2) * 9 + u32(u) * 3 + u32(v) : u32(u) * 9 + u32(v) * 3 + filter];
+    GLuint sampler(Wrap3D u, Wrap3D v, ScaleMode mode, std::optional<TextureSampler3D> explicit_sampler = {}) {
+        const auto s = explicit_sampler.value_or(legacy_sampler3d(mode, u, v));
+        const u32 slant =
+            s.mip != MipFilter3D::None && s.min == TextureFilter3D::Linear && s.mag == TextureFilter3D::Linear
+                ? anisotropy
+                : 1;
+        const u32 key =
+            u32(s.wrap_u) | u32(s.wrap_v) << 2 | u32(s.min) << 4 | u32(s.mag) << 5 | u32(s.mip) << 6 | slant << 8;
+        auto& value = samplers[key];
         if (!value) {
             glGenSamplers(1, &value);
-            glSamplerParameteri(value, GL_TEXTURE_WRAP_S, wrap(u));
-            glSamplerParameteri(value, GL_TEXTURE_WRAP_T, wrap(v));
-            glSamplerParameteri(value, GL_TEXTURE_MIN_FILTER,
-                                filter == 2   ? GL_LINEAR_MIPMAP_LINEAR
-                                : filter == 0 ? GL_NEAREST
-                                              : GL_LINEAR);
-            glSamplerParameteri(value, GL_TEXTURE_MAG_FILTER, filter == 0 ? GL_NEAREST : GL_LINEAR);
+            glSamplerParameteri(value, GL_TEXTURE_WRAP_S, wrap(s.wrap_u));
+            glSamplerParameteri(value, GL_TEXTURE_WRAP_T, wrap(s.wrap_v));
+            const bool nearest = s.min == TextureFilter3D::Nearest;
+            const GLint min = s.mip == MipFilter3D::None ? (nearest ? GL_NEAREST : GL_LINEAR)
+                              : s.mip == MipFilter3D::Nearest
+                                  ? (nearest ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_NEAREST)
+                                  : (nearest ? GL_NEAREST_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_LINEAR);
+            glSamplerParameteri(value, GL_TEXTURE_MIN_FILTER, min);
+            glSamplerParameteri(value, GL_TEXTURE_MAG_FILTER,
+                                s.mag == TextureFilter3D::Nearest ? GL_NEAREST : GL_LINEAR);
             if (slant > 1)
                 glSamplerParameterf(value, texture_max_anisotropy, GLfloat(slant));
         }
@@ -599,7 +623,11 @@ struct WebGLRenderer3D::Impl {
         for (u32 unit = 0; unit < images.size(); ++unit) {
             const auto* texture = device.texture(*images[unit] ? *images[unit] : white);
             auto& bound = material_bindings[unit];
-            const GLuint sampling = sampler(material.wrap_u, material.wrap_v, texture->scale_mode);
+            constexpr std::array<u32, 5> slots{0, 2, 1, 3, 4};
+            auto descriptor = material.texture_samplers[slots[unit]];
+            if (descriptor && !texture->mipmapped)
+                descriptor->mip = MipFilter3D::None;
+            const GLuint sampling = sampler(material.wrap_u, material.wrap_v, texture->scale_mode, descriptor);
             if (bound.texture != texture->handle) {
                 glActiveTexture(GL_TEXTURE0 + unit);
                 glBindTexture(GL_TEXTURE_2D, texture->handle);
@@ -622,6 +650,8 @@ struct WebGLRenderer3D::Impl {
         loc.color.set(material.color);
         loc.unlit.set(material.unlit);
         loc.emissive.set(material.emissive);
+        loc.emission_color.set(material.emission_color);
+        loc.independent_emission.set(material.emission_mode == EmissionMode3D::Independent);
         loc.blend.set(int(material.blend));
         loc.alpha_cutoff.set(material.blend == Blend3D::Mask ? material.alpha_cutoff : 0.0f);
         if (material.double_sided)

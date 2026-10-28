@@ -55,8 +55,9 @@ struct GiVoxelizeUniforms {
     u32 first[4]; // the draw's first copy, the level's first word of the dirty blocks' bits
     i32 window[4];
     i32 low[4], high[4]; // the box round the blocks to make (the world's voxels)
+    f32 emission[4];
 };
-static_assert(sizeof(GiVoxelizeUniforms) == 144);
+static_assert(sizeof(GiVoxelizeUniforms) == 160);
 
 // gi_clear.comp's.
 struct GiClearUniforms {
@@ -659,10 +660,27 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         material.add(m.color);
         material.add(m.blend);
         material.add(m.alpha_cutoff);
-        material.add(m.emissive > 0.0f); // emissive or not (an emissive item owns its voxels first), not how strongly
+        material.add(m.emits_light()); // emitter membership, not strength
         material.add(m.double_sided);
+        material.add(m.emission_mode);
+        material.add(m.emission_color);
         for (const Texture* texture : {&m.texture, &m.emissive_texture}) {
             material.add(texture->backend().get());
+            if (const auto* gpu = dynamic_cast<const GpuTextureBackend*>(texture->backend().get())) {
+                material.add(gpu->version());
+                material.add(gpu->scale_mode());
+            }
+        }
+        for (const u32 slot : {0u, 4u}) {
+            const auto& sampler = m.texture_samplers[slot];
+            material.add(bool(sampler));
+            if (sampler) {
+                material.add(sampler->wrap_u);
+                material.add(sampler->wrap_v);
+                material.add(sampler->min);
+                material.add(sampler->mag);
+                material.add(sampler->mip);
+            }
         }
         material.add(m.wrap_u);
         material.add(m.wrap_v);
@@ -670,8 +688,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         // takes the strength from the emitters' list each render, so a strength that changes (a lamp dimmed, a game's
         // exposure applied to its emissives) makes nothing again. Without a number to give, its strength stays in its
         // voxels, and a change of it is a change of what they are made of.
-        const u32 emitter = m.emissive > 0.0f ? emitter_for(material.value, m.emissive) : 0u;
-        if (m.emissive > 0.0f && emitter == 0) {
+        const u32 emitter = m.emits_light() ? emitter_for(material.value, m.emissive) : 0u;
+        if (m.emits_light() && emitter == 0) {
             material.add(m.emissive);
         }
         const u32 job = static_cast<u32>(jobs.size());
@@ -1056,8 +1074,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 const Job& job = jobs[lj.job];
                 const Material3D& m = job.draw->material;
                 const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
-                    texture_binding(m.texture, m.wrap_u, m.wrap_v),
-                    texture_binding(m.emissive_texture, m.wrap_u, m.wrap_v)};
+                    texture_binding(m.texture, m.wrap_u, m.wrap_v, m.texture_samplers[0]),
+                    texture_binding(m.emissive_texture, m.wrap_u, m.wrap_v, m.texture_samplers[4])};
                 SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), 2);
                 const std::array<SDL_GPUBuffer*, 8> buffers{job.mesh->vertices,
                                                             job.mesh->indices,
@@ -1086,10 +1104,14 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 u.flags[1] = m.blend == Blend3D::Mask ? 1u : 0u;
                 u.flags[2] = decode ? 1u : 0u;
                 u.flags[3] = m.emissive_texture.backend() ? 1u : 0u;
-                u.material[0] = std::max(m.emissive, 0.0f);
+                u.material[0] = m.emits_light() ? m.emissive : 0.0f;
                 u.material[3] = static_cast<f32>(job.emitter);
                 u.material[1] = m.alpha_cutoff;
                 u.material[2] = m.double_sided ? 1.0f : 0.0f;
+                u.emission[0] = m.emission_color.r;
+                u.emission[1] = m.emission_color.g;
+                u.emission[2] = m.emission_color.b;
+                u.emission[3] = m.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f;
                 u.first[0] = lj.copy_first;
                 u.first[1] = k * words;
                 u.first[2] = lj.pair_first;

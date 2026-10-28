@@ -227,7 +227,7 @@ void material_gpu(Renderer2D& renderer) {
               "disabled shader cache duplicated one binding's shader");
     }
 #endif
-    // Authored maps reuse imported glTF textures only when role AND sampling match.
+    // Sampling belongs to each map: images share by colour/data role, including a legacy nearest material override.
     write(scratch.path / "maps.kinmaterials", R"({"schema":"kin.materials3d/1","material":{
         "texture":{"asset":"shared pixel.png","filter":"nearest"},
         "normal":{"asset":"shared pixel.png","filter":"nearest"},
@@ -238,10 +238,13 @@ void material_gpu(Renderer2D& renderer) {
               maps->materials[0].normal == model->parts[0].material.normal &&
               maps->materials[0].normal == maps->materials[0].occlusion &&
               maps->materials[0].texture != maps->materials[0].normal,
-          "texture sharing lost role/filter semantics");
+          "texture sharing lost colour/data role semantics");
     auto filtered = assets.load_texture("shared pixel.png", false, true).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
-    check(filtered && filtered != maps->materials[0].texture, "different filters incorrectly shared");
+    check(filtered && filtered == maps->materials[0].texture &&
+              maps->materials[0].texture_samplers[0]->min == TextureFilter3D::Nearest &&
+              maps->materials[0].texture_samplers[0]->mip == MipFilter3D::None,
+          "independent nearest sampling duplicated an image or lost its filter");
 
     auto parts = assets.load_model("parts.glb").value_or({}).shared();
     write(scratch.path / "parts.kinmaterials", R"({"schema":"kin.materials3d/1","material":{"roughness":0.9},

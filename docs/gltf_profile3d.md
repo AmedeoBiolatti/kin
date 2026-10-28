@@ -21,6 +21,13 @@ The file format remains glTF 2.0; this profile is a Kin contract, not a new exte
 | Deformation | Linear blend skinning and rigid-node transforms | Bake/remove shape keys and morph targets. Oversized or unsupported skins do not fall back to static geometry. |
 | Scene content | Mesh parts from the default scene, or first scene when no default is selected | Author Kin cameras/lights/environment in `.kinscene`; model loading does not create them from glTF. |
 
+Emission preserves the authored linear RGB factor independently of base colour and tint, multiplied by the decoded
+emissive map and `KHR_materials_emissive_strength`. A missing emissive map is white. Each map preserves its sampler's
+wrap U/V and independent min/mag/mip filters; shared images are independent of sampling. Unspecified filters resolve
+to linear magnification/minification and linear mip interpolation; unspecified wrapping is repeat. Texture placement
+and UV-set limitations below still apply. [KHR_materials_unlit](https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_materials_unlit)
+uses base colour/alpha/vertex colour only; its PBR emission is fallback data and is disabled on import.
+
 Quantized attributes and native compressed textures have additional implementation
 support, but are not the portable export baseline above. Required extensions outside
 the loader's allowlist reject the file. Optional extensions can use their glTF core

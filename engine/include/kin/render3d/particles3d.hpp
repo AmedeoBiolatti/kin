@@ -53,7 +53,7 @@ enum class ParticleShape3D : u8 {
 // How a particle's colour goes over what is behind it.
 enum class ParticleBlend3D : u8 {
     Alpha,    // over, by its alpha (kin's premultiplied targets: colour * alpha added to what is left under 1 - alpha)
-    Additive, // adds light: sparks, fire, glows. Needs no sorting.
+    Additive, // adds light: sparks, fire, glows; ordered with alpha foregrounds.
     Premultiplied, // a texture that already holds colour * alpha: alpha 0 with colour is additive, in the same sprite
 };
 
@@ -120,8 +120,8 @@ struct ParticleLook3D {
     bool casts_shadow = false;
     f32 shadow_cutoff = 0.5f; // intrinsic texture/procedural alpha times particle alpha, in [0,1]
     bool fogged = true; // Scene3D::fog applies (as it does to meshes; an additive particle is dimmed by it, not mixed)
-    // Back to front within the batch (alpha and premultiplied; additive needs no order). Batches are ordered by their
-    // depth.
+    // Back to front together with other sprites and transparent meshes. False keeps this source as one run at its
+    // mean depth (an explicit approximation for effects that do not need per-sprite composition).
     bool sort = true;
 };
 

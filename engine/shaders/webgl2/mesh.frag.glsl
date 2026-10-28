@@ -7,6 +7,8 @@ uniform vec4 uColor;
 uniform vec3 uSunDirection, uSunColor, uFillDirection, uFillColor, uAmbient, uGround;
 uniform bool uUnlit, uHasNormal, uHasEmission;
 uniform float uEmissive, uAlphaCutoff, uMetallic, uRoughness, uNormalScale, uOcclusionStrength;
+uniform vec3 uEmissionColor;
+uniform bool uIndependentEmission;
 uniform float uSpecularAa; // Scene3D::specular_aa
 uniform int uBlend, uPointCount;
 uniform vec4 uPoints[32];
@@ -31,9 +33,8 @@ vec2 uv_for(bool flip) { return vec2(vUV.x, flip ? 1.0 - vUV.y : vUV.y); }
 vec3 normal_for_surface() {
     vec3 dx = dFdx(vWorld), dy = dFdy(vWorld);
     // GL framebuffer Y increases upward; this cross product faces the viewer.
-    if (dot(vNormal, vNormal) < 1e-20) return normalize(cross(dx, dy));
     float front = gl_FrontFacing ? 1.0 : -1.0;
-    vec3 n = normalize(vNormal) * front;
+    vec3 n = dot(vNormal, vNormal) < 1e-20 ? normalize(cross(dx, dy)) : normalize(vNormal) * front;
     if (!uHasNormal) return n;
     vec2 uv = uv_for(uFlip[1]);
     vec2 du = dFdx(uv), dv = dFdy(uv);
@@ -92,8 +93,10 @@ void main() {
     vec3 mr = texture(uMetalRough,uv_for(uFlip[2])).rgb;
     float metallic = clamp(uMetallic*mr.b,0.0,1.0), roughness = clamp(uRoughness*mr.g,0.045,1.0);
     float occlusion = mix(1.0,texture(uOcclusion,uv_for(uFlip[3])).r,uOcclusionStrength);
-    vec3 emission = uHasEmission ? decode(texture(uEmission,uv_for(uFlip[4])).rgb) : base.rgb;
-    vec3 color = uUnlit ? base.rgb : lighting(base.rgb,normal_for_surface(),metallic,roughness,occlusion)+emission*uEmissive;
+    vec3 emission = uHasEmission ? decode(texture(uEmission,uv_for(uFlip[4])).rgb)
+                                : uIndependentEmission ? vec3(1.0) : base.rgb;
+    if (uIndependentEmission) emission *= uEmissionColor;
+    vec3 color = (uUnlit ? base.rgb : lighting(base.rgb,normal_for_surface(),metallic,roughness,occlusion))+emission*uEmissive;
     // The view stores display-encoded, premultiplied color for the gamma 2D frame.
     float alpha = uBlend == 1 || uBlend == 2 ? base.a : 1.0;
     color=fogged(color,vWorld,uSunDirection,uSunColor,uBlend==2);

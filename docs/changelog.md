@@ -7,6 +7,18 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Preserve glTF linear RGB emission and strength, independently of base/vertex/instance colour, through stock/custom
+  shaders, browser rendering, material files and GI. Legacy base-relative glow remains explicit and compatible.
+- Preserve independent wrap, min, mag and mip filters per imported/material map while sharing images by colour/data
+  role. Explicit nearest magnification no longer discards requested mip filtering; sampling participates in shadow,
+  GI and temporal appearance caches.
+- Compose transparent mesh copies and particle sprites in one stable camera-depth order, including additive effects
+  behind alpha foregrounds, and batch only adjacent compatible runs. Expose sort/run/CPU-storage counters.
+- Keep flat-soup LOD UV/colour/alpha seams with seam-aware remapping and attribute simplification, retaining the cheap
+  uniform-attribute path. Version mesh-level bakes so existing unsafe bakes are rebuilt.
+- Preserve complete geometry under cluster storage pressure with a conservative whole-draw level-zero fallback shared
+  by all dependent passes. Publish reservation/fallback counts without debug GPU readback.
+
 - Bound 3D instances and cluster LOD errors conservatively under shear, including a nonuniformly scaled parent with a
   rotated child. Camera/shadow culling, spatial groups, retained bounds and browser LOD now share the affine stretch
   bound used by skinned meshes and GI. Finite very small/large scales avoid squared-length underflow/overflow;

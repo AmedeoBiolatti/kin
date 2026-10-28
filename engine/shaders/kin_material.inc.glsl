@@ -196,14 +196,11 @@ vec3 kin_screen_normal(vec3 dp1, vec3 dp2) {
 // The unit normal on the side the viewer sees (a double-sided face turns it
 // round from behind), bent by the material's normal map when it has one.
 vec3 kin_normal() {
-    // A flat-shaded mesh with clusters has no normal in its vertices (they are zero): the face's comes from how the
-    // world position changes across the screen, on the side the viewer sees (so no `front`, and no normal map).
+    // Flat LOD/cluster vertices carry zero normals. Reconstruct the face normal, then retain the UV-derived normal
+    // map frame exactly as for supplied normals. Flat shading does not imply an absent normal map.
     const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
-    if (dot(vNormal, vNormal) < 1e-20) {
-        return kin_screen_normal(dp1, dp2);
-    }
     const float front = gl_FrontFacing ? 1.0 : -1.0;
-    const vec3 n = normalize(vNormal) * front;
+    const vec3 n = dot(vNormal, vNormal) < 1e-20 ? kin_screen_normal(dp1, dp2) : normalize(vNormal) * front;
     return material.maps.x > 0.5 ? mapped_normal(n, front) : n;
 }
 
@@ -236,12 +233,15 @@ float kin_occlusion() {
 // The material's own light for a surface of colour `base`: its share of the
 // colour, or its emissive map, times the material's emissive.
 vec3 kin_emissive(vec3 base) {
-    vec3 own = base;
+    vec3 own = material.emission.w > 0.5 ? vec3(1.0) : base;
     if (material.maps.y > 0.5) {
         own = texture(uEmissive, vUV).rgb;
         if (frame.flags.y > 0.5) {
             own = decode(own);
         }
+    }
+    if (material.emission.w > 0.5) {
+        own *= material.emission.rgb;
     }
     return own * material.params.x;
 }

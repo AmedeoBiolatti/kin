@@ -388,7 +388,7 @@ an output shader. Kin's ordinary fence timer remains a different measurement fro
 
 `kin::Material3D`: `color` (times the mesh's vertex colours and each
 instance's tint), `texture` (the base colour's, by the mesh's UVs),
-`emissive` (light of its own, a share of its colour), `unlit`, `double_sided`
+`emissive` (emission strength), `unlit`, `double_sided`
 (back faces are culled otherwise), `blend`, `casts_shadow` and
 `receives_shadow`. A transform that mirrors turns a mesh inside out: draw it
 double-sided.
@@ -411,8 +411,14 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   of a map points into the surface, so a texel whose z would is read so too;
   the others are read as they are. `occlusion` (R, with
   `occlusion_strength`) dims the ambient light only. `emissive_texture`: a
-  colour times `emissive` (without it, `emissive` is a share of the base
-  colour as before).
+  colour decoded to linear light. `material.set_emission({r,g,b}, strength)` selects independent emission:
+  linear `emission_color` × `emissive` × the map (white when absent), unaffected by base colour, vertex colour or
+  instance tint. HDR factors/strength retain their energy. The default `emission_mode = BaseRelative` preserves
+  native legacy glow: the map alone, or the base colour when absent, times `emissive`. `Independent` is what glTF
+  imports use; glTF's RGB factor and `KHR_materials_emissive_strength` remain separate. Imported `KHR_materials_unlit`
+  uses base colour only, as that extension specifies; native unlit materials can still add emission. `emits_light()` excludes
+  independent zero RGB and zero strength from GI emitter membership. Colour/mode/map edits invalidate GI attributes;
+  nonzero strength-only edits continue to reuse them.
 - Maps of data (`metallic_roughness`, `normal`, `occlusion`) are read as the
   numbers they hold; colours (`texture`, `emissive_texture`) are sRGB, decoded
   as they are sampled. A texture you make yourself for a data map: 
@@ -431,9 +437,14 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   samples the base texture for these). A cut-out is opaque where it stays.
 
 - `wrap_u`, `wrap_v` (`Wrap3D::Clamp` by default, `Repeat`, `Mirror`): what
-  all of the material's textures do past 0..1. Models set them from the
-  glTF sampler (`REPEAT`, the glTF default, when it names none); samplers are
-  made by filter and wrap on first use.
+  maps without an explicit sampler do past 0..1. `texture_samplers` has optional entries in `MaterialMap3D` order:
+  base colour, metallic-roughness, normal, occlusion, emission. A `TextureSampler3D` declares independent wrap U/V,
+  minification and magnification (`Nearest` or `Linear`), and mip filtering (`None`, `Nearest`, `Linear`). Images share
+  independently of these descriptors. glTF preserves all six min filters, both mag filters and all wrap combinations;
+  omitted filters default to linear/trilinear and omitted wraps to repeat. Nearest magnification does not discard
+  separately requested mips. Reset an imported entry to `std::nullopt` to use the legacy material/texture settings.
+  Missing mip storage resolves to no-mip sampling on both native and browser backends. Quality anisotropy and bias
+  affect only fully linear mipmapped samplers, preserving explicit nearest and no-mip intent.
 - `Scene3D::anisotropy` (1, off, by default; up to 16): anisotropic filtering
   of the materials' mipmapped textures. Where a surface is seen at a slant (a
   street, a floor, a wall along the view) a pixel covers many texels along the
@@ -1186,14 +1197,18 @@ particles in gusts and turbulence: 0.6 ms an `update(1/60)`, from 16 ms; `kin_re
 (`advance_weather(dt)`, `apply_weather(scene, base_fog)`).
 
 **Drawing** (`ParticleLook3D`, `Scene3D::draw_particles`): one instanced draw a batch of sprites (a system's, or the weather's layers),
-tested against the depth of the opaque meshes and never written, after the scene's own blended meshes and before the overlay (the overlay's
+tested against the depth of the opaque meshes and never written, interleaved with transparent meshes before the overlay (the overlay's
 and a Scene3D::overlay's particles are not drawn). Facings: `Camera` (turned by `rotation`), `Stretched` (along the velocity, `stretch`
 seconds of motion long, head at the particle, for rain and sparks), `Axis` (turns about an axis to face the camera), `Flat` (in the plane
 normal to the axis, a ring on the ground). A texture, an atlas of columns by rows (the sprite's `frame`, mixed with the next with
 `blend_frames`), or a procedural soft disc (`softness`, `ring`). Blend `Alpha`, `Additive` (adds light; dimmed by fog, not mixed) or
-`Premultiplied` (a texture that holds colour times alpha: alpha 0 with colour adds, inside one sprite). `sort`: back to front within the
-batch (a radix sort on the view depth, stable: O(n), 24,000 sprites 0.2 ms); batches are drawn in the order of their mean depth, so two
-systems overlap correctly as wholes and not particle by particle across systems. Additive never sorts.
+`Premultiplied` (a texture that holds colour times alpha: alpha 0 with colour adds, inside one sprite). `sort` (default true): sprites and alpha/additive mesh copies compose together by camera-space centre depth, with
+stable ties. Only consecutive copies of one compatible source and contiguous packed slots share a draw. This preserves
+cross-batch interleaving and dims additive light behind alpha foregrounds. `sort=false` explicitly keeps that particle
+source in one run at its mean depth. Centre sorting is approximate for intersecting geometry; it does not split polygons.
+`debug_stats().transparent_draw_runs`, `transparent_sort_ms` (CPU scheduling, not GPU time) and `composition_order_bytes`
+show the cost. Overlay meshes use their own scene/camera order. Native sprites are supported; browser particle support
+remains unavailable.
 
 **Soft particles** (`soft`, `soft_distance`): the fragment shader reads the view's depth, the opaque meshes' pre-pass depth (one sample a
 pixel, a depth texture of its own: under MSAA the particle is shaded once a pixel and the depth read at its centre), and fades the sprite by
@@ -1405,7 +1420,7 @@ Its game code retains the content-specific placements, collider checks and art t
 `r3d.load_model("models/crate.glb")` reads a glTF 2.0 file (`.glb`, or
 `.gltf` with its buffers and images beside it) through the content folder or
 pack: each primitive a mesh, placed by its node, with its material's base
-colour and texture (mipmapped; nearest when the file's sampler asks), emissive
+colour and texture (shared mip storage, independent per-map samplers), RGB emissive
 light, `BLEND` as alpha, `MASK` as a cut-out (`alphaCutoff`), double-sided and
 `KHR_materials_unlit`, and its metallic and roughness factors and map, normal
 map (and its scale), occlusion map (and its strength) and emissive map.
@@ -2162,11 +2177,17 @@ the copy's slot in the instance buffer as the first instance. The CPU only lists
 against 0.4 to 0.9 for the CPU cut). The picture is the CPU cut's, byte for byte (tested with 1, 3 and 4 cascades, occlusion, contact shadows, temporal
 anti-aliasing, picking). It costs video memory: the table of clusters (80 bytes each) and every level's indices (the kiln: 62 MB more than the leaves
 alone, 7 MB of table), and the gathered indices (`scene.lod.max_cluster_triangles`, default 4 million triangles, 12 bytes each, shared by all
-passes and copies; a cut that passes it is cut short, never written out of bounds). The counts of what it drew are on the GPU:
+passes and copies). Before selecting clusters, each submitted draw reserves the upper bound of its finest complete
+cut for all camera/sun views. If it cannot fit, that draw uses its complete level-zero mesh across colour, depth, motion,
+picking and shadows. This first conservative policy can use more geometry than the requested detail budget, even when
+an actual coarser cut would have fit. It preserves coverage without synchronous GPU readback; `cluster_budget_fallbacks`
+counts submitted fallback copies and `cluster_budget_reserved_triangles` reports the reservation. Both CPU and GPU cuts
+use this policy. Budget zero selects complete meshes. A future per-object GPU overflow path can reduce conservative
+fallback costs. Allocation failure remains an operation failure, not permission to omit geometry. The counts of what it drew are on the GPU:
 `scene.debug.stats_readback` reads them back at the end of `render()` (waiting for the GPU, as `pick` does: for tools and tests) into `debug_stats()`
 (`clusters_drawn`, `triangles`, `cluster_overflow`, `cluster_triangles_all`); without it the GPU-only counters are 0, `triangles` excludes GPU-selected geometry (`triangles_complete` is false), and `draws`, `shadow_draws` count the multi-draws.
 `Renderer3D::read_cluster_picks` lists the clusters it chose. `debug_stats().cluster_gpu` says which cut a render made.
-`scene.debug.gpu_culling = false` selects the CPU cut. Alpha-blended copies are never cut. The cut runs on the Vulkan and Metal drivers
+`scene.debug.gpu_culling = false` selects the CPU cut. Alpha and additive copies are never cut. The cut runs on the Vulkan and Metal drivers
 only: its indirect draws carry the copy's slot as the argument's first instance and the vertex shader reads `instances[first + gl_InstanceIndex]`,
 which Vulkan's `gl_InstanceIndex` and Metal's `instance_id` include and Direct3D 12's `SV_InstanceID` does not (SDL_GPU promises nothing), so on
 any other driver `gpu_driven_clusters` (and `occlusion_culling`) is false and the CPU cuts, with one line in the log.
@@ -3131,9 +3152,24 @@ Texture fields are `texture`, `normal`, `metallic_roughness`, `occlusion` and
 
 Filters are `mipmapped` (default) and `nearest`. Base color/emissive maps load as sRGB;
 normal, metallic-roughness (G roughness, B metallic) and occlusion (R) maps load as
-linear data. Identical paths/roles/filters share texture handles with imported glTF
-maps and other variants. Different sampling or color-space requirements have separate
-entries. Texture paths are file paths, not percent-encoded glTF URIs. Model3D UVs and
+linear data. Identical paths and roles share images with imported glTF maps and other variants; different samplers
+retain their own descriptors. The legacy `filter` field converts to a per-map descriptor using the material's wrap
+settings. An explicit descriptor can instead preserve different min/mag/mip choices:
+
+```json
+"emission_color": [1.0, 0.1, 0.02],
+"emissive": 5,
+"texture": {"asset": "textures/canvas.png", "sampler": {
+  "wrap_u": "repeat", "wrap_v": "clamp", "min": "linear", "mag": "nearest", "mip": "linear"
+}}
+```
+
+`sampler: "inherit"` preserves the imported/previous map sampler; `sampler: null` clears that override and converts the
+replacement map to legacy sampling. A replacement without `sampler` also converts to legacy sampling. Do not combine
+`filter` and `sampler`. Descriptor defaults are repeat, linear min/mag and linear mip filtering. Clearing the map also
+clears its override. `emission_color` is a three-number linear RGB factor (each in [0,1e6]) and implies
+`emission_mode: "independent"`; an explicit `"base_relative"` with that colour is rejected. An old `emissive`-only patch
+retains legacy base-relative appearance. To edit only independent strength, also specify `emission_mode: "independent"`. Texture paths are file paths, not percent-encoded glTF URIs. Model3D UVs and
 tangents must suit the maps; the importer supplies the existing tangent generation.
 
 `Assets3D::load_materials(path, model, variant)` returns an existing-style

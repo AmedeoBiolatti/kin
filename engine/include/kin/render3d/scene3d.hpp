@@ -19,6 +19,7 @@
 #include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
 #include <optional>
@@ -34,7 +35,7 @@ class ModelBatch3D;
 enum class Blend3D : u8 {
     Opaque,   // replaces it, hides what is further
     Alpha,    // over it by its alpha (drawn after the opaque, furthest first)
-    Additive, // adds light to it: sparks, glows, flashes (in any order)
+    Additive, // adds light: ordered with alpha foregrounds (additive layers commute only with each other)
     // Opaque where the base colour's alpha reaches Material3D::alpha_cutoff,
     // not drawn where it falls short: leaves, fences, grates. Drawn with the
     // opaque, and casts the cut-out shadow.
@@ -47,6 +48,27 @@ enum class Wrap3D : u8 {
     Repeat, // tiles
     Mirror, // tiles, every other copy flipped
 };
+
+// Linear RGB emission is independent of the surface, vertex colours and instance tint. BaseRelative keeps the
+// original native material behaviour (a share of the base colour, or the emissive texture when present).
+enum class EmissionMode3D : u8 { BaseRelative, Independent };
+
+enum class TextureFilter3D : u8 { Nearest, Linear };
+enum class MipFilter3D : u8 { None, Nearest, Linear };
+struct TextureSampler3D {
+    Wrap3D wrap_u = Wrap3D::Repeat, wrap_v = Wrap3D::Repeat;
+    TextureFilter3D min = TextureFilter3D::Linear, mag = TextureFilter3D::Linear;
+    MipFilter3D mip = MipFilter3D::Linear;
+    friend bool operator==(const TextureSampler3D&, const TextureSampler3D&) = default;
+};
+enum class MaterialMap3D : u8 { BaseColor, MetallicRoughness, Normal, Occlusion, Emissive, Count };
+
+// The legacy texture-level filter, used only when a material map has no explicit sampler.
+inline TextureSampler3D legacy_sampler3d(ScaleMode mode, Wrap3D u, Wrap3D v) {
+    return {u, v, mode == ScaleMode::Nearest ? TextureFilter3D::Nearest : TextureFilter3D::Linear,
+            mode == ScaleMode::Nearest ? TextureFilter3D::Nearest : TextureFilter3D::Linear,
+            mode == ScaleMode::Mipmapped ? MipFilter3D::Linear : MipFilter3D::None};
+}
 
 // The backend's copy of a material shader (Renderer3D::create_material_shader).
 class IMaterialShaderBackend3D {
@@ -73,8 +95,8 @@ private:
 
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
-    // Light of its own, as a share of its colour: glows in the dark, and
-    // past white feeds bloom in an HDR view.
+    // Emission strength. BaseRelative (legacy default): a share of the base colour or emissive map.
+    // Independent: emission_color times the map (white when absent). Past white feeds bloom in HDR.
     f32 emissive = 0.0f;
     bool unlit = false;        // its colour as it is, no light or shade
     bool double_sided = false; // its back faces drawn too (else culled)
@@ -115,8 +137,7 @@ struct Material3D {
     // Blend3D::Mask: below this alpha (the base colour's, times the mesh's,
     // the material's and the copy's) a pixel is not drawn.
     f32 alpha_cutoff = 0.5f;
-    // How all of its textures run past 0..1 along u and v (glTF's default,
-    // and what models set, is Repeat).
+    // Legacy wrap defaults for maps without a texture_samplers override. Imported maps carry their own samplers.
     Wrap3D wrap_u = Wrap3D::Clamp;
     Wrap3D wrap_v = Wrap3D::Clamp;
     // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
@@ -125,6 +146,21 @@ struct Material3D {
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
     std::array<f32, 16> shader_params{};
+
+    LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
+    EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;
+    // Independent of the image. Omitted entries inherit wrap_u/v and the Texture's legacy scale mode.
+    std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
+
+    void set_emission(LinearRgb color, f32 strength = 1.0f) {
+        emission_color = color;
+        emissive = strength;
+        emission_mode = EmissionMode3D::Independent;
+    }
+    bool emits_light() const {
+        return emissive > 0 && (emission_mode == EmissionMode3D::BaseRelative || emission_color.r > 0 ||
+                                emission_color.g > 0 || emission_color.b > 0);
+    }
 
     friend bool operator==(const Material3D&, const Material3D&) = default;
 };
@@ -396,8 +432,9 @@ struct Lod3D {
     // Quality multiplier: 2 holds the error to half of error_pixels, 0.5 allows twice.
     f32 bias = 1.0f;
     // The most triangles the GPU's gathered index buffer holds, all passes and copies together (12 bytes a triangle of
-    // video memory). Clusters that do not fit are not drawn (the picture degrades, nothing is written out of bounds),
-    // counted in debug_stats().cluster_overflow when debug.stats_readback is on.
+    // video memory). A draw unable to reserve its complete finest cut uses its full level-zero mesh in all passes,
+    // counted in debug_stats().cluster_budget_fallbacks without readback. Conservative: an actual coarser cut may
+    // have fit; coverage takes precedence over the detail/performance target. Zero selects full meshes.
     u32 max_cluster_triangles = 4'000'000;
     // Clusters hidden behind others are not drawn (G3d). Needs `enabled` and Scene3D::debug.gpu_culling (else ignored,
     // with a line in the log) and a device with the GPU cut and ambient occlusion's formats

@@ -567,9 +567,9 @@ private:
     u32 select_particles(FrameCtx& ctx, std::span<const ParticleSource> sources);
     void match_particles(FrameCtx& ctx, u32 total);
     void upload_particles(FrameCtx& ctx, u32 total);
-    void order_particle_batches();
     void prepare_particles(FrameCtx& ctx);
-    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false);
+    void draw_particles(FrameCtx& ctx, SDL_GPURenderPass* pass, bool reactive = false, u32 batch = ~0u, u32 first = 0,
+                        u32 count = 0);
     bool reactive_pass(FrameCtx& ctx);
     SDL_GPUGraphicsPipeline* particle_cast_pipeline() const;
     struct ParticleCastView {
@@ -593,7 +593,8 @@ private:
                        SDL_GPUBufferUsageFlags usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
     static Pass pass_of(const Material3D& material);
     // A material's texture as a binding: its own, or a white one without.
-    SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v);
+    SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
+                                                 std::optional<TextureSampler3D> sampler = {});
     void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
 
     GpuRenderer2DBackend* _owner = nullptr;
@@ -889,7 +890,8 @@ private:
     // Samplers for materials' textures by filter, wrap, anisotropy and mip bias (made on first use). The mipmapped ones
     // read with _anisotropy and _lod_bias: this render's Scene3D::anisotropy and ::texture_lod_bias (in sixteenths of
     // a level), clamped.
-    SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v);
+    SDL_GPUSampler* sampler_for(const GpuTextureBackend& texture, Wrap3D u, Wrap3D v,
+                                std::optional<TextureSampler3D> sampler = {});
     std::unordered_map<u32, SDL_GPUSampler*> _samplers;
     u32 _anisotropy = 1;
     i32 _lod_bias = 0;
@@ -1161,8 +1163,14 @@ private:
     std::vector<u8> _visible; // a copy: the bits of camera_bit, sun_bit and cascade_bit(k) (gpu_renderer3d.cpp)
     std::vector<u8>
         _level_of; // a copy: its level of detail (only filled with Scene3D::lod, for the meshes that have levels)
-    std::vector<u32> _caster_list;            // the cascades' lists, uploaded
-    std::vector<u32> _order;                  // draws sorted
+    std::vector<u32> _caster_list; // the cascades' lists, uploaded
+    std::vector<u32> _order;       // draws sorted
+    struct MainItem {
+        u32 ref, first, count, scene;
+        f32 depth;
+        bool particle, transparent;
+    };
+    std::vector<MainItem> _main_order;
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first
 };
 

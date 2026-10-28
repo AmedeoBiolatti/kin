@@ -72,6 +72,7 @@ layout(std140, set = 2, binding = 0) uniform Params {
     ivec4 window;  // xyz: the window's first voxel (in the level's voxels); w: the level's offset along z
     ivec4 low;     // xyz: the first voxel of the box round the blocks to make (the world's voxels)
     ivec4 high;    // xyz: its last
+    vec4 emission; // xyz: linear factor, w: independent emission
 } p;
 
 #include "kin_srgb.inc.glsl"
@@ -271,12 +272,15 @@ void visit(Tri t, Corners k, ivec3 voxel, uint item) {
     }
     vec3 emission = vec3(0.0);
     if (p.material.x > 0.0) {
-        vec3 own = base.rgb;
+        vec3 own = p.emission.w > 0.5 ? vec3(1.0) : base.rgb;
         if (p.flags.w != 0u) {
             own = textureLod(uEmissive, uv, mip_for(t, k, vec2(textureSize(uEmissive, 0)))).rgb;
             if (p.flags.z != 0u) {
                 own = decode(own);
             }
+        }
+        if (p.emission.w > 0.5) {
+            own *= p.emission.rgb;
         }
         // With an emitter, the colour alone: the GI's light takes the strength from the emitter's (gi_light.comp).
         emission = p.material.w > 0.5 ? own : own * p.material.x;

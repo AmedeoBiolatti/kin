@@ -156,7 +156,12 @@ struct RenderDebugStats3D : RenderStats3D {
     // passes), and the CPU time of the cuts (choosing, compacting, handing over the upload).
     u32 cluster_copies = 0;
     u64 clusters_tested = 0;
+    u32 transparent_draw_runs = 0;   // main colour runs after global mesh/sprite ordering
+    u64 composition_order_bytes = 0; // retained CPU capacity of the compact composition commands
+    f64 transparent_sort_ms = 0;     // CPU scheduling/sort/compaction, never GPU time
     u32 clusters_drawn = 0;
+    u32 cluster_budget_fallbacks = 0;          // submitted copies conservatively using their complete level-zero mesh
+    u64 cluster_budget_reserved_triangles = 0; // worst-case cut storage, including sun views; no readback
     u32 cluster_upload_bytes = 0;
     f64 cluster_ms = 0.0;
     f64 cluster_upload_ms = 0.0; // of which the compaction and handing over the upload (the rest is choosing)
