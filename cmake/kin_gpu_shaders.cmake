@@ -11,7 +11,7 @@ set(_kin_gpu_shader_names_3D
     mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag mesh_unlit.vert
     mesh_unlit_textured.vert mesh_unlit.frag mesh_unlit_textured.frag mesh_unlit_mask.frag
     mesh_unlit_textured_mask.frag fullscreen.vert bloom.frag view_output.frag pick.frag env_filter.comp
-    prepass.vert prepass.frag prepass_mask.frag gtao.comp gtao_chain.comp ao_depth_chain.comp ao_blur.comp
+    prepass.vert prepass.frag prepass_mask.frag gtao.comp gtao_chain.comp ao_depth_chain.comp ao_blur.comp ao_upsample.comp
     ao_blur_chain.comp ao_blur_both.comp ao_blur_both_chain.comp contact.comp prepass_velocity.vert
     prepass_velocity.frag prepass_velocity_mask.frag taa.comp mesh_velocity.vert mesh_velocity.frag
     cluster_cull.comp cluster_cull_occ.comp cluster_scan.comp cluster_args.comp cluster_gather.comp hiz_depth.comp

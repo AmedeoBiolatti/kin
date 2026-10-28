@@ -651,8 +651,12 @@ visibility, Schlick Fresnel) for the sun, the fill light and point lights:
   behind them), nor does the first-person overlay, which is not in the
   pre-pass either: its own lighting stays as it was. Where the device lacks a
   sampled depth, a two-float colour target or an R8 storage texture, occlusion
-  is off with one line in the log. `half_resolution` computes at half the
-  view's size (about a third of the cost; a little softer at depth edges).
+  is off with one line in the log. `half_resolution` computes and blurs at half
+  the view's size, then reconstructs against full-size depth and normals to
+  avoid borrowing occlusion from a different surface. Reconstruction adds one
+  compute dispatch and a full-size R8 target; `ao_dispatches` includes it. The
+  original linear upscale is the fallback when that optional shader is unavailable.
+  Half size remains a speed/detail tradeoff; full resolution is the default.
   `debug_stats()` has `ao_draws`, `ao_instances` and `ao_dispatches` (0 when
   off). Costs a second draw of every opaque copy and about 0.3 ms or more of
   compute at 1280 x 720: see the plan's G2b results. With contact shadows also
@@ -3943,6 +3947,13 @@ if (!r3d.render(view, scene)) return;
 const auto& summary = r3d.stats();
 const auto& details = r3d.debug_stats();
 ```
+
+The `kin3d.prepass` GPU group contains nested `kin3d.prepass_geometry`,
+`kin3d.ao`, contact-shadow and GI-resolve ranges. Inside `kin3d.ao`, the depth
+chain, horizon search, horizontal/vertical blur and optional upsample have
+separate labels. These groups stay in the existing command buffer and introduce
+no timing readback or submission splits. Parent and child durations overlap;
+do not add them when attributing total GPU time.
 
 When storing a detailed snapshot, use `RenderDebugStats3D`; copying it into
 `RenderStats3D` intentionally keeps only the compact summary.

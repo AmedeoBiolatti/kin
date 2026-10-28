@@ -37,6 +37,22 @@ namespace kin::gpu {
 
 namespace {
 
+// Stay in the existing command buffer: external profilers can time nested
+// operations without introducing submission splits or CPU/GPU waits.
+struct PassMarker {
+    SDL_GPUCommandBuffer* commands;
+    PassMarker(SDL_GPUCommandBuffer* buffer, bool enabled, const char* name) : commands(enabled ? buffer : nullptr) {
+        if (commands)
+            SDL_PushGPUDebugGroup(commands, name);
+    }
+    ~PassMarker() {
+        if (commands)
+            SDL_PopGPUDebugGroup(commands);
+    }
+    PassMarker(const PassMarker&) = delete;
+    PassMarker& operator=(const PassMarker&) = delete;
+};
+
 // Fingerprint the inputs already packed for the GPU. Reject transient history
 // while those inputs or their opaque backdrop change; a paused effect retains
 // ordinary temporal smoothing. All callers supply initialized scalar data.
@@ -1060,6 +1076,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         _point_sampler = SDL_CreateGPUSampler(handle, &point);
         _gtao_pipeline = make_compute(handle, "gtao.comp.spv", {.samplers = 2});
         _ao_blur_pipeline = make_compute(handle, "ao_blur.comp.spv", {.samplers = 2});
+        _ao_upsample_pipeline = make_compute(handle, "ao_upsample.comp.spv", {.samplers = 3});
         _ao_blur_both_pipeline =
             make_compute(handle, "ao_blur_both.comp.spv",
                          {.samplers = 3, .readwrite_textures = 2}); // optional: two dispatches without
@@ -1437,8 +1454,8 @@ GpuRenderer3D::~GpuRenderer3D() {
     }
     for (SDL_GPUComputePipeline* compute :
          {_filter_pipeline, _ao_blur_chain_pipeline, _ao_blur_both_chain_pipeline, _gtao_pipeline, _gtao_chain_pipeline,
-          _ao_chain_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _contact_pipeline, _fog_sun_pipeline,
-          _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline,
+          _ao_chain_pipeline, _ao_blur_pipeline, _ao_blur_both_pipeline, _ao_upsample_pipeline, _contact_pipeline,
+          _fog_sun_pipeline, _taa_pipeline, _gc_cull, _gc_scan, _gc_args, _gc_gather, _gc_cull_occ, _hiz_depth_pipeline,
           _hiz_reduce_pipeline}) {
         if (compute) {
             SDL_ReleaseGPUComputePipeline(_device->handle(), compute);
@@ -2538,8 +2555,14 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
     const bool have_base =
         sized(view._ao_depth, w, h) && view._ao_normals && view._ao_normals.format() == normals_format;
     const bool have_ao = !want_ao || (sized(view._ao_raw, aw, ah) && view._ao_across);
+    const bool reconstruct = want_ao && (aw != w || ah != h) && _ao_upsample_pipeline;
+    const bool have_upsample = !reconstruct || sized(view._ao_upsampled, w, h);
+    if (want_ao && !reconstruct) {
+        view._ao_upsampled = {};
+        view._ao_upsampled_ready = false;
+    }
     const bool have_contact = !want_contact || (sized(view._contact_raw, w, h) && view._contact_across);
-    if (have_base && have_ao && have_contact) {
+    if (have_base && have_ao && have_contact && have_upsample) {
         return true;
     }
     try {
@@ -2561,6 +2584,10 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
             view._ao_raw = std::move(raw);
             view._ao_across = std::move(across);
         }
+        if (!have_upsample) {
+            view._ao_upsampled = _device->create_target(w, h, ao_format, stored);
+            view._ao_upsampled_ready = false;
+        }
         if (!have_contact) {
             GpuTexture raw = _device->create_target(w, h, ao_format, stored);
             GpuTexture across = _device->create_target(w, h, ao_format, stored);
@@ -2571,9 +2598,10 @@ bool GpuRenderer3D::ensure_ao_targets(GpuView3D& view, bool half, bool want_ao, 
         KIN_LOG_WARN_F("render", "3D: ambient occlusion targets not made",
                        (LogFields{{.name = "reason", .value = e.what()}}));
         for (GpuTexture* texture : {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw,
-                                    &view._ao_across, &view._contact_raw, &view._contact_across}) {
+                                    &view._ao_across, &view._ao_upsampled, &view._contact_raw, &view._contact_across}) {
             *texture = {};
         }
+        view._ao_upsampled_ready = false;
         return false;
     }
     // Made now rather than on the first draw, as the view's own.
@@ -2618,6 +2646,7 @@ bool GpuRenderer3D::ensure_velocity_target(GpuView3D& view) {
 // size changes. False when it cannot be made or built: the caller then reads the depth itself.
 bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Mat4f& projection,
                                    f32 radius) {
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ao_depth_chain"};
     if (!_gtao_chain_pipeline || !_ao_chain_pipeline) {
         return false;
     }
@@ -2667,6 +2696,8 @@ bool GpuRenderer3D::build_ao_chain(SDL_GPUCommandBuffer* commands, GpuView3D& vi
 void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
                                       const Mat4f& projection, const AmbientOcclusion3D& ao, RenderDebugStats3D& stats,
                                       bool blur_too) {
+    const PassMarker marker{commands, _gpu_markers, "kin3d.ao"};
+    view._ao_upsampled_ready = false;
     const Unprojection unproject = unproject_coefficients(projection);
     const f32 w = static_cast<f32>(view._ao_raw.width()), h = static_cast<f32>(view._ao_raw.height());
     const f32 depth_w = static_cast<f32>(view._ao_depth.width()), depth_h = static_cast<f32>(view._ao_depth.height());
@@ -2693,6 +2724,7 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     std::memcpy(u.shape, shape, sizeof(shape));
     const bool use_chain = static_cast<u64>(depth_w) * static_cast<u64>(depth_h) >= ao_chain_min_pixels;
     if (use_chain && build_ao_chain(commands, view, projection, u.shape[0])) {
+        const PassMarker gtao_marker{commands, _gpu_markers, "kin3d.ao_horizons"};
         // The chain stands in for the depth as the first input.
         const std::array<SDL_GPUTextureSamplerBinding, 2> inputs{
             SDL_GPUTextureSamplerBinding{view._ao_chain.handle(), _point_sampler},
@@ -2708,6 +2740,7 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
             }
         }
     } else {
+        const PassMarker gtao_marker{commands, _gpu_markers, "kin3d.ao_horizons"};
         dispatch(_gtao_pipeline, view._ao_raw, view._ao_normals, &u, sizeof(u));
     }
     if (!blur_too) {
@@ -2719,10 +2752,27 @@ void GpuRenderer3D::compute_occlusion(SDL_GPUCommandBuffer* commands, GpuView3D&
     std::memcpy(blur.depth, unproject.zw, sizeof(unproject.zw));
     blur.step[0] = 1.0f;
     SDL_GPUComputePipeline* const blur_pipeline = _chain_ready ? _ao_blur_chain_pipeline : _ao_blur_pipeline;
-    dispatch(blur_pipeline, view._ao_across, view._ao_raw, &blur, sizeof(blur));
+    {
+        const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_blur_x"};
+        dispatch(blur_pipeline, view._ao_across, view._ao_raw, &blur, sizeof(blur));
+    }
     blur.step[0] = 0.0f;
     blur.step[1] = 1.0f;
-    dispatch(blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
+    {
+        const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_blur_y"};
+        dispatch(blur_pipeline, view._ao_raw, view._ao_across, &blur, sizeof(blur));
+    }
+    if (_ao_upsample_pipeline && view._ao_upsampled && (w != depth_w || h != depth_h)) {
+        const PassMarker upsample_marker{commands, _gpu_markers, "kin3d.ao_upsample"};
+        const std::array<SDL_GPUTextureSamplerBinding, 3> inputs{
+            SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _point_sampler},
+            SDL_GPUTextureSamplerBinding{view._ao_raw.handle(), _point_sampler}};
+        view._ao_upsampled_ready =
+            compute_pass(commands, _ao_upsample_pipeline, view._ao_upsampled, inputs, &u, sizeof(u));
+        if (view._ao_upsampled_ready)
+            ++stats.ao_dispatches;
+    }
 }
 
 void GpuRenderer3D::compute_contact_shadows(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Camera3D& camera,
@@ -2971,9 +3021,9 @@ u64 texture_bytes(const GpuTexture& t) {
 u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     u64 bytes = 0;
     for (const GpuTexture* t :
-         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._contact_raw,
-          &view._contact_across, &view._fog_sun, &view._taa_depth, &view._taa_in, &view._taa_sharp, &view._taa_motion,
-          &view._taa_history[0], &view._taa_history[1], &view._taa_dilated[0], &view._taa_dilated[1],
+         {&view._ao_chain, &view._ao_depth, &view._ao_normals, &view._ao_raw, &view._ao_across, &view._ao_upsampled,
+          &view._contact_raw, &view._contact_across, &view._fog_sun, &view._taa_depth, &view._taa_in, &view._taa_sharp,
+          &view._taa_motion, &view._taa_history[0], &view._taa_history[1], &view._taa_dilated[0], &view._taa_dilated[1],
           &view._occ_depth}) {
         bytes += texture_bytes(*t);
     }
@@ -4196,9 +4246,11 @@ void GpuRenderer3D::age_targets(FrameCtx& ctx) {
             idle = 0;
         }
     };
-    age(v._idle_ao, ctx.occluded, v._ao_raw || v._ao_across, [&] {
+    age(v._idle_ao, ctx.occluded, v._ao_raw || v._ao_across || v._ao_upsampled, [&] {
         v._ao_raw = {};
         v._ao_across = {};
+        v._ao_upsampled = {};
+        v._ao_upsampled_ready = false;
     });
     age(v._idle_contact, ctx.contacted, v._contact_raw || v._contact_across, [&] {
         v._contact_raw = {};
@@ -10199,6 +10251,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
         const auto& geometry_plan = compiler.compile(recipe, graph_feature::attachments);
         stats.geometry_graph_reused = compilations == compiler.stats().compilations;
         const auto record = [&] {
+            const PassMarker geometry_marker{commands, _gpu_markers, "kin3d.prepass_geometry"};
             auto* prepass = SDL_BeginGPURenderPass(commands, &target, 1, &prepass_depth);
             if (!prepass)
                 return false;
@@ -10238,10 +10291,12 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
                 compute_occlusion(commands, *view, scene.camera, ctx.main_projection, ao, stats, !merge);
             }
             if (want_contact) {
+                const PassMarker contact_marker{commands, _gpu_markers, "kin3d.contact_shadows"};
                 compute_contact_shadows(commands, *view, scene.camera, ctx.main_projection, contact,
                                         lights.sun.direction, stats, !merge);
             }
             if (merge) {
+                const PassMarker blur_marker{commands, _gpu_markers, "kin3d.ao_contact_blur"};
                 blur_screen_space_both(commands, *view, ctx.main_projection, stats);
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
@@ -10410,9 +10465,12 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear},
         ctx.environment ? SDL_GPUTextureSamplerBinding{ctx.environment->irradiance.handle(), _environment_sampler}
                         : SDL_GPUTextureSamplerBinding{_owner->_white.handle(), _owner->_sampler_linear}};
-    // Smooth, so a half-size occlusion is read up; white (and never read) without.
+    // Prefer the depth/normal-aware reconstruction of half-size AO. Without
+    // that optional pipeline the original linear upscale remains available.
     const SDL_GPUTextureSamplerBinding occlusion_binding{
-        ctx.occluded ? view->_ao_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
+        ctx.occluded ? (view->_ao_upsampled_ready ? view->_ao_upsampled.handle() : view->_ao_raw.handle())
+                     : _owner->_white.handle(),
+        _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding contact_binding{
         ctx.contacted ? view->_contact_raw.handle() : _owner->_white.handle(), _owner->_sampler_linear};
     const SDL_GPUTextureSamplerBinding shadow_binding{ctx.shadows ? ctx.sun_depth->handle() : _no_shadow.handle(),
@@ -11060,20 +11118,6 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     ctx.sun_shadow_cached = ctx.shadows && shadow_unchanged(ctx);
     upload_particle_casts(ctx);
     begin_commands(ctx);
-    // Debug markers stay in the existing command buffer. External profilers can
-    // timestamp them without the submission splits of the fence-based scopes.
-    struct PassMarker {
-        SDL_GPUCommandBuffer* commands;
-        PassMarker(SDL_GPUCommandBuffer* buffer, bool enabled, const char* name)
-            : commands(enabled ? buffer : nullptr) {
-            if (commands)
-                SDL_PushGPUDebugGroup(commands, name);
-        }
-        ~PassMarker() {
-            if (commands)
-                SDL_PopGPUDebugGroup(commands);
-        }
-    };
     // Coarse stock operations use the public compiler. Tokens cover backend-owned
     // resources; their existing allocation/history ownership stays explicit. Inner
     // prepass/main subpasses remain atomic operations in this first migration.

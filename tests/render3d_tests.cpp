@@ -2677,13 +2677,17 @@ void test_gpu_occlusion_speedups() {
                 assert(r3d.debug_stats().ao_chain_built == kin::u32(chained));
             }
             if (r3d.capabilities().temporal_aa) {
-                view.reset_history();
-                Pixels previous;
-                for (int frame = 0; frame < 12; ++frame) {
-                    auto image = render(perspective, ao, Draw::Blocks, nullptr, true);
-                    if (frame == 11)
-                        assert(delta(previous, image).mean < 2.0);
-                    previous = std::move(image);
+                for (const bool half : {false, true}) {
+                    view.reset_history();
+                    auto temporal_ao = ao;
+                    temporal_ao.half_resolution = half;
+                    Pixels previous;
+                    for (int frame = 0; frame < 12; ++frame) {
+                        auto image = render(perspective, temporal_ao, Draw::Blocks, nullptr, true);
+                        if (frame == 11)
+                            assert(delta(previous, image).mean < 2.0);
+                        previous = std::move(image);
+                    }
                 }
             }
             const auto before = render(perspective, ao);
@@ -2698,6 +2702,118 @@ void test_gpu_occlusion_speedups() {
             assert(r3d.debug_stats().feature_bytes == 0);
             assert(before.rgba == render(perspective, ao).rgba);
         }
+    });
+}
+
+// Degenerate horizon directions and nearly coincident depth taps must remain
+// finite. Exercise both depth policies, odd workgroup/mip edges and the half
+// path with grazing normals. Zero intensity and a subpixel radius are neutral
+// oracles; ordinary AO must still darken the room without adding light.
+void test_gpu_ao_grazing_and_odd_sizes() {
+    with_gpu("test_gpu_ao_grazing_and_odd_sizes", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion"))
+            return;
+        const AoRoom room{r3d};
+        kin::Scene3D scene;
+        scene.lights.sun.color = {0, 0, 0};
+        scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+        room.draw_floor(scene);
+        room.draw_wall(scene);
+        room.draw_pole(scene, 0.1f, -0.5f);
+        for (const auto size : {kin::Vec2i{161, 121}, kin::Vec2i{1601, 1001}}) {
+            auto view = r3d.create_view(size, {.samples = 1}).value_or({});
+            for (const bool ortho : {false, true}) {
+                scene.camera = kin::Camera3D::look_at({0.15f, 0.08f, 5}, {0, 0.05f, -2}, 50);
+                if (ortho) {
+                    scene.camera.projection = kin::Projection3D::Orthographic;
+                    scene.camera.height = 5;
+                }
+                const auto shoot = [&](kin::AmbientOcclusion3D ao) {
+                    scene.ambient_occlusion = ao;
+                    auto image = shoot_large(renderer, r3d, view, scene);
+                    renderer.present();
+                    return image;
+                };
+                const auto off = shoot({});
+                Pixels full_image;
+                kin::u64 full_bytes = 0;
+                for (const bool half : {false, true}) {
+                    const auto neutral = shoot({.enabled = true, .radius = 3, .intensity = 0, .half_resolution = half});
+                    assert(delta(off, neutral).worst <= 2);
+                    const auto tiny = shoot({.enabled = true, .radius = 0.00001f, .half_resolution = half});
+                    assert(delta(off, tiny).worst <= 2);
+                    const auto on = shoot({.enabled = true, .radius = 3, .half_resolution = half});
+                    assert(r3d.debug_stats().ao_dispatches == kin::u32(half ? 4 : 3));
+                    assert(r3d.debug_stats().ao_chain_built == kin::u32(size.x * size.y >= 1500000));
+                    assert(delta(off, on).mean > 0.01);
+                    if (!half) {
+                        full_image = on;
+                        full_bytes = r3d.debug_stats().feature_bytes;
+                    } else {
+                        const auto area = kin::u64(size.x) * kin::u64(size.y);
+                        const auto half_area = kin::u64((size.x + 1) / 2) * kin::u64((size.y + 1) / 2);
+                        // Two full-size R8 AO targets become two half-size
+                        // targets plus the full-size reconstruction target.
+                        assert(full_bytes + 2 * half_area == r3d.debug_stats().feature_bytes + area);
+                    }
+                    for (std::size_t i = 0; i < off.rgba.size(); i += 4)
+                        for (std::size_t c = 0; c < 3; ++c)
+                            assert(int(on.rgba[i + c]) <= int(off.rgba[i + c]) + 2);
+                }
+                assert(shoot({.enabled = true, .radius = 3}).rgba == full_image.rgba);
+                assert(r3d.debug_stats().feature_bytes == full_bytes);
+                shoot({.enabled = true, .radius = 3, .half_resolution = true});
+                scene.ambient_occlusion.enabled = false;
+                for (int frame = 0; frame < 120; ++frame) {
+                    renderer.clear(kin::colors::black);
+                    render_ok(r3d, view, scene);
+                    renderer.present();
+                }
+                assert(r3d.debug_stats().feature_bytes == 0);
+            }
+        }
+    });
+}
+
+// A thin, isolated foreground surface crosses the room's dark crease. Its
+// lighting must not borrow the background AO when reconstructed from half size.
+void test_gpu_ao_half_resolution_silhouette() {
+    with_gpu("test_gpu_ao_half_resolution_silhouette", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().ambient_occlusion, "ambient occlusion"))
+            return;
+        const AoRoom room{r3d};
+        const auto pole = make_box(r3d, {0.035f, 0.8f, 0.03f});
+        auto view = r3d.create_view({321, 241}, {.samples = 1}).value_or({});
+        kin::Scene3D scene;
+        scene.camera = kin::Camera3D::look_at({0, 3, 6}, {0, 0.3f, -2}, 50);
+        scene.lights.sun.color = {0, 0, 0};
+        scene.lights.ambient = {0.6f, 0.6f, 0.6f};
+        room.draw_floor(scene);
+        room.draw_wall(scene);
+        (void)scene.draw(pole, Mat4f::translation({0, 1.51f, 2.1f}), {.color = Color::rgb(40, 70, 240)});
+        const auto shoot = [&](kin::AmbientOcclusion3D ao) {
+            scene.ambient_occlusion = ao;
+            auto image = shoot_large(renderer, r3d, view, scene);
+            renderer.present();
+            return image;
+        };
+        const auto off = shoot({});
+        const auto full = shoot({.enabled = true, .radius = 1});
+        const auto half = shoot({.enabled = true, .radius = 1, .half_resolution = true});
+        assert(r3d.debug_stats().ao_dispatches == 4);
+        int blue_pixels = 0, full_drop = 0, half_drop = 0;
+        for (std::size_t i = 0; i < off.rgba.size(); i += 4) {
+            if (int(off.rgba[i + 2]) <= int(off.rgba[i]) + 50 || int(off.rgba[i + 2]) <= int(off.rgba[i + 1]) + 50)
+                continue;
+            ++blue_pixels;
+            full_drop = std::max(full_drop, int(off.rgba[i + 2]) - int(full.rgba[i + 2]));
+            half_drop = std::max(half_drop, int(off.rgba[i + 2]) - int(half.rgba[i + 2]));
+        }
+        std::cerr << "AO thin foreground: " << blue_pixels << " pixels, full/half darkening " << full_drop << "/"
+                  << half_drop << "\n";
+        assert(blue_pixels >= 30 && full_drop <= 3 && half_drop <= 3);
     });
 }
 
@@ -22355,6 +22471,8 @@ int main(int argc, char** argv) {
     RUN(test_gpu_ambient_occlusion());
     RUN(test_gpu_contact_shadows());
     RUN(test_gpu_occlusion_speedups());
+    RUN(test_gpu_ao_grazing_and_odd_sizes());
+    RUN(test_gpu_ao_half_resolution_silhouette());
     RUN(test_taa_jitter());
     RUN(test_gpu_taa());
     RUN(test_gpu_taa_slow_motion());

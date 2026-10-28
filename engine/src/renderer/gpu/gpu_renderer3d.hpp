@@ -240,7 +240,9 @@ private:
     GpuTexture _ao_chain; // the linear depth chain of the occlusion (R32F, 5 levels), rebuilt each render that uses it;
                           // goes with _ao_depth
     GpuTexture _ao_depth, _ao_normals, _ao_raw,
-        _ao_across; // the occlusion's result is in _ao_raw (the blur ends back in it)
+        _ao_across;                   // the occlusion's result is in _ao_raw (the blur ends back in it)
+    GpuTexture _ao_upsampled;         // half-size AO reconstructed against full-size depth/normals; R8
+    bool _ao_upsampled_ready = false; // written by this render, never a previous mode/frame
     // With Scene3D::contact_shadows, the same way (the pre-pass's depth and
     // normals are shared): the march, blurred across, blurred down; R8, the view's size.
     GpuTexture _contact_raw, _contact_across; // and the contact shadows' in _contact_raw
@@ -847,6 +849,7 @@ private:
     SDL_GPUComputePipeline* _ao_blur_chain_pipeline = nullptr;      // ao_blur_chain.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_both_chain_pipeline = nullptr; // ao_blur_both_chain.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_pipeline = nullptr;            // ao_blur.comp
+    SDL_GPUComputePipeline* _ao_upsample_pipeline = nullptr;        // ao_upsample.comp (optional)
     SDL_GPUComputePipeline* _ao_blur_both_pipeline =
         nullptr; // ao_blur_both.comp: both features' blur in one dispatch (optional)
     // The shadow map's cache (Lights3D::cache_shadows): what the map was last drawn from, so that the pass is skipped

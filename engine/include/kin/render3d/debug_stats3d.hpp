@@ -69,7 +69,7 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 ao_draws = 0; // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither
                       // this render)
     u32 ao_instances = 0;       // meshes drawn into it
-    u32 ao_dispatches = 0;      // compute dispatches (the occlusion and its blur)
+    u32 ao_dispatches = 0;      // compute dispatches (occlusion, blur, optional half-size reconstruction)
     u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
     // With both on at one size (the occlusion not at half resolution) the two blurs are one dispatch a direction; these
     // count that dispatch in each of the two numbers above, and this says how many there were (2, else 0).

@@ -275,3 +275,65 @@ Four ordinary Cornell/motion RGBA captures match the preceding attachment-versio
 captures byte for byte. Benchmark mode separately verifies exact configured
 warm-up/frame counts with TAA, avoiding the legacy capture settling extension.
 The 199-file 3D format gate passes. This is not a full-project/all-target build.
+## AO/prepass follow-up
+
+The first AO profiling pass separates geometry, depth-chain construction, GTAO horizons,
+both blur directions and reconstruction with nested GPU groups. A parent range includes
+its children; summing them double-counts GPU time.
+
+The retained rendering change reconstructs the existing half-resolution AO mode using
+full-size depth and normals. It adds one dispatch and an R8 target, with original-sample
+and zero-weight-neighbour shortcuts. Full-resolution output remains byte-identical at
+1280×720 and 2560×1440; full-resolution defaults and sample counts are unchanged.
+
+Three interleaved Bistro runs per configuration, RTX 4080 Laptop GPU, eight seconds
+warm-up and eight seconds measured, same static afternoon view, GI/TAA on, VSync off:
+
+| AO mode | 1280×720 FPS | 2560×1440 FPS |
+|---|---:|---:|
+| Full resolution | 208.2 | 78.8 |
+| Original half resolution | 222.2 | 88.3 |
+| Reconstructed half resolution | 218.0 | 88.7 |
+
+Thermal/clock variation is substantial, especially at 720p; these are exploratory mode
+comparisons. Reconstructed half AO observed +4.7%/+12.6% versus full AO, and -1.9%/+0.5%
+versus old half AO. This is not a throughput improvement of the full-quality path.
+Against the same two 512-sample Cycles seeds at 720p, full/old-half/new-half FLIP is
+0.176637/0.178040/0.178128 and JOD is 7.469986/7.424574/7.426322. The new reconstruction
+improves surface separation, not every aggregate metric. Half resolution remains an
+explicit quality tradeoff; moving-camera and additional-scene checks precede any preset change.
+
+Math-only horizon simplifications/unrolling had no convincing win. A shared-memory blur
+was about 35% slower per blur pass at 1440p despite fewer unique texture fetches. Both
+experiments were removed. Hardware counters would be needed to explain the cache/barrier
+behaviour. The dominant full-quality AO target remains the horizon search.
+
+Native build artifacts under `evaluations/bistro-ao/` retain the report, commands,
+binary hashes, raw frame windows, quality jobs, GPU traces and rejected experiments.
+
+### Full-resolution GTAO horizon/locality screening
+
+Ten further candidates were screened at 1280×720 and 2560×1440 using a diagnostic
+linker shim, with baseline and candidate GPU pipelines alternating inside one
+process. Blocks contain 32 dispatches; the first four are excluded and complete
+28-sample blocks are compared with neighbouring baseline blocks. This reduces
+thermal drift between processes but does not remove clock/scheduling variance.
+
+No runtime change was retained. The 16×4, 32×2 and 4×16 execution layouts showed
+no dependable cross-resolution gain. Conservative rejection of taps beyond the
+AO radius by their z-distance was about 5% slower in the 1440p horizon range.
+Degree 1–4 inverse-cosine fits and `glslc -O`/`-Os` produced only small or mixed
+changes. Apparent 1440p improvements were generally 1–2% of a 2.4–2.5 ms diagnostic
+GTAO range (about 0.02–0.04 ms), with comparable variation in the controls.
+
+The numerical candidates were rejected on timing, before full-scene still/video
+quality qualification. No full-quality FPS gain or definite hardware bottleneck
+is claimed. Resolution, sample budgets, production shaders and previous AO work
+remain unchanged. A larger AO gain needs a separately evaluated algorithm-level
+prototype; main material shading remains another measured optimization target.
+
+The consolidated report and paired-block plots are under
+`evaluations/gtao-study/`. Exact source, SPIR-V, binaries, commands, Vulkan traces
+and individual range exports are under `gtao-locality`, `gtao-horizon`,
+`gtao-approx` and `gtao-compiler` beside that directory. All shader/pipeline
+selection hooks are diagnostic prototypes outside the engine.
