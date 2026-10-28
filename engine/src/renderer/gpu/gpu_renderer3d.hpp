@@ -364,6 +364,10 @@ public:
                                                      RenderDebugStats3D&) override;
     bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
     bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
+    Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
+                                            RenderDebugStats3D&) override;
+    bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
+                        RenderDebugStats3D&) override;
     Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) override;
     bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
 
@@ -523,7 +527,7 @@ private:
     bool ensure_gi_sun_map(); // the GI's sun map (made once); false where there can be none
     void upload_joints(FrameCtx& ctx);
     void begin_commands(FrameCtx& ctx); // flushes 2D; environment and empty-shadow set-up
-    void shadow_pass(FrameCtx& ctx);
+    bool shadow_pass(FrameCtx& ctx);
     // End of a render: counts the renders each feature's targets went unused and releases those unused for
     // `_release_after`; fills RenderDebugStats3D::feature_bytes.
     void age_targets(FrameCtx& ctx);

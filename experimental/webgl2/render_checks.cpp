@@ -123,6 +123,10 @@ void check_webgl_instances(Renderer2D& r, Renderer3D& r3d) {
             "WebGL must report unsupported standalone geometry attachments");
     require(!r3d.capabilities().shared_preparation && !r3d.prepare({}),
             "Unsupported shared preparation must return diagnostics");
+    require(!r3d.capabilities().sun_shadow_pass && !r3d.capabilities().surface_pass &&
+                !r.capabilities().render_attachment_arrays && !r3d.render_sun_shadow({}, {}, {64, 64}) &&
+                !r3d.render_surface({}, {}),
+            "Unsupported public shadow/surface operations must fail explicitly");
     const auto unsupported = r3d.render_geometry({}, {});
     require(!unsupported && !unsupported.diagnostics.empty(), "Unsupported geometry must return diagnostics");
     require(!r.create_render_attachment({64, 64}, TextureFormat::Depth32Float),

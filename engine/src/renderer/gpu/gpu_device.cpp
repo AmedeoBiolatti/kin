@@ -300,7 +300,7 @@ GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL
         throw sdl_error("SDL_CreateGPUTexture (target array) failed");
     }
     poison_texture(texture, format, width, height, layers, 1, usage);
-    return GpuTexture{_shared, texture, width, height, format};
+    return GpuTexture{_shared, texture, width, height, format, usage};
 }
 
 GpuTexture GpuDevice::create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,

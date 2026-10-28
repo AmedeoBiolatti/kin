@@ -106,6 +106,7 @@ struct RendererBackendCapabilities {
     // create_texture() accepts the data formats (R16Uint, Rg16Uint, R32Float).
     bool data_textures = false;
     bool render_attachments = false; // sampled RG16F/RGBA16F colour and D32F depth targets
+    bool render_attachment_arrays = false; // the same formats as explicit 2D arrays
 };
 
 // A named part of a frame's GPU work (Renderer2D::gpu_scope) and its GPU time.
@@ -417,7 +418,7 @@ public:
         return {};
     }
     virtual Texture create_storage_texture(Vec2i /*size*/, TextureFormat /*format*/) { return {}; }
-    virtual Texture create_render_attachment(Vec2i /*size*/, TextureFormat /*format*/) { return {}; }
+    virtual Texture create_render_attachment(Vec2i /*size*/, TextureFormat /*format*/, u32 /*array_layers*/ = 0) { return {}; }
     virtual bool dispatch_compute(ComputeShaderHandle, Vec2i /*groups*/, const ComputeBindings&) { return false; }
 
     // Storage buffers for shaders (capabilities().data_buffers). `data` (or

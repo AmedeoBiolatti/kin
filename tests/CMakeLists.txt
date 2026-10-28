@@ -330,7 +330,7 @@ endif()
 if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     kin_add_test(kin_render3d_geometry_tests kin-render3d-geometry SOURCES render3d_geometry_tests.cpp)
     kin_compile_glsl(_geometry_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/geometry/shaders"
-        SOURCES shaders/geometry_probe.frag.glsl)
+        SOURCES shaders/geometry_probe.frag.glsl shaders/shadow_probe.frag.glsl)
     kin_embed_files(kin_render3d_geometry_tests NAME geometry_probe FILES ${_geometry_spv})
     add_test(NAME kin-render3d-geometry-foreign COMMAND kin_render3d_geometry_tests --foreign-device)
     add_test(NAME kin-render3d-preparation-lifetime COMMAND kin_render3d_geometry_tests --lifetime)

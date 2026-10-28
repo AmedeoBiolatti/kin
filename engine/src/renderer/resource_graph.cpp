@@ -13,14 +13,17 @@ u64 graph_resource_payload(const GraphResourceDesc& desc) {
         return 0;
     if (desc.kind == GraphResourceKind::Buffer)
         return desc.bytes;
-    const u64 bytes = texture_level_bytes(desc.format, desc.size);
+    const u64 single = texture_level_bytes(desc.format, desc.size);
+    const u64 layers = std::max(1u, desc.array_layers);
+    const u64 bytes = single > ~u64{0} / layers ? ~u64{0} : single * layers;
     if (!desc.hdr)
         return bytes;
     return bytes > std::numeric_limits<u64>::max() / 2 ? std::numeric_limits<u64>::max() : bytes * 2;
 }
 namespace {
 bool compatible(const GraphResourceDesc& a, const GraphResourceDesc& b) {
-    return a.kind == b.kind && a.format == b.format && a.size == b.size && a.bytes == b.bytes && a.hdr == b.hdr;
+    return a.kind == b.kind && a.format == b.format && a.size == b.size && a.bytes == b.bytes && a.hdr == b.hdr &&
+           a.array_layers == b.array_layers;
 }
 CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphCompileOptions options) {
     CompiledResourceGraph plan;
@@ -35,6 +38,12 @@ CompiledResourceGraph build(const ResourceGraphDesc& graph, u64 features, GraphC
         if (r.kind != GraphResourceKind::Token && r.kind != GraphResourceKind::Buffer &&
             texture_level_bytes(r.format, r.size) == ~u64{0})
             error(r.name + ": texture payload overflows the planner");
+        if (r.array_layers && !(features & graph_feature::attachment_arrays))
+            error(r.name + ": attachment arrays unavailable on backend");
+        if (r.array_layers && r.kind != GraphResourceKind::RenderAttachment)
+            error(r.name + ": arrays require explicit render attachments");
+        if (r.array_layers && graph_resource_payload(r) == ~u64{0})
+            error(r.name + ": array payload overflows the planner");
         if (r.hdr && r.kind != GraphResourceKind::ColorTarget)
             error(r.name + ": HDR applies to colour targets only");
         if (r.hdr && texture_level_bytes(r.format, r.size) > std::numeric_limits<u64>::max() / 2)

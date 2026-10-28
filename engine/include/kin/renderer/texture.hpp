@@ -117,6 +117,7 @@ public:
     explicit ITextureBackend(Kind kind = Kind::Unknown) : _kind(kind) {}
     virtual ~ITextureBackend() = default;
     virtual Vec2i size() const = 0;
+    virtual u32 array_layers() const { return 0; } // 0: 2D; >0: 2D array
     virtual TextureFormat format() const { return TextureFormat::Rgba8; }
 
     Kind kind() const { return _kind; }
@@ -134,6 +135,7 @@ public:
     explicit operator bool() const { return valid(); }
     Vec2i size() const;
     TextureFormat format() const;
+    u32 array_layers() const;
     // True for handles to the same texture.
     bool operator==(const Texture&) const = default;
 

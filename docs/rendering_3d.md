@@ -41,6 +41,9 @@ if (session.render())
 `Renderer3D::render` APIs support embedded views, renderer tools and the benchmark examples below.
 `Renderer3D::render_geometry` also records standalone opaque/cutout depth and world normals for custom pipelines;
 see the [geometry graph contract and outline example](render_graph.md#geometry-operations-and-data-attachments).
+For explicit native shadow → material shading → custom postprocessing, use
+[`render_sun_shadow()` and `render_surface()`](render_graph.md#explicit-sun-shadows-and-mesh-surfaces).
+The [surface graph example](../tools/surface3d/main.cpp) composes these with GPU ASCII without a stock view.
 For several consumers of the same scene, [explicit shared preparation](render_graph.md#shared-draw-preparation)
 reuses world data and compatible GPU uploads while keeping visibility and temporal history per view.
 Configure with `cmake --preset 3d` to include the experimental engine; ordinary and shipping builds leave it out.

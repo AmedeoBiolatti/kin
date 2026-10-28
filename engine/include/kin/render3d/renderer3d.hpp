@@ -156,6 +156,13 @@ public:
     Result3D<PreparedScene3D> prepare(const Scene3D& scene, const PrepareOptions3D& options = {});
     Status3D render_prepared(View3D& view, const PreparedScene3D& prepared);
     Status3D render_geometry_prepared(const GeometryTargets3D& targets, const PreparedScene3D& prepared);
+    // Directional shadow rasterization into graph-owned D32F array layers. The
+    // receiver extent controls cascade fitting; no colour or history is rendered.
+    Result3D<SunShadow3D> render_sun_shadow(const Texture& depth_array, const PreparedScene3D&, Vec2i receiver_size);
+    // Single-sample material shading into explicit colour/depth attachments.
+    // Meshes/overlays, environment, point/spot lights and optional supplied sun
+    // shadow; no implicit shadow maps, sky/fog/particles, AO/GI/TAA or postproc.
+    Status3D render_surface(const SurfaceTargets3D&, const PreparedScene3D&, const SurfaceOptions3D& = {});
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
     // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a

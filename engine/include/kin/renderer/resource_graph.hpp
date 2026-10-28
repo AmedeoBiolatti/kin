@@ -18,11 +18,13 @@ struct GraphResourceDesc {
     Vec2i size{};
     u64 bytes = 0; // buffer capacity; texture payload is derived from size/format
     bool imported = false, exported = false, persistent = false;
-    bool hdr = false; // ColorTarget: renderer working space is HDR (RGBA16F payload)
+    u32 array_layers = 0; // 0: 2D; >=1: explicit 2D array, including a one-layer array
+    bool hdr = false;     // ColorTarget: renderer working space is HDR (RGBA16F payload)
     friend bool operator==(const GraphResourceDesc&, const GraphResourceDesc&) = default;
 };
 namespace graph_feature {
 inline constexpr u64 raster = 1, compute = 2, buffers = 4, rendering3d = 8, shaders = 16;
+inline constexpr u64 attachment_arrays = 64;
 inline constexpr u64 attachments = 32; // explicit linear float/depth render attachments
 } // namespace graph_feature
 struct GraphPassDesc {

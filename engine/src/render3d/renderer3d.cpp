@@ -399,6 +399,47 @@ Status3D Renderer3D::render_geometry_prepared(const GeometryTargets3D& targets, 
     return status3d(ok, _errors);
 }
 
+Result3D<SunShadow3D> Renderer3D::render_sun_shadow(const Texture& depth, const PreparedScene3D& prepared,
+                                                    Vec2i receiver) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().sun_shadow_pass) {
+        fail3d(_errors, "Renderer3D::render_sun_shadow", "sun shadow operation unavailable on this backend");
+        return {std::nullopt, _errors};
+    }
+    if (!prepared.backend() || !depth || depth.format() != TextureFormat::Depth32Float || depth.array_layers() < 1 ||
+        depth.array_layers() > max_shadow_cascades || depth.size().x != depth.size().y || receiver.x <= 0 ||
+        receiver.y <= 0) {
+        fail3d(_errors, "Renderer3D::render_sun_shadow",
+               "requires prepared data, a square D32F array (1..4 layers) and positive receiver extent");
+        return {std::nullopt, _errors};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto result = _backend->render_sun_shadow(depth, *prepared.backend(), receiver, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!result)
+        _errors = result.diagnostics;
+    return result;
+}
+Status3D Renderer3D::render_surface(const SurfaceTargets3D& targets, const PreparedScene3D& prepared,
+                                    const SurfaceOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    if (!_backend || !_backend->capabilities().surface_pass) {
+        fail3d(_errors, "Renderer3D::render_surface", "surface operation unavailable on this backend");
+        return status3d(false, _errors);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = prepared.backend() && targets.colour && targets.depth &&
+                    targets.depth.format() == TextureFormat::Depth32Float && !targets.depth.array_layers() &&
+                    targets.colour.size() == targets.depth.size() &&
+                    _backend->render_surface(targets, *prepared.backend(), options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        fail3d(_errors, "Renderer3D::render_surface", "incompatible/expired inputs or GPU surface recording failed");
+    return status3d(ok, _errors);
+}
+
 bool Renderer3D::render_operation(View3D& view, const Scene3D& scene) {
     _errors.clear();
     _stats = {};

@@ -107,6 +107,8 @@ Vec2i Texture::size() const {
     return _backend ? _backend->size() : Vec2i{};
 }
 
+u32 Texture::array_layers() const { return _backend ? _backend->array_layers() : 0; }
+
 TextureFormat Texture::format() const {
     return _backend ? _backend->format() : TextureFormat::Rgba8;
 }
@@ -1368,11 +1370,11 @@ Renderer2D::ClipGuard Renderer2D::scoped_mask(const Texture& mask, Rectf dest, M
     return ClipGuard{this};
 }
 
-Texture Renderer2D::create_render_attachment(Vec2i size, TextureFormat format) {
+Texture Renderer2D::create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers) {
     if (size.x <= 0 || size.y <= 0)
         return {};
     try {
-        return _backend->create_render_attachment(size, format);
+        return _backend->create_render_attachment(size, format, array_layers);
     } catch (const std::exception& error) {
         KIN_LOG_ERROR_F("render", "create_render_attachment failed",
                         (LogFields{{.name = "error", .value = error.what()}}));

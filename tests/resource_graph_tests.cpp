@@ -102,6 +102,36 @@ int main() {
     geometry.resources[1].hdr = false;
     geometry.resources[1].format = TextureFormat::Rgba8;
     assert(!compiler.compile(geometry, graph_feature::attachments));
+    geometry.resources[1].format = TextureFormat::Rg16Float;
+    geometry.resources[0].array_layers = 4;
+    constexpr auto array_features = graph_feature::attachments | graph_feature::attachment_arrays;
+    const auto arrays = compiler.compile(geometry, array_features);
+    assert(arrays && arrays.slot_payload_bytes == 64 * 32 * 28);
+    assert(graph_resource_payload(geometry.resources[0]) == 64 * 32 * 4 * 4);
+    assert(!compiler.compile(geometry, graph_feature::attachments));
+    auto wrong_kind = geometry;
+    wrong_kind.resources[0].kind = GraphResourceKind::StorageTexture;
+    assert(!compiler.compile(wrong_kind, ~u64{0}));
+    auto overflow_array = geometry;
+    overflow_array.resources[0].size = {0x7fffffff, 0x7fffffff};
+    overflow_array.resources[0].array_layers = 4;
+    assert(!compiler.compile(overflow_array, array_features));
+    // One-layer arrays and 2D textures cannot share physical slots.
+    ResourceGraphDesc array_slots;
+    array_slots.resources = {{.name = "2d",
+                              .kind = GraphResourceKind::RenderAttachment,
+                              .format = TextureFormat::Depth32Float,
+                              .size = {8, 8}},
+                             {.name = "array",
+                              .kind = GraphResourceKind::RenderAttachment,
+                              .format = TextureFormat::Depth32Float,
+                              .size = {8, 8},
+                              .exported = true,
+                              .array_layers = 1}};
+    array_slots.passes = {{.name = "2d", .writes = {0}, .side_effect = true},
+                          {.name = "array", .writes = {1}, .after = {"2d"}}};
+    const auto distinct = compiler.compile(array_slots, array_features);
+    assert(distinct && distinct.slots.size() == 2);
     assert(texture_format_compressed(TextureFormat::Bc1RgbaUnorm));
     assert(texture_format_compressed(TextureFormat::Astc4x4RgbaSrgb));
     for (auto format : {TextureFormat::Rg16Float, TextureFormat::Rgba16Float, TextureFormat::Depth32Float,

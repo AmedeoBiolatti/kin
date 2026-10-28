@@ -90,6 +90,12 @@ void resources() {
         View3D absent;
         assert(!renderer.render_prepared(absent, {}) && !renderer.render_geometry_prepared({}, {}));
     }
+    if (!renderer.capabilities().sun_shadow_pass) {
+        const auto refused = renderer.render_sun_shadow({}, {}, {64, 64});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+    }
+    if (!renderer.capabilities().surface_pass)
+        assert(!renderer.render_surface({}, {}));
     const auto root = std::filesystem::temp_directory_path() /
                       ("kin-errors3d-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);

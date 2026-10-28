@@ -464,6 +464,13 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
             SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
                                          SDL_GPU_TEXTURETYPE_2D,
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
+        .render_attachment_arrays =
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
     };
 }
 
@@ -1377,7 +1384,9 @@ Texture GpuRenderer2DBackend::create_texture_compressed(const CompressedImage& i
 
 bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) {
     const auto* backend = as_gpu(texture.backend().get());
-    if (!backend || !backend->texture() || texture_format_compressed(backend->format())) {
+    if (!backend || !backend->texture() || backend->array_layers() ||
+        backend->format() == TextureFormat::Depth32Float || backend->format() == TextureFormat::Depth24Unorm ||
+        texture_format_compressed(backend->format())) {
         return false;
     }
     _device.update_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
@@ -1393,7 +1402,9 @@ bool GpuRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2
 bool GpuRenderer2DBackend::write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t /*bytes*/,
                                          const std::function<void(std::span<u8>)>& fill) {
     const auto* backend = as_gpu(texture.backend().get());
-    if (!backend || !backend->texture() || texture_format_compressed(backend->format())) {
+    if (!backend || !backend->texture() || backend->array_layers() ||
+        backend->format() == TextureFormat::Depth32Float || backend->format() == TextureFormat::Depth24Unorm ||
+        texture_format_compressed(backend->format())) {
         return false;
     }
     _device.write_texture(backend->texture().handle(), static_cast<u32>(at.x), static_cast<u32>(at.y),
@@ -2296,7 +2307,7 @@ ComputeShaderHandle GpuRenderer2DBackend::create_compute_shader(ShaderBlob spirv
     return ComputeShaderHandle{static_cast<u64>(_compute_pipelines.size())};
 }
 
-Texture GpuRenderer2DBackend::create_render_attachment(Vec2i size, TextureFormat format) {
+Texture GpuRenderer2DBackend::create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers) {
     if (size.x <= 0 || size.y <= 0 ||
         (format != TextureFormat::Rg16Float && format != TextureFormat::Rgba16Float &&
          format != TextureFormat::Depth32Float && format != TextureFormat::Depth24Unorm))
@@ -2306,10 +2317,15 @@ Texture GpuRenderer2DBackend::create_render_attachment(Vec2i size, TextureFormat
                                             ? SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET
                                             : SDL_GPU_TEXTUREUSAGE_COLOR_TARGET);
     const auto native = sdl_format(format);
-    if (!SDL_GPUTextureSupportsFormat(_device.handle(), native, SDL_GPU_TEXTURETYPE_2D, usage))
+    if (!SDL_GPUTextureSupportsFormat(_device.handle(), native,
+                                      array_layers ? SDL_GPU_TEXTURETYPE_2D_ARRAY : SDL_GPU_TEXTURETYPE_2D, usage))
         return {};
-    auto texture = _device.create_target(static_cast<u32>(size.x), static_cast<u32>(size.y), native, usage);
-    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(texture), false, ScaleMode::Nearest, format)};
+    auto texture = array_layers
+                       ? _device.create_target_array(static_cast<u32>(size.x), static_cast<u32>(size.y), array_layers,
+                                                     native, usage)
+                       : _device.create_target(static_cast<u32>(size.x), static_cast<u32>(size.y), native, usage);
+    return Texture{std::make_shared<gpu::GpuTextureBackend>(std::move(texture), false, ScaleMode::Nearest, format,
+                                                            false, array_layers)};
 }
 
 Texture GpuRenderer2DBackend::create_storage_texture(Vec2i size, TextureFormat format) {

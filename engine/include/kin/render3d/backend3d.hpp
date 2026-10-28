@@ -14,6 +14,7 @@
 #include <kin/render3d/scene3d.hpp>
 #include <kin/render3d/shadow_cascades3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
 #include <span>
@@ -73,6 +74,7 @@ struct RendererCapabilities3D {
     // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
     bool geometry_pass = false;
     bool shared_preparation = false;
+    bool surface_pass = false, sun_shadow_pass = false;
 };
 
 struct ViewOptions3D {
@@ -104,6 +106,21 @@ struct ViewOptions3D {
 struct GeometryTargets3D {
     Texture depth;   // TextureFormat::Depth32Float
     Texture normals; // TextureFormat::Rg16Float; same extent and device as depth
+};
+
+// A directional depth map and its projection metadata. The texture is mutable:
+// keep matching projection/depth versions, or use distinct persistent targets.
+struct SunShadow3D {
+    Texture depth; // sampled D32F 2D array, 1..max_shadow_cascades layers
+    ShadowCascades3D projection;
+};
+struct SurfaceTargets3D {
+    RenderTarget colour; // current Renderer2D working colour format
+    Texture depth;       // sampled D32F 2D, same extent; stores reverse-Z depth
+};
+struct SurfaceOptions3D {
+    Color background = colors::transparent;
+    const SunShadow3D* sun_shadow = nullptr; // null: no sun shadow; never generates maps implicitly
 };
 
 // What a pixel of a view shows (Renderer3D::pick): the mesh copy nearest the
@@ -206,6 +223,14 @@ public:
     }
     virtual bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) { return false; }
     virtual bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) {
+        return false;
+    }
+    virtual Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
+                                                    RenderDebugStats3D&) {
+        return {std::nullopt, {"sun shadow operation unavailable"}};
+    }
+    virtual bool render_surface(const SurfaceTargets3D&, IPreparedSceneBackend3D&, const SurfaceOptions3D&,
+                                RenderDebugStats3D&) {
         return false;
     }
     // What `pixel` of the view's last render shows; waits for the GPU.

@@ -52,7 +52,7 @@ Build and run `kin_ascii3d` for the public-API 3D → ASCII → output example. 
 
 The legacy 2D `RenderGraph` caches its dependency order through this compiler. Missing dependencies and cycles now throw an actionable error before any callback, instead of silently ignoring a dependency or recursing indefinitely. Toggle behaviour and pass statistics remain available.
 
-The native 3D migration currently exposes thirteen backend operations as dependency tokens. Their existing internal depth, shadow, GI, temporal and output work remains atomic and owns its resources. `Scene3D::debug.graph_reference` runs the original fixed order for parity testing. `RenderDebugStats3D` reports pass counts, cache reuse and CPU compilation/recording time. Stock transient allocation aliasing, independently replaceable internal geometry/shadow nodes and a general finite-propagation simulation are still separate work in the pipeline plan.
+The native 3D migration currently exposes thirteen backend operations as dependency tokens. Their existing internal depth, shadow, GI, temporal and output work remains atomic and owns its resources. `Scene3D::debug.graph_reference` runs the original fixed order for parity testing. `RenderDebugStats3D` reports pass counts, cache reuse and CPU compilation/recording time. Stock transient allocation aliasing, complete stock composition from public operations and a general finite-propagation simulation remain separate work. Standalone geometry, sun-shadow and mesh-surface operations are available below.
 
 ## Geometry operations and data attachments
 
@@ -89,7 +89,7 @@ vec3 decode_normal(vec2 e) {
 }
 ```
 
-Opaque and masked world meshes share the stock prepass recorder, including UV/vertex/instance alpha coverage and sampler overrides, skinning, retained batches, frustum culling, whole-mesh LOD and CPU/GPU cluster cuts. Flat meshes reconstruct normals from position derivatives. Blended meshes, wireframes, overlays, particles, material normal maps and material fragment effects are excluded. The operation performs no lighting, environment filtering, shadow rendering, GI, AO, TAA or postprocessing, and does not advance a stock view's jitter/history. Occlusion history is disabled. Culling/instance preparation is currently performed per geometry call; sharing prepared submissions between independently invoked stock/custom operations is a later optimization.
+Opaque and masked world meshes share the stock prepass recorder, including UV/vertex/instance alpha coverage and sampler overrides, skinning, retained batches, frustum culling, whole-mesh LOD and CPU/GPU cluster cuts. Flat meshes reconstruct normals from position derivatives. Blended meshes, wireframes, overlays, particles, material normal maps and material fragment effects are excluded. The operation performs no lighting, environment filtering, shadow rendering, GI, AO, TAA or postprocessing, and does not advance a stock view's jitter/history. Occlusion history is disabled. The scene overload prepares per call; `render_geometry_prepared()` shares the frame-scoped data described below.
 
 Targets must match in extent and belong to the renderer. They must have been allocated as render attachments: a sampled-only RG16F data texture is insufficient. Validation precedes command recording. A later GPU recording failure can leave partial output, consistent with graph execution's existing no-rollback contract. Retained `Texture` handles keep their allocations alive after graph resize/clear; rendering into the same handles replaces their contents.
 
@@ -127,4 +127,36 @@ The default admission limit is 32 MiB of preparation payload per handle. Packed 
 
 Preparation has an up-front CPU/memory cost and includes copies that may later be culled. It is useful when several consumers share a submission. A retained-only scene may already benefit from incremental caches and need no extra preparation. Measure total time including `prepare()`, separately from consumer recording. `preparation_records`/`preparation_skin_bounds` count build work; `shared_records`, `shared_uploads`, `shared_instance_bytes`, `shared_joint_uploads` and `shared_joint_bytes` describe reuse. `instance_upload_bytes`, `joint_upload_bytes` and `bounds_instance_tests` expose the work still performed. `shared_records` counts source records bound for culling/drawing, including subsequently culled copies; byte counters measure actual skipped uploads. Reading these counters does not trigger GPU readback.
 
-Separate public shadow and main-surface operations remain the next migration. `render_prepared()` currently consumes the whole stock pipeline, including its existing shadow, lighting and temporal operations.
+## Explicit sun shadows and mesh surfaces
+
+Native SDL_GPU exposes `render_sun_shadow()` and `render_surface()` as independent graph callbacks. Check `RendererCapabilities3D::sun_shadow_pass` / `surface_pass`. WebGL2 and SDL_Renderer reject these operations with owned diagnostics; they retain their existing stock renderer.
+
+`GraphResourceDesc::array_layers` defaults to zero (a 2D texture). A positive count declares an explicit 2D array, including a one-layer array. Arrays require `GraphResourceKind::RenderAttachment` and `graph_feature::attachment_arrays` / `Renderer2D::capabilities().render_attachment_arrays`. Direct allocation uses `create_render_attachment(size, format, layers)`. Payload budgets multiply by the layer count; slot compatibility and imports distinguish 2D textures from one-layer arrays. Custom shaders must declare the corresponding sampler type. Ordinary 2D uploads and 3D material texture slots do not accept arrays.
+
+A complete runnable example is [kin_surface3d](../tools/surface3d/main.cpp): graph-owned sun depth → mesh colour/depth → GPU ASCII → output, with no stock `View3D`. Prepare once after updating the scene and before executing the graph:
+
+```cpp
+// Resources: sun = D32F array, colour = working-colour target, depth = D32F 2D.
+// Declare sun's writer, surface's read of sun and writes of colour/depth,
+// and postprocessing's reads/writes in the graph.
+auto prepared = r3d.prepare(scene).value_or({});
+SunShadow3D shadow;
+// sun callback:
+auto result = r3d.render_sun_shadow(resources.texture(sun), prepared, receiver_size);
+if (!result) return false;
+shadow = *result;
+// surface callback:
+return bool(r3d.render_surface(
+    {resources.target(colour), resources.texture(depth)}, prepared,
+    {.background = colors::black, .sun_shadow = &shadow}));
+```
+
+`render_sun_shadow()` clears and writes a square, sampled D32F array with 1–4 layers. It fits the scene's sun against `shadow_area`; `receiver_size` supplies the camera aspect for cascades. The requested cascade count is limited by the supplied array capacity. The target's extent sets shadow resolution. Opaque/masked world casters, off-camera casters, skinning, retained instances and CPU/GPU LOD cuts use stock recording. Overlays and particle casters are excluded. Unused layers, including every layer of an inactive sun, clear to reverse-Z zero. This operation deliberately redraws rather than consulting the stock view's private shadow cache.
+
+The returned `SunShadow3D` holds the texture plus `ShadowCascades3D` projection/bias-scale metadata. It is a binding to mutable texture contents. Keep projection and depth versions together; use distinct persistent or ping-pong resources for history. A developer may supply a custom projection/map by constructing the same value. Finite matrices, positive texel/depth scales, valid cascade ranges, sampler format and ownership are checked before recording. Shadows use the stock comparison/PCF material interface; arbitrary lighting algorithms still require additional material hooks.
+
+`render_surface()` clears single-sample colour/depth and shades scene meshes with the exact unjittered camera projection. It includes stock materials/custom material shaders, opaque and masked draws, ordered transparency, wireframes, overlays, explicit environment lighting and unshadowed point/spot lights. Colour uses the current Renderer2D working format (including linear HDR); it performs no view tonemapping. Depth is stored for later graph consumers. Overlay depth uses the stock split range; blended materials test depth without writing it.
+
+Pass `sun_shadow = nullptr` to shade without sun shadows. No shadow map is generated implicitly. Scene switches for local/fill shadows, sky, fog, particles, AO, GI, TAA and postprocessing do not add work to this operation. Procedural sky lighting is also omitted; an explicitly supplied environment may be filtered on first use. These features and local-shadow inputs remain future public operations. Geometry/surface culling disables temporal occlusion, and neither operation advances a stock view's history or modifies its private shadow maps.
+
+Both operations consume the prepared handle's frame and source-lifetime contract. Targets/maps must belong to the renderer; surface attachment feedback through any material map is rejected before recording. Allocation or recording failure follows the graph's no-rollback contract. Keep all declared graph reads live through their consumers; projection metadata is ordinary callback data, while the graph tracks the matching depth texture. A finite-propagation light simulation needs explicit scene/light history and a bounded solver in addition to these rendering operations.

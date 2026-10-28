@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Expose explicit sun-shadow and mesh-surface operations for custom native 3D graphs, reusing prepared scene data.
+  Add typed array attachments and a shadow → surface → ASCII example, with explicit shadow inputs, stored depth,
+  HDR working colour and independent stock view history/cache ownership.
+
 - Add frame-scoped shared 3D preparation for standalone geometry and stock rendering, with bounded CPU payload,
   explicit source/pose/batch/frame invalidation, reusable instance/joint uploads and shared local-shadow inputs.
   Preserve separate camera/shadow visibility and view history; expose preparation/reuse counters and raw-span edit

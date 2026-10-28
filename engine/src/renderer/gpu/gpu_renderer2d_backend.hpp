@@ -37,10 +37,11 @@ class GpuTextureBackend : public ITextureBackend {
 public:
     // `mipmapped`: the texture has its mip chain already (a compressed one's levels).
     explicit GpuTextureBackend(GpuTexture texture, bool premultiplied = false, ScaleMode scale = ScaleMode::Nearest,
-                               TextureFormat format = TextureFormat::Rgba8, bool mipmapped = false)
+                               TextureFormat format = TextureFormat::Rgba8, bool mipmapped = false, u32 array_layers = 0)
         : ITextureBackend(ITextureBackend::Kind::Gpu), _texture(std::move(texture)), _mipmapped(mipmapped),
-          _premultiplied(premultiplied), _scale(scale), _format(format) {}
+          _premultiplied(premultiplied), _scale(scale), _format(format), _array_layers(array_layers) {}
     Vec2i size() const override { return {static_cast<i32>(_texture.width()), static_cast<i32>(_texture.height())}; }
+    u32 array_layers() const override { return _array_layers; }
     TextureFormat format() const override { return _format; }
     const GpuTexture& texture() const { return _texture; }
     // Puts `texture` in place of the current one (made mipmapped), returning
@@ -75,6 +76,7 @@ private:
     bool _premultiplied = false;
     mutable ScaleMode _scale = ScaleMode::Nearest;
     TextureFormat _format = TextureFormat::Rgba8;
+    u32 _array_layers = 0;
     mutable u64 _used_in_frame = 0;
 };
 // A storage buffer (kin/renderer/data_buffer.hpp).
@@ -208,7 +210,7 @@ public:
     bool reload_shader(ShaderHandle handle, const ShaderDesc& desc) override;
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv, const ShaderLayout& layout) override;
     Texture create_storage_texture(Vec2i size, TextureFormat format) override;
-    Texture create_render_attachment(Vec2i size, TextureFormat format) override;
+    Texture create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers) override;
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i groups, const ComputeBindings& bindings) override;
     DataBuffer create_data_buffer(std::size_t bytes, const void* data) override;
     bool update_data_buffer(const DataBuffer& buffer, std::size_t offset, std::size_t bytes, const void* data) override;

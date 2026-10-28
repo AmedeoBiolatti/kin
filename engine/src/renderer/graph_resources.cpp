@@ -9,7 +9,8 @@ u64 available_graph_features(const Renderer2D& renderer) {
     return (caps.render_targets ? graph_feature::raster : 0) | (caps.compute ? graph_feature::compute : 0) |
            (caps.data_buffers ? graph_feature::buffers : 0) | (caps.rendering_3d ? graph_feature::rendering3d : 0) |
            (caps.materials_2d ? graph_feature::shaders : 0) |
-           (caps.render_attachments ? graph_feature::attachments : 0);
+           (caps.render_attachments ? graph_feature::attachments : 0) |
+           (caps.render_attachment_arrays ? graph_feature::attachment_arrays : 0);
 }
 bool GraphResources::prepare(Renderer2D& renderer, const ResourceGraphDesc& desc, const CompiledResourceGraph& plan,
                              std::span<const GraphImport> imports) {
@@ -52,7 +53,8 @@ bool GraphResources::prepare(Renderer2D& renderer, const ResourceGraphDesc& desc
         const bool valid = value != imports.end() && (r.kind == GraphResourceKind::Buffer
                                                           ? value->buffer.valid() && value->buffer.size() == r.bytes
                                                           : value->texture && value->texture.size() == r.size &&
-                                                                value->texture.format() == r.format);
+                                                                value->texture.format() == r.format &&
+                                                                value->texture.array_layers() == r.array_layers);
         if (!valid) {
             _diagnostics = {r.name + ": missing or incompatible imported resource"};
             return false;
@@ -92,7 +94,7 @@ bool GraphResources::prepare(Renderer2D& renderer, const ResourceGraphDesc& desc
                 slot.texture = renderer.create_storage_texture(r.size, r.format);
                 break;
             case GraphResourceKind::RenderAttachment:
-                slot.texture = renderer.create_render_attachment(r.size, r.format);
+                slot.texture = renderer.create_render_attachment(r.size, r.format, r.array_layers);
                 break;
             case GraphResourceKind::Buffer:
                 slot.buffer = renderer.create_data_buffer(r.bytes);

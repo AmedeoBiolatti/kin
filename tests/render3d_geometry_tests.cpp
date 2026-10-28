@@ -262,6 +262,12 @@ void history(Fixture& f) {
     Scene3D scene;
     scene.taa.enabled = true;
     scene.ambient_occlusion.enabled = true;
+    SurfaceTargets3D surface{f.renderer.create_render_target(extent), f.targets.depth};
+    const auto sun = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 4);
+    Scene3D unrelated;
+    unrelated.lights.sun.direction = {-2, 1, 3};
+    unrelated.lights.shadow_cascades = 4;
+    assert(unrelated.draw(f.mesh, Mat4f::translation({1, 0, 0})));
     const auto shoot = [&](View3D& view) {
         f.renderer.clear(colors::black);
         assert(f.r3d.render(view, scene));
@@ -277,10 +283,16 @@ void history(Fixture& f) {
         assert(scene.draw(f.mesh, Mat4f::translation({f32(frame) * .02f, 0, 0})));
         auto expected = shoot(a);
         f.draw(scene);
+        f.renderer.clear(colors::black);
+        const auto prepared = f.r3d.prepare(unrelated).value_or({});
+        const auto shadow = f.r3d.render_sun_shadow(sun, prepared, extent).value_or({});
+        assert(shadow.depth && f.r3d.render_surface(surface, prepared, {.sun_shadow = &shadow}));
+        f.renderer.present();
         assert(shoot(b) == expected);
         assert(f.r3d.debug_stats().geometry_graph_reused == (frame > 0));
     }
-    std::cout << "geometry interleaving: exact stock pixels and unchanged temporal history\n";
+    std::cout
+        << "geometry/shadow/surface interleaving: exact stock pixels, private shadow cache and temporal history\n";
 }
 std::vector<u8> prepared_picture(Fixture& f, View3D& view, const Scene3D& scene, bool shared) {
     f.renderer.clear(colors::black);
@@ -414,6 +426,287 @@ void shared_preparation(Fixture& f) {
     std::cout << "shared preparation: exact pixels, independent cameras/resize, upload generations, budgets, edits and "
                  "lifetimes\n";
 }
+
+void public_passes(Fixture& f) {
+    assert(f.r3d.capabilities().surface_pass && f.r3d.capabilities().sun_shadow_pass);
+    assert(f.renderer.capabilities().render_attachment_arrays);
+    SurfaceTargets3D targets{f.renderer.create_render_target(extent), f.targets.depth};
+    const auto array = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 4);
+    const auto single = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 1);
+    assert(targets.colour && array && single && array.array_layers() == 4 && single.array_layers() == 1 &&
+           !targets.depth.array_layers());
+    ResourceGraphDesc imports;
+    imports.resources = {{.name = "sun",
+                          .kind = GraphResourceKind::RenderAttachment,
+                          .format = TextureFormat::Depth32Float,
+                          .size = {128, 128},
+                          .imported = true,
+                          .array_layers = 1},
+                         {.name = "output", .exported = true}};
+    imports.passes = {{.name = "sample", .reads = {0}, .writes = {1}}};
+    ResourceGraphCompiler import_compiler;
+    const auto import_plan = import_compiler.compile(imports, available_graph_features(f.renderer));
+    assert(import_plan);
+    GraphResources imported;
+    const auto plain_depth = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float);
+    for (const auto& t : {plain_depth, array}) {
+        const std::array input{GraphImport{.resource = 0, .texture = t}};
+        assert(!imported.prepare(f.renderer, imports, import_plan, input));
+    }
+    const std::array input{GraphImport{.resource = 0, .texture = single}};
+    assert(imported.prepare(f.renderer, imports, import_plan, input));
+    // 2D upload APIs cannot silently overwrite only layer zero of an array.
+    const std::array<u8, 4> pixel{};
+    assert(!f.renderer.update_texture(single, {0, 0}, {1, 1}, pixel.data()));
+    bool filled = false;
+    assert(!f.renderer.write_texture(single, {0, 0}, {1, 1}, [&](auto) { filled = true; }) && !filled);
+    const auto box = f.r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
+    const auto ground = f.r3d.create_mesh(meshes::box({8, .1f, 6})).value_or({});
+    auto stock = f.r3d.create_view(extent, {.samples = 1, .background = colors::black}).value_or({});
+    Scene3D scene;
+    scene.camera = Camera3D::look_at({3, 3, 6}, {0, .3f, 0}, 45);
+    scene.lights.shadow_area = {{-8, -2, -5}, {8, 6, 5}};
+    scene.lights.shadow_resolution = 128;
+    scene.lights.sun.direction = {2, 4, 1};
+    assert(box && ground && stock);
+    assert(scene.draw(ground, Mat4f::translation({0, -.1f, 0})));
+    assert(scene.draw(box, Mat4f::translation({0, .5f, 0}), {.color = Color::rgb(200, 100, 50)}));
+    const auto read = [&](const Texture& t) {
+        f.renderer.draw_texture(t, rect);
+        std::vector<u8> pixels;
+        Vec2i size;
+        assert(f.renderer.read_rgba(rect, pixels, size) && size == extent);
+        f.renderer.present();
+        return pixels;
+    };
+    const auto picture = [&](bool custom, bool shadows) {
+        f.renderer.clear(colors::black);
+        auto p = f.r3d.prepare(scene).value_or({});
+        assert(p);
+        if (!custom) {
+            assert(f.r3d.render_prepared(stock, p));
+            return read(stock.texture());
+        }
+        SunShadow3D shadow;
+        if (shadows) {
+            const auto result = f.r3d.render_sun_shadow(array, p, extent);
+            assert(result && result->projection.count == scene.lights.shadow_cascades);
+            shadow = *result;
+            assert(f.r3d.debug_stats().shadow_draws > 0 && f.r3d.debug_stats().particle_shadow_draws == 0 &&
+                   !f.r3d.debug_stats().shadow_cached && f.r3d.debug_stats().bounds_instance_tests == 0 &&
+                   f.r3d.debug_stats().device_waits == 0);
+        }
+        assert(
+            f.r3d.render_surface(targets, p, {.background = colors::black, .sun_shadow = shadows ? &shadow : nullptr}));
+        const auto& stats = f.r3d.debug_stats();
+        assert(stats.draws > 0 && stats.shadow_draws == 0 && stats.local_shadow_draws == 0 &&
+               stats.ao_dispatches == 0 && stats.taa_dispatches == 0 && stats.gi_dispatches == 0 &&
+               stats.particles_drawn == 0 && stats.device_waits == 0 && stats.taa_jitter == Vec2f{} &&
+               stats.bounds_instance_tests == 0);
+        return read(targets.colour.texture());
+    };
+    for (const u32 count : {1u, 4u}) {
+        scene.lights.shadow_cascades = count;
+        const auto expected = picture(false, true);
+        // Seed stock particle-caster scratch with another scene. Public mesh
+        // shadows must neither reuse it nor require its light-view mappings.
+        Scene3D particles;
+        particles.camera = scene.camera;
+        particles.lights = scene.lights;
+        const std::array sprites{ParticleSprite3D{.position = {0, 1, 0}, .size = 2}};
+        assert(particles.draw_particles({.casts_shadow = true}, sprites));
+        f.renderer.clear(colors::black);
+        assert(f.r3d.render(stock, particles) && f.r3d.debug_stats().particle_shadow_draws > 0);
+        f.renderer.present();
+        const auto actual = picture(true, true);
+        assert(actual == expected);
+    }
+    scene.lights.cache_shadows = true;
+    for (int i = 0; i < 3; ++i)
+        picture(false, true);
+    assert(f.r3d.debug_stats().shadow_cached);
+    const auto cached = picture(false, true);
+    picture(true, true);
+    assert(picture(false, true) == cached && f.r3d.debug_stats().shadow_cached);
+    scene.lights.cache_shadows = false;
+    const auto shadowed = picture(true, true);
+    const auto unshadowed = picture(true, false);
+    assert(shadowed != unshadowed);
+    scene.lights.sun_shadow_strength = 0;
+    assert(picture(false, false) == unshadowed);
+    scene.lights.sun_shadow_strength = 1;
+    // Texture/projection are explicit inputs: a developer can alter the projection.
+    f.renderer.clear(colors::black);
+    auto p = f.r3d.prepare(scene).value_or({});
+    auto shadow = f.r3d.render_sun_shadow(array, p, extent).value_or({});
+    assert(shadow.depth);
+    for (u32 k = 0; k < shadow.projection.count; ++k)
+        shadow.projection.cascade[k].view_projection.m[12] += 1000;
+    assert(f.r3d.render_surface(targets, p, {.background = colors::black, .sun_shadow = &shadow}));
+    assert(read(targets.colour.texture()) == unshadowed);
+    // Depth is stored and can be sampled after surface shading.
+    f.renderer.clear(colors::black);
+    p = f.r3d.prepare(scene).value_or({});
+    assert(f.r3d.render_surface(targets, p));
+    f.renderer.draw_shader_surface(rect, f.probe, {}, targets.depth, f.targets.normals);
+    std::vector<u8> depth_pixels;
+    Vec2i size;
+    assert(f.renderer.read_rgba(rect, depth_pixels, size));
+    f.renderer.present();
+    assert(at(depth_pixels, 80, 60) == 255 && at(depth_pixels, 0, 0) == 0);
+    // Unused layers, and every layer of an inactive sun, are initialized to far.
+    const auto bytes = geometry_probe("shadow_probe.frag.spv");
+    const auto probe = f.renderer.create_shader(
+        {.spirv = {bytes.data(), static_cast<u32>(bytes.size())}, .num_samplers = 1, .num_uniform_buffers = 1});
+    assert(probe);
+    for (const bool active : {true, false}) {
+        scene.lights.shadow_cascades = 1;
+        scene.lights.sun_shadow_strength = active ? 1 : 0;
+        f.renderer.clear(colors::black);
+        p = f.r3d.prepare(scene).value_or({});
+        const auto result = f.r3d.render_sun_shadow(array, p, extent);
+        assert(result && result->projection.count == (active ? 1u : 0u));
+        for (u32 layer = active ? 1 : 0; layer < 4; ++layer) {
+            ShaderParams params;
+            params.uniforms[0] = static_cast<f32>(layer);
+            f.renderer.draw_shader_surface(rect, probe, params, array);
+            std::vector<u8> pixels;
+            assert(f.renderer.read_rgba(rect, pixels, size));
+            for (std::size_t i = 0; i < pixels.size(); i += 4)
+                assert(pixels[i] == 0);
+        }
+        f.renderer.present();
+    }
+    scene.lights.sun_shadow_strength = 1;
+    // Single-layer arrays retain their array texture type and work with stock sampling.
+    f.renderer.clear(colors::black);
+    p = f.r3d.prepare(scene).value_or({});
+    auto one = f.r3d.render_sun_shadow(single, p, extent).value_or({});
+    assert(one.projection.count == 1 &&
+           f.r3d.render_surface(targets, p, {.background = colors::black, .sun_shadow = &one}));
+    const auto one_pixels = read(targets.colour.texture());
+    assert(one_pixels == picture(false, true));
+    scene.lights.sun_shadow_strength = 0;
+    f.renderer.clear(colors::black);
+    p = f.r3d.prepare(scene).value_or({});
+    assert(f.r3d.render_surface(targets, p, {.background = colors::black, .sun_shadow = &one}));
+    assert(read(targets.colour.texture()) == unshadowed);
+    scene.lights.sun_shadow_strength = .35f;
+    assert(picture(true, true) == picture(false, true));
+    scene.lights.sun_shadow_strength = 1;
+
+    // Materials and overlay ordering share the existing recorder. Local lights
+    // illuminate surfaces, but their private shadow cache is never consumed.
+    assert(scene.draw(box, Mat4f::translation({-.5f, .7f, .8f}),
+                      {.color = Color::rgba(30, 200, 100, 100), .blend = Blend3D::Alpha}));
+    assert(scene.draw(box, Mat4f::translation({.5f, .7f, .5f}),
+                      {.color = Color::rgba(100, 20, 10, 60), .blend = Blend3D::Additive}));
+    assert(scene.overlay().draw(f.mesh, Mat4f::scaling({.15f, .15f, .15f}), {.unlit = true}));
+    scene.lights.points.push_back({.position = {0, 2, 2}, .color = LinearRgb{2, 1, 1}, .radius = 10});
+    scene.lights.spots.push_back(
+        {.position = {0, 4, 2}, .direction = {0, -1, 0}, .color = LinearRgb{1, 2, 1}, .radius = 10});
+    assert(picture(true, true) == picture(false, true));
+    // Whole-mesh LOD, CPU/GPU cuts, retained instances, masks, flat geometry
+    // and skinning all use the same explicit maps and material recorder.
+    for (const bool clustered : {false, true}) {
+        const auto mesh =
+            f.r3d.create_mesh(meshes::sphere(1, 24, 12), {.levels = 3, .clusters = clustered}).value_or({});
+        assert(mesh);
+        for (const bool gpu : {false, true}) {
+            scene.clear();
+            scene.lod.enabled = true;
+            scene.debug.gpu_culling = gpu;
+            scene.debug.force_level = 0;
+            scene.lights.shadow_cascades = 4;
+            assert(scene.draw(mesh, Mat4f::scaling({1.5f, .7f, 1})));
+            assert(picture(true, true) == picture(false, true));
+        }
+    }
+    scene.lod.enabled = false;
+    scene.debug.force_level = -1;
+    scene.lights.shadow_cascades = 1;
+    auto flat = quad();
+    for (auto& vertex : flat.vertices)
+        vertex.normal = {};
+    auto skin = quad();
+    skin.skin.assign(skin.vertices.size(), {});
+    const auto flat_mesh = f.r3d.create_mesh(flat).value_or({});
+    const auto skin_mesh = f.r3d.create_mesh(skin).value_or({});
+    assert(flat_mesh && skin_mesh);
+    const std::array<Mat4f, 1> pose{Mat4f::translation({.2f, 0, 0})};
+    const auto batch =
+        InstanceBatch3D::create(flat_mesh,
+                                std::vector<MeshInstance3D>{MeshInstance3D{.transform = Mat4f::translation({-1, 0, 0})},
+                                                            MeshInstance3D{.transform = Mat4f::translation({1, 0, 0})}})
+            .value_or({});
+    scene.clear();
+    assert(batch && scene.draw_instanced(batch, {.double_sided = true}));
+    assert(scene.draw_skinned(skin_mesh, pose, Mat4f::translation({0, 0, .5f})));
+    assert(picture(true, true) == picture(false, true));
+    const std::array<u8, 8> mask{255, 255, 255, 0, 255, 255, 255, 255};
+    const auto cutout = f.renderer.create_texture_from_rgba(mask.data(), {2, 1});
+    scene.clear();
+    assert(cutout && scene.draw(f.mesh, {}, {.blend = Blend3D::Mask, .texture = cutout}));
+    assert(picture(true, true) == picture(false, true));
+    // Surface history/effect requests are opt-in graph operations, with no hidden
+    // allocation or work from the corresponding Scene3D switches.
+    const auto plain = picture(true, false);
+    const std::array ignored_sprites{ParticleSprite3D{.position = {0, 0, 1}, .size = 2}};
+    assert(scene.draw_particles({.casts_shadow = true}, ignored_sprites));
+    scene.taa.enabled = scene.ambient_occlusion.enabled = scene.contact_shadows.enabled = true;
+    scene.sky.enabled = scene.fog.enabled = scene.global_illumination.enabled = true;
+    assert(picture(true, false) == plain);
+    scene.taa.enabled = scene.ambient_occlusion.enabled = scene.contact_shadows.enabled = false;
+    scene.sky.enabled = scene.fog.enabled = scene.global_illumination.enabled = false;
+    f.renderer.clear(colors::black);
+    p = f.r3d.prepare(scene).value_or({});
+    assert(!f.r3d.render_sun_shadow(targets.depth, p, extent));
+    assert(!f.r3d.render_sun_shadow(array, p, {0, 1}));
+    assert(!f.r3d.render_surface({targets.colour, array}, p));
+    auto bad = f.r3d.render_sun_shadow(array, p, extent).value_or({});
+    bad.projection.cascade[0].view_projection.m[0] = std::numeric_limits<f32>::quiet_NaN();
+    assert(!f.r3d.render_surface(targets, p, {.sun_shadow = &bad}));
+    bad.projection.count = 5;
+    assert(!f.r3d.render_surface(targets, p, {.sun_shadow = &bad}));
+    bad.projection.count = 1;
+    bad.depth = targets.depth;
+    assert(!f.r3d.render_surface(targets, p, {.sun_shadow = &bad}));
+    f.renderer.present();
+    assert(!f.r3d.render_surface(targets, p) && !f.r3d.render_sun_shadow(array, p, extent));
+    // Feedback is rejected for every material slot, before a GPU pass starts.
+    for (u32 slot = 0; slot < 5; ++slot) {
+        Scene3D feedback;
+        Material3D material;
+        const std::array<Texture*, 5> maps{&material.texture, &material.metallic_roughness, &material.normal,
+                                           &material.occlusion, &material.emissive_texture};
+        *maps[slot] = targets.colour.texture();
+        assert(feedback.draw(f.mesh, {}, material));
+        f.renderer.clear(colors::black);
+        const auto input = f.r3d.prepare(feedback).value_or({});
+        assert(input && !f.r3d.render_surface(targets, input));
+        f.renderer.present();
+    }
+    // Queued commands retain every input/output even when the graph's handles
+    // are released before 2D is flushed and before GPU submission.
+    f.renderer.clear(colors::black);
+    p = f.r3d.prepare(scene).value_or({});
+    {
+        SurfaceTargets3D temporary{f.renderer.create_render_target(extent),
+                                   f.renderer.create_render_attachment(extent, TextureFormat::Depth32Float)};
+        const auto map = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 1);
+        const auto sampled = f.r3d.render_sun_shadow(map, p, extent).value_or({});
+        assert(sampled.depth &&
+               f.r3d.render_surface(temporary, p, {.background = colors::black, .sun_shadow = &sampled}));
+        f.renderer.draw_texture(temporary.colour.texture(), rect);
+    }
+    std::vector<u8> retained;
+    assert(f.renderer.read_rgba(rect, retained, size));
+    f.renderer.present();
+    assert(std::any_of(retained.begin(), retained.end(), [](u8 x) { return x > 0 && x < 255; }));
+    std::cout << "public passes: exact stock shadow/surface pixels, cascades, explicit projection, stored depth, "
+                 "array clears, transparency/overlay/local lights, exclusions and validation\n";
+}
+
 void prepared_shadows(Fixture& f) {
     const auto ground = f.r3d.create_mesh(meshes::box({8, .1f, 6})).value_or({});
     const auto box = f.r3d.create_mesh(meshes::box({1, 1, 1})).value_or({});
@@ -479,10 +772,17 @@ void prepared_local_shadows(Fixture& f) {
     };
     for (int i = 0; i < 3; ++i)
         frame();
-    const auto allocations = f.renderer.backend_stats().gpu_memory.allocations;
+    const auto before = f.renderer.backend_stats();
     for (int i = 0; i < 4; ++i)
         frame();
-    assert(f.renderer.backend_stats().gpu_memory.allocations == allocations);
+    const auto after = f.renderer.backend_stats();
+    // The shared upload staging buffer may shrink at a submission-window
+    // boundary inherited from earlier tests. Account for that maintenance
+    // separately; the stable geometry/local-shadow resources must not allocate,
+    // and this small workload must not grow staging capacity.
+    assert(after.gpu_memory.allocations - before.gpu_memory.allocations ==
+           after.upload_staging_allocations - before.upload_staging_allocations);
+    assert(after.upload_staging_bytes <= before.upload_staging_bytes);
     std::cout
         << "shared preparation: local shadow union parity, shared input buffers and stable allocations across frames\n";
 }
@@ -596,6 +896,7 @@ int main(int argc, char** argv) {
         history(f);
         prepared_work(f);
         shared_preparation(f);
+        public_passes(f);
         prepared_shadows(f);
         prepared_local_shadows(f);
         prepared_skin_history(f);
@@ -622,6 +923,20 @@ int main(int argc, char** argv) {
     assert(!f.r3d.render_prepared(own_view, foreign_prepared));
     assert(!f.r3d.render_geometry_prepared(f.targets, foreign_prepared));
     assert(!other3d.render_prepared(own_view, foreign_prepared)); // view belongs to the other device
+    const SurfaceTargets3D surface{f.renderer.create_render_target(extent), f.targets.depth};
+    const auto own_array = f.renderer.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 1);
+    assert(!f.r3d.render_surface(surface, foreign_prepared));
+    assert(!f.r3d.render_sun_shadow(own_array, foreign_prepared, extent));
+    Scene3D own_scene;
+    assert(own_scene.draw(f.mesh, {}));
+    const auto own_prepared = f.r3d.prepare(own_scene).value_or({});
+    const auto foreign_array = other.create_render_attachment({128, 128}, TextureFormat::Depth32Float, 1);
+    const auto foreign_depth = other.create_render_attachment(extent, TextureFormat::Depth32Float);
+    const auto foreign_colour = other.create_render_target(extent);
+    assert(own_prepared && !f.r3d.render_sun_shadow(foreign_array, own_prepared, extent));
+    assert(!f.r3d.render_surface({surface.colour, foreign_depth}, own_prepared));
+    assert(!f.r3d.render_surface({foreign_colour, surface.depth}, own_prepared));
+
     scene.clear();
     const u8 white[]{255, 255, 255, 255};
     const auto foreign_texture = other.create_texture_from_rgba(white, {1, 1});
