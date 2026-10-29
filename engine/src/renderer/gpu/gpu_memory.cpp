@@ -67,6 +67,36 @@ void unregister_memory_device(SDL_GPUDevice* device) {
     const std::lock_guard lock{mutex};
     devices.erase(device);
 }
+void release_device_allocations(SDL_GPUDevice* device) {
+    std::unordered_map<void*, Allocation> remaining;
+    {
+        const std::lock_guard lock{mutex};
+        auto found = devices.find(device);
+        if (found == devices.end())
+            return;
+        auto& ledger = found->second;
+        remaining.swap(ledger.handles);
+        ledger.stats.releases += ledger.stats.live_handles;
+        ledger.stats.live_handles = 0;
+        ledger.stats.texture_bytes = ledger.stats.buffer_bytes = ledger.stats.transfer_bytes = 0;
+        ledger.stats.pooled_texture_bytes = 0;
+    }
+    // SDL calls run outside the ledger lock. The owners' shared token is already null, so their later
+    // destructors skip these handles instead of releasing them twice or calling a destroyed device.
+    for (const auto& [handle, allocation] : remaining) {
+        switch (allocation.kind) {
+        case Kind::Texture:
+            SDL_ReleaseGPUTexture(device, static_cast<SDL_GPUTexture*>(handle));
+            break;
+        case Kind::Buffer:
+            SDL_ReleaseGPUBuffer(device, static_cast<SDL_GPUBuffer*>(handle));
+            break;
+        case Kind::Transfer:
+            SDL_ReleaseGPUTransferBuffer(device, static_cast<SDL_GPUTransferBuffer*>(handle));
+            break;
+        }
+    }
+}
 GpuMemoryStats gpu_memory_stats(SDL_GPUDevice* device) {
     const std::lock_guard lock{mutex};
     auto found = devices.find(device);

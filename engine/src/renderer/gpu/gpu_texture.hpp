@@ -9,10 +9,9 @@
 
 namespace kin::gpu {
 
-// A device handle shared by the device and every texture it creates. The device
-// nulls it when destroyed, so a texture that outlives its device (for example
-// one held by a static cache until exit) skips the release instead of calling
-// into a destroyed device.
+// A device handle shared by the device and its resources. Teardown nulls the token and releases the
+// remaining tracked allocations. Wrappers held past the renderer (for example in a static cache)
+// then skip release instead of releasing twice or calling into a destroyed device.
 using SharedDevice = std::shared_ptr<SDL_GPUDevice*>;
 
 // Released sampled textures kept for reuse, so a game that creates the same

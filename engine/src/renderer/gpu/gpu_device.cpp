@@ -210,6 +210,7 @@ GpuDevice::~GpuDevice() {
     *_shared = nullptr;
     SDL_WaitForGPUIdle(_device);
     release_upload_ring();
+    release_device_allocations(_device);
     if (_window) {
         SDL_ReleaseWindowFromGPUDevice(_device, _window);
     }

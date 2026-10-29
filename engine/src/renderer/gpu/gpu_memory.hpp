@@ -5,6 +5,8 @@
 namespace kin::gpu {
 void register_memory_device(SDL_GPUDevice* device);
 void unregister_memory_device(SDL_GPUDevice* device);
+// After invalidating the shared device token and finishing uploads: release allocations held past the renderer.
+void release_device_allocations(SDL_GPUDevice* device);
 GpuMemoryStats gpu_memory_stats(SDL_GPUDevice* device);
 u64 texture_payload_bytes(const SDL_GPUTextureCreateInfo& info);
 void pooled_texture(SDL_GPUDevice* device, SDL_GPUTexture* texture, bool pooled);

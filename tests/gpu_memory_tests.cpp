@@ -1,4 +1,5 @@
 #include "../engine/src/renderer/gpu/gpu_memory.hpp"
+#include "../engine/src/renderer/gpu/gpu_device.hpp"
 
 #include <cassert>
 #include <cstdlib>
@@ -79,5 +80,34 @@ int main() {
     // Buffers and textures can both outlive the renderer without releasing into a dead device.
     held_buffer = {};
     held_texture = {};
+    // Teardown must release every tracked kind even when its wrapper survives the renderer. Invalidate
+    // the owners first, as GpuDevice does, then verify that cleanup and late destruction are idempotent.
+    {
+        gpu::GpuDevice device{window};
+        auto token = device.shared();
+        SDL_GPUTextureCreateInfo texture_info{};
+        texture_info.type = SDL_GPU_TEXTURETYPE_2D;
+        texture_info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        texture_info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        texture_info.width = texture_info.height = 16;
+        texture_info.layer_count_or_depth = texture_info.num_levels = 1;
+        gpu::GpuTexture texture{token, gpu::tracked_create_texture(device.handle(), &texture_info), 16, 16,
+                                texture_info.format};
+        const SDL_GPUBufferCreateInfo buffer_info{.usage = SDL_GPU_BUFFERUSAGE_VERTEX, .size = 32};
+        gpu::GpuBuffer buffer{token, gpu::tracked_create_buffer(device.handle(), &buffer_info), 32};
+        const SDL_GPUTransferBufferCreateInfo transfer_info{.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD, .size = 32};
+        assert(texture && buffer && gpu::tracked_create_transfer(device.handle(), &transfer_info));
+        const auto before = gpu::gpu_memory_stats(device.handle());
+        assert(before.live_handles == 3 && before.payload_bytes() > 0);
+        *token = nullptr;
+        assert(SDL_WaitForGPUIdle(device.handle()));
+        gpu::release_device_allocations(device.handle());
+        const auto after = gpu::gpu_memory_stats(device.handle());
+        assert(after.live_handles == 0 && after.payload_bytes() == 0 && after.releases == before.releases + 3);
+        texture = {};
+        buffer = {};
+        gpu::release_device_allocations(device.handle());
+        assert(gpu::gpu_memory_stats(device.handle()).releases == after.releases);
+    }
     std::cout << "GPU memory: descriptor sizes, pool reuse, 100 resize cycles, plateau and late handle destruction\n";
 }
