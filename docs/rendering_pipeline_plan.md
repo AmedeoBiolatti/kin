@@ -621,6 +621,48 @@ Run native tests under the real selected backend and require GPU execution for r
 - [ ] Quality presets pass still, moving, dark-scene, memory and performance checks on the declared target tiers.
 - [ ] Required backend tests actually execute, and migration/packaging workflows are complete.
 
+## Optional adaptive voxel GI experiment
+
+Status: proposed, separate from the clipmap continuity fixes. Keep the current dense clipmap backend as the default
+and the comparison baseline until an alternative passes the same quality, movement and lifetime checks.
+
+Kin already increases voxel size with distance through clipmaps. The additional experiment is spatial adaptivity:
+allocate fine cells near relevant surfaces and detail, keep empty or demonstrably simple regions coarse, and retain
+a coarse representation farther away. Aim for world-stable coarse coverage over the known scene area, with fine
+camera-local refinement, so distant occluders do not disappear at a moving camera box. Keep a bounded memory budget
+and a smooth fallback when that budget cannot cover the requested area. Retain the regular irradiance-probe grids first; adaptive geometry storage
+and adaptive probe placement are separate changes and need separate measurements.
+
+1. **Measure the opportunity.** Record resident/occupied 8-cubed bricks, geometry and radiance bytes, probe bytes,
+   traversal steps, update work, CPU submission time and GPU time separately. Compare Sponza, Bistro, Yard and a
+   small emissive interior at 720p and 1440p, including moving cameras, teleports and geometry changes. Dense outdoor
+   foliage and almost-empty scenes should both be represented. Do not infer whole-renderer memory savings from GI
+   occupancy alone.
+2. **Sparse storage before adaptive resolution.** Prototype a bounded brick pool and page table using the existing
+   8-cubed dirty-work granularity, preserving current cell sizes and probe/ray budgets. Build coarse occupancy for
+   empty-space skipping. This isolates the cost/benefit of sparsity from the error introduced by merging geometry.
+   Compare a shallow hierarchy/page table against a compact linear octree; GPU traversal divergence, indirections,
+   texture filtering and rebuild cost can outweigh saved voxel work.
+3. **Adaptive leaves.** Refine using distance/ray footprint plus conservative geometry/visibility error and material
+   or emission variation. A large flat wall can be crucial to occlusion; low triangle count or low colour variation
+   alone is not a merge rule. Preserve thin occluders, openings, foliage coverage, two-sided surfaces and small bright
+   emitters. Coarser lighting stores must preserve energy and directional information rather than dropping detail
+   that changes a bounce. Keep larger nearby cells only where the error bound permits it.
+4. **Stable updates.** Use separate split/merge thresholds, minimum residence time, bounded upload/update work,
+   world-stable identities and a coarse fallback while children are prepared. Blend radiance across resolution
+   changes, but keep visibility conservative; blending away a wall is a light leak. Cache imported static geometry
+   separately from moving/skinned objects and test invalidation for edits, removals and material/emission changes.
+5. **Optional backend and acceptance.** Select explicitly through an experimental option/prototype harness. Report
+   fixed-memory quality and fixed-quality speed comparisons against dense clipmaps, including p95/p99 frame times,
+   startup/convergence, allocated and peak bytes, overflow/fallback counts and CPU/GPU work. Use both Cycles seeds
+   for the reference noise floor and retain moving clips: an attractive still does not establish temporal quality.
+   Test the largest supported scene against pool exhaustion and a dense worst case. Promote only after repeatable
+   benefits without regressions in leaks, popping, memory bounds, validation or supported GPU backends.
+
+Starting reference: [Laine and Karras, Efficient Sparse Voxel Octrees](https://research.nvidia.com/publication/2010-02_efficient-sparse-voxel-octrees).
+This is an implementation candidate, not evidence that an octree will be faster than Kin's current distance-field
+marching. Extending GI coverage and blending its edges remain necessary with either storage layout.
+
 ## References
 
 Internal starting points are the [render graph](../engine/include/kin/renderer/render_graph.hpp), [3D backend](../engine/include/kin/render3d/backend3d.hpp), [scene frame](../engine/src/scene/scene_frame3d.cpp), [ECS rendering](../engine/src/ecs/render3d.cpp), [asset library](../engine/include/kin/render3d/assets3d.hpp), [material assets](../engine/include/kin/render3d/material_asset3d.hpp), [export profile](gltf_profile3d.md), [asset preview](asset_preview.md), [shipping workflow](shipping.md) and [profiling guide](profiling.md).
