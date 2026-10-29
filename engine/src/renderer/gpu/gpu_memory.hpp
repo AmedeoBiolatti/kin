@@ -13,7 +13,10 @@ void pooled_texture(SDL_GPUDevice* device, SDL_GPUTexture* texture, bool pooled)
 SDL_GPUTexture* tracked_create_texture(SDL_GPUDevice*, const SDL_GPUTextureCreateInfo*);
 SDL_GPUBuffer* tracked_create_buffer(SDL_GPUDevice*, const SDL_GPUBufferCreateInfo*);
 SDL_GPUTransferBuffer* tracked_create_transfer(SDL_GPUDevice*, const SDL_GPUTransferBufferCreateInfo*);
+// Shader modules participate in device teardown, without contributing to descriptor-payload statistics.
+SDL_GPUShader* tracked_create_shader(SDL_GPUDevice*, const SDL_GPUShaderCreateInfo*);
 void tracked_release_texture(SDL_GPUDevice*, SDL_GPUTexture*);
 void tracked_release_buffer(SDL_GPUDevice*, SDL_GPUBuffer*);
 void tracked_release_transfer(SDL_GPUDevice*, SDL_GPUTransferBuffer*);
+void tracked_release_shader(SDL_GPUDevice*, SDL_GPUShader*);
 } // namespace kin::gpu

@@ -1660,10 +1660,14 @@ void test_gpu_meshes_outlive_renderer() {
     }
     kin::Mesh3D mesh;
     kin::View3D view;
+    kin::MaterialShader3D shader;
     {
         kin::Renderer3D r3d{*renderer};
         mesh = r3d.create_mesh(kin::meshes::sphere(1.0f)).value_or({});
         view = r3d.create_view({64, 64}).value_or({});
+        shader = r3d.compile_material_shader(std::filesystem::path{KIN_TEST_MATERIAL_SHADERS} / "custom_flat.frag.glsl")
+                     .value_or({});
+        assert(shader);
         kin::Scene3D scene;
         (void)scene.draw(mesh, Mat4f::identity());
         renderer->clear(kin::colors::black);
@@ -1675,6 +1679,7 @@ void test_gpu_meshes_outlive_renderer() {
     assert(mesh.valid() && view.valid());
     mesh = {};
     view = {};
+    shader = {};
 }
 
 // In a linear HDR scene the view follows (float targets), and colours come

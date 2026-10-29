@@ -2,6 +2,7 @@
 #include "embedded_gpu_shader.hpp"
 
 #include "gpu_device.hpp"
+#include "gpu_memory.hpp"
 
 #include <fstream>
 #include <stdexcept>
@@ -65,7 +66,7 @@ GpuShader GpuShader::from_bytes(GpuDevice& device, SDL_GPUShaderStage stage,
     info.num_samplers = samplers;
     info.num_storage_buffers = storage_buffers;
 
-    SDL_GPUShader* shader = SDL_CreateGPUShader(device.handle(), &info);
+    SDL_GPUShader* shader = tracked_create_shader(device.handle(), &info);
     if (!shader) {
         throw sdl_error("SDL_CreateGPUShader failed");
     }
@@ -93,7 +94,7 @@ GpuShader GpuShader::from_embedded(GpuDevice& device, SDL_GPUShaderStage stage, 
 
 void GpuShader::release() {
     if (_device && *_device && _shader) {
-        SDL_ReleaseGPUShader(*_device, _shader);
+        tracked_release_shader(*_device, _shader);
     }
     _device = nullptr;
     _shader = nullptr;

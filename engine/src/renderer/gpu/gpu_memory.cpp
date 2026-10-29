@@ -4,6 +4,7 @@
 #include <array>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace kin::gpu {
 namespace {
@@ -16,6 +17,7 @@ struct Allocation {
 struct Ledger {
     GpuMemoryStats stats{.available = true};
     std::unordered_map<void*, Allocation> handles;
+    std::unordered_set<SDL_GPUShader*> shaders;
 };
 std::mutex mutex;
 std::unordered_map<SDL_GPUDevice*, Ledger> devices;
@@ -69,6 +71,7 @@ void unregister_memory_device(SDL_GPUDevice* device) {
 }
 void release_device_allocations(SDL_GPUDevice* device) {
     std::unordered_map<void*, Allocation> remaining;
+    std::unordered_set<SDL_GPUShader*> shaders;
     {
         const std::lock_guard lock{mutex};
         auto found = devices.find(device);
@@ -76,6 +79,7 @@ void release_device_allocations(SDL_GPUDevice* device) {
             return;
         auto& ledger = found->second;
         remaining.swap(ledger.handles);
+        shaders.swap(ledger.shaders);
         ledger.stats.releases += ledger.stats.live_handles;
         ledger.stats.live_handles = 0;
         ledger.stats.texture_bytes = ledger.stats.buffer_bytes = ledger.stats.transfer_bytes = 0;
@@ -96,6 +100,8 @@ void release_device_allocations(SDL_GPUDevice* device) {
             break;
         }
     }
+    for (SDL_GPUShader* shader : shaders)
+        SDL_ReleaseGPUShader(device, shader);
 }
 GpuMemoryStats gpu_memory_stats(SDL_GPUDevice* device) {
     const std::lock_guard lock{mutex};
@@ -195,5 +201,30 @@ void tracked_release_buffer(SDL_GPUDevice* d, SDL_GPUBuffer* h) {
 void tracked_release_transfer(SDL_GPUDevice* d, SDL_GPUTransferBuffer* h) {
     released(d, h);
     SDL_ReleaseGPUTransferBuffer(d, h);
+}
+SDL_GPUShader* tracked_create_shader(SDL_GPUDevice* device, const SDL_GPUShaderCreateInfo* info) {
+    SDL_GPUShader* shader = SDL_CreateGPUShader(device, info);
+    try {
+        const std::lock_guard lock{mutex};
+        if (shader) {
+            auto found = devices.find(device);
+            if (found != devices.end())
+                found->second.shaders.insert(shader);
+        }
+    } catch (...) {
+        if (shader)
+            SDL_ReleaseGPUShader(device, shader);
+        throw;
+    }
+    return shader;
+}
+void tracked_release_shader(SDL_GPUDevice* device, SDL_GPUShader* shader) {
+    {
+        const std::lock_guard lock{mutex};
+        auto found = devices.find(device);
+        if (found != devices.end())
+            found->second.shaders.erase(shader);
+    }
+    SDL_ReleaseGPUShader(device, shader);
 }
 } // namespace kin::gpu
