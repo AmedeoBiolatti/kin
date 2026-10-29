@@ -334,8 +334,15 @@ bool Renderer2D::read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& ou
 }
 
 u64 Renderer2D::request_read_rgba(Rectf logical_region) {
+    return request_read_rgba(logical_region, true);
+}
+
+u64 Renderer2D::request_read_rgba(Rectf logical_region, bool allow_wait_fallback) {
     if (const u64 ticket = _backend->request_read_rgba(logical_region)) {
         return ticket;
+    }
+    if (!allow_wait_fallback) {
+        return 0;
     }
     WaitedRead read{.ticket = waited_read | _next_waited_read++};
     if (!_backend->read_rgba(logical_region, read.pixels, read.size)) {

@@ -418,6 +418,31 @@ Status3D Renderer3D::render_geometry_prepared(const GeometryTargets3D& targets, 
     return status3d(ok, _errors);
 }
 
+Status3D Renderer3D::render_visibility(const VisibilityTargets3D& targets, const PreparedScene3D& prepared,
+                                       const VisibilityOptions3D& options) {
+    _errors.clear();
+    _stats = {};
+    const auto fail = [&](const char* message) {
+        fail3d(_errors, "Renderer3D::render_visibility", message);
+        return status3d(false, _errors);
+    };
+    if (!_backend || !_backend->capabilities().visibility_pass)
+        return fail("standalone visibility passes are unavailable on this backend");
+    if (options.target_id == ~0u ||
+        (options.ignored_id && (*options.ignored_id == ~0u || *options.ignored_id == options.target_id)))
+        return fail("target and ignored IDs must be distinct and cannot be UINT32_MAX");
+    if (!targets.depth || !targets.mask || targets.depth.format() != TextureFormat::Depth32Float ||
+        targets.mask.format() != TextureFormat::Rgba16Float || targets.depth.size() != targets.mask.size() ||
+        targets.depth.size().x <= 0 || targets.depth.size().y <= 0)
+        return fail("requires matching D32F depth and RGBA16F mask render attachments");
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = prepared.backend() && _backend->render_visibility(targets, *prepared.backend(), options, _stats);
+    _stats.cpu_ms = std::chrono::duration<f64, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (!ok)
+        return fail("invalid, edited, expired or foreign prepared submission/targets, or GPU recording failed");
+    return status3d(true, _errors);
+}
+
 Result3D<SunShadow3D> Renderer3D::render_sun_shadow(const Texture& depth, const PreparedScene3D& prepared,
                                                     Vec2i receiver) {
     _errors.clear();

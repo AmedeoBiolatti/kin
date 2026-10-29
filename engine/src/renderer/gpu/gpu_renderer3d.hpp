@@ -388,6 +388,8 @@ public:
                                                      RenderDebugStats3D&) override;
     bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
     bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) override;
+    bool render_visibility(const VisibilityTargets3D&, IPreparedSceneBackend3D&, const VisibilityOptions3D&,
+                           RenderDebugStats3D&) override;
     Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,
                                             RenderDebugStats3D&) override;
     Result3D<LocalShadows3D> render_local_shadows(const Texture&, IPreparedSceneBackend3D&,
@@ -413,7 +415,19 @@ private:
     bool render_scene(IViewBackend3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
     bool render_geometry_scene(const GeometryTargets3D&, const Scene3D&, RenderDebugStats3D&, GpuPreparedScene3D*);
     // In the order a scene's draws are made (shadow, pick and the occlusion's pre-pass are passes of their own).
-    enum class Pass : u8 { Opaque, Wire, Alpha, Additive, Shadow, Pick, Prepass, Occluder, Reactive, ReactiveWire };
+    enum class Pass : u8 {
+        Opaque,
+        Wire,
+        Alpha,
+        Additive,
+        Shadow,
+        Pick,
+        Prepass,
+        Occluder,
+        Reactive,
+        ReactiveWire,
+        Visibility
+    };
     enum class Unlit : u8 { Off, Colour, Textured };
     // (Re)makes `view`'s targets for its size, samples and HDR, in the colour
     // format the 2D backend draws in now.
@@ -697,12 +711,13 @@ private:
     bool _unlit_available = false;
     GpuShader _unlit_vertex_shader, _unlit_textured_vertex_shader;
     GpuShader _unlit_shader, _unlit_textured_shader, _unlit_mask_shader, _unlit_textured_mask_shader;
-    GpuShader _shadow_shader;                  // shadow.frag
-    GpuShader _shadow_vertex_shader;           // shadow.vert
-    GpuShader _fullscreen_shader;              // fullscreen.vert
-    GpuShader _bloom_shader;                   // bloom.frag
-    GpuShader _output_shader;                  // view_output.frag
-    GpuShader _pick_shader;                    // pick.frag
+    GpuShader _shadow_shader;        // shadow.frag
+    GpuShader _shadow_vertex_shader; // shadow.vert
+    GpuShader _fullscreen_shader;    // fullscreen.vert
+    GpuShader _bloom_shader;         // bloom.frag
+    GpuShader _output_shader;        // view_output.frag
+    GpuShader _pick_shader;          // pick.frag
+    GpuShader _visibility_shader, _visibility_mask_shader;
     GpuShader _shadow_mask_shader;             // shadow_mask.frag
     GpuShader _shadow_mask_vertex_shader;      // shadow_mask.vert
     GpuShader _pick_mask_shader;               // pick_mask.frag

@@ -94,6 +94,7 @@ struct RenderDebugStats3D : RenderStats3D {
     // stayed), and, when it did, the blocks of 8 x 8 x 8 voxels it made, the copies and triangles it voxelized and its
     // compute dispatches.
     u32 gi_voxels = 0;
+    u32 visibility_draws = 0, visibility_instances = 0;
     u32 gi_levels = 0;
     bool gi_built = false;
     u32 gi_blocks = 0;

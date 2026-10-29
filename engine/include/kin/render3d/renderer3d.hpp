@@ -163,6 +163,9 @@ public:
     Result3D<PreparedScene3D> prepare(const Scene3D& scene, const PrepareOptions3D& options = {});
     Status3D render_prepared(View3D& view, const PreparedScene3D& prepared);
     Status3D render_geometry_prepared(const GeometryTargets3D& targets, const PreparedScene3D& prepared);
+    // Exact, unjittered source-camera projection. Reuses preparation, culling, LOD, skinning and alpha cutouts.
+    // No stock colour, lights, GI, AO, shadows, TAA, particles or readback; does not advance any View3D history.
+    Status3D render_visibility(const VisibilityTargets3D&, const PreparedScene3D&, const VisibilityOptions3D& = {});
     // Directional shadow rasterization into graph-owned D32F array layers. The
     // receiver extent controls cascade fitting; no colour or history is rendered.
     Result3D<SunShadow3D> render_sun_shadow(const Texture& depth_array, const PreparedScene3D&, Vec2i receiver_size);

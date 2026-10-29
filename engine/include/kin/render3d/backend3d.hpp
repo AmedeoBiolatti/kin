@@ -17,6 +17,7 @@
 #include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -73,6 +74,7 @@ struct RendererCapabilities3D {
     bool software = false;
     // Standalone opaque/cutout geometry into caller-owned D32F + RG16F targets.
     bool geometry_pass = false;
+    bool visibility_pass = false; // standalone target-ID mask, without stock lighting/history
     bool shared_preparation = false;
     bool material_inputs = false;
     bool surface_pass = false, sun_shadow_pass = false, local_shadow_pass = false;
@@ -109,6 +111,18 @@ struct ViewOptions3D {
 struct GeometryTargets3D {
     Texture depth;   // TextureFormat::Depth32Float
     Texture normals; // TextureFormat::Rg16Float; same extent and device as depth
+};
+
+// A binary, linear target-ID mask (RGB 1 for the nearest target, 0 otherwise).
+// Opaque/masked world meshes occlude; blended meshes, overlays and particles do not.
+// IDs are MeshInstance3D::id; give the target a distinct ID. UINT32_MAX is reserved.
+struct VisibilityTargets3D {
+    Texture depth; // D32F, single-sample
+    Texture mask;  // RGBA16F, same extent/device; both must be render attachments
+};
+struct VisibilityOptions3D {
+    u32 target_id = 1;
+    std::optional<u32> ignored_id; // e.g. the observer's own body; ignored fragments write no depth
 };
 
 // A directional depth map and its projection metadata. The texture is mutable:
@@ -277,6 +291,10 @@ public:
     }
     virtual bool render_prepared(IViewBackend3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) { return false; }
     virtual bool render_geometry_prepared(const GeometryTargets3D&, IPreparedSceneBackend3D&, RenderDebugStats3D&) {
+        return false;
+    }
+    virtual bool render_visibility(const VisibilityTargets3D&, IPreparedSceneBackend3D&, const VisibilityOptions3D&,
+                                   RenderDebugStats3D&) {
         return false;
     }
     virtual Result3D<SunShadow3D> render_sun_shadow(const Texture&, IPreparedSceneBackend3D&, Vec2i,

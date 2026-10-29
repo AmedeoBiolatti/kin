@@ -57,6 +57,7 @@ PATTERNS = (
     "tools/outline3d/*.*pp",
     "tools/surface3d/*.*pp",
     "tools/slowlight3d/*.*pp",
+    "tools/vision3d/*.*pp",
     "tools/reference/kin_reference.cpp",
 )
 

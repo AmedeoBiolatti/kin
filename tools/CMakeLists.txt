@@ -9,6 +9,15 @@ target_compile_options(kin_pack PRIVATE
 kin_enable_release_optimizations(kin_pack)
 
 if(KIN_EXPERIMENTAL_3D)
+    add_executable(kin_vision3d vision3d/main.cpp)
+    target_link_libraries(kin_vision3d PRIVATE kin::engine)
+    kin_compile_glsl(_vision_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/vision3d/shaders"
+        SOURCES vision3d/reduce.comp.glsl vision3d/pack.frag.glsl vision3d/show.frag.glsl)
+    kin_embed_files(kin_vision3d NAME vision3d_shader FILES ${_vision_spv})
+    if(BUILD_TESTING AND KIN_HAS_GPU_RENDERER AND _vision_spv)
+        add_test(NAME kin-vision3d-graph COMMAND kin_vision3d --test)
+        set_tests_properties(kin-vision3d-graph PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    endif()
     # Standalone experiment: solver/history/shaders stay under tools/slowlight3d.
     add_executable(kin_slowlight3d slowlight3d/main.cpp)
     target_link_libraries(kin_slowlight3d PRIVATE kin::engine)

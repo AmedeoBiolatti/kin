@@ -260,6 +260,8 @@ public:
     // once the GPU has drawn it, a frame or two later (a backend that can only wait reads them here, with read_rgba).
     // Returns the read's ticket.
     u64 request_read_rgba(Rectf logical_region);
+    // false returns 0 instead of using a synchronous fallback (including on read setup failure).
+    u64 request_read_rgba(Rectf logical_region, bool allow_wait_fallback);
     // The pixels of `ticket`'s read once they have arrived (true: the ticket is spent; `out` empty when the read
     // failed), false until then. `wait`: waits for them (taken a fixed number of frames after the request, a
     // deterministic run gets them at the same frame whatever the GPU's speed; two or three frames on, they are there).

@@ -453,6 +453,11 @@ void test_facade_with_fake_backend() {
     assert(renderer.take_read_rgba(ticket, read_pixels, read_size));
     assert(read_pixels.empty());
 
+    // Explicitly nonblocking consumers must not silently fall back to a blocking read.
+    const auto readbacks_before = raw->readbacks;
+    assert(renderer.request_read_rgba({0, 0, 1, 1}, false) == 0);
+    assert(raw->readbacks == readbacks_before);
+
     {
         auto viewport = renderer.scoped_viewport({1.0f, 2.0f, 3.0f, 4.0f});
         assert(raw->viewport_pushes == 1);

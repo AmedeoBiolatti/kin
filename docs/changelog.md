@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Optional native visibility masks reuse prepared world data across camera graphs, retaining skinning/cutouts
+  without GI, shadows or temporal history. `kin_vision3d` demonstrates budgeted asynchronous observations.
+- Pixel readback can explicitly refuse a synchronous fallback; existing one-argument calls retain their behaviour.
+
 - Add scene-independent rendering evaluation jobs for raw performance, captures,
   Cycles references, perceptual/temporal scoring and persistent-view memory stress.
   Include Sponza, Yard, optional external Bistro and custom command adapters;

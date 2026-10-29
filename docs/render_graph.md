@@ -164,6 +164,73 @@ The default admission limit is 32 MiB of preparation payload per handle. Packed 
 
 Preparation has an up-front CPU/memory cost and includes copies that may later be culled. It is useful when several consumers share a submission. A retained-only scene may already benefit from incremental caches and need no extra preparation. Measure total time including `prepare()`, separately from consumer recording. `preparation_records`/`preparation_skin_bounds` count build work; `shared_records`, `shared_uploads`, `shared_instance_bytes`, `shared_joint_uploads` and `shared_joint_bytes` describe reuse. `instance_upload_bytes`, `joint_upload_bytes` and `bounds_instance_tests` expose the work still performed. `shared_records` counts source records bound for culling/drawing, including subsequently culled copies; byte counters measure actual skipped uploads. Reading these counters does not trigger GPU readback.
 
+## Multiple cameras and visibility masks
+
+A scene can feed independent camera graphs in the same GPU frame. Prepare its world data once, change
+`scene.camera` between consumers, and restore it before recording the main view. Culling, projection and LOD are
+per operation; changing a camera does not recompile a structural graph or edit the prepared geometry. Separate
+stock views own their GI/TAA history. Sequential sensor graphs can reuse a small depth/mask pair after reducing
+each camera's result; simultaneously retained images need separate resources.
+
+Native `Renderer3D::render_visibility(targets, prepared, options)` exposes a lightweight target-ID pass. Check
+`capabilities().visibility_pass`. It writes a single-sample **D32F depth + linear RGBA16F mask**, of matching size
+on the renderer's device. Mask RGB is one for the nearest target fragment and zero for occluders/background.
+It uses the prepared source's current, exact unjittered camera; the caller's camera range/FOV apply normally.
+
+```cpp
+// target_id is MeshInstance3D::id (also the id argument to Scene3D::draw).
+const VisibilityOptions3D query{.target_id = player_id, .ignored_id = enemy_body_id};
+scene.camera = enemy_camera;
+const auto observed = r3d.render_visibility({depth, mask}, prepared, query);
+scene.camera = main_camera;
+if (!observed) return;
+if (!r3d.render_prepared(main_view, prepared)) return;
+// Submit/read results only after every consumer of this frame's preparation.
+```
+
+Assign a distinct target ID; all of a model's parts may share it. Unassigned world objects can keep ID zero.
+`UINT32_MAX` is reserved, and an ignored ID must differ from the target. Ignored fragments write neither mask nor
+depth, allowing a sensor to exclude its own body. Opaque and alpha-masked world meshes preserve skinning, UV/alpha
+cutouts, imported samplers, material-sidedness, retained copies and LOD/cluster selection. Blended/additive meshes,
+wireframes, overlays and particles do not occlude this pass. Material fragment effects and custom displacement
+are not evaluated. Use suitable proxy geometry when gameplay visibility needs a different policy.
+
+There is no lighting, GI, AO, shadows, TAA or postprocessing, no main-view history advance and no readback inside
+the operation. Invalid/expired/foreign inputs and recording failures return diagnostics rather than an occluded
+observation. `debug_stats().visibility_draws` and `visibility_instances` describe its geometry work. Unsupported
+backends, including WebGL2, report unavailable; stock rendering keeps its existing behaviour.
+
+The optional [vision example](../tools/vision3d) combines a camera graph (mask → GPU pixel count → tiny byte atlas)
+with the normal main-view graph:
+
+```sh
+<native-build>/bin/kin_vision3d
+<native-build>/bin/kin_vision3d --resolution 128 --budget 2
+<native-build>/bin/kin_vision3d --frames 120 --capture vision.png
+<native-build>/bin/kin_vision3d --test
+```
+
+SPACE toggles cover; ESC closes the example. The top image is the normal camera, the bottom three images are
+front/flank/rear enemy masks, with unknown/occluded/visible indicators and pixel-count bars. The optional scheduler
+in `tools/vision3d/vision.hpp` belongs to the example, not the engine's AI/runtime systems. It admits at most
+`views_per_batch` observers (default four, rotating fairly) and `max_pending` asynchronous batches (default three).
+Its maximum mask extent is 256 × 256. No room in the pending queue means no new observation, not invisibility.
+
+`Graph::record(scene, prepared, requests, frame)` requires the **same source scene passed to prepare** and records
+only; `submit()` runs once after main/observer consumers. It requests one small readback, four alpha bytes per
+observer, without downloading the mask. Using alpha preserves exact integer counts through gamma/linear/HDR
+colour targets. `Renderer2D::request_read_rgba(rect, false)` explicitly refuses a synchronous fallback, returning
+zero on unsupported/read-setup failure. The original one-argument API retains its existing fallback behaviour.
+`poll()` never waits and returns the original token/generation, source frame, camera, target ID, count and validity.
+Failed reads are unknown. Completion can take multiple frames; callers discard stale identities and choose their
+own age limits, thresholds and hysteresis. Destruction drains at most the configured pending reads and can wait;
+the renderers must outlive the scheduler. Call `prepare()` before scene preparation after a working-space change.
+
+Pixel counts measure rasterized geometric visibility at the chosen resolution/LOD, not lighting-based perception
+or an exact visible-area fraction. Small targets/thin gaps can be missed. Filter candidate observers with distance
+and FOV first, bound the update rate, and compare the total submission cost against physics raycasts. Gameplay
+decisions and confidence policies stay outside the renderer.
+
 ## Explicit sun shadows and mesh surfaces
 
 Native SDL_GPU exposes `render_sun_shadow()` and `render_surface()` as independent graph callbacks. Check `RendererCapabilities3D::sun_shadow_pass` / `surface_pass`. WebGL2 and SDL_Renderer reject these operations with owned diagnostics; they retain their existing stock renderer.

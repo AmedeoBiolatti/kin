@@ -974,6 +974,21 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: meshes not drawn", (LogFields{{.name = "reason", .value = e.what()}}));
     }
+    try {
+        _visibility_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "visibility.frag.spv", 2, 0);
+        _visibility_mask_shader =
+            GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "visibility_mask.frag.spv", 2, 1);
+        _capabilities.visibility_pass =
+            bool(_visibility_shader) && bool(_visibility_mask_shader) && bool(_vertex_shader) &&
+            SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
+            SDL_GPUTextureSupportsFormat(handle, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D,
+                                         SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER);
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: visibility masks unavailable",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+    }
     {
         try {
             _indexed_vertex =
@@ -1593,19 +1608,22 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     }
     if (pass == Pass::Prepass)
         return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed);
-    if (pass == Pass::Pick) {
+    if (pass == Pass::Pick || pass == Pass::Visibility) {
         // The pick fragment shaders read vWorld and vId, which mesh.vert and mesh_skinned.vert both write.
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = (indexed   ? _indexed_vertex
-                                                                : skinned ? _mesh_skinned_vertex_shader
-                                                                          : _vertex_shader)
-                                                                   .handle(),
-                                                     .fragment = (mask ? _pick_mask_shader : _pick_shader).handle(),
-                                                     .blend = GpuBlendMode::Replace,
-                                                     .format = pick_format,
-                                                     .layout = layout,
-                                                     .depth_stencil = _depth_format,
-                                                     .depth = GpuDepthTest::TestWrite,
-                                                     .cull = cull ? GpuCull::Back : GpuCull::None});
+        return _owner->_pipelines.get(
+            GpuPipelineKey{.vertex = (indexed   ? _indexed_vertex
+                                      : skinned ? _mesh_skinned_vertex_shader
+                                                : _vertex_shader)
+                                         .handle(),
+                           .fragment = (pass == Pass::Visibility ? (mask ? _visibility_mask_shader : _visibility_shader)
+                                                                 : (mask ? _pick_mask_shader : _pick_shader))
+                                           .handle(),
+                           .blend = GpuBlendMode::Replace,
+                           .format = pass == Pass::Visibility ? format : pick_format,
+                           .layout = layout,
+                           .depth_stencil = pass == Pass::Visibility ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : _depth_format,
+                           .depth = GpuDepthTest::TestWrite,
+                           .cull = cull ? GpuCull::Back : GpuCull::None});
     }
     // Opaque: written over what is there, alpha and all; transparent: blended,
     // tested against the depth but not writing it; wireframes over the faces.
@@ -10995,6 +11013,151 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
             view->_pick_valid = true;
         }
     }
+}
+
+bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPreparedSceneBackend3D& input,
+                                      const VisibilityOptions3D& options, RenderDebugStats3D& stats) {
+    auto* prepared = dynamic_cast<GpuPreparedScene3D*>(&input);
+    if (!prepared || prepared->owner != this || !prepared->valid() || !_capabilities.visibility_pass)
+        return false;
+    const auto* depth = dynamic_cast<const GpuTextureBackend*>(targets.depth.backend().get());
+    const auto* mask = dynamic_cast<const GpuTextureBackend*>(targets.mask.backend().get());
+    const auto valid = [&](const GpuTextureBackend* t, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage) {
+        return t && t->texture() && t->texture().belongs_to(_device->handle()) && t->texture().format() == format &&
+               (t->texture().usage() & usage) == usage;
+    };
+    if (targets.depth.array_layers() || targets.mask.array_layers() ||
+        !valid(depth, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        !valid(mask, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+               SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) ||
+        depth->size() != mask->size())
+        return false;
+    const auto& camera = prepared->sources[0].scene->camera;
+    if (!(camera.z_near > 0) || !(camera.z_far > camera.z_near))
+        return false;
+    const auto projection = camera.view_projection(f32(depth->size().x) / f32(depth->size().y));
+    for (const auto value : projection.m)
+        if (!std::isfinite(value))
+            return false;
+    for (const auto& draw : prepared->sources[0].scene->draws()) {
+        if (draw.material.blend != Blend3D::Mask || !draw.material.texture)
+            continue;
+        const auto& source = draw.material.texture;
+        const auto* texture = dynamic_cast<const GpuTextureBackend*>(source.backend().get());
+        if (source == targets.mask || source == targets.depth || !texture ||
+            !texture->texture().belongs_to(_device->handle()) || source.array_layers())
+            return false;
+    }
+    const auto waits = _device->idle_waits();
+    const auto pipelines = _owner->_pipelines.size();
+    collect_mesh_buffers();
+    GpuView3D scratch;
+    scratch._size = depth->size();
+    FrameCtx ctx{&scratch, *prepared->sources[0].scene, stats};
+    ctx.prepared = prepared;
+    ctx.geometry_only = true;
+    _local_views.clear();
+    _particle_batches.clear();
+    setup_frame(ctx);
+    cull_and_upload(ctx);
+    order_draws(ctx);
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    ctx.commands = _owner->_frame->command_buffer();
+    ctx.storage = _instances ? _instances->handle() : nullptr;
+    ctx.joints = _joints ? _joints->handle() : nullptr;
+    ctx.joint_offsets = _joint_offsets ? _joint_offsets->handle() : nullptr;
+    _owner->retain(targets.depth);
+    _owner->retain(targets.mask);
+    cluster_pass_gpu(ctx, 0);
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = mask->texture().handle();
+    colour.load_op = SDL_GPU_LOADOP_CLEAR;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = true;
+    const auto depth_info = depth_target(depth->texture().handle(), SDL_GPU_STOREOP_STORE, true);
+    bool complete = false;
+    if (auto* picking = SDL_BeginGPURenderPass(ctx.commands, &colour, 1, &depth_info)) {
+        complete = true;
+        auto* commands = ctx.commands;
+        auto* storage = ctx.storage;
+        auto* cluster_index = cluster_index_buffer();
+        set_viewport(picking, scratch._size.x, scratch._size.y);
+        DrawUniforms u{};
+        std::memcpy(u.view_projection, ctx.view_projections[0].m, sizeof(u.view_projection));
+        const u32 ids[4] = {options.target_id, options.ignored_id.value_or(0), options.ignored_id ? 1u : 0u, 0};
+        SDL_PushGPUFragmentUniformData(commands, 1, ids, sizeof(ids));
+        DrawBinder binder{picking};
+        for (const u32 index : _order) {
+            const DrawRef& ref = _refs[index];
+            const Pass kind = pass_of(ref.draw->material);
+            if (ref.scene != 0 || kind != Pass::Opaque) {
+                continue;
+            }
+            if (std::none_of(ref.level_seen.begin(), ref.level_seen.end(), [](u32 count) { return count != 0; }))
+                continue;
+            if (!storage || (ref.skinned && (!ctx.joints || !ctx.joint_offsets))) {
+                complete = false;
+                break;
+            }
+            const Material3D& picked = ref.draw->material;
+            const bool cutout = picked.blend == Blend3D::Mask;
+            SDL_GPUGraphicsPipeline* p =
+                pipeline(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 1, !picked.double_sided, Pass::Visibility, cutout,
+                         nullptr, false, ref.skinned, false, false, Unlit::Off, ref.retained != ~0u);
+            if (!p) {
+                complete = false;
+                break;
+            }
+            const std::array<SDL_GPUBuffer*, 3> skinned_buffers{storage, ctx.joints, ctx.joint_offsets};
+            const std::array<SDL_GPUBuffer*, 2> retained_buffers{
+                ref.retained != ~0u ? _retained[ref.retained].buffer->handle() : nullptr,
+                _retained_indices ? _retained_indices->handle() : nullptr};
+            binder.bind_pipeline(p,
+                                 ref.retained != ~0u ? retained_buffers.data()
+                                 : ref.skinned       ? skinned_buffers.data()
+                                                     : &storage,
+                                 ref.retained != ~0u ? 2
+                                 : ref.skinned       ? 3
+                                                     : 1);
+            if (ref.clustered && !cluster_index) {
+                complete = false;
+                break;
+            }
+            binder.bind_mesh(ref.mesh, ref.clustered ? cluster_index : nullptr);
+            if (ref.skinned) {
+                binder.bind_skin(ref.mesh);
+            }
+            if (cutout) {
+                bind_cutout(commands, picking, picked);
+            }
+            if (ref.clustered) {
+                RenderDebugStats3D drawn{};
+                draw_cluster_copies(ref, commands, picking, binder, u, &drawn);
+                stats.visibility_draws += drawn.ao_draws;
+                stats.visibility_instances += drawn.ao_instances;
+                continue;
+            }
+            for (u32 l = 0; l < ref.levels; ++l) {
+                if (ref.level_seen[l] == 0) {
+                    continue;
+                }
+                u.first[0] = ref.level_first[l];
+                SDL_PushGPUVertexUniformData(commands, 0, &u, sizeof(u));
+                binder.draw(ref.mesh->levels[l].index_count, ref.level_seen[l], ref.mesh->levels[l].first_index);
+                ++stats.visibility_draws;
+                stats.visibility_instances += ref.level_seen[l];
+            }
+        }
+        SDL_EndGPURenderPass(picking);
+        mask->bump_version();
+        depth->bump_version();
+    }
+    resume_2d();
+    stats.pipelines_made = static_cast<u32>(_owner->_pipelines.size() - pipelines);
+    stats.device_waits = static_cast<u32>(_device->idle_waits() - waits);
+    return complete;
 }
 
 bool GpuRenderer3D::render_geometry(const GeometryTargets3D& targets, const Scene3D& scene, RenderDebugStats3D& stats) {

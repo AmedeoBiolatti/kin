@@ -4,6 +4,11 @@ Work proceeds on `exp/rendering-foundations`, from committed lighting work `77b7
 
 ## Testing and optimization — 2026-10-29
 
+The optional multi-camera visibility pass adds a target-ID mask operation on prepared scenes, with independent
+camera culling/LOD and no stock lighting or history. `tools/vision3d` demonstrates separate normal/observer graphs,
+GPU count reduction, bounded round-robin scheduling and asynchronous batched results. The scheduler is example
+code; no AI component is added to the engine. See [the contract](render_graph.md#multiple-cameras-and-visibility-masks).
+
 Five runtime commits through `c084128` reduce repeated GI work and repair retained GPU-resource and custom-material interface lifetimes. The [updated readiness report](rendering_readiness_2026-10-28.md) records 720p/1440p paired timing on Bistro, Sponza, Cornell and heavy Yard, pixel-exact regressions, core/synchronization validation, scoped sanitizers, and new GI resize plateaus. Whole-frame gains remain small and clock-sensitive; the shared-memory AO experiment was rejected. Frozen launchers are ready for native manual testing. Main and its local planning edits remain untouched.
 
 ## Main-readiness validation — 2026-10-28/29
