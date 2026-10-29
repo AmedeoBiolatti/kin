@@ -337,9 +337,13 @@ static std::vector<std::string> resolve_particles3d_assets_impl(EcsWorld& world,
             }
         }
         auto* e = entity.get_mut<ParticleEmitter3D>(); // own state before first simulation
-        if (!path.empty() || !e->bound_texture.empty())
+        const bool replaces = !path.empty() || !e->bound_texture.empty();
+        const bool changed = e->bound_texture != path || (replaces && e->system.desc.look.texture != texture);
+        if (replaces)
             e->system.desc.look.texture = std::move(texture);
         e->bound_texture = path;
+        if (changed)
+            entity.modified<ParticleEmitter3D>();
     }
     return errors;
 }

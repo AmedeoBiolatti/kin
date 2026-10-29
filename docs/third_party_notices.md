@@ -30,6 +30,13 @@ fonts and additional libraries through its `LICENSE_FILES` argument.
 | [meshoptimizer](https://github.com/zeux/meshoptimizer) (with `KIN_EXPERIMENTAL_3D`; simplifier, meshlet builder, cluster partitioner, index and vertex-cache tools) | 0.25 | MIT | Arseny Kapoulkine |
 | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) (with `KIN_EXPERIMENTAL_3D`; the rigid body engine behind `kin/physics3d`) | 5.5.0 | MIT | Jorrit Rouwe |
 
+Native GPU builds use a marked, generated variant of SDL's Vulkan translation unit
+to include compute shader reads in sampler barriers. The original source and zlib
+notice are retained; shared/fetched sources are not edited. The guarded patch
+is in [kin_sdl_gpu.cmake](../cmake/kin_sdl_gpu.cmake). The optional direct-API SDL
+variant separately changes its private copy's `SDL_DYNAMIC_API` default; see
+[kin_sdl_direct.cmake](../cmake/kin_sdl_direct.cmake).
+
 ## Libraries bundled by SDL_image and SDL_ttf
 
 Kin builds SDL_image and SDL_ttf with their vendored libraries enabled, so these

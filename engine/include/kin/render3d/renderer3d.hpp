@@ -71,6 +71,21 @@ private:
     std::shared_ptr<IViewBackend3D> _backend;
 };
 
+// Frame-scoped preparation, borrowing its scene. Edits to mesh commands, batch
+// records or poses, moving/destroying the source, and submission/readback/present
+// invalidate it. Camera, light and quality settings remain operation-specific.
+class PreparedScene3D {
+public:
+    PreparedScene3D() = default;
+    explicit PreparedScene3D(std::shared_ptr<IPreparedSceneBackend3D> backend) : _backend(std::move(backend)) {}
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    IPreparedSceneBackend3D* backend() const { return _backend.get(); }
+
+private:
+    std::shared_ptr<IPreparedSceneBackend3D> _backend;
+};
+
 class Renderer3D {
 public:
     // Draws through `renderer`, which must outlive it.
@@ -123,11 +138,56 @@ public:
     // kin/renderer/shader_compiler.hpp; shipped games load SPIR-V). Empty,
     // with glslc's messages in the result when it doesn't compile.
     Result3D<MaterialShader3D> compile_material_shader(const std::filesystem::path& source);
+    // Shader-specific immutable extra resource bindings. Sampled textures occupy
+    // fragment set 2 slots 12..15; read-only storage follows the shader's sampler
+    // count. Shapes/types/counts/ownership are validated once here. GPU contents
+    // can change; graph resize or shader reload requires a new binding set.
+    Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D& shader,
+                                                      std::span<const Texture> textures = {},
+                                                      std::span<const DataBuffer> buffers = {});
     // Gives `view` a new size (its texture changes); false when it can't.
     Status3D resize(View3D& view, Vec2i size);
     // Draws `scene` into `view`: after the 2D drawn so far in this frame, and
     // before the 2D drawn after (which may draw view.texture()).
     Status3D render(View3D& view, const Scene3D& scene);
+    // Clears and writes caller-owned depth/normals, without a stock view or any
+    // lighting, shadows, particles, postprocessing or temporal history. Opaque
+    // and masked world meshes use stock culling, skinning, retained batches and
+    // LOD selection. Blended/wireframe meshes and overlays are excluded. No
+    // occlusion history or jitter. Suitable as a graph callback; targets may be
+    // GraphResourceKind::RenderAttachment resources. Unsupported backends fail.
+    Status3D render_geometry(const GeometryTargets3D& targets, const Scene3D& scene);
+    // Builds world bounds and packed instance data once for multiple passes in
+    // this GPU frame. Culling and LOD remain per camera/shadow view. No GPU wait,
+    // history advance or implicit retention after the handle is released.
+    Result3D<PreparedScene3D> prepare(const Scene3D& scene, const PrepareOptions3D& options = {});
+    Status3D render_prepared(View3D& view, const PreparedScene3D& prepared);
+    Status3D render_geometry_prepared(const GeometryTargets3D& targets, const PreparedScene3D& prepared);
+    // Exact, unjittered source-camera projection. Reuses preparation, culling, LOD, skinning and alpha cutouts.
+    // No stock colour, lights, GI, AO, shadows, TAA, particles or readback; does not advance any View3D history.
+    Status3D render_visibility(const VisibilityTargets3D&, const PreparedScene3D&, const VisibilityOptions3D& = {});
+    // Directional shadow rasterization into graph-owned D32F array layers. The
+    // receiver extent controls cascade fitting; no colour or history is rendered.
+    Result3D<SunShadow3D> render_sun_shadow(const Texture& depth_array, const PreparedScene3D&, Vec2i receiver_size);
+    // Explicit point/spot mesh casters into caller-owned D32F array layers.
+    // Writes all six faces of requested points and clears every unused layer.
+    // At most eight spots/two points; no implicit selection, particles or cache.
+    Result3D<LocalShadows3D> render_local_shadows(const Texture& depth_array, const PreparedScene3D&,
+                                                  std::span<const LocalShadowRequest3D> requests, Vec2i receiver_size);
+    // Single-sample material shading into explicit colour/depth attachments.
+    // Meshes/overlays, environment, point/spot lights and optional supplied sun/local
+    // shadows. Default All preserves combined mesh-only rendering. Opaque clears;
+    // Transparent loads existing attachments or copies colour_input first. Opt-in
+    // particles/weather share the transparent mesh order; soft particles need a
+    // separate sampled soft_depth. No implicit maps, sky/fog, AO/GI/TAA or postproc.
+    Status3D render_surface(const SurfaceTargets3D&, const PreparedScene3D&, const SurfaceOptions3D& = {});
+    // Stock bloom extraction and two separable blur rounds into caller-owned
+    // attachments. Source is linear premultiplied RGBA16F; no view/history or
+    // implicit resource allocation. Final bloom is in targets.result.
+    Status3D render_bloom(const BloomTargets3D&, const Texture& linear_colour, const BloomOptions3D& = {});
+    // Stock bloom composition, exposure/ACES and output encoding, replacing the
+    // whole current-working-format target. No blend, history or implicit bloom.
+    Status3D render_output(const RenderTarget&, const Texture& linear_colour, const OutputOptions3D& = {});
     // Makes, without drawing, what rendering `scene` into `view` would make on its first render: the graphics pipelines
     // of its draws and of the passes its settings switch on (shadow maps and cascades, the pre-pass, ambient occlusion,
     // contact shadows, temporal anti-aliasing, occlusion culling), and those features' targets for the view. For a
@@ -150,6 +210,9 @@ public:
     // The indirect draws that cut made, a (view, copy) each (for tests); waits for the GPU. With Lod3D::occlusion the
     // second pass's (the camera's view only) follow.
     Result3D<bool> read_cluster_draws(View3D& view, std::vector<ClusterDraw3D>& out);
+    // The GI scene the view holds (Scene3D::global_illumination, built by the last render with it on), for tests and
+    // tools; waits for the GPU like pick(). False when the view has none.
+    Result3D<bool> read_gi_scene(View3D& view, GiScene3D& out);
     // Compact, nonblocking summary of the last render().
     const RenderStats3D& stats() const { return _stats; }
     // Detailed implementation counters for profilers/tools. Reading this never
@@ -177,6 +240,7 @@ private:
     PickResult3D pick_operation(View3D& view, Vec2i pixel);
     bool read_cluster_picks_operation(View3D& view, std::vector<ClusterPick3D>& out);
     bool read_cluster_draws_operation(View3D& view, std::vector<ClusterDraw3D>& out);
+    bool read_gi_scene_operation(View3D& view, GiScene3D& out);
     friend class Assets3D;
     Model3D load_model_shared(const std::filesystem::path& path, const MeshOptions3D& options, std::string* error,
                               Assets3D* assets);

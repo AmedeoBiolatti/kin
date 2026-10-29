@@ -444,6 +444,19 @@ void test_facade_with_fake_backend() {
     assert(renderer.read_rgba({5.0f, 6.0f, 7.0f, 8.0f}, read_pixels, read_size));
     assert(read_size == raw->readback_size);
     assert(read_pixels == raw->readback_pixels);
+    // A backend that can only wait: request_read_rgba reads at once, and the pixels are taken once.
+    const kin::u64 ticket = renderer.request_read_rgba({5.0f, 6.0f, 7.0f, 8.0f});
+    assert(ticket != 0);
+    assert(renderer.take_read_rgba(ticket, read_pixels, read_size));
+    assert(read_size == raw->readback_size);
+    assert(read_pixels == raw->readback_pixels);
+    assert(renderer.take_read_rgba(ticket, read_pixels, read_size));
+    assert(read_pixels.empty());
+
+    // Explicitly nonblocking consumers must not silently fall back to a blocking read.
+    const auto readbacks_before = raw->readbacks;
+    assert(renderer.request_read_rgba({0, 0, 1, 1}, false) == 0);
+    assert(raw->readbacks == readbacks_before);
 
     {
         auto viewport = renderer.scoped_viewport({1.0f, 2.0f, 3.0f, 4.0f});
@@ -958,6 +971,71 @@ void test_gpu_texture_released_before_flush() {
     }
 }
 
+// request_read_rgba reads what was drawn before it, without waiting: the pixels arrive with a later frame (what is
+// drawn after the request is not in them), from the window's picture and from a render target, each ticket once.
+void test_gpu_read_without_waiting() {
+    constexpr std::string_view test_name = "test_gpu_read_without_waiting";
+    bool gpu_ready = false;
+    try {
+        kin::App app{};
+        kin::Window& window = app.create_window({.title = "gpu-read-test", .width = 64, .height = 64, .hidden = true});
+        std::string unavailable_reason;
+        std::unique_ptr<kin::Renderer2D> renderer = try_create_gpu_renderer(window, unavailable_reason);
+        if (!renderer) {
+            skip_or_require_gpu_test(test_name, unavailable_reason);
+            return;
+        }
+        gpu_ready = true;
+
+        const std::vector<kin::u8> white(8u * 8u * 4u, 255);
+        kin::Texture texture = renderer->create_texture_from_rgba(white.data(), 8, 8);
+        renderer->clear(kin::Color::rgb(0, 0, 0));
+        renderer->draw_texture(texture, kin::Rectf{8.0f, 8.0f, 16.0f, 16.0f});
+        const kin::u64 screen = renderer->request_read_rgba(kin::Rectf{0.0f, 0.0f, 64.0f, 64.0f});
+        renderer->draw_texture(texture, kin::Rectf{36.0f, 36.0f, 16.0f, 16.0f}); // after the request
+        kin::RenderTarget target = renderer->create_render_target({8, 4});
+        renderer->push_render_target(target);
+        renderer->clear(kin::Color::rgb(200, 30, 60));
+        const kin::u64 small = renderer->request_read_rgba(kin::Rectf{0.0f, 0.0f, 8.0f, 4.0f});
+        renderer->pop_render_target();
+        renderer->present();
+        assert(screen != 0 && small != 0 && screen != small);
+        // Waited for, a read is there whenever it is taken.
+        renderer->clear(kin::Color::rgb(20, 180, 90));
+        const kin::u64 waited = renderer->request_read_rgba(kin::Rectf{0.0f, 0.0f, 64.0f, 64.0f});
+        renderer->present();
+        std::vector<kin::u8> waited_pixels;
+        kin::Vec2i waited_size{};
+        assert(renderer->take_read_rgba(waited, waited_pixels, waited_size, true));
+        assert(waited_size == (kin::Vec2i{64, 64}));
+        assert(pixel_near(waited_pixels, waited_size, 16, 16, kin::Color::rgb(20, 180, 90)));
+
+        std::vector<kin::u8> pixels, target_pixels;
+        kin::Vec2i size{}, target_size{};
+        bool got_screen = false, got_small = false;
+        for (int frame = 0; frame < 200 && !(got_screen && got_small); ++frame) {
+            got_screen = got_screen || renderer->take_read_rgba(screen, pixels, size);
+            got_small = got_small || renderer->take_read_rgba(small, target_pixels, target_size);
+            renderer->clear(kin::Color::rgb(0, 0, 255));
+            renderer->present();
+        }
+        assert(got_screen && got_small);
+        assert(size == (kin::Vec2i{64, 64}));
+        assert(pixel_near(pixels, size, 16, 16, kin::Color::rgb(255, 255, 255)));
+        assert(pixel_near(pixels, size, 44, 44, kin::Color::rgb(0, 0, 0)));
+        assert(target_size == (kin::Vec2i{8, 4}));
+        assert(pixel_near(target_pixels, target_size, 3, 2, kin::Color::rgb(200, 30, 60)));
+        std::vector<kin::u8> again;
+        kin::Vec2i again_size{};
+        assert(renderer->take_read_rgba(screen, again, again_size) && again.empty());
+    } catch (const std::exception& e) {
+        if (gpu_ready || gpu_tests_required()) {
+            throw;
+        }
+        skip_or_require_gpu_test(test_name, e.what());
+    }
+}
+
 // With GPU timing on, a CPU that runs frames ahead of a busy GPU fills the
 // timer, and the frames past it go untimed. Their fences once went back to
 // SDL's pool still in flight, to be reset for the next submission (an upload,
@@ -1205,18 +1283,26 @@ void test_gpu_content_scale() {
         gpu_ready = true;
         renderer->clear();
         const auto pixels = window.pixel_size();
-        // A unit is 1.5 pixels: the frame is the window's pixels, coordinates fit it.
-        assert(renderer->set_content_scale(1.5f));
-        assert(renderer->content_scale() == 1.5f);
-        renderer->clear();
-        assert(renderer->output_size() == kin::Vec2i(static_cast<int>(pixels.x / 1.5f), static_cast<int>(pixels.y / 1.5f)));
         const auto units = window.size();
-        const kin::Vec2f center{units.x * .5f, units.y * .5f};
-        const auto logical = renderer->window_to_logical(center);
-        assert(std::abs(logical.x - pixels.x * .5f / 1.5f) < .01f && std::abs(logical.y - pixels.y * .5f / 1.5f) < .01f);
-        const auto back = renderer->logical_to_window(logical);
-        assert(std::abs(back.x - center.x) < .01f && std::abs(back.y - center.y) < .01f);
-        renderer->present();
+        // Content scaling keeps fractional coordinates even when output_size()
+        // reports only the whole units that fit. Test both directions away from
+        // the centre too; explicit logical sizing follows a different DPI path.
+        for (const float scale : {1.25f, 1.5f, 2.0f}) {
+            assert(renderer->set_content_scale(scale));
+            assert(renderer->content_scale() == scale);
+            renderer->clear();
+            assert(renderer->output_size() == kin::Vec2i(static_cast<int>(pixels.x / scale), static_cast<int>(pixels.y / scale)));
+            for (const kin::Vec2f point : {kin::Vec2f{0, 0}, kin::Vec2f{units.x * .5f, units.y * .5f},
+                                          kin::Vec2f{units.x * .25f, units.y * .75f}, kin::Vec2f{float(units.x), float(units.y)}}) {
+                const auto logical = renderer->window_to_logical(point);
+                assert(std::abs(logical.x - point.x * pixels.x / units.x / scale) < .01f);
+                assert(std::abs(logical.y - point.y * pixels.y / units.y / scale) < .01f);
+                const auto back = renderer->logical_to_window(logical);
+                assert(std::isfinite(back.x) && std::isfinite(back.y));
+                assert(std::abs(back.x - point.x) < .01f && std::abs(back.y - point.y) < .01f);
+            }
+            renderer->present();
+        }
         // A logical size takes over again, and 0 turns it off.
         renderer->set_logical_size(160, 100);
         assert(renderer->content_scale() == 0.0f && renderer->output_size() == kin::Vec2i(160, 100));
@@ -1240,7 +1326,8 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
         auto renderer = try_create_gpu_renderer(window, reason);
         if (!renderer) { skip_or_require_gpu_test(test_name, reason); return; }
         gpu_ready = true;
-        for (kin::Vec2i requested : {kin::Vec2i{320, 240}, kin::Vec2i{480, 360}}) {
+        for (kin::Vec2i requested : {kin::Vec2i{320, 240}, kin::Vec2i{480, 360}, kin::Vec2i{481, 361}}) {
+            renderer->set_logical_size(0, 0);
             window.set_size(requested);
             SDL_SyncWindow(SDL_GetWindowFromID(window.id()));
             renderer->clear();
@@ -1253,6 +1340,21 @@ void test_gpu_native_pixel_size_and_pointer_mapping() {
             const auto back = renderer->logical_to_window(native);
             assert(std::abs(back.x - center.x) < .01f && std::abs(back.y - center.y) < .01f);
             renderer->present();
+            for (bool integer : {false, true}) {
+                for (kin::Vec2i logical : {kin::Vec2i{160, 100}, kin::Vec2i{173, 97}}) {
+                    if (integer) renderer->set_integer_logical_size(logical);
+                    else renderer->set_logical_size(logical);
+                    const auto mapped = renderer->window_to_logical(center);
+                    assert(std::abs(mapped.x - logical.x * .5f) < .01f);
+                    assert(std::abs(mapped.y - logical.y * .5f) < .01f);
+                    const auto restored = renderer->logical_to_window(mapped);
+                    assert(std::abs(restored.x - center.x) < .01f && std::abs(restored.y - center.y) < .01f);
+                    // Off-centre coordinates must also survive both directions.
+                    const kin::Vec2f point{logical.x * .25f, logical.y * .75f};
+                    const auto roundtrip = renderer->window_to_logical(renderer->logical_to_window(point));
+                    assert(std::abs(roundtrip.x - point.x) < .01f && std::abs(roundtrip.y - point.y) < .01f);
+                }
+            }
         }
         renderer->set_logical_size(160, 100);
         const auto units = window.size();
@@ -2636,6 +2738,10 @@ void test_gpu_shader_geometry() {
         assert(pixel_near(px, size, 20, 13, kin::Color::rgb(0, 128, 0), 3));  // below the diagonal
         assert(pixel_near(px, size, 28, 3, kin::Color::rgba(0, 0, 0, 0), 0)); // above it: not covered
 
+        // The same material can make a surface pipeline too. Without custom vertices its custom input is zero.
+        draw([&] { renderer->draw_shader_surface({0.0f, 0.0f, 32.0f, 16.0f}, shader, {}); });
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgba(0, 0, 0, 0), 0));
+
         // Bad geometry is refused whole.
         const std::array<kin::u32, 3> past_the_end{0, 1, 9};
         draw([&] { renderer->draw_shader_geometry(quad, past_the_end, shader, {}); });
@@ -3458,7 +3564,9 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
         draw();
         assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
     };
-    // What the screen shows (through the output pass): a screenshot's pixel.
+    // Displayed-output checks use the optional PNG codec; target readbacks below
+    // still exercise linear blending, HDR, gradients and masks without image I/O.
+#if KIN_ENABLE_IMAGE_IO
     kin::Image shot;
     const auto on_screen = [&](const std::function<void()>& draw) {
         renderer.clear(kin::Color::rgb(0, 0, 0));
@@ -3473,6 +3581,7 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
         const std::size_t i = (static_cast<std::size_t>(y) * shot.size.x + x) * 4;
         return kin::Color::rgb(shot.rgba[i], shot.rgba[i + 1], shot.rgba[i + 2]);
     };
+#endif
     (void)window;
     const std::array<kin::u8, 4> texel{128, 64, 200, 255};
     const kin::Gradient ramp{.start = kin::colors::black, .end = kin::colors::white, .direction = kin::GradientDirection::Horizontal};
@@ -3522,12 +3631,15 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
             fail(mode + "a clipped half white is " + std::to_string(grey_at(32, 32)));
         }
         // The screen: encoded on the way out.
+#if KIN_ENABLE_IMAGE_IO
         on_screen([&] { renderer.fill_rect({0.0f, 0.0f, 64.0f, 64.0f}, kin::Color::rgba(255, 255, 255, 128)); });
         if (std::abs(int(shot_at(8, 8).r) - 188) > 2) {
             fail(mode + "the screen shows " + std::to_string(shot_at(8, 8).r));
         }
+#endif
     }
 
+#if KIN_ENABLE_IMAGE_IO
     // HDR: twice white, added, brought down by each tonemapper and by exposure.
     assert(renderer.set_color_space(kin::ColorSpace::Linear, true));
     const auto twice_white = [&] {
@@ -3588,6 +3700,7 @@ void check_linear_color(kin::Renderer2D& renderer, kin::Window& window) {
         fail("dithered, a colour between steps stays one value");
     }
     renderer.set_color_output({});
+#endif
     assert(renderer.set_color_space(kin::ColorSpace::Gamma));
 }
 
@@ -4087,6 +4200,7 @@ int main(int argc, char** argv) {
 #endif
 #if KIN_HAS_GPU_RENDERER
     test_gpu_timing_survives_a_gpu_behind();
+    test_gpu_read_without_waiting();
 #endif
 #if KIN_HAS_GPU_RENDERER
     test_gpu_native_coordinates_disable_logical_presentation();

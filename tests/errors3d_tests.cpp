@@ -77,6 +77,41 @@ void resources() {
     auto& window = app.create_window({.width = 64, .height = 64, .hidden = true});
     Renderer2D r2d{window};
     Renderer3D renderer{r2d};
+    if (!renderer.capabilities().geometry_pass) {
+        const auto refused = renderer.render_geometry({}, {});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+        const auto saved = refused.diagnostics;
+        renderer.capabilities();
+        assert(refused.diagnostics == saved);
+    }
+    if (!renderer.capabilities().shared_preparation) {
+        const auto refused = renderer.prepare({});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+        View3D absent;
+        assert(!renderer.render_prepared(absent, {}) && !renderer.render_geometry_prepared({}, {}));
+    }
+    if (!renderer.capabilities().sun_shadow_pass) {
+        const auto refused = renderer.render_sun_shadow({}, {}, {64, 64});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+    }
+    if (!renderer.capabilities().material_inputs) {
+        const auto refused = renderer.create_material_inputs({});
+        assert(!refused && !refused.diagnostics.empty());
+    }
+    if (!renderer.capabilities().local_shadow_pass) {
+        const auto refused = renderer.render_local_shadows({}, {}, {}, {64, 64});
+        assert(!refused && diagnostics3d_text(refused.diagnostics).find("unavailable") != std::string::npos);
+    }
+    if (!renderer.capabilities().surface_pass)
+        assert(!renderer.render_surface({}, {}));
+    if (!renderer.capabilities().surface_stages)
+        assert(!renderer.render_surface({}, {}, {.stage = SurfaceStage3D::Transparent}));
+    if (!renderer.capabilities().surface_particles)
+        assert(!renderer.render_surface({}, {}, {.particles = true}));
+    if (!renderer.capabilities().bloom_pass)
+        assert(!renderer.render_bloom({}, {}));
+    if (!renderer.capabilities().output_pass)
+        assert(!renderer.render_output({}, {}));
     const auto root = std::filesystem::temp_directory_path() /
                       ("kin-errors3d-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root);

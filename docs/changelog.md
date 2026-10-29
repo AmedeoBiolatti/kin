@@ -7,6 +7,195 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Patch SDL Vulkan sampler barriers for compute shader reads in a guarded, generated build source. Keep shared
+  dependency sources untouched and enable shader-access analysis in synchronization validation.
+
+- Defer root-motion transform notifications until animation queries unlock their storage, preventing a Debug ECS
+  abort while preserving tracked transform propagation.
+
+- Preserve fractional content-scale pointer mapping alongside rounded logical-size presentation; avoid zero
+  coordinates and division by zero when no explicit logical size is set.
+
+- Run rendering-branch CI with Debug graph coverage, required Vulkan core/synchronization checks and scoped
+  ASAN/UBSAN integration tests. Retain test evidence and document portable 3D build, viewer and validation commands.
+
+- Optional native visibility masks reuse prepared world data across camera graphs, retaining skinning/cutouts
+  without GI, shadows or temporal history. `kin_vision3d` demonstrates budgeted asynchronous observations.
+- Pixel readback can explicitly refuse a synchronous fallback; existing one-argument calls retain their behaviour.
+
+- Add scene-independent rendering evaluation jobs for raw performance, captures,
+  Cycles references, perceptual/temporal scoring and persistent-view memory stress.
+  Include Sponza, Yard, optional external Bistro and custom command adapters;
+  preserve provenance, verified resume, shared truth caching and offline reports.
+  Label baseline-only comparisons and unavailable measurements explicitly.
+
+- Compile attachment load/store declarations and logical colour/depth versions into safe storage handoffs or explicit
+  preservation copies. Distinguish depth testing from shader sampling, report copy/reuse decisions and payload,
+  protect re-imported history, and execute copies through public GPU texture-copy APIs. Remove the normal surface
+  graph's opaque-to-transparent colour copy and second full-size HDR colour allocation.
+
+- Split native public surfaces into opaque and transparent stages with opt-in ordered sprites/weather, explicit
+  soft-depth and sun/local sprite-shadow inputs. Support in-place attachment loads or versioned graph colour copies;
+  retain queued sprite textures and CPU upload ordering. Fix linear HDR surface background clears and extend the
+  surface graph with ordered glass/sprites before bloom/output and ASCII. Preserve stock TAA history when glass
+  splits one sprite source into multiple colour draws.
+
+- Expose stock bloom and view output as native graph operations with explicit inputs, intermediate/output targets,
+  exposure/ACES, alpha handling and output encoding. Allow independent linear HDR surface attachments, share recording
+  with stock views, and extend the surface graph with HDR toon → bloom/output → ASCII.
+
+- Add a standalone slow-light prototype comparing instantaneous and delayed direct illumination, with moving-source
+  and photon-time occluder history, fixed memory bounds, interactive controls and deterministic GPU/CPU checks.
+  Simulation and shaders stay in the example; the engine and stock renderer are unchanged.
+
+- Bind graph-produced textures and read-only buffers to native custom 3D materials through immutable, reflected input
+  sets. Validate shader/device/types/layouts and output feedback; preserve CPU upload ordering and GPU-produced input
+  revisions, reset affected TAA history, and guard resources that outlive the renderer. Extend the surface graph with
+  compute-generated lighting/palette data feeding its toon material.
+
+- Add explicit spot/point mesh-shadow graph operations, complete point cubes and surface-local shadow bindings,
+  preserving stock selection/cache/history ownership. Add an opt-in direct-light material response with separate
+  irradiance/visibility and light position/distance, plus a toon-lighting graph example.
+
+- Expose explicit sun-shadow and mesh-surface operations for custom native 3D graphs, reusing prepared scene data.
+  Add typed array attachments and a shadow → surface → ASCII example, with explicit shadow inputs, stored depth,
+  HDR working colour and independent stock view history/cache ownership.
+
+- Add frame-scoped shared 3D preparation for standalone geometry and stock rendering, with bounded CPU payload,
+  explicit source/pose/batch/frame invalidation, reusable instance/joint uploads and shared local-shadow inputs.
+  Preserve separate camera/shadow visibility and view history; expose preparation/reuse counters and raw-span edit
+  notification. Keep the ordinary streaming path available.
+
+- Expose standalone opaque/cutout geometry passes with sampled reverse-Z depth and signed world normals. Add explicit
+  float/depth graph attachments, a cached typed stock prepass subgraph and a public-API outline renderer. Stable
+  attachments survive working-colour changes; stock lighting and temporal history remain compatible.
+
+- Preserve glTF linear RGB emission and strength, independently of base/vertex/instance colour, through stock/custom
+  shaders, browser rendering, material files and GI. Legacy base-relative glow remains explicit and compatible.
+- Preserve independent wrap, min, mag and mip filters per imported/material map while sharing images by colour/data
+  role. Explicit nearest magnification no longer discards requested mip filtering; sampling participates in shadow,
+  GI and temporal appearance caches.
+- Compose transparent mesh copies and particle sprites in one stable camera-depth order, including additive effects
+  behind alpha foregrounds, and batch only adjacent compatible runs. Expose sort/run/CPU-storage counters.
+- Keep flat-soup LOD UV/colour/alpha seams with seam-aware remapping and attribute simplification, retaining the cheap
+  uniform-attribute path. Version mesh-level bakes so existing unsafe bakes are rebuilt.
+- Preserve complete geometry under cluster storage pressure with a conservative whole-draw level-zero fallback shared
+  by all dependent passes. Publish reservation/fallback counts without debug GPU readback.
+
+- Bound 3D instances and cluster LOD errors conservatively under shear, including a nonuniformly scaled parent with a
+  rotated child. Camera/shadow culling, spatial groups, retained bounds and browser LOD now share the affine stretch
+  bound used by skinned meshes and GI. Finite very small/large scales avoid squared-length underflow/overflow;
+  nonfinite linear transforms produce an unbounded result rather than an undersized sphere.
+
+- 3D global illumination lights its voxels by the sun through a sun map of its own (4096 a side over the GI's area,
+  drawn with the local lights' maps before the GI, kept while nothing in it changes), not by their march toward the
+  sun, which the voxels' conservative, coarser-further-out cover makes close the narrow gaps the sun comes through.
+  Bistro's afternoon (against Cycles): the sun's bounce into the shade from 0.54 of Cycles' to 0.68. The local
+  lights' maps are now drawn before the GI. `debug_stats().gi_sun_map`; `Scene3D::debug.gi_sun_map`.
+- The main pass begins from a copy of the pre-pass's depth (where a pre-pass ran, with one sample a pixel and no
+  overlay) instead of clearing its own, so the fragments the nearest surfaces hide are not shaded. Every mesh vertex
+  shader's position is now `invariant`, which keeps the two passes' depths equal to the bit (the pictures of the two
+  ways are identical; positions may round differently from before by a last bit, which moves a few edge pixels).
+  `debug_stats().main_depth_from_prepass`; `Scene3D::debug.prepass_depth = false` to compare. Bistro at 2404 x 1352
+  (GI, AO, TAA): about 1.4 ms of GPU a frame less at night, 0.75 by day.
+- Add `GlobalIllumination3D::skinned` (`gi_skinned`), on by default: off, the GI scene leaves skinned copies out, as
+  Godot's SDFGI holds static geometry only. An animated character is then lit by the GI but neither shades nor lights
+  it, and its pose no longer makes the blocks round it again every few renders (Bistro's idle mannequin: 0.4 ms of
+  GPU a frame on average).
+- 3D global illumination no longer makes its scene again when an emissive material's strength changes: the voxels
+  keep the emission at a strength of one and their emitter's number (`max_gi_emitters`, 2048), and the GI's light
+  takes each emitter's strength every render. A game that scaled its emissives by its exposure every frame had every
+  lamp's surroundings voxelized again on each level's turn (in nearly half its frames, about 4.9 ms of GPU a frame on
+  average in Bistro's night at 2404 x 1352, 9 ms in those frames). Whether a material emits is still a change.
+- Add the light grid: the main pass's light variants shade a fragment with the point and spot lights whose reach
+  touches its cell of the view (64-pixel tiles by 32 slices of view depth, listed on the CPU each frame and read
+  from two storage buffers), and draw every light in view, up to 256 of each kind a frame where it was 16
+  (`RendererCapabilities3D::max_point_lights` and `::max_spot_lights`). More than 16 point lights in view choose the
+  light variant. The overlay, particles, custom shaders and WebGL2 keep the 16 strongest of each.
+  `Scene3D::debug.light_grid = false` turns it off. Bistro's night: 1.6 ms less GPU a frame at Normal, 3.4 at
+  High (2404 x 1352), with all of its 40 to 60 lights in view drawn.
+- Add `Renderer2D::request_read_rgba` and `take_read_rgba`: a read of the
+  current target that does not wait for the GPU (SDL_GPU; the other backends
+  read at the request). `read_rgba` stops the CPU until the GPU has drawn
+  everything before it: a game reading a small copy of its picture every sixth
+  frame (an auto exposure's) lost a third of its frame rate, and that frame
+  showed as a hitch.
+- Present without vsync on MAILBOX where the swapchain has no IMMEDIATE
+  (NVIDIA's Vulkan on Wayland) instead of falling back to VSYNC, which held
+  frames to whole refreshes of the screen; the log's `gpu backend created`
+  line names the present mode obtained.
+- Settle 3D global illumination's probes faster: a young probe takes the mean
+  of its updates so far until `GiProbes3D::hysteresis` weighs as much, and the
+  windows round the camera share each render's updates 4 : 2 : 1 from the
+  nearest. With a game's three windows, a probe is updated only every so many
+  renders, and new probes and the bounced light building up took most of a
+  minute to settle (the shade 21% short after 480 renders in the `canyon`
+  reference against Cycles; now 9%). And fade a window's probes into the next
+  level's over three probe cells, not one: the step showed as a seam.
+- Add the `canyon` reference scene (a shaded street between warm walls: the
+  bounce against Cycles) and `kin_reference --gi-windows` (global illumination
+  in a game's windows round the camera instead of one level over the scene).
+- Add the fog's sun through the shadows (`Fog3D::sun_shadows`, off by default;
+  `SceneEnvironment3D`'s `fog_sun_shadows`): the sun's in-scattering only
+  where the fog's air is in sunlight, walked along each ray through the sun's
+  shadow map at half the view's size and added once a pixel after the main
+  pass. Fog in shade no longer veils it, and light shafts show where shadows
+  cross the air. The Bistro's daytime views: fine detail from 85% of Godot's
+  to 91% on average. About 0.45 ms at 2404 x 1352; needs a float picture (HDR
+  or TAA) and SDL_GPU.
+- Add specular anti-aliasing for 3D materials (`Scene3D::specular_aa`, 0 to 1,
+  off by default, Godot's 0.25; authored as `SceneEnvironment3D`'s
+  `specular_aa`), on SDL_GPU and WebGL2: the roughness is raised where the
+  normal turns within a pixel, so a glossy highlight thinner than a pixel (a
+  door's bevels) no longer glints from frame to frame, which TAA in motion
+  showed as bright lines.
+- Steady TAA on detail finer than a pixel: still pixels (moving under half a
+  pixel a frame) keep more of their history (`TemporalAA3D::still_blend`, 0.96
+  by default, never below `blend`; authored as `SceneEnvironment3D`'s
+  `taa_still_blend`) with a clip box by the spread of the colours round them,
+  and the sharpening keeps off edges the depth showed in any of the last eight
+  frames, not only this one (a thin thing comes and goes in one frame's depth
+  with the jitter). Such detail (print, a railing's bars) shimmered with the
+  jitter's period. The Bistro's start view at 2404 x 1352: pixels changing by
+  more than 16 levels a frame from 5,566 to 537, and a little sharper.
+- Add 3D global illumination (`Scene3D::global_illumination`, off by default;
+  `RendererCapabilities3D::global_illumination`; authored as
+  `SceneEnvironment3D`'s `gi_*` keys): the scene in voxels with a distance field
+  (every opaque and cut-out copy in its area, skinned ones in their pose; no gap
+  through a wall of no thickness; the same voxels to the byte each time), each
+  surface voxel lit by the sun, the fill, the point and spot lights through rays
+  walked through it, and probes traced through it (`GiProbes3D`, DDGI) that light
+  the picture: the sky's light only where they see it, bounced light and
+  emission, none through walls, and reflections dimmed where the sky is hidden.
+  Sponza against Cycles: from 50 levels off on average to 7.
+  `RenderDebugOptions3D::gi_view` shows the voxels and `Renderer3D::read_gi_scene`
+  reads them back. The voxels are in `levels` windows round the camera
+  (`side` x `height` x `side` each, every level's voxels twice the last's; one
+  fixed over an area it holds), made again only where something changed or a
+  window moved, to the byte as if built afresh; the probes' light is read once a
+  pixel at half the view's size after the depth pre-pass (which global
+  illumination turns on); what keeps moving is made every fourth render. The
+  Bistro at 2844 x 1600: about 1.6 ms of GPU a render (2.35 throttled).
+- Add anisotropic filtering of 3D materials' mipmapped textures
+  (`Scene3D::anisotropy`, 1 to 16, off by default; authored as
+  `SceneEnvironment3D`'s `anisotropy`) on SDL_GPU and on WebGL2 with
+  `EXT_texture_filter_anisotropic`; `RendererCapabilities3D::max_anisotropy`
+  says how far it goes.
+- Add a texture mip bias for 3D materials (`Scene3D::texture_lod_bias`, -2 to
+  2, `RendererCapabilities3D::texture_lod_bias`; authored as
+  `SceneEnvironment3D`'s `texture_lod_bias`): with TAA, sharper textures
+  without sharpening edges.
+- Keep TAA's sharpening (`TemporalAA3D::sharpness`) within surfaces: where the
+  depth bends (a silhouette, a crease) it no longer pushes an anti-aliased
+  outline's blended pixels back into steps.
+- Read 3D normal maps of two channels (BC5, or any whose blue reads 0) as x and
+  y with z rebuilt; they were lit from behind (z read as -1). Maps of three
+  channels are read as before.
+- Keep temporal anti-aliasing on moving edges: the resolve reprojects by the
+  nearest surface's velocity round each pixel (from the main pass's depth) and
+  trusts a history read between pixels more. An edge moving a tenth of a pixel
+  a frame (a character at rest) was 2.3 times as far from a 16-sample picture as
+  a still one, and at a whole pixel 8 times; now both are within a quarter.
 - Bind assets that components name by path in 2D scenes (`Assets2D`, run by
   `EcsScene`): textures, sprite catalogs, sounds and audio catalogs, and
   particle catalogs, read again when their files change. Particle emitters
@@ -2251,3 +2440,16 @@ First public release.
 [0.2.1]: https://github.com/AmedeoBiolatti/kin/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/AmedeoBiolatti/kin/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/AmedeoBiolatti/kin/releases/tag/v0.1.0
+
+### Rendering foundations
+
+- Add an explicit tracked-mutation mode with dirty hierarchy updates, retained static mesh/model extraction, particle
+  validation revisions and CPU work counters. Keep raw mutable access compatible by default, and publish native
+  physics/root-motion and asset binding changes. Protect deferred observer callbacks during state destruction.
+- Account for Kin-owned SDL_GPU texture, buffer and transfer payload, idle texture pools, peaks and allocation events.
+  Guard buffers that outlive their device, as textures already do.
+- Compile public resource graphs with validation, cached schedules, lifetime slots, payload admission limits and
+  transactional resource binding. Add a GPU ASCII example with Release runtime checks and HDR support.
+- Schedule the native stock renderer's coarse phases with the same compiler and expose fixed-order parity checks.
+  Add reproducible quality-candidate captures, requested/effective settings and independently seeded Cycles references.
+  Quality candidates do not change engine defaults.

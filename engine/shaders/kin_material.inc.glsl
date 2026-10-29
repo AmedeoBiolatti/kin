@@ -34,6 +34,37 @@ layout(set = 2, binding = 9) uniform sampler2D uContactShadow;    // R: the shar
 layout(set = 2, binding = 10) uniform sampler2DArrayShadow uLocalShadow; // depth from a spot (a layer), or a face of a point light's cube (six layers), compared
 layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // depth from the fill light (the moon), a layer a cascade, compared
 #endif
+#ifdef KIN_GI
+// Global illumination (G5; docs/3d_plan.md): only the stock light variants (mesh_light*.frag) have it, so that every
+// other shader, and custom ones, keep their samplers. The probes' light on what the pre-pass drew, read once a texel at
+// half the view's size (gi_resolve.comp).
+layout(set = 2, binding = 12) uniform sampler2D uGiLight; // rgb: the light facing the surface; a: its depth along the
+                                                          // view (less: the probes have none there; 0: no surface)
+layout(set = 2, binding = 13) uniform sampler2D uGiSlope; // the light facing way d is rgb * (w + xyz . d)
+layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe lighting; the rest is ambient/environment
+#endif
+#ifdef KIN_LIGHT_GRID
+// The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
+// the view (frame.grid: tiles of pixels by slices of view depth) those whose reach touches it, so that a fragment
+// loops over its cell's lights only; where frame.grid.x is 0 (the overlay) the fixed blocks' loops light it.
+struct KinGridLight {
+    vec4 at;     // position, radius
+    vec4 colour; // linear rgb, the square of the light's size
+    vec4 axis;   // a spot's way and the cosine of its outer angle (a point light: w is -2)
+    vec4 cone;   // x: 1 / (cos inner - cos outer), y: its shadow's layer (a point light's cube's first; -1: none)
+};
+#ifdef KIN_GI
+layout(std430, set = 2, binding = 15) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+#else
+layout(std430, set = 2, binding = 14) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+#endif
+// A cell (slice by row by column): the first of its list << 12 | its count; the lists after the cells.
+#ifdef KIN_GI
+layout(std430, set = 2, binding = 16) readonly buffer KinGridCells { uint grid_cells[]; };
+#else
+layout(std430, set = 2, binding = 15) readonly buffer KinGridCells { uint grid_cells[]; };
+#endif
+#endif
 
 const float PI = 3.14159265358979;
 #include "kin_material_uniforms.inc.glsl"
@@ -120,11 +151,17 @@ vec3 mapped_normal(vec3 n, float front) {
     t = normalize(t - n * dot(n, t));
     b = normalize(b - n * dot(n, b));
     vec3 m = texture(uNormalMap, vUV).xyz * 2.0 - 1.0;
+    // No normal of the map points into the surface: where z would (every texel of a map of two channels, BC5, whose
+    // blue reads 0), the map holds x and y only, and z is what makes the normal a unit one.
+    if (m.z < 0.0) {
+        m.z = sqrt(max(1.0 - dot(m.xy, m.xy), 0.0));
+    }
     m.xy *= material.pbr.z;
     return normalize(front * (t * m.x - b * m.y) + n * m.z);
 }
 
 #include "kin_brdf.inc.glsl"
+#include "kin_light_response.inc.glsl"
 
 // The ambient occlusion of the pixel (1: none, or this surface has none).
 // Only what the pre-pass drew has it: a blended surface would read what is behind it.
@@ -169,14 +206,11 @@ vec3 kin_screen_normal(vec3 dp1, vec3 dp2) {
 // The unit normal on the side the viewer sees (a double-sided face turns it
 // round from behind), bent by the material's normal map when it has one.
 vec3 kin_normal() {
-    // A flat-shaded mesh with clusters has no normal in its vertices (they are zero): the face's comes from how the
-    // world position changes across the screen, on the side the viewer sees (so no `front`, and no normal map).
+    // Flat LOD/cluster vertices carry zero normals. Reconstruct the face normal, then retain the UV-derived normal
+    // map frame exactly as for supplied normals. Flat shading does not imply an absent normal map.
     const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
-    if (dot(vNormal, vNormal) < 1e-20) {
-        return kin_screen_normal(dp1, dp2);
-    }
     const float front = gl_FrontFacing ? 1.0 : -1.0;
-    const vec3 n = normalize(vNormal) * front;
+    const vec3 n = dot(vNormal, vNormal) < 1e-20 ? kin_screen_normal(dp1, dp2) : normalize(vNormal) * front;
     return material.maps.x > 0.5 ? mapped_normal(n, front) : n;
 }
 
@@ -209,12 +243,15 @@ float kin_occlusion() {
 // The material's own light for a surface of colour `base`: its share of the
 // colour, or its emissive map, times the material's emissive.
 vec3 kin_emissive(vec3 base) {
-    vec3 own = base;
+    vec3 own = material.emission.w > 0.5 ? vec3(1.0) : base;
     if (material.maps.y > 0.5) {
         own = texture(uEmissive, vUV).rgb;
         if (frame.flags.y > 0.5) {
             own = decode(own);
         }
+    }
+    if (material.emission.w > 0.5) {
+        own *= material.emission.rgb;
     }
     return own * material.params.x;
 }
@@ -222,7 +259,142 @@ vec3 kin_emissive(vec3 base) {
 // The light of the scene on a surface (linear, what leaves it toward the
 // camera): the sun through its shadow, the fill, the point lights, and the
 // ambient light or environment. Not the surface's own light (kin_emissive).
+#ifdef KIN_GI
+// The probes' light here, as gi_resolve.comp read it on what the pre-pass drew, from the four texels round this pixel
+// (at half its size), filtered: on what the pre-pass drew, those within `near` of this fragment's `depth` along the
+// view (all four, most often), or where none is (a thin thing between texels) the one nearest in depth; on what it did
+// not draw (glass, in front of what it shows) all of them with light. Weighed, not picked, so that a texel coming or
+// going as the view's jitter moves does not make the light jump. For the way `n` (this surface's normal, its normal
+// map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
+// (the sky's stands).
+bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced, out float coverage) {
+    const ivec2 size = textureSize(uGiLight, 0);
+    const vec2 uv = gl_FragCoord.xy * 0.5 / vec2(size);
+    // x, y, z, w: the texels at (0, 1), (1, 1), (1, 0) and (0, 0) from the footprint's first.
+    const vec4 depths = textureGather(uGiLight, uv, 3);
+    const bool drawn = material.maps.z > 0.5;
+    vec4 light, slope;
+    coverage = 0.0;
+    if (all(greaterThan(depths, vec4(0.0))) && (!drawn || all(lessThanEqual(abs(depths - depth), vec4(near))))) {
+        light = textureLod(uGiLight, uv, 0.0);
+        slope = textureLod(uGiSlope, uv, 0.0);
+        coverage = textureLod(uGiCoverage, uv, 0.0).r;
+    } else {
+        const vec2 at = uv * vec2(size) - 0.5;
+        const vec2 f = fract(at);
+        const vec4 weight = vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y));
+        const ivec2 offsets[4] = ivec2[4](ivec2(0, 1), ivec2(1, 1), ivec2(1, 0), ivec2(0, 0));
+        const ivec2 base = ivec2(floor(at));
+        int nearest_one = -1;
+        float nearest = 1e30, total = 0.0;
+        light = vec4(0.0);
+        slope = vec4(0.0);
+        for (int i = 0; i < 4; ++i) {
+            if (depths[i] == 0.0) {
+                continue; // no surface
+            }
+            const float off = abs(abs(depths[i]) - depth);
+            if (off < nearest) {
+                nearest = off;
+                nearest_one = i;
+            }
+            if (depths[i] > 0.0 && (!drawn || off <= near)) {
+                const ivec2 q = clamp(base + offsets[i], ivec2(0), size - 1);
+                light += weight[i] * texelFetch(uGiLight, q, 0);
+                slope += weight[i] * texelFetch(uGiSlope, q, 0);
+                coverage += weight[i] * texelFetch(uGiCoverage, q, 0).r;
+                total += weight[i];
+            }
+        }
+        if (total > 0.0) {
+            light /= total;
+            slope /= total;
+            coverage /= total;
+        } else if (nearest_one >= 0 && depths[nearest_one] > 0.0) {
+            const ivec2 q = clamp(base + offsets[nearest_one], ivec2(0), size - 1);
+            light = texelFetch(uGiLight, q, 0);
+            slope = texelFetch(uGiSlope, q, 0);
+            coverage = texelFetch(uGiCoverage, q, 0).r;
+        } else {
+            return false;
+        }
+    }
+    probed = light.rgb * clamp(slope.w + dot(slope.xyz, n), 0.0, 4.0);
+    traced = light.rgb * clamp(slope.w + dot(slope.xyz, r), 0.0, 4.0);
+    return true;
+}
+#endif
+
+#ifdef KIN_LIGHTS
+// A point light's light on the surface: the inverse square, windowed to nothing at the radius (Karis' fall-off, as
+// glTF's punctual lights), no brighter than at the light's own size (colour.w: its square), so a surface inside a
+// flash is lit as at its edge, not without bound; its shadow from its cube (`first`: the cube's first layer, -1:
+// none). Zero attenuation contributes nothing, including to the specular BRDF.
+vec3 kin_point_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour, float first) {
+    const vec3 to = at.xyz - vWorld;
+    const float d2 = dot(to, to);
+    const float r2 = d2 / (at.w * at.w);
+    const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+    const float k = window * window / max(d2, colour.w);
+    if (k <= 0.0) {
+        return vec3(0.0);
+    }
+    const vec3 toward = to * inversesqrt(max(d2, 1e-8));
+    float seen = 1.0;
+    if (material.params.z > 0.5
+#ifndef KIN_DIRECT_LIGHT
+        && dot(n, toward) > 0.0
+#endif
+    ) {
+        seen = point_light_shadow_from(first, offset_normal, toward, sqrt(d2));
+    }
+#ifdef KIN_DIRECT_LIGHT
+    return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_POINT, at.xyz, sqrt(d2));
+#else
+    return shade(s, toward, colour.rgb * (k * seen));
+#endif
+}
+
+// A spot light's: a point light's falloff inside a cone (glTF's punctual spot: the square of the linear step of the
+// cosine between the inner and the outer angle; axis.w the outer's, more.x 1 / (cos inner - cos outer)), its shadow
+// from its layer of the local array (more.y, -1: none).
+vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour, vec4 axis, vec4 more) {
+    const vec3 to = at.xyz - vWorld;
+    const float d2 = dot(to, to);
+    const float r2 = d2 / (at.w * at.w);
+    const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
+    const vec3 toward = to * inversesqrt(max(d2, 1e-8));
+    const float step_in_cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
+    const float k = window * window * step_in_cone * step_in_cone / max(d2, colour.w);
+    if (k <= 0.0) {
+        return vec3(0.0);
+    }
+    float seen = 1.0;
+    if (more.y >= 0.0 && material.params.z > 0.5
+#ifndef KIN_DIRECT_LIGHT
+        && dot(n, toward) > 0.0
+#endif
+    ) {
+        seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
+    }
+#ifdef KIN_DIRECT_LIGHT
+    return kin_direct_light(s, toward, colour.rgb * k, seen, KIN_LIGHT_SPOT, at.xyz, sqrt(d2));
+#else
+    return shade(s, toward, colour.rgb * (k * seen));
+#endif
+}
+#endif
+
 vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion) {
+    // Specular anti-aliasing (Scene3D::specular_aa; Tokuyoshi and Kaplanyan's, as Godot's roughness limiter): where
+    // the normal turns within the pixel, a highlight can be thinner than the pixel, very bright where a sample hits it
+    // and missed by the next; the roughness is raised by how much the normal turns across the pixel (at most to an
+    // alpha of 0.18 more), spreading the highlight over it.
+    if (frame.environment.z > 0.0) {
+        const vec3 dn_dx = dFdx(n), dn_dy = dFdy(n);
+        const float widen = min(2.0 * frame.environment.z * (dot(dn_dx, dn_dx) + dot(dn_dy, dn_dy)), 0.18);
+        roughness = sqrt(min(1.0, roughness * roughness + widen));
+    }
     const vec3 v = kin_view();
     Surface s;
     s.n = n;
@@ -247,7 +419,11 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     const vec3 offset_normal = shadow_offset_normal(n); // the moon's and the local lights' shadows, as the sun's
 #endif
     const float sun = dot(n, frame.sun_direction.xyz);
+#ifdef KIN_DIRECT_LIGHT
+    if (dot(frame.sun_color.rgb, vec3(1.0)) > 0.0) {
+#else
     if (sun > 0.0) {
+#endif
         float lit = sunlight(n, world_dx, world_dy);
 #ifdef KIN_LIGHTS
         lit = mix(1.0, lit, locals.counts.w);
@@ -261,18 +437,44 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
             lit *= contact_shadow();
 #endif
         }
+#ifdef KIN_DIRECT_LIGHT
+        light += kin_direct_light(s, frame.sun_direction.xyz, frame.sun_color.rgb, lit, KIN_LIGHT_SUN, vec3(0.0), 0.0);
+#else
         light += shade(s, frame.sun_direction.xyz, frame.sun_color.rgb * lit);
+#endif
     }
     if (dot(frame.fill_color.rgb, vec3(1.0)) > 0.0) {
-#ifdef KIN_LIGHTS
+#ifdef KIN_DIRECT_LIGHT
+        light += kin_direct_light(s, frame.fill_direction.xyz, frame.fill_color.rgb, moonlight(offset_normal), KIN_LIGHT_FILL, vec3(0.0), 0.0);
+#elif defined(KIN_LIGHTS)
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb * moonlight(offset_normal));
 #else
         light += shade(s, frame.fill_direction.xyz, frame.fill_color.rgb);
 #endif
     }
+#ifdef KIN_LIGHT_GRID
+    if (frame.grid.x > 0.5) {
+        // The cell: the fragment's tile, and its slice of the view depth (as the cascades measure it).
+        const uvec3 size = uvec3(frame.grid_size.xyz);
+        const uvec2 tile = min(uvec2(gl_FragCoord.xy / frame.grid.y), size.xy - 1u);
+        const float depth = max(dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz), frame.grid.z);
+        const uint slice = min(uint(log(depth / frame.grid.z) * frame.grid.w), size.z - 1u);
+        const uint cell = grid_cells[(slice * size.y + tile.y) * size.x + tile.x];
+        const uint first = uint(frame.grid_size.w) + (cell >> 12);
+        const uint count = cell & 0xfffu;
+        for (uint j = 0u; j < count; ++j) {
+            const KinGridLight g = grid_lights[grid_cells[first + j]];
+            light += g.axis.w < -1.5 ? kin_point_light(s, n, offset_normal, g.at, g.colour, g.cone.y)
+                                     : kin_spot_light(s, n, offset_normal, g.at, g.colour, g.axis, g.cone);
+        }
+    } else {
+#endif
     const int count = int(frame.flags.w);
     for (int i = 0; i < count; ++i) {
-
+#ifdef KIN_LIGHTS
+        light += kin_point_light(s, n, offset_normal, frame.lights[2 * i], frame.lights[2 * i + 1],
+                                 locals.point_shadow[i].x);
+#else
         const vec4 at = frame.lights[2 * i];
         const vec3 to = at.xyz - vWorld;
         const float d2 = dot(to, to);
@@ -287,41 +489,18 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         if (k <= 0.0) {
             continue;
         }
-#ifdef KIN_LIGHTS
-        const vec3 toward = to * inversesqrt(max(d2, 1e-8));
-        float seen = 1.0;
-        if (k > 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
-            seen = point_light_shadow(i, offset_normal, toward, sqrt(d2));
-        }
-        light += shade(s, toward, frame.lights[2 * i + 1].rgb * (k * seen));
-#else
         light += shade(s, to * inversesqrt(max(d2, 1e-8)), frame.lights[2 * i + 1].rgb * k);
 #endif
     }
 #ifdef KIN_LIGHTS
-    // Spot lights: a point light's falloff inside a cone (glTF's punctual spot: the square of the linear step of the
-    // cosine between the inner and the outer angle), its shadow from its layer of the local array.
+    // Spot lights (the fixed block's): kin_spot_light.
     const int spot_count = int(locals.counts.x);
     for (int i = 0; i < spot_count; ++i) {
-        const vec4 at = locals.spots[4 * i];
-        const vec4 colour = locals.spots[4 * i + 1];
-        const vec4 axis = locals.spots[4 * i + 2];
-        const vec4 more = locals.spots[4 * i + 3];
-        const vec3 to = at.xyz - vWorld;
-        const float d2 = dot(to, to);
-        const float r2 = d2 / (at.w * at.w);
-        const float window = clamp(1.0 - r2 * r2, 0.0, 1.0);
-        const vec3 toward = to * inversesqrt(max(d2, 1e-8));
-        const float step_in_cone = clamp((dot(-toward, axis.xyz) - axis.w) * more.x, 0.0, 1.0);
-        const float k = window * window * step_in_cone * step_in_cone / max(d2, colour.w);
-        if (k <= 0.0) {
-            continue;
-        }
-        float seen = 1.0;
-        if (more.y >= 0.0 && material.params.z > 0.5 && dot(n, toward) > 0.0) {
-            seen = local_shadow(int(more.y), offset_normal, toward, sqrt(d2));
-        }
-        light += shade(s, toward, colour.rgb * (k * seen));
+        light += kin_spot_light(s, n, offset_normal, locals.spots[4 * i], locals.spots[4 * i + 1],
+                                locals.spots[4 * i + 2], locals.spots[4 * i + 3]);
+    }
+#endif
+#ifdef KIN_LIGHT_GRID
     }
 #endif
 
@@ -339,6 +518,29 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         around = mix(frame.ground_ambient.rgb, frame.ambient.rgb, n.y * 0.5 + 0.5);
         above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, reflected.y * 0.5 + 0.5);
     }
+#ifdef KIN_GI
+    // With global illumination's probes the diffuse is theirs: the sky's light where they see it, the light of every
+    // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
+    // light along the reflection, blurred: what the probes see that way; a smooth surface keeps the sky's sharp
+    // reflection, dimmed by how much of the sky's light the probes see that way (none in a closed room).
+    if (frame.gi.x > 0.5) {
+        const vec3 r = normalize(mix(reflect(-v, n), n, s.alpha));
+        const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
+        const float near = 0.02 * depth + 4.0 * fwidth(depth);
+        vec3 probed, traced;
+        float coverage;
+        if (kin_gi_resolved(n, r, depth, near, probed, traced, coverage)) {
+            around = mix(around, probed, coverage);
+            const vec3 open = frame.environment.w > 0.5
+                                  ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
+                                  : mix(frame.ground_ambient.rgb, frame.ambient.rgb, r.y * 0.5 + 0.5);
+            const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+            const float seen = clamp(dot(traced, luma) / max(dot(open, luma), 1e-6), 0.0, 1.0);
+            const float smooth_share = (1.0 - roughness) * (1.0 - roughness);
+            above = mix(above, mix(traced, above * seen, smooth_share), coverage);
+        }
+    }
+#endif
     const vec3 dielectric = sky_reflectance(vec3(0.04), ab);
     const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
     if (frame.occlusion.x > 0.5 && material.maps.z > 0.5) {
@@ -394,7 +596,12 @@ vec3 kin_fog_apply(vec3 colour) {
     if (fog_params.fog.colour.w > 0.5) {
         fog_colour = kin_fog_sky(dir);
     }
-    return mix(colour, kin_fog_sun(fog_params.fog, fog_colour, dir, frame.sun_direction.xyz, frame.sun_color.rgb), opacity);
+    // With Fog3D::sun_shadows (fog.view.z) the sun's in-scattering is added after the main pass, through the shadows
+    // (fog_sun_apply.frag), once a pixel.
+    const vec3 sun = fog_params.fog.view.z > 0.5
+                         ? vec3(0.0)
+                         : kin_fog_sun_light(fog_params.fog, dir, frame.sun_direction.xyz, frame.sun_color.rgb);
+    return mix(colour, fog_colour + sun, opacity);
 }
 #endif
 

@@ -11,6 +11,8 @@ class Assets3D;
 struct MaterialTexture3D {
     std::filesystem::path asset; // empty explicitly clears the imported map
     bool nearest = false;        // otherwise mipmapped
+    std::optional<TextureSampler3D> sampler;
+    bool reset_sampler = true; // a replacement map uses legacy sampling unless sampler:"inherit" is explicit
 };
 
 // Omitted fields preserve the imported material. Color uses the standard
@@ -23,6 +25,8 @@ struct MaterialPatch3D {
     std::optional<bool> unlit, double_sided, casts_shadow, receives_shadow, wireframe;
     std::optional<Blend3D> blend;
     std::optional<Wrap3D> wrap_u, wrap_v;
+    std::optional<LinearRgb> emission_color;
+    std::optional<EmissionMode3D> emission_mode;
     std::optional<MaterialTexture3D> texture, metallic_roughness, normal, occlusion, emissive_texture;
 };
 struct MaterialPartPatch3D {

@@ -1,0 +1,50 @@
+{
+  "schema": "kin.eval-suite/1",
+  "scenes": [
+    "../scenes/sponza.json",
+    "../scenes/industrial_yard.json",
+    "../scenes/bistro.json"
+  ],
+  "builds": {},
+  "tools": {},
+  "display": {
+    "name": "bistro_laptop",
+    "file": "../profiles/display_models_bistro.json"
+  },
+  "profiles": {
+    "smoke": {
+      "stages": [
+        "bench",
+        "capture",
+        "truth",
+        "score"
+      ]
+    },
+    "standard": {
+      "stages": [
+        "bench",
+        "capture",
+        "truth",
+        "score"
+      ]
+    },
+    "stress": {
+      "stages": [
+        "capture",
+        "stress"
+      ],
+      "runs": 1,
+      "warmup": 0,
+      "frames": 1500,
+      "size": [
+        1280,
+        720
+      ],
+      "stress_cycles": 10,
+      "stress_hold_frames": 130
+    }
+  },
+  "thresholds": {
+    "performance_review_percent": 5
+  }
+}

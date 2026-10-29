@@ -71,6 +71,7 @@ const std::map<std::string, std::string>& presets() {
     static const std::map<std::string, std::string> p{
         {"ao", "ao=on"},
         {"ao-half", "ao=on,ao_half=on"},
+        {"gi", "gi=on"},
         {"contact", "contact=on"},
         {"lod", "lod=on"},
         {"clusters", "lod=on"},                                // also builds clusters at load (as --lod-clusters)
@@ -98,6 +99,7 @@ const std::map<std::string, std::string>& presets() {
         {"bloom", "bloom=0.8,bloom_threshold=0.9"},
         {"msaa1", "msaa=1"},
         {"msaa8", "msaa=8"},
+        {"anisotropy", "anisotropy=16"},
         {"point-lights", "drop_light=1,light_r=14,light_g=9,light_b=4"},
         {"character", "character=on,char_clip=blend,char_count=5"}, // skinned entities with an animator (P1a part 2)
         {"character-all", "character=on,char_count=5,ao=on,contact=on,taa=on,cascades=4,shadow_distance=60"},
@@ -560,6 +562,15 @@ private:
         slider("shadow_extent", "Camera area half-size", s.shadow_extent, 3.0f, 60.0f);
         check("shadow_cache", "Keep the map while nothing moves", s.shadow_cache);
 
+        section("Global illumination");
+        check("gi", "Probe global illumination", s.gi);
+        slider("gi_cell", "Finest voxel size (m)", s.gi_cell, 0.05f, 1.0f);
+        islider("gi_levels", "Clipmap levels", s.gi_levels, 1, 4);
+        islider("gi_rays", "Rays per probe update", s.gi_rays, 16, 256);
+        islider("gi_per_render", "Probes per frame (0: automatic)", s.gi_per_render, 0, 16384);
+        slider("gi_intensity", "Intensity", s.gi_intensity, 0.0f, 3.0f);
+        note("GI settles over the first few seconds. More levels extend its range; smaller voxels improve detail.");
+
         section("Ambient occlusion");
         check("ao", "Occlusion (GTAO)", s.ao);
         slider("ao_radius", "Radius", s.ao_radius, 0.05f, 3.0f);
@@ -635,6 +646,8 @@ private:
         for (unsigned n : caps.samples)
             samples.push_back(std::to_string(n));
         choice("msaa", "MSAA samples", s.msaa, samples);
+        islider("anisotropy", "Anisotropic filtering (1: off)", s.anisotropy, 1, 16);
+        slider("texture_lod_bias", "Texture mip bias (negative: sharper)", s.texture_lod_bias, -2.0f, 2.0f);
         slider("bg_r", "Background red", s.background[0], 0.0f, 255.0f);
         slider("bg_g", "Background green", s.background[1], 0.0f, 255.0f);
         slider("bg_b", "Background blue", s.background[2], 0.0f, 255.0f);
@@ -1257,10 +1270,10 @@ private:
     void warm_up_features() {
         if (!_view.valid())
             return;
-        const auto key = std::make_tuple(_s.ao, _s.ao_half, _s.contact, _s.taa, _s.taa_sharpness > 0.0f, _s.shadows,
-                                         _s.shadow_resolution, _s.shadow_cascades > 1, _s.lod, _s.lod_occlusion,
-                                         _s.materials.blended, _s.materials.cutout, _s.wireframe, _key.samples,
-                                         _key.hdr, _key.size.x, _key.size.y);
+        const auto key = std::make_tuple(_s.gi, _s.ao, _s.ao_half, _s.contact, _s.taa, _s.taa_sharpness > 0.0f,
+                                         _s.shadows, _s.shadow_resolution, _s.shadow_cascades > 1, _s.lod,
+                                         _s.lod_occlusion, _s.materials.blended, _s.materials.cutout, _s.wireframe,
+                                         _key.samples, _key.hdr, _key.size.x, _key.size.y);
         if (!_warmed) {
             _warmed = true;
             _warmed_key = key;
@@ -2425,6 +2438,10 @@ private:
             << " --target " << json_number(_pos.x + f.x) << ',' << json_number(_pos.y + f.y) << ','
             << json_number(_pos.z + f.z) << '\n';
         out << "  (point lights are in the JSON below; --preset point-lights drops one at the camera)\n";
+        if (_s.gi)
+            out << "  (the reference runner also needs --gi --gi-windows --gi-cell " << _s.gi_cell << " --gi-rays "
+                << _s.gi_rays << " --gi-per-render " << _s.gi_per_render
+                << "; its volume bounds can differ from this viewer's padded model bounds)\n";
         // A scene file for tools/reference (tests/reference/scenes/*.json): the
         // lights, occlusion and view; materials are not part of a scene.
         const Lights3D& l = _scene.lights;
@@ -2685,6 +2702,12 @@ private:
         std::snprintf(line, sizeof line, "ao: %u draws, %u meshes, %u dispatches%s   lights %u", st.ao_draws,
                       st.ao_instances, st.ao_dispatches, st.ao_chain_built ? " (depth chain)" : "", st.lights);
         lines.push_back(line);
+        if (_s.gi) {
+            std::snprintf(line, sizeof line, "gi: %s   %u levels   %u probes (%u updated)   %u rays",
+                          st.gi_lit && st.gi_resolved ? "lighting" : "unavailable", st.gi_levels, st.gi_probes,
+                          st.gi_probes_updated, st.gi_rays);
+            lines.push_back(line);
+        }
         if (st.spots > 0 || st.local_shadow_maps > 0 || st.moon_cascades > 0) {
             std::snprintf(line, sizeof line,
                           "spots %u   local maps %u (%u drawn, %u kept) %u draws   moon cascades %u   %.1f MiB%s",
@@ -2841,7 +2864,7 @@ private:
     float _fire_dt = 0.0f;
     int _frames = 0;
     bool _warmed = false;
-    std::tuple<bool, bool, bool, bool, bool, bool, int, bool, bool, bool, bool, bool, int, u32, bool, int, int>
+    std::tuple<bool, bool, bool, bool, bool, bool, bool, int, bool, bool, bool, bool, bool, int, u32, bool, int, int>
         _warmed_key;
     bool _ready = false, _captured = false, _quit = false, _shot_requested = false, _shot_done = false;
     Clock::time_point _last = Clock::now();

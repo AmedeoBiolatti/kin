@@ -48,11 +48,42 @@ MaterialTexture3D texture(const JsonValue& value) {
         return {};
     if (value.is_string())
         return {text(value)};
-    fields(value, {"asset", "filter"});
+    fields(value, {"asset", "filter", "sampler"});
     require(value.find("asset") != nullptr, "texture requires 'asset'");
     MaterialTexture3D result{.asset = text(*value.find("asset"))};
     if (const auto* filter = value.find("filter"))
         result.nearest = enumeration<bool>(*filter, {{"nearest", true}, {"mipmapped", false}});
+    if (const auto* v = value.find("sampler")) {
+        require(!value.find("filter"), "use either filter or sampler, not both");
+        if (v->is_string()) {
+            require(v->as_string() == "inherit", "sampler string must be 'inherit'");
+            result.reset_sampler = false;
+        } else if (!v->is_null()) {
+            fields(*v, {"wrap_u", "wrap_v", "min", "mag", "mip"});
+            TextureSampler3D s;
+            const auto wrap = [](const JsonValue& v) {
+                return enumeration<Wrap3D>(
+                    v, {{"clamp", Wrap3D::Clamp}, {"repeat", Wrap3D::Repeat}, {"mirror", Wrap3D::Mirror}});
+            };
+            const auto filter = [](const JsonValue& v) {
+                return enumeration<TextureFilter3D>(
+                    v, {{"nearest", TextureFilter3D::Nearest}, {"linear", TextureFilter3D::Linear}});
+            };
+            if (const auto* x = v->find("wrap_u"))
+                s.wrap_u = wrap(*x);
+            if (const auto* x = v->find("wrap_v"))
+                s.wrap_v = wrap(*x);
+            if (const auto* x = v->find("min"))
+                s.min = filter(*x);
+            if (const auto* x = v->find("mag"))
+                s.mag = filter(*x);
+            if (const auto* x = v->find("mip"))
+                s.mip = enumeration<MipFilter3D>(
+                    *x,
+                    {{"none", MipFilter3D::None}, {"nearest", MipFilter3D::Nearest}, {"linear", MipFilter3D::Linear}});
+            result.sampler = s;
+        }
+    }
     return result;
 }
 MaterialPatch3D patch(const JsonValue& value) {
@@ -66,8 +97,23 @@ MaterialPatch3D patch(const JsonValue& value) {
                    "wrap_v",          "texture",
                    "normal",          "metallic_roughness",
                    "occlusion",       "emissive_texture",
-                   "shader",          "shader_params"});
+                   "shader",          "shader_params",
+                   "emission_color",  "emission_mode"});
     MaterialPatch3D result;
+    if (const auto* v = value.find("emission_mode"))
+        result.emission_mode = enumeration<EmissionMode3D>(
+            *v, {{"base_relative", EmissionMode3D::BaseRelative}, {"independent", EmissionMode3D::Independent}});
+    if (const auto* v = value.find("emission_color")) {
+        require(v->is_array() && v->items().size() == 3, "emission_color requires three linear RGB numbers");
+        result.emission_color = {number(v->items()[0], 0, 1e6, "emission_color"),
+                                 number(v->items()[1], 0, 1e6, "emission_color"),
+                                 number(v->items()[2], 0, 1e6, "emission_color")};
+        require(!result.emission_mode || *result.emission_mode == EmissionMode3D::Independent,
+                "emission_color requires independent emission");
+        result.emission_mode = EmissionMode3D::Independent;
+    } else if (value.find("emissive") && !result.emission_mode) {
+        result.emission_mode = EmissionMode3D::BaseRelative; // conversion of existing base-relative material files
+    }
     if (const auto* v = value.find("shader"))
         result.shader = v->is_null() ? std::filesystem::path{} : std::filesystem::path{text(*v)};
     if (const auto* v = value.find("shader_params")) {
@@ -184,6 +230,8 @@ void merge(MaterialPatch3D& to, const MaterialPatch3D& from) {
     FIELD(metallic);
     FIELD(roughness);
     FIELD(emissive);
+    FIELD(emission_color);
+    FIELD(emission_mode);
     FIELD(normal_scale);
     FIELD(occlusion_strength);
     FIELD(alpha_cutoff);
@@ -281,10 +329,10 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         if (reference.asset.empty())
             return {};
         const auto path = (assets.root() / reference.asset).lexically_normal();
-        auto [entry, added] = textures.try_emplace(std::tuple{path, reference.nearest, srgb});
+        auto [entry, added] = textures.try_emplace(std::tuple{path, false, srgb});
         if (added) {
             std::string error;
-            entry->second = assets.load_texture(path, reference.nearest, srgb).value_or({});
+            entry->second = assets.load_texture(path, false, srgb).value_or({});
             error = kin::diagnostics3d_text(assets.diagnostics());
             require(bool(entry->second), "texture '" + path.string() + "': " + error);
             result.source_files.push_back(path);
@@ -316,6 +364,8 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         FIELD(metallic);
         FIELD(roughness);
         FIELD(emissive);
+        FIELD(emission_color);
+        FIELD(emission_mode);
         FIELD(normal_scale);
         FIELD(occlusion_strength);
         FIELD(alpha_cutoff);
@@ -328,14 +378,21 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         FIELD(wrap_u);
         FIELD(wrap_v);
 #undef FIELD
-#define TEXTURE(name, srgb)                                                                                            \
-    if (p.name)                                                                                                        \
-    material.name = resolve(*p.name, srgb)
-        TEXTURE(texture, true);
-        TEXTURE(emissive_texture, true);
-        TEXTURE(metallic_roughness, false);
-        TEXTURE(normal, false);
-        TEXTURE(occlusion, false);
+#define TEXTURE(name, srgb, slot)                                                                                      \
+    if (p.name) {                                                                                                      \
+        material.name = resolve(*p.name, srgb);                                                                        \
+        if (p.name->reset_sampler) {                                                                                   \
+            material.texture_samplers[slot] = p.name->sampler;                                                         \
+            if (!p.name->sampler && material.name)                                                                     \
+                material.texture_samplers[slot] = legacy_sampler3d(                                                    \
+                    p.name->nearest ? ScaleMode::Nearest : ScaleMode::Mipmapped, material.wrap_u, material.wrap_v);    \
+        }                                                                                                              \
+    }
+        TEXTURE(texture, true, 0);
+        TEXTURE(emissive_texture, true, 4);
+        TEXTURE(metallic_roughness, false, 1);
+        TEXTURE(normal, false, 2);
+        TEXTURE(occlusion, false, 3);
 #undef TEXTURE
         if (p.shader) {
             material.shader = {};

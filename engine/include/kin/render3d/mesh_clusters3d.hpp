@@ -155,7 +155,7 @@ struct NoClusterCull3D {
     u32 views(Vec3f, f32) const { return 1u; }
 };
 
-// The scale a transform gives lengths (its largest axis').
+// Conservative stretch used for cluster spheres and projected errors, including sheared transforms.
 f32 cluster_scale_of(const Mat4f& transform);
 
 // Whether the cluster's own error is within the allowed pixels, and whether its parent's is (a root's never is).

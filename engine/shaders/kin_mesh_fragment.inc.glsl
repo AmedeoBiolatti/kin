@@ -31,7 +31,10 @@ void main() {
     }
     vec3 c;
     if (material.params.y > 0.5) {
-        c = color.rgb * (vec3(1.0) + vec3(material.params.x));
+        // Keep the legacy no-map operation order identical to the minimal unlit shader.
+        c = material.emission.w < 0.5 && material.maps.y < 0.5
+                ? color.rgb * (vec3(1.0) + vec3(material.params.x))
+                : color.rgb + kin_emissive(color.rgb);
     } else {
         const vec2 mr = kin_metallic_roughness();
         c = kin_lit(color.rgb, kin_normal(), mr.x, mr.y, kin_occlusion()) + kin_emissive(color.rgb);

@@ -96,6 +96,14 @@ struct Fog3D {
     // Henyey-Greenstein lobe of `sun_anisotropy` (0 even, near 1 a tight glare), added to the fog's colour.
     f32 sun_scatter = 0.0f;
     f32 sun_anisotropy = 0.6f;
+    // The sun's in-scattering only where the fog's air is in sunlight: along each pixel's ray, the share of the fog the
+    // sun reaches through its shadow map (Lights3D's sun shadows, out to their reach; lit past it), walked at half the
+    // view's size after the depth pre-pass (which this turns on) and added once a pixel after the main pass. In a
+    // street's shade the air between the camera and a wall is in the buildings' shadow: without it the fog there shone
+    // with the sun as in the open and veiled the shade. Shafts of light where shadows cross the air. Off by default;
+    // needs the sun's shadows, a float picture (ViewOptions3D::hdr or temporal anti-aliasing), a perspective camera and
+    // SDL_GPU (elsewhere the sun's in-scattering stays unshadowed). About 0.45 ms at 2404 x 1352 (RTX 4080 Laptop).
+    bool sun_shadows = false;
 };
 
 namespace sky_model {

@@ -1,0 +1,28 @@
+{
+  "schema": "kin.eval-scene/1",
+  "id": "bistro",
+  "adapter": "bistro",
+  "source": "${KIN_BISTRO_PROJECT}/tools/eval/views.json",
+  "project": "${KIN_BISTRO_PROJECT}",
+  "asset_root": "${KIN_BISTRO_CONTENT}",
+  "script": "${KIN_BISTRO_PROJECT}/tools/eval/cycles_truth.py",
+  "views": [
+    "start",
+    "street",
+    "terrace",
+    "start_noon",
+    "start_dusk",
+    "start_walk"
+  ],
+  "settle_frames": 600,
+  "quality": 1,
+  "tonemap_match": 0.91,
+  "saturation": 1.17,
+  "dependencies": [
+    "${KIN_BISTRO_CONTENT}"
+  ],
+  "reference": {
+    "provider": "bistro",
+    "coverage": "daylight views; no night lamps/fog reference mapping"
+  }
+}

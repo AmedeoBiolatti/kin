@@ -90,6 +90,8 @@ add_library(kin_engine STATIC
     src/renderer/animation_import.cpp
     src/renderer/cached_target.cpp
     src/renderer/render_graph.cpp
+    src/renderer/resource_graph.cpp
+    src/renderer/graph_resources.cpp
     src/renderer/render_profile.cpp
     src/renderer/material.cpp
     src/renderer/render_queue.cpp
@@ -178,6 +180,7 @@ if(KIN_HAS_GPU_RENDERER)
         src/renderer/shader_reflect.cpp
         src/renderer/gpu/gpu_buffer.cpp
         src/renderer/gpu/gpu_device.cpp
+        src/renderer/gpu/gpu_memory.cpp
         src/renderer/gpu/gpu_frame_timer.cpp
         src/renderer/gpu/gpu_geometry_batch.cpp
         src/renderer/gpu/gpu_pipeline_cache.cpp
@@ -337,7 +340,8 @@ if(KIN_EXPERIMENTAL_3D)
         src/render3d/taa.cpp src/render3d/sky3d.cpp src/render3d/particles3d.cpp
         src/render3d/environment.cpp src/render3d/hdr_decode.c)
     if(KIN_HAS_GPU_RENDERER)
-        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_mesh_pool.cpp)
+        target_sources(kin_engine PRIVATE src/renderer/gpu/gpu_renderer3d.cpp src/renderer/gpu/gpu_gi3d.cpp
+                                          src/renderer/gpu/gpu_mesh_pool.cpp)
     elseif(KIN_HAS_WEBGL2_RENDERER)
         target_sources(kin_engine PRIVATE src/renderer/webgl2_renderer3d.cpp)
         list(APPEND _kin_webgl_shaders

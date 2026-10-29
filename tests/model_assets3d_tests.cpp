@@ -343,8 +343,16 @@ void gpu_assets(Renderer2D& renderer) {
           "cross-model external texture sharing failed");
     check(mat.texture != mat.normal, "sRGB and linear data textures aliased");
     check(mat.normal == mat.metallic_roughness && mat.normal == mat.occlusion, "same data texture not shared");
-    check(mat.texture != filtered->parts[0].material.texture, "different filtering modes aliased");
-    check(assets.stats().texture_loads == 3, "unnecessary dependent texture uploads");
+    const auto& filtered_mat = filtered->parts[0].material;
+    const auto base_map = u32(MaterialMap3D::BaseColor);
+    check(mat.texture == filtered_mat.texture, "per-map filtering duplicated the imported image");
+    check(mat.texture_samplers[base_map] && filtered_mat.texture_samplers[base_map] &&
+              mat.texture_samplers[base_map]->mag == TextureFilter3D::Nearest &&
+              filtered_mat.texture_samplers[base_map]->mag == TextureFilter3D::Linear &&
+              mat.texture_samplers[base_map]->min == TextureFilter3D::Linear &&
+              mat.texture_samplers[base_map]->mip == MipFilter3D::Linear,
+          "shared imported image lost independent min/mag/mip sampling");
+    check(assets.stats().texture_loads == 2, "unnecessary dependent texture uploads");
 
     auto parts = assets.load_model("parts.glb").value_or({});
     auto changed_options = assets.load_model("parts.glb", {.levels = 2}).value_or({});

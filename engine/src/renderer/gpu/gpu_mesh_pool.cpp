@@ -1,11 +1,13 @@
 #include "gpu_mesh_pool.hpp"
 
+#include "gpu_memory.hpp"
+
 #include <algorithm>
 
 namespace kin::gpu {
 GpuMeshBufferPage::~GpuMeshBufferPage() {
     if (buffer && device && *device)
-        SDL_ReleaseGPUBuffer(*device, buffer);
+        tracked_release_buffer(*device, buffer);
 }
 GpuMeshBufferPool::~GpuMeshBufferPool() {
     if (_device && *_device) {
@@ -44,7 +46,7 @@ GpuMeshBufferSlice GpuMeshBufferPool::allocate_slice(u32 bytes, SDL_GPUBufferUsa
         return {};
     auto page = std::make_shared<GpuMeshBufferPage>(_device);
     const SDL_GPUBufferCreateInfo info{.usage = usage, .size = capacity, .props = 0};
-    page->buffer = SDL_CreateGPUBuffer(*_device, &info);
+    page->buffer = tracked_create_buffer(*_device, &info);
     if (!page->buffer)
         return {};
     page->usage = usage;
@@ -62,10 +64,10 @@ GpuMeshBufferAllocation GpuMeshBufferPool::allocate(u32 vertex_bytes, u32 index_
     if (!vertex_bytes || !index_bytes || vertex_bytes > vertex_page / 2 || index_bytes > index_page / 2)
         return {};
     GpuMeshBufferAllocation result;
-    result.vertices = allocate_slice(vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX, vertex_page);
+    result.vertices = allocate_slice(vertex_bytes, SDL_GPU_BUFFERUSAGE_VERTEX | _extra_usage, vertex_page);
     if (!result.vertices.page)
         return {};
-    result.indices = allocate_slice(index_bytes, SDL_GPU_BUFFERUSAGE_INDEX, index_page);
+    result.indices = allocate_slice(index_bytes, SDL_GPU_BUFFERUSAGE_INDEX | _extra_usage, index_page);
     if (!result.indices.page) {
         free_slice(result.vertices);
         return {};

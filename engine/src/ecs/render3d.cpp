@@ -100,6 +100,99 @@ struct Wanted {
 
 } // namespace
 
+// Stable callback storage; observers never capture the movable Flecs table data.
+struct WorldRenderState3D::Tracking {
+    // Observer entity deletion may be deferred. Their callbacks retain this
+    // small liveness token, never a dangling pointer to destroyed state.
+    struct Callbacks {
+        Tracking* state = nullptr;
+    };
+    std::shared_ptr<Callbacks> callbacks = std::make_shared<Callbacks>(Callbacks{this});
+    struct Node {
+        flecs::entity_t id = 0, parent = 0, source = 0;
+        u32 parent_index = ~u32{0};
+        Transform3D local{};
+        Mat4f world{};
+        u32 first_child = ~u32{0}, next_sibling = ~u32{0};
+        bool dirty = false, collected = false;
+    };
+    struct Binding {
+        u32 bucket = 0, slot = 0, part = ~u32{0}, next = ~u32{0};
+    };
+    flecs::world_t* world = nullptr;
+    SceneMutationMode3D mode = SceneMutationMode3D::Conservative;
+    SceneWorkStats3D stats{};
+    bool topology = true, collection = false;
+    u64 particle_revision = 1;
+    std::vector<Node> nodes;
+    std::unordered_map<flecs::entity_t, u32> indices;
+    std::unordered_map<flecs::entity_t, std::vector<u32>> sources;
+    std::vector<flecs::entity_t> pending, changed;
+    std::vector<u32> dirty;
+    std::unordered_map<flecs::entity_t, Binding> bindings;
+    std::vector<Binding> extra_bindings;
+    std::vector<flecs::observer> observers;
+    ~Tracking() {
+        callbacks->state = nullptr;
+        for (auto& observer : observers)
+            observer.destruct();
+    }
+};
+
+WorldRenderState3D::~WorldRenderState3D() = default;
+void WorldRenderState3D::mutation_mode(SceneMutationMode3D mode) {
+    if (_tracking->mode != mode) {
+        _tracking->mode = mode;
+        invalidate();
+        if (mode == SceneMutationMode3D::Conservative) {
+            auto& t = *_tracking;
+            decltype(t.nodes){}.swap(t.nodes);
+            decltype(t.indices){}.swap(t.indices);
+            decltype(t.sources){}.swap(t.sources);
+            decltype(t.bindings){}.swap(t.bindings);
+            decltype(t.extra_bindings){}.swap(t.extra_bindings);
+            decltype(t.pending){}.swap(t.pending);
+            decltype(t.changed){}.swap(t.changed);
+            decltype(t.dirty){}.swap(t.dirty);
+        }
+    }
+}
+SceneMutationMode3D WorldRenderState3D::mutation_mode() const {
+    return _tracking->mode;
+}
+void WorldRenderState3D::invalidate() {
+    _tracking->topology = true;
+    _tracking->collection = false;
+    ++_tracking->particle_revision;
+}
+SceneWorkStats3D WorldRenderState3D::work_stats() const {
+    auto stats = _tracking->stats;
+    // Capacity estimate, including hash nodes/buckets; allocator overhead is not observable here.
+    const auto& t = *_tracking;
+    stats.tracking_bytes =
+        t.nodes.capacity() * sizeof(Tracking::Node) +
+        (t.pending.capacity() + t.changed.capacity()) * sizeof(flecs::entity_t) + t.dirty.capacity() * sizeof(u32) +
+        t.indices.size() * sizeof(decltype(t.indices)::value_type) + t.indices.bucket_count() * sizeof(void*) +
+        t.sources.size() * sizeof(decltype(t.sources)::value_type) + t.sources.bucket_count() * sizeof(void*) +
+        t.bindings.size() * sizeof(decltype(t.bindings)::value_type) + t.bindings.bucket_count() * sizeof(void*) +
+        t.extra_bindings.capacity() * sizeof(Tracking::Binding);
+    for (const auto& [id, uses] : t.sources)
+        stats.tracking_bytes += uses.capacity() * sizeof(u32);
+    return stats;
+}
+u64 WorldRenderState3D::particle_configuration_revision() const {
+    return _tracking->particle_revision;
+}
+void WorldRenderState3D::note_particle_validation(bool reused) {
+    if (reused)
+        ++_tracking->stats.particle_validation_reuses;
+    else
+        ++_tracking->stats.particle_validation_runs;
+}
+void WorldRenderState3D::reset_work_stats() {
+    _tracking->stats = {};
+}
+
 u64 WorldRenderState3D::history_id(flecs::entity entity) const {
     const auto* lease = entity.get<detail::SceneLease3D>();
     const u64 scope = detail::history3d_mix(_history_identity);
@@ -109,12 +202,13 @@ u64 WorldRenderState3D::history_id(flecs::entity entity) const {
 }
 
 WorldRenderState3D::WorldRenderState3D(flecs::world& world)
-    : _history_identity([] {
+    : _tracking(std::make_unique<Tracking>()), _history_identity([] {
           static std::atomic<u64> next{1};
           return next.fetch_add(1, std::memory_order_relaxed);
       }()),
       _attachments(world.query_builder<JointAttachment3D>().term_at(0).self().build()),
       _transform_observer(world.observer<Transform3D>("add_world_transform_3d")
+                              .query_flags(EcsQueryMatchDisabled | EcsQueryMatchPrefab)
                               .event(flecs::OnAdd)
                               .yield_existing()
                               .each([](flecs::entity entity, Transform3D&) { entity.ensure<WorldTransform3D>(); })),
@@ -148,6 +242,66 @@ WorldRenderState3D::WorldRenderState3D(flecs::world& world)
     // Optional lookups during collection must not lazily register a component
     // while a Flecs table is being iterated, including in non-authored worlds.
     world.component<ModelMaterials3D>();
+    auto* tracking = _tracking.get();
+    tracking->world = world.c_ptr();
+    const auto transform_id = world.id<Transform3D>(), world_id = world.id<WorldTransform3D>();
+    const auto emitter_id = world.id<ParticleEmitter3D>();
+    const auto structural = [callbacks = tracking->callbacks, transform_id, world_id, emitter_id](flecs::iter& it) {
+        while (it.next()) {
+            auto* tracking = callbacks->state;
+            if (!tracking)
+                continue;
+            const auto id = it.event_id();
+            const bool hierarchy = id.is_pair() && (id.first() == flecs::ChildOf || id.first() == flecs::IsA);
+            const bool configuration = id == emitter_id || id == transform_id || id == flecs::Disabled || hierarchy;
+            if (configuration)
+                ++tracking->particle_revision;
+            for (auto row : it) {
+                if (hierarchy || id == transform_id || id == world_id || id == flecs::Disabled ||
+                    it.entity(row).has<Transform3D>()) {
+                    tracking->topology = true;
+                    tracking->collection = false;
+                    break;
+                }
+            }
+        }
+    };
+    tracking->observers.push_back(world.observer()
+                                      .with(flecs::Wildcard)
+                                      .query_flags(EcsQueryMatchDisabled | EcsQueryMatchPrefab)
+                                      .event(flecs::OnAdd)
+                                      .event(flecs::OnRemove)
+                                      .run(structural));
+    tracking->observers.push_back(world.observer()
+                                      .with(flecs::Wildcard, flecs::Wildcard)
+                                      .query_flags(EcsQueryMatchDisabled | EcsQueryMatchPrefab)
+                                      .event(flecs::OnAdd)
+                                      .event(flecs::OnRemove)
+                                      .run(structural));
+    tracking->observers.push_back(
+        world.observer()
+            .with(flecs::Wildcard)
+            .query_flags(EcsQueryMatchDisabled | EcsQueryMatchPrefab)
+            .event(flecs::OnSet)
+            .run([callbacks = tracking->callbacks, transform = transform_id, world_id, emitter_id](flecs::iter& it) {
+                while (it.next()) {
+                    auto* tracking = callbacks->state;
+                    if (!tracking)
+                        continue;
+                    if (it.event_id() == transform) {
+                        if (tracking->mode == SceneMutationMode3D::Tracked && !tracking->topology)
+                            for (auto row : it)
+                                tracking->pending.push_back(it.entity(row).id());
+                    } else {
+                        if (it.event_id() == emitter_id)
+                            ++tracking->particle_revision;
+                        tracking->collection = false;
+                        // An explicitly edited derived parent may affect children.
+                        if (it.event_id() == world_id)
+                            tracking->topology = true;
+                    }
+                }
+            }));
 }
 
 void WorldRenderState3D::simulate_particles(f64 dt, const Wind3D* wind) {
@@ -256,8 +410,8 @@ u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& d
 
 void WorldRenderState3D::animate(f32 dt) {
     ++_epoch;
-    _animators.each([&](flecs::iter& it, size_t, const SkinnedMeshRenderer3D* renderer, const ModelRenderer3D* rigid,
-                        Animator3D& a, Transform3D* own) {
+    const auto advance = [&](flecs::iter& it, size_t row, const SkinnedMeshRenderer3D* renderer,
+                             const ModelRenderer3D* rigid, Animator3D& a, Transform3D* own) {
         a.events.clear();
         const Animated target = animated(renderer, rigid);
         const Model3D* model = target.model ? target.model->get() : nullptr;
@@ -354,6 +508,7 @@ void WorldRenderState3D::animate(f32 dt) {
             if (a.apply_root_motion) {
                 const RootMotion3D& m = a.player.root_motion();
                 if (own) {
+                    const Transform3D before = *own;
                     // The motion is in the root's parent space (the model's): turned and scaled as the entity is.
                     own->position +=
                         own->rotation.rotate(Vec3f{m.translation.x * own->scale.x, m.translation.y * own->scale.y,
@@ -361,6 +516,8 @@ void WorldRenderState3D::animate(f32 dt) {
                     if (a.root_motion_axes.rotation) {
                         own->rotation = (own->rotation * m.rotation).normalized();
                     }
+                    if (own->position != before.position || own->rotation != before.rotation)
+                        it.entity(row).modified<Transform3D>();
                 }
             }
         }
@@ -392,7 +549,10 @@ void WorldRenderState3D::animate(f32 dt) {
                 }
             }
         }
-    });
+    };
+    // Root-motion modified() notifications must wait until the query unlocks
+    // its tables. Publish them before the caller's transform barrier.
+    _ecs->raw().defer([&] { _animators.each(advance); });
 }
 
 void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pose3D& base, const Mat4f& entity_matrix,
@@ -669,27 +829,159 @@ void WorldRenderState3D::apply_ik() {
 
 void WorldRenderState3D::propagate_transforms() {
     ++_epoch;
-    // Tables come parents first (cascade), and every entity in a table shares
-    // its parent: one tight loop a table.
-    _transforms.run([](flecs::iter& it) {
-        while (it.next()) {
-            const auto self = it.field<WorldTransform3D>(0);
-            const auto local = it.field<const Transform3D>(1);
-            if (!it.is_set(2)) {
-                for (const auto i : it) {
-                    self[i].matrix = local[i].matrix();
+    auto& t = *_tracking;
+    ++t.stats.transform_flushes;
+    if (t.mode == SceneMutationMode3D::Conservative) {
+        // Preserve the original tight table loops. A value cache increased the
+        // cost of this compatibility scan; sparse tracking is an explicit choice.
+        _transforms.run([&](flecs::iter& it) {
+            while (it.next()) {
+                const auto self = it.field<WorldTransform3D>(0);
+                const auto local = it.field<const Transform3D>(1);
+                const bool own_local = it.is_self(1);
+                t.stats.transform_visits += it.count();
+                t.stats.transforms_recomputed += it.count();
+                if (!it.is_set(2)) {
+                    if (own_local)
+                        for (auto row : it)
+                            self[row].matrix = local[row].matrix();
+                    else {
+                        const Mat4f matrix = local[0].matrix();
+                        for (auto row : it)
+                            self[row].matrix = matrix;
+                    }
+                    continue;
                 }
-                continue;
+                const Mat4f parent = it.field<const WorldTransform3D>(2)[0].matrix;
+                if (own_local)
+                    for (auto row : it)
+                        self[row].matrix = parent * local[row].matrix();
+                else {
+                    const Mat4f matrix = parent * local[0].matrix();
+                    for (auto row : it)
+                        self[row].matrix = matrix;
+                }
             }
-            const Mat4f parent = it.field<const WorldTransform3D>(2)[0].matrix;
-            for (const auto i : it) {
-                self[i].matrix = parent * local[i].matrix();
+        });
+        return;
+    }
+
+    const bool rebuild = t.topology;
+    if (rebuild) {
+        t.nodes.clear();
+        t.indices.clear();
+        t.sources.clear();
+        t.changed.clear();
+        t.bindings.clear();
+        t.extra_bindings.clear();
+        t.collection = false;
+        ++t.stats.topology_rebuilds;
+        _transforms.run([&](flecs::iter& it) {
+            while (it.next()) {
+                const auto local = it.field<const Transform3D>(1);
+                for (auto row : it) {
+                    const u32 index = static_cast<u32>(t.nodes.size());
+                    const auto id = it.entity(row).id();
+                    const auto parent = it.is_set(2) ? it.src(2).id() : 0;
+                    const auto source = it.is_self(1) ? id : it.src(1).id();
+                    t.indices.emplace(id, index);
+                    if (source != id)
+                        t.sources[source].push_back(index);
+                    t.nodes.push_back(
+                        {.id = id, .parent = parent, .source = source, .local = local[it.is_self(1) ? row : 0]});
+                    if (auto p = t.indices.find(parent); p != t.indices.end()) {
+                        t.nodes.back().next_sibling = t.nodes[p->second].first_child;
+                        t.nodes[p->second].first_child = index;
+                        t.nodes.back().parent_index = p->second;
+                    }
+                }
             }
+        });
+        t.topology = false;
+    }
+    const auto update = [&](u32 index, const Transform3D* local, WorldTransform3D* world, const Mat4f& parent) {
+        auto& node = t.nodes[index];
+        if (!world || !local) {
+            t.topology = true;
+            t.collection = false;
+            return;
         }
-    });
+        ++t.stats.transform_visits;
+        const bool same_local = local->position == node.local.position && local->rotation == node.local.rotation &&
+                                local->scale == node.local.scale;
+        const bool parent_changed = node.parent_index != ~u32{0} && t.nodes[node.parent_index].dirty;
+        // External derived parents are uncommon and deliberately conservative.
+        const bool external_parent = node.parent && node.parent_index == ~u32{0};
+        if (rebuild || !same_local || parent_changed || external_parent || world->matrix != node.world) {
+            const Mat4f result = parent * local->matrix();
+            node.dirty = result != node.world || rebuild;
+            world->matrix = result;
+            node.world = result;
+            node.local = *local;
+            ++t.stats.transforms_recomputed;
+            if (node.dirty && !node.collected) {
+                t.changed.push_back(node.id);
+                node.collected = true;
+            }
+        } else {
+            node.dirty = false;
+            ++t.stats.transforms_reused;
+        }
+    };
+    if (rebuild) {
+        u32 index = 0;
+        _transforms.run([&](flecs::iter& it) {
+            while (it.next()) {
+                auto worlds = it.field<WorldTransform3D>(0);
+                const auto locals = it.field<const Transform3D>(1);
+                const Mat4f parent = it.is_set(2) ? it.field<const WorldTransform3D>(2)[0].matrix : Mat4f{};
+                for (auto row : it)
+                    update(index++, &locals[it.is_self(1) ? row : 0], &worlds[row], parent);
+            }
+        });
+    } else {
+        t.dirty.clear();
+        const auto mark = [&](u32 index) {
+            if (!t.nodes[index].dirty) {
+                t.nodes[index].dirty = true;
+                t.dirty.push_back(index);
+            }
+        };
+        for (auto id : t.pending) {
+            if (auto node = t.indices.find(id); node != t.indices.end())
+                mark(node->second);
+            if (auto uses = t.sources.find(id); uses != t.sources.end())
+                for (auto index : uses->second)
+                    mark(index);
+        }
+        for (std::size_t i = 0; i < t.dirty.size(); ++i)
+            for (u32 child = t.nodes[t.dirty[i]].first_child; child != ~u32{0}; child = t.nodes[child].next_sibling)
+                mark(child);
+        std::sort(t.dirty.begin(), t.dirty.end());
+        for (auto index : t.dirty) {
+            t.nodes[index].dirty = false;
+            flecs::entity entity(t.world, t.nodes[index].id);
+            const auto* parent =
+                t.nodes[index].parent ? flecs::entity(t.world, t.nodes[index].parent).get<WorldTransform3D>() : nullptr;
+            update(index, entity.get<Transform3D>(), entity.get_mut<WorldTransform3D>(),
+                   parent ? parent->matrix : Mat4f{});
+        }
+    }
+    // Retain only the changed IDs for collection, not transient dependency marks.
+    if (rebuild) {
+        for (auto& node : t.nodes)
+            node.dirty = false;
+    } else {
+        for (auto index : t.dirty)
+            t.nodes[index].dirty = false;
+    }
+    t.pending.clear();
 }
 
 void WorldRenderState3D::clear_collection_cache() {
+    _tracking->collection = false;
+    _tracking->bindings.clear();
+    _tracking->extra_bindings.clear();
     _buckets.clear();
     _bucket_lookup.clear();
     _bucket_lookup_dirty = false;
@@ -800,6 +1092,83 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         ~IKGuard() { value = nullptr; }
     } ik_guard{_ik_presentation};
     _ik_presentation = &ik;
+    auto& tracking = *_tracking;
+    const bool tracked = tracking.mode == SceneMutationMode3D::Tracked;
+    const bool simple = tracked && !presentation && _animators.count() == 0 && _skinned.count() == 0 &&
+                        _attachments.count() == 0 && _point_lights.count() == 0 && _spot_lights.count() == 0 &&
+                        _emitters.count() == 0;
+    if (simple && tracking.collection && !tracking.topology) {
+        std::unordered_map<u32, std::vector<u32>> edits;
+        for (auto id : tracking.changed) {
+            auto binding = tracking.bindings.find(id);
+            if (binding == tracking.bindings.end())
+                continue;
+            flecs::entity entity(tracking.world, id);
+            const auto* world = entity.get<WorldTransform3D>();
+            const auto placement = draw_placement(entity, *world, entity.get<RenderTransform3D>());
+            if (!placement) {
+                tracking.collection = false;
+                break;
+            }
+            const auto* record = &binding->second;
+            const auto* model =
+                record->part == ~u32{0} && record->next == ~u32{0} ? nullptr : entity.get<ModelRenderer3D>();
+            while (record) {
+                if (record->part != ~u32{0} &&
+                    (!model || !model->model || record->part >= model->model->parts.size())) {
+                    tracking.collection = false;
+                    break;
+                }
+                auto& bucket = _buckets[record->bucket];
+                bucket.instances[record->slot].transform =
+                    record->part == ~u32{0} ? *placement : *placement * model->model->parts[record->part].transform;
+                edits[record->bucket].push_back(record->slot);
+                ++tracking.stats.collection_updates;
+                record = record->next == ~u32{0} ? nullptr : &tracking.extra_bindings[record->next];
+            }
+            if (!tracking.collection)
+                break;
+        }
+        if (tracking.collection) {
+            for (auto& [index, slots] : edits) {
+                auto& bucket = _buckets[index];
+                if (!bucket.batch)
+                    continue;
+                if (bucket.batch.lifetime().use_count() > 1) {
+                    std::swap(bucket.batch, bucket.spare);
+                    bucket.rebuild();
+                    continue;
+                }
+                std::sort(slots.begin(), slots.end());
+                for (std::size_t i = 0; i < slots.size();) {
+                    const u32 first = slots[i++];
+                    u32 end = first + 1;
+                    while (i < slots.size() && slots[i] == end) {
+                        ++end;
+                        ++i;
+                    }
+                    if (!bucket.batch.update(
+                            first, std::span<const MeshInstance3D>(bucket.instances).subspan(first, end - first)))
+                        bucket.rebuild();
+                }
+            }
+            for (auto& bucket : _buckets) {
+                if (bucket.batch)
+                    (void)scene.draw_instanced(bucket.batch, bucket.material);
+                else
+                    (void)scene.draw_instanced(bucket.mesh, bucket.instances, bucket.material);
+            }
+            for (auto id : tracking.changed)
+                tracking.nodes[tracking.indices.at(id)].collected = false;
+            tracking.changed.clear();
+            ++tracking.stats.collection_reuses;
+            return;
+        }
+    }
+    ++tracking.stats.collection_fallbacks;
+    tracking.collection = false;
+    tracking.bindings.clear();
+    tracking.extra_bindings.clear();
     prepare_joint_attachments();
     auto& by_mesh = _bucket_lookup;
     if (_bucket_lookup_dirty) {
@@ -816,6 +1185,18 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
         candidates.push_back(_buckets.size());
         return _buckets.emplace_back(Bucket{mesh, material, {}, {}});
     };
+    const auto bind = [&](flecs::entity_t id, Bucket& bucket, u32 part = ~u32{0}) {
+        if (!simple)
+            return;
+        Tracking::Binding record{static_cast<u32>(&bucket - _buckets.data()), static_cast<u32>(bucket.instances.size()),
+                                 part};
+        auto [entry, inserted] = tracking.bindings.try_emplace(id, record);
+        if (!inserted) {
+            record.next = entry->second.next;
+            entry->second.next = static_cast<u32>(tracking.extra_bindings.size());
+            tracking.extra_bindings.push_back(record);
+        }
+    };
     for (Bucket& bucket : _buckets) {
         bucket.instances.clear();
     }
@@ -824,20 +1205,23 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             const auto world = it.field<const WorldTransform3D>(0);
             const auto renderers = it.field<const MeshRenderer3D>(1);
             const auto presentation = it.field<const RenderTransform3D>(2);
+            const bool own_world = it.is_self(0), own_renderer = it.is_self(1), own_presentation = it.is_self(2);
             Bucket* last = nullptr; // entities of a table mostly share a mesh
             for (const auto i : it) {
-                const MeshRenderer3D& r = renderers[i];
+                ++tracking.stats.collection_visits;
+                const MeshRenderer3D& r = renderers[own_renderer ? i : 0];
                 if (!r.visible || !r.mesh.valid()) {
                     continue;
                 }
-                const auto placement =
-                    draw_placement(it.entity(i), world[i], it.is_set(2) ? &presentation[i] : nullptr);
+                const auto placement = draw_placement(it.entity(i), world[own_world ? i : 0],
+                                                      it.is_set(2) ? &presentation[own_presentation ? i : 0] : nullptr);
                 if (!placement)
                     continue;
                 if (!last || !(last->mesh == r.mesh) || !(last->material == r.material)) {
                     last = &bucket_for(r.mesh, r.material);
                 }
                 // Picking retains the low entity index; history includes generation, scope and lease.
+                bind(it.entity(i).id(), *last);
                 last->instances.push_back(
                     {*placement, r.tint, r.id ? r.id : u32(it.entity(i).id() & 0xFFFFFFFFu), history_id(it.entity(i))});
             }
@@ -845,6 +1229,7 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
     });
     _models.each([&](flecs::entity entity, const WorldTransform3D& world, const ModelRenderer3D& renderer,
                      const RenderTransform3D* presentation, Animator3D* animator) {
+        ++tracking.stats.collection_visits;
         if (!renderer.visible || !renderer.model)
             return;
         const auto placement = draw_placement(entity, world, presentation);
@@ -884,12 +1269,20 @@ void WorldRenderState3D::collect(Scene3D& scene, const Presentation3D& presentat
             const auto& material = binding ? binding->materials[index] : part.material;
             if (!part.mesh || part.mesh.skinned() || part.skin >= 0)
                 continue;
-            bucket_for(part.mesh, material)
-                .instances.push_back(
-                    {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint,
-                     id, detail::part_history3d(history_id(entity), index)});
+            auto& bucket = bucket_for(part.mesh, material);
+            bind(entity.id(), bucket, static_cast<u32>(index));
+            bucket.instances.push_back(
+                {*placement * (nodes.empty() ? part.transform : model.part_transform(index, nodes)), renderer.tint, id,
+                 detail::part_history3d(history_id(entity), index)});
         }
     });
+    const bool empty_buckets =
+        std::any_of(_buckets.begin(), _buckets.end(), [](const Bucket& b) { return b.instances.empty(); });
+    tracking.collection = simple && !empty_buckets;
+    for (auto id : tracking.changed)
+        if (auto found = tracking.indices.find(id); found != tracking.indices.end())
+            tracking.nodes[found->second].collected = false;
+    tracking.changed.clear();
     // A bucket is a reuse aid for live draws, never a resident asset cache.
     if (std::erase_if(_buckets, [](const Bucket& bucket) { return bucket.instances.empty(); }))
         _bucket_lookup_dirty = true;

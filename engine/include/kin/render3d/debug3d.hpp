@@ -4,6 +4,14 @@
 
 namespace kin {
 
+// What the view shows of Scene3D::global_illumination's GI scene instead of the picture
+// (RenderDebugOptions3D::gi_view): each pixel traced through its voxels to the first one a surface is in, and that
+// voxel's colour (shaded a little by which way it faces the camera), normal or emission; `Steps` the trace's cost, from
+// blue (a few steps) to red (many); `Radiance` the light leaving the voxel (the lit scene), `Irradiance` the probes'
+// light there (what a white surface facing the camera would show). Off, or with no GI scene, the picture is drawn as
+// ever.
+enum class GiView3D : u8 { Off, Albedo, Normal, Emission, Steps, Radiance, Irradiance };
+
 // Explicit diagnostic overrides, separate from visual quality and budgets.
 // Defaults preserve normal rendering and never request a blocking readback.
 // Attach to Scene3D::debug; these are not authored/serialized scene settings.
@@ -12,7 +20,14 @@ struct RenderDebugOptions3D {
     bool gpu_culling = true;       // false: compare with the CPU cluster cut
     bool stats_readback = false;   // waits for GPU cluster counters: profiling only
     bool gpu_pass_markers = false; // labels for external GPU profilers, no readback
+    bool graph_reference = false;  // execute stock phases in fixed reference order for graph parity checks
     bool freeze_jitter = false;    // hold the first TAA jitter sample
+    bool light_grid = true;        // false: every fragment loops over the 16 strongest point and spot lights, as
+                                   // before the light grid (to compare with it)
+    bool prepass_depth = true;     // false: the main pass clears its depth and draws it all again, instead of starting
+                                   // from the pre-pass's (to compare with it)
+    bool gi_sun_map = true;        // false: the GI's voxels take the sun's light by their own march, not its sun map
+    GiView3D gi_view = GiView3D::Off;
 };
 
 } // namespace kin

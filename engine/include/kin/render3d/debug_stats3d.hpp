@@ -13,6 +13,19 @@ namespace kin {
 // Implementation counters can change as the renderer changes. Reading this
 // snapshot never triggers a GPU readback.
 struct RenderDebugStats3D : RenderStats3D {
+    // Explicit shared preparation: build counts belong to prepare(); reused
+    // records and upload savings belong to a consuming operation.
+    u64 preparation_records = 0, preparation_skin_bounds = 0, preparation_cpu_bytes = 0;
+    u64 shared_records = 0, shared_instance_bytes = 0, shared_joint_bytes = 0;
+    u64 joint_upload_bytes = 0, preparation_scratch_bytes = 0;
+    u32 shared_uploads = 0, shared_joint_uploads = 0;
+    bool graph_reused = false;
+    u32 graph_passes = 0, graph_culled_passes = 0;
+    f64 graph_compile_ms = 0, graph_record_ms = 0;  // CPU, never GPU timestamps
+    bool geometry_graph_reused = false;             // stock prepass geometry subgraph cache
+    u32 surface_colour_copies = 0;                  // explicit out-of-place transparency input copy
+    u32 bloom_draws = 0, output_draws = 0;          // shared stock/public fullscreen recorders
+    u32 geometry_draws = 0, geometry_instances = 0; // standalone geometry; stock prepass also keeps ao_* counters
     // Shared small-mesh GPU pages, excluding dedicated meshes and driver allocations. Retired ranges await GPU fences.
     u64 shared_mesh_allocated_bytes = 0, shared_mesh_live_bytes = 0, shared_mesh_retired_bytes = 0;
     u64 shared_mesh_range_reuses = 0;
@@ -56,7 +69,7 @@ struct RenderDebugStats3D : RenderStats3D {
     u32 ao_draws = 0; // draw calls into the depth and normal pre-pass (ambient occlusion or contact shadows; 0: neither
                       // this render)
     u32 ao_instances = 0;       // meshes drawn into it
-    u32 ao_dispatches = 0;      // compute dispatches (the occlusion and its blur)
+    u32 ao_dispatches = 0;      // compute dispatches (occlusion, blur, optional half-size reconstruction)
     u32 contact_dispatches = 0; // compute dispatches of the contact shadows (the march and its blur): 0 when off
     // With both on at one size (the occlusion not at half resolution) the two blurs are one dispatch a direction; these
     // count that dispatch in each of the two numbers above, and this says how many there were (2, else 0).
@@ -72,7 +85,30 @@ struct RenderDebugStats3D : RenderStats3D {
     // geometry pass for it: ao_draws is 0); false with the pre-pass (ambient occlusion, contact shadows, occlusion
     // culling, an opaque mesh with a custom shader) or without temporal anti-aliasing.
     bool taa_main_velocity = false;
+    // The main pass began from the pre-pass's depth (copied: a sample a pixel, no overlay), so that what the pre-pass's
+    // surfaces hide is not shaded.
+    bool main_depth_from_prepass = false;
     u32 taa_reactive_draws = 0; // transient coverage draws; no extra targets, zero without TAA/effects
+    // The GI scene (Scene3D::global_illumination): its voxels (all its levels', 0 without one this render) and levels,
+    // whether this render made any of it again (else it was kept: nothing it is made of changed and its windows
+    // stayed), and, when it did, the blocks of 8 x 8 x 8 voxels it made, the copies and triangles it voxelized and its
+    // compute dispatches.
+    u32 gi_voxels = 0;
+    u32 visibility_draws = 0, visibility_instances = 0;
+    u32 gi_levels = 0;
+    bool gi_built = false;
+    u32 gi_blocks = 0;
+    u32 gi_copies = 0;
+    u64 gi_triangles = 0;
+    u32 gi_dispatches = 0;
+    // Its probes (GiProbes3D): how many there are, how many this render updated (and the rays they cast), whether
+    // their light was in the picture, and whether it was read once a texel on what the pre-pass drew (else each
+    // fragment read the probes).
+    u32 gi_probes = 0, gi_probes_updated = 0;
+    u32 gi_rays = 0;
+    bool gi_lit = false;
+    bool gi_sun_map = false; // the GI's voxels took the sun's light through its own sun map (else their march)
+    bool gi_resolved = false;
     // The video memory the view's opt-in targets hold now (ambient occlusion, contact shadows, the pre-pass, temporal
     // anti-aliasing and occlusion culling's pyramid and history; with occlusion culling the renderer's second gathered
     // buffer too), in bytes, and how many feature groups of them this render gave back: a feature that has not been
@@ -105,6 +141,7 @@ struct RenderDebugStats3D : RenderStats3D {
     // and the CPU time spent recording the last one.
     bool sky_drawn = false;
     bool fog_applied = false;
+    bool fog_sun_shadowed = false; // Fog3D::sun_shadows: the share of the fog's air the sun reaches was walked
     bool sky_env_regenerated = false;
     u32 sky_env_generations = 0;
     f64 sky_env_cpu_ms = 0.0;
@@ -133,7 +170,12 @@ struct RenderDebugStats3D : RenderStats3D {
     // passes), and the CPU time of the cuts (choosing, compacting, handing over the upload).
     u32 cluster_copies = 0;
     u64 clusters_tested = 0;
+    u32 transparent_draw_runs = 0;   // main colour runs after global mesh/sprite ordering
+    u64 composition_order_bytes = 0; // retained CPU capacity of the compact composition commands
+    f64 transparent_sort_ms = 0;     // CPU scheduling/sort/compaction, never GPU time
     u32 clusters_drawn = 0;
+    u32 cluster_budget_fallbacks = 0;          // submitted copies conservatively using their complete level-zero mesh
+    u64 cluster_budget_reserved_triangles = 0; // worst-case cut storage, including sun views; no readback
     u32 cluster_upload_bytes = 0;
     f64 cluster_ms = 0.0;
     f64 cluster_upload_ms = 0.0; // of which the compaction and handing over the upload (the rest is choosing)

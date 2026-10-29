@@ -13,7 +13,8 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 fill_color;
     vec4 flags;         // x: encode to sRGB (a gamma target), y: decode the texture, z: shadows, w: point lights
     vec4 eye;           // xyz: the camera, in world space
-    vec4 environment;   // x: intensity, y: the specular's last level, w: 1 with an environment (else the hemisphere)
+    vec4 environment;   // x: intensity, y: the specular's last level, z: specular anti-aliasing (Scene3D::specular_aa),
+                        // w: 1 with an environment (else the hemisphere)
     mat4 environment_matrix; // world to the environment's space
     mat4 shadow_matrix[4]; // world to the shadow map's clip space, a cascade each
     vec4 shadow;        // x: cascades, y: receiver-plane PCF correction, z: a texel (uv)
@@ -23,4 +24,8 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 cascade_forward; // xyz: the camera's forward, to measure view depth along
     vec4 occlusion;     // x: 1 with ambient occlusion, y: 1 with contact shadows, zw: 1 / the view's size
     vec4 lights[MAX_LIGHTS * 2]; // position.xyz and radius; colour.rgb (linear)
+    vec4 gi;            // x: 1 when global illumination's probes light the scene (their light on the view, uGiLight)
+    vec4 grid;          // x: 1 when the light grid lights this pass (KIN_LIGHT_GRID), y: a tile's side (pixels), z: the
+                        // first slice's near depth, w: slices per unit of the log of depth
+    vec4 grid_size;     // x, y: tiles across and down, z: slices, w: cells (where the lists start)
 } frame;

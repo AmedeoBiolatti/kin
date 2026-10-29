@@ -225,6 +225,7 @@ public:
         return std::any_of(_ranges.begin(), _ranges.end(), [](const Range& r) { return r.stencil != GpuStencilOp::None; });
     }
 
+    bool has_writes() const { return _target && (_do_clear || !empty()); }
     bool empty() const {
         return _vertices.empty() && _instances.empty() && _shader_vertices.empty() && _shape_indices.empty() &&
                _sdf_instances.empty();

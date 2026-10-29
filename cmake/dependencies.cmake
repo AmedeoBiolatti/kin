@@ -99,6 +99,10 @@ function(kin_configure_sdl)
         kin_prepare_sdl_direct("${sdl3_SOURCE_DIR}" "${sdl3_BINARY_DIR}/../sdl3-direct-src")
         add_subdirectory("${KIN_SDL_DIRECT_SOURCE_DIR}" "${sdl3_BINARY_DIR}")
     endif()
+    if(KIN_HAS_GPU_RENDERER)
+        include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_sdl_gpu.cmake")
+        kin_patch_sdl_gpu_sampler_barriers(SDL3-static)
+    endif()
     if(NOT KIN_ENABLE_IMAGE_IO)
         # SDL 3.4 also embeds PNG/JPEG codecs independently of SDL_image. Keep its
         # built-in disabled-codec stubs, excluding those implementations too.
@@ -231,6 +235,12 @@ if(KIN_ENABLE_SCRIPTING)
     )
 
     FetchContent_MakeAvailable(sol2)
+    # sol2 3.3.1 contains an unused optional<T&>::emplace body that GCC 15
+    # diagnoses before instantiation (upstream ThePhD/sol2#1695). Preserve the
+    # diagnostic as a warning for every consumer, including public-header users.
+    # Remove this compatibility option when updating sol2 to a fixed release.
+    target_compile_options(sol2 INTERFACE
+        "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,15>>:-Wno-error=template-body>")
 endif()
 
 if(KIN_ENABLE_AUDIO)

@@ -1,21 +1,22 @@
 #include "gpu_device.hpp"
 
-#include <kin/assets/texture_file.hpp>
-#include <kin/core/jobs.hpp>
-#include <kin/platform/log.hpp>
+#include "gpu_memory.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <cstdlib>
+#include <cstring>
+#include <kin/assets/texture_file.hpp>
+#include <kin/core/jobs.hpp>
+#include <kin/platform/log.hpp>
 #include <limits>
-#include <vector>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #if defined(__SSE2__) || defined(_M_X64)
 #include <emmintrin.h>
@@ -33,7 +34,8 @@ constexpr u32 DefaultUploadRingSize = 1024u * 1024u;
 // pages faulting in), and shrinks back once none has come for a while.
 constexpr u32 InitialAdaptiveStagingSize = 4u * 1024u * 1024u;
 constexpr u32 MinimumStagingSize = 1024u * 1024u;
-constexpr u32 MaximumGrownStagingSize = 64u * 1024u * 1024u; // what batches of small writes can grow it to (one bigger write still grows it)
+constexpr u32 MaximumGrownStagingSize =
+    64u * 1024u * 1024u; // what batches of small writes can grow it to (one bigger write still grows it)
 constexpr u32 StagingWindowBatches = 120;
 // Where each staged upload starts in it (Vulkan wants a multiple of the texel
 // size and of 4; this covers every format, and D3D12's 512 would be next).
@@ -107,9 +109,9 @@ std::runtime_error sdl_error(std::string_view prefix) {
     return std::runtime_error(message);
 }
 
-// Waits for a read-back's fence and gives it back. When the wait fails (a lost device) the fence is not released: it may not be
-// signalled, and SDL would hand it out again for another submission while the GPU could still be using it. It is left, a leak on a
-// device that is gone, and the read-back fails.
+// Waits for a read-back's fence and gives it back. When the wait fails (a lost device) the fence is not released: it
+// may not be signalled, and SDL would hand it out again for another submission while the GPU could still be using it.
+// It is left, a leak on a device that is gone, and the read-back fails.
 bool wait_for_readback(SDL_GPUDevice* device, SDL_GPUFence* fence) {
     if (SDL_WaitForGPUFences(device, true, &fence, 1)) {
         SDL_ReleaseGPUFence(device, fence);
@@ -117,7 +119,8 @@ bool wait_for_readback(SDL_GPUDevice* device, SDL_GPUFence* fence) {
     }
     static std::atomic<bool> said{false};
     if (!said.exchange(true)) {
-        KIN_LOG_WARN_F("render", "GPU read-back dropped: waiting for its fence failed", (LogFields{{.name = "reason", .value = SDL_GetError()}}));
+        KIN_LOG_WARN_F("render", "GPU read-back dropped: waiting for its fence failed",
+                       (LogFields{{.name = "reason", .value = SDL_GetError()}}));
     }
     return false;
 }
@@ -138,12 +141,10 @@ std::string gpu_support_report() {
     return report;
 }
 
-GpuDevice::GpuDevice(Window& window, bool debug)
-    : GpuDevice(window, GpuDeviceOptions{.debug = debug}) {}
+GpuDevice::GpuDevice(Window& window, bool debug) : GpuDevice(window, GpuDeviceOptions{.debug = debug}) {}
 
 GpuDevice::GpuDevice(Window& window, GpuDeviceOptions options)
-    : _window(static_cast<SDL_Window*>(window.native_handle())),
-      _present_mode(options.present_mode) {
+    : _window(static_cast<SDL_Window*>(window.native_handle())), _present_mode(options.present_mode) {
     _device = SDL_CreateGPUDevice(SupportedShaderFormats, options.debug, nullptr);
     if (!_device) {
         std::string message = "SDL_CreateGPUDevice(SPIRV) failed: ";
@@ -159,13 +160,21 @@ GpuDevice::GpuDevice(Window& window, GpuDeviceOptions options)
         throw sdl_error("SDL_ClaimWindowForGPUDevice failed");
     }
 
-    // Non-fatal: some (notably visible/resizable) windows reject explicit swapchain
-    // params; the default swapchain from ClaimWindow (SDR + VSYNC) works fine.
-    if (!SDL_SetGPUSwapchainParameters(_device, _window,
-                                       SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
-                                       _present_mode)) {
+    // The present mode asked for if the window's swapchain takes it. Without vsync (IMMEDIATE) MAILBOX comes next: it
+    // does not wait for the screen either (a finished frame replaces one still waiting to be shown) and does not tear;
+    // NVIDIA's Vulkan on Wayland has no IMMEDIATE, and VSYNC there held frames to whole refreshes. Non-fatal: some
+    // (notably visible/resizable) windows reject explicit swapchain params; the default swapchain from ClaimWindow
+    // (SDR + VSYNC) works fine.
+    const SDL_GPUPresentMode asked = _present_mode;
+    _present_mode = SDL_GPU_PRESENTMODE_VSYNC;
+    for (const SDL_GPUPresentMode mode :
+         {asked, asked == SDL_GPU_PRESENTMODE_IMMEDIATE ? SDL_GPU_PRESENTMODE_MAILBOX : asked}) {
+        if (SDL_WindowSupportsGPUPresentMode(_device, _window, mode) &&
+            SDL_SetGPUSwapchainParameters(_device, _window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, mode)) {
+            _present_mode = mode;
+            break;
+        }
         SDL_ClearError();
-        _present_mode = SDL_GPU_PRESENTMODE_VSYNC;
     }
 
     _swapchain_format = SDL_GetGPUSwapchainTextureFormat(_device, _window);
@@ -178,6 +187,7 @@ GpuDevice::GpuDevice(Window& window, GpuDeviceOptions options)
     }
     _shared = std::make_shared<SDL_GPUDevice*>(_device);
     _texture_pool = std::make_shared<GpuTexturePool>(_shared);
+    register_memory_device(_device);
 }
 
 GpuDevice::~GpuDevice() {
@@ -190,7 +200,7 @@ GpuDevice::~GpuDevice() {
         // The device is going away: its uploads with it.
     }
     if (_staging) {
-        SDL_ReleaseGPUTransferBuffer(_device, _staging);
+        tracked_release_transfer(_device, _staging);
     }
     if (_texture_pool) {
         _texture_pool->close();
@@ -200,15 +210,16 @@ GpuDevice::~GpuDevice() {
     *_shared = nullptr;
     SDL_WaitForGPUIdle(_device);
     release_upload_ring();
+    release_device_allocations(_device);
     if (_window) {
         SDL_ReleaseWindowFromGPUDevice(_device, _window);
     }
     SDL_DestroyGPUDevice(_device);
+    unregister_memory_device(_device);
 }
 
 GpuDevice::GpuDevice(GpuDevice&& other) noexcept
-    : _device(std::exchange(other._device, nullptr)),
-      _shared(std::move(other._shared)),
+    : _device(std::exchange(other._device, nullptr)), _shared(std::move(other._shared)),
       _window(std::exchange(other._window, nullptr)),
       _swapchain_format(std::exchange(other._swapchain_format, SDL_GPU_TEXTUREFORMAT_INVALID)),
       _present_mode(std::exchange(other._present_mode, SDL_GPU_PRESENTMODE_VSYNC)),
@@ -217,18 +228,15 @@ GpuDevice::GpuDevice(GpuDevice&& other) noexcept
       _upload_ring_offset(std::exchange(other._upload_ring_offset, 0)),
       _first_submit_ns(std::exchange(other._first_submit_ns, 0)),
       _upload_commands(std::exchange(other._upload_commands, nullptr)),
-      _upload_pass(std::exchange(other._upload_pass, nullptr)),
-      _staging(std::exchange(other._staging, nullptr)),
-      _staging_used(std::exchange(other._staging_used, 0)),
-      _staging_size(std::exchange(other._staging_size, 0)),
+      _upload_pass(std::exchange(other._upload_pass, nullptr)), _staging(std::exchange(other._staging, nullptr)),
+      _staging_used(std::exchange(other._staging_used, 0)), _staging_size(std::exchange(other._staging_size, 0)),
       _staging_recent_peak(std::exchange(other._staging_recent_peak, 0)),
       _staging_recent_batches(std::exchange(other._staging_recent_batches, 0)),
       _staging_overflow(std::exchange(other._staging_overflow, false)),
       _staging_spilled(std::exchange(other._staging_spilled, 0)),
       _staging_allocations(std::exchange(other._staging_allocations, 0)),
       _uploads_staged(std::exchange(other._uploads_staged, 0)),
-      _upload_batches(std::exchange(other._upload_batches, 0)),
-      _idle_waits(std::exchange(other._idle_waits, 0)) {
+      _upload_batches(std::exchange(other._upload_batches, 0)), _idle_waits(std::exchange(other._idle_waits, 0)) {
     _texture_pool = std::move(other._texture_pool);
 }
 
@@ -251,15 +259,15 @@ GpuTexture GpuDevice::create_render_texture(u32 width, u32 height, SDL_GPUTextur
     info.num_levels = 1;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
 
-    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
-    return GpuTexture{_shared, texture, width, height, format};
+    return GpuTexture{_shared, texture, width, height, format, info.usage};
 }
 
 GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat format, SDL_GPUTextureUsageFlags usage,
-                                     SDL_GPUSampleCount samples, u32 levels) {
+                                    SDL_GPUSampleCount samples, u32 levels) {
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.format = format;
@@ -269,16 +277,16 @@ GpuTexture GpuDevice::create_target(u32 width, u32 height, SDL_GPUTextureFormat 
     info.layer_count_or_depth = 1;
     info.num_levels = levels;
     info.sample_count = samples;
-    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture (target) failed");
     }
     poison_texture(texture, format, width, height, 1, levels, usage, samples);
-    return GpuTexture{_shared, texture, width, height, format};
+    return GpuTexture{_shared, texture, width, height, format, usage};
 }
 
 GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
-                                           SDL_GPUTextureUsageFlags usage) {
+                                          SDL_GPUTextureUsageFlags usage) {
     SDL_GPUTextureCreateInfo info{};
     info.type = SDL_GPU_TEXTURETYPE_2D_ARRAY;
     info.format = format;
@@ -288,16 +296,35 @@ GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL
     info.layer_count_or_depth = layers;
     info.num_levels = 1;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture (target array) failed");
     }
     poison_texture(texture, format, width, height, layers, 1, usage);
+    return GpuTexture{_shared, texture, width, height, format, usage};
+}
+
+GpuTexture GpuDevice::create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
+                                    SDL_GPUTextureUsageFlags usage) {
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_3D;
+    info.format = format;
+    info.usage = usage;
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = depth;
+    info.num_levels = 1;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture (volume) failed");
+    }
     return GpuTexture{_shared, texture, width, height, format};
 }
 
 SDL_GPUTextureFormat GpuDevice::depth_stencil_format() const {
-    for (const SDL_GPUTextureFormat format : {SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT}) {
+    for (const SDL_GPUTextureFormat format :
+         {SDL_GPU_TEXTUREFORMAT_D24_UNORM_S8_UINT, SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT}) {
         if (SDL_GPUTextureSupportsFormat(_device, format, SDL_GPU_TEXTURETYPE_2D,
                                          SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET)) {
             return format;
@@ -316,7 +343,7 @@ GpuTexture GpuDevice::create_depth_stencil(u32 width, u32 height) {
     info.layer_count_or_depth = 1;
     info.num_levels = 1;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture (depth-stencil) failed");
     }
@@ -363,7 +390,7 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
     SDL_GPUTexture* raw_texture = _texture_pool->take(width, height, format, texture_info.usage);
     const bool reused = raw_texture != nullptr;
     if (!reused) {
-        raw_texture = SDL_CreateGPUTexture(_device, &texture_info);
+        raw_texture = tracked_create_texture(_device, &texture_info);
         if (!raw_texture) {
             throw sdl_error("SDL_CreateGPUTexture failed");
         }
@@ -376,7 +403,7 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
             stage_texture_upload(raw_texture, 0, 0, width, height, pixels, texel_bytes, /*cycle=*/reused);
         }
     } catch (...) {
-        SDL_ReleaseGPUTexture(_device, raw_texture);
+        tracked_release_texture(_device, raw_texture);
         throw;
     }
     const u64 bytes = static_cast<u64>(width) * height * texel_bytes;
@@ -385,18 +412,28 @@ GpuTexture GpuDevice::create_texture(const void* pixels, u32 width, u32 height, 
 
 SDL_GPUTextureFormat GpuDevice::compressed_format(TextureFormat format, bool decode_srgb) {
     switch (format) {
-    case TextureFormat::Bc1RgbaUnorm: return SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
-    case TextureFormat::Bc1RgbaSrgb: return decode_srgb ? SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
-    case TextureFormat::Bc3RgbaUnorm: return SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
-    case TextureFormat::Bc3RgbaSrgb: return decode_srgb ? SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
-    case TextureFormat::Bc4RUnorm: return SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM;
-    case TextureFormat::Bc5RgUnorm: return SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM;
-    case TextureFormat::Bc7RgbaUnorm: return SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
-    case TextureFormat::Bc7RgbaSrgb: return decode_srgb ? SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
-    case TextureFormat::Astc4x4RgbaUnorm: return SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM;
+    case TextureFormat::Bc1RgbaUnorm:
+        return SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
+    case TextureFormat::Bc1RgbaSrgb:
+        return decode_srgb ? SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM;
+    case TextureFormat::Bc3RgbaUnorm:
+        return SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
+    case TextureFormat::Bc3RgbaSrgb:
+        return decode_srgb ? SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM;
+    case TextureFormat::Bc4RUnorm:
+        return SDL_GPU_TEXTUREFORMAT_BC4_R_UNORM;
+    case TextureFormat::Bc5RgUnorm:
+        return SDL_GPU_TEXTUREFORMAT_BC5_RG_UNORM;
+    case TextureFormat::Bc7RgbaUnorm:
+        return SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
+    case TextureFormat::Bc7RgbaSrgb:
+        return decode_srgb ? SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_BC7_RGBA_UNORM;
+    case TextureFormat::Astc4x4RgbaUnorm:
+        return SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM;
     case TextureFormat::Astc4x4RgbaSrgb:
         return decode_srgb ? SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM_SRGB : SDL_GPU_TEXTUREFORMAT_ASTC_4x4_UNORM;
-    default: return SDL_GPU_TEXTUREFORMAT_INVALID;
+    default:
+        return SDL_GPU_TEXTUREFORMAT_INVALID;
     }
 }
 
@@ -426,7 +463,7 @@ GpuTexture GpuDevice::create_texture_compressed(const CompressedImage& image, bo
     SDL_GPUTexture* texture = _texture_pool->take(width, height, format, info.usage, levels);
     const bool reused = texture != nullptr;
     if (!reused) {
-        texture = SDL_CreateGPUTexture(_device, &info);
+        texture = tracked_create_texture(_device, &info);
         if (!texture) {
             throw sdl_error("SDL_CreateGPUTexture (compressed) failed");
         }
@@ -435,20 +472,23 @@ GpuTexture GpuDevice::create_texture_compressed(const CompressedImage& image, bo
     try {
         for (u32 level = 0; level < levels; ++level) {
             const auto& from = image.levels[level];
-            const UploadDestination to{.texture = texture, .w = static_cast<u32>(from.size.x),
-                                       .h = static_cast<u32>(from.size.y), .level = level, .blocks = true};
+            const UploadDestination to{.texture = texture,
+                                       .w = static_cast<u32>(from.size.x),
+                                       .h = static_cast<u32>(from.size.y),
+                                       .level = level,
+                                       .blocks = true};
             stage_upload(to, static_cast<u32>(from.bytes.size()), from.bytes.data(), reused && level == 0, nullptr);
             bytes += from.bytes.size();
         }
     } catch (...) {
-        SDL_ReleaseGPUTexture(_device, texture);
+        tracked_release_texture(_device, texture);
         throw;
     }
     return GpuTexture{_shared, texture, width, height, format, _texture_pool, bytes, info.usage, levels};
 }
 
-void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels,
-                               u32 texel_bytes, bool whole) {
+void GpuDevice::update_texture(SDL_GPUTexture* texture, u32 x, u32 y, u32 w, u32 h, const u8* pixels, u32 texel_bytes,
+                               bool whole) {
     if (!texture || !pixels || w == 0 || h == 0 || texel_bytes == 0) {
         throw std::runtime_error("update_texture failed: invalid arguments");
     }
@@ -488,11 +528,13 @@ void GpuDevice::upload_storage_buffer(SDL_GPUBuffer* buffer, u32 offset, u32 byt
 void GpuDevice::upload_storage_ranges(SDL_GPUBuffer* buffer, std::span<const std::array<u32, 2>> ranges,
                                       const std::function<void(std::span<u8>)>& fill) {
     u64 total = 0;
-    for (const auto& range : ranges) total += range[1];
+    for (const auto& range : ranges)
+        total += range[1];
     if (!buffer || total > 0xFFFFFFFFull) {
         throw std::runtime_error("upload_storage_ranges failed: invalid arguments");
     }
-    if (total == 0) return;
+    if (total == 0)
+        return;
     stage_upload(UploadDestination{.buffer = buffer, .ranges = ranges}, static_cast<u32>(total), nullptr, false, &fill);
 }
 
@@ -543,14 +585,14 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
         lock.lock();
     }
     if (_staging && needed > _staging_size) {
-        SDL_ReleaseGPUTransferBuffer(_device, _staging); // freed once its copies are done
+        tracked_release_transfer(_device, _staging); // freed once its copies are done
         _staging = nullptr;
     }
     if (!_staging) {
         SDL_GPUTransferBufferCreateInfo info{};
         info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         info.size = needed;
-        _staging = SDL_CreateGPUTransferBuffer(_device, &info);
+        _staging = tracked_create_transfer(_device, &info);
         if (!_staging) {
             throw sdl_error("SDL_CreateGPUTransferBuffer failed");
         }
@@ -571,7 +613,8 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
     if (to.buffer && !to.ranges.empty()) {
         u32 at = offset;
         for (const auto& [where, size] : to.ranges) {
-            if (size == 0) continue;
+            if (size == 0)
+                continue;
             const SDL_GPUTransferBufferLocation source{.transfer_buffer = transfer, .offset = at};
             const SDL_GPUBufferRegion destination{.buffer = to.buffer, .offset = where, .size = size};
             SDL_UploadToGPUBuffer(_upload_pass, &source, &destination, false);
@@ -628,11 +671,12 @@ GpuTexture GpuDevice::make_mipmapped(const GpuTexture& source) {
     info.layer_count_or_depth = 1;
     info.num_levels = levels;
     info.sample_count = SDL_GPU_SAMPLECOUNT_1;
-    SDL_GPUTexture* texture = SDL_CreateGPUTexture(_device, &info);
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
     if (!texture) {
         throw sdl_error("SDL_CreateGPUTexture failed");
     }
-    poison_texture(texture, info.format, w, h, 1, levels, info.usage, SDL_GPU_SAMPLECOUNT_1, /*first_level=*/1); // KIN_POISON_TEXTURES: before level 0 is copied
+    poison_texture(texture, info.format, w, h, 1, levels, info.usage, SDL_GPU_SAMPLECOUNT_1,
+                   /*first_level=*/1); // KIN_POISON_TEXTURES: before level 0 is copied
     refuse_upload_inside_fill();
     const std::lock_guard lock{_uploads_mutex};
     begin_upload_commands();
@@ -664,8 +708,9 @@ u32 GpuDevice::complete_mip_levels(u32 width, u32 height) {
     return levels;
 }
 
-void GpuDevice::poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat format, u32 width, u32 height, u32 layers, u32 levels,
-                               SDL_GPUTextureUsageFlags usage, SDL_GPUSampleCount samples, u32 first_level) {
+void GpuDevice::poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat format, u32 width, u32 height, u32 layers,
+                               u32 levels, SDL_GPUTextureUsageFlags usage, SDL_GPUSampleCount samples,
+                               u32 first_level) {
     const char* env = std::getenv("KIN_POISON_TEXTURES");
     const int mode = env ? std::atoi(env) : 0;
     if (mode <= 0 || !texture) {
@@ -695,23 +740,48 @@ void GpuDevice::poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat for
     }
     // Bytes of one texel and the pattern that fills it.
     u32 texel = 0;
-    u16 half = large ? 0x7BFF : 0x7E00; // 65504 or NaN
+    u16 half = large ? 0x7BFF : 0x7E00;             // 65504 or NaN
     u32 single = large ? 0x46EA6000u : 0x7FC00000u; // 3e4 or NaN
     bool is_half = false, is_single = false;
     switch (format) {
-    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT: texel = 8; is_half = true; break;
-    case SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT: texel = 4; is_half = true; break;
-    case SDL_GPU_TEXTUREFORMAT_R16_FLOAT: texel = 2; is_half = true; break;
-    case SDL_GPU_TEXTUREFORMAT_R32_FLOAT: texel = 4; is_single = true; break;
-    case SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT: texel = 8; is_single = true; break;
-    case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT: texel = 16; is_single = true; break;
-    case SDL_GPU_TEXTUREFORMAT_R8_UNORM: texel = 1; break;
-    case SDL_GPU_TEXTUREFORMAT_R8G8_UNORM: texel = 2; break;
+    case SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT:
+        texel = 8;
+        is_half = true;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT:
+        texel = 4;
+        is_half = true;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R16_FLOAT:
+        texel = 2;
+        is_half = true;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R32_FLOAT:
+        texel = 4;
+        is_single = true;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT:
+        texel = 8;
+        is_single = true;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT:
+        texel = 16;
+        is_single = true;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R8_UNORM:
+        texel = 1;
+        break;
+    case SDL_GPU_TEXTUREFORMAT_R8G8_UNORM:
+        texel = 2;
+        break;
     case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM:
     case SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM_SRGB:
     case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM:
-    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB: texel = 4; break;
-    default: return; // not a format the renderer makes
+    case SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM_SRGB:
+        texel = 4;
+        break;
+    default:
+        return; // not a format the renderer makes
     }
     if (samples != SDL_GPU_SAMPLECOUNT_1) {
         // A multisampled target cannot be uploaded to: cleared (a render pass), to NaN or white/large.
@@ -749,7 +819,7 @@ void GpuDevice::poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat for
             SDL_GPUTransferBufferCreateInfo info{};
             info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
             info.size = static_cast<u32>(total);
-            SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(_device, &info);
+            SDL_GPUTransferBuffer* transfer = tracked_create_transfer(_device, &info);
             if (!transfer) {
                 return;
             }
@@ -772,7 +842,7 @@ void GpuDevice::poison_texture(SDL_GPUTexture* texture, SDL_GPUTextureFormat for
                 destination.d = 1;
                 SDL_UploadToGPUTexture(_upload_pass, &source, &destination, false);
             }
-            SDL_ReleaseGPUTransferBuffer(_device, transfer); // freed once the copy is done
+            tracked_release_transfer(_device, transfer); // freed once the copy is done
         }
     }
 }
@@ -841,8 +911,10 @@ void GpuDevice::flush_uploads() {
         const u32 peak = static_cast<u32>(std::min<u64>(needed, MaximumGrownStagingSize));
         _staging_recent_peak = std::max(_staging_recent_peak, peak);
         if (needed > _staging_size && _staging_size < MaximumGrownStagingSize) {
-            // As when shrinking: SDL frees the old buffer once its copies are done, and the next upload makes the new one.
-            if (_staging) SDL_ReleaseGPUTransferBuffer(_device, _staging);
+            // As when shrinking: SDL frees the old buffer once its copies are done, and the next upload makes the new
+            // one.
+            if (_staging)
+                tracked_release_transfer(_device, _staging);
             _staging = nullptr;
             _staging_size = next_power_of_two(peak);
         }
@@ -851,7 +923,7 @@ void GpuDevice::flush_uploads() {
             if (_staging && target <= _staging_size / 2) {
                 // SDL defers disposal until submitted copies finish. The next
                 // upload allocates the smaller buffer; no new GPU wait is needed.
-                SDL_ReleaseGPUTransferBuffer(_device, _staging);
+                tracked_release_transfer(_device, _staging);
                 _staging = nullptr;
                 _staging_size = target;
             }
@@ -872,12 +944,12 @@ GpuBuffer GpuDevice::create_buffer(SDL_GPUBufferUsageFlags usage, const void* da
     buffer_info.usage = usage;
     buffer_info.size = size;
 
-    SDL_GPUBuffer* raw_buffer = SDL_CreateGPUBuffer(_device, &buffer_info);
+    SDL_GPUBuffer* raw_buffer = tracked_create_buffer(_device, &buffer_info);
     if (!raw_buffer) {
         throw sdl_error("SDL_CreateGPUBuffer failed");
     }
 
-    GpuBuffer buffer{_device, raw_buffer, size};
+    GpuBuffer buffer{_shared, raw_buffer, size};
     if (data) {
         upload_buffer(buffer, data, size);
     } else {
@@ -900,7 +972,24 @@ bool GpuDevice::read_texture_rgba(const GpuTexture& src, std::vector<u8>& out_rg
     return read_texture_region(src, 0, 0, src.width(), src.height(), 4, out_rgba);
 }
 
-bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes, std::vector<u8>& out) {
+bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes,
+                                    std::vector<u8>& out) {
+    PendingRead read;
+    if (!begin_read_texture_region(src, x, y, w, h, texel_bytes, read)) {
+        return false;
+    }
+    std::vector<u8> pixels;
+    (void)finish_read(read, pixels, true);
+    if (pixels.empty()) {
+        return false;
+    }
+    out = std::move(pixels);
+    return true;
+}
+
+bool GpuDevice::begin_read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, u32 h, u32 texel_bytes,
+                                          PendingRead& read) {
+    read = {};
     if (!_device || !src.handle() || w == 0 || h == 0 || x + w > src.width() || y + h > src.height()) {
         return false;
     }
@@ -910,13 +999,13 @@ bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, 
     SDL_GPUTransferBufferCreateInfo tb_info{};
     tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
     tb_info.size = bytes;
-    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(_device, &tb_info);
+    SDL_GPUTransferBuffer* tb = tracked_create_transfer(_device, &tb_info);
     if (!tb) {
         return false;
     }
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(_device);
     if (!cmd) {
-        SDL_ReleaseGPUTransferBuffer(_device, tb);
+        tracked_release_transfer(_device, tb);
         return false;
     }
 
@@ -936,10 +1025,74 @@ bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, 
     SDL_DownloadFromGPUTexture(copy, &region, &dst);
     SDL_EndGPUCopyPass(copy);
 
-    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
-    // No fence (the submit failed) or a failed wait: the copy may not have run, so the transfer buffer is not read.
-    const bool arrived = fence && wait_for_readback(_device, fence);
+    // No fence (the submit failed): the copy may not have run, and finish_read gives nothing.
+    read = {.transfer = tb, .fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd), .bytes = bytes};
+    return true;
+}
 
+bool GpuDevice::finish_read(PendingRead& read, std::vector<u8>& out, bool wait) {
+    out.clear();
+    if (!read.transfer) {
+        return true;
+    }
+    bool arrived = false;
+    if (read.fence) {
+        if (wait) {
+            // (A failed wait keeps its fence: SDL must not reuse one the GPU may still signal.)
+            arrived = wait_for_readback(_device, read.fence);
+        } else if (SDL_QueryGPUFence(_device, read.fence)) {
+            SDL_ReleaseGPUFence(_device, read.fence);
+            arrived = true;
+        } else {
+            return false;
+        }
+    }
+    if (void* mapped = arrived ? SDL_MapGPUTransferBuffer(_device, read.transfer, false) : nullptr) {
+        out.resize(read.bytes);
+        std::memcpy(out.data(), mapped, read.bytes);
+        SDL_UnmapGPUTransferBuffer(_device, read.transfer);
+    }
+    tracked_release_transfer(_device, read.transfer);
+    read = {};
+    return true;
+}
+
+bool GpuDevice::read_volume(const GpuTexture& src, u32 depth, u32 texel_bytes, std::vector<u8>& out) {
+    if (!_device || !src.handle() || depth == 0) {
+        return false;
+    }
+    flush_uploads();
+    const u64 total = static_cast<u64>(src.width()) * src.height() * depth * texel_bytes;
+    if (total > std::numeric_limits<u32>::max()) {
+        return false;
+    }
+    const u32 bytes = static_cast<u32>(total);
+    SDL_GPUTransferBufferCreateInfo tb_info{};
+    tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tb_info.size = bytes;
+    SDL_GPUTransferBuffer* tb = tracked_create_transfer(_device, &tb_info);
+    if (!tb) {
+        return false;
+    }
+    SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(_device);
+    if (!cmd) {
+        tracked_release_transfer(_device, tb);
+        return false;
+    }
+    SDL_GPUTextureRegion region{};
+    region.texture = src.handle();
+    region.w = src.width();
+    region.h = src.height();
+    region.d = depth;
+    SDL_GPUTextureTransferInfo dst{};
+    dst.transfer_buffer = tb;
+    dst.pixels_per_row = src.width();
+    dst.rows_per_layer = src.height();
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_DownloadFromGPUTexture(copy, &region, &dst);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
+    const bool arrived = fence && wait_for_readback(_device, fence); // as read_texture_region
     bool ok = false;
     if (void* mapped = arrived ? SDL_MapGPUTransferBuffer(_device, tb, false) : nullptr) {
         out.resize(bytes);
@@ -947,7 +1100,7 @@ bool GpuDevice::read_texture_region(const GpuTexture& src, u32 x, u32 y, u32 w, 
         SDL_UnmapGPUTransferBuffer(_device, tb);
         ok = true;
     }
-    SDL_ReleaseGPUTransferBuffer(_device, tb);
+    tracked_release_transfer(_device, tb);
     return ok;
 }
 
@@ -959,13 +1112,13 @@ bool GpuDevice::read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vect
     SDL_GPUTransferBufferCreateInfo tb_info{};
     tb_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
     tb_info.size = bytes;
-    SDL_GPUTransferBuffer* tb = SDL_CreateGPUTransferBuffer(_device, &tb_info);
+    SDL_GPUTransferBuffer* tb = tracked_create_transfer(_device, &tb_info);
     if (!tb) {
         return false;
     }
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(_device);
     if (!cmd) {
-        SDL_ReleaseGPUTransferBuffer(_device, tb);
+        tracked_release_transfer(_device, tb);
         return false;
     }
     const SDL_GPUBufferRegion region{src, offset, bytes};
@@ -982,7 +1135,7 @@ bool GpuDevice::read_buffer(SDL_GPUBuffer* src, u32 offset, u32 bytes, std::vect
         SDL_UnmapGPUTransferBuffer(_device, tb);
         ok = true;
     }
-    SDL_ReleaseGPUTransferBuffer(_device, tb);
+    tracked_release_transfer(_device, tb);
     return ok;
 }
 
@@ -998,7 +1151,7 @@ GpuDevice::UploadSlice GpuDevice::stage_upload_data(const void* data, u32 size, 
         SDL_GPUTransferBufferCreateInfo transfer_info{};
         transfer_info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         transfer_info.size = required_size;
-        _upload_ring = SDL_CreateGPUTransferBuffer(_device, &transfer_info);
+        _upload_ring = tracked_create_transfer(_device, &transfer_info);
         if (!_upload_ring) {
             throw sdl_error("SDL_CreateGPUTransferBuffer failed");
         }
@@ -1026,7 +1179,7 @@ GpuDevice::UploadSlice GpuDevice::stage_upload_data(const void* data, u32 size, 
 
 void GpuDevice::release_upload_ring() {
     if (_device && _upload_ring) {
-        SDL_ReleaseGPUTransferBuffer(_device, _upload_ring);
+        tracked_release_transfer(_device, _upload_ring);
     }
     _upload_ring = nullptr;
     _upload_ring_size = 0;
@@ -1093,12 +1246,10 @@ GpuFrame::~GpuFrame() {
 }
 
 GpuFrame::GpuFrame(GpuFrame&& other) noexcept
-    : _device(std::exchange(other._device, nullptr)),
-      _command_buffer(std::exchange(other._command_buffer, nullptr)),
+    : _device(std::exchange(other._device, nullptr)), _command_buffer(std::exchange(other._command_buffer, nullptr)),
       _swapchain_texture(std::exchange(other._swapchain_texture, nullptr)),
       _swapchain_width(std::exchange(other._swapchain_width, 0)),
-      _swapchain_height(std::exchange(other._swapchain_height, 0)),
-      _submitted(std::exchange(other._submitted, true)) {}
+      _swapchain_height(std::exchange(other._swapchain_height, 0)), _submitted(std::exchange(other._submitted, true)) {}
 
 bool GpuFrame::acquire_swapchain() {
     if (_swapchain_texture) {
@@ -1107,10 +1258,8 @@ bool GpuFrame::acquire_swapchain() {
     if (!_device || !_command_buffer) {
         return false;
     }
-    if (!SDL_WaitAndAcquireGPUSwapchainTexture(_command_buffer, _device->_window,
-                                               &_swapchain_texture,
-                                               &_swapchain_width,
-                                               &_swapchain_height)) {
+    if (!SDL_WaitAndAcquireGPUSwapchainTexture(_command_buffer, _device->_window, &_swapchain_texture,
+                                               &_swapchain_width, &_swapchain_height)) {
         throw sdl_error("SDL_WaitAndAcquireGPUSwapchainTexture failed");
     }
     return _swapchain_texture != nullptr;

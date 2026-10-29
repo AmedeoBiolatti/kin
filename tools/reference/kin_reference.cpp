@@ -1,3 +1,5 @@
+#include "../../engine/src/runtime/eval_telemetry.hpp"
+
 #include <stdexcept>
 // Renders the reference scenes (docs/3d_plan.md, G0): each camera of each
 // scene to a PNG, timed, with what was drawn, into a folder a later run (or
@@ -14,6 +16,8 @@
 //                 [--lod] [--lod-error PX] [--lod-bias B] [--lod-force N] [--lod-levels N] [--lod-clusters]
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
 //                 [--bake-cache DIR]
+//                 [--gi] [--gi-windows] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H]
+//                 [--gi-per-render N]
 //
 // --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR
 // (Renderer3D::set_bake_cache), and reads them back on the next run with the same DIR instead of building them: the
@@ -1885,8 +1889,10 @@ struct Overrides {
     bool contact = false;
     double contact_distance = 0.0, contact_thickness = 0.0;
     int contact_steps = 0;
+    std::optional<float> anisotropy, texture_lod_bias, specular_aa;
+    bool graph_reference = false;
     bool taa = false;
-    double taa_blend = 0.0, taa_sharpness = 0.0;
+    double taa_blend = 0.0, taa_sharpness = -1.0;
     bool lod = false;
     double lod_error = 0.0, lod_bias = 0.0;
     int lod_force = -2; // -2: the scene's own
@@ -1929,6 +1935,15 @@ struct Overrides {
     long particles = 0;        // --particles N: a system with N live particles in the scene's middle
     bool shadow_cache = false; // Lights3D::cache_shadows: off here, because a static scene is rendered many times and
                                // the shadow pass would be timed once
+    // --gi: global illumination over the scene's bounds (a twentieth larger), in one level over all of it, voxels of
+    // --gi-cell (else a 128th of the bounds' longest side; larger where there would be too many), probes every
+    // --gi-spacing voxels casting --gi-rays rays, keeping --gi-hysteresis, --gi-per-render of them updated a render
+    // (0: all, up to a million rays).
+    bool gi = false;
+    bool gi_windows = false; // --gi-windows: GlobalIllumination3D's default windows round the camera, as a game has
+                             // them (--gi-cell their first level's voxel, 0.15 else), instead of the one level
+    double gi_cell = 0.0, gi_hysteresis = -1.0;
+    int gi_spacing = 0, gi_rays = 0, gi_per_render = -1;
 };
 
 // Each feature's settings: the scene file's (if it has any; then on unless it says not), then the command line's.
@@ -1986,7 +2001,7 @@ void merge_taa(kin::TemporalAA3D& taa, const kin::JsonValue* doc, const Override
         if (over.taa_blend > 0.0) {
             taa.blend = static_cast<float>(over.taa_blend);
         }
-        if (over.taa_sharpness > 0.0) {
+        if (over.taa_sharpness >= 0.0) {
             taa.sharpness = static_cast<float>(over.taa_sharpness);
         }
     }
@@ -2448,6 +2463,15 @@ int main(int argc, char** argv) {
     fs::path cache = cache_env ? fs::path{cache_env} : fs::path{home ? home : "."} / ".cache" / "kin" / "reference";
     int frames = 60, warmup = 10, repeat = 8, width = 1280, height = 720;
     bool gpu_timing = true;
+    bool eval_bench = false;
+    kin::detail::EvalTelemetry eval_telemetry;
+    std::ofstream eval_captures;
+    if (const auto* path = std::getenv("KIN_EVAL_CAPTURE_LOG"); path && *path) {
+        eval_captures.open(path);
+        eval_captures << std::setprecision(9);
+        if (!eval_captures)
+            throw std::runtime_error("cannot open KIN_EVAL_CAPTURE_LOG");
+    }
     int cascades_override = 0; // 0: the scene's own
     double distance_override = 0.0;
     Overrides over;
@@ -2456,7 +2480,9 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         const auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
-        if (a == "--out") {
+        if (a == "--eval-bench") {
+            eval_bench = true;
+        } else if (a == "--out") {
             out = next();
         } else if (a == "--cache") {
             cache = next();
@@ -2550,6 +2576,25 @@ int main(int argc, char** argv) {
             over.fog_fixed = true;
         } else if (a == "--time") {
             over.time_hours = std::atof(next().c_str());
+        } else if (a == "--anisotropy" || a == "--texture-lod-bias" || a == "--specular-aa") {
+            const auto text = next();
+            char* end = nullptr;
+            const float value = std::strtof(text.c_str(), &end);
+            const float low = a == "--anisotropy" ? 1.0f : a == "--texture-lod-bias" ? -4.0f : 0.0f;
+            const float high = a == "--anisotropy" ? 16.0f : a == "--texture-lod-bias" ? 4.0f : 1.0f;
+            if (text.empty() || *end || !std::isfinite(value) || value < low || value > high ||
+                (a == "--anisotropy" && std::floor(value) != value)) {
+                std::fprintf(stderr, "invalid value for %s\n", a.c_str());
+                return 2;
+            }
+            if (a == "--anisotropy")
+                over.anisotropy = value;
+            else if (a == "--texture-lod-bias")
+                over.texture_lod_bias = value;
+            else
+                over.specular_aa = value;
+        } else if (a == "--graph-reference") {
+            over.graph_reference = true;
         } else if (a == "--taa") {
             over.taa = true;
         } else if (a == "--taa-blend") {
@@ -2585,6 +2630,26 @@ int main(int argc, char** argv) {
             over.readback = true;
         } else if (a == "--lod-room") {
             over.lod_room = std::atol(next().c_str());
+        } else if (a == "--gi-windows") {
+            over.gi = true;
+            over.gi_windows = true;
+        } else if (a == "--gi") {
+            over.gi = true;
+        } else if (a == "--gi-cell") {
+            over.gi = true;
+            over.gi_cell = std::atof(next().c_str());
+        } else if (a == "--gi-spacing") {
+            over.gi = true;
+            over.gi_spacing = std::max(2, std::atoi(next().c_str()));
+        } else if (a == "--gi-rays") {
+            over.gi = true;
+            over.gi_rays = std::max(16, std::atoi(next().c_str()));
+        } else if (a == "--gi-hysteresis") {
+            over.gi = true;
+            over.gi_hysteresis = std::atof(next().c_str());
+        } else if (a == "--gi-per-render") {
+            over.gi = true;
+            over.gi_per_render = std::max(0, std::atoi(next().c_str()));
         } else if (a == "--samples") {
             samples_override = std::clamp(std::atoi(next().c_str()), 1, 8);
         } else if (a == "--supersample") {
@@ -3060,9 +3125,61 @@ int main(int argc, char** argv) {
             scene.lod = {};
             merge_lod(scene.lod, scene.debug, doc.find("lod"), over);
             scene.debug.gpu_pass_markers = over.gpu_pass_markers;
+            scene.debug.graph_reference = over.graph_reference;
+            scene.anisotropy =
+                over.anisotropy.value_or(static_cast<float>(doc.number_at("anisotropy", scene.anisotropy)));
+            scene.texture_lod_bias = over.texture_lod_bias.value_or(
+                static_cast<float>(doc.number_at("texture_lod_bias", scene.texture_lod_bias)));
+            scene.specular_aa =
+                over.specular_aa.value_or(static_cast<float>(doc.number_at("specular_aa", scene.specular_aa)));
+            scene.global_illumination = {};
+            if (over.gi) {
+                const kin::Vec3f extent = bounds.size(), pad = extent * 0.05f + kin::Vec3f{0.05f, 0.05f, 0.05f};
+                const kin::Bounds3D area{bounds.min - pad, bounds.max + pad};
+                float cell = over.gi_cell > 0.0 ? static_cast<float>(over.gi_cell)
+                                                : std::max({extent.x, extent.y, extent.z}) / 128.0f;
+                // One level, a window over the whole area (a block more each way for where it starts), the voxels
+                // larger where it would have more than max_gi_voxels.
+                kin::u32 side = 0, height = 0;
+                for (;; cell *= 1.05f) {
+                    const kin::Vec3f size = area.size() / cell;
+                    side = std::min<kin::u32>((static_cast<kin::u32>(std::ceil(std::max(size.x, size.z))) + 15) / 8 * 8,
+                                              kin::max_gi_side);
+                    height =
+                        std::min<kin::u32>((static_cast<kin::u32>(std::ceil(size.y)) + 15) / 8 * 8, kin::max_gi_side);
+                    if (std::max(size.x, size.z) + 8.0f <= static_cast<float>(side) &&
+                        size.y + 8.0f <= static_cast<float>(height) &&
+                        static_cast<kin::u64>(side) * side * height <= kin::max_gi_voxels) {
+                        break;
+                    }
+                }
+                scene.global_illumination = {.enabled = true,
+                                             .area = area,
+                                             .cell = cell,
+                                             .levels = 1,
+                                             .side = std::max(side, 32u),
+                                             .height = std::max(height, 32u)};
+                if (over.gi_windows) {
+                    scene.global_illumination = {.enabled = true,
+                                                 .area = area,
+                                                 .cell = over.gi_cell > 0.0 ? static_cast<float>(over.gi_cell) : 0.15f};
+                }
+                kin::GiProbes3D& probes = scene.global_illumination.probes;
+                probes.spacing = over.gi_spacing > 0 ? static_cast<kin::u32>(over.gi_spacing) : probes.spacing;
+                probes.rays = over.gi_rays > 0 ? static_cast<kin::u32>(over.gi_rays) : probes.rays;
+                probes.per_render =
+                    over.gi_per_render >= 0 ? static_cast<kin::u32>(over.gi_per_render) : probes.per_render;
+                probes.hysteresis =
+                    over.gi_hysteresis >= 0.0 ? static_cast<float>(over.gi_hysteresis) : probes.hysteresis;
+            }
             attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
                 for (const kin::JsonValue& p : points->items()) {
+                    // A light standing in for an emissive surface (the Cornell box's panel) is left out with global
+                    // illumination, which takes the surface's own light.
+                    if (over.gi && p.find("stand_in") && p.find("stand_in")->as_bool()) {
+                        continue;
+                    }
                     scene.add_point_light({.position = vec3(p.find("position")),
                                            .color = light_color(p.find("color")),
                                            .radius = static_cast<float>(p.number_at("radius", 1.0)),
@@ -3325,8 +3442,36 @@ int main(int argc, char** argv) {
                     }
                 }
             };
+            const auto* eval_frames = c.find("eval_frames");
+            const auto* eval_capture = c.find("eval_capture");
+            if (eval_frames && (eval_frames->items().empty() || !eval_capture || !eval_captures))
+                throw std::runtime_error("evaluation sequence requires frames, capture indices and capture log");
             const auto pose = [&](int time) {
-                fill_scene(time);
+                fill_scene(eval_frames ? std::max(0, time) : time);
+                if (eval_frames) {
+                    const auto& step =
+                        eval_frames->items()[std::clamp<int>(time, 0, int(eval_frames->items().size()) - 1)];
+                    scene.camera = kin::Camera3D::look_at(vec3(step.find("eye")), vec3(step.find("target")),
+                                                          float(step.number_at("fov", fov)));
+                    scene.camera.z_near = float(c.number_at("near", .05));
+                    if (time >= 0) {
+                        if (step.bool_at("cut"))
+                            view.reset_history();
+                        if (const auto* size = step.find("resize")) {
+                            if (size->items().size() != 2)
+                                throw std::runtime_error("evaluation resize needs width,height");
+                            const int w = int(size->items()[0].as_number()), h = int(size->items()[1].as_number());
+                            if (w < 16 || h < 16 || w > 8192 || h > 8192 || !r3d.resize(view, {w, h}))
+                                throw std::runtime_error("evaluation view resize failed");
+                        }
+                        if (const auto* value = step.find("taa"))
+                            scene.taa.enabled = value->as_bool();
+                        if (const auto* value = step.find("ao"))
+                            scene.ambient_occlusion.enabled = value->as_bool();
+                    }
+                    attach();
+                    return;
+                }
                 const Vec3f moved = pan * static_cast<float>(time);
                 if (is_walker || is_climber) {
                     // `follow: {eye, target}`: offsets from the character's feet (the camera goes where it goes).
@@ -3425,7 +3570,10 @@ int main(int argc, char** argv) {
             // A temporal history starts afresh at each camera, and runs long enough to settle.
             view.reset_history();
             pose(0); // for what the scene asks of temporal anti-aliasing
-            const int run = warmup + frames + (scene.taa.enabled ? std::max(0, taa_frames - warmup - frames) : 0);
+            const int run =
+                eval_frames ? warmup + int(eval_frames->items().size())
+                            : warmup + frames +
+                                  (!eval_bench && scene.taa.enabled ? std::max(0, taa_frames - warmup - frames) : 0);
             const int each = animated ? 1 : repeat;
 
             // The first picture: pipelines and targets made, the GPU waited for.
@@ -3435,21 +3583,54 @@ int main(int argc, char** argv) {
             if (auto rendered = r3d.render(view, scene); !rendered)
                 throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
             renderer.draw_texture(view.texture(), full);
-            wait_for_gpu();
+            if (!eval_bench)
+                wait_for_gpu();
             const double first_ms = ms_since(first_start);
             renderer.present();
 
             std::vector<double> cpu, gpu, cut_ms, cut_upload_ms;
+            auto eval_previous = std::chrono::steady_clock::now();
             for (int f = 0; f < run; ++f) {
-
-                pose(f - run);
+                const auto eval_begin =
+                    eval_telemetry ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+                const int eval_index = f - warmup;
+                pose(eval_frames ? eval_index : f - run);
+                const auto eval_pose_ms = eval_telemetry ? ms_since(eval_begin) : 0.0;
                 renderer.clear(kin::Color::rgb(0, 0, 0));
                 for (int k = 0; k < each; ++k) {
                     if (auto rendered = r3d.render(view, scene); !rendered)
                         throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                 }
                 renderer.draw_texture(view.texture(), full);
+                if (!eval_bench && eval_frames && eval_index >= 0 &&
+                    std::any_of(eval_capture->items().begin(), eval_capture->items().end(),
+                                [&](const auto& value) { return value.as_number() == eval_index; })) {
+                    kin::Image captured;
+                    if (!renderer.read_rgba(full, captured.rgba, captured.size))
+                        throw std::runtime_error("evaluation sequence readback failed");
+                    const auto folder = out / name / camera_name;
+                    fs::create_directories(folder);
+                    const auto path = folder / ("frame_" + std::to_string(eval_index) + ".png");
+                    if (!kin::save_image(captured, path))
+                        throw std::runtime_error("evaluation sequence save failed");
+                    const auto e = scene.camera.position;
+                    const auto t = vec3(eval_frames->items()[eval_index].find("target"));
+                    eval_captures << "{\"view\":" << quoted(camera_name) << ",\"frame\":" << eval_index
+                                  << ",\"image\":" << quoted(fs::relative(path, out).generic_string()) << ",\"eye\":["
+                                  << e.x << ',' << e.y << ',' << e.z << "],\"target\":[" << t.x << ',' << t.y << ','
+                                  << t.z << "],\"fov\":" << scene.camera.fov << "}\n";
+                }
+                const auto eval_present =
+                    eval_telemetry ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
                 renderer.present();
+                if (eval_telemetry) {
+                    const auto now = std::chrono::steady_clock::now();
+                    eval_telemetry.record(camera_name, f,
+                                          std::chrono::duration<double, std::milli>(now - eval_previous).count(),
+                                          ms_since(eval_begin), eval_pose_ms, r3d.debug_stats().cpu_ms,
+                                          ms_since(eval_present), renderer.backend_stats());
+                    eval_previous = now;
+                }
                 if (f >= run - frames) {
                     cpu.push_back(r3d.debug_stats().cpu_ms);
                     cut_ms.push_back(r3d.debug_stats().cluster_ms);
@@ -3457,116 +3638,122 @@ int main(int argc, char** argv) {
                     gpu.push_back(renderer.backend_stats().last_gpu_frame_ms / each);
                 }
             }
-            wait_for_gpu();
-
-            // The picture.
-            pose(0);
-            renderer.clear(kin::Color::rgb(0, 0, 0));
-            scene.debug.stats_readback = over.readback; // waits for the GPU: only for this render, not the timed ones
-            if (auto rendered = r3d.render(view, scene); !rendered)
-                throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
-            scene.debug.stats_readback = false;
-            const kin::RenderDebugStats3D stats = r3d.debug_stats();
-            renderer.draw_texture(view.texture(), full);
-            kin::Image image;
-            if (!renderer.read_rgba(full, image.rgba, image.size)) {
-                std::fprintf(stderr, "  %s: could not read the picture back\n", camera_name.c_str());
-                ++failures;
-            }
-            renderer.present();
-            for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
-                image.rgba[i] = 255;
-            }
-            const fs::path png = out / name / (camera_name + ".png");
-            kin::save_image(image, png);
-            if (over.flicker > 0) {
-                // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change from
-                // one to the next?
-                std::vector<kin::u8> previous = image.rgba;
-                double sum_mean = 0, worst = 0, over8 = 0;
-                for (int k = 1; k <= over.flicker; ++k) {
-                    pose(k);
-                    renderer.clear(kin::Color::rgb(0, 0, 0));
-                    if (auto rendered = r3d.render(view, scene); !rendered)
-                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
-                    renderer.draw_texture(view.texture(), full);
-                    kin::Image next_image;
-                    renderer.read_rgba(full, next_image.rgba, next_image.size);
-                    renderer.present();
-                    if (k > 1) {
-                        double sum = 0;
-                        std::size_t count = 0, big = 0;
-                        for (std::size_t i = 0; i < next_image.rgba.size(); i += 4) {
-                            for (std::size_t c = 0; c < 3; ++c) {
-                                const int d = std::abs(int(next_image.rgba[i + c]) - int(previous[i + c]));
-                                sum += d;
-                                worst = std::max(worst, double(d));
-                                big += d > 8;
-                                ++count;
-                            }
-                        }
-                        sum_mean += sum / double(count);
-                        over8 += 100.0 * double(big) / double(count);
-                    }
-                    previous = next_image.rgba;
-                }
-                std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(),
-                            sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
-            }
-            if (over.vram_cycle) {
-                const double on_mb = gpu_used_mb();
-                const double on_bytes = static_cast<double>(stats.feature_bytes);
-                pose(0);
-                scene.ambient_occlusion.enabled = false;
-                scene.contact_shadows.enabled = false;
-                scene.taa.enabled = false;
-                scene.lod.occlusion.enabled = false;
-                kin::u64 released = 0;
-                for (int f = 0; f < 130; ++f) {
-                    renderer.clear(kin::Color::rgb(0, 0, 0));
-                    if (auto rendered = r3d.render(view, scene); !rendered)
-                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
-                    renderer.draw_texture(view.texture(), full);
-                    renderer.present();
-                    released += r3d.debug_stats().targets_released;
-                }
+            if (!eval_bench)
                 wait_for_gpu();
-                std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with "
-                            "them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
-                            name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
-                            static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0,
-                            static_cast<unsigned long long>(released));
+
+            kin::RenderDebugStats3D stats = r3d.debug_stats();
+            const fs::path png = out / name / (camera_name + ".png");
+            if (!eval_bench && !eval_frames) {
+                // The picture.
                 pose(0);
                 renderer.clear(kin::Color::rgb(0, 0, 0));
+                scene.debug.stats_readback =
+                    over.readback; // waits for the GPU: only for this render, not the timed ones
                 if (auto rendered = r3d.render(view, scene); !rendered)
                     throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
+                scene.debug.stats_readback = false;
+                stats = r3d.debug_stats();
+                renderer.draw_texture(view.texture(), full);
+                kin::Image image;
+                if (!renderer.read_rgba(full, image.rgba, image.size)) {
+                    std::fprintf(stderr, "  %s: could not read the picture back\n", camera_name.c_str());
+                    ++failures;
+                }
                 renderer.present();
-            }
-            // The same moment drawn large and averaged down, with temporal anti-aliasing off.
-            if (supersample > 1) {
-                const kin::Vec2i big_size{width * supersample, height * supersample};
-                kin::View3D big = make_view(big_size, 4);
-                kin::RenderTarget target = renderer.create_render_target(big_size);
-                pose(0);
-                scene.taa.enabled = false;
-                kin::Image large;
-                if (big && target.valid()) {
-                    renderer.push_render_target(target);
+                for (std::size_t i = 3; i < image.rgba.size(); i += 4) {
+                    image.rgba[i] = 255;
+                }
+
+                kin::save_image(image, png);
+                if (over.flicker > 0) {
+                    // Consecutive frames from here on (the animation, if any, goes on): how much does a pixel change
+                    // from one to the next?
+                    std::vector<kin::u8> previous = image.rgba;
+                    double sum_mean = 0, worst = 0, over8 = 0;
+                    for (int k = 1; k <= over.flicker; ++k) {
+                        pose(k);
+                        renderer.clear(kin::Color::rgb(0, 0, 0));
+                        if (auto rendered = r3d.render(view, scene); !rendered)
+                            throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
+                        renderer.draw_texture(view.texture(), full);
+                        kin::Image next_image;
+                        renderer.read_rgba(full, next_image.rgba, next_image.size);
+                        renderer.present();
+                        if (k > 1) {
+                            double sum = 0;
+                            std::size_t count = 0, big = 0;
+                            for (std::size_t i = 0; i < next_image.rgba.size(); i += 4) {
+                                for (std::size_t c = 0; c < 3; ++c) {
+                                    const int d = std::abs(int(next_image.rgba[i + c]) - int(previous[i + c]));
+                                    sum += d;
+                                    worst = std::max(worst, double(d));
+                                    big += d > 8;
+                                    ++count;
+                                }
+                            }
+                            sum_mean += sum / double(count);
+                            over8 += 100.0 * double(big) / double(count);
+                        }
+                        previous = next_image.rgba;
+                    }
+                    std::printf("FLICKER %s/%s mean %.4f max %.0f over8 %.4f%%\n", name.c_str(), camera_name.c_str(),
+                                sum_mean / (over.flicker - 1), worst, over8 / (over.flicker - 1));
+                }
+                if (over.vram_cycle) {
+                    const double on_mb = gpu_used_mb();
+                    const double on_bytes = static_cast<double>(stats.feature_bytes);
+                    pose(0);
+                    scene.ambient_occlusion.enabled = false;
+                    scene.contact_shadows.enabled = false;
+                    scene.taa.enabled = false;
+                    scene.lod.occlusion.enabled = false;
+                    kin::u64 released = 0;
+                    for (int f = 0; f < 130; ++f) {
+                        renderer.clear(kin::Color::rgb(0, 0, 0));
+                        if (auto rendered = r3d.render(view, scene); !rendered)
+                            throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
+                        renderer.draw_texture(view.texture(), full);
+                        renderer.present();
+                        released += r3d.debug_stats().targets_released;
+                    }
+                    wait_for_gpu();
+                    std::printf("  vram %s/%s: features on: %.0f MiB used (feature targets %.1f MiB); 130 renders with "
+                                "them off: %.0f MiB used (feature targets %.1f MiB, %llu groups released)\n",
+                                name.c_str(), camera_name.c_str(), on_mb, on_bytes / 1048576.0, gpu_used_mb(),
+                                static_cast<double>(r3d.debug_stats().feature_bytes) / 1048576.0,
+                                static_cast<unsigned long long>(released));
+                    pose(0);
                     renderer.clear(kin::Color::rgb(0, 0, 0));
-                    if (auto result = r3d.render(big, scene); !result)
-                        throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
-                    const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x),
-                                              static_cast<float>(big_size.y)};
-                    renderer.draw_texture(big.texture(), big_rect);
-                    renderer.read_rgba(big_rect, large.rgba, large.size);
-                    renderer.pop_render_target();
+                    if (auto rendered = r3d.render(view, scene); !rendered)
+                        throw std::runtime_error(kin::diagnostics3d_text(rendered.diagnostics));
                     renderer.present();
                 }
-                if (large.size.x == big_size.x && large.size.y == big_size.y) {
-                    const kin::Image small = supersample_average(large, {width, height}, supersample);
-                    kin::save_image(small, out / name / (camera_name + "_ss.png"));
-                } else {
-                    std::fprintf(stderr, "  %s: could not draw the supersampled picture\n", camera_name.c_str());
+                // The same moment drawn large and averaged down, with temporal anti-aliasing off.
+                if (supersample > 1) {
+                    const kin::Vec2i big_size{width * supersample, height * supersample};
+                    kin::View3D big = make_view(big_size, 4);
+                    kin::RenderTarget target = renderer.create_render_target(big_size);
+                    pose(0);
+                    scene.taa.enabled = false;
+                    kin::Image large;
+                    if (big && target.valid()) {
+                        renderer.push_render_target(target);
+                        renderer.clear(kin::Color::rgb(0, 0, 0));
+                        if (auto result = r3d.render(big, scene); !result)
+                            throw std::runtime_error(kin::diagnostics3d_text(result.diagnostics));
+                        const kin::Rectf big_rect{0.0f, 0.0f, static_cast<float>(big_size.x),
+                                                  static_cast<float>(big_size.y)};
+                        renderer.draw_texture(big.texture(), big_rect);
+                        renderer.read_rgba(big_rect, large.rgba, large.size);
+                        renderer.pop_render_target();
+                        renderer.present();
+                    }
+                    if (large.size.x == big_size.x && large.size.y == big_size.y) {
+                        const kin::Image small = supersample_average(large, {width, height}, supersample);
+                        kin::save_image(small, out / name / (camera_name + "_ss.png"));
+                    } else {
+                        std::fprintf(stderr, "  %s: could not draw the supersampled picture\n", camera_name.c_str());
+                    }
                 }
             }
             const Summary cpu_s = summarize(cpu), gpu_s = summarize(gpu);
@@ -3574,6 +3761,12 @@ int main(int argc, char** argv) {
                         "shadow casters (%u cascades)\n",
                         camera_name.c_str(), cpu_s.median, gpu_s.median, gpu_s.p10, gpu_s.p90, stats.draws,
                         static_cast<unsigned long long>(stats.triangles), stats.shadow_casters, stats.shadow_cascades);
+            if (stats.gi_voxels > 0) {
+                std::printf(
+                    "                 global illumination: %u voxels, %u probes (%u updated a render, %u rays)%s\n",
+                    stats.gi_voxels, stats.gi_probes, stats.gi_probes_updated, stats.gi_rays,
+                    stats.gi_lit ? "" : ", not yet lit");
+            }
             if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
                 std::printf("                 lights: %u spots, %u shadow maps (%u drawn, %u cached) with %u draws of "
                             "%u casters, %u moon cascades, %.1f MB of maps%s\n",
@@ -3653,6 +3846,36 @@ int main(int argc, char** argv) {
                    << ", \"ao_dispatches\": " << stats.ao_dispatches
                    << ", \"contact_dispatches\": " << stats.contact_dispatches
                    << ", \"taa_dispatches\": " << stats.taa_dispatches << ", \"lights\": " << stats.lights;
+            const auto memory = renderer.backend_stats().gpu_memory;
+            const auto capabilities = r3d.capabilities();
+            const auto effective_anisotropy = std::clamp(scene.anisotropy, 1u, capabilities.max_anisotropy);
+            const float effective_bias = capabilities.texture_lod_bias
+                                             ? std::round(std::clamp(scene.texture_lod_bias, -2.0f, 2.0f) * 16) / 16
+                                             : 0;
+            const bool taa_active = stats.taa_dispatches > 0;
+
+            report << ", \"quality\": {\"anisotropy\": " << scene.anisotropy
+                   << ", \"texture_lod_bias\": " << scene.texture_lod_bias << ", \"specular_aa\": " << scene.specular_aa
+                   << ", \"taa\": " << (scene.taa.enabled ? "true" : "false")
+                   << ", \"taa_sharpness\": " << scene.taa.sharpness
+                   << ", \"effective\": {\"eligible_map_anisotropy\": " << effective_anisotropy
+                   << ", \"texture_lod_bias\": " << effective_bias
+                   << ", \"specular_aa\": " << std::clamp(scene.specular_aa, 0.0f, 1.0f)
+                   << ", \"taa\": " << (taa_active ? "true" : "false")
+                   << ", \"main_samples\": " << (taa_active ? 1u : view.samples()) << ", \"fallback\": "
+                   << quoted(scene.taa.enabled && !taa_active ? "TAA did not execute; inspect backend diagnostics"
+                             : effective_anisotropy != scene.anisotropy ? "anisotropy limited by device"
+                             : effective_bias != scene.texture_lod_bias ? "mip bias limited or quantized by backend"
+                                                                        : "")
+                   << "}}"
+                   << ", \"graph\": {\"passes\": " << stats.graph_passes
+                   << ", \"reused\": " << (stats.graph_reused ? "true" : "false")
+                   << ", \"record_cpu_ms\": " << stats.graph_record_ms << "}"
+                   << ", \"memory\": {\"logical_payload_bytes\": " << memory.payload_bytes()
+                   << ", \"pooled_texture_bytes\": " << memory.pooled_texture_bytes
+                   << ", \"transfer_bytes\": " << memory.transfer_bytes
+                   << ", \"peak_payload_bytes\": " << memory.peak_payload_bytes
+                   << ", \"allocations\": " << memory.allocations << "}";
             if (stats.spots > 0 || stats.local_shadow_maps > 0 || stats.moon_cascades > 0) {
                 report << ", \"spots\": " << stats.spots << ", \"local_shadow_maps\": " << stats.local_shadow_maps
                        << ", \"local_shadow_drawn\": " << stats.local_shadow_drawn

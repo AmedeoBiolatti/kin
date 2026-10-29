@@ -1,9 +1,7 @@
 #pragma once
 // Ported from v0 engine/renderer_gpu. RAII wrapper over an SDL_GPUTexture.
-#include <kin/core/types.hpp>
-
 #include <SDL3/SDL.h>
-
+#include <kin/core/types.hpp>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -11,10 +9,9 @@
 
 namespace kin::gpu {
 
-// A device handle shared by the device and every texture it creates. The device
-// nulls it when destroyed, so a texture that outlives its device (for example
-// one held by a static cache until exit) skips the release instead of calling
-// into a destroyed device.
+// A device handle shared by the device and its resources. Teardown nulls the token and releases the
+// remaining tracked allocations. Wrappers held past the renderer (for example in a static cache)
+// then skip release instead of releasing twice or calling into a destroyed device.
 using SharedDevice = std::shared_ptr<SDL_GPUDevice*>;
 
 // Released sampled textures kept for reuse, so a game that creates the same
@@ -62,8 +59,8 @@ private:
 class GpuTexture {
 public:
     GpuTexture() = default;
-    GpuTexture(SharedDevice device, SDL_GPUTexture* texture,
-               u32 width, u32 height, SDL_GPUTextureFormat format);
+    GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
+               SDL_GPUTextureUsageFlags usage = 0);
     // A texture (of `levels` mip levels) that goes back to `pool` (as `bytes`) when released.
     GpuTexture(SharedDevice device, SDL_GPUTexture* texture, u32 width, u32 height, SDL_GPUTextureFormat format,
                std::shared_ptr<GpuTexturePool> pool, u64 bytes, SDL_GPUTextureUsageFlags usage, u32 levels = 1);
@@ -78,6 +75,8 @@ public:
     u32 width() const { return _width; }
     u32 height() const { return _height; }
     SDL_GPUTextureFormat format() const { return _format; }
+    bool belongs_to(SDL_GPUDevice* device) const { return _device && *_device == device; }
+    SDL_GPUTextureUsageFlags usage() const { return _usage; }
 
     explicit operator bool() const { return _texture != nullptr; }
 

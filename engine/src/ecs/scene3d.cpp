@@ -233,6 +233,7 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
                 continue;
             }
             auto* renderer = entity.get_mut<Renderer>();
+            const bool changed_model = renderer->model != model;
             if constexpr (std::is_same_v<Renderer, SkinnedMeshRenderer3D>) {
                 if (renderer->model != model) {
                     if (auto* animator = entity.get_mut<Animator3D>()) {
@@ -260,6 +261,8 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
                 }
             }
             entity.get_mut<Renderer>()->model = std::move(model);
+            if (changed_model)
+                entity.modified<Renderer>();
         }
     };
     bind.operator()<ModelRenderer3D>(false);
@@ -293,8 +296,10 @@ static std::vector<std::string> resolve_materials3d_assets_impl(EcsWorld& world,
     for (auto entity : entities) {
         const auto reference = *entity.get<ModelMaterials3D>(); // COW may move the table
         if (reference.asset.id.empty()) {
-            if (reference.binding)
+            if (reference.binding) {
                 entity.get_mut<ModelMaterials3D>()->binding.reset();
+                entity.modified<ModelMaterials3D>();
+            }
             continue;
         }
         const auto* statics = entity.get<ModelRenderer3D>();
@@ -313,8 +318,10 @@ static std::vector<std::string> resolve_materials3d_assets_impl(EcsWorld& world,
         if (!binding)
             diagnostics.push_back("entity '" + entity.name() + "', ModelMaterials3D asset '" + reference.asset.id +
                                   "': " + error);
-        else
+        else if (reference.binding != binding) {
             entity.get_mut<ModelMaterials3D>()->binding = std::move(binding);
+            entity.modified<ModelMaterials3D>();
+        }
     }
     return diagnostics;
 }

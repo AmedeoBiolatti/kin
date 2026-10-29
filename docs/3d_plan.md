@@ -480,7 +480,9 @@ The plan as it was:
 
 - **Bloom** on the view's HDR texture: glowing shots and enemies.
 - **Point lights**: muzzle flashes and explosions, at most 16 a frame,
-  forward shaded, chosen by distance and strength; no clustering.
+  forward shaded, chosen by distance and strength; no clustering. (Since
+  2026-10-27 the light variants shade through a light grid, up to 256 of each
+  kind: see rendering_3d.md, "The light grid".)
 - **Transparency**: sparks and explosion particles drawn additively, tested
   against depth but not writing it; alpha-blended draws sorted back to
   front. `render.overdraw` watched, since this is where it grows.
@@ -2464,6 +2466,287 @@ moves) and ray queries in compute; a progressive path tracer (the studio's
 Trace view, converging toward Cycles); ray-traced shadows, occlusion and
 reflections for games, at reduced rate and accumulated. Checks: Cornell,
 Sponza and the kiln against Cycles by samples; rays a second.
+
+### G5 — Global illumination
+
+The user's direction (2026-10-26, branch `exp/realtime-lighting`): beat the
+original Bistro demo (Godot 4.4: SDFGI, SSIL, 15 reflection probes) with
+real-time techniques, and keep global illumination general: several
+strategies that can be used together. Today a surface's indirect light is the
+sky's or the environment's everywhere (times GTAO and the material's
+occlusion), so the shade of a street, an arch or a room has the open sky's
+light. The gallery's port measures it: the arch by day has 0.238 of light
+where Godot has 0.064, the day's picture 1.4 times Godot's light at the same
+exposure, and at night Godot's GI is 94% of the light (the lamps and windows
+bounced), so the port's night has about 6% of it. G0's distances to Cycles say
+the same: the Cornell box lacks bounced light, and Sponza (14.5 dB on the
+nave) has "kin's ambient everywhere".
+
+**How strategies compose.** Three layers, the lower two shared:
+
+1. *The GI scene*: the scene in voxels for tracing it. A distance to the
+   nearest surface in every voxel, and in each voxel a surface touches its
+   colour, normal and emission. Built in compute from the meshes the renderer
+   already holds (every opaque and cut-out copy in `area`, skinned copies in
+   their pose), in cascades round the camera.
+2. *The lit scene* (a radiance cache): the light leaving each surface voxel:
+   the sun, the lamps, emission, and the GI itself fed back, so bounces add up
+   from frame to frame. A ray that hits a surface reads its light there.
+3. *Strategies* gather light for a pixel (or any point). Each one reports the
+   light it found within its reach and the share of directions it found
+   blocked; the renderer stacks them nearest first, as alpha layers are, and
+   what no layer blocked sees the sky or environment. GTAO is already the
+   nearest layer (it blocks and finds no light); probes are the far one;
+   screen-space GI, cones traced through the distance field, a baked source
+   come in the same way. Reflections get their own stack by the same rule
+   (screen space, traced, probes, the sky).
+
+Tracing is one interface: rays in, a distance and light out. The distance
+field is the first tracer; a BVH in compute (G4) could stand in for it
+without the strategies changing.
+
+**The first strategy: probes traced through the GI scene** (DDGI: Majercik
+et al. 2019). A grid of probes in each cascade; each render a budget of them
+casts rays through the distance field (a hit reads the lit scene, a miss the
+sky), and each keeps its irradiance (octahedral, 8 x 8) and the moments of
+its rays' distances (16 x 16), blended over time. A pixel reads its 8 nearest
+probes, weighted by distance, by which way they face and by whether they can
+see it (Chebyshev, from the moments): what keeps light from leaking through
+walls. Probes inside a wall move out or switch off, those far from any
+surface sleep. The material shader reads them with its normal-mapped normal
+in place of the sky's diffuse; GTAO, kept shorter than the probes' spacing,
+and the occlusion maps still multiply it for contact detail. It is Godot's
+class of technique (SDFGI: probes through cascaded distance fields): this
+one's chances against it are the visibility test, probes out of walls, the
+normal maps, denser probes near the camera, and the scene's moving things in
+the GI scene (Godot's SDFGI takes static meshes only).
+
+Decided (2026-10-26): moving things feed the GI from the start, props and
+skinned characters alike (Godot's SDFGI takes neither); the budget is 2 ms
+of GPU a frame for all of it at 2844 x 1600 on the laptop's RTX 4080 (the
+port runs about 10 ms a frame by day there), with settings that go lower;
+off by default, and off the picture and the cost are as without it; compute
+only (WebGL2 keeps the sky's light).
+
+Steps, each with its checks:
+
+- **G5a — The GI scene in one box.** `Scene3D::global_illumination`
+  (`enabled`, `area`, `cell`): one level over `area`, voxels of `cell` (larger
+  where the box would take more than the level's voxels). Triangles to voxels
+  in compute: every voxel a triangle touches (conservative: no gap a ray can
+  pass), its owner the touching triangle drawn first (the same scene gives the
+  same voxels, to the byte, whatever order the GPU runs in); the owner writes
+  the voxel's colour (the material's texture at the voxel's nearest point of
+  it, at a mip the voxel's size), normal and emission; a cut-out's voxels only
+  where its texture is opaque enough. A jump flood gives each voxel its
+  distance to the nearest surface voxel. Built again when what it is made of
+  changes (meshes, materials, copies, poses), whole. A debug view
+  (`debug.gi_view`) shows it traced from the camera instead of the picture;
+  `read_gi_scene` gives it to tests and tools. Checks: distances to planes and
+  spheres; a thin wall, straight and slanted, that no ray passes; a skinned
+  copy in its pose; two builds the same to the byte; off, every picture as
+  before; the build's cost on Sponza and Bistro.
+- **G5b — Light and probes in that box.** The lit scene (the sun through its
+  shadow map where it reaches, else a ray through the field; lamps the same;
+  emission; probe light for the bounces), the probes and the shading. Checks:
+  the Cornell box and Sponza against Cycles; the furnace stays white; energy
+  conserved in a closed box; ECS settings.
+- **G5c — Cascades round the camera.** Scrolling as the camera moves (only
+  the new slabs voxelized), a moved prop or a posed character voxelized again
+  in its old and new box, the probes' and the lit scene's work spread over
+  frames within the budget. Checks: the Bistro against Godot (`compare.py`:
+  the arch by day, the night's light, the day's excess, the shade's colour),
+  the four times of day and their blends, the cost.
+- **G5d — Reflections and fog.** Reflections kept from the sky where the field
+  says something is in the way (the sky rim on the mannequin's head), and the
+  fog lit by the probes.
+
+Then other strategies on the same layers, as they are asked for: screen-space
+GI for the near field, cones traced through the field for occlusion between
+the probes' spacing and GTAO's reach, reflection probes and screen-space
+reflections, a baked source.
+
+#### G5a — results
+
+`Scene3D::global_illumination` (`enabled`, `area`, `cell`) builds the GI scene in compute
+(`gpu_gi3d.cpp`; `kin_gi_voxelize.inc.glsl`, `gi_clear.comp`, `gi_flood.comp`, `gi_view.frag`): every voxel
+of 3D textures over the area (a half for the distance, RGBA8 for colour and normal, four halves for emission),
+`debug.gi_view` and `Renderer3D::read_gi_scene`. The steps of a build, each a compute pass: clear; owners (a
+dispatch a draw, `atomicMin` of the item); attributes (a dispatch a draw, the owner writes); the flood (a seed
+pass, rounds at half the reach down to one and one more at one, the distances). A triangle over more than
+eight columns of voxels along its normal's axis is shared by its workgroup. Meshes' vertex, index and skin
+buffers (and the shared pages) are made readable by compute where the device has the feature.
+
+Checks (`test_gpu_gi_scene`, `test_gpu_gi_scene_builds`, `test_gpu_gi_view`, on the RTX 4080, Intel's and
+lavapipe, the same numbers on all three):
+
+| What | Result |
+|---|---|
+| A floor 0.27 above the area's bottom, voxels of 0.1 | one layer (7), the layers either side empty; above it the distances are the layers counted, exactly |
+| Two walls of no thickness, upright and turned 45 degrees | 0 of 80,802 points of them in an empty voxel: no ray gets through |
+| A ball's distances, from 0.15 to 0.65 m outside it | within 0.81 voxels of its surface's |
+| The floor's colour and normal | its linear colour to the byte (147, 32, 8); normal (128, 255, 128) |
+| A skinned box of one joint | its pose's voxels full, its rest's empty |
+| A cut-out clear on its left half | that half empty, the other full |
+| An emissive wall (green, emissive 2) | its light 1.154 against 1.155 |
+| Built when | once; again for a pose, a copy moved, a material's colour; not for the same scene |
+| Two views of one scene | the same voxels to the byte |
+| Off | nothing built or kept; the picture the same as with it on (it lights nothing) |
+| The debug view | the wall's grey to the level straight ahead; 0 of 361 points of it show what is behind |
+
+The rest of the renderer is untouched: `kin_render3d_tests` passes whole on lavapipe (259 GPU fixtures),
+and the other 121 of kin's tests pass (`kin-renderer`'s `test_gpu_native_pixel_size_and_pointer_mapping`
+fails, as it does in a build of 2026-10-23 on this desktop, whose scale is 1.5).
+
+**The Bistro** (the gallery's port, `--gi`, the level's box 160 x 50 x 170 m: voxels of 0.69 m, 231 x 73 x
+246, 4.15 million; a box 60 x 27 x 65 m round the square: 0.30 m): its 1,030 opaque draws, 3.09 million
+triangles, 269 distinct sets of vertex and index buffers. The mannequin's idle pose changes each frame, so
+the scene is built every frame: 600 frames at 1280 x 720 take 23.0 s against 8.7 s without it, about 24 ms
+a build (the laptop in power-saver). Switched off one at a time, the owners' pass saves about 12 ms, the
+attributes' 13 and the flood 3. SDL_GPU puts a barrier between dispatches each time another buffer is bound
+for reading, and 620 of the draws are under 16 workgroups: the GPU idles between them. Dispatching the draws
+in the order of their buffers (the items keep their draw order, so the voxels do not change) brings a build
+to about 17 ms; recording it costs the CPU about 4 ms. The debug view shows the level recognisably at 0.30
+m (the arch's vault, the doors, the awnings, the posed mannequin); thin things (the festoon lights' cables)
+come out a voxel thick, and the trees' cut-out leaves, mostly clear at a voxel's size, not at all.
+
+What this leaves for G5c, where the budget is: a moving thing must not cost a whole build. Build the static
+part once and voxelize only the regions moving copies leave and enter; batch the draws that share buffers
+into one dispatch (a table of their runs instead of a dispatch each), so a slab or a region is a handful of
+dispatches; the flood only round what changed.
+
+#### G5b — results
+
+`GlobalIllumination3D::probes` (`GiProbes3D`: `spacing`, `rays`, `per_render`, `hysteresis`, `intensity`), the
+lit scene and the probes (`gi_light.comp`, `gi_probe_place.comp`, `gi_probe_trace.comp`, `gi_probe_update.comp`,
+`kin_gi.inc.glsl`), read by the stock shaders' light variants (`KIN_GI`: three more samplers, the probes' 3D
+atlases; with the probes on, those variants draw). Authored as `SceneEnvironment3D`'s `gi_*` keys. Each render:
+the probes stand (after a build), the lit scene, a batch of probes traces, the batch takes its rays in. What
+changed on the way, each found by a check:
+
+- **Reflections** (planned for G5d) came now: Sponza's shade measured (0.015, 0.016, 0.019) in linear light where
+  Cycles has (0.003, 0.002, 0.001), the open sky's reflection off 4% stone; probes finer or denser did not move it.
+  A rough surface now reflects what the probes see along the reflection, a smooth one the environment dimmed by the
+  share of the sky's light they see that way: the shade went to (0.001, 0.001, 0.000) and Sponza's mean from 15 to 7.
+- **A metal's colour:** the voxels held base x (1 - metallic), so the furnace's metal spheres were black to the
+  probes (its mean went from 0.23 to 1.84 levels, p99 42); now the base colour (a metal reflects its colour's share),
+  0.27 and p99 3.
+- **Emission first:** the Cornell box's panel is half a millimetre under the ceiling, in the same voxels, and the
+  ceiling (drawn first) owned them: the box lit by the panel alone was black. An emissive triangle now owns a voxel
+  before any other (the owners' top bit).
+- **Two sides:** a thin wall's voxel had one light for both sides, so a dark room would have seen the lit room's
+  side of the wall. Each side now has its own (a second lit-scene texture); a voxel with faces both ways (opposite
+  faces in it, or a double-sided material) counts as double-sided, so probes beside a thin wall are not taken as
+  inside it.
+
+Checks (`test_gpu_gi_furnace`, `_rooms`, `_tunnel`, `_bleeding`, with G5a's; the same numbers on the RTX 4080,
+Intel's and lavapipe):
+
+| What | Without the probes | With them |
+|---|---|---|
+| A white ball in an even sky (the furnace) | the sky's 0.5 | within 1 level of without |
+| Two rooms, a wall of no thickness between, a panel lighting the left | both floors black | left 115, right 0 (no leak); two views the same to the byte |
+| A tunnel 8 x 2 x 2 under an even sky, floor inside / outside | 128 / 128 | 28 / 125 (in light about a twentieth) |
+| A white ground by a sunlit red wall: red over green, by the wall / 5 m away | 1.00 / 1.00 | 1.24 / 1.03 |
+
+Against Cycles (`tools/reference/run.py`, the RTX 4080, 1280 x 720; `kin_reference --gi`, voxels a 128th of the
+scene's bounds, probes every 4, 128 rays, 0.97 kept, as many probes a render as a million rays allow, 8,192; the
+Cornell box's point light is marked a stand-in, left out with `--gi`, which lights the box with its panel):
+
+| Picture | without: mean, PSNR, SSIM | with: mean, PSNR, SSIM | GPU ms without / with |
+|---|---|---|---|
+| cornell/front | 10.20, 22.4 dB, 0.887 | **7.61, 24.7 dB, 0.986** | 0.06 / 1.23 |
+| furnace/front | 0.23, 48.6 dB, 0.998 | 0.27, 50.4 dB, 0.998 | 0.06 / 1.19 |
+| sponza/nave | 50.10, 13.3 dB, 0.501 | **7.10, 28.0 dB, 0.805** | 0.34 / 2.51 |
+| sponza/roof | 33.98, 15.7 dB, 0.641 | **6.50, 27.4 dB, 0.840** | 0.29 / 2.36 |
+
+What is left of the distance: the Cornell box's light is grey where Cycles' is warm (kin's materials take emission
+as a share of the base colour, and the panel's base is grey: its glTF emissive colour is not kept), and its area
+light's shadows (the probes' light is low-frequency); Sponza's shade a third darker than Cycles' and a little cooler.
+The cost: about 1.2 ms for the Cornell box (4.1 million voxels, 31,744 probes) and 2.1 for Sponza (750,000 voxels,
+13,616 probes), 8,192 probes and a million rays a render in both: a cost of the voxels and the probes, not of the
+picture's size. The budget work is G5c's (fewer probes and voxels a render, cascades).
+
+**The Bistro** (`--gi`, the square's box 60 x 27 x 65 m, voxels of 0.30 m): the shade loses the open sky's blue and
+is warmer, the arch's tunnel goes dark inside as the original's is, the night's lamps bounce onto the facades and the
+street; the same picture to the byte from run to run. Its comparison with Godot is G5c's, with the cascades.
+
+#### G5c — results so far
+
+`GlobalIllumination3D`'s `levels`, `side` and `height`: the GI scene in windows of `side` x `height` x `side` voxels
+(128 x 64 x 128), each level's voxels twice the last's, round the camera; the first level whose window holds the
+whole area stays over it. A window is stored wrapped round and moves a block of 8 x 8 x 8 at a time; the probes have a
+window in each level too. What is made again, and how:
+
+- **By blocks:** each render finds what changed from a hash and a box of each copy (its transform, tint, material,
+  pose); the blocks a change covers or covered (a voxel more), and the slabs a moving window gains, are emptied,
+  voxelized and flooded again (the flood over them and two blocks more, written over one more; at the side a window
+  left, the block along its new edge). The voxelizer counts voxels from the world's origin, not the window's, so a
+  voxel holds the same wherever its window stood: made again where it changed, or after the window moved or jumped,
+  the scene is to the byte the one built afresh (`test_gpu_gi_scene_builds`, `_scrolls`). A change is made at once
+  after a still render, else (an animation, a falling prop) every fourth render; the coarser levels' every 4 x 2^k
+  renders, each level in its own renders.
+- **Fewer triangles:** each mesh keeps the box of each run of 64 of its triangles; the voxelizer takes only the runs
+  that reach a block being made (a workgroup a run), and clamps each triangle to the box round those blocks.
+- **Fewer passes:** the flood's seeding and its writing folded into its first and last rounds (five passes, not
+  seven), all its boxes a pass (boxes that overlap made one).
+- **The probes:** placed again only near where the distances were written; those new to a window traced first (a
+  queue: a level whose probes are not traced yet leaves the place to the next, `test_gpu_gi_probes_scroll`); the lit
+  scene lights the blocks made this render and an eighth of the others in turn; 2,048 probes traced a render (was
+  4,096).
+- **Their light on the view:** read once a texel at half the view's size after the pre-pass (`gi_resolve.comp`: the
+  light facing the surface's normal and a linear fit of its brightness round it), and by the main pass from the four
+  texels round each pixel, turned to the normal map's normal and the reflection.
+
+The Bistro at 2844 x 1600 (`--gi`, the RTX 4080 laptop, the mannequin posed anew each render; GPU times from kin's
+fences, each part timed in its own submission, and passes compared in alternating blocks of one run, the laptop
+throttling at 86-87 C): GI from about 24 ms a render to about 4.3 in part 1 (kin 5a363b6):
+
+| Part | ms | What did it |
+|---|---|---|
+| The GI scene (the mannequin's blocks; the coarser levels in turn) | 1.3 | blocks, runs, passes; was 17 for a whole build |
+| The probes (placing, the lit scene, 4,096 traced and taken in) | 1.2 | placing near changes (was all 49,152 each render) |
+| Their light on the view | 0.5 | |
+| Reading it in the main pass | 0.9 | was 13: each fragment of the overdraw read the probes |
+| The light variants (with the probes on) | 0.3 | |
+
+Against Cycles, with as many probes a render as G5b (`--gi-per-render 0`) and `kin_reference` making one level over
+each scene (`max_gi_probes` now 65,536 a level, so the Cornell box keeps probes every 4 voxels): Cornell 7.65 (25.0
+dB, SSIM 0.978; G5b 7.61), the furnace 0.53 (44.1 dB; 0.27), Sponza's nave 7.09 (7.10), its roof 6.91 (6.50): the
+light read on the view loses nothing that shows.
+
+Then the work spread over renders: what keeps changing (the mannequin's pose) made every fourth render and the coarser
+levels' in their own renders (a test: a pose changing every render is made every fourth, and the scene catches up to
+the byte the one built afresh once it stops), boxes already waiting not queued again, an eighth of the lit scene a
+render, 2,048 probes traced a render, and the probes' update a walk over the rays a thread (the borders copied). Timed
+as the average of a render (the work comes in some renders, not others) and with GI on and off in alternating blocks of
+one run: **about 2.35 ms a render with the laptop throttling** (its frame without GI 11.9 ms), **about 1.6 at full
+clock** (8.0 ms without GI; the same share, a fifth). Of it, about: the GI scene 15%, the probes 28% (their trace 14%),
+their light on the view 21%, reading it in the main pass 36%. The light variants with nothing else to light cost about
+0.15 ms: a variant of their own is not worth it.
+
+Then the flicker the user saw in the live game (standing still: details pulsing a few times a second, a shadow at a
+door for 0.2 s every 2-3 s; none of it in the fixed-step runs the checks and timings used): the Bistro drew each prop at
+rest rebuilt from its last two physics steps, its matrix a little different each render (the frame's own blend), so
+every one of its 98 props was "changed" in every live render, the 64 boxes' cap merged them into one round the square
+and the GI scene was made again over most of its first level every fourth render. Fixed in the port (a prop at rest is
+drawn with its own matrix) and made safer here: many changes are gathered by place (an 8-unit grid, doubled till they
+are 64 boxes at most), not into one box; a change goes on for four renders (a game rendering more often than it steps
+keeps the every-fourth cadence). And the probes placed again round a change: they stay where they stand while it has
+room, and keep the verdict of their rays that they are inside something (a probe in a closed building, woken by being
+placed again, lit the facades with its dark inside till its next update). Last, the light on the view read in the main
+pass weighs the texels instead of picking one, and keeps 85% of the render before's (reprojected), so that the jitter
+of temporal anti-aliasing does not make it flicker at the edges of things: GI's own flicker over the start view,
+frame to frame, from 0.16% of the pixels changing by more than 16 levels beyond what they do without it to 0.10%
+(a shop window's frame as without GI). What flickers still, with or without GI: thin bright things (the tables' menus)
+under temporal anti-aliasing's 8-frame jitter.
+
+Against Godot (`tools/compare.py shots ... --port=--gi`, 2404 x 1352): by day the arch's tunnel 0.057 against Godot's
+0.065 (0.238 without GI), the start's view 0.158 against 0.165, the side street 0.173 against 0.168; at night the
+port is far darker (0.04-0.05 against 0.17-0.27): what is next.
+
+Left for G5c: the night. Then, if the budget must hold while the laptop throttles: the light on the view at a quarter
+of the view's size, or the main pass shading only what the pre-pass kept.
 
 ### Later, each on request
 

@@ -26,6 +26,10 @@ ctest --test-dir build -C Release --output-on-failure --rerun-failed
 
 Use `-j 1` when diagnosing order or resource issues.
 
+For GPU-required 3D tests, software Vulkan, core/synchronization validation,
+sanitizers and CI coverage, see the [rendering validation guide](rendering_validation.md).
+Dummy-driver test passes do not exercise GPU rendering.
+
 ## Building Tests
 
 Build one test executable:

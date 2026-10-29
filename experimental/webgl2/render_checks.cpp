@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <kin/renderer/graph_resources.hpp>
 #include <stdexcept>
 #include <string>
 
@@ -119,6 +120,65 @@ void check_webgl_geometry2d(Renderer2D& r) {
 }
 
 void check_webgl_instances(Renderer2D& r, Renderer3D& r3d) {
+    require(!r.capabilities().texture_copies && !r.copy_texture({}, {}),
+            "Unsupported exact texture copies must fail explicitly");
+    ResourceGraphDesc graph;
+    graph.resources = {{.name = "base", .kind = GraphResourceKind::ColorTarget, .size = {32, 16}},
+                       {.name = "overlay", .kind = GraphResourceKind::ColorTarget, .size = {32, 16}, .exported = true}};
+    graph.passes = {
+        {.name = "base", .attachments = {{.resource = 0}}},
+        {.name = "overlay", .attachments = {{.resource = 1, .previous = 0, .load = GraphAttachmentLoad::Load}}}};
+    ResourceGraphCompiler compiler;
+    GraphResources bindings;
+    const auto plan = compiler.compile(graph, available_graph_features(r));
+    require(plan && plan.attachment_reuses == 1 && bindings.prepare(r, graph, plan),
+            "Browser attachment handoff planning/allocation failed");
+    require(bindings.texture(0) == bindings.texture(1), "Browser attachment versions must share safe storage");
+    const std::array<std::function<bool()>, 2> operations{[&] {
+                                                              auto target = r.scoped_render_target(bindings.target(0));
+                                                              r.clear(Color::rgb(255, 0, 0));
+                                                              return true;
+                                                          },
+                                                          [&] {
+                                                              auto target = r.scoped_render_target(bindings.target(1));
+                                                              r.fill_rect({0, 0, 16, 16}, Color::rgb(0, 0, 255));
+                                                              return true;
+                                                          }};
+    require(bindings.execute(plan, operations), "Browser attachment handoff recording failed");
+    {
+        auto target = r.scoped_render_target(bindings.target(1));
+        std::vector<u8> pixels;
+        Vec2i size;
+        require(r.read_rgba({0, 0, 32, 16}, pixels, size) && size == Vec2i{32, 16}, "Browser handoff readback failed");
+        require(pixels[(8 * 32 + 8) * 4 + 2] > 250 && pixels[(8 * 32 + 24) * 4] > 250,
+                "Browser handoff lost loaded colour contents");
+    }
+    require(!compiler.compile(graph, available_graph_features(r), {.reuse_slots = false}),
+            "Browser must reject attachment plans requiring unavailable copies");
+    require(!r3d.capabilities().geometry_pass && !r.capabilities().render_attachments,
+            "WebGL must report unsupported standalone geometry attachments");
+    require(!r3d.capabilities().shared_preparation && !r3d.prepare({}),
+            "Unsupported shared preparation must return diagnostics");
+    require(!r3d.capabilities().sun_shadow_pass && !r3d.capabilities().surface_pass &&
+                !r.capabilities().render_attachment_arrays && !r3d.render_sun_shadow({}, {}, {64, 64}) &&
+                !r3d.render_surface({}, {}),
+            "Unsupported public shadow/surface operations must fail explicitly");
+    require(!r3d.capabilities().surface_stages && !r3d.capabilities().surface_particles &&
+                !r3d.capabilities().surface_soft_particles &&
+                !r3d.render_surface({}, {}, {.stage = SurfaceStage3D::Opaque}) &&
+                !r3d.render_surface({}, {}, {.stage = SurfaceStage3D::Transparent, .particles = true}),
+            "Unsupported surface stages/particles must fail explicitly");
+    require(!r3d.capabilities().material_inputs && !r3d.create_material_inputs({}),
+            "Unsupported material inputs must fail explicitly");
+    require(!r3d.capabilities().local_shadow_pass && !r3d.render_local_shadows({}, {}, {}, {64, 64}),
+            "Unsupported local shadow operation must fail explicitly");
+    require(!r3d.capabilities().bloom_pass && !r3d.capabilities().output_pass && !r3d.render_bloom({}, {}) &&
+                !r3d.render_output({}, {}),
+            "Unsupported bloom/output operations must fail explicitly");
+    const auto unsupported = r3d.render_geometry({}, {});
+    require(!unsupported && !unsupported.diagnostics.empty(), "Unsupported geometry must return diagnostics");
+    require(!r.create_render_attachment({64, 64}, TextureFormat::Depth32Float),
+            "Unsupported depth attachment allocation must fail explicitly");
     auto view = r3d.create_view({64, 64}, {.samples = 1, .background = colors::black}).value_or({});
     const auto target = r.create_render_target({64, 64}, ScaleMode::Nearest);
     const auto mesh = r3d.create_mesh(quad()).value_or({});

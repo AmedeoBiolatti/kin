@@ -276,6 +276,9 @@ with `python3 tools/reference/fetch.py` into `$KIN_REFERENCE_CACHE` or
   scale (the picture is of a person on a swing in Sponza's nave).
 - `--set key=value` and `--preset name[,name]` set the same switches at start
   (`--list-settings`, `--help`); `--camera nave|roof`, `--eye X,Y,Z --target X,Y,Z`.
+- Probe global illumination: `--preset gi,ao,taa,contact`. The "Global illumination" panel controls the finest voxel
+  size, clipmap levels, rays per update, probes per frame and intensity. GI is opt-in in this feature viewer; the
+  stats show `gi: lighting` when it is active. Let it settle for a few seconds; for a still use at least 600 frames.
 - Without a display: `KIN_RENDER_BACKEND=gpu sponza_walk --headless --frames 8
   --screenshot out.png --preset ao` (or `--preset contact`, `--preset taa`, with `--spin 0.4` for a moving camera and enough `--frames` to settle) renders from the start camera and writes the
   picture (`--hud` puts the panel in it, `--spin DEG` turns the camera a frame,

@@ -2,7 +2,7 @@ name: Experimental WebGL2
 
 on:
   push:
-    branches: ['main']
+    branches: ['main', 'exp/rendering-*']
   pull_request:
     paths:
       - 'engine/**'

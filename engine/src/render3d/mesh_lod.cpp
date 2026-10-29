@@ -1,6 +1,7 @@
 #include "mesh_bake.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <kin/render3d/mesh_lod3d.hpp>
@@ -47,6 +48,14 @@ bool is_flat_soup(const MeshData3D& data) {
     return counted > 0 && flat * 100 >= counted * 99;
 }
 
+// Position-only welding is valid only when selecting another corner cannot change appearance. Attribute-bearing
+// soups use the attribute-aware branch below; refusing a reduction is preferable to replacing a UV/colour seam.
+bool uniform_flat_attributes(const MeshData3D& data) {
+    const auto& first = data.vertices.front();
+    return std::all_of(data.vertices.begin(), data.vertices.end(),
+                       [&](const MeshVertex3D& v) { return v.uv == first.uv && v.color == first.color; });
+}
+
 } // namespace
 
 MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& options) {
@@ -74,18 +83,22 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
                    static_cast<f64>(current_triangles) * (1.0 - static_cast<f64>(options.min_reduction));
     };
 
-    // A flat-shaded mesh with no indices (a model with no normals; the kiln's 15 M vertices): welded by position,
-    // simplified on positions alone (cheap: the 9 attributes of 15 M vertices took gigabytes). The levels index
-    // vertices of the chain's own: each welded position they use, once, with the UV and colour of the mesh's first
+    // Flat soups weld by position only when attributes are uniform (the kiln's 15 M vertices: no attribute array).
+    // Otherwise UV/colour seams remain distinct and six appearance attributes guide simplification. The levels index
+    // vertices of the chain's own: each welded vertex they use, once, with the UV and colour of the mesh's first
     // corner there and a zero normal, which the shader takes for flat and replaces with the face's (from the
     // derivatives of the position, as for flat clusters). A vertex for each corner of each level, to carry its
     // triangle's normal, took the kiln's 4 levels 12.8 M vertices; these are at most the first level's (a level only
     // drops vertices of the one before). The mesh's vertices are not touched.
     if (data.indices.empty() && is_flat_soup(data)) {
+        const bool uniform = uniform_flat_attributes(data);
         std::vector<u32> current(vertex_count);
-        const meshopt_Stream stream{&data.vertices[0].position, 3 * sizeof(f32), sizeof(MeshVertex3D)};
-        const std::size_t unique =
-            meshopt_generateVertexRemapMulti(current.data(), nullptr, vertex_count, vertex_count, &stream, 1);
+        const std::array<meshopt_Stream, 3> streams{
+            {{&data.vertices[0].position, 3 * sizeof(f32), sizeof(MeshVertex3D)},
+             {&data.vertices[0].uv, sizeof(Vec2f), sizeof(MeshVertex3D)},
+             {&data.vertices[0].color, sizeof(Color), sizeof(MeshVertex3D)}}};
+        const std::size_t unique = meshopt_generateVertexRemapMulti(current.data(), nullptr, vertex_count, vertex_count,
+                                                                    streams.data(), uniform ? 1 : streams.size());
         std::vector<u32> from(unique, ~0u); // a corner of the mesh for each welded position
         for (std::size_t i = vertex_count; i-- > 0;) {
             from[current[i]] = static_cast<u32>(i);
@@ -97,6 +110,18 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
             positions[w * 3] = p.x;
             positions[w * 3 + 1] = p.y;
             positions[w * 3 + 2] = p.z;
+        }
+        std::vector<f32> attributes;
+        const float weights[6] = {options.uv_weight,    options.uv_weight,    options.color_weight,
+                                  options.color_weight, options.color_weight, options.color_weight};
+        if (!uniform) {
+            attributes.resize(unique * 6);
+            for (std::size_t w = 0; w < unique; ++w) {
+                const auto& v = data.vertices[from[w]];
+                const f32 values[6] = {
+                    v.uv.x, v.uv.y, v.color.r / 255.0f, v.color.g / 255.0f, v.color.b / 255.0f, v.color.a / 255.0f};
+                std::copy_n(values, 6, attributes.data() + w * 6);
+            }
         }
         std::vector<u32> simplified, ordered;
         std::vector<u32> slot; // each welded position's place in extra_vertices (~0u: none yet)
@@ -112,8 +137,12 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
             simplified.resize(current.size());
             f32 relative = 0.0f;
             const std::size_t kept =
-                meshopt_simplify(simplified.data(), current.data(), current.size(), positions.data(), unique,
-                                 3 * sizeof(f32), target_of(current_triangles), max_error, flags, &relative);
+                uniform ? meshopt_simplify(simplified.data(), current.data(), current.size(), positions.data(), unique,
+                                           3 * sizeof(f32), target_of(current_triangles), max_error, flags, &relative)
+                        : meshopt_simplifyWithAttributes(simplified.data(), current.data(), current.size(),
+                                                         positions.data(), unique, 3 * sizeof(f32), attributes.data(),
+                                                         6 * sizeof(f32), weights, 6, nullptr,
+                                                         target_of(current_triangles), max_error, flags, &relative);
             if (stops(kept / 3, current_triangles)) {
                 break;
             }
@@ -232,7 +261,7 @@ MeshLodChain3D build_mesh_levels(const MeshData3D& data, const MeshOptions3D& op
 
 // The bake of a chain (mesh_levels_bake_key, save_mesh_levels). Raise it whenever build_mesh_levels would make another
 // chain from the same mesh and options (the key then changes, so no old bake is read), or the bytes change.
-constexpr u32 levels_bake_version = 1;
+constexpr u32 levels_bake_version = 2;
 
 u64 mesh_levels_bake_key(const MeshData3D& data, const MeshOptions3D& options) {
     BakeKey key{"kin.mesh_levels", levels_bake_version};

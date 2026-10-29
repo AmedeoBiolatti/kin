@@ -58,6 +58,8 @@ private:
     SceneFrameOptions3D _options;
     std::vector<std::string> _errors;
     bool _running = false;
+    u64 _particle_revision = 0;
+    std::vector<std::string> _particle_diagnostics;
 };
 
 } // namespace kin

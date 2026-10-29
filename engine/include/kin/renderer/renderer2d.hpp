@@ -265,6 +265,16 @@ public:
     // backend cannot read back pixels.
     bool save_png(const std::string& path);
     bool read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size);
+    // read_rgba without waiting for the GPU: what is drawn so far is submitted, and take_read_rgba gives the pixels
+    // once the GPU has drawn it, a frame or two later (a backend that can only wait reads them here, with read_rgba).
+    // Returns the read's ticket.
+    u64 request_read_rgba(Rectf logical_region);
+    // false returns 0 instead of using a synchronous fallback (including on read setup failure).
+    u64 request_read_rgba(Rectf logical_region, bool allow_wait_fallback);
+    // The pixels of `ticket`'s read once they have arrived (true: the ticket is spent; `out` empty when the read
+    // failed), false until then. `wait`: waits for them (taken a fixed number of frames after the request, a
+    // deterministic run gets them at the same frame whatever the GPU's speed; two or three frames on, they are there).
+    bool take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait = false);
 
     void set_logical_size(i32 width, i32 height);
     void set_logical_size(Vec2i size);
@@ -428,6 +438,16 @@ public:
     // bindings fall short of what the shader declares (logged).
     ComputeShaderHandle create_compute_shader(ShaderBlob spirv);
     Texture create_storage_texture(Vec2i size, TextureFormat format = TextureFormat::Rgba8);
+    // Single-sample linear data target, also sampled by shaders. Supports RG16F,
+    // RGBA16F and D32F where capabilities().render_attachments is true. Cleared
+    // and written by an operation such as Renderer3D::render_geometry; never a
+    // 2D colour target. array_layers > 0 requests an explicit 2D array (including
+    // one layer); check render_attachment_arrays. Retained handles own the allocation.
+    Texture create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers = 0);
+    // Exact GPU copy of base-level texels across every layer, without blending or
+    // colour conversion. Same extent/format/array shape/device, distinct handles;
+    // no compressed formats or mipmapped destinations. Unsupported backends fail.
+    bool copy_texture(const Texture& source, const Texture& destination);
     bool dispatch_compute(ComputeShaderHandle shader, Vec2i size, const ComputeBindings& bindings);
 
     // Storage buffers for shaders (capabilities().data_buffers; elsewhere an
@@ -550,6 +570,16 @@ public:
 
 private:
     JobSystem* _jobs = nullptr;
+    // request_read_rgba's reads on a backend that can only wait: read at once, kept until taken. Their tickets have the
+    // top bit set, apart from the backend's own.
+    static constexpr u64 waited_read = u64{1} << 63;
+    struct WaitedRead {
+        u64 ticket = 0;
+        std::vector<u8> pixels;
+        Vec2i size{};
+    };
+    std::vector<WaitedRead> _waited_reads;
+    u64 _next_waited_read = 1;
     friend class ViewportGuard;
     friend class PooledTarget;
 

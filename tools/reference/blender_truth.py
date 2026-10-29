@@ -2,7 +2,7 @@
 Cycles rendering the same models from the same cameras, in the same light.
 
     blender -b --factory-startup --python tools/reference/blender_truth.py -- \\
-        <scene.json> --kin <kin_reference's results.json> --cache <dir> --out <dir> [--samples N]
+        <scene.json> --kin <kin_reference's results.json> --cache <dir> --out <dir> [--samples N] [--seed N] [--denoise]
     blender -b --factory-startup --python tools/reference/blender_truth.py -- --calibrate
 
 The cameras are read from kin's results (where kin_reference placed them:
@@ -39,14 +39,17 @@ from mathutils import Vector
 
 def args():
     argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
-    opts = {"samples": None, "calibrate": False}
+    opts = {"samples": None, "calibrate": False, "seed": 0, "denoise": False}
     rest = []
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--kin", "--cache", "--out", "--samples"):
+        if a in ("--kin", "--cache", "--out", "--samples", "--seed"):
             opts[a[2:]] = argv[i + 1]
             i += 2
+        elif a == "--denoise":
+            opts["denoise"] = True
+            i += 1
         elif a == "--calibrate":
             opts["calibrate"] = True
             i += 1
@@ -66,7 +69,7 @@ def clear():
     bpy.ops.wm.read_factory_settings(use_empty=True)
 
 
-def setup_render(width, height, samples):
+def setup_render(width, height, samples, seed=0, denoise=False):
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     prefs = bpy.context.preferences.addons["cycles"].preferences
@@ -85,7 +88,16 @@ def setup_render(width, height, samples):
             continue
     scene.cycles.device = device
     scene.cycles.samples = samples
-    scene.cycles.use_denoising = True
+    scene.cycles.seed = int(seed)
+    scene.cycles.use_denoising = denoise
+    scene.cycles.use_adaptive_sampling = False
+    scene.cycles.sample_clamp_direct = 0
+    scene.cycles.sample_clamp_indirect = 0
+    scene.cycles.max_bounces = 16
+    scene.cycles.diffuse_bounces = 8
+    scene.cycles.glossy_bounces = 8
+    scene.cycles.transmission_bounces = 12
+    scene.cycles.transparent_max_bounces = 64
     scene.render.resolution_x = width
     scene.render.resolution_y = height
     scene.render.resolution_percentage = 100
@@ -220,7 +232,7 @@ def main():
     samples = int(opts["samples"] or truth.get("samples", 512))
 
     clear()
-    device = setup_render(width, height, samples)
+    device = setup_render(width, height, samples, opts["seed"], opts["denoise"])
     for m in doc.get("models", []):
         before = set(bpy.data.objects)
         bpy.ops.import_scene.gltf(filepath=os.path.join(opts["cache"], m["file"]))
@@ -267,7 +279,7 @@ def main():
     background = doc.get("view", {}).get("background", (0, 0, 0))
     out = os.path.join(opts["out"], name)
     os.makedirs(out, exist_ok=True)
-    record = {"blender": bpy.app.version_string, "device": device, "samples": samples, "cameras": {}}
+    record = {"profile": "kin.reference.cycles/2", "blender": bpy.app.version_string, "device": device, "samples": samples, "seed": int(opts["seed"]), "denoise": opts["denoise"], "adaptive_sampling": False, "clamp_direct": 0, "clamp_indirect": 0, "cameras": {}}
     for c in cams:
         camera(c["eye"], c["target"], c["fov"], width, height)
         path = os.path.join(out, c["name"] + ".png")

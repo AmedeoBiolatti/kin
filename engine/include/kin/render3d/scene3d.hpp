@@ -19,6 +19,8 @@
 #include <kin/render3d/particles3d.hpp>
 #include <kin/render3d/sky3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/data_buffer.hpp>
+#include <kin/renderer/render_target.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
 #include <optional>
@@ -34,7 +36,7 @@ class ModelBatch3D;
 enum class Blend3D : u8 {
     Opaque,   // replaces it, hides what is further
     Alpha,    // over it by its alpha (drawn after the opaque, furthest first)
-    Additive, // adds light to it: sparks, glows, flashes (in any order)
+    Additive, // adds light: ordered with alpha foregrounds (additive layers commute only with each other)
     // Opaque where the base colour's alpha reaches Material3D::alpha_cutoff,
     // not drawn where it falls short: leaves, fences, grates. Drawn with the
     // opaque, and casts the cut-out shadow.
@@ -48,10 +50,32 @@ enum class Wrap3D : u8 {
     Mirror, // tiles, every other copy flipped
 };
 
+// Linear RGB emission is independent of the surface, vertex colours and instance tint. BaseRelative keeps the
+// original native material behaviour (a share of the base colour, or the emissive texture when present).
+enum class EmissionMode3D : u8 { BaseRelative, Independent };
+
+enum class TextureFilter3D : u8 { Nearest, Linear };
+enum class MipFilter3D : u8 { None, Nearest, Linear };
+struct TextureSampler3D {
+    Wrap3D wrap_u = Wrap3D::Repeat, wrap_v = Wrap3D::Repeat;
+    TextureFilter3D min = TextureFilter3D::Linear, mag = TextureFilter3D::Linear;
+    MipFilter3D mip = MipFilter3D::Linear;
+    friend bool operator==(const TextureSampler3D&, const TextureSampler3D&) = default;
+};
+enum class MaterialMap3D : u8 { BaseColor, MetallicRoughness, Normal, Occlusion, Emissive, Count };
+
+// The legacy texture-level filter, used only when a material map has no explicit sampler.
+inline TextureSampler3D legacy_sampler3d(ScaleMode mode, Wrap3D u, Wrap3D v) {
+    return {u, v, mode == ScaleMode::Nearest ? TextureFilter3D::Nearest : TextureFilter3D::Linear,
+            mode == ScaleMode::Nearest ? TextureFilter3D::Nearest : TextureFilter3D::Linear,
+            mode == ScaleMode::Mipmapped ? MipFilter3D::Linear : MipFilter3D::None};
+}
+
 // The backend's copy of a material shader (Renderer3D::create_material_shader).
 class IMaterialShaderBackend3D {
 public:
     virtual ~IMaterialShaderBackend3D() = default;
+    virtual bool valid() const { return true; }
 };
 
 // A fragment shader of a material's own, made by Renderer3D::create_material_shader
@@ -61,7 +85,7 @@ public:
     MaterialShader3D() = default;
     explicit MaterialShader3D(std::shared_ptr<IMaterialShaderBackend3D> backend) : _backend(std::move(backend)) {}
 
-    bool valid() const { return _backend != nullptr; }
+    bool valid() const { return _backend && _backend->valid(); }
     explicit operator bool() const { return valid(); }
     const std::shared_ptr<IMaterialShaderBackend3D>& backend() const { return _backend; }
 
@@ -71,10 +95,38 @@ private:
     std::shared_ptr<IMaterialShaderBackend3D> _backend;
 };
 
+inline constexpr u32 max_material_input_textures3d = 4, max_material_input_buffers3d = 8;
+class IMaterialInputsBackend3D {
+public:
+    virtual ~IMaterialInputsBackend3D() = default;
+    virtual bool valid() const = 0;
+    virtual std::span<const Texture> textures() const = 0;
+    virtual std::span<const DataBuffer> buffers() const = 0;
+};
+// Immutable shader-specific resource bindings. Handles own allocations, while
+// their GPU contents remain mutable. Recreate bindings after graph reallocation
+// or shader replacement; declare matching graph reads in consuming passes.
+class MaterialInputs3D {
+public:
+    MaterialInputs3D() = default;
+    explicit MaterialInputs3D(std::shared_ptr<const IMaterialInputsBackend3D> backend) : _backend(std::move(backend)) {}
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    std::span<const Texture> textures() const { return _backend ? _backend->textures() : std::span<const Texture>{}; }
+    std::span<const DataBuffer> buffers() const {
+        return _backend ? _backend->buffers() : std::span<const DataBuffer>{};
+    }
+    const std::shared_ptr<const IMaterialInputsBackend3D>& backend() const { return _backend; }
+    friend bool operator==(const MaterialInputs3D&, const MaterialInputs3D&) = default;
+
+private:
+    std::shared_ptr<const IMaterialInputsBackend3D> _backend;
+};
+
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
-    // Light of its own, as a share of its colour: glows in the dark, and
-    // past white feeds bloom in an HDR view.
+    // Emission strength. BaseRelative (legacy default): a share of the base colour or emissive map.
+    // Independent: emission_color times the map (white when absent). Past white feeds bloom in HDR.
     f32 emissive = 0.0f;
     bool unlit = false;        // its colour as it is, no light or shade
     bool double_sided = false; // its back faces drawn too (else culled)
@@ -115,8 +167,7 @@ struct Material3D {
     // Blend3D::Mask: below this alpha (the base colour's, times the mesh's,
     // the material's and the copy's) a pixel is not drawn.
     f32 alpha_cutoff = 0.5f;
-    // How all of its textures run past 0..1 along u and v (glTF's default,
-    // and what models set, is Repeat).
+    // Legacy wrap defaults for maps without a texture_samplers override. Imported maps carry their own samplers.
     Wrap3D wrap_u = Wrap3D::Clamp;
     Wrap3D wrap_v = Wrap3D::Clamp;
     // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
@@ -125,6 +176,22 @@ struct Material3D {
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
     std::array<f32, 16> shader_params{};
+    MaterialInputs3D inputs{}; // optional extra sampled textures/read-only buffers for shader
+
+    LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
+    EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;
+    // Independent of the image. Omitted entries inherit wrap_u/v and the Texture's legacy scale mode.
+    std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
+
+    void set_emission(LinearRgb color, f32 strength = 1.0f) {
+        emission_color = color;
+        emissive = strength;
+        emission_mode = EmissionMode3D::Independent;
+    }
+    bool emits_light() const {
+        return emissive > 0 && (emission_mode == EmissionMode3D::BaseRelative || emission_color.r > 0 ||
+                                emission_color.g > 0 || emission_color.b > 0);
+    }
 
     friend bool operator==(const Material3D&, const Material3D&) = default;
 };
@@ -308,8 +375,10 @@ struct AmbientOcclusion3D {
     bool enabled = false;
     f32 radius = 0.5f;    // how far from a surface something can still shut light off (units)
     f32 intensity = 1.0f; // the darkening's power: 1 is the plain answer, more is stronger
-    // Computed at half the view's size, blurred and read up: about a third of
-    // the cost, a little blurrier at edges.
+    // Compute and blur at half the view's size, then reconstruct using the
+    // full-size depth and normals (one extra dispatch and an R8 target).
+    // Faster with less fine detail; falls back to linear upscaling when the
+    // optional reconstruction shader is unavailable.
     bool half_resolution = false;
 };
 
@@ -349,8 +418,17 @@ struct ContactShadows3D {
 // docs/rendering_3d.md for how, and what it cannot do.
 struct TemporalAA3D {
     bool enabled = false;
-    f32 blend = 0.9f;     // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
-    f32 sharpness = 0.0f; // a small local-contrast boost on the result, 0 (off) to 1; costs one more dispatch
+    f32 blend = 0.9f; // how much of the history stays each frame (0 to 0.98): more is smoother, slower to follow
+    // The same where the picture holds still (moving under half a pixel a frame), never below blend (and none with a
+    // blend of 0). A still pixel reads its history exactly, so it can keep more: detail finer than a pixel (print,
+    // a railing's bars), which one frame's samples miss in some of the jitter's places, stays steady instead of
+    // shimmering with the jitter's period. Its clip is wider too (by the spread of the colours round it). After a
+    // reset (a cut, the first frame) a still pixel takes the mean of the frames the history holds until that weighs
+    // as much. At blend or below, still pixels are treated as moving ones.
+    f32 still_blend = 0.96f;
+    // A local-contrast boost on the result, 0 (off) to 1, within surfaces: not at a silhouette or a crease (where the
+    // depth bends), whose anti-aliased pixels it would push back into steps. Costs one more dispatch.
+    f32 sharpness = 0.0f;
     f32 jitter_scale =
         1.0f; // the jitter's reach: 1 is a pixel; 0 turns the jitter off (no anti-aliasing, for looking at the rest)
     u32 jitter_samples = 8; // frames before the jitter sequence repeats (1 to 16)
@@ -387,8 +465,9 @@ struct Lod3D {
     // Quality multiplier: 2 holds the error to half of error_pixels, 0.5 allows twice.
     f32 bias = 1.0f;
     // The most triangles the GPU's gathered index buffer holds, all passes and copies together (12 bytes a triangle of
-    // video memory). Clusters that do not fit are not drawn (the picture degrades, nothing is written out of bounds),
-    // counted in debug_stats().cluster_overflow when debug.stats_readback is on.
+    // video memory). A draw unable to reserve its complete finest cut uses its full level-zero mesh in all passes,
+    // counted in debug_stats().cluster_budget_fallbacks without readback. Conservative: an actual coarser cut may
+    // have fit; coverage takes precedence over the detail/performance target. Zero selects full meshes.
     u32 max_cluster_triangles = 4'000'000;
     // Clusters hidden behind others are not drawn (G3d). Needs `enabled` and Scene3D::debug.gpu_culling (else ignored,
     // with a line in the log) and a device with the GPU cut and ambient occlusion's formats
@@ -396,6 +475,63 @@ struct Lod3D {
     // default: it adds a first draw of last frame's visible clusters and a depth pyramid, which pay only where much of
     // the scene is hidden.
     Occlusion3D occlusion{};
+};
+
+// The GI scene's limits: levels, voxels a window's side and in all; probes a level (GiProbes3D::spacing grows to keep
+// within them).
+constexpr u32 max_gi_levels = 4;
+constexpr u32 max_gi_side = 256;
+constexpr u32 max_gi_voxels = 1u << 22;
+constexpr u32 max_gi_probes = 1u << 16;
+
+// Global illumination's first strategy (G5b): probes on a grid over the area, every `spacing` voxels, each casting
+// `rays` rays through the GI scene and keeping what it sees (DDGI). A surface takes its diffuse light from the eight
+// probes round it, those that can see it, in place of the sky's or the environment's: the sky's light where the
+// probes see the sky, the light of every surface they see (lit by the sun and the lamps through rays walked toward
+// them, and by the probes themselves: the bounces add up over frames), none through walls.
+struct GiProbes3D {
+    bool enabled = true;
+    // Voxels between neighbouring probes (2, 4 or 8; others are taken as the nearest): the light's finest detail is
+    // about this. More where a level would have more than max_gi_probes.
+    u32 spacing = 4;
+    u32 rays = 128; // rays a probe casts at each update (16 to 256)
+    // Probes updated each render: those new to their window first, then the others in turn, the levels sharing them
+    // 4 : 2 : 1 from the nearest (0: as many as a million rays allow).
+    u32 per_render = 2048;
+    // How much of a probe's last answer an update keeps (0 to 0.99): more is steadier, slower. A young probe keeps
+    // less: the mean of its updates so far, until that weighs as much.
+    f32 hysteresis = 0.97f;
+    f32 intensity = 1.0f; // their light's strength
+};
+
+// Global illumination (docs/rendering_3d.md, "Global illumination"; docs/3d_plan.md, G5): light that reaches a surface
+// off other surfaces, and the sky's light kept out of where walls hide it. Its layers: the GI scene, the scene in
+// voxels, each holding its distance to the nearest surface, and each voxel a surface touches that surface's colour,
+// normal and emission (G5a); the lit scene, the light leaving each of those voxels; and `probes`, the first strategy,
+// which light the picture (G5b). The GI scene is in `levels` windows of `side` x `height` x `side` voxels round the
+// camera, the first's voxels `cell` wide and each next level's twice the last's (G5c); where one window holds the whole
+// `area`, it stays over it, and there are no more. It takes in every opaque and cut-out copy that reaches into `area`
+// (skinned copies in their pose; a cut-out where its texture is opaque enough), not the overlay, blended, additive,
+// wireframe or unlit ones. Only what changes is made again: the blocks of 8 x 8 x 8 voxels a copy that moved, changed
+// or came or went leaves or enters, and those a window gains as the camera moves. RenderDebugOptions3D::gi_view shows
+// it and Renderer3D::read_gi_scene reads it back. Off by default; off, the picture and the cost are as without it.
+// Needs compute (RendererCapabilities3D::global_illumination); else off, with a line in the log the first time it is
+// asked for.
+struct GlobalIllumination3D {
+    bool enabled = false;
+    // The box it takes in (the level). Empty: nothing, and the feature is off.
+    Bounds3D area{};
+    f32 cell = 0.15f; // the first level's voxel side (units): the finest detail it has
+    u32 levels = 3;   // 1 to max_gi_levels
+    // A window's voxels along x and z and along y: multiples of 8 from 32 to max_gi_side (others are rounded up),
+    // side x height x side at most max_gi_voxels.
+    u32 side = 128;
+    u32 height = 64;
+    // Skinned copies (animated characters) in the GI scene: a pose that keeps changing makes the blocks round it again
+    // every few renders. Off, it holds only what does not bend (as Godot's SDFGI holds static geometry only): the
+    // characters are lit by it, but neither shade nor light it.
+    bool skinned = true;
+    GiProbes3D probes{};
 };
 
 // A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a
@@ -463,7 +599,29 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    // Anisotropic filtering of the materials' mipmapped textures: where a surface is seen at a slant (a street, a
+    // floor, a wall along the view), its texture is read with up to this many samples along the slant, from the mip
+    // that fits the slant's short side, instead of with one from the mip that fits its long side (which blurs it into
+    // the distance). 1 (the default) is off: trilinear, the picture and the cost as without it; 2 to 16, clamped to
+    // RendererCapabilities3D::max_anisotropy. Nearest and unmipmapped textures are read as before. Every pass reads a
+    // material's textures alike (the cut-outs' in shadows, the pre-pass and picking; particles), so that a cut-out's
+    // edge is the same in all of them; the overlay is drawn with the scene's.
+    u32 anisotropy = 1;
+    // The mip level the materials' mipmapped textures are read from, moved by this many levels (-2 to 2): negative is
+    // finer and sharper, positive blurrier. With temporal anti-aliasing, which averages the shimmer of a finer level,
+    // a negative one gives back the sharpness its resolve takes from textures without sharpening the picture (whose
+    // boost steepens anti-aliased edges back into steps): Godot moves it -0.5 with its TAA. 0 (the default) is the
+    // picture as without it. Read as `anisotropy` is, in every pass. Where RendererCapabilities3D::texture_lod_bias.
+    f32 texture_lod_bias = 0.0f;
+    // Specular anti-aliasing (Tokuyoshi and Kaplanyan's, Godot's "roughness limiter"): where a surface's normal turns
+    // within a pixel (a normal map's bevels, a curved edge, small things far away), a highlight can be thinner than the
+    // pixel and very bright: some samples hit it and the next miss it, so it glints and crawls as the view moves, and
+    // temporal anti-aliasing gathers the glints into bright lines. The roughness is raised there by how much the
+    // normal turns across the pixel (this times its change, at most 0.18 of alpha more), spreading the highlight over
+    // the pixel. 0 (the default) is off: the picture as without it; Godot's is 0.25. The scene's, for the overlay too.
+    f32 specular_aa = 0.0f;
     Lod3D lod{};
+    GlobalIllumination3D global_illumination{};
     RenderDebugOptions3D debug{}; // diagnostic overrides; never GPU-read back by default
     // A sky behind the opaque meshes, and fog over them that agrees with it (render3d/sky3d.hpp, P3a). Off by default:
     // off, the picture and the cost are as without the features.
@@ -593,7 +751,19 @@ public:
     // A move gives its destination a fresh identity and invalidates the source revision.
     u64 draw_identity() const { return _draw_stamp.identity; }
     u64 draw_revision() const { return _draw_stamp.revision; }
+    u64 pose_revision() const { return _draw_stamp.pose; }
+    // Weak identity token: becomes zero on destruction or move, even if a reader
+    // holds it locked. Prepared submissions never keep a source scene alive.
+    std::weak_ptr<const u64> draw_lifetime() const {
+        if (!_draw_stamp.lifetime)
+            _draw_stamp.lifetime = std::make_shared<u64>(_draw_stamp.identity);
+        return _draw_stamp.lifetime;
+    }
     std::span<const MeshInstance3D> instances() const { return _instances; }
+    // After editing a previously returned add_instances() span, invalidate any
+    // prepared submission. Fill new spans before prepare(); ordinary rendering
+    // continues to read their current values without this notification.
+    void modified_instances() { touch_draws(); }
     std::span<const InstanceGroup> instance_groups() const { return _instance_groups; }
     // Skinned copies: the joint matrices of all of them, and where each copy's start (one for each copy of a skinned
     // draw).
@@ -650,9 +820,16 @@ private:
 
     struct DrawStamp {
         DrawStamp();
+        ~DrawStamp() { invalidate(); }
+        void invalidate() {
+            if (lifetime)
+                *lifetime = 0;
+            lifetime.reset();
+        }
         DrawStamp(DrawStamp&& other) noexcept;
         DrawStamp& operator=(DrawStamp&& other) noexcept;
-        u64 identity = 0, revision = 0;
+        u64 identity = 0, revision = 0, pose = 0;
+        mutable std::shared_ptr<u64> lifetime;
     } _draw_stamp;
     void touch_draws() { ++_draw_stamp.revision; }
     std::vector<Draw> _draws;

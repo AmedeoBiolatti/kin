@@ -24,6 +24,9 @@ layout(set = 1, binding = 0) uniform Draw {
 }
 draw;
 
+// The same position as the pre-pass's and the main pass's, to the bit (the main pass starts from the pre-pass's depth).
+invariant gl_Position;
+
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec2 vUV;
 layout(location = 2) out float vAlpha;

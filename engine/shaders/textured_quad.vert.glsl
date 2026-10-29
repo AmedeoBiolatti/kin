@@ -23,10 +23,14 @@ layout(location = 0) out struct {
     vec4 Color;
     vec2 UV;
 } Out;
+// Match shader_geometry's fragment interface when a material reads custom vertex data.
+// Ordinary quads have no custom attributes.
+layout(location = 2) out vec4 vCustom;
 
 void main() {
     Out.Color = decode_color(aColor);
     Out.UV = aUV;
+    vCustom = vec4(0.0);
     gl_Position = vec4(aPos * ubo.uScale + ubo.uTranslate, 0.0, 1.0);
     gl_Position.y *= -1.0;
 }

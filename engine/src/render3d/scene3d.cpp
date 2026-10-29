@@ -7,6 +7,7 @@
 #include <kin/platform/log.hpp>
 #include <kin/render3d/model3d.hpp>
 #include <kin/render3d/scene3d.hpp>
+#include <kin/render3d/skeleton3d.hpp>
 #include <limits>
 #include <mutex>
 #include <vector>
@@ -26,10 +27,7 @@ struct InstanceBox {
 };
 bool instance_box(const Vec3f& centre, f32 radius, const Mat4f& t, InstanceBox& out) {
     const Vec3f c = t.apply(centre);
-    const f32 sx = t.m[0] * t.m[0] + t.m[1] * t.m[1] + t.m[2] * t.m[2];
-    const f32 sy = t.m[4] * t.m[4] + t.m[5] * t.m[5] + t.m[6] * t.m[6];
-    const f32 sz = t.m[8] * t.m[8] + t.m[9] * t.m[9] + t.m[10] * t.m[10];
-    f32 r = radius * std::sqrt(std::max(std::max(sx, sy), sz));
+    f32 r = radius * stretch_bound(t);
     if (!std::isfinite(c.x) || !std::isfinite(c.y) || !std::isfinite(c.z) || !std::isfinite(r))
         return false;
     r += 1e-5f * (1 + std::max(std::max(std::abs(c.x), std::abs(c.y)), std::abs(c.z)) + r); // outward rounding margin
@@ -409,9 +407,13 @@ Scene3D::DrawStamp::DrawStamp() {
     identity = next.fetch_add(1, std::memory_order_relaxed);
 }
 Scene3D::DrawStamp::DrawStamp(DrawStamp&& other) noexcept : DrawStamp() {
+    other.invalidate();
     ++other.revision;
 }
 Scene3D::DrawStamp& Scene3D::DrawStamp::operator=(DrawStamp&& other) noexcept {
+    invalidate();
+    other.invalidate();
+    pose = 0;
     DrawStamp fresh;
     identity = fresh.identity;
     revision = 0;
@@ -772,8 +774,10 @@ bool Scene3D::update_joint_matrices_operation(u32 first, std::span<const Mat4f> 
         return false;
     if (first > _joints.size() || matrices.size() > _joints.size() - first)
         return fail_submission("joint matrix update outside submitted poses");
-    if (!matrices.empty())
+    if (!matrices.empty()) {
         std::memmove(_joints.data() + first, matrices.data(), matrices.size_bytes());
+        ++_draw_stamp.pose;
+    }
     return _errors.empty();
 }
 

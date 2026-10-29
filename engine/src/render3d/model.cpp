@@ -1169,6 +1169,7 @@ public:
 private:
     Material3D material(const cgltf_material* m) {
         Material3D out;
+        out.wrap_u = out.wrap_v = Wrap3D::Repeat;
         if (!m) {
             return out;
         }
@@ -1185,35 +1186,41 @@ private:
         out.occlusion = texture(m->occlusion_texture.texture, /*srgb=*/false);
         out.occlusion_strength = m->occlusion_texture.scale;
         out.emissive_texture = texture(m->emissive_texture.texture, /*srgb=*/true);
-        // Emissive light as a share of the base colour: the strongest channel.
-        f32 emissive = std::max({m->emissive_factor[0], m->emissive_factor[1], m->emissive_factor[2]});
-        if (m->has_emissive_strength) {
-            emissive *= m->emissive_strength.emissive_strength;
-        }
-        out.emissive = emissive;
+        out.set_emission({m->emissive_factor[0], m->emissive_factor[1], m->emissive_factor[2]},
+                         m->has_emissive_strength ? m->emissive_strength.emissive_strength : 1.0f);
         out.unlit = m->unlit;
+        // KHR_materials_unlit uses only base colour/alpha; PBR emission is fallback data for clients without it.
+        if (out.unlit)
+            out.emissive = 0;
         out.double_sided = m->double_sided;
         out.blend = m->alpha_mode == cgltf_alpha_mode_blend  ? Blend3D::Alpha
                     : m->alpha_mode == cgltf_alpha_mode_mask ? Blend3D::Mask
                                                              : Blend3D::Opaque;
         out.alpha_cutoff = m->alpha_cutoff;
-        // One sampler's wrap modes for all its maps: the base colour's, else the first map's.
-        const cgltf_texture* first =
-            m->has_pbr_metallic_roughness ? m->pbr_metallic_roughness.base_color_texture.texture : nullptr;
-        for (const cgltf_texture* t :
-             {m->pbr_metallic_roughness.metallic_roughness_texture.texture, m->normal_texture.texture,
-              m->occlusion_texture.texture, m->emissive_texture.texture}) {
-            first = first ? first : t;
-        }
-        if (first) {
-            const auto wrap = [](cgltf_int mode) {
-                return mode == 33071   ? Wrap3D::Clamp
-                       : mode == 33648 ? Wrap3D::Mirror
-                                       : Wrap3D::Repeat; // REPEAT (10497) the default
-            };
-            out.wrap_u = first->sampler ? wrap(first->sampler->wrap_s) : Wrap3D::Repeat;
-            out.wrap_v = first->sampler ? wrap(first->sampler->wrap_t) : Wrap3D::Repeat;
-        }
+        const auto sampler = [](const cgltf_texture* texture) -> std::optional<TextureSampler3D> {
+            if (!texture)
+                return {};
+            TextureSampler3D result; // omitted glTF filters: linear, trilinear mips
+            if (const auto* s = texture->sampler) {
+                const auto wrap = [](cgltf_int mode) {
+                    return mode == 33071 ? Wrap3D::Clamp : mode == 33648 ? Wrap3D::Mirror : Wrap3D::Repeat;
+                };
+                result.wrap_u = wrap(s->wrap_s);
+                result.wrap_v = wrap(s->wrap_t);
+                result.mag = s->mag_filter == 9728 ? TextureFilter3D::Nearest : TextureFilter3D::Linear;
+                result.min = s->min_filter == 9728 || s->min_filter == 9984 || s->min_filter == 9986
+                                 ? TextureFilter3D::Nearest
+                                 : TextureFilter3D::Linear;
+                result.mip = s->min_filter == 9728 || s->min_filter == 9729   ? MipFilter3D::None
+                             : s->min_filter == 9984 || s->min_filter == 9985 ? MipFilter3D::Nearest
+                                                                              : MipFilter3D::Linear;
+            }
+            return result;
+        };
+        out.texture_samplers = {sampler(m->pbr_metallic_roughness.base_color_texture.texture),
+                                sampler(m->pbr_metallic_roughness.metallic_roughness_texture.texture),
+                                sampler(m->normal_texture.texture), sampler(m->occlusion_texture.texture),
+                                sampler(m->emissive_texture.texture)};
         return out;
     }
 
@@ -1224,13 +1231,13 @@ private:
         if (!t) {
             return {};
         }
-        // Pixel art asks for its texels as they are (a NEAREST sampler);
-        // anything else is mipmapped. KHR_texture_basisu's KTX2 is read only
+        // Images and available mips are shared independently of sampling; a per-map sampler selects them.
+        // KHR_texture_basisu's KTX2 is read only
         // where there is no other image (it needs a transcoder: said as it fails).
         return texture(t->image        ? t->image
                        : t->has_basisu ? t->basisu_image
                                        : nullptr,
-                       t->sampler && t->sampler->mag_filter == 9728, srgb);
+                       false, srgb); // image/mips shared independently of per-map sampler state
     }
 
     Texture texture(const cgltf_image* image, bool nearest, bool srgb) {

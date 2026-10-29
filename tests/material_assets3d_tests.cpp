@@ -133,11 +133,24 @@ void material_gpu(Renderer2D& renderer) {
     {
         kin::EcsWorld manual;
         WorldRenderState3D state{manual};
-        manual.entity("plain").set(Transform3D{}).set(ModelRenderer3D{.model = model});
+        state.mutation_mode(SceneMutationMode3D::Tracked);
+        auto prop = manual.entity("plain").set(Transform3D{}).set(ModelRenderer3D{.model = model});
         Scene3D collected;
         state.propagate_transforms();
         state.collect(collected);
         check(collected.draws().size() == model->parts.size(), "material-free C++ world collection regressed");
+        prop.set(ModelMaterials3D{.asset = {"colors.kinmaterials"}, .variant = "green"});
+        check(resolve_materials3d_assets(manual, assets), "tracked material bind failed");
+        collected.clear();
+        state.collect(collected);
+        check(collected.draws()[0].material.color == Color::rgb(0, 255, 0), "tracked material binding was stale");
+        prop.get_mut<ModelMaterials3D>()->asset = {};
+        check(resolve_materials3d_assets(manual, assets), "tracked material clear failed");
+        state.reset_work_stats();
+        collected.clear();
+        state.collect(collected);
+        check(state.work_stats().collection_fallbacks == 1 && collected.draws()[0].material == model->parts[0].material,
+              "native material resolver did not invalidate tracked extraction");
     }
     auto red = left.get<ModelMaterials3D>()->binding, green = right.get<ModelMaterials3D>()->binding;
     check(model == right.get<ModelRenderer3D>()->model && assets.stats().model_loads == 1,
@@ -227,7 +240,7 @@ void material_gpu(Renderer2D& renderer) {
               "disabled shader cache duplicated one binding's shader");
     }
 #endif
-    // Authored maps reuse imported glTF textures only when role AND sampling match.
+    // Sampling belongs to each map: images share by colour/data role, including a legacy nearest material override.
     write(scratch.path / "maps.kinmaterials", R"({"schema":"kin.materials3d/1","material":{
         "texture":{"asset":"shared pixel.png","filter":"nearest"},
         "normal":{"asset":"shared pixel.png","filter":"nearest"},
@@ -238,10 +251,13 @@ void material_gpu(Renderer2D& renderer) {
               maps->materials[0].normal == model->parts[0].material.normal &&
               maps->materials[0].normal == maps->materials[0].occlusion &&
               maps->materials[0].texture != maps->materials[0].normal,
-          "texture sharing lost role/filter semantics");
+          "texture sharing lost colour/data role semantics");
     auto filtered = assets.load_texture("shared pixel.png", false, true).value_or({});
     error = kin::diagnostics3d_text(assets.diagnostics());
-    check(filtered && filtered != maps->materials[0].texture, "different filters incorrectly shared");
+    check(filtered && filtered == maps->materials[0].texture &&
+              maps->materials[0].texture_samplers[0]->min == TextureFilter3D::Nearest &&
+              maps->materials[0].texture_samplers[0]->mip == MipFilter3D::None,
+          "independent nearest sampling duplicated an image or lost its filter");
 
     auto parts = assets.load_model("parts.glb").value_or({}).shared();
     write(scratch.path / "parts.kinmaterials", R"({"schema":"kin.materials3d/1","material":{"roughness":0.9},

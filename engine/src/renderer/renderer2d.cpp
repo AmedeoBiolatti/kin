@@ -107,6 +107,8 @@ Vec2i Texture::size() const {
     return _backend ? _backend->size() : Vec2i{};
 }
 
+u32 Texture::array_layers() const { return _backend ? _backend->array_layers() : 0; }
+
 TextureFormat Texture::format() const {
     return _backend ? _backend->format() : TextureFormat::Rgba8;
 }
@@ -329,6 +331,42 @@ bool Renderer2D::save_png(const std::string& path) {
 
 bool Renderer2D::read_rgba(Rectf logical_region, std::vector<u8>& out, Vec2i& out_size) {
     return _backend->read_rgba(logical_region, out, out_size);
+}
+
+u64 Renderer2D::request_read_rgba(Rectf logical_region) {
+    return request_read_rgba(logical_region, true);
+}
+
+u64 Renderer2D::request_read_rgba(Rectf logical_region, bool allow_wait_fallback) {
+    if (const u64 ticket = _backend->request_read_rgba(logical_region)) {
+        return ticket;
+    }
+    if (!allow_wait_fallback) {
+        return 0;
+    }
+    WaitedRead read{.ticket = waited_read | _next_waited_read++};
+    if (!_backend->read_rgba(logical_region, read.pixels, read.size)) {
+        read.pixels.clear();
+        read.size = {};
+    }
+    _waited_reads.push_back(std::move(read));
+    return _waited_reads.back().ticket;
+}
+
+bool Renderer2D::take_read_rgba(u64 ticket, std::vector<u8>& out, Vec2i& out_size, bool wait) {
+    if ((ticket & waited_read) == 0) {
+        return _backend->take_read_rgba(ticket, out, out_size, wait);
+    }
+    out.clear();
+    out_size = {};
+    const auto it = std::find_if(_waited_reads.begin(), _waited_reads.end(),
+                                 [ticket](const WaitedRead& r) { return r.ticket == ticket; });
+    if (it != _waited_reads.end()) {
+        out = std::move(it->pixels);
+        out_size = it->size;
+        _waited_reads.erase(it);
+    }
+    return true;
 }
 
 void Renderer2D::set_logical_size(i32 width, i32 height) {
@@ -1116,6 +1154,7 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         const char* file = nullptr;
         u32 samplers = 1;
         switch (id) {
+        case BuiltinShader::Ascii: file = "pp_ascii.frag.spv"; break;
         case BuiltinShader::Vignette: file = "pp_vignette.frag.spv"; break;
         case BuiltinShader::ColorGrade: file = "pp_color_grade.frag.spv"; break;
         case BuiltinShader::Scanline: file = "pp_scanline.frag.spv"; break;
@@ -1393,6 +1432,31 @@ Renderer2D::ClipGuard Renderer2D::scoped_mask(const std::function<void(Renderer2
 Renderer2D::ClipGuard Renderer2D::scoped_mask(const Texture& mask, Rectf dest, MaskOptions options) {
     push_mask(mask, dest, options);
     return ClipGuard{this};
+}
+
+Texture Renderer2D::create_render_attachment(Vec2i size, TextureFormat format, u32 array_layers) {
+    if (size.x <= 0 || size.y <= 0)
+        return {};
+    try {
+        return _backend->create_render_attachment(size, format, array_layers);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "create_render_attachment failed",
+                        (LogFields{{.name = "error", .value = error.what()}}));
+        return {};
+    }
+}
+
+bool Renderer2D::copy_texture(const Texture& source, const Texture& destination) {
+    if (!source || !destination || source == destination || source.size() != destination.size() ||
+        source.format() != destination.format() || source.array_layers() != destination.array_layers() ||
+        texture_format_compressed(source.format()) || !_backend->capabilities().texture_copies)
+        return false;
+    try {
+        return _backend->copy_texture(source, destination);
+    } catch (const std::exception& error) {
+        KIN_LOG_ERROR_F("render", "copy_texture failed", (LogFields{{.name = "error", .value = error.what()}}));
+        return false;
+    }
 }
 
 RenderTarget Renderer2D::create_render_target(Vec2i size, ScaleMode mode) {
