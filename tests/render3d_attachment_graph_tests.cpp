@@ -304,13 +304,16 @@ int main(int argc, char** argv) {
     auto& w = app.create_window(
         {.title = "attachment graph", .width = initial_size.x, .height = initial_size.y, .hidden = true});
     Renderer2D r{make_render_backend(w, false, true)};
-    Fixture f{r};
-    if (!r.capabilities().texture_copies || !f.r3d.capabilities().surface_particles ||
-        !f.r3d.capabilities().sun_shadow_pass)
+    Renderer3D check{r};
+    if (!r.capabilities().texture_copies || !check.capabilities().surface_particles ||
+        !check.capabilities().sun_shadow_pass)
         return std::getenv("KIN_REQUIRE_GPU_TESTS") ? 1 : 77;
+    if (argc > 1 && std::string_view(argv[1]) == "--foreign-device" && !check.capabilities().software &&
+        !std::getenv("KIN_TEST_LIVE_GPU_DEVICES"))
+        return 77;
+    // Creating mesh/shader fixtures is a test assertion only after GPU admission.
+    Fixture f{r};
     if (argc > 1 && std::string_view(argv[1]) == "--foreign-device") {
-        if (!f.r3d.capabilities().software && !std::getenv("KIN_TEST_LIVE_GPU_DEVICES"))
-            return 77;
         foreign(f, app);
     } else {
         versions(f);

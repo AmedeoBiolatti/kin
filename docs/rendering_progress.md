@@ -13,6 +13,8 @@ multi-camera visibility, imported content, GI controls and scene evaluation. Mai
 Integration testing exposed a content-scale pointer-mapping conflict: active fractional coordinate extents now
 preserve main's content scaling alongside the branch's rounded logical-size mapping. The renderer regression
 checks forward/inverse coordinates at 1.25, 1.5 and 2 pixels per unit without weakening the existing DPI checks.
+The attachment-graph test admits the GPU before creating mesh/shader fixtures, so dummy-driver jobs skip cleanly
+while required-GPU jobs still fail if unavailable. Software-Vulkan validation and sanitizer jobs require all 21 cases.
 
 ## Testing and optimization — 2026-10-29
 
