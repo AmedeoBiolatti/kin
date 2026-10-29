@@ -2639,6 +2639,10 @@ void test_gpu_shader_geometry() {
         assert(pixel_near(px, size, 20, 13, kin::Color::rgb(0, 128, 0), 3));  // below the diagonal
         assert(pixel_near(px, size, 28, 3, kin::Color::rgba(0, 0, 0, 0), 0)); // above it: not covered
 
+        // The same material can make a surface pipeline too. Without custom vertices its custom input is zero.
+        draw([&] { renderer->draw_shader_surface({0.0f, 0.0f, 32.0f, 16.0f}, shader, {}); });
+        assert(pixel_near(px, size, 8, 8, kin::Color::rgba(0, 0, 0, 0), 0));
+
         // Bad geometry is refused whole.
         const std::array<kin::u32, 3> past_the_end{0, 1, 9};
         draw([&] { renderer->draw_shader_geometry(quad, past_the_end, shader, {}); });
