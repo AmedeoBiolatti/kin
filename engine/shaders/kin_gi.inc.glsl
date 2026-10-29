@@ -28,6 +28,7 @@ struct KinGiProbes {
     vec4 bias;      // x: the look-up moved out along the normal, y: toward the eye (in spacings); z: their light's
                     // strength; w: levels
     vec4 level[4];  // xyz: the window's first probe (whole numbers, in probe steps); w: the spacing (world)
+    vec4 centre;    // xyz: unsnapped camera; abs(w): half a voxel block in probe steps; negative: last level is fixed
 };
 
 #include "kin_gi_address.inc.glsl"
@@ -128,24 +129,32 @@ vec3 kin_gi_atlas(ivec3 stored, vec3 n, float tile, vec3 counts, float levels) {
 // (`count` of them, up to 4) into `light`, the look-up moved to `biased` (world); false where none of the eight has
 // light to give (asleep, in a wall, not yet traced).
 bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 grid, vec3 ways[4], int count,
-                        out vec3 light[4]) {
+                        out vec3 light[4], out float coverage) {
     const ivec3 counts = ivec3(g.counts.xyz);
     const ivec3 base = clamp(ivec3(floor(grid)), ivec3(0), max(counts - 2, ivec3(0)));
     const vec3 alpha = clamp(grid - vec3(base), 0.0, 1.0);
     const float spacing = g.level[k].w;
     vec3 sum[4] = vec3[4](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
     float total = 0.0;
+    float ready = 0.0, possible = 0.0;
     for (int i = 0; i < 8; ++i) {
         const ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         const ivec3 world = base + offset + ivec3(g.level[k].xyz);
         const ivec3 st = kin_gi_wrap(world, counts);
         const ivec3 stored = ivec3(st.xy, st.z + k * counts.z);
         const vec4 data = texelFetch(uGiProbes, stored, 0);
+        const vec3 trilinear = mix(1.0 - alpha, alpha, vec3(offset));
+        const float share = trilinear.x * trilinear.y * trilinear.z;
+        // Sleeping/inside probes intentionally give no light. An untraced probe, however, is missing support:
+        // normalizing its first ready neighbour to full strength makes a newly exposed slab pop into view.
+        if (data.w > 0.0) {
+            possible += share;
+        }
         if (data.w < 0.5) {
             continue;
         }
+        ready += share;
         const vec3 at = vec3(world) * spacing + data.xyz;
-        const vec3 trilinear = mix(1.0 - alpha, alpha, vec3(offset));
         const vec3 to_probe = at - p;
         const float facing = (dot(to_probe * inversesqrt(max(dot(to_probe, to_probe), 1e-12)), n) + 1.0) * 0.5;
         float weight = facing * facing + 0.2;
@@ -164,7 +173,7 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
         if (weight < 0.2) {
             weight *= weight * weight / 0.04; // the faintest lose more: a probe that barely sees leaks less
         }
-        weight *= trilinear.x * trilinear.y * trilinear.z;
+        weight *= share;
         for (int j = 0; j < count; ++j) {
             sum[j] += weight * textureLod(uGiIrradiance, kin_gi_atlas(stored, ways[j], 8.0, g.counts.xyz, g.bias.w), 0.0).rgb;
         }
@@ -173,6 +182,7 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     for (int j = 0; j < 4; ++j) {
         light[j] = total > 0.0 ? sum[j] / total : vec3(0.0);
     }
+    coverage = possible > 0.0 ? clamp(ready / possible, 0.0, 1.0) : 0.0;
     return total > 0.0;
 }
 
@@ -183,14 +193,14 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
 // front of the surface (a wrapped cosine) and by whether it can see the surface (Chebyshev's inequality on its
 // distances that way: a wall between them keeps its light out). A probe asleep, in a wall or not yet traced (its
 // data's w under 0.5) gives nothing; a level none of whose eight gives anything leaves it to the next. False where no
-// level's probes have anything for `p`.
-bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, out vec3 light[4]) {
+// level's probes have anything for `p`. `coverage` is their share of the lighting: the rest must come from the
+// caller's ambient/environment fallback, including at the outermost window. `light` is not premultiplied by it.
+bool kin_gi_blended_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, bool fade_outer,
+                          out vec3 light[4], out float coverage) {
     light = vec3[4](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
+    coverage = 0.0;
     const int levels = int(g.bias.w);
     const vec3 last = g.counts.xyz - 1.0;
-    bool have = false;
-    vec3 below[4] = light;
-    float share = 1.0; // of the level below's light still to give
     for (int k = 0; k < levels; ++k) {
         const float spacing = g.level[k].w;
         const vec3 biased = p + (n * g.bias.x + to_eye * g.bias.y) * spacing;
@@ -199,28 +209,52 @@ bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int 
             continue;
         }
         vec3 here[4];
-        if (!kin_gi_level_light(g, k, p, biased, n, grid, ways, count, here)) {
+        float ready;
+        if (!kin_gi_level_light(g, k, p, biased, n, grid, ways, count, here, ready)) {
             continue;
         }
-        const vec3 edge = min(grid, last - grid);
-        const float inside = clamp(min(min(edge.x, edge.y), edge.z) / 3.0, 0.0, 1.0);
-        if (have) {
-            // The level below faded into this one over its window's last cells.
-            for (int j = 0; j < 4; ++j) {
-                light[j] = mix(here[j], below[j], share);
-            }
+        // Storage scrolls a whole voxel block at a time. The fade follows the camera continuously, inset by half
+        // a block so it reaches zero before *either* storage position runs out of probes. A fixed window uses its
+        // actual bounds instead. Without this guard a smooth spatial ramp still jumps whenever storage scrolls.
+        const bool stationary = k == levels - 1 && g.centre.w < 0.0;
+        const float guard = stationary ? 0.0 : abs(g.centre.w);
+        const vec3 fade_grid = stationary ? grid : (biased - g.centre.xyz) / spacing + g.counts.xyz * 0.5;
+        const vec3 edge = min(fade_grid, last - fade_grid) - vec3(guard);
+        const float width = max(0.25, min(3.0, min(min(last.x, last.y), last.z) * 0.5 - guard));
+        // A fixed outer level contains the whole requested scene: do not fade its floor/roof toward unoccluded
+        // ambient. Feedback likewise keeps its outer light (the output fallback is not lost bounce energy).
+        const float inside = stationary || (!fade_outer && k == levels - 1)
+                                 ? 1.0 : smoothstep(0.0, width, min(min(edge.x, edge.y), edge.z));
+        const float share = (1.0 - coverage) * inside * ready;
+        for (int j = 0; j < count; ++j) {
+            light[j] += share * here[j];
+        }
+        coverage += share;
+        if (coverage >= 1.0) {
             return true;
         }
-        if (inside >= 1.0) {
-            light = here;
-            return true;
-        }
-        // Over its window's last cells, into the next level up (none: its own all the way).
-        have = true;
-        below = here;
-        share = inside;
     }
-    light = below;
+    if (coverage > 0.0) {
+        for (int j = 0; j < count; ++j) {
+            light[j] /= coverage;
+        }
+    }
+    return coverage > 0.0;
+}
+
+bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, out vec3 light[4],
+                  out float coverage) {
+    return kin_gi_blended_light(g, p, n, to_eye, ways, count, true, light, coverage);
+}
+
+// Feedback lighting has no ambient replacement here (the voxel shader already adds the sky's direct light).
+// Keep the original helpers for shader users, returning the probes' weighted contribution.
+bool kin_gi_light(KinGiProbes g, vec3 p, vec3 n, vec3 to_eye, vec3 ways[4], int count, out vec3 light[4]) {
+    float coverage;
+    const bool have = kin_gi_blended_light(g, p, n, to_eye, ways, count, false, light, coverage);
+    for (int j = 0; j < count; ++j) {
+        light[j] *= coverage;
+    }
     return have;
 }
 

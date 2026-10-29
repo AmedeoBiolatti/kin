@@ -22,6 +22,7 @@ layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uLight; // rgb: 
                                                                          // light there; 0: nothing drawn)
 layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uSlope; // xyz: g, the brightness's change with the
                                                                          // way faced, over the brightness (world); w: k
+layout(set = 1, binding = 2, r16f) uniform writeonly image2D uCoverage; // probe share; the main pass supplies the rest
 
 #define KIN_GI_PROBES
 #include "kin_gi.inc.glsl"
@@ -62,6 +63,7 @@ void main() {
     if (depth <= 0.0) {
         imageStore(uLight, xy, vec4(0.0));
         imageStore(uSlope, xy, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(uCoverage, xy, vec4(0.0));
         return;
     }
     // How far apart along the view the 2 x 2 pixels' surfaces are (an edge: which one the texel stands for moves with
@@ -88,9 +90,11 @@ void main() {
     const vec3 ways[4] = vec3[4](n, c * n + s * t, c * n + s * (-0.5 * t + 0.8660254 * b),
                                  c * n + s * (-0.5 * t - 0.8660254 * b));
     vec3 light[4];
-    if (!kin_gi_light(params.probes, p, n, to_eye, ways, 4, light)) {
+    float coverage;
+    if (!kin_gi_light(params.probes, p, n, to_eye, ways, 4, light, coverage)) {
         imageStore(uLight, xy, vec4(0.0, 0.0, 0.0, min(seen.z, -1e-4))); // the main pass keeps the sky's light
         imageStore(uSlope, xy, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(uCoverage, xy, vec4(0.0));
         return;
     }
     // E(d) = E(n) + slope . (d - n), fitted to the four (the side ways' mean gives it along the normal, their spread
@@ -122,4 +126,6 @@ void main() {
     }
     imageStore(uLight, xy, vec4(now, max(-seen.z, 1e-4)));
     imageStore(uSlope, xy, slope);
+    // Coverage follows the current window, not temporal history: old support must not linger outside it.
+    imageStore(uCoverage, xy, vec4(coverage));
 }

@@ -1408,17 +1408,17 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
             // (And the light grid's two storage buffers: its lights, its cells and their lists.)
             _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv",
                                                           /*uniform_buffers=*/3,
-                                                          /*samplers=*/14, /*storage_buffers=*/2);
+                                                          /*samplers=*/15, /*storage_buffers=*/2);
             _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                               "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
-                                                              /*samplers=*/14, /*storage_buffers=*/2);
+                                                              /*samplers=*/15, /*storage_buffers=*/2);
             if (_mesh_velocity_shader) {
                 _mesh_velocity_light_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
-                                             /*uniform_buffers=*/3, /*samplers=*/14, /*storage_buffers=*/2);
+                                             /*uniform_buffers=*/3, /*samplers=*/15, /*storage_buffers=*/2);
                 _mesh_velocity_light_fog_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
-                                             /*uniform_buffers=*/4, /*samplers=*/14, /*storage_buffers=*/2);
+                                             /*uniform_buffers=*/4, /*samplers=*/15, /*storage_buffers=*/2);
             }
             _lights_available = true;
             _capabilities.local_shadows = true;
@@ -3049,6 +3049,7 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
                            : 0u;
     bytes += gi.light ? static_cast<u64>(gi.light.width()) * gi.light.height() * 16 : 0u;
     bytes += gi.last_light ? static_cast<u64>(gi.last_light.width()) * gi.last_light.height() * 16 : 0u;
+    bytes += gi.coverage ? static_cast<u64>(gi.coverage.width()) * gi.coverage.height() * 2 : 0u;
     for (const std::shared_ptr<GpuBuffer>& b :
          {gi.owners, gi.seeds, gi.rays, gi.place_list, gi.batch_list, gi.light_list}) {
         bytes += b ? b->size() : 0u;
@@ -10485,7 +10486,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     const SDL_GPUTextureSamplerBinding moon_binding{
         ctx.lights_variant && ctx.moon_cascades > 0 && _moon_map ? _moon_map.handle() : _no_shadow.handle(),
         _compare_sampler};
-    const std::array<SDL_GPUTextureSamplerBinding, 2> gi_binding = gi_bindings(*view, ctx.gi_resolved);
+    const std::array<SDL_GPUTextureSamplerBinding, 3> gi_binding = gi_bindings(*view, ctx.gi_resolved);
     SDL_GPUBuffer* cluster_index = cluster_index_buffer();
     DrawBinder binder{pass};
     // The textures bound (the material's five), to bind again only when they change.
@@ -10586,7 +10587,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                                                       material.texture_samplers[0]);
                     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
                 } else if (unlit == Unlit::Off) {
-                    const std::array<SDL_GPUTextureSamplerBinding, 14> samplers{
+                    const std::array<SDL_GPUTextureSamplerBinding, 15> samplers{
                         texture_binding(material.texture, material.wrap_u, material.wrap_v,
                                         material.texture_samplers[0]),
                         shadow_binding,
@@ -10605,9 +10606,11 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                         local_binding,
                         moon_binding,
                         gi_binding[0],
-                        gi_binding[1]};
-                    // Custom shaders have twelve; the stock light variants fourteen (global illumination's light).
-                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 14u : 10u);
+                        gi_binding[1],
+                        gi_binding[2]};
+                    // Custom shaders have twelve; the stock light variants fifteen (global illumination's light and
+                    // coverage).
+                    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
                     if (lit_variant) {
                         SDL_BindGPUFragmentStorageBuffers(pass, 0, grid_buffers.data(), 2);
                     }

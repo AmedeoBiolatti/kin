@@ -42,8 +42,9 @@ struct GiProbeUniforms {
     f32 counts[4];   // probes a window, 1 when they have light to give
     f32 bias[4];     // along the normal and toward the eye (in spacings), their light's strength, levels
     f32 level[4][4]; // each window's first probe, the spacing (world)
+    f32 centre[4];   // unsnapped camera; signed half block in probe steps (negative: fixed outer level)
 };
-static_assert(sizeof(GiProbeUniforms) == 96);
+static_assert(sizeof(GiProbeUniforms) == 112);
 
 // gi_voxelize.comp's and gi_voxelize_attributes.comp's Params.
 struct GiVoxelizeUniforms {
@@ -84,7 +85,7 @@ struct GiViewUniforms {
     GiSceneUniforms scene;
     GiProbeUniforms probes;
 };
-static_assert(sizeof(GiViewUniforms) == 288);
+static_assert(sizeof(GiViewUniforms) == 304);
 
 // gi_light.comp's Params, and a light as it reads them.
 struct GiLightUniforms {
@@ -148,7 +149,7 @@ struct GiResolveUniforms {
     f32 last_eye[4]; // w: 1 with a render before
     f32 last_forward[4];
 };
-static_assert(sizeof(GiResolveUniforms) == 336);
+static_assert(sizeof(GiResolveUniforms) == 352);
 
 // The most rays a batch casts (16 bytes each in the rays' buffer).
 constexpr u32 max_gi_rays = 1u << 20;
@@ -396,7 +397,7 @@ void GpuRenderer3D::make_gi() {
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
-        _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 7, 0, 2, 0, 8, 8);
+        _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 7, 0, 3, 0, 8, 8);
         if (!_gi_clear || !_gi_voxelize || !_gi_attributes || !_gi_flood || !_gi_light || !_gi_place || !_gi_trace ||
             !_gi_update || !_gi_resolve) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
@@ -479,6 +480,10 @@ void GpuRenderer3D::gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, 
         u.bias[1] = 0.1f;
         u.bias[2] = std::max(intensity, 0.0f);
         u.bias[3] = static_cast<f32>(g.levels);
+        u.centre[0] = g.centre.x;
+        u.centre[1] = g.centre.y;
+        u.centre[2] = g.centre.z;
+        u.centre[3] = (g.fixed_outer ? -4.0f : 4.0f) / static_cast<f32>(std::max(g.spacing, 1u));
         for (u32 k = 0; k < g.levels; ++k) {
             for (int a = 0; a < 3; ++a) {
                 u.level[k][a] = static_cast<f32>(g.probe_origin[k][a]);
@@ -528,6 +533,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     const u32 wanted = std::clamp(gi.levels, 1u, max_gi_levels);
     std::array<std::array<i32, 3>, max_gi_levels> origin{};
     u32 levels = 0;
+    bool fixed_outer = false;
     const Vec3f camera = scene.camera.position;
     for (u32 k = 0; k < wanted; ++k) {
         const f32 c = cell * static_cast<f32>(1u << k);
@@ -540,6 +546,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         }
         levels = k + 1;
         if (holds) {
+            fixed_outer = true;
             if (k == 0) {
                 for (int a = 0; a < 3; ++a) {
                     size[a] = static_cast<u32>(std::max(8, (need[a] + 7) / 8 * 8));
@@ -592,6 +599,9 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         g = {};
         return false;
     }
+
+    g.centre = camera;
+    g.fixed_outer = fixed_outer;
 
     // The draws it takes in and their copies that reach into the area (the skinned in their pose), each with a hash of
     // all it is made of and its box.
@@ -1253,14 +1263,15 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     return true;
 }
 
-std::array<SDL_GPUTextureSamplerBinding, 2> GpuRenderer3D::gi_bindings(const GpuView3D& view, bool resolved) const {
+std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_bindings(const GpuView3D& view, bool resolved) const {
     const GpuView3D::Gi& g = view._gi;
     if (!resolved || !g.light) {
         const SDL_GPUTextureSamplerBinding flat{_owner->_white.handle(), _owner->_sampler_linear};
-        return {flat, flat};
+        return {flat, flat, flat};
     }
     return {SDL_GPUTextureSamplerBinding{g.light.handle(), _gi_linear},
-            SDL_GPUTextureSamplerBinding{g.slope.handle(), _gi_linear}};
+            SDL_GPUTextureSamplerBinding{g.slope.handle(), _gi_linear},
+            SDL_GPUTextureSamplerBinding{g.coverage.handle(), _gi_linear}};
 }
 
 std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_atlases(const GpuView3D& view, bool lit) const {
@@ -1294,6 +1305,11 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
             g.light = _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
             g.slope = _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
         }
+        if (!g.coverage || g.coverage.width() != hw || g.coverage.height() != hh) {
+            g.coverage =
+                _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16_FLOAT,
+                                       SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
+        }
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: the GI's light on the view could not be made",
                        (LogFields{{.name = "reason", .value = e.what()}}));
@@ -1301,6 +1317,7 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
         g.slope = {};
         g.last_light = {};
         g.last_slope = {};
+        g.coverage = {};
         g.has_last = false;
         return false;
     }
@@ -1329,10 +1346,11 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     const f32 last_way[4] = {g.last_forward.x, g.last_forward.y, g.last_forward.z, 0.0f};
     std::memcpy(u.last_eye, last_eye, sizeof(last_eye));
     std::memcpy(u.last_forward, last_way, sizeof(last_way));
-    const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> out{
+    const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> out{
         SDL_GPUStorageTextureReadWriteBinding{.texture = g.light.handle(), .cycle = true},
-        SDL_GPUStorageTextureReadWriteBinding{.texture = g.slope.handle(), .cycle = true}};
-    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, out.data(), 2, nullptr, 0);
+        SDL_GPUStorageTextureReadWriteBinding{.texture = g.slope.handle(), .cycle = true},
+        SDL_GPUStorageTextureReadWriteBinding{.texture = g.coverage.handle(), .cycle = true}};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, out.data(), static_cast<u32>(out.size()), nullptr, 0);
     if (!pass) {
         return false;
     }

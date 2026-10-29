@@ -82,6 +82,13 @@ struct Settings {
     int environment = 0; // 0: none, else the HDRI at index - 1
     float environment_intensity = 1.0f;
     float environment_rotation = 0.0f;
+    // GI is opt-in in the feature viewer (--preset gi); the interactive evaluation launcher enables it.
+    bool gi = false;
+    float gi_cell = 0.15f;
+    int gi_levels = 3;
+    int gi_rays = 64;
+    int gi_per_render = 4096;
+    float gi_intensity = 1.0f;
     // Point lights (at most 16 light a frame)
     std::vector<PointLightSource3D> points;
     bool light_markers = true;
@@ -417,6 +424,19 @@ inline void apply(const Settings& s, Scene3D& scene, const Environment3D& enviro
         l.shadow_distance = s.shadow_distance;
         l.cache_shadows = s.shadow_cache;
     }
+    // Keep the model inside the outer probes' fade band, including the floor and roof. The guard is based on the
+    // coarsest requested spacing; the renderer still bounds the actual voxel/probe allocations.
+    const u32 gi_levels = static_cast<u32>(std::clamp(s.gi_levels, 1, int(max_gi_levels)));
+    const float gi_cell = std::clamp(s.gi_cell, 0.05f, 1.0f);
+    const float guard = 3.0f * 4.0f * gi_cell * static_cast<float>(1u << (gi_levels - 1));
+    const Vec3f padding{guard, guard, guard};
+    scene.global_illumination = {.enabled = s.gi,
+                                 .area = {area.min - padding, area.max + padding},
+                                 .cell = gi_cell,
+                                 .levels = gi_levels,
+                                 .probes = {.rays = static_cast<u32>(std::clamp(s.gi_rays, 16, 256)),
+                                            .per_render = static_cast<u32>(std::clamp(s.gi_per_render, 0, 16384)),
+                                            .intensity = std::clamp(s.gi_intensity, 0.0f, 3.0f)}};
     scene.ambient_occlusion = {
         .enabled = s.ao, .radius = s.ao_radius, .intensity = s.ao_intensity, .half_resolution = s.ao_half};
     scene.contact_shadows = {

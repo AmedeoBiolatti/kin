@@ -931,16 +931,24 @@ the plan's G5b results.
 - **What a surface reads:** the probes of the finest level whose window holds it: the eight round it, each weighted by
   distance, by whether it is in front of the surface, and by whether it can see it (Chebyshev's inequality on its
   distances that way), the look-up moved out three tenths of a spacing along the normal and a tenth toward the eye;
-  times `intensity`. Over a window's last three cells of probes it fades into the next level's (over one, the step
-  between the levels' light showed as a seam where a window ends); a level none of whose eight
-  has light to give (asleep, in a wall, not yet traced) leaves the place to the next, and where no level has any the
-  surface keeps the sky's light. They are read once a texel at half the view's size, after the depth and normal
+  times `intensity`. Over a window's last three cells of probes it smoothly fades into the next level's; the outer
+  scrolling level fades to the actual ambient/environment lighting, for diffuse and specular together. A last fixed
+  level that already contains the whole requested area retains its lighting; voxel bounce feedback also retains its
+  outer light rather than treating the display fallback as lost energy. A scrolling window's
+  blend follows the camera continuously, inset by half a voxel block so storage snapping cannot jump the ramp.
+  Small windows shorten the ramp to retain an interior. Untraced probes contribute missing support rather than
+  making the first ready neighbour supply full GI. Sleeping/inside probes are still deliberately excluded.
+  Keep important surfaces inside the outer fade band; include the floors and roofs in the requested GI area.
+  They are read once a texel at half the view's size, after the depth and normal
   pre-pass (which global illumination brings with it), on the surface each texel stands for (the nearest of its 2 x
   2 pixels): the light facing its normal, and how its brightness changes with the way faced (a linear fit from three
   more ways, 60 degrees round the normal). With temporal anti-aliasing, each texel keeps 85% of what the same place
   held the render before (found where the last view put it, if it held the same surface, give or take its own pixels'
   spread), so that the jitter, which moves what a texel's pixels show at the edges of things, does not make the light
   flicker; a change of light shows within a few renders. The main pass takes the four texels round each pixel,
+  with the current GI coverage in a separate half-resolution R16F target (0.44 MiB at 1280 x 720, 1.76 MiB at
+  2560 x 1440; no coverage history), filtered with the same surface/depth choices as the light. Coverage follows the
+  current window immediately; old lighting history cannot keep GI alive outside it. The light and slope are
   filtered: those at its depth (all four, most often), else the nearest in depth (a thin thing between texels); for
   what the pre-pass did not draw (glass, in front of what it shows) all four; and turns that light to the normal map's
   normal for the diffuse and to the reflection: a rough surface reflects
@@ -2120,6 +2128,9 @@ limits, foot locking, toes, and a person that drifts from side to side to see fe
 section (P3a) has the sky, fog, time of day and the sky's light on switches (`--preset sky`, `dusk`, `fog`, `night`, `day-night`); its "Spot
 lights and shadows" section (P3b) drops spot lights at the camera (J), carries a flashlight, hangs rings of spot and point lamps over the
 model and switches their shadow maps, the moon's shadow and the budget (`--preset spots`, `flashlight`, `moon`, `lamps`).
+Its "Global illumination" section and `--preset gi` enable probe GI, with voxel size, clipmap levels, rays,
+probes per frame and intensity controls. GI remains opt-in in the feature viewer. The model bounds have an outer
+probe guard, and the stats report whether GI is actually lighting the view. Allow a few seconds to settle.
 
 ## Cameras
 

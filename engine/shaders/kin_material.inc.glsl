@@ -41,6 +41,7 @@ layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // dept
 layout(set = 2, binding = 12) uniform sampler2D uGiLight; // rgb: the light facing the surface; a: its depth along the
                                                           // view (less: the probes have none there; 0: no surface)
 layout(set = 2, binding = 13) uniform sampler2D uGiSlope; // the light facing way d is rgb * (w + xyz . d)
+layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe lighting; the rest is ambient/environment
 #endif
 #ifdef KIN_LIGHT_GRID
 // The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
@@ -52,9 +53,17 @@ struct KinGridLight {
     vec4 axis;   // a spot's way and the cosine of its outer angle (a point light: w is -2)
     vec4 cone;   // x: 1 / (cos inner - cos outer), y: its shadow's layer (a point light's cube's first; -1: none)
 };
+#ifdef KIN_GI
+layout(std430, set = 2, binding = 15) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+#else
 layout(std430, set = 2, binding = 14) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+#endif
 // A cell (slice by row by column): the first of its list << 12 | its count; the lists after the cells.
+#ifdef KIN_GI
+layout(std430, set = 2, binding = 16) readonly buffer KinGridCells { uint grid_cells[]; };
+#else
 layout(std430, set = 2, binding = 15) readonly buffer KinGridCells { uint grid_cells[]; };
+#endif
 #endif
 
 const float PI = 3.14159265358979;
@@ -258,16 +267,18 @@ vec3 kin_emissive(vec3 base) {
 // going as the view's jitter moves does not make the light jump. For the way `n` (this surface's normal, its normal
 // map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
 // (the sky's stands).
-bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced) {
+bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced, out float coverage) {
     const ivec2 size = textureSize(uGiLight, 0);
     const vec2 uv = gl_FragCoord.xy * 0.5 / vec2(size);
     // x, y, z, w: the texels at (0, 1), (1, 1), (1, 0) and (0, 0) from the footprint's first.
     const vec4 depths = textureGather(uGiLight, uv, 3);
     const bool drawn = material.maps.z > 0.5;
     vec4 light, slope;
+    coverage = 0.0;
     if (all(greaterThan(depths, vec4(0.0))) && (!drawn || all(lessThanEqual(abs(depths - depth), vec4(near))))) {
         light = textureLod(uGiLight, uv, 0.0);
         slope = textureLod(uGiSlope, uv, 0.0);
+        coverage = textureLod(uGiCoverage, uv, 0.0).r;
     } else {
         const vec2 at = uv * vec2(size) - 0.5;
         const vec2 f = fract(at);
@@ -291,16 +302,19 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
                 const ivec2 q = clamp(base + offsets[i], ivec2(0), size - 1);
                 light += weight[i] * texelFetch(uGiLight, q, 0);
                 slope += weight[i] * texelFetch(uGiSlope, q, 0);
+                coverage += weight[i] * texelFetch(uGiCoverage, q, 0).r;
                 total += weight[i];
             }
         }
         if (total > 0.0) {
             light /= total;
             slope /= total;
+            coverage /= total;
         } else if (nearest_one >= 0 && depths[nearest_one] > 0.0) {
             const ivec2 q = clamp(base + offsets[nearest_one], ivec2(0), size - 1);
             light = texelFetch(uGiLight, q, 0);
             slope = texelFetch(uGiSlope, q, 0);
+            coverage = texelFetch(uGiCoverage, q, 0).r;
         } else {
             return false;
         }
@@ -514,15 +528,16 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const float depth = dot(vWorld - frame.eye.xyz, frame.cascade_forward.xyz);
         const float near = 0.02 * depth + 4.0 * fwidth(depth);
         vec3 probed, traced;
-        if (kin_gi_resolved(n, r, depth, near, probed, traced)) {
-            around = probed;
+        float coverage;
+        if (kin_gi_resolved(n, r, depth, near, probed, traced, coverage)) {
+            around = mix(around, probed, coverage);
             const vec3 open = frame.environment.w > 0.5
                                   ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
                                   : mix(frame.ground_ambient.rgb, frame.ambient.rgb, r.y * 0.5 + 0.5);
             const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
             const float seen = clamp(dot(traced, luma) / max(dot(open, luma), 1e-6), 0.0, 1.0);
             const float smooth_share = (1.0 - roughness) * (1.0 - roughness);
-            above = mix(traced, above * seen, smooth_share);
+            above = mix(above, mix(traced, above * seen, smooth_share), coverage);
         }
     }
 #endif

@@ -340,6 +340,9 @@ private:
         // The probes' light on the view (gi_resolve.comp's; RGBA16F, half its size), and the render before's, which it
         // keeps from (the pairs take turns), with that render's view.
         GpuTexture light, slope, last_light, last_slope;
+        GpuTexture coverage; // R16F, half size; current window/probe support, without temporal history
+        Vec3f centre{};      // unsnapped camera for continuous clipmap blending
+        bool fixed_outer = false;
         Mat4f last_view_projection{};
         Vec3f last_eye{}, last_forward{};
         bool has_last = false;
@@ -594,7 +597,7 @@ private:
                    const GpuEnvironment3D* environment, const Mat4f& to_environment, RenderDebugStats3D& stats);
     // What the light variants bind for global illumination (samplers 12 and 13: the probes' light on the view, when
     // `resolved`), dummies without; and the probes' three atlases as the compute and the debug view read them.
-    std::array<SDL_GPUTextureSamplerBinding, 2> gi_bindings(const GpuView3D& view, bool resolved) const;
+    std::array<SDL_GPUTextureSamplerBinding, 3> gi_bindings(const GpuView3D& view, bool resolved) const;
     std::array<SDL_GPUTextureSamplerBinding, 3> gi_atlases(const GpuView3D& view, bool lit) const;
     // G5c: the probes' light on what the pre-pass drew, at half the view's size (gi_resolve.comp), after it and its
     // compute (`projection`: the one it drew with; `jittered`: temporal anti-aliasing's, which each texel's keeping
@@ -607,7 +610,7 @@ private:
     // And its light added to the main pass's picture, once a pixel (fog_sun_apply.frag).
     void fog_sun_apply(FrameCtx& ctx);
     // The view's GI scene and probes as the shaders read them (kin_gi.inc.glsl's KinGiScene, 5 vec4s, into `scene`;
-    // KinGiProbes, 6, into `probes`; either may be null).
+    // KinGiProbes, 7, into `probes`; either may be null).
     void gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const;
     void draw_gi_view(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const GpuView3D& view,
                       const Scene3D& scene, const Mat4f& view_projection, SDL_GPUTextureFormat format, u32 samples,

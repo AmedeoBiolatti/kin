@@ -4067,8 +4067,9 @@ void test_gpu_gi_probes_scroll() {
             return scene;
         };
         const float x = 6.0f;
-        const std::array<Vec3f, 3> points{Vec3f{x + 1.0f, 0.0f, 0.0f}, Vec3f{x + 2.0f, 0.0f, 0.5f},
-                                          Vec3f{x + 3.0f, 0.0f, -0.5f}};
+        // Compare retained/arriving probes inside the fade; the coverage test below exercises the outer edge.
+        const std::array<Vec3f, 3> points{Vec3f{x + 1.0f, 0.0f, 0.0f}, Vec3f{x + 1.5f, 0.0f, 0.5f},
+                                          Vec3f{x + 2.0f, 0.0f, -0.5f}};
         const auto linear = [](float c) { return kin::srgb_to_linear(c / 255.0f); };
         const auto floor_of = [&](const Pixels& p, int i) { return linear(block_at(p, camera_at(x), points[i])[1]); };
         for (const kin::u32 levels : {1u, 2u}) {
@@ -4092,6 +4093,66 @@ void test_gpu_gi_probes_scroll() {
                 assert(reference > 0.05f);
                 assert(levels == 1 ? now > 0.4f * reference : std::abs(now - reference) < 0.35f * reference);
                 assert(std::abs(settled - reference) < 0.05f * reference);
+            }
+        }
+    });
+}
+
+// A surface crossing the last probe window blends to ambient light, rather than switching off a bright bounce.
+// Test both sides of the toroidal window and both diffuse and glossy materials, with and without resolve history.
+void test_gpu_gi_coverage_edge() {
+    with_gpu("test_gpu_gi_coverage_edge", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiRooms rooms{r3d};
+        kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 1.0f, 0.0f}, {}, 60.0f, {0.0f, 0.0f, -1.0f});
+        camera.projection = kin::Projection3D::Orthographic;
+        camera.height = 8.0f;
+        const auto sample = [&](const Pixels& image, float x) {
+            return kin::srgb_to_linear(block_at(image, camera, {x, 0.0f, 0.0f})[1] / 255.0f);
+        };
+        for (float roughness : {1.0f, 0.2f}) {
+            kin::Scene3D scene = GiRooms::dark(camera);
+            scene.lights.ambient = {0.08f, 0.08f, 0.08f};
+            scene.lights.ground_ambient = {.enabled = true, .color = {0.08f, 0.08f, 0.08f}};
+            rooms.quad(scene, {}, 'y', 20.0f, 20.0f, {.color = kin::colors::white, .roughness = roughness});
+            rooms.quad(scene, {0.0f, 2.0f, 0.0f}, 'Y', 20.0f, 20.0f, {.color = kin::colors::white, .emissive = 0.25f});
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            const Pixels plain = settle(renderer, r3d, view, scene, 1);
+            scene.global_illumination = GiRooms::settings({{-20.0f, -10.0f, -20.0f}, {20.0f, 10.0f, 20.0f}}, 0.1f);
+            scene.global_illumination.levels = 1;
+            scene.global_illumination.side = scene.global_illumination.height = 64;
+            scene.global_illumination.probes.per_render = 0;
+            // Storage runs from -3.2 to +2.8; the continuous fade includes a half-block guard (0.4 m).
+            for (bool taa : {false, true}) {
+                scene.camera = camera;
+                scene.taa.enabled = taa;
+                const Pixels lit = settle(renderer, r3d, view, scene, 32);
+                const float middle = sample(lit, 0.0f) - sample(plain, 0.0f);
+                assert(middle > 0.1f);
+                for (float sign : {-1.0f, 1.0f}) {
+                    const float edge = sign > 0 ? 2.4f : -2.8f;
+                    const float band = sample(lit, edge - sign * 0.3f) - sample(plain, edge - sign * 0.3f);
+                    const float outside = sample(lit, edge + sign * 0.5f) - sample(plain, edge + sign * 0.5f);
+                    std::cerr << "gi coverage: roughness " << roughness << ", taa " << taa << ", edge " << edge
+                              << ", middle " << middle << ", band " << band << ", exterior " << outside << '\n';
+                    assert(band > 0.01f && band < 0.45f * middle);
+                    assert(std::abs(outside) < 0.01f);
+                }
+                // Crossing x=0.4 scrolls storage by 0.8 m. A fixed world point must follow the 4 cm camera
+                // movement rather than jumping through most of the fade band with the storage window.
+                camera.position.x = 0.38f;
+                scene.camera = camera;
+                const float before = sample(settle(renderer, r3d, view, scene, 32), 2.4f);
+                camera.position.x = 0.42f;
+                scene.camera = camera;
+                const float after = sample(settle(renderer, r3d, view, scene, 1), 2.4f);
+                std::cerr << "gi coverage scroll: roughness " << roughness << ", taa " << taa << ", before " << before
+                          << ", after " << after << '\n';
+                assert(std::abs(after - before) < 0.05f);
+                camera.position.x = 0.0f;
             }
         }
     });
@@ -22621,6 +22682,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_tunnel());
     RUN(test_gpu_gi_bleeding());
     RUN(test_gpu_gi_probes_scroll());
+    RUN(test_gpu_gi_coverage_edge());
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());
