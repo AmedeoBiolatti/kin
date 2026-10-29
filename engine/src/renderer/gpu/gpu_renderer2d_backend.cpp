@@ -1982,10 +1982,11 @@ Vec2f GpuRenderer2DBackend::window_to_logical(Vec2f window_px) const {
     if (d.w <= 0.0f || d.h <= 0.0f) {
         return window_px;
     }
-    // The raster projection fits each logical axis to the rounded scene extent.
+    const Vec2f coords = coordinate_size();
+    // The raster projection fits each coordinate axis to the rounded scene extent.
     // A shared scale drifts on one axis at fractional DPI (e.g. 721 x 451).
-    return {(physical.x - d.x) * static_cast<f32>(_logical_size.x) / d.w,
-            (physical.y - d.y) * static_cast<f32>(_logical_size.y) / d.h};
+    // Content scaling has fractional coordinates and no explicit _logical_size.
+    return {(physical.x - d.x) * coords.x / d.w, (physical.y - d.y) * coords.y / d.h};
 }
 
 Vec2f GpuRenderer2DBackend::logical_to_window(Vec2f logical) const {
@@ -1996,8 +1997,10 @@ Vec2f GpuRenderer2DBackend::logical_to_window(Vec2f logical) const {
         return {logical.x * win.x / pixels.x, logical.y * win.y / pixels.y};
     }
     const Rectf d = letterbox_rect(_scene_size, pixels, _integer_scale);
-    return {(d.x + logical.x * d.w / static_cast<f32>(_logical_size.x)) * win.x / pixels.x,
-            (d.y + logical.y * d.h / static_cast<f32>(_logical_size.y)) * win.y / pixels.y};
+    const Vec2f coords = coordinate_size();
+    if (coords.x <= 0.0f || coords.y <= 0.0f) return logical;
+    return {(d.x + logical.x * d.w / coords.x) * win.x / pixels.x,
+            (d.y + logical.y * d.h / coords.y) * win.y / pixels.y};
 }
 
 RenderTarget GpuRenderer2DBackend::create_render_target(Vec2i size, ScaleMode mode) {

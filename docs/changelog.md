@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Preserve fractional content-scale pointer mapping alongside rounded logical-size presentation; avoid zero
+  coordinates and division by zero when no explicit logical size is set.
+
 - Run rendering-branch CI with Debug graph coverage, required Vulkan core/synchronization checks and scoped
   ASAN/UBSAN integration tests. Retain test evidence and document portable 3D build, viewer and validation commands.
 

@@ -10,6 +10,9 @@ and a scoped ASAN/UBSAN software-Vulkan job with retained evidence. The gate rej
 requires validation-layer insertion per test. Windows jobs establish compilation, while native Windows GPU and
 other target-hardware checks remain separate. The portable guide links scene sessions, custom graphs,
 multi-camera visibility, imported content, GI controls and scene evaluation. Main's local planning edits are untouched.
+Integration testing exposed a content-scale pointer-mapping conflict: active fractional coordinate extents now
+preserve main's content scaling alongside the branch's rounded logical-size mapping. The renderer regression
+checks forward/inverse coordinates at 1.25, 1.5 and 2 pixels per unit without weakening the existing DPI checks.
 
 ## Testing and optimization — 2026-10-29
 

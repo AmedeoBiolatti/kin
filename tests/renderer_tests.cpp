@@ -1283,18 +1283,26 @@ void test_gpu_content_scale() {
         gpu_ready = true;
         renderer->clear();
         const auto pixels = window.pixel_size();
-        // A unit is 1.5 pixels: the frame is the window's pixels, coordinates fit it.
-        assert(renderer->set_content_scale(1.5f));
-        assert(renderer->content_scale() == 1.5f);
-        renderer->clear();
-        assert(renderer->output_size() == kin::Vec2i(static_cast<int>(pixels.x / 1.5f), static_cast<int>(pixels.y / 1.5f)));
         const auto units = window.size();
-        const kin::Vec2f center{units.x * .5f, units.y * .5f};
-        const auto logical = renderer->window_to_logical(center);
-        assert(std::abs(logical.x - pixels.x * .5f / 1.5f) < .01f && std::abs(logical.y - pixels.y * .5f / 1.5f) < .01f);
-        const auto back = renderer->logical_to_window(logical);
-        assert(std::abs(back.x - center.x) < .01f && std::abs(back.y - center.y) < .01f);
-        renderer->present();
+        // Content scaling keeps fractional coordinates even when output_size()
+        // reports only the whole units that fit. Test both directions away from
+        // the centre too; explicit logical sizing follows a different DPI path.
+        for (const float scale : {1.25f, 1.5f, 2.0f}) {
+            assert(renderer->set_content_scale(scale));
+            assert(renderer->content_scale() == scale);
+            renderer->clear();
+            assert(renderer->output_size() == kin::Vec2i(static_cast<int>(pixels.x / scale), static_cast<int>(pixels.y / scale)));
+            for (const kin::Vec2f point : {kin::Vec2f{0, 0}, kin::Vec2f{units.x * .5f, units.y * .5f},
+                                          kin::Vec2f{units.x * .25f, units.y * .75f}, kin::Vec2f{float(units.x), float(units.y)}}) {
+                const auto logical = renderer->window_to_logical(point);
+                assert(std::abs(logical.x - point.x * pixels.x / units.x / scale) < .01f);
+                assert(std::abs(logical.y - point.y * pixels.y / units.y / scale) < .01f);
+                const auto back = renderer->logical_to_window(logical);
+                assert(std::isfinite(back.x) && std::isfinite(back.y));
+                assert(std::abs(back.x - point.x) < .01f && std::abs(back.y - point.y) < .01f);
+            }
+            renderer->present();
+        }
         // A logical size takes over again, and 0 turns it off.
         renderer->set_logical_size(160, 100);
         assert(renderer->content_scale() == 0.0f && renderer->output_size() == kin::Vec2i(160, 100));
