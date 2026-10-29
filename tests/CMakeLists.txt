@@ -8,6 +8,8 @@ add_compile_options(
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME kin-rendering-ci-python
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/rendering_ci_tests.py")
     add_test(NAME kin-eval-python
         COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/eval" -v)
     set_tests_properties(kin-eval-python PROPERTIES TIMEOUT 120)

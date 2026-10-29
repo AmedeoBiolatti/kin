@@ -1,5 +1,9 @@
 # Rendering readiness — 2026-10-28/29
 
+This is a dated measurement record. For current build/viewer commands, GI controls, multi-camera visibility and
+the CI/platform coverage contract, use the [rendering validation guide](rendering_validation.md).
+The runtime checkpoints and test counts below describe their original builds; they are not current-commit CI results.
+
 ## Three-hour testing and optimization follow-up — 29 October
 
 Current runtime: `c084128` on `exp/rendering-foundations`, compared with frozen `22e1ed7` binaries. Main remains at `6245258`; its two local planning edits were preserved. Use the new [manual launcher guide](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/START-HERE.txt), [result summary](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/summary.json), and [executable hashes/configuration](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/release-provenance.json). Earlier sections below retain the preceding validation campaign's results.

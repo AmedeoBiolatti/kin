@@ -47,6 +47,8 @@ The [surface graph example](../tools/surface3d/main.cpp) composes opaque HDR sha
 For several consumers of the same scene, [explicit shared preparation](render_graph.md#shared-draw-preparation)
 reuses world data and compatible GPU uploads while keeping visibility and temporal history per view.
 Configure with `cmake --preset 3d` to include the experimental engine; ordinary and shipping builds leave it out.
+The [build and validation guide](rendering_validation.md) includes runnable viewer/graph commands, multiple-camera
+visibility, required-GPU tests, CI coverage and evaluation limits.
 
 Fallible native 3D operations return `Result3D<T>` or `Status3D`. Check the result
 before reading `*result`; `result.diagnostics` owns the failure messages. Empty

@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Run rendering-branch CI with Debug graph coverage, required Vulkan core/synchronization checks and scoped
+  ASAN/UBSAN integration tests. Retain test evidence and document portable 3D build, viewer and validation commands.
+
 - Optional native visibility masks reuse prepared world data across camera graphs, retaining skinning/cutouts
   without GI, shadows or temporal history. `kin_vision3d` demonstrates budgeted asynchronous observations.
 - Pixel readback can explicitly refuse a synchronous fallback; existing one-argument calls retain their behaviour.

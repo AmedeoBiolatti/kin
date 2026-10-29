@@ -1,6 +1,15 @@
 # Rendering implementation progress
 
-Work proceeds on `exp/rendering-foundations`, from committed lighting work `77b76c8`. The active GI subvoxel edits and main's planning changes are separate. See the [pipeline plan](rendering_pipeline_plan.md) for scope and acceptance gates.
+Work proceeds on `exp/rendering-foundations`, from committed lighting work `77b76c8`. See the [pipeline plan](rendering_pipeline_plan.md) for scope and acceptance gates, and the [build and validation guide](rendering_validation.md) for current commands and CI coverage. Earlier sections below preserve dated implementation and measurement checkpoints.
+
+## CI and documentation completion — 2026-10-29
+
+Integrated main's UI/editor update (`9ac0dde`) into the rendering branch before platform validation. CI now includes
+rendering-branch push triggers, Debug graph/visibility coverage, required 21-case Vulkan core/synchronization gates,
+and a scoped ASAN/UBSAN software-Vulkan job with retained evidence. The gate rejects missing/skipped tests and
+requires validation-layer insertion per test. Windows jobs establish compilation, while native Windows GPU and
+other target-hardware checks remain separate. The portable guide links scene sessions, custom graphs,
+multi-camera visibility, imported content, GI controls and scene evaluation. Main's local planning edits are untouched.
 
 ## Testing and optimization — 2026-10-29
 
