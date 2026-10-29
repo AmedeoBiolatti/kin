@@ -92,6 +92,9 @@ def main():
     command = ["ctest", "--test-dir", str(args.build.resolve()), "-C", args.config,
                "-R", "^(" + "|".join(re.escape(name) for name in TESTS) + ")$",
                "-j", "1", "--timeout", "300", "--no-tests=error", "--verbose",
+               # CTest otherwise retains only 1 KiB for passing tests, before
+               # the loader reaches layer insertion. The full log is uncapped.
+               "--test-output-size-passed", "1048576", "--test-output-size-failed", "1048576",
                "--output-junit", str(report)]
     start = time.monotonic()
     with log.open("w") as stream:
