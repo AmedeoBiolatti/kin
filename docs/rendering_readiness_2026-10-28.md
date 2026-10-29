@@ -3,6 +3,9 @@
 This is a dated measurement record. For current build/viewer commands, GI controls, multi-camera visibility and
 the CI/platform coverage contract, use the [rendering validation guide](rendering_validation.md).
 The runtime checkpoints and test counts below describe their original builds; they are not current-commit CI results.
+Later CI enabled shader-access analysis explicitly and exposed missing compute-stage sampler barriers in SDL.
+The current build applies that fix; historical local synchronization passes below did not cover those shader
+accesses. See the current guide and rendering progress for the corrected validation configuration.
 
 ## Three-hour testing and optimization follow-up — 29 October
 

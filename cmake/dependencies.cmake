@@ -99,6 +99,10 @@ function(kin_configure_sdl)
         kin_prepare_sdl_direct("${sdl3_SOURCE_DIR}" "${sdl3_BINARY_DIR}/../sdl3-direct-src")
         add_subdirectory("${KIN_SDL_DIRECT_SOURCE_DIR}" "${sdl3_BINARY_DIR}")
     endif()
+    if(KIN_HAS_GPU_RENDERER)
+        include("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_sdl_gpu.cmake")
+        kin_patch_sdl_gpu_sampler_barriers(SDL3-static)
+    endif()
     if(NOT KIN_ENABLE_IMAGE_IO)
         # SDL 3.4 also embeds PNG/JPEG codecs independently of SDL_image. Keep its
         # built-in disabled-codec stubs, excluding those implementations too.

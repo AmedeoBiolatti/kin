@@ -87,8 +87,11 @@ def main():
                    VK_VALIDATION_DEBUG_ACTION="VK_DBG_LAYER_ACTION_LOG_MSG",
                    VK_VALIDATION_REPORT_FLAGS="error:warn")
         env.pop("VK_VALIDATION_VALIDATE_SYNC", None)
+        env.pop("VK_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC", None)
         if args.mode == "sync":
             env["VK_VALIDATION_VALIDATE_SYNC"] = "1"
+            # Newer layers can omit shader accesses unless explicitly enabled.
+            env["VK_VALIDATION_SYNCVAL_SHADER_ACCESSES_HEURISTIC"] = "1"
     command = ["ctest", "--test-dir", str(args.build.resolve()), "-C", args.config,
                "-R", "^(" + "|".join(re.escape(name) for name in TESTS) + ")$",
                "-j", "1", "--timeout", "300", "--no-tests=error", "--verbose",
@@ -113,6 +116,8 @@ def main():
     if total_errors:
         errors.append(f"combined log: {total_errors} Vulkan validation error markers")
     summary = {"mode": args.mode, "command": command, "returncode": result.returncode,
+               "environment": {key: value for key, value in env.items()
+                               if key.startswith("VK_") or key in ("KIN_REQUIRE_GPU_TESTS", "SDL_VIDEO_DRIVER")},
                "elapsed_s": time.monotonic() - start, "errors": errors, "tests": observations}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"Rendering {args.mode}: {len(observations)}/{len(TESTS)} cases, {len(errors)} errors; {log}")

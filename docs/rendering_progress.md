@@ -15,6 +15,13 @@ preserve main's content scaling alongside the branch's rounded logical-size mapp
 checks forward/inverse coordinates at 1.25, 1.5 and 2 pixels per unit without weakening the existing DPI checks.
 The attachment-graph test admits the GPU before creating mesh/shader fixtures, so dummy-driver jobs skip cleanly
 while required-GPU jobs still fail if unavailable. Software-Vulkan validation and sanitizer jobs require all 21 cases.
+Debug CI exposed root-motion notifications inside a locked Flecs query. Animation now defers those notifications
+until iteration completes, before transform propagation; the regression uses tracked transforms. The evaluator's
+Windows path assertion also accounts for canonical expansion of a short TEMP directory alias.
+Shader-access-enabled synchronization validation exposed missing compute stages in SDL 3.4.10's Vulkan sampler
+barriers. A guarded generated translation unit adds the stages without changing shared dependency sources;
+CI explicitly enables shader-access analysis and retains its effective Vulkan settings. Earlier local zero-error
+sync results used the newer layer's default without shader-access analysis and must be read with that limitation.
 
 ## Testing and optimization — 2026-10-29
 

@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Patch SDL Vulkan sampler barriers for compute shader reads in a guarded, generated build source. Keep shared
+  dependency sources untouched and enable shader-access analysis in synchronization validation.
+
+- Defer root-motion transform notifications until animation queries unlock their storage, preventing a Debug ECS
+  abort while preserving tracked transform propagation.
+
 - Preserve fractional content-scale pointer mapping alongside rounded logical-size presentation; avoid zero
   coordinates and division by zero when no explicit logical size is set.
 

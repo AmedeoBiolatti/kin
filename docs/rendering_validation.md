@@ -94,7 +94,8 @@ Each output contains verbose `ctest.log`, JUnit `ctest.xml` and `summary.json`.
 Both modes require loader evidence that Khronos validation was inserted for
 every selected test, and fail on validation/synchronization error markers even
 when the executable exits zero. Compatibility warnings remain in the logs for
-review. `--mode plain` applies the inventory/skip checks without enabling
+review. Synchronization mode explicitly enables shader-access analysis on newer
+layers; their default can omit shader accesses. `--mode plain` applies the inventory/skip checks without enabling
 validation; the sanitizer job uses it.
 
 The [CI workflow](../.github/workflows/ci.yml) runs on pull requests, main and
@@ -118,6 +119,14 @@ complete engine or driver leak audit.
 Native shaders currently select SDL_GPU's Vulkan backend. Windows compilation
 and browser SwiftShader checks do not establish native Windows GPU behavior,
 Metal/D3D12 support, macOS support or coverage of every physical GPU.
+
+Kin patches missing compute-stage sampler barriers in SDL 3.4.10's Vulkan
+backend. CMake generates a marked, patched translation unit in the build directory,
+checks the original source hash and leaves fetched/shared source overrides untouched.
+The patch also applies to the optional direct-API SDL build. Review
+[`kin_sdl_gpu.cmake`](../cmake/kin_sdl_gpu.cmake) when upgrading SDL. This is a
+correctness fix for render/compute texture transitions, including GI/AO and
+visibility reduction; validation errors are not filtered out to accommodate it.
 
 ## Multiple cameras and asynchronous observations
 

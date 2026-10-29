@@ -98,7 +98,8 @@ class EvaluationTests(unittest.TestCase):
         write_json(path, self.scene)
         self.suite["scenes"] = [str(path)]
         write_json(self.path, self.suite)
-        self.assertEqual(self.plan()["scenes"][0]["manifest"], str(path))
+        # The loader canonicalizes paths, including Windows TEMP's 8.3 alias.
+        self.assertEqual(self.plan()["scenes"][0]["manifest"], str(path.resolve()))
 
     def test_duplicate_scene_ids_rejected(self):
         self.suite["scenes"].append(self.scene)

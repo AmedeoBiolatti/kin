@@ -410,8 +410,8 @@ u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& d
 
 void WorldRenderState3D::animate(f32 dt) {
     ++_epoch;
-    _animators.each([&](flecs::iter& it, size_t row, const SkinnedMeshRenderer3D* renderer,
-                        const ModelRenderer3D* rigid, Animator3D& a, Transform3D* own) {
+    const auto advance = [&](flecs::iter& it, size_t row, const SkinnedMeshRenderer3D* renderer,
+                             const ModelRenderer3D* rigid, Animator3D& a, Transform3D* own) {
         a.events.clear();
         const Animated target = animated(renderer, rigid);
         const Model3D* model = target.model ? target.model->get() : nullptr;
@@ -549,7 +549,10 @@ void WorldRenderState3D::animate(f32 dt) {
                 }
             }
         }
-    });
+    };
+    // Root-motion modified() notifications must wait until the query unlocks
+    // its tables. Publish them before the caller's transform barrier.
+    _ecs->raw().defer([&] { _animators.each(advance); });
 }
 
 void WorldRenderState3D::solve_ik(Animator3D& a, const Skeleton3D& sk, const Pose3D& base, const Mat4f& entity_matrix,
