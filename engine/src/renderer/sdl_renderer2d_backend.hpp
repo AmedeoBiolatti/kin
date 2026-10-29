@@ -41,6 +41,7 @@ public:
     Vec2f logical_to_window(Vec2f logical) const override;
 
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size) override;
+    bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     void draw_texture(const Texture& texture, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;

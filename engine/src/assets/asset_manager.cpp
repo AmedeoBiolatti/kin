@@ -54,7 +54,9 @@ AssetStatus status_for_path(const std::filesystem::path& path) {
 
 AssetType infer_asset_type(const std::filesystem::path& path) {
     const std::string ext = lowercase_extension(path);
-    if (ext == ".bmp" || ext == ".png") {
+    // What load_image reads, and the compressed textures (texture_file.hpp).
+    if (ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".qoi" ||
+        ext == ".gif" || ext == ".ktx2" || ext == ".dds") {
         return AssetType::Image;
     }
     if (ext == ".kinanim" || ext == ".kinanim2") {
@@ -84,11 +86,41 @@ AssetType infer_asset_type(const std::filesystem::path& path) {
     if (ext == ".kintilemap") {
         return AssetType::TileMap;
     }
+    if (ext == ".kintileset") {
+        return AssetType::TileSet;
+    }
     if (ext == ".kindialogue") {
         return AssetType::Dialogue;
     }
     if (ext == ".kinprefab") {
         return AssetType::Prefab;
+    }
+    if (ext == ".kinscene") {
+        return AssetType::Scene;
+    }
+    if (ext == ".wav" || ext == ".ogg" || ext == ".mp3" || ext == ".flac") {
+        return AssetType::Audio;
+    }
+    if (ext == ".ttf" || ext == ".otf") {
+        return AssetType::Font;
+    }
+    if (ext == ".glb" || ext == ".gltf") {
+        return AssetType::Model;
+    }
+    if (ext == ".svg") {
+        return AssetType::Shape;
+    }
+    if (ext == ".glsl" || ext == ".spv") {
+        return AssetType::Shader;
+    }
+    if (ext == ".cube") {
+        return AssetType::ColorLut;
+    }
+    if (ext == ".kinui") {
+        return AssetType::UiScreen;
+    }
+    if (ext == ".kintheme") {
+        return AssetType::UiTheme;
     }
     return AssetType::Unknown;
 }

@@ -5,9 +5,11 @@
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace kin {
@@ -89,7 +91,203 @@ void warn_direct_sprite_outside_texture(const std::filesystem::path& path,
                    }));
 }
 
+std::string_view playback_text(SpritePlayback playback) {
+    switch (playback) {
+    case SpritePlayback::Loop: return "loop";
+    case SpritePlayback::Once: return "once";
+    case SpritePlayback::PingPong: return "pingpong";
+    }
+    return "loop";
+}
+
+bool parse_playback(std::string_view text, SpritePlayback& out) {
+    for (const SpritePlayback playback : {SpritePlayback::Loop, SpritePlayback::Once, SpritePlayback::PingPong}) {
+        if (text == playback_text(playback)) {
+            out = playback;
+            return true;
+        }
+    }
+    return false;
+}
+
+// "hero.walk.2" or, held for longer, "hero.walk.2*2".
+bool parse_animation_frame(const std::string& token, SpriteAnimationFrame& out) {
+    out = {.sprite = token, .hold = 1.0f};
+    if (const auto star = token.rfind('*'); star != std::string::npos) {
+        std::istringstream in(token.substr(star + 1));
+        f32 hold = 0.0f;
+        if (!(in >> hold) || !in.eof() || !(hold > 0.0f) || star == 0) {
+            return false;
+        }
+        out = {.sprite = token.substr(0, star), .hold = hold};
+    }
+    return !out.sprite.empty();
+}
+
+// The directives of a catalog's text into `catalog`: false at the first that
+// does not read (its line and why in `error`). `path` (when given) names the
+// file in the warnings logged for what reads but shows nothing.
+bool read_catalog(std::string_view text, const std::filesystem::path* path, SpriteCatalog& catalog, std::string& error) {
+    std::istringstream file{std::string{text}};
+    std::string line;
+    i32 line_no = 0;
+    const auto fail = [&](std::string_view message) {
+        error = "line " + std::to_string(line_no) + ": " + std::string{message};
+        return false;
+    };
+
+    while (std::getline(file, line)) {
+        ++line_no;
+        std::istringstream in(trim_comment(std::move(line)));
+        std::string kind;
+        if (!(in >> kind)) {
+            continue;
+        }
+
+        if (kind == "texture") {
+            std::string id;
+            std::string rel_path;
+            if (!(in >> id >> rel_path)) {
+                return fail("malformed texture");
+            }
+            catalog.set_texture(id, rel_path, {});
+            continue;
+        }
+
+        if (kind == "sheet") {
+            SpriteSheetDefinition sheet_def;
+            if (!(in >> sheet_def.id >> sheet_def.texture_id >> sheet_def.grid.tile_w >> sheet_def.grid.tile_h)) {
+                return fail("malformed sheet");
+            }
+            in >> sheet_def.grid.spacing >> sheet_def.grid.margin;
+            catalog.add_sheet(std::move(sheet_def));
+            continue;
+        }
+
+        if (kind == "sprite") {
+            SpriteDefinition sprite_def;
+            if (!(in >> sprite_def.id >> sprite_def.texture_id
+                     >> sprite_def.source.x >> sprite_def.source.y >> sprite_def.source.w >> sprite_def.source.h)) {
+                return fail("malformed sprite");
+            }
+            sprite_def.size = {sprite_def.source.w, sprite_def.source.h};
+            if (!(in >> sprite_def.size.x >> sprite_def.size.y)) {
+                sprite_def.size = {sprite_def.source.w, sprite_def.source.h};
+            }
+            if (!(in >> sprite_def.pivot.x >> sprite_def.pivot.y)) {
+                sprite_def.pivot = {0.5f, 0.5f};
+            }
+            if (!(in >> sprite_def.offset.x >> sprite_def.offset.y)) {
+                sprite_def.offset = {};
+            }
+            if (path) {
+                warn_empty_direct_sprite(*path, line_no, sprite_def);
+            }
+            catalog.add(std::move(sprite_def));
+            continue;
+        }
+
+        if (kind == "sheet_sprite") {
+            SpriteDefinition sprite_def;
+            if (!(in >> sprite_def.id >> sprite_def.sheet_id >> sprite_def.frame)) {
+                return fail("malformed sheet_sprite");
+            }
+            if (!(in >> sprite_def.size.x >> sprite_def.size.y)) {
+                sprite_def.size = {};
+            }
+            if (!(in >> sprite_def.pivot.x >> sprite_def.pivot.y)) {
+                sprite_def.pivot = {0.5f, 0.5f};
+            }
+            if (!(in >> sprite_def.offset.x >> sprite_def.offset.y)) {
+                sprite_def.offset = {};
+            }
+            catalog.add(std::move(sprite_def));
+            continue;
+        }
+
+        if (kind == "animation") {
+            SpriteAnimationDefinition animation;
+            std::string playback;
+            if (!(in >> animation.id >> playback >> animation.fps) || !parse_playback(playback, animation.playback) ||
+                !(animation.fps > 0.0f)) {
+                return fail("malformed animation (animation <id> loop|once|pingpong <fps> <sprite>[*hold]...)");
+            }
+            for (std::string token; in >> token;) {
+                SpriteAnimationFrame frame;
+                if (!parse_animation_frame(token, frame)) {
+                    return fail("malformed animation frame '" + token + "'");
+                }
+                animation.frames.push_back(std::move(frame));
+            }
+            catalog.add_animation(std::move(animation));
+            continue;
+        }
+
+        return fail("unknown directive");
+    }
+    return true;
+}
+
 } // namespace
+
+f32 sprite_animation_length(const SpriteAnimationDefinition& animation) {
+    if (animation.frames.empty() || !(animation.fps > 0.0f)) {
+        return 0.0f;
+    }
+    f32 holds = 0.0f;
+    for (const SpriteAnimationFrame& frame : animation.frames) {
+        holds += std::max(frame.hold, 0.0f);
+    }
+    // There and back: its first and last frames shown once a turn.
+    if (animation.playback == SpritePlayback::PingPong && animation.frames.size() > 1) {
+        holds += holds - std::max(animation.frames.front().hold, 0.0f) - std::max(animation.frames.back().hold, 0.0f);
+    }
+    return holds / animation.fps;
+}
+
+i32 sprite_animation_frame(const SpriteAnimationDefinition& animation, f32 time, bool* finished) {
+    if (finished) {
+        *finished = false;
+    }
+    const auto count = static_cast<i32>(animation.frames.size());
+    const f32 length = sprite_animation_length(animation);
+    if (count == 0) {
+        return -1;
+    }
+    if (!(length > 0.0f)) {
+        return 0;
+    }
+    f32 t = time;
+    if (animation.playback == SpritePlayback::Once) {
+        if (t >= length) {
+            if (finished) {
+                *finished = true;
+            }
+            return count - 1;
+        }
+        t = std::max(t, 0.0f);
+    } else {
+        t = std::fmod(t, length);
+        if (t < 0.0f) {
+            t += length;
+        }
+    }
+    // Its frames there (and, for PingPong, back: the last but one to the second).
+    const auto hold = [&](i32 index) { return std::max(animation.frames[static_cast<std::size_t>(index)].hold, 0.0f) / animation.fps; };
+    for (i32 index = 0; index < count; ++index) {
+        t -= hold(index);
+        if (t < 0.0f) {
+            return index;
+        }
+    }
+    for (i32 index = count - 2; index > 0; --index) {
+        t -= hold(index);
+        if (t < 0.0f) {
+            return index;
+        }
+    }
+    return animation.playback == SpritePlayback::PingPong && count > 1 ? 1 : count - 1; // rounding, at the very end
+}
 
 bool SpriteRef::valid() const {
     return catalog && !id.empty() && catalog->contains(id);
@@ -99,6 +297,7 @@ void SpriteCatalog::clear() {
     _textures.clear();
     _sheets.clear();
     _sprites.clear();
+    _animations.clear();
 }
 
 void SpriteCatalog::set_texture(std::string_view id, Texture texture) {
@@ -136,6 +335,26 @@ void SpriteCatalog::add_sheet_sprite(std::string_view id,
         .size = size,
         .pivot = pivot,
     });
+}
+
+void SpriteCatalog::add_animation(SpriteAnimationDefinition animation) {
+    _animations[animation.id] = std::move(animation);
+}
+
+bool SpriteCatalog::remove_texture(std::string_view id) {
+    return _textures.erase(std::string{id}) > 0;
+}
+
+bool SpriteCatalog::remove_sheet(std::string_view id) {
+    return _sheets.erase(std::string{id}) > 0;
+}
+
+bool SpriteCatalog::remove(std::string_view sprite_id) {
+    return _sprites.erase(std::string{sprite_id}) > 0;
+}
+
+bool SpriteCatalog::remove_animation(std::string_view id) {
+    return _animations.erase(std::string{id}) > 0;
 }
 
 SpriteRef SpriteCatalog::ref(std::string_view id) const {
@@ -202,6 +421,21 @@ const SpriteDefinition* SpriteCatalog::sprite(std::string_view id) const {
     return found == _sprites.end() ? nullptr : &found->second;
 }
 
+const SpriteAnimationDefinition* SpriteCatalog::animation(std::string_view id) const {
+    const auto found = _animations.find(std::string{id});
+    return found == _animations.end() ? nullptr : &found->second;
+}
+
+std::vector<std::string> SpriteCatalog::animation_ids() const {
+    std::vector<std::string> ids;
+    ids.reserve(_animations.size());
+    for (const auto& [id, animation] : _animations) {
+        ids.push_back(id);
+    }
+    std::ranges::sort(ids);
+    return ids;
+}
+
 std::vector<std::string> SpriteCatalog::sprite_ids() const {
     std::vector<std::string> ids;
     ids.reserve(_sprites.size());
@@ -223,83 +457,25 @@ SpriteCatalog load_sprite_catalog(const std::filesystem::path& path) {
                         }));
         throw std::runtime_error("Failed to open sprite catalog: " + path.string());
     }
-    std::istringstream file{*text};
-
     SpriteCatalog catalog;
-    std::string line;
-    i32 line_no = 0;
-    const auto fail = [&](std::string_view message) {
-        throw std::runtime_error(path.string() + ":" + std::to_string(line_no) + ": " + std::string{message});
-    };
-
-    while (std::getline(file, line)) {
-        ++line_no;
-        std::istringstream in(trim_comment(std::move(line)));
-        std::string kind;
-        if (!(in >> kind)) {
-            continue;
+    if (std::string error; !read_catalog(*text, &path, catalog, error)) {
+        // "line 3: ..." as "<path>:3: ..."
+        throw std::runtime_error(path.string() + ":" + error.substr(std::string_view{"line "}.size()));
+    }
+    for (const auto& [id, animation] : catalog.animations()) {
+        for (const SpriteAnimationFrame& frame : animation.frames) {
+            if (!catalog.contains(frame.sprite)) {
+                KIN_LOG_WARN_F("asset",
+                               "sprite catalog animation shows a sprite it has not",
+                               (LogFields{
+                                   {.name = "path", .value = path.string()},
+                                   {.name = "type", .value = "SpriteCatalog"},
+                                   {.name = "animation", .value = id},
+                                   {.name = "sprite", .value = frame.sprite},
+                               }));
+                break;
+            }
         }
-
-        if (kind == "texture") {
-            std::string id;
-            std::string rel_path;
-            if (!(in >> id >> rel_path)) {
-                fail("malformed texture");
-            }
-            catalog.set_texture(id, rel_path, {});
-            continue;
-        }
-
-        if (kind == "sheet") {
-            SpriteSheetDefinition sheet_def;
-            if (!(in >> sheet_def.id >> sheet_def.texture_id >> sheet_def.grid.tile_w >> sheet_def.grid.tile_h)) {
-                fail("malformed sheet");
-            }
-            in >> sheet_def.grid.spacing >> sheet_def.grid.margin;
-            catalog.add_sheet(std::move(sheet_def));
-            continue;
-        }
-
-        if (kind == "sprite") {
-            SpriteDefinition sprite_def;
-            if (!(in >> sprite_def.id >> sprite_def.texture_id
-                     >> sprite_def.source.x >> sprite_def.source.y >> sprite_def.source.w >> sprite_def.source.h)) {
-                fail("malformed sprite");
-            }
-            sprite_def.size = {sprite_def.source.w, sprite_def.source.h};
-            if (!(in >> sprite_def.size.x >> sprite_def.size.y)) {
-                sprite_def.size = {sprite_def.source.w, sprite_def.source.h};
-            }
-            if (!(in >> sprite_def.pivot.x >> sprite_def.pivot.y)) {
-                sprite_def.pivot = {0.5f, 0.5f};
-            }
-            if (!(in >> sprite_def.offset.x >> sprite_def.offset.y)) {
-                sprite_def.offset = {};
-            }
-            warn_empty_direct_sprite(path, line_no, sprite_def);
-            catalog.add(std::move(sprite_def));
-            continue;
-        }
-
-        if (kind == "sheet_sprite") {
-            SpriteDefinition sprite_def;
-            if (!(in >> sprite_def.id >> sprite_def.sheet_id >> sprite_def.frame)) {
-                fail("malformed sheet_sprite");
-            }
-            if (!(in >> sprite_def.size.x >> sprite_def.size.y)) {
-                sprite_def.size = {};
-            }
-            if (!(in >> sprite_def.pivot.x >> sprite_def.pivot.y)) {
-                sprite_def.pivot = {0.5f, 0.5f};
-            }
-            if (!(in >> sprite_def.offset.x >> sprite_def.offset.y)) {
-                sprite_def.offset = {};
-            }
-            catalog.add(std::move(sprite_def));
-            continue;
-        }
-
-        fail("unknown directive");
     }
 
     if (catalog.sprite_ids().empty()) {
@@ -350,44 +526,33 @@ SpriteCatalog load_sprite_catalog(AssetManager& assets, Renderer2D& renderer, co
     return catalog;
 }
 
-bool save_sprite_catalog(const SpriteCatalog& catalog, const std::filesystem::path& path) {
-    std::ofstream out(path);
-    if (!out) {
+bool parse_sprite_catalog(std::string_view text, SpriteCatalog& out, std::string& error) {
+    SpriteCatalog catalog;
+    if (!read_catalog(text, nullptr, catalog, error)) {
         return false;
     }
+    out = std::move(catalog);
+    return true;
+}
 
-    std::vector<const TextureAssetRef*> textures;
-    textures.reserve(catalog.textures().size());
-    for (const auto& [id, texture] : catalog.textures()) {
-        textures.push_back(&texture);
-    }
-    std::ranges::sort(textures, [](const TextureAssetRef* a, const TextureAssetRef* b) {
-        return a->id < b->id;
-    });
+std::string serialize_sprite_catalog(const SpriteCatalog& catalog) {
+    const auto sorted = [](const auto& by_id) {
+        std::vector<const typename std::decay_t<decltype(by_id)>::mapped_type*> out;
+        out.reserve(by_id.size());
+        for (const auto& [id, value] : by_id) {
+            out.push_back(&value);
+        }
+        std::ranges::sort(out, [](const auto* a, const auto* b) { return a->id < b->id; });
+        return out;
+    };
+    const auto textures = sorted(catalog.textures());
+    const auto sheets = sorted(catalog.sheets());
+    const auto sprites = sorted(catalog.sprites());
+    const auto animations = sorted(catalog.animations());
 
-    std::vector<const SpriteSheetDefinition*> sheets;
-    sheets.reserve(catalog.sheets().size());
-    for (const auto& [id, sheet_def] : catalog.sheets()) {
-        sheets.push_back(&sheet_def);
-    }
-    std::ranges::sort(sheets, [](const SpriteSheetDefinition* a, const SpriteSheetDefinition* b) {
-        return a->id < b->id;
-    });
-
-    std::vector<const SpriteDefinition*> sprites;
-    sprites.reserve(catalog.sprites().size());
-    for (const auto& [id, sprite_def] : catalog.sprites()) {
-        sprites.push_back(&sprite_def);
-    }
-    std::ranges::sort(sprites, [](const SpriteDefinition* a, const SpriteDefinition* b) {
-        return a->id < b->id;
-    });
-
+    std::ostringstream out;
     out << "# kin sprite catalog\n";
     for (const TextureAssetRef* texture : textures) {
-        if (texture->path.empty()) {
-            return false;
-        }
         out << "texture " << texture->id << ' ' << texture->path << '\n';
     }
     if (!textures.empty() && (!sheets.empty() || !sprites.empty())) {
@@ -415,7 +580,31 @@ bool save_sprite_catalog(const SpriteCatalog& catalog, const std::filesystem::pa
             << ' ' << sprite_def->pivot.x << ' ' << sprite_def->pivot.y
             << ' ' << sprite_def->offset.x << ' ' << sprite_def->offset.y << '\n';
     }
+    if (!animations.empty() && (!textures.empty() || !sheets.empty() || !sprites.empty())) {
+        out << '\n';
+    }
+    for (const SpriteAnimationDefinition* animation : animations) {
+        out << "animation " << animation->id << ' ' << playback_text(animation->playback) << ' ' << animation->fps;
+        for (const SpriteAnimationFrame& frame : animation->frames) {
+            out << ' ' << frame.sprite;
+            if (frame.hold != 1.0f) {
+                out << '*' << frame.hold;
+            }
+        }
+        out << '\n';
+    }
+    return out.str();
+}
 
+bool save_sprite_catalog(const SpriteCatalog& catalog, const std::filesystem::path& path) {
+    if (std::ranges::any_of(catalog.textures(), [](const auto& texture) { return texture.second.path.empty(); })) {
+        return false; // a texture made in code: nothing to name it by
+    }
+    std::ofstream out(path);
+    if (!out) {
+        return false;
+    }
+    out << serialize_sprite_catalog(catalog);
     return static_cast<bool>(out);
 }
 

@@ -107,6 +107,12 @@ Vec2f measure(const TabBar& widget) {
     return {std::max(240.0f, width + content_pad * 2.0f), height};
 }
 
+// MenuList as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, MenuList& widget) {
+    widget.style = themed_widget_style(widget.style, theme.menu);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, MenuList& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     widget.activated = -1;
@@ -138,15 +144,16 @@ void run(Context& ctx, MenuList& widget) {
         selection_normalized = true;
     }
     const i32 previous = widget.selected;
-    if (widget.enabled && ctx.action_pressed("menu_up")) {
+    const bool keys = widget.enabled && (widget.popup_keys || takes_keys(ctx, widget.id, widget.keys_without_focus));
+    if (keys && ctx.action_pressed("menu_up")) {
         widget.selected = widget.selected < 0 ? next_menu_index(widget.items, 0, -1, widget.wrap)
                                               : next_menu_index(widget.items, widget.selected, -1, widget.wrap);
     }
-    if (widget.enabled && ctx.action_pressed("menu_down")) {
+    if (keys && ctx.action_pressed("menu_down")) {
         widget.selected = widget.selected < 0 ? first_menu_index(widget.items)
                                               : next_menu_index(widget.items, widget.selected, 1, widget.wrap);
     }
-    widget.cancelled = ctx.action_pressed("quit");
+    widget.cancelled = keys && ctx.action_pressed("quit");
 
     const f32 natural_height = static_cast<f32>(count) * metrics.row_height + static_cast<f32>(std::max(0, count - 1)) * widget.row_spacing;
     const f32 available_pad = std::max(0.0f, (widget.bounds.h - natural_height) * 0.5f);
@@ -206,6 +213,7 @@ void run(Context& ctx, MenuList& widget) {
         }
         const Id row_id = make_id(widget.id, static_cast<u64>(i));
         const Interaction it = ctx.region(row_id, visible_row, widget.z);
+        focus_on_press(ctx, widget.id, it.pressed);
         if (it.hot && item.enabled && widget.enabled) {
             widget.selected = i;
             widget.hovered = i;
@@ -213,12 +221,12 @@ void run(Context& ctx, MenuList& widget) {
             widget.hovered_rect = row;
         }
         if (widget.selected >= 0 && widget.selected == i && !selection_normalized && !item.submenu_id.empty() && widget.enabled && item.enabled &&
-            (it.hot || ctx.action_pressed("menu_right") || ctx.action_pressed("accept"))) {
+            (it.hot || (keys && (ctx.action_pressed("menu_right") || ctx.action_pressed("accept"))))) {
             widget.submenu_requested = true;
             widget.submenu_id = item.submenu_id;
             widget.submenu_anchor = ctx.to_screen(row);
         }
-        if ((it.clicked || (widget.selected >= 0 && !selection_normalized && ctx.action_pressed("accept") && widget.selected == i)) && item.enabled && widget.enabled) {
+        if ((it.clicked || (keys && widget.selected >= 0 && !selection_normalized && ctx.action_pressed("accept") && widget.selected == i)) && item.enabled && widget.enabled) {
             if (item.submenu_id.empty()) {
                 widget.activated = i;
                 widget.activated_id = menu_item_result_id(item);
@@ -280,13 +288,18 @@ void run(Context& ctx, MenuList& widget) {
     widget.changed = widget.selected != previous;
 }
 
+// MenuBar as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, MenuBar& widget) {
+    widget.style = themed_widget_style(widget.style, theme.menu);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, MenuBar& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: menus run from the right
     widget.opened = -1;
     widget.opened_id.clear();
     widget.opened_menu = {};
     widget.changed = false;
-    widget.cancelled = ctx.action_pressed("quit");
     const WidgetStyle style = themed_widget_style(widget.style, ctx.theme().menu);
     const TextStyle base_text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
     const i32 count = static_cast<i32>(widget.items.size());
@@ -295,10 +308,25 @@ void run(Context& ctx, MenuBar& widget) {
         return;
     }
 
-    widget.selected = std::clamp(widget.selected, 0, count - 1);
+    // The menu open (if one of its own is), and whether the keys are its.
+    i32 open_index = -1;
+    for (i32 i = 0; i < count && open_index < 0; ++i) {
+        const Id menu = widget.items[static_cast<std::size_t>(i)].menu_id;
+        open_index = menu && ctx.popup_open(menu) ? i : -1;
+    }
+    const bool focused = widget.id && ctx.state().focused() == widget.id;
+    // Left, Right and Enter while it has the keys and none of its menus is
+    // open (an open menu takes them: Right opens a submenu); the pointer moved
+    // onto another title switches an open menu.
+    const bool keys = takes_keys(ctx, widget.id, widget.keys_without_focus) && open_index < 0;
+    const Vec2f pointer = ctx.pointer();
+    const bool moved = pointer.x != widget.pointer.x || pointer.y != widget.pointer.y;
+    widget.pointer = pointer;
+    widget.cancelled = keys && ctx.action_pressed("quit");
+    widget.selected = open_index >= 0 ? open_index : focused ? std::clamp(widget.selected, 0, count - 1) : -1;
     const i32 previous = widget.selected;
     const auto next_enabled = [&](i32 current, i32 delta) {
-        i32 next = current;
+        i32 next = current < 0 ? (delta > 0 ? -1 : 0) : current;
         for (i32 tries = 0; tries < count; ++tries) {
             next = (next + delta + count) % count;
             if (widget.items[static_cast<std::size_t>(next)].enabled) {
@@ -307,12 +335,17 @@ void run(Context& ctx, MenuBar& widget) {
         }
         return current;
     };
-    if (ctx.action_pressed("menu_left")) {
+    i32 to_open = -1;
+    if (keys && ctx.action_pressed("menu_left")) {
         widget.selected = next_enabled(widget.selected, -1);
     }
-    if (ctx.action_pressed("menu_right")) {
+    if (keys && ctx.action_pressed("menu_right")) {
         widget.selected = next_enabled(widget.selected, 1);
     }
+    if (keys && widget.selected >= 0 && ctx.action_pressed("accept")) {
+        to_open = widget.selected;
+    }
+    bool pressed = false;
 
     ctx.surface(widget.bounds, with_fill_border(ctx.theme().menu_surface, style.track, widget_border(style, WidgetColorState::Normal)));
     const UiPadding padding = intrinsic_padding(style);
@@ -325,17 +358,21 @@ void run(Context& ctx, MenuBar& widget) {
         const Rectf row{x, content.y, text.x + item_pad_x * 2.0f, content.h};
         const Id row_id = make_id(widget.id, static_cast<u64>(i));
         const Interaction it = ctx.region(row_id, row, widget.z);
-        if (it.hot && item.enabled) {
+        pressed = pressed || it.pressed;
+        if (it.hot && moved && item.enabled && open_index >= 0 && i != open_index && i != to_open) {
+            widget.selected = i; // another menu's title while one is open: that menu
+            to_open = i;
+        }
+        const bool open = item.menu_id && ctx.popup_open(item.menu_id);
+        if (it.clicked && item.enabled) {
             widget.selected = i;
+            if (open) {
+                ctx.close_popup(item.menu_id);
+            } else {
+                to_open = i;
+            }
         }
         const bool selected = i == widget.selected;
-        const bool open = item.menu_id && ctx.popup_open(item.menu_id);
-        if ((it.clicked || (selected && ctx.action_pressed("accept")) || (open && (ctx.action_pressed("menu_left") || ctx.action_pressed("menu_right")))) && item.enabled && item.menu_id) {
-            ctx.open_popup(item.menu_id);
-            widget.opened = i;
-            widget.opened_id = item.id.empty() ? item.label : item.id;
-            widget.opened_menu = item.menu_id;
-        }
         ctx.surface(row, ctx.resolve_animated(row_id, style.surface, it, selected || open, item.enabled));
         TextStyle text_style = base_text_style;
         if (!item.enabled) {
@@ -346,7 +383,23 @@ void run(Context& ctx, MenuBar& widget) {
         ctx.text(item.label, {row.x + item_pad_x, row.y + (row.h - text.y) * 0.5f}, text_style);
         x += row.w + widget.item_gap;
     }
+    if (to_open >= 0) {
+        const MenuBarItem& item = widget.items[static_cast<std::size_t>(to_open)];
+        if (item.enabled && item.menu_id) {
+            ctx.open_popup(item.menu_id);
+            widget.opened = to_open;
+            widget.opened_id = item.id.empty() ? item.label : item.id;
+            widget.opened_menu = item.menu_id;
+        }
+    }
+    focus_on_press(ctx, widget.id, pressed);
     widget.changed = widget.selected != previous;
+}
+
+// TabBar as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, TabBar& widget) {
+    widget.style = themed_widget_style(widget.style, theme.tab);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
 }
 
 void run(Context& ctx, TabBar& widget) {
@@ -367,13 +420,14 @@ void run(Context& ctx, TabBar& widget) {
     }
     widget.selected = std::clamp(widget.selected, 0, count - 1);
     const i32 previous = widget.selected;
-    if (widget.enabled && ctx.action_pressed("menu_left")) {
+    const bool keys = widget.enabled && takes_keys(ctx, widget.id, widget.keys_without_focus);
+    if (keys && ctx.action_pressed("menu_left")) {
         widget.selected = next_enabled_tab(widget, widget.selected, -1);
     }
-    if (widget.enabled && ctx.action_pressed("menu_right")) {
+    if (keys && ctx.action_pressed("menu_right")) {
         widget.selected = next_enabled_tab(widget, widget.selected, 1);
     }
-    if (widget.enabled && ctx.action_pressed("accept") && widget.items[static_cast<std::size_t>(widget.selected)].enabled) {
+    if (keys && ctx.action_pressed("accept") && widget.items[static_cast<std::size_t>(widget.selected)].enabled) {
         widget.activated = widget.selected;
         widget.activated_id = item_result_id(widget.items[static_cast<std::size_t>(widget.selected)].id,
                                              widget.items[static_cast<std::size_t>(widget.selected)].label);
@@ -414,6 +468,7 @@ void run(Context& ctx, TabBar& widget) {
                                    metrics.close_size};
             const Id tab_id = make_id(widget.id, static_cast<u64>(i));
             const Interaction it = ctx.region(tab_id, tab, widget.z);
+            focus_on_press(ctx, widget.id, it.pressed);
             if (it.clicked && widget.enabled && item.enabled) {
                 widget.selected = i;
                 widget.activated = i;
@@ -485,6 +540,7 @@ void run(Context& ctx, TabBar& widget) {
                                metrics.close_size};
         const Id tab_id = make_id(widget.id, static_cast<u64>(i));
         const Interaction it = ctx.region(tab_id, tab, widget.z);
+            focus_on_press(ctx, widget.id, it.pressed);
         if (it.clicked && widget.enabled && item.enabled) {
             widget.selected = i;
             widget.activated = i;
@@ -534,7 +590,7 @@ void run(Context& ctx, TabBar& widget) {
 ContextMenuResult popup_menu(Context& ctx, Id id, Rectf anchor, MenuList& menu, PopupMenuOptions options) {
     ContextMenuResult result;
     if (options.size.x <= 0.0f || options.size.y <= 0.0f) {
-        options.size = measure(menu);
+        options.size = ctx.measured(menu);
     }
     const Context::PopupResult popup = ctx.begin_popup(id,
                                                        anchor,
@@ -556,6 +612,7 @@ ContextMenuResult popup_menu(Context& ctx, Id id, Rectf anchor, MenuList& menu, 
     }
     ctx.surface(popup.bounds, ctx.theme().popup_surface);
     menu.bounds = popup.bounds;
+    menu.popup_keys = ctx.popup_on_top(id); // a submenu over it has them
     run(ctx, menu);
     if (menu.activated >= 0 || menu.cancelled) {
         ctx.close_popup(id);
@@ -577,7 +634,7 @@ ContextMenuResult context_menu(Context& ctx, Id id, Rectf anchor, MenuList& menu
                       id,
                       anchor,
                       menu,
-                      {.size = measure(menu),
+                      {.size = ctx.measured(menu),
                        .offset = {0.0f, anchor.h},
                        .anchor = UiAnchor::TopLeft});
 }
@@ -588,7 +645,7 @@ ContextMenuResult submenu(Context& ctx, Id parent, Id id, Rectf anchor, MenuList
                       id,
                       anchor,
                       menu,
-                      {.size = measure(menu),
+                      {.size = ctx.measured(menu),
                        .offset = {anchor.w + 4.0f, 0.0f},
                        .anchor = UiAnchor::TopLeft,
                        .z = 10001});

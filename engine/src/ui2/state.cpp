@@ -1,5 +1,7 @@
 #include <kin/ui2/state.hpp>
 
+#include <cmath>
+
 namespace kin::ui2 {
 namespace {
 
@@ -42,8 +44,22 @@ Id make_id(Id parent, u64 value) {
     return non_zero(mix_u64(parent.value != 0 ? parent.value : fnv_offset, value));
 }
 
+Id make_id(std::string_view label, std::string_view part) {
+    return make_id(make_id(label), part);
+}
+
+Id make_id(std::string_view label, u64 part) {
+    return make_id(make_id(label), part);
+}
+
+Id make_path_id(Id parent, const std::filesystem::path& path) {
+    const std::u8string text = path.generic_u8string();
+    return make_id(parent, std::string_view(reinterpret_cast<const char*>(text.data()), text.size()));
+}
+
 void State::begin_frame() {
     _hot = _has_hit ? _hit_id : Id{};
+    _hot_z = _has_hit ? _hit_z : 0;
     _has_hit = false;
     _hit_id = {};
     _hit_z = 0;
@@ -54,6 +70,7 @@ void State::begin_frame() {
 void State::clear() {
     _frame = 0;
     _hot = {};
+    _hot_z = 0;
     _active = {};
     _active_button = MouseButton::Left;
     _focused = {};
@@ -61,6 +78,18 @@ void State::clear() {
     _hit_id = {};
     _hit_z = 0;
     _has_hit = false;
+}
+
+bool State::register_click(Id id, Vec2f pos, f64 now) {
+    constexpr f32 double_click_distance = 4.0f;
+    const bool repeat = id && _last_click_id == id && now - _last_click_time <= double_click_seconds &&
+                        std::abs(pos.x - _last_click_pos.x) <= double_click_distance &&
+                        std::abs(pos.y - _last_click_pos.y) <= double_click_distance;
+    // A double click starts afresh, so a third click is not a second double.
+    _last_click_id = repeat ? Id{} : id;
+    _last_click_time = now;
+    _last_click_pos = pos;
+    return repeat;
 }
 
 void State::register_hit(Id id, i32 z) {

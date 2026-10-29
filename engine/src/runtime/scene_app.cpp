@@ -274,6 +274,8 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.fail_on_text_overflow = true;
         } else if (arg == "--server") {
             options.server = true;
+        } else if (arg == "--inspect") {
+            options.inspect = true;
         } else if (arg.starts_with("--server-mode=")) {
             options.server = true;
             options.server_mode = arg.substr(14);
@@ -489,6 +491,11 @@ struct SceneAppSession::Impl {
     i32 frame_update_steps = 0;
     std::function<void(FrameContext&)> prepare_frame;
     std::function<SceneContext(FrameContext&)> make_scene_context;
+#if KIN_ENABLE_SCENE_SERVER
+    // --inspect: the tool's requests, answered between frames.
+    std::unique_ptr<LiveInspector> inspector;
+    std::unique_ptr<ServerContext> inspector_context;
+#endif
     bool finished = false;
     int result = 0;
     // Destroy the driver first, while every field its shutdown needs still lives.
@@ -678,6 +685,17 @@ struct SceneAppSession::Impl {
             window.max_frames = config.headless.frames > 0
                                     ? config.headless.frames
                                     : ((config.headless.profile_render || config.headless.profile) ? 600 : 1);
+        }
+        if (config.headless.inspect) {
+#if KIN_ENABLE_SCENE_SERVER
+            if (window.mode == AppMode::Headless) {
+                KIN_LOG_WARN("runtime", "--inspect watches a game in its window; a headless run ignores it");
+            } else {
+                inspector = std::make_unique<LiveInspector>(std::cin, std::cout);
+            }
+#else
+            KIN_LOG_WARN("runtime", "--inspect requested, but this build has no scene server (KIN_ENABLE_SCENE_SERVER)");
+#endif
         }
 
 #if KIN_ENABLE_RUNTIME_PROFILING
@@ -948,6 +966,11 @@ struct SceneAppSession::Impl {
                     config.file_watcher->poll();
                 }
 #endif
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector && !inspector->admit_update()) {
+                    return; // held by the tool (sim.pause); it still draws
+                }
+#endif
                 const auto update_start = std::chrono::steady_clock::now();
                 scenes.update(scene_ctx);
                 const f64 update_ms = ms_since(update_start);
@@ -988,6 +1011,20 @@ struct SceneAppSession::Impl {
             },
             [this](FrameContext& ctx) {
                 prepare_frame(ctx);
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector) {
+                    if (!inspector_context) {
+                        inspector_context = std::make_unique<ServerContext>(
+                            ctx.app, ctx.window, ctx.renderer, scenes, window, root_key,
+                            window.fixed_dt > 0.0f ? window.fixed_dt : default_fixed_dt, false,
+                            config.asset_server, scene_renderer3d);
+                    }
+                    inspector->poll(*inspector_context, config.game);
+                    if (ctx.app.waits_for_events() && !inspector->finished()) {
+                        ctx.app.request_redraw(0.1f); // requests come without events
+                    }
+                }
+#endif
                 kin::SceneContext scene_ctx = make_scene_context(ctx);
                 sync_ui_direction();
                 f64 render_scene_ms = 0.0;
@@ -1080,6 +1117,14 @@ struct SceneAppSession::Impl {
                     eval_telemetry.record("main", eval_frame++, interval, frame_ms, frame_update_total_ms,
                                           render_scene_ms, present_ms, ctx.renderer.backend_stats());
                 }
+#if KIN_ENABLE_SCENE_SERVER
+                if (inspector_context) { // the tool watching it reads these (frame.timing)
+                    inspector_context->record_frame_timing({.update_ms = frame_update_total_ms,
+                                                            .render_ms = render_scene_ms + overlay_ms,
+                                                            .present_ms = present_ms,
+                                                            .interval_ms = static_cast<f64>(app_frame.raw_frame_time) * 1000.0});
+                }
+#endif
                 debug_overlay.record("frame.update_total", frame_update_total_ms);
                 debug_overlay.record("frame.update_steps", static_cast<f64>(frame_update_steps));
                 debug_overlay.record("app.raw_frame", static_cast<f64>(app_frame.raw_frame_time) * 1000.0);

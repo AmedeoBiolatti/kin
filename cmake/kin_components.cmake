@@ -138,7 +138,7 @@ endfunction()
 # A single declaration supplies the option, public definitions, manifest and
 # test registration. Source/target migration is incremental.
 kin_declare_component(SCRIPTING DEFAULT ON DESCRIPTION "Build Lua scripting and scene bindings"
-    EXTERNAL_DEPENDENCIES Lua sol2 TESTS kin-lua-script kin-scripting)
+    EXTERNAL_DEPENDENCIES Lua sol2 TESTS kin-lua-script kin-scripting kin-entity-scripts)
 kin_declare_component(PHYSICS DEFAULT ON DESCRIPTION "Build Box2D physics and ECS integration"
     EXTERNAL_DEPENDENCIES Box2D TESTS kin-physics kin-ecs-physics kin-physics-component)
 kin_declare_component(AUDIO DEFAULT ON DESCRIPTION "Build audio playback, catalogs and ECS integration"

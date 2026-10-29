@@ -613,6 +613,20 @@ Texture SdlRenderer2DBackend::create_texture_from_rgba(const u8* pixels, Vec2i s
     return Texture{std::make_shared<SdlTextureBackend>(texture, size, _alive)};
 }
 
+bool SdlRenderer2DBackend::update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) {
+    const auto* sdl_texture = as_sdl(texture.backend().get());
+    if (!sdl_texture || !sdl_texture->handle() || !pixels) {
+        return false;
+    }
+    flush_batch(); // what is queued to draw from it draws what it held
+    const SDL_Rect area{at.x, at.y, size.x, size.y};
+    if (!SDL_UpdateTexture(sdl_texture->handle(), &area, pixels, size.x * 4)) {
+        KIN_LOG_ERROR_F("render", "texture update failed", (LogFields{{.name = "error", .value = std::string{SDL_GetError()}}}));
+        return false;
+    }
+    return true;
+}
+
 void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf dest) {
     const Vec2i size = texture.size();
     draw_texture(texture, {0.0f, 0.0f, static_cast<f32>(size.x), static_cast<f32>(size.y)}, dest);

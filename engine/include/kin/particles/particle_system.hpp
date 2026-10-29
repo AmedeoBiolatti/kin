@@ -23,6 +23,13 @@ struct Particle {
     Color start_color{255, 255, 255, 255};
     Color end_color{255, 255, 255, 0};
     ParticleRenderStyle render{};
+    f32 drag = 0.0f;
+    f32 rotation = 0.0f; // degrees
+    f32 spin = 0.0f;     // degrees a second
+    bool use_mid = false;
+    f32 mid_at = 0.5f;
+    f32 mid_size = 1.0f;
+    Color mid_color{255, 255, 255, 255};
 };
 
 struct ParticleRenderOptions {
@@ -30,6 +37,7 @@ struct ParticleRenderOptions {
     f32 pixel_grid = 1.0f;
     const SpriteCatalog* sprites = nullptr;
     bool sort = true;
+    BlendMode blend = BlendMode::Alpha; // Additive: sparks, fire, glows
 };
 
 class ParticleSystem {
@@ -66,13 +74,14 @@ public:
     void render(Renderer2D& renderer, ParticleRenderOptions options) const;
 
     std::size_t active_count() const { return _particles.size(); }
+    // The catalog its effects are from (set_catalog's); null when none is.
+    const ParticleCatalog* catalog() const;
     bool empty() const { return _particles.empty(); }
     const std::vector<Particle>& particles() const { return _particles; }
 
 private:
     RngKey split_key();
     f32 random_range(ParticleRange range);
-    const ParticleCatalog* catalog() const;
 
     std::vector<Particle> _particles;
     RngKey _key = make_key(1);

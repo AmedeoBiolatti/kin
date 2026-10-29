@@ -27,7 +27,7 @@ Process::Process(Process&& other) noexcept
       _to_write(std::move(other._to_write)),
       _close_input(other._close_input),
       _output(std::move(other._output)),
-      _output_read(other._output_read),
+      _errors(std::move(other._errors)),
       _exit_code(other._exit_code),
       _error(std::move(other._error)) {
 }
@@ -39,7 +39,7 @@ Process& Process::operator=(Process&& other) noexcept {
         _to_write = std::move(other._to_write);
         _close_input = other._close_input;
         _output = std::move(other._output);
-        _output_read = other._output_read;
+        _errors = std::move(other._errors);
         _exit_code = other._exit_code;
         _error = std::move(other._error);
     }
@@ -63,8 +63,8 @@ bool Process::start(const ProcessOptions& options) {
     release();
     _to_write.clear();
     _close_input = false;
-    _output.clear();
-    _output_read = 0;
+    _output = {};
+    _errors = {};
     _exit_code.reset();
     _error.clear();
     if (options.args.empty()) {
@@ -91,6 +91,8 @@ bool Process::start(const ProcessOptions& options) {
                           options.capture_output ? SDL_PROCESS_STDIO_APP : SDL_PROCESS_STDIO_INHERITED);
     if (options.capture_output && options.errors_to_output) {
         SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_TO_STDOUT_BOOLEAN, true);
+    } else if (options.capture_errors) {
+        SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_APP);
     } else {
         SDL_SetNumberProperty(props, SDL_PROP_PROCESS_CREATE_STDERR_NUMBER, SDL_PROCESS_STDIO_INHERITED);
     }
@@ -173,18 +175,23 @@ void Process::read_output() {
     if (!_process) {
         return;
     }
-    SDL_IOStream* output = SDL_GetProcessOutput(sdl(_process));
-    if (!output) {
-        return;
-    }
-    std::array<char, 4096> buffer{};
-    for (;;) {
-        const std::size_t got = SDL_ReadIO(output, buffer.data(), buffer.size());
-        if (got == 0) {
-            break; // nothing more yet, or the child closed it
+    const auto drain = [](SDL_IOStream* stream, Received& into) {
+        if (!stream) {
+            return;
         }
-        _output.append(buffer.data(), got);
-    }
+        std::array<char, 4096> buffer{};
+        for (;;) {
+            const std::size_t got = SDL_ReadIO(stream, buffer.data(), buffer.size());
+            if (got == 0) {
+                break; // nothing more yet, or the child closed it
+            }
+            into.text.append(buffer.data(), got);
+        }
+    };
+    drain(SDL_GetProcessOutput(sdl(_process)), _output);
+    drain(static_cast<SDL_IOStream*>(
+              SDL_GetPointerProperty(SDL_GetProcessProperties(sdl(_process)), SDL_PROP_PROCESS_STDERR_POINTER, nullptr)),
+          _errors);
 }
 
 void Process::pump() {
@@ -193,40 +200,54 @@ void Process::pump() {
     running();
 }
 
-std::string Process::read() {
+std::string Process::take_all(Received& received) {
     pump();
-    std::string rest = _output.substr(_output_read);
-    _output.clear();
-    _output_read = 0;
+    std::string rest = received.text.substr(received.taken);
+    received = {};
     return rest;
 }
 
-std::optional<std::string> Process::read_line() {
-    std::size_t end = _output.find('\n', _output_read);
+std::optional<std::string> Process::take_line(Received& received) {
+    std::size_t end = received.text.find('\n', received.taken);
     if (end == std::string::npos) {
         pump(); // only when no whole line is waiting
-        end = _output.find('\n', _output_read);
+        end = received.text.find('\n', received.taken);
     }
     if (end == std::string::npos) {
-        if (_exit_code && _output_read < _output.size()) {
-            return read(); // its last words, unfinished
+        if (_exit_code && received.taken < received.text.size()) {
+            return take_all(received); // its last words, unfinished
         }
         return std::nullopt;
     }
-    std::string line = _output.substr(_output_read, end - _output_read);
-    _output_read = end + 1;
+    std::string line = received.text.substr(received.taken, end - received.taken);
+    received.taken = end + 1;
     // Drop what was read now and then, not per line (that would be quadratic).
-    if (_output_read == _output.size()) {
-        _output.clear();
-        _output_read = 0;
-    } else if (_output_read > 65536) {
-        _output.erase(0, _output_read);
-        _output_read = 0;
+    if (received.taken == received.text.size()) {
+        received = {};
+    } else if (received.taken > 65536) {
+        received.text.erase(0, received.taken);
+        received.taken = 0;
     }
     if (!line.empty() && line.back() == '\r') {
         line.pop_back();
     }
     return line;
+}
+
+std::string Process::read() {
+    return take_all(_output);
+}
+
+std::optional<std::string> Process::read_line() {
+    return take_line(_output);
+}
+
+std::string Process::read_errors() {
+    return take_all(_errors);
+}
+
+std::optional<std::string> Process::read_error_line() {
+    return take_line(_errors);
 }
 
 bool Process::wait(std::chrono::milliseconds timeout) {
@@ -247,6 +268,38 @@ void Process::kill(bool force) {
     if (_process && !_exit_code) {
         SDL_KillProcess(sdl(_process), force);
     }
+}
+
+bool launch(const std::vector<std::string>& args, const std::filesystem::path& working_directory, std::string* error) {
+    if (args.empty()) {
+        if (error) {
+            *error = "no program to start";
+        }
+        return false;
+    }
+    std::vector<const char*> argv;
+    for (const std::string& arg : args) {
+        argv.push_back(arg.c_str());
+    }
+    argv.push_back(nullptr);
+    const std::u8string directory = working_directory.u8string();
+    const std::string directory_text{directory.begin(), directory.end()};
+    const SDL_PropertiesID props = SDL_CreateProperties();
+    SDL_SetPointerProperty(props, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, const_cast<char**>(argv.data()));
+    if (!directory_text.empty()) {
+        SDL_SetStringProperty(props, SDL_PROP_PROCESS_CREATE_WORKING_DIRECTORY_STRING, directory_text.c_str());
+    }
+    SDL_SetBooleanProperty(props, SDL_PROP_PROCESS_CREATE_BACKGROUND_BOOLEAN, true);
+    SDL_Process* process = SDL_CreateProcessWithProperties(props);
+    SDL_DestroyProperties(props);
+    if (!process) {
+        if (error) {
+            *error = std::string("could not start ") + args.front() + ": " + SDL_GetError();
+        }
+        return false;
+    }
+    SDL_DestroyProcess(process); // forgets it; it runs on
+    return true;
 }
 
 } // namespace kin

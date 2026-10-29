@@ -1,7 +1,11 @@
 #include <kin/ecs/physics.hpp>
+#include <kin/scene/scene_asset.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -315,6 +319,139 @@ void test_component_removal_cleans_up_physics_objects() {
     (void)bridge;
 }
 
+const kin::ComponentFieldSnapshot* snapshot_field(const kin::ComponentSnapshot& snapshot, std::string_view name) {
+    const auto found = std::ranges::find(snapshot.fields, name, &kin::ComponentFieldSnapshot::name);
+    return found == snapshot.fields.end() ? nullptr : &*found;
+}
+
+void test_described_components_make_bodies() {
+    // Scenes and tools set a body, and its first collider, by their fields.
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::register_physics_components(world);
+    kin::PhysicsWorld physics({.gravity = {0.0f, 9.8f * 32.0f}, .units_per_meter = 32.0f});
+    kin::EcsPhysicsBridge bridge{world, physics};
+    kin::EcsComponentRegistry& components = world.components();
+
+    const kin::ComponentDescriptor* described = components.find("PhysicsBodyComponent");
+    assert(described && !described->fields.empty() && described->fields[0].name == "type");
+    assert((described->fields[0].choices == std::vector<std::string>{"static", "dynamic", "kinematic"}));
+    assert(components.find("PhysicsColliderComponent") && components.find("PhysicsVelocity"));
+    assert(components.find("PhysicsContactQueue") && components.find("PhysicsOverlapSet"));
+
+    kin::EcsEntity crate = world.entity("crate").set(kin::Transform2D{.pos = {100.0f, 50.0f}});
+    assert(components.add(crate, "PhysicsBodyComponent"));
+    assert(components.patch_field(crate, "PhysicsBodyComponent", "type", std::string("dynamic")));
+    assert(!components.patch_field(crate, "PhysicsBodyComponent", "type", std::string("wobbly")));
+    assert(components.patch_field(crate, "PhysicsBodyComponent", "angular_damping", 0.5f));
+    assert(components.patch_field(crate, "PhysicsBodyComponent", "angular_velocity", 90.0f)); // degrees a second
+    const kin::PhysicsBodyComponent* body = crate.get<kin::PhysicsBodyComponent>();
+    assert(body->def.type == kin::PhysicsBodyType::Dynamic && body->def.angular_damping == 0.5f);
+    assert(near(body->def.angular_velocity, 1.5707964f));
+
+    assert(components.add(crate, "PhysicsColliderComponent"));
+    assert(crate.get<kin::PhysicsColliderComponent>()->colliders.empty()); // none until a field is set
+    assert(components.patch_field(crate, "PhysicsColliderComponent", "half_extents", kin::Vec2f{16.0f, 8.0f}));
+    assert(components.patch_field(crate, "PhysicsColliderComponent", "restitution", 0.5f));
+    assert(!components.patch_field(crate, "PhysicsColliderComponent", "mask_bits", kin::u32{0x10000}));
+    assert(!components.patch_field(crate, "PhysicsColliderComponent", "shape", std::string("triangle")));
+    const kin::PhysicsColliderComponent* colliders = crate.get<kin::PhysicsColliderComponent>();
+    assert(colliders->colliders.size() == 1);
+    assert((colliders->colliders[0].def.shape.half_extents == kin::Vec2f{16.0f, 8.0f}));
+    assert(colliders->colliders[0].def.restitution == 0.5f);
+
+    const std::optional<kin::ComponentSnapshot> read = components.snapshot(crate, "PhysicsBodyComponent");
+    assert(read);
+    const kin::ComponentFieldSnapshot* type = snapshot_field(*read, "type");
+    assert(type && std::get<std::string>(type->value) == "dynamic");
+    const kin::ComponentFieldSnapshot* turning = snapshot_field(*read, "angular_velocity");
+    assert(turning && near(std::get<kin::f32>(turning->value), 90.0f, 0.001f));
+
+    // Made where the entity is, and it falls.
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    assert(physics.is_alive(crate.get<kin::PhysicsBodyComponent>()->body));
+    std::vector<kin::PhysicsDebugShape> shapes = physics.debug_shapes();
+    assert(shapes.size() == 1 && shapes[0].type == kin::PhysicsDebugShapeType::Polygon);
+    for (int i = 0; i < 30; ++i) {
+        kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    }
+    assert(crate.get<kin::Transform2D>()->pos.y > 60.0f);
+
+    // A collider changed: its fixture is made again from it, the old one goes.
+    assert(components.patch_field(crate, "PhysicsColliderComponent", "shape", std::string("circle")));
+    assert(components.patch_field(crate, "PhysicsColliderComponent", "radius", 12.0f));
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    shapes = physics.debug_shapes();
+    assert(shapes.size() == 1 && shapes[0].type == kin::PhysicsDebugShapeType::Circle && near(shapes[0].radius, 12.0f, 0.01f));
+    (void)bridge;
+}
+
+void test_prefab_instances_get_their_own_bodies() {
+    // Described components are inherited by a prefab's instances; each
+    // instance's body, fixtures and contacts are made its own.
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::register_physics_components(world);
+    kin::PhysicsWorld physics({.gravity = {0.0f, 10.0f}});
+    kin::EcsPhysicsBridge bridge{world, physics};
+
+    flecs::entity prefab = world.raw().prefab("ball");
+    prefab.set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic}});
+    prefab.set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(1.0f))}});
+    prefab.add<kin::PhysicsContactQueue>();
+    flecs::entity a = world.raw().entity().is_a(prefab).set(kin::Transform2D{.pos = {0.0f, 0.0f}});
+    flecs::entity b = world.raw().entity().is_a(prefab).set(kin::Transform2D{.pos = {10.0f, 0.0f}});
+    assert(!a.owns<kin::PhysicsBodyComponent>()); // inherited, as described components are
+
+    for (int i = 0; i < 30; ++i) {
+        kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    }
+    for (flecs::entity instance : {a, b}) {
+        assert(instance.owns<kin::PhysicsBodyComponent>() && instance.owns<kin::PhysicsColliderComponent>());
+        assert(instance.owns<kin::PhysicsContactQueue>());
+        assert(physics.is_alive(instance.get<kin::PhysicsBodyComponent>()->body));
+        assert(instance.get<kin::Transform2D>()->pos.y > 0.5f);
+    }
+    assert(!(a.get<kin::PhysicsBodyComponent>()->body == b.get<kin::PhysicsBodyComponent>()->body));
+    assert(near(a.get<kin::Transform2D>()->pos.x, 0.0f) && near(b.get<kin::Transform2D>()->pos.x, 10.0f));
+    assert(physics.debug_shapes().size() == 2);
+    assert(!physics.is_alive(prefab.get<kin::PhysicsBodyComponent>()->body)); // the prefab stays a template
+
+    b.destruct();
+    assert(physics.debug_shapes().size() == 1);
+    (void)bridge;
+}
+
+void test_bridge_takes_its_observers_with_it() {
+    // A bridge moved works on; one gone leaves nothing behind to reach the
+    // physics world (which may go before the ECS world does).
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics;
+    const auto body_entity = [&](const char* name) {
+        return world.entity(name)
+            .set(kin::Transform2D{})
+            .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic}})
+            .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(1.0f))}});
+    };
+    kin::EcsEntity kept = body_entity("kept");
+    {
+        kin::EcsPhysicsBridge first{world, physics};
+        kin::EcsPhysicsBridge bridge = std::move(first);
+        kin::EcsEntity gone = body_entity("gone");
+        kin::sync_physics_bodies(world, physics);
+        const kin::PhysicsBody gone_body = gone.get<kin::PhysicsBodyComponent>()->body;
+        assert(physics.is_alive(gone_body));
+        gone.destroy();
+        assert(!physics.is_alive(gone_body));
+    }
+    const kin::PhysicsBody body = kept.get<kin::PhysicsBodyComponent>()->body;
+    assert(physics.is_alive(body));
+    kept.remove<kin::PhysicsBodyComponent>();
+    assert(physics.is_alive(body)); // no bridge, so nothing destroyed it
+}
+
 } // namespace
 
 int main() {
@@ -326,5 +463,8 @@ int main() {
     test_contact_and_overlap_collection();
     test_entity_removal_destroys_physics_body();
     test_component_removal_cleans_up_physics_objects();
+    test_described_components_make_bodies();
+    test_prefab_instances_get_their_own_bodies();
+    test_bridge_takes_its_observers_with_it();
     return 0;
 }

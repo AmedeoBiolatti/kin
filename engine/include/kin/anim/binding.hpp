@@ -1,10 +1,12 @@
 #pragma once
 
 #include <kin/anim/value.hpp>
+#include <kin/ecs/component.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -80,6 +82,14 @@ private:
 };
 
 void register_builtin_properties(PropertyRegistry& registry, EcsWorld& world);
+// Every field of the world's described native components that holds a number,
+// a pair, a colour, a whole number, a check or text (and is not read-only), as
+// "Component.field" ("Transform2D.pos", "TextRenderer.color"): what scene
+// files and editors animate.
+void register_described_properties(PropertyRegistry& registry, const EcsWorld& world);
+// The kind of value a property of that kind animates; none for kinds that
+// are not animated (an asset, an entity, a 64-bit number).
+std::optional<AnimValueKind> anim_value_kind_of(ComponentFieldKind kind);
 bool set_sprite_renderer_sprite(EcsEntity entity,
                                 const SpriteCatalog* catalog,
                                 std::string_view sprite_id,

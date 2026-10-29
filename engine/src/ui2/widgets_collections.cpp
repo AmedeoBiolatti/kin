@@ -412,10 +412,16 @@ Vec2f measure(const TreeView& widget) {
     };
 }
 
+// AssetBrowser as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, AssetBrowser& widget) {
+    widget.style = themed_widget_style(widget.style, theme.list_item);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, AssetBrowser& widget) {
     const auto _draw_scope = ctx.draw_scope("AssetBrowser", widget.bounds, ctx.theme().panel_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const AssetBrowserLayoutMetrics metrics = asset_browser_layout_metrics(widget);
     widget.activated = -1;
     widget.activated_id.clear();
@@ -538,10 +544,16 @@ void run(Context& ctx, AssetBrowser& widget) {
     collection_outline(ctx, widget.bounds, ctx.theme().panel_surface);
 }
 
+// StatusBar as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, StatusBar& widget) {
+    widget.style = themed_widget_style(widget.style, theme.panel);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, StatusBar& widget) {
     const auto _draw_scope = ctx.draw_scope("StatusBar", widget.bounds, ctx.theme().subtle_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().panel);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const StatusBarLayoutMetrics metrics = status_bar_layout_metrics(widget);
     widget.clicked_id.clear();
     SurfaceStyle status_surface = ctx.theme().subtle_surface;
@@ -612,10 +624,16 @@ void run(Context& ctx, StatusBar& widget) {
     ctx.pop_clip();
 }
 
+// LogConsole as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, LogConsole& widget) {
+    widget.style = themed_widget_style(widget.style, theme.list_item);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, LogConsole& widget) {
     const auto _draw_scope = ctx.draw_scope("LogConsole", widget.bounds, ctx.theme().panel_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const LogConsoleLayoutMetrics metrics = log_console_layout_metrics(widget);
     widget.activated = -1;
     widget.activated_id.clear();
@@ -749,13 +767,19 @@ void run(Context& ctx, LogConsole& widget) {
     collection_outline(ctx, widget.bounds, ctx.theme().panel_surface);
 }
 
+// IconGrid as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, IconGrid& widget) {
+    widget.style = themed_widget_style(widget.style, theme.list_item);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, IconGrid& widget) {
     const auto _draw_scope = ctx.draw_scope("IconGrid", widget.bounds, ctx.theme().panel_surface.radius);
     // Item collections fall back to list_item (a tinted, borderless selection),
     // not button — button.selected carries an opaque accent border that the
     // inside-border fill technique would bleed into a solid accent cell.
-    widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     widget.clicked_index = -1;
     widget.activated = -1;
     widget.drag_source = -1;
@@ -810,7 +834,8 @@ void run(Context& ctx, IconGrid& widget) {
     }
     widget.offset = scroll.offset.y;
 
-    const Context::NavResult nav = ctx.nav_index(count, widget.selected, columns, widget.wrap);
+    const bool keys = widget.enabled && takes_keys(ctx, widget.id, widget.keys_without_focus);
+    const Context::NavResult nav = keys ? ctx.nav_index(count, widget.selected, columns, widget.wrap) : Context::NavResult{.index = widget.selected};
     if (widget.enabled && nav.changed) {
         widget.selected = nav.index;
     }
@@ -867,6 +892,7 @@ void run(Context& ctx, IconGrid& widget) {
             widget.clicked_index = i;
             widget.activated = i;
         }
+        focus_on_press(ctx, widget.id, it.pressed);
 
         const bool selected_cell = i == widget.selected || i == widget.drop_target;
         const bool enabled_cell = item.enabled && !item.locked;
@@ -889,11 +915,17 @@ void run(Context& ctx, IconGrid& widget) {
     widget.changed = widget.selected != previous;
 }
 
+// ListView as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, ListView& widget) {
+    widget.style = themed_widget_style(widget.style, theme.list_item);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, ListView& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
     const auto _draw_scope = ctx.draw_scope("ListView", widget.bounds, ctx.theme().panel_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const ListViewLayoutMetrics metrics = list_view_layout_metrics(widget);
     widget.changed = false;
     widget.activated = false;
@@ -916,15 +948,18 @@ void run(Context& ctx, ListView& widget) {
     widget.selected = std::clamp(widget.selected, 0, count - 1);
     const i32 previous = widget.selected;
     const f32 step = metrics.row_height + widget.row_spacing;
-    if (widget.enabled && ctx.action_pressed("menu_up")) {
+    const bool keys = widget.enabled && takes_keys(ctx, widget.id, widget.keys_without_focus);
+    if (keys && ctx.action_pressed("menu_up")) {
         widget.selected = widget.selected <= 0 ? (widget.wrap ? count - 1 : 0) : widget.selected - 1;
     }
-    if (widget.enabled && ctx.action_pressed("menu_down")) {
+    if (keys && ctx.action_pressed("menu_down")) {
         widget.selected = widget.selected + 1 >= count ? (widget.wrap ? 0 : count - 1) : widget.selected + 1;
     }
-    if (widget.enabled && ctx.action_pressed("accept")) {
+    if (keys && ctx.action_pressed("accept")) {
         widget.activated = true;
     }
+    const bool moved_by_keys = widget.selected != previous;
+    bool pressed = false;
 
     const SurfaceStyle panel_surface = ctx.theme().panel_surface;
     const CollectionFrame frame = collection_background(ctx, widget.bounds, panel_surface);
@@ -966,6 +1001,7 @@ void run(Context& ctx, ListView& widget) {
                               widget.dropped_target = i;
                           }
                       }
+                      pressed = pressed || it.pressed;
                       if (it.clicked && !drag.dragging && !drag.released) {
                           widget.selected = i;
                           widget.activated = true;
@@ -979,22 +1015,32 @@ void run(Context& ctx, ListView& widget) {
                                widget.text_style);
                   });
 
-    // Keep the selected row visible (applies next frame, matching the prior behavior).
-    ScrollState scroll{.offset = {0.0f, widget.offset},
-                       .content_size = {frame.content.w, static_cast<f32>(count) * step},
-                       .viewport_size = {frame.content.w, frame.content.h}};
-    ensure_visible(scroll, {0.0f, static_cast<f32>(widget.selected) * step, frame.content.w, metrics.row_height});
-    widget.offset = scroll.offset.y;
+    focus_on_press(ctx, widget.id, pressed);
+    // The row the keys moved to kept in view (applies next frame); the wheel
+    // scrolls freely.
+    if (moved_by_keys) {
+        ScrollState scroll{.offset = {0.0f, widget.offset},
+                           .content_size = {frame.content.w, static_cast<f32>(count) * step},
+                           .viewport_size = {frame.content.w, frame.content.h}};
+        ensure_visible(scroll, {0.0f, static_cast<f32>(widget.selected) * step, frame.content.w, metrics.row_height});
+        widget.offset = scroll.offset.y;
+    }
 
     collection_outline(ctx, widget.bounds, panel_surface);
 
     widget.changed = widget.selected != previous;
 }
 
+// Table as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, Table& widget) {
+    widget.style = themed_widget_style(widget.style, theme.list_item);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, Table& widget) {
     const auto _draw_scope = ctx.draw_scope("Table", widget.bounds, ctx.theme().panel_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const TableLayoutMetrics metrics = table_layout_metrics(widget);
     const i32 row_count = static_cast<i32>(widget.rows.size());
     const f32 header_h = metrics.header_height;
@@ -1067,10 +1113,16 @@ void run(Context& ctx, Table& widget) {
     collection_outline(ctx, widget.bounds, panel_surface);
 }
 
+// TreeView as the theme makes it look: its styles merged with the theme's.
+void theme_styles(const Theme& theme, TreeView& widget) {
+    widget.style = themed_widget_style(widget.style, theme.list_item);
+    widget.text_style = themed_text_style(widget.text_style, theme.body_text);
+}
+
 void run(Context& ctx, TreeView& widget) {
     const auto _draw_scope = ctx.draw_scope("TreeView", widget.bounds, ctx.theme().panel_surface.radius);
-    widget.style = themed_widget_style(widget.style, ctx.theme().list_item);
-    widget.text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
+    const KeepStyles keep(widget); // the caller's styles, back when it is done
+    theme_styles(ctx.theme(), widget);
     const TreeViewLayoutMetrics metrics = tree_view_layout_metrics(widget);
     widget.changed = false;
     widget.activated = -1;
@@ -1091,13 +1143,14 @@ void run(Context& ctx, TreeView& widget) {
     widget.selected = std::clamp(widget.selected, 0, count - 1);
     const i32 previous = widget.selected;
     const f32 step = metrics.row_height + widget.row_spacing;
-    if (widget.enabled && ctx.action_pressed("menu_up")) {
+    const bool keys = widget.enabled && takes_keys(ctx, widget.id, widget.keys_without_focus);
+    if (keys && ctx.action_pressed("menu_up")) {
         widget.selected = widget.selected <= 0 ? (widget.wrap ? count - 1 : 0) : widget.selected - 1;
     }
-    if (widget.enabled && ctx.action_pressed("menu_down")) {
+    if (keys && ctx.action_pressed("menu_down")) {
         widget.selected = widget.selected + 1 >= count ? (widget.wrap ? 0 : count - 1) : widget.selected + 1;
     }
-    if (widget.enabled && ctx.action_pressed("accept")) {
+    if (keys && ctx.action_pressed("accept")) {
         widget.activated = widget.selected;
     }
 
@@ -1142,6 +1195,7 @@ void run(Context& ctx, TreeView& widget) {
                               widget.dropped_target = i;
                           }
                       }
+                      focus_on_press(ctx, widget.id, it.pressed);
                       const f32 indent = static_cast<f32>(std::max(0, item.depth)) * metrics.indent;
                       if (it.clicked && !drag.dragging && !drag.released) {
                           widget.selected = i;

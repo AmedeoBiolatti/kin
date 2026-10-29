@@ -1,11 +1,17 @@
 #include <kin/ecs/ecs_scene.hpp>
 
+#include <kin/assets/content.hpp>
+#include <kin/ecs/camera.hpp>
+#include <kin/ecs/lighting.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/runtime/debug_options.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <string>
+#include <utility>
 
 namespace kin {
 namespace {
@@ -57,9 +63,44 @@ WorldRenderState& EcsScene::render_state() {
     return *_render_state;
 }
 
+void EcsScene::add_asset_binder(std::string name, Assets2D::Binder binder) {
+    if (_assets) {
+        _assets->add_binder(name, binder);
+    }
+    const auto found = std::ranges::find(_asset_binders, name, &std::pair<std::string, Assets2D::Binder>::first);
+    if (found != _asset_binders.end()) {
+        found->second = std::move(binder);
+    } else {
+        _asset_binders.emplace_back(std::move(name), std::move(binder));
+    }
+}
+
+void EcsScene::bind_assets(SceneContext& ctx) {
+    if (!_assets) {
+        std::filesystem::path root = _render_config.asset_root;
+        if (root.empty()) {
+            root = content_root();
+        }
+        _assets = std::make_unique<Assets2D>(ctx.renderer, root.empty() ? std::filesystem::path(".") : root);
+        for (const auto& [name, binder] : _asset_binders) {
+            _assets->add_binder(name, binder);
+        }
+    }
+    if (_render_config.asset_check_frames > 0 && ++_asset_frames >= _render_config.asset_check_frames) {
+        _asset_frames = 0;
+        _assets->reload_changed();
+    }
+    if (_assets->bind(ecs())) {
+        _static_render_cache.mark_dirty("assets");
+    }
+}
+
 void EcsScene::render(SceneContext& ctx) {
     if (!_render_config.enabled) {
         return;
+    }
+    if (_render_config.assets) {
+        bind_assets(ctx);
     }
 
     RuntimeDebugOptions* debug = ctx.debug_options;
@@ -71,13 +112,44 @@ void EcsScene::render(SceneContext& ctx) {
 
     ctx.renderer.clear(_render_config.clear_color);
 
+    if (_render_config.scene_lighting) {
+        // The colour output a ColorGrade says, while there is one.
+        if (std::optional<ColorOutput> output = scene_color_output(ecs())) {
+            ctx.renderer.set_color_output(std::move(*output));
+            _graded = true;
+        } else if (std::exchange(_graded, false)) {
+            ctx.renderer.set_color_output({});
+        }
+    }
+
+    Vec2f screen = _render_config.view_size;
+    if (screen.x <= 0.0f || screen.y <= 0.0f) {
+        const Vec2i points = ctx.window.size();
+        screen = {static_cast<f32>(points.x), static_cast<f32>(points.y)};
+    }
     Camera2D camera;
     const Camera2D* camera_ptr = nullptr;
     if (_render_config.camera_callback) {
         DebugStepTimer timer{timing_debug, "render.scene.camera"};
         camera = _render_config.camera_callback(ecs(), ctx);
         camera_ptr = &camera;
+    } else if (_render_config.scene_cameras) {
+        DebugStepTimer timer{timing_debug, "render.scene.camera"};
+        if (std::optional<Camera2D> found = scene_camera(ecs(), screen)) {
+            camera = *found;
+            camera_ptr = &camera;
+        }
     }
+
+    // Lit: the world (and its effects) drawn first, then lit, then the UI layer and above.
+    const bool lit = _render_config.scene_lighting && scene_lighting(ecs()) != nullptr;
+    constexpr u64 unlit_passes = render_pass_mask::ui | render_pass_mask::debug | render_pass_mask::editor_overlay;
+    const auto light_world = [&] {
+        DebugStepTimer timer{timing_debug, "render.scene.lighting"};
+        const Rectf area = camera_ptr ? Rectf{0.0f, 0.0f, camera_ptr->viewport.x, camera_ptr->viewport.y}
+                                      : Rectf{0.0f, 0.0f, screen.x, screen.y};
+        apply_scene_lighting(ctx.renderer, _lighting, ecs(), camera_ptr ? camera_ptr->view_transform() : Affine2{}, area);
+    };
 
     RenderProfile profile;
     RenderView view;
@@ -170,7 +242,13 @@ void EcsScene::render(SceneContext& ctx) {
         }
         {
             DebugStepTimer timer{timing_debug, "render.scene.flush_world"};
-            _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask);
+            if (lit) {
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask & ~unlit_passes);
+                light_world();
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask & unlit_passes);
+            } else {
+                _static_render_cache.flush_merged(ctx.renderer, _dynamic_render_queue, view, pass_mask);
+            }
         }
     } else {
         WorldRenderState& state = render_state();
@@ -204,7 +282,13 @@ void EcsScene::render(SceneContext& ctx) {
         }
         {
             DebugStepTimer timer{timing_debug, "render.scene.flush_world"};
-            _dynamic_render_queue.flush(ctx.renderer, view, pass_mask);
+            if (lit) {
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask & ~unlit_passes);
+                light_world();
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask & unlit_passes);
+            } else {
+                _dynamic_render_queue.flush(ctx.renderer, view, pass_mask);
+            }
         }
     }
     if (debug) {

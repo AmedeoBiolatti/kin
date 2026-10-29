@@ -21,8 +21,15 @@ enum class AudioEmitterEnd {
 // (which wins where an entity has both). update_audio_emitters starts it (when
 // auto_start), keeps it positioned, applies volume, pitch and paused each frame,
 // and stops it when the component or the entity goes away.
+//
+// What it plays: `cue` of the catalog update_audio_emitters is given, or the
+// one Assets2D binds from `asset`: a sound file of the game's content
+// ("audio/hum.ogg", played as it is: then `cue` is empty) or a .kinaudio
+// catalog (whose `cue` it plays).
 struct AudioEmitter {
     std::string cue;
+    ComponentAssetRef asset;
+    const AudioCatalog* catalog = nullptr; // bound from `asset`; else update_audio_emitters' one
     bool playing = false; // written by update_audio_emitters
     bool auto_start = true;
     f32 volume = 1.0f; // on top of the cue's
@@ -56,6 +63,8 @@ struct AudioOneShot {
 
 void update_audio_listeners(EcsWorld& world, AudioEngine& audio);
 void update_audio_emitters(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog);
+// The same for emitters whose catalogs are bound (AudioEmitter::catalog); the others stay silent.
+void update_audio_emitters(EcsWorld& world, AudioEngine& audio);
 void consume_audio_one_shots(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog);
 EventInterpreter make_audio_event_interpreter(AudioEngine& audio, const AudioCatalog& catalog);
 void play_animation_audio_events(EcsWorld& world, AudioEngine& audio, const AudioCatalog& catalog);

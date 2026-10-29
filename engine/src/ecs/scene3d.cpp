@@ -138,6 +138,7 @@ void register_physics3d_components(EcsWorld& world) {
                         return false;
                     return true;
                 })
+            .choices({"box", "sphere", "capsule", "cylinder"})
             .field("asset", &Collider3D::asset)
             .field("half_extents", &Collider3D::half_extents)
             .units("m")
@@ -168,6 +169,7 @@ void register_physics3d_components(EcsWorld& world) {
                         return false;
                     return true;
                 })
+            .choices({"static", "dynamic", "kinematic"})
             .field("mass", &RigidBody3D::mass)
             .units("kg")
             .field("density", &RigidBody3D::density)

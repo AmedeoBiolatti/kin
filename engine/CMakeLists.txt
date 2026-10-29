@@ -48,6 +48,7 @@ add_library(kin_engine STATIC
     src/core/profile.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
+    src/ecs/assets2d.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -56,6 +57,14 @@ add_library(kin_engine STATIC
     src/ecs/ecs_scene.cpp
     src/ecs/particles.cpp
     src/ecs/render.cpp
+    src/ecs/animator.cpp
+    src/ecs/camera.cpp
+    src/ecs/lighting.cpp
+    src/ecs/shader_effect.cpp
+    src/ecs/ui_screens.cpp
+    src/ecs/dialogue.cpp
+    src/ecs/sprite_animator.cpp
+    src/ecs/text.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
     src/ecs/ui2.cpp
@@ -84,6 +93,7 @@ add_library(kin_engine STATIC
     src/renderer/resource_graph.cpp
     src/renderer/graph_resources.cpp
     src/renderer/render_profile.cpp
+    src/renderer/material.cpp
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp
@@ -115,6 +125,12 @@ add_library(kin_engine STATIC
     src/ui2/menu_scene.cpp
     src/ui2/state.cpp
     src/ui2/context.cpp
+    src/ui2/compose.cpp
+    src/ui2/composed.cpp
+    src/ui2/value_field.cpp
+    src/ui2/drag_value.cpp
+    src/ui2/scale.cpp
+    src/ui2/charts.cpp
     src/ui2/skin_loader.cpp
     src/ui2/style_internal.cpp
     src/ui2/text_baked.cpp
@@ -122,6 +138,7 @@ add_library(kin_engine STATIC
     src/ui2/text_script.cpp
     src/ui2/theme.cpp
     src/ui2/theme_file.cpp
+    src/ui2/screen.cpp
     src/ui2/widget_internal.cpp
     src/ui2/widgets_core.cpp
     src/ui2/widgets_inputs.cpp
@@ -235,7 +252,8 @@ if(KIN_ENABLE_SCRIPTING)
     add_library(kin_scripting_scenes STATIC
         src/scripting/script_engine.cpp
         src/scripting/script_scene.cpp
-        src/scripting/script_runtime.cpp)
+        src/scripting/script_runtime.cpp
+        src/scripting/entity_scripts.cpp)
     if(KIN_ENABLE_AUDIO)
         target_sources(kin_scripting_scenes PRIVATE src/scripting/lua_audio.cpp)
     endif()

@@ -23,6 +23,10 @@ struct ProcessOptions {
     bool capture_output = true;
     // Its standard error joins the captured output. Off: it shares the app's.
     bool errors_to_output = false;
+    // Read its standard error apart from its output (read_errors(),
+    // read_error_line()), when it does not join the output: e.g. a child that
+    // answers on its output and logs on its error stream.
+    bool capture_errors = false;
     // Variables set for it (name, value), over the app's own environment.
     std::vector<std::pair<std::string, std::string>> environment;
 };
@@ -70,6 +74,9 @@ public:
     // arrived (pumping when none is waiting). After the child exits, a last
     // unfinished line comes out too.
     std::optional<std::string> read_line();
+    // The same for its standard error (ProcessOptions::capture_errors).
+    std::string read_errors();
+    std::optional<std::string> read_error_line();
 
     // Pumps until the child exits or `timeout` passes; true if it exited.
     bool wait(std::chrono::milliseconds timeout);
@@ -79,18 +86,32 @@ public:
     const std::string& error() const { return _error; }
 
 private:
+    // What arrived from one of the child's streams.
+    struct Received {
+        std::string text;
+        std::size_t taken = 0; // what read_line() has taken from text
+    };
+
     void flush_input();
     void read_output();
     void finish();
     void release();
+    std::string take_all(Received& received);
+    std::optional<std::string> take_line(Received& received);
 
     void* _process = nullptr; // SDL_Process
     std::string _to_write;
     bool _close_input = false;
-    std::string _output;
-    std::size_t _output_read = 0; // what read_line() has taken from _output
+    Received _output;
+    Received _errors;
     std::optional<i64> _exit_code;
     std::string _error;
 };
+
+// Starts a program and leaves it running on its own, after the app ends too:
+// an editor, a file manager. It reads and writes nothing of the app's. False if
+// it could not be started (with why in `error`, when given).
+bool launch(const std::vector<std::string>& args, const std::filesystem::path& working_directory = {},
+            std::string* error = nullptr);
 
 } // namespace kin

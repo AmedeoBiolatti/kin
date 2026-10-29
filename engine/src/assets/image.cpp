@@ -56,6 +56,41 @@ Image decode_image(std::span<const u8> bytes, std::string_view name) {
 #endif
 }
 
+Image rasterize_svg(std::string_view svg, Vec2i size, std::string_view name) {
+#if KIN_ENABLE_IMAGE_IO
+    if (size.x <= 0 || size.y <= 0) {
+        return {};
+    }
+    // Text without an <svg> element is refused here, as IMG_isSVG does for
+    // files: SDL_image's parse of one comes out empty, and it does not free it.
+    if (svg.find("<svg") == std::string_view::npos) {
+        KIN_LOG_ERROR_F("asset", "svg rasterize failed",
+                        (LogFields{{.name = "name", .value = std::string{name}}, {.name = "error", .value = "no <svg> element"}}));
+        return {};
+    }
+    SDL_IOStream* stream = SDL_IOFromConstMem(svg.data(), svg.size());
+    SDL_Surface* loaded = stream ? IMG_LoadSizedSVG_IO(stream, size.x, size.y) : nullptr;
+    if (stream) {
+        SDL_CloseIO(stream);
+    }
+    SDL_Surface* converted = loaded ? SDL_ConvertSurface(loaded, SDL_PIXELFORMAT_RGBA32) : nullptr;
+    if (loaded) {
+        SDL_DestroySurface(loaded);
+    }
+    if (!converted) {
+        KIN_LOG_ERROR_F("asset", "svg rasterize failed",
+                        (LogFields{{.name = "name", .value = std::string{name}}, {.name = "error", .value = SDL_GetError()}}));
+        return {};
+    }
+    return to_image(converted);
+#else
+    static_cast<void>(svg);
+    static_cast<void>(size);
+    static_cast<void>(name);
+    throw std::runtime_error("SVG rasterizing requires KIN_ENABLE_IMAGE_IO");
+#endif
+}
+
 Image load_image(const std::filesystem::path& path) {
 #if KIN_ENABLE_IMAGE_IO
     const std::string filename = path_string(path);

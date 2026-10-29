@@ -68,6 +68,11 @@ audio.play(catalog, {.cue = "shot", .position_3d = muzzle, .has_position_3d = tr
 audio.set_position_3d(handle, drone_position); // a sound that moves
 ```
 
+An `AudioEmitter` can name its sound by path in the game's content (`asset`:
+a sound file, or a `.kinaudio` catalog whose `cue` it plays), as a scene file
+writes it: `Assets2D` (and so an `EcsScene`) binds its `catalog`, and
+`update_audio_emitters(world, audio)` plays it from there (see [assets](assets.md)).
+
 The ECS bridge (`kin/ecs/audio.hpp`) does this for 3D entities by itself. An
 `AudioEmitter` or `AudioOneShot` on an entity with a `WorldTransform3D` sounds
 from it, at `offset_3d`: a point of the entity's own space, which moves and

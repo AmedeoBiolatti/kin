@@ -385,8 +385,13 @@ int main() {
     const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin-runtime-tests";
     std::filesystem::create_directories(dir);
     const std::filesystem::path info_path = dir / "game.kininfo";
-    assert(kin::save_game_info(info, info_path));
+    kin::GameInfo with_icon = info;
+    with_icon.icon = "images/icon.png";
+    assert(kin::save_game_info(with_icon, info_path));
     const kin::GameInfo loaded_info = kin::load_game_info(info_path);
+    assert(loaded_info.icon == "images/icon.png");
+    assert(kin::window_config(loaded_info, "content").icon == std::filesystem::path("content") / "images/icon.png");
+    assert(kin::window_config(loaded_info).icon.empty()); // no content root: no icon
     assert(loaded_info.id == "runtime-test");
     assert(loaded_info.title == "Runtime Test");
     assert(loaded_info.version == "0.1");

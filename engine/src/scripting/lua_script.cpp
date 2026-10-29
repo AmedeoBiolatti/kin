@@ -244,4 +244,16 @@ void LuaScript::rewatch() {
     }
 }
 
+bool check_lua_syntax(std::string_view code, std::string_view name, std::string& error) {
+    sol::state lua;
+    const sol::load_result loaded = lua.load(code, "=" + std::string(name)); // "=": named as it is, not [string "..."]
+    if (loaded.valid()) {
+        error.clear();
+        return true;
+    }
+    const sol::error why = loaded;
+    error = why.what();
+    return false;
+}
+
 } // namespace kin

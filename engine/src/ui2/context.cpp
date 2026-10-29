@@ -1,5 +1,7 @@
 #include <kin/ui2/context.hpp>
 
+#include <kin/platform/app.hpp>
+
 #include <kin/anim/value.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/post_blur.hpp>
@@ -7,6 +9,8 @@
 #include "mirror_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <iterator>
 #include <array>
 #include <cmath>
 #include <atomic>
@@ -300,7 +304,7 @@ SurfaceStyle resolve(const InteractiveSurfaceStyle& style, const Interaction& it
     } else if (it.hot) {
         out = style.hovered;
     }
-    if (enabled && it.focused) {
+    if (enabled && it.focused && !it.quiet_focus) {
         out.border = style.focused.border;
         out.border_width = std::max(out.border_width, style.focused.border_width);
         out.border_mode = style.focused.border_mode;
@@ -324,6 +328,23 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _renderer = &renderer;
     _dt = dt;
     _state.begin_frame();
+    _cursor = SystemCursor::Default;
+    _redraw_in = -1.0f;
+    _focus_trap = {};
+    _overlays.clear();
+    _wheel_takers.swap(_wheel_takers_next);
+    _wheel_takers_next.clear();
+    _now = _clock ? _clock() : std::chrono::duration<f64>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    _pixel_scale = renderer.content_scale();
+    _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
+                 input.mouse_frame_pressed(MouseButton::Middle);
+    // State not asked for all last frame belonged to something no longer built.
+    if (!_states.empty()) {
+        const u64 frame = _state.frame();
+        std::erase_if(_states, [frame](const auto& kv) {
+            return !kv.second.kept && kv.second.frame + 1 < frame;
+        });
+    }
     // GC stale surface-animation entries (widgets not drawn for a few frames).
     if (!_surface_anim.empty()) {
         const u64 frame = _state.frame();
@@ -331,9 +352,14 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
             return kv.second.last_frame + 4 < frame;
         });
     }
-    _nodes.clear();
+    clear_nodes();
     _stack.clear();
     _pending.clear();
+    _compose.clear();
+    _compose_ids.clear();
+    _scroll_ids.clear();
+    _splits_open.clear();
+    _list_heights.clear();
     _diagnostics.clear();
     _draw_scopes.clear();
     _clip_stack.clear();
@@ -349,7 +375,9 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _in_shadow = false;
     _debug_last_hue = 0.0f;
     _surface_fill_under = colors::black;
+    _wants_text_input_last = _wants_text_input;
     _wants_text_input = false;
+    _focus_order.clear();
     _text_input_area.reset();
     _text_input_cursor = 0;
     _root = {};
@@ -361,6 +389,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     if (!_input->mouse_held(MouseButton::Left) && !_drag.dragging) {
         _drag = {};
     }
+    dispatch_bindings();
 }
 
 SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& style, const Interaction& it,
@@ -393,6 +422,19 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
     current.opacity = lerp_f(current.opacity, target.opacity);
     found->second.last_frame = frame;
 
+    // Close enough to stop: colours within a step a channel (mixing rounds, and
+    // would otherwise creep forever), sizes within a hundredth.
+    const auto near = [](Color a, Color b) {
+        return std::abs(a.r - b.r) <= 1 && std::abs(a.g - b.g) <= 1 && std::abs(a.b - b.b) <= 1 && std::abs(a.a - b.a) <= 1;
+    };
+    if (near(current.fill, target.fill) && near(current.border, target.border) && near(current.glow_color, target.glow_color) &&
+        near(current.glass_tint, target.glass_tint) && std::abs(current.border_width - target.border_width) < 0.01f &&
+        std::abs(current.glow_size - target.glow_size) < 0.01f && std::abs(current.opacity - target.opacity) < 0.01f) {
+        current = target;
+    } else {
+        request_redraw(); // still on the way
+    }
+
     // Everything else (radius, fill_kind, gradient, shadow, skin, ...) snaps to target.
     SurfaceStyle out = target;
     out.fill = current.fill;
@@ -406,6 +448,7 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
 }
 
 void Context::end() {
+    draw_overlays(); // those asked after end_layout() (or without a layout)
     if (_drag.released_this_frame || (!_input || !_input->mouse_held(MouseButton::Left))) {
         _drag = {};
     }
@@ -431,6 +474,7 @@ void Context::end() {
         !_state.focused_this_frame() && !blocked_by_modal) {
         _state.clear_focused();
     }
+    finish_focus();
     // Frame invariant: every push must have a matching pop by end(). A leftover entry means a
     // forgotten pop_clip()/pop_draw_scope(), which silently mis-clips everything drawn after it.
     if (_debug.detect_invariants) {
@@ -544,20 +588,23 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
         }
     }
 
+    z += _region_z_base;
     const Vec2f p = pointer();
-    if (contains(bounds, p)) {
+    // Not where the clips it draws under hide it (a field scrolled out of its panel).
+    if (contains(bounds, p) && (_clip_stack.empty() || contains(_clip_stack.back(), screen_pointer()))) {
         _state.register_hit(id, z);
     }
 
     out.hot = _state.is_hot(id);
     out.focused = _state.is_focused(id);
+    out.quiet_focus = out.focused && !_state.focus_visible();
 
     const bool press = pointer_pressed(button);
     const bool release = pointer_released(button);
 
     if (press && out.hot && !_state.active()) {
         _state.set_active(id, button);
-        _state.set_focused(id);
+        _state.set_focused(id, false);
         // Claim the press so it does not persist past this frame (it survives 0-step
         // frames until read, but once a widget owns it, re-reading on later persisted
         // frames must not re-fire `pressed` — e.g. re-capturing a drag/grab origin).
@@ -663,6 +710,33 @@ bool Context::popup_open(Id id) const {
     return static_cast<bool>(id) && (_open_popup == id || _open_subpopup == id);
 }
 
+void Context::draw_overlays() {
+    // A box's drag: its text by the pointer.
+    if (_drag.dragging && _drag.label && !_drag.payload.text.empty()) {
+        const TooltipOptions look = tooltip_style();
+        const Vec2f size = measure_text(look.text_style.font, _drag.payload.text, look.text_style.scale);
+        const Rectf bounds{pointer().x + 12.0f, pointer().y + 6.0f, size.x + look.padding.left + look.padding.right,
+                           size.y + look.padding.top + look.padding.bottom};
+        fill_rect(bounds, look.fill);
+        outline_rect(bounds, look.border);
+        text(_drag.payload.text, {bounds.x + look.padding.left, bounds.y + look.padding.top}, look.text_style);
+    }
+    for (std::size_t i = 0; i < _overlays.size(); ++i) {
+        const PendingRuns::Run& run = _overlays[i];
+        run.call(run.closure, *this, {});
+    }
+    _overlays.clear();
+}
+
+void Context::open_popup_at(Id id, Vec2f point) {
+    open_popup(id);
+    _popup_point = point;
+}
+
+bool Context::popup_on_top(Id id) const {
+    return static_cast<bool>(id) && (_open_subpopup ? _open_subpopup == id : _open_popup == id);
+}
+
 bool Context::popup_hovered_or_open(Id id) const {
     // Popup bounds are kept on screen (a mirrored widget's popup is reflected).
     return popup_open(id) ||
@@ -717,9 +791,29 @@ void Context::end_popup() {
     }
 }
 
+Context::TooltipOptions Context::tooltip_style() const {
+    if (_tooltip_style) {
+        return *_tooltip_style;
+    }
+    TooltipOptions options;
+    options.text_style = _theme.body_text;
+    if (_theme.tooltip_surface.fill.a > 0) {
+        options.fill = _theme.tooltip_surface.fill;
+    }
+    if (_theme.tooltip_surface.border.a > 0) {
+        options.border = _theme.tooltip_surface.border;
+    }
+    return options;
+}
+
 Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view value, TooltipOptions options) {
+    return show_tooltip(id, _input && contains(anchor, pointer()), anchor, value, options);
+}
+
+Context::TooltipResult Context::show_tooltip(Id id, bool over, Rectf anchor, std::string_view value, const TooltipOptions& options) {
+    static_cast<void>(anchor);
     TooltipResult result;
-    if (!_input || value.empty() || !contains(anchor, pointer())) {
+    if (!_input || value.empty() || !over) {
         if (_tooltip_candidate == id) {
             _tooltip_candidate = {};
         }
@@ -728,16 +822,15 @@ Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view va
 
     if (_tooltip_candidate != id) {
         _tooltip_candidate = id;
-        _tooltip_first_frame = _state.frame();
-        _tooltip_warm = _tooltip_shown_frame && _state.frame() <= *_tooltip_shown_frame + options.warm_frames;
-        if (!_tooltip_warm) {
-            return result;
-        }
+        _tooltip_first_time = _now;
+        _tooltip_warm = _tooltip_shown_time && _now <= *_tooltip_shown_time + options.warm;
     }
-    if (!_tooltip_warm && _state.frame() < _tooltip_first_frame + options.delay_frames) {
+    if (!_tooltip_warm && _now < _tooltip_first_time + options.delay) {
+        // A frame when it is due, though the pointer rests.
+        request_redraw(static_cast<f32>(_tooltip_first_time + options.delay - _now));
         return result;
     }
-    _tooltip_shown_frame = _state.frame();
+    _tooltip_shown_time = _now;
 
     const Vec2f text_size = measure_text(options.text_style.font, value, options.text_style.scale);
     const Vec2f size{
@@ -751,9 +844,13 @@ Context::TooltipResult Context::tooltip(Id id, Rectf anchor, std::string_view va
     }
 
     region(id, bounds, options.z);
-    fill_rect(bounds, options.fill);
-    outline_rect(bounds, options.border);
-    text(value, {bounds.x + options.padding.left, bounds.y + options.padding.top}, options.text_style);
+    // Over everything: drawn once the frame is laid out.
+    overlay([bounds, fill = options.fill, border = options.border, words = std::string(value),
+             at = Vec2f{bounds.x + options.padding.left, bounds.y + options.padding.top}, style = options.text_style](Context& ctx) {
+        ctx.fill_rect(bounds, fill);
+        ctx.outline_rect(bounds, border);
+        ctx.text(words, at, style);
+    });
     result.visible = true;
     result.bounds = bounds;
     return result;
@@ -932,8 +1029,22 @@ bool Context::pointer_released(MouseButton button) const {
     return _input && _input->mouse_frame_released(button);
 }
 
+void Context::take_wheel(Id id) {
+    if (id && std::ranges::find(_wheel_takers_next, id.value) == _wheel_takers_next.end()) {
+        _wheel_takers_next.push_back(id.value);
+    }
+}
+
+bool Context::double_click(Id id) {
+    return _state.register_click(id, pointer(), _now);
+}
+
 f32 Context::mouse_wheel_y() const {
     return _input ? _input->frame_mouse_wheel_y() : 0.0f;
+}
+
+f32 Context::mouse_wheel_x() const {
+    return _input ? _input->frame_mouse_wheel_x() : 0.0f;
 }
 
 bool Context::key_pressed(Key key) const {
@@ -982,6 +1093,42 @@ void Context::apply_text_input(Window& window) const {
     if (_wants_text_input && _text_input_area) {
         window.set_text_input_area(*_text_input_area, _text_input_cursor);
     }
+}
+
+void Context::apply(App& app, Window& window) const {
+    apply_text_input(window);
+    window.set_cursor(_cursor);
+    if (_redraw_in >= 0.0f) {
+        app.request_redraw(_redraw_in);
+    }
+    // A window drawing its own title bar: what its drags_window() boxes are, in
+    // window coordinates, and edges to resize it by.
+    if (window.borderless() && _renderer) {
+        constexpr f32 resize_border = 5.0f;
+        const auto to_window = [&](Rectf r) {
+            const Vec2f a = _renderer->logical_to_window({r.x, r.y});
+            const Vec2f b = _renderer->logical_to_window({r.x + r.w, r.y + r.h});
+            return Rectf{a.x, a.y, b.x - a.x, b.y - a.y};
+        };
+        WindowChrome chrome{.drag = {}, .exclude = {}, .resize_border = resize_border};
+        std::ranges::transform(_chrome.drag, std::back_inserter(chrome.drag), to_window);
+        std::ranges::transform(_chrome.exclude, std::back_inserter(chrome.exclude), to_window);
+        window.set_chrome(std::move(chrome));
+    }
+}
+
+const WindowChrome& Context::window_chrome() const {
+    return _chrome;
+}
+
+void Context::keep_state(Id id, bool keep) {
+    if (const auto it = _states.find(id.value); it != _states.end()) {
+        it->second.kept = keep;
+    }
+}
+
+void Context::drop_state(Id id) {
+    _states.erase(id.value);
 }
 
 std::string Context::clipboard_text() const {
@@ -1154,6 +1301,7 @@ bool draw_op_contains(const Context::DrawOp& op, Vec2f p) {
     case Kind::Sprite:
     case Kind::Texture:
     case Kind::Text:
+    case Kind::Shape: // the box around it
         return contains(op.rect, p);
     case Kind::RoundedFill:
         return rounded_contains(op.rect, op.radius, p);
@@ -1209,6 +1357,7 @@ std::string_view draw_op_role(const Context::DrawOp& op) {
     case Kind::Texture: return "texture";
     case Kind::Gradient: return "gradient";
     case Kind::Line: return "line";
+    case Kind::Shape: return "shape";
     default: return "fill";
     }
 }
@@ -1398,7 +1547,30 @@ void Context::check_draw(std::string_view kind, Rectf rect, bool corner_exempt) 
     }
 }
 
+// Under a content scale, edges on whole pixels: a hairline is one pixel, not one
+// or two by where it falls, and nothing is smeared across a pixel's edge. Never
+// thinner than a pixel.
+Rectf Context::pixel_snap(Rectf rect) const {
+    const f32 s = _pixel_scale;
+    if (s <= 0.0f) {
+        return rect;
+    }
+    const auto edge = [s](f32 v) { return std::round(v * s) / s; };
+    const f32 x0 = edge(rect.x);
+    const f32 y0 = edge(rect.y);
+    f32 x1 = edge(rect.x + rect.w);
+    f32 y1 = edge(rect.y + rect.h);
+    if (rect.w > 0.0f && x1 <= x0) {
+        x1 = x0 + 1.0f / s;
+    }
+    if (rect.h > 0.0f && y1 <= y0) {
+        y1 = y0 + 1.0f / s;
+    }
+    return {x0, y0, x1 - x0, y1 - y0};
+}
+
 void Context::push_clip(Rectf bounds) {
+    bounds = pixel_snap(bounds);
     // Clips are untransformed: reflected here, innermost scope first.
     for (auto axis = _mirror_axes.rbegin(); axis != _mirror_axes.rend(); ++axis) {
         bounds.x = *axis - bounds.x - bounds.w;
@@ -1410,6 +1582,7 @@ void Context::push_clip(Rectf bounds) {
 }
 
 void Context::push_clip(Rectf bounds, std::array<f32, 4> corner_radii) {
+    bounds = pixel_snap(bounds);
     if (std::ranges::all_of(corner_radii, [](f32 r) { return r <= 0.0f; })) {
         push_clip(bounds);
         return;
@@ -1434,6 +1607,7 @@ void Context::pop_clip() {
 }
 
 void Context::fill_rect(Rectf rect, Color color) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0) {
         check_draw("fill_rect", rect);
         // Direct fills (e.g. zebra row stripes) get a stable wireframe color too. surface()'s
@@ -1450,6 +1624,7 @@ void Context::fill_rect(Rectf rect, Color color) {
 }
 
 void Context::outline_rect(Rectf rect, Color color) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0) {
         check_draw("outline_rect", rect);
         record_draw(DrawOp::Kind::Outline, rect, 0.0f, 1.0f, color);
@@ -1458,6 +1633,7 @@ void Context::outline_rect(Rectf rect, Color color) {
 }
 
 void Context::outline_rect(Rectf rect, Color color, f32 width) {
+    rect = pixel_snap(rect);
     if (!_renderer || color.a == 0 || width <= 0.0f) {
         return;
     }
@@ -1479,6 +1655,7 @@ void Context::outline_rect(Rectf rect, Color color, f32 width) {
 }
 
 void Context::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0) {
         check_draw("fill_rounded_rect", rect, true);
         if (_theme.debug_component_tint && !_in_shadow) {
@@ -1493,6 +1670,7 @@ void Context::fill_rounded_rect(Rectf rect, f32 radius, Color color) {
 }
 
 void Context::outline_rounded_rect(Rectf rect, f32 radius, Color color, f32 width) {
+    rect = pixel_snap(rect);
     if (_renderer && color.a > 0 && width > 0.0f) {
         check_draw("outline_rounded_rect", rect, true);
         record_draw(DrawOp::Kind::RoundedOutline, rect, radius, width, color);
@@ -1501,6 +1679,7 @@ void Context::outline_rounded_rect(Rectf rect, f32 radius, Color color, f32 widt
 }
 
 void Context::fill_gradient_rect(Rectf rect, const Gradient& gradient) {
+    rect = pixel_snap(rect);
     if (!_renderer || rect.w <= 0.0f || rect.h <= 0.0f || (gradient.start.a == 0 && gradient.end.a == 0)) {
         return;
     }
@@ -1750,7 +1929,8 @@ void Context::surface(Rectf rect, const SurfaceStyle& style) {
             if (!_in_shadow) {
                 _surface_fill_under = style.fill; // best-effort for contrast checks
             }
-            _renderer->draw_shader_surface(fill_rect_value, style.shader, style.shader_params);
+            static const ShaderParams no_params{};
+            _renderer->draw_shader_surface(fill_rect_value, style.shader, style.shader_params ? *style.shader_params : no_params);
         } else if (kind == SurfaceFill::Glass) {
             bool drew_glass = false;
             if (caps.render_targets && ensure_glass_backdrop()) {
@@ -1835,6 +2015,120 @@ void Context::line(Vec2f a, Vec2f b, Color color) {
     }
 }
 
+namespace {
+
+// The box around `points`, grown by `pad` on every side.
+Rectf points_box(std::span<const Vec2f> points, f32 pad) {
+    if (points.empty()) {
+        return {};
+    }
+    f32 x0 = points[0].x, y0 = points[0].y, x1 = x0, y1 = y0;
+    for (const Vec2f& p : points) {
+        x0 = std::min(x0, p.x);
+        y0 = std::min(y0, p.y);
+        x1 = std::max(x1, p.x);
+        y1 = std::max(y1, p.y);
+    }
+    return {x0 - pad, y0 - pad, x1 - x0 + pad * 2.0f, y1 - y0 + pad * 2.0f};
+}
+
+Rectf circle_box(Vec2f center, f32 radius) {
+    return {center.x - radius, center.y - radius, radius * 2.0f, radius * 2.0f};
+}
+
+// Half a stroke and the pixel of soft edge past it.
+f32 stroke_pad(f32 width) {
+    return width * 0.5f + 1.0f;
+}
+
+// A stroke's pad where its joins may be mitred (out to the miter limit).
+f32 stroke_pad(const StrokeStyle& style) {
+    return stroke_pad(style.join == LineJoin::Miter ? style.width * std::max(1.0f, style.miter_limit) : style.width);
+}
+
+} // namespace
+
+bool Context::shape_drawn(std::string_view kind, Rectf box, f32 width, Color color) {
+    if (!_renderer || color.a == 0) {
+        return false;
+    }
+    // The box says where a shape may paint, not where it does: only the
+    // rectangle is checked, not the draw scope's corners.
+    check_draw(kind, box, true);
+    record_draw(DrawOp::Kind::Shape, box, 0.0f, width, color);
+    return true;
+}
+
+void Context::line(Vec2f a, Vec2f b, Color color, f32 width, LineCap cap) {
+    const std::array<Vec2f, 2> ends{a, b};
+    if (width > 0.0f && shape_drawn("line", points_box(ends, stroke_pad(width)), width, color)) {
+        _renderer->draw_line(a, b, color, width, cap);
+    }
+}
+
+void Context::polyline(std::span<const Vec2f> points, Color color, StrokeStyle style) {
+    if (points.size() >= 2 && style.width > 0.0f &&
+        shape_drawn("polyline", points_box(points, stroke_pad(style)), style.width, color)) {
+        _renderer->draw_polyline(points, color, style);
+    }
+}
+
+void Context::fill_polygon(std::span<const Vec2f> points, Color color) {
+    if (points.size() >= 3 && shape_drawn("fill_polygon", points_box(points, 1.0f), 0.0f, color)) {
+        _renderer->fill_polygon(points, color);
+    }
+}
+
+void Context::fill_circle(Vec2f center, f32 radius, Color color) {
+    if (radius > 0.0f && shape_drawn("fill_circle", circle_box(center, radius + 1.0f), 0.0f, color)) {
+        _renderer->fill_circle(center, radius, color);
+    }
+}
+
+void Context::outline_circle(Vec2f center, f32 radius, Color color, f32 width) {
+    if (radius > 0.0f && width > 0.0f && shape_drawn("outline_circle", circle_box(center, radius + stroke_pad(width)), width, color)) {
+        _renderer->draw_circle(center, radius, color, width);
+    }
+}
+
+void Context::arc(Vec2f center, f32 radius, f32 start, f32 end, Color color, StrokeStyle style) {
+    if (radius > 0.0f && style.width > 0.0f &&
+        shape_drawn("arc", circle_box(center, radius + stroke_pad(style.width)), style.width, color)) {
+        _renderer->draw_arc(center, radius, start, end, color, style);
+    }
+}
+
+void Context::fill_pie(Vec2f center, f32 radius, f32 start, f32 end, Color color) {
+    if (radius > 0.0f && shape_drawn("fill_pie", circle_box(center, radius + 1.0f), 0.0f, color)) {
+        _renderer->fill_pie(center, radius, start, end, color);
+    }
+}
+
+void Context::fill_path(const Path& path, Color color, FillRule rule) {
+    if (!path.empty() && shape_drawn("fill_path", outset(path.bounds(), 1.0f), 0.0f, color)) {
+        _renderer->fill_path(path, color, rule);
+    }
+}
+
+void Context::stroke_path(const Path& path, Color color, StrokeStyle style) {
+    if (!path.empty() && style.width > 0.0f &&
+        shape_drawn("stroke_path", outset(path.bounds(), stroke_pad(style)), style.width, color)) {
+        _renderer->stroke_path(path, color, style);
+    }
+}
+
+void Context::shape(const ShapeMesh& mesh, const Affine2& transform, Color tint) {
+    if (mesh.empty()) {
+        return;
+    }
+    const Rectf b = mesh.bounds;
+    const std::array<Vec2f, 4> corners{transform.apply({b.x, b.y}), transform.apply({b.x + b.w, b.y}),
+                                       transform.apply({b.x + b.w, b.y + b.h}), transform.apply({b.x, b.y + b.h})};
+    if (shape_drawn("shape", points_box(corners, 0.0f), 0.0f, tint)) {
+        _renderer->draw_shape(mesh, transform, tint);
+    }
+}
+
 void Context::texture(const Texture& texture, Rectf bounds, Color tint) {
     if (_renderer && texture.valid() && bounds.w > 0.0f && bounds.h > 0.0f && tint.a > 0) {
         check_draw("texture", bounds);
@@ -1848,6 +2142,7 @@ void Context::texture(const Texture& texture, Rectf bounds, Color tint) {
 }
 
 void Context::sprite(const Sprite& sprite, Rectf bounds, Color tint, bool corner_exempt) {
+    bounds = pixel_snap(bounds);
     if (_renderer && sprite.valid() && bounds.w > 0.0f && bounds.h > 0.0f && tint.a > 0) {
         check_draw("sprite", bounds, corner_exempt);
         record_draw(DrawOp::Kind::Sprite, bounds, 0.0f, 0.0f, tint);
@@ -1924,20 +2219,81 @@ void Context::text(std::string_view value, Vec2f pos, const TextStyle& style) {
     }
 }
 
-i32 Context::add_node(LayoutStyle style, Vec2f intrinsic) {
+Context::PendingRuns& Context::PendingRuns::operator=(PendingRuns&& other) noexcept {
+    if (this != &other) {
+        clear();
+        _runs = std::move(other._runs);
+        _blocks = std::move(other._blocks);
+        _block_sizes = std::move(other._block_sizes);
+        _block = std::exchange(other._block, 0);
+        _used = std::exchange(other._used, 0);
+        other._runs.clear();
+        other._blocks.clear();
+        other._block_sizes.clear();
+    }
+    return *this;
+}
+
+void Context::PendingRuns::clear() {
+    for (const Run& run : _runs) {
+        if (run.destroy) {
+            run.destroy(run.closure);
+        }
+    }
+    _runs.clear();
+    _block = 0;
+    _used = 0;
+}
+
+void* Context::PendingRuns::allocate(std::size_t size, std::size_t align) {
+    constexpr std::size_t block_size = 64 * 1024;
+    for (;;) {
+        if (_block < _blocks.size()) {
+            const std::size_t at = (_used + align - 1) / align * align;
+            if (at + size <= _block_sizes[_block]) {
+                _used = at + size;
+                return _blocks[_block].get() + at;
+            }
+            ++_block; // the next block, from its start
+            _used = 0;
+            continue;
+        }
+        // A new block: most closures share one; a big one has its own.
+        const std::size_t bytes = std::max(block_size, size + alignof(std::max_align_t));
+        _blocks.push_back(std::make_unique<std::byte[]>(bytes));
+        _block_sizes.push_back(bytes);
+    }
+}
+
+i32 Context::add_node(const LayoutStyle& style, Vec2f intrinsic) {
     const i32 index = static_cast<i32>(_nodes.size());
     const i32 parent = _stack.empty() ? -1 : _stack.back();
 
-    LayoutNode node;
+    LayoutNode& node = _nodes.emplace_back();
     node.style = style;
     node.intrinsic = intrinsic;
     node.parent = parent;
-    _nodes.push_back(std::move(node));
 
     if (parent >= 0) {
-        _nodes[static_cast<std::size_t>(parent)].children.push_back(index);
+        std::vector<i32>& children = _nodes[static_cast<std::size_t>(parent)].children;
+        if (children.capacity() == 0 && !_child_lists.empty()) {
+            children = std::move(_child_lists.back()); // a list kept from last frame
+            _child_lists.pop_back();
+        }
+        children.push_back(index);
     }
     return index;
+}
+
+// Last frame's nodes gone; their child lists kept (emptied) for this frame's.
+void Context::clear_nodes() {
+    for (LayoutNode& node : _nodes) {
+        if (node.children.capacity() > 0) {
+            node.children.clear();
+            _child_lists.push_back(std::move(node.children));
+        }
+    }
+    _nodes.clear();
 }
 
 void Context::begin_container(LayoutStyle style) {
@@ -1946,9 +2302,14 @@ void Context::begin_container(LayoutStyle style) {
 }
 
 void Context::begin_layout(Rectf root) {
-    _nodes.clear();
+    clear_nodes();
     _stack.clear();
     _pending.clear();
+    _compose.clear();
+    _compose_ids.clear();
+    _scroll_ids.clear();
+    _splits_open.clear();
+    _list_heights.clear();
     _root = root;
 
     LayoutStyle style;
@@ -1991,6 +2352,23 @@ void Context::end_layout() {
     }
 
     solve(_nodes, 0, _root, _layout_scratch);
+    if (!_compose.empty()) {
+        layout_compose();
+    }
+
+    // Each node's enclosing box (a box's own): a widget taking focus is in it.
+    _node_owner.assign(_nodes.size(), Id{});
+    for (const ComposeNode& c : _compose) {
+        if (c.id && c.node >= 0 && c.node < static_cast<i32>(_nodes.size())) {
+            _node_owner[static_cast<std::size_t>(c.node)] = c.id;
+        }
+    }
+    for (std::size_t i = 0; i < _nodes.size(); ++i) {
+        const i32 parent = _nodes[i].parent;
+        if (!_node_owner[i] && parent >= 0) {
+            _node_owner[i] = _node_owner[static_cast<std::size_t>(parent)];
+        }
+    }
 
     // Map each node to its widget (at most one per node; widget() makes a dedicated node).
     std::vector<i32> node_pending(_nodes.size(), -1);
@@ -2014,11 +2392,21 @@ void Context::end_layout() {
     // Effective layer = max(own layer, parent's effective layer). A child can never draw
     // behind an ancestor, while higher-layer subtrees still float above lower ones globally.
     // Nodes are stored pre-order (parent index < child index), so one forward pass resolves it.
+    // A floating node lifts its subtree this far above whatever it hangs off.
+    constexpr i32 floating_layer = 1000;
     std::vector<i32> effective_layer(_nodes.size(), 0);
+    // And is hit above it: a widget in a floating box (a field in a dialog) is
+    // hit at the box's depth, not under it (see compose_z).
+    std::vector<i32> floats_around(_nodes.size(), 0);
     for (std::size_t i = 0; i < _nodes.size(); ++i) {
         const i32 parent = _nodes[i].parent;
         const i32 base = parent >= 0 ? effective_layer[static_cast<std::size_t>(parent)] : 0;
         effective_layer[i] = std::max(_nodes[i].style.layer, base);
+        floats_around[i] = parent >= 0 ? floats_around[static_cast<std::size_t>(parent)] : 0;
+        if (_nodes[i].style.floats) {
+            effective_layer[i] = base + floating_layer + std::max(0, _nodes[i].style.layer);
+            ++floats_around[i];
+        }
     }
 
     std::vector<DrawEntry> draws;
@@ -2034,18 +2422,106 @@ void Context::end_layout() {
         return lhs.layer < rhs.layer;
     });
 
+    // Clipping boxes (composition): each node draws under the clip of its nearest
+    // clipping ancestor. clips[] holds each clipping box (its rect, corner radius
+    // and the clip around it); visible[] the same intersected, for hit tests.
+    struct Clip {
+        Rectf rect{};
+        f32 radius = 0.0f;
+        i32 parent = -1;
+    };
+    std::vector<i32> clip_of;
+    std::vector<Clip> clips;
+    std::vector<Rectf> visible;
+    if (!_compose.empty()) {
+        std::vector<i32> clip_children(_nodes.size(), -1); // the clip a node's children draw under
+        std::vector<f32> radius(_nodes.size(), -1.0f);    // >= 0: the node clips
+        for (const ComposeNode& c : _compose) {
+            if (c.clip) {
+                radius[static_cast<std::size_t>(c.node)] = c.clip_radius;
+            }
+        }
+        clip_of.assign(_nodes.size(), -1);
+        for (std::size_t i = 0; i < _nodes.size(); ++i) {
+            const i32 parent = _nodes[i].parent;
+            // Floating boxes draw outside their ancestors' clips.
+            const i32 inherited =
+                parent >= 0 && !_nodes[i].style.floats ? clip_children[static_cast<std::size_t>(parent)] : -1;
+            clip_of[i] = inherited;
+            clip_children[i] = inherited;
+            if (radius[i] >= 0.0f) {
+                const Rectf own = _nodes[i].solved;
+                visible.push_back(inherited >= 0 ? rect_intersect(visible[static_cast<std::size_t>(inherited)], own) : own);
+                clips.push_back({own, radius[i], inherited});
+                clip_children[i] = static_cast<i32>(clips.size()) - 1;
+            }
+        }
+    }
+
+    // The clips open on the renderer, outermost first; moving to another clip pops
+    // back to the clip both share and pushes down to it.
+    std::vector<i32> open_clips;
+    std::vector<i32> path;
+    const auto use_clip = [&](i32 want) {
+        if ((open_clips.empty() ? -1 : open_clips.back()) == want) {
+            return;
+        }
+        path.clear();
+        for (i32 c = want; c >= 0; c = clips[static_cast<std::size_t>(c)].parent) {
+            path.push_back(c);
+        }
+        std::ranges::reverse(path);
+        std::size_t shared = 0;
+        while (shared < open_clips.size() && shared < path.size() && open_clips[shared] == path[shared]) {
+            ++shared;
+        }
+        while (open_clips.size() > shared) {
+            pop_clip();
+            open_clips.pop_back();
+        }
+        for (std::size_t k = shared; k < path.size(); ++k) {
+            const Clip& clip = clips[static_cast<std::size_t>(path[k])];
+            if (clip.radius > 0.0f) {
+                push_clip(clip.rect, {clip.radius, clip.radius, clip.radius, clip.radius});
+            } else {
+                push_clip(clip.rect);
+            }
+            open_clips.push_back(path[k]);
+        }
+    };
+
     for (const DrawEntry& entry : draws) {
         const LayoutNode& node = _nodes[static_cast<std::size_t>(entry.node)];
+        if (!clip_of.empty()) {
+            use_clip(clip_of[static_cast<std::size_t>(entry.node)]);
+        }
         if (!entry.widget) {
             draw_layout_surface(node.solved, node.style);
             continue;
         }
         const i32 p = node_pending[static_cast<std::size_t>(entry.node)];
-        if (p >= 0 && _pending[static_cast<std::size_t>(p)].finalize) {
-            _pending[static_cast<std::size_t>(p)].finalize(*this, node.solved);
+        if (p >= 0) {
+            const PendingRuns::Run& run = _pending[static_cast<std::size_t>(p)];
+            _region_z_base = floats_around[static_cast<std::size_t>(entry.node)] * floating_hit_z;
+            _running_node = entry.node;
+            run.call(run.closure, *this, node.solved);
+            _running_node = -1;
+            _region_z_base = 0;
         }
     }
+    if (!clip_of.empty()) {
+        use_clip(-1);
+    }
+    draw_overlays();
 
+    if (!_compose.empty()) {
+        record_compose(clip_of, visible);
+        _compose.clear();
+        _compose_ids.clear();
+        _scroll_ids.clear();
+        _splits_open.clear();
+        _list_heights.clear();
+    }
     _stack.clear();
 }
 

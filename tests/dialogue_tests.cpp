@@ -1,6 +1,10 @@
 #include <kin/assets/asset_manager.hpp>
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/dialogue/dialogue_graph.hpp>
+#include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/render.hpp>
+#include <kin/platform/input.hpp>
+#include <kin/scene/scene_asset.hpp>
 #include <kin/l10n/localization.hpp>
 
 #include <algorithm>
@@ -192,10 +196,105 @@ void test_localized_view() {
     assert(found("dialogue.fixture.start", "no many")); // French has a form for millions
 }
 
+// What is wrong with a dialogue; its places and speakers' colours kept.
+void test_problems_and_format() {
+    assert(dialogue_problems(make_document()).empty());
+    DialogueDocument broken = make_document();
+    broken.nodes[0].line.speaker_id = "nobody";
+    broken.nodes[1].choices[0].target = "nowhere";
+    broken.nodes.push_back({.id = "lost", .kind = DialogueNodeKind::End});
+    const std::vector<std::string> problems = dialogue_problems(broken);
+    const auto says = [&](std::string_view words) {
+        return std::ranges::any_of(problems, [&](const std::string& p) { return p.find(words) != std::string::npos; });
+    };
+    assert(says("'nobody'") && says("'nowhere'") && says("'lost' is never reached"));
+    // A node the game starts it at too: a start, not lost; written and read back.
+    DialogueDocument entered = make_document();
+    entered.nodes.push_back({.id = "lost", .kind = DialogueNodeKind::End});
+    entered.entries = {"lost"};
+    assert(dialogue_problems(entered).empty());
+    assert(parse_dialogue(dialogue_to_json(entered)).document->entries == std::vector<std::string>{"lost"});
+    entered.entries = {"gone"};
+    assert(!dialogue_problems(entered).empty()); // a start that is no node
+
+    DialogueDocument placed = make_document();
+    placed.nodes[0].place = Vec2f{120.0f, 40.0f};
+    placed.nodes[0].line.tags = {"happy"};
+    const DialogueLoadResult read = parse_dialogue(dialogue_to_json(placed));
+    assert(read.ok() && read.document->nodes[0].place && read.document->nodes[0].place->x == 120.0f);
+    assert(read.document->nodes[0].line.tags == std::vector<std::string>{"happy"});
+    assert(read.document->speakers[0].name_color == Color::rgb(128, 226, 160));
+    assert(dialogue_variable_text(dialogue_variable_from_text("3")) == "3" && std::get<bool>(dialogue_variable_from_text("true").value));
+}
+
+// A dialogue run in a scene: revealed letter by letter; the game's variables
+// kept between dialogues; what happened told; started by talking.
+void test_scene_dialogue() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_scene_dialogue_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    assert(save_dialogue(make_document(), dir / "guide.kindialogue"));
+    assert(dialogue_letter_count("[b]Hél[/b]lo") == 5 && dialogue_plain_text("a [[b] c") == "a [b] c");
+
+    SceneDialogue dialogue{dir};
+    dialogue.letters_per_second = 10.0f;
+    assert(!dialogue.start("missing.kindialogue") && dialogue.problems().contains("missing.kindialogue"));
+    assert(dialogue.start("guide.kindialogue") && dialogue.active());
+    assert(dialogue.view().text_markup == "Hello" && dialogue.letters() == 5 && dialogue.revealed() == 0);
+    dialogue.update(0.25f);
+    assert(dialogue.revealed() == 2 && dialogue.revealing());
+    dialogue.advance(); // the whole line first
+    assert(dialogue.revealed() == 5 && !dialogue.revealing() && dialogue.view().node_id == "start");
+    dialogue.advance();
+    // At the choice: the line before it shows with it, all of it.
+    assert(dialogue.view().node_id == "choice" && dialogue.view().text_markup == "Hello" && dialogue.view().choices.size() == 1);
+    assert(!dialogue.revealing());
+    assert(dialogue.choose(0) && !dialogue.active());
+    assert(std::get<f64>(dialogue.variable("score").value) == 2.0);
+    std::vector<std::string> told;
+    for (const DialogueEvent& e : dialogue.events()) told.push_back(e.id);
+    assert((told == std::vector<std::string>{"dialogue.started", "choice.accepted", "met.guide", "dialogue.ended"}));
+    dialogue.clear_events();
+
+    // Again: the variables kept (score 2, then 10 opens the locked choice).
+    assert(dialogue.start("guide.kindialogue", "choice"));
+    assert(dialogue.view().choices.size() == 1);
+    dialogue.set_variable("score", {.value = 10.0});
+    assert(dialogue.view().choices.size() == 2);
+    // Saved and back.
+    const DialogueStateSnapshot saved = dialogue.snapshot();
+    dialogue.stop();
+    assert(dialogue.restore("guide.kindialogue", saved) && dialogue.active() && dialogue.view().node_id == "choice");
+    dialogue.stop();
+
+    // Talking: the Talker near a TalkComponent, the talk action pressed.
+    kin::EcsWorld world;
+    register_builtin_editor_components(world);
+    kin::EcsEntity player = world.entity().set(Transform2D{.pos = {0.0f, 0.0f}}).set(Talker{});
+    kin::EcsEntity far = world.entity().set(Transform2D{.pos = {500.0f, 0.0f}});
+    far.set(TalkComponent{.asset = {.id = "guide.kindialogue"}, .start = {}, .radius = 64.0f, .prompt = "Talk", .enabled = true});
+    kin::EcsEntity guide = world.entity().set(Transform2D{.pos = {40.0f, 0.0f}});
+    guide.set(TalkComponent{.asset = {.id = "guide.kindialogue"}, .start = "choice", .radius = 64.0f, .prompt = "Talk", .enabled = true});
+    assert(talk_target(world) && talk_target(world)->id() == guide.id());
+    Input input;
+    input.bind("talk", Key::E);
+    update_talk(world, dialogue, input); // not pressed
+    assert(!dialogue.active());
+    input.set_key_pressed(Key::E);
+    update_talk(world, dialogue, input);
+    assert(dialogue.active() && dialogue.view().node_id == "choice" && dialogue.speaker_entity() == guide.id());
+    player.set(Transform2D{.pos = {1000.0f, 0.0f}});
+    assert(!talk_target(world));
+    fs::remove_all(dir);
+}
+
 int main() {
     test_localized_view();
     test_linear_choice_effects_and_events();
     test_snapshot_restore_and_invalid_target();
     test_json_roundtrip_asset_and_graph();
+    test_problems_and_format();
+    test_scene_dialogue();
     return 0;
 }

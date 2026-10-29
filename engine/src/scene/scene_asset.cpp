@@ -1,9 +1,27 @@
 #include <kin/scene/scene_asset.hpp>
 
+#include <kin/assets/asset_manager.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
+#include <kin/ecs/animator.hpp>
+#include <kin/ecs/camera.hpp>
+#include <kin/ecs/lighting.hpp>
+#include <kin/ecs/particles.hpp>
+#include <kin/ecs/tilemap.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/script.hpp>
+#include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/ui_screens.hpp>
+#include <kin/ecs/sprite_animator.hpp>
+#include <kin/ecs/text.hpp>
+#if KIN_ENABLE_AUDIO
+#include <kin/ecs/audio.hpp>
+#endif
+#if KIN_ENABLE_PHYSICS
+#include <kin/ecs/physics.hpp>
+#endif
 #if defined(KIN_EXPERIMENTAL_3D)
 #include <kin/ecs/scene3d.hpp>
 #endif
@@ -18,6 +36,21 @@
 
 namespace kin {
 namespace {
+
+// A renderer's `blend` field described: how it combines with what is under it.
+template <typename T>
+EcsComponentRegistry::NativeComponentBuilder<T>& describe_blend(EcsComponentRegistry::NativeComponentBuilder<T>& builder) {
+    return builder
+        .template property<std::string>("blend", [](const T& r) { return std::string(blend_mode_name(r.blend)); },
+                                        [](T& r, const std::string& name) {
+                                            const std::optional<BlendMode> mode = blend_mode_named(name.empty() ? "alpha" : name);
+                                            if (!mode) return false;
+                                            r.blend = *mode;
+                                            return true;
+                                        })
+        .choices({"alpha", "additive", "multiply", "max", "min"})
+        .description("How it combines with what is under it: additive for glows and light, multiply for shade.");
+}
 
 struct SceneHeader {
     std::string name;
@@ -233,6 +266,142 @@ void mark_prefab_metadata(EcsWorld& world,
                                   "PrefabInstanceComponent");
 }
 
+#if KIN_ENABLE_PHYSICS
+// A collider component as scenes and tools see it: its first collider (one
+// is made by the first field set). A change lets its fixture go, so the next
+// sync makes it again from the change (and destroys the one it replaces).
+PhysicsFixtureDef first_collider(const PhysicsColliderComponent& component) {
+    return component.colliders.empty() ? PhysicsFixtureDef{} : component.colliders.front().def;
+}
+
+PhysicsFixtureDef& first_collider(PhysicsColliderComponent& component) {
+    if (component.colliders.empty()) {
+        component.colliders.emplace_back();
+    }
+    component.colliders.front().fixture = {};
+    return component.colliders.front().def;
+}
+
+// `member` (of a PhysicsFixtureDef, const or not) as a property of the first collider.
+template <typename Field, typename Member>
+EcsComponentRegistry::NativeComponentBuilder<PhysicsColliderComponent>& collider_field(
+    EcsComponentRegistry::NativeComponentBuilder<PhysicsColliderComponent>& builder, std::string name, Member member) {
+    return builder.property<Field>(std::move(name),
+                                   [member](const PhysicsColliderComponent& component) {
+                                       const PhysicsFixtureDef def = first_collider(component);
+                                       return Field(member(def));
+                                   },
+                                   [member](PhysicsColliderComponent& component, const Field& value) {
+                                       member(first_collider(component)) = value;
+                                       return true;
+                                   });
+}
+
+void register_physics2d_editor_components(EcsWorld& world) {
+    EcsComponentRegistry& registry = world.components();
+    if (!registry.find("PhysicsBodyComponent")) {
+        // A Box2D body, made where the entity is when the game steps a
+        // PhysicsWorld (update_physics_world), from these; Transform2D then
+        // follows it. Its shapes are its PhysicsColliderComponent's.
+        constexpr f32 degrees_per_radian = 180.0f / 3.14159265358979323846f;
+        registry.native<PhysicsBodyComponent>("PhysicsBodyComponent")
+            .property<std::string>("type",
+                                   [](const PhysicsBodyComponent& body) {
+                                       switch (body.def.type) {
+                                       case PhysicsBodyType::Static: return std::string("static");
+                                       case PhysicsBodyType::Dynamic: return std::string("dynamic");
+                                       case PhysicsBodyType::Kinematic: return std::string("kinematic");
+                                       }
+                                       return std::string("static");
+                                   },
+                                   [](PhysicsBodyComponent& body, const std::string& type) {
+                                       if (type == "static") body.def.type = PhysicsBodyType::Static;
+                                       else if (type == "dynamic") body.def.type = PhysicsBodyType::Dynamic;
+                                       else if (type == "kinematic") body.def.type = PhysicsBodyType::Kinematic;
+                                       else return false;
+                                       return true;
+                                   })
+            .choices({"static", "dynamic", "kinematic"})
+            .description("static: stays; dynamic: moved by gravity, forces and what it hits; kinematic: moves at its velocity, and pushes.")
+            .field("linear_velocity", &PhysicsBodyComponent::def, &PhysicsBodyDef::linear_velocity)
+            .units("units/s")
+            .description("Its velocity when it is made.")
+            .property<f32>("angular_velocity",
+                           [=](const PhysicsBodyComponent& body) { return body.def.angular_velocity * degrees_per_radian; },
+                           [=](PhysicsBodyComponent& body, const f32& value) {
+                               body.def.angular_velocity = value / degrees_per_radian;
+                               return true;
+                           })
+            .units("degrees/s")
+            .description("Its turning when it is made.")
+            .field("linear_damping", &PhysicsBodyComponent::def, &PhysicsBodyDef::linear_damping)
+            .field("angular_damping", &PhysicsBodyComponent::def, &PhysicsBodyDef::angular_damping)
+            .field("gravity_scale", &PhysicsBodyComponent::def, &PhysicsBodyDef::gravity_scale)
+            .field("fixed_rotation", &PhysicsBodyComponent::def, &PhysicsBodyDef::fixed_rotation)
+            .description("It never turns.")
+            .field("sync_to_physics", &PhysicsBodyComponent::sync_to_physics)
+            .description("The entity leads: the body is put where it is before each step (it follows its parent).")
+            .field("sync_from_physics", &PhysicsBodyComponent::sync_from_physics)
+            .description("The body leads: Transform2D says where it is after each step.");
+    }
+    if (!registry.find("PhysicsColliderComponent")) {
+        auto collider = registry.native<PhysicsColliderComponent>("PhysicsColliderComponent");
+        collider.property<std::string>("shape",
+                                       [](const PhysicsColliderComponent& component) {
+                                           return std::string(first_collider(component).shape.type == PhysicsShapeType::Circle ? "circle" : "box");
+                                       },
+                                       [](PhysicsColliderComponent& component, const std::string& shape) {
+                                           if (shape != "box" && shape != "circle") {
+                                               return false;
+                                           }
+                                           first_collider(component).shape.type = shape == "circle" ? PhysicsShapeType::Circle : PhysicsShapeType::Box;
+                                           return true;
+                                       })
+            .choices({"box", "circle"});
+        collider_field<Vec2f>(collider, "half_extents", [](auto& def) -> auto& { return def.shape.half_extents; })
+            .description("A box's half width and half height.");
+        collider_field<f32>(collider, "radius", [](auto& def) -> auto& { return def.shape.radius; })
+            .description("A circle's.");
+        collider_field<Vec2f>(collider, "offset", [](auto& def) -> auto& { return def.shape.offset; })
+            .description("Its centre, from the entity's.");
+        collider_field<f32>(collider, "density", [](auto& def) -> auto& { return def.density; })
+            .units("kg/m^2");
+        collider_field<f32>(collider, "friction", [](auto& def) -> auto& { return def.friction; });
+        collider_field<f32>(collider, "restitution", [](auto& def) -> auto& { return def.restitution; })
+            .description("How it bounces: 0 not at all, 1 back as fast.");
+        collider_field<bool>(collider, "sensor", [](auto& def) -> auto& { return def.sensor; })
+            .description("It says what it overlaps, and stops nothing.");
+        collider.property<u32>("category_bits", [](const PhysicsColliderComponent& c) { return u32{first_collider(c).category_bits}; },
+                               [](PhysicsColliderComponent& c, const u32& bits) {
+                                   if (bits > 0xFFFFu) return false;
+                                   first_collider(c).category_bits = static_cast<u16>(bits);
+                                   return true;
+                               })
+            .description("The kinds it is (bits).");
+        collider.property<u32>("mask_bits", [](const PhysicsColliderComponent& c) { return u32{first_collider(c).mask_bits}; },
+                               [](PhysicsColliderComponent& c, const u32& bits) {
+                                   if (bits > 0xFFFFu) return false;
+                                   first_collider(c).mask_bits = static_cast<u16>(bits);
+                                   return true;
+                               })
+            .description("The kinds it hits (bits).");
+    }
+    if (!registry.find("PhysicsVelocity")) {
+        registry.native<PhysicsVelocity>("PhysicsVelocity")
+            .field("linear", &PhysicsVelocity::linear)
+            .units("units/s")
+            .description("Given to the body before each step.");
+    }
+    // The contacts of an entity's body, each step (for its game to read).
+    if (!registry.find("PhysicsContactQueue")) {
+        registry.native<PhysicsContactQueue>("PhysicsContactQueue");
+    }
+    if (!registry.find("PhysicsOverlapSet")) {
+        registry.native<PhysicsOverlapSet>("PhysicsOverlapSet");
+    }
+}
+#endif
+
 } // namespace
 
 void register_builtin_editor_components(EcsWorld& world) {
@@ -247,14 +416,120 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("scale", &Transform2D::scale);
     }
     if (!world.components().find("RectRenderer")) {
-        world.components().native<RectRenderer>("RectRenderer")
-            .field("offset", &RectRenderer::offset)
+        auto rect = world.components().native<RectRenderer>("RectRenderer");
+        rect.field("offset", &RectRenderer::offset)
             .field("size", &RectRenderer::size)
             .field("color", &RectRenderer::color)
             .field("layer", &RectRenderer::layer)
             .field("order", &RectRenderer::order)
             .field("visible", &RectRenderer::visible);
+        describe_blend(rect);
     }
+    if (!world.components().find("TextureRenderer")) {
+        // An image of the game's content, by its path (Assets2D binds it).
+        auto texture = world.components().native<TextureRenderer>("TextureRenderer");
+        texture.field("asset", &TextureRenderer::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Image)})
+            .field("offset", &TextureRenderer::offset)
+            .field("size", &TextureRenderer::size)
+            .field("pivot", &TextureRenderer::pivot)
+            .field("tint", &TextureRenderer::tint)
+            .field("layer", &TextureRenderer::layer)
+            .field("order", &TextureRenderer::order)
+            .field("visible", &TextureRenderer::visible)
+            .field("flip_x", &TextureRenderer::flip_x)
+            .field("flip_y", &TextureRenderer::flip_y);
+        describe_blend(texture);
+    }
+    if (!world.components().find("SpriteRenderer")) {
+        // A sprite of a catalog of the game's content, by the catalog's path and
+        // the sprite's id (Assets2D binds the catalog).
+        auto sprite = world.components().native<SpriteRenderer>("SpriteRenderer");
+        sprite.field("asset", &SpriteRenderer::asset)
+            .asset_type(std::string{asset_type_name(AssetType::SpriteCatalog)})
+            .property<std::string>("sprite", [](const SpriteRenderer& r) { return r.sprite.id; },
+                                   [](SpriteRenderer& r, const std::string& id) {
+                                       r.sprite.id = id;
+                                       return true;
+                                   })
+            .entry_of("asset")
+            .field("offset", &SpriteRenderer::offset)
+            .field("size", &SpriteRenderer::size)
+            .description("Zero: the sprite's own size.")
+            .field("pivot", &SpriteRenderer::pivot)
+            .description("A fraction of the sprite; below zero: the catalog's pivot.")
+            .field("tint", &SpriteRenderer::tint)
+            .field("rotation", &SpriteRenderer::rotation)
+            .units("degrees")
+            .field("layer", &SpriteRenderer::layer)
+            .field("order", &SpriteRenderer::order)
+            .field("y_sort", &SpriteRenderer::y_sort)
+            .field("visible", &SpriteRenderer::visible)
+            .field("flip_x", &SpriteRenderer::flip_x)
+            .field("flip_y", &SpriteRenderer::flip_y);
+        describe_blend(sprite);
+    }
+    if (!world.components().find("SpriteAnimator")) {
+        // An animation of its SpriteRenderer's catalog played on it
+        // (update_sprite_animators sets the renderer's sprite).
+        world.components().native<SpriteAnimator>("SpriteAnimator")
+            .field("animation", &SpriteAnimator::animation)
+            .entry_of("SpriteRenderer.asset")
+            .description("An animation of its SpriteRenderer's catalog.")
+            .field("speed", &SpriteAnimator::speed)
+            .range(0.0, 100.0)
+            .description("1: as the animation says; 2: twice as fast.")
+            .field("playing", &SpriteAnimator::playing)
+            .property<i32>("frame", [](const SpriteAnimator& a) { return a.frame; },
+                           [](SpriteAnimator&, const i32&) { return true; }) // as it is: nothing to set
+            .readonly()
+            .description("The frame of the animation shown now (-1: none).")
+            .property<bool>("finished", [](const SpriteAnimator& a) { return a.finished; },
+                            [](SpriteAnimator&, const bool&) { return true; })
+            .readonly()
+            .description("A Once animation has played through.");
+    }
+#if KIN_ENABLE_AUDIO
+    if (!world.components().find("AudioEmitter")) {
+        // A sound of the game's content (a file, or a cue of an audio catalog)
+        // playing from the entity (Assets2D binds it; update_audio_emitters plays it).
+        world.components().native<AudioEmitter>("AudioEmitter")
+            .field("asset", &AudioEmitter::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Audio)} + "," + std::string{asset_type_name(AssetType::AudioCatalog)})
+            .field("cue", &AudioEmitter::cue)
+            .entry_of("asset")
+            .description("A cue of the catalog; empty for a sound file.")
+            .field("auto_start", &AudioEmitter::auto_start)
+            .field("volume", &AudioEmitter::volume)
+            .range(0.0, 4.0)
+            .field("pitch", &AudioEmitter::pitch)
+            .range(0.01, 8.0)
+            .field("paused", &AudioEmitter::paused)
+            .field("fade_in", &AudioEmitter::fade_in)
+            .units("seconds")
+            .property<std::string>("when_done",
+                                   [](const AudioEmitter& e) {
+                                       switch (e.when_done) {
+                                       case AudioEmitterEnd::Restart: return std::string("restart");
+                                       case AudioEmitterEnd::Keep: return std::string("keep");
+                                       case AudioEmitterEnd::Remove: return std::string("remove");
+                                       case AudioEmitterEnd::Despawn: return std::string("despawn");
+                                       }
+                                       return std::string("restart");
+                                   },
+                                   [](AudioEmitter& e, const std::string& value) {
+                                       if (value == "restart") e.when_done = AudioEmitterEnd::Restart;
+                                       else if (value == "keep") e.when_done = AudioEmitterEnd::Keep;
+                                       else if (value == "remove") e.when_done = AudioEmitterEnd::Remove;
+                                       else if (value == "despawn") e.when_done = AudioEmitterEnd::Despawn;
+                                       else return false;
+                                       return true;
+                                   })
+            .choices({"restart", "keep", "remove", "despawn"})
+            .description("What it does once its sound ends.")
+            .field("offset_3d", &AudioEmitter::offset_3d);
+    }
+#endif
     if (!world.components().find("LineRenderer")) {
         world.components().native<LineRenderer>("LineRenderer")
             .field("a", &LineRenderer::a)
@@ -263,6 +538,344 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("layer", &LineRenderer::layer)
             .field("order", &LineRenderer::order)
             .field("visible", &LineRenderer::visible);
+    }
+#if KIN_ENABLE_PHYSICS
+    register_physics2d_editor_components(world);
+#endif
+    if (!world.components().find("ParticleSystemComponent")) {
+        // Particles: an effect of a particle catalog of the game's content,
+        // burst where the entity is (update_particles; Assets2D binds the catalog).
+        auto particles = world.components().native<ParticleSystemComponent>("ParticleSystemComponent");
+        particles.field("asset", &ParticleSystemComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Particles)})
+            .field("effect", &ParticleSystemComponent::effect)
+            .entry_of("asset")
+            .description("An effect of the catalog; empty: the game emits.")
+            .field("rate", &ParticleSystemComponent::rate)
+            .units("bursts/s")
+            .range(0.0, 1000.0)
+            .field("emitting", &ParticleSystemComponent::emitting)
+            .field("burst_at_start", &ParticleSystemComponent::burst_at_start)
+            .description("One burst as it starts.")
+            .field("offset", &ParticleSystemComponent::offset)
+            .description("Where it bursts, from the entity.")
+            .field("sprites", &ParticleSystemComponent::sprites_asset)
+            .asset_type(std::string{asset_type_name(AssetType::SpriteCatalog)})
+            .description("The sprite catalog its effects' sprites are of.")
+            .property<u32>("active", [](const ParticleSystemComponent& p) { return static_cast<u32>(p.system.active_count()); },
+                           [](ParticleSystemComponent&, const u32&) { return true; }) // as it is: nothing to set
+            .readonly()
+            .description("Its particles alive now.");
+        describe_blend(particles);
+    }
+    if (!world.components().find("ParticleFieldComponent")) {
+        // A field of particles (snow, stars) of a particle catalog, its area
+        // from where the entity is (Assets2D makes it).
+        auto field = world.components().native<ParticleFieldComponent>("ParticleFieldComponent");
+        field.field("asset", &ParticleFieldComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Particles)})
+            .field("field", &ParticleFieldComponent::name)
+            .entry_of("asset")
+            .description("A field of the catalog.")
+            .field("sprites", &ParticleFieldComponent::sprites_asset)
+            .asset_type(std::string{asset_type_name(AssetType::SpriteCatalog)})
+            .description("The sprite catalog its sprites are of.");
+        describe_blend(field);
+    }
+    if (!world.components().find("TilemapComponent")) {
+        // A tilemap file (square cells or hexagons) drawn from where the entity
+        // is (Assets2D reads it, its tileset and the tileset's image).
+        world.components().native<TilemapComponent>("TilemapComponent")
+            .field("asset", &TilemapComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::TileMap)})
+            .field("layer", &TilemapComponent::layer)
+            .field("order", &TilemapComponent::order)
+            .description("Its layers' orders come after this.")
+            .field("visible", &TilemapComponent::visible)
+            .property<u32>("cells",
+                           [](const TilemapComponent& t) { return t.tilemap ? static_cast<u32>(t.tilemap->map.cols * t.tilemap->map.rows) : 0u; },
+                           [](TilemapComponent&, const u32&) { return true; }) // as it is: nothing to set
+            .readonly()
+            .description("Its map's cells, once read (0: not read).");
+    }
+#if KIN_ENABLE_SCRIPTING
+    if (!world.components().find("ScriptComponent")) {
+        // A Lua script of the game's content run for the entity (EntityScripts:
+        // on_start, on_update, on_contact; kin/scripting/entity_scripts.hpp).
+        world.components().native<ScriptComponent>("ScriptComponent")
+            .field("asset", &ScriptComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Script)})
+            .description("A .lua file of the content.")
+            .field("enabled", &ScriptComponent::enabled);
+    }
+#endif
+    if (!world.components().find("Animator")) {
+        // An animation of an animation file of the game's content played on
+        // the entity: its tracks set its components' fields (update_animators).
+        world.components().native<Animator>("Animator")
+            .field("asset", &Animator::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Animation)})
+            .field("animation", &Animator::animation)
+            .entry_of("asset")
+            .description("An animation of the file.")
+            .field("machine", &Animator::machine)
+            .entry_of("asset")
+            .description("A state machine of the file: it plays in place of the animation.")
+            .field("speed", &Animator::speed)
+            .range(0.0, 100.0)
+            .description("1: as the animation says; 2: twice as fast.")
+            .field("playing", &Animator::playing)
+            .property<f32>("time", [](const Animator& a) { return a.time; }, [](Animator&, const f32&) { return true; })
+            .readonly()
+            .units("seconds")
+            .description("Into the animation now.")
+            .property<bool>("finished", [](const Animator& a) { return a.finished; }, [](Animator&, const bool&) { return true; })
+            .readonly()
+            .description("One that ends has played through.")
+            .property<std::string>("state", [](const Animator& a) { return a.state; }, [](Animator&, const std::string&) { return true; })
+            .readonly()
+            .description("The machine's state now.");
+    }
+    if (!world.components().find("TalkComponent")) {
+        // A character the player talks to: its dialogue starts when the
+        // Talker, near it, presses the talk action (update_talk).
+        world.components().native<TalkComponent>("TalkComponent")
+            .field("asset", &TalkComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Dialogue)})
+            .description("A .kindialogue of the content.")
+            .field("start", &TalkComponent::start)
+            .description("The node it starts at; empty: the file's start.")
+            .field("radius", &TalkComponent::radius)
+            .range(0.0, 100000.0)
+            .description("How near the Talker must be.")
+            .field("prompt", &TalkComponent::prompt)
+            .field("enabled", &TalkComponent::enabled);
+    }
+    if (!world.components().find("Talker")) {
+        // The one who talks (the player): TalkComponents are measured from it.
+        world.components().native<Talker>("Talker").field("enabled", &Talker::enabled);
+    }
+    if (!world.components().find("UiScreenComponent")) {
+        // A UI screen (.kinui) shown over the world while the entity is there
+        // (SceneScreens draws it; kin/ecs/ui_screens.hpp).
+        world.components().native<UiScreenComponent>("UiScreenComponent")
+            .field("asset", &UiScreenComponent::asset)
+            .asset_type(std::string{asset_type_name(AssetType::UiScreen)})
+            .description("A .kinui screen of the content.")
+            .field("visible", &UiScreenComponent::visible)
+            .field("order", &UiScreenComponent::order)
+            .description("Higher draws over lower.");
+    }
+    if (!world.components().find("LightComponent")) {
+        // A light where its entity is: it brightens the world when the scene
+        // has a SceneLighting (kin/ecs/lighting.hpp).
+        world.components().native<LightComponent>("LightComponent")
+            .field("color", &LightComponent::color)
+            .field("radius", &LightComponent::radius)
+            .range(0.0, 100000.0)
+            .description("Nothing further is lit; scaled with its entity.")
+            .field("intensity", &LightComponent::intensity)
+            .range(0.0, 4.0)
+            .description("1 adds its colour in full at the centre.")
+            .field("shape", &LightComponent::shape_asset)
+            .asset_type(std::string{asset_type_name(AssetType::Image)})
+            .description("An image whose alpha shapes it (a cone, a window); none: round.")
+            .field("rotation", &LightComponent::rotation)
+            .units("degrees")
+            .field("enabled", &LightComponent::enabled);
+    }
+    if (!world.components().find("SceneLighting")) {
+        // The scene darkened to an ambient light and lit by its lights (the
+        // first one found is the scene's).
+        world.components().native<SceneLighting>("SceneLighting")
+            .field("enabled", &SceneLighting::enabled)
+            .field("ambient", &SceneLighting::ambient)
+            .description("What is not lit looks like this much light: black is dark, white unlit.")
+            .field("resolution", &SceneLighting::resolution)
+            .range(0.05, 1.0)
+            .description("Light-map pixels per screen point (lights are smooth: half is plenty).");
+    }
+    if (!world.components().find("ColorGrade")) {
+        // The game's colour output while it is in the scene: exposure and
+        // tonemapping (a linear game's), a look, dithering.
+        world.components().native<ColorGrade>("ColorGrade")
+            .field("enabled", &ColorGrade::enabled)
+            .field("exposure", &ColorGrade::exposure)
+            .range(0.0, 16.0)
+            .description("Scales the light (a linear game's).")
+            .property<std::string>("tonemap", [](const ColorGrade& g) { return std::string(tonemap_name(g.tonemap)); },
+                                   [](ColorGrade& g, const std::string& name) {
+                                       const std::optional<Tonemap> tonemap = tonemap_named(name.empty() ? "none" : name);
+                                       if (!tonemap) return false;
+                                       g.tonemap = *tonemap;
+                                       return true;
+                                   })
+            .choices({"none", "reinhard", "aces"})
+            .description("How light above white comes into range (a linear game's).")
+            .field("look", &ColorGrade::lut_asset)
+            .asset_type(std::string{asset_type_name(AssetType::ColorLut)} + "," + std::string{asset_type_name(AssetType::Image)})
+            .description("A .cube file or a LUT image the colours are graded through.")
+            .field("strength", &ColorGrade::strength)
+            .range(0.0, 1.0)
+            .description("How much of the look.")
+            .field("dither", &ColorGrade::dither)
+            .description("Noise of half a step, so dark gradients do not band.");
+    }
+    if (!world.components().find("ShaderEffect")) {
+        // A fragment shader of the content drawn over a box at the entity
+        // (kin/ecs/shader_effect.hpp).
+        auto effect = world.components().native<ShaderEffect>("ShaderEffect");
+        effect.field("asset", &ShaderEffect::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Shader)})
+            .description("A .frag.glsl file of the content.")
+            .field("texture", &ShaderEffect::texture_asset)
+            .asset_type(std::string{asset_type_name(AssetType::Image)})
+            .description("An image it samples (sampler 0).")
+            .field("size", &ShaderEffect::size)
+            .description("The box it covers, centred on the entity.")
+            .field("offset", &ShaderEffect::offset)
+            .field("params", &ShaderEffect::params)
+            .description("Its uniforms' values by name: \"speed=1.5 tint=1,0.8,0.6,1\".")
+            .field("layer", &ShaderEffect::layer)
+            .field("order", &ShaderEffect::order)
+            .field("y_sort", &ShaderEffect::y_sort)
+            .field("visible", &ShaderEffect::visible);
+        describe_blend(effect);
+    }
+    if (!world.components().find("CameraComponent")) {
+        // What the game sees of its world: EcsScene draws through the first
+        // current one, looking at where its entity is (kin/ecs/camera.hpp).
+        world.components().native<CameraComponent>("CameraComponent")
+            .field("current", &CameraComponent::current)
+            .description("The one the game is drawn through (the first current one).")
+            .field("zoom", &CameraComponent::zoom)
+            .range(0.01, 100.0)
+            .description("2: the world twice as big.")
+            .field("smoothing", &CameraComponent::smoothing)
+            .units("seconds")
+            .range(0.0, 10.0)
+            .description("How long it takes to catch its entity up (update_cameras); 0: at once.")
+            .field("limited", &CameraComponent::limited)
+            .description("It shows nothing past its limits.")
+            .field("limit_min", &CameraComponent::limit_min)
+            .description("The world's top-left corner it shows no further than.")
+            .field("limit_max", &CameraComponent::limit_max)
+            .description("And its bottom-right.");
+    }
+    if (!world.components().find("ShapeRenderer")) {
+        // A vector shape at the entity: a box, a rounded box, an ellipse, a
+        // regular polygon, or an SVG file (Assets2D makes its mesh).
+        auto shape = world.components().native<ShapeRenderer>("ShapeRenderer");
+        shape.property<std::string>("shape", [](const ShapeRenderer& r) { return std::string(shape_kind_name(r.spec.kind)); },
+                                   [](ShapeRenderer& r, const std::string& name) {
+                                       const std::optional<ShapeKind> kind = shape_kind_named(name);
+                                       if (!kind) return false;
+                                       r.spec.kind = *kind;
+                                       return true;
+                                   })
+            .choices({"none", "rect", "rounded_rect", "ellipse", "polygon", "svg"})
+            .description("none: the game sets its mesh; svg: the file `asset` names.")
+            .field("asset", &ShapeRenderer::asset)
+            .asset_type(std::string{asset_type_name(AssetType::Shape)})
+            .description("An SVG file of the content (shape svg).")
+            .field("size", &ShapeRenderer::spec, &ShapeSpec::size)
+            .description("Centred on the entity; an SVG is fitted in it (zero: its own size).")
+            .field("radius", &ShapeRenderer::spec, &ShapeSpec::radius)
+            .description("A rounded box's corners.")
+            .field("sides", &ShapeRenderer::spec, &ShapeSpec::sides)
+            .range(3.0, 256.0)
+            .description("A polygon's.")
+            .field("fill", &ShapeRenderer::spec, &ShapeSpec::fill)
+            .field("stroke", &ShapeRenderer::spec, &ShapeSpec::stroke)
+            .description("Its outline's colour.")
+            .field("stroke_width", &ShapeRenderer::spec, &ShapeSpec::stroke_width)
+            .range(0.0, 1000.0)
+            .field("offset", &ShapeRenderer::offset)
+            .field("tint", &ShapeRenderer::tint)
+            .description("Multiplies its colours (an SVG's too).")
+            .field("layer", &ShapeRenderer::layer)
+            .field("order", &ShapeRenderer::order)
+            .field("y_sort", &ShapeRenderer::y_sort)
+            .field("visible", &ShapeRenderer::visible);
+        describe_blend(shape);
+    }
+    if (!world.components().find("ClipGroup")) {
+        // Its entity's renderers, and those of every entity under it, cut to a
+        // shape that moves, turns and scales with it.
+        const auto clip_field = [](auto member) {
+            return [member](ClipGroup& group, const auto& value) {
+                group.*member = value;
+                reshape_clip(group);
+                return true;
+            };
+        };
+        world.components().native<ClipGroup>("ClipGroup")
+            .property<std::string>("shape",
+                                   [](const ClipGroup& g) {
+                                       switch (g.shape) {
+                                       case ClipShape::None: return std::string("none");
+                                       case ClipShape::Rect: return std::string("rect");
+                                       case ClipShape::RoundedRect: return std::string("rounded_rect");
+                                       case ClipShape::Ellipse: return std::string("ellipse");
+                                       }
+                                       return std::string("none");
+                                   },
+                                   [](ClipGroup& g, const std::string& name) {
+                                       if (name == "rect") g.shape = ClipShape::Rect;
+                                       else if (name == "rounded_rect") g.shape = ClipShape::RoundedRect;
+                                       else if (name == "ellipse") g.shape = ClipShape::Ellipse;
+                                       else if (name == "none" || name.empty()) g.shape = ClipShape::None;
+                                       else return false;
+                                       reshape_clip(g);
+                                       return true;
+                                   })
+            .choices({"none", "rect", "rounded_rect", "ellipse"})
+            .description("What shows of them: what is inside it (none: the game sets its clip).")
+            .property<Vec2f>("size", [](const ClipGroup& g) { return g.size; }, clip_field(&ClipGroup::size))
+            .property<Vec2f>("offset", [](const ClipGroup& g) { return g.offset; }, clip_field(&ClipGroup::offset))
+            .description("Its centre, from the entity.")
+            .property<f32>("radius", [](const ClipGroup& g) { return g.radius; }, clip_field(&ClipGroup::radius))
+            .description("A rounded box's corners.")
+            .field("layer", &ClipGroup::layer)
+            .description("They are drawn together, at its layer and order.")
+            .field("order", &ClipGroup::order)
+            .field("y_sort", &ClipGroup::y_sort);
+    }
+    if (!world.components().find("TextRenderer")) {
+        // Text in the world at the entity, in a font of the content (Assets2D
+        // reads it) or the system's.
+        world.components().native<TextRenderer>("TextRenderer")
+            .field("text", &TextRenderer::text)
+            .field("key", &TextRenderer::key)
+            .description("A translation key; empty: scene.<scene>.<entity>, where a language has it.")
+            .field("font", &TextRenderer::font)
+            .asset_type(std::string{asset_type_name(AssetType::Font)})
+            .description("A font file of the content; empty: the system's.")
+            .field("size", &TextRenderer::size)
+            .units("points")
+            .range(1.0, 512.0)
+            .field("color", &TextRenderer::color)
+            .field("offset", &TextRenderer::offset)
+            .field("pivot", &TextRenderer::pivot)
+            .description("The point of its box at the entity: 0.5, 0.5 its centre.")
+            .field("wrap", &TextRenderer::wrap)
+            .description("Lines break past this wide (0: only at line ends).")
+            .property<std::string>("align", [](const TextRenderer& t) { return std::string(text_align_name(t.align)); },
+                                   [](TextRenderer& t, const std::string& name) {
+                                       const std::optional<TextAlign> align = text_align_named(name);
+                                       if (!align) return false;
+                                       t.align = *align;
+                                       return true;
+                                   })
+            .choices({"left", "center", "right"})
+            .field("outline", &TextRenderer::outline)
+            .range(0.0, 64.0)
+            .description("Points round each letter.")
+            .field("outline_color", &TextRenderer::outline_color)
+            .field("layer", &TextRenderer::layer)
+            .field("order", &TextRenderer::order)
+            .field("y_sort", &TextRenderer::y_sort)
+            .field("visible", &TextRenderer::visible);
     }
     if (!world.components().find("Timer")) {
         world.components().data("Timer")
@@ -464,6 +1077,10 @@ SceneInstance instantiate_scene_asset(EcsWorld& world,
             if (!apply_component(world, runtime, component, instance.diagnostics)) {
                 return instance;
             }
+        }
+        // Its text translated under its own key (scene.<scene>.<entity>), where a language has it.
+        if (const TextRenderer* text = runtime.get<TextRenderer>(); text && text->auto_key.empty()) {
+            runtime.get_mut<TextRenderer>()->auto_key = scene_text_key(scene.name, entity.id);
         }
     }
 

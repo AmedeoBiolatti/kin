@@ -184,6 +184,126 @@ releases may change APIs.
   trusts a history read between pixels more. An edge moving a tenth of a pixel
   a frame (a character at rest) was 2.3 times as far from a 16-sample picture as
   a still one, and at a whole pixel 8 times; now both are within a quarter.
+- Bind assets that components name by path in 2D scenes (`Assets2D`, run by
+  `EcsScene`): textures, sprite catalogs, sounds and audio catalogs, and
+  particle catalogs, read again when their files change. Particle emitters
+  burst an authored effect at a rate where their entity is.
+- Describe 2D physics and particle components to scene files and tools, with
+  `choices` for string fields and nested-member fields. Add
+  `PhysicsWorldDef::units_per_meter` for worlds in points. Give prefab
+  instances physics bodies of their own, and remove `EcsPhysicsBridge`'s
+  observers with it (they could reach a destroyed `PhysicsWorld`).
+- Add hex tilemaps (`TileMap::grid`: pointy- or flat-top hexagons in offset
+  cells), drawn, picked, collided, filled and pathed by their hexagons; tileset
+  files (`.kintileset`) that maps name to share, their tiles cut from an image
+  (`TileDefinition::frame`); `TilemapComponent`, bound by `Assets2D` and drawn
+  by `WorldRenderState` where its entity is (`TilemapRenderOptions::origin`).
+- Add sprite animations to sprite catalogs (`animation` lines: frames, frames
+  a second, loop, once or ping-pong, frames held longer), played on an entity
+  by `SpriteAnimator` (`update_sprite_animators`), described to scene files.
+  Add `parse_sprite_catalog`, `serialize_sprite_catalog` and removing from a
+  catalog. `entry_of` may name another component's asset (`SpriteRenderer.asset`).
+- Add scene cameras (`CameraComponent`: zoom, limits, smoothing), drawn
+  through by `EcsScene` (`scene_cameras`, `view_size`; `scene_camera`,
+  `update_cameras`). Describe `ShapeRenderer` (shapes made from a `ShapeSpec`
+  or an SVG file by `Assets2D`), `ClipGroup` (its clip made from a shape) and
+  the new `TextRenderer` (text in the world, in a content font or the system's)
+  to scene files. Add `AssetType::Shape` (`.svg`).
+- Add blend spaces (`blendspace` blocks: animations mixed by a float
+  parameter, kept in step), played by states and `set_base`, and transition
+  blends (`blend` seconds: the state left fades into the next;
+  `AnimationPlayer::fading`).
+- Let an `Animator` run a state machine of its file (`machine`, its `params`
+  set by the game, its `state` told). Add the `finished` condition (a state's
+  animation has played through) and `place` lines (where editors draw states).
+  An any-state transition into the state already running no longer restarts
+  it every step. `.kinanim` files keep a `step` easing (it was written as
+  linear).
+- Add `Animator`, which plays an animation of a `.kinanim` file on an entity
+  from scene files (`update_animators`; `Assets2D` reads the file), its tracks
+  setting any described field (`register_described_properties`,
+  `EcsComponentRegistry::field_access`); instances of prefabs animate their own
+  copies.
+- Give particle effects a direction and spread, an emission shape (point,
+  circle, box), drag, rotation and spin, and a size and colour midway through
+  their lives, written as optional `name=value` settings so older catalogs
+  read unchanged. Add `parse_particle_catalog`, `serialize_particle_catalog`,
+  and `ParticleCatalog::remove_effect`/`remove_field`.
+- Write f32 field values in their shortest form (`0.2`, not `0.20000000298`).
+- Add `input.drop` to the scene server and `App::hold_close` for editors.
+- Add game controller bindings (`pad` lines, `PadControl`: buttons, the d-pad,
+  sticks and triggers pushed past halfway) and axes (`InputAxis`, `axis`
+  lines: bindings for -1 and 1, analog sticks, a dead zone;
+  `Input::axis`) to input maps, read by `parse_input_map` and written by
+  `serialize_input_map`. `App::open_gamepads` polls a controller with the
+  window's events. `binding_held` and `axis_value` let editors try bindings
+  that are not in the map.
+- Rich text (`parse_advanced_text`, the dialogue element) reads `[b]` and
+  `[i]`: in `AdvancedTextMarkupOptions::bold_font` and `italic_font` when
+  given. Before, they showed as text, and a dialogue's line was cut short by
+  their length while it was revealed.
+- Add game icons and project info to games' builds:
+  - `GameInfo::icon` (`icon <png>` in a game info file) and
+    `WindowedAppConfig::icon` set the window's icon; `window_config(info,
+    content)` fills it in. `Window::set_icon` takes an `Image`.
+  - `kin_game(... INFO project.kin)` takes the title, version and icon from a
+    game info file, and uses `<icon>.ico` in the content as the Windows icon.
+  - `kin_game` defines `KIN_GAME_TITLE`, `KIN_GAME_VERSION` and
+    `KIN_GAME_ICON` for the game's code.
+- Translate UI screens and scene text without code:
+  - A `.kinui` label, button or toggle with an id, and no `key` of its own, is
+    translated under `ui.<screen>.<id>` (a text field's hint under
+    `ui.<screen>.<id>.hint`) when the active localization has that key.
+    `screen_name`, `screen_text_key` and `screen_language_file` give the
+    names and a file to start from.
+  - A scene's `TextRenderer` is translated under `scene.<scene>.<entity>`, or
+    its own `key`. `shown_text` and `scene_text_key` give the text and key.
+  - Lua's `l10n` table gets `set_locale()` in scene scripts too.
+- Add dialogue in scenes:
+  - `SceneDialogue` runs one dialogue at a time. It reveals text letter by
+    letter, keeps the game's variables between dialogues, reports events, and
+    saves with snapshots.
+  - `TalkComponent` and `Talker`, with `update_talk`, start a dialogue when
+    the talk action is pressed nearby.
+  - A `dialogue` element in UI screens shows the running dialogue and passes
+    on clicks.
+  - Lua scripts get a `dialogue` table and `on_dialogue_event`.
+  - `.kindialogue` files keep node places, speaker colours and line tags,
+    and list the nodes a game also starts at (`entries`).
+  - Add `dialogue_problems` and `dialogue_targets`.
+- Add UI screens as data: `.kinui` files are trees of boxes, panels, labels,
+  buttons, images, bars, toggles, sliders, text fields and spacers, with sizes,
+  anchors and a theme.
+  - `ui2::UiScreen` draws one, sets elements by id and reports clicks and
+    values.
+  - A `UiScreenComponent` shows a screen in a scene.
+  - `SceneScreens` reads screens and themes and reloads them when they change;
+    entity scripts reach them through `ui`.
+  - Add `AssetType::UiScreen` and `AssetType::UiTheme`.
+- Let `.kintheme` files name a font file (`font`, `bold_font`, `font_size`)
+  and image skins (`image <path> [margin] [x y w h]`), read by
+  `ThemeFile::build`. Add the theme name lists for tools.
+- Add lights to scenes: `LightComponent` lights from its entity, and
+  `SceneLighting` (the ambient colour) makes `EcsScene` light the world, while
+  the UI layer and above stay unlit. Add `scene_lights` and
+  `apply_scene_lighting`.
+- Add `ColorGrade`: a scene's exposure, tonemapping, look (a `.cube` file or a
+  LUT image) and dithering, set as the colour output.
+- Add `Renderer2D::draw_color_output` and `LayerOptions::grade` for graded
+  previews.
+- Add a `blend` field to sprites, textures, rects, shapes and particles
+  (`blend_material`; the renderer applies a material's blend mode).
+- Add `ShaderEffect`: a fragment shader of the content drawn over a box at its
+  entity, with its uniforms set by name from `params`.
+  - `time` and `size` are set by kin.
+  - `Assets2D::shader` compiles the shader with glslc, or loads the `.spv`
+    beside it, and reloads it in place when it changes.
+  - Add `AssetType::Shader` and `AssetType::ColorLut`.
+- Add scripts on entities: `ScriptComponent` names a Lua file, which
+  `EntityScripts` runs with `on_start`, `on_update` and `on_contact`. `self`
+  reaches the entity's components, transform, `Animator`, input actions and
+  axes; scripts can find, spawn and destroy entities. Changed script files are
+  read again while the game runs. Add `check_lua_syntax`.
 
 - Add experimental Emscripten/WebGL2 exports for Hex and Summit, with itch.io
   ZIP packaging, bundled assets/fonts/licenses, browser audio, pointer lock,
@@ -225,6 +345,43 @@ releases may change APIs.
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
   history stable across views, and restore Windows compilation of Summit, the
   renderer tests and the reference tool.
+
+- A game run with `--inspect` writes its answers on a thread of its own, so a
+  tool slow to read a large one (a world's snapshot, 219 KB in Lantern Vale)
+  no longer holds the game: watched by the studio, it lost a frame of up to
+  150 ms to each snapshot (31 in 8 s) and now loses none. Its own prints to
+  stdout still never land inside an answer.
+- The SDL_Renderer backend updates textures in place (`update_texture`,
+  `write_texture`): it returned false, and callers made the whole texture
+  again. Draws queued before an update show what the texture held.
+- ui2 text: a DEL byte (0x7F) in otherwise plain text read and wrote past the
+  ASCII kerning table (a heap overflow); it is a control character now, as the
+  others. Shaped runs drawn with distance-field fonts kept pointers into a
+  cache that drawing the next run could move (a use after free).
+- ui2: a double click, a tooltip's delay and a caret's blinking are timed in
+  seconds, not frames (a window that waits for events draws few frames: two
+  clicks seconds apart counted as a double click). A widget hidden by the clips
+  it draws under (a field scrolled out of its panel) is no longer hit there.
+  Tab goes through boxes and text fields in layout order (fields came after
+  every box). The wheel scrolls the box under what is on top, not one under a
+  dialog or a menu. A virtualized list builds the rows for this frame's scroll
+  offset (a thumb dragged, `set_scroll_offset`, `scroll_to_row`), not last
+  frame's (rows were blank for a frame). Enter or Esc leaves a text field and
+  its focus (it took the keys back the next frame). A widget's `state` the app
+  changes after declaring the widget that frame is kept, not undone by the
+  widget's run.
+- ui2: a box that was hovered last frame under a box no longer there was not
+  hovered (a drop target, right after the pointer moved). `MenuBar` no longer
+  highlights a title while idle, and switches an open menu only when the
+  pointer moves onto another title (one resting there took over the menu the
+  keys opened). A virtualized `ListView` scrolls to keep its selection in view
+  only when the keys moved it.
+- ui2: a `TextInput`, `NumberInput` or `TextEdit` being typed in keeps its
+  focused frame under the pointer (it showed the hover colour instead); other
+  controls show the focused frame for the keys' focus only.
+- `rasterize_svg` refuses text without an `<svg>` element before SDL_image
+  parses it, as SDL_image does for files: SDL_image does not free a parse that
+  comes out empty (16 bytes lost per call).
 
 - Bound navmesh boundary-rejection diagnostics to eight face examples plus one
   count/bounds summary per build, including when refinement rejects many faces.
@@ -438,6 +595,42 @@ releases may change APIs.
 
 ### Changed
 
+- `kin/ui2/widgets.hpp`'s editor widgets (docks, splitters, breadcrumbs, the
+  asset browser, log console, status bar, property inspectors and grids, node
+  graphs) are declared in `kin/ui2/editor.hpp`, and its game screen widgets
+  (prompts, dialogue, nameplates, the reticle and selection rectangle, resource
+  rows, bars and meters, slots, floating text) in `kin/ui2/hud.hpp`.
+  `widgets.hpp` includes both, so code that includes it is unchanged.
+- ui2 timing in seconds: `Context::now()` (the steady clock, or one given to
+  `set_clock`, read at `begin()`), `TooltipOptions::delay`/`warm` (were
+  `delay_frames`/`warm_frames`), `UiTextEditState::last_click_time` and
+  `caret_time`, `State::register_click(id, pos, now)`.
+  `Context::request_redraw(seconds)` keeps the soonest asked and `apply()`
+  passes it on (`redraw_in()`): a focused editor asks for the frame its caret
+  blinks, not every frame.
+- ui2 allocates far less per frame (a studio frame: 6,600 heap allocations to
+  1,500): `SurfaceStyle::shader_params` is a `shared_ptr<const ShaderParams>`
+  (every surface allocated its 16 floats, and a `BoxStyle` holds one a state), the
+  layout nodes' child lists are kept from frame to frame, and what
+  `end_layout()` runs for each node is kept in reused blocks, not a
+  `std::function` each.
+- ui2 keys go only to the focused widget: `ListView`, `TreeView`, `IconGrid`,
+  `TabBar`, `MenuBar` and `NodeGraph` take them while they have focus (a click
+  or Tab gives it; `keys_without_focus` for the old way), `MenuList` and
+  `DialogueView` also while nothing else has focus. The focus ring shows for
+  the keys' focus only, not a click's (`Interaction::quiet_focus`,
+  `State::focus_visible()`).
+- `NumberInput` shows its value until typed in, commits on Enter or leaving,
+  goes back on Esc, steps with Up and Down, and outlines what is not a number
+  in range (`invalid`). Its range defaults to every float (was 0 to 1).
+  `PropertyInspector`'s text rows commit on leaving and go back on Esc.
+- `SvgOptions::oversample` defaults to 0: the renderer's content scale (was 1,
+  blurred icons on high-density displays unless given).
+- `TextStyle::inherit` and `WidgetStyle::inherit` (default true): false keeps a
+  style as given, its default values too, instead of filling them from the
+  theme. Widgets are measured in their themed styles, as they are drawn.
+- `TooltipOptions` tooltips are drawn after layout, over everything.
+
 - Separate mesh temporal `history_id` from picking `id`; assign generation- and
   pooled-lease-aware identities during ECS collection and distinct model-part IDs.
   Zero history IDs preserve direct callers' existing matching behavior.
@@ -546,6 +739,72 @@ releases may change APIs.
     `kin_render3d_bench` (batch edits, wind) and `kin_physics3d_bench ecs` are added.
 
 ### Added
+
+- `kin/ui2/charts.hpp`: `Plot` (series as lines, areas, grouped bars or points
+  on fitted or given axes, linear or log; the wheel zooms x around the pointer,
+  a drag pans, a double click shows all of it; a readout of every series at
+  the nearest sample, or a bar's value on the bar; a legend for two or more
+  named series; lines of more samples than pixels drawn as each column's
+  lowest and highest), `Sparkline`, and `HeatmapImage` with `Heatmap` (a grid
+  of values as colours in a texture updated where it changed; `push_column()`
+  scrolls it, for a spectrogram). Zoomed in on the newest samples of data that
+  grows, a plot moves on with them. Series take `chart_color()`, eight colours
+  in an order checked for colour-blind readers; `map_color()` has Magma,
+  Viridis and Gray. `games/charts_demo` shows them, with a dial.
+- A game run with `--inspect` records each frame's update, render and present
+  times and the interval since the frame before, and answers `frame.timing`
+  (it was refused); `frame.timing {since}` lists each frame after `since`
+  (`history`), for a profiler to plot. `ServerContext::FrameTiming` has
+  `present_ms`, `interval_ms` and `frame`; `record_frame_timing()` keeps one.
+- `kin/ui2/scale.hpp`: `Scale` (linear or log), `ticks()` (round values to mark,
+  labelled), `tick_label()` ("10k", "1 kHz", "40 ms") and `nice_scale()`.
+- ui2 draws anti-aliased shapes through the Context (`line()` with a width,
+  `polyline`, `fill_polygon`, `fill_circle`, `outline_circle`, `arc`,
+  `fill_pie`, `fill_path`, `stroke_path`, `shape()` for a `ShapeMesh`),
+  checked against draw scopes and recorded (`DrawOp::Kind::Shape`,
+  `Context::draw_ops()`) as the rest. `Context::drag_value()` changes a value by
+  a drag (Shift: finely), the wheel, the arrows and a double click (to a reset
+  value), along a linear or log `Scale`: what a dial or fader is built on.
+  `take_wheel(id)` keeps the wheel from the scroll boxes under a widget that
+  reads it; `double_click(id)` makes any region's clicks double clicks.
+- ui2 boxes with tooltips, drags and drops, drawn in an overlay pass after
+  layout (`Context::overlay`): `BoxStyle::tooltip(text)`,
+  `draggable(type, text, value)` and `accepts_drop(type)` (`BoxResult::drag_started`,
+  `dragging`, `drop_hovered`, `dropped`, the payload in `drag_payload()`).
+  `Context::popup(id, style, PopupPlace)` is a box that opens under an anchor
+  or at a point (`open_popup_at`), closes on a press outside it and its opener,
+  or Esc while on top (`popup_on_top`). `set_tooltip_style` sets every
+  tooltip's look.
+- ui2 value fields: `Context::value_field(id, shown, options, valid)` shows a
+  value until it is typed in, commits on Enter or leaving
+  (`ValueFieldResult::committed`), goes back to the value on Esc (a `live`
+  field commits the value from before the typing again), and outlines what
+  does not validate; `number_field` for numbers in a range (`number_text`,
+  `parse_number`), `edit_value(id)` to start typing in one (a rename),
+  `stop_value_fields()`.
+- ui2 focus traps: `BoxStyle::focus_trap()` keeps Tab and the focus inside a
+  dialog while it is open.
+- ui2 scrolling: `Context::scroll_into_view(id)` (a box, or a widget by the box
+  around it), `ScrollBoxOptions::stick_to_end` (a log follows its last lines
+  while it is at its end), PageUp, PageDown, Home and End in the scroll box
+  the focus is in, else the one under the pointer.
+- ui2 ids from text and paths: `make_id(label, part)` for a part named by text
+  or a number, `make_id(parent, path)` (`make_path_id`) for a file's.
+- `kin/ui2/composed.hpp`: widgets built from boxes, in the look of
+  `ComposedLook` (the theme's colours by default): `menu_bar` (Alt and a
+  title's letter, the arrows, submenus, keys shown), `pick_list` (a searchable
+  list under an anchor; with `free_text`, Enter takes what is typed when
+  nothing matches) and
+  `breadcrumbs`.
+- `Context::measured(widget)`, a widget's size in its themed styles;
+  `theme_styles(theme, widget)` gives a widget its theme's styles where it
+  inherits them; `layout_root()`, `typing()`.
+- ui2 text: Left, Right, Backspace and Delete step over whole graphemes
+  (`utf8_next_grapheme`, `utf8_prev_grapheme`: combining marks, emoji with
+  modifiers and joiners, flags, CR LF). Segoe UI Emoji is a fallback font on
+  Windows. A full bitmap glyph atlas starts over with the text being drawn
+  instead of leaving its new glyphs out; `TtfFontOptions::atlas_pages` caps
+  its pages.
 
 - Tested `kin-gltf/1` export profile with CPU/GPU asset acceptance regressions.
   Reject distinct skin palettes, oversized/unsupported skins, morphs, mixed poses

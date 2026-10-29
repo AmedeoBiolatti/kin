@@ -2,6 +2,7 @@
 
 #include <kin/core/utf8.hpp>
 
+#include <cmath>
 #include <functional>
 
 namespace kin::ui2 {
@@ -17,9 +18,8 @@ enum class EditKind : u8 {
     Other,
 };
 
-constexpr u64 double_click_frames = 30;
 constexpr f32 double_click_distance = 4.0f;
-constexpr u64 caret_blink_frames = 32;
+constexpr f64 caret_blink_seconds = 0.53; // shown, then hidden, as long
 
 // Per-frame geometry of an editor.
 struct EditView {
@@ -33,7 +33,7 @@ struct EditView {
 class Editor {
 public:
     Editor(Context& ctx, TextEdit& widget, UiTextEditState& state)
-        : _ctx(ctx), _w(widget), _s(state), _frame(ctx.state().frame()) {}
+        : _ctx(ctx), _w(widget), _s(state), _now(ctx.now()) {}
 
     void run();
 
@@ -76,7 +76,7 @@ private:
     Context& _ctx;
     TextEdit& _w;
     UiTextEditState& _s;
-    u64 _frame = 0;
+    f64 _now = 0.0;
     UiPadding _padding{};
     EditView _view{};
     bool _reveal = false;
@@ -187,7 +187,7 @@ std::size_t Editor::visual_step(i32 step, bool forward) {
     if (moved) {
         return std::min(range.begin + *moved, line_last_offset(line));
     }
-    return forward ? utf8_next(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret);
+    return forward ? utf8_next_grapheme(_s.text, _s.caret) : utf8_prev_grapheme(_s.text, _s.caret);
 }
 
 f32 Editor::line_start(std::size_t line) {
@@ -237,7 +237,7 @@ void Editor::move_caret(std::size_t offset, bool select, bool keep_column) {
         _s.preferred_x = -1.0f;
     }
     _s.last_edit = static_cast<u8>(EditKind::None);
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
 }
 
@@ -289,7 +289,7 @@ bool Editor::edit(std::size_t from, std::size_t to, std::string_view insert, Edi
     _s.preferred_x = -1.0f;
     _s.last_edit = static_cast<u8>(kind);
     _s.last_edit_caret = _s.caret;
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
     _w.result.changed = true;
     return true;
@@ -310,7 +310,7 @@ bool Editor::undo() {
     _s.caret = step.caret;
     _s.selection_anchor = step.selection_anchor;
     _s.last_edit = static_cast<u8>(EditKind::None);
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
     _w.result.changed = true;
     return true;
@@ -327,7 +327,7 @@ bool Editor::redo() {
     _s.caret = step.caret;
     _s.selection_anchor = step.selection_anchor;
     _s.last_edit = static_cast<u8>(EditKind::None);
-    _s.caret_frame = _frame;
+    _s.caret_time = _now;
     _reveal = true;
     _w.result.changed = true;
     return true;
@@ -337,11 +337,11 @@ void Editor::handle_mouse(const Interaction& it) {
     const Vec2f pointer = _ctx.pointer();
     if (it.pressed && _w.enabled) {
         _s.active = true;
-        const bool repeat = _frame - _s.last_click_frame <= double_click_frames &&
+        const bool repeat = _now - _s.last_click_time <= State::double_click_seconds &&
                             std::abs(pointer.x - _s.last_click_position.x) <= double_click_distance &&
                             std::abs(pointer.y - _s.last_click_position.y) <= double_click_distance;
         _s.click_count = repeat ? std::min(_s.click_count + 1, 3) : 1;
-        _s.last_click_frame = _frame;
+        _s.last_click_time = _now;
         _s.last_click_position = pointer;
         const std::size_t at = offset_at(pointer);
         if (_s.click_count == 2) {
@@ -484,7 +484,7 @@ void Editor::handle_keys() {
         if (_s.has_selection()) {
             replace_selection({}, EditKind::Other);
         } else if (_s.caret > 0) {
-            const std::size_t from = ctrl ? utf8_word_left(_s.text, _s.caret) : utf8_prev(_s.text, _s.caret);
+            const std::size_t from = ctrl ? utf8_word_left(_s.text, _s.caret) : utf8_prev_grapheme(_s.text, _s.caret);
             edit(from, _s.caret, {}, ctrl ? EditKind::Other : EditKind::Deleting);
         }
     }
@@ -492,7 +492,7 @@ void Editor::handle_keys() {
         if (_s.has_selection()) {
             replace_selection({}, EditKind::Other);
         } else if (_s.caret < _s.text.size()) {
-            const std::size_t to = ctrl ? utf8_word_right(_s.text, _s.caret) : utf8_next(_s.text, _s.caret);
+            const std::size_t to = ctrl ? utf8_word_right(_s.text, _s.caret) : utf8_next_grapheme(_s.text, _s.caret);
             edit(_s.caret, to, {}, ctrl ? EditKind::Other : EditKind::Deleting);
         }
     }
@@ -514,6 +514,7 @@ void Editor::handle_keys() {
         } else {
             stop_editing();
             _w.result.tab_direction = shift ? -1 : 1;
+            _ctx.request_focus_move(_w.id, _w.result.tab_direction);
         }
     }
     if (_ctx.key_pressed(Key::Escape)) {
@@ -566,7 +567,7 @@ void Editor::run_scrollbar() {
 }
 
 void Editor::draw(const Interaction& it) {
-    const SurfaceStyle surface = with_fill_border(_ctx.theme().input_surface, _w.style.track, frame_color(_w.style, it, _w.enabled));
+    const SurfaceStyle surface = with_fill_border(_ctx.theme().input_surface, _w.style.track, frame_color(_w.style, it, _w.enabled, _s.active));
     _ctx.surface(_w.bounds, surface);
     if (_s.active && _w.enabled) {
         _ctx.outline_rounded_rect(_w.bounds, surface.radius, widget_border(_w.style, WidgetColorState::Focused), 2.0f);
@@ -610,7 +611,12 @@ void Editor::draw(const Interaction& it) {
         hint.color = alpha_scaled(hint.color, 0.45f);
         _ctx.text(_w.placeholder, {x0, vp.y - _s.scroll.y}, hint);
     }
-    const bool blink_on = ((_frame - _s.caret_frame) / caret_blink_frames) % 2 == 0;
+    const f64 since = std::max(0.0, _now - _s.caret_time);
+    const bool blink_on = std::fmod(since, 2.0 * caret_blink_seconds) < caret_blink_seconds;
+    if (_s.active && _w.enabled && !_w.read_only) {
+        // The caret blinks: a frame when it next shows or hides.
+        _ctx.request_redraw(static_cast<f32>(caret_blink_seconds - std::fmod(since, caret_blink_seconds)));
+    }
     if (_s.active && _w.enabled && !_w.read_only && blink_on) {
         const std::size_t line = line_of(_s.caret);
         const f32 y = vp.y + static_cast<f32>(line) * _view.pitch - _s.scroll.y;
@@ -660,6 +666,15 @@ void Editor::run() {
 
     if (it.focused && _w.enabled) {
         _s.active = true;
+    } else if (_s.active && !it.pressed && _ctx.focus_moved()) {
+        _s.active = false; // Tab took focus elsewhere
+        _s.clear_selection();
+    }
+    if (_w.enabled && _w.tab == UiTabKey::LeaveField) {
+        _ctx.register_focusable(_w.id);
+    }
+    if (_w.enabled && (it.hot || it.active)) {
+        _ctx.set_cursor(SystemCursor::Text);
     }
     handle_mouse(it);
     if (_s.active && _w.enabled) {

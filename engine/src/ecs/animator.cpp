@@ -1,0 +1,186 @@
+#include <kin/ecs/animator.hpp>
+
+#include <kin/anim/binding.hpp>
+#include <kin/anim/player.hpp>
+#include <kin/ecs/render.hpp>
+
+#include <algorithm>
+#include <limits>
+#include <variant>
+#include <vector>
+
+namespace kin {
+namespace {
+
+// How long a node plays (infinity: it repeats forever).
+f32 node_length(const AnimationNode& node) {
+    constexpr f32 forever = std::numeric_limits<f32>::infinity();
+    if (const auto* clip = std::get_if<Clip>(&node.value)) {
+        return clip->duration;
+    }
+    if (const auto* sequence = std::get_if<Sequence>(&node.value)) {
+        f32 total = 0.0f;
+        for (const AnimationNode& child : sequence->children) {
+            total += node_length(child);
+        }
+        return total;
+    }
+    if (const auto* parallel = std::get_if<Parallel>(&node.value)) {
+        f32 longest = 0.0f;
+        for (const AnimationNode& child : parallel->children) {
+            longest = std::max(longest, node_length(child));
+        }
+        return longest;
+    }
+    if (const auto* repeat = std::get_if<Repeat>(&node.value)) {
+        return repeat->count <= 0 || !repeat->child ? forever : node_length(*repeat->child) * static_cast<f32>(repeat->count);
+    }
+    return 0.0f; // a reference: as long as what it names, not known here
+}
+
+// The entity a track names: the animated one, or a child of it by name (a
+// path of names, "arm/hand").
+flecs::entity target_of(flecs::entity root, std::string_view target) {
+    flecs::entity at = root;
+    while (!target.empty() && at) {
+        const std::size_t slash = target.find('/');
+        at = at.lookup(std::string(target.substr(0, slash)).c_str());
+        target = slash == std::string_view::npos ? std::string_view{} : target.substr(slash + 1);
+    }
+    return at;
+}
+
+// A component the entity inherits from its prefab, copied down so writing it
+// changes this entity only.
+void own(flecs::entity entity, flecs::id_t component) {
+    if (!entity || !entity.has(component) || entity.owns(component)) {
+        return;
+    }
+    const ecs_type_info_t* info = ecs_get_type_info(entity.world(), component);
+    const void* inherited = entity.get(component);
+    if (info && inherited) {
+        entity.set_ptr(component, static_cast<std::size_t>(info->size), inherited);
+    }
+}
+
+// What the animation's tracks write, owned by the entities they write it on.
+void own_targets(flecs::entity root, const AnimationNode& node, const PropertyRegistry& properties, flecs::id_t sprites) {
+    if (const auto* clip = std::get_if<Clip>(&node.value)) {
+        for (const PropertyTrack& track : clip->properties) {
+            if (const PropertyAccessor* accessor = properties.find(track.property)) {
+                own(target_of(root, track.target), accessor->component);
+            }
+        }
+        for (const SpriteTrack& track : clip->sprites) {
+            own(target_of(root, track.target), sprites);
+        }
+    } else if (const auto* sequence = std::get_if<Sequence>(&node.value)) {
+        for (const AnimationNode& child : sequence->children) {
+            own_targets(root, child, properties, sprites);
+        }
+    } else if (const auto* parallel = std::get_if<Parallel>(&node.value)) {
+        for (const AnimationNode& child : parallel->children) {
+            own_targets(root, child, properties, sprites);
+        }
+    } else if (const auto* repeat = std::get_if<Repeat>(&node.value); repeat && repeat->child) {
+        own_targets(root, *repeat->child, properties, sprites);
+    }
+}
+
+// What an animation, or a blend space's animations, by that name write: owned.
+void own_named(flecs::entity root, AnimationRegistry& registry, const std::string& name, const PropertyRegistry& properties,
+               flecs::id_t sprites) {
+    if (const std::shared_ptr<const AnimationBlendSpace> space = registry.blend_space(name)) {
+        for (const BlendSpaceEntry& entry : space->entries) {
+            own_named(root, registry, entry.animation, properties, sprites);
+        }
+    } else if (const std::shared_ptr<const Animation> animation = registry.resolve(name)) {
+        own_targets(root, animation->root, properties, sprites);
+    }
+}
+
+} // namespace
+
+void update_animators(EcsWorld& world, f32 dt) {
+    flecs::world& raw = world.raw();
+    std::vector<flecs::entity> animated;
+    raw.each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
+    for (const flecs::entity found : animated) {
+        EcsEntity entity{found};
+        Animator* animator = entity.get_mut<Animator>(); // its own, when it is a prefab's
+        if (!animator->library || !animator->properties) {
+            continue; // its file not bound yet (Assets2D)
+        }
+        // What it plays: a machine (by its name, marked apart from an animation's), or an animation.
+        const std::string wanted = animator->machine.empty() ? animator->animation : "machine:" + animator->machine;
+        const bool fresh = wanted != animator->current || animator->bound != animator->library.get() || !found.has<AnimationPlayer>();
+        if (fresh) {
+            // Another animation, or the file read again: from its start.
+            animator->current = wanted;
+            animator->bound = animator->library.get();
+            animator->time = 0.0f;
+            animator->finished = false;
+            animator->state.clear();
+            // Owning what it writes, and its player, move the entity to other
+            // tables and its Animator with them: what is needed meanwhile, kept here.
+            const std::shared_ptr<AnimationAssetLibrary> library = animator->library;
+            const PropertyRegistry* properties = animator->properties;
+            const std::string machine_name = animator->machine;
+            const std::string animation = animator->animation;
+            AnimationPlayerConfig config;
+            config.registry = &library->registry;
+            config.properties = properties;
+            config.sprite_catalog = sprite_renderer_catalog(entity);
+            AnimationPlayer player = make_animation_player(std::move(config));
+            const flecs::id_t sprites = raw.component<SpriteRenderer>().id();
+            if (!machine_name.empty()) {
+                const auto machine = library->state_machines.find(machine_name);
+                if (machine != library->state_machines.end()) {
+                    player.machine = machine->second;
+                    // What any of its states plays, owned.
+                    for (const auto& [state, played] : machine->second->states) {
+                        own_named(found, library->registry, played, *properties, sprites);
+                    }
+                }
+            } else if (!animation.empty()) {
+                set_base(player, animation);
+                own_named(found, library->registry, animation, *properties, sprites);
+            }
+            found.set<AnimationPlayer>(std::move(player));
+            animator = entity.get_mut<Animator>(); // where it is now
+        }
+        AnimationPlayer* player = found.get_mut<AnimationPlayer>();
+        if (!player) {
+            continue;
+        }
+        // The game's parameters: its triggers handed over once (the machine takes them).
+        player->params.bools = animator->params.bools;
+        player->params.floats = animator->params.floats;
+        player->params.triggers.insert(animator->params.triggers.begin(), animator->params.triggers.end());
+        animator->params.triggers.clear();
+        // A machine plays on through its states; an animation stops once played through.
+        player->playing = animator->playing && (player->machine || !animator->finished);
+        player->sprite_catalog = sprite_renderer_catalog(entity);
+        if (!player->layers.empty()) {
+            player->layers.front().speed = animator->speed;
+        }
+    }
+
+    advance_animation_players(world, dt);
+    sample_animation_players(world);
+
+    for (const flecs::entity found : animated) {
+        Animator* animator = found.get_mut<Animator>();
+        const AnimationPlayer* player = found.get<AnimationPlayer>();
+        if (!animator || !player || player->layers.empty() || !player->layers.front().animation) {
+            continue;
+        }
+        const PlayerLayer& base = player->layers.front();
+        const f32 length = node_length(base.animation->root);
+        animator->time = std::min(base.cursor.time, length);
+        animator->finished = base.cursor.time >= length;
+        animator->state = player->state;
+    }
+}
+
+} // namespace kin

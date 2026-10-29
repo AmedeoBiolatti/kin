@@ -90,11 +90,42 @@ i32 depth_of(flecs::entity entity) {
     return depth;
 }
 
+// An entity that has T from a prefab (IsA) gets its own copy, as `fresh`
+// makes it: a body, its fixtures and its contacts are the entity's alone.
+template <typename T, typename Fresh>
+void own_inherited(flecs::world& world, Fresh fresh) {
+    if (!world.template component<T>().has(flecs::OnInstantiate, flecs::Inherit)) {
+        return; // copied onto instances when they are made (flecs will not look up for it)
+    }
+    std::vector<std::pair<flecs::entity, T>> inherited;
+    world.template query_builder<const T>().term_at(0).up(flecs::IsA).build().each([&](flecs::entity entity, const T& value) {
+        if (!entity.template owns<T>()) { // matched by its prefab's even once it has its own
+            inherited.emplace_back(entity, value);
+        }
+    });
+    for (auto& [entity, value] : inherited) {
+        fresh(value);
+        entity.set(std::move(value));
+    }
+}
+
+void own_inherited_physics(flecs::world& world) {
+    own_inherited<PhysicsBodyComponent>(world, [](PhysicsBodyComponent& body) { body.body = {}; });
+    own_inherited<PhysicsColliderComponent>(world, [](PhysicsColliderComponent& colliders) {
+        for (PhysicsCollider& collider : colliders.colliders) {
+            collider.fixture = {};
+        }
+    });
+    own_inherited<PhysicsContactQueue>(world, [](PhysicsContactQueue& queue) { queue.events.clear(); });
+    own_inherited<PhysicsOverlapSet>(world, [](PhysicsOverlapSet& overlaps) { overlaps.contacts.clear(); });
+}
+
 // Internal flecs-typed implementations. The public API (further down) takes
 // EcsWorld& and forwards via world.raw(), keeping flecs out of the
 // kin/ecs/physics.hpp surface.
 
 void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
+    own_inherited_physics(world);
     world.query<PhysicsBodyComponent>().each([&](flecs::entity entity, PhysicsBodyComponent& body) {
         if (!physics.is_alive(body.body)) {
             PhysicsBodyDef def = body.def;
@@ -241,6 +272,33 @@ EcsPhysicsBridge::EcsPhysicsBridge(EcsWorld& ecs, PhysicsWorld& physics)
                                             collider.fixture = {};
                                         }
                                     })) {
+}
+
+EcsPhysicsBridge::~EcsPhysicsBridge() {
+    release();
+}
+
+EcsPhysicsBridge::EcsPhysicsBridge(EcsPhysicsBridge&& other) noexcept
+    : _remove_body_observer(std::exchange(other._remove_body_observer, flecs::observer{})),
+      _remove_collider_observer(std::exchange(other._remove_collider_observer, flecs::observer{})) {
+}
+
+EcsPhysicsBridge& EcsPhysicsBridge::operator=(EcsPhysicsBridge&& other) noexcept {
+    if (this != &other) {
+        release();
+        _remove_body_observer = std::exchange(other._remove_body_observer, flecs::observer{});
+        _remove_collider_observer = std::exchange(other._remove_collider_observer, flecs::observer{});
+    }
+    return *this;
+}
+
+void EcsPhysicsBridge::release() {
+    for (flecs::observer* observer : {&_remove_body_observer, &_remove_collider_observer}) {
+        if (observer->id() != 0 && observer->is_alive()) {
+            observer->destruct();
+        }
+        *observer = flecs::observer{};
+    }
 }
 
 void register_physics_components(EcsWorld& world) {

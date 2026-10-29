@@ -89,9 +89,39 @@ texture actors actors.png
 sheet actors.sheet actors 16 16 0 0
 sheet_sprite hero.walk.0 actors.sheet 0 24 24 0.5 1 0 0
 sprite hero.icon actors 0 0 16 16 24 24 0.5 1 0 0
+animation hero.walk loop 10 hero.walk.0 hero.walk.1 hero.walk.2*2 hero.walk.3
 ```
 
-Use `save_sprite_catalog(...)` and `load_sprite_catalog(...)` for roundtrips.
+Use `save_sprite_catalog(...)` and `load_sprite_catalog(...)` for roundtrips;
+`parse_sprite_catalog(text, out, error)` and `serialize_sprite_catalog(...)`
+work on the text (an editor's), and `remove(...)`, `remove_animation(...)`,
+`remove_sheet(...)` and `remove_texture(...)` change a catalog in code.
+
+### Sprite animations
+
+An `animation` line names the catalog's sprites shown in turn: its id, what
+it does at its end (`loop`: again; `once`: its last frame stays; `pingpong`:
+back to its first, and on), its frames a second, then its frames, each a
+sprite, held longer with `*` (`hero.walk.2*2` shows for two frames).
+`sprite_animation_frame(animation, time)` says which frame shows `time`
+seconds in, and `sprite_animation_length(animation)` how long it plays before
+it starts again.
+
+`SpriteAnimator` plays one on an entity, setting its `SpriteRenderer`'s sprite
+to the frame it is on (`kin/ecs/sprite_animator.hpp`):
+
+```cpp
+hero.set(kin::SpriteRenderer{.asset = {"sprites/hero.kinsprites"}});
+hero.set(kin::SpriteAnimator{.animation = "hero.walk"});
+// each frame: another animation named starts from its first frame
+hero.get_mut<kin::SpriteAnimator>()->animation = moving ? "hero.walk" : "hero.idle";
+kin::update_sprite_animators(world, dt);
+```
+
+`speed` scales its time, `playing = false` holds it on its frame, and `time = 0`
+plays it again; `frame` and `finished` (a `once` animation played through) say
+where it is. Instances of a prefab each get their own animator. For blending,
+state machines and events on frames, see the [animation system](animation_system.md).
 The renderer-backed load overload can create textures from image assets:
 
 ```cpp
@@ -158,6 +188,26 @@ through `view_transform()`; one that only moves shifts each command as before.
 Output-pixel commands and `Text` / `Custom` callbacks draw without the camera
 either way: draw world coordinates in a callback with
 `renderer.scoped_transform(camera.view_transform())`.
+
+#### A camera in the scene
+
+`kin::CameraComponent` (`kin/ecs/camera.hpp`) makes an entity a camera: it
+looks at where its entity is and turns as it turns, `zoom` times as big. Put it
+on a child of the player and it follows the player. `EcsScene` draws through
+the first `current` one when its config has no `camera_callback`
+(`scene_cameras`, on by default). Its viewport is `view_size`, or the window's
+size in points when that is zero. With `limited` it shows nothing past
+`limit_min`..`limit_max`: it stops at a level's edges while its entity goes on.
+`smoothing` (seconds) makes it catch its entity up gradually: call
+`update_cameras(world, dt)` each frame for that.
+
+```cpp
+follow.child_of(player).set(kin::CameraComponent{.zoom = 2.0f, .smoothing = 0.2f});
+kin::update_cameras(world, dt);
+const std::optional<kin::Camera2D> camera = kin::scene_camera(world, {1280, 720}); // to map the mouse, say
+```
+
+Scene files describe it, so editors place and change it.
 
 ## Shapes
 
@@ -267,7 +317,17 @@ sprite renderers it takes the whole world transform, so it turns, scales
 unevenly and mirrors (a negative scale) with the entity and its parents. It
 sorts (`layer`, `order`, `y_sort`), culls and follows cameras like the other
 renderers, and many entities can share one mesh. `RenderQueue::draw_shape`
-queues a mesh directly. `games/shapes_demo` is an orrery: planets and moons
+queues a mesh directly.
+
+Scene files give a shape instead of a mesh: `spec` (`ShapeSpec`) names a box, a
+rounded box, an ellipse or a regular polygon `size` big and centred on the
+entity, filled and outlined. It can also be `svg`, an SVG-lite file of the
+content (`asset`), fitted in `size` or drawn at its own size when `size` is
+zero. `Assets2D` makes the mesh (`bind_shape_renderers`) and remakes it when
+the spec or the file changes. With `ShapeKind::None` (the C++ default) the mesh
+is the game's own. `make_shape(spec, svg)` gives the `Shape` itself.
+
+`games/shapes_demo` is an orrery: planets and moons
 turning with their parents, shapes composed in code and a rocket read from
 SVG-lite, a zooming and turning camera.
 
@@ -288,6 +348,26 @@ The token is 1 primitive plus 20 vertices and 28 triangles for the star; as
 triangles alone it was 140 vertices and 206 triangles, and the cached mesh took
 3.5 ms. Tessellating 200 tokens takes 0.54 ms: make meshes once and draw them
 many times.
+
+## Text In The World
+
+`kin::TextRenderer` (`kin/ecs/text.hpp`) draws text at an entity: a name over
+a head, a sign, a score that floats up. It moves, turns and scales with the
+entity and the camera, and sorts by `layer` and `order` among the sprites. Its
+font is a font file of the content (`font`, read by `Assets2D` at `size`
+points from distance fields where the backend has them, so it stays sharp as
+the camera zooms in) or the system's UI font. Lines break at `\n`, and past
+`wrap` wide when that is set. `pivot` is the point of the text's box at the
+entity, `align` places its lines, and `outline` draws an `outline_color` edge
+round each letter.
+
+```cpp
+sign.set(kin::TextRenderer{.text = "Shop", .size = 24.0f, .outline = 2.0f});
+```
+
+Text is always drawn with the dynamic renderers. Its command's callback puts
+the camera back on, since text callbacks draw in screen space. Menus and HUDs
+are ui2's.
 
 ## Animation
 
@@ -443,6 +523,35 @@ shader kept. `kin::compile_glsl()` compiles a file directly, and
 `Renderer2D::reload_shader()` replaces any shader in place. Shipped games load
 precompiled SPIR-V. Kin embeds its built-in shaders in the engine; game-specific
 shader files belong in the game's packaged assets (see [shipping](shipping.md)).
+
+### Shader effects in a scene
+
+A `ShaderEffect` (`kin/ecs/shader_effect.hpp`) draws a fragment shader of the
+content over a box at its entity:
+
+```json
+"ShaderEffect": {"asset": "shaders/water.frag.glsl", "size": {"x": 400, "y": 100},
+                 "params": "speed=3 tint=0.2,0.6,1,1"}
+```
+
+- **Where it draws:** the box is centred on the entity (`offset` from it),
+  turned and scaled with it. It draws among the world's renderers, by `layer`
+  and `order`.
+- **Uniforms:** `params` sets the uniform block's members by name. kin sets
+  `time` (moved on by `update_shader_effects(world, dt)`) and `size` (the
+  box's) itself.
+- **Texture:** `texture` names an image of the content, sampled as `sTexture`
+  at sampler 0.
+- **Loading:** `Assets2D` compiles `.frag.glsl` files with glslc where one is
+  found. Without glslc it loads the `.frag.spv` beside the source, which
+  Kin Studio writes as the shader is saved. A shipped game needs that `.spv`
+  in its content.
+- **Hot reload:** a shader that changes is compiled again and reloaded in
+  place. A version that does not compile keeps the last good one, and the
+  reason is in `Assets2D::problems()`.
+
+Shaders are SPIR-V, so they draw on the Vulkan backend. Elsewhere, and on SDL's
+renderer, nothing is drawn and the problem says why.
 
 ### Pipelines
 
@@ -735,6 +844,11 @@ window.set(kin::ClipGroup{.clip = kin::ClipRegion::to_path(kin::Path::rounded_re
 Groups below groups nest. Clipped renderers are collected with the dynamic
 ones (`collect_dynamic_world`), whatever their `static_renderable` says.
 
+Scene files give a ClipGroup's clip as a shape: `shape` (`rect`,
+`rounded_rect` or `ellipse`), `size`, `offset` (its centre, from the entity) and
+`radius`. Each described field remakes `clip` as it is set (`reshape_clip`).
+`ClipShape::None` leaves `clip` to the game.
+
 ui2 widgets clip with `Context::push_clip(bounds, corner_radii)`: the list,
 table and tree bodies keep their scrolled rows inside the panel's rounded
 corners (only the corners the body touches).
@@ -819,6 +933,12 @@ combine with what is under them:
 | `Replace` | src | copying |
 | `Max` | max(dst, src), each channel and alpha | overlapping shadows, fog of war, coverage, heat maps |
 | `Min` | min(dst, src), each channel and alpha | the reverse |
+
+`SpriteRenderer`, `TextureRenderer`, `RectRenderer`, `ShapeRenderer`,
+`ShaderEffect` and the particle components have a `blend` field (`alpha`,
+`additive`, `multiply`, `max` or `min`). Their queued draws carry
+`blend_material(mode)`, which sets that mode for the draw and restores the
+previous one afterwards.
 
 `Max` and `Min` let overlapping shapes each be drawn on their own, in any order,
 into one target: two shadows that overlap darken it once, not twice. The source
@@ -922,6 +1042,17 @@ trilinearly:
 The lighting demo makes a look per time of day from the neutral LUT and
 cross-fades between them as the time changes.
 
+A scene can set its own colour output with a `ColorGrade` component
+(`kin/ecs/lighting.hpp`). Its fields are `exposure`, `tonemap` (`none`,
+`reinhard` or `aces`), `look` (a `.cube` file or a LUT image of the content),
+`strength` and `dither`. `EcsScene` sets the colour output each frame while
+the component is there, and resets it when the component goes.
+
+`Renderer2D::draw_color_output(picture, source, dest, output, linear)` draws a
+picture as the output pass would show it, and `LayerOptions::grade` lays a
+layer over that way. An editor uses them to show a graded game in part of its
+window.
+
 ### Colour maths
 
 `kin/renderer/color.hpp`: `srgb_to_linear`, `linear_to_srgb`, `LinearColor`
@@ -977,6 +1108,31 @@ draw_ui(renderer);                                // drawn after: not darkened
 backends both have; it uses no shaders. Where they are missing it returns
 `false` and leaves the scene unlit. `games/lighting_demo` has lamps, a campfire, a
 coloured crystal and a flashlight, with a day/night cycle.
+
+### Lights in a scene
+
+Scene files and the ECS can do the same with components (`kin/ecs/lighting.hpp`):
+
+```json
+{"id": "night", "components": {"SceneLighting": {"ambient": {"r": 30, "g": 32, "b": 60, "a": 255}}}},
+{"id": "torch", "parent": "player", "components": {"Transform2D": {},
+  "LightComponent": {"color": {"r": 255, "g": 190, "b": 120, "a": 255}, "radius": 160}}}
+```
+
+- A world that has a `SceneLighting` is lit. `EcsScene` draws the world, applies
+  the light map, and then draws what is on the UI layer and above, which stays
+  unlit.
+- A `LightComponent` lights from where its entity is. It turns with its entity,
+  and its radius scales with the entity's scale.
+- `shape` names an image of the content that shapes the light.
+- `scene_lights(world, to_screen)` returns a world's lights as `Light2D`s, placed
+  through a camera's view transform.
+- `apply_scene_lighting(renderer, layer, world, to_screen, area)` lights the
+  world the way `EcsScene` does, for code that draws its own world.
+- The first `SceneLighting` found is the scene's. Turning it off
+  (`enabled: false`) leaves the scene unlit.
+- `EcsSceneRenderConfig::scene_lighting = false` turns off both the lighting and
+  the colour grade.
 
 ## Performance And Data Layout Notes
 

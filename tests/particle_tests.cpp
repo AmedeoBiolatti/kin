@@ -9,12 +9,14 @@
 #include <kin/platform/log.hpp>
 
 #include <cassert>
+#include <cmath>
 #ifdef _MSC_VER
 #include <crtdbg.h>
 #endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -461,6 +463,73 @@ void test_ecs_render_world_converts_output_policy_particles() {
 
 } // namespace
 
+// Direction and spread, where they start, drag, spin and a mid-life point;
+// written as name=value after an effect's first settings and read back.
+void test_richer_bursts_and_their_text() {
+    constexpr kin::f32 pi = 3.14159265f;
+    kin::ParticleSystem system{kin::make_key(7)};
+    kin::ParticleBurst burst{
+        .position = {100.0f, 100.0f},
+        .count = 64,
+        .speed = {10.0f, 10.0f},
+        .lifetime = {1.0f, 1.0f},
+        .start_size = 2.0f,
+        .end_size = 0.0f,
+        .start_color = {255, 0, 0, 255},
+        .end_color = {0, 0, 255, 0},
+        .direction = 90.0f, // down
+        .spread = 30.0f,
+        .shape = kin::ParticleShape::Box,
+        .shape_size = {20.0f, 4.0f},
+        .drag = 1.0f,
+        .rotation = {10.0f, 10.0f},
+        .spin = {90.0f, 90.0f},
+        .use_mid = true,
+        .mid_at = 0.25f,
+        .mid_size = 8.0f,
+        .mid_color = {0, 255, 0, 255},
+    };
+    system.burst(burst);
+    for (const kin::Particle& p : system.particles()) {
+        const kin::f32 angle = std::atan2(p.velocity.y, p.velocity.x) * 180.0f / pi;
+        assert(angle >= 75.0f - 1e-3f && angle <= 105.0f + 1e-3f);
+        assert(std::abs(p.position.x - 100.0f) <= 10.0f && std::abs(p.position.y - 100.0f) <= 2.0f);
+        assert(p.rotation == 10.0f);
+    }
+    system.update(0.25f);
+    const kin::Particle& p = system.particles()[0];
+    assert(std::abs(p.rotation - 32.5f) < 1e-3f);
+    // Slowed by drag: e^-0.25 of its speed kept.
+    assert(std::abs(std::hypot(p.velocity.x, p.velocity.y) - 10.0f * std::exp(-0.25f)) < 1e-3f);
+    // A quarter through its life: at the mid point.
+    assert(std::abs(kin::particle_size_at(p) - 8.0f) < 1e-3f);
+    assert((kin::particle_color_at(p) == kin::Color{0, 255, 0, 255}));
+    system.update(0.375f); // halfway from mid (0.25) to the end
+    assert(std::abs(kin::particle_size_at(system.particles()[0]) - 4.0f) < 1e-2f);
+
+    kin::ParticleCatalog catalog;
+    catalog.set_effect("rain", {.burst = burst});
+    catalog.set_effect("plain", {.burst = {.count = 3}});
+    const std::string text = kin::serialize_particle_catalog(catalog);
+    assert(text.find("direction=90 spread=30 shape=box shape_size=20,4 drag=1 rotation=10 spin=90 "
+                     "mid_at=0.25 mid_size=8 mid_color=0,255,0,255\n") != std::string::npos);
+    assert(text.find("effect plain 3 20 80 0.25 0.6 2 0 255 255 255 255 255 255 255 0 0 0 300 0 -\n") != std::string::npos);
+    kin::ParticleCatalog read;
+    std::string error;
+    assert(kin::parse_particle_catalog(text, read, error) && error.empty());
+    const kin::ParticleBurst& back = read.effect("rain")->burst;
+    assert(back.direction == 90.0f && back.spread == 30.0f && back.shape == kin::ParticleShape::Box);
+    assert(back.shape_size == (kin::Vec2f{20.0f, 4.0f}) && back.use_mid && back.mid_size == 8.0f);
+    assert(!read.effect("plain")->burst.use_mid && read.effect("plain")->burst.spread == 360.0f);
+    assert(kin::serialize_particle_catalog(read) == text);
+
+    // Not a setting kin knows: the line says so.
+    assert(!kin::parse_particle_catalog("effect x 1 0 0 1 1 1 1 255 255 255 255 0 0 0 0 0 0 0 0 - wobble=3\n", read, error));
+    assert(error.find("particles:1") != std::string::npos && error.find("wobble") != std::string::npos);
+    assert(read.has_effect("rain")); // left as it was
+    assert(read.remove_effect("rain") && !read.has_effect("rain") && !read.remove_effect("rain"));
+}
+
 int main() {
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
@@ -469,6 +538,7 @@ int main() {
     test_deterministic_bursts_and_update();
     test_catalog_asset_and_defaults();
     test_particle_catalog_seed_roundtrip();
+    test_richer_bursts_and_their_text();
     test_fields_wrap_and_render_pixel_policies();
     test_rendering_rects_sprites_sort_and_output_policy();
     test_animation_event_and_ecs_bridge();

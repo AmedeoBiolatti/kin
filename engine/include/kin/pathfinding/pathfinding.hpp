@@ -29,7 +29,9 @@ struct GridPathOptions {
 // Returns empty when start/goal are out of bounds, blocked, or unreachable.
 std::vector<Vec2i> find_path(const GridNav& nav, Vec2i start, Vec2i goal, GridPathOptions options = {});
 
-// TileMap convenience wrapper. Treats any solid tile in any layer as blocked.
+// TileMap convenience wrapper. Treats any solid tile in any layer as blocked; a
+// hex map's paths go through its hexagons' sides (as HexGridNav's; `options`
+// unused).
 std::vector<Vec2i> find_path(const TileMap& map, Vec2i start, Vec2i goal, GridPathOptions options = {});
 
 Vec2i world_to_tile(const TileMap& map, Vec2f world_pos);
