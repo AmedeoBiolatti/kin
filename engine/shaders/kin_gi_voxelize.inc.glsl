@@ -76,6 +76,7 @@ layout(std140, set = 2, binding = 0) uniform Params {
 } p;
 
 #include "kin_srgb.inc.glsl"
+#include "kin_gi_address.inc.glsl"
 
 // A triangle in voxels (a unit a voxel, voxel (0, 0, 0) from the world's origin: what a voxel holds does not depend on
 // where the window is, so a window that moves keeps what it made), with what the touch test needs: its normal
@@ -247,7 +248,7 @@ vec4 base_at(Tri t, Corners k, vec3 b, vec2 uv) {
 // Voxel `voxel` (the world's voxels, in the window) touched by item `item`.
 void visit(Tri t, Corners k, ivec3 voxel, uint item) {
     const ivec3 size = ivec3(p.size.xyz);
-    const ivec3 st = (voxel + size * 4096) % size;
+    const ivec3 st = kin_gi_wrap(voxel, size);
     const ivec3 bricks = size >> 3, brick = st >> 3;
     const uint block = uint(brick.x + bricks.x * (brick.y + bricks.y * brick.z));
     if ((work[p.first.y + (block >> 5u)] & (1u << (block & 31u))) == 0u) {

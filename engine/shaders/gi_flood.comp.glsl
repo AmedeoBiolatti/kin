@@ -29,6 +29,8 @@ layout(std140, set = 2, binding = 0) uniform Params {
 const uint none = 0xffffffffu;
 const float most = 8.0;
 
+#include "kin_gi_address.inc.glsl"
+
 uint pack(ivec3 v) {
     return uint(v.x) | (uint(v.y) << 10u) | (uint(v.z) << 20u);
 }
@@ -46,7 +48,7 @@ uint seed_at(ivec3 stored, ivec3 local) {
 
 uint index_of(ivec3 local, out ivec3 stored) {
     const ivec3 size = ivec3(p.size.xyz);
-    const ivec3 st = (local + p.window.xyz + size * 4096) % size;
+    const ivec3 st = kin_gi_wrap(local + p.window.xyz, size);
     stored = ivec3(st.xy, st.z + int(p.size.w) * size.z);
     return uint(stored.x) + p.size.x * (uint(stored.y) + p.size.y * uint(stored.z));
 }

@@ -51,7 +51,7 @@ void main() {
     const ivec3 st = ivec3(index % counts.x, (index / counts.x) % counts.y, index / (counts.x * counts.y));
     const ivec3 stored = ivec3(st.xy, st.z + k * counts.z);
     const ivec3 first = ivec3(p.probes.level[k].xyz);
-    const ivec3 world = first + (st - first + counts * 4096) % counts;
+    const ivec3 world = first + kin_gi_wrap(st - first, counts);
     const float cell = p.scene.level[k].w, spacing = p.probes.level[k].w / cell; // in voxels
     const vec3 base = vec3(world) * spacing - p.scene.level[k].xyz;
     const float here = room(k, base);

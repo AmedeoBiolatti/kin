@@ -68,7 +68,7 @@ void main() {
         return;
     }
     const ivec3 first = ivec3(p.probes.level[k].xyz);
-    const ivec3 world = first + (st - first + counts * 4096) % counts;
+    const ivec3 world = first + kin_gi_wrap(st - first, counts);
     const vec3 at = vec3(world) * p.probes.level[k].w + data.xyz;
     const vec3 way = normalize(mat3(p.rotation) * fibonacci(r, p.batch.z));
     ivec3 hit;

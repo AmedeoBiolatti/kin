@@ -178,7 +178,7 @@ void main() {
     }
     // The voxel's place in the world: the window voxel stored here.
     const ivec3 first = ivec3(p.scene.level[k].xyz);
-    const ivec3 local = (st - first + size * 4096) % size;
+    const ivec3 local = kin_gi_wrap(st - first, size);
     const float cell = p.scene.level[k].w;
     const vec3 world = (vec3(first + local) + 0.5) * cell;
     const vec4 normal = texelFetch(uNormal, voxel, 0);

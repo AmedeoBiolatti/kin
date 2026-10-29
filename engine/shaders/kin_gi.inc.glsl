@@ -30,9 +30,7 @@ struct KinGiProbes {
     vec4 level[4];  // xyz: the window's first probe (whole numbers, in probe steps); w: the spacing (world)
 };
 
-ivec3 kin_gi_wrap(ivec3 w, ivec3 s) {
-    return (w + s * 4096) % s;
-}
+#include "kin_gi_address.inc.glsl"
 
 vec2 kin_gi_sign(vec2 v) {
     return vec2(v.x >= 0.0 ? 1.0 : -1.0, v.y >= 0.0 ? 1.0 : -1.0);
