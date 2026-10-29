@@ -70,7 +70,7 @@ layout(std140, set = 2, binding = 0) uniform Params {
     uvec4 first;   // x: the draw's first copy in Copies; y: the level's first word in Work; z: the draw's first run's,
                    // w: its runs
     ivec4 window;  // xyz: the window's first voxel (in the level's voxels); w: the level's offset along z
-    ivec4 low;     // xyz: the first voxel of the box round the blocks to make (the world's voxels)
+    ivec4 low;     // xyz: the first voxel of the box round the blocks to make; w: every block inside the box is dirty
     ivec4 high;    // xyz: its last
     vec4 emission; // xyz: linear factor, w: independent emission
 } p;
@@ -245,15 +245,16 @@ vec4 base_at(Tri t, Corners k, vec3 b, vec2 uv) {
     return copies[k.copy].colour * vertex * tex;
 }
 
-// Voxel `voxel` (the world's voxels, in the window) touched by item `item`.
-void visit(Tri t, Corners k, ivec3 voxel, uint item) {
+bool dirty_at(ivec3 st) {
     const ivec3 size = ivec3(p.size.xyz);
-    const ivec3 st = kin_gi_wrap(voxel, size);
     const ivec3 bricks = size >> 3, brick = st >> 3;
     const uint block = uint(brick.x + bricks.x * (brick.y + bricks.y * brick.z));
-    if ((work[p.first.y + (block >> 5u)] & (1u << (block & 31u))) == 0u) {
-        return; // kept as it is
-    }
+    return (work[p.first.y + (block >> 5u)] & (1u << (block & 31u))) != 0u;
+}
+
+// Voxel `voxel` (the world's voxels, in the window) touched by item `item`, in a dirty stored block.
+void visit(Tri t, Corners k, ivec3 voxel, ivec3 st, uint item) {
+    const ivec3 size = ivec3(p.size.xyz);
     const ivec3 stored = ivec3(st.xy, st.z + p.window.w);
     const uint at = uint(stored.x) + p.size.x * (uint(stored.y) + p.size.y * uint(stored.z));
     item |= p.material.x > 0.0 ? 0u : 0x80000000u; // the emissive first
@@ -325,8 +326,17 @@ void column(Tri t, Corners k, ivec2 c, uint item) {
         voxel[t.u] = c.x;
         voxel[t.v] = c.y;
         voxel[t.w] = w;
-        if (touches(t, voxel)) {
-            visit(t, k, voxel, item);
+        if (p.low.w != 0) {
+            // A dense box needs neither the dirty-mask lookup nor wrapping rejected triangle/voxel pairs.
+            if (touches(t, voxel)) {
+                visit(t, k, voxel, kin_gi_wrap(voxel, ivec3(p.size.xyz)), item);
+            }
+        } else {
+            // A moving window's bounding box may cover several thin slabs. Reject the kept blocks before SAT.
+            const ivec3 st = kin_gi_wrap(voxel, ivec3(p.size.xyz));
+            if (dirty_at(st) && touches(t, voxel)) {
+                visit(t, k, voxel, st, item);
+            }
         }
     }
 }

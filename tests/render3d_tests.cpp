@@ -3460,6 +3460,63 @@ void test_gpu_gi_scene_builds() {
     });
 }
 
+// Submission order is not geometry identity. Reordering unchanged copies, then changing a material at the same
+// count, must keep the voxel fields consistent with a fresh build; disabling GI must discard its reuse state.
+void test_gpu_gi_submission_order() {
+    with_gpu("test_gpu_gi_submission_order", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.8f, 1.0f, 0.8f})).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto scene_of = [&](bool reverse, Color middle) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 0.5f, 0.0f}, 60.0f);
+            scene.global_illumination = GiLevel::settings();
+            for (int i = 0; i < 3; ++i) {
+                const int id = reverse ? 2 - i : i;
+                const Color color = id == 1 ? middle : Color::rgb(180, 70 + id * 60, 90);
+                (void)scene.draw(box, Mat4f::translation({2.0f * (id - 1), 0.5f, 0.0f}), {.color = color});
+            }
+            return scene;
+        };
+        const auto step = [&](kin::View3D& target, const kin::Scene3D& scene) {
+            render_ok(r3d, target, scene);
+            renderer.present();
+            return r3d.debug_stats().gi_built;
+        };
+        const auto read = [&](kin::View3D& target) {
+            kin::GiScene3D result;
+            assert(r3d.read_gi_scene(target, result).value_or(false));
+            return result;
+        };
+        const auto equal_fields = [](const kin::GiScene3D& a, const kin::GiScene3D& b) {
+            assert(a.size == b.size && a.distance == b.distance && a.albedo == b.albedo && a.normal == b.normal &&
+                   a.emission == b.emission);
+        };
+        const Color green = Color::rgb(50, 200, 80), red = Color::rgb(200, 50, 80);
+        assert(step(view, scene_of(false, green)));
+        const kin::GiScene3D first = read(view);
+        assert(!step(view, scene_of(false, green)));
+        assert(!step(view, scene_of(true, green)));
+        assert(!step(view, scene_of(true, green)));
+        equal_fields(first, read(view));
+        for (int i = 0; i < 8; ++i) {
+            (void)step(view, scene_of(true, red));
+        }
+        kin::View3D fresh = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        assert(step(fresh, scene_of(true, red)));
+        equal_fields(read(view), read(fresh));
+        assert(read(view).albedo != first.albedo);
+        kin::Scene3D off = scene_of(false, green);
+        off.global_illumination.enabled = false;
+        assert(!step(view, off));
+        assert(step(view, scene_of(false, green)));
+        equal_fields(first, read(view));
+    });
+}
+
 // An emissive material's strength changing (a lamp dimmed, a game's exposure on its emissives) makes nothing of the GI
 // scene again: its voxels keep its colour, the GI's light takes the strength each render, and read back they hold the
 // new strength, to the bit as the scene built afresh with it; its view shows it. Emissive or not is a change still (an
@@ -22548,6 +22605,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_texture_lod_bias());
     RUN(test_gpu_gi_scene());
     RUN(test_gpu_gi_scene_builds());
+    RUN(test_gpu_gi_submission_order());
     RUN(test_gpu_gi_emitter_strength());
     RUN(test_gpu_gi_without_skinned());
     RUN(test_gpu_gi_sun_map());

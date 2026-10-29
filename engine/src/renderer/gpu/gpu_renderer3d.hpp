@@ -322,6 +322,7 @@ private:
         u64 key = 0;
         bool valid = false; // the textures hold a built scene
         std::vector<std::pair<u64, Bounds3D>> copies;
+        std::vector<u64> copy_order; // last submission order; unchanged geometry needs no sort/diff
         std::vector<u32> made;
         std::vector<std::array<i32, 7>> rewritten;
         // The emitters (an emissive draw's material, its strength left out): each one's number (from 1, in the voxels'

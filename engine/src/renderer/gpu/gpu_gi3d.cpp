@@ -54,7 +54,7 @@ struct GiVoxelizeUniforms {
     f32 material[4];
     u32 first[4]; // the draw's first copy, the level's first word of the dirty blocks' bits
     i32 window[4];
-    i32 low[4], high[4]; // the box round the blocks to make (the world's voxels)
+    i32 low[4], high[4]; // xyz: the box round the blocks to make; low.w: every block inside the box is dirty
     f32 emission[4];
 };
 static_assert(sizeof(GiVoxelizeUniforms) == 160);
@@ -763,26 +763,32 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         return record;
     };
     // What changed: the copies that came or went (a copy that moved or changed is one of each), by their hashes.
+    const bool same_copies = !whole && copies.size() == g.copy_order.size() &&
+                             std::equal(copies.begin(), copies.end(), g.copy_order.begin(),
+                                        [](const Copy& c, u64 previous) { return c.hash == previous; });
     std::vector<std::pair<u64, Bounds3D>> now;
-    now.reserve(copies.size());
-    for (const Copy& c : copies) {
-        now.emplace_back(c.hash, c.box);
-    }
-    std::sort(now.begin(), now.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<Bounds3D> changed;
-    if (!whole) {
-        std::size_t i = 0, j = 0;
-        while (i < g.copies.size() || j < now.size()) {
-            if (j == now.size() || (i < g.copies.size() && g.copies[i].first < now[j].first)) {
-                changed.push_back(g.copies[i++].second);
-            } else if (i == g.copies.size() || now[j].first < g.copies[i].first) {
-                changed.push_back(now[j++].second);
-            } else {
-                ++i;
-                ++j;
-            }
+    if (!same_copies) {
+        now.reserve(copies.size());
+        g.copy_order.reserve(copies.size());
+        for (const Copy& c : copies) {
+            now.emplace_back(c.hash, c.box);
         }
-        gather_boxes(changed, 64);
+        std::sort(now.begin(), now.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        if (!whole) {
+            std::size_t i = 0, j = 0;
+            while (i < g.copies.size() || j < now.size()) {
+                if (j == now.size() || (i < g.copies.size() && g.copies[i].first < now[j].first)) {
+                    changed.push_back(g.copies[i++].second);
+                } else if (i == g.copies.size() || now[j].first < g.copies[i].first) {
+                    changed.push_back(now[j++].second);
+                } else {
+                    ++i;
+                    ++j;
+                }
+            }
+            gather_boxes(changed, 64);
+        }
     }
 
     // The blocks to make again, each level's: all of them on a whole build, else those its window gained (the camera
@@ -794,6 +800,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     // past it), over two.
     std::vector<u32> dirty(static_cast<std::size_t>(words) * levels, 0u);
     std::vector<u32>& made = g.made;
+    std::array<u32, max_gi_levels> made_per_level{};
     std::array<std::vector<GiBlocks>, max_gi_levels> cores;
     struct Flood {
         GiBlocks write, over;
@@ -819,6 +826,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                     if (!(word & (1u << (index % 32)))) {
                         word |= 1u << (index % 32);
                         made.push_back(st[0] | (st[1] << 8) | (st[2] << 16) | (k << 24));
+                        ++made_per_level[k];
                     }
                 }
             }
@@ -908,7 +916,11 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     g.origin = origin;
     g.cell = cell;
     g.key = settings.value;
-    g.copies = std::move(now);
+    if (!same_copies) {
+        g.copies = std::move(now);
+        g.copy_order.resize(copies.size());
+        std::transform(copies.begin(), copies.end(), g.copy_order.begin(), [](const Copy& c) { return c.hash; });
+    }
     // The emitters' strengths this render, for the GI's light and its view.
     {
         const u32 bytes = static_cast<u32>(std::max<std::size_t>(g.emitter_strength.size(), 1) * sizeof(f32));
@@ -1057,19 +1069,28 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
     // 2 and 3. The owners, then their attributes: a dispatch a draw a level, with its buffers and textures, in the
     // order of the buffers they read (SDL_GPU puts a barrier between dispatches each time another buffer is bound for
     // reading; the voxels do not depend on the order: the items are numbered in draw order).
+    std::array<GiBlocks, max_gi_levels> voxel_bounds{};
+    for (u32 k = 0; k < levels; ++k) {
+        std::vector<LevelJob>& list = level_jobs[k];
+        std::stable_sort(list.begin(), list.end(), [&](const LevelJob& a, const LevelJob& b) {
+            const Job &x = jobs[a.job], &y = jobs[b.job];
+            return std::tuple{x.mesh->vertices, x.mesh->indices, x.skinned ? x.mesh->skin : nullptr} <
+                   std::tuple{y.mesh->vertices, y.mesh->indices, y.skinned ? y.mesh->skin : nullptr};
+        });
+        GiBlocks& round = voxel_bounds[k];
+        for (const GiBlocks& b : cores[k]) {
+            round = round.empty() ? b : round_both(round, b);
+        }
+    }
     const auto voxelize = [&](SDL_GPUComputePass* pass, bool attributes) {
         for (u32 k = 0; k < levels; ++k) {
-            std::vector<LevelJob>& list = level_jobs[k];
-            std::stable_sort(list.begin(), list.end(), [&](const LevelJob& a, const LevelJob& b) {
-                const Job &x = jobs[a.job], &y = jobs[b.job];
-                return std::tuple{x.mesh->vertices, x.mesh->indices, x.skinned ? x.mesh->skin : nullptr} <
-                       std::tuple{y.mesh->vertices, y.mesh->indices, y.skinned ? y.mesh->skin : nullptr};
-            });
+            const std::vector<LevelJob>& list = level_jobs[k];
             const f32 c = cell * static_cast<f32>(1u << k);
-            GiBlocks round = cores[k].empty() ? GiBlocks{} : cores[k][0];
-            for (const GiBlocks& b : cores[k]) {
-                round = round_both(round, b);
-            }
+            const GiBlocks& round = voxel_bounds[k];
+            const u32 box_blocks = static_cast<u32>((round.hi[0] - round.lo[0]) * (round.hi[1] - round.lo[1]) *
+                                                    (round.hi[2] - round.lo[2]));
+            // The union fills its box on full builds and single slabs; only disjoint/concave unions need a mask.
+            const bool dense = made_per_level[k] == box_blocks;
             for (const LevelJob& lj : list) {
                 const Job& job = jobs[lj.job];
                 const Material3D& m = job.draw->material;
@@ -1094,6 +1115,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                     u.high[a] = origin[k][a] + round.hi[a] * 8 - 1;
                 }
                 u.origin[3] = 1.0f / c;
+                u.low[3] = dense ? 1 : 0;
                 u.size[3] = lj.item_first;
                 u.window[3] = static_cast<i32>(k * size[2]);
                 u.mesh[0] = job.index_first;
