@@ -2,6 +2,10 @@
 
 Work proceeds on `exp/rendering-foundations`, from committed lighting work `77b76c8`. The active GI subvoxel edits and main's planning changes are separate. See the [pipeline plan](rendering_pipeline_plan.md) for scope and acceptance gates.
 
+## Testing and optimization — 2026-10-29
+
+Five runtime commits through `c084128` reduce repeated GI work and repair retained GPU-resource and custom-material interface lifetimes. The [updated readiness report](rendering_readiness_2026-10-28.md) records 720p/1440p paired timing on Bistro, Sponza, Cornell and heavy Yard, pixel-exact regressions, core/synchronization validation, scoped sanitizers, and new GI resize plateaus. Whole-frame gains remain small and clock-sensitive; the shared-memory AO experiment was rejected. Frozen launchers are ready for native manual testing. Main and its local planning edits remain untouched.
+
 ## Main-readiness validation — 2026-10-28/29
 
 The [readiness report](rendering_readiness_2026-10-28.md) records the frozen native candidate, full configured test inventory, minimal GCC 13 and browser checks, nine-scene measurements, two-seed Cycles scores, and persistent resource replays. This pass fixes fractional-DPI pointer mapping and applies the sol2/GCC 15 compatibility option to all dependency consumers; it also repairs stale sampler and optional-codec test assumptions.

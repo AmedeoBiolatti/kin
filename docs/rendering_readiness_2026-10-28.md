@@ -1,6 +1,49 @@
 # Rendering readiness — 2026-10-28/29
 
-Measured source: `66f834f78411f022703f24edde36926bec01f35e` on `exp/rendering-foundations`. The last runtime change is `41d25d1`; later commits adjust tests and an API comment. Frozen executable SHA-256 values and the exact CMake configuration are in [provenance.json](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/readiness-2026-10-28/provenance.json) and [CMakeCache-candidate.txt](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/readiness-2026-10-28/CMakeCache-candidate.txt).
+## Three-hour testing and optimization follow-up — 29 October
+
+Current runtime: `c084128` on `exp/rendering-foundations`, compared with frozen `22e1ed7` binaries. Main remains at `6245258`; its two local planning edits were preserved. Use the new [manual launcher guide](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/START-HERE.txt), [result summary](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/summary.json), and [executable hashes/configuration](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/release-provenance.json). Earlier sections below retain the preceding validation campaign's results.
+
+Five runtime commits:
+
+- `d893341`: shared toroidal GI addressing uses a mask for power-of-two windows and preserves the general path for fitted dimensions.
+- `5a07347`: unchanged GI submissions avoid sorted-copy allocation/sort/diff; voxel-job order and bounds are prepared once for both passes. Dense dirty boxes skip mask reads, while sparse unions reject kept blocks before triangle tests. The CPU cache stores eight bytes per submitted copy per view; it does not remove the initial hash/bounds traversal.
+- `ed1596f`, `c084128`: device teardown releases retained texture/buffer/transfer allocations and material shader modules before destroying the device. Late CPU-handle destruction remains safe. Core validation exposed ten buffer/image/view lifetime errors and a separate retained-shader-module error; the repaired cases report zero. Shader tracking preserves descriptor-payload accounting.
+- `dfe393d`: quads and sprites supply zero custom vertex data, matching fragment materials' geometry interface. Four Vulkan pipeline-interface errors become zero; a surface regression covers the fallback value.
+
+The shared-memory AO reconstruction experiment was rejected: it saved only about 0.009 ms at 1440p and caused a handful of one-level pixel differences. The existing AO reconstruction and quality budgets remain unchanged.
+
+### Verification
+
+- Native all-target Release build passes. All 146 configured cases are accounted for: 141 pass after an isolated rerun of the 31 evaluation Python tests; five existing hardware foreign-device cases remain skipped and pass on software Vulkan. One contended run hit the evaluator's 120-second limit; its isolated CTest rerun passes. The final full 3D executable, 2D tests and GPU memory tests pass.
+- Full 3D core and synchronization sweeps report zero Vulkan errors. Six graph/geometry families pass synchronization validation. Final retained-shader and 2D interface/lifetime checks pass core validation with the validation library observed loaded. Configuration follows [LunarG's synchronization validation guide](https://vulkan.lunarg.com/doc/view/latest/windows/synchronization_usage.html).
+- Scoped AddressSanitizer/UndefinedBehaviorSanitizer checks pass for GPU memory, GI, retained handles, model imports, attachment graphs and postprocessing; the final material-shader lifetime case passes after rebuilding. This is **not a completed full sanitizer suite**. The initial full run was interrupted for budget, remained alive after SIGTERM and was force-stopped; the last logged point-light case exits normally in an isolated debugger run. LeakSanitizer was disabled.
+- Minimal GCC 13 with 3D/optional systems disabled passes six selected checks, followed by fresh renderer/memory reruns after the repairs. Frozen Sponza, Bistro and Yard manual launchers pass bounded loading/drawing smokes.
+- The GI/interface checkpoint (`dfe393d`): [720p regression](/home/bamedeo/kin-build/rendering-optimization-2026-10-29/accepted-regression-720/report/index.html) and [1440p regression](/home/bamedeo/kin-build/rendering-optimization-2026-10-29/accepted-regression-1440/report/index.html): seven stills plus a 12-frame moving Bistro clip at each size are pixel-identical to the original baseline. A [final ownership-only regression](/home/bamedeo/kin-build/rendering-optimization-2026-10-29/release-regression-720/report/index.html) adds five identical frames across Sponza/Bistro/Yard. No new Cycles renders were made; the earlier two-seed references remain the accuracy baseline. These runs establish regression equivalence, not a new accuracy measurement.
+- [GI resize/feature stress](/home/bamedeo/kin-build/rendering-optimization-2026-10-29/release-stress-fixed/report/index.html): three cycles and 1,720 frames each at 1440p return to exactly **777,092,092 bytes** for Sponza and **505,251,688 bytes** for Cornell. Both initial/final plateaus are stable. Asset/shader reload, load/unload and multi-view stress remain unexercised by this pass. Payload counters are owned descriptors, not physical residency.
+
+### Timing
+
+Diagnostic moving-Bistro traces show about 32% less idle GI CPU preparation (0.239 to 0.163 ms at 1440p), 16% less GI-ray time (0.417 to 0.349 ms), and 13% less voxel-attribute time (1.595 to 1.387 ms on six update frames). The latter reduces total measured GI scene-update cost about 6%. These are individual scopes, with profiling overhead and different sampling windows; they are not whole-frame gains. [Per-pass data](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/profile-summary.json) retain clocks, control-pass timings and nested-range accounting.
+
+Final normal-binary measurements use three alternating pairs, 180 warm-up plus 540 measured frames per run: **48 runs / 25,920 measured frames**, with 20 Hz NVML telemetry. No pass markers or synchronizing captures run in throughput jobs. Yard uses the **heavy** recipe; its extra shutdown frame is retained in raw data and excluded from the requested sample window.
+
+| Scene | Render size | Baseline median FPS | Candidate median FPS | Median paired change |
+|---|---|---:|---:|---:|
+| bistro | 1280x720 | 207.9 | 210.5 | +1.11% |
+| bistro | 2560x1440 | 88.9 | 88.9 | +0.07% |
+| sponza | 1280x720 | 390.3 | 396.6 | +1.68% |
+| sponza | 2560x1440 | 129.5 | 131.0 | +1.47% |
+| cornell | 1280x720 | 964.4 | 941.5 | -2.75% |
+| cornell | 2560x1440 | 281.8 | 278.1 | -2.02% |
+| yard | 1280x720 | 33.2 | 33.1 | -0.02% |
+| yard | 2560x1440 | 30.5 | 31.0 | +2.73% |
+
+The scene-dependent changes remain within about ±3%. Software power capping and some thermal slowdown occur; pairwise clock differences are retained in [throughput-summary.json](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/optimization-2026-10-29/throughput-summary.json). **There is no demonstrated broad 1440p FPS win or performance signoff.** Cornell's small negative observations need a controlled rerun, including the fitted-volume fallback. Heavy Yard averages roughly 29.9 ms of CPU render work and 0.09 ms presenting at 720p, pointing to CPU render/submission work as its next profiling target. All paired final owned-payload counters match.
+
+The SDL/NVIDIA/X11 simultaneous-device teardown crash still reproduces in an SDL-only program, including with core validation; releasing both surfaces first avoids it in the probe. The reproduction and logs are retained, with no speculative engine workaround shipped. Native Windows/macOS, other hardware GPUs, and a complete sanitizer run remain pre-merge coverage gaps. This is a stronger native manual-testing candidate; main has not been deployed.
+
+Original campaign measured source: `66f834f78411f022703f24edde36926bec01f35e` on `exp/rendering-foundations`. The last runtime change is `41d25d1`; later commits adjust tests and an API comment. Frozen executable SHA-256 values and the exact CMake configuration are in [provenance.json](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/readiness-2026-10-28/provenance.json) and [CMakeCache-candidate.txt](/mnt/windows/Users/amedeo/Desktop/gamedev/kin-eval/readiness-2026-10-28/CMakeCache-candidate.txt).
 
 This is a candidate for native manual testing. Main has not been merged, and its local plan edits were left untouched. Performance acceptance remains open because the laptop throttled heavily. Successful evaluation jobs mean measurements completed and passed protocol/resource checks; image-quality acceptance also requires reviewing their differences.
 
