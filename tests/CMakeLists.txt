@@ -192,8 +192,10 @@ endif()
 # engine) they are not compiled and the tests that need them skip.
 set(_kin_test_shader_dir "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 target_compile_definitions(kin_renderer_tests PRIVATE KIN_TEST_SHADER_DIR="${_kin_test_shader_dir}")
+# The engine's compiled shaders, beside kin_engine (not CMAKE_BINARY_DIR: kin may be built inside another project).
+get_target_property(_kin_engine_binary_dir kin_engine BINARY_DIR)
 target_compile_definitions(kin_renderer_tests PRIVATE
-    KIN_GPU_SHADER_DIR_FOR_TESTS="${CMAKE_BINARY_DIR}/engine/shaders")
+    KIN_GPU_SHADER_DIR_FOR_TESTS="${_kin_engine_binary_dir}/shaders")
 if(KIN_GLSLC AND KIN_HAS_GPU_RENDERER)
     file(MAKE_DIRECTORY "${_kin_test_shader_dir}")
     set(_kin_test_spv)
