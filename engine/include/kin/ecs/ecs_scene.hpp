@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -78,6 +79,12 @@ public:
     void add_asset_binder(std::string name, Assets2D::Binder binder);
 
     void render(SceneContext& ctx) override;
+    // Drawn through `camera` (a tool's view of the game, see Scene::view_scene)
+    // instead of its camera_callback and scene cameras; null: those again.
+    bool set_view_camera(const Camera2D* camera) override;
+    // The camera a tool views the world through, null when none: what the
+    // game draws in the world itself goes through it too.
+    const Camera2D* view_camera() const { return _view_camera ? &*_view_camera : nullptr; }
 
     EcsWorld* world() override {
         return &ecs();
@@ -97,6 +104,7 @@ private:
     std::vector<std::pair<std::string, Assets2D::Binder>> _asset_binders;
     i32 _asset_frames = 0;
     LightLayer _lighting;
+    std::optional<Camera2D> _view_camera; // a tool's (set_view_camera)
     bool _graded = false; // a ColorGrade set the colour output
 };
 

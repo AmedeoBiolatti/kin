@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <kin/anim/anim_format.hpp>
 #include <kin/anim/player.hpp>
@@ -19,6 +20,7 @@
 #include <kin/ecs/system.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/renderer/render_view.hpp>
 #include <cctype>
 #include <mutex>
 #include <optional>
@@ -621,6 +623,94 @@ ServerResponse handle_view_screenshot(ServerContext& ctx, const JsonValue& param
     return ok_result(out.str());
 }
 
+// view.scene {path, content?}: the top scene shows the scene file `path` (in
+// the working folder) in place of its own, read as it reads its own (Kin
+// Studio's scene view: see Scene::view_scene).
+ServerResponse handle_view_scene(ServerContext& ctx, const JsonValue& params) {
+    Scene* scene = ctx.scenes().top_mut();
+    if (!scene) {
+        return error_result("no active scene");
+    }
+    std::string path_error;
+    const std::optional<std::filesystem::path> file = confine_to_working_dir(params.string_at("path"), path_error);
+    if (!file) {
+        return error_result("invalid scene path: " + path_error);
+    }
+    const std::filesystem::path content = params.string_at("content");
+    std::string error;
+    if (!scene->view_scene(*file, content, error)) {
+        KIN_LOG_WARN_F("server", "view.scene failed", (LogFields{{.name = "path", .value = file->string()}, {.name = "error", .value = error}}));
+        return error_result(error);
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("path", std::string_view{file->string()});
+    json.end_object();
+    return ok_result(out.str());
+}
+
+// view.frame {path, width, height, x, y, zoom, rotation}: the top scene drawn
+// at `width` x `height` through a camera centred on world point (x, y), `zoom`
+// screen units a world unit, turned `rotation` degrees; its pixels written to
+// `path` (in the working folder) as they are: rows of RGBA bytes, top first.
+// The camera stays for later frames (screenshots too).
+ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
+    Scene* scene = ctx.scenes().top_mut();
+    if (!scene) {
+        return error_result("no active scene");
+    }
+    const i64 width = params.int_at("width", 0);
+    const i64 height = params.int_at("height", 0);
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
+        return error_result("view.frame needs a width and height of 1 to 8192");
+    }
+    const f64 zoom = params.number_at("zoom", 1.0);
+    if (!(zoom > 0.0)) {
+        return error_result("view.frame needs a zoom above 0");
+    }
+    std::string path_error;
+    const std::optional<std::filesystem::path> file = confine_to_working_dir(params.string_at("path", "kin-view.rgba"), path_error);
+    if (!file) {
+        return error_result("invalid frame path: " + path_error);
+    }
+    const Vec2i size{static_cast<i32>(width), static_cast<i32>(height)};
+    if (ctx.window().size() != size) {
+        ctx.window().set_size(size);
+    }
+    Camera2D camera;
+    camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
+    camera.zoom = static_cast<f32>(zoom);
+    camera.rotation = static_cast<f32>(params.number_at("rotation", 0.0));
+    camera.look_at({static_cast<f32>(params.number_at("x", 0.0)), static_cast<f32>(params.number_at("y", 0.0))});
+    if (!scene->set_view_camera(&camera)) {
+        return error_result("the scene has no world to draw through another camera");
+    }
+    ctx.render_frame();
+    std::vector<u8> pixels;
+    Vec2i read{};
+    const Vec2i points = ctx.window().size();
+    if (!ctx.renderer().read_rgba(Rectf{0.0f, 0.0f, static_cast<f32>(points.x), static_cast<f32>(points.y)}, pixels, read) ||
+        pixels.size() != static_cast<std::size_t>(read.x) * static_cast<std::size_t>(read.y) * 4u) {
+        return error_result("failed to read the frame back (the backend cannot read pixels)");
+    }
+    {
+        std::ofstream out(*file, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+        if (!out) {
+            return error_result("failed to write the frame to " + file->string());
+        }
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("path", std::string_view{file->string()});
+    json.field("width", read.x);
+    json.field("height", read.y);
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_sim_reset(ServerContext& ctx, const JsonValue& params) {
     if (!ctx.can_reset()) {
         KIN_LOG_WARN("server", "sim.reset rejected");
@@ -1138,6 +1228,12 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     }
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);
+    }
+    if (method == "view.scene") {
+        return handle_view_scene(ctx, params);
+    }
+    if (method == "view.frame") {
+        return handle_view_frame(ctx, params);
     }
     if (method == "sim.reset") {
         return handle_sim_reset(ctx, params);
@@ -1807,7 +1903,7 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
             response = status();
         }
     } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
-               method == "view.screenshot" || method == "ui.snapshot") {
+               method.starts_with("view.") || method == "ui.snapshot") {
         response = error_result(method + " drives a headless server (--server); this game runs in its window");
     } else {
         response = dispatch_server_command(ctx, game, method, params);

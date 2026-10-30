@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cassert>
 #include <filesystem>
+#include <optional>
 #include <fstream>
 #include <memory>
 #include <sstream>
@@ -873,6 +874,101 @@ void test_view_screenshot() {
     assert(!std::filesystem::exists(escape_path));
 }
 
+// A scene a tool views (view.scene, view.frame): it shows the files it is
+// given, and fills the frame with a colour telling the camera it is drawn
+// through (red: ten times its zoom, green: its centre's x).
+class ViewedScene final : public kin::Scene {
+public:
+    explicit ViewedScene(std::filesystem::path* shown) : _shown(shown) {}
+    bool view_scene(const std::filesystem::path& file, const std::filesystem::path&, std::string& error) override {
+        if (file.filename() == "broken.kinscene") {
+            error = "broken.kinscene does not read";
+            return false;
+        }
+        *_shown = file;
+        return true;
+    }
+    bool set_view_camera(const kin::Camera2D* camera) override {
+        _camera = camera ? std::optional<kin::Camera2D>(*camera) : std::nullopt;
+        return true;
+    }
+    void render(kin::SceneContext& ctx) override {
+        const auto red = static_cast<kin::u8>(_camera ? _camera->zoom * 10.0f : 0.0f);
+        const auto green = static_cast<kin::u8>(_camera ? _camera->center().x : 0.0f);
+        ctx.renderer.clear(kin::Color::rgb(red, green, 7));
+    }
+
+private:
+    std::filesystem::path* _shown;
+    std::optional<kin::Camera2D> _camera;
+};
+
+void test_view_scene_and_frame() {
+    const std::string frame_name = "kin-server-view.rgba";
+    const std::filesystem::path frame_path = std::filesystem::current_path() / frame_name;
+    std::filesystem::remove(frame_path);
+    std::filesystem::path shown;
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<ViewedScene>(&shown));
+
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"view.scene","params":{"path":"edited.kinscene"}})" "\n"
+        R"({"id":2,"method":"view.scene","params":{"path":"broken.kinscene"}})" "\n"
+        R"({"id":3,"method":"view.scene","params":{"path":"../outside.kinscene"}})" "\n" +
+        std::string(R"({"id":4,"method":"view.frame","params":{"path":")") + frame_name +
+        R"(","width":32,"height":16,"x":40,"y":5,"zoom":3}})" "\n"
+        R"({"id":5,"method":"view.frame","params":{"width":0,"height":16}})" "\n"
+        R"({"id":6,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "view", .width = 64, .height = 48},
+        .mode = kin::ServerMode::Driven,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    const std::string text = out.str();
+
+    // The scene shows the file (in the working folder); one it can't read, or
+    // one outside the folder, is refused with why.
+    assert(response_result(text, 1) != nullptr && shown == std::filesystem::current_path() / "edited.kinscene");
+    assert(response_result(text, 2) == nullptr && text.find("broken.kinscene does not read") != std::string::npos);
+    assert(response_result(text, 3) == nullptr && text.find("invalid scene path") != std::string::npos);
+
+    // Drawn at the size asked for, through the camera asked for, its pixels raw.
+    const kin::JsonValue* frame = response_result(text, 4);
+    assert(frame != nullptr && frame->int_at("width") == 32 && frame->int_at("height") == 16);
+    assert(std::filesystem::file_size(frame_path) == 32u * 16u * 4u);
+    std::ifstream file(frame_path, std::ios::binary);
+    unsigned char pixel[4] = {};
+    file.read(reinterpret_cast<char*>(pixel), sizeof(pixel));
+    assert(pixel[0] == 30 && pixel[1] == 40 && pixel[2] == 7 && pixel[3] == 255);
+    file.close();
+    std::filesystem::remove(frame_path);
+    assert(response_result(text, 5) == nullptr && text.find("width and height of 1 to 8192") != std::string::npos);
+}
+
+void test_view_scene_refused_by_default() {
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<InputProbeScene>());
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"view.scene","params":{"path":"edited.kinscene"}})" "\n"
+        R"({"id":2,"method":"view.frame","params":{"width":8,"height":8}})" "\n"
+        R"({"id":3,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "view", .width = 64, .height = 48},
+        .mode = kin::ServerMode::Driven,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    // A scene that does not say how shows no other files, and has no world to
+    // draw through another camera.
+    assert(response_result(out.str(), 1) == nullptr && out.str().find("does not show other scene files") != std::string::npos);
+    assert(response_result(out.str(), 2) == nullptr && out.str().find("no world to draw") != std::string::npos);
+}
+
 } // namespace
 
 // A scene that records its teardown: the server must pop (and destroy) the
@@ -1053,6 +1149,8 @@ int main() {
     test_sim_reset();
     test_sim_reset_unsupported_without_factory();
     test_view_screenshot();
+    test_view_scene_and_frame();
+    test_view_scene_refused_by_default();
     test_server_tears_down_scenes_before_returning();
     test_live_inspector();
     return 0;
