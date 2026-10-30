@@ -474,6 +474,8 @@ response is one line: `{"id": <echoed>, "result": {...}}` or
 | `animation.diagnostics` | Unresolved-reference diagnostics from the scene's animation library. |
 | `ui.snapshot {scene?}` | Unavailable after legacy `kin/ui` removal; use `world.snapshot` or scene reports. |
 | `view.screenshot {path?}` | Render the current scene and save a PNG; returns path + dimensions. |
+| `view.scene {path, content?}` | The top scene shows another scene file (`Scene::view_scene`); for tools' scene views. |
+| `view.frame {path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene through the given camera and write raw RGBA; returns path + dimensions. |
 | `sim.tick {count}` | Advance N fixed-timestep frames; returns the frame counter. |
 | `sim.reset {seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
 | `input.action {name, mode}` | Queue an action `press` (a tap, released at the start of the next tick), `hold`, or `release` for the next tick. |

@@ -206,6 +206,10 @@ void Window::set_size(i32 width, i32 height) {
     set_size(Vec2i{width, height});
 }
 
+bool Window::sync() {
+    return _handle && SDL_SyncWindow(to_sdl_window(_handle));
+}
+
 void Window::minimize() {
     if (_handle) {
         SDL_MinimizeWindow(to_sdl_window(_handle));

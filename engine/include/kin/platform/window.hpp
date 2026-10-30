@@ -107,6 +107,9 @@ public:
     void set_minimum_size(Vec2i size);
     void set_size(Vec2i size);
     void set_size(i32 width, i32 height);
+    // Waits (a moment at most) until what was asked of the window is done:
+    // some systems (X11) size, move and show it later. False when it timed out.
+    bool sync();
     bool borderless() const;
     // Desktop (borderless, display-sized) fullscreen, toggled at runtime.
     bool fullscreen() const;

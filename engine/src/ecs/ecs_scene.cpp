@@ -95,6 +95,15 @@ void EcsScene::bind_assets(SceneContext& ctx) {
     }
 }
 
+bool EcsScene::set_view_camera(const Camera2D* camera) {
+    if (camera) {
+        _view_camera = *camera;
+    } else {
+        _view_camera.reset();
+    }
+    return true;
+}
+
 void EcsScene::render(SceneContext& ctx) {
     if (!_render_config.enabled) {
         return;
@@ -129,7 +138,10 @@ void EcsScene::render(SceneContext& ctx) {
     }
     Camera2D camera;
     const Camera2D* camera_ptr = nullptr;
-    if (_render_config.camera_callback) {
+    if (_view_camera) {
+        camera = *_view_camera;
+        camera_ptr = &camera;
+    } else if (_render_config.camera_callback) {
         DebugStepTimer timer{timing_debug, "render.scene.camera"};
         camera = _render_config.camera_callback(ecs(), ctx);
         camera_ptr = &camera;

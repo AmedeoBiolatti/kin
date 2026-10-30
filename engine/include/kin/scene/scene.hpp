@@ -6,6 +6,8 @@
 #include <kin/platform/input.hpp>
 #include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <filesystem>
+#include <string>
 #include <string_view>
 
 namespace kin {
@@ -17,6 +19,7 @@ class AnimationAssetLibrary;
 class Renderer3D;
 struct RuntimeDebugOptions;
 struct RunReport;
+struct Camera2D;
 
 struct SceneContext {
     App& app;
@@ -71,6 +74,30 @@ public:
 
     // Optional animation asset library hook for tooling/server diagnostics.
     virtual const AnimationAssetLibrary* animation_library() const { return nullptr; }
+
+    // A tool's view of the game: Kin Studio's scene view runs a copy of the
+    // game as a scene server (no window), has its scene show the scene file
+    // being edited (view.scene) and draws it through the view's camera
+    // (view.frame), so the view shows what the game's own code draws.
+    //
+    // Shows `file` (a scene file; what it names read from `content`, empty:
+    // the game's content) in place of what the scene shows, as it reads its
+    // own: a scene whose entities come from a file reads this one instead.
+    // False, with why in `error`, when it can't (the default: the scene does
+    // not say how).
+    virtual bool view_scene(const std::filesystem::path& file, const std::filesystem::path& content, std::string& error) {
+        (void)file;
+        (void)content;
+        error = "the scene does not show other scene files (Scene::view_scene)";
+        return false;
+    }
+    // The world drawn through `camera` instead of the scene's own cameras;
+    // null: its own again. False when the scene has no world to draw so (the
+    // default; EcsScene has).
+    virtual bool set_view_camera(const Camera2D* camera) {
+        (void)camera;
+        return false;
+    }
 
     virtual bool is_overlay() const { return false; }
     virtual bool updates_below() const { return false; }

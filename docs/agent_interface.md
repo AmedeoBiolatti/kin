@@ -143,6 +143,8 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
 | `ui.snapshot` | `{scene?}` | Unavailable after legacy `kin/ui` removal; use reports or `world.snapshot`. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
+| `view.scene` | `{path, content?}` | The top scene shows the scene file `path` in place of its own, as it reads its own (`Scene::view_scene`; a game says how). |
+| `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit; write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |
 | `sim.tick` | `{count?}` | Advance N fixed frames, default 1. Returns frame counter and failure flag. |
 | `sim.reset` | `{seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
@@ -192,7 +194,7 @@ Answers are written on a thread of their own, in order: a tool slow to read
 a large one holds that thread, not the game.
 
 `server.shutdown` quits the game. What drives a headless server (`sim.tick`,
-`sim.reset`, `input.*`, `view.screenshot`) is refused. When the
+`sim.reset`, `input.*`, `view.*`) is refused. When the
 tool closes its end of stdin the game goes on, never left paused. Headless
 runs and builds without the scene server ignore `--inspect`, with a warning.
 
