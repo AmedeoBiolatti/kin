@@ -10,7 +10,7 @@ releases may change APIs.
 - Let tools draw a game's scenes as the game does: the scene server's `view.scene` has the top scene show another
   scene file (`Scene::view_scene`, which a game implements), and `view.frame` draws it through a given camera
   (`Scene::set_view_camera`, implemented by `EcsScene`) and writes the pixels as raw RGBA. Kin Studio's scene view
-  uses them. `--inspect` refuses `view.*`.
+  uses them. `--inspect` refuses `view.*`. `Window::sync()` waits for a window's pending size (X11 sizes it later).
 
 - Patch SDL Vulkan sampler barriers for compute shader reads in a guarded, generated build source. Keep shared
   dependency sources untouched and enable shader-access analysis in synchronization validation.

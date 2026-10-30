@@ -677,6 +677,7 @@ ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
     const Vec2i size{static_cast<i32>(width), static_cast<i32>(height)};
     if (ctx.window().size() != size) {
         ctx.window().set_size(size);
+        ctx.window().sync(); // sized later on some systems (X11)
     }
     Camera2D camera;
     camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
@@ -693,6 +694,10 @@ ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
     if (!ctx.renderer().read_rgba(Rectf{0.0f, 0.0f, static_cast<f32>(points.x), static_cast<f32>(points.y)}, pixels, read) ||
         pixels.size() != static_cast<std::size_t>(read.x) * static_cast<std::size_t>(read.y) * 4u) {
         return error_result("failed to read the frame back (the backend cannot read pixels)");
+    }
+    if (read != size) {
+        return error_result("the frame came out " + std::to_string(read.x) + "x" + std::to_string(read.y) + ", not " +
+                            std::to_string(size.x) + "x" + std::to_string(size.y) + " (the window could not be sized)");
     }
     {
         std::ofstream out(*file, std::ios::binary | std::ios::trunc);
