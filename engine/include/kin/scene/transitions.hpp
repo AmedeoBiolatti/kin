@@ -3,7 +3,10 @@
 #include <kin/renderer/color.hpp>
 #include <kin/scene/scene.hpp>
 
+#include <functional>
 #include <memory>
+#include <optional>
+#include <string_view>
 
 namespace kin {
 
@@ -42,6 +45,10 @@ public:
     ReplaceWithFadeScene(std::unique_ptr<Scene> next,
                          f32 duration = default_fade_duration,
                          Color color = colors::black);
+    // The scene below stays: `swap` changes it once the screen is covered.
+    ReplaceWithFadeScene(std::function<void(SceneContext&)> swap,
+                         f32 duration = default_fade_duration,
+                         Color color = colors::black);
 
     std::string_view name() const override { return "ReplaceWithFadeScene"; }
     bool is_overlay() const override { return true; }
@@ -52,6 +59,7 @@ public:
 
 private:
     std::unique_ptr<Scene> _next;
+    std::function<void(SceneContext&)> _swap;
     f32 _duration = default_fade_duration;
     f32 _elapsed = 0.0f;
     Color _color = colors::black;
@@ -81,5 +89,20 @@ std::unique_ptr<Scene> transition_to(std::unique_ptr<Scene> next,
                                      TransitionKind kind,
                                      f32 duration = default_fade_duration,
                                      Color color = colors::black);
+
+// The same transitions over a scene that stays: `swap` changes it (reads
+// another scene file into it, say) where transition_to would put the next
+// scene in, the screen covered (a crossfade's: after the outgoing frame is
+// kept). Pushed over the scene: ctx.scenes.push(transition_within(...)). The
+// scene below does not update while it plays.
+std::unique_ptr<Scene> transition_within(std::function<void(SceneContext&)> swap,
+                                         TransitionKind kind,
+                                         f32 duration = default_fade_duration,
+                                         Color color = colors::black);
+
+// "fade", "crossfade", "dissolve", "pixelate", "wipe", "iris" (as scene files
+// and scripts name them), and back (none for another name).
+std::string_view transition_name(TransitionKind kind);
+std::optional<TransitionKind> transition_from_name(std::string_view name);
 
 } // namespace kin

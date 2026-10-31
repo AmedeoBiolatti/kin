@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Go from scene to scene as data: `SceneDoor` (touch or action, the scene and the entity arrived at, an exit, a
+  transition) and `SceneTraveller` components, `SceneFlow` (doors used, arriving without being sent back), and
+  `scene.go` for entity scripts. `transition_within` plays the shader transitions over a scene that stays while it
+  reads another file; `transition_name`/`transition_from_name`. `PhysicsTeleport` moves a body to its entity once.
+  `world.snapshot` without `scene` reads the topmost scene with a world (under transitions and other overlays).
+
 - Let tools draw a game's scenes as the game does: the scene server's `view.scene` has the top scene show another
   scene file (`Scene::view_scene`, which a game implements), and `view.frame` draws it through a given camera
   (`Scene::set_view_camera`, implemented by `EcsScene`) and writes the pixels as raw RGBA. Kin Studio's scene view

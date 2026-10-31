@@ -170,14 +170,23 @@ void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
 }
 
 void sync_transforms_to_physics_raw(flecs::world& world, PhysicsWorld& physics) {
-    // The entity leads: a body under a parent follows it.
+    // The entity leads: a body under a parent follows it. One teleported goes
+    // where its entity is, once.
+    std::vector<flecs::entity> teleported;
     world.query<PhysicsBodyComponent, const Transform2D>().each(
         [&](flecs::entity entity, PhysicsBodyComponent& body, const Transform2D& transform) {
-            if (body.sync_to_physics && physics.is_alive(body.body)) {
+            const bool teleport = entity.has<PhysicsTeleport>();
+            if (teleport) {
+                teleported.push_back(entity);
+            }
+            if ((body.sync_to_physics || teleport) && physics.is_alive(body.body)) {
                 const WorldTransform pose = world_pose(entity, transform);
                 physics.set_transform(body.body, pose.pos, to_physics_angle(pose.rotation));
             }
         });
+    for (flecs::entity entity : teleported) {
+        entity.remove<PhysicsTeleport>();
+    }
 }
 
 void step_physics_raw(flecs::world& world, PhysicsWorld& physics, f32 dt, i32 velocity_iterations, i32 position_iterations) {
@@ -306,6 +315,7 @@ void register_physics_components(EcsWorld& world) {
     raw.component<PhysicsBodyComponent>("PhysicsBodyComponent");
     raw.component<PhysicsColliderComponent>("PhysicsColliderComponent");
     raw.component<PhysicsVelocity>("PhysicsVelocity");
+    raw.component<PhysicsTeleport>("PhysicsTeleport");
     raw.component<PhysicsContactQueue>("PhysicsContactQueue");
     raw.component<PhysicsOverlapSet>("PhysicsOverlapSet");
 }

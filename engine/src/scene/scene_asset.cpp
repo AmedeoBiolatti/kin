@@ -13,6 +13,7 @@
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
@@ -654,6 +655,63 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("Talker")) {
         // The one who talks (the player): TalkComponents are measured from it.
         world.components().native<Talker>("Talker").field("enabled", &Talker::enabled);
+    }
+    if (!world.components().find("SceneDoor")) {
+        // A way to another scene, or another place of this one: a
+        // SceneTraveller stepping into its area (or pressing its action in
+        // it) goes there (SceneFlow, kin/ecs/scene_flow.hpp).
+        world.components().native<SceneDoor>("SceneDoor")
+            .field("scene", &SceneDoor::scene)
+            .asset_type(std::string{asset_type_name(AssetType::Scene)})
+            .description("The scene it leads to; none: a place of this one.")
+            .field("arrive", &SceneDoor::arrive)
+            .entry_of("scene")
+            .description("The entity there travellers arrive at, by its name (another door, a marker).")
+            .property<std::string>("trigger",
+                                   [](const SceneDoor& d) { return std::string(d.trigger == DoorTrigger::Action ? "action" : "touch"); },
+                                   [](SceneDoor& d, const std::string& value) {
+                                       if (value == "touch") d.trigger = DoorTrigger::Touch;
+                                       else if (value == "action") d.trigger = DoorTrigger::Action;
+                                       else return false;
+                                       return true;
+                                   })
+            .choices({"touch", "action"})
+            .description("Touch: stepping into it; action: pressing its action in it.")
+            .field("action", &SceneDoor::action)
+            .description("An action door's (an action of input.kininput).")
+            .field("size", &SceneDoor::size)
+            .description("Its area, centred on the entity.")
+            .field("offset", &SceneDoor::offset)
+            .description("The area's centre, from the entity.")
+            .field("exit", &SceneDoor::exit)
+            .description("Where those arriving at this door stand, from it (out of its area).")
+            .property<std::string>("transition",
+                                   [](const SceneDoor& d) {
+                                       return d.transition ? std::string(transition_name(*d.transition)) : std::string("none");
+                                   },
+                                   [](SceneDoor& d, const std::string& value) {
+                                       if (value == "none") {
+                                           d.transition.reset();
+                                           return true;
+                                       }
+                                       const std::optional<TransitionKind> kind = transition_from_name(value);
+                                       if (!kind) return false;
+                                       d.transition = kind;
+                                       return true;
+                                   })
+            .choices({"fade", "crossfade", "dissolve", "pixelate", "wipe", "iris", "none"})
+            .field("duration", &SceneDoor::duration)
+            .range(0.0, 10.0)
+            .units("seconds")
+            .field("color", &SceneDoor::color)
+            .description("What the screen goes to between the scenes.")
+            .field("prompt", &SceneDoor::prompt)
+            .description("What the game shows by an action door.")
+            .field("enabled", &SceneDoor::enabled);
+    }
+    if (!world.components().find("SceneTraveller")) {
+        // Who goes through SceneDoors (the player): where it is, is what is in a door.
+        world.components().native<SceneTraveller>("SceneTraveller").field("enabled", &SceneTraveller::enabled);
     }
     if (!world.components().find("UiScreenComponent")) {
         // A UI screen (.kinui) shown over the world while the entity is there
