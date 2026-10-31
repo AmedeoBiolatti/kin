@@ -17,6 +17,9 @@ enum class PhysicsBodyType {
 enum class PhysicsShapeType {
     Box,
     Circle,
+    Capsule, // a box with round ends: the ends of its longer side
+    Polygon, // any simple polygon (a concave one is cut in triangles)
+    Chain,   // a line through points (a loop: closed): it has no inside
 };
 
 enum class PhysicsContactEventType {
@@ -27,6 +30,15 @@ enum class PhysicsContactEventType {
 enum class PhysicsDebugShapeType {
     Polygon,
     Circle,
+    Chain, // a line through its points
+};
+
+enum class PhysicsJointType {
+    Hinge,    // they turn about one point (Box2D's revolute joint)
+    Slider,   // one slides along an axis of the other, neither turning (prismatic)
+    Distance, // two points kept apart: a rod, a rope (limits), a spring
+    Weld,     // held as they are (springy, with a frequency)
+    Wheel,    // a hinge on a spring along an axis: a car's wheel
 };
 
 struct PhysicsBody {
@@ -45,6 +57,15 @@ struct PhysicsFixture {
     bool valid() const { return index != UINT32_MAX; }
     explicit operator bool() const { return valid(); }
     friend constexpr bool operator==(PhysicsFixture, PhysicsFixture) = default;
+};
+
+struct PhysicsJoint {
+    u32 index = UINT32_MAX;
+    u32 generation = 0;
+
+    bool valid() const { return index != UINT32_MAX; }
+    explicit operator bool() const { return valid(); }
+    friend constexpr bool operator==(PhysicsJoint, PhysicsJoint) = default;
 };
 
 // Lengths, positions, velocities, forces and impulses given to a PhysicsWorld,
@@ -71,14 +92,27 @@ struct PhysicsBodyDef {
     u64 user_id = 0;
 };
 
+// A shape on a body, from the body's origin: centred at `offset` and turned
+// by `angle` there (a box's, a capsule's; a polygon's or a chain's points
+// are from `offset`, turned by `angle` about it).
 struct PhysicsShape {
     PhysicsShapeType type = PhysicsShapeType::Box;
-    Vec2f half_extents{0.5f, 0.5f};
+    Vec2f half_extents{0.5f, 0.5f}; // a box's; a capsule's (the box it fills)
     Vec2f offset{};
-    f32 radius = 0.5f;
+    f32 radius = 0.5f; // a circle's
+    f32 angle = 0.0f;  // radians
+    std::vector<Vec2f> points{}; // a polygon's corners, a chain's points
+    bool loop = false;      // a chain's: back from its last point to its first
+    // A chain's: it stops what comes from one side of it only, the left going
+    // from point to point (on screen, y down): wound clockwise, a loop stops
+    // what comes from outside. Two-sided (the default), it stops both.
+    bool one_sided = false;
 
     static PhysicsShape box(Vec2f half_extents, Vec2f offset = {});
     static PhysicsShape circle(f32 radius, Vec2f offset = {});
+    static PhysicsShape capsule(Vec2f half_extents, Vec2f offset = {});
+    static PhysicsShape polygon(std::vector<Vec2f> points, Vec2f offset = {});
+    static PhysicsShape chain(std::vector<Vec2f> points, bool loop = false, Vec2f offset = {});
 };
 
 struct PhysicsFixtureDef {
@@ -126,6 +160,43 @@ struct PhysicsRaycastHit {
     f32 fraction = 0.0f;
 };
 
+// body_a joined to body_b (none: to where it is in the world). Its angle,
+// travel and motor are body_a's from body_b (a door's from its frame). Places
+// in the world; angles in radians.
+struct PhysicsJointDef {
+    PhysicsJointType type = PhysicsJointType::Hinge;
+    PhysicsBody body_a{};
+    PhysicsBody body_b{};
+    Vec2f anchor{};       // where they are joined (a distance joint's point on body_a)
+    Vec2f other_anchor{}; // a distance joint's point on body_b
+    Vec2f axis{1.0f, 0.0f}; // a slider's, a wheel's: what it moves along
+    bool collide_connected = false;
+    // Limits: a hinge's angles (from where it was made); a slider's or a
+    // wheel's travel along its axis; a distance joint's shortest and longest
+    // (a rope: 0 to its length).
+    bool limit = false;
+    f32 lower = 0.0f;
+    f32 upper = 0.0f;
+    // A motor: a hinge's or a wheel's turning (radians/s, up to a torque), a
+    // slider's sliding (units/s, up to a force).
+    bool motor = false;
+    f32 motor_speed = 0.0f;
+    f32 max_motor_force = 0.0f;
+    f32 length = 0.0f; // a distance joint's; 0: how far apart its points are when made
+    // A spring (a distance joint's, a wheel's, a weld's): how often it swings
+    // (Hz; 0: none, it is stiff) and how soon that dies (1: at once).
+    f32 frequency = 0.0f;
+    f32 damping_ratio = 0.7f;
+    u64 user_id = 0;
+};
+
+struct PhysicsDebugJoint {
+    PhysicsJoint joint{};
+    PhysicsJointType type = PhysicsJointType::Hinge;
+    Vec2f anchor_a{};
+    Vec2f anchor_b{};
+};
+
 struct PhysicsDebugShape {
     PhysicsDebugShapeType type = PhysicsDebugShapeType::Polygon;
     PhysicsBody body{};
@@ -152,10 +223,31 @@ public:
     void destroy_body(PhysicsBody body);
     bool is_alive(PhysicsBody body) const;
 
+    // One fixture is one shape, made of as many Box2D shapes as it takes (a
+    // capsule's three, a concave polygon's triangles): its contacts begin
+    // when the first of them touches and end when the last stops. One that
+    // takes none (a polygon with no area, a chain of one point) is made, and
+    // touches nothing (shape_parts: 0).
     PhysicsFixture add_fixture(PhysicsBody body, const PhysicsFixtureDef& def);
     void destroy_fixture(PhysicsFixture fixture);
     bool is_alive(PhysicsFixture fixture) const;
     std::vector<PhysicsFixture> fixtures(PhysicsBody body) const;
+    u32 shape_parts(PhysicsFixture fixture) const;
+
+    // A joint goes with either of its bodies. None (invalid) when body_a is
+    // gone, or body_b is given and gone, or they are one.
+    PhysicsJoint create_joint(const PhysicsJointDef& def);
+    void destroy_joint(PhysicsJoint joint);
+    bool is_alive(PhysicsJoint joint) const;
+    // Its limits, motor, length and spring as `def` says (not its bodies,
+    // anchors or axis: those it was made with).
+    void update_joint(PhysicsJoint joint, const PhysicsJointDef& def);
+    // The force it pulled with over the last step (units, as forces are).
+    Vec2f joint_force(PhysicsJoint joint) const;
+    // A hinge's angle (radians, from where it was made); a slider's or a
+    // wheel's travel along its axis; a distance joint's length now.
+    f32 joint_value(PhysicsJoint joint) const;
+    u64 joint_user_id(PhysicsJoint joint) const;
 
     u64 user_id(PhysicsBody body) const;
     u64 fixture_tag(PhysicsFixture fixture) const;
@@ -180,6 +272,7 @@ public:
     std::vector<PhysicsFixture> query_aabb(Rectf rect, PhysicsFilter filter = {}) const;
     std::vector<PhysicsRaycastHit> raycast(Vec2f from, Vec2f to, PhysicsFilter filter = {}) const;
     std::vector<PhysicsDebugShape> debug_shapes(PhysicsFilter filter = {}) const;
+    std::vector<PhysicsDebugJoint> debug_joints() const;
 
     // As the def said (above zero; one when it was not).
     f32 units_per_meter() const;

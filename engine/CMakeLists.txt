@@ -228,6 +228,7 @@ if(KIN_ENABLE_PHYSICS)
     target_compile_features(kin_physics PUBLIC cxx_std_23)
     target_include_directories(kin_physics PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(kin_physics PUBLIC kin::components box2d)
+    target_link_libraries(kin_physics PRIVATE earcut_hpp::earcut_hpp) # concave polygons, in triangles
     kin_enable_release_optimizations(kin_physics)
 
     add_library(kin_physics_render STATIC src/physics/debug_render.cpp)
@@ -287,6 +288,8 @@ target_compile_features(kin_engine PUBLIC cxx_std_23)
 if(MSVC)
     set_source_files_properties(src/scripting/script_engine.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
     set_source_files_properties(src/ecs/ui2.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+    # Every built-in component's registration, and the physics systems' queries.
+    set_source_files_properties(src/scene/scene_asset.cpp src/ecs/physics.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 target_compile_definitions(kin_engine PUBLIC
     "$<$<OR:$<BOOL:${KIN_ENABLE_PROFILING}>,$<AND:$<CONFIG:Release>,$<BOOL:${KIN_ENABLE_RELEASE_PROFILING}>>>:KIN_ENABLE_PROFILING>"

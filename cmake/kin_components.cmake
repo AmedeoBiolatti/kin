@@ -140,7 +140,7 @@ endfunction()
 kin_declare_component(SCRIPTING DEFAULT ON DESCRIPTION "Build Lua scripting and scene bindings"
     EXTERNAL_DEPENDENCIES Lua sol2 TESTS kin-lua-script kin-scripting kin-entity-scripts)
 kin_declare_component(PHYSICS DEFAULT ON DESCRIPTION "Build Box2D physics and ECS integration"
-    EXTERNAL_DEPENDENCIES Box2D TESTS kin-physics kin-ecs-physics kin-physics-component)
+    EXTERNAL_DEPENDENCIES Box2D TESTS kin-physics kin-ecs-physics kin-physics-component kin-physics-shapes kin-ecs-physics-shapes)
 kin_declare_component(AUDIO DEFAULT ON DESCRIPTION "Build audio playback, catalogs and ECS integration"
     EXTERNAL_DEPENDENCIES SDL3 TESTS kin-audio kin-audio-component)
 kin_declare_component(SCENE_SERVER DEFAULT ${KIN_ENABLE_AGENT_SERVER} DESCRIPTION "Build the scene automation server (--server)" TESTS kin-server)

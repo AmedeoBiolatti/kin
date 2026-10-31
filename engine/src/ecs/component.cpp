@@ -141,6 +141,7 @@ std::string field_kind_name(ComponentFieldKind kind) {
     case ComponentFieldKind::AssetRef: return "asset_ref";
     case ComponentFieldKind::Vec3f: return "vec3f";
     case ComponentFieldKind::Quatf: return "quatf";
+    case ComponentFieldKind::Points: return "points";
     }
     return "unknown";
 }
@@ -161,6 +162,7 @@ std::optional<ComponentFieldKind> field_kind_from_name(std::string_view name) {
     if (name == "asset_ref") return ComponentFieldKind::AssetRef;
     if (name == "vec3f") return ComponentFieldKind::Vec3f;
     if (name == "quatf") return ComponentFieldKind::Quatf;
+    if (name == "points") return ComponentFieldKind::Points;
     return std::nullopt;
 }
 
@@ -1198,6 +1200,12 @@ void write_component_field_value_json(JsonWriter& json, const ComponentFieldValu
             json.value(std::string_view{typed});
         } else if constexpr (std::is_same_v<T, f32>) {
             json.value(as_written(typed));
+        } else if constexpr (std::is_same_v<T, std::vector<Vec2f>>) {
+            json.begin_array();
+            for (Vec2f point : typed) {
+                json.begin_array().value(as_written(point.x)).value(as_written(point.y)).end_array();
+            }
+            json.end_array();
         } else {
             json.value(typed);
         }
@@ -1415,6 +1423,26 @@ std::optional<ComponentFieldValue> component_field_value_from_json(ComponentFiel
         if (value.is_string()) return ComponentFieldValue{ComponentAssetRef{.id = value.as_string()}};
         if (value.is_object()) return ComponentFieldValue{ComponentAssetRef{.id = value.string_at("id")}};
         break;
+    case ComponentFieldKind::Points: {
+        // [[x, y], ...] (or [{"x": x, "y": y}, ...]).
+        if (!value.is_array()) break;
+        std::vector<Vec2f> points;
+        points.reserve(value.items().size());
+        for (const JsonValue& item : value.items()) {
+            std::string ignored;
+            const std::optional<ComponentFieldValue> point = component_field_value_from_json(ComponentFieldKind::Vec2f, item, ignored);
+            if (!point) {
+                points.clear();
+                break;
+            }
+            points.push_back(std::get<Vec2f>(*point));
+        }
+        ComponentFieldValue result{std::move(points)};
+        if (std::get<std::vector<Vec2f>>(result).size() == value.items().size() && detail::field_value_matches_kind(result, kind)) {
+            return result;
+        }
+        break;
+    }
     }
     error = "invalid JSON value for field kind '" + field_kind_name(kind) + "'";
     return std::nullopt;

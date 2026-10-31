@@ -7,6 +7,17 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 2D physics for whole games: `PhysicsShape` capsules, polygons (any simple one: concave ones in triangles) and
+  chains (lines through points, two- or one-sided, loops), turned by an `angle`; a fixture of several Box2D shapes
+  (`shape_parts`) whose contacts begin and end once, and which queries and rays find once. Joints
+  (`PhysicsWorld::create_joint`: hinge, slider, distance with limits and springs, weld, wheel; `update_joint`,
+  `joint_force`, `joint_value`, `debug_joints`; they go with their bodies). In the ECS, colliders on children with
+  no body of their own are their ancestor's body's (placed, turned and scaled as they are, made again when moved);
+  `PhysicsJointComponent` (breaking past `break_force`); `TilemapCollider` makes a map's solid cells a static body
+  (`TileMap::collision_shapes`: joined one-sided loops, holes too, and cells' polygons). Scene files say all of it:
+  a `points` field kind (`std::vector<Vec2f>`), and native components may hold entity refs. The physics debug view
+  draws chains and joints; Lua `on_contact` names a tilemap's entity.
+
 - Go from scene to scene as data: `SceneDoor` (touch or action, the scene and the entity arrived at, an exit, a
   transition) and `SceneTraveller` components, `SceneFlow` (doors used, arriving without being sent back), and
   `scene.go` for entity scripts. `transition_within` plays the shader transitions over a scene that stays while it

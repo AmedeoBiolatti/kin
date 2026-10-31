@@ -159,6 +159,17 @@ struct TilemapRenderOptions {
     Vec2f origin{};
 };
 
+// What a map's solid cells stop, as shapes to collide with (from the map's
+// top left): `loops` around each run of touching solid cells (those without a
+// collision polygon of their own), joined, straight sides one; wound clockwise
+// on screen (y down), the solid on the right going along it; a hole's loop the
+// other way round, so its solid is on the right too. `polygons`: each cell
+// with a collision polygon, its own.
+struct TileCollisionShapes {
+    std::vector<std::vector<Vec2f>> loops;
+    std::vector<std::vector<Vec2f>> polygons;
+};
+
 class TileMap {
 public:
     i32 cols = 0;
@@ -229,6 +240,7 @@ public:
     bool blocks_rect(std::string_view layer_id, Rectf world_rect) const;
     std::vector<Rectf> collision_rects(std::string_view layer_id = {}) const;
     std::vector<std::vector<Vec2f>> collision_polygons(std::string_view layer_id = {}) const;
+    TileCollisionShapes collision_shapes(std::string_view layer_id = {}) const;
     void invalidate_render_cache(std::string_view layer_id = {}) const;
     void set_render_chunk_size(i32 cols, i32 rows);
     Vec2i render_chunk_size() const;

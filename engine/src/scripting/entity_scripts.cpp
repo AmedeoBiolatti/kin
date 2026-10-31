@@ -67,6 +67,12 @@ sol::object to_lua(sol::state_view lua, const ComponentFieldValue& value) {
                 return sol::make_object(lua, v.id);
             } else if constexpr (std::is_same_v<V, ComponentEntityRef>) {
                 return sol::make_object(lua, static_cast<f64>(v.id));
+            } else if constexpr (std::is_same_v<V, std::vector<Vec2f>>) {
+                sol::table points = lua.create_table(static_cast<int>(v.size()), 0);
+                for (std::size_t i = 0; i < v.size(); ++i) {
+                    points[i + 1] = lua.create_table_with("x", v[i].x, "y", v[i].y);
+                }
+                return sol::make_object(lua, points);
             } else {
                 return sol::lua_nil; // 3D values: not for 2D scripts
             }
@@ -123,6 +129,21 @@ std::optional<ComponentFieldValue> from_lua(ComponentFieldKind kind, const sol::
         if (value.get_type() == sol::type::table) {
             const auto channel = [&](const char* name) { return static_cast<u8>(std::clamp(field(name, 255.0), 0.0, 255.0)); };
             return Color{channel("r"), channel("g"), channel("b"), channel("a")};
+        }
+        break;
+    case ComponentFieldKind::Points:
+        if (value.get_type() == sol::type::table) {
+            const sol::table table = value.as<sol::table>();
+            std::vector<Vec2f> points;
+            for (std::size_t i = 1; i <= table.size(); ++i) {
+                const sol::object item = table[i];
+                if (item.get_type() != sol::type::table) {
+                    return std::nullopt;
+                }
+                const sol::table point = item.as<sol::table>();
+                points.push_back({point.get_or("x", 0.0f), point.get_or("y", 0.0f)});
+            }
+            return points;
         }
         break;
     default: break;
@@ -566,6 +587,13 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
                             other = candidate;
                         }
                     });
+                    if (!other) { // a tilemap's solid cells
+                        world.raw().each([&](flecs::entity candidate, const TilemapCollider& component) {
+                            if (!other && component.body == body) {
+                                other = candidate;
+                            }
+                        });
+                    }
                     if (other && entity.is_alive()) {
                         file.script->call("on_contact", run.self, ScriptEntity{&world, other});
                     }

@@ -57,6 +57,22 @@ void submit_physics_debug(RenderQueue& queue, const PhysicsWorld& physics, Physi
         case PhysicsDebugShapeType::Circle:
             submit_circle(queue, options.key, shape.center, shape.radius, options.circle_segments, color);
             break;
+        case PhysicsDebugShapeType::Chain:
+            for (std::size_t i = 0; i + 1 < shape.points.size(); ++i) {
+                queue.draw_line(options.key, shape.points[i], shape.points[i + 1], color);
+            }
+            break;
+        }
+    }
+
+    if (options.draw_joints) {
+        // Each joint's anchors, a line between them when they are apart.
+        for (const PhysicsDebugJoint& joint : physics.debug_joints()) {
+            submit_circle(queue, options.key, joint.anchor_a, 3.0f, 8, options.joint_color);
+            if (std::hypot(joint.anchor_b.x - joint.anchor_a.x, joint.anchor_b.y - joint.anchor_a.y) > 0.5f) {
+                submit_circle(queue, options.key, joint.anchor_b, 3.0f, 8, options.joint_color);
+                queue.draw_line(options.key, joint.anchor_a, joint.anchor_b, options.joint_color);
+            }
         }
     }
 
