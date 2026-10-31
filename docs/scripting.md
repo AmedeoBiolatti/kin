@@ -180,8 +180,12 @@ scripts.update(world, ctx.input, ctx.dt);
   - `position()`, `set_position(x, y)`, `move(dx, dy)`, `rotation()`,
     `set_rotation(degrees)`;
   - `destroy()`;
-  - and, for its `Animator`, `play(animation)`, `set_param(name, value)`,
-    `trigger(name)` and `state()`.
+  - for its `Animator`, `play(animation)`, `set_param(name, value)`,
+    `trigger(name)` and `state()`;
+  - and, for its `ParticleSystemComponent`, `emit([effect])`, which bursts its
+    effect (or another of its catalog) where it bursts, and says whether it
+    could. Setting the component's `emitting` starts and stops an effect that
+    streams.
 - Fields are read and written the way scene files write them: numbers,
   booleans, strings, `{x, y}` and `{r, g, b, a}` tables.
 - The `input` table reads the input map: `held`, `pressed`, `released` and

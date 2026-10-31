@@ -19,8 +19,11 @@ struct ParticleSystemComponent {
     // content (.kinparticles), and an effect of it that update_particles
     // bursts where the entity is (`offset` from there, turned with it): once
     // as it starts, and `rate` times a second while `emitting`. With no effect
-    // or rate, the game emits (from code). Assets2D binds the catalog to
-    // `system`, and `sprites_asset` (a sprite catalog) to `sprites`.
+    // or rate, the game emits (from code). An effect that streams (its own
+    // rate, ParticleEmission) streams from there instead while `emitting`,
+    // turned with the entity, its burst at start still made. Assets2D binds
+    // the catalog to `system`, and `sprites_asset` (a sprite catalog) to
+    // `sprites`.
     ComponentAssetRef asset{};
     std::string effect;
     f32 rate = 0.0f;
@@ -31,6 +34,8 @@ struct ParticleSystemComponent {
     BlendMode blend = BlendMode::Alpha; // Additive: sparks, fire, glows
     f32 until_next = 0.0f; // seconds to its next burst
     bool started = false;  // its burst at start made
+    ParticleEmitter emitter{}; // its effect streaming (an effect that streams)
+    bool streaming = false;    // the emitter started while `emitting`
 };
 
 struct ParticleFieldComponent {
@@ -50,6 +55,10 @@ struct ParticleFieldComponent {
 };
 
 void update_particles(EcsWorld& world, f32 dt);
+// `entity`'s ParticleSystemComponent's effect (or `effect`, another of its
+// catalog) burst where it bursts (`offset` from the entity, turned with it);
+// false when it has none, or its catalog no such effect.
+bool emit_particles(EcsEntity entity, std::string_view effect = {});
 bool submit_particles(RenderQueue& queue, const ParticleSystemComponent& particles);
 bool submit_particles(RenderQueue& queue, const ParticleFieldComponent& field);
 void render_particles(EcsWorld& world, Renderer2D& renderer);

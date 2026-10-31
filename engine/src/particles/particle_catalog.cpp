@@ -5,6 +5,7 @@
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -226,18 +227,79 @@ bool read_color_text(std::string_view text, Color& color) {
     return true;
 }
 
+// "0:2;0.5:6;1:0": keys `at:value`, in order of `at` once read.
+template <typename Key, typename ReadValue>
+bool read_keys(std::string_view text, std::vector<Key>& keys, ReadValue read_value) {
+    keys.clear();
+    while (!text.empty()) {
+        const std::size_t end = std::min(text.find(';'), text.size());
+        const std::string_view key = text.substr(0, end);
+        text.remove_prefix(std::min(end + 1, text.size()));
+        const std::size_t colon = key.find(':');
+        if (colon == std::string_view::npos) {
+            return false;
+        }
+        Key read{};
+        f32 again = 0.0f;
+        if (!read_pair(key.substr(0, colon), read.at, again) || !read_value(key.substr(colon + 1), read)) {
+            return false;
+        }
+        read.at = std::clamp(read.at, 0.0f, 1.0f);
+        keys.push_back(read);
+    }
+    std::ranges::stable_sort(keys, {}, &Key::at);
+    return !keys.empty();
+}
+
+bool read_curve(std::string_view text, std::vector<ParticleKey>& curve) {
+    return read_keys(text, curve, [](std::string_view value, ParticleKey& key) {
+        f32 again = 0.0f;
+        return read_pair(value, key.value, again);
+    });
+}
+
+bool read_gradient(std::string_view text, std::vector<ParticleColorKey>& gradient) {
+    return read_keys(text, gradient, [](std::string_view value, ParticleColorKey& key) {
+        return read_color_text(value, key.color);
+    });
+}
+
+bool read_flag(std::string_view text, bool& flag) {
+    if (text == "1" || text == "true") {
+        flag = true;
+        return true;
+    }
+    if (text == "0" || text == "false") {
+        flag = false;
+        return true;
+    }
+    return false;
+}
+
+// A name of another effect: anything with no space (the line's tokens have none).
+bool read_name(std::string_view text, std::string& name) {
+    name = std::string(text);
+    return !name.empty();
+}
+
 // An effect's `name=value` settings after its first ones; false: one is not known, or not read.
-bool read_extra(std::string_view token, ParticleBurst& burst, std::string& why) {
+bool read_extra(std::string_view token, ParticleEffect& effect, std::string& why) {
     const std::size_t equals = token.find('=');
     if (equals == std::string_view::npos) {
         why = "expected name=value, not '" + std::string(token) + "'";
         return false;
     }
+    ParticleBurst& burst = effect.burst;
+    ParticleEmission& emission = effect.emission;
     const std::string_view name = token.substr(0, equals);
     const std::string_view value = token.substr(equals + 1);
     f32 a = 0.0f;
     f32 b = 0.0f;
     bool read = false;
+    // One number, kept no lower than `least`.
+    const auto number = [&](f32& to, f32 least) {
+        return read_pair(value, a, b) && ((to = std::max(least, a)), true);
+    };
     if (name == "direction") {
         read = read_pair(value, a, b) && ((burst.direction = a), true);
     } else if (name == "spread") {
@@ -259,6 +321,30 @@ bool read_extra(std::string_view token, ParticleBurst& burst, std::string& why) 
         read = read_pair(value, a, b) && ((burst.mid_size = a), (burst.use_mid = true), true);
     } else if (name == "mid_color") {
         read = read_color_text(value, burst.mid_color) && ((burst.use_mid = true), true);
+    } else if (name == "size_curve") {
+        read = read_curve(value, burst.size_curve);
+    } else if (name == "color_curve") {
+        read = read_gradient(value, burst.color_curve);
+    } else if (name == "speed_curve") {
+        read = read_curve(value, burst.speed_curve);
+    } else if (name == "on_death") {
+        read = read_name(value, burst.on_death);
+    } else if (name == "trail") {
+        read = read_name(value, burst.trail);
+    } else if (name == "trail_rate") {
+        read = number(burst.trail_rate, 0.0f);
+    } else if (name == "rate") {
+        read = number(emission.rate, 0.0f);
+    } else if (name == "per_distance") {
+        read = number(emission.per_distance, 0.0f);
+    } else if (name == "duration") {
+        read = number(emission.duration, 0.0f);
+    } else if (name == "prewarm") {
+        read = number(emission.prewarm, 0.0f);
+    } else if (name == "inherit") {
+        read = read_pair(value, a, b) && ((emission.inherit = a), true);
+    } else if (name == "local") {
+        read = read_flag(value, emission.local);
     } else {
         why = "unknown effect setting '" + std::string(name) + "'";
         return false;
@@ -304,7 +390,7 @@ bool read_catalog(std::string_view text, const std::string& where, ParticleCatal
             std::string token;
             std::string why;
             while (in >> token) {
-                if (!read_extra(token, effect.burst, why)) {
+                if (!read_extra(token, effect, why)) {
                     return fail(why);
                 }
             }
@@ -353,6 +439,32 @@ std::vector<std::string> sorted_names(const Map& map) {
     return names;
 }
 
+void write_color_text(std::ostream& out, Color color) {
+    out << static_cast<i32>(color.r) << ',' << static_cast<i32>(color.g) << ','
+        << static_cast<i32>(color.b) << ',' << static_cast<i32>(color.a);
+}
+
+void write_curve(std::ostream& out, std::string_view name, const std::vector<ParticleKey>& curve) {
+    if (curve.empty()) {
+        return;
+    }
+    out << ' ' << name << '=';
+    for (std::size_t i = 0; i < curve.size(); ++i) {
+        out << (i ? ";" : "") << curve[i].at << ':' << curve[i].value;
+    }
+}
+
+void write_gradient(std::ostream& out, std::string_view name, const std::vector<ParticleColorKey>& gradient) {
+    if (gradient.empty()) {
+        return;
+    }
+    out << ' ' << name << '=';
+    for (std::size_t i = 0; i < gradient.size(); ++i) {
+        out << (i ? ";" : "") << gradient[i].at << ':';
+        write_color_text(out, gradient[i].color);
+    }
+}
+
 void write_range_extra(std::ostream& out, std::string_view name, ParticleRange range) {
     out << ' ' << name << '=' << range.min;
     if (range.max != range.min) {
@@ -361,6 +473,49 @@ void write_range_extra(std::ostream& out, std::string_view name, ParticleRange r
 }
 
 } // namespace
+
+namespace {
+
+// Where `t` falls between a curve's keys: the key before it, and how far to the next.
+template <typename Key, typename Mix>
+auto key_at(std::span<const Key> keys, f32 t, Mix mix) {
+    if (t <= keys.front().at) {
+        return mix(keys.front(), keys.front(), 0.0f);
+    }
+    for (std::size_t i = 1; i < keys.size(); ++i) {
+        if (t < keys[i].at) {
+            const Key& a = keys[i - 1];
+            const Key& b = keys[i];
+            const f32 span = b.at - a.at;
+            return mix(a, b, span > 0.0f ? (t - a.at) / span : 1.0f);
+        }
+    }
+    return mix(keys.back(), keys.back(), 0.0f);
+}
+
+} // namespace
+
+f32 particle_curve_at(std::span<const ParticleKey> curve, f32 t, f32 otherwise) {
+    if (curve.empty()) {
+        return otherwise;
+    }
+    return key_at(curve, t, [](const ParticleKey& a, const ParticleKey& b, f32 f) {
+        return a.value + (b.value - a.value) * f;
+    });
+}
+
+Color particle_gradient_at(std::span<const ParticleColorKey> gradient, f32 t, Color otherwise) {
+    if (gradient.empty()) {
+        return otherwise;
+    }
+    return key_at(gradient, t, [](const ParticleColorKey& a, const ParticleColorKey& b, f32 f) {
+        const auto mix = [f](u8 x, u8 y) {
+            return static_cast<u8>(std::clamp(std::round(static_cast<f32>(x) + (static_cast<f32>(y) - static_cast<f32>(x)) * f),
+                                              0.0f, 255.0f));
+        };
+        return Color{mix(a.color.r, b.color.r), mix(a.color.g, b.color.g), mix(a.color.b, b.color.b), mix(a.color.a, b.color.a)};
+    });
+}
 
 std::string_view particle_shape_name(ParticleShape shape) {
     switch (shape) {
@@ -427,9 +582,40 @@ std::string serialize_particle_catalog(const ParticleCatalog& catalog) {
             write_range_extra(out, "spin", burst.spin);
         }
         if (burst.use_mid) {
-            out << " mid_at=" << burst.mid_at << " mid_size=" << burst.mid_size << " mid_color="
-                << static_cast<i32>(burst.mid_color.r) << ',' << static_cast<i32>(burst.mid_color.g) << ','
-                << static_cast<i32>(burst.mid_color.b) << ',' << static_cast<i32>(burst.mid_color.a);
+            out << " mid_at=" << burst.mid_at << " mid_size=" << burst.mid_size << " mid_color=";
+            write_color_text(out, burst.mid_color);
+        }
+        write_curve(out, "size_curve", burst.size_curve);
+        write_gradient(out, "color_curve", burst.color_curve);
+        write_curve(out, "speed_curve", burst.speed_curve);
+        if (!burst.on_death.empty()) {
+            out << " on_death=" << burst.on_death;
+        }
+        if (!burst.trail.empty()) {
+            out << " trail=" << burst.trail;
+        }
+        if (burst.trail_rate != plain.trail_rate) {
+            out << " trail_rate=" << burst.trail_rate;
+        }
+        const ParticleEmission& emission = catalog.effect(name)->emission;
+        const ParticleEmission still{};
+        if (emission.rate != still.rate) {
+            out << " rate=" << emission.rate;
+        }
+        if (emission.per_distance != still.per_distance) {
+            out << " per_distance=" << emission.per_distance;
+        }
+        if (emission.duration != still.duration) {
+            out << " duration=" << emission.duration;
+        }
+        if (emission.prewarm != still.prewarm) {
+            out << " prewarm=" << emission.prewarm;
+        }
+        if (emission.inherit != still.inherit) {
+            out << " inherit=" << emission.inherit;
+        }
+        if (emission.local) {
+            out << " local=1";
         }
         out << '\n';
     }
