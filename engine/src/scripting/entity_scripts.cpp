@@ -4,6 +4,7 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/l10n/localization.hpp>
@@ -182,6 +183,7 @@ struct EntityScripts::Impl {
     Input* input = nullptr;
     SceneScreens* screens = nullptr;
     SceneDialogue* dialogue = nullptr;
+    SceneFlow* flow = nullptr;
     std::string calling; // the script being called, for its problems
 
     void bind(sol::state& lua) {
@@ -365,6 +367,28 @@ struct EntityScripts::Impl {
             else if (value.is<std::string>()) dialogue->set_variable(name, {.value = value.as<std::string>()});
         };
 
+        sol::table scene_table = lua.create_named_table("scene");
+        scene_table["go"] = [this](const std::string& path, sol::optional<std::string> arrive, sol::optional<std::string> transition,
+                                   sol::optional<f32> duration) {
+            if (!flow) {
+                return false;
+            }
+            SceneTravel travel{.scene = path, .arrive = arrive.value_or("")};
+            if (transition) {
+                if (*transition == "none") {
+                    travel.transition.reset();
+                } else if (const std::optional<TransitionKind> kind = transition_from_name(*transition)) {
+                    travel.transition = kind;
+                } else {
+                    throw sol::error("no transition is called '" + *transition + "'");
+                }
+            }
+            travel.duration = std::max(duration.value_or(travel.duration), 0.0f);
+            flow->go(std::move(travel));
+            return true;
+        };
+        scene_table["going"] = [this]() { return flow && flow->pending(); };
+
         sol::table world_table = lua.create_named_table("world");
         world_table["find"] = [this](const std::string& name) -> std::optional<ScriptEntity> {
             const EcsEntity found = world ? world->entities().find_by_name(name) : EcsEntity{};
@@ -463,6 +487,10 @@ void EntityScripts::set_screens(SceneScreens* screens) {
 
 void EntityScripts::set_dialogue(SceneDialogue* dialogue) {
     _impl->dialogue = dialogue;
+}
+
+void EntityScripts::set_flow(SceneFlow* flow) {
+    _impl->flow = flow;
 }
 
 void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {

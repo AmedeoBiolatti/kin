@@ -4,11 +4,23 @@
 #include <kin/scene/scene_manager.hpp>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <utility>
 
 namespace kin {
 namespace {
+
+// What comes after the out phase: another scene in place of the one below,
+// or the one below changed in place (transition_within).
+void swap_in(SceneContext& ctx, std::unique_ptr<Scene>& next, std::function<void(SceneContext&)>& swap) {
+    if (swap) {
+        std::function<void(SceneContext&)> run = std::move(swap);
+        run(ctx);
+    } else {
+        ctx.scenes.replace(std::move(next));
+    }
+}
 
 f32 normalized_time(f32 elapsed, f32 duration) {
     return std::clamp(elapsed / std::max(duration, 0.001f), 0.0f, 1.0f);
@@ -119,6 +131,8 @@ class TransitionOutScene final : public Scene {
 public:
     TransitionOutScene(std::unique_ptr<Scene> next, TransitionKind kind, f32 duration, Color color)
         : _next(std::move(next)), _kind(kind), _duration(std::max(duration, 0.001f)), _color(color) {}
+    TransitionOutScene(std::function<void(SceneContext&)> swap, TransitionKind kind, f32 duration, Color color)
+        : _swap(std::move(swap)), _kind(kind), _duration(std::max(duration, 0.001f)), _color(color) {}
 
     std::string_view name() const override { return "TransitionOutScene"; }
     bool is_overlay() const override { return true; }
@@ -132,7 +146,7 @@ public:
         if ((!gpu || _captured) && _elapsed >= phase) {
             const f32 in_dur = _kind == TransitionKind::Crossfade ? _duration : _duration * 0.5f;
             ctx.scenes.pop();
-            ctx.scenes.replace(std::move(_next));
+            swap_in(ctx, _next, _swap);
             ctx.scenes.push(std::make_unique<TransitionInScene>(_kind, in_dur, _color,
                                                                 std::move(_snapshot)));
         }
@@ -163,6 +177,7 @@ public:
 
 private:
     std::unique_ptr<Scene> _next;
+    std::function<void(SceneContext&)> _swap;
     TransitionKind _kind;
     f32 _duration;
     f32 _elapsed = 0.0f;
@@ -199,11 +214,17 @@ ReplaceWithFadeScene::ReplaceWithFadeScene(std::unique_ptr<Scene> next, f32 dura
       _color(color) {
 }
 
+ReplaceWithFadeScene::ReplaceWithFadeScene(std::function<void(SceneContext&)> swap, f32 duration, Color color)
+    : _swap(std::move(swap)),
+      _duration(std::max(duration, 0.001f)),
+      _color(color) {
+}
+
 void ReplaceWithFadeScene::update(SceneContext& ctx) {
     _elapsed += std::max(ctx.dt, 0.0f);
     if (_elapsed >= _duration) {
         ctx.scenes.pop();
-        ctx.scenes.replace(std::move(_next));
+        swap_in(ctx, _next, _swap);
         ctx.scenes.push(fade_in(_duration, _color));
     }
 }
@@ -232,6 +253,43 @@ std::unique_ptr<Scene> transition_to(std::unique_ptr<Scene> next, TransitionKind
         return replace_with_fade(std::move(next), duration, color);
     }
     return std::make_unique<TransitionOutScene>(std::move(next), kind, duration, color);
+}
+
+std::unique_ptr<Scene> transition_within(std::function<void(SceneContext&)> swap, TransitionKind kind, f32 duration,
+                                         Color color) {
+    if (kind == TransitionKind::Fade) {
+        return std::make_unique<ReplaceWithFadeScene>(std::move(swap), duration, color);
+    }
+    return std::make_unique<TransitionOutScene>(std::move(swap), kind, duration, color);
+}
+
+namespace {
+constexpr std::array<std::pair<TransitionKind, std::string_view>, 6> transition_names{{
+    {TransitionKind::Fade, "fade"},
+    {TransitionKind::Crossfade, "crossfade"},
+    {TransitionKind::Dissolve, "dissolve"},
+    {TransitionKind::Pixelate, "pixelate"},
+    {TransitionKind::Wipe, "wipe"},
+    {TransitionKind::Iris, "iris"},
+}};
+} // namespace
+
+std::string_view transition_name(TransitionKind kind) {
+    for (const auto& [known, name] : transition_names) {
+        if (known == kind) {
+            return name;
+        }
+    }
+    return "fade";
+}
+
+std::optional<TransitionKind> transition_from_name(std::string_view name) {
+    for (const auto& [kind, known] : transition_names) {
+        if (known == name) {
+            return kind;
+        }
+    }
+    return std::nullopt;
 }
 
 } // namespace kin
