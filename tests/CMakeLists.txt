@@ -103,8 +103,12 @@ kin_add_component_test(PHYSICS kin_physics_tests kin-physics
     SOURCES physics_tests.cpp LINK_TARGET kin::physics_render)
 kin_add_component_test(PHYSICS kin_physics_component_tests kin-physics-component
     SOURCES physics_component_tests.cpp LINK_TARGET kin::physics)
+kin_add_component_test(PHYSICS kin_physics_shapes_tests kin-physics-shapes
+    SOURCES physics_shapes_tests.cpp LINK_TARGET kin::physics)
 kin_add_component_test(PHYSICS kin_ecs_physics_tests kin-ecs-physics
     SOURCES ecs_physics_tests.cpp LINK_TARGET kin::physics_ecs)
+kin_add_component_test(PHYSICS kin_ecs_physics_shapes_tests kin-ecs-physics-shapes
+    SOURCES ecs_physics_shapes_tests.cpp LINK_TARGET kin::physics_ecs)
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)

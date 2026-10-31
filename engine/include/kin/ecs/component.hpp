@@ -9,6 +9,7 @@
 
 #include <flecs.h>
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -44,6 +45,8 @@ enum class ComponentFieldKind {
     AssetRef,
     Vec3f,
     Quatf,
+    // Points (a polygon's corners, a line's): in the scene file [[x, y], ...].
+    Points,
 };
 
 struct ComponentEntityRef {
@@ -73,7 +76,8 @@ using ComponentFieldValue = std::variant<bool,
                                          ComponentEntityRef,
                                          ComponentAssetRef,
                                          Vec3f,
-                                         Quatf>;
+                                         Quatf,
+                                         std::vector<Vec2f>>;
 
 ComponentFieldKind component_field_kind_from_value(const ComponentFieldValue& value);
 
@@ -204,11 +208,12 @@ template <> struct ComponentFieldKindOf<Vec3f> { static constexpr ComponentField
 template <> struct ComponentFieldKindOf<Quatf> { static constexpr ComponentFieldKind value = ComponentFieldKind::Quatf; };
 template <> struct ComponentFieldKindOf<ComponentAssetRef> { static constexpr ComponentFieldKind value = ComponentFieldKind::AssetRef; };
 template <> struct ComponentFieldKindOf<ComponentEntityRef> { static constexpr ComponentFieldKind value = ComponentFieldKind::EntityRef; };
+template <> struct ComponentFieldKindOf<std::vector<Vec2f>> { static constexpr ComponentFieldKind value = ComponentFieldKind::Points; };
 
-// Field types a native component member can be reflected as. These are exactly
-// the types ComponentFieldKindOf is specialized for above, except entity refs:
-// those still use the data-component path for authored-id remapping. Asset refs
-// are path/ID values and work as native members too. Keeping this list in sync with
+// Field types a native component member can be reflected as: exactly the
+// types ComponentFieldKindOf is specialized for above. Asset refs are path/ID
+// values; an entity ref is kept whole by the component (its authored id with
+// its id), so scene and prefab loading resolve it as a data component's. Keeping this list in sync with
 // ComponentFieldKindOf ensures an unsupported native field fails on the
 // static_assert in NativeComponentBuilder::field() with a clear message rather
 // than an opaque "ComponentFieldKindOf has no member 'value'" error.
@@ -227,7 +232,9 @@ inline constexpr bool supported_component_field_v =
     std::is_same_v<T, Color> ||
     std::is_same_v<T, Vec3f> ||
     std::is_same_v<T, Quatf> ||
-    std::is_same_v<T, ComponentAssetRef>;
+    std::is_same_v<T, std::vector<Vec2f>> ||
+    std::is_same_v<T, ComponentAssetRef> ||
+    std::is_same_v<T, ComponentEntityRef>;
 
 inline bool field_value_matches_kind(const ComponentFieldValue& value, ComponentFieldKind kind) {
     switch (kind) {
@@ -253,6 +260,10 @@ inline bool field_value_matches_kind(const ComponentFieldValue& value, Component
         if (!q || !std::isfinite(q->x) || !std::isfinite(q->y) || !std::isfinite(q->z) || !std::isfinite(q->w)) return false;
         const double n = double(q->x)*q->x + double(q->y)*q->y + double(q->z)*q->z + double(q->w)*q->w;
         return std::abs(n - 1.0) <= .001;
+    }
+    case ComponentFieldKind::Points: {
+        const auto* points = std::get_if<std::vector<Vec2f>>(&value);
+        return points && std::ranges::all_of(*points, [](Vec2f p) { return std::isfinite(p.x) && std::isfinite(p.y); });
     }
     }
     return false;

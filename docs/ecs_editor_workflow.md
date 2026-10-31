@@ -57,10 +57,25 @@ audio emitters, and:
 - **2D physics.** `PhysicsBodyComponent` (`type`: static, dynamic or kinematic;
   velocities, damping, `gravity_scale`, `fixed_rotation`, which side leads)
   and `PhysicsColliderComponent`, described as its first collider (`shape`:
-  box or circle; `half_extents`, `radius`, `offset`, `density`, `friction`,
-  `restitution`, `sensor`, `category_bits`, `mask_bits`). A collider is made
-  by the first field set (`{}` has none), and a field changed later makes its
-  fixture again. `PhysicsVelocity`, `PhysicsContactQueue` and
+  box, circle, capsule, polygon or chain; `half_extents` (a box's, a
+  capsule's), `radius`, `offset`, `angle` (degrees), `points` (a polygon's
+  corners, concave too; a chain's points), `loop` and `one_sided` (a chain's),
+  `density`, `friction`, `restitution`, `sensor`, `category_bits`,
+  `mask_bits`). A collider is made by the first field set (`{}` has none),
+  and a field changed later makes its fixture again. On an entity with no
+  body, a collider is its nearest ancestor's body's, placed, turned and scaled
+  as the entity is from it: a body of several shapes is an entity with a child
+  for each (moved, a child's shape is made again there). `PhysicsJointComponent`
+  joins the entity's body to `other`'s (an entity ref; none: to the world):
+  `type` hinge, slider, distance, weld or wheel; `anchor` (from the entity),
+  `other_anchor` (a distance joint's, from the other), `axis`; `limit` with
+  `lower`/`upper` (a hinge's in degrees); `motor`, `motor_speed`,
+  `max_motor_force`; `length`; a spring's `frequency` and `damping_ratio`;
+  `break_force`, and `broken` once it has. `TilemapCollider` on a tilemap
+  entity makes its solid cells a static body (`TileMap::collision_shapes`: a
+  one-sided loop around each run of touching cells, a cell's
+  `collision_polygon` its own shape; `layer`, `friction`, `restitution`,
+  `sensor`, the bits). `PhysicsVelocity`, `PhysicsContactQueue` and
   `PhysicsOverlapSet` (no fields: an entity that collects its contacts) too.
   A game steps them with a `PhysicsWorld` and `update_physics_world`; for a
   world in points, `PhysicsWorldDef::units_per_meter` says how many make a

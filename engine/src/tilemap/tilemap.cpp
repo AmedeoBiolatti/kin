@@ -1855,6 +1855,170 @@ std::vector<std::vector<Vec2f>> TileMap::collision_polygons(std::string_view lay
     return polygons;
 }
 
+TileCollisionShapes TileMap::collision_shapes(std::string_view layer_id) const {
+    TileCollisionShapes shapes;
+    if (cols <= 0 || rows <= 0) {
+        return shapes;
+    }
+    // The cells solid all over (in any layer), and those with polygons.
+    std::vector<u8> full(static_cast<std::size_t>(cols) * static_cast<std::size_t>(rows), 0);
+    std::vector<std::pair<Vec2i, const TileDefinition*>> shaped;
+    visit_layers(*this, layer_id, [&](const TileLayer& tile_layer) {
+        if (!tile_layer.participates_in_collision) {
+            return;
+        }
+        visit_layer_cells(tile_layer, cols, rows, [&](Vec2i cell, TileCell tile_cell) {
+            const TileDefinition* definition = tile(tile_cell.tile_id);
+            if (!definition || !definition->solid) {
+                return;
+            }
+            if (definition->collision_polygon.empty()) {
+                full[cell_index(cell, cols)] = 1;
+            } else {
+                shaped.emplace_back(cell, definition);
+            }
+        });
+    });
+    for (const auto& [cell, definition] : shaped) {
+        if (full[cell_index(cell, cols)]) {
+            continue;
+        }
+        const Vec2f origin = map_to_world(cell);
+        std::vector<Vec2f> polygon;
+        polygon.reserve(definition->collision_polygon.size());
+        for (Vec2f point : definition->collision_polygon) {
+            polygon.push_back({origin.x + point.x, origin.y + point.y});
+        }
+        shapes.polygons.push_back(std::move(polygon));
+    }
+
+    // Each full cell's sides, clockwise; a side two cells share (each going
+    // its own way along it) is inside, and goes.
+    struct Corner {
+        i64 x = 0;
+        i64 y = 0;
+        bool operator==(const Corner&) const = default;
+    };
+    const auto corner = [](Vec2f point) {
+        return Corner{std::llround(point.x * 64.0), std::llround(point.y * 64.0)};
+    };
+    struct Side {
+        Corner from;
+        Corner to;
+        bool operator==(const Side&) const = default;
+    };
+    struct SideHash {
+        std::size_t operator()(const Side& side) const {
+            u64 hash = 1469598103934665603ull;
+            for (i64 value : {side.from.x, side.from.y, side.to.x, side.to.y}) {
+                hash = (hash ^ static_cast<u64>(value)) * 1099511628211ull;
+            }
+            return static_cast<std::size_t>(hash);
+        }
+    };
+    std::unordered_map<Side, std::pair<Vec2f, Vec2f>, SideHash> sides;
+    for (i32 row = 0; row < rows; ++row) {
+        for (i32 col = 0; col < cols; ++col) {
+            if (!full[cell_index({col, row}, cols)]) {
+                continue;
+            }
+            std::vector<Vec2f> outline = tile_outline({col, row});
+            f32 area = 0.0f;
+            for (std::size_t i = 0; i < outline.size(); ++i) {
+                const Vec2f a = outline[i];
+                const Vec2f b = outline[(i + 1) % outline.size()];
+                area += a.x * b.y - a.y * b.x;
+            }
+            if (area < 0.0f) {
+                std::ranges::reverse(outline); // clockwise on screen: y is down
+            }
+            for (std::size_t i = 0; i < outline.size(); ++i) {
+                const Vec2f a = outline[i];
+                const Vec2f b = outline[(i + 1) % outline.size()];
+                const Side side{corner(a), corner(b)};
+                if (side.from == side.to) {
+                    continue;
+                }
+                if (const auto shared = sides.find(Side{side.to, side.from}); shared != sides.end()) {
+                    sides.erase(shared);
+                } else {
+                    sides.emplace(side, std::pair{a, b});
+                }
+            }
+        }
+    }
+
+    // The sides left, joined into loops: from each, on to the side leaving its
+    // end that turns furthest right (where two cells touch only at a corner,
+    // each keeps its own loop).
+    struct Open {
+        Corner to;
+        Vec2f from_point;
+        Vec2f to_point;
+        bool used = false;
+    };
+    struct CornerHash {
+        std::size_t operator()(Corner c) const {
+            return std::hash<i64>{}(c.x * 73856093) ^ std::hash<i64>{}(c.y * 19349663);
+        }
+    };
+    std::unordered_map<Corner, std::vector<Open>, CornerHash> leaving;
+    std::vector<Corner> starts;
+    for (const auto& [side, points] : sides) {
+        leaving[side.from].push_back({side.to, points.first, points.second});
+    }
+    for (auto& [from, list] : leaving) {
+        starts.push_back(from);
+    }
+    // In a fixed order, so the same map gives the same loops.
+    std::ranges::sort(starts, [](Corner a, Corner b) { return a.y != b.y ? a.y < b.y : a.x < b.x; });
+    for (Corner start : starts) {
+        for (std::size_t first = 0; first < leaving[start].size(); ++first) {
+            if (leaving[start][first].used) {
+                continue;
+            }
+            std::vector<Vec2f> loop;
+            Open* side = &leaving[start][first];
+            const Open* begin = side;
+            while (side && !side->used) {
+                side->used = true;
+                loop.push_back(side->from_point);
+                const Vec2f in{side->to_point.x - side->from_point.x, side->to_point.y - side->from_point.y};
+                Open* next = nullptr;
+                f32 best = -10.0f;
+                for (Open& out : leaving[side->to]) {
+                    if (out.used && &out != begin) {
+                        continue;
+                    }
+                    const Vec2f along{out.to_point.x - out.from_point.x, out.to_point.y - out.from_point.y};
+                    const f32 turn = std::atan2(in.x * along.y - in.y * along.x, in.x * along.x + in.y * along.y);
+                    if (turn > best) {
+                        best = turn;
+                        next = &out;
+                    }
+                }
+                side = next;
+            }
+            // Straight on through a corner: one side.
+            std::vector<Vec2f> joined;
+            for (std::size_t i = 0; i < loop.size(); ++i) {
+                const Vec2f before = loop[(i + loop.size() - 1) % loop.size()];
+                const Vec2f at = loop[i];
+                const Vec2f after = loop[(i + 1) % loop.size()];
+                const f32 turn = (at.x - before.x) * (after.y - at.y) - (at.y - before.y) * (after.x - at.x);
+                const f32 scale = std::hypot(at.x - before.x, at.y - before.y) * std::hypot(after.x - at.x, after.y - at.y);
+                if (std::abs(turn) > 1e-4f * scale) {
+                    joined.push_back(at);
+                }
+            }
+            if (joined.size() >= 3) {
+                shapes.loops.push_back(std::move(joined));
+            }
+        }
+    }
+    return shapes;
+}
+
 TileMap::LayerRenderCache* TileMap::render_cache(std::string_view layer_id) const {
     const auto found = std::ranges::find_if(_render_caches, [&](const LayerRenderCache& cache) {
         return cache.layer_id == layer_id;

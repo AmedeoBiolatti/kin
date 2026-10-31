@@ -301,6 +301,15 @@ sol::object component_value_to_lua(sol::this_state state, const ComponentFieldVa
             return result;
         } else if constexpr (std::is_same_v<T, ComponentAssetRef>) {
             return sol::make_object(state, typed.id);
+        } else if constexpr (std::is_same_v<T, std::vector<Vec2f>>) {
+            sol::table result = lua.create_table();
+            for (std::size_t i = 0; i < typed.size(); ++i) {
+                sol::table point = lua.create_table();
+                point["x"] = typed[i].x;
+                point["y"] = typed[i].y;
+                result[i + 1] = point;
+            }
+            return result;
         } else {
             return sol::make_object(state, typed);
         }
@@ -370,6 +379,23 @@ std::optional<ComponentFieldValue> component_value_from_lua(ComponentFieldKind k
         break;
     case ComponentFieldKind::AssetRef:
         if (object.is<std::string>()) return ComponentFieldValue{ComponentAssetRef{.id = object.as<std::string>()}};
+        break;
+    case ComponentFieldKind::Points:
+        // {{x = 0, y = 0}, {x = 32, y = 0}, ...} (or {{0, 0}, {32, 0}, ...}).
+        if (object.get_type() == sol::type::table) {
+            sol::table table = object.as<sol::table>();
+            std::vector<Vec2f> points;
+            for (std::size_t i = 1; i <= table.size(); ++i) {
+                sol::object item = table[i];
+                if (item.get_type() != sol::type::table) {
+                    return std::nullopt;
+                }
+                sol::table point = item.as<sol::table>();
+                points.push_back({point.get_or("x", point.get_or(1, 0.0f)), point.get_or("y", point.get_or(2, 0.0f))});
+            }
+            ComponentFieldValue value{std::move(points)};
+            if (detail::field_value_matches_kind(value, kind)) return value;
+        }
         break;
     }
     return std::nullopt;

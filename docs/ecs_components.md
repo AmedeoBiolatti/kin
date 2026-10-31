@@ -58,10 +58,15 @@ Supported V1 field kinds:
 - `Vec2f`, `Vec2i`, `Vec3f`, `Quatf`
 - `Color`
 - `ComponentAssetRef` (a content path string, with runtime resources stored separately)
+- `ComponentEntityRef` (another entity, by its authored id in files)
+- `std::vector<Vec2f>`, kind `points` (a polygon's corners, a line's points): `[[x, y], ...]`
+  in JSON (objects with `x`/`y` are read too), a list of `{x = .., y = ..}` tables in Lua
 
 `EntityRef` and `AssetRef` are supported metadata values. Scene and prefab JSON
 can store entity refs by authored id; instantiation remaps them to runtime ids.
-Native member fields support asset refs; entity refs remain data-component fields.
+Native member fields support both: a native `ComponentEntityRef` member keeps its
+authored id with its id, and is remapped as a data component's is
+(`PhysicsJointComponent::other`).
 `vec3f` accepts a three-number JSON array or an object with `x/y/z`; `quatf`
 accepts four numbers in `x/y/z/w` order or an object with those members.
 New 3D values must be finite and rotations must be unit quaternions (squared-length

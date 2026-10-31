@@ -228,6 +228,7 @@ if(KIN_ENABLE_PHYSICS)
     target_compile_features(kin_physics PUBLIC cxx_std_23)
     target_include_directories(kin_physics PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(kin_physics PUBLIC kin::components box2d)
+    target_link_libraries(kin_physics PRIVATE earcut_hpp::earcut_hpp) # concave polygons, in triangles
     kin_enable_release_optimizations(kin_physics)
 
     add_library(kin_physics_render STATIC src/physics/debug_render.cpp)

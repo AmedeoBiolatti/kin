@@ -347,24 +347,52 @@ void register_physics2d_editor_components(EcsWorld& world) {
     }
     if (!registry.find("PhysicsColliderComponent")) {
         auto collider = registry.native<PhysicsColliderComponent>("PhysicsColliderComponent");
+        // On an entity with no body, it is the body above it's (placed as
+        // the entity is): a body of several shapes is an entity with a
+        // child for each.
+        static constexpr std::pair<PhysicsShapeType, const char*> shapes[] = {
+            {PhysicsShapeType::Box, "box"},         {PhysicsShapeType::Circle, "circle"}, {PhysicsShapeType::Capsule, "capsule"},
+            {PhysicsShapeType::Polygon, "polygon"}, {PhysicsShapeType::Chain, "chain"},
+        };
         collider.property<std::string>("shape",
                                        [](const PhysicsColliderComponent& component) {
-                                           return std::string(first_collider(component).shape.type == PhysicsShapeType::Circle ? "circle" : "box");
-                                       },
-                                       [](PhysicsColliderComponent& component, const std::string& shape) {
-                                           if (shape != "box" && shape != "circle") {
-                                               return false;
+                                           const PhysicsShapeType type = first_collider(component).shape.type;
+                                           for (const auto& [shape, name] : shapes) {
+                                               if (shape == type) return std::string(name);
                                            }
-                                           first_collider(component).shape.type = shape == "circle" ? PhysicsShapeType::Circle : PhysicsShapeType::Box;
-                                           return true;
+                                           return std::string("box");
+                                       },
+                                       [](PhysicsColliderComponent& component, const std::string& name) {
+                                           for (const auto& [shape, shape_name] : shapes) {
+                                               if (name == shape_name) {
+                                                   first_collider(component).shape.type = shape;
+                                                   return true;
+                                               }
+                                           }
+                                           return false;
                                        })
-            .choices({"box", "circle"});
+            .choices({"box", "circle", "capsule", "polygon", "chain"})
+            .description("box; circle; capsule: a box with round ends; polygon: its points' (any, concave too); chain: a line through its points.");
         collider_field<Vec2f>(collider, "half_extents", [](auto& def) -> auto& { return def.shape.half_extents; })
-            .description("A box's half width and half height.");
+            .description("A box's half width and half height; a capsule's (round at the ends of the longer).");
         collider_field<f32>(collider, "radius", [](auto& def) -> auto& { return def.shape.radius; })
             .description("A circle's.");
         collider_field<Vec2f>(collider, "offset", [](auto& def) -> auto& { return def.shape.offset; })
-            .description("Its centre, from the entity's.");
+            .description("Its centre, from the entity's (a polygon's or a chain's points are from it).");
+        constexpr f32 degrees_per_radian = 180.0f / 3.14159265358979323846f;
+        collider.property<f32>("angle", [=](const PhysicsColliderComponent& c) { return first_collider(c).shape.angle * degrees_per_radian; },
+                               [=](PhysicsColliderComponent& c, const f32& degrees) {
+                                   first_collider(c).shape.angle = degrees / degrees_per_radian;
+                                   return true;
+                               })
+            .units("degrees")
+            .description("It turned about its centre.");
+        collider_field<std::vector<Vec2f>>(collider, "points", [](auto& def) -> auto& { return def.shape.points; })
+            .description("A polygon's corners, a chain's points, in order.");
+        collider_field<bool>(collider, "loop", [](auto& def) -> auto& { return def.shape.loop; })
+            .description("A chain's: back from its last point to its first.");
+        collider_field<bool>(collider, "one_sided", [](auto& def) -> auto& { return def.shape.one_sided; })
+            .description("A chain's: it stops what comes from the left of it going along it only (a platform to jump up through, drawn left to right).");
         collider_field<f32>(collider, "density", [](auto& def) -> auto& { return def.density; })
             .units("kg/m^2");
         collider_field<f32>(collider, "friction", [](auto& def) -> auto& { return def.friction; });
@@ -385,6 +413,95 @@ void register_physics2d_editor_components(EcsWorld& world) {
                                    first_collider(c).mask_bits = static_cast<u16>(bits);
                                    return true;
                                })
+            .description("The kinds it hits (bits).");
+    }
+    if (!registry.find("PhysicsJointComponent")) {
+        // The entity's body joined to another entity's, or to the world.
+        static constexpr std::pair<PhysicsJointType, const char*> types[] = {
+            {PhysicsJointType::Hinge, "hinge"}, {PhysicsJointType::Slider, "slider"}, {PhysicsJointType::Distance, "distance"},
+            {PhysicsJointType::Weld, "weld"},   {PhysicsJointType::Wheel, "wheel"},
+        };
+        registry.native<PhysicsJointComponent>("PhysicsJointComponent")
+            .property<std::string>("type",
+                                   [](const PhysicsJointComponent& joint) {
+                                       for (const auto& [type, name] : types) {
+                                           if (type == joint.type) return std::string(name);
+                                       }
+                                       return std::string("hinge");
+                                   },
+                                   [](PhysicsJointComponent& joint, const std::string& name) {
+                                       for (const auto& [type, type_name] : types) {
+                                           if (name == type_name) {
+                                               joint.type = type;
+                                               return true;
+                                           }
+                                       }
+                                       return false;
+                                   })
+            .choices({"hinge", "slider", "distance", "weld", "wheel"})
+            .description("hinge: they turn about the anchor; slider: it slides along the axis; distance: the anchors kept apart (a rod, a rope, a spring); weld: held as they are; wheel: a hinge on a spring along the axis.")
+            .field("other", &PhysicsJointComponent::other)
+            .description("The entity (with a body) it is joined to; none: to where it is in the world.")
+            .field("anchor", &PhysicsJointComponent::anchor)
+            .description("Where they are joined, from this entity.")
+            .field("other_anchor", &PhysicsJointComponent::other_anchor)
+            .description("A distance joint's point on the other entity, from it.")
+            .field("axis", &PhysicsJointComponent::axis)
+            .description("A slider's or a wheel's: what it moves along (this entity's).")
+            .field("collide_connected", &PhysicsJointComponent::collide_connected)
+            .description("The two still collide with each other.")
+            .field("limit", &PhysicsJointComponent::limit)
+            .description("Keep it between lower and upper: a hinge's angle, a slider's or a wheel's travel, a distance joint's length (a rope: 0 to its length).")
+            .field("lower", &PhysicsJointComponent::lower)
+            .description("A hinge's in degrees, the others' in units.")
+            .field("upper", &PhysicsJointComponent::upper)
+            .description("A hinge's in degrees, the others' in units.")
+            .field("motor", &PhysicsJointComponent::motor)
+            .description("It drives itself: a hinge or a wheel turns, a slider slides.")
+            .field("motor_speed", &PhysicsJointComponent::motor_speed)
+            .description("A hinge's or a wheel's in degrees/s; a slider's in units/s.")
+            .field("max_motor_force", &PhysicsJointComponent::max_motor_force)
+            .description("How hard the motor may drive (a torque, for turning).")
+            .field("length", &PhysicsJointComponent::length)
+            .units("units")
+            .description("A distance joint's; 0: how far apart its anchors are when it is made.")
+            .field("frequency", &PhysicsJointComponent::frequency)
+            .units("Hz")
+            .range(0.0, 60.0)
+            .description("A spring (a distance joint's, a wheel's, a weld's): how often it swings; 0: none, it is stiff.")
+            .field("damping_ratio", &PhysicsJointComponent::damping_ratio)
+            .range(0.0, 2.0)
+            .description("How soon the spring's swinging dies (1: at once).")
+            .field("break_force", &PhysicsJointComponent::break_force)
+            .description("It breaks when it pulls harder than this; 0: never.")
+            .field("broken", &PhysicsJointComponent::broken)
+            .description("It broke (it is made again when this is cleared).");
+    }
+    if (!registry.find("TilemapCollider")) {
+        // A tilemap's solid cells as a static body.
+        registry.native<TilemapCollider>("TilemapCollider")
+            .field("layer", &TilemapCollider::layer)
+            .description("Only this layer's cells; empty: every layer that takes part in collision.")
+            .field("friction", &TilemapCollider::friction)
+            .field("restitution", &TilemapCollider::restitution)
+            .description("How it bounces: 0 not at all, 1 back as fast.")
+            .field("sensor", &TilemapCollider::sensor)
+            .description("It says what it overlaps, and stops nothing.")
+            .property<u32>("category_bits", [](const TilemapCollider& c) { return u32{c.category_bits}; },
+                           [](TilemapCollider& c, const u32& bits) {
+                               if (bits > 0xFFFFu) return false;
+                               c.category_bits = static_cast<u16>(bits);
+                               c.built_from.reset(); // made again
+                               return true;
+                           })
+            .description("The kinds it is (bits).")
+            .property<u32>("mask_bits", [](const TilemapCollider& c) { return u32{c.mask_bits}; },
+                           [](TilemapCollider& c, const u32& bits) {
+                               if (bits > 0xFFFFu) return false;
+                               c.mask_bits = static_cast<u16>(bits);
+                               c.built_from.reset();
+                               return true;
+                           })
             .description("The kinds it hits (bits).");
     }
     if (!registry.find("PhysicsVelocity")) {
