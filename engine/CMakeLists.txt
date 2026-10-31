@@ -288,6 +288,8 @@ target_compile_features(kin_engine PUBLIC cxx_std_23)
 if(MSVC)
     set_source_files_properties(src/scripting/script_engine.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
     set_source_files_properties(src/ecs/ui2.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+    # Every built-in component's registration, and the physics systems' queries.
+    set_source_files_properties(src/scene/scene_asset.cpp src/ecs/physics.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 target_compile_definitions(kin_engine PUBLIC
     "$<$<OR:$<BOOL:${KIN_ENABLE_PROFILING}>,$<AND:$<CONFIG:Release>,$<BOOL:${KIN_ENABLE_RELEASE_PROFILING}>>>:KIN_ENABLE_PROFILING>"
