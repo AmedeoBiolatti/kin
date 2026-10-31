@@ -115,6 +115,7 @@ kin_add_test(kin_ui2_text_edit_tests kin-ui2-text-edit SOURCES ui2_text_edit_tes
 kin_add_test(kin_ui2_text_tests kin-ui2-text SOURCES ui2_text_tests.cpp)
 kin_add_test(kin_ui2_theme_file_tests kin-ui2-theme-file SOURCES ui2_theme_file_tests.cpp)
 kin_add_test(kin_dialogue_tests kin-dialogue SOURCES dialogue_tests.cpp)
+kin_add_test(kin_scene_flow_tests kin-scene-flow SOURCES scene_flow_tests.cpp)
 kin_add_test(kin_l10n_tests kin-l10n SOURCES l10n_tests.cpp)
 kin_add_test(kin_bidi_tests kin-bidi SOURCES bidi_tests.cpp)
 if(KIN_ENABLE_IMAGE_IO)

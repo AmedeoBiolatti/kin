@@ -5,6 +5,7 @@
 
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/input.hpp>
@@ -17,6 +18,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 
 namespace {
@@ -114,9 +116,45 @@ end
     fs::remove_all(dir);
 }
 
+// scene.go asks the scene's flow for a travel; scene.going() says one is asked.
+void test_scene_go() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_scene_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/exit.lua", R"lua(
+function on_update(self, dt)
+    if not self.asked then
+        self.asked = true
+        self.was = scene.going()
+        scene.go("scenes/cave.kinscene", "Entrance", "pixelate", 1.25)
+        self:set("Transform2D", {pos = {x = scene.going() and 1 or 0, y = self.was and 1 or 0}})
+    elseif not self.wrong then
+        self.wrong = true
+        scene.go("scenes/x.kinscene", "", "sparkle")
+    end
+end
+)lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::EcsEntity hero = world.entity("Hero").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/exit.lua"}});
+    kin::Input input;
+    kin::SceneFlow flow;
+    kin::EntityScripts scripts{{.content = dir, .check_frames = 0}};
+    scripts.set_flow(&flow);
+    scripts.update(world, input, 0.1f);
+    assert(hero.get<kin::Transform2D>()->pos == (kin::Vec2f{1, 0}));
+    std::optional<kin::SceneTravel> go = flow.take();
+    assert(go && go->scene == "scenes/cave.kinscene" && go->arrive == "Entrance");
+    assert(go->transition == kin::TransitionKind::Pixelate && near(go->duration, 1.25f));
+    // A transition with no such name: an error, and nothing asked.
+    scripts.update(world, input, 0.1f);
+    assert(!flow.pending() && scripts.problems().at("scripts/exit.lua").find("sparkle") != std::string::npos);
+    fs::remove_all(dir);
+}
+
 } // namespace
 
 int main() {
     test_entity_scripts();
+    test_scene_go();
     return 0;
 }

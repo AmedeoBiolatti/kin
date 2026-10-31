@@ -35,6 +35,11 @@
 // dialogue.node(), dialogue.get(name), dialogue.set(name, value); and each
 // entity's on_dialogue_event(self, id, node) for what the dialogue told
 // (its events, "dialogue.started", "dialogue.ended") this step.
+// And, given the scene's flow (set_flow): scene.go(path[, arrive[,
+// transition[, seconds]]]) asks to go to a scene file of the content (empty:
+// a place of this one), arriving at the entity named `arrive` (transition:
+// "fade", "crossfade", "dissolve", "pixelate", "wipe", "iris" or "none");
+// scene.going() while one is asked for and not yet begun.
 // Fields read and set as scene files have them: numbers, true/false, text,
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
@@ -51,6 +56,7 @@ class EcsWorld;
 class Input;
 class SceneScreens;
 class SceneDialogue;
+class SceneFlow;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -76,6 +82,8 @@ public:
     void set_screens(SceneScreens* screens);
     // The scene's dialogue, for the scripts' `dialogue` and on_dialogue_event (null: none).
     void set_dialogue(SceneDialogue* dialogue);
+    // The scene's flow, for the scripts' `scene` (null: none).
+    void set_flow(SceneFlow* flow);
 
 private:
     struct Impl;

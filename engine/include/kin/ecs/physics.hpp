@@ -35,6 +35,11 @@ struct PhysicsColliderComponent {
     std::vector<PhysicsCollider> colliders;
 };
 
+// Put on an entity with a body: at the next step its body goes to where the
+// entity is (it keeps its velocity), once; then the tag goes. A body the
+// simulation leads can be moved so (SceneFlow::arrive does, for travellers).
+struct PhysicsTeleport {};
+
 struct PhysicsVelocity {
     Vec2f linear{};
 };

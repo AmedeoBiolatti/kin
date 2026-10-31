@@ -393,6 +393,29 @@ void test_ecs_scene_default_render_draws_world(Fixture& fixture) {
 
 } // namespace
 
+void test_transition_within_keeps_the_scene(Fixture& fixture) {
+    for (const kin::TransitionKind kind : {kin::TransitionKind::Fade, kin::TransitionKind::Iris}) {
+        reset_fixture(fixture);
+        Counts scene{};
+        fixture.scenes.push(std::make_unique<CountingScene>("kept", scene));
+        fixture.scenes.update(fixture.ctx);
+        int swaps = 0;
+        fixture.scenes.push(kin::transition_within([&](kin::SceneContext&) { ++swaps; }, kind, 0.05f));
+        for (int i = 0; i < 8; ++i) {
+            fixture.scenes.render(fixture.ctx);
+            fixture.scenes.update(fixture.ctx);
+        }
+        // Changed once, in place: never left, the overlays gone.
+        assert(swaps == 1);
+        assert(scene.enters == 1 && scene.exits == 0);
+        assert(fixture.scenes.depth() == 1 && fixture.scenes.at(0)->name() == "kept");
+        reset_fixture(fixture);
+    }
+    assert(kin::transition_from_name("iris") == kin::TransitionKind::Iris);
+    assert(kin::transition_name(kin::TransitionKind::Crossfade) == "crossfade");
+    assert(!kin::transition_from_name("none") && !kin::transition_from_name("Fade"));
+}
+
 int main() {
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
@@ -405,6 +428,7 @@ int main() {
     test_fade_overlay_pops_itself(fixture);
     test_replace_with_fade_replaces_scene_below_overlay(fixture);
     test_transition_to_replaces_scene_below_overlay(fixture);
+    test_transition_within_keeps_the_scene(fixture);
     test_ecs_scene_default_render_draws_world(fixture);
     return 0;
 }

@@ -462,6 +462,12 @@ ServerResponse handle_world_snapshot(ServerContext& ctx, const JsonValue& params
     i32 index = scenes.depth() - 1;
     if (const JsonValue* scene_index = params.find("scene")) {
         index = static_cast<i32>(scene_index->as_int(index));
+    } else {
+        // The topmost scene with a world: overlays without one (a transition,
+        // a pause menu's) show the game's world under them.
+        while (index > 0 && scenes.at_mut(index) && !scenes.at_mut(index)->world()) {
+            --index;
+        }
     }
     Scene* scene = scenes.at_mut(index);
     if (!scene) {
