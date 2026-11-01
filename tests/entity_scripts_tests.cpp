@@ -4,6 +4,7 @@
 // does not read is told and skipped; a changed file is read again.
 
 #include <kin/ecs/animator.hpp>
+#include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/script.hpp>
@@ -116,6 +117,38 @@ end
     fs::remove_all(dir);
 }
 
+// self:emit() bursts its ParticleSystemComponent's effect where it is, or another of its catalog.
+void test_entity_emit() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_emit_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/burst.lua", R"lua(
+function on_start(self)
+    assert(self:emit())
+    assert(self:emit("puff"))
+    assert(not self:emit("none"))
+end
+)lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::ParticleCatalog catalog;
+    catalog.set_effect("spark", {.burst = {.count = 3, .speed = {0.0f, 0.0f}}});
+    catalog.set_effect("puff", {.burst = {.count = 2, .speed = {0.0f, 0.0f}}});
+    kin::ParticleSystem system;
+    system.set_catalog(std::move(catalog));
+    kin::EcsEntity torch = world.entity("Torch")
+                               .set(kin::Transform2D{{10.0f, 20.0f}})
+                               .set(kin::ParticleSystemComponent{.system = std::move(system), .effect = "spark", .offset = {0.0f, -4.0f}})
+                               .set(kin::ScriptComponent{.asset = {.id = "scripts/burst.lua"}});
+    kin::Input input;
+    kin::EntityScripts scripts{{.content = dir}};
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    const kin::ParticleSystem& made = torch.get<kin::ParticleSystemComponent>()->system;
+    assert(made.active_count() == 5);
+    assert((made.particles()[0].position == kin::Vec2f{10.0f, 16.0f}));
+    fs::remove_all(dir);
+}
+
 // scene.go asks the scene's flow for a travel; scene.going() says one is asked.
 void test_scene_go() {
     const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_scene_test";
@@ -155,6 +188,7 @@ end
 
 int main() {
     test_entity_scripts();
+    test_entity_emit();
     test_scene_go();
     return 0;
 }

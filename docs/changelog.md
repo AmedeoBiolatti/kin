@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 2D particles that stream and change over their lives: an effect with a `rate` or `per_distance` streams from
+  an emitter (`ParticleSystem::start`/`move`/`jump`/`stop`, laying particles along the way it went; `duration`,
+  `prewarm`, `inherit`, `local`), and a `ParticleSystemComponent` streams it from its entity, turned with it.
+  `size_curve`, `color_curve` and `speed_curve` give values over a particle's life (`particle_curve_at`,
+  `particle_gradient_at`). The sub-effects `on_death` and `trail` burst other effects where particles end and along
+  their way (three deep at most, held to `set_limit`). All of it is written in `.kinparticles` as optional
+  `name=value` settings. Entity scripts burst particles with `self:emit([effect])` (`emit_particles`).
+
 - 2D physics for whole games: `PhysicsShape` capsules, polygons (any simple one: concave ones in triangles) and
   chains (lines through points, two- or one-sided, loops), turned by an `angle`; a fixture of several Box2D shapes
   (`shape_parts`) whose contacts begin and end once, and which queries and rays find once. Joints

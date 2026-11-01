@@ -8,6 +8,7 @@
 #include <kin/particles/particle_system.hpp>
 #include <kin/platform/log.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #ifdef _MSC_VER
@@ -530,6 +531,245 @@ void test_richer_bursts_and_their_text() {
     assert(read.remove_effect("rain") && !read.has_effect("rain") && !read.remove_effect("rain"));
 }
 
+bool near(kin::f32 a, kin::f32 b, kin::f32 within = 1e-3f) {
+    return std::abs(a - b) <= within;
+}
+
+void test_curves_over_life() {
+    const std::vector<kin::ParticleKey> curve{{0.0f, 2.0f}, {0.5f, 6.0f}, {1.0f, 0.0f}};
+    assert(near(kin::particle_curve_at(curve, 0.25f, 9.0f), 4.0f));
+    assert(near(kin::particle_curve_at(curve, 0.75f, 9.0f), 3.0f));
+    assert(near(kin::particle_curve_at({}, 0.5f, 9.0f), 9.0f));
+    const std::vector<kin::ParticleKey> late{{0.5f, 1.0f}};
+    assert(near(kin::particle_curve_at(late, 0.0f, 9.0f), 1.0f) && near(kin::particle_curve_at(late, 1.0f, 9.0f), 1.0f));
+    const std::vector<kin::ParticleColorKey> gradient{{0.0f, {255, 0, 0, 255}}, {1.0f, {0, 0, 255, 0}}};
+    assert((kin::particle_gradient_at(gradient, 0.5f, {}) == kin::Color{128, 0, 128, 128}));
+
+    kin::ParticleSystem system{kin::make_key(3)};
+    system.burst({
+        .count = 1,
+        .speed = {100.0f, 100.0f},
+        .lifetime = {1.0f, 1.0f},
+        .direction = 0.0f,
+        .spread = 0.0f,
+        .size_curve = curve,
+        .color_curve = gradient,
+        .speed_curve = {{0.0f, 1.0f}, {0.5f, 0.0f}}, // stops halfway
+    });
+    system.update(0.25f);
+    const kin::Particle& p = system.particles()[0];
+    assert(near(kin::particle_size_at(p), 4.0f));
+    assert((kin::particle_color_at(p) == kin::Color{191, 0, 64, 191}));
+    assert(near(p.position.x, 12.5f)); // at half its speed, as at 0.25 of its life
+    system.update(0.5f);
+    assert(near(system.particles()[0].position.x, 12.5f)); // at 0 since halfway
+    assert(near(kin::particle_size_at(system.particles()[0]), 3.0f));
+}
+
+kin::ParticleCatalog stream_catalog() {
+    kin::ParticleCatalog catalog;
+    const kin::ParticleBurst still{.count = 5, .speed = {0.0f, 0.0f}, .lifetime = {10.0f, 10.0f}};
+    catalog.set_effect("smoke", {.burst = still, .emission = {.rate = 10.0f}});
+    catalog.set_effect("trail", {.burst = still, .emission = {.per_distance = 0.1f}});
+    catalog.set_effect("short", {.burst = still, .emission = {.rate = 10.0f, .duration = 0.5f}});
+    catalog.set_effect("warm", {.burst = {.speed = {0.0f, 0.0f}, .lifetime = {1.0f, 1.0f}},
+                                .emission = {.rate = 10.0f, .prewarm = 2.0f}});
+    catalog.set_effect("held", {.burst = still, .emission = {.rate = 10.0f, .local = true}});
+    catalog.set_effect("thrown", {.burst = still, .emission = {.rate = 100.0f, .inherit = 1.0f}});
+    catalog.set_effect("jet", {.burst = {.speed = {10.0f, 10.0f}, .lifetime = {10.0f, 10.0f}, .spread = 0.0f},
+                               .emission = {.rate = 10.0f}});
+    return catalog;
+}
+
+void test_emitters_stream() {
+    kin::ParticleSystem system{kin::make_key(4)};
+    system.set_catalog(stream_catalog());
+
+    // At its rate, its count not burst.
+    const kin::ParticleEmitter smoke = system.start("smoke", {});
+    assert(smoke && system.emitting(smoke) && system.emitter_count() == 1);
+    assert(system.active_count() == 0);
+    system.update(1.0f);
+    assert(system.active_count() == 10);
+    system.update(0.25f);
+    system.update(0.25f);
+    assert(system.active_count() == 15);
+    system.stop(smoke);
+    system.update(1.0f);
+    assert(system.active_count() == 15 && !system.emitting(smoke) && system.emitter_count() == 0);
+    system.clear();
+
+    // Along the way it moved, evenly.
+    const kin::ParticleEmitter trail = system.start("trail", {});
+    system.move(trail, {100.0f, 0.0f});
+    system.update(0.1f);
+    assert(system.active_count() == 10);
+    for (std::size_t i = 0; i < 10; ++i) {
+        assert(near(system.particles()[i].position.x, 10.0f * static_cast<kin::f32>(i + 1)));
+    }
+    system.jump(trail, {500.0f, 0.0f}); // and none on a jump
+    system.update(0.1f);
+    assert(system.active_count() == 10);
+    system.clear();
+
+    // For its duration.
+    system.start("short", {});
+    system.update(0.25f);
+    system.update(0.25f);
+    system.update(0.25f);
+    assert(system.active_count() == 5 && system.emitter_count() == 0);
+    system.clear();
+
+    // Prewarmed: as it would be, two seconds in (a second's particles alive).
+    system.start("warm", {});
+    assert(system.active_count() >= 9 && system.active_count() <= 11);
+    kin::f32 oldest = 0.0f;
+    for (const kin::Particle& p : system.particles()) {
+        oldest = std::max(oldest, p.age);
+    }
+    assert(oldest > 0.8f);
+    system.clear();
+
+    // Local: its particles move with it.
+    const kin::ParticleEmitter held = system.start("held", {});
+    system.update(1.0f);
+    system.move(held, {50.0f, 0.0f});
+    system.update(0.0f);
+    for (const kin::Particle& p : system.particles()) {
+        assert(near(p.position.x, 50.0f));
+    }
+    system.stop(held);
+    system.update(0.0f);
+    assert(system.emitter_count() == 1); // kept while its particles follow it
+    system.clear();
+
+    // With the emitter's velocity.
+    const kin::ParticleEmitter thrown = system.start("thrown", {});
+    system.move(thrown, {10.0f, 0.0f});
+    system.update(0.1f);
+    assert(system.active_count() == 10);
+    assert(near(system.particles().back().velocity.x, 100.0f));
+    system.clear();
+
+    // Turned with it.
+    system.start("jet", {}, 90.0f);
+    system.update(0.1f);
+    assert(system.active_count() == 1);
+    assert(near(system.particles()[0].velocity.x, 0.0f) && near(system.particles()[0].velocity.y, 10.0f));
+    system.clear();
+
+    // An effect that does not stream: burst once.
+    kin::ParticleCatalog plain = test_catalog();
+    system.set_catalog(std::move(plain));
+    assert(!system.start("spark", {}) && system.active_count() == 3 && system.emitter_count() == 0);
+}
+
+void test_sub_effects() {
+    kin::ParticleCatalog catalog;
+    catalog.set_effect("rocket", {.burst = {
+        .count = 1, .speed = {0.0f, 0.0f}, .lifetime = {0.5f, 0.5f},
+        .start_color = {255, 0, 0, 255}, .end_color = {255, 0, 0, 255},
+        .on_death = "pop", .trail = "puff", .trail_rate = 10.0f,
+    }});
+    catalog.set_effect("pop", {.burst = {.count = 5, .lifetime = {1.0f, 1.0f},
+                                         .start_color = {0, 255, 0, 255}, .end_color = {0, 255, 0, 255}}});
+    catalog.set_effect("puff", {.burst = {.count = 1, .lifetime = {2.0f, 2.0f},
+                                          .start_color = {0, 0, 255, 255}, .end_color = {0, 0, 255, 255}}});
+    catalog.set_effect("echo", {.burst = {.count = 1, .lifetime = {0.1f, 0.1f}, .on_death = "echo"}});
+    kin::ParticleSystem system{kin::make_key(8)};
+    system.set_catalog(catalog);
+    const auto count_of = [&](kin::Color color) {
+        return std::ranges::count_if(system.particles(), [&](const kin::Particle& p) { return p.start_color == color; });
+    };
+    assert(system.emit("rocket", {}));
+    for (int i = 0; i < 5; ++i) {
+        system.update(0.1f);
+    }
+    assert(count_of({255, 0, 0, 255}) == 0);
+    assert(count_of({0, 255, 0, 255}) == 5);
+    assert(count_of({0, 0, 255, 255}) >= 4 && count_of({0, 0, 255, 255}) <= 5);
+    system.clear();
+
+    // Three deep at most: an effect bursting itself as it ends ends.
+    system.emit("echo", {});
+    int generations = 0;
+    for (int i = 0; i < 20 && !system.empty(); ++i) {
+        system.update(0.1f);
+        generations += system.empty() ? 0 : 1;
+    }
+    assert(system.empty() && generations == 3);
+
+    // Held to the limit.
+    system.set_limit(3);
+    system.emit("rocket", {});
+    for (int i = 0; i < 5; ++i) {
+        system.update(0.1f);
+    }
+    assert(system.active_count() <= 3);
+}
+
+void test_streams_in_text() {
+    kin::ParticleCatalog catalog;
+    catalog.set_effect("fire", {
+        .burst = {
+            .count = 2,
+            .size_curve = {{0.0f, 2.0f}, {0.5f, 6.0f}, {1.0f, 0.0f}},
+            .color_curve = {{0.0f, {255, 200, 100, 255}}, {1.0f, {80, 20, 10, 0}}},
+            .speed_curve = {{0.0f, 1.0f}, {1.0f, 0.25f}},
+            .on_death = "smoke",
+            .trail = "ember",
+            .trail_rate = 4.0f,
+        },
+        .emission = {.rate = 30.0f, .per_distance = 0.5f, .duration = 2.0f, .prewarm = 1.0f, .inherit = 0.5f, .local = true},
+    });
+    const std::string text = kin::serialize_particle_catalog(catalog);
+    assert(text.find(" size_curve=0:2;0.5:6;1:0 color_curve=0:255,200,100,255;1:80,20,10,0 speed_curve=0:1;1:0.25"
+                     " on_death=smoke trail=ember trail_rate=4 rate=30 per_distance=0.5 duration=2 prewarm=1"
+                     " inherit=0.5 local=1\n") != std::string::npos);
+    kin::ParticleCatalog read;
+    std::string error;
+    assert(kin::parse_particle_catalog(text, read, error));
+    const kin::ParticleEffect& back = *read.effect("fire");
+    assert(back.burst.size_curve == catalog.effect("fire")->burst.size_curve);
+    assert(back.burst.color_curve == catalog.effect("fire")->burst.color_curve);
+    assert(back.burst.speed_curve == catalog.effect("fire")->burst.speed_curve);
+    assert(back.burst.on_death == "smoke" && back.burst.trail == "ember" && back.burst.trail_rate == 4.0f);
+    assert(back.emission == catalog.effect("fire")->emission && back.streams());
+    assert(kin::serialize_particle_catalog(read) == text);
+
+    // Keys read in any order come in order.
+    assert(kin::parse_particle_catalog("effect x 1 0 0 1 1 1 1 255 255 255 255 0 0 0 0 0 0 0 0 - size_curve=1:0;0:4\n", read, error));
+    assert((read.effect("x")->burst.size_curve == std::vector<kin::ParticleKey>{{0.0f, 4.0f}, {1.0f, 0.0f}}));
+    assert(!kin::parse_particle_catalog("effect x 1 0 0 1 1 1 1 255 255 255 255 0 0 0 0 0 0 0 0 - size_curve=0;1\n", read, error));
+    assert(error.find("size_curve") != std::string::npos);
+    assert(!kin::parse_particle_catalog("effect x 1 0 0 1 1 1 1 255 255 255 255 0 0 0 0 0 0 0 0 - local=maybe\n", read, error));
+}
+
+void test_ecs_streams_follow_the_entity() {
+    kin::EcsWorld world;
+    world.component<kin::Transform2D>("Transform2D");
+    world.component<kin::ParticleSystemComponent>("ParticleSystemComponent");
+    kin::ParticleSystem system{kin::make_key(6)};
+    system.set_catalog(stream_catalog());
+    flecs::entity e = world.raw().entity("chimney")
+                          .set(kin::Transform2D{{40.0f, 0.0f}})
+                          .set(kin::ParticleSystemComponent{.system = std::move(system), .effect = "smoke", .rate = 50.0f});
+    kin::update_particles(world, 1.0f);
+    const auto* particles = e.get<kin::ParticleSystemComponent>();
+    assert(particles->system.active_count() == 10); // its own rate, not the component's
+    assert(near(particles->system.particles()[0].position.x, 40.0f));
+    e.set(kin::Transform2D{{80.0f, 0.0f}});
+    kin::update_particles(world, 0.5f);
+    assert(particles->system.active_count() == 15);
+    assert(near(particles->system.particles().back().position.x, 80.0f));
+    e.get_mut<kin::ParticleSystemComponent>()->emitting = false;
+    kin::update_particles(world, 1.0f);
+    assert(particles->system.active_count() == 15 && particles->system.emitter_count() == 0);
+    e.get_mut<kin::ParticleSystemComponent>()->emitting = true;
+    kin::update_particles(world, 0.1f);
+    assert(particles->system.active_count() == 16);
+}
+
 int main() {
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
@@ -539,6 +779,11 @@ int main() {
     test_catalog_asset_and_defaults();
     test_particle_catalog_seed_roundtrip();
     test_richer_bursts_and_their_text();
+    test_curves_over_life();
+    test_emitters_stream();
+    test_sub_effects();
+    test_streams_in_text();
+    test_ecs_streams_follow_the_entity();
     test_fields_wrap_and_render_pixel_policies();
     test_rendering_rects_sprites_sort_and_output_policy();
     test_animation_event_and_ecs_bridge();

@@ -145,8 +145,9 @@ Sounds still need a game's `AudioEngine`: `update_audio_emitters(world, audio)`
 plays the emitters whose catalogs are bound. Particles move in
 `update_particles(world, dt)`, which also bursts each emitter's `effect` where
 its entity is (`offset` from it): once as it starts (`burst_at_start`), and
-`rate` times a second while `emitting`. An emitter with no effect is the
-game's to emit from, in code, as before.
+`rate` times a second while `emitting`. An effect that streams (see below)
+streams from the entity instead while `emitting`, follows it and turns with
+it. An emitter with no effect is the game's to emit from, in code, as before.
 
 A particle catalog's `effect` line gives a burst: how many particles, their
 speed and lifetime ranges, start and end sizes and colours, acceleration
@@ -156,13 +157,33 @@ spread of 360, the default, goes every way); `shape` (`point`, `circle` or
 `box`) and `shape_size`, where the particles start; `drag` (the part of their
 speed they lose each second); `rotation` and `spin` (a degree range, or
 `a,b`); and `mid_at`, `mid_size` and `mid_color`, a size and colour they pass
-through partway through their lives. Only settings that differ from their
-defaults are written, so effects that don't use them read as they always did.
+through partway through their lives.
+
+Curves over a particle's life win over start, mid and end when they have keys:
+`size_curve`, `color_curve` and `speed_curve` (a multiplier of its speed),
+written as `at:value` keys joined by `;` (`at` from 0, its birth, to 1, its
+end; a colour is `r,g,b,a`). Sub-effects are other effects of the catalog:
+`on_death` bursts where each particle ends, and `trail` bursts along its way
+`trail_rate` times a second (three deep at most, and no more particles than
+`ParticleSystem::set_limit`, 16384 by default).
+
+An effect streams when it has a `rate` (particles a second) or `per_distance`
+(particles a unit moved). `ParticleSystem::start(effect, position, angle)`
+starts one as an emitter, `move` and `jump` move it, and `stop` stops it; it
+lays its particles along the way it went. `duration` stops it by itself
+(seconds; 0 means never), `prewarm` starts it as if it had been running that
+long, `inherit` gives its particles part of its velocity, and `local=1` makes
+them move with it. Each particle is made as the effect's burst makes one,
+turned by the emitter's angle; the effect's `count` is not used.
+
+Only settings that differ from their defaults are written, so effects that
+don't use them read as they always did.
 `parse_particle_catalog` and `serialize_particle_catalog` read and write the
 text, for editors.
 
 ```text
 effect fire 14 30 70 0.4 0.8 8 2 255 240 150 255 140 20 10 0 0 -40 300 0 - direction=270 spread=40 shape=circle shape_size=12,6 mid_at=0.4 mid_size=6 mid_color=255,130,30,220
+effect torch 1 20 40 0.5 0.9 6 0 255 255 255 255 255 255 255 0 0 -30 300 0 - direction=270 spread=30 size_curve=0:3;0.3:7;1:0 color_curve=0:255,240,150,255;0.5:255,120,30,200;1:60,20,10,0 on_death=smoke rate=40 prewarm=1
 ```
 
 Tilemaps draw with the rest (`WorldRenderState`), their top left where their

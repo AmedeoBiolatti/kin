@@ -1,6 +1,7 @@
 #include <kin/scripting/entity_scripts.hpp>
 
 #include <kin/ecs/animator.hpp>
+#include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/dialogue.hpp>
@@ -286,6 +287,10 @@ struct EntityScripts::Impl {
             target.set(t);
         };
         entity["destroy"] = [](const ScriptEntity& e) { e.live().destruct(); };
+        // Its ParticleSystemComponent's effect burst (or another of its catalog).
+        entity["emit"] = [](const ScriptEntity& e, sol::optional<std::string> effect) {
+            return emit_particles(EcsEntity{e.live()}, effect.value_or(std::string{}));
+        };
         // Its Animator's.
         const auto animator = [](const ScriptEntity& e) {
             Animator* found = EcsEntity{e.live()}.get_mut<Animator>();
