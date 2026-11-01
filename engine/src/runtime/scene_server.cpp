@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <kin/anim/anim_format.hpp>
 #include <kin/anim/player.hpp>
 #include <kin/core/json.hpp>
@@ -1695,6 +1696,7 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
 
 struct LiveInspector::Shared {
     std::mutex mutex;
+    std::condition_variable arrived; // a line, or the end of them
     std::deque<std::string> lines;
     bool reading = true;
 };
@@ -1750,12 +1752,18 @@ LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
     _reader = std::thread([shared = _shared, &in] {
         std::string line;
         while (std::getline(in, line)) {
-            std::lock_guard<std::mutex> lock(shared->mutex);
-            shared->lines.push_back(std::move(line));
+            {
+                std::lock_guard<std::mutex> lock(shared->mutex);
+                shared->lines.push_back(std::move(line));
+            }
+            shared->arrived.notify_all();
             line.clear();
         }
-        std::lock_guard<std::mutex> lock(shared->mutex);
-        shared->reading = false;
+        {
+            std::lock_guard<std::mutex> lock(shared->mutex);
+            shared->reading = false;
+        }
+        shared->arrived.notify_all();
     });
     // The writer, too, holds what it shares: blocked by a tool that stopped
     // reading as the game ends, it is left behind.
@@ -1781,10 +1789,13 @@ LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
             outbox->changed.notify_all();
         }
     });
+    script_debugger().set_waiter([this](ScriptDebugger&) { return wait_stopped(); });
     KIN_LOG_INFO("server", "inspector listening on stdin");
 }
 
 LiveInspector::~LiveInspector() {
+    script_debugger().set_waiter({});
+    script_debugger().set_breakpoints({});
     if (_writer.joinable()) {
         // What is left goes out, unless the tool has stopped reading.
         std::unique_lock<std::mutex> lock(_outbox->mutex);
@@ -1816,6 +1827,7 @@ LiveInspector::~LiveInspector() {
 }
 
 void LiveInspector::poll(ServerContext& ctx, const GameInfo* game) {
+    _ctx = &ctx;
     std::deque<std::string> lines;
     bool reading = true;
     {
@@ -1875,17 +1887,7 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
     static const JsonValue empty_params;
     const JsonValue* given = root.find("params");
     const JsonValue& params = given ? *given : empty_params;
-    const auto status = [&] {
-        std::ostringstream out;
-        JsonWriter json(out, false);
-        json.begin_object();
-        json.field("frame", _frame);
-        json.field("paused", _paused);
-        json.field("fixed_dt", static_cast<f64>(ctx.fixed_dt()));
-        json.field("scene_depth", ctx.scenes().depth());
-        json.end_object();
-        return ok_result(out.str());
-    };
+    const auto status = [&] { return this->status(false); };
 
     ServerResponse response;
     if (method.empty()) {
@@ -1913,6 +1915,9 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
             _steps += std::min(count, MAX_TICKS_PER_CALL);
             response = status();
         }
+    } else if (method.starts_with("debug.")) {
+        std::optional<ScriptResume> resume;
+        response = answer_debug(method, params, false, resume);
     } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
                method.starts_with("view.") || method == "ui.snapshot") {
         response = error_result(method + " drives a headless server (--server); this game runs in its window");
@@ -1920,6 +1925,190 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
         response = dispatch_server_command(ctx, game, method, params);
     }
     send(id, response);
+}
+
+ServerResponse LiveInspector::status(bool stopped) const {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("frame", _frame);
+    json.field("paused", _paused);
+    json.field("stopped", stopped);
+    if (_ctx) {
+        json.field("fixed_dt", static_cast<f64>(_ctx->fixed_dt()));
+        json.field("scene_depth", _ctx->scenes().depth());
+    }
+    json.end_object();
+    return ok_result(out.str());
+}
+
+namespace {
+
+void write_script_value(JsonWriter& json, const ScriptValue& value) {
+    json.begin_object();
+    json.field("name", value.name);
+    json.field("value", value.value);
+    json.field("kind", value.kind);
+    if (!value.fields.empty()) {
+        json.key("fields").begin_array();
+        for (const ScriptValue& field : value.fields) {
+            write_script_value(json, field);
+        }
+        json.end_array();
+    }
+    if (value.more) {
+        json.field("more", true);
+    }
+    json.end_object();
+}
+
+std::string debug_state_json(const std::optional<ScriptStop>& stop) {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("stopped", stop.has_value());
+    if (stop) {
+        json.field("serial", stop->serial);
+        json.field("reason", stop->reason);
+        json.key("frames").begin_array();
+        for (const ScriptFrame& frame : stop->frames) {
+            json.begin_object();
+            json.field("function", frame.function);
+            json.field("file", frame.file);
+            json.field("line", frame.line);
+            for (const auto& [name, values] : {std::pair{"locals", &frame.locals}, std::pair{"upvalues", &frame.upvalues}}) {
+                json.key(name).begin_array();
+                for (const ScriptValue& value : *values) {
+                    write_script_value(json, value);
+                }
+                json.end_array();
+            }
+            json.end_object();
+        }
+        json.end_array();
+    }
+    json.end_object();
+    return out.str();
+}
+
+} // namespace
+
+ServerResponse LiveInspector::answer_debug(std::string_view method, const JsonValue& params, bool stopped,
+                                           std::optional<ScriptResume>& resume) {
+    ScriptDebugger& debugger = script_debugger();
+    if (method == "debug.breakpoints") {
+        ScriptDebugger::Breakpoints breakpoints;
+        const JsonValue* files = params.find("files");
+        if (files && !files->is_object()) {
+            return error_result("files must be an object of line lists");
+        }
+        i64 count = 0;
+        if (files) {
+            for (const auto& [file, lines] : files->members()) {
+                std::set<i32>& set = breakpoints[file];
+                for (const JsonValue& line : lines.items()) {
+                    if (line.is_number() && line.as_int() > 0) {
+                        set.insert(static_cast<i32>(line.as_int()));
+                    }
+                }
+                count += static_cast<i64>(set.size());
+            }
+        }
+        debugger.set_breakpoints(std::move(breakpoints));
+        return ok_result("{\"breakpoints\":" + std::to_string(count) + "}");
+    }
+    if (method == "debug.state") {
+        return ok_result(debug_state_json(debugger.stop()));
+    }
+    if (method == "debug.pause") {
+        if (!stopped) {
+            debugger.pause();
+        }
+        return ok_result(debug_state_json(debugger.stop()));
+    }
+    if (method == "debug.continue" || method == "debug.step") {
+        if (!stopped) {
+            return error_result("no script is stopped");
+        }
+        if (method == "debug.continue") {
+            resume = ScriptResume::Continue;
+        } else {
+            const std::string how = params.string_at("how", "over");
+            if (how == "into") {
+                resume = ScriptResume::Into;
+            } else if (how == "over") {
+                resume = ScriptResume::Over;
+            } else if (how == "out") {
+                resume = ScriptResume::Out;
+            } else {
+                return error_result("how must be into, over or out");
+            }
+        }
+        return ok_result("{\"stopped\":false}");
+    }
+    return error_result("unknown method: " + std::string(method));
+}
+
+ScriptResume LiveInspector::wait_stopped() {
+    // What waits for the game to go on: answered once it does, in order.
+    std::deque<std::string> later;
+    const auto go_on = [&](ScriptResume how) {
+        std::lock_guard<std::mutex> lock(_shared->mutex);
+        _shared->lines.insert(_shared->lines.begin(), std::make_move_iterator(later.begin()),
+                              std::make_move_iterator(later.end()));
+        return how;
+    };
+    KIN_LOG_INFO("server", "a script stopped for the inspector");
+    for (;;) {
+        std::string line;
+        {
+            std::unique_lock<std::mutex> lock(_shared->mutex);
+            _shared->arrived.wait(lock, [&] { return !_shared->lines.empty() || !_shared->reading; });
+            if (_shared->lines.empty()) {
+                // The tool is gone: nobody is left to say go on.
+                lock.unlock();
+                script_debugger().set_breakpoints({});
+                return go_on(ScriptResume::Continue);
+            }
+            line = std::move(_shared->lines.front());
+            _shared->lines.pop_front();
+        }
+        if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
+            continue;
+        }
+        const JsonParseResult parsed = parse_json(strip_bom(line));
+        if (!parsed.ok()) {
+            send(nullptr, error_result("invalid JSON: " + parsed.error));
+            continue;
+        }
+        const JsonValue& root = *parsed.value;
+        const JsonValue* id = root.find("id");
+        const std::string method = root.string_at("method");
+        static const JsonValue empty_params;
+        const JsonValue* given = root.find("params");
+        const JsonValue& params = given ? *given : empty_params;
+        if (method.starts_with("debug.")) {
+            std::optional<ScriptResume> resume;
+            send(id, answer_debug(method, params, true, resume));
+            if (resume) {
+                return go_on(*resume);
+            }
+        } else if (method == "server.status") {
+            send(id, status(true));
+        } else if (method == "ping") {
+            send(id, ok_result("{\"pong\":true}"));
+        } else if (method == "server.shutdown") {
+            KIN_LOG_INFO("server", "inspector asked the game to quit");
+            if (_ctx) {
+                _ctx->app().quit();
+            }
+            send(id, ok_result("{\"bye\":true}"));
+            script_debugger().set_breakpoints({});
+            return go_on(ScriptResume::Continue);
+        } else {
+            later.push_back(std::move(line));
+        }
+    }
 }
 
 } // namespace kin

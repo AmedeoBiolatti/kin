@@ -9,6 +9,7 @@ add_library(kin_foundation STATIC
     src/core/hash.cpp
     src/core/jobs.cpp
     src/core/json_value.cpp
+    src/core/script_debugger.cpp
     src/core/utf8.cpp
     src/l10n/gettext.cpp
     src/l10n/language_file.cpp

@@ -20,6 +20,7 @@
 #include <optional>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <condition_variable>
@@ -1134,6 +1135,70 @@ void test_live_inspector_slow_tool() {
     assert(text.find("\"id\":1") < text.find("\"id\":2"));
 }
 
+// --inspect debugs the game's scripts: a script stopped is held inside the
+// inspector, which answers debug.* and the status then, and the rest after.
+void test_live_inspector_debugs_scripts() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "debugged", .width = 32, .height = 32, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<KinSnapshotScene>());
+    kin::ServerContext ctx{app, window, renderer, scenes, {.title = "debugged"}, kin::make_key(1), 1.0f / 60.0f, false};
+    ctx.realize_scenes();
+    kin::GameInfo game;
+    game.title = "Debugged";
+    kin::ScriptDebugger& debugger = kin::script_debugger();
+    assert(!debugger.waiting());
+    {
+        std::istringstream in(
+            R"({"id":1,"method":"debug.state"})" "\n"
+            R"({"id":2,"method":"server.status"})" "\n"
+            R"({"id":3,"method":"game.info"})" "\n"
+            R"({"id":4,"method":"debug.step","params":{"how":"sideways"}})" "\n"
+            R"({"id":5,"method":"debug.step","params":{"how":"into"}})" "\n"
+            R"({"id":6,"method":"debug.continue"})" "\n"
+            R"({"id":7,"method":"debug.breakpoints","params":{"files":{"scripts/a.lua":[3,5,0]}}})" "\n"
+            R"({"id":8,"method":"debug.pause"})" "\n");
+        std::ostringstream out;
+        kin::LiveInspector inspector{in, out};
+        assert(debugger.waiting());
+        debugger.set_breakpoints({{"scripts/a.lua", {3}}});
+        assert(debugger.armed());
+
+        // A script (here the test, as Lua would) stops: the tool's requests
+        // are answered from inside, until one says how to go on.
+        kin::ScriptStop stop{.reason = "breakpoint"};
+        stop.frames.push_back({.function = "on_update", .file = "scripts/a.lua", .line = 3,
+                               .locals = {{.name = "dt", .value = "0.5", .kind = "number"}}});
+        assert(debugger.stopped(stop, 1, 1) == kin::ScriptResume::Into);
+        assert(!debugger.stop() && debugger.seeking());
+
+        for (int i = 0; i < 2000 && !inspector.finished(); ++i) {
+            inspector.poll(ctx, &game);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        inspector.flush();
+        const std::string text = out.str();
+        const kin::JsonValue* state = response_result(text, 1);
+        assert(state && state->bool_at("stopped") && state->string_at("reason") == "breakpoint" && state->int_at("serial") > 0);
+        const kin::JsonValue& frame = state->find("frames")->items().at(0);
+        assert(frame.string_at("function") == "on_update" && frame.string_at("file") == "scripts/a.lua" && frame.int_at("line") == 3);
+        assert(frame.find("locals")->items().at(0).string_at("value") == "0.5" && frame.find("upvalues")->items().empty());
+        assert(response_result(text, 2)->bool_at("stopped"));
+        assert(!response_result(text, 4) && text.find("how must be into, over or out") != std::string::npos);
+        assert(response_result(text, 5));
+        // game.info waited for the script to go on.
+        assert(response_result(text, 3)->string_at("title") == "Debugged");
+        assert(text.find("\"id\":3") > text.find("\"id\":5"));
+        assert(!response_result(text, 6) && text.find("no script is stopped") != std::string::npos);
+        assert(response_result(text, 7)->int_at("breakpoints") == 2);
+        assert((debugger.breakpoints()->at("scripts/a.lua") == std::set<kin::i32>{3, 5}));
+        assert(debugger.seeking()); // the pause asked for
+    }
+    // The inspector gone, nothing stops any more.
+    assert(!debugger.waiting() && !debugger.armed() && debugger.breakpoints()->empty());
+}
+
 int main() {
     test_json_parser();
     test_driven_server();
@@ -1144,6 +1209,7 @@ int main() {
     test_ui_snapshot_and_pointer_input();
     test_press_completes_a_ui2_click_and_frame_timing();
     test_live_inspector_slow_tool();
+    test_live_inspector_debugs_scripts();
     test_input_key_drives_a_text_edit();
     test_input_drop();
     test_sim_reset();

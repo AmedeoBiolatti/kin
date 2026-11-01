@@ -198,6 +198,32 @@ a large one holds that thread, not the game.
 tool closes its end of stdin the game goes on, never left paused. Headless
 runs and builds without the scene server ignore `--inspect`, with a warning.
 
+### Debugging Its Scripts
+
+An inspected game's Lua scripts (`LuaScript`, and so a scene's entity
+scripts) stop where the tool asks. A script file is named as it is under the
+content root, `/` between folders (`scripts/player.lua`).
+
+| Method | Params | Effect |
+|---|---|---|
+| `debug.breakpoints` | `{files: {"scripts/a.lua": [3, 7]}}` | Set every breakpoint, replacing those before. Returns `{breakpoints}`, the lines set. |
+| `debug.pause` | none | Stop at the next line any script runs. |
+| `debug.state` | none | `{stopped}`; when stopped, `serial` (counts stops), `reason` (`breakpoint`, `step`, `pause`) and `frames`, innermost first: `function`, `file`, `line`, `locals` and `upvalues`. |
+| `debug.continue` | none | Go on from a stop, to the next breakpoint. |
+| `debug.step` | `{how?}` | Go on to the next line: `into` a call made there, `over` it (the default), or `out` of the function. |
+
+A value is `{name, value, kind}`: `value` as text (`12.5`, `"text"`,
+`table (3)`, a userdata as its `__tostring` gives it), `kind` Lua's type. A
+table's `fields` follow, two tables deep and 64 fields each (`more` when some
+are left out).
+
+While a script is stopped the game is held inside it: it does not update or
+draw. Then only `debug.*`, `server.status` (`stopped: true`), `ping` and
+`server.shutdown` are answered; the rest wait, and are answered in order
+once it goes on. Lines are watched only while a breakpoint, a pause or a step
+is set, so a game whose tool sets none runs its scripts at full pace. If the
+tool closes stdin the script goes on and its breakpoints are cleared.
+
 ## Input
 
 Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.drop`) is queued and applied

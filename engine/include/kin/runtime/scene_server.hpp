@@ -2,6 +2,7 @@
 
 #include <kin/core/json_value.hpp>
 #include <kin/core/rng.hpp>
+#include <kin/core/script_debugger.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/runtime/run_report.hpp>
@@ -218,6 +219,15 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes);
 // sim.pause, sim.resume, sim.step {count} (the game keeps drawing meanwhile).
 // server.shutdown quits the game. What drives a headless server (sim.tick,
 // sim.reset, input.*, view.screenshot) is refused: the player drives this one.
+//
+// It debugs the game's scripts (script_debugger(), while it lives):
+// debug.breakpoints {files: {"scripts/a.lua": [3, 7]}} sets them all,
+// debug.pause stops at the next line run, debug.state tells the stop (if a
+// script is held at one: its frames, their locals and upvalues), and
+// debug.continue or debug.step {how: "into"|"over"|"out"} goes on from it.
+// While a script is stopped the game is held inside it (it does not draw):
+// only debug.*, server.status (with "stopped"), ping and server.shutdown are
+// answered then, the rest when it goes on.
 class LiveInspector {
 public:
     // Reads requests from `in` on a thread of its own; answers on `out`, from
@@ -250,12 +260,19 @@ private:
 
     void answer(ServerContext& ctx, const GameInfo* game, std::string_view line);
     void send(const JsonValue* id, const ServerResponse& response);
+    // A debug.* request; while stopped, how the script goes on, when it says.
+    ServerResponse answer_debug(std::string_view method, const JsonValue& params, bool stopped,
+                                std::optional<ScriptResume>& resume);
+    // The debugger's waiter: answers the tool while a script is stopped.
+    ScriptResume wait_stopped();
+    ServerResponse status(bool stopped) const;
 
     std::shared_ptr<Shared> _shared;
     std::thread _reader;
     std::shared_ptr<Outbox> _outbox;
     std::thread _writer;
     std::ostream& _out;
+    ServerContext* _ctx = nullptr; // the last poll's
     bool _paused = false;
     i64 _steps = 0; // updates to run while paused
     i64 _frame = 0;
