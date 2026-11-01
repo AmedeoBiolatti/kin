@@ -1156,9 +1156,7 @@ void test_live_inspector_debugs_scripts() {
             R"({"id":3,"method":"game.info"})" "\n"
             R"({"id":4,"method":"debug.step","params":{"how":"sideways"}})" "\n"
             R"({"id":5,"method":"debug.step","params":{"how":"into"}})" "\n"
-            R"({"id":6,"method":"debug.continue"})" "\n"
-            R"({"id":7,"method":"debug.breakpoints","params":{"files":{"scripts/a.lua":[3,5,0]}}})" "\n"
-            R"({"id":8,"method":"debug.pause"})" "\n");
+            R"({"id":6,"method":"debug.continue"})" "\n");
         std::ostringstream out;
         kin::LiveInspector inspector{in, out};
         assert(debugger.waiting());
@@ -1191,9 +1189,25 @@ void test_live_inspector_debugs_scripts() {
         assert(response_result(text, 3)->string_at("title") == "Debugged");
         assert(text.find("\"id\":3") > text.find("\"id\":5"));
         assert(!response_result(text, 6) && text.find("no script is stopped") != std::string::npos);
-        assert(response_result(text, 7)->int_at("breakpoints") == 2);
-        assert((debugger.breakpoints()->at("scripts/a.lua") == std::set<kin::i32>{3, 5}));
+    }
+    assert(!debugger.waiting() && !debugger.armed() && debugger.breakpoints()->empty());
+    {
+        // Breakpoints and a pause are taken as they are read, before any poll:
+        // a game's first update stops already.
+        std::istringstream in(R"({"id":7,"method":"debug.breakpoints","params":{"files":{"scripts/a.lua":[3,5,0]}}})" "\n"
+                              R"({"id":8,"method":"debug.pause"})" "\n");
+        std::ostringstream out;
+        kin::LiveInspector inspector{in, out};
+        for (int i = 0; i < 2000 && !debugger.seeking(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         assert(debugger.seeking()); // the pause asked for
+        assert((debugger.breakpoints()->at("scripts/a.lua") == std::set<kin::i32>{3, 5}));
+        for (int i = 0; i < 2000 && !response_result((inspector.flush(), out.str()), 8); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); // answered on the reader's thread
+        }
+        assert(response_result(out.str(), 7)->int_at("breakpoints") == 2);
+        assert(response_result(out.str(), 8));
     }
     // The inspector gone, nothing stops any more.
     assert(!debugger.waiting() && !debugger.armed() && debugger.breakpoints()->empty());

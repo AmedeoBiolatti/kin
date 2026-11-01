@@ -1741,6 +1741,57 @@ private:
     bool _locked;
 };
 
+ServerResponse set_debug_breakpoints(const JsonValue& params) {
+    ScriptDebugger::Breakpoints breakpoints;
+    const JsonValue* files = params.find("files");
+    if (files && !files->is_object()) {
+        return error_result("files must be an object of line lists");
+    }
+    i64 count = 0;
+    if (files) {
+        for (const auto& [file, lines] : files->members()) {
+            std::set<i32>& set = breakpoints[file];
+            for (const JsonValue& line : lines.items()) {
+                if (line.is_number() && line.as_int() > 0) {
+                    set.insert(static_cast<i32>(line.as_int()));
+                }
+            }
+            count += static_cast<i64>(set.size());
+        }
+    }
+    script_debugger().set_breakpoints(std::move(breakpoints));
+    return ok_result("{\"breakpoints\":" + std::to_string(count) + "}");
+}
+
+// The answer to what the reader does itself as it reads it (debug.breakpoints
+// and debug.pause: the debugger's own, taken at once, so that a game's first
+// update already stops), else nullopt.
+std::optional<std::string> answered_on_reading(std::string_view line) {
+    if (line.find("\"debug.") == std::string_view::npos) {
+        return std::nullopt; // not parsed: most lines are not
+    }
+    const JsonParseResult parsed = parse_json(strip_bom(line));
+    if (!parsed.ok()) {
+        return std::nullopt;
+    }
+    const std::string method = parsed.value->string_at("method");
+    if (method != "debug.breakpoints" && method != "debug.pause") {
+        return std::nullopt;
+    }
+    ServerResponse response;
+    if (method == "debug.pause") {
+        script_debugger().pause();
+        response = ok_result("{\"stopped\":false}");
+    } else {
+        static const JsonValue empty_params;
+        const JsonValue* given = parsed.value->find("params");
+        response = set_debug_breakpoints(given ? *given : empty_params);
+    }
+    std::ostringstream answer;
+    write_envelope(answer, parsed.value->find("id"), response);
+    return std::move(answer).str();
+}
+
 } // namespace
 
 LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
@@ -1749,9 +1800,18 @@ LiveInspector::LiveInspector(std::istream& in, std::ostream& out)
       _out(out) {
     // The reader holds the shared state, so it can outlive this when it is
     // still blocked reading as the game ends (it is then left behind).
-    _reader = std::thread([shared = _shared, &in] {
+    _reader = std::thread([shared = _shared, outbox = _outbox, &in] {
         std::string line;
         while (std::getline(in, line)) {
+            if (std::optional<std::string> answer = answered_on_reading(line)) {
+                {
+                    std::lock_guard<std::mutex> lock(outbox->mutex);
+                    outbox->answers.push_back(std::move(*answer));
+                }
+                outbox->changed.notify_all();
+                line.clear();
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(shared->mutex);
                 shared->lines.push_back(std::move(line));
@@ -1997,25 +2057,7 @@ ServerResponse LiveInspector::answer_debug(std::string_view method, const JsonVa
                                            std::optional<ScriptResume>& resume) {
     ScriptDebugger& debugger = script_debugger();
     if (method == "debug.breakpoints") {
-        ScriptDebugger::Breakpoints breakpoints;
-        const JsonValue* files = params.find("files");
-        if (files && !files->is_object()) {
-            return error_result("files must be an object of line lists");
-        }
-        i64 count = 0;
-        if (files) {
-            for (const auto& [file, lines] : files->members()) {
-                std::set<i32>& set = breakpoints[file];
-                for (const JsonValue& line : lines.items()) {
-                    if (line.is_number() && line.as_int() > 0) {
-                        set.insert(static_cast<i32>(line.as_int()));
-                    }
-                }
-                count += static_cast<i64>(set.size());
-            }
-        }
-        debugger.set_breakpoints(std::move(breakpoints));
-        return ok_result("{\"breakpoints\":" + std::to_string(count) + "}");
+        return set_debug_breakpoints(params);
     }
     if (method == "debug.state") {
         return ok_result(debug_state_json(debugger.stop()));

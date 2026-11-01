@@ -218,10 +218,12 @@ table's `fields` follow, two tables deep and 64 fields each (`more` when some
 are left out).
 
 While a script is stopped the game is held inside it: it does not update or
-draw. Then only `debug.*`, `server.status` (`stopped: true`), `ping` and
-`server.shutdown` are answered; the rest wait, and are answered in order
-once it goes on. Lines are watched only while a breakpoint, a pause or a step
-is set, so a game whose tool sets none runs its scripts at full pace. If the
+draw. Only `debug.*`, `server.status` (`stopped: true`), `ping` and
+`server.shutdown` are answered then; the rest wait, and are answered in order
+once it goes on. `debug.breakpoints` and `debug.pause` are taken as soon as
+they are read, before the next frame, so breakpoints sent as the game starts
+stop its first update. Lines are watched only while a breakpoint, a pause or
+a step is set, so a game whose tool sets none runs its scripts at full pace. If the
 tool closes stdin the script goes on and its breakpoints are cleared.
 
 ## Input
