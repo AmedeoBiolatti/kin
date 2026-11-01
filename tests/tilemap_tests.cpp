@@ -728,11 +728,112 @@ void test_terrain_connect_updates_cells_and_neighbors() {
     map.clear_dirty();
     assert(map.set_terrain_connect("ground", branch, "road") >= 1);
     assert(map.get(2, 0) == 7);
-    assert(map.get(2, 1) == 1);
+    // North, east and west: no variant of its own; the nearest joining no
+    // other side, east and west (said in the diagnostics), as it was.
+    assert(map.get(2, 1) == 2);
     assert(!map.terrain_diagnostics.empty());
     assert(map.layer_dirty("ground"));
     assert(map.dirty_regions("ground").size() == 1);
-    assert((map.dirty_regions("ground").back() == kin::TileRect{2, 0, 1, 2}));
+    assert((map.dirty_regions("ground").back() == kin::TileRect{2, 0, 1, 1}));
+}
+
+// Terrain taken away again, and painted over another: the cells around fitted
+// to what is left, each to its own terrain; the nearest variant never joins a
+// side that has no neighbour.
+void test_terrain_erase_nearest_and_other_terrains() {
+    kin::TileMap map = make_terrain_map();
+    const std::array<kin::Vec2i, 3> road{{{0, 1}, {1, 1}, {2, 1}}};
+    map.set_terrain_connect("ground", road, "road");
+    assert(map.get(0, 1) == 4 && map.get(1, 1) == 2 && map.get(2, 1) == 5);
+
+    const std::array<kin::Vec2i, 1> middle{{{1, 1}}};
+    map.clear_dirty();
+    assert(map.clear_terrain_connect("ground", middle) == 3);
+    assert(map.get(1, 1) == 0 && map.get(0, 1) == 1 && map.get(2, 1) == 1);
+    assert((map.dirty_regions("ground").back() == kin::TileRect{0, 1, 3, 1}));
+
+    // Grass (its own fallback only) painted where the road was: the road's
+    // ends fitted again, around it.
+    map.tileset.resize(9);
+    map.tileset.tiles[8] = {.id = "grass", .terrain = "grass"};
+    map.tileset.add_terrain_variant("grass", 0, 8, true);
+    map.set_terrain_connect("ground", road, "road");
+    map.clear_terrain_diagnostics();
+    assert(map.set_terrain_connect("ground", middle, "grass") == 3);
+    assert(map.get(1, 1) == 8 && map.get(0, 1) == 1 && map.get(2, 1) == 1);
+    assert(map.terrain_diagnostics.empty()); // each joins nothing: their own variants (mask 0)
+    assert(map.terrain_mask("ground", {0, 1}, "road") == 0 && map.terrain_mask("ground", {0, 1}, "grass") == kin::TileTerrainEast);
+
+    // A side with no neighbour is never joined: with only an east-and-west
+    // variant (and the fallback), a cell joined east only is the fallback.
+    kin::TileSet tiles;
+    tiles.resize(3);
+    tiles.tiles[1] = {.id = "wall", .terrain = "wall"};
+    tiles.tiles[2] = {.id = "wall-ew", .terrain = "wall"};
+    tiles.add_terrain_variant("wall", 0, 1, true);
+    tiles.add_terrain_variant("wall", kin::TileTerrainEast | kin::TileTerrainWest, 2);
+    bool exact = true;
+    assert(tiles.terrain_match("wall", kin::TileTerrainEast, &exact) == 1 && !exact);
+    assert(tiles.terrain_match("wall", kin::TileTerrainEast | kin::TileTerrainWest | kin::TileTerrainNorth, &exact) == 2 && !exact);
+    assert(tiles.terrain_match("wall", kin::TileTerrainEast | kin::TileTerrainWest, &exact) == 2 && exact);
+    assert(tiles.terrain_match("sand", 0) == 0);
+    assert((tiles.terrains() == std::vector<std::string>{"wall"}));
+}
+
+// Terrain on hexagons: a cell joins its neighbours across its six sides, side
+// d toward neighbour direction d; the masks (up to 63) and the tileset's cells
+// kept in its file.
+void test_hex_terrain_six_sides() {
+    for (const kin::HexOrientation orientation : {kin::HexOrientation::PointyTop, kin::HexOrientation::FlatTop}) {
+        kin::TileMap map;
+        map.resize(5, 5);
+        map.tile_w = 32;
+        map.tile_h = 32;
+        map.grid = {.shape = kin::TileShape::Hex, .orientation = orientation, .offset = kin::HexOffset::Odd};
+        map.tileset.resize(9);
+        map.tileset.tiles[1] = {.id = "water", .terrain = "water"};
+        map.tileset.add_terrain_variant("water", 0, 1, true);
+        for (kin::i32 side = 0; side < 6; ++side) { // tiles 2..7: one side each
+            map.tileset.tiles[2 + side] = {.id = "water-" + std::to_string(side), .terrain = "water"};
+            map.tileset.add_terrain_variant("water", kin::tile_terrain_hex_side(side), static_cast<kin::u16>(2 + side));
+        }
+        map.tileset.tiles[8] = {.id = "water-all", .terrain = "water"};
+        map.tileset.add_terrain_variant("water", kin::tile_terrain_sides(true), 8);
+
+        const kin::HexLayout layout = map.hex_layout();
+        const kin::Vec2i center{2, 2};
+        const kin::Hex hex = layout.from_offset(center);
+        for (kin::i32 side = 0; side < 6; ++side) {
+            kin::TileMap one = map;
+            const kin::Vec2i next = layout.to_offset(kin::hex_neighbor(hex, side));
+            const std::array<kin::Vec2i, 2> pair{{center, next}};
+            assert(one.set_terrain_connect("ground", pair, "water") == 2);
+            assert(one.terrain_diagnostics.empty());
+            assert(one.get(center.x, center.y) == 2 + side);
+            assert(one.get(next.x, next.y) == 2 + (side + 3) % 6);
+        }
+
+        std::vector<kin::Vec2i> flower{center};
+        for (const kin::Vec2i next : map.neighbor_cells(center)) {
+            flower.push_back(next);
+        }
+        assert(flower.size() == 7);
+        map.set_terrain_connect("ground", flower, "water");
+        assert(map.get(center.x, center.y) == 8);
+        assert(map.terrain_mask("ground", center, "water") == 0x3F);
+    }
+
+    kin::TileSet tiles;
+    tiles.grid = {.shape = kin::TileShape::Hex, .orientation = kin::HexOrientation::FlatTop};
+    tiles.resize(2);
+    tiles.tiles[1] = {.id = "water", .terrain = "water"};
+    tiles.add_terrain_variant("water", 0x2A, 1);
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "kin-hex-terrain.kintileset";
+    assert(kin::save_tileset(tiles, path));
+    const kin::TileSet read = kin::load_tileset(path);
+    std::filesystem::remove(path);
+    assert(read.grid.hex() && read.grid.orientation == kin::HexOrientation::FlatTop);
+    assert(read.terrain_tile("water", 0x2A) == 1);
 }
 
 void test_terrain_missing_fallback_and_roundtrip() {
@@ -1103,7 +1204,7 @@ void test_hex_grid_geometry() {
 }
 
 // What a hex map does with its cells: blocks by its hexagons, fills across
-// their six sides, finds paths through them; terrain (four sides) is refused.
+// their six sides, finds paths through them; a terrain without variants is refused.
 void test_hex_grid_cells() {
     kin::TileMap map;
     map.resize(5, 5);
@@ -1133,7 +1234,7 @@ void test_hex_grid_cells() {
     assert(open.flood_fill({0, 0}, rock) == 25);
 
     const std::vector<kin::Vec2i> cells{{1, 1}};
-    assert(map.set_terrain_connect("ground", cells, "grass") == 0 && !map.terrain_diagnostics.empty());
+    assert(map.set_terrain_connect("ground", cells, "grass") == 0 && !map.terrain_diagnostics.empty()); // no variants
 }
 
 // A tileset in a file of its own, cut from an image: a map names it, is saved
@@ -1250,6 +1351,8 @@ int main() {
     test_collision_polygon_roundtrip();
     test_terrain_connect_updates_cells_and_neighbors();
     test_terrain_missing_fallback_and_roundtrip();
+    test_terrain_erase_nearest_and_other_terrains();
+    test_hex_terrain_six_sides();
     test_asset_metadata_and_loader();
     test_render_queue_submission_and_culling();
     test_render_cache_matches_uncached_submission();
