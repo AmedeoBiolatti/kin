@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Terrain autotiling on hex maps: a cell joins its neighbours across six sides (`tile_terrain_hex_side`, masks up
+  to 63). A cell with no variant of its own now takes the nearest (joining most of its sides and no other) before
+  the fallback (`TileSet::terrain_match`). Painting and the new `clear_terrain_connect` fit the cells around each to
+  its own terrain, not only the one painted, and count only cells that changed. `TileMap::terrain_mask`,
+  `TileSet::terrains`, and `TileSet::grid` (the cells a tileset is for, `"cells"` in its file).
+
 - 2D particles that stream and change over their lives: an effect with a `rate` or `per_distance` streams from
   an emitter (`ParticleSystem::start`/`move`/`jump`/`stop`, laying particles along the way it went; `duration`,
   `prewarm`, `inherit`, `local`), and a `ParticleSystemComponent` streams it from its entity, turned with it.

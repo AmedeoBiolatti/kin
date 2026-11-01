@@ -196,7 +196,28 @@ follow the shape. A tileset kept in a file of its own (`.kintileset`, format
 `kin.tileset`: its tiles, and the image their `frame`s are cut from) is shared
 by the maps naming it (`"tileset": "tilesets/ground.kintileset"`, read from
 the content root by `load_tilemap(path, content_root)` and `Assets2D`).
-Terrain autotiling (four sides) stays square-only.
+
+Terrain autotiling fits a terrain's cells to their neighbours:
+`set_terrain_connect(layer, cells, terrain)` paints them and
+`clear_terrain_connect(layer, cells)` empties them, and either fits the cells
+around again, each to its own terrain. A tileset's `terrain_variants` say which
+tile a cell is for the sides it joins (`mask`): a square's four
+(`TileTerrainNorth`, `East`, `South`, `West`), or a hexagon's six, side `d`
+toward neighbour direction `d` (`tile_terrain_hex_side(d)`; masks up to 63).
+A cell with no variant of its own takes the one joining most of its sides and
+no other, else the terrain's fallback (`TileSet::terrain_match`; said in
+`terrain_diagnostics`). So a few variants go a long way, a hex terrain's 64
+are not all needed. A tileset says which cells its tiles are drawn for
+(`TileSet::grid`, `"cells": {"shape": "hex", "orientation": "flat"}`), for
+editors.
+
+```json
+"terrain_variants": [
+  {"terrain": "water", "mask": 0, "tile_id": 4, "fallback": true},
+  {"terrain": "water", "mask": 9, "tile_id": 5},
+  {"terrain": "water", "mask": 63, "tile_id": 6}
+]
+```
 
 A component of the game's own gets a binder, a function over the world:
 

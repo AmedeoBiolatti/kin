@@ -26,11 +26,42 @@ struct ShapeMesh;
 
 using TileMetadataValue = std::variant<bool, i32, f32, std::string>;
 
+// The sides a cell's terrain joins its neighbours' at (TerrainVariant::mask):
+// a square's four, these; a hexagon's six, side d toward neighbour direction
+// d (bit 1 << d: tile_terrain_hex_side). With HexDirections those are, for
+// pointy-top hexes, east, north-east, north-west, west, south-west and
+// south-east; for flat-top ones, south-east, north-east, north, north-west,
+// south-west and south.
 enum TileTerrainMask : u8 {
     TileTerrainNorth = 1 << 0,
     TileTerrainEast = 1 << 1,
     TileTerrainSouth = 1 << 2,
     TileTerrainWest = 1 << 3,
+};
+
+constexpr u8 tile_terrain_hex_side(i32 direction) {
+    return static_cast<u8>(1u << hex_wrap_direction(direction));
+}
+
+// Every side of a square (0x0F) or of a hexagon (0x3F).
+constexpr u8 tile_terrain_sides(bool hex) {
+    return hex ? 0x3F : 0x0F;
+}
+
+// The shape of a map's cells: squares in rows and columns; or hexagons,
+// pointy-top (in rows, every other one half a hex right or left) or flat-top
+// (in columns), kept as the cols x rows offset cells of HexLayout. A hex
+// cell's box (tile_w x tile_h, what map_to_world() and tile_rect() give)
+// bounds its hexagon, and its tile's image is drawn in it.
+enum class TileShape : u8 { Square, Hex };
+
+struct TileGrid {
+    TileShape shape = TileShape::Square;
+    HexOrientation orientation = HexOrientation::PointyTop;
+    HexOffset offset = HexOffset::Odd; // which rows (pointy) or columns (flat) sit half a hex further on
+
+    bool hex() const { return shape == TileShape::Hex; }
+    friend constexpr bool operator==(TileGrid, TileGrid) = default;
 };
 
 struct TileDefinition {
@@ -65,7 +96,12 @@ struct TerrainVariant {
 
 struct TileSet {
     std::vector<TileDefinition> tiles;
+    // Which tile a terrain's cell is for each set of sides it joins at (its
+    // mask); the one marked fallback when none is near (else its first).
     std::vector<TerrainVariant> terrain_variants;
+    // The cells its tiles are drawn for (their variants' sides: four or six),
+    // for the editors; a map uses its own grid. Square unless said.
+    TileGrid grid{};
     // The image its tiles' frames are cut from: a content path, as scenes name
     // assets ("images/tiles.png"), in frames of sheet.tile_w x sheet.tile_h
     // (sheet.margin around them, sheet.spacing between). Empty: none.
@@ -82,24 +118,16 @@ struct TileSet {
     u16 tile_id(std::string_view id) const;
     u16 ensure_tile(std::string_view id);
     void add_terrain_variant(std::string_view terrain, u8 mask, u16 tile_id, bool fallback = false);
+    // The variant of `terrain` joining exactly `mask`'s sides; 0: none.
     u16 terrain_tile(std::string_view terrain, u8 mask) const;
     u16 terrain_fallback_tile(std::string_view terrain) const;
-};
-
-// The shape of a map's cells: squares in rows and columns; or hexagons,
-// pointy-top (in rows, every other one half a hex right or left) or flat-top
-// (in columns), kept as the cols x rows offset cells of HexLayout. A hex
-// cell's box (tile_w x tile_h, what map_to_world() and tile_rect() give)
-// bounds its hexagon, and its tile's image is drawn in it.
-enum class TileShape : u8 { Square, Hex };
-
-struct TileGrid {
-    TileShape shape = TileShape::Square;
-    HexOrientation orientation = HexOrientation::PointyTop;
-    HexOffset offset = HexOffset::Odd; // which rows (pointy) or columns (flat) sit half a hex further on
-
-    bool hex() const { return shape == TileShape::Hex; }
-    friend constexpr bool operator==(TileGrid, TileGrid) = default;
+    // The tile a cell of `terrain` joining `mask`'s sides is drawn with: the
+    // variant joining exactly those; else the one joining most of them and no
+    // other (the first listed of those); else the fallback. 0: the terrain has
+    // no variants. `exact`, when given: whether its own variant was found.
+    u16 terrain_match(std::string_view terrain, u8 mask, bool* exact = nullptr) const;
+    // The terrains its tiles and variants name, each once, in order.
+    std::vector<std::string> terrains() const;
 };
 
 struct TileCell {
@@ -213,7 +241,16 @@ public:
     i32 replace_tile(std::string_view layer_id, u16 from_id, u16 to_id);
     i32 flood_fill(Vec2i start, u16 replacement_tile);
     i32 flood_fill(std::string_view layer_id, Vec2i start, u16 replacement_tile);
+    // Cells set to `terrain`, each with the variant joining its neighbours of
+    // that terrain (four sides, or a hexagon's six), and their neighbours
+    // fitted again (each to its own terrain). Cells changed, those around them
+    // included; a missing variant (the nearest used) or fallback is said in
+    // terrain_diagnostics.
     i32 set_terrain_connect(std::string_view layer_id, std::span<const Vec2i> cells, std::string_view terrain);
+    // Cells emptied, the terrain cells around them fitted again.
+    i32 clear_terrain_connect(std::string_view layer_id, std::span<const Vec2i> cells);
+    // The sides of `cell` with a neighbour of `terrain` (in the map).
+    u8 terrain_mask(std::string_view layer_id, Vec2i cell, std::string_view terrain) const;
     void clear_terrain_diagnostics();
     u16 get(i32 col, i32 row) const;
     u16 get(std::string_view layer_id, i32 col, i32 row) const;
@@ -302,6 +339,7 @@ private:
         std::vector<RenderChunkCache> chunks;
     };
 
+    i32 connect_terrain(TileLayer& layer, std::span<const Vec2i> painted, u16 tile);
     void mark_dirty(TileLayer& layer, TileRect rect);
     void invalidate_render_cache_for_dirty(const TileLayer& layer, TileRect rect) const;
     RenderCacheKey make_render_cache_key(const TileLayer& layer, TilemapRenderOptions options) const;

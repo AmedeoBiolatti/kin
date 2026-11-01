@@ -7,6 +7,7 @@
 #include <kin/renderer/shape.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cctype>
@@ -793,7 +794,7 @@ TerrainVariant read_terrain_variant(const JsonValue& value) {
     variant.terrain = value.string_at("terrain");
     const i64 mask = value.int_at("mask", 0);
     const i64 tile_id = value.int_at("tile_id", 0);
-    variant.mask = static_cast<u8>(std::clamp<i64>(mask, 0, 15));
+    variant.mask = static_cast<u8>(std::clamp<i64>(mask, 0, 63));
     if (tile_id > 0 && tile_id <= std::numeric_limits<u16>::max()) {
         variant.tile_id = static_cast<u16>(tile_id);
     }
@@ -858,6 +859,12 @@ void write_tileset_members(JsonWriter& json, const TileSet& tileset) {
             json.field("spacing", tileset.sheet.spacing);
         }
     }
+    if (tileset.grid.hex()) {
+        json.key("cells").begin_object()
+            .field("shape", "hex")
+            .field("orientation", tileset.grid.orientation == HexOrientation::FlatTop ? "flat" : "pointy")
+            .end_object();
+    }
     json.key("tiles").begin_array();
     for (std::size_t id = 1; id < tileset.size(); ++id) {
         if (says_something(tileset.tiles[id])) {
@@ -882,6 +889,10 @@ void read_tileset_members(TileSet& tileset, const JsonValue& value) {
     }
     tileset.sheet.margin = static_cast<i32>(std::max<i64>(0, value.int_at("margin", 0)));
     tileset.sheet.spacing = static_cast<i32>(std::max<i64>(0, value.int_at("spacing", 0)));
+    if (const JsonValue* cells = value.find("cells"); cells && cells->is_object()) {
+        tileset.grid.shape = cells->string_at("shape") == "hex" ? TileShape::Hex : TileShape::Square;
+        tileset.grid.orientation = cells->string_at("orientation") == "flat" ? HexOrientation::FlatTop : HexOrientation::PointyTop;
+    }
     if (const JsonValue* tiles = value.find("tiles"); tiles && tiles->is_array()) {
         for (const JsonValue& tile : tiles->items()) {
             read_tile_definition(tileset, tile);
@@ -1133,7 +1144,7 @@ u16 TileSet::ensure_tile(std::string_view id) {
 void TileSet::add_terrain_variant(std::string_view terrain, u8 mask, u16 tile_id, bool fallback) {
     terrain_variants.push_back({
         .terrain = std::string{terrain},
-        .mask = static_cast<u8>(mask & 0x0F),
+        .mask = static_cast<u8>(mask & 0x3F),
         .tile_id = tile_id,
         .fallback = fallback,
     });
@@ -1141,7 +1152,7 @@ void TileSet::add_terrain_variant(std::string_view terrain, u8 mask, u16 tile_id
 
 u16 TileSet::terrain_tile(std::string_view terrain, u8 mask) const {
     for (const TerrainVariant& variant : terrain_variants) {
-        if (variant.terrain == terrain && variant.mask == (mask & 0x0F)) {
+        if (variant.terrain == terrain && variant.mask == (mask & 0x3F)) {
             return variant.tile_id;
         }
     }
@@ -1162,6 +1173,47 @@ u16 TileSet::terrain_fallback_tile(std::string_view terrain) const {
         }
     }
     return first;
+}
+
+u16 TileSet::terrain_match(std::string_view terrain, u8 mask, bool* exact) const {
+    const TerrainVariant* nearest = nullptr;
+    i32 nearest_sides = -1;
+    for (const TerrainVariant& variant : terrain_variants) {
+        if (variant.terrain != terrain) {
+            continue;
+        }
+        if (variant.mask == mask) {
+            if (exact) {
+                *exact = true;
+            }
+            return variant.tile_id;
+        }
+        const i32 sides = std::popcount(static_cast<u32>(variant.mask));
+        if ((variant.mask & ~mask) == 0 && sides > nearest_sides) {
+            nearest = &variant;
+            nearest_sides = sides;
+        }
+    }
+    if (exact) {
+        *exact = false;
+    }
+    return nearest ? nearest->tile_id : terrain_fallback_tile(terrain);
+}
+
+std::vector<std::string> TileSet::terrains() const {
+    std::vector<std::string> result;
+    const auto add = [&](const std::string& terrain) {
+        if (!terrain.empty() && std::ranges::find(result, terrain) == result.end()) {
+            result.push_back(terrain);
+        }
+    };
+    for (const TileDefinition& definition : tiles) {
+        add(definition.terrain);
+    }
+    for (const TerrainVariant& variant : terrain_variants) {
+        add(variant.terrain);
+    }
+    return result;
 }
 
 void TileMap::resize(i32 c, i32 r, u16 fill) {
@@ -1427,13 +1479,101 @@ i32 TileMap::flood_fill(std::string_view layer_id, Vec2i start, u16 replacement_
     return changed;
 }
 
+u8 TileMap::terrain_mask(std::string_view layer_id, Vec2i cell, std::string_view terrain) const {
+    const auto same = [&](Vec2i other) {
+        const TileDefinition* definition = in_bounds(other.x, other.y) ? tile(get(layer_id, other.x, other.y)) : nullptr;
+        return definition && definition->terrain == terrain;
+    };
+    u8 mask = 0;
+    if (grid.hex()) {
+        const HexLayout layout = hex_layout();
+        const Hex hex = layout.from_offset(cell);
+        for (i32 direction = 0; direction < 6; ++direction) {
+            if (same(layout.to_offset(hex_neighbor(hex, direction)))) {
+                mask |= tile_terrain_hex_side(direction);
+            }
+        }
+        return mask;
+    }
+    if (same({cell.x, cell.y - 1})) {
+        mask |= TileTerrainNorth;
+    }
+    if (same({cell.x + 1, cell.y})) {
+        mask |= TileTerrainEast;
+    }
+    if (same({cell.x, cell.y + 1})) {
+        mask |= TileTerrainSouth;
+    }
+    if (same({cell.x - 1, cell.y})) {
+        mask |= TileTerrainWest;
+    }
+    return mask;
+}
+
+// Cells written, then they and those around them fitted to their terrains:
+// `painted` (in bounds) set to `tile` first. Cells changed in the end.
+i32 TileMap::connect_terrain(TileLayer& layer, std::span<const Vec2i> painted, u16 tile) {
+    std::vector<Vec2i> affected;
+    affected.reserve(painted.size() * 7);
+    for (Vec2i cell : painted) {
+        if (!in_bounds(cell.x, cell.y)) {
+            continue;
+        }
+        affected.push_back(cell);
+        for (Vec2i neighbor : neighbor_cells(cell)) {
+            affected.push_back(neighbor);
+        }
+    }
+    std::ranges::sort(affected, [](Vec2i a, Vec2i b) {
+        return a.y == b.y ? a.x < b.x : a.y < b.y;
+    });
+    affected.erase(std::ranges::unique(affected).begin(), affected.end());
+    std::vector<TileCell> before;
+    before.reserve(affected.size());
+    for (Vec2i cell : affected) {
+        before.push_back(this->cell(layer.id, cell));
+    }
+
+    for (Vec2i cell : painted) {
+        write_cell(layer, cols, rows, cell, TileCell{.tile_id = tile}, nullptr);
+    }
+    // Every cell fitted from the map as painted, before any is changed: a
+    // cell's sides are its neighbours' terrains, whatever their variants.
+    std::vector<std::pair<Vec2i, u16>> fitted;
+    for (Vec2i cell : affected) {
+        const TileDefinition* definition = this->tile(get(layer.id, cell.x, cell.y));
+        if (!definition || definition->terrain.empty() || tileset.terrain_fallback_tile(definition->terrain) == 0) {
+            continue;
+        }
+        const u8 mask = terrain_mask(layer.id, cell, definition->terrain);
+        bool exact = false;
+        const u16 variant = tileset.terrain_match(definition->terrain, mask, &exact);
+        if (!exact) {
+            terrain_diagnostics.push_back("missing terrain variant terrain='" + definition->terrain + "' mask=" + terrain_mask_text(mask));
+        }
+        fitted.emplace_back(cell, variant);
+    }
+    for (const auto& [cell, variant] : fitted) {
+        write_cell(layer, cols, rows, cell, TileCell{.tile_id = variant}, nullptr);
+    }
+
+    i32 changed = 0;
+    DirtyAccumulator dirty;
+    for (std::size_t i = 0; i < affected.size(); ++i) {
+        if (this->cell(layer.id, affected[i]) != before[i]) {
+            dirty.include(affected[i]);
+            ++changed;
+        }
+    }
+    if (dirty.dirty) {
+        mark_dirty(layer, dirty.rect);
+    }
+    return changed;
+}
+
 i32 TileMap::set_terrain_connect(std::string_view layer_id, std::span<const Vec2i> cells, std::string_view terrain) {
     TileLayer* tile_layer = layer(layer_id);
     if (!tile_layer || terrain.empty()) {
-        return 0;
-    }
-    if (grid.hex()) {
-        terrain_diagnostics.push_back("terrain connects square cells only (their four sides): '" + std::string{terrain} + "' on a hex map");
         return 0;
     }
     const u16 fallback = tileset.terrain_fallback_tile(terrain);
@@ -1441,65 +1581,12 @@ i32 TileMap::set_terrain_connect(std::string_view layer_id, std::span<const Vec2
         terrain_diagnostics.push_back("missing terrain fallback for '" + std::string{terrain} + "'");
         return 0;
     }
+    return connect_terrain(*tile_layer, cells, fallback);
+}
 
-    i32 changed = 0;
-    DirtyAccumulator dirty;
-    std::vector<Vec2i> affected;
-    affected.reserve(cells.size() * 5);
-    for (Vec2i cell : cells) {
-        if (!in_bounds(cell.x, cell.y)) {
-            continue;
-        }
-        if (write_cell(*tile_layer, cols, rows, cell, TileCell{.tile_id = fallback}, &dirty).accepted) {
-            ++changed;
-        }
-        affected.push_back(cell);
-        for (Vec2i neighbor : neighbor_cells(cell)) {
-            affected.push_back(neighbor);
-        }
-    }
-
-    std::ranges::sort(affected, [](Vec2i a, Vec2i b) {
-        return a.y == b.y ? a.x < b.x : a.y < b.y;
-    });
-    affected.erase(std::ranges::unique(affected).begin(), affected.end());
-
-    for (Vec2i cell : affected) {
-        const TileDefinition* definition = tile(get(layer_id, cell.x, cell.y));
-        if (!definition || definition->terrain != terrain) {
-            continue;
-        }
-        u8 mask = 0;
-        const auto same_terrain = [&](Vec2i other) {
-            const TileDefinition* other_definition = tile(get(layer_id, other.x, other.y));
-            return other_definition && other_definition->terrain == terrain;
-        };
-        if (in_bounds(cell.x, cell.y - 1) && same_terrain({cell.x, cell.y - 1})) {
-            mask |= TileTerrainNorth;
-        }
-        if (in_bounds(cell.x + 1, cell.y) && same_terrain({cell.x + 1, cell.y})) {
-            mask |= TileTerrainEast;
-        }
-        if (in_bounds(cell.x, cell.y + 1) && same_terrain({cell.x, cell.y + 1})) {
-            mask |= TileTerrainSouth;
-        }
-        if (in_bounds(cell.x - 1, cell.y) && same_terrain({cell.x - 1, cell.y})) {
-            mask |= TileTerrainWest;
-        }
-
-        u16 variant_tile = tileset.terrain_tile(terrain, mask);
-        if (variant_tile == 0) {
-            variant_tile = fallback;
-            terrain_diagnostics.push_back("missing terrain variant terrain='" + std::string{terrain} + "' mask=" + terrain_mask_text(mask));
-        }
-        if (write_cell(*tile_layer, cols, rows, cell, TileCell{.tile_id = variant_tile}, &dirty).accepted) {
-            ++changed;
-        }
-    }
-    if (dirty.dirty) {
-        mark_dirty(*tile_layer, dirty.rect);
-    }
-    return changed;
+i32 TileMap::clear_terrain_connect(std::string_view layer_id, std::span<const Vec2i> cells) {
+    TileLayer* tile_layer = layer(layer_id);
+    return tile_layer ? connect_terrain(*tile_layer, cells, 0) : 0;
 }
 
 void TileMap::clear_terrain_diagnostics() {
