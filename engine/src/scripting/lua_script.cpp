@@ -104,9 +104,15 @@ std::string userdata_text(lua_State* state, int index) {
         lua_pop(state, 1);
     }
     if (luaL_getmetafield(state, index, "__name") == LUA_TSTRING) {
+        // A bound type's name, without its namespaces ("sol.kin::ScriptEntity" -> "ScriptEntity").
         std::string out = lua_tostring(state, -1);
         lua_pop(state, 1);
-        return out;
+        if (const std::size_t colon = out.rfind("::"); colon != std::string::npos) {
+            out.erase(0, colon + 2);
+        } else if (out.starts_with("sol.")) {
+            out.erase(0, 4);
+        }
+        return out.empty() ? "userdata" : out;
     }
     return "userdata";
 }
