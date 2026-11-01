@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Script debugging for an inspected game (`--inspect`): `debug.breakpoints`, `debug.pause`, `debug.state`,
+  `debug.continue` and `debug.step` (into, over, out) stop its Lua scripts at a line and show their frames, locals
+  and upvalues (`ScriptDebugger`, `script_debugger()`). A `LuaScript` loaded from under its `module_root` now
+  names its chunk from there (`scripts/player.lua:12:` in its errors, not `player.lua:12:`).
+
 - Terrain autotiling on hex maps: a cell joins its neighbours across six sides (`tile_terrain_hex_side`, masks up
   to 63). A cell with no variant of its own now takes the nearest (joining most of its sides and no other) before
   the fallback (`TileSet::terrain_match`). Painting and the new `clear_terrain_connect` fit the cells around each to
