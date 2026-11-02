@@ -83,74 +83,90 @@ std::vector<Light2D> scene_lights(EcsWorld& world, const Affine2& to_screen) {
     return lights;
 }
 
-std::vector<LightOccluder2D> scene_occluders(EcsWorld& world, const Affine2& to_screen) {
+std::vector<LightOccluder2D> occluder_outlines(EcsEntity handle, const Affine2& to_screen) {
     constexpr f32 pi = 3.14159265358979323846f;
     std::vector<LightOccluder2D> out;
+    const flecs::entity entity = handle.raw();
+    const LightOccluder* found = entity && entity.is_alive() ? entity.get<LightOccluder>() : nullptr;
+    if (!found || !found->enabled) {
+        return out;
+    }
+    const LightOccluder& occluder = *found;
     const bool mirrored = to_screen.a * to_screen.d - to_screen.b * to_screen.c < 0.0f;
-    world.raw().each([&](flecs::entity entity, const LightOccluder& occluder) {
-        if (!occluder.enabled) {
+    const WorldTransform placed = current_world_transform(handle);
+    const Affine2 to = to_screen * Affine2::trs(placed.pos, placed.rotation, placed.scale);
+    const auto add = [&](std::vector<Vec2f> local) {
+        if (local.size() < 3) {
             return;
         }
-        const WorldTransform placed = current_world_transform(entity);
-        const Affine2 to = to_screen * Affine2::trs(placed.pos, placed.rotation, placed.scale);
-        const auto add = [&](std::vector<Vec2f> local) {
-            if (local.size() < 3) {
-                return;
-            }
-            for (Vec2f& p : local) {
-                p = to.apply({p.x + occluder.offset.x, p.y + occluder.offset.y});
-            }
-            out.push_back({.points = clockwise(std::move(local)), .lit = occluder.lit});
-        };
-        switch (occluder.shape) {
-        case OccluderShape::Box: {
-            const Vec2f h{occluder.size.x * 0.5f, occluder.size.y * 0.5f};
-            add({{-h.x, -h.y}, {h.x, -h.y}, {h.x, h.y}, {-h.x, h.y}});
+        for (Vec2f& p : local) {
+            p = to.apply({p.x + occluder.offset.x, p.y + occluder.offset.y});
+        }
+        out.push_back({.points = clockwise(std::move(local)), .lit = occluder.lit});
+    };
+    switch (occluder.shape) {
+    case OccluderShape::Box: {
+        const Vec2f h{occluder.size.x * 0.5f, occluder.size.y * 0.5f};
+        add({{-h.x, -h.y}, {h.x, -h.y}, {h.x, h.y}, {-h.x, h.y}});
+        break;
+    }
+    case OccluderShape::Circle: {
+        constexpr i32 sides = 24;
+        std::vector<Vec2f> ring;
+        for (i32 i = 0; i < sides; ++i) {
+            const f32 angle = 2.0f * pi * static_cast<f32>(i) / static_cast<f32>(sides);
+            ring.push_back({std::cos(angle) * occluder.radius, std::sin(angle) * occluder.radius});
+        }
+        add(std::move(ring));
+        break;
+    }
+    case OccluderShape::Polygon:
+        add(occluder.points);
+        break;
+    case OccluderShape::Tiles: {
+        // Its map's solid cells, joined into outlines (holes wound the other
+        // way, so kept as they are); the map is drawn from where its entity is.
+        const auto* tiles = entity.get<TilemapComponent>();
+        if (!tiles || !tiles->tilemap) {
             break;
         }
-        case OccluderShape::Circle: {
-            constexpr i32 sides = 24;
-            std::vector<Vec2f> ring;
-            for (i32 i = 0; i < sides; ++i) {
-                const f32 angle = 2.0f * pi * static_cast<f32>(i) / static_cast<f32>(sides);
-                ring.push_back({std::cos(angle) * occluder.radius, std::sin(angle) * occluder.radius});
+        const TileCollisionShapes shapes = tiles->tilemap->map.collision_shapes(occluder.layer);
+        const Affine2 map = to_screen * Affine2::translation({placed.pos.x + occluder.offset.x, placed.pos.y + occluder.offset.y});
+        for (const std::vector<Vec2f>& loop : shapes.loops) {
+            LightOccluder2D outline{.points = loop, .lit = occluder.lit};
+            for (Vec2f& p : outline.points) {
+                p = map.apply(p);
             }
-            add(std::move(ring));
-            break;
+            if (mirrored) {
+                std::reverse(outline.points.begin(), outline.points.end());
+            }
+            out.push_back(std::move(outline));
         }
-        case OccluderShape::Polygon:
-            add(occluder.points);
-            break;
-        case OccluderShape::Tiles: {
-            // Its map's solid cells, joined into outlines (holes wound the other
-            // way, so kept as they are); the map is drawn from where its entity is.
-            const auto* tiles = entity.get<TilemapComponent>();
-            if (!tiles || !tiles->tilemap) {
-                break;
+        for (const std::vector<Vec2f>& polygon : shapes.polygons) {
+            std::vector<Vec2f> points = polygon;
+            for (Vec2f& p : points) {
+                p = map.apply(p);
             }
-            const TileCollisionShapes shapes = tiles->tilemap->map.collision_shapes(occluder.layer);
-            const Affine2 map = to_screen * Affine2::translation({placed.pos.x + occluder.offset.x, placed.pos.y + occluder.offset.y});
-            for (const std::vector<Vec2f>& loop : shapes.loops) {
-                LightOccluder2D outline{.points = loop, .lit = occluder.lit};
-                for (Vec2f& p : outline.points) {
-                    p = map.apply(p);
-                }
-                if (mirrored) {
-                    std::reverse(outline.points.begin(), outline.points.end());
-                }
-                out.push_back(std::move(outline));
-            }
-            for (const std::vector<Vec2f>& polygon : shapes.polygons) {
-                std::vector<Vec2f> points = polygon;
-                for (Vec2f& p : points) {
-                    p = map.apply(p);
-                }
-                out.push_back({.points = clockwise(std::move(points)), .lit = occluder.lit});
-            }
-            break;
+            out.push_back({.points = clockwise(std::move(points)), .lit = occluder.lit});
         }
+        break;
+    }
+    }
+    return out;
+}
+
+std::vector<LightOccluder2D> scene_occluders(EcsWorld& world, const Affine2& to_screen) {
+    std::vector<flecs::entity> occluding;
+    world.raw().each([&](flecs::entity entity, const LightOccluder& occluder) {
+        if (occluder.enabled) {
+            occluding.push_back(entity);
         }
     });
+    std::vector<LightOccluder2D> out;
+    for (const flecs::entity entity : occluding) {
+        std::vector<LightOccluder2D> outlines = occluder_outlines(EcsEntity{entity}, to_screen);
+        out.insert(out.end(), std::make_move_iterator(outlines.begin()), std::make_move_iterator(outlines.end()));
+    }
     return out;
 }
 

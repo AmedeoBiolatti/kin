@@ -1589,6 +1589,9 @@ void test_light_occluders() {
     assert(lights.size() == 1 && lights[0].shadows && near(lights[0].shadow_strength, 0.75f) && near(lights[0].shadow_softness, 6.0f));
     found = kin::scene_occluders(scene, kin::Affine2{});
     assert(found.size() == 1 && found[0].points.size() == 3 && !found[0].lit && clockwise(found[0].points));
+    // One entity's, for editors; none for one without an occluder.
+    assert(kin::occluder_outlines(scene.entities().find_by_name("Post"), kin::Affine2{}).size() == 1);
+    assert(kin::occluder_outlines(scene.entities().find_by_name("Lamp"), kin::Affine2{}).empty());
 }
 
 // Shapes, clips and text as a scene file gives them: described fields, made

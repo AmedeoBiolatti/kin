@@ -1202,7 +1202,8 @@ Scene files and the ECS can do the same with components (`kin/ecs/lighting.hpp`)
   (`points`), turned and scaled with its entity and moved by `offset`; or, on
   an entity with a `TilemapComponent`, `tiles`: the map's solid cells (those
   of `layer`; empty: every layer that collides), joined into outlines.
-  `scene_occluders(world, to_screen)` returns them as `LightOccluder2D`s.
+  `scene_occluders(world, to_screen)` returns them as `LightOccluder2D`s
+  (`occluder_outlines(entity, to_screen)`, one entity's, for editors).
 - `scene_lights(world, to_screen)` returns a world's lights as `Light2D`s, placed
   through a camera's view transform.
 - `apply_scene_lighting(renderer, layer, world, to_screen, area)` lights the

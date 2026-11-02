@@ -113,6 +113,8 @@ const SceneLighting* scene_lighting(EcsWorld& world);
 std::vector<Light2D> scene_lights(EcsWorld& world, const Affine2& to_screen);
 // Its enabled occluders' outlines, as LightLayer takes them, through `to_screen` too.
 std::vector<LightOccluder2D> scene_occluders(EcsWorld& world, const Affine2& to_screen);
+// One entity's (none without an enabled LightOccluder): editors draw them.
+std::vector<LightOccluder2D> occluder_outlines(EcsEntity entity, const Affine2& to_screen);
 // The world lit, as EcsScene does it: `area` (in the coordinates drawn in,
 // with no transform on: the screen's) darkened to its SceneLighting's
 // ambient and lit by its lights. False, and nothing done, without a
