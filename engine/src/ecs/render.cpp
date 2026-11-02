@@ -371,7 +371,7 @@ void WorldRenderState::collect_all(RenderQueue& queue,
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
         if (wanted(it, i)) {
-            submit_shape(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_shape(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
@@ -625,7 +625,7 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
         if (take(it, r.static_renderable, t)) {
-            submit_shape(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_shape(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {

@@ -8,7 +8,7 @@ releases may change APIs.
 ## [Unreleased]
 
 - Parallax layers and animated tiles. A `Parallax` entity (and those under it) moves `factor` as much as the world
-  as the camera moves, from where it is placed at `anchor`; it can `repeat` its own sprite, texture or rectangle
+  as the camera moves, from where it is placed at `anchor`; it can `repeat` its own sprite, texture, rectangle or shape
   over the view and `scroll` by itself (`parallax_shift`, `update_parallax`,
   `WorldRenderState::set_parallax_view`; `WorldTransform::parallax`). A tile's `frames` play in turn,
   `frame_seconds` each (`TileDefinition::frame_at`, `TilemapRenderOptions::time`, `TilemapComponent::clock`,

@@ -221,7 +221,7 @@ struct StaticRenderable {
 // foreground): it, and every entity under it, moves `factor` as much as the
 // world does as the camera moves. Drawn where it is when the camera looks at
 // `anchor`, shifted by (camera's centre - anchor) * (1 - factor) otherwise.
-// `repeat` draws its own renderer (sprite, texture or rectangle) again every
+// `repeat` draws its own renderer (sprite, texture, rectangle or shape) again every
 // so many points along an axis, filling the view (0: once), so a background
 // as wide as `repeat.x` goes on for ever. `scroll` moves it by itself (clouds),
 // kept within `repeat`. A scene's view in an editor (EcsScene::set_view_camera)

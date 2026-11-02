@@ -843,7 +843,7 @@ void register_builtin_editor_components(EcsWorld& world) {
             .description("Where the camera looks when the layer is where the scene puts it.")
             .field("repeat", &Parallax::repeat)
             .units("points")
-            .description("Its own sprite, texture or rectangle drawn again every so many points along each axis, filling the view; 0: once.")
+            .description("Its own sprite, texture, rectangle or shape drawn again every so many points along each axis, filling the view; 0: once.")
             .field("scroll", &Parallax::scroll)
             .units("points/s")
             .description("How fast it moves by itself (clouds).")

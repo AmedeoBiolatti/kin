@@ -216,8 +216,8 @@ further away than the world (a background) or nearer (a foreground): it moves
 `factor` as much as the world does as the camera moves (`0.5`: half as much;
 `0`: fixed on the screen; above `1`: nearer). It is where the scene places it
 when the camera looks at `anchor`, and shifted by `(centre - anchor) * (1 -
-factor)` otherwise (`parallax_shift`). `repeat` draws its own sprite, texture
-or rectangle again every so many points along each axis, over the view, so a
+factor)` otherwise (`parallax_shift`). `repeat` draws its own sprite, texture,
+rectangle or shape again every so many points along each axis, over the view, so a
 strip `repeat.x` wide goes on for ever; `scroll` moves it by itself, points a
 second (call `update_parallax(world, dt)` each step).
 
