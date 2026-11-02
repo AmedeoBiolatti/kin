@@ -92,10 +92,11 @@ public:
     sol::state& lua() { return *_lua; }
 
 private:
-    // Holds the instruction budget for one load or call (see lua_script.cpp).
+    // Holds the instruction budget for one load or call, and sets the hooks
+    // the debugger needs (see lua_script.cpp).
     class Budget {
     public:
-        explicit Budget(const LuaScript& script);
+        Budget(const LuaScript& script, lua_State* state);
         ~Budget();
         Budget(const Budget&) = delete;
         Budget& operator=(const Budget&) = delete;
@@ -103,6 +104,7 @@ private:
     private:
         u64 _remaining;
         u64* _previous;
+        u64 _previous_call;
     };
 
     using Dependencies = std::shared_ptr<std::vector<std::filesystem::path>>;
@@ -130,7 +132,7 @@ bool LuaScript::call(std::string_view function, Args&&... args) {
     if (!target.valid()) {
         return false;
     }
-    const Budget budget{*this};
+    const Budget budget{*this, _lua->lua_state()};
     return check(target(std::forward<Args>(args)...), function);
 }
 
@@ -140,7 +142,7 @@ std::optional<R> LuaScript::call_for(std::string_view function, Args&&... args) 
     if (!target.valid()) {
         return std::nullopt;
     }
-    const Budget budget{*this};
+    const Budget budget{*this, _lua->lua_state()};
     const sol::protected_function_result result = target(std::forward<Args>(args)...);
     if (!check(result, function)) {
         return std::nullopt;
