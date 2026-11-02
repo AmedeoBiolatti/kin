@@ -7,6 +7,15 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 2D games made with Lua scripts, physics, sounds and saves run in browsers. Every `kin_game` built with Emscripten
+  gets a 1 MiB stack (`KIN_WEB_STACK_SIZE`; the 64 KiB default ran over memory making a flecs world) and Noto Sans'
+  Latin subset as the UI's system font (`/kin/fonts/ui.ttf`; kin's bitmap font has capitals only), and links again
+  when its content changes (its `.data` was left as it was). In a browser `user_data_dir()` is under `/persistent`,
+  so SaveStore's saves and settings are kept in its storage (with `KIN_WEB_PERSISTENCE`): it asks for them to be
+  copied there after each write, as `kin::user_data_written()` does for a game's own files. A shipping game in a
+  browser writes no log file. sol2 is v3.5.0 (3.3.1's `optional<T&>` didn't compile with Emscripten's Clang, nor
+  without a warning switch with GCC 15). CI builds the hex demo for the web with these modules too.
+
 - 2D light shadows: a light with `shadows` (`Light2D`, `LightComponent`; `shadow_strength`, `shadow_softness`) is
   stopped by occluders: `LightOccluder2D` outlines passed to `LightLayer::apply`, or `LightOccluder` components
   (a box, a circle, a polygon, or a tilemap's solid cells; `lit` or dark themselves), `scene_occluders`. Each

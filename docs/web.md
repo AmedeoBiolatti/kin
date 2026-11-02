@@ -95,6 +95,11 @@ automatic resource restoration is not implemented.
 Layers/masks, custom 2D materials, distance-field shaders, post-processing,
 compute and data buffers remain unsupported. Loose content can be preloaded with
 the host Emscripten packer; Hex and the render fixture have no external content.
+Every `kin_game` in a browser gets a 1 MiB stack (`KIN_WEB_STACK_SIZE`):
+Emscripten's 64 KiB default is less than creating a flecs world takes.
+With `KIN_ENABLE_TTF` it also preloads Noto Sans' Latin subset
+(`examples/content/lang/fonts/latin.ttf`, OFL) as `/kin/fonts/ui.ttf`, the UI's
+system font there: a browser has none, and kin's bitmap font has capitals only.
 Native pack creation/cooking, touch controls and Signal Siege remain follow-up
 work. Summit includes bundled images/fonts, gesture-activated audio and persistent
 IndexedDB settings.
@@ -213,10 +218,12 @@ cannot consume a cooperative queue safely. Native worker-backed worlds retain
 the pooled path.
 
 `KIN_WEB_PERSISTENCE=ON` restores `/persistent` from IDBFS before `main()` and
-settings construction. Summit uses the existing SaveStore under that root and
-explicitly requests a coalesced asynchronous flush after successful setting
-writes. `Module.kinStorage` reports readiness, availability, pending writes,
-flush count and errors. Storage denial/quota errors leave the game usable with
+settings construction. In a browser `user_data_dir()` is under `/persistent`, so
+every game's SaveStore (and so scripts' `save.write`) keeps its files there, and
+SaveStore requests a coalesced asynchronous flush after each successful write or
+delete (`kin::user_data_written()`; a game writing there itself calls it after).
+`Module.kinStorage` reports readiness, availability, pending writes, flush count
+and errors. Storage denial/quota errors leave the game usable with
 in-memory settings; persistence is not guaranteed until a flush succeeds.
 
 Summit preloads a licensed UI font and sets `KIN_UI_FONT_REGULAR` and

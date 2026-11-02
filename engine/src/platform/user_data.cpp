@@ -3,6 +3,10 @@
 #include <cstdlib>
 #include <string>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 namespace kin {
 namespace {
 
@@ -25,7 +29,10 @@ std::filesystem::path home_dir() {
 }
 
 std::filesystem::path platform_user_data_root() {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+    // web/persistent.js mounts the browser's storage there (KIN_WEB_PERSISTENCE).
+    return std::filesystem::path{"/persistent"};
+#elif defined(_WIN32)
     if (const char* app_data = std::getenv("APPDATA")) {
         return std::filesystem::path{app_data};
     }
@@ -54,6 +61,15 @@ void set_user_data_dir_override(std::filesystem::path path) {
 
 void clear_user_data_dir_override() {
     user_data_override().clear();
+}
+
+void user_data_written() {
+#ifdef __EMSCRIPTEN__
+    EM_ASM({
+        if (Module.kinStorage)
+            Module.kinStorage.flush();
+    });
+#endif
 }
 
 } // namespace kin

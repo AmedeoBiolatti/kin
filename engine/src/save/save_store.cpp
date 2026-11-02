@@ -105,6 +105,7 @@ SaveResult atomic_write_text(const std::filesystem::path& path, const std::strin
                             path);
     }
 #endif
+    user_data_written(); // in a browser, kept once in its storage
     return ok_result(path);
 }
 
@@ -374,6 +375,7 @@ SaveResult SaveStore::delete_slot(std::string_view slot_id) {
     if (ec) {
         return error_result(SaveErrorCode::IoError, "failed to delete save slot: " + ec.message(), path);
     }
+    user_data_written();
     return ok_result(path);
 }
 
