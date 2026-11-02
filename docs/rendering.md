@@ -1155,6 +1155,26 @@ draw_ui(renderer);                                // drawn after: not darkened
 - `resolution` (default 0.5) is the light map's size relative to the area. Lights
   are smooth, so half resolution is plenty.
 
+**Shadows.** A light with `shadows` is stopped by occluders, passed to
+`apply()` as `LightOccluder2D`s: closed outlines, wound clockwise on the screen
+(`clockwise(points)` turns one round), what they are made of on the right.
+
+```cpp
+const std::array<kin::LightOccluder2D, 1> walls{{{.points = kin::clockwise(wall_corners)}}};
+lighting.apply(renderer, area, night_ambient, lights, 0.5f, walls);
+```
+
+- What is behind an occluder, seen from the light, gets none of its light. A
+  `lit` occluder (the default) is lit itself, only what is behind it is dark;
+  otherwise it is dark too.
+- `shadow_strength` is how much light the shadows take: 1 all of it, 0.5 half.
+- `shadow_softness` is the light's size: its shadows' edges soften, as four
+  shadows cast from around it are averaged (four times the cost).
+- Each light with shadows is drawn into a target of its own, the shadows
+  (`shadow_quads`: the quads behind the edges facing away from it) filled
+  black there, and the rest added to the light map. A light that casts no
+  shadows costs what it did.
+
 `apply()` needs render targets and blend modes, which the software and GPU
 backends both have; it uses no shaders. Where they are missing it returns
 `false` and leaves the scene unlit. `games/lighting_demo` has lamps, a campfire, a
@@ -1176,6 +1196,14 @@ Scene files and the ECS can do the same with components (`kin/ecs/lighting.hpp`)
 - A `LightComponent` lights from where its entity is. It turns with its entity,
   and its radius scales with the entity's scale.
 - `shape` names an image of the content that shapes the light.
+- `shadows` on a `LightComponent` (with `shadow_strength` and
+  `shadow_softness`, the latter scaled with its entity) makes `LightOccluder`s
+  stop it. An occluder is a box (`size`), a circle (`radius`) or a polygon
+  (`points`), turned and scaled with its entity and moved by `offset`; or, on
+  an entity with a `TilemapComponent`, `tiles`: the map's solid cells (those
+  of `layer`; empty: every layer that collides), joined into outlines.
+  `scene_occluders(world, to_screen)` returns them as `LightOccluder2D`s
+  (`occluder_outlines(entity, to_screen)`, one entity's, for editors).
 - `scene_lights(world, to_screen)` returns a world's lights as `Light2D`s, placed
   through a camera's view transform.
 - `apply_scene_lighting(renderer, layer, world, to_screen, area)` lights the
