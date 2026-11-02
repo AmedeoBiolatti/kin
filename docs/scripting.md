@@ -192,6 +192,9 @@ scripts.update(world, ctx.input, ctx.dt);
   `axis` by name, and `mouse()` returns x and y ([input](input.md)).
 - The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
   the new prefab instance's root.
+- The `camera` table shakes the current camera: `camera.shake(trauma)` adds
+  trauma (0 to 1) that wears off, and `camera.trauma()` says how much is left
+  ([cameras](rendering.md#a-camera-in-the-scene)).
 - When the game gives the scripts its screens (`EntityScripts::set_screens`),
   the `ui` table reaches their elements by id ([UI screens](ui.md#screens-from-data)):
   - reading: `clicked`, `changed`, `value`, `checked` and `text`;

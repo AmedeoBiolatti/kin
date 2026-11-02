@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Cameras that follow better and shake: `CameraComponent::dead_zone` (a box its entity moves in without the camera
+  following), `look_ahead` and `look_ahead_time` (looking ahead the way its entity moves), `zoom_smoothing`, and a
+  trauma shake (`shake_camera(world, trauma)`, `shake_strength`, `shake_rotation`, `shake_frequency`, `shake_decay`;
+  moved and turned by trauma squared along smooth noise, the same each run). Scripts get `camera.shake(trauma)` and
+  `camera.trauma()`.
+
 - Parallax layers and animated tiles. A `Parallax` entity (and those under it) moves `factor` as much as the world
   as the camera moves, from where it is placed at `anchor`; it can `repeat` its own sprite, texture, rectangle or shape
   over the view and `scroll` by itself (`parallax_shift`, `update_parallax`,

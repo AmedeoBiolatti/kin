@@ -1431,6 +1431,91 @@ void test_scene_cameras() {
     assert(std::abs(centre.x - (500.0f + 100.0f * (1.0f - std::exp(-1.0f)))) < 0.01f && near(centre.y, 300.0f));
 }
 
+// A camera following its entity through a dead zone, looking ahead the way
+// it moves, easing its zoom; shaken by trauma that wears off, the same each run.
+void test_camera_follow_and_shake() {
+    const kin::Vec2f view{320.0f, 180.0f};
+    {
+        // A dead zone 100 wide (none along y): the camera stays put until its entity leaves it.
+        kin::EcsWorld world;
+        kin::register_builtin_editor_components(world);
+        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.dead_zone = {100.0f, 0.0f}});
+        kin::update_cameras(world, 0.1f);
+        cam.set(kin::Transform2D{.pos = {40.0f, 10.0f}});
+        kin::update_cameras(world, 0.1f);
+        assert(near(kin::scene_camera(world, view)->center(), {0.0f, 10.0f}));
+        cam.set(kin::Transform2D{.pos = {80.0f, 10.0f}});
+        kin::update_cameras(world, 0.1f);
+        assert(near(kin::scene_camera(world, view)->center(), {30.0f, 10.0f}));
+        cam.set(kin::Transform2D{.pos = {-60.0f, 10.0f}});
+        kin::update_cameras(world, 0.1f);
+        assert(near(kin::scene_camera(world, view)->center(), {-10.0f, 10.0f}));
+    }
+    {
+        // Looking ahead: moving 100 a second over 0.5 s looks 50 ahead; faster, no further than 80.
+        kin::EcsWorld world;
+        kin::register_builtin_editor_components(world);
+        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.look_ahead = {80.0f, 0.0f}, .look_ahead_time = 0.5f});
+        kin::update_cameras(world, 0.1f);
+        float x = 0.0f;
+        for (int i = 0; i < 100; ++i) {
+            x += 10.0f;
+            cam.set(kin::Transform2D{.pos = {x, 0.0f}});
+            kin::update_cameras(world, 0.1f);
+        }
+        assert(std::abs(kin::scene_camera(world, view)->center().x - (x + 50.0f)) < 0.5f);
+        for (int i = 0; i < 100; ++i) {
+            x -= 100.0f;
+            cam.set(kin::Transform2D{.pos = {x, 0.0f}});
+            kin::update_cameras(world, 0.1f);
+        }
+        assert(std::abs(kin::scene_camera(world, view)->center().x - (x - 80.0f)) < 0.5f);
+    }
+    {
+        // Zoom eased: from 1 to 2, 63% of the way (in proportion) in its time.
+        kin::EcsWorld world;
+        kin::register_builtin_editor_components(world);
+        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.zoom_smoothing = 0.5f});
+        kin::update_cameras(world, 0.1f);
+        cam.get_mut<kin::CameraComponent>()->zoom = 2.0f;
+        kin::update_cameras(world, 0.5f);
+        const float zoom = kin::scene_camera(world, view)->zoom;
+        assert(std::abs(zoom - std::exp(std::log(2.0f) * (1.0f - std::exp(-1.0f)))) < 1e-3f);
+    }
+    // Shaken: trauma added (to current cameras only, at most 1), wearing off;
+    // moved and turned no more than its strength times trauma squared.
+    const auto shaken = [&](std::vector<kin::Vec2f>* offsets) {
+        kin::EcsWorld world;
+        kin::register_builtin_editor_components(world);
+        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{});
+        kin::EcsEntity spare = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.current = false});
+        kin::shake_camera(world, 0.6f);
+        kin::shake_camera(world, 0.6f);
+        assert(near(cam.get<kin::CameraComponent>()->trauma, 1.0f) && spare.get<kin::CameraComponent>()->trauma == 0.0f);
+        bool moved = false;
+        for (int i = 0; i < 10; ++i) {
+            kin::update_cameras(world, 0.05f);
+            const kin::CameraComponent& c = *cam.get<kin::CameraComponent>();
+            const float most = c.shake_strength * c.trauma * c.trauma;
+            assert(std::abs(c.shake_offset.x) <= most + 1e-3f && std::abs(c.shake_offset.y) <= most + 1e-3f);
+            assert(std::abs(c.shake_angle) <= c.shake_rotation * c.trauma * c.trauma + 1e-3f);
+            const kin::Camera2D seen = *kin::scene_camera(world, view);
+            assert(near(seen.shake_offset, c.shake_offset) && near(seen.rotation, c.shake_angle));
+            moved = moved || std::abs(c.shake_offset.x) > 0.5f;
+            offsets->push_back(c.shake_offset);
+        }
+        assert(moved);
+        kin::update_cameras(world, 1.0f); // worn off
+        const kin::CameraComponent& c = *cam.get<kin::CameraComponent>();
+        assert(c.trauma == 0.0f && c.shake_offset == (kin::Vec2f{}) && c.shake_angle == 0.0f);
+    };
+    std::vector<kin::Vec2f> first;
+    std::vector<kin::Vec2f> second;
+    shaken(&first);
+    shaken(&second);
+    assert(first == second);
+}
+
 // Shapes, clips and text as a scene file gives them: described fields, made
 // into meshes, clips and fonts; the text drawn through the camera.
 void test_scene_shapes_clips_and_text() {
@@ -1742,6 +1827,7 @@ void test_animators_started_together() {
 
 int main() {
     test_parallax_layers();
+    test_camera_follow_and_shake();
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
