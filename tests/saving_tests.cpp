@@ -104,6 +104,7 @@ void test_scenes_kept_and_slots() {
         assert(spawned.root);
         spawned.root.raw().set<SpawnedPrefab>({.prefab = "prefabs/crate.kinprefab"});
         saves.set_value("coins", JsonValue{1.0});
+        saves.played(75.5);
         saves.keep(world);
     }
     const JsonValue* kept = saves.kept(scene_path);
@@ -143,6 +144,7 @@ void test_scenes_kept_and_slots() {
     }
     const std::vector<SaveSlotInfo> slots = saves.store().list_slots();
     assert(slots.size() == 1 && slots[0].slot_id == "slot_1" && slots[0].title == "In the field" && slots[0].summary == "1 coin");
+    assert(slots[0].play_time_seconds == 75);
 
     // A new run reads it back: the scene to read, then entered as it was.
     SceneSaves again{{.game_id = "saving_test", .game_version = "1", .root_override = store}, content};
@@ -152,6 +154,7 @@ void test_scenes_kept_and_slots() {
     const std::optional<std::string> scene = again.read("slot_1", error);
     assert(scene && *scene == scene_path && error.empty());
     assert(again.value("coins") && again.value("coins")->as_number() == 1.0);
+    assert(again.play_time() == 75.0);
     {
         kin::EcsWorld world;
         const SceneInstance made = read_field(world, content);
@@ -176,7 +179,7 @@ void test_scenes_kept_and_slots() {
         assert(!made.by_authored_id.at("hero").raw().has<RectRenderer>());
     }
     again.clear();
-    assert(!again.kept(scene_path) && !again.value("coins"));
+    assert(!again.kept(scene_path) && !again.value("coins") && again.play_time() == 0.0);
 
     // A read asked for is taken once.
     again.ask_read("slot_1");

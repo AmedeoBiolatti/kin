@@ -263,6 +263,7 @@ void SceneSaves::set_value(const std::string& name, JsonValue value) {
 void SceneSaves::clear() {
     _scenes.clear();
     _values.clear();
+    _played = 0.0;
 }
 
 const JsonValue* SceneSaves::kept(std::string_view scene) const {
@@ -279,6 +280,7 @@ SaveResult SceneSaves::write(EcsWorld& world, std::string_view slot, std::string
     info.slot_id = std::string(slot);
     info.title = std::move(title);
     info.summary = std::move(summary);
+    info.play_time_seconds = static_cast<i64>(_played);
     return _store.write_slot(slot, info, [&](JsonWriter& json) {
         json.begin_object();
         json.field("schema", payload_schema);
@@ -321,6 +323,7 @@ std::optional<std::string> SceneSaves::read(std::string_view slot, std::string& 
     if (const JsonValue* values = payload.find("values"); values && values->is_object()) {
         _values = values->members();
     }
+    _played = static_cast<f64>(read.info.play_time_seconds);
     _scene.clear(); // what is in the world now is not kept over what was read
     return scene;
 }

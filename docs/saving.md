@@ -38,6 +38,8 @@ scripts.set_saves(&saves); // the scripts' save table, and their kept values
 saves.enter(world, "scenes/cave.kinscene");
 // Before the scene goes for another:
 saves.keep(world);
+// Each step:
+saves.played(ctx.dt);
 
 // After each step: a read a script asked for.
 if (std::optional<std::string> slot = saves.take_read()) {
@@ -63,7 +65,9 @@ if (std::optional<std::string> slot = saves.take_read()) {
   returns the scene to read. The game reads it, then enters it.
 - **`value(name)` and `set_value(name, value)`** are the game's own values (a
   score, the keys found). They go from scene to scene and into the slots.
-- **`clear()`** forgets the scenes kept and the values, for a new game.
+- **`played(seconds)`** adds to the time played, which each slot keeps
+  (`play_time_seconds`) and `read` gives back.
+- **`clear()`** forgets the scenes kept, the values and the time played, for a new game.
 - **`store()`** is the `SaveStore`: list, delete or check slots.
 
 Moving an entity with a physics body puts its body there too, at the next

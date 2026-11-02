@@ -9,6 +9,8 @@
 //     kin::SceneSaves saves{{.game_id = "my_game"}, content};
 //     // a scene read (the first, or one travelled to, or read again):
 //     saves.enter(world, "scenes/cave.kinscene");
+//     // each step:
+//     saves.played(ctx.dt);
 //     // before it goes for another:
 //     saves.keep(world);
 //     // a save, and reading it back (a script's save.write and save.read):
@@ -88,7 +90,11 @@ public:
     void set_value(const std::string& name, JsonValue value);
     const JsonValue::Object& values() const { return _values; }
 
-    // A new game: the scenes kept and the values forgotten.
+    // Time played (the game adds each step's), written with each slot and read back.
+    void played(f64 seconds) { _played += seconds; }
+    f64 play_time() const { return _played; }
+
+    // A new game: the scenes kept, the values and the time played forgotten.
     void clear();
 
     // What was kept of a scene, if any:
@@ -127,6 +133,7 @@ private:
     std::map<std::string, JsonValue, std::less<>> _scenes;
     JsonValue::Object _values;
     std::optional<std::string> _asked;
+    f64 _played = 0.0;
     SavedScripts _scripts;
     std::vector<std::string> _problems;
 };

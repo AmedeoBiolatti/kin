@@ -202,6 +202,7 @@ function on_start(self)
 end
 
 function on_load(self)
+    assert(math.type(self.coins) == "integer" and math.type(self.where.y) == "integer")
     save.set("loaded", self.coins)
 end
 

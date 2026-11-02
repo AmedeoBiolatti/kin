@@ -207,7 +207,14 @@ std::optional<JsonValue> json_of(const sol::object& value, int depth = 0) {
 sol::object lua_of(sol::state_view lua, const JsonValue& value) {
     switch (value.type()) {
     case JsonValue::Type::Bool: return sol::make_object(lua, value.as_bool());
-    case JsonValue::Type::Number: return sol::make_object(lua, value.as_number());
+    case JsonValue::Type::Number: {
+        // A whole number an integer again (a count shows "3", not "3.0").
+        const f64 number = value.as_number();
+        if (std::trunc(number) == number && std::abs(number) < 9.0e15) {
+            return sol::make_object(lua, static_cast<lua_Integer>(number));
+        }
+        return sol::make_object(lua, number);
+    }
     case JsonValue::Type::String: return sol::make_object(lua, value.as_string());
     case JsonValue::Type::Array: {
         sol::table table = lua.create_table(static_cast<int>(value.items().size()), 0);
@@ -364,7 +371,14 @@ struct EntityScripts::Impl {
             t.rotation = degrees;
             target.set(t);
         };
-        entity["destroy"] = [](const ScriptEntity& e) { e.live().destruct(); };
+        entity["destroy"] = [](const ScriptEntity& e) {
+            const EcsEntity target{e.live()};
+            if (e.world && e.world->entities().registered(target)) {
+                e.world->entities().destroy(target); // its authored id (and its children's) let go, and told
+            } else {
+                target.raw().destruct();
+            }
+        };
         // Its ParticleSystemComponent's effect burst (or another of its catalog).
         entity["emit"] = [](const ScriptEntity& e, sol::optional<std::string> effect) {
             return emit_particles(EcsEntity{e.live()}, effect.value_or(std::string{}));

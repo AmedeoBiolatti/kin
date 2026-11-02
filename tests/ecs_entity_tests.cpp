@@ -86,6 +86,12 @@ void test_create_lookup_handle_and_enabled_state() {
     assert(world.entities().destroy(handle));
     assert(!world.entities().valid(handle));
     assert(!world.entities().find_by_authored_id("root-id"));
+    // One destroyed past the registry (by flecs itself) leaves its authored id free.
+    kin::EcsEntity first = world.entities().create({.name = "first", .authored_id = "kept-id"});
+    assert(first);
+    first.raw().destruct();
+    kin::EcsEntity again = world.entities().create({.name = "again", .authored_id = "kept-id"});
+    assert(again && world.entities().find_by_authored_id("kept-id").id() == again.id());
 }
 
 void test_rename_reparent_detach_and_cycle_rejection() {
