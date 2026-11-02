@@ -1483,11 +1483,11 @@ void test_camera_follow_and_shake() {
         assert(std::abs(zoom - std::exp(std::log(2.0f) * (1.0f - std::exp(-1.0f)))) < 1e-3f);
     }
     // Shaken: trauma added (to current cameras only, at most 1), wearing off;
-    // moved and turned no more than its strength times trauma squared.
+    // moved no more than its strength times trauma squared, never turned.
     const auto shaken = [&](std::vector<kin::Vec2f>* offsets) {
         kin::EcsWorld world;
         kin::register_builtin_editor_components(world);
-        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.shake_rotation = 3.0f});
+        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{});
         kin::EcsEntity spare = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.current = false});
         kin::shake_camera(world, 0.6f);
         kin::shake_camera(world, 0.6f);
@@ -1498,16 +1498,15 @@ void test_camera_follow_and_shake() {
             const kin::CameraComponent& c = *cam.get<kin::CameraComponent>();
             const float most = c.shake_strength * c.trauma * c.trauma;
             assert(std::abs(c.shake_offset.x) <= most + 1e-3f && std::abs(c.shake_offset.y) <= most + 1e-3f);
-            assert(std::abs(c.shake_angle) <= c.shake_rotation * c.trauma * c.trauma + 1e-3f);
             const kin::Camera2D seen = *kin::scene_camera(world, view);
-            assert(near(seen.shake_offset, c.shake_offset) && near(seen.rotation, c.shake_angle));
-            moved = moved || (std::abs(c.shake_offset.x) > 0.5f && std::abs(c.shake_angle) > 0.01f);
+            assert(near(seen.shake_offset, c.shake_offset) && seen.rotation == 0.0f);
+            moved = moved || std::abs(c.shake_offset.x) > 0.5f;
             offsets->push_back(c.shake_offset);
         }
         assert(moved);
         kin::update_cameras(world, 1.0f); // worn off
         const kin::CameraComponent& c = *cam.get<kin::CameraComponent>();
-        assert(c.trauma == 0.0f && c.shake_offset == (kin::Vec2f{}) && c.shake_angle == 0.0f);
+        assert(c.trauma == 0.0f && c.shake_offset == (kin::Vec2f{}));
     };
     std::vector<kin::Vec2f> first;
     std::vector<kin::Vec2f> second;

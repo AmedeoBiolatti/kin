@@ -73,7 +73,7 @@ Camera2D camera_of(const EcsEntity& entity, Vec2f viewport) {
     const WorldTransform world = current_world_transform(entity);
     const f32 zoom = component->zoom_smoothing > 0.0f && component->shown_zoom > 0.0f ? component->shown_zoom : component->zoom;
     camera.zoom = zoom > 0.0f ? zoom : 1.0f;
-    camera.rotation = world.rotation + component->shake_angle;
+    camera.rotation = world.rotation;
     Vec2f centre = follows(*component) && component->placed ? component->at : world.pos;
     if (component->limited) {
         const Vec2f half{viewport.x * 0.5f / camera.zoom, viewport.y * 0.5f / camera.zoom};
@@ -103,7 +103,7 @@ void update_cameras(EcsWorld& world, f32 dt) {
     std::vector<flecs::entity> moving;
     raw.each([&](flecs::entity entity, const CameraComponent& camera) {
         if (follows(camera) || camera.placed || camera.zoom_smoothing > 0.0f || camera.shown_zoom > 0.0f || camera.trauma > 0.0f ||
-            camera.shake_offset.x != 0.0f || camera.shake_offset.y != 0.0f || camera.shake_angle != 0.0f) {
+            camera.shake_offset.x != 0.0f || camera.shake_offset.y != 0.0f) {
             moving.push_back(entity);
         }
     });
@@ -165,7 +165,6 @@ void update_cameras(EcsWorld& world, f32 dt) {
         camera->trauma = std::max(0.0f, camera->trauma - std::max(camera->shake_decay, 0.0f) * dt);
         if (camera->trauma <= 0.0f) {
             camera->shake_offset = {};
-            camera->shake_angle = 0.0f;
             camera->shake_time = 0.0;
             continue;
         }
@@ -175,7 +174,6 @@ void update_cameras(EcsWorld& world, f32 dt) {
         const u64 seed = scramble(static_cast<u64>(entity.id()));
         camera->shake_offset = {camera->shake_strength * amount * noise(seed ^ 0x9e3779b97f4a7c15ull, t),
                                 camera->shake_strength * amount * noise(seed ^ 0xc2b2ae3d27d4eb4full, t)};
-        camera->shake_angle = camera->shake_rotation * amount * noise(seed ^ 0x165667b19e3779f9ull, t);
     }
 }
 

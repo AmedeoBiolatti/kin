@@ -23,8 +23,8 @@
 //
 // Shaking: shake_camera() adds trauma (0 to 1), which wears off by
 // `shake_decay` a second. Shaken, the camera moves by up to `shake_strength`
-// points and turns by up to `shake_rotation` degrees, times the trauma
-// squared (a small knock barely shows, a big one throws it about), jittering
+// points times the trauma squared (a small knock barely shows, a big one
+// throws it about), without turning, jittering
 // `shake_frequency` times a second along smooth noise (the same each run).
 //
 //     kin::shake_camera(world, 0.5f); // a hard landing
@@ -48,7 +48,6 @@ struct CameraComponent {
     f32 look_ahead_time = 0.4f; // seconds of its entity's motion it looks ahead (no further than look_ahead)
     f32 zoom_smoothing = 0.0f;  // seconds a change of zoom takes (about); 0: at once
     f32 shake_strength = 16.0f; // points it moves by at full trauma
-    f32 shake_rotation = 0.0f;  // degrees it turns by at full trauma (turned, rectangles' edges show steps)
     f32 shake_frequency = 18.0f; // jitters a second
     f32 shake_decay = 1.5f;     // trauma worn off a second
 
@@ -60,11 +59,10 @@ struct CameraComponent {
     Vec2f lead{};
     Vec2f last_target{};
     f32 shown_zoom = 0.0f; // the zoom it shows while zoom_smoothing (0: not yet)
-    // Its shake: trauma (0 to 1, shake_camera()), and how it is moved and turned now.
+    // Its shake: trauma (0 to 1, shake_camera()), and how far it is moved now.
     f32 trauma = 0.0f;
     f64 shake_time = 0.0;
     Vec2f shake_offset{};
-    f32 shake_angle = 0.0f;
 };
 
 // The camera an entity with a CameraComponent is, for a viewport of `viewport`
