@@ -204,6 +204,10 @@ scripts.update(world, ctx.input, ctx.dt);
   - `get(name)` and `set(name, value)` for its variables.
 
   Each entity's `on_dialogue_event(self, id, node)` hears what it tells.
+- When the game gives the scripts its saves (`EntityScripts::set_saves`), the
+  `save` table writes and reads save slots and keeps the game's own values, and
+  an entity marked `Saved` keeps its `self`'s values ([saving](saving.md)).
+  `on_load(self)` runs when they are given back.
 - `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
 - `on_contact(self, other)` runs when the entity's body begins to touch
   another, when the world has a `PhysicsContactQueue`.

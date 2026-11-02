@@ -13,6 +13,7 @@
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/saving.hpp>
 #include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/sprite_animator.hpp>
@@ -831,6 +832,23 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("SceneTraveller")) {
         // Who goes through SceneDoors (the player): where it is, is what is in a door.
         world.components().native<SceneTraveller>("SceneTraveller").field("enabled", &SceneTraveller::enabled);
+    }
+    if (!world.components().find("Saved")) {
+        // What the entity keeps while the player is elsewhere, and in saves
+        // (SceneSaves, kin/ecs/saving.hpp); once destroyed, it stays destroyed.
+        world.components().native<Saved>("Saved")
+            .field("keep", &Saved::keep)
+            .description("The components it keeps, by name, commas between (\"Transform2D, Health\"); none: only that it is gone.")
+            .field("script", &Saved::script)
+            .description("Its script's own values (those of its self) kept too.");
+    }
+    if (!world.components().find("SpawnedPrefab")) {
+        // A prefab instance made while the game ran (a script's world.spawn):
+        // what a save makes it again from.
+        world.components().native<SpawnedPrefab>("SpawnedPrefab")
+            .field("prefab", &SpawnedPrefab::prefab)
+            .description("The prefab it was made from, as the content names it.")
+            .readonly();
     }
     if (!world.components().find("UiScreenComponent")) {
         // A UI screen (.kinui) shown over the world while the entity is there

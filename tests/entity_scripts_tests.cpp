@@ -6,6 +6,7 @@
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/saving.hpp>
 #include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/world.hpp>
@@ -15,6 +16,7 @@
 #include <kin/scripting/lua_script.hpp>
 
 #include <cassert>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -184,11 +186,115 @@ end
     fs::remove_all(dir);
 }
 
+// The save table: the game's values, slots written, listed and read (asked
+// for); an entity marked Saved keeps its self's values (not its functions),
+// given back after on_start, then on_load; world.spawn's instances are kept
+// with their prefab.
+void test_saves() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_saves_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/keeper.lua", R"lua(
+function on_start(self)
+    self.coins = 0
+    self.bag = {"key", "map"}
+    self.where = {x = 1, y = 2}
+    self.hello = function() end
+end
+
+function on_load(self)
+    assert(math.type(self.coins) == "integer" and math.type(self.where.y) == "integer")
+    save.set("loaded", self.coins)
+end
+
+function on_update(self, dt)
+    self.coins = self.coins + 1
+    save.set("coins_seen", self.coins)
+    if self.coins == 3 then
+        save.set("best", {score = self.coins, names = {"a", "b"}})
+        assert(save.get("missing", 7) == 7)
+        assert(save.get("best").names[2] == "b")
+        local ok, why = save.write("slot_a", "Three coins", "3")
+        assert(ok, why)
+        assert(save.exists("slot_a") and not save.exists("slot_b"))
+        local slots = save.slots()
+        assert(#slots == 1 and slots[1].id == "slot_a" and slots[1].title == "Three coins" and slots[1].summary == "3")
+        local fine, why2 = save.read("nope")
+        assert(not fine and why2 ~= "")
+        assert(save.read("slot_a"))
+        world.spawn("prefabs/coin.kinprefab", 3, 4)
+        save.set("coins_seen", nil)
+    end
+end
+)lua");
+    write(dir / "prefabs/coin.kinprefab",
+          R"({"schema":"kin.prefab/1","id":"coin","root":"coin","entities":[{"id":"coin","components":{"Transform2D":{},"Saved":{}}}]})");
+    const std::string scene_text = R"({"schema": "kin.scene/1", "entities": [
+        {"id": "hero", "name": "Hero", "components": {"Transform2D": {}, "Saved": {},
+                                                      "ScriptComponent": {"asset": "scripts/keeper.lua"}}}]})";
+    const auto read_scene = [&](kin::EcsWorld& world) {
+        kin::register_builtin_editor_components(world);
+        const kin::SceneLoadResult read = kin::parse_scene_asset(scene_text, world.components());
+        assert(read.ok());
+        assert(kin::instantiate_scene_asset(world, *read.scene, dir, world.components()).ok());
+    };
+    kin::Input input;
+    kin::SceneSaves saves{{.game_id = "scripts_saves", .game_version = "1", .root_override = dir / "store"}, dir};
+    {
+        kin::EcsWorld world;
+        read_scene(world);
+        kin::EntityScripts scripts{{.content = dir, .check_frames = 0}};
+        scripts.set_saves(&saves);
+        saves.enter(world, "scenes/a.kinscene");
+        for (int i = 0; i < 3; ++i) {
+            scripts.update(world, input, 0.1f);
+        }
+        for (const auto& [path, problem] : scripts.problems()) std::fprintf(stderr, "%s: %s\n", path.c_str(), problem.c_str());
+        assert(scripts.problems().empty());
+        assert(saves.take_read() == std::optional<std::string>("slot_a"));
+        assert(!saves.value("coins_seen")); // nil took it away
+        const kin::JsonValue& hero = *saves.kept("scenes/a.kinscene")->find("entities")->find("hero");
+        const kin::JsonValue& script = *hero.find("script");
+        assert(script.number_at("coins") == 3.0 && !script.contains("hello") && !script.contains("entity"));
+        assert(script.find("bag")->is_array() && script.find("bag")->items()[1].as_string() == "map");
+        assert(script.find("where")->number_at("y") == 2.0);
+        // What world.spawn made knows its prefab (a save makes it again from it).
+        int coins = 0;
+        world.raw().each([&](flecs::entity, const kin::SpawnedPrefab& from) {
+            assert(from.prefab == "prefabs/coin.kinprefab");
+            ++coins;
+        });
+        assert(coins == 1);
+    }
+    // Read back: the script's values its own again after on_start, then on_load.
+    std::string error;
+    const std::optional<std::string> scene = saves.read("slot_a", error);
+    assert(scene && *scene == "scenes/a.kinscene");
+    assert(saves.value("best") && saves.value("best")->number_at("score") == 3.0);
+    {
+        kin::EcsWorld world;
+        read_scene(world);
+        kin::EntityScripts scripts{{.content = dir, .check_frames = 0}};
+        scripts.set_saves(&saves);
+        saves.enter(world, *scene);
+        assert(saves.problems().empty());
+        scripts.update(world, input, 0.1f);
+        assert(scripts.problems().empty());
+        assert(saves.value("loaded") && saves.value("loaded")->as_number() == 3.0);
+        assert(saves.value("coins_seen") && saves.value("coins_seen")->as_number() == 4.0);
+        // The coin was made after the save was written: not in it.
+        int coins = 0;
+        world.raw().each([&](flecs::entity, const kin::SpawnedPrefab&) { ++coins; });
+        assert(coins == 0);
+    }
+    fs::remove_all(dir);
+}
+
 } // namespace
 
 int main() {
     test_entity_scripts();
     test_entity_emit();
     test_scene_go();
+    test_saves();
     return 0;
 }
