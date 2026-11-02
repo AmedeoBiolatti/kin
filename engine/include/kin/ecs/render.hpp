@@ -46,6 +46,9 @@ struct WorldTransform {
     Vec2f pos{};
     f32 rotation = 0.0f;
     Vec2f scale{1.0f, 1.0f};
+    // A Parallax layer moves it with the camera (it, or one above it): drawn
+    // each frame, never from a scene's static cache. Set by propagate_transforms.
+    bool parallax = false;
 };
 
 // `child` (a Transform2D) under `parent` (a WorldTransform).
@@ -214,6 +217,28 @@ struct StaticRenderable {
     i32 marker = 1;
 };
 
+// A layer further away than the world (a background), or nearer (a
+// foreground): it, and every entity under it, moves `factor` as much as the
+// world does as the camera moves. Drawn where it is when the camera looks at
+// `anchor`, shifted by (camera's centre - anchor) * (1 - factor) otherwise.
+// `repeat` draws its own renderer (sprite, texture or rectangle) again every
+// so many points along an axis, filling the view (0: once), so a background
+// as wide as `repeat.x` goes on for ever. `scroll` moves it by itself (clouds),
+// kept within `repeat`. A scene's view in an editor (EcsScene::set_view_camera)
+// draws layers where they are placed.
+struct Parallax {
+    Vec2f factor{0.5f, 0.5f}; // 1: like the world; 0: fixed on the screen; 0.5: twice as far; above 1: nearer
+    Vec2f anchor{};           // where the camera looks when the layer is where the scene puts it
+    Vec2f repeat{};           // drawn again every repeat.x along x (repeat.y along y); 0: once
+    Vec2f scroll{};           // points a second it moves by itself
+    Vec2f offset{};           // where scroll has taken it (update_parallax)
+};
+
+// How far a layer is shifted from where it is placed, the camera looking at `view_centre`.
+Vec2f parallax_shift(const Parallax& layer, Vec2f view_centre);
+// Layers that scroll moved on by `dt` seconds (each step).
+void update_parallax(EcsWorld& world, f32 dt);
+
 struct SpriteRenderOptions {
     bool sort = true;
     RenderSortMode sort_mode = RenderSortMode::LayerThenY;
@@ -262,6 +287,10 @@ public:
     flecs::world& world() const { return *_world; }
     bool matches(flecs::world& world) const { return _world == &world; }
 
+    // Where the camera looks, for Parallax layers (their shift is in their
+    // WorldTransforms from the next propagate_transforms); none: drawn where placed.
+    void set_parallax_view(std::optional<Vec2f> centre) { _parallax_view = centre; }
+
     void propagate_transforms();
     void collect_all(RenderQueue& queue, const EcsRenderFilter& include = {}, SpriteRenderOptions options = {});
     void collect_static(RenderQueue& queue, SpriteRenderOptions options = {});
@@ -291,7 +320,9 @@ private:
     std::vector<TextureChunk> _chunks; // per parallel chunk, reused
     // Own transform, local transform, and the parent's world transform (optional,
     // cascaded so parents are visited before their children).
-    flecs::query<WorldTransform, const Transform2D, const WorldTransform> _transforms;
+    // And its own Parallax (optional: field 3).
+    flecs::query<WorldTransform, const Transform2D, const WorldTransform, const Parallax*> _transforms;
+    std::optional<Vec2f> _parallax_view;
     // Each renderer with its ClipGroup, on itself or the nearest entity above
     // (optional: field 3, or 1 for particles).
     flecs::query<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*> _sprites;

@@ -81,10 +81,17 @@ struct TileDefinition {
     // says), from 0 at the top left, along the rows; -1: none. A sprite (in
     // TilemapRenderOptions::sprites) is drawn before it; else its colour.
     i32 frame = -1;
+    // Frames of the image it shows in turn, `frame_seconds` each, over and
+    // over (an animated tile: water, a torch); fewer than two: only `frame`.
+    std::vector<i32> frames;
+    f32 frame_seconds = 0.15f;
     Vec2f render_offset_px{};
     Vec2f render_size_px{};
 
     bool is_walkable() const { return walkable.value_or(!solid); }
+    bool animated() const { return frames.size() > 1 && frame_seconds > 0.0f; }
+    // Its frame `seconds` into the map's animation.
+    i32 frame_at(f64 seconds) const;
 };
 
 struct TerrainVariant {
@@ -128,6 +135,8 @@ struct TileSet {
     u16 terrain_match(std::string_view terrain, u8 mask, bool* exact = nullptr) const;
     // The terrains its tiles and variants name, each once, in order.
     std::vector<std::string> terrains() const;
+    // Whether any of its tiles is animated (TileDefinition::frames).
+    bool animated() const;
 };
 
 struct TileCell {
@@ -185,6 +194,8 @@ struct TilemapRenderOptions {
     const SpriteSheet* sheet = nullptr;
     // Where the map's top left is drawn (its cells' world positions plus this).
     Vec2f origin{};
+    // Seconds into the map's animation: the frame its animated tiles show.
+    f64 time = 0.0;
 };
 
 // What a map's solid cells stop, as shapes to collide with (from the map's
@@ -327,6 +338,8 @@ private:
         TileRect bounds{};
         bool dirty = true;
         std::vector<RenderCommand> commands;
+        // Its animated tiles' commands (by index) and tiles: their frames set as it is drawn.
+        std::vector<std::pair<u32, u16>> animated;
     };
 
     struct LayerRenderCache {
@@ -347,7 +360,7 @@ private:
     void reset_render_cache_chunks(LayerRenderCache& cache, const RenderCacheKey& key, Vec2i chunk_size, i32 chunk_cols, i32 chunk_rows) const;
     void rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& layer, const RenderCacheKey& key) const;
     void submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key,
-                               Vec2f origin) const;
+                               Vec2f origin, f64 time) const;
     void submit_cached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key, TilemapRenderOptions options) const;
     // A hexagon filling a hex cell's box (centred on the origin), shared by every colour tile.
     std::shared_ptr<const ShapeMesh> hex_tile_mesh() const;

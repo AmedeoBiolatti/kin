@@ -1330,9 +1330,49 @@ void test_frames_hexagons_and_origin_drawn() {
     assert(near(hexagon.detail->transform.apply({0.0f, 0.0f}), {center.x + 10.0f, center.y}));
 }
 
+// Animated tiles: their frames in turn, frame_seconds each, as the map's
+// time goes on (cached chunks too); written to the tileset and read back; a
+// map with one is drawn each frame (update_tilemaps plays it).
+void test_animated_tiles() {
+    kin::TileMap map;
+    map.resize(2, 1);
+    map.tile_w = 16;
+    map.tile_h = 16;
+    const kin::u16 water = map.tileset.ensure_tile("water");
+    kin::TileDefinition& definition = *map.tileset.tile(water);
+    definition.frame = 0;
+    definition.frames = {0, 1, 2};
+    definition.frame_seconds = 0.25f;
+    assert(definition.animated() && map.tileset.animated());
+    assert(definition.frame_at(0.0) == 0 && definition.frame_at(0.3) == 1 && definition.frame_at(0.6) == 2 && definition.frame_at(0.8) == 0);
+    map.set(0, 0, water);
+    const kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{48, 16})};
+    const kin::SpriteSheet sheet{texture, {.tile_w = 16, .tile_h = 16, .spacing = 0, .margin = 0}};
+    for (const bool cached : {true, false}) {
+        for (const auto& [time, x] : {std::pair{0.0, 0.0f}, std::pair{0.3, 16.0f}, std::pair{0.55, 32.0f}, std::pair{0.8, 0.0f}}) {
+            kin::RenderQueue queue{kin::RenderSortMode::Submission};
+            map.submit(queue, {.draw_top_edge = false, .use_cache = cached, .sheet = &sheet, .time = time});
+            assert(queue.size() == 1 && queue.commands()[0].source.x == x);
+        }
+    }
+    // Written with its frames, and read back.
+    kin::TileSet plain;
+    plain.ensure_tile("stone");
+    assert(!plain.animated());
+    const std::filesystem::path file = std::filesystem::temp_directory_path() / "kin_animated_tiles.kintileset";
+    assert(kin::save_tileset(map.tileset, file));
+    std::string error;
+    const kin::TileSet read = kin::load_tileset(file, &error);
+    assert(error.empty());
+    const kin::TileDefinition* again = read.tile(read.tile_id("water"));
+    assert(again && (again->frames == std::vector<kin::i32>{0, 1, 2}) && std::abs(again->frame_seconds - 0.25f) < 1e-6f);
+    std::filesystem::remove(file);
+}
+
 } // namespace
 
 int main() {
+    test_animated_tiles();
     test_basic_grid_and_solidity();
     test_layers_and_roundtrip();
     test_layer_identity_is_unique_by_id();

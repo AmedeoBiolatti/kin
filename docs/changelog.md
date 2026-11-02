@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Parallax layers and animated tiles. A `Parallax` entity (and those under it) moves `factor` as much as the world
+  as the camera moves, from where it is placed at `anchor`; it can `repeat` its own sprite, texture or rectangle
+  over the view and `scroll` by itself (`parallax_shift`, `update_parallax`,
+  `WorldRenderState::set_parallax_view`; `WorldTransform::parallax`). A tile's `frames` play in turn,
+  `frame_seconds` each (`TileDefinition::frame_at`, `TilemapRenderOptions::time`, `TilemapComponent::clock`,
+  `update_tilemaps`); cached chunks change only their animated tiles' frames. What is under a layer, and maps with
+  animated tiles, are drawn each frame, never from the static cache.
+
 - Saving games as data ([saving](saving.md)): an entity marked `Saved` keeps the components it names and its
   script's values while the player is in another scene and in save slots, and stays destroyed once destroyed.
   `SceneSaves` keeps the scenes left (`enter`, `keep`), the game's own values, and writes and reads slots

@@ -209,6 +209,32 @@ const std::optional<kin::Camera2D> camera = kin::scene_camera(world, {1280, 720}
 
 Scene files describe it, so editors place and change it.
 
+#### Parallax layers
+
+A `kin::Parallax` on an entity makes it, and every entity under it, a layer
+further away than the world (a background) or nearer (a foreground): it moves
+`factor` as much as the world does as the camera moves (`0.5`: half as much;
+`0`: fixed on the screen; above `1`: nearer). It is where the scene places it
+when the camera looks at `anchor`, and shifted by `(centre - anchor) * (1 -
+factor)` otherwise (`parallax_shift`). `repeat` draws its own sprite, texture
+or rectangle again every so many points along each axis, over the view, so a
+strip `repeat.x` wide goes on for ever; `scroll` moves it by itself, points a
+second (call `update_parallax(world, dt)` each step).
+
+```json
+{"id": "hills", "name": "Hills", "components": {
+  "Transform2D": {"pos": {"x": 640, "y": 300}},
+  "TextureRenderer": {"asset": "images/hills.png"},
+  "Parallax": {"factor": {"x": 0.3, "y": 0.6}, "anchor": {"x": 640, "y": 360}, "repeat": {"x": 1280, "y": 0}}}}
+```
+
+`EcsScene` shifts layers from its camera's centre (the screen's without one);
+an editor's view (`set_view_camera`) draws them where they are placed. The
+shift is in their `WorldTransform` (marked `parallax`), so what is drawn under
+a layer is drawn each frame, never from the static cache.
+`WorldRenderState::set_parallax_view` sets the centre for code drawing a world
+itself.
+
 ## Shapes
 
 ![The shapes demo: an orrery of planets with night sides, moons and an SVG rocket around a star, and a telescope following the rocket](images/shapes_demo.png)

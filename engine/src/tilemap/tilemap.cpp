@@ -221,7 +221,9 @@ void append_tile_render_commands(const TileMap& map,
                                  const SpriteCatalog* sprites,
                                  const SpriteSheet* sheet,
                                  const std::shared_ptr<const ShapeMesh>& hex_mesh,
-                                 std::vector<RenderCommand>& out) {
+                                 std::vector<RenderCommand>& out,
+                                 f64 time = 0.0,
+                                 std::vector<std::pair<u32, u16>>* animated = nullptr) {
     const TileDefinition* definition = tile_definition_in_layer(map, tile_layer, col, row);
     if (!definition) {
         return;
@@ -240,8 +242,11 @@ void append_tile_render_commands(const TileMap& map,
     Sprite sprite;
     if (ResolvedSprite resolved; sprites && !definition->sprite_id.empty() && sprites->resolve(definition->sprite_id, resolved)) {
         sprite = resolved.sprite;
-    } else if (sheet && definition->frame >= 0 && definition->frame < sheet->cols() * sheet->rows()) {
-        sprite = sheet->sprite(definition->frame);
+    } else if (const i32 frame = definition->frame_at(time); sheet && frame >= 0 && frame < sheet->cols() * sheet->rows()) {
+        sprite = sheet->sprite(frame);
+        if (animated && definition->animated()) {
+            animated->emplace_back(static_cast<u32>(out.size()), cell_in_layer(tile_layer, map.cols, map.rows, col, row).tile_id);
+        }
     }
     if (sprite.valid()) {
         Rectf sprite_rect = rect;
@@ -620,6 +625,14 @@ void write_tile_definition(JsonWriter& out, const TileDefinition& definition, u1
     if (definition.frame >= 0) {
         out.field("frame", definition.frame);
     }
+    if (!definition.frames.empty()) {
+        out.key("frames").begin_array();
+        for (const i32 frame : definition.frames) {
+            out.value(frame);
+        }
+        out.end_array();
+        out.field("frame_seconds", static_cast<f64>(definition.frame_seconds));
+    }
     if (definition.render_offset_px.x != 0.0f || definition.render_offset_px.y != 0.0f) {
         out.key("render_offset_px");
         write_vec2(out, definition.render_offset_px);
@@ -682,6 +695,15 @@ void read_tile_definition(TileSet& tileset, const JsonValue& value) {
     definition.blocks_sight = value.bool_at("blocks_sight", definition.blocks_sight);
     definition.sprite_id = value.string_at("sprite", definition.sprite_id);
     definition.frame = static_cast<i32>(std::clamp<i64>(value.int_at("frame", definition.frame), -1, std::numeric_limits<i32>::max()));
+    definition.frames.clear();
+    if (const JsonValue* frames = value.find("frames"); frames && frames->is_array()) {
+        for (const JsonValue& frame : frames->items()) {
+            if (frame.is_number() && frame.as_int() >= 0 && frame.as_int() <= std::numeric_limits<i32>::max()) {
+                definition.frames.push_back(static_cast<i32>(frame.as_int()));
+            }
+        }
+    }
+    definition.frame_seconds = static_cast<f32>(std::clamp(value.number_at("frame_seconds", definition.frame_seconds), 0.001, 3600.0));
     if (const JsonValue* render_offset = value.find("render_offset_px")) {
         definition.render_offset_px = vec2_from_json(*render_offset);
     }
@@ -841,7 +863,7 @@ TilePattern read_pattern(const JsonValue& value) {
 bool says_something(const TileDefinition& definition) {
     return !definition.id.empty() || definition.solid || definition.walkable.has_value() || definition.cost != 10 ||
            definition.blocks_sight || !definition.terrain.empty() || !definition.tags.empty() || !definition.metadata.empty() ||
-           !definition.collision_polygon.empty() || !definition.sprite_id.empty() || definition.frame >= 0;
+           !definition.collision_polygon.empty() || !definition.sprite_id.empty() || definition.frame >= 0 || !definition.frames.empty();
 }
 
 // A tileset's members (a map's "tileset" object, or a .kintileset file's).
@@ -1088,6 +1110,18 @@ void TileSet::clear() {
 
 void TileSet::resize(std::size_t count) {
     tiles.resize(count);
+}
+
+bool TileSet::animated() const {
+    return std::ranges::any_of(tiles, [](const TileDefinition& definition) { return definition.animated(); });
+}
+
+i32 TileDefinition::frame_at(f64 seconds) const {
+    if (!animated()) {
+        return frame;
+    }
+    const f64 steps = std::floor(std::max(seconds, 0.0) / static_cast<f64>(frame_seconds));
+    return frames[static_cast<std::size_t>(std::fmod(steps, static_cast<f64>(frames.size())))];
 }
 
 std::size_t TileSet::size() const {
@@ -2294,7 +2328,7 @@ void TileMap::submit(RenderQueue& queue, const RenderView& view, TilemapRenderOp
         const RenderCacheKey cache_key = make_render_cache_key(tile_layer, options);
         const bool can_cache = options.static_renderable && options.use_cache && !tile_layer.y_sort;
         if (!can_cache) {
-            submit_uncached_layer(queue, tile_layer, visible_tiles, cache_key, options.origin);
+            submit_uncached_layer(queue, tile_layer, visible_tiles, cache_key, options.origin, options.time);
             continue;
         }
         submit_cached_layer(queue, tile_layer, visible_tiles, cache_key, options);
@@ -2347,6 +2381,7 @@ void TileMap::reset_render_cache_chunks(LayerRenderCache& cache,
 void TileMap::rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& layer, const RenderCacheKey& key) const {
     const std::shared_ptr<const ShapeMesh> hex_mesh = grid.hex() ? hex_tile_mesh() : nullptr;
     chunk.commands.clear();
+    chunk.animated.clear();
     chunk.commands.reserve(static_cast<std::size_t>(std::max(0, chunk.bounds.w) * std::max(0, chunk.bounds.h)));
     for (i32 row = chunk.bounds.y; row < chunk.bounds.y + chunk.bounds.h; ++row) {
         for (i32 col = chunk.bounds.x; col < chunk.bounds.x + chunk.bounds.w; ++col) {
@@ -2361,14 +2396,16 @@ void TileMap::rebuild_render_chunk(RenderChunkCache& chunk, const TileLayer& lay
                                         key.sprites,
                                         key.sheet,
                                         hex_mesh,
-                                        chunk.commands);
+                                        chunk.commands,
+                                        0.0,
+                                        &chunk.animated);
         }
     }
     chunk.dirty = false;
 }
 
 void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, TileRect visible_tiles, const RenderCacheKey& key,
-                                    Vec2f origin) const {
+                                    Vec2f origin, f64 time) const {
     const std::shared_ptr<const ShapeMesh> hex_mesh = grid.hex() ? hex_tile_mesh() : nullptr;
     const bool moved = origin.x != 0.0f || origin.y != 0.0f;
     std::vector<RenderCommand> commands;
@@ -2387,7 +2424,8 @@ void TileMap::submit_uncached_layer(RenderQueue& queue, const TileLayer& layer, 
                                         key.sprites,
                                         key.sheet,
                                         hex_mesh,
-                                        commands);
+                                        commands,
+                                        time);
             for (RenderCommand& command : commands) {
                 queue.submit(moved ? moved_command(std::move(command), origin) : std::move(command));
             }
@@ -2429,6 +2467,16 @@ void TileMap::submit_cached_layer(RenderQueue& queue,
             RenderChunkCache& chunk = cache.chunks[chunk_index(chunk_col, chunk_row, chunk_cols)];
             if (chunk.dirty) {
                 rebuild_render_chunk(chunk, layer, key);
+            }
+            // Its animated tiles at the frame the time says (the rest as cached).
+            for (const auto& [command, tile_id] : chunk.animated) {
+                const TileDefinition* definition = this->tile(tile_id);
+                if (definition && key.sheet && command < chunk.commands.size()) {
+                    const i32 frame = definition->frame_at(options.time);
+                    if (frame >= 0 && frame < key.sheet->cols() * key.sheet->rows()) {
+                        chunk.commands[command].source = key.sheet->sprite(frame).source;
+                    }
+                }
             }
             visible_commands += chunk.commands.size();
         }
