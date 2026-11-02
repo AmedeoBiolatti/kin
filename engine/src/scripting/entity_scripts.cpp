@@ -5,6 +5,7 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/saving.hpp>
 #include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/world.hpp>
@@ -18,6 +19,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <optional>
 #include <system_error>
@@ -152,6 +154,79 @@ std::optional<ComponentFieldValue> from_lua(ComponentFieldKind kind, const sol::
     return std::nullopt;
 }
 
+// A Lua value as a save keeps it: true/false, numbers, text, and tables of
+// them (a table counting from 1 with nothing else, a list); none for the rest
+// (functions, entities, a table nested too deep).
+std::optional<JsonValue> json_of(const sol::object& value, int depth = 0) {
+    switch (value.get_type()) {
+    case sol::type::boolean: return JsonValue{value.as<bool>()};
+    case sol::type::number: {
+        const f64 number = value.as<f64>();
+        return std::isfinite(number) ? std::optional(JsonValue{number}) : std::nullopt;
+    }
+    case sol::type::string: return JsonValue{value.as<std::string>()};
+    case sol::type::table: {
+        if (depth >= 16) {
+            return std::nullopt;
+        }
+        const sol::table table = value.as<sol::table>();
+        const std::size_t length = table.size();
+        std::size_t count = 0;
+        table.for_each([&](const sol::object&, const sol::object&) { ++count; });
+        if (length > 0 && count == length) {
+            JsonValue::Array items;
+            for (std::size_t i = 1; i <= length; ++i) {
+                std::optional<JsonValue> item = json_of(sol::object(table[i]), depth + 1);
+                items.push_back(item ? std::move(*item) : JsonValue{});
+            }
+            return JsonValue{std::move(items)};
+        }
+        JsonValue::Object members;
+        table.for_each([&](const sol::object& key, const sol::object& item) {
+            std::string name;
+            if (key.get_type() == sol::type::string) {
+                name = key.as<std::string>();
+            } else if (key.get_type() == sol::type::number) {
+                char text[32];
+                std::snprintf(text, sizeof(text), "%.17g", key.as<f64>());
+                name = text;
+            } else {
+                return;
+            }
+            if (std::optional<JsonValue> kept = json_of(item, depth + 1)) {
+                members.emplace(std::move(name), std::move(*kept));
+            }
+        });
+        return JsonValue{std::move(members)};
+    }
+    default: return std::nullopt;
+    }
+}
+
+// And back.
+sol::object lua_of(sol::state_view lua, const JsonValue& value) {
+    switch (value.type()) {
+    case JsonValue::Type::Bool: return sol::make_object(lua, value.as_bool());
+    case JsonValue::Type::Number: return sol::make_object(lua, value.as_number());
+    case JsonValue::Type::String: return sol::make_object(lua, value.as_string());
+    case JsonValue::Type::Array: {
+        sol::table table = lua.create_table(static_cast<int>(value.items().size()), 0);
+        for (std::size_t i = 0; i < value.items().size(); ++i) {
+            table[i + 1] = lua_of(lua, value.items()[i]);
+        }
+        return sol::make_object(lua, table);
+    }
+    case JsonValue::Type::Object: {
+        sol::table table = lua.create_table(0, static_cast<int>(value.members().size()));
+        for (const auto& [name, member] : value.members()) {
+            table[name] = lua_of(lua, member);
+        }
+        return sol::make_object(lua, table);
+    }
+    default: return sol::lua_nil;
+    }
+}
+
 // Makes a script's `self`: a table of its own, with the entity's methods.
 constexpr const char* self_prelude = R"lua(
 function __kin_self(entity)
@@ -206,6 +281,9 @@ struct EntityScripts::Impl {
     SceneScreens* screens = nullptr;
     SceneDialogue* dialogue = nullptr;
     SceneFlow* flow = nullptr;
+    SceneSaves* saves = nullptr;
+    // Values given back by the saves, for entities once they start (by id).
+    std::unordered_map<u64, JsonValue> restored;
     std::string calling; // the script being called, for its problems
 
     void bind(sol::state& lua) {
@@ -427,7 +505,76 @@ struct EntityScripts::Impl {
             }
             const PrefabInstance made = instantiate_prefab(*world, *asset, PrefabSpawn{.pos = {x.value_or(0.0f), y.value_or(0.0f)}},
                                                            world->components());
-            return made.root.valid() ? std::optional(ScriptEntity{world, made.root.raw()}) : std::nullopt;
+            if (!made.root.valid()) {
+                return std::nullopt;
+            }
+            made.root.raw().set<SpawnedPrefab>({.prefab = prefab}); // a save makes it again from it
+            return ScriptEntity{world, made.root.raw()};
+        };
+
+        sol::table save_table = lua.create_named_table("save");
+        const auto saves_or_throw = [this]() -> SceneSaves& {
+            if (!saves) {
+                throw sol::error("the game keeps no saves");
+            }
+            return *saves;
+        };
+        save_table["write"] = [this, saves_or_throw](const std::string& slot, sol::optional<std::string> title,
+                                                     sol::optional<std::string> summary, sol::this_state state) {
+            SceneSaves& kept = saves_or_throw();
+            if (!world) {
+                throw sol::error("save.write: no world");
+            }
+            const SaveResult written = kept.write(*world, slot, title.value_or(slot), summary.value_or(""));
+            sol::state_view lua(state);
+            if (written.ok) {
+                return std::make_tuple(sol::make_object(lua, true), sol::make_object(lua, sol::lua_nil));
+            }
+            return std::make_tuple(sol::make_object(lua, sol::lua_nil), sol::make_object(lua, written.message));
+        };
+        save_table["read"] = [saves_or_throw](const std::string& slot) {
+            SceneSaves& kept = saves_or_throw();
+            if (!valid_save_id(slot)) {
+                return std::make_tuple(false, std::string("'" + slot + "' is not a slot's name"));
+            }
+            if (!kept.store().slot_exists(slot)) {
+                return std::make_tuple(false, std::string("no save is called '" + slot + "'"));
+            }
+            kept.ask_read(slot);
+            return std::make_tuple(true, std::string());
+        };
+        save_table["exists"] = [saves_or_throw](const std::string& slot) {
+            return valid_save_id(slot) && saves_or_throw().store().slot_exists(slot);
+        };
+        save_table["delete"] = [saves_or_throw](const std::string& slot) {
+            return valid_save_id(slot) && saves_or_throw().store().delete_slot(slot).ok;
+        };
+        save_table["slots"] = [saves_or_throw](sol::this_state state) {
+            sol::state_view lua(state);
+            std::vector<SaveSlotInfo> slots = saves_or_throw().store().list_slots();
+            std::ranges::stable_sort(slots, [](const SaveSlotInfo& a, const SaveSlotInfo& b) { return a.updated_at_unix > b.updated_at_unix; });
+            sol::table listed = lua.create_table(static_cast<int>(slots.size()), 0);
+            for (std::size_t i = 0; i < slots.size(); ++i) {
+                listed[i + 1] = lua.create_table_with("id", slots[i].slot_id, "title", slots[i].title, "summary", slots[i].summary,
+                                                      "updated", static_cast<f64>(slots[i].updated_at_unix));
+            }
+            return listed;
+        };
+        save_table["get"] = [saves_or_throw](const std::string& name, sol::object fallback, sol::this_state state) -> sol::object {
+            const JsonValue* value = saves_or_throw().value(name);
+            return value ? lua_of(state, *value) : fallback;
+        };
+        save_table["set"] = [saves_or_throw](const std::string& name, sol::object value) {
+            SceneSaves& kept = saves_or_throw();
+            if (value.get_type() == sol::type::lua_nil || value.get_type() == sol::type::none) {
+                kept.set_value(name, JsonValue{});
+                return;
+            }
+            std::optional<JsonValue> json = json_of(value);
+            if (!json) {
+                throw sol::error("save.set: '" + name + "' is not kept (true/false, numbers, text and tables of them are)");
+            }
+            kept.set_value(name, std::move(*json));
         };
         lua.safe_script(self_prelude);
     }
@@ -492,6 +639,9 @@ EntityScripts::EntityScripts(EntityScriptsConfig config) : _impl(std::make_uniqu
 }
 
 EntityScripts::~EntityScripts() {
+    if (_impl->saves) {
+        _impl->saves->set_scripts({}); // its hooks go with it
+    }
     _impl->running.clear(); // the selves before the states they live in
 }
 
@@ -519,6 +669,42 @@ void EntityScripts::set_flow(SceneFlow* flow) {
     _impl->flow = flow;
 }
 
+void EntityScripts::set_saves(SceneSaves* saves) {
+    Impl& impl = *_impl;
+    impl.saves = saves;
+    impl.restored.clear();
+    if (!saves) {
+        return;
+    }
+    saves->set_scripts({
+        .write = [&impl](EcsEntity entity) -> std::optional<JsonValue> {
+            const auto found = impl.running.find(entity.id());
+            if (found == impl.running.end() || !found->second.self.valid()) {
+                return std::nullopt;
+            }
+            JsonValue::Object values;
+            found->second.self.for_each([&](const sol::object& key, const sol::object& value) {
+                if (key.get_type() != sol::type::string) {
+                    return;
+                }
+                std::string name = key.as<std::string>();
+                if (name == "entity") {
+                    return; // its entity (methods), not a value
+                }
+                if (std::optional<JsonValue> kept = json_of(value)) {
+                    values.emplace(std::move(name), std::move(*kept));
+                }
+            });
+            return JsonValue{std::move(values)};
+        },
+        .read = [&impl](EcsEntity entity, const JsonValue& values) {
+            if (values.is_object()) {
+                impl.restored[entity.id()] = values;
+            }
+        },
+    });
+}
+
 void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     Impl& impl = *_impl;
     impl.world = &world;
@@ -534,6 +720,8 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
             scripted.emplace_back(entity, script.asset.id);
         }
     });
+    // Values given back to entities gone since (or running no script): let go.
+    std::erase_if(impl.restored, [&](const auto& entry) { return !world.raw().is_alive(entry.first); });
     // Those that no longer run theirs: gone.
     std::erase_if(impl.running, [&](const auto& entry) {
         const auto found = std::ranges::find_if(scripted, [&](const auto& item) { return item.first.id() == entry.first; });
@@ -562,6 +750,22 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         if (!run.started) {
             run.started = true;
             file.script->call("on_start", run.self);
+        }
+        // What a save gave back: its self's again, then on_load.
+        if (const auto given = impl.restored.find(entity.id()); given != impl.restored.end()) {
+            const JsonValue values = std::move(given->second);
+            impl.restored.erase(given);
+            if (entity.is_alive() && run.self.valid()) {
+                sol::state_view lua(run.self.lua_state());
+                for (const auto& [name, value] : values.members()) {
+                    if (name != "entity") {
+                        run.self[name] = lua_of(lua, value);
+                    }
+                }
+                if (file.script->has("on_load")) {
+                    file.script->call("on_load", run.self);
+                }
+            }
         }
         if (entity.is_alive()) {
             file.script->call("on_update", run.self, dt);

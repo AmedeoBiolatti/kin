@@ -40,6 +40,16 @@
 // a place of this one), arriving at the entity named `arrive` (transition:
 // "fade", "crossfade", "dissolve", "pixelate", "wipe", "iris" or "none");
 // scene.going() while one is asked for and not yet begun.
+// And, given the game's saves (set_saves, kin/ecs/saving.hpp): save.write(slot[,
+// title[, summary]]) -> true, or nil and why; save.read(slot) asks the game to
+// read it (it does, after the step) -> true, or false and why; save.exists(slot),
+// save.delete(slot), save.slots() -> {{id, title, summary, updated}, ...} (the
+// newest first); save.get(name[, default]) and save.set(name, value) for the
+// game's own values (true/false, numbers, text and tables of them; nil takes
+// one away), kept with the saves and from scene to scene. An entity marked
+// Saved (with script) keeps its self's values (the same kinds; its entity and
+// functions not): given back once it starts, after on_start, and then
+// on_load(self) runs.
 // Fields read and set as scene files have them: numbers, true/false, text,
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
@@ -57,6 +67,7 @@ class Input;
 class SceneScreens;
 class SceneDialogue;
 class SceneFlow;
+class SceneSaves;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -84,6 +95,9 @@ public:
     void set_dialogue(SceneDialogue* dialogue);
     // The scene's flow, for the scripts' `scene` (null: none).
     void set_flow(SceneFlow* flow);
+    // The game's saves, for the scripts' `save` and their entities' kept
+    // values (null: none). They are given the scripts' hooks (set_scripts).
+    void set_saves(SceneSaves* saves);
 
 private:
     struct Impl;

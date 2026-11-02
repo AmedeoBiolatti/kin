@@ -7,6 +7,13 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Saving games as data ([saving](saving.md)): an entity marked `Saved` keeps the components it names and its
+  script's values while the player is in another scene and in save slots, and stays destroyed once destroyed.
+  `SceneSaves` keeps the scenes left (`enter`, `keep`), the game's own values, and writes and reads slots
+  (`kin.scene_saves/1` payloads in `SaveStore`). Prefab instances a script spawns carry `SpawnedPrefab` and are
+  made again. Entity scripts get a `save` table (`write`, `read`, `exists`, `delete`, `slots`, `get`, `set`) and
+  `on_load(self)` (`EntityScripts::set_saves`).
+
 - Script debugging for an inspected game (`--inspect`): `debug.breakpoints`, `debug.pause`, `debug.state`,
   `debug.continue` and `debug.step` (into, over, out) stop its Lua scripts at a line and show their frames, locals
   and upvalues (`ScriptDebugger`, `script_debugger()`). A `LuaScript` loaded from under its `module_root` now
