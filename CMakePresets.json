@@ -363,6 +363,22 @@
       }
     },
     {
+      "name": "hex-webgl2-modules",
+      "displayName": "Hex demo with the 2D game modules (WebGL2)",
+      "description": "What a 2D game made in Kin Studio builds for the web: Lua scripts, physics, audio, images, fonts, runtime assets and browser saves",
+      "inherits": "hex-webgl2",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "KIN_ENABLE_SCRIPTING": "ON",
+        "KIN_ENABLE_PHYSICS": "ON",
+        "KIN_ENABLE_AUDIO": "ON",
+        "KIN_ENABLE_IMAGE_IO": "ON",
+        "KIN_ENABLE_TTF": "ON",
+        "KIN_ENABLE_RUNTIME_ASSETS": "ON",
+        "KIN_WEB_PERSISTENCE": "ON"
+      }
+    },
+    {
       "name": "webgl2-3d",
       "displayName": "WebGL2 3D rendering fixture",
       "inherits": "webgl2",

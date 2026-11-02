@@ -230,17 +230,13 @@ if(KIN_ENABLE_SCRIPTING)
 
     FetchContent_Declare(sol2
         GIT_REPOSITORY https://github.com/ThePhD/sol2.git
-        GIT_TAG v3.3.1
+        # 3.5.0: its optional<T&>::emplace compiles with GCC 15 and Clang 20+
+        # (3.3.1's was rejected before use: ThePhD/sol2#1695), Emscripten's included.
+        GIT_TAG v3.5.0
         GIT_SHALLOW TRUE
     )
 
     FetchContent_MakeAvailable(sol2)
-    # sol2 3.3.1 contains an unused optional<T&>::emplace body that GCC 15
-    # diagnoses before instantiation (upstream ThePhD/sol2#1695). Preserve the
-    # diagnostic as a warning for every consumer, including public-header users.
-    # Remove this compatibility option when updating sol2 to a fixed release.
-    target_compile_options(sol2 INTERFACE
-        "$<$<AND:$<CXX_COMPILER_ID:GNU>,$<VERSION_GREATER_EQUAL:$<CXX_COMPILER_VERSION>,15>>:-Wno-error=template-body>")
 endif()
 
 if(KIN_ENABLE_AUDIO)

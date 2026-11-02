@@ -138,9 +138,10 @@ void configure_runtime_logging(const HeadlessOptions& options, const GameInfo* g
     if (!options.log_path.empty()) {
         config.file_path = options.log_path;
     }
-#ifdef KIN_SHIPPING
+#if defined(KIN_SHIPPING) && !defined(__EMSCRIPTEN__)
     // Players have no console: this run's log, and the one before, go with the
-    // game's saves, where a bug report can find them.
+    // game's saves, where a bug report can find them. (A browser has one; its
+    // storage keeps saves only.)
     if (config.file_path.empty() && game && !game->id.empty()) {
         const std::filesystem::path dir = user_data_dir(game->id);
         std::error_code error;

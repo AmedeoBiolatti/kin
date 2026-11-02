@@ -38,6 +38,9 @@ jobs:
           - preset: hex-webgl2
             target: hex_demo
             mode: hex
+          - preset: hex-webgl2-modules
+            target: hex_demo
+            mode: hex
           - preset: webgl2-3d
             target: webgl2_3d_fixture
             mode: 3d
