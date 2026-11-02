@@ -1515,6 +1515,82 @@ void test_camera_follow_and_shake() {
     assert(first == second);
 }
 
+// Occluders as the world gives them to the light layer: boxes and circles
+// turned and scaled with their entities, polygons, a map's solid cells; all
+// wound clockwise on screen, mirrored views too; read from scene files.
+void test_light_occluders() {
+    const auto bounds = [](const std::vector<kin::Vec2f>& p) {
+        kin::Rectf r{p[0].x, p[0].y, 0.0f, 0.0f};
+        float x1 = p[0].x, y1 = p[0].y;
+        for (const kin::Vec2f q : p) {
+            r.x = std::min(r.x, q.x), r.y = std::min(r.y, q.y), x1 = std::max(x1, q.x), y1 = std::max(y1, q.y);
+        }
+        r.w = x1 - r.x;
+        r.h = y1 - r.y;
+        return r;
+    };
+    const auto clockwise = [](const std::vector<kin::Vec2f>& p) {
+        float twice = 0.0f;
+        for (std::size_t i = 0; i < p.size(); ++i) {
+            twice += p[i].x * p[(i + 1) % p.size()].y - p[(i + 1) % p.size()].x * p[i].y;
+        }
+        return twice > 0.0f;
+    };
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    world.entity("Crate").set(kin::Transform2D{.pos = {100.0f, 50.0f}, .rotation = 90.0f}).set(kin::LightOccluder{.size = {20.0f, 10.0f}});
+    world.entity("Pillar").set(kin::Transform2D{.pos = {0.0f, 0.0f}, .scale = {2.0f, 2.0f}})
+        .set(kin::LightOccluder{.shape = kin::OccluderShape::Circle, .radius = 5.0f, .lit = false});
+    world.entity("Off").set(kin::Transform2D{}).set(kin::LightOccluder{.enabled = false});
+    std::vector<kin::LightOccluder2D> found = kin::scene_occluders(world, kin::Affine2{});
+    assert(found.size() == 2);
+    for (const kin::LightOccluder2D& o : found) {
+        assert(clockwise(o.points));
+        const kin::Rectf r = bounds(o.points);
+        if (o.points.size() == 4) {
+            assert(o.lit && near(r.w, 10.0f) && near(r.h, 20.0f) && near(r.x, 95.0f) && near(r.y, 40.0f)); // turned a quarter
+        } else {
+            assert(!o.lit && o.points.size() == 24 && std::abs(r.w - 20.0f) < 0.1f); // scaled twice
+        }
+    }
+    // Through a mirroring view: still clockwise on the screen.
+    for (const kin::LightOccluder2D& o : kin::scene_occluders(world, kin::Affine2::scaling({-1.0f, 1.0f}))) {
+        assert(clockwise(o.points));
+    }
+
+    // A map's solid cells: one outline around the middle cell of three, from where its entity is.
+    auto asset = std::make_shared<kin::TilemapAsset>();
+    asset->map.resize(3, 1);
+    asset->map.tile_w = 16;
+    asset->map.tile_h = 16;
+    const kin::u16 wall = asset->map.tileset.ensure_tile("wall");
+    asset->map.tileset.tile(wall)->solid = true;
+    asset->map.set(1, 0, wall);
+    kin::EcsWorld tiles_world;
+    kin::register_builtin_editor_components(tiles_world);
+    tiles_world.entity("Map").set(kin::Transform2D{.pos = {10.0f, 0.0f}}).set(kin::TilemapComponent{.tilemap = asset})
+        .set(kin::LightOccluder{.shape = kin::OccluderShape::Tiles});
+    found = kin::scene_occluders(tiles_world, kin::Affine2{});
+    assert(found.size() == 1 && clockwise(found[0].points));
+    const kin::Rectf cell = bounds(found[0].points);
+    assert(near(cell.x, 26.0f) && near(cell.y, 0.0f) && near(cell.w, 16.0f) && near(cell.h, 16.0f));
+
+    // From a scene file; and a light's shadows reach the light layer, its softness scaled.
+    const kin::SceneLoadResult read = kin::parse_scene_asset(R"({"schema": "kin.scene/1", "entities": [
+      {"id": "lamp", "name": "Lamp", "components": {"Transform2D": {"scale": {"x": 2, "y": 2}},
+        "LightComponent": {"radius": 50, "shadows": true, "shadow_strength": 0.75, "shadow_softness": 3}}},
+      {"id": "post", "name": "Post", "components": {"Transform2D": {}, "LightOccluder": {"shape": "polygon",
+        "points": [[0, 0], [10, 0], [5, 8]], "lit": false}}}]})", world.components());
+    assert(read.ok());
+    kin::EcsWorld scene;
+    kin::register_builtin_editor_components(scene);
+    assert(kin::instantiate_scene_asset(scene, *read.scene, ".", scene.components()).ok());
+    const std::vector<kin::Light2D> lights = kin::scene_lights(scene, kin::Affine2{});
+    assert(lights.size() == 1 && lights[0].shadows && near(lights[0].shadow_strength, 0.75f) && near(lights[0].shadow_softness, 6.0f));
+    found = kin::scene_occluders(scene, kin::Affine2{});
+    assert(found.size() == 1 && found[0].points.size() == 3 && !found[0].lit && clockwise(found[0].points));
+}
+
 // Shapes, clips and text as a scene file gives them: described fields, made
 // into meshes, clips and fonts; the text drawn through the camera.
 void test_scene_shapes_clips_and_text() {
@@ -1827,6 +1903,7 @@ void test_animators_started_together() {
 int main() {
     test_parallax_layers();
     test_camera_follow_and_shake();
+    test_light_occluders();
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);

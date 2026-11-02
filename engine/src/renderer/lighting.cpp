@@ -15,7 +15,66 @@ bool reaches(const Light2D& light, Rectf area) {
            light.position.y + light.radius > area.y && light.position.y - light.radius < area.y + area.h;
 }
 
+// Twice the signed area: positive for a loop clockwise on a screen with y down.
+f32 winding(std::span<const Vec2f> points) {
+    f32 area = 0.0f;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const Vec2f a = points[i];
+        const Vec2f b = points[(i + 1) % points.size()];
+        area += a.x * b.y - b.x * a.y;
+    }
+    return area;
+}
+
+Vec2f away(Vec2f from, Vec2f p, f32 reach) {
+    const Vec2f d{p.x - from.x, p.y - from.y};
+    const f32 length = std::sqrt(d.x * d.x + d.y * d.y);
+    if (length <= 1e-6f) {
+        return p;
+    }
+    return {p.x + d.x / length * reach, p.y + d.y / length * reach};
+}
+
 } // namespace
+
+std::vector<Vec2f> clockwise(std::vector<Vec2f> points) {
+    if (winding(points) < 0.0f) {
+        std::reverse(points.begin(), points.end());
+    }
+    return points;
+}
+
+std::vector<std::array<Vec2f, 4>> shadow_quads(Vec2f light, f32 reach, std::span<const LightOccluder2D> occluders) {
+    std::vector<std::array<Vec2f, 4>> quads;
+    const f32 far = std::max(reach, 0.0f) * 2.0f + 1.0f; // past where the light reaches, from any point within it
+    for (const LightOccluder2D& occluder : occluders) {
+        const std::vector<Vec2f>& p = occluder.points;
+        if (p.size() < 2) {
+            continue;
+        }
+        // Not near enough to the light to matter.
+        f32 x0 = p[0].x, y0 = p[0].y, x1 = p[0].x, y1 = p[0].y;
+        for (const Vec2f q : p) {
+            x0 = std::min(x0, q.x), y0 = std::min(y0, q.y), x1 = std::max(x1, q.x), y1 = std::max(y1, q.y);
+        }
+        if (x1 < light.x - reach || x0 > light.x + reach || y1 < light.y - reach || y0 > light.y + reach) {
+            continue;
+        }
+        for (std::size_t i = 0; i < p.size(); ++i) {
+            const Vec2f a = p[i];
+            const Vec2f b = p[(i + 1) % p.size()];
+            // Its outside is on the left going along it: facing away from the
+            // light when the light is on its inside.
+            const Vec2f outward{b.y - a.y, a.x - b.x};
+            const f32 facing = outward.x * (light.x - a.x) + outward.y * (light.y - a.y);
+            if (occluder.lit && facing >= 0.0f) {
+                continue; // lit side: what is behind it is behind another edge
+            }
+            quads.push_back({a, b, away(light, b, far), away(light, a, far)});
+        }
+    }
+    return quads;
+}
 
 const Texture& LightLayer::falloff(Renderer2D& renderer) {
     if (_falloff.valid()) {
@@ -42,7 +101,7 @@ const Texture& LightLayer::falloff(Renderer2D& renderer) {
 }
 
 bool LightLayer::apply(Renderer2D& renderer, Rectf area, Color ambient, std::span<const Light2D> lights,
-                       f32 resolution) {
+                       f32 resolution, std::span<const LightOccluder2D> occluders) {
     const RendererBackendCapabilities caps = renderer.capabilities();
     if (!caps.render_targets || !caps.blend_modes || area.w <= 0.0f || area.h <= 0.0f || resolution <= 0.0f) {
         return false;
@@ -60,22 +119,71 @@ bool LightLayer::apply(Renderer2D& renderer, Rectf area, Color ambient, std::spa
         const auto bind = renderer.scoped_render_target(map.target());
         renderer.clear(Color::rgb(ambient.r, ambient.g, ambient.b));
         const auto blend = renderer.scoped_blend_mode(BlendMode::Additive);
+        // A light drawn at `dest`, `share` of it (additive blending adds colour *
+        // alpha, so the tint's alpha carries the intensity; above 1 the light is
+        // added again).
+        const auto draw_light = [&](const Light2D& light, const Rectf& dest, f32 share) {
+            const Texture& shape = light.shape.valid() ? light.shape : round;
+            const Vec2i shape_size = shape.size();
+            const Rectf source{0.0f, 0.0f, static_cast<f32>(shape_size.x), static_cast<f32>(shape_size.y)};
+            for (f32 left = std::min(light.intensity, max_intensity) * share; left > 0.0f; left -= 1.0f) {
+                const u8 alpha = static_cast<u8>(std::lround(std::min(left, 1.0f) * 255.0f));
+                const Color tint = Color::rgba(light.color.r, light.color.g, light.color.b, alpha);
+                renderer.draw_texture(shape, source, dest, tint, light.rotation, {0.5f, 0.5f});
+            }
+        };
         for (const Light2D& light : lights) {
             if (light.radius <= 0.0f || light.intensity <= 0.0f || !reaches(light, area)) {
                 continue;
             }
-            const Texture& shape = light.shape.valid() ? light.shape : round;
-            const Vec2i shape_size = shape.size();
-            const Rectf source{0.0f, 0.0f, static_cast<f32>(shape_size.x), static_cast<f32>(shape_size.y)};
             const f32 extent = 2.0f * light.radius * resolution;
             const Rectf dest{(light.position.x - light.radius - area.x) * resolution,
                              (light.position.y - light.radius - area.y) * resolution, extent, extent};
-            // Additive blending adds colour * alpha, so the tint's alpha carries the
-            // intensity; above 1 the light is added again.
-            for (f32 left = std::min(light.intensity, max_intensity); left > 0.0f; left -= 1.0f) {
-                const u8 alpha = static_cast<u8>(std::lround(std::min(left, 1.0f) * 255.0f));
-                const Color tint = Color::rgba(light.color.r, light.color.g, light.color.b, alpha);
-                renderer.draw_texture(shape, source, dest, tint, light.rotation, {0.5f, 0.5f});
+            const f32 strength = std::clamp(light.shadow_strength, 0.0f, 1.0f);
+            if (!light.shadows || occluders.empty() || strength <= 0.0f) {
+                draw_light(light, dest, 1.0f);
+                continue;
+            }
+            // What its shadows leave of it.
+            if (strength < 1.0f) {
+                draw_light(light, dest, 1.0f - strength);
+            }
+            // The rest: drawn into a target of its own, its occluders' shadows
+            // filled black there, added to the map. A light with a size: four
+            // shadows from around it, each a quarter (soft edges).
+            const f32 softness = std::max(light.shadow_softness, 0.0f);
+            static constexpr std::array<Vec2f, 4> around{{{-0.5f, 0.0f}, {0.5f, 0.0f}, {0.0f, -0.5f}, {0.0f, 0.5f}}};
+            const i32 samples = softness > 0.0f ? 4 : 1;
+            const f32 share = strength / static_cast<f32>(samples);
+            const i32 side = std::max(1, static_cast<i32>(std::ceil(extent)));
+            const Vec2f corner{light.position.x - light.radius, light.position.y - light.radius};
+            for (i32 sample = 0; sample < samples; ++sample) {
+                const Vec2f from = samples == 1 ? light.position
+                                                : Vec2f{light.position.x + around[sample].x * softness,
+                                                        light.position.y + around[sample].y * softness};
+                const std::vector<std::array<Vec2f, 4>> quads = shadow_quads(from, light.radius + softness, occluders);
+                PooledTarget scratch = quads.empty() ? PooledTarget{} : renderer.acquire_render_target({side, side}, ScaleMode::Linear);
+                if (!scratch.valid()) {
+                    draw_light(light, dest, share); // nothing in its way (or no target to cut it in)
+                    continue;
+                }
+                {
+                    const auto bind = renderer.scoped_render_target(scratch.target());
+                    renderer.clear(Color::rgb(0, 0, 0)); // opaque: additive blending keeps it so
+                    draw_light(light, {0.0f, 0.0f, extent, extent}, 1.0f);
+                    const auto cut = renderer.scoped_blend_mode(BlendMode::Replace);
+                    std::array<Vec2f, 4> points{};
+                    for (const std::array<Vec2f, 4>& quad : quads) {
+                        for (std::size_t i = 0; i < 4; ++i) {
+                            points[i] = {(quad[i].x - corner.x) * resolution, (quad[i].y - corner.y) * resolution};
+                        }
+                        renderer.fill_polygon(points, Color::rgb(0, 0, 0));
+                    }
+                }
+                // Added to the map (the outer additive blending), its share of the light.
+                const u8 alpha = static_cast<u8>(std::lround(std::clamp(share, 0.0f, 1.0f) * 255.0f));
+                renderer.draw_texture(scratch.texture(), {0.0f, 0.0f, static_cast<f32>(side), static_cast<f32>(side)},
+                                      {dest.x, dest.y, static_cast<f32>(side), static_cast<f32>(side)}, Color::rgba(255, 255, 255, alpha));
             }
         }
     }

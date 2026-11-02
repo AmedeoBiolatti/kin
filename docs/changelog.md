@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 2D light shadows: a light with `shadows` (`Light2D`, `LightComponent`; `shadow_strength`, `shadow_softness`) is
+  stopped by occluders: `LightOccluder2D` outlines passed to `LightLayer::apply`, or `LightOccluder` components
+  (a box, a circle, a polygon, or a tilemap's solid cells; `lit` or dark themselves), `scene_occluders`. Each
+  shadowed light is drawn into a target of its own with its shadows (`shadow_quads`) cut out, still with no
+  shaders; softness averages four shadows from around the light.
+
 - Cameras that follow better and shake: `CameraComponent::dead_zone` (a box its entity moves in without the camera
   following), `look_ahead` and `look_ahead_time` (looking ahead the way its entity moves), `zoom_smoothing`, and a
   trauma shake (`shake_camera(world, trauma)`, `shake_strength`, `shake_frequency`, `shake_decay`;

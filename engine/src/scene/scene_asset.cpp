@@ -894,7 +894,41 @@ void register_builtin_editor_components(EcsWorld& world) {
             .description("An image whose alpha shapes it (a cone, a window); none: round.")
             .field("rotation", &LightComponent::rotation)
             .units("degrees")
-            .field("enabled", &LightComponent::enabled);
+            .field("enabled", &LightComponent::enabled)
+            .field("shadows", &LightComponent::shadows)
+            .description("LightOccluders cast its shadows.")
+            .field("shadow_strength", &LightComponent::shadow_strength)
+            .range(0.0, 1.0)
+            .description("How much light its shadows take: 1 all of it, 0 none.")
+            .field("shadow_softness", &LightComponent::shadow_softness)
+            .units("points")
+            .range(0.0, 1000.0)
+            .description("The light's size: its shadows' edges soft; 0: sharp.");
+    }
+    if (!world.components().find("LightOccluder")) {
+        // What stops lights that cast shadows (kin/ecs/lighting.hpp).
+        world.components().native<LightOccluder>("LightOccluder")
+            .property<std::string>("shape", [](const LightOccluder& o) { return std::string(occluder_shape_name(o.shape)); },
+                                   [](LightOccluder& o, const std::string& name) {
+                                       const std::optional<OccluderShape> shape = occluder_shape_named(name);
+                                       if (!shape) return false;
+                                       o.shape = *shape;
+                                       return true;
+                                   })
+            .choices({"box", "circle", "polygon", "tiles"})
+            .description("tiles: its TilemapComponent's solid cells.")
+            .field("size", &LightOccluder::size)
+            .description("A box's, centred on the entity.")
+            .field("radius", &LightOccluder::radius)
+            .description("A circle's.")
+            .field("points", &LightOccluder::points)
+            .description("A polygon's corners, in the entity's units.")
+            .field("offset", &LightOccluder::offset)
+            .field("layer", &LightOccluder::layer)
+            .description("tiles: the map layer whose solid cells stop light; empty: every layer's.")
+            .field("lit", &LightOccluder::lit)
+            .description("Its own area lit (only what is behind it dark); off: dark too.")
+            .field("enabled", &LightOccluder::enabled);
     }
     if (!world.components().find("SceneLighting")) {
         // The scene darkened to an ambient light and lit by its lights (the

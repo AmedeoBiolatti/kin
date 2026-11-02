@@ -1481,12 +1481,13 @@ void test_gpu_shader_surface_binds_every_source() {
 
 // Draws `scene` into a 64 x 64 target, lights it, and reads it back.
 std::vector<kin::u8> lit_scene(kin::Renderer2D& renderer, kin::LightLayer& layer, kin::Color scene,
-                               kin::Color ambient, std::span<const kin::Light2D> lights) {
+                               kin::Color ambient, std::span<const kin::Light2D> lights,
+                               std::span<const kin::LightOccluder2D> occluders = {}) {
     kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
     assert(target.valid());
     const auto bind = renderer.scoped_render_target(target);
     renderer.clear(scene);
-    assert(layer.apply(renderer, {0.0f, 0.0f, 64.0f, 64.0f}, ambient, lights, 1.0f));
+    assert(layer.apply(renderer, {0.0f, 0.0f, 64.0f, 64.0f}, ambient, lights, 1.0f, occluders));
     std::vector<kin::u8> pixels;
     kin::Vec2i size{};
     assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, pixels, size));
@@ -3965,9 +3966,62 @@ void check_lighting(kin::Renderer2D& renderer) {
     assert(pixel_near(px, size, 2, 32, ambient, 2));
     // Pixel 63's centre is 6.5 from the light at x = 70: alpha 0.697.
     assert(pixel_near(px, size, 63, 32, kin::Color::rgb(40, 40, 40 + 178), 10));
+
+    // Shadows: a light at (16, 32) and a wall from x 28 to 34, y 24 to 40. Behind
+    // the wall is dark; above it, lit; the wall itself lit (lit), or dark.
+    kin::Light2D lamp{.position = {16.0f, 32.0f}, .radius = 48.0f, .color = white, .shadows = true};
+    const std::array<kin::LightOccluder2D, 1> wall{{{.points = kin::clockwise({{28.0f, 40.0f}, {34.0f, 40.0f}, {34.0f, 24.0f}, {28.0f, 24.0f}})}}};
+    // Unshadowed, (44, 32) is 28.5 away: alpha (1 - (28.5 / 48)^2)^2 = 0.418.
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&lamp, 1});
+    assert(pixel_near(px, size, 44, 32, kin::Color::rgb(40 + 107, 40 + 107, 40 + 107), 10));
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&lamp, 1}, wall);
+    assert(pixel_near(px, size, 44, 32, ambient, 6));   // behind the wall
+    assert(pixel_near(px, size, 58, 32, ambient, 6));
+    assert(px[static_cast<std::size_t>((12 * 64 + 40) * 4)] > 40 + 60); // above it, lit
+    assert(px[static_cast<std::size_t>((32 * 64 + 31) * 4)] > 200);      // the wall itself, lit
+    assert(pixel_near(px, size, 8, 32, kin::Color::rgb(255, 255, 255), 30)); // the light's side, as without
+    const std::array<kin::LightOccluder2D, 1> dark_wall{{{.points = wall[0].points, .lit = false}}};
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&lamp, 1}, dark_wall);
+    assert(pixel_near(px, size, 31, 32, ambient, 6));
+    // Half strength: half the light behind it.
+    lamp.shadow_strength = 0.5f;
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&lamp, 1}, wall);
+    assert(pixel_near(px, size, 44, 32, kin::Color::rgb(40 + 53, 40 + 53, 40 + 53), 10));
+    // Soft: still dark straight behind it, lighter towards the shadow's edge than sharp.
+    lamp.shadow_strength = 1.0f;
+    lamp.shadow_softness = 8.0f;
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&lamp, 1}, wall);
+    assert(pixel_near(px, size, 44, 32, ambient, 6));
+    // A light that casts no shadows passes through.
+    lamp.shadows = false;
+    px = lit_scene(renderer, layer, white, ambient, std::span<const kin::Light2D>{&lamp, 1}, wall);
+    assert(pixel_near(px, size, 44, 32, kin::Color::rgb(40 + 107, 40 + 107, 40 + 107), 10));
+}
+
+// Shadow geometry: the quads behind an occluder's edges facing away from a
+// light (every edge, for one not lit); none out of its reach.
+void test_shadow_quads() {
+    const std::vector<kin::Vec2f> box = kin::clockwise({{10.0f, 5.0f}, {20.0f, 5.0f}, {20.0f, -5.0f}, {10.0f, -5.0f}});
+    float twice = 0.0f;
+    for (std::size_t i = 0; i < box.size(); ++i) {
+        twice += box[i].x * box[(i + 1) % box.size()].y - box[(i + 1) % box.size()].x * box[i].y;
+    }
+    assert(twice > 0.0f); // clockwise on a screen, y down
+    const std::array<kin::LightOccluder2D, 1> lit{{{.points = box}}};
+    const std::vector<std::array<kin::Vec2f, 4>> quads = kin::shadow_quads({0.0f, 0.0f}, 50.0f, lit);
+    assert(quads.size() == 3); // the far side and the two seen edge-on
+    for (const auto& quad : quads) {
+        // Each reaches past the light's reach, along its rays.
+        assert(std::hypot(quad[2].x, quad[2].y) > 50.0f && std::hypot(quad[3].x, quad[3].y) > 50.0f);
+        assert(quad[0].x >= 10.0f && quad[1].x >= 10.0f);
+    }
+    const std::array<kin::LightOccluder2D, 1> dark{{{.points = box, .lit = false}}};
+    assert(kin::shadow_quads({0.0f, 0.0f}, 50.0f, dark).size() == 4);
+    assert(kin::shadow_quads({-100.0f, 0.0f}, 50.0f, lit).empty()); // too far to matter
 }
 
 void test_lighting_on_software_backend() {
+    test_shadow_quads();
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "lighting-test", .width = 64, .height = 64, .hidden = true});
     kin::Renderer2D renderer{window};
