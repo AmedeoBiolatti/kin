@@ -994,7 +994,7 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("shake_rotation", &CameraComponent::shake_rotation)
             .units("degrees")
             .range(0.0, 180.0)
-            .description("How far it turns at full trauma.")
+            .description("How far it turns at full trauma; 0: it does not (turned, rectangles' edges show steps).")
             .field("shake_frequency", &CameraComponent::shake_frequency)
             .units("/s")
             .range(0.0, 200.0)

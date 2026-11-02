@@ -1487,7 +1487,7 @@ void test_camera_follow_and_shake() {
     const auto shaken = [&](std::vector<kin::Vec2f>* offsets) {
         kin::EcsWorld world;
         kin::register_builtin_editor_components(world);
-        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{});
+        kin::EcsEntity cam = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.shake_rotation = 3.0f});
         kin::EcsEntity spare = world.entity().set(kin::Transform2D{}).set(kin::CameraComponent{.current = false});
         kin::shake_camera(world, 0.6f);
         kin::shake_camera(world, 0.6f);
@@ -1501,7 +1501,7 @@ void test_camera_follow_and_shake() {
             assert(std::abs(c.shake_angle) <= c.shake_rotation * c.trauma * c.trauma + 1e-3f);
             const kin::Camera2D seen = *kin::scene_camera(world, view);
             assert(near(seen.shake_offset, c.shake_offset) && near(seen.rotation, c.shake_angle));
-            moved = moved || std::abs(c.shake_offset.x) > 0.5f;
+            moved = moved || (std::abs(c.shake_offset.x) > 0.5f && std::abs(c.shake_angle) > 0.01f);
             offsets->push_back(c.shake_offset);
         }
         assert(moved);

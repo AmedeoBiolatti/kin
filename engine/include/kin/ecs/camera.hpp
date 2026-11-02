@@ -48,7 +48,7 @@ struct CameraComponent {
     f32 look_ahead_time = 0.4f; // seconds of its entity's motion it looks ahead (no further than look_ahead)
     f32 zoom_smoothing = 0.0f;  // seconds a change of zoom takes (about); 0: at once
     f32 shake_strength = 16.0f; // points it moves by at full trauma
-    f32 shake_rotation = 2.0f;  // degrees it turns by at full trauma
+    f32 shake_rotation = 0.0f;  // degrees it turns by at full trauma (turned, rectangles' edges show steps)
     f32 shake_frequency = 18.0f; // jitters a second
     f32 shake_decay = 1.5f;     // trauma worn off a second
 

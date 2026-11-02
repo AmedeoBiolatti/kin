@@ -221,8 +221,9 @@ How it follows its entity, zooms and shakes (all in `update_cameras`):
 - **Shake:** `shake_camera(world, trauma)` adds trauma, 0 to 1, to the current
   cameras (`shake_camera(entity, trauma)` to one); it wears off by
   `shake_decay` a second. The camera moves by up to `shake_strength` points
-  and turns by up to `shake_rotation` degrees, times the trauma squared, so a
-  small knock barely shows and a big one throws it about. It jitters
+  and turns by up to `shake_rotation` degrees (0 unless set: rectangles are
+  not anti-aliased, so a slight turn shows their edges stepped), times the
+  trauma squared, so a small knock barely shows and a big one throws it about. It jitters
   `shake_frequency` times a second along smooth noise, the same each run. The
   shake goes on top of the limits.
 
