@@ -197,6 +197,14 @@ follow the shape. A tileset kept in a file of its own (`.kintileset`, format
 by the maps naming it (`"tileset": "tilesets/ground.kintileset"`, read from
 the content root by `load_tilemap(path, content_root)` and `Assets2D`).
 
+A tile can be animated: its `frames` of the image in turn, `frame_seconds`
+each, over and over (`"frames": [4, 5, 6, 7], "frame_seconds": 0.15`), for
+water or a torch. A map draws them at `TilemapRenderOptions::time`; a
+`TilemapComponent` keeps its own (`clock`), which `update_tilemaps(world, dt)`
+plays on each step. A map with an animated tile is drawn each frame, never
+from a scene's static cache; its chunks stay cached, only their animated
+tiles' frames are changed.
+
 Terrain autotiling fits a terrain's cells to their neighbours:
 `set_terrain_connect(layer, cells, terrain)` paints them and
 `clear_terrain_connect(layer, cells)` empties them, and either fits the cells

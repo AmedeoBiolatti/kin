@@ -159,8 +159,9 @@ WorldRenderState::WorldRenderState(flecs::world& world)
                               .each([](flecs::entity entity, Transform2D&) {
                                   entity.ensure<WorldTransform>();
                               })),
-      _transforms(world.query_builder<WorldTransform, const Transform2D, const WorldTransform>()
+      _transforms(world.query_builder<WorldTransform, const Transform2D, const WorldTransform, const Parallax*>()
                       .term_at(2).parent().cascade().optional()
+                      .term_at(3).self()
                       .cached()
                       .build()),
       _sprites(world.query_builder<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*>()
@@ -261,10 +262,54 @@ void each_particles(flecs::query<const P, const ClipGroup*>& query, Fn&& fn) {
 
 } // namespace
 
+namespace {
+
+// fn(where) for each place a renderer is drawn: where it is, and, for a
+// Parallax layer's own that repeats, again every `repeat` along each axis over
+// the view (64 times at most along one).
+template <typename Fn>
+void repeated(flecs::entity entity, const WorldTransform& at, const RenderView* view, Fn&& fn) {
+    const Parallax* layer = at.parallax ? entity.get<Parallax>() : nullptr;
+    if (!layer || (layer->repeat.x <= 0.0f && layer->repeat.y <= 0.0f) || !view) {
+        fn(at);
+        return;
+    }
+    const Rectf area = render_view_visible_rect(*view);
+    if (area.w <= 0.0f || area.h <= 0.0f) {
+        fn(at);
+        return;
+    }
+    constexpr i32 most = 32;
+    const auto span = [&](f32 period, f32 from, f32 begin, f32 size) {
+        if (period <= 0.0f) {
+            return std::pair{0, 0};
+        }
+        const i32 first = static_cast<i32>(std::floor((begin - from) / period)) - 1;
+        const i32 last = static_cast<i32>(std::ceil((begin + size - from) / period)) + 1;
+        return std::pair{std::max(first, -most), std::min(last, most)};
+    };
+    const auto [x0, x1] = span(layer->repeat.x, at.pos.x, area.x, area.w);
+    const auto [y0, y1] = span(layer->repeat.y, at.pos.y, area.y, area.h);
+    for (i32 y = y0; y <= y1; ++y) {
+        for (i32 x = x0; x <= x1; ++x) {
+            WorldTransform copy = at;
+            copy.pos = {at.pos.x + static_cast<f32>(x) * layer->repeat.x, at.pos.y + static_cast<f32>(y) * layer->repeat.y};
+            fn(copy);
+        }
+    }
+}
+
+bool animated(const TilemapComponent& tilemap) {
+    return tilemap.tilemap && tilemap.tilemap->map.tileset.animated();
+}
+
+} // namespace
+
 void WorldRenderState::propagate_transforms() {
     // Tables come in hierarchy depth order (cascade), and every entity in a table
     // shares its parent, so each table is one tight loop with no per-entity lookups.
-    _transforms.run([](flecs::iter& it) {
+    const std::optional<Vec2f> view = _parallax_view;
+    _transforms.run([&view](flecs::iter& it) {
         while (it.next()) {
             const auto self = it.field<WorldTransform>(0);
             const auto local = it.field<const Transform2D>(1);
@@ -274,14 +319,24 @@ void WorldRenderState::propagate_transforms() {
             }
             if (plain(parent)) {
                 for (const auto i : it) {
-                    self[i] = {add(parent.pos, local[i].pos), parent.rotation + local[i].rotation, local[i].scale};
+                    self[i] = {add(parent.pos, local[i].pos), parent.rotation + local[i].rotation, local[i].scale, parent.parallax};
                 }
-                continue;
+            } else {
+                const Affine2 linear = Affine2::trs({}, parent.rotation, parent.scale); // once per table
+                for (const auto i : it) {
+                    self[i] = {add(parent.pos, linear.apply_vector(local[i].pos)), parent.rotation + local[i].rotation,
+                               mul(parent.scale, local[i].scale), parent.parallax};
+                }
             }
-            const Affine2 linear = Affine2::trs({}, parent.rotation, parent.scale); // once per table
-            for (const auto i : it) {
-                self[i] = {add(parent.pos, linear.apply_vector(local[i].pos)), parent.rotation + local[i].rotation,
-                           mul(parent.scale, local[i].scale)};
+            if (it.is_set(3)) {
+                // Parallax layers: shifted as the camera looks elsewhere (their children with them).
+                const auto layers = it.field<const Parallax>(3);
+                for (const auto i : it) {
+                    self[i].parallax = true;
+                    if (view) {
+                        self[i].pos = add(self[i].pos, parallax_shift(layers[i], *view));
+                    }
+                }
             }
         }
     });
@@ -296,17 +351,17 @@ void WorldRenderState::collect_all(RenderQueue& queue,
     const auto wanted = [&](flecs::iter& it, std::size_t i) { return !include || include(it.entity(i)); };
     each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
         if (wanted(it, i)) {
-            submit_sprite(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_sprite(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_textures, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TextureRenderer& r) {
         if (wanted(it, i)) {
-            submit_texture(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_texture(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
         if (wanted(it, i)) {
-            submit_rect(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
@@ -316,7 +371,7 @@ void WorldRenderState::collect_all(RenderQueue& queue,
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
         if (wanted(it, i)) {
-            submit_shape(to(it, i), it.entity(i), t, r, options.view);
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_shape(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
@@ -360,30 +415,31 @@ void WorldRenderState::collect_static(RenderQueue& queue, SpriteRenderOptions op
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     // Clipped renderers are left to collect_dynamic(): their groups are made there.
-    const auto take = [](flecs::iter& it, bool is_static) { return is_static && !it.is_set(3); };
+    // Those a Parallax layer moves too, and maps with animated tiles: drawn each frame.
+    const auto take = [](flecs::iter& it, bool is_static, const WorldTransform& t) { return is_static && !it.is_set(3) && !t.parallax; };
     each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_sprite(queue, it.entity(i), t, r, options.view);
         }
     });
     collect_textures(queue, options, true);
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_rect(queue, it.entity(i), t, r, options.view);
         }
     });
     each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_line(queue, it.entity(i), t, r, options.view);
         }
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_shape(queue, it.entity(i), t, r, options.view);
         }
     });
     each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable && !animated(r), t)) {
             KIN_DRAW_ENTITY(it.entity(i), "TilemapComponent");
             submit_tilemap(queue, t, r, options.view);
         }
@@ -454,15 +510,19 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 // Clipped: all dynamic, each into its group's queue.
                 if (!statics) {
                     for (const auto i : it) {
-                        submit_texture(route(queue, it, i, 3, options), it.entity(i), world[i], textures[i], options.view);
+                        repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
+                            submit_texture(route(queue, it, i, 3, options), it.entity(i), at, textures[i], options.view);
+                        });
                     }
                 }
                 continue;
             }
-            if (!options.jobs || rows < parallel_min) {
+            if (!options.jobs || rows < parallel_min || world[0].parallax) { // a table shares its parent (and any Parallax)
                 for (const auto i : it) {
-                    if (textures[i].static_renderable == statics) {
-                        submit_texture(queue, it.entity(i), world[i], textures[i], options.view);
+                    if ((textures[i].static_renderable && !world[i].parallax) == statics) {
+                        repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
+                            submit_texture(queue, it.entity(i), at, textures[i], options.view);
+                        });
                     }
                 }
                 continue;
@@ -484,7 +544,7 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 const auto [begin, end] = rows_of(c);
                 for (i32 i = begin; i < end; ++i) {
                     const auto row = static_cast<std::size_t>(i);
-                    if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+                    if ((textures[row].static_renderable && !world[row].parallax) == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
                         ++count;
                         // Each entity holds its own handle: compare textures, not handle addresses.
                         if ((!last || !(*sprite.texture == *last)) &&
@@ -517,7 +577,7 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
                 const auto [begin, end] = rows_of(c);
                 for (i32 i = begin; i < end; ++i) {
                     const auto row = static_cast<std::size_t>(i);
-                    if (textures[row].static_renderable == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
+                    if ((textures[row].static_renderable && !world[row].parallax) == statics && prepare_texture(world[row], textures[row], culler, sprite)) {
 #ifdef KIN_ENABLE_RENDER_PROBE
                         sprite.draw_source = draw_source_for(it.entity(row), "TextureRenderer");
 #endif
@@ -533,7 +593,7 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
             });
             for (i32 i = 0; i < rows; ++i) {
                 const auto row = static_cast<std::size_t>(i);
-                if (textures[row].blend != BlendMode::Alpha && textures[row].static_renderable == statics) {
+                if (textures[row].blend != BlendMode::Alpha && (textures[row].static_renderable && !world[row].parallax) == statics) {
                     submit_texture(queue, it.entity(row), world[row], textures[row], options.view);
                 }
             }
@@ -546,30 +606,30 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
     const auto to = [&](flecs::iter& it, std::size_t i) -> RenderQueue& { return route(queue, it, i, 3, options); };
     // Clipped renderers are all dynamic: their groups are made here.
-    const auto take = [](flecs::iter& it, bool is_static) { return !is_static || it.is_set(3); };
+    const auto take = [](flecs::iter& it, bool is_static, const WorldTransform& t) { return !is_static || it.is_set(3) || t.parallax; };
     each_row(_sprites, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SpriteRenderer& r) {
-        if (take(it, r.static_renderable)) {
-            submit_sprite(to(it, i), it.entity(i), t, r, options.view);
+        if (take(it, r.static_renderable, t)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_sprite(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     collect_textures(queue, options, false);
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
-        if (take(it, r.static_renderable)) {
-            submit_rect(to(it, i), it.entity(i), t, r, options.view);
+        if (take(it, r.static_renderable, t)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_lines, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const LineRenderer& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable, t)) {
             submit_line(to(it, i), it.entity(i), t, r, options.view);
         }
     });
     each_row(_shapes, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const ShapeRenderer& r) {
-        if (take(it, r.static_renderable)) {
-            submit_shape(to(it, i), it.entity(i), t, r, options.view);
+        if (take(it, r.static_renderable, t)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_shape(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
     each_row(_tilemaps, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const TilemapComponent& r) {
-        if (take(it, r.static_renderable)) {
+        if (take(it, r.static_renderable && !animated(r), t)) {
             KIN_DRAW_ENTITY(it.entity(i), "TilemapComponent");
             submit_tilemap(to(it, i), t, r, options.view);
         }
@@ -957,6 +1017,7 @@ bool submit_tilemap(RenderQueue& queue, const WorldTransform& world, const Tilem
         .order = tilemap.order,
         .sheet = tilemap.tilemap->sheet.valid() ? &tilemap.tilemap->sheet : nullptr,
         .origin = world.pos,
+        .time = tilemap.clock,
     };
     if (view) {
         tilemap.tilemap->map.submit(queue, *view, options);
@@ -1298,6 +1359,38 @@ void reshape_clip(ClipGroup& group) {
         group.clip = ClipRegion::to_path(Path::rounded_rect(box, std::clamp(group.radius, 0.0f, std::min(half.x, half.y))));
         break;
     case ClipShape::Ellipse: group.clip = ClipRegion::to_path(Path::ellipse(group.offset, half)); break;
+    }
+}
+
+Vec2f parallax_shift(const Parallax& layer, Vec2f view_centre) {
+    return {(view_centre.x - layer.anchor.x) * (1.0f - layer.factor.x) + layer.offset.x,
+            (view_centre.y - layer.anchor.y) * (1.0f - layer.factor.y) + layer.offset.y};
+}
+
+void update_parallax(EcsWorld& world, f32 dt) {
+    std::vector<flecs::entity> moving;
+    world.raw().each([&](flecs::entity entity, const Parallax& layer) {
+        if (layer.scroll.x != 0.0f || layer.scroll.y != 0.0f) {
+            moving.push_back(entity);
+        }
+    });
+    const auto wrapped = [](f32 value, f32 period) { return period > 0.0f ? std::fmod(value, period) : value; };
+    for (flecs::entity entity : moving) {
+        Parallax* layer = entity.get_mut<Parallax>(); // its own, when a prefab's
+        layer->offset = {wrapped(layer->offset.x + layer->scroll.x * dt, layer->repeat.x),
+                         wrapped(layer->offset.y + layer->scroll.y * dt, layer->repeat.y)};
+    }
+}
+
+void update_tilemaps(EcsWorld& world, f32 dt) {
+    std::vector<flecs::entity> animated_maps;
+    world.raw().each([&](flecs::entity entity, const TilemapComponent& tilemap) {
+        if (animated(tilemap)) {
+            animated_maps.push_back(entity);
+        }
+    });
+    for (flecs::entity entity : animated_maps) {
+        entity.get_mut<TilemapComponent>()->clock += std::max(dt, 0.0f);
     }
 }
 

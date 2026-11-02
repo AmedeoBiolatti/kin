@@ -962,6 +962,84 @@ void test_world_render_state_collect_dynamic_excludes_static_renderables() {
     assert(dynamic_queue.size() == 2);
 }
 
+// Parallax layers: shifted as the camera looks away from their anchor (their
+// children with them), drawn each frame (never cached as static), repeated
+// over the view, scrolling by themselves within their repeat; an editor's view
+// (no parallax view) draws them where they are placed.
+void test_parallax_layers() {
+    assert(kin::parallax_shift({.factor = {0.5f, 1.0f}, .anchor = {100.0f, 0.0f}}, {300.0f, 50.0f}) == (kin::Vec2f{100.0f, 0.0f}));
+    assert(kin::parallax_shift({.factor = {0.0f, 0.0f}, .offset = {3.0f, 4.0f}}, {10.0f, 20.0f}) == (kin::Vec2f{13.0f, 24.0f}));
+
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::EcsEntity hills = world.entity("Hills")
+                               .set(kin::Transform2D{{100.0f, 0.0f}})
+                               .set(kin::Parallax{.factor = {0.5f, 0.5f}})
+                               .set(kin::RectRenderer{.size = {4.0f, 4.0f}, .static_renderable = true});
+    world.entity("Tree")
+        .child_of(hills)
+        .set(kin::Transform2D{{10.0f, 0.0f}})
+        .set(kin::RectRenderer{.size = {2.0f, 2.0f}, .static_renderable = true});
+    world.entity("Ground").set(kin::Transform2D{{0.0f, 0.0f}}).set(kin::RectRenderer{.size = {8.0f, 8.0f}, .static_renderable = true});
+
+    kin::WorldRenderState state{world};
+    state.propagate_transforms(); // no view: where they are placed
+    assert(hills.get<kin::WorldTransform>()->pos == (kin::Vec2f{100.0f, 0.0f}) && hills.get<kin::WorldTransform>()->parallax);
+    state.set_parallax_view(kin::Vec2f{200.0f, 40.0f});
+    state.propagate_transforms();
+    assert(hills.get<kin::WorldTransform>()->pos == (kin::Vec2f{200.0f, 20.0f}));
+    const kin::WorldTransform* tree = world.entities().find_by_name("Tree").get<kin::WorldTransform>();
+    assert(tree->pos == (kin::Vec2f{210.0f, 20.0f}) && tree->parallax);
+    assert(!world.entities().find_by_name("Ground").get<kin::WorldTransform>()->parallax);
+
+    // Static ones under a layer are drawn each frame.
+    kin::RenderQueue statics{kin::RenderSortMode::Submission};
+    state.collect_static(statics, {.sort = false});
+    assert(statics.size() == 1);
+    kin::RenderQueue dynamics{kin::RenderSortMode::Submission};
+    state.collect_dynamic(dynamics, {.sort = false});
+    assert(dynamics.size() == 2);
+
+    // Repeated every 100 points over a view 400 wide: its rectangle drawn again and again.
+    hills.get_mut<kin::Parallax>()->repeat = {100.0f, 0.0f};
+    kin::RenderView view{.cull_rect = {0.0f, 0.0f, 400.0f, 100.0f}};
+    kin::RenderQueue across{kin::RenderSortMode::Submission};
+    state.collect_all(across, {}, {.sort = false, .view = &view});
+    std::vector<float> xs;
+    for (const kin::RenderCommand& command : across.commands()) {
+        if (command.rect.w == 4.0f) {
+            xs.push_back(command.rect.x);
+        }
+    }
+    std::ranges::sort(xs);
+    assert(xs.size() >= 4 && xs.front() <= 0.0f && xs.back() >= 396.0f);
+    for (std::size_t i = 1; i < xs.size(); ++i) {
+        assert(std::abs(xs[i] - xs[i - 1] - 100.0f) < 1e-3f);
+    }
+
+    // Scrolling by itself, kept within its repeat.
+    hills.get_mut<kin::Parallax>()->scroll = {30.0f, 0.0f};
+    for (int i = 0; i < 5; ++i) {
+        kin::update_parallax(world, 1.0f);
+    }
+    assert(std::abs(hills.get<kin::Parallax>()->offset.x - 50.0f) < 1e-3f);
+
+    // A map with an animated tile: played on by update_tilemaps, drawn each frame.
+    auto asset = std::make_shared<kin::TilemapAsset>();
+    asset->map.resize(1, 1);
+    const kin::u16 water = asset->map.tileset.ensure_tile("water");
+    asset->map.tileset.tile(water)->frames = {0, 1};
+    asset->map.set(0, 0, water);
+    kin::EcsEntity pond = world.entity("Pond").set(kin::Transform2D{}).set(kin::TilemapComponent{.tilemap = asset});
+    kin::update_tilemaps(world, 0.5f);
+    assert(std::abs(pond.get<kin::TilemapComponent>()->clock - 0.5) < 1e-9);
+    state.set_parallax_view(std::nullopt);
+    state.propagate_transforms();
+    kin::RenderQueue still{kin::RenderSortMode::Submission};
+    state.collect_static(still, {.sort = false});
+    assert(still.size() == 1); // only the ground
+}
+
 void test_one_shot_submit_reuses_scratch_queue_output() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -1663,6 +1741,7 @@ void test_animators_started_together() {
 }
 
 int main() {
+    test_parallax_layers();
 #ifdef _MSC_VER
     _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
     _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);

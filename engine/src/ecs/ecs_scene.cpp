@@ -153,6 +153,11 @@ void EcsScene::render(SceneContext& ctx) {
         }
     }
 
+    // Where Parallax layers are shifted from: the camera's centre (the screen's
+    // without one); an editor's view draws them where they are placed.
+    const std::optional<Vec2f> parallax_view =
+        _view_camera ? std::nullopt : std::optional(camera_ptr ? camera_ptr->center() : Vec2f{screen.x * 0.5f, screen.y * 0.5f});
+
     // Lit: the world (and its effects) drawn first, then lit, then the UI layer and above.
     const bool lit = _render_config.scene_lighting && scene_lighting(ecs()) != nullptr;
     constexpr u64 unlit_passes = render_pass_mask::ui | render_pass_mask::debug | render_pass_mask::editor_overlay;
@@ -204,6 +209,7 @@ void EcsScene::render(SceneContext& ctx) {
     }
     if (static_cache_enabled) {
         WorldRenderState& state = render_state();
+        state.set_parallax_view(parallax_view);
         {
             DebugStepTimer timer{timing_debug, "render.scene.propagate_transforms"};
             state.propagate_transforms();
@@ -264,6 +270,7 @@ void EcsScene::render(SceneContext& ctx) {
         }
     } else {
         WorldRenderState& state = render_state();
+        state.set_parallax_view(parallax_view);
         {
             DebugStepTimer timer{timing_debug, "render.scene.propagate_transforms"};
             state.propagate_transforms();

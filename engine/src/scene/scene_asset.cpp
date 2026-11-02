@@ -833,6 +833,23 @@ void register_builtin_editor_components(EcsWorld& world) {
         // Who goes through SceneDoors (the player): where it is, is what is in a door.
         world.components().native<SceneTraveller>("SceneTraveller").field("enabled", &SceneTraveller::enabled);
     }
+    if (!world.components().find("Parallax")) {
+        // A background (or foreground) layer moving less (or more) than the
+        // world as the camera moves; its entities with it (kin/ecs/render.hpp).
+        world.components().native<Parallax>("Parallax")
+            .field("factor", &Parallax::factor)
+            .description("How much it moves with the world: 1 like the rest, 0 fixed on the screen, 0.5 far away, above 1 nearer.")
+            .field("anchor", &Parallax::anchor)
+            .description("Where the camera looks when the layer is where the scene puts it.")
+            .field("repeat", &Parallax::repeat)
+            .units("points")
+            .description("Its own sprite, texture, rectangle or shape drawn again every so many points along each axis, filling the view; 0: once.")
+            .field("scroll", &Parallax::scroll)
+            .units("points/s")
+            .description("How fast it moves by itself (clouds).")
+            .field("offset", &Parallax::offset)
+            .readonly();
+    }
     if (!world.components().find("Saved")) {
         // What the entity keeps while the player is elsewhere, and in saves
         // (SceneSaves, kin/ecs/saving.hpp); once destroyed, it stays destroyed.

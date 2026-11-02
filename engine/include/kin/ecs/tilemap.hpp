@@ -39,9 +39,13 @@ struct TilemapComponent {
     i32 layer = layer_value(RenderLayer::TileBack);
     i32 order = 0;
     bool visible = true;
-    bool static_renderable = true; // drawn into a scene's cached static queue
+    bool static_renderable = true; // drawn into a scene's cached static queue (unless its tiles are animated)
+    f64 clock = 0.0; // seconds its animated tiles have played (update_tilemaps)
     // What `asset` names, read (Assets2D's binder sets it). Null: nothing drawn.
     std::shared_ptr<const TilemapAsset> tilemap;
 };
+
+// Maps with animated tiles played on by `dt` seconds (each step).
+void update_tilemaps(EcsWorld& world, f32 dt);
 
 } // namespace kin
