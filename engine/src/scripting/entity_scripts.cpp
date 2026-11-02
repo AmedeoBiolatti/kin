@@ -1,6 +1,7 @@
 #include <kin/scripting/entity_scripts.hpp>
 
 #include <kin/ecs/animator.hpp>
+#include <kin/ecs/camera.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
@@ -524,6 +525,24 @@ struct EntityScripts::Impl {
             }
             made.root.raw().set<SpawnedPrefab>({.prefab = prefab}); // a save makes it again from it
             return ScriptEntity{world, made.root.raw()};
+        };
+
+        sol::table camera_table = lua.create_named_table("camera");
+        camera_table["shake"] = [this](f32 trauma) {
+            if (world) {
+                shake_camera(*world, trauma);
+            }
+        };
+        camera_table["trauma"] = [this]() {
+            f32 most = 0.0f;
+            if (world) {
+                world->raw().each([&](const CameraComponent& camera) {
+                    if (camera.current) {
+                        most = std::max(most, camera.trauma);
+                    }
+                });
+            }
+            return most;
         };
 
         sol::table save_table = lua.create_named_table("save");

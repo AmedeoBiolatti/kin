@@ -209,6 +209,31 @@ const std::optional<kin::Camera2D> camera = kin::scene_camera(world, {1280, 720}
 
 Scene files describe it, so editors place and change it.
 
+How it follows its entity, zooms and shakes (all in `update_cameras`):
+- **`dead_zone`:** a box, centred on what the camera looks at, that its entity
+  moves about in without the camera following. The camera moves only as far
+  as keeps the entity inside it. An axis of 0 follows exactly.
+- **`look_ahead`:** how far ahead it looks the way its entity moves, along
+  each axis: the entity's motion over `look_ahead_time` seconds, no further.
+  The lead eases in and out, so turning round does not jerk the view.
+- **`zoom_smoothing`:** a change of `zoom` takes about that long, eased in
+  proportion (1 to 2 takes as long as 2 to 4).
+- **Shake:** `shake_camera(world, trauma)` adds trauma, 0 to 1, to the current
+  cameras (`shake_camera(entity, trauma)` to one); it wears off by
+  `shake_decay` a second. The camera moves by up to `shake_strength` points
+  times the trauma squared, without turning, so a small knock barely shows
+  and a big one throws it about. It jitters
+  `shake_frequency` times a second along smooth noise, the same each run. The
+  shake goes on top of the limits.
+
+```cpp
+follow.set(kin::CameraComponent{.smoothing = 0.15f, .dead_zone = {80, 120}, .look_ahead = {160, 0}});
+kin::shake_camera(world, 0.4f); // a hard landing
+kin::update_cameras(world, dt);
+```
+
+Scripts shake it with `camera.shake(trauma)` ([scripting](scripting.md)).
+
 #### Parallax layers
 
 A `kin::Parallax` on an entity makes it, and every entity under it, a layer

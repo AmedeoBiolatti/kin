@@ -26,6 +26,8 @@
 //   input.held(action), input.pressed(action), input.released(action), input.axis(name),
 //   input.mouse() -> x, y
 //   world.find(name) -> an entity or nil; world.spawn(prefab, x, y) -> its root, or nil
+//   camera.shake(trauma) shakes the current cameras (0 to 1, added; it wears
+//   off: kin/ecs/camera.hpp); camera.trauma() -> what is left
 // and, given the scene's screens (set_screens), its UI's elements by id:
 //   ui.clicked(id), ui.changed(id), ui.value(id), ui.checked(id), ui.text(id),
 //   ui.set_text(id, text), ui.set_value(id, v), ui.set_checked(id, b), ui.show(id[, b]),

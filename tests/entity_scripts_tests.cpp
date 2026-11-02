@@ -4,6 +4,7 @@
 // does not read is told and skipped; a changed file is read again.
 
 #include <kin/ecs/animator.hpp>
+#include <kin/ecs/camera.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/saving.hpp>
@@ -289,6 +290,32 @@ end
     fs::remove_all(dir);
 }
 
+// camera.shake adds trauma to the current camera; camera.trauma() says what is left.
+void test_camera_shake() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_camera_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/thud.lua", R"lua(
+function on_update(self, dt)
+    if not self.done then
+        self.done = true
+        camera.shake(0.3)
+        camera.shake(0.2)
+        self:set("Transform2D", {pos = {x = camera.trauma() * 100, y = 0}})
+    end
+end
+)lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::EcsEntity cam = world.entity("Camera").set(kin::Transform2D{}).set(kin::CameraComponent{});
+    kin::EcsEntity hero = world.entity("Hero").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/thud.lua"}});
+    kin::Input input;
+    kin::EntityScripts scripts{{.content = dir, .check_frames = 0}};
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    assert(near(cam.get<kin::CameraComponent>()->trauma, 0.5f) && near(hero.get<kin::Transform2D>()->pos.x, 50.0f));
+    fs::remove_all(dir);
+}
+
 } // namespace
 
 int main() {
@@ -296,5 +323,6 @@ int main() {
     test_entity_emit();
     test_scene_go();
     test_saves();
+    test_camera_shake();
     return 0;
 }
