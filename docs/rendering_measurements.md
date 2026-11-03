@@ -434,6 +434,75 @@ settings, binary/content hashes and scores. Scene preparation, the release Godot
 pack, Unreal adapter sources/build logs, per-frame logs and both raw/denoised
 reference seeds are retained there.
 
+### Experimental Cornell GI quality/cost, 2026-11-03
+
+`exp/gi-yard` and `quality/gi-response` both identify `6d75304`. Its better
+Cornell result comes from a generated static-source/residual-history prototype,
+not the branch's default renderer. The reviewed generator chain was rebuilt as
+isolated archive overlays on optimized main `63e1fef` (renderer `427b594`).
+Both source quadrature tiers include the immutable emission-lookup SSBO fix.
+No shipping GI code or defaults were changed for this study.
+
+The fixture, authored emission, camera, TAA, raster sample count and two Cycles
+references are identical to the engine comparison above. Fresh serial cost runs
+use three rotated repeats, each 1,200 warm-up + 2,400 measured frames at 720p,
+CPUs 0–15, release Vulkan, RTX 4080 Laptop. Captures/readbacks and memory sampling
+are separate from throughput. Quality averages phases 2,400/2,573 against both
+1,024-sample denoised reference seeds, with the same room crop/mask and no fitting.
+
+| GI configuration | Frame p50 | Run p50 range | Crop SSIM ↑ | Room RGB MAE ↓ | Process VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Optimized main | 1.059 ms | 0.856–1.060 ms | 0.9338 | 7.524 | 483 MiB |
+| Experimental, 32 source points | 5.181 ms | 3.930–5.567 ms | 0.9781 | 2.993 | 534 MiB |
+| Experimental, 128 source points | 17.845 ms | 14.809–17.946 ms | 0.9784 | 2.987 | 534 MiB |
+
+The 32-point tier removes most of main's wall bands and bright edge leaks,
+reducing room color error by 60.2%, at 4.89x main's median frame cost. Its interval
+is 71.0% below 128 points with only a small aggregate quality difference. The
+two tiers differ by a mean 0.0288 RGB levels out of 255 across the full frames;
+the largest channel difference is eight levels, localized near shadow edges.
+For this static scene, 32 points is the useful experimental tier.
+
+The prototype separates authored emission from feedback, improves probe
+reconstruction, keeps signed indirect residuals in history and recomposes current
+direct source lighting after history. It integrates the actual emissive triangles
+with visibility against the frozen opaque triangle cache. Half-resolution source
+integration/visibility, extra transport treatment and the composite dispatch add
+GPU work. Probe budgets remain 51,984 probes, 4,096 updates x 128 rays/render,
+with 3,326,976 voxels. After subtracting main's interval, extra cost grows 4.07x
+for 4x the source points, supporting source integration as the next target.
+This does not assign individual GPU-pass durations.
+
+Median CPU render-call scopes are 0.124/0.182/0.229 ms for main/32/128;
+presentation/backpressure scopes are 0.883/4.946/17.456 ms. Most added interval
+appears as GPU backpressure rather than CPU submission. The next experiment
+should cache static source irradiance/visibility in surface or world space with
+explicit invalidation, or adapt source samples around penumbrae. These are
+proposals, not measured improvements. The branch's earlier BVH/full-table-buffer
+pilots did not establish a win.
+
+VRAM is per-PID NVML from a separate 1,200 + 2,400-frame run per tier, excluding
+the last buffered progress block. Main/32/128 have 44/230/739 bounded samples;
+GNOME Shell is the only other observed GPU PID. The lookup buffer is 30,624 bytes
+for 696 emission entries. The old pre-SSBO prototype is not measured here.
+
+Unlocked clocks and thermals vary substantially: startup observations span
+77–86 C, and the memory lane holds around 1,290 MHz graphics. Run ranges are
+retained; exact timings and ratios are exploratory, not fixed-clock claims.
+These results exclude source-cache construction, shader compilation and cold
+convergence. The source/opaque geometry caches are immutable; arbitrary scenes,
+dynamic sources/geometry, motion and cuts are untested by this campaign. Two
+static capture phases do not establish temporal stability. Earlier Godot/Unreal
+times remain a separate campaign, not part of this fresh speed ranking.
+
+Artifacts: `out/cornell-gi-tradeoff-20261103/index.html` and `comparison.png`;
+`summary.json`, `quality-summary.json`, `campaign.json`, `build-record.json` and
+`memory-summary.json` retain metrics, phases/seeds, commands, source/binary/shader
+hashes, clocks and bounded windows. The isolated builder, runners, staged source
+caches and raw per-frame/process logs are retained there. Five lookup-table and
+nine residual/integration CPU contracts pass. This is a static-scene study, not
+production qualification of the generated overlays.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
