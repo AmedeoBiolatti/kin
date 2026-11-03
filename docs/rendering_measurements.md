@@ -374,6 +374,66 @@ hashes and validation checks are in `source-identity.json` and
 `final-validation.json`. `yard-preflight/` and `yard-before-budget-fix/` are
 preceding measurements, not included in the final figures above.
 
+### Cornell GI across Kin, Godot and Unreal, 2026-11-03
+
+The three CPU optimization commits are merged into local main at `427b594`,
+after updating from `origin/main`. A fresh main build passes the CPU renderer,
+direct-instance/local-shadow cache and draw-command GPU regressions.
+
+The comparison uses one static 1280x720 Cornell view on the RTX 4080 Laptop GPU,
+Vulkan release builds, TAA, no MSAA, black ambient/background and no explicit
+lights: only the original ceiling panel emits. All consumers receive the same
+materials, emission, camera and 82 triangles. The original interior faces are
+preserved; closed 2 cm exterior wall slabs and a uniform 10x geometry/camera scale
+make the shared fixture suitable for distance-field GI. Fresh Cycles references
+use this same adapted asset.
+
+| Renderer / GI profile | Frame p50 | Frame p95 | Crop SSIM, higher better | Room RGB MAE, lower better |
+| --- | ---: | ---: | ---: | ---: |
+| Kin stock GI | 0.950 ms | 1.214 ms | 0.934 | 7.51 |
+| Godot 4.7.2 Forward+ / SDFGI | 0.526 ms | 1.051 ms | 0.730 | 38.77 |
+| Unreal 5.8.4 Shipping / software Lumen | 2.483 ms | 2.571 ms | 0.971 | 8.09 |
+
+Timing figures are medians of three rotated, serial repeats, each with 1,200
+warm-up and 2,400 measured frames, CPUs 0–15. No builds or captures overlap cost
+runs. Run p50 ranges are 0.851–1.047 ms Kin, 0.523–0.619 ms Godot and
+2.455–2.655 ms Unreal. These are full-frame intervals, including each adapter and
+presentation; unlike individual engine CPU/GPU columns, that scope is comparable.
+Clocks are unlocked on a shared desktop. Cold import, shader compilation, mesh
+distance-field generation and initial GI convergence are excluded.
+
+Quality is captured separately after 2,400 warm-up frames. Scores average two
+independent 1,024-sample denoised Cycles references, without exposure or color
+fitting. SSIM uses the repository's 11x11 Gaussian luminance implementation on
+the same room crop. MAE is in 8-bit sRGB levels on reference room pixels, excluding
+black background and the clipped emitter. The denoised references agree to
+SSIM 0.9991 / room MAE 0.147; raw reference seeds and their scores are retained.
+
+Kin is about 2.6x Lumen's throughput in this configuration, retaining broad
+illumination/color bleeding with bright edge leaks and wall banding. Lumen has
+cleaner shadows and fewer localized artifacts; Kin's slightly lower average
+color error alone does not establish better overall quality. Godot SDFGI is
+fastest, with pronounced lighting/shadow discontinuities and excessive back-wall
+brightness. These profiles do not have equal image quality and do not establish
+a general engine ranking. This small static scene exercises GI rather than the
+many-object CPU submission workload optimized above; temporal stability is untested.
+
+Kin uses 128 rays and up to 4,096 probe updates/render, with TAA sharpness 0.
+Godot uses a 0.1 m minimum SDFGI cell, four cascades, occlusion, bounce feedback
+0.5 and its half-resolution GI project setting. Unreal uses Epic software Lumen,
+100% screen percentage, TAA and mesh distance-field resolution scale 4, with
+AO/bloom/motion blur/occlusion queries off. Initial Godot VoxelGI 128/256 bakes
+underlit the panel-only fixture through dynamic-range and black-ambient controls;
+those diagnostics are excluded from the main ranking, not evidence that another
+VoxelGI setup cannot render Cornell correctly.
+
+Session artifacts are `out/cornell-engines-20261103/`: `index.html` and
+`comparison.png` show the images; `campaign.json`, `speed-summary.json`,
+`quality-summary.json` and `final-summary.json` record commands, checks, effective
+settings, binary/content hashes and scores. Scene preparation, the release Godot
+pack, Unreal adapter sources/build logs, per-frame logs and both raw/denoised
+reference seeds are retained there.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
