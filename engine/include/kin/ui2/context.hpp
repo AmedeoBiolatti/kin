@@ -519,6 +519,11 @@ public:
     void describe(Id id, std::string_view role, std::string_view label, Rectf bounds,
                   bool enabled = true, bool focusable = false, std::string_view value = {}, bool checked = false);
     void semantic_key(Id id, std::string_view key);
+    // Accessible name independent of visible text, for icon buttons and fields.
+    // Call before or after the widget each frame.
+    void semantic_label(Id id, std::string_view label);
+    void semantic_numeric(Id id, f64 value, f64 min, f64 max, f64 step);
+    std::optional<f64> take_numeric_action(Id id, f64 value, f64 min, f64 max, f64 step);
     void semantic_parent(Id id, Id parent);
     const std::vector<SemanticElement>& elements() const { return _elements; }
     bool accepts_input(Id id) const;
@@ -531,9 +536,18 @@ public:
     void cancel_action() { _semantic_action.reset(); }
     void set_controller_navigation(ControllerNavigation options) { _controller_options = options; }
     bool controller_active() const { return _controller_active; }
+    void set_reduced_motion(bool value) {
+        _reduced_motion = value;
+        _surface_anim.clear();
+    }
+    bool reduced_motion() const { return _reduced_motion; }
     bool back_requested() const { return _controller_back; }
-    std::string_view accept_prompt() const { return _controller_active ? "A / Cross" : "Enter"; }
-    std::string_view back_prompt() const { return _controller_active ? "B / Circle" : "Esc"; }
+    std::string_view accept_prompt() const {
+        return _controller_active ? gamepad_button_label(_previous_pad.family, GamepadButton::A) : "Enter";
+    }
+    std::string_view back_prompt() const {
+        return _controller_active ? gamepad_button_label(_previous_pad.family, GamepadButton::B) : "Esc";
+    }
 
     void open_modal(Id id);
     void close_modal(Id id);
@@ -1069,6 +1083,8 @@ private:
     Vec2i _glass_last_output{};               // last frame's output size (skip readback while resizing)
     bool _glass_captured = false;             // capture attempted this frame
     Theme _theme;
+    bool _reduced_motion = false;
+    std::unordered_map<u64, std::string> _semantic_labels;
     DebugOptions _debug{};
     std::vector<Diagnostic> _diagnostics;
     std::vector<DrawScopeEntry> _draw_scopes; // declared widget bounds; check_draw tests against back()

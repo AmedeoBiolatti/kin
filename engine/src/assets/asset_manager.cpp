@@ -1,3 +1,4 @@
+#include <kin/anim/skeleton2d.hpp>
 #include <kin/assets/asset_manager.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/l10n/localization.hpp>
@@ -55,6 +56,8 @@ AssetStatus status_for_path(const std::filesystem::path& path) {
 
 AssetType infer_asset_type(const std::filesystem::path& path) {
     const std::string ext = lowercase_extension(path);
+    if (ext == ".kinskel")
+        return AssetType::Skeleton2D;
     // What load_image reads, and the compressed textures (texture_file.hpp).
     if (ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".qoi" ||
         ext == ".gif" || ext == ".ktx2" || ext == ".dds") {
@@ -312,6 +315,16 @@ AssetMetadata AssetManager::make_metadata(std::string relative_path) const {
 }
 
 void register_default_asset_loaders(AssetManager& assets) {
+    assets.register_loader<SkeletonAsset2D>([](const std::filesystem::path& path) {
+        const auto source = read_content_text(path);
+        std::string error;
+        if (!source)
+            throw std::runtime_error("skeleton file could not be read");
+        auto rig = parse_skeleton2d(*source, error);
+        if (!rig)
+            throw std::runtime_error(error);
+        return std::move(*rig);
+    });
     assets.register_loader<Image>([](const std::filesystem::path& path) {
         return load_image(path);
     });

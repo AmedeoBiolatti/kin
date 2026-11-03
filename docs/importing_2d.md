@@ -36,6 +36,25 @@ For custom targets, include `kin_import_2d.cmake` and call
 It creates `target_import_2d`, adds the dependency and sets target property
 `KIN_IMPORTED_CONTENT_DIR`.
 
+## Watching and incremental processing
+
+Add `--watch` to keep development content up to date, or build the long-running
+`<target>_watch_2d` terminal target. Changes are debounced with `--debounce` (0.1
+seconds); `--interval` controls polling (0.25 seconds). Ordinary running scenes
+pick up generated files through Assets2D::reload_changed. Preloaded scenes retain
+their immutable snapshots.
+
+Per-job output blobs are cached using tool/options/version keys, with verified
+source and artifact hashes. Unrelated jobs remain cache hits; unchanged outputs
+keep their mtimes. The default cache is `.kin-import-cache` in the output directory;
+`--cache directory` selects another store. Deleting it is safe. Hit/miss metrics
+are CLI diagnostics; generated reports remain deterministic.
+
+Invalid source files and edits during transforms retain the last good output;
+corrupt cache artifacts regenerate. Watch mode retries on the next source change.
+All transforms validate before publishing; individual file replacements are atomic.
+Keep authoring and output directories separate. Native Aseprite still needs its CLI.
+
 ## Manifest
 
 ```json

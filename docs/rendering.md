@@ -1,5 +1,48 @@
 # Rendering And Sprites
 
+## Normal-mapped sprites
+
+`kin/renderer/normal_lighting2d.hpp` provides portable CPU forward shading with
+Lambert diffuse, Blinn-Phong specular, point/directional lights, receiver masks and
+the existing polygon occluders. It computes at source resolution in linear light
+and preserves alpha. Albedo/light colours are sRGB; normal/specular maps are data.
+Normals encode +X right, +Y down, +Z toward the viewer.
+
+For scenes, use `kin/ecs/normal_sprite2d.hpp`:
+
+```cpp
+world.entity("lighting").set(kin::SceneLighting{
+    .ambient = kin::Color::rgb(40, 44, 64), .forward_sprites = true});
+world.entity("sun").set(kin::DirectionalLight2D{.direction = {-.3f, -.5f}, .elevation = 1});
+actor.set(kin::NormalSpriteRenderer2D{
+    .albedo_asset = {"images/hero.png"}, .normal_asset = {"images/hero_n.png"},
+    .specular_asset = {"images/hero_s.png"}, .specular_strength = .3f});
+```
+
+Assets2D binds images; normal sprites enter the normal render queue with sorting,
+culling, hierarchy transforms, clipping, flips and atlas source regions.
+source_pos/source_size are reflected for scene files; C++ uses source. Maps share
+normalized atlas UVs and may have different resolutions. Missing normals use a
+flat surface; specular strength defaults to zero. The specular map's red channel
+scales the highlight, with shininess controlling its width.
+
+Point lights use LightComponent's height above the plane and mask. Directional
+lights use a direction toward the light plus elevation, rotated with their
+entity. Only intersecting light/receiver mask bits contribute. Existing
+LightOccluders stop either light type; softness uses four shadow samples. Light
+shape images also affect point-light intensity.
+
+forward_sprites disables the scene-wide flat lightmap; NormalSpriteRenderer2D
+receives forward lighting and ordinary sprites/shapes/UI remain unlit. Existing
+scenes keep their original lightmap path by default. Without forward_sprites,
+normal sprites draw their albedo for the legacy lightmap to shade.
+
+This first path shades on the CPU on every backend, caching the resulting
+texture until material, pose, lights or occluders change. It supports up to 256
+lights and 4 million source pixels per sprite. Moving large receivers/lights can
+be expensive; this is not a GPU deferred lighting implementation. Use
+shade_normal_sprite2d directly for baking/reference shading.
+
 The experimental [WebGL2 browser target](web.md) implements a subset of this API;
 its capabilities and build instructions are documented separately.
 

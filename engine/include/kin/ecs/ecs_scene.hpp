@@ -74,6 +74,7 @@ public:
     // The assets its world's components name, once it has drawn (it needs the
     // renderer); nullptr before.
     Assets2D* assets() { return _assets.get(); }
+    void adopt_assets(std::unique_ptr<Assets2D> assets);
     // A binder for a component of the game's own that names an asset (see
     // Assets2D), kept for when the assets are made.
     void add_asset_binder(std::string name, Assets2D::Binder binder);

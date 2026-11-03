@@ -46,6 +46,8 @@ function(kin_import_2d_assets target)
         DEPENDS ${dependencies}
         COMMENT "Importing ${target} 2D assets" VERBATIM)
     add_custom_target(${target}_import_2d DEPENDS "${stamp}")
+    add_custom_target(${target}_watch_2d COMMAND ${command} --watch
+        COMMENT "Watching ${target} authoring assets" USES_TERMINAL VERBATIM)
     add_dependencies(${target} ${target}_import_2d)
     set_target_properties(${target} PROPERTIES KIN_IMPORTED_CONTENT_DIR "${output}")
 endfunction()

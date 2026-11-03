@@ -1,8 +1,8 @@
-#include <kin/ui2/context.hpp>
-#include <kin/core/json.hpp>
-
 #include <algorithm>
+#include <charconv>
 #include <cmath>
+#include <kin/core/json.hpp>
+#include <kin/ui2/context.hpp>
 #include <limits>
 
 namespace kin::ui2 {
@@ -29,6 +29,47 @@ void Context::semantic_parent(Id id, Id parent) {
     if (auto* e = element(id)) e->parent = parent;
 }
 
+void Context::semantic_label(Id id, std::string_view label) {
+    _semantic_labels[id.value] = label;
+    if (auto* e = element(id))
+        e->label = label;
+}
+
+void Context::semantic_numeric(Id id, f64 value, f64 min, f64 max, f64 step) {
+    if (!std::isfinite(value) || !std::isfinite(min) || !std::isfinite(max) || !std::isfinite(step) || min > max ||
+        step < 0)
+        return;
+    if (auto* e = element(id)) {
+        e->numeric_value = value;
+        e->numeric_min = min;
+        e->numeric_max = max;
+        e->numeric_step = step;
+    }
+}
+std::optional<f64> Context::take_numeric_action(Id id, f64 value, f64 min, f64 max, f64 step) {
+    const auto* e = element(id);
+    if (!_semantic_action || _semantic_action->id != id || !e || !e->enabled || !e->visible || e->blocked)
+        return std::nullopt;
+    const auto kind = _semantic_action->action;
+    if (kind != SemanticAction::Increment && kind != SemanticAction::Decrement && kind != SemanticAction::SetNumber)
+        return std::nullopt;
+    if (!std::isfinite(value) || !std::isfinite(min) || !std::isfinite(max) || !std::isfinite(step) || min > max ||
+        step < 0)
+        return std::nullopt;
+    if (kind == SemanticAction::SetNumber) {
+        const auto& text = _semantic_action->text;
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (error != std::errc{} || end != text.data() + text.size() || !std::isfinite(value)) {
+            _semantic_action.reset();
+            return std::nullopt;
+        }
+    } else
+        value += (kind == SemanticAction::Increment ? step : -step);
+    _semantic_action.reset();
+    _state.set_focused(id);
+    return std::clamp(value, min, max);
+}
+
 void Context::describe(Id id, std::string_view role, std::string_view label, Rectf bounds,
                        bool enabled, bool focusable, std::string_view value, bool checked) {
     if (!id) return;
@@ -37,6 +78,8 @@ void Context::describe(Id id, std::string_view role, std::string_view label, Rec
     auto& e = _elements[found->second];
     e.role = role;
     e.label = label;
+    if (const auto name = _semantic_labels.find(id.value); name != _semantic_labels.end())
+        e.label = name->second;
     e.value = value;
     e.bounds = to_screen(bounds);
     if (!_clip_stack.empty()) {
@@ -79,12 +122,26 @@ std::optional<Id> Context::resolve_action(std::string_view selector, SemanticAct
     if (action == SemanticAction::SetText && target->role != "text_input" && target->role != "text_edit") {
         error = "set_text requires a text input"; return std::nullopt;
     }
+    if ((action == SemanticAction::Increment || action == SemanticAction::Decrement ||
+         action == SemanticAction::SetNumber) &&
+        target->role != "slider" && target->role != "spinbutton") {
+        error = "numeric action requires a slider or number input";
+        return std::nullopt;
+    }
     return target->id;
 }
 
 bool Context::queue_action(std::string_view selector, SemanticAction action, std::string text, std::string& error) {
     const auto target = resolve_action(selector, action, error);
     if (!target) return false;
+    if (action == SemanticAction::SetNumber) {
+        f64 value = 0;
+        const auto [end, code] = std::from_chars(text.data(), text.data() + text.size(), value);
+        if (code != std::errc{} || end != text.data() + text.size() || !std::isfinite(value)) {
+            error = "set_number requires finite numeric text";
+            return false;
+        }
+    }
     if (_semantic_action) { error = "a UI action is already pending; advance a frame first"; return false; }
     _semantic_action = PendingSemanticAction{*target, action, std::move(text)};
     return true;
@@ -118,6 +175,14 @@ void Context::write_snapshot(JsonWriter& json) const {
         json.field("focusable", e.focusable);
         json.field("focused", _state.is_focused(e.id));
         json.field("checked", e.checked);
+        if (e.numeric_value)
+            json.field("numeric_value", *e.numeric_value);
+        if (e.numeric_min)
+            json.field("numeric_min", *e.numeric_min);
+        if (e.numeric_max)
+            json.field("numeric_max", *e.numeric_max);
+        if (e.numeric_step)
+            json.field("numeric_step", *e.numeric_step);
         json.key("bounds").begin_object();
         json.field("x", e.bounds.x); json.field("y", e.bounds.y);
         json.field("w", e.bounds.w); json.field("h", e.bounds.h);

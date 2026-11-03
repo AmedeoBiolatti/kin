@@ -27,6 +27,8 @@ std::string_view asset_type_name(AssetType type) {
     case AssetType::ColorLut: return "ColorLut";
     case AssetType::UiScreen: return "UiScreen";
     case AssetType::UiTheme: return "UiTheme";
+    case AssetType::Skeleton2D:
+        return "Skeleton2D";
     }
     return "Unknown";
 }

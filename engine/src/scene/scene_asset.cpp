@@ -1,23 +1,25 @@
-#include <kin/scene/scene_asset.hpp>
-
 #include <kin/assets/asset_manager.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/camera.hpp>
-#include <kin/ecs/lighting.hpp>
-#include <kin/ecs/particles.hpp>
-#include <kin/ecs/tilemap.hpp>
-#include <kin/ecs/render.hpp>
-#include <kin/ecs/script.hpp>
-#include <kin/ecs/shader_effect.hpp>
 #include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/lighting.hpp>
+#include <kin/ecs/normal_sprite2d.hpp>
+#include <kin/ecs/particles.hpp>
+#include <kin/ecs/render.hpp>
 #include <kin/ecs/saving.hpp>
 #include <kin/ecs/scene_flow.hpp>
-#include <kin/ecs/ui_screens.hpp>
+#include <kin/ecs/script.hpp>
+#include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/skeleton2d.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
+#include <kin/ecs/tilemap.hpp>
+#include <kin/ecs/ui_screens.hpp>
+#include <kin/pathfinding/navigation2d.hpp>
+#include <kin/scene/scene_asset.hpp>
 #if KIN_ENABLE_AUDIO
 #include <kin/ecs/audio.hpp>
 #endif
@@ -567,6 +569,9 @@ void register_physics2d_editor_components(EcsWorld& world) {
 } // namespace
 
 void register_builtin_editor_components(EcsWorld& world) {
+    register_navigation2d_components(world);
+    register_skeleton2d_components(world);
+    register_normal_sprite2d_components(world);
 #if defined(KIN_EXPERIMENTAL_3D) && KIN_ENABLE_PHYSICS3D
     register_render3d_components(world);
     register_physics3d_components(world);
@@ -924,7 +929,10 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("LightComponent")) {
         // A light where its entity is: it brightens the world when the scene
         // has a SceneLighting (kin/ecs/lighting.hpp).
-        world.components().native<LightComponent>("LightComponent")
+        world.components()
+            .native<LightComponent>("LightComponent")
+            .field("height", &LightComponent::height)
+            .field("mask", &LightComponent::mask)
             .field("color", &LightComponent::color)
             .field("radius", &LightComponent::radius)
             .range(0.0, 100000.0)
@@ -976,7 +984,9 @@ void register_builtin_editor_components(EcsWorld& world) {
     if (!world.components().find("SceneLighting")) {
         // The scene darkened to an ambient light and lit by its lights (the
         // first one found is the scene's).
-        world.components().native<SceneLighting>("SceneLighting")
+        world.components()
+            .native<SceneLighting>("SceneLighting")
+            .field("forward_sprites", &SceneLighting::forward_sprites)
             .field("enabled", &SceneLighting::enabled)
             .field("ambient", &SceneLighting::ambient)
             .description("What is not lit looks like this much light: black is dark, white unlit.")

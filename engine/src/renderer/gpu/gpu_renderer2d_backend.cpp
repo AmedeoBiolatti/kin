@@ -480,6 +480,7 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
         .blend_modes = true,
         .min_max_blend = true,
         .shader_geometry = static_cast<bool>(_shader_vertex_shader.handle()),
+        .textured_geometry = true,
         .data_buffers = true,
         .compute = true,
         .transforms = true,
@@ -510,11 +511,14 @@ RendererBackendCapabilities GpuRenderer2DBackend::capabilities() const {
                                          SDL_GPU_TEXTURETYPE_2D,
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
         .render_attachment_arrays =
-            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_D32_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                                         SDL_GPU_TEXTURETYPE_2D_ARRAY,
                                          SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
-            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16_FLOAT,
+                                         SDL_GPU_TEXTURETYPE_2D_ARRAY,
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER) &&
-            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, SDL_GPU_TEXTURETYPE_2D_ARRAY,
+            SDL_GPUTextureSupportsFormat(_device.handle(), SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                         SDL_GPU_TEXTURETYPE_2D_ARRAY,
                                          SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
         .texture_copies = true,
     };
@@ -1161,6 +1165,27 @@ void GpuRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     ensure_frame();
     place(corners);
     _batch.push_quads(corners, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
+}
+
+bool GpuRenderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                                  std::span<const u32> indices) {
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend || !backend->texture())
+        return false;
+    ensure_frame();
+    retain(texture);
+    _scratch_verts.clear();
+    _scratch_verts.reserve(indices.size());
+    for (const auto i : indices) {
+        const auto& v = vertices[i];
+        const auto p = place(v.position);
+        // The triangle vertex shader decodes sRGB vertex colours, just as for quads.
+        _scratch_verts.push_back({p.x, p.y, v.uv.x, v.uv.y, v.color.r, v.color.g, v.color.b, v.color.a});
+    }
+    const auto blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied : gpu::GpuBlendMode::Alpha;
+    _batch.push(_scratch_verts, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr,
+                0, sampler_for(*backend));
+    return true;
 }
 
 void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,

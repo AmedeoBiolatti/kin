@@ -39,6 +39,7 @@ add_library(kin_engine STATIC
     src/anim/state_machine.cpp
     src/anim/track.cpp
     src/anim/tween.cpp
+    src/anim/skeleton2d.cpp
     src/anim/value.cpp
     src/assets/asset_manager.cpp
     src/assets/asset_server.cpp
@@ -69,6 +70,8 @@ add_library(kin_engine STATIC
     src/ecs/saving.cpp
     src/ecs/scene_flow.cpp
     src/ecs/sprite_animator.cpp
+    src/ecs/skeleton2d.cpp
+    src/ecs/normal_sprite2d.cpp
     src/ecs/text.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
@@ -77,6 +80,7 @@ add_library(kin_engine STATIC
     src/ecs/ui2_sync.cpp
     src/platform/app.cpp
     src/platform/input.cpp
+    src/platform/input_router.cpp
     src/platform/file_dialogs.cpp
     src/platform/gamepad.cpp
     src/platform/resource_paths.cpp
@@ -92,8 +96,10 @@ add_library(kin_engine STATIC
     src/pathfinding/hex_pathfinding.cpp
     src/pathfinding/navmesh3d.cpp
     src/pathfinding/path_server.cpp
+    src/pathfinding/navigation2d.cpp
     src/pathfinding/pathfinding.cpp
     src/prefab/prefab_asset.cpp
+    src/prefab/prefab_pool2d.cpp
     src/prefab/prefab_structure.cpp
     src/renderer/animation_import.cpp
     src/renderer/cached_target.cpp
@@ -105,6 +111,7 @@ add_library(kin_engine STATIC
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp
+    src/renderer/normal_lighting2d.cpp
     src/renderer/post_blur.cpp
     src/renderer/path.cpp
     src/renderer/shape.cpp
@@ -124,6 +131,7 @@ add_library(kin_engine STATIC
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
     src/scene/scene_asset_runtime.cpp
+    src/scene/scene_preload2d.cpp
     src/scene/scene_manager.cpp
     src/scene/transitions.cpp
     src/save/save_store.cpp
@@ -133,6 +141,7 @@ add_library(kin_engine STATIC
     src/ui2/menu_scene.cpp
     src/ui2/state.cpp
     src/ui2/semantics.cpp
+    src/ui2/accessibility.cpp
     src/ui2/context.cpp
     src/ui2/compose.cpp
     src/ui2/composed.cpp
@@ -162,6 +171,7 @@ add_library(kin_engine_components INTERFACE)
 add_library(kin::engine ALIAS kin_engine_components)
 target_link_libraries(kin_engine_components INTERFACE kin_engine)
 target_link_libraries(kin_engine PUBLIC kin_foundation)
+include(kin_accessibility)
 
 target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
 if(KIN_HAS_SDL_RENDERER)

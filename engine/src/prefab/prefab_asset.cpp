@@ -719,6 +719,42 @@ PrefabInstance instantiate_prefab(EcsWorld& world,
     return instance;
 }
 
+bool restore_prefab_instance(EcsWorld& world, const PrefabAsset& source, PrefabInstance& instance,
+                             const PrefabSpawn& spawn) {
+    const auto& prefab = resolved_prefab_asset(source);
+    instance.diagnostics.clear();
+    for (const auto& item : prefab.entities) {
+        const auto found = instance.by_authored_id.find(item.id);
+        if (found == instance.by_authored_id.end() || !found->second) {
+            instance.diagnostics.push_back("pooled prefab entity is no longer alive: " + item.id);
+            return false;
+        }
+    }
+    for (const auto& item : prefab.entities) {
+        auto entity = instance.by_authored_id.at(item.id);
+        set_runtime_name(world, entity,
+                         item.id == prefab.root && !spawn.name.empty() ? spawn.name
+                         : item.name.empty()                           ? item.id
+                                                                       : item.name);
+        if (!world.entities().register_existing(entity, runtime_authored_id(spawn, item.id)))
+            return false;
+        entity.enable();
+    }
+    for (const auto& item : prefab.entities) {
+        auto entity = instance.by_authored_id.at(item.id);
+        if (!item.parent.empty() && !world.entities().reparent(entity, instance.by_authored_id.at(item.parent)))
+            return false;
+        for (const auto& component : item.components)
+            if (!apply_component_fields(entity, resolve_prefab_component_refs(component, instance.by_authored_id),
+                                        world.components(), instance.diagnostics))
+                return false;
+    }
+    if (spawn.parent && !world.entities().reparent(instance.root, spawn.parent))
+        return false;
+    apply_spawn_transform(instance.root, spawn.pos, world.components(), instance.diagnostics);
+    return instance.diagnostics.empty();
+}
+
 PrefabInstance PrefabInstanceRegistry::instantiate(EcsWorld& world,
                                                   const PrefabAsset& prefab,
                                                   const PrefabSpawn& spawn,

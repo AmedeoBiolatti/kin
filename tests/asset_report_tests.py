@@ -154,6 +154,14 @@ class DependencyTrackingTests(unittest.TestCase):
     def report(self):
         return analyze(self.assets, self.manifest)
 
+    def test_native_skeleton_atlas_dependency(self):
+        from asset_dependencies import discover
+        (self.assets / "hero.kinskel").write_text(json.dumps({"schema":"kin.skeleton2d/1", "texture_asset":"textures/hero.png"}))
+        result = discover(self.assets, "hero.kinskel", {"hero.kinskel", "textures/hero.png"}, dict)
+        self.assertTrue(result["complete"])
+        self.assertEqual(result["edges"][0]["target"], "textures/hero.png")
+        self.assertEqual(result["edges"][0]["origin"], "scanner:kinskel")
+
     def edit(self, change):
         data = json.loads(self.manifest.read_text())
         change(data)

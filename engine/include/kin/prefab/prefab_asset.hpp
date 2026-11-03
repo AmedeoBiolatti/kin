@@ -162,4 +162,9 @@ private:
     std::string _last_error;
 };
 
+// Restore authored components/hierarchy on an existing, cleared instance.
+// Used by PrefabPool2D; retains entity identities and resolves local references.
+bool restore_prefab_instance(EcsWorld& world, const PrefabAsset& prefab, PrefabInstance& instance,
+                             const PrefabSpawn& spawn);
+
 } // namespace kin

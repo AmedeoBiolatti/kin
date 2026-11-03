@@ -833,10 +833,15 @@ ServerResponse handle_ui(ServerContext& ctx, const JsonValue& params, bool actio
     auto& ui = *scene->ui_context();
     if (action) {
         const std::string name = params.string_at("action", "click");
-        const auto kind = name == "click" ? ui2::SemanticAction::Click : name == "focus" ? ui2::SemanticAction::Focus :
-                          ui2::SemanticAction::SetText;
-        if (name != "click" && name != "focus" && name != "set_text")
-            return error_result("UI action must be click, focus or set_text");
+        const auto kind = name == "click"        ? ui2::SemanticAction::Click
+                          : name == "focus"      ? ui2::SemanticAction::Focus
+                          : name == "increment"  ? ui2::SemanticAction::Increment
+                          : name == "decrement"  ? ui2::SemanticAction::Decrement
+                          : name == "set_number" ? ui2::SemanticAction::SetNumber
+                                                 : ui2::SemanticAction::SetText;
+        if (name != "click" && name != "focus" && name != "set_text" && name != "increment" && name != "decrement" &&
+            name != "set_number")
+            return error_result("UI action must be click, focus, set_text, increment, decrement or set_number");
         std::string error;
         const auto target = ui.resolve_action(params.string_at("id"), kind, error);
         if (!target) return error_result(error);

@@ -170,6 +170,12 @@ void run(Context& ctx, NumberInput& widget) {
             show();
         }
     }
+    if (widget.enabled)
+        if (const auto value = ctx.take_numeric_action(widget.id, widget.value, widget.min, widget.max, widget.step)) {
+            widget.changed |= widget.value != static_cast<f32>(*value);
+            widget.value = static_cast<f32>(*value);
+            show();
+        }
     if (widget.invalid) {
         widget.style.surface.normal.border = ctx.theme().colors.solid_danger;
         widget.style.surface.focused.border = ctx.theme().colors.solid_danger;
@@ -177,6 +183,7 @@ void run(Context& ctx, NumberInput& widget) {
 
     draw_text_input(ctx, widget.bounds, widget.text, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.text.active));
     ctx.describe(widget.id, "spinbutton", {}, widget.bounds, widget.enabled, true, number_text(widget.value));
+    ctx.semantic_numeric(widget.id, widget.value, widget.min, widget.max, widget.step);
 }
 
 void run_combo_popup(Context& ctx, ComboBox& widget) {

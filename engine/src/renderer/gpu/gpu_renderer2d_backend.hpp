@@ -152,6 +152,7 @@ public:
     bool write_texture(const Texture& texture, Vec2i at, Vec2i size, std::size_t bytes,
                        const std::function<void(std::span<u8>)>& fill) override;
     void draw_texture(const Texture& texture, Rectf dest) override;
+    bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) override;

@@ -17,10 +17,50 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 
 class ImportError(ValueError):
     pass
+
+
+class ImportCache:
+    """Content-addressed, verified job outputs; source hashes determine validity."""
+    def __init__(self, root):
+        self.root = Path(root)
+        self.tool_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        self.hits = self.misses = 0
+
+    def key(self, job, source_root, aseprite):
+        Image = pillow()
+        executable = shutil.which(aseprite) if job.get("source", "").endswith((".ase", ".aseprite")) else None
+        exporter = hashlib.sha256(Path(executable).read_bytes()).hexdigest() if executable and Path(executable).is_file() else aseprite
+        return hashlib.sha256(json_bytes({"job": job, "root": str(source_root), "tool": self.tool_hash,
+                                         "pillow": Image.__version__, "aseprite": exporter})).hexdigest()
+
+    def read(self, key):
+        try:
+            entry = json.loads((self.root / (key + ".json")).read_text())
+            for name, digest in entry["dependencies"].items():
+                if hashlib.sha256(Path(name).read_bytes()).hexdigest() != digest: return None
+            files = {}
+            for name, digest in entry["files"].items():
+                data = (self.root / "objects" / digest).read_bytes()
+                if hashlib.sha256(data).hexdigest() != digest: return None
+                files[output_path(name)] = data
+            return files, {Path(name): digest for name, digest in entry["dependencies"].items()}
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def write(self, key, pipeline):
+        entry = {"dependencies": {}, "files": {}}
+        for path, digest in sorted(pipeline.fingerprints.items()):
+            entry["dependencies"][str(path)] = digest
+        for name, data in pipeline.files.items():
+            digest = hashlib.sha256(data).hexdigest()
+            entry["files"][name] = digest
+            atomic_write(self.root / "objects" / digest, data)
+        atomic_write(self.root / (key + ".json"), json_bytes(entry))
 
 
 def require(condition, message):
@@ -64,9 +104,9 @@ def pillow():
     return Image
 
 
-def image_file(path):
+def image_file(path, data=None):
     Image = pillow()
-    with Image.open(path) as image:
+    with Image.open(io.BytesIO(data) if data is not None else path) as image:
         require(image.width <= 16384 and image.height <= 16384 and image.width * image.height <= 67108864,
                 f"image is too large: {path}")
         return image.convert("RGBA")
@@ -91,24 +131,37 @@ class Pipeline:
         self.root = Path(root).resolve()
         self.files = {}
         self.dependencies = set()
+        self.fingerprints = {}
         self.images = {}
         self.aseprite_executable = aseprite
 
     def source(self, path):
         resolved = (self.root / path).resolve()
-        self.dependencies.add(resolved)
+        self.read_bytes(resolved)
         return resolved
+
+    def read_bytes(self, path):
+        path = Path(path).resolve()
+        self.dependencies.add(path)
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        require(path not in self.fingerprints or self.fingerprints[path] == digest,
+                f"source changed while importing; retry: {path}")
+        self.fingerprints[path] = digest
+        return data
+
+    def verify(self):
+        for path, digest in self.fingerprints.items():
+            require(hashlib.sha256(path.read_bytes()).hexdigest() == digest,
+                    f"source changed while importing; retry: {path}")
 
     def image(self, path):
         path = Path(path).resolve()
-        self.dependencies.add(path)
-        if path not in self.images: self.images[path] = image_file(path)
+        if path not in self.images: self.images[path] = image_file(path, self.read_bytes(path))
         return self.images[path]
 
     def read_json(self, path):
-        self.dependencies.add(Path(path).resolve())
-        with Path(path).open(encoding="utf-8-sig") as stream:
-            value = json.load(stream)
+        value = json.loads(self.read_bytes(path).decode("utf-8-sig"))
         require(isinstance(value, dict), f"expected JSON object: {path}")
         return value
 
@@ -188,6 +241,9 @@ class Pipeline:
                                         capture_output=True, text=True)
                 require(result.returncode == 0, "Aseprite export failed: " + result.stderr.strip())
                 self._aseprite(job, self.read_json(data), sheet)
+                ephemeral = Path(temporary).resolve()
+                self.dependencies = {p for p in self.dependencies if not p.is_relative_to(ephemeral)}
+                self.fingerprints = {p: digest for p, digest in self.fingerprints.items() if not p.is_relative_to(ephemeral)}
         else:
             data = self.read_json(source)
             self._aseprite(job, data, source.parent / data["meta"]["image"])
@@ -248,7 +304,7 @@ class Pipeline:
             animations.append(f"animation {name} {playback} 1000 {tokens}")
         self.pack(sprites, job["output"], job["texture"], job.get("max_size", 2048), job.get("padding", 2), animations)
 
-    def run(self, manifest):
+    def run(self, manifest, cache=None):
         require(manifest.get("schema") == "kin.imports/1", "expected schema kin.imports/1")
         jobs = manifest.get("imports")
         require(isinstance(jobs, list), "imports must be an array")
@@ -257,7 +313,27 @@ class Pipeline:
             try:
                 kind = job.get("kind")
                 require(kind in ("atlas", "aseprite", "tiled", "ldtk"), f"unknown import kind: {kind}")
-                getattr(self, kind)(job)
+                key = cache.key(job, self.root, self.aseprite_executable) if cache else None
+                cached = cache.read(key) if cache else None
+                if cached is not None:
+                    cache.hits += 1
+                    files, fingerprints = cached
+                    dependencies = set(fingerprints)
+                else:
+                    child = Pipeline(self.root, self.aseprite_executable)
+                    getattr(child, kind)(job)
+                    child.verify()
+                    files, dependencies = child.files, child.dependencies
+                    fingerprints = child.fingerprints
+                    if cache:
+                        cache.misses += 1
+                        cache.write(key, child)
+                for name, data in files.items(): self.emit(name, data)
+                self.dependencies.update(dependencies)
+                for path, digest in fingerprints.items():
+                    require(path not in self.fingerprints or self.fingerprints[path] == digest,
+                            f"source changed between import jobs; retry: {path}")
+                self.fingerprints.update(fingerprints)
             except (KeyError, TypeError, ValueError, OSError) as error:
                 raise ImportError(f"import {index} ({job.get('source', job.get('output', '?'))}): {error}") from error
 
@@ -497,18 +573,20 @@ class Pipeline:
         self._emit_map(job, cols, rows, size, size, tiles, layers, prefabs)
 
 
-def build(manifest, output, content=None, aseprite="aseprite"):
+def build(manifest, output, content=None, aseprite="aseprite", cache_dir=None, statistics=None):
     manifest, output = Path(manifest).resolve(), Path(output).resolve()
     require(output != manifest.parent, "use a dedicated output directory, separate from import sources")
     pipeline = Pipeline(manifest.parent, aseprite)
-    pipeline.run(pipeline.read_json(manifest))
+    cache = ImportCache(cache_dir if cache_dir is not None else output / ".kin-import-cache")
+    if cache_dir is None:
+        require(cache.root.resolve().is_relative_to(output), "cache symlink escapes the output directory")
+    pipeline.run(pipeline.read_json(manifest), cache)
     if content:
         content = Path(content).resolve()
         require(output != content and not output.is_relative_to(content), "import output must be outside source content")
         for path in sorted(content.rglob("*")):
             if path.is_file() and not any(p.startswith(".") for p in path.relative_to(content).parts):
-                pipeline.dependencies.add(path.resolve())
-                pipeline.emit(path.relative_to(content).as_posix(), path.read_bytes())
+                pipeline.emit(path.relative_to(content).as_posix(), pipeline.read_bytes(path))
     report_path = output / ".kin-import-report.json"
     old = json.loads(report_path.read_text()).get("files", {}) if report_path.exists() else {}
     report = {"schema": "kin.import-report/1", "files": {
@@ -520,12 +598,85 @@ def build(manifest, output, content=None, aseprite="aseprite"):
         require((output / output_path(name)).resolve().is_relative_to(output), "output symlink escapes the content directory")
     # Validate the entire import before touching any previous output. Each file
     # replacement is atomic, and unchanged outputs retain their modification time.
+    pipeline.verify()
     for name, data in sorted(pipeline.files.items()): atomic_write(output / name, data)
     for name in sorted(set(old) - set(pipeline.files)):
         stale = output / output_path(name)
         if stale.is_file(): stale.unlink()
     atomic_write(report_path, json_bytes(report))
+    if statistics is not None: statistics.update(hits=cache.hits, misses=cache.misses)
     return report
+
+
+class ImportWatcher:
+    """Debounced authoring watcher. Failed imports keep all last-good outputs."""
+    def __init__(self, manifest, output, content=None, aseprite="aseprite", cache_dir=None, debounce=0.1):
+        self.manifest, self.output = Path(manifest).resolve(), Path(output).resolve()
+        self.content = Path(content).resolve() if content else None
+        self.aseprite, self.cache_dir = aseprite, cache_dir
+        self.debounce = max(0, debounce)
+        self.signature = None
+        self.pending_since = None
+        self.last_error = None
+
+    def scan(self):
+        result = {}
+        roots = [self.manifest.parent] + ([self.content] if self.content else [])
+        paths = {self.manifest}
+        # Include missing/external authoring references even before the first
+        # successful build, so creating a missing PNG/tileset retries the job.
+        pending = [self.manifest]
+        visited = set()
+        while pending and len(visited) < 256:
+            document = pending.pop()
+            if document in visited: continue
+            visited.add(document)
+            try:
+                def references(value):
+                    if isinstance(value, dict):
+                        for key, child in value.items():
+                            if key in ("source", "image", "relPath", "externalRelPath") and isinstance(child, str):
+                                path = (document.parent / child).resolve()
+                                paths.add(path)
+                                if path.suffix.lower() in (".json", ".tmj", ".tsj", ".ldtk", ".ldtkl"): pending.append(path)
+                            references(child)
+                    elif isinstance(value, list):
+                        for child in value: references(child)
+                references(json.loads(document.read_text(encoding="utf-8-sig")))
+            except (OSError, ValueError): pass
+        for root in roots:
+            for directory, folders, files in os.walk(root):
+                folders[:] = [name for name in folders if not name.startswith(".") and
+                              not (Path(directory) / name).resolve().is_relative_to(self.output)]
+                for name in files:
+                    if not name.startswith("."): paths.add(Path(directory) / name)
+        # External referenced files can live outside the authoring folder.
+        try:
+            report = json.loads((self.output / ".kin-import-report.json").read_text())
+            paths.update((self.manifest.parent / name).resolve() for name in report["dependencies"])
+        except (OSError, ValueError, KeyError): pass
+        for path in paths:
+            try:
+                stat = path.stat()
+                result[str(path)] = (stat.st_mtime_ns, stat.st_size)
+            except OSError: result[str(path)] = None
+        return result
+
+    def poll(self, now=None):
+        now = time.monotonic() if now is None else now
+        signature = self.scan()
+        if signature != self.signature:
+            self.signature, self.pending_since = signature, now
+        if self.pending_since is None or now - self.pending_since < self.debounce: return None
+        self.pending_since = None
+        stats = {}
+        try:
+            report = build(self.manifest, self.output, self.content, self.aseprite, self.cache_dir, stats)
+            self.last_error = None
+            return {"ok": True, "files": len(report["files"]), "cache": stats}
+        except (ImportError, OSError, json.JSONDecodeError) as error:
+            self.last_error = str(error)
+            return {"ok": False, "error": self.last_error}
 
 
 def main():
@@ -534,13 +685,30 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--content", type=Path, help="copy source content beside generated assets")
     parser.add_argument("--aseprite", default="aseprite", help="Aseprite executable for native .ase/.aseprite files")
+    parser.add_argument("--cache", type=Path, help="processed artifact cache (default: hidden directory in output)")
+    parser.add_argument("--watch", action="store_true", help="reimport changed authoring sources while the game runs")
+    parser.add_argument("--interval", type=float, default=0.25)
+    parser.add_argument("--debounce", type=float, default=0.1)
     args = parser.parse_args()
+    if args.watch:
+        if not math.isfinite(args.interval) or args.interval <= 0 or not math.isfinite(args.debounce) or args.debounce < 0:
+            parser.error("watch interval must be positive and debounce nonnegative")
+        watcher = ImportWatcher(args.manifest, args.output, args.content, args.aseprite, args.cache, args.debounce)
+        try:
+            while True:
+                result = watcher.poll()
+                if result is not None:
+                    print(json.dumps(result), file=sys.stdout if result["ok"] else sys.stderr, flush=True)
+                time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
     try:
-        report = build(args.manifest, args.output, args.content, args.aseprite)
+        stats = {}
+        report = build(args.manifest, args.output, args.content, args.aseprite, args.cache, stats)
     except (ImportError, OSError, json.JSONDecodeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}), file=sys.stderr)
         return 1
-    print(json.dumps({"ok": True, "files": len(report["files"])}))
+    print(json.dumps({"ok": True, "files": len(report["files"]), "cache": stats}))
     return 0
 
 

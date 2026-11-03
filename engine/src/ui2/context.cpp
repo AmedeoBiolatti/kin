@@ -342,6 +342,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _elements.clear();
     _element_indices.clear();
     _semantic_keys.clear();
+    _semantic_labels.clear();
     // State not asked for all last frame belonged to something no longer built.
     if (!_states.empty()) {
         const u64 frame = _state.frame();
@@ -403,7 +404,7 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
     // Instant: no dt (2-arg begin / tests), no duration, or no id. Touch no state so apps
     // that never animate (the common case) don't churn the retained map; a later animated
     // frame just snaps from the target on first use.
-    if (_dt <= 0.0f || dur <= 0.0f || !static_cast<bool>(id)) {
+    if (_reduced_motion || _dt <= 0.0f || dur <= 0.0f || !static_cast<bool>(id)) {
         return target;
     }
     const u64 frame = _state.frame();

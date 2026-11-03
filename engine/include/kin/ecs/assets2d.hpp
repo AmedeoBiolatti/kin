@@ -49,6 +49,7 @@ class Renderer2D;
 class Shape;
 class SpriteCatalog;
 struct TilemapAsset;
+struct SkeletonAsset2D;
 
 class Assets2D {
 public:
@@ -69,9 +70,13 @@ public:
     // textures), made once and shared. Invalid when it cannot be read: why is
     // in problems(), and it is tried again once its file changes.
     Texture texture(std::string_view path);
+    // Renderer-thread upload of pixels decoded by an asynchronous scene load.
+    bool prime_texture(std::string_view path, const Image& image);
+    std::shared_ptr<const Image> image(std::string_view path);
     // A sprite catalog (.kinsprites) with its images made textures; read again
     // when it or one of its images changes. Null when it cannot be read.
     std::shared_ptr<const SpriteCatalog> sprite_catalog(std::string_view path);
+    std::shared_ptr<const SkeletonAsset2D> skeleton2d(std::string_view path);
     // An audio catalog (.kinaudio), or a sound file (WAV, Ogg, ...) as a
     // catalog of one cue named by its path. Null when it cannot be read (or
     // kin was built without audio).
@@ -155,6 +160,7 @@ private:
     AssetManager _manager;
     std::unordered_map<std::string, Made, PathHash, std::equal_to<>> _textures;
     std::unordered_map<std::string, Read<SpriteCatalog>, PathHash, std::equal_to<>> _sprite_catalogs;
+    std::unordered_map<std::string, Read<SkeletonAsset2D>, PathHash, std::equal_to<>> _skeletons2d;
     std::unordered_map<std::string, Read<AudioCatalog>, PathHash, std::equal_to<>> _audio_catalogs;
     std::unordered_map<std::string, Read<ParticleCatalog>, PathHash, std::equal_to<>> _particle_catalogs;
     std::unordered_map<std::string, Read<TilemapAsset>, PathHash, std::equal_to<>> _tilemaps;

@@ -227,6 +227,74 @@ kin_game(check NAME imported IMPORTS "{manifest.as_posix()}")
         self.build([self.aseprite(), self.tiled(), self.ldtk()])
         subprocess.run([VALIDATOR, str(self.output)], check=True)
 
+    def test_incremental_cache_and_corrupt_artifact_recovery(self):
+        hero = self.aseprite()
+        atlas = {"kind": "atlas", "sprites": [{"id": "sheet", "source": "sheet.png"}],
+                 "output": "other.kinsprites", "texture": "other.png"}
+        manifest = self.write("imports.json", {"schema": "kin.imports/1", "imports": [hero, atlas]})
+        stats = {}
+        imports.build(manifest, self.output, statistics=stats)
+        self.assertEqual(stats, {"hits": 0, "misses": 2})
+        stats = {}; imports.build(manifest, self.output, statistics=stats)
+        self.assertEqual(stats, {"hits": 2, "misses": 0})
+        data = json.loads((self.art / "hero.json").read_text())
+        data["frames"][0]["duration"] = 90
+        self.write("hero.json", data)
+        stats = {}; imports.build(manifest, self.output, statistics=stats)
+        self.assertEqual(stats, {"hits": 1, "misses": 1})
+        self.assertIn("hero.0*90", (self.output / hero["output"]).read_text())
+        stamp = (self.output / "other.png").stat().st_mtime_ns
+        cache = imports.ImportCache(self.output / ".kin-import-cache")
+        entry = json.loads((cache.root / (cache.key(atlas, self.art, "aseprite") + ".json")).read_text())
+        (cache.root / "objects" / entry["files"]["other.png"]).write_bytes(b"broken cache")
+        stats = {}; imports.build(manifest, self.output, statistics=stats)
+        self.assertEqual(stats, {"hits": 1, "misses": 1})
+        self.assertEqual((self.output / "other.png").stat().st_mtime_ns, stamp)
+
+    def test_source_edit_during_transform_keeps_previous_outputs(self):
+        job = self.aseprite()
+        self.build([job])
+        before = (self.output / job["texture"]).read_bytes()
+        shutil.rmtree(self.output / ".kin-import-cache")
+        original = imports.Pipeline.image
+        def edit_after_read(pipeline, path):
+            image = original(pipeline, path)
+            Image.new("RGBA", (4, 2), (0, 0, 255, 255)).save(path)
+            return image
+        with mock.patch.object(imports.Pipeline, "image", edit_after_read):
+            with self.assertRaisesRegex(imports.ImportError, "source changed"):
+                self.build([job])
+        self.assertEqual((self.output / job["texture"]).read_bytes(), before)
+        self.build([job])
+        self.assertNotEqual((self.output / job["texture"]).read_bytes(), before)
+
+    def test_missing_external_authoring_file_is_watched(self):
+        job = {"kind":"atlas", "sprites":[{"id":"x","source":"../outside.png"}],
+               "output":"x.kinsprites", "texture":"x.png"}
+        manifest = self.write("imports.json", {"schema":"kin.imports/1", "imports":[job]})
+        watcher = imports.ImportWatcher(manifest, self.output, debounce=0)
+        self.assertFalse(watcher.poll(0)["ok"])
+        Image.new("RGBA", (1,1), (255,255,255,255)).save(self.root / "outside.png")
+        self.assertTrue(watcher.poll(1)["ok"])
+
+    def test_watch_debounce_failure_and_recovery(self):
+        job = self.aseprite()
+        manifest = self.write("imports.json", {"schema": "kin.imports/1", "imports": [job]})
+        watcher = imports.ImportWatcher(manifest, self.output, debounce=0.1)
+        self.assertIsNone(watcher.poll(0))
+        self.assertTrue(watcher.poll(0.2)["ok"])
+        before = (self.output / job["output"]).read_bytes()
+        self.assertIsNone(watcher.poll(0.3))
+        (self.art / "hero.json").write_text("{bad")
+        self.assertIsNone(watcher.poll(1))
+        self.assertFalse(watcher.poll(1.2)["ok"])
+        self.assertEqual((self.output / job["output"]).read_bytes(), before)
+        self.assertIsNone(watcher.poll(1.3)) # one diagnostic per failed source revision
+        self.aseprite()
+        self.assertIsNone(watcher.poll(2))
+        self.assertTrue(watcher.poll(2.2)["ok"])
+        self.assertIsNone(watcher.last_error)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=False)

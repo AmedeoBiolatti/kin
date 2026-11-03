@@ -1,17 +1,16 @@
-#include <kin/assets/content.hpp>
-
-#include <kin/platform/log.hpp>
-
 #include <SDL3/SDL.h>
-
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <kin/assets/content.hpp>
+#include <kin/platform/log.hpp>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <utility>
 
 #if defined(_WIN32)
@@ -184,6 +183,32 @@ struct Mounts {
     std::shared_mutex mutex;
     std::vector<Mount> list; // longest mount point first, so nested mounts win
 };
+
+struct MemoryMounts {
+    std::shared_mutex mutex;
+    std::vector<std::weak_ptr<const MemoryContent>> list;
+};
+MemoryMounts& memory_mounts() {
+    static MemoryMounts state;
+    return state;
+}
+struct MemoryLocation {
+    std::shared_ptr<const MemoryContent> content;
+    std::string inner;
+};
+std::optional<MemoryLocation> locate_memory(const std::filesystem::path& path) {
+    auto& state = memory_mounts();
+    std::shared_lock lock{state.mutex};
+    const auto query = normalized(path);
+    for (const auto& weak : state.list)
+        if (auto content = weak.lock()) {
+            const auto relative = query.lexically_relative(content->root());
+            const auto inner = relative.generic_string();
+            if (!inner.empty() && inner != ".." && !inner.starts_with("../") && !relative.is_absolute())
+                return MemoryLocation{std::move(content), inner == "." ? "" : inner};
+        }
+    return std::nullopt;
+}
 
 Mounts& mounts() {
     static Mounts state;
@@ -524,6 +549,22 @@ void mount_content_pack(const std::filesystem::path& mount_point, std::shared_pt
     std::ranges::stable_sort(state.list, std::greater<>{}, [](const Mount& m) { return m.point.native().size(); });
 }
 
+std::shared_ptr<const MemoryContent> MemoryContent::create(Files files) {
+    for (const auto& [name, bytes] : files)
+        if (!valid_entry_path(name))
+            throw std::invalid_argument("invalid memory content path: " + name);
+    static std::atomic<u64> next{1};
+    auto content = std::make_shared<MemoryContent>();
+    content->_root =
+        normalized(std::filesystem::temp_directory_path() / ".kin-memory-content" / std::to_string(next.fetch_add(1)));
+    content->_files = std::move(files);
+    auto& state = memory_mounts();
+    std::unique_lock lock{state.mutex};
+    std::erase_if(state.list, [](const auto& weak) { return weak.expired(); });
+    state.list.push_back(content);
+    return content;
+}
+
 void unmount_content_pack(const std::filesystem::path& mount_point) {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
@@ -543,6 +584,10 @@ std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path&
 }
 
 std::optional<std::string> read_content_file(const std::filesystem::path& path) {
+    if (auto location = locate_memory(path)) {
+        const auto found = location->content->files().find(location->inner);
+        return found == location->content->files().end() ? std::nullopt : std::optional(found->second);
+    }
     if (const std::optional<PackLocation> location = locate(path)) {
         const ContentPack::Entry* entry = find_entry(*location);
         if (!entry) {
@@ -570,6 +615,12 @@ std::optional<std::string> read_content_text(const std::filesystem::path& path) 
 }
 
 std::optional<ContentBytes> view_content_file(const std::filesystem::path& path) {
+    if (auto location = locate_memory(path)) {
+        const auto found = location->content->files().find(location->inner);
+        if (found == location->content->files().end())
+            return std::nullopt;
+        return ContentBytes{std::as_bytes(std::span{found->second.data(), found->second.size()}), location->content};
+    }
     if (const std::optional<PackLocation> location = locate(path)) {
         const ContentPack::Entry* entry = find_entry(*location);
         if (!entry) {
@@ -586,6 +637,8 @@ std::optional<ContentBytes> view_content_file(const std::filesystem::path& path)
 }
 
 bool content_file_exists(const std::filesystem::path& path) {
+    if (auto location = locate_memory(path))
+        return location->content->files().contains(location->inner);
     if (const std::optional<PackLocation> location = locate(path)) {
         return !location->inner.empty() && location->pack->find(location->inner);
     }
@@ -594,6 +647,13 @@ bool content_file_exists(const std::filesystem::path& path) {
 }
 
 bool content_directory_exists(const std::filesystem::path& path) {
+    if (auto location = locate_memory(path)) {
+        const auto prefix = location->inner.empty() ? "" : location->inner + "/";
+        if (prefix.empty())
+            return true;
+        const auto it = location->content->files().lower_bound(prefix);
+        return it != location->content->files().end() && it->first.starts_with(prefix);
+    }
     if (const std::optional<PackLocation> location = locate(path)) {
         if (location->inner.empty()) {
             return true;
@@ -610,6 +670,10 @@ bool content_directory_exists(const std::filesystem::path& path) {
 }
 
 std::optional<u64> content_file_size(const std::filesystem::path& path) {
+    if (auto location = locate_memory(path)) {
+        const auto found = location->content->files().find(location->inner);
+        return found == location->content->files().end() ? std::nullopt : std::optional<u64>(found->second.size());
+    }
     if (const std::optional<PackLocation> location = locate(path)) {
         const ContentPack::Entry* entry = location->inner.empty() ? nullptr : location->pack->find(location->inner);
         return entry ? std::optional<u64>{entry->size} : std::nullopt;
@@ -624,6 +688,16 @@ std::optional<u64> content_file_size(const std::filesystem::path& path) {
 
 std::vector<std::filesystem::path> list_content_files(const std::filesystem::path& dir, bool recursive) {
     std::vector<std::filesystem::path> files;
+    if (auto location = locate_memory(dir)) {
+        const auto prefix = location->inner.empty() ? "" : location->inner + "/";
+        for (auto it = location->content->files().lower_bound(prefix);
+             it != location->content->files().end() && it->first.starts_with(prefix); ++it) {
+            const auto rest = it->first.substr(prefix.size());
+            if (recursive || rest.find('/') == std::string::npos)
+                files.push_back(dir / rest);
+        }
+        return files;
+    }
     if (const std::optional<PackLocation> location = locate(dir)) {
         const std::string prefix = location->inner.empty() ? std::string{} : location->inner + "/";
         const auto& entries = location->pack->entries();

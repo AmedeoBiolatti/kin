@@ -1,0 +1,27 @@
+# AccessKit C 0.23.2. Keep the Rust toolchain optional: consumers can use the
+# upstream binary distribution or build the pinned release themselves.
+if(KIN_ENABLE_ACCESSIBILITY)
+    if(EMSCRIPTEN OR ANDROID OR IOS OR NOT (WIN32 OR APPLE OR CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD|OpenBSD|NetBSD|DragonFly"))
+        message(FATAL_ERROR "Kin's AccessKit adapter currently supports desktop Windows, macOS and Unix")
+    endif()
+    find_path(KIN_ACCESSKIT_INCLUDE_DIR accesskit.h REQUIRED)
+    find_library(KIN_ACCESSKIT_LIBRARY NAMES accesskit REQUIRED)
+    add_library(kin_accesskit UNKNOWN IMPORTED)
+    set_target_properties(kin_accesskit PROPERTIES IMPORTED_LOCATION "${KIN_ACCESSKIT_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${KIN_ACCESSKIT_INCLUDE_DIR}")
+    if(WIN32)
+        target_link_libraries(kin_accesskit INTERFACE bcrypt ntdll propsys runtimeobject uiautomationcore userenv ws2_32)
+    elseif(APPLE)
+        target_link_libraries(kin_accesskit INTERFACE "-framework AppKit" "-framework Foundation" "-framework CoreFoundation" objc c++)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(kin_accesskit INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+    endif()
+    target_link_libraries(kin_engine PRIVATE kin_accesskit)
+    # Source-local definition avoids rebuilding every engine consumer when toggled.
+    set_property(SOURCE src/ui2/accessibility.cpp APPEND PROPERTY COMPILE_DEFINITIONS KIN_HAS_ACCESSKIT)
+    foreach(license LICENSE-APACHE LICENSE-MIT LICENSE.chromium)
+        list(APPEND KIN_THIRD_PARTY_LICENSES "AccessKit-${license}.txt|${CMAKE_CURRENT_LIST_DIR}/../docs/licenses/accesskit/${license}")
+    endforeach()
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES}" CACHE INTERNAL "" FORCE)
+endif()

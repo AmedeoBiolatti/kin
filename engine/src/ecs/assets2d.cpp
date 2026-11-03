@@ -1,22 +1,22 @@
-#include <kin/ecs/assets2d.hpp>
-
-#include <kin/ecs/animator.hpp>
-#include <kin/ecs/lighting.hpp>
-#include <kin/ecs/shader_effect.hpp>
-
 #include <kin/anim/anim_format.hpp>
 #include <kin/anim/binding.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
+#include <kin/ecs/animator.hpp>
+#include <kin/ecs/assets2d.hpp>
+#include <kin/ecs/lighting.hpp>
+#include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/skeleton2d.hpp>
 #include <kin/ecs/text.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/particles/particle_catalog.hpp>
+#include <kin/platform/log.hpp>
 #include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/renderer2d.hpp>
-#include <kin/platform/log.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 #include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/sprite_catalog.hpp>
@@ -65,6 +65,54 @@ std::optional<std::filesystem::file_time_type> Assets2D::file_time(std::string_v
     std::error_code error;
     const std::filesystem::file_time_type time = std::filesystem::last_write_time(_manager.resolve(path), error);
     return error ? std::nullopt : std::optional(time); // in a pack, or gone
+}
+
+bool Assets2D::prime_texture(std::string_view path, const Image& image) {
+    if (path.empty() || !image.valid())
+        return false;
+    auto texture = _renderer.create_texture_from_rgba(image.rgba.data(), image.size);
+    if (!texture)
+        return false;
+    _textures[std::string(path)] = Made{std::move(texture), file_time(path), false};
+    _manager.reserve_storage<Image>(path);
+    _manager.replace_loaded<Image>(path, image);
+    _read[std::string(path)] = file_time(path);
+    _problems.erase(std::string(path));
+    ++_version;
+    return true;
+}
+
+std::shared_ptr<const Image> Assets2D::image(std::string_view path) {
+    if (path.empty())
+        return {};
+    const auto image = _manager.load<Image>(path);
+    _read.try_emplace(std::string(path), file_time(path));
+    if (image && image->valid()) {
+        _problems.erase(std::string(path));
+        return image;
+    }
+    tell(_problems, std::string(path), "image could not be read");
+    return {};
+}
+
+std::shared_ptr<const SkeletonAsset2D> Assets2D::skeleton2d(std::string_view path) {
+    if (path.empty())
+        return {};
+    if (const auto found = _skeletons2d.find(path); found != _skeletons2d.end())
+        return found->second.catalog;
+    const auto source = read_content_text(_manager.resolve(path));
+    std::string error;
+    auto rig = source ? parse_skeleton2d(*source, error) : std::nullopt;
+    if (!source)
+        error = "skeleton file could not be read";
+    Read<SkeletonAsset2D> entry;
+    if (rig) {
+        entry.catalog = std::make_shared<SkeletonAsset2D>(std::move(*rig));
+        _problems.erase(std::string(path));
+    } else
+        tell(_problems, std::string(path), error);
+    entry.files.push_back({std::string(path), file_time(path)});
+    return _skeletons2d.emplace(std::string(path), std::move(entry)).first->second.catalog;
 }
 
 Texture Assets2D::texture(std::string_view path) {
@@ -122,12 +170,24 @@ std::shared_ptr<const SpriteCatalog> Assets2D::sprite_catalog(std::string_view p
     Read<SpriteCatalog> read{.catalog = nullptr, .files = {{key, file_time(path)}}};
     try {
         // Its images are named from the content root, as the catalog's own path is.
-        auto catalog = std::make_shared<SpriteCatalog>(load_sprite_catalog(_manager, _renderer, _manager.resolve(path)));
-        for (const auto& [id, texture] : catalog->textures()) {
-            if (!texture.path.empty()) {
-                read.files.emplace_back(texture.path, file_time(texture.path));
-                _manager.unload(texture.path); // made a texture: its pixels are not kept
-            }
+        const auto source = read_content_text(_manager.resolve(path));
+        if (!source)
+            throw std::runtime_error("sprite catalog could not be read");
+        auto catalog = std::make_shared<SpriteCatalog>();
+        std::string error;
+        if (!parse_sprite_catalog(*source, *catalog, error) || catalog->sprite_ids().empty())
+            throw std::runtime_error(error.empty() ? "sprite catalog contains no sprites" : error);
+        std::vector<std::pair<std::string, std::string>> textures;
+        for (const auto& [id, image] : catalog->textures())
+            textures.emplace_back(id, image.path);
+        for (const auto& [id, image] : textures) {
+            if (image.empty())
+                continue;
+            read.files.emplace_back(image, file_time(image));
+            auto gpu = texture(image);
+            if (!gpu)
+                throw std::runtime_error("sprite catalog texture could not be uploaded: " + image);
+            catalog->set_texture(id, image, std::move(gpu));
         }
         read.catalog = std::move(catalog);
         _problems.erase(key);
@@ -411,6 +471,8 @@ bool Assets2D::bind(EcsWorld& world) {
     _bound_changed = false;
     bind_texture_renderers(world, *this);
     bind_sprite_renderers(world, *this);
+    bind_skeletons2d(world, *this);
+    bind_normal_sprites2d(world, *this);
     bind_audio_emitters(world, *this);
     bind_particle_systems(world, *this);
     bind_particle_fields(world, *this);
@@ -455,6 +517,7 @@ std::vector<std::string> Assets2D::reload_changed() {
         }
     };
     reread(_sprite_catalogs);
+    reread(_skeletons2d);
     reread(_audio_catalogs);
     reread(_particle_catalogs);
     reread(_tilemaps);
@@ -736,16 +799,24 @@ void bind_animators(EcsWorld& world, Assets2D& assets) {
 namespace kin {
 
 void bind_lights(EcsWorld& world, Assets2D& assets) {
-    std::vector<std::pair<flecs::entity, Texture>> rebound;
+    struct Bound {
+        flecs::entity entity;
+        Texture texture;
+        std::shared_ptr<const Image> image;
+    };
+    std::vector<Bound> rebound;
     world.raw().each([&](flecs::entity entity, const LightComponent& light) {
         Texture shape = assets.texture(light.shape_asset.id);
-        if (!(shape == light.shape)) {
-            rebound.emplace_back(entity, std::move(shape));
+        auto image = assets.image(light.shape_asset.id);
+        if (!(shape == light.shape) || image != light.shape_image) {
+            rebound.push_back({entity, std::move(shape), std::move(image)});
         }
     });
-    for (auto& [entity, shape] : rebound) {
+    for (auto& [entity, shape, image] : rebound) {
         EcsEntity owner{entity}; // one from a prefab gets its own copy first
-        owner.get_mut<LightComponent>()->shape = std::move(shape);
+        auto* light = owner.get_mut<LightComponent>();
+        light->shape = std::move(shape);
+        light->shape_image = std::move(image);
         owner.modified<LightComponent>();
     }
 }

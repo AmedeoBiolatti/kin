@@ -1,7 +1,7 @@
 #pragma once
 
 #include <kin/ui2/state.hpp>
-
+#include <optional>
 #include <string>
 
 namespace kin { class JsonWriter; }
@@ -22,9 +22,10 @@ struct SemanticElement {
     bool focusable = false;
     bool focused = false;
     bool checked = false;
+    std::optional<f64> numeric_value, numeric_min, numeric_max, numeric_step;
 };
 
-enum class SemanticAction { Click, Focus, SetText };
+enum class SemanticAction { Click, Focus, SetText, Increment, Decrement, SetNumber };
 
 struct ControllerNavigation {
     bool enabled = true;

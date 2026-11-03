@@ -1498,6 +1498,11 @@ void Input::set_gamepad(const GamepadState& state) {
     }
 }
 
+bool Input::pad_pressed(PadControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < pad_control_count && _pad_pressed[index];
+}
+
 f32 Input::axis(std::string_view name) const {
     const InputAxis* axis = _map.axis(name);
     return axis ? axis_value(*this, *axis) : 0.0f;

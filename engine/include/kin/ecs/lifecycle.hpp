@@ -7,6 +7,12 @@
 
 namespace kin {
 
+// Runtime incarnation of a reusable entity. Captured script/entity references
+// must match this value before acting on a recycled entity.
+struct EntityLifetime {
+    u64 generation = 0;
+};
+
 struct SceneEntity {
 };
 

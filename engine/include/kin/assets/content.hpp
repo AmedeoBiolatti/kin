@@ -1,9 +1,9 @@
 #pragma once
 
-#include <kin/core/types.hpp>
-
 #include <cstddef>
 #include <filesystem>
+#include <kin/core/types.hpp>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -12,6 +12,20 @@
 #include <vector>
 
 namespace kin {
+
+// Immutable, scoped content snapshot. Native loaders read it through the same
+// APIs as disk/pack content. Views retain their owner after the scene releases it.
+class MemoryContent {
+public:
+    using Files = std::map<std::string, std::string, std::less<>>;
+    static std::shared_ptr<const MemoryContent> create(Files files);
+    const std::filesystem::path& root() const { return _root; }
+    const Files& files() const { return _files; }
+
+private:
+    std::filesystem::path _root;
+    Files _files;
+};
 
 // A game's content (images, sounds, fonts, scripts, data files) is a folder
 // while it is made and, when it ships, either the same folder beside the

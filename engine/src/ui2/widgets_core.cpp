@@ -1085,6 +1085,13 @@ void run(Context& ctx, Slider& widget) {
         widget.value = std::clamp(widget.value, widget.min, widget.max);
         widget.changed = widget.value != before;
     }
+    if (widget.enabled && widget.max > widget.min) {
+        const f32 step = widget.step > 0 ? widget.step : (widget.max - widget.min) / 100.0f;
+        if (const auto value = ctx.take_numeric_action(widget.id, widget.value, widget.min, widget.max, step)) {
+            widget.changed |= widget.value != static_cast<f32>(*value);
+            widget.value = static_cast<f32>(*value);
+        }
+    }
 
     if (it.active && widget.enabled && widget.max > widget.min) {
         const f32 norm = std::clamp((ctx.pointer().x - widget.bounds.x) / std::max(1.0f, widget.bounds.w), 0.0f, 1.0f);
@@ -1100,6 +1107,8 @@ void run(Context& ctx, Slider& widget) {
     }
 
     ctx.describe(widget.id, "slider", {}, widget.bounds, widget.enabled, true, std::to_string(widget.value));
+    ctx.semantic_numeric(widget.id, widget.value, widget.min, widget.max,
+                         widget.step > 0 ? widget.step : (widget.max - widget.min) / 100.0f);
     const f32 norm = widget.max > widget.min
                          ? std::clamp((widget.value - widget.min) / (widget.max - widget.min), 0.0f, 1.0f)
                          : 0.0f;

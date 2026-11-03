@@ -458,6 +458,7 @@ public:
     // and axes bound to a controller read.
     void set_gamepad(const GamepadState& state);
     const GamepadState& gamepad() const { return _pad; }
+    bool pad_pressed(PadControl control) const;
 
 private:
     friend class App;

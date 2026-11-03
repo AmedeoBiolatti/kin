@@ -343,6 +343,7 @@ RendererBackendCapabilities SdlRenderer2DBackend::capabilities() const {
         .render_targets = true,
         .blend_modes = true,
         .min_max_blend = _min_max_blend,
+        .textured_geometry = true,
         .transforms = true,
         .shapes = true,
         .masks = true,
@@ -677,6 +678,25 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
         SDL_SetTextureColorMod(sdl_texture->handle(), 255, 255, 255);
         SDL_SetTextureAlphaMod(sdl_texture->handle(), 255);
     }
+}
+
+bool SdlRenderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                                  std::span<const u32> indices) {
+    const auto* backend = as_sdl(texture.backend().get());
+    if (!backend || !backend->handle())
+        return false;
+    flush_batch();
+    _shape_vertices.clear();
+    _shape_vertices.reserve(vertices.size());
+    for (const auto& v : vertices) {
+        const auto p = _transformed ? _transform.apply(v.position) : v.position;
+        _shape_vertices.push_back({{p.x, p.y}, to_sdl_color(v.color), {v.uv.x, v.uv.y}});
+    }
+    _shape_indices.assign(indices.begin(), indices.end());
+    const TextureBlendScope blend{backend->handle(), _blend};
+    return SDL_RenderGeometry(_handle, backend->handle(), _shape_vertices.data(),
+                              static_cast<int>(_shape_vertices.size()), _shape_indices.data(),
+                              static_cast<int>(_shape_indices.size()));
 }
 
 void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,

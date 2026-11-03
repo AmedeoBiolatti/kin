@@ -28,6 +28,22 @@ releases may change APIs.
   so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
+- [2D runtime workflows](2d_workflows.md): consuming/modal input contexts, rebinding
+  capture/conflicts and saved overrides; per-player controllers, reconnects, haptics
+  and family prompts; prefab prewarming/reuse with stale lease/script guards;
+  staged async scene preparation, cancellation and bounded image uploads; grid
+  navigation agents with radius clearance, replanning, events and local steering.
+- [Incremental 2D imports](importing_2d.md#watching-and-incremental-processing):
+  verified content-addressed job caching, debounced watch targets, corrupt-cache
+  recovery and preservation of last-good outputs when sources fail/change mid-import.
+- [Accessible UI](ui.md#accessibility): optional AccessKit desktop bridge, accessible
+  names, announcements, numeric control actions and reduced-motion surface transitions.
+- [Normal-mapped sprites](rendering.md#normal-mapped-sprites): CPU forward diffuse/
+  specular shading, directional lights, receiver masks and polygon shadows.
+- [2D skeletal animation](skeleton_2d.md): native rigs/clips, weighted meshes,
+  attachments, two-bone IK and asset/ECS integration, with textured triangle drawing
+  on SDL, SDL_GPU and WebGL2.
+
 - Runtime [tweens](animation_system.md#tweens) for values chosen by game code: sequential/parallel steps,
   easing, delays and callbacks, pause/resume/restart/cancel, and target-lifetime guards.
 - [Controller UI](ui.md#controllers) navigation and semantic [UI automation](ui.md#automation): spatial

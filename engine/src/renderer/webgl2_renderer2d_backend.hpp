@@ -33,6 +33,7 @@ public:
     bool update_texture(const Texture& texture, Vec2i at, Vec2i size, const u8* pixels) override;
     void set_scale_mode(const Texture& texture, ScaleMode mode) override;
     void draw_texture(const Texture& texture, Rectf dest) override;
+    bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) override;

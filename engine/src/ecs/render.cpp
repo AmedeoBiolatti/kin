@@ -1,19 +1,18 @@
-#include <kin/ecs/render.hpp>
-
-#include <kin/core/affine.hpp>
-#include <kin/core/jobs.hpp>
-
-#include <kin/ecs/particles.hpp>
-#include <kin/ecs/shader_effect.hpp>
-#include <kin/ecs/text.hpp>
-#include <kin/ecs/tilemap.hpp>
-#include <kin/platform/log.hpp>
-#include <kin/renderer/render_profile.hpp>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <kin/core/affine.hpp>
+#include <kin/core/jobs.hpp>
+#include <kin/ecs/normal_sprite2d.hpp>
+#include <kin/ecs/particles.hpp>
+#include <kin/ecs/render.hpp>
+#include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/skeleton2d.hpp>
+#include <kin/ecs/text.hpp>
+#include <kin/ecs/tilemap.hpp>
+#include <kin/platform/log.hpp>
+#include <kin/renderer/render_profile.hpp>
 #include <optional>
 #include <string>
 #include <vector>
@@ -156,35 +155,91 @@ WorldRenderState::WorldRenderState(flecs::world& world)
       _transform_observer(world.observer<Transform2D>("add_world_transform")
                               .event(flecs::OnAdd)
                               .yield_existing()
-                              .each([](flecs::entity entity, Transform2D&) {
-                                  entity.ensure<WorldTransform>();
-                              })),
+                              .each([](flecs::entity entity, Transform2D&) { entity.ensure<WorldTransform>(); })),
       _transforms(world.query_builder<WorldTransform, const Transform2D, const WorldTransform, const Parallax*>()
-                      .term_at(2).parent().cascade().optional()
-                      .term_at(3).self()
+                      .term_at(2)
+                      .parent()
+                      .cascade()
+                      .optional()
+                      .term_at(3)
+                      .self()
                       .cached()
                       .build()),
       _sprites(world.query_builder<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*>()
-                   .term_at(3).self().up().cached().build()),
+                   .term_at(3)
+                   .self()
+                   .up()
+                   .cached()
+                   .build()),
       _textures(world.query_builder<const Transform2D, const WorldTransform, const TextureRenderer, const ClipGroup*>()
-                    .term_at(3).self().up().cached().build()),
+                    .term_at(3)
+                    .self()
+                    .up()
+                    .cached()
+                    .build()),
+      _skeletons(
+          world.query_builder<const Transform2D, const WorldTransform, const SkeletonRenderer2D, const ClipGroup*>()
+              .term_at(3)
+              .self()
+              .up()
+              .cached()
+              .build()),
+      _normal_sprites(
+          world.query_builder<const Transform2D, const WorldTransform, const NormalSpriteRenderer2D, const ClipGroup*>()
+              .term_at(3)
+              .self()
+              .up()
+              .cached()
+              .build()),
       _rects(world.query_builder<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*>()
-                 .term_at(3).self().up().cached().build()),
+                 .term_at(3)
+                 .self()
+                 .up()
+                 .cached()
+                 .build()),
       _lines(world.query_builder<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*>()
-                 .term_at(3).self().up().cached().build()),
+                 .term_at(3)
+                 .self()
+                 .up()
+                 .cached()
+                 .build()),
       _shapes(world.query_builder<const Transform2D, const WorldTransform, const ShapeRenderer, const ClipGroup*>()
-                  .term_at(3).self().up().cached().build()),
+                  .term_at(3)
+                  .self()
+                  .up()
+                  .cached()
+                  .build()),
       _particle_systems(world.query_builder<const ParticleSystemComponent, const ClipGroup*>()
-                            .term_at(1).self().up().cached().build()),
+                            .term_at(1)
+                            .self()
+                            .up()
+                            .cached()
+                            .build()),
       _particle_fields(world.query_builder<const ParticleFieldComponent, const ClipGroup*>()
-                           .term_at(1).self().up().cached().build()),
+                           .term_at(1)
+                           .self()
+                           .up()
+                           .cached()
+                           .build()),
       _tilemaps(world.query_builder<const Transform2D, const WorldTransform, const TilemapComponent, const ClipGroup*>()
-                    .term_at(3).self().up().cached().build()),
+                    .term_at(3)
+                    .self()
+                    .up()
+                    .cached()
+                    .build()),
       _texts(world.query_builder<const Transform2D, const WorldTransform, const TextRenderer, const ClipGroup*>()
-                 .term_at(3).self().up().cached().build()),
-      _shader_effects(world.query_builder<const Transform2D, const WorldTransform, const ShaderEffect, const ClipGroup*>()
-                          .term_at(3).self().up().cached().build()) {
-}
+                 .term_at(3)
+                 .self()
+                 .up()
+                 .cached()
+                 .build()),
+      _shader_effects(
+          world.query_builder<const Transform2D, const WorldTransform, const ShaderEffect, const ClipGroup*>()
+              .term_at(3)
+              .self()
+              .up()
+              .cached()
+              .build()) {}
 
 RenderQueue& WorldRenderState::group_queue(flecs::entity owner, const SpriteRenderOptions& options) {
     std::shared_ptr<RenderQueue>& queue = _group_queues[owner.id()];
@@ -359,6 +414,19 @@ void WorldRenderState::collect_all(RenderQueue& queue,
             repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_texture(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
+    each_row(_skeletons, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SkeletonRenderer2D& r) {
+        if (wanted(it, i))
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                submit_skeleton2d(to(it, i), it.entity(i), at, r, options.view);
+            });
+    });
+    each_row(_normal_sprites,
+             [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const NormalSpriteRenderer2D& r) {
+                 if (wanted(it, i))
+                     repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                         submit_normal_sprite2d(to(it, i), it.entity(i), at, r, options.view);
+                     });
+             });
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
         if (wanted(it, i)) {
             repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });
@@ -613,6 +681,16 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
         }
     });
     collect_textures(queue, options, false);
+    each_row(_skeletons, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SkeletonRenderer2D& r) {
+        repeated(it.entity(i), t, options.view,
+                 [&](const WorldTransform& at) { submit_skeleton2d(to(it, i), it.entity(i), at, r, options.view); });
+    });
+    each_row(_normal_sprites,
+             [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const NormalSpriteRenderer2D& r) {
+                 repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                     submit_normal_sprite2d(to(it, i), it.entity(i), at, r, options.view);
+                 });
+             });
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
         if (take(it, r.static_renderable, t)) {
             repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });

@@ -117,6 +117,7 @@ public:
     // axes bound to a controller read. Once is enough; later calls do nothing.
     void open_gamepads();
     bool gamepads_open() const { return _gamepads != nullptr; }
+    Gamepads* gamepads() { return _gamepads.get(); }
     bool close_asked() const { return _close_asked; }
     void forget_close() { _close_asked = false; }
 

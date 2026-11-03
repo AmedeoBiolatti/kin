@@ -1,5 +1,10 @@
 # Assets
 
+For runtime input/scene/pool services see [2D workflows](2d_workflows.md). The
+Assets2D binders also load [2D skeletons](skeleton_2d.md) and
+[normal-mapped sprites](rendering.md#normal-mapped-sprites). Authoring hot imports
+and the processed artifact cache are covered in [2D importing](importing_2d.md).
+
 Kin has two complementary asset APIs that share one cache:
 
 - **`AssetManager`** — synchronous, eager loading. `load<T>(path)` blocks, caches,

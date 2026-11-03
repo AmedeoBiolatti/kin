@@ -29,6 +29,7 @@ class ParticleCatalog;
 struct PrefabAsset;
 class SpriteCatalog;
 class TileMap;
+struct SkeletonAsset2D;
 
 enum class AssetType {
     Unknown,
@@ -44,16 +45,17 @@ enum class AssetType {
     TileMap,
     Dialogue,
     Prefab,
-    Scene,  // .kinscene
-    Audio,  // a sound: .wav, .ogg, .mp3, .flac
-    Font,   // .ttf, .otf
-    Model,  // a 3D model: .glb, .gltf
-    TileSet, // .kintileset: tiles maps share
-    Shape,   // .svg: a vector shape (SVG-lite)
-    Shader,  // .glsl (.frag.glsl), .spv: a fragment shader
-    ColorLut, // .cube: a colour look (a LUT image is an Image)
-    UiScreen, // .kinui: a UI screen
-    UiTheme,  // .kintheme: a UI look
+    Scene,      // .kinscene
+    Audio,      // a sound: .wav, .ogg, .mp3, .flac
+    Font,       // .ttf, .otf
+    Model,      // a 3D model: .glb, .gltf
+    TileSet,    // .kintileset: tiles maps share
+    Shape,      // .svg: a vector shape (SVG-lite)
+    Shader,     // .glsl (.frag.glsl), .spv: a fragment shader
+    ColorLut,   // .cube: a colour look (a LUT image is an Image)
+    UiScreen,   // .kinui: a UI screen
+    UiTheme,    // .kintheme: a UI look
+    Skeleton2D, // .kinskel: a 2D skeleton, weighted mesh and clips
 };
 
 enum class AssetStatus {
@@ -295,6 +297,8 @@ private:
             return AssetType::Particles;
         } else if constexpr (std::is_same_v<T, SpriteCatalog>) {
             return AssetType::SpriteCatalog;
+        } else if constexpr (std::is_same_v<T, SkeletonAsset2D>) {
+            return AssetType::Skeleton2D;
         } else if constexpr (std::is_same_v<T, AudioCatalog>) {
             return AssetType::AudioCatalog;
         } else if constexpr (std::is_same_v<T, TileMap>) {

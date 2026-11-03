@@ -1,21 +1,21 @@
-#include <kin/scripting/entity_scripts.hpp>
-
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/camera.hpp>
+#include <kin/ecs/dialogue.hpp>
+#include <kin/ecs/lifecycle.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/render.hpp>
-#include <kin/ecs/script.hpp>
-#include <kin/ecs/dialogue.hpp>
 #include <kin/ecs/saving.hpp>
 #include <kin/core/timers.hpp>
 #include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/tween.hpp>
+#include <kin/ecs/script.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/l10n/localization.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/prefab/prefab_asset.hpp>
+#include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>
 #if KIN_ENABLE_PHYSICS
 #include <kin/ecs/physics.hpp>
@@ -47,7 +47,18 @@ struct ScriptEntity {
     EcsWorld* world = nullptr;
     flecs::entity entity;
 
-    bool alive() const { return entity && entity.is_alive(); }
+    u64 lifetime = 0;
+    ScriptEntity(EcsWorld* w, flecs::entity e) : world(w), entity(e) {
+        if (entity && entity.is_alive())
+            if (const auto* lease = entity.get<EntityLifetime>())
+                lifetime = lease->generation;
+    }
+    bool alive() const {
+        if (!entity || !entity.is_alive())
+            return false;
+        const auto* lease = entity.get<EntityLifetime>();
+        return lifetime == (lease ? lease->generation : 0);
+    }
     flecs::entity live() const {
         if (!alive()) {
             throw sol::error("the entity is gone");
@@ -298,6 +309,7 @@ struct EntityScripts::Impl {
         bool started = false;
         Timers timers; // its self:after and self:every
         std::unordered_map<u32, sol::protected_function> tween_done; // by tween id
+        u64 lifetime = 0;
     };
     std::unordered_map<std::string, File> files;
     std::unordered_map<u64, Running> running;
@@ -1067,9 +1079,12 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         }
         auto [found, fresh] = impl.running.try_emplace(entity.id());
         Impl::Running& run = found->second;
-        if (fresh || run.generation != file.generation) {
+        const auto* lease = entity.get<EntityLifetime>();
+        const u64 lifetime = lease ? lease->generation : 0;
+        if (fresh || run.generation != file.generation || run.lifetime != lifetime) {
             // Its self, in the file's state as read now.
             run = {.path = path, .generation = file.generation, .self = {}, .started = false};
+            run.lifetime = lifetime;
             const sol::protected_function make = file.script->lua()["__kin_self"];
             const sol::protected_function_result made = make(ScriptEntity{&world, entity});
             if (!made.valid()) {

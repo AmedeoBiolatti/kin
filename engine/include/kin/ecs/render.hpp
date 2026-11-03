@@ -28,6 +28,8 @@ struct ParticleFieldComponent;
 struct TilemapComponent;
 struct TextRenderer;
 struct ShaderEffect;
+struct SkeletonRenderer2D;
+struct NormalSpriteRenderer2D;
 
 // Where an entity sits relative to its parent (flecs ChildOf), or to the world
 // without one: scaled, then turned (degrees, clockwise), then moved to `pos`.
@@ -327,6 +329,9 @@ private:
     // (optional: field 3, or 1 for particles).
     flecs::query<const Transform2D, const WorldTransform, const SpriteRenderer, const ClipGroup*> _sprites;
     flecs::query<const Transform2D, const WorldTransform, const TextureRenderer, const ClipGroup*> _textures;
+    flecs::query<const Transform2D, const WorldTransform, const SkeletonRenderer2D, const ClipGroup*> _skeletons;
+    flecs::query<const Transform2D, const WorldTransform, const NormalSpriteRenderer2D, const ClipGroup*>
+        _normal_sprites;
     flecs::query<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*> _rects;
     flecs::query<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*> _lines;
     flecs::query<const Transform2D, const WorldTransform, const ShapeRenderer, const ClipGroup*> _shapes;

@@ -4,6 +4,56 @@
 snapshot path have been removed, so new and existing UI code should include
 `kin/ui2/*` headers and use the `kin::ui2` namespace explicitly.
 
+## Accessibility
+
+`kin/ui2/accessibility.hpp` connects UI semantics to AccessKit C 0.23.2: AT-SPI on
+Linux/Unix, UI Automation on Windows and the macOS accessibility APIs. Native
+support is optional; ordinary builds require neither AccessKit nor Rust:
+
+```sh
+cmake -S . -B build -DKIN_ENABLE_ACCESSIBILITY=ON \
+  -DKIN_ACCESSKIT_INCLUDE_DIR=/path/to/accesskit-c/include \
+  -DKIN_ACCESSKIT_LIBRARY=/path/to/libaccesskit.a
+```
+
+Use the upstream 0.23.2 desktop static library or build that tag with
+`cargo build --release --locked`. The library must match the target platform and
+runtime. Kin adds desktop system libraries and packages the retained AccessKit
+license texts.
+
+Create one bridge per window after its renderer, and destroy it first:
+
+```cpp
+kin::ui2::Accessibility accessibility{window, renderer, "My game"};
+// Each frame:
+ui.begin(input, renderer, dt);
+ui.semantic_label(volume_id, "Music volume"); // before or after the widget
+// ...build UI...
+ui.end();
+accessibility.update(ui);
+// On an event:
+accessibility.announce("Settings saved"); // second argument true: assertive
+```
+
+Labels, values, bounds, hierarchy, focus, toggled state and disabled/modal state
+come from UI semantics. Give icon buttons/fields explicit semantic_label names
+every frame. Sliders/number inputs expose numeric ranges/steps and accept
+increment/decrement/set-value. Text inputs accept replacement text; buttons,
+toggles and menu items accept activation. Custom controls should describe their
+semantics and implement Context's matching action helpers.
+
+Native callbacks queue actions across threads without accessing UI state. The
+main thread revalidates targets and applies one action to the next UI frame.
+Removed/disabled/modal-blocked targets cannot activate. native_available() reports
+adapter initialization, not an attached screen reader. snapshot/request_action
+also work with native support disabled. Mobile adapters and rich-text caret/
+selection accessibility are not implemented.
+
+set_reduced_motion(true) makes surface transitions immediate; share that setting
+with your game's tween policy. OS preference detection is not automatic.
+Semantic automation additionally accepts `increment`, `decrement`, `set_number`
+(`text` holds the number), alongside click/focus/set_text.
+
 ## Entry Points
 
 - `kin/ui2/context.hpp` for immediate-mode UI context, drawing, clipping, input,
@@ -718,6 +768,8 @@ Ambiguous selectors and hidden, disabled, or blocked targets are refused.
 `.kinui` buttons, toggles, sliders and text inputs use their element IDs as keys.
 Actions are `click`, `focus`, and `set_text` (with a `text` string for `TextInput`
 or editable `TextEdit`). `TextEdit` keeps its undo history and byte limit.
+Sliders/number inputs also accept `increment`, `decrement` and `set_number`
+(the finite numeric value is in `text`); snapshots include their numeric range/step.
 One action may be queued per tick; it is rechecked against the next frame and
 expires after that step. Taking a screenshot does not consume it. `--inspect`
 allows snapshots of the last drawn frame and refuses semantic input, as it does

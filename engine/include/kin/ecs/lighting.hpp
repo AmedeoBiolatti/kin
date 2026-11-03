@@ -38,6 +38,7 @@
 namespace kin {
 
 class Renderer2D;
+struct Image;
 
 struct LightComponent {
     Color color = colors::white;
@@ -53,6 +54,9 @@ struct LightComponent {
     bool shadows = false;        // LightOccluders cast its shadows
     f32 shadow_strength = 1.0f;  // how much light they take: 1 all of it, 0 none
     f32 shadow_softness = 0.0f;  // the light's size (in its entity's units): soft edges; 0 sharp
+    f32 height = 64.0f;          // above the sprite plane, for normal-mapped receivers
+    i32 mask = -1;               // forward-lit receiver bit mask
+    std::shared_ptr<const Image> shape_image;
 };
 
 enum class OccluderShape : u8 {
@@ -86,6 +90,7 @@ struct SceneLighting {
     Color ambient = Color::rgb(40, 44, 64);
     // Light-map pixels per screen unit (lights are smooth: half is plenty).
     f32 resolution = 0.5f;
+    bool forward_sprites = false; // NormalSpriteRenderer2D shades itself; other renderers are unlit
 };
 
 struct ColorGrade {

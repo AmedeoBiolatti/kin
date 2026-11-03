@@ -10,10 +10,15 @@
 //     move = {pad.left_x, pad.left_y};             // -1 to 1, y up is positive (forward)
 
 #include <kin/core/types.hpp>
-
 #include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace kin {
+
+enum class GamepadFamily { Generic, Xbox, PlayStation, Nintendo };
 
 enum class GamepadButton : u8 {
     A, // the south face button (Cross)
@@ -42,6 +47,8 @@ struct GamepadState {
     f32 left_trigger = 0.0f, right_trigger = 0.0f;
     // One bit for each GamepadButton.
     u32 buttons = 0;
+    u32 device = 0; // connection identity; zero for synthetic/legacy input
+    GamepadFamily family = GamepadFamily::Generic;
 
     bool button(GamepadButton b) const { return (buttons >> static_cast<u32>(b)) & 1u; }
     void set_button(GamepadButton b, bool down) {
@@ -49,6 +56,39 @@ struct GamepadState {
         buttons = down ? (buttons | bit) : (buttons & ~bit);
     }
     friend bool operator==(const GamepadState&, const GamepadState&) = default;
+};
+
+struct GamepadDevice {
+    u32 id = 0;
+    std::string name;
+    std::string identity; // GUID + serial, for reconnect matching
+    GamepadState state;
+};
+
+std::string_view gamepad_button_label(GamepadFamily family, GamepadButton button);
+
+// Deterministic device ownership, usable with hardware inventories or replayed
+// inventories. A disconnected player's slot remains reserved until leave().
+class GamepadPlayers {
+public:
+    explicit GamepadPlayers(std::size_t max_players = 4);
+    void update(std::span<const GamepadDevice> devices, bool join_on_start = true);
+    bool join(u32 device, std::size_t player);
+    void leave(std::size_t player);
+    const GamepadState& state(std::size_t player) const;
+    u32 device(std::size_t player) const;
+    bool joined(std::size_t player) const;
+    std::size_t capacity() const { return _players.size(); }
+
+private:
+    struct Player {
+        u32 device = 0;
+        std::string identity;
+        GamepadState state;
+        bool joined = false;
+    };
+    std::vector<Player> _players;
+    std::vector<GamepadDevice> _devices;
 };
 
 // Reads the first connected controller. Starts SDL's gamepad subsystem when made and stops it when destroyed; where there is
@@ -64,6 +104,12 @@ public:
     const GamepadState& poll();
     // The device's name ("" with none).
     const char* name() const;
+    std::span<const GamepadDevice> devices() const;
+    GamepadPlayers& players();
+    // Starts both motors for duration_ms; zero duration stops. False when the
+    // device is disconnected, lacks rumble, or the strengths are non-finite.
+    bool rumble(u32 device, f32 low, f32 high, u32 duration_ms);
+    bool rumble_player(std::size_t player, f32 low, f32 high, u32 duration_ms);
 
 private:
     struct Impl;

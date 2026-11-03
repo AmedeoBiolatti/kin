@@ -75,6 +75,17 @@ void EcsScene::add_asset_binder(std::string name, Assets2D::Binder binder) {
     }
 }
 
+void EcsScene::adopt_assets(std::unique_ptr<Assets2D> assets) {
+    if (assets) {
+        for (const auto& [name, binder] : _asset_binders)
+            assets->add_binder(name, binder);
+        _render_config.asset_root = assets->root();
+    }
+    _assets = std::move(assets);
+    _asset_frames = 0;
+    mark_render_cache_dirty("preloaded assets");
+}
+
 void EcsScene::bind_assets(SceneContext& ctx) {
     if (!_assets) {
         std::filesystem::path root = _render_config.asset_root;
@@ -159,7 +170,8 @@ void EcsScene::render(SceneContext& ctx) {
         _view_camera ? std::nullopt : std::optional(camera_ptr ? camera_ptr->center() : Vec2f{screen.x * 0.5f, screen.y * 0.5f});
 
     // Lit: the world (and its effects) drawn first, then lit, then the UI layer and above.
-    const bool lit = _render_config.scene_lighting && scene_lighting(ecs()) != nullptr;
+    const auto* lighting = _render_config.scene_lighting ? scene_lighting(ecs()) : nullptr;
+    const bool lit = lighting && !lighting->forward_sprites;
     constexpr u64 unlit_passes = render_pass_mask::ui | render_pass_mask::debug | render_pass_mask::editor_overlay;
     const auto light_world = [&] {
         DebugStepTimer timer{timing_debug, "render.scene.lighting"};

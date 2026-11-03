@@ -41,7 +41,7 @@ def discover(root, path, inventory, object_hook):
     suffix = PurePosixPath(path).suffix.lower()
     if suffix in LEAVES:
         return {"format": "leaf", "complete": True, "edges": [], "notes": []}
-    if suffix not in (".kinscene", ".kinprefab", ".kinsprites", ".kinaudio"):
+    if suffix not in (".kinscene", ".kinprefab", ".kinsprites", ".kinaudio", ".kinskel"):
         return None
     edges, notes = [], []
 
@@ -50,7 +50,14 @@ def discover(root, path, inventory, object_hook):
             edges.append({"source": path, "target": target, "origin": "scanner:" + suffix[1:], "location": location})
 
     text = (root / path).read_text(encoding="utf-8")
-    if suffix in (".kinscene", ".kinprefab"):
+    if suffix == ".kinskel":
+        document = json.loads(text, object_pairs_hook=object_hook)
+        if not isinstance(document, dict) or document.get("schema") != "kin.skeleton2d/1":
+            raise ValueError(f"Unsupported skeleton schema in {path}")
+        if document.get("texture_asset"):
+            add(document["texture_asset"], "/texture_asset")
+        complete = True
+    elif suffix in (".kinscene", ".kinprefab"):
         document = json.loads(text, object_pairs_hook=object_hook)
         expected = "kin.scene/1" if suffix == ".kinscene" else "kin.prefab/1"
         if not isinstance(document, dict) or document.get("schema", expected) != expected:
