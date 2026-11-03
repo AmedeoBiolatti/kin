@@ -548,6 +548,56 @@ checks, exact regenerated helpers, unchanged backend, declared sample counts
 and binary/SPIR-V hashes pass for all three new tiers. No production GI code
 or defaults are changed.
 
+#### Zero, one and two source points
+
+A further fresh campaign tests zero explicit source quadrature, one area-weighted
+panel centroid and one centroid per emitting triangle (two total). Main and the
+same 8-point binary are freshly measured controls. One/two preserve source area,
+power and first moments; the one-point rule requires the verified uniform,
+coplanar panel with common normal and sidedness.
+
+Zero has two explicitly different meanings. Simply removing quadrature while
+still subtracting primary emission from probe rays leaves the room black apart
+from the panel. That literal-zero ablation is captured at both phases and is
+excluded from the timing ranking. The usable zero-point fallback keeps primary
+emission in the probe rays, so probes carry full source and bounce lighting;
+the explicit source helper returns constant zero without surface/visibility work.
+This fallback changes the trace subtraction policy as well as the helper, so it
+is an algorithm variation rather than a sample-count-only comparison.
+
+| Configuration | Frame p50 | Run p50 range | Room SSIM ↑ | Room RGB MAE ↓ | Shadow-crop SSIM ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main | 1.054 ms | 0.888–1.054 ms | 0.9338 | 7.524 | 0.9696 |
+| 0, full-probe fallback | 1.439 ms | 1.248–1.440 ms | 0.9728 | 3.263 | 0.9824 |
+| 1, panel centroid | 1.705 ms | 1.588–1.730 ms | 0.9701 | 3.639 | 0.9693 |
+| 2, triangle centroids | 1.806 ms | 1.626–1.814 ms | 0.9730 | 3.250 | 0.9780 |
+| 8 points | 2.448 ms | 2.399–2.510 ms | 0.9767 | 3.019 | 0.9884 |
+
+The zero-point fallback costs 41.2% less per frame than 8 points and 36.6% more
+than main, with 56.6% less room RGB error than main. It keeps most broad visual
+improvements and smoother probe shadows, with blurred contacts and some residual
+edge leakage. One point creates a hard shadow and is worse than zero on both
+cost and aggregate error. Two points create split shadows, adding cost for little
+aggregate improvement over zero and worse shadow-crop SSIM. The zero fallback is
+the useful new candidate for further work. It still retains the prototype's
+paired history resources and source-composite pass; removing that overhead is
+unmeasured. The literal-zero ablation has room SSIM 0.0087 and MAE 59.344.
+
+All 27 jobs pass count/settings/output checks: 15 serial cost runs (three varied
+orders, 1,200 warm-up + 2,400 measured frames) and 12 separate quality captures
+(phases 2,400/2,573, including the ablation). The two 1,024-sample denoised Cycles
+seeds, crop/mask, fixed shadow ROI and no-fitting policy remain unchanged.
+All cases retain 51,984 probes, 4,096 updates x 128 rays, TAA and 82 triangles at
+720p on RTX 4080 Laptop/Vulkan. Startup/thermal drift affects exact timings.
+These are static-source/geometry results; motion/cuts and general runtime
+invalidation remain untested. No production GI code or defaults change.
+
+Artifacts: `out/cornell-gi-min-budget-20261103/` contains the full-room and enlarged
+shadow contact sheets, HTML report, literal-zero image, per-phase/seed metrics,
+commands/frame telemetry, source builder and validation runner. Exact source
+reconstruction, declared helper/trace changes, zero-path behavior, source power/
+centroid checks and binary/SPIR-V hashes pass for all four generated variants.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
