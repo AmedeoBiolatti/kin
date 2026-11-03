@@ -59,7 +59,8 @@ audio emitters, and:
   and `PhysicsColliderComponent`, described as its first collider (`shape`:
   box, circle, capsule, polygon or chain; `half_extents` (a box's, a
   capsule's), `radius`, `offset`, `angle` (degrees), `points` (a polygon's
-  corners, concave too; a chain's points), `loop` and `one_sided` (a chain's),
+  corners, concave too; a chain's points), `loop` (a chain's), `one_sided` (a
+  platform to jump up through: [one-way platforms](physics_2d.md#one-way-platforms)),
   `density`, `friction`, `restitution`, `sensor`, `category_bits`,
   `mask_bits`). A collider is made by the first field set (`{}` has none),
   and a field changed later makes its fixture again. On an entity with no
@@ -75,7 +76,11 @@ audio emitters, and:
   entity makes its solid cells a static body (`TileMap::collision_shapes`: a
   one-sided loop around each run of touching cells, a cell's
   `collision_polygon` its own shape; `layer`, `friction`, `restitution`,
-  `sensor`, the bits). `PhysicsVelocity`, `PhysicsContactQueue` and
+  `sensor`, the bits). `CharacterController2D` makes the entity a character
+  its game moves: `velocity`, `gravity`, `up`, `max_slope` (degrees), `snap`,
+  `stop_on_slope`, `push`, `drop_through`; and, read-only, `on_floor`,
+  `on_wall`, `on_ceiling`, `floor_normal`, `wall_normal`
+  ([characters](physics_2d.md#characters)). `PhysicsVelocity`, `PhysicsContactQueue` and
   `PhysicsOverlapSet` (no fields: an entity that collects its contacts) too.
   A game steps them with a `PhysicsWorld` and `update_physics_world`; for a
   world in points, `PhysicsWorldDef::units_per_meter` says how many make a

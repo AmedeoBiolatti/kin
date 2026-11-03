@@ -259,6 +259,24 @@ std::string format_number(double value) {
     return text;
 }
 
+// What a character found in its last step.
+struct CharacterFound {
+    bool floor = false;
+    bool wall = false;
+    bool ceiling = false;
+};
+
+// An entity a script moved: its body goes there at the next step.
+void teleport(EcsEntity entity) {
+#if KIN_ENABLE_PHYSICS
+    if (entity.raw().has<PhysicsBodyComponent>()) {
+        entity.raw().add<PhysicsTeleport>();
+    }
+#else
+    (void)entity;
+#endif
+}
+
 } // namespace
 
 struct EntityScripts::Impl {
@@ -290,6 +308,7 @@ struct EntityScripts::Impl {
     SceneDialogue* dialogue = nullptr;
     SceneFlow* flow = nullptr;
     SceneSaves* saves = nullptr;
+    PhysicsWorld* physics = nullptr;
     // Values given back by the saves, for entities once they start (by id).
     std::unordered_map<u64, JsonValue> restored;
     std::string calling; // the script being called, for its problems
@@ -355,13 +374,63 @@ struct EntityScripts::Impl {
             Transform2D t = target.get<Transform2D>() ? *target.get<Transform2D>() : Transform2D{};
             t.pos = {x, y};
             target.set(t);
+            teleport(target);
         };
         entity["move"] = [](const ScriptEntity& e, f32 dx, f32 dy) {
             EcsEntity target{e.live()};
             Transform2D t = target.get<Transform2D>() ? *target.get<Transform2D>() : Transform2D{};
             t.pos = {t.pos.x + dx, t.pos.y + dy};
             target.set(t);
+            teleport(target);
         };
+        // Its velocity: its character's (CharacterController2D), else its body's.
+        entity["velocity"] = [this](const ScriptEntity& e) {
+            Vec2f velocity{};
+#if KIN_ENABLE_PHYSICS
+            const flecs::entity live = e.live();
+            if (const CharacterController2D* character = live.get<CharacterController2D>()) {
+                velocity = character->velocity;
+            } else if (const PhysicsVelocity* set = live.get<PhysicsVelocity>()) {
+                velocity = set->linear;
+            } else if (const PhysicsBodyComponent* body = live.get<PhysicsBodyComponent>(); body && physics) {
+                velocity = physics->linear_velocity(body->body);
+            }
+#else
+            (void)e;
+            (void)this;
+#endif
+            return std::make_tuple(velocity.x, velocity.y);
+        };
+        entity["set_velocity"] = [](const ScriptEntity& e, f32 x, f32 y) {
+#if KIN_ENABLE_PHYSICS
+            flecs::entity live = e.live();
+            if (CharacterController2D* character = live.get_mut<CharacterController2D>()) {
+                character->velocity = {x, y};
+            } else {
+                live.set(PhysicsVelocity{.linear = {x, y}});
+            }
+#else
+            (void)e, (void)x, (void)y;
+            throw sol::error("set_velocity: the game has no physics");
+#endif
+        };
+        // What its character found in the last step.
+        const auto character_found = [](const ScriptEntity& e, bool CharacterFound::*what) {
+#if KIN_ENABLE_PHYSICS
+            const CharacterController2D* character = e.live().get<CharacterController2D>();
+            if (!character) {
+                return false;
+            }
+            const CharacterFound found{character->on_floor, character->on_wall, character->on_ceiling};
+            return found.*what;
+#else
+            (void)e, (void)what;
+            return false;
+#endif
+        };
+        entity["on_floor"] = [character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::floor); };
+        entity["on_wall"] = [character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::wall); };
+        entity["on_ceiling"] = [character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::ceiling); };
         entity["rotation"] = [](const ScriptEntity& e) {
             const Transform2D* t = e.live().get<Transform2D>();
             return t ? t->rotation : 0.0f;
@@ -545,6 +614,10 @@ struct EntityScripts::Impl {
             return most;
         };
 
+#if KIN_ENABLE_PHYSICS
+        bind_physics(lua);
+#endif
+
         sol::table save_table = lua.create_named_table("save");
         const auto saves_or_throw = [this]() -> SceneSaves& {
             if (!saves) {
@@ -621,6 +694,129 @@ struct EntityScripts::Impl {
         prefabs.emplace(path, asset);
         return asset;
     }
+
+#if KIN_ENABLE_PHYSICS
+    // The entity a body is: its body's, or its tilemap's solid cells'.
+    flecs::entity entity_of(PhysicsBody body) const {
+        if (!physics || !world || !body) {
+            return {};
+        }
+        const u64 id = physics->user_id(body);
+        if (id == 0 || !world->raw().is_alive(id)) {
+            return {};
+        }
+        const flecs::entity found = world->raw().entity(id);
+        if (const PhysicsBodyComponent* owned = found.get<PhysicsBodyComponent>(); owned && owned->body == body) {
+            return found;
+        }
+        if (const TilemapCollider* cells = found.get<TilemapCollider>(); cells && cells->body == body) {
+            return found;
+        }
+        return {};
+    }
+
+    // A query's options: {mask = bits, sensors = true, ignore = an entity (or self)}.
+    static PhysicsFilter filter_of(const sol::optional<sol::table>& options) {
+        PhysicsFilter filter{.include_sensors = false};
+        if (!options) {
+            return filter;
+        }
+        if (const sol::optional<double> mask = (*options)["mask"]) {
+            if (*mask < 0.0 || *mask > 65535.0) {
+                throw sol::error("physics: mask takes bits, 0 to 65535");
+            }
+            filter.mask_bits = static_cast<u16>(*mask);
+        }
+        if (const sol::optional<bool> sensors = (*options)["sensors"]) {
+            filter.include_sensors = *sensors;
+        }
+        sol::object ignore = (*options)["ignore"];
+        if (ignore.is<sol::table>()) {
+            ignore = ignore.as<sol::table>()["entity"]; // a script's self
+        }
+        if (ignore.is<ScriptEntity>()) {
+            const ScriptEntity& other = ignore.as<const ScriptEntity&>();
+            if (other.alive()) {
+                if (const PhysicsBodyComponent* body = other.entity.get<PhysicsBodyComponent>()) {
+                    filter.ignore = body->body;
+                }
+            }
+        }
+        return filter;
+    }
+
+    PhysicsWorld& physics_or_throw() const {
+        if (!physics) {
+            throw sol::error("the game gives its scripts no physics");
+        }
+        return *physics;
+    }
+
+    // A hit as scripts see it.
+    sol::table hit_table(sol::state_view lua, PhysicsBody body, Vec2f point, Vec2f normal, f32 fraction) const {
+        sol::table hit = lua.create_table();
+        if (const flecs::entity entity = entity_of(body)) {
+            hit["entity"] = ScriptEntity{world, entity};
+        }
+        hit["x"] = point.x;
+        hit["y"] = point.y;
+        hit["normal"] = lua.create_table_with("x", normal.x, "y", normal.y);
+        hit["fraction"] = fraction;
+        return hit;
+    }
+
+    // The entities of `fixtures`, each once, as a list.
+    sol::table entities_table(sol::state_view lua, const std::vector<PhysicsFixture>& fixtures) const {
+        sol::table list = lua.create_table();
+        std::vector<u64> seen;
+        int n = 0;
+        for (const PhysicsFixture fixture : fixtures) {
+            const flecs::entity entity = entity_of(physics->body_of(fixture));
+            if (entity && std::ranges::find(seen, entity.id()) == seen.end()) {
+                seen.push_back(entity.id());
+                list[++n] = ScriptEntity{world, entity};
+            }
+        }
+        return list;
+    }
+
+    void bind_physics(sol::state& lua) {
+        sol::table table = lua.create_named_table("physics");
+        table["raycast"] = [this](f32 x1, f32 y1, f32 x2, f32 y2, sol::optional<sol::table> options, sol::this_state state) -> sol::object {
+            const std::vector<PhysicsRaycastHit> hits = physics_or_throw().raycast({x1, y1}, {x2, y2}, filter_of(options));
+            if (hits.empty()) {
+                return sol::lua_nil;
+            }
+            const PhysicsRaycastHit& hit = hits.front();
+            return hit_table(state, hit.body, hit.point, hit.normal, hit.fraction);
+        };
+        const auto cast = [this](const PhysicsShape& shape, Vec2f from, Vec2f to, const sol::optional<sol::table>& options,
+                                 sol::this_state state) -> sol::object {
+            const std::optional<PhysicsShapeHit> hit = physics_or_throw().cast_shape(shape, from, to, filter_of(options));
+            if (!hit) {
+                return sol::lua_nil;
+            }
+            return hit_table(state, hit->body, hit->point, hit->normal, hit->fraction);
+        };
+        table["cast_circle"] = [cast](f32 x1, f32 y1, f32 x2, f32 y2, f32 radius, sol::optional<sol::table> options, sol::this_state state) {
+            return cast(PhysicsShape::circle(radius), {x1, y1}, {x2, y2}, options, state);
+        };
+        table["cast_box"] = [cast](f32 x1, f32 y1, f32 x2, f32 y2, f32 width, f32 height, sol::optional<sol::table> options,
+                                   sol::this_state state) {
+            return cast(PhysicsShape::box({0.5f * width, 0.5f * height}), {x1, y1}, {x2, y2}, options, state);
+        };
+        table["overlap_point"] = [this](f32 x, f32 y, sol::optional<sol::table> options, sol::this_state state) {
+            return entities_table(state, physics_or_throw().query_point({x, y}, filter_of(options)));
+        };
+        table["overlap_circle"] = [this](f32 x, f32 y, f32 radius, sol::optional<sol::table> options, sol::this_state state) {
+            return entities_table(state, physics_or_throw().query_shape(PhysicsShape::circle(radius), {x, y}, filter_of(options)));
+        };
+        table["overlap_box"] = [this](f32 x, f32 y, f32 width, f32 height, sol::optional<sol::table> options, sol::this_state state) {
+            return entities_table(state,
+                                  physics_or_throw().query_shape(PhysicsShape::box({0.5f * width, 0.5f * height}), {x, y}, filter_of(options)));
+        };
+    }
+#endif
 
     // A script file, read (or read again): false when it does not read.
     File& file(const std::string& path) {
@@ -700,6 +896,10 @@ void EntityScripts::set_dialogue(SceneDialogue* dialogue) {
 
 void EntityScripts::set_flow(SceneFlow* flow) {
     _impl->flow = flow;
+}
+
+void EntityScripts::set_physics(PhysicsWorld* physics) {
+    _impl->physics = physics;
 }
 
 void EntityScripts::set_saves(SceneSaves* saves) {
@@ -812,33 +1012,39 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
             }
         }
 #if KIN_ENABLE_PHYSICS
-        // What its body began touching this step.
-        if (entity.is_alive() && file.script->has("on_contact")) {
-            if (const PhysicsContactQueue* queue = entity.get<PhysicsContactQueue>(); queue && !queue->events.empty()) {
-                const PhysicsBodyComponent* mine = entity.get<PhysicsBodyComponent>();
-                std::vector<PhysicsBody> touched;
-                for (const PhysicsContactEvent& event : queue->events) {
-                    if (event.type == PhysicsContactEventType::Begin) {
-                        touched.push_back(mine && event.body_a == mine->body ? event.body_b : event.body_a);
-                    }
+        // What its body began touching this step, and stopped touching.
+        for (const auto& [type, callback] : {std::pair{PhysicsContactEventType::Begin, "on_contact"},
+                                             std::pair{PhysicsContactEventType::End, "on_contact_end"}}) {
+            if (!entity.is_alive() || !file.script->has(callback)) {
+                continue;
+            }
+            const PhysicsContactQueue* queue = entity.get<PhysicsContactQueue>();
+            if (!queue || queue->events.empty()) {
+                continue;
+            }
+            const PhysicsBodyComponent* mine = entity.get<PhysicsBodyComponent>();
+            std::vector<PhysicsBody> touched;
+            for (const PhysicsContactEvent& event : queue->events) {
+                if (event.type == type) {
+                    touched.push_back(mine && event.body_a == mine->body ? event.body_b : event.body_a);
                 }
-                for (const PhysicsBody body : touched) {
-                    flecs::entity other;
-                    world.raw().each([&](flecs::entity candidate, const PhysicsBodyComponent& component) {
+            }
+            for (const PhysicsBody body : touched) {
+                flecs::entity other;
+                world.raw().each([&](flecs::entity candidate, const PhysicsBodyComponent& component) {
+                    if (!other && component.body == body) {
+                        other = candidate;
+                    }
+                });
+                if (!other) { // a tilemap's solid cells
+                    world.raw().each([&](flecs::entity candidate, const TilemapCollider& component) {
                         if (!other && component.body == body) {
                             other = candidate;
                         }
                     });
-                    if (!other) { // a tilemap's solid cells
-                        world.raw().each([&](flecs::entity candidate, const TilemapCollider& component) {
-                            if (!other && component.body == body) {
-                                other = candidate;
-                            }
-                        });
-                    }
-                    if (other && entity.is_alive()) {
-                        file.script->call("on_contact", run.self, ScriptEntity{&world, other});
-                    }
+                }
+                if (other && entity.is_alive()) {
+                    file.script->call(callback, run.self, ScriptEntity{&world, other});
                 }
             }
         }

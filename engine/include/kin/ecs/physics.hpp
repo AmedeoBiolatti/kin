@@ -104,6 +104,42 @@ struct TilemapCollider {
     std::shared_ptr<const void> built_from; // the map its body was made from
 };
 
+// A character its game moves (a player, an enemy that walks), rather than the
+// simulation pushing it about: each step its body goes along `velocity` as
+// far as it can, sliding along what stops it (PhysicsWorld::move_character).
+// Its shape is its first collider that is not a sensor (a box, a circle or a
+// capsule); its body is made dynamic, never turning, never asleep and with no
+// gravity of the world's (`gravity` is its own), so sensors see it and
+// dynamic bodies bump into it. A game sets `velocity` (a script: its x to run,
+// its y to jump) and reads where it ended up and what it found:
+//   on_floor, on_wall, on_ceiling, and the floor's and wall's normals.
+// Landing stops its fall (velocity's part along -up goes); a ceiling stops
+// its rise; a wall what went into it. What it stands on carries it as it
+// moves or turns (a moving platform), whether the simulation moves it or its
+// entity does (sync_to_physics). One-sided colliders (`one_sided`) are
+// platforms it lands on and jumps up through; `drop_through` (seconds) lets
+// it fall through them.
+struct CharacterController2D {
+    Vec2f velocity{};          // units/s: what the game asks; after a step, what is left of it
+    f32 gravity = 0.0f;        // units/s², along -up, while it is not on a floor
+    Vec2f up{0.0f, -1.0f};     // on screen (y down), up is -y
+    f32 max_slope = 45.0f;     // degrees: a floor at most this steep; steeper is a wall
+    f32 snap = 0.0f;           // units: kept on a floor going down slopes and steps this far (0: it goes off them)
+    bool stop_on_slope = true; // standing on a slope, it doesn't slide down it
+    f32 push = 1.0f;           // dynamic bodies it walks into are pushed on at its speed times this (0: they stop it)
+    f32 drop_through = 0.0f;   // seconds left in which one-sided platforms let it through
+    // What the last step found.
+    bool on_floor = false;
+    bool on_wall = false;
+    bool on_ceiling = false;
+    Vec2f floor_normal{};
+    Vec2f wall_normal{};
+    // What it stands on, and where that was after the last step (to carry it).
+    PhysicsBody floor{};
+    Vec2f floor_position{};
+    f32 floor_rotation = 0.0f;
+};
+
 // Put on an entity with a body: at the next step its body goes to where the
 // entity is (it keeps its velocity), once; then the tag goes. A body the
 // simulation leads can be moved so (SceneFlow::arrive does, for travellers).

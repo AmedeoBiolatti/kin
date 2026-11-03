@@ -5,7 +5,8 @@
 // no clock, an instruction budget), shared by the entities running it, each
 // with a `self` table of its own. Each update an entity whose script has read
 // gets on_start(self) once, then on_update(self, dt), and on_contact(self,
-// other) for each body its body began touching (with a PhysicsContactQueue).
+// other) for each body its body began touching, on_contact_end(self, other)
+// for each it stopped touching (with a PhysicsContactQueue).
 // A script whose file changed is read again; its entities start over (a
 // broken edit keeps the last good one running). Nothing a script does stops
 // the game: an error is logged, kept in problems(), and that call skipped.
@@ -19,7 +20,11 @@
 //   id(), name(), alive(), parent(), child(name)
 //   get(component) -> a table of its fields, or nil; set(component, {field = value, ...})
 //     (adds it when missing); has(component), add(component), remove(component)
-//   position() -> x, y; set_position(x, y); move(dx, dy); rotation(); set_rotation(degrees)
+//   position() -> x, y; set_position(x, y); move(dx, dy) (its body goes there too);
+//   rotation(); set_rotation(degrees)
+//   velocity() -> vx, vy; set_velocity(vx, vy): its CharacterController2D's,
+//   else its body's (PhysicsVelocity); on_floor(), on_wall(), on_ceiling():
+//   what its CharacterController2D found in the last step
 //   destroy()
 //   play(animation), set_param(name, true|false|number), trigger(name), state()  (its Animator's)
 // and the script has:
@@ -28,6 +33,17 @@
 //   world.find(name) -> an entity or nil; world.spawn(prefab, x, y) -> its root, or nil
 //   camera.shake(trauma) shakes the current cameras (0 to 1, added; it wears
 //   off: kin/ecs/camera.hpp); camera.trauma() -> what is left
+// and, given the scene's physics (set_physics), what is where (positions in
+// the world; `options`, a table: mask = the kinds of collider to find (bits),
+// sensors = true to find sensors too, ignore = an entity, self say):
+//   physics.raycast(x1, y1, x2, y2[, options]) -> the nearest hit, or nil:
+//     {entity = , x = , y = , normal = {x = , y = }, fraction = }
+//   physics.cast_circle(x1, y1, x2, y2, radius[, options]) and
+//   physics.cast_box(x1, y1, x2, y2, width, height[, options]): the same, for
+//     a circle or a box (centred on the point, not turned) going that way
+//   physics.overlap_point(x, y[, options]), physics.overlap_circle(x, y,
+//     radius[, options]), physics.overlap_box(x, y, width, height[, options])
+//     -> a list of the entities there (a box centred on x, y)
 // and, given the scene's screens (set_screens), its UI's elements by id:
 //   ui.clicked(id), ui.changed(id), ui.value(id), ui.checked(id), ui.text(id),
 //   ui.set_text(id, text), ui.set_value(id, v), ui.set_checked(id, b), ui.show(id[, b]),
@@ -70,6 +86,7 @@ class SceneScreens;
 class SceneDialogue;
 class SceneFlow;
 class SceneSaves;
+class PhysicsWorld;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -97,6 +114,9 @@ public:
     void set_dialogue(SceneDialogue* dialogue);
     // The scene's flow, for the scripts' `scene` (null: none).
     void set_flow(SceneFlow* flow);
+    // The scene's physics, for the scripts' `physics` and their entities'
+    // bodies' velocities (null: none).
+    void set_physics(PhysicsWorld* physics);
     // The game's saves, for the scripts' `save` and their entities' kept
     // values (null: none). They are given the scripts' hooks (set_scripts).
     void set_saves(SceneSaves* saves);

@@ -393,7 +393,7 @@ void register_physics2d_editor_components(EcsWorld& world) {
         collider_field<bool>(collider, "loop", [](auto& def) -> auto& { return def.shape.loop; })
             .description("A chain's: back from its last point to its first.");
         collider_field<bool>(collider, "one_sided", [](auto& def) -> auto& { return def.shape.one_sided; })
-            .description("A chain's: it stops what comes from the left of it going along it only (a platform to jump up through, drawn left to right).");
+            .description("A platform to jump up through: it stops only what comes down onto its top (a chain's top: the left of it going along it, drawn left to right).");
         collider_field<f32>(collider, "density", [](auto& def) -> auto& { return def.density; })
             .units("kg/m^2");
         collider_field<f32>(collider, "friction", [](auto& def) -> auto& { return def.friction; });
@@ -504,6 +504,49 @@ void register_physics2d_editor_components(EcsWorld& world) {
                                return true;
                            })
             .description("The kinds it hits (bits).");
+    }
+    if (!registry.find("CharacterController2D")) {
+        // A character its game moves: it goes along `velocity` as far as it
+        // can, sliding along what stops it, its body made for it.
+        registry.native<CharacterController2D>("CharacterController2D")
+            .field("velocity", &CharacterController2D::velocity)
+            .units("units/s")
+            .description("Where the game sends it (a script sets it); after each step, what is left of it (landing stops its fall).")
+            .field("gravity", &CharacterController2D::gravity)
+            .units("units/s^2")
+            .description("Its own, added to its velocity along -up while it is not on a floor.")
+            .field("up", &CharacterController2D::up)
+            .description("Which way is up for it (on screen, y down: 0, -1).")
+            .field("max_slope", &CharacterController2D::max_slope)
+            .units("degrees")
+            .range(0.0, 85.0)
+            .description("A floor is at most this steep; steeper is a wall.")
+            .field("snap", &CharacterController2D::snap)
+            .units("units")
+            .description("Kept on a floor going down slopes and steps this far; 0: it goes off them, falling.")
+            .field("stop_on_slope", &CharacterController2D::stop_on_slope)
+            .description("Standing on a slope, it doesn't slide down it.")
+            .field("push", &CharacterController2D::push)
+            .range(0.0, 4.0)
+            .description("Dynamic bodies it walks into are pushed on at its speed times this; 0: they stop it.")
+            .field("drop_through", &CharacterController2D::drop_through)
+            .units("s")
+            .description("Seconds in which one-sided platforms let it through (set it to drop off one).")
+            .field("on_floor", &CharacterController2D::on_floor)
+            .readonly()
+            .description("It stands on a floor.")
+            .field("on_wall", &CharacterController2D::on_wall)
+            .readonly()
+            .description("It ran into a wall in the last step.")
+            .field("on_ceiling", &CharacterController2D::on_ceiling)
+            .readonly()
+            .description("It ran into a ceiling in the last step.")
+            .field("floor_normal", &CharacterController2D::floor_normal)
+            .readonly()
+            .description("Which way its floor faces.")
+            .field("wall_normal", &CharacterController2D::wall_normal)
+            .readonly()
+            .description("Which way the wall it ran into faces.");
     }
     if (!registry.find("PhysicsVelocity")) {
         registry.native<PhysicsVelocity>("PhysicsVelocity")

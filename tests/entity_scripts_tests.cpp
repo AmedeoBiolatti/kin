@@ -15,6 +15,10 @@
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>
+#if KIN_ENABLE_PHYSICS
+#include <kin/ecs/physics.hpp>
+#include <kin/physics/physics.hpp>
+#endif
 
 #include <cassert>
 #include <cstdio>
@@ -318,11 +322,105 @@ end
 
 } // namespace
 
+#if KIN_ENABLE_PHYSICS
+// A character's script: it reads what its CharacterController2D found, sets
+// its velocity, asks the physics what is where (rays, casts, overlaps; masks,
+// sensors, itself left out), hears contacts begin and end, and is put back
+// (its body with it).
+void test_physics_scripts() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_physics_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/hero.lua", R"lua(
+function on_update(self, dt)
+    self.frames = (self.frames or 0) + 1
+    if self.frames == 40 then
+        assert(self:on_floor(), "landed")
+        assert(not self:on_wall() and not self:on_ceiling())
+        local x, y = self:position()
+        local hit = physics.raycast(x, y, x, 500, {ignore = self})
+        assert(hit and hit.entity:name() == "Floor", "the ray hits the floor")
+        assert(math.abs(hit.y - 100) < 0.5 and math.abs(hit.normal.y + 1) < 0.01 and hit.fraction > 0)
+        assert(physics.raycast(x, y - 100, x, 500).entity:name() == "Hero", "itself, not left out")
+        assert(physics.raycast(x, y, x, -500, {ignore = self}) == nil)
+        local cast = physics.cast_box(-200, 0, -200, 300, 20, 20)
+        assert(cast and cast.entity:name() == "Floor" and math.abs(cast.y - 100) < 0.5, "a box cast")
+        assert(physics.cast_circle(-200, 0, -200, 50, 5) == nil)
+        assert(#physics.overlap_point(60, 84) == 0, "sensors left out")
+        local found = physics.overlap_point(60, 84, {sensors = true})
+        assert(#found == 1 and found[1]:name() == "Coin", "a sensor asked for")
+        local under = physics.overlap_box(0, 110, 100, 10)
+        assert(#under == 1 and under[1]:name() == "Floor")
+        assert(#physics.overlap_circle(0, 110, 5, {mask = 2}) == 0, "masked out")
+        self:set_velocity(300, 0)
+        local vx, vy = self:velocity()
+        assert(vx == 300 and vy == 0)
+    end
+    if self.frames == 80 then
+        assert(self.touched == "Coin", "it touched the coin")
+        assert(self.left == "Coin", "and left it")
+        assert(self:on_floor())
+        self:set_position(0, 0)
+    end
+    if self.frames == 81 then
+        local x, y = self:position()
+        assert(x < 6 and y < 10, "put back, its body too: " .. x .. ", " .. y)
+        self:set("RectRenderer", {size = {x = 3, y = 3}})
+    end
+end
+
+function on_contact(self, other)
+    if other:name() == "Coin" then self.touched = "Coin" end
+end
+
+function on_contact_end(self, other)
+    if other:name() == "Coin" then self.left = "Coin" end
+end
+)lua");
+
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::PhysicsWorld physics{{.gravity = {0.0f, 9.8f * 32.0f}, .units_per_meter = 32.0f}};
+    kin::EcsPhysicsBridge bridge{world, physics};
+    world.entity("Floor")
+        .set(kin::Transform2D{.pos = {0.0f, 116.0f}})
+        .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Static}})
+        .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = kin::PhysicsShape::box({400.0f, 16.0f})}}}});
+    world.entity("Coin")
+        .set(kin::Transform2D{.pos = {60.0f, 84.0f}})
+        .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Static}})
+        .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = kin::PhysicsShape::circle(6.0f), .sensor = true}}}});
+    const kin::EcsEntity hero = world.entity("Hero")
+                                    .set(kin::Transform2D{})
+                                    .set(kin::RectRenderer{})
+                                    .set(kin::PhysicsBodyComponent{})
+                                    .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = kin::PhysicsShape::box({8.0f, 16.0f})}}}})
+                                    .set(kin::PhysicsContactQueue{})
+                                    .set(kin::CharacterController2D{.gravity = 2000.0f})
+                                    .set(kin::ScriptComponent{.asset = {.id = "scripts/hero.lua"}});
+    kin::Input input;
+    kin::EntityScripts scripts{{.content = dir}};
+    scripts.set_physics(&physics);
+    for (int frame = 0; frame < 81; ++frame) {
+        kin::update_physics_world(world, physics, 1.0f / 60.0f);
+        scripts.update(world, input, 1.0f / 60.0f);
+        for (const auto& [path, problem] : scripts.problems()) {
+            std::fprintf(stderr, "frame %d: %s: %s\n", frame + 1, path.c_str(), problem.c_str());
+        }
+        assert(scripts.problems().empty());
+    }
+    assert(hero.get<kin::RectRenderer>()->size == (kin::Vec2f{3.0f, 3.0f}));
+    fs::remove_all(dir);
+}
+#endif
+
 int main() {
     test_entity_scripts();
     test_entity_emit();
     test_scene_go();
     test_saves();
     test_camera_shake();
+#if KIN_ENABLE_PHYSICS
+    test_physics_scripts();
+#endif
     return 0;
 }

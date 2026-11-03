@@ -3,6 +3,7 @@
 #include <kin/core/types.hpp>
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -90,6 +91,9 @@ struct PhysicsBodyDef {
     f32 gravity_scale = 1.0f;
     bool fixed_rotation = false;
     u64 user_id = 0;
+    // A body at rest falls asleep (and stops being simulated) unless this is
+    // off; one that never sleeps keeps seeing what comes to touch it.
+    bool allow_sleep = true;
 };
 
 // A shape on a body, from the body's origin: centred at `offset` and turned
@@ -103,9 +107,12 @@ struct PhysicsShape {
     f32 angle = 0.0f;  // radians
     std::vector<Vec2f> points{}; // a polygon's corners, a chain's points
     bool loop = false;      // a chain's: back from its last point to its first
-    // A chain's: it stops what comes from one side of it only, the left going
-    // from point to point (on screen, y down): wound clockwise, a loop stops
-    // what comes from outside. Two-sided (the default), it stops both.
+    // A platform to jump up through. A chain: it stops what comes from one
+    // side of it only, the left going from point to point (on screen, y down:
+    // drawn left to right, its top): wound clockwise, a loop stops what comes
+    // from outside. Any other shape: it stops only what comes down onto its
+    // top (its up is -y, turned with it), what touches it from below or from
+    // the side passing through. Two-sided (the default), it stops all.
     bool one_sided = false;
 
     static PhysicsShape box(Vec2f half_extents, Vec2f offset = {});
@@ -130,6 +137,7 @@ struct PhysicsFilter {
     u16 category_bits = 0xFFFF;
     u16 mask_bits = 0xFFFF;
     bool include_sensors = true;
+    PhysicsBody ignore{}; // not found: a body asking what is around it
 };
 
 struct PhysicsContactEvent {
@@ -158,6 +166,63 @@ struct PhysicsRaycastHit {
     Vec2f point{};
     Vec2f normal{};
     f32 fraction = 0.0f;
+};
+
+// What a moving shape ran into (PhysicsWorld::cast_shape, move_character).
+struct PhysicsShapeHit {
+    PhysicsBody body{};
+    PhysicsFixture fixture{};
+    Vec2f point{};   // where they touch, on what was hit
+    Vec2f normal{};  // out of what was hit, towards the shape (length 1)
+    f32 fraction = 0.0f; // how much of its way the shape went before touching it
+};
+
+// A character moved by its game (PhysicsWorld::move_character): it goes where
+// it is told, as far as it can, and slides along what stops it, rather than
+// being pushed about by the simulation.
+struct PhysicsCharacterDef {
+    // Its shape, from where it is: a box (its corners a little round, so it
+    // slides over seams), a circle or a capsule; a polygon is taken as its
+    // outline's hull. A chain moves nothing.
+    PhysicsShape shape = PhysicsShape::box({0.5f, 0.5f});
+    Vec2f up{0.0f, -1.0f}; // on screen (y down), up is -y
+    // A surface it touches is a floor when it is at most this steep (radians,
+    // from level), a ceiling when it is that close to facing down, else a wall.
+    f32 max_slope = 0.7853982f;
+    // On a floor when the move starts and not going up, it is kept on it when
+    // the floor is at most this far below (units): it walks down slopes and
+    // steps rather than off them. 0: it goes off them, falling.
+    f32 snap = 0.0f;
+    // Moving straight down onto a sloped floor (only falling, or standing),
+    // it stops there rather than sliding down the slope.
+    bool stop_on_slope = true;
+    // One-sided shapes (PhysicsShape::one_sided) stop it when it comes down
+    // onto them; with this off they let it through (to drop down off one).
+    bool one_way = true;
+    // A dynamic body it walks into is pushed on at its speed times this (a
+    // crate it shoves). 0: such bodies stop it as walls do.
+    f32 push = 1.0f;
+    // How close it stays to what it touches (units); 0: 0.02 metres (Box2D's
+    // contacts begin closer than that, so they leave it alone).
+    f32 skin = 0.0f;
+    i32 max_slides = 4; // surfaces it slides along in one move, at most
+    // What stops it (sensors never do): set `ignore` to its own body.
+    PhysicsFilter filter{};
+};
+
+// Where a move took a character, and what it found there.
+struct PhysicsCharacterMove {
+    Vec2f position{};
+    // The velocity it was given, less what went into what stopped it (landing
+    // stops its fall, a ceiling its rise, a wall what went into the wall).
+    Vec2f velocity{};
+    bool on_floor = false;
+    bool on_wall = false;
+    bool on_ceiling = false;
+    Vec2f floor_normal{};
+    Vec2f wall_normal{};
+    PhysicsBody floor{};               // what it stands on
+    std::vector<PhysicsShapeHit> hits; // what it ran into, in order
 };
 
 // body_a joined to body_b (none: to where it is in the world). Its angle,
@@ -232,6 +297,7 @@ public:
     void destroy_fixture(PhysicsFixture fixture);
     bool is_alive(PhysicsFixture fixture) const;
     std::vector<PhysicsFixture> fixtures(PhysicsBody body) const;
+    PhysicsBody body_of(PhysicsFixture fixture) const; // none when it is gone
     u32 shape_parts(PhysicsFixture fixture) const;
 
     // A joint goes with either of its bodies. None (invalid) when body_a is
@@ -268,9 +334,30 @@ public:
     std::span<const PhysicsContact> current_contacts() const;
     void clear_contacts();
 
+    // How fast the point of the body at `point` (in the world) is moving: its
+    // velocity, and its turning's there.
+    Vec2f point_velocity(PhysicsBody body, Vec2f point) const;
+
     std::vector<PhysicsFixture> query_point(Vec2f point, PhysicsFilter filter = {}) const;
     std::vector<PhysicsFixture> query_aabb(Rectf rect, PhysicsFilter filter = {}) const;
     std::vector<PhysicsRaycastHit> raycast(Vec2f from, Vec2f to, PhysicsFilter filter = {}) const;
+    // The fixtures `shape` overlaps, placed at `at` (its offset and angle from
+    // there). A chain overlaps nothing.
+    std::vector<PhysicsFixture> query_shape(const PhysicsShape& shape, Vec2f at, PhysicsFilter filter = {}) const;
+    // The first thing `shape` touches going from `from` to `to` without
+    // turning; none when it gets there freely. What it touches at the start is
+    // a hit only when it goes on into it, so a shape on a floor can be cast
+    // along it. One-sided shapes are hit only by what comes down onto them
+    // from above. A chain hits nothing.
+    std::optional<PhysicsShapeHit> cast_shape(const PhysicsShape& shape, Vec2f from, Vec2f to, PhysicsFilter filter = {}) const;
+    // A character at `position` moved by `velocity` for `dt` seconds, plus
+    // `carry` (how far what it stands on takes it this step), sliding along
+    // what stops it; `on_floor`: it stood on a floor before (for `snap`). Moving
+    // bodies are met where they will be as they move this step (a platform
+    // carries what stands on it). The character's own body is not moved: put
+    // it at the move's position. Not const: what it pushes (`push`) is pushed.
+    PhysicsCharacterMove move_character(const PhysicsCharacterDef& def, Vec2f position, Vec2f velocity, f32 dt, bool on_floor = false,
+                                        Vec2f carry = {});
     std::vector<PhysicsDebugShape> debug_shapes(PhysicsFilter filter = {}) const;
     std::vector<PhysicsDebugJoint> debug_joints() const;
 

@@ -7,6 +7,20 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 2D characters, shape queries and one-way platforms ([2D physics](physics_2d.md)). `CharacterController2D` moves
+  an entity as its game says, Godot's move-and-slide way: along `velocity` (and its own `gravity`), sliding along
+  what stops it, knowing floors from walls and ceilings by `max_slope`, walking up slopes at its speed, kept on
+  floors going down them (`snap`), carried by what it stands on as that moves or turns, pushing dynamic bodies
+  (`push`); it says `on_floor`, `on_wall`, `on_ceiling` and their normals. `PhysicsWorld::move_character` is the
+  same move without the component; `cast_shape` (the first thing a box, circle, capsule or polygon meets moving)
+  and `query_shape` (what one overlaps) are new queries, `PhysicsFilter::ignore` leaves a body out of any, and
+  `body_of(fixture)`, `point_velocity` and `PhysicsBodyDef::allow_sleep` are new too. `one_sided` makes any
+  collider a platform to jump up through, not only a chain: for characters (`drop_through` lets one fall
+  through), dynamic bodies and casts. Entity scripts get `physics.raycast`, `cast_circle`, `cast_box`,
+  `overlap_point`, `overlap_circle` and `overlap_box` (given `EntityScripts::set_physics`), `on_contact_end`,
+  `self:velocity()`, `set_velocity`, `on_floor()`, `on_wall()` and `on_ceiling()`; `set_position` and `move` move
+  an entity's body too.
+
 - 2D games made with Lua scripts, physics, sounds and saves run in browsers. Every `kin_game` built with Emscripten
   gets a 1 MiB stack (`KIN_WEB_STACK_SIZE`; the 64 KiB default ran over memory making a flecs world) and Noto Sans'
   Latin subset as the UI's system font (`/kin/fonts/ui.ttf`; kin's bitmap font has capitals only), and links again

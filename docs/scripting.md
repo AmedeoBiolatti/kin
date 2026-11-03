@@ -177,8 +177,12 @@ scripts.update(world, ctx.input, ctx.dt);
   - `id()`, `name()`, `alive()`, `parent()`, `child(name)`;
   - `get(component)`, `set(component, {field = value})` (adds the component when
     it is missing), `has`, `add`, `remove`;
-  - `position()`, `set_position(x, y)`, `move(dx, dy)`, `rotation()`,
-    `set_rotation(degrees)`;
+  - `position()`, `set_position(x, y)`, `move(dx, dy)` (an entity with a
+    body: its body goes there too), `rotation()`, `set_rotation(degrees)`;
+  - `velocity()` and `set_velocity(vx, vy)`: its `CharacterController2D`'s,
+    else its body's (`PhysicsVelocity`); `on_floor()`, `on_wall()` and
+    `on_ceiling()`, what its character found in the last step
+    ([characters](physics_2d.md#characters));
   - `destroy()`;
   - for its `Animator`, `play(animation)`, `set_param(name, value)`,
     `trigger(name)` and `state()`;
@@ -192,6 +196,18 @@ scripts.update(world, ctx.input, ctx.dt);
   `axis` by name, and `mouse()` returns x and y ([input](input.md)).
 - The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
   the new prefab instance's root.
+- When the game gives the scripts its physics (`EntityScripts::set_physics`),
+  the `physics` table asks what is where, in the world
+  ([2D physics](physics_2d.md#what-is-where)):
+  - `raycast(x1, y1, x2, y2[, options])`, `cast_circle(x1, y1, x2, y2,
+    radius[, options])` and `cast_box(x1, y1, x2, y2, width, height[, options])`
+    return the nearest hit, or nil: `{entity, x, y, normal = {x, y}, fraction}`;
+  - `overlap_point(x, y[, options])`, `overlap_circle(x, y, radius[, options])`
+    and `overlap_box(x, y, width, height[, options])` (centred on x, y) return
+    a list of the entities there;
+  - `options` is a table: `mask` (the kinds of collider to find, as bits),
+    `sensors = true` to find sensors too, and `ignore`, an entity (or `self`)
+    left out.
 - The `camera` table shakes the current camera: `camera.shake(trauma)` adds
   trauma (0 to 1) that wears off, and `camera.trauma()` says how much is left
   ([cameras](rendering.md#a-camera-in-the-scene)).
@@ -213,7 +229,8 @@ scripts.update(world, ctx.input, ctx.dt);
   `on_load(self)` runs when they are given back.
 - `on_start(self)` runs once, before the entity's first `on_update(self, dt)`.
 - `on_contact(self, other)` runs when the entity's body begins to touch
-  another, when the world has a `PhysicsContactQueue`.
+  another, and `on_contact_end(self, other)` when it stops, when the entity
+  has a `PhysicsContactQueue`.
 - Script files are checked for changes every `check_frames` updates. A changed
   file is read again and its entities start over. If the new version does not
   read, the last good one keeps running.
