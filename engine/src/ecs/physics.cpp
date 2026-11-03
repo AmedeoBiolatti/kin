@@ -257,6 +257,7 @@ void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
                 def.fixed_rotation = true;
                 def.gravity_scale = 0.0f;
                 def.allow_sleep = false;
+                def.character = true;
             }
             body.body = physics.create_body(def);
         }
