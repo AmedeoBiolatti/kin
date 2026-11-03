@@ -4,6 +4,199 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Industrial Yard CPU investigation, 2026-11-03
+
+The newer cross-engine experiment lives in the sibling `kin-wt/yard-engines`
+worktree, based on `998c1e9`. Its `out/yard-baseline/medium-engines-summary.md`
+reports 720p frame p50 **6.13 ms Kin / 2.67 ms Unreal matched** over three repeats.
+Kin's render caller consumes **5.88 ms thread CPU**. These are frame intervals;
+Unreal's separate game/render/RHI timers do not describe the same scope as Kin's
+caller timer. The original comparison also uses Kin 4x MSAA against Unreal's
+no-AA matched preset, and has no equivalent native Kin GPU timestamp.
+
+A new CPU profile uses the existing Yard binary, NVIDIA Vulkan on the RTX 4080
+Laptop GPU, CPUs 0–15, four helpers, 300 warm-up and 1,440 measured route frames.
+`perf record -F 499 -e cycles:u --call-graph dwarf,8192` records all threads.
+CSV monotonic timestamps select only measured frames; main-thread percentages
+below are inclusive, period-weighted user cycles, not elapsed or GPU times.
+
+| Main-thread work | Share |
+| --- | ---: |
+| Local-shadow culling, caster lists, packing and batching | 42.5% |
+| Camera culling, bounds and instance uploads | 25.7% |
+| Main-pass recording, including its driver calls | 12.5% |
+| Local-light grid | 5.9% |
+| Draw/composition ordering | 5.1% |
+| Local-shadow pass recording | 2.9% |
+| Material-input validation | 1.1% |
+
+This is primarily preparation work. The existing prepared-layout cache hits on
+every measured frame, but explicitly excludes visibility and instance payloads.
+The 7,200 stationary props use individual `Scene3D::draw` records: they do not
+receive `InstanceBatch3D` retained GPU records or persistent world-bound caches.
+Their bounds and camera/shadow instance packing repeat. Local-shadow gathering
+also makes tasks for thousands of tiny draws and sorts caster entries each frame.
+The ECS collection path already groups compatible meshes/materials; this finding
+is specific to the direct submission pattern and is not evidence that ECS
+transform propagation is responsible for this benchmark.
+
+**Tested reduction using existing APIs.** A temporary harness groups stationary
+props by `(mesh, material)` into 64 persistent batches, one spatial group per
+batch. It preserves all prop transforms, materials, 800 moving props, 128 animated
+robots, smoke, lights, 4x MSAA and HDR. Five paired full-route repeats alternate
+baseline/batched/spatial order. Neither `perf` nor image readback runs during
+throughput measurement; thread/process CPU clocks run in every case.
+
+| Median of five run medians | Individual static draws | Retained static batches |
+| --- | ---: | ---: |
+| Frame p50 | 6.268 ms | 3.186 ms |
+| Frame p95 (median of run p95s) | 7.559 ms | 5.388 ms |
+| Render caller thread CPU p50 | 6.017 ms | 1.379 ms |
+| Render process CPU p50, including helpers | 8.047 ms | 1.874 ms |
+| Prepared draw records | 7,429 | 293 |
+| Main-pass draws, p50 | 4,211.5 | 240 |
+| Local-shadow draws | 1,140 | 524 |
+| Streamed instance bytes/frame, p50 | 1,338,560 | 103,360 |
+| Changed retained instance bytes/frame | 102,400 | 102,400 |
+| Recomputed streamed bounds/frame | 8,855 | 1,655 |
+| Local gather task payload capacity | 950,656 bytes | 37,248 bytes |
+| Resident instance GPU payload | 102,400 bytes | 1,024,000 bytes |
+
+Paired thread-CPU reductions range from **73.0% to 79.9%**; process-CPU reductions
+range from **73.0% to 79.5%**. Frame reductions range from 36.0% to 55.0%.
+Clocks/background load are uncontrolled and drift substantially, so these are
+local paired observations, not a new Unreal ranking or a universal speedup.
+Resident GPU records grow by about **0.88 MiB**, avoiding repeated computation
+and streaming. The Medium scene's 64 static plus 64 moving batches exactly fill
+the existing 128-table admission limit; no budget was raised.
+
+Per-frame camera instances/triangles, shadow casters/triangles, joint counts and
+motion sums agree across the entire route. Outside, warehouse and elevated
+captures (route offsets 0, 540 and 960) are decoded-RGBA identical for both
+batching variants. A 16-unit spatial-cell variant cuts median local instance
+tests from 33,348 to 17,610 but increases task payload to 275,840 bytes; its caller
+CPU is 1.857 ms versus 1.379 ms for simple batches. Fewer sphere tests alone do
+not establish a win. Three no-local-shadow and three MSAA-1 controls support the
+preparation diagnosis; their later timing windows are not used as paired feature
+cost estimates.
+
+The example now exposes the successful path as `--batch-static-props` and reports
+its effective batch count. Default comparison submissions remain unchanged.
+After generating the usual Medium recipe, compare otherwise identical commands
+with/without that flag:
+
+```sh
+KIN_RENDER_BACKEND=gpu build/bin/industrial_yard \
+  --recipe /path/to/medium.yrd --metrics /path/to/batched.csv \
+  --report=/path/to/batched.json --profile-cpu --measured 1440 --batch-static-props
+```
+
+**Next renderer work, in order.** Make compatible direct opaque/masked draws
+benefit from retained batching or revision-tracked static records automatically;
+the current ECS buckets provide an existing model. Cache fixed local-light caster
+membership and batch plans before rebuilding tasks, with invalidation for changed
+meshes, transforms, poses, material masks, light projections and camera-dependent
+LOD/reach. Keep static and dynamic dependencies separate: the fixture deliberately
+disables whole-map shadow caching, and one moving caster would invalidate a
+whole cached map anyway. Reuse bounded scratch storage and precomputed sort keys
+after reducing the number of records. The batched path also unlocks existing
+four-sphere SIMD ranges that one-copy draws cannot use. Reprofile those changes
+before adding workers or changing compiler flags. The per-frame public prepared
+scene handle shares work between consumers; it is not a persistent cross-frame
+cache for static scene content.
+
+Artifacts are `/tmp/kin-cpu-investigation/`: measured-window profile summary,
+raw stacks/data, source patch, build commands, per-run CSV/JSON/logs, provenance,
+work checks and exact image comparisons. The original sibling worktree and its
+existing rendering edits were used read-only. At this investigation checkpoint,
+only the example option and these notes changed; no renderer algorithm was replaced.
+
+Final main-source validation separately builds the edited example against the
+existing native renderer libraries. Its default/batched full 1,440-frame routes
+have identical geometry, shadow and motion counters. Three paired captures use
+main's own background settings and agree exactly; an additional TAA/AO/contact
+capture agrees exactly. Rebuilt-command and empty-population runs pass. Small
+and Heavy controls (300 warm-up, 16 measured frames) preserve geometry/shadow/
+motion counts, including Heavy's streamed fallback beyond 128 retained tables;
+these short checks are not scaling measurements. All five recipe tests pass,
+and `git diff --check` is clean. At that checkpoint the renderer library was
+unchanged, so the full renderer suite was not repeated for the example-only option.
+
+### Direct scene retention implementation
+
+Branch `perf/render3d-cpu-preparation` starts at main `998c1e9`. Its first engine
+slice shares one retained table across a source scene's direct opaque/masked
+records while preserving every colour draw's order, material and picking ID.
+It caches packed GPU records, transformed bounds and admission counts by source
+identity/revision; pose-only updates and camera/light changes do not rebuild the
+static payload. Visibility, local-shadow gathering and sorting still run. The
+earlier material-grouped example remains a separate, opt-in experiment: this
+implementation does not claim its much larger CPU reduction.
+
+Admission requires 32 eligible draw records and 256 copies after an unchanged
+render, and shares the existing 32 MiB/128-table GPU and 4 MiB bounds limits.
+Raw mutable spans, TAA, enabled LOD/occlusion, skinned/blended/custom/wireframe
+draws and explicit prepared consumers keep their prior paths. A scene command
+edit refreshes the whole source table; sparse direct-record updates and cached
+light caster plans are subsequent work. The fallback for an additional edit
+after an upload in one GPU frame preserves all earlier views.
+
+The new GPU regression compares decoded pixels and geometry/shadow counters with
+`debug.retain_scene_instances = false`, including mixed masked/opaque/alpha,
+explicit batches, skinning, equal-depth surfaces, one/four sun cascades, local
+shadows, AO/contact, camera and pose edits, raw spans, source moves with a held
+weak-identity token, independent overlay tables, three views around same-frame
+edits, and over-budget streaming. Its warmed static path requires no record
+uploads or repeated static bounds, with no explicit device-idle wait. It passes
+on NVIDIA Vulkan and llvmpipe. The regression exposed a fresh moved-scene table
+mistaken for populated revision zero; checking initialization independently of
+revision fixes it. The CPU suite and five recipe tests also pass.
+
+Fresh same-binary on/off timing runs follow the user's power-setting change;
+the preceding investigation's timings are not their baseline. Both controls use
+four helpers, CPUs 0–15, 720p, default 4x MSAA/HDR, the complete Medium route,
+300 warm-up and 1,440 measured frames. Five alternating pairs run serially,
+with no build, test, profiler or capture load alongside them. Captures follow
+throughput measurement at offsets 0, 540 and 960. Reproduce with
+`tools/benchmark_render3d_direct_cache.py --binary <industrial_yard> --output <directory>`.
+
+| Median of five run medians | Cache off | Cache on |
+| --- | ---: | ---: |
+| Render caller thread CPU p50 | 6.204 ms | 5.728 ms |
+| Render process CPU p50 | 8.220 ms | 7.333 ms |
+| Frame p50 / p95 | 6.477 / 9.257 ms | 5.984 / 8.557 ms |
+| Recomputed bounds/frame | 8,855 | 1,446 |
+| Streamed instance bytes/frame, p50 | 1,338,560 | 66,048 |
+| Direct records retained | 0 | 7,409 |
+| Static table uploads / bounds rebuilt after warm-up | — | 0 / 0 |
+| Resident instance GPU payload | 102,400 bytes | 1,133,440 bytes |
+
+The deterministic reductions are **83.7% fewer bound transformations** and
+**95.1% fewer streamed instance bytes** at p50, for about **0.98 MiB** additional
+live GPU payload. Main draw counts and per-frame geometry, shadows, joints and
+motion sums agree, and all three decoded captures are exact. Local-shadow draw
+counts remain 1,140: the gather/list/sort workload has not been eliminated.
+
+Clocks/background load drift substantially across these runs. The median of the
+five paired thread-CPU reductions is **2.9%** (range **0.5–20.2%**); process-CPU
+reduction is **6.8%** (range **3.8–22.0%**). Paired frame reductions range from
+**−0.2% to 21.5%**, with a 3.8% median. The run-median table alone overstates the
+typical paired gain under that drift. Treat frame throughput as noisy and the
+CPU benefit as modest; the larger example-batching gain above is not achieved
+by this order-preserving slice. An initial version that rescanned admission
+eligibility every frame is archived under `yard-initial`; the final code caches
+that count with the source revision.
+
+The final complete native 3D suite also passes after admission-count reuse.
+Implementation artifacts are `/tmp/kin-cpu-implementation/`: clean build logs,
+full native suite logs, NVIDIA/llvmpipe direct-cache regressions, CPU/recipe logs,
+source identities and `yard/` commands/CSV/captures/summary. The next measured
+target is fixed-light caster membership and cached gather/batch plans, whose
+dependency rules must keep moving casters, masks, poses and camera-dependent
+LOD/reach correct.
+
+### ECS transform and extraction baseline
+
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
 
 | 100,000 entities | Static p50 | 1-percent-edit p50 | Transform visits/frame | Extraction visits/frame |

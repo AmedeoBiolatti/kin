@@ -1040,6 +1040,7 @@ private:
         u32 joint_base = 0;
         u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
         u32 retained = ~0u;                   // bounded retained-table cache entry, or immediate path
+        u32 retained_first = 0;               // direct draws share a scene table; explicit batches start at zero
         u32 prepared_first = 0;
         const GpuInstance3D* prepared_records = nullptr;
         const f32* prepared_scales = nullptr;
@@ -1073,6 +1074,8 @@ private:
         u64 revision;
     };
     std::array<PreparedKey, 2> _prepared_keys{};
+    // Admission history is independent of the bounded draw-layout cache.
+    std::array<std::array<u64, 2>, 2> _direct_sources{};
     std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
     bool _prepared_valid = false;
     u32 _prepared_total = 0;
@@ -1085,6 +1088,9 @@ private:
             layout = 0; // the GPU frame (submission) it was last claimed in; the batch layout_revision it holds
         Color color{};
         std::weak_ptr<const void> lifetime;
+        std::weak_ptr<const u64> scene_lifetime;
+        bool direct = false;
+        u32 direct_instances = 0;
         std::shared_ptr<GpuBuffer> buffer; // null: a free entry (evicted), dropped at the next collection
         u64 bounds_revision = 0;
         std::vector<Vec4f>
@@ -1122,6 +1128,7 @@ private:
     std::shared_ptr<GpuBuffer> _retained_indices;
     GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
+    void retain_scene_instances(FrameCtx& ctx);
     void cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stats);
     struct CullGroup {
         u32 first = 0, end = 0; // relative to the draw

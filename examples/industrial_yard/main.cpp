@@ -7,6 +7,7 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
@@ -25,7 +26,7 @@ struct Options {
         props = -1, offset = 0;
     bool gpu_pass_markers = false, receives = true, validate = false, animation = true, motion = true, glass = true,
          structures = true, shadows = true, taa = false, ao = false, contact = false, profile = false, visible = false,
-         preview = false, rebuild = false;
+         preview = false, rebuild = false, batch_static_props = false, retain_scene_instances = true;
 };
 double cpu(bool process) {
 #ifdef __linux__
@@ -46,7 +47,8 @@ public:
                 "cpu_ms,draws,triangles,instances,culled,lights,spots,local_shadow_maps,local_shadow_draws,local_"
                 "shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_"
                 "upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_"
-                "sum,moving_z_sum,profile_mono_ms\n";
+                "sum,moving_z_sum,profile_mono_ms,direct_retained_instances,direct_cache_hits,direct_upload_bytes,"
+                "direct_bounds_rebuilt,bounds_instance_tests,retained_gpu_bytes,device_waits\n";
     }
     std::string_view name() const override { return "Industrial yard"; }
     void update(SceneContext& ctx) override {
@@ -80,9 +82,14 @@ public:
                 for (const auto& o : _data.world)
                     if (_o.glass || o.material < _data.material_count)
                         draw(o);
-            for (int i = 0; i < _o.props; ++i)
-                if (!_data.props[i].moving)
-                    draw(_data.props[i]);
+            if (_o.batch_static_props) {
+                for (const auto& b : _static)
+                    (void)_scene.draw_instanced(b.batch, _materials[b.material]);
+            } else {
+                for (int i = 0; i < _o.props; ++i)
+                    if (!_data.props[i].moving)
+                        draw(_data.props[i]);
+            }
             for (const auto& b : _dynamic)
                 (void)_scene.draw_instanced(b.batch, _materials[b.material]);
             for (int i = 0; i < _o.actors; ++i) {
@@ -125,6 +132,9 @@ public:
                  << st.instance_upload_bytes << ',' << st.prepared_reused << ',' << st.prepared_draws << ','
                  << st.feature_bytes << ',' << st.local_shadow_bytes << ',' << _sums[0] << ',' << _sums[1] << ','
                  << _sums[2] << ',' << std::chrono::duration<double, std::milli>(begin.time_since_epoch()).count()
+                 << ',' << st.direct_retained_instances << ',' << st.direct_cache_hits << ',' << st.direct_upload_bytes
+                 << ',' << st.direct_bounds_rebuilt << ',' << st.bounds_instance_tests << ',' << st.retained_gpu_bytes
+                 << ',' << st.device_waits
                  << '\n';
         }
         if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
@@ -171,6 +181,9 @@ public:
             .field("warmup_frames", _o.warmup)
             .field("moving_props", _moving)
             .field("moving_batches", u64(_dynamic.size()))
+            .field("batch_static_props", _o.batch_static_props)
+            .field("static_batches", u64(_static.size()))
+            .field("retain_scene_instances", _o.retain_scene_instances)
             .field("source_triangles", _data.source_triangles)
             .field("scene_triangles", _triangles)
             .field("source_mesh_bytes", _data.mesh_bytes)
@@ -199,6 +212,7 @@ private:
     void draw(const yard::Object& o) { (void)_scene.draw(_meshes[o.mesh], o.transform, _materials[o.material]); }
     void configure() {
         _scene.debug.gpu_pass_markers = _o.gpu_pass_markers;
+        _scene.debug.retain_scene_instances = _o.retain_scene_instances;
         auto& l = _scene.lights;
         l.points.clear();
         l.spots.clear();
@@ -321,6 +335,23 @@ private:
             d.batch = InstanceBatch3D::create(_meshes[mesh], d.records, {{0, u32(d.records.size())}}).value_or({});
             _dynamic.push_back(std::move(d));
         }
+        if (_o.batch_static_props) {
+            // Keep stationary copies resident as well as moving copies. Group by both mesh and material;
+            // a single spatial group per batch shares its bound without making one task per source prop.
+            std::map<std::pair<u32, u32>, std::vector<MeshInstance3D>> batches;
+            for (int i = 0; i < _o.props; ++i) {
+                const auto& o = _data.props[i];
+                if (!o.moving)
+                    batches[{o.mesh, o.material}].push_back({o.transform, colors::white, 0});
+            }
+            for (auto& [key, copies] : batches) {
+                const u32 count = static_cast<u32>(copies.size());
+                auto batch = InstanceBatch3D::create(_meshes[key.first], std::move(copies), {{0, count}});
+                if (!batch)
+                    throw std::runtime_error("yard static batch creation failed");
+                _static.push_back({key.second, batch.value_or({})});
+            }
+        }
         if (_o.structures)
             for (const auto& o : _data.world)
                 if (_o.glass || o.material < _data.material_count)
@@ -340,6 +371,10 @@ private:
         std::vector<MeshInstance3D> records;
         InstanceBatch3D batch;
     };
+    struct StaticBatch {
+        u32 material = 0;
+        InstanceBatch3D batch;
+    };
     Options _o;
     JobSystem* _jobs;
     yard::Recipe _data;
@@ -347,6 +382,7 @@ private:
     std::vector<Material3D> _materials;
     std::array<Texture, 5> _textures;
     std::vector<Dynamic> _dynamic;
+    std::vector<StaticBatch> _static;
     std::vector<u32> _actor_joints;
     std::unique_ptr<Renderer3D> _r;
     View3D _view;
@@ -414,12 +450,16 @@ int main(int argc, char** argv) {
                 o.gpu_pass_markers = true;
             else if (a == "--profile-cpu")
                 o.profile = true;
+            else if (a == "--batch-static-props")
+                o.batch_static_props = true;
             else if (a == "--receive-shadows" || a == "--animation" || a == "--motion" || a == "--glass" ||
+                     a == "--retain-scene-instances" ||
                      a == "--structures" || a == "--local-shadows" || a == "--taa" || a == "--ao" || a == "--contact") {
                 auto v = value();
                 if (v != "0" && v != "1")
                     throw std::runtime_error("yard booleans require 0 or 1");
-                bool* p = a == "--receive-shadows" ? &o.receives
+                bool* p = a == "--retain-scene-instances" ? &o.retain_scene_instances
+                          : a == "--receive-shadows" ? &o.receives
                           : a == "--animation"     ? &o.animation
                           : a == "--motion"        ? &o.motion
                           : a == "--glass"         ? &o.glass

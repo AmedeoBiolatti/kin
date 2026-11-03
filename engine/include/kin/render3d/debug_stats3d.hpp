@@ -38,6 +38,10 @@ struct RenderDebugStats3D : RenderStats3D {
     // Tables given up this render for other batches (least recently drawn first), and draws that wanted one but found
     // no room.
     u32 retained_evictions = 0, retained_refused = 0;
+    // Direct scene records share one table without changing draw/composition order.
+    // These are subsets of the retained/bounds counters above and below.
+    u32 direct_retained_instances = 0, direct_cache_hits = 0;
+    u64 direct_upload_bytes = 0, direct_bounds_rebuilt = 0;
     // Device-wide GPU waits (SDL_WaitForGPUIdle) inside this render(): 0 in an ordinary frame.
     u32 device_waits = 0;
     // CPU sphere storage: resident-table cache (<=4 MiB), compact transient allocation,

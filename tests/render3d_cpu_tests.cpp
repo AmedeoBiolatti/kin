@@ -37,6 +37,28 @@ Mesh3D test_mesh() {
     return Mesh3D{std::make_shared<Fake>(), 24, 36, {{-0.5f, -1.0f, -0.25f}, {0.5f, 1.0f, 0.25f}}};
 }
 
+void test_scene_instance_exposure() {
+    const auto mesh = test_mesh();
+    Scene3D scene;
+    assert(scene.draw(mesh, {}));
+    const std::array<MeshInstance3D, 2> copies{};
+    assert(scene.draw_instanced(mesh, copies));
+    assert(!scene.instances_exposed());
+    auto exposed = scene.add_instances(mesh, 1).value_or({});
+    assert(exposed.size() == 1 && scene.instances_exposed());
+    const auto revision = scene.draw_revision();
+    exposed[0].transform = Mat4f::translation({2, 3, 4});
+    assert(scene.draw_revision() == revision); // legacy raw writes still require live reads
+    scene.modified_instances();
+    assert(scene.instances_exposed()); // notification cannot revoke an escaped span
+    Scene3D moved = std::move(scene);
+    assert(moved.instances_exposed());
+    moved.clear();
+    assert(!moved.instances_exposed());
+    assert(moved.add_instances(mesh, 0));
+    assert(!moved.instances_exposed());
+}
+
 bool same(const Bounds3D& a, const Bounds3D& b) {
     return a.min.x == b.min.x && a.min.y == b.min.y && a.min.z == b.min.z && a.max.x == b.max.x && a.max.y == b.max.y &&
            a.max.z == b.max.z;
@@ -681,6 +703,7 @@ void test_sun_times_at_the_poles() {
 } // namespace
 
 int main() {
+    test_scene_instance_exposure();
     test_affine_bounds();
     test_bounds_follow_edits();
     test_changed_ranges();

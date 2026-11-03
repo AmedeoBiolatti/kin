@@ -289,6 +289,32 @@ streamed main/local-shadow 128-byte records, excluding retained records and all 
 Blockfield CSV/report. Grove uses retained masked foliage. `--rebuild-scene` measures per-frame command submission.
 Mist keeps its existing alpha-sorted path.
 
+Ordinary direct scene draws can share a retained table too. A scene with at least
+32 eligible draw records and 256 eligible copies is admitted after its commands
+survive a render without resubmission. Built-in opaque/masked, unskinned draws
+share storage while keeping their original material, draw order and picking IDs.
+Packed records and world bounds are reused across camera changes and pose-only
+edits; visibility and shadow membership still run for each consumer. A command
+revision refreshes the scene table and its eligible bounds. This first path does
+not merge colour draws or cache local-shadow gather plans.
+
+Scene tables share the existing 32 MiB/128-table GPU budget and 4 MiB bounds
+budget with explicit batches. Their rows follow `Scene3D::instances()`, including
+unused rows for ineligible draws. Tables retain weak scene identities and release
+expired/moved sources between GPU frames. Unsupported features, memory pressure,
+and later edits after an upload in the same GPU frame use the streamed path.
+Shared prepared consumers, TAA, enabled LOD/occlusion, custom shaders, wireframes,
+skinned and blended draws retain their existing paths. A public `add_instances()`
+span disables scene-table retention until `clear()`: unannounced writes through
+that span remain visible even after `modified_instances()`.
+
+`Scene3D::debug.retain_scene_instances = false` selects the streamed reference
+for this optimization. The Yard example exposes `--retain-scene-instances 0|1`.
+`direct_retained_instances`, `direct_cache_hits`, `direct_upload_bytes` and
+`direct_bounds_rebuilt` expose useful work/reuse; the instance/upload/bounds
+counts are subsets of the existing retained counters. For alternating full-route
+controls and exact captures, use `tools/benchmark_render3d_direct_cache.py`.
+
 Resident tables also cache transformed culling spheres on the CPU, using 16 bytes/copy and at most **4 MiB per renderer**
 (plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes only
 the union of edited ranges since that table's own bounds revision; new tables and expired history refresh the full array.
