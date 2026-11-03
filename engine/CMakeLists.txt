@@ -38,6 +38,7 @@ add_library(kin_engine STATIC
     src/anim/registry.cpp
     src/anim/state_machine.cpp
     src/anim/track.cpp
+    src/anim/tween.cpp
     src/anim/value.cpp
     src/assets/asset_manager.cpp
     src/assets/asset_server.cpp
@@ -131,6 +132,7 @@ add_library(kin_engine STATIC
     src/ui2/layout.cpp
     src/ui2/menu_scene.cpp
     src/ui2/state.cpp
+    src/ui2/semantics.cpp
     src/ui2/context.cpp
     src/ui2/compose.cpp
     src/ui2/composed.cpp

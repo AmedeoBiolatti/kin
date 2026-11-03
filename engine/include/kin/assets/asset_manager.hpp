@@ -201,6 +201,11 @@ public:
 
     void clear();
     void unload(std::string_view relative_path);
+    // Main-thread collection. External handles/shared() values are roots; their
+    // transitive async dependencies stay resident. Unreferenced cycles can be
+    // collected. Returns the number of cache entries released.
+    std::size_t unload_unused();
+    void set_dependencies(std::string key, std::vector<std::string> dependencies);
     void discover();
 
     const std::filesystem::path& root() const { return _root; }
@@ -304,6 +309,7 @@ private:
     std::filesystem::path _root;
     std::unordered_map<std::type_index, std::shared_ptr<void>> _loaders;
     std::unordered_map<std::string, std::shared_ptr<IAssetStorage>> _assets;
+    std::unordered_map<std::string, std::vector<std::string>> _dependencies;
     std::unordered_map<std::string, std::string> _loaded_paths;
     std::unordered_map<std::string, AssetMetadata> _metadata;
 };

@@ -74,6 +74,42 @@ For things to do later by time, `kin::Timers` (`kin/core/timers.hpp`) runs
 actions `after(seconds, ...)` or `every(seconds, ...)` as the game calls
 `update(dt)`, and `cancel(id)` stops one.
 
+### Sequenced tweens
+
+`kin::Tween` (`kin/anim/tween.hpp`) animates values chosen at runtime. Keep the
+tween with the object that owns the effect and call `advance(dt)` from its update:
+
+```cpp
+kin::Vec2f position{};
+kin::f32 opacity = 1.0f;
+kin::Tween enter;
+enter.to(position, kin::Vec2f{200, 80}, 0.3f, kin::Easing::EaseOut)
+     .parallel().to(opacity, 0.5f, 0.2f)
+     .wait(0.1f)
+     .call([] { /* arrival effect */ });
+// Each update:
+enter.advance(dt);
+```
+
+Steps run in sequence. `parallel()` puts the next step alongside the preceding
+group; the following step starts after the longest member finishes. A large dt
+continues through subsequent steps. Each property captures its starting value
+when its step begins. Floats, `Vec2f`, `Color`, `i32`, bools and strings use the
+existing animation interpolation rules; integers, bools and strings change at the end.
+
+`pause()`, `resume()`, `cancel()`, `restart()`, `finished()` and `cancelled()`
+control playback. Restart captures new starting values when the steps run again.
+Build the sequence before the first advance; appending after playback starts is
+an error. Durations and dt must be finite and nonnegative. Callbacks execute on
+the advancing thread, once per traversal, and may cancel or restart the tween.
+
+`to` holds a reference: its value must outlive playback. For targets that can
+disappear, use `property(getter, setter, destination, seconds, easing)` with
+accessors that reacquire the target, and `while_alive(predicate)` to cancel when
+it is gone. The getter must return the same `AnimValue` alternative as the
+destination. Tweens are explicitly stepped C++ objects; they are not registered
+with a global scheduler or automatically bound to Lua entities.
+
 ## Definitions And Players
 
 Definitions are immutable and shared. Per-entity playback state lives on

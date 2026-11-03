@@ -50,6 +50,7 @@ public:
     explicit MenuScene(MenuSceneConfig config);
 
     std::string_view name() const override { return _config.name; }
+    Context* ui_context() override { return &_ui; }
 
     void update(SceneContext& ctx) override;
     void render(SceneContext& ctx) override;
@@ -74,6 +75,7 @@ private:
     // fire scene-changing actions, so it parks the index here for the next update() to
     // act on. -1 means nothing pending. Keeps menus single-click at refresh > sim rate.
     i32 _render_activated = -1;
+    bool _render_cancelled = false;
 };
 
 } // namespace kin::ui2

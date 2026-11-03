@@ -208,6 +208,7 @@ void normalize_text_state(UiTextInputState& state) {
 }
 
 bool takes_keys(Context& ctx, Id id, bool without_focus) {
+    if (!ctx.accepts_input(id)) return false;
     if (id) {
         ctx.register_focusable(id);
     }

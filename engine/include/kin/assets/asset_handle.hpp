@@ -40,6 +40,7 @@ public:
     }
 
 private:
+    friend class AssetScope;
     std::shared_ptr<AssetStorage<T>> _storage;
 };
 

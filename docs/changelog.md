@@ -28,6 +28,15 @@ releases may change APIs.
   so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
+- Runtime [tweens](animation_system.md#tweens) for values chosen by game code: sequential/parallel steps,
+  easing, delays and callbacks, pause/resume/restart/cancel, and target-lifetime guards.
+- [Controller UI](ui.md#controllers) navigation and semantic [UI automation](ui.md#automation): spatial
+  focus, repeat, accept/back, modal boundaries, `Scene::ui_context`, `ui.snapshot` and deferred `ui.action`
+  by stable ID, label or `.kinui` key. Live inspection reads UI without consuming player input.
+- Manifest-driven [2D imports](importing_2d.md) for Aseprite, PNG atlases, finite Tiled maps and selected
+  LDtk levels, with native scene/tilemap output and `kin_game(IMPORTS ...)` rebuild/package integration.
+- [Asset lifetime](assets.md#asset-lifetime): `AssetScope`, dependency-aware `unload_unused`, optional
+  collection after async pumps, and temporary dependency-batch pins that keep in-flight cycles safe.
 
 - Global illumination's emitters are area lights by default (`GlobalIllumination3D::emitters`, `GiEmitters3D::Exact`;
   [3D rendering](rendering_3d.md), "Global illumination"). An emissive surface the GI numbers lights what the camera

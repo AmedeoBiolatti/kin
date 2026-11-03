@@ -712,6 +712,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     case ScreenKind::Button: {
         Live& live = _live.emplace_back(Live{.id = e.id, .kind = e.kind, .button = std::make_unique<Button>(), .toggle = {}, .slider = {}, .input = {}});
         live.button->id = make_id(id, "button");
+        ctx.semantic_key(live.button->id, e.id);
         live.button->label = shown_text();
         live.button->enabled = enabled;
         if (!e.style.empty()) {
@@ -745,6 +746,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     case ScreenKind::Toggle: {
         Live& live = _live.emplace_back(Live{.id = e.id, .kind = e.kind, .button = {}, .toggle = std::make_unique<Toggle>(), .slider = {}, .input = {}});
         live.toggle->id = make_id(id, "toggle");
+        ctx.semantic_key(live.toggle->id, e.id);
         live.toggle->label = shown_text();
         live.toggle->value = s && s->checked ? *s->checked : e.checked;
         live.toggle->enabled = enabled;
@@ -754,6 +756,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     case ScreenKind::Slider: {
         Live& live = _live.emplace_back(Live{.id = e.id, .kind = e.kind, .button = {}, .toggle = {}, .slider = std::make_unique<Slider>(), .input = {}});
         live.slider->id = make_id(id, "slider");
+        ctx.semantic_key(live.slider->id, e.id);
         live.slider->min = e.min;
         live.slider->max = e.max;
         live.slider->step = e.step;
@@ -765,6 +768,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     case ScreenKind::TextInput: {
         Live& live = _live.emplace_back(Live{.id = e.id, .kind = e.kind, .button = {}, .toggle = {}, .slider = {}, .input = std::make_unique<TextInput>()});
         live.input->id = make_id(id, "input");
+        ctx.semantic_key(live.input->id, e.id);
         if (s && s->input_made) {
             live.input->state = s->input;
         } else {

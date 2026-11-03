@@ -73,6 +73,11 @@ if(Python3_Interpreter_FOUND)
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_cooking_tests.py")
     kin_add_script_test(kin-asset-report
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_report_tests.py")
+    add_executable(kin_import_2d_native_tests import_2d_native_tests.cpp)
+    target_link_libraries(kin_import_2d_native_tests PRIVATE kin::engine)
+    add_test(NAME kin-import-2d
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/import_2d_tests.py"
+            --validator "$<TARGET_FILE:kin_import_2d_native_tests>")
 endif()
 
 function(kin_add_test target test_name)
@@ -173,6 +178,8 @@ kin_add_test(kin_instrumentation_tests kin-instrumentation
         "$<$<CXX_COMPILER_ID:MSVC>:/Od>"
 )
 kin_add_test(kin_anim_core_tests kin-anim-core SOURCES anim_core_tests.cpp)
+kin_add_test(kin_anim_tween_tests kin-anim-tween SOURCES anim_tween_tests.cpp)
+kin_add_test(kin_asset_lifetime_tests kin-asset-lifetime SOURCES asset_lifetime_tests.cpp)
 kin_add_test(kin_anim_player_tests kin-anim-player SOURCES anim_player_tests.cpp)
 kin_add_test(kin_anim_event_tests kin-anim-events SOURCES anim_event_tests.cpp anim_event_consumer_tests.cpp)
 kin_add_test(kin_anim_state_machine_tests kin-anim-state-machine SOURCES anim_state_machine_tests.cpp)

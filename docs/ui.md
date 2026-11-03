@@ -331,6 +331,24 @@ text field has the keys, so typing is not taken for commands.
 `games/studio_demo` is an editor-style window built this way, and
 `games/nextcode_look` rebuilds next_code's window (menus, icons, title bar).
 
+### Controllers
+
+Call `app.open_gamepads()` to poll a controller. ui2 navigation is enabled by
+default: D-pad/left-stick directions move focus spatially between enabled,
+visible controls; A/Cross accepts and B/Circle backs out. Widgets with directional
+editing or selection consume their directions before focus navigation runs.
+Buttons, toggles, sliders and focusable boxes work with acceptance; menu lists
+use their usual selection/activation paths. A slider uses Left/Right to change
+its value. Existing modal and focus-trap boundaries constrain navigation.
+
+Pass dt to `ui.begin(input, renderer, dt)` for held-direction repeat. Configure
+dead zone and repeat timing with `set_controller_navigation({.dead_zone = 0.5f,
+.repeat_delay = 0.4f, .repeat_interval = 0.1f})`, or disable it with
+`{.enabled = false}`. `back_requested()` lets custom screens handle cancellation.
+`controller_active()`, `accept_prompt()` and `back_prompt()` expose the last
+navigation device and generic button names; pointer presses and keyboard
+Tab/Enter switch prompts back. Platform-specific glyphs can be supplied by the game.
+
 ## Charts
 
 `kin/ui2/charts.hpp` plots numbers the app keeps: a widget holds spans of them
@@ -681,7 +699,43 @@ scrolling, and copy selection are independent of a game's configured logical siz
 
 ## Automation
 
-There is no `ui.snapshot` server method. For automation, expose assertable scene
-state through `Scene::write_report`, inspect ECS scenes through `world.snapshot`,
-and drive UI with `input.mouse`, `input.action`, and `input.text`.
+Return your ui2 context from `Scene::ui_context()` to expose `ui.snapshot` and
+`ui.action`. `MenuScene` already does this. A snapshot reports stable string IDs,
+parent IDs, author keys, role, label, value, clipped logical bounds and
+enabled/visible/blocked/focus/checked flags. String IDs preserve all 64 bits in
+JavaScript clients. Snapshots describe the most recent UI frame; an initially
+empty render-driven context is rendered once to populate its layout.
+
+```json
+{"id":1,"method":"ui.snapshot"}
+{"id":2,"method":"ui.action","params":{"id":"Play","action":"click"}}
+{"id":3,"method":"sim.tick","params":{"count":1}}
+```
+
+The `id` selector matches an exact label, decimal numeric ID, or author key.
+Ambiguous selectors and hidden, disabled, or blocked targets are refused.
+`ui.semantic_key(control.id, "play_button")` assigns an author key for that frame;
+`.kinui` buttons, toggles, sliders and text inputs use their element IDs as keys.
+Actions are `click`, `focus`, and `set_text` (with a `text` string for `TextInput`
+or editable `TextEdit`). `TextEdit` keeps its undo history and byte limit.
+One action may be queued per tick; it is rechecked against the next frame and
+expires after that step. Taking a screenshot does not consume it. `--inspect`
+allows snapshots of the last drawn frame and refuses semantic input, as it does
+physical input injection; inspecting never renders an extra UI frame.
+
+Buttons, icon buttons, toggles, sliders, text inputs/edits, number inputs and menu
+rows provide semantics. Labels with IDs report text. Layout boxes report groups
+and focusable controls. Other/custom controls can opt in before `region()`:
+
+```cpp
+ui.describe(id, "button", "Inventory", bounds, enabled, true);
+ui.semantic_key(id, "inventory");
+ui.register_focusable(id);
+auto interaction = ui.region(id, bounds);
+```
+
+`describe` can be called again after input to report the new value.
+`queue_action(selector, action, text, error)` supports in-process automation;
+`write_snapshot` serializes the same tree. Keep assertable game state in
+`Scene::write_report` and inspect ECS scenes through `world.snapshot` alongside it.
 

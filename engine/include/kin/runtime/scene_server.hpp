@@ -108,6 +108,9 @@ public:
     // step and released at the start of the one after, which sees the release),
     // "hold", or "release".
     void queue_action(std::string name, std::string mode);
+    // One semantic UI action per step. Deferred like physical input so a
+    // screenshot between the request and sim.tick cannot activate the control.
+    bool queue_ui_action(std::function<void()> action);
 
     // Queue a pointer move to window-space pos for the next step.
     void queue_mouse_move(Vec2f window_pos);
@@ -168,6 +171,7 @@ private:
     i64 _frame = 0;
     RunReport _report;
     std::vector<PendingInput> _pending;
+    std::function<void()> _pending_ui_action;
     // Taps pressed in the last step, released at the start of the next.
     std::vector<std::string> _tapped_actions;
     std::vector<MouseButton> _tapped_buttons;

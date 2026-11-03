@@ -141,7 +141,8 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `scene.actions` | none | Available input actions and bindings. |
 | `world.snapshot` | `{scene?, animations?}` | Flecs world JSON plus animation snapshots unless `animations:false`. ECS scenes only; without `scene`, the topmost scene with a world (under overlays such as transitions). |
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
-| `ui.snapshot` | `{scene?}` | Unavailable after legacy `kin/ui` removal; use reports or `world.snapshot`. |
+| `ui.snapshot` | `{scene?}` | Semantic ui2 tree from `Scene::ui_context()`: IDs, labels, roles, values, bounds and interaction flags. |
+| `ui.action` | `{scene?, id, action?, text?}` | Queue `click` (default), `focus`, or `set_text` by author key, exact label or numeric string ID. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
 | `view.scene` | `{path, content?}` | The top scene shows the scene file `path` in place of its own, as it reads its own (`Scene::view_scene`; a game says how). |
 | `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit; write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |
@@ -157,11 +158,10 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `ping` | none | `{"pong": true}`. |
 | `server.shutdown` | none | `{"bye": true}` and stop the server. |
 
-`ui.snapshot` intentionally returns an error:
-
-```json
-{"message":"ui.snapshot is unavailable after legacy kin/ui removal; use reports or world.snapshot"}
-```
+Scenes that expose ui2 return their context from `Scene::ui_context()`;
+`MenuScene` does this automatically. Other scenes return an explanatory error.
+Semantic IDs are decimal strings so JSON clients preserve every bit. See
+[UI automation](ui.md#automation) for the tree and supported controls.
 
 ## Inspecting A Game While It Is Played
 
@@ -179,7 +179,7 @@ game --inspect
 ```
 
 It answers what reads the game (`game.info`, `scene.stack`, `scene.current`,
-`scene.actions`, `world.snapshot`, `animation.diagnostics`, `ping`),
+`scene.actions`, `world.snapshot`, `ui.snapshot`, `animation.diagnostics`, `ping`),
 `frame.timing` for the frames it draws (a profiler asks with `since`), and
 `server.status` with `paused`. Three methods hold its updates while it keeps
 drawing:
@@ -249,6 +249,7 @@ The server reads a scene through optional hooks:
 | `Scene::write_report(JsonWriter&)` | run report, `scene.current` | Override to expose assertable game state. |
 | `Scene::world() -> EcsWorld*` | `world.snapshot` | `EcsScene` returns its world automatically. |
 | `Scene::animation_library()` | `animation.diagnostics` | Return the scene's animation asset library. |
+| `Scene::ui_context() -> ui2::Context*` | `ui.snapshot`, `ui.action` | Return the scene's active ui2 context; `MenuScene` does so automatically. |
 
 Perception by game style:
 
@@ -269,8 +270,10 @@ sim.tick {count:1}
 scene.stack
 ```
 
-For pointer-driven menu tests, keep button coordinates in `write_report` state or
-use fixed coordinates from the game's logical layout, then send `input.mouse`.
+For semantic menu tests, read `ui.snapshot`, queue a `ui.action` by label/key/ID,
+then tick once and check the scene report. These actions are deferred until a
+tick; intermediate snapshots/screenshots do not activate controls. Only one may
+be pending per step. `input.mouse` remains available for pointer-specific tests.
 
 ## Architecture
 

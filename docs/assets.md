@@ -107,6 +107,50 @@ config.asset_server = &server;
 return kin::run_scene_app(config, scenes);
 ```
 
+## Asset lifetime
+
+The cache retains assets by default. `AssetManager::unload_unused()` releases
+entries with no external `AssetHandle` or `shared()` view, keeping every
+transitive dependency declared through `LoadContext::require`. Pending jobs pin
+their storage until they finish applying. Dependency graphs may contain cycles;
+a cycle with no external owner is collected. Call collection on the main thread,
+between frames, after releasing handles that are no longer needed.
+
+`kin::AssetScope` (`kin/assets/asset_scope.hpp`) groups strong references for a
+level, menu or loading screen:
+
+```cpp
+kin::AssetScope level;
+auto hero = level.load_async<kin::Image>(server, "images/hero.png");
+// Or level.load<T>(assets, path), or level.keep(existing_handle).
+server.drain();
+// On leaving the level:
+hero = {};
+level.clear();
+assets.unload_unused();
+```
+
+Destroying the scope also releases its pins. A handle kept elsewhere continues
+to own its asset. To collect after every `pump()`/`drain()` instead, construct
+`AssetServer` with `AssetServerConfig{.unload_unused = true}`. Collection runs
+after completed jobs release their temporary references. Completed parents stay
+pinned until the server's current dependency batch is quiescent. Unload/clear remain
+explicit invalidation operations, including for handles that still exist.
+
+Keep a handle or shared view when retaining a loaded value; a borrowed `const T&`
+does not pin it. Dependency retention covers declared async dependencies and
+ordinary strong ownership. It does not break arbitrary shared-pointer cycles
+inside asset values. `Assets2D`, described below, has its own scene-owned cache;
+this collector manages `AssetManager`/`AssetServer` storage.
+
+## Importing authoring assets
+
+`tools/import_2d_assets.py` converts Aseprite exports/native documents, PNG sprite
+sets, finite Tiled JSON maps and selected LDtk levels into native content. It
+packs sprites into deterministic atlases and integrates with `kin_game(IMPORTS
+...)`, loose content and `.kinpak` packaging. See [2D imports](importing_2d.md)
+for the manifest, build setup and supported format subsets.
+
 ## Assets named by components (2D)
 
 A component names an asset by its path in the game's content, with a
@@ -379,13 +423,11 @@ config.file_watcher = &files; // run_scene_app polls it once per frame
 ## Scope (V1)
 
 Implemented: async loading, handles, `LoadState`, events, dependency loading,
-deterministic drain, frame integration, and default prefab asset discovery/loading
-for `.kinprefab` files.
+deterministic drain, frame integration, optional unused-asset collection, asset
+scopes, manifest-driven 2D imports/atlas packing, and default prefab loading.
 
-Not yet implemented: ref-counted auto-unload (assets are released via
-`AssetManager::unload`/`clear`), and an asset processing pipeline (`.meta`/import
-settings/cached artifacts/multiple sources). Hot-reload `Modified` events are
-reserved but not yet emitted.
+Imports use an explicit build manifest; there is no editor `.meta` database or
+general artifact cache. Hot-reload `Modified` events are reserved but not yet emitted.
 
 ## Shipping inventory and dependency declarations
 

@@ -1,5 +1,6 @@
 include("${CMAKE_CURRENT_LIST_DIR}/kin_packaging.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kin_web.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/kin_import_2d.cmake")
 
 function(kin_configure_asset_pipeline target game_name KIN_GAME_SOURCE_DIR KIN_GAME_MANIFEST)
     option(KIN_ENABLE_ASSET_COOKING "Cook lossless game assets for shipping" OFF)
@@ -21,6 +22,9 @@ function(kin_configure_asset_pipeline target game_name KIN_GAME_SOURCE_DIR KIN_G
                 --output "${CMAKE_BINARY_DIR}/asset-reports/${target}-$<CONFIG>.assets.json"
             COMMENT "Auditing ${game_name} assets (dry run; all files kept)"
             VERBATIM)
+        if(TARGET ${target}_import_2d)
+            add_dependencies(${target}_asset_report ${target}_import_2d)
+        endif()
     endif()
 
     if(KIN_ENABLE_ASSET_COOKING)
@@ -42,6 +46,9 @@ function(kin_configure_asset_pipeline target game_name KIN_GAME_SOURCE_DIR KIN_G
                 --output "${cook_output}" --cache "${cook_cache}" --report "${cook_report}"
                 --target "${cook_target}"
             COMMENT "Cooking ${game_name} assets (lossless; all files kept)" VERBATIM)
+        if(TARGET ${target}_import_2d)
+            add_dependencies(${target}_cook_assets ${target}_import_2d)
+        endif()
     endif()
 
 endfunction()
@@ -50,6 +57,7 @@ endfunction()
 #
 #   kin_game(<target>
 #       [CONTENT <dir>]        # the game's content folder (default: content/ beside the CMakeLists)
+#       [IMPORTS <file.json>]  # build authoring sources into native 2D assets (docs/importing_2d.md)
 #       [NAME <name>]          # its name beside the executable: <name>.kinpak or <name>/ (default: <target>)
 #       [TITLE <text>]         # the product name in the Windows version info (default: <name>)
 #       [VERSION <x.y.z>]      # (default: the project's version)
@@ -171,7 +179,7 @@ function(_kin_game_steam_library out_var where)
 endfunction()
 
 function(kin_game target)
-    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO;STEAM_APP_ID;STEAM_REDIST"
+    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO;STEAM_APP_ID;STEAM_REDIST;IMPORTS"
         "FILES;RUNTIME_TARGETS" ${ARGN})
     if(NOT ARG_NAME)
         set(ARG_NAME "${target}")
@@ -180,6 +188,14 @@ function(kin_game target)
         set(ARG_CONTENT "${CMAKE_CURRENT_SOURCE_DIR}/content")
     endif()
     get_filename_component(content "${ARG_CONTENT}" ABSOLUTE)
+    if(ARG_IMPORTS)
+        if(ARG_NO_CONTENT)
+            message(FATAL_ERROR "kin_game IMPORTS cannot be combined with NO_CONTENT")
+        endif()
+        kin_import_2d_assets(${target} MANIFEST "${ARG_IMPORTS}" CONTENT "${content}"
+            OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/imported-content/${target}")
+        get_target_property(content ${target} KIN_IMPORTED_CONTENT_DIR)
+    endif()
     set(icon_png "")
     if(ARG_INFO)
         # The game info's lines ("title My Game", "version 1.2.0", "icon icon.png"),
@@ -297,6 +313,9 @@ function(kin_game target)
                 COMMAND kin_pack create "${content}" "${pack}"
                 COMMENT "Packing ${ARG_NAME} content"
                 VERBATIM)
+            if(TARGET ${target}_import_2d)
+                add_dependencies(${target}_content ${target}_import_2d)
+            endif()
             if(KIN_SHIPPING)
                 add_dependencies(${target} ${target}_content)
             endif()

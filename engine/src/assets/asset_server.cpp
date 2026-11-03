@@ -19,7 +19,8 @@ std::string_view load_state_name(LoadState state) {
 AssetServer::AssetServer(AssetManager& manager, AssetServerConfig config)
     : _manager(manager),
       _jobs(config.jobs ? config.jobs : &default_job_system()),
-      _max_tasks(config.worker_count > 0 ? config.worker_count : 2) {
+      _max_tasks(config.worker_count > 0 ? config.worker_count : 2),
+      _unload_unused(config.unload_unused) {
     KIN_LOG_INFO_F("asset",
                    "asset server created",
                    (LogFields{{.name = "max_loads", .value = std::to_string(_max_tasks)}}));
@@ -119,6 +120,19 @@ void apply_sorted(std::vector<std::unique_ptr<LoadJob>>& batch, AssetServer& ser
 
 void AssetServer::pump(PumpMode mode) {
     _events.clear();
+    const auto collect = [&] {
+        bool quiescent;
+        {
+            std::lock_guard<std::mutex> lock(_mutex);
+            quiescent = _queue.empty() && _active == 0 && _completed.empty();
+        }
+        if (quiescent) {
+            for (auto& [key, record] : _assets) record.dependency_pin.reset();
+        }
+        if (!_unload_unused) return;
+        _manager.unload_unused();
+        std::erase_if(_assets, [](const auto& entry) { return entry.second.storage.expired(); });
+    };
 
     if (mode == PumpMode::Budgeted) {
         // A cooperative queue has no worker to complete these tasks. Never
@@ -131,6 +145,8 @@ void AssetServer::pump(PumpMode mode) {
             batch.swap(_completed);
         }
         apply_sorted(batch, *this);
+        batch.clear(); // completed jobs no longer pin storage during collection
+        collect();
         return;
     }
 
@@ -150,6 +166,8 @@ void AssetServer::pump(PumpMode mode) {
             std::unique_lock<std::mutex> lock(_mutex);
             _done_cv.wait(lock, [&] { return _queue.empty() && _active == 0; });
             if (_completed.empty()) {
+                lock.unlock();
+                collect();
                 return; // fully quiescent
             }
             batch.swap(_completed);

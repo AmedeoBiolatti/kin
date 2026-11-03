@@ -12,6 +12,7 @@
 #include <kin/runtime/scene_server.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <kin/ui2/context.hpp>
+#include <kin/ui2/menu_scene.hpp>
 #include <kin/ui2/widgets.hpp>
 
 #include <algorithm>
@@ -65,6 +66,36 @@ public:
 private:
     kin::i32 _count = 0;
     kin::u32 _observed = 0;
+};
+
+class SemanticProbeScene final : public kin::Scene {
+public:
+    explicit SemanticProbeScene(bool in_render = false) : _in_render(in_render) {}
+    kin::ui2::Context* ui_context() override { return &_ui; }
+    void update(kin::SceneContext& ctx) override {
+        if (!_in_render) draw(ctx);
+    }
+    void render(kin::SceneContext& ctx) override {
+        if (_in_render) draw(ctx);
+    }
+    void draw(kin::SceneContext& ctx) {
+        _ui.begin(ctx.input, ctx.renderer, ctx.dt);
+        kin::ui2::Button button{.id = kin::ui2::make_id("play"), .bounds = {10, 10, 80, 25}, .label = "Play"};
+        kin::ui2::run(_ui, button);
+        if (button.clicked) ++_clicks;
+        _ui.semantic_key(_text.id, "player_name");
+        kin::ui2::run(_ui, _text);
+        _ui.end();
+    }
+    void write_report(kin::JsonWriter& json) const override {
+        json.field("clicks", _clicks);
+        json.field("text", _text.state.text);
+    }
+private:
+    kin::ui2::Context _ui;
+    kin::ui2::TextInput _text{.id = kin::ui2::make_id("name"), .bounds = {10, 45, 120, 25}};
+    int _clicks = 0;
+    bool _in_render = false;
 };
 
 // Reacts to injected pointer and text input so the input.mouse / input.text
@@ -576,7 +607,7 @@ void test_ui_snapshot_and_pointer_input() {
 
     const kin::JsonValue* snapshot = response_result(text, 2);
     assert(snapshot == nullptr);
-    assert(text.find("ui.snapshot is unavailable after the legacy UI module was removed") != std::string::npos);
+    assert(text.find("scene has no semantic UI") != std::string::npos);
 
     // The injected click activated the button.
     const kin::JsonValue* after_click = response_result(text, 5);
@@ -594,6 +625,90 @@ void test_ui_snapshot_and_pointer_input() {
     assert(after_motion->find("state")->number_at("motion_x") == 12.0);
     assert(after_motion->find("state")->number_at("motion_y") == -3.0);
     assert(response_result(text, 12) == nullptr); // neither a place nor a motion
+}
+
+void test_controller_menu_scene() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    auto& window = app.create_window({.title = "controller menu", .width = 320, .height = 240, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    kin::SceneContext ctx{app, window, renderer, app.input(), scenes, 0.016f};
+    int play = 0, options = 0, cancelled = 0;
+    kin::ui2::MenuScene menu{{
+        .items = {{.label = "Play", .action = [&](auto&) { ++play; }},
+                  {.label = "Options", .action = [&](auto&) { ++options; }}},
+        .size = {320, 240},
+        .cancel = [&](auto&) { ++cancelled; },
+    }};
+    const auto frame = [&] {
+        app.input().begin_frame();
+        menu.update(ctx);
+        menu.render(ctx);
+    };
+    frame();
+    kin::GamepadState pad{.connected = true, .buttons = 1u << static_cast<kin::u8>(kin::GamepadButton::DPadDown)};
+    app.input().set_gamepad(pad); frame();
+    pad.buttons = 1u << static_cast<kin::u8>(kin::GamepadButton::A);
+    app.input().set_gamepad(pad); frame(); frame();
+    assert(play == 0 && options == 1); // update + render never double-activate
+    pad.buttons = 1u << static_cast<kin::u8>(kin::GamepadButton::B);
+    app.input().set_gamepad(pad);
+    menu.render(ctx); // a zero-step frame parks cancellation for the next update
+    assert(cancelled == 0);
+    frame(); frame();
+    assert(cancelled == 1);
+}
+
+void test_semantic_ui_server() {
+    for (bool in_render : {false, true}) {
+        kin::SceneManager scenes;
+        scenes.push(std::make_unique<SemanticProbeScene>(in_render));
+        std::ostringstream out;
+        std::istringstream in(
+            R"({"id":0,"method":"ui.snapshot"})" "\n"
+            R"({"id":1,"method":"view.screenshot","params":{"path":"kin-semantic-test.png"}})" "\n"
+            R"({"id":2,"method":"sim.tick"})" "\n"
+            R"({"id":3,"method":"ui.snapshot"})" "\n"
+            R"({"id":4,"method":"ui.action","params":{"id":"Play","action":"click"}})" "\n"
+            R"({"id":5,"method":"ui.action","params":{"id":"Play"}})" "\n"
+            R"({"id":6,"method":"view.screenshot","params":{"path":"kin-semantic-test.png"}})" "\n"
+            R"({"id":7,"method":"scene.current"})" "\n"
+            R"({"id":8,"method":"sim.tick","params":{"count":2}})" "\n"
+            R"({"id":9,"method":"scene.current"})" "\n"
+            R"({"id":10,"method":"ui.action","params":{"id":"player_name","action":"set_text","text":"Player α"}})" "\n"
+            R"({"id":11,"method":"sim.tick"})" "\n"
+            R"({"id":12,"method":"scene.current"})" "\n"
+            R"({"id":13,"method":"ui.action","params":{"id":"missing"}})" "\n"
+            R"({"id":14,"method":"ui.action","params":{"id":"Play"}})" "\n"
+            R"({"id":15,"method":"sim.reset"})" "\n"
+            R"({"id":16,"method":"sim.tick"})" "\n"
+            R"({"id":17,"method":"scene.current"})" "\n"
+            R"({"id":18,"method":"server.shutdown"})" "\n");
+        assert(kin::run_scene_server({
+            .window = {.title = "semantic UI", .width = 160, .height = 100},
+            .mode = kin::ServerMode::Driven,
+            .in = &in,
+            .out = &out,
+            .reset_scenes = [in_render](kin::SceneManager& reset) {
+                reset.push(std::make_unique<SemanticProbeScene>(in_render));
+            },
+        }, scenes) == 0);
+        const std::string text = out.str();
+        if (in_render) assert(response_result(text, 0)->find("elements")->items().size() == 2);
+        const auto* snapshot = response_result(text, 3);
+        assert(snapshot && snapshot->find("elements")->items().size() == 2);
+        const auto& button = snapshot->find("elements")->items().front();
+        assert(button.string_at("role") == "button" && button.string_at("label") == "Play");
+        assert(button.find("id")->is_string()); // stable 64-bit ids are lossless in JS
+        assert(response_result(text, 4)->bool_at("queued"));
+        assert(!response_result(text, 5)); // one action per tick
+        assert(response_result(text, 7)->find("state")->int_at("clicks") == 0);
+        assert(response_result(text, 9)->find("state")->int_at("clicks") == 1);
+        assert(response_result(text, 12)->find("state")->string_at("text") == "Player α");
+        assert(!response_result(text, 13));
+        assert(response_result(text, 17)->find("state")->int_at("clicks") == 0);
+        std::filesystem::remove("kin-semantic-test.png");
+    }
 }
 
 void test_press_completes_a_ui2_click_and_frame_timing() {
@@ -1007,6 +1122,33 @@ void test_server_tears_down_scenes_before_returning() {
 }
 
 // --inspect: a windowed game answers between frames, and is held and stepped.
+void test_live_semantic_snapshot_preserves_player_input() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    auto& window = app.create_window({.title = "semantic inspector", .width = 160, .height = 100, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    auto scene = std::make_unique<SemanticProbeScene>(true);
+    auto* ui = scene->ui_context();
+    scenes.push(std::move(scene));
+    kin::ServerContext ctx{app, window, renderer, scenes, {}, kin::make_key(1), 1.0f / 60.0f, false};
+    ctx.realize_scenes();
+    app.input().set_key_pressed(kin::Key::A);
+    std::istringstream in(R"({"id":1,"method":"ui.snapshot"})" "\n"
+                          R"({"id":2,"method":"ui.action","params":{"id":"Play"}})" "\n");
+    std::ostringstream out;
+    kin::LiveInspector inspector{in, out};
+    for (int i = 0; i < 2000 && !inspector.finished(); ++i) {
+        inspector.poll(ctx, nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    assert(inspector.finished());
+    inspector.flush();
+    assert(response_result(out.str(), 1)->find("elements")->items().empty());
+    assert(!response_result(out.str(), 2));
+    assert(ui->elements().empty() && app.input().frame_pressed(kin::Key::A));
+    ctx.shutdown_scenes();
+}
+
 void test_live_inspector() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "inspected", .width = 32, .height = 32, .hidden = true});
@@ -1029,6 +1171,7 @@ void test_live_inspector() {
         R"({"id":4,"method":"sim.tick"})" "\n"
         R"({"id":5,"method":"input.key","params":{"name":"A"}})" "\n"
         R"({"id":6,"method":"sim.step","params":{"count":2}})" "\n"
+        R"({"id":11,"method":"ui.action","params":{"id":"Play"}})" "\n"
         "\n"
         "not json\n");
     std::ostringstream out;
@@ -1055,6 +1198,7 @@ void test_live_inspector() {
     assert(paused && paused->bool_at("paused") && paused->int_at("frame") == 1);
     assert(!response_result(text, 4) && text.find("sim.tick drives a headless server") != std::string::npos);
     assert(!response_result(text, 5)); // input belongs to the player
+    assert(!response_result(text, 11)); // semantic actions also belong to the player
     assert(response_result(text, 6)->bool_at("paused"));
     assert(text.find("invalid JSON") != std::string::npos);
 
@@ -1221,6 +1365,8 @@ int main() {
     test_animation_diagnostics_endpoint();
     test_animation_diagnostics_endpoint_missing_provider_errors();
     test_ui_snapshot_and_pointer_input();
+    test_semantic_ui_server();
+    test_controller_menu_scene();
     test_press_completes_a_ui2_click_and_frame_timing();
     test_live_inspector_slow_tool();
     test_live_inspector_debugs_scripts();
@@ -1233,5 +1379,6 @@ int main() {
     test_view_scene_refused_by_default();
     test_server_tears_down_scenes_before_returning();
     test_live_inspector();
+    test_live_semantic_snapshot_preserves_player_input();
     return 0;
 }

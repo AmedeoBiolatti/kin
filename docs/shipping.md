@@ -28,6 +28,7 @@ kin_game(my_game TITLE "My Game")   # content/ beside this CMakeLists.txt
 | Argument | Default | |
 |---|---|---|
 | `CONTENT <dir>` | `content/` | The game's content folder |
+| `IMPORTS <file.json>` | none | Import authoring sources and merge generated native assets with `CONTENT`; see [2D imports](importing_2d.md) |
 | `NAME <name>` | the target | Its name beside the executable: `<name>.kinpak` or `<name>/` |
 | `TITLE <text>` | the name | The product name in the Windows version info |
 | `VERSION <x.y.z>` | the project's | Version info, and the package's name |

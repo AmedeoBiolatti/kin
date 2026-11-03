@@ -8,6 +8,7 @@
 #include <kin/ui2/layout.hpp>
 #include <kin/ui2/scale.hpp>
 #include <kin/ui2/state.hpp>
+#include <kin/ui2/semantics.hpp>
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
 
@@ -513,6 +514,26 @@ public:
     // `button` selects which mouse button drives pressed/released/active; defaults to Left.
     // Note: `active` state is shared across buttons — only one widget can be active at a time.
     Interaction region(Id id, Rectf bounds, i32 z = 0, MouseButton button = MouseButton::Left);
+    // Custom controls describe themselves before region(), then update their
+    // reported value after handling input. Built-in controls do this themselves.
+    void describe(Id id, std::string_view role, std::string_view label, Rectf bounds,
+                  bool enabled = true, bool focusable = false, std::string_view value = {}, bool checked = false);
+    void semantic_key(Id id, std::string_view key);
+    void semantic_parent(Id id, Id parent);
+    const std::vector<SemanticElement>& elements() const { return _elements; }
+    bool accepts_input(Id id) const;
+    void write_snapshot(JsonWriter& json) const;
+    // Matches an author-facing key, decimal numeric id, or exact label. An
+    // ambiguous/disabled/hidden target is refused. Actions expire at end().
+    bool queue_action(std::string_view selector, SemanticAction action, std::string text, std::string& error);
+    std::optional<Id> resolve_action(std::string_view selector, SemanticAction action, std::string& error) const;
+    std::optional<std::string> take_text_action(Id id);
+    void cancel_action() { _semantic_action.reset(); }
+    void set_controller_navigation(ControllerNavigation options) { _controller_options = options; }
+    bool controller_active() const { return _controller_active; }
+    bool back_requested() const { return _controller_back; }
+    std::string_view accept_prompt() const { return _controller_active ? "A / Cross" : "Enter"; }
+    std::string_view back_prompt() const { return _controller_active ? "B / Circle" : "Esc"; }
 
     void open_modal(Id id);
     void close_modal(Id id);
@@ -1083,6 +1104,8 @@ private:
         std::string key_context{};
         ScrollBoxOptions scroll{};
         bool interactive = false;
+        bool enabled = true;
+        bool focusable = false;
         bool window_drag = false;
         i32 z = 0; // hit depth (compose_z)
     };
@@ -1153,6 +1176,25 @@ private:
     std::vector<std::string> _actions; // fired this frame
     bool _wants_text_input_last = false;
     bool _focus_moved = false;
+    std::vector<SemanticElement> _elements;
+    std::unordered_map<u64, std::size_t> _element_indices;
+    std::unordered_map<u64, std::string> _semantic_keys;
+    struct PendingSemanticAction { Id id; SemanticAction action; std::string text; };
+    std::optional<PendingSemanticAction> _semantic_action;
+    ControllerNavigation _controller_options{};
+    GamepadState _previous_pad{};
+    i32 _controller_direction = 0; // Up, Right, Down, Left: 1..4
+    i32 _held_direction = 0;
+    f32 _controller_repeat = 0;
+    bool _controller_accept = false;
+    bool _controller_back = false;
+    bool _controller_active = false;
+    mutable bool _controller_direction_consumed = false;
+    void begin_navigation();
+    void finish_semantics();
+    bool controller_key(Key key) const;
+    void finish_navigation();
+    SemanticElement* element(Id id);
     bool _any_press = false; // a mouse button went down this frame (before widgets took it)
     f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
     i32 _region_z_base = 0;  // added to region()'s z while end_layout() runs a widget in floating boxes

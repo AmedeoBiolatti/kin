@@ -63,6 +63,8 @@ struct AssetServerConfig {
     int worker_count = 0;
     // Where loads run. Null: default_job_system(), shared with the rest of kin.
     JobSystem* jobs = nullptr;
+    // Release unreferenced loaded assets after pump(), on its calling thread.
+    bool unload_unused = false;
 };
 
 // Async loader signature. Distinct from AssetManager's synchronous Loader<T>:
@@ -157,7 +159,10 @@ private:
         std::vector<std::string> dependencies;
         // Storage identity separates generations when AssetManager unloads or
         // clears an asset while an async request is still running.
-        std::shared_ptr<IAssetStorage> storage;
+        std::weak_ptr<IAssetStorage> storage;
+        // A completed parent stays alive while this server finishes its batch
+        // of dependency loads, including cycles with no external handle.
+        std::shared_ptr<IAssetStorage> dependency_pin;
     };
 
     template<typename U>
@@ -204,6 +209,7 @@ private:
     int _tasks = 0;   // tasks submitted and not yet finished
     std::vector<Job<void>> _task_handles;
     bool _stopping = false;
+    bool _unload_unused = false;
 
     u64 _next_id = 1;
     // One server-owned record keeps lifecycle and dependency edges together.
@@ -253,7 +259,7 @@ void AssetServer::commit(TypedLoadJob<T>& job) {
     // A newer request may have replaced the manager storage while this job
     // was running. Its completion belongs to the old generation and must be
     // ignored without touching the new record.
-    if (record == _assets.end() || record->second.storage.get() != job.storage.get()) {
+    if (record == _assets.end() || record->second.storage.lock().get() != job.storage.get()) {
         return;
     }
 
@@ -283,10 +289,12 @@ void AssetServer::commit(TypedLoadJob<T>& job) {
 
     // Enqueue dependencies discovered by the loader and record the edges. This
     // runs on the main thread, so load_async (and its cache access) is safe.
+    if (!job.ctx.deps.empty()) record->second.dependency_pin = job.storage;
     std::vector<std::string>& edges = record->second.dependencies;
     for (auto& thunk : job.ctx.deps) {
         edges.push_back(thunk(*this));
     }
+    _manager.set_dependencies(job.key, edges);
 }
 
 template<typename T>
@@ -301,7 +309,7 @@ AssetHandle<T> AssetServer::load_async(std::string_view relative_path) {
         record.storage = storage;
         return handle;
     }
-    if (record.state == LoadState::Loading && record.storage.get() == storage.get()) {
+    if (record.state == LoadState::Loading && record.storage.lock().get() == storage.get()) {
         return handle; // already requested
     }
 
@@ -311,6 +319,7 @@ AssetHandle<T> AssetServer::load_async(std::string_view relative_path) {
     record.state = LoadState::Loading;
     record.storage = storage;
     record.dependencies.clear();
+    record.dependency_pin.reset();
 
     auto job = std::make_unique<TypedLoadJob<T>>();
     job->request_id = next_request_id();

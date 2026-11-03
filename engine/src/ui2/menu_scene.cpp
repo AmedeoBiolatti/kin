@@ -65,7 +65,8 @@ MenuScene::MenuScene(MenuSceneConfig config)
 }
 
 void MenuScene::update(SceneContext& ctx) {
-    if (ctx.input.pressed("quit")) {
+    if (_render_cancelled || ctx.input.pressed("quit")) {
+        _render_cancelled = false;
         if (_config.cancel) {
             _config.cancel(ctx);
         }
@@ -87,7 +88,7 @@ void MenuScene::update(SceneContext& ctx) {
     }
 
     _ui.set_theme(game_theme(_config.theme));
-    _ui.begin(ctx.input, ctx.renderer);
+    _ui.begin(ctx.input, ctx.renderer, ctx.dt);
 
     MenuList menu = menu_list();
     run(_ui, menu);
@@ -104,6 +105,11 @@ void MenuScene::update(SceneContext& ctx) {
     // unaffected: only THIS scene's input was consumed. (The input loop no longer
     // clears these globally — that dropped ~half of render-time clicks/keystrokes.)
     ctx.input.consume_frame_edges();
+
+    if (menu.cancelled) {
+        if (_config.cancel) _config.cancel(ctx);
+        return;
+    }
 
     if (menu.activated >= 0 && menu.activated < static_cast<i32>(_config.items.size())) {
         MenuSceneItem& item = _config.items[static_cast<std::size_t>(menu.activated)];
@@ -145,6 +151,7 @@ void MenuScene::render(SceneContext& ctx) {
     if (menu.activated >= 0) {
         _render_activated = menu.activated;
     }
+    if (menu.cancelled) _render_cancelled = true;
 
     if (!_config.hint.empty()) {
         const f32 y = _config.hint_y >= 0.0f ? _config.hint_y : _config.size.y - 69.5f;

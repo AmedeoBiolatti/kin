@@ -19,6 +19,7 @@
 #include <cctype>
 #include <stdexcept>
 #include <utility>
+#include <unordered_set>
 
 namespace kin {
 
@@ -139,6 +140,7 @@ void AssetManager::clear() {
         asset->clear_loaded();
     }
     _assets.clear();
+    _dependencies.clear();
     _loaded_paths.clear();
     for (auto& [path, metadata] : _metadata) {
         metadata.status = status_for_path(resolve(path));
@@ -155,6 +157,7 @@ void AssetManager::unload(std::string_view relative_path) {
         if (it->first.ends_with(suffix)) {
             it->second->clear_loaded();
             _loaded_paths.erase(it->first);
+            _dependencies.erase(it->first);
             it = _assets.erase(it);
             ++removed;
         } else {
@@ -172,6 +175,49 @@ void AssetManager::unload(std::string_view relative_path) {
                         {.name = "path", .value = path},
                         {.name = "count", .value = std::to_string(removed)},
                     }));
+}
+
+void AssetManager::set_dependencies(std::string key, std::vector<std::string> dependencies) {
+    _dependencies[std::move(key)] = std::move(dependencies);
+}
+
+std::size_t AssetManager::unload_unused() {
+    std::unordered_set<std::string> retained;
+    std::vector<std::string> pending;
+    for (const auto& [key, storage] : _assets) {
+        // Pending jobs are also owners. Never release their storage mid-load.
+        if (storage.use_count() > 1) pending.push_back(key);
+    }
+    while (!pending.empty()) {
+        std::string key = std::move(pending.back());
+        pending.pop_back();
+        if (!retained.insert(key).second) continue;
+        if (const auto it = _dependencies.find(key); it != _dependencies.end())
+            pending.insert(pending.end(), it->second.begin(), it->second.end());
+    }
+    std::size_t removed = 0;
+    for (auto it = _assets.begin(); it != _assets.end();) {
+        if (retained.contains(it->first)) { ++it; continue; }
+        const auto path = _loaded_paths.find(it->first);
+        if (path != _loaded_paths.end()) {
+            if (auto m = _metadata.find(path->second); m != _metadata.end())
+                m->second.status = status_for_path(resolve(path->second));
+            _loaded_paths.erase(path);
+        }
+        _dependencies.erase(it->first);
+        it = _assets.erase(it);
+        ++removed;
+    }
+    // Metadata is keyed by path, while cache entries also include the type.
+    // Collecting one interpretation must not hide another retained one.
+    for (const auto& [key, path] : _loaded_paths) {
+        const auto asset = _assets.find(key);
+        if (asset != _assets.end() && asset->second->loaded()) {
+            if (auto metadata = _metadata.find(path); metadata != _metadata.end())
+                metadata->second.status = AssetStatus::Loaded;
+        }
+    }
+    return removed;
 }
 
 void AssetManager::discover() {

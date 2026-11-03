@@ -1,4 +1,5 @@
 #include <kin/runtime/scene_server.hpp>
+#include <kin/ui2/context.hpp>
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/renderer3d.hpp>
 #endif
@@ -819,10 +820,38 @@ ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) 
     return ok_result(out.str());
 }
 
-ServerResponse handle_ui_snapshot(ServerContext& ctx, const JsonValue& params) {
-    (void)ctx;
-    (void)params;
-    return error_result("ui.snapshot is unavailable after the legacy UI module was removed");
+ServerResponse handle_ui(ServerContext& ctx, const JsonValue& params, bool action, bool initialize = true) {
+    const i32 index = static_cast<i32>(params.int_at("scene", ctx.scenes().depth() - 1));
+    Scene* scene = ctx.scenes().at_mut(index);
+    if (!scene || !scene->ui_context()) return error_result("scene has no semantic UI (Scene::ui_context)");
+    if (!action && initialize && scene->ui_context()->elements().empty()) {
+        // Render-driven UI needs its first layout even in a non-rendering server.
+        ctx.render_frame();
+        scene = ctx.scenes().at_mut(index);
+        if (!scene || !scene->ui_context()) return error_result("scene has no semantic UI (Scene::ui_context)");
+    }
+    auto& ui = *scene->ui_context();
+    if (action) {
+        const std::string name = params.string_at("action", "click");
+        const auto kind = name == "click" ? ui2::SemanticAction::Click : name == "focus" ? ui2::SemanticAction::Focus :
+                          ui2::SemanticAction::SetText;
+        if (name != "click" && name != "focus" && name != "set_text")
+            return error_result("UI action must be click, focus or set_text");
+        std::string error;
+        const auto target = ui.resolve_action(params.string_at("id"), kind, error);
+        if (!target) return error_result(error);
+        const std::string text = params.string_at("text");
+        if (!ctx.queue_ui_action([&ctx, scene, index, id = *target, kind, text] {
+                if (ctx.scenes().at_mut(index) != scene || !scene->ui_context()) return;
+                std::string ignored;
+                scene->ui_context()->queue_action(std::to_string(id.value), kind, text, ignored);
+            })) return error_result("a UI action is already pending; advance a frame first");
+        return ok_result("{\"queued\":true}");
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    ui.write_snapshot(json);
+    return ok_result(out.str());
 }
 
 ServerResponse handle_input_mouse(ServerContext& ctx, const JsonValue& params) {
@@ -1011,6 +1040,12 @@ void ServerContext::queue_action(std::string name, std::string mode) {
     _pending.push_back({PendingInput::Kind::Action, std::move(name), std::move(mode), {}, 0.0f});
 }
 
+bool ServerContext::queue_ui_action(std::function<void()> action) {
+    if (_pending_ui_action) return false;
+    _pending_ui_action = std::move(action);
+    return true;
+}
+
 void ServerContext::queue_mouse_move(Vec2f window_pos) {
     _pending.push_back({PendingInput::Kind::MouseMove, {}, {}, window_pos, 0.0f});
 }
@@ -1040,6 +1075,8 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
 }
 
 void ServerContext::step() {
+    auto ui_action = std::exchange(_pending_ui_action, {});
+    if (ui_action) ui_action();
     Input& input = _app.input();
     input.begin_frame();
 
@@ -1121,10 +1158,18 @@ void ServerContext::step() {
     _scenes.update(scene_ctx);
     const auto render_start = clock::now();
     auto present_start = render_start;
-    if (_render) {
+    if (_render || ui_action) {
         _scenes.render(scene_ctx);
         present_start = clock::now();
         _renderer.present();
+    }
+    if (ui_action) {
+        // A hidden/paused UI may not have begun a frame. Its queued action must
+        // still expire on this step instead of firing when it reappears.
+        for (i32 index = 0; index < _scenes.depth(); ++index) {
+            if (auto* scene = _scenes.at_mut(index); scene && scene->ui_context())
+                scene->ui_context()->cancel_action();
+        }
     }
     const auto end = clock::now();
     const auto ms = [](clock::duration d) { return std::chrono::duration<f64, std::milli>(d).count(); };
@@ -1184,6 +1229,7 @@ void ServerContext::reset(std::optional<u64> seed) {
     }
     _report = {};
     _pending.clear();
+    _pending_ui_action = {};
     _timings.clear();
 
     SceneContext scene_ctx = make_context();
@@ -1236,8 +1282,9 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
         return handle_input_key(ctx, params);
     }
     if (method == "ui.snapshot") {
-        return handle_ui_snapshot(ctx, params);
+        return handle_ui(ctx, params, false);
     }
+    if (method == "ui.action") return handle_ui(ctx, params, true);
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);
     }
@@ -1979,8 +2026,10 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
         std::optional<ScriptResume> resume;
         response = answer_debug(method, params, false, resume);
     } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
-               method.starts_with("view.") || method == "ui.snapshot") {
+               method.starts_with("view.") || method == "ui.action") {
         response = error_result(method + " drives a headless server (--server); this game runs in its window");
+    } else if (method == "ui.snapshot") {
+        response = handle_ui(ctx, params, false, false); // inspect the last frame without consuming player input
     } else {
         response = dispatch_server_command(ctx, game, method, params);
     }
