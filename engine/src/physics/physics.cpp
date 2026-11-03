@@ -1,6 +1,7 @@
 #include <kin/physics/physics.hpp>
 
 #include <box2d/box2d.h>
+#include <box2d/b2_distance.h>
 #include <mapbox/earcut.hpp>
 
 #include <algorithm>
@@ -196,6 +197,10 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
         u32 generation = 1;
         u64 tag = 0;
         bool sensor = false;
+        // One-sided, and not a chain (Box2D's chains are one-sided by
+        // themselves): which way its top faces, on its body.
+        bool one_sided = false;
+        b2Vec2 up{0.0f, -1.0f};
     };
 
     struct JointSlot {
@@ -251,7 +256,14 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
     // For each pair of fixtures touching: how many of their shapes' contacts touch.
     std::map<ContactKey, u32> touching;
     std::vector<PhysicsContact> current;
+    // Contacts of one-sided shapes that let what they touch through, until they end.
+    std::unordered_set<b2Contact*> passing;
     f32 last_dt = 0.0f;
+
+    // Whether `fixture` passes `filter` (ignoring its body when it is the one to ignore).
+    bool matches(const b2Fixture& fixture, const PhysicsFilter& filter) const {
+        return filter_matches(fixture, filter) && (!filter.ignore || handle_for(fixture.GetBody()) != filter.ignore);
+    }
 
     PhysicsBody body_handle(u32 index) const {
         if (index >= bodies.size() || !bodies[index].body) {
@@ -389,9 +401,49 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
         events.push_back(event);
     }
 
+    const FixtureSlot* slot_of(const b2Fixture* fixture) const {
+        return fixture_slot(handle_for(fixture));
+    }
+
+    // A contact a one-sided shape (not a chain) begins: it lets what it
+    // touches through, until they part, unless that comes down onto its top.
+    void judge_one_sided(b2Contact* contact) {
+        b2Fixture* a = contact->GetFixtureA();
+        b2Fixture* b = contact->GetFixtureB();
+        const FixtureSlot* slot_a = slot_of(a);
+        const FixtureSlot* slot_b = slot_of(b);
+        const bool one_a = slot_a && slot_a->one_sided;
+        const bool one_b = slot_b && slot_b->one_sided;
+        if (!one_a && !one_b) {
+            return;
+        }
+        if (one_a && one_b) {
+            passing.insert(contact); // two platforms: neither stops the other
+            return;
+        }
+        const b2Fixture* platform = one_a ? a : b;
+        const b2Fixture* other = one_a ? b : a;
+        b2WorldManifold manifold;
+        contact->GetWorldManifold(&manifold);
+        const b2Vec2 out = one_a ? manifold.normal : -manifold.normal; // from the platform to the other
+        const b2Vec2 up = b2Mul(platform->GetBody()->GetTransform().q, (one_a ? slot_a : slot_b)->up);
+        const b2Vec2 at = contact->GetManifold()->pointCount > 0 ? manifold.points[0] : other->GetBody()->GetWorldCenter();
+        const b2Vec2 rising = other->GetBody()->GetLinearVelocityFromWorldPoint(at) - platform->GetBody()->GetLinearVelocityFromWorldPoint(at);
+        if (b2Dot(out, up) < 0.7f || b2Dot(rising, up) > 0.05f) {
+            passing.insert(contact);
+        }
+    }
+
+    void PreSolve(b2Contact* contact, const b2Manifold*) override {
+        if (!passing.empty() && passing.contains(contact)) {
+            contact->SetEnabled(false);
+        }
+    }
+
     // Two fixtures' contact begins with the first of their shapes' touching,
     // and ends with the last's.
     void BeginContact(b2Contact* contact) override {
+        judge_one_sided(contact);
         const PhysicsFixture fixture_a = handle_for(contact->GetFixtureA());
         const PhysicsFixture fixture_b = handle_for(contact->GetFixtureB());
         if (fixture_a && fixture_b && ++touching[make_key(fixture_a, fixture_b)] > 1) {
@@ -401,6 +453,7 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
     }
 
     void EndContact(b2Contact* contact) override {
+        passing.erase(contact);
         const PhysicsFixture fixture_a = handle_for(contact->GetFixtureA());
         const PhysicsFixture fixture_b = handle_for(contact->GetFixtureB());
         if (fixture_a && fixture_b) {
@@ -629,6 +682,328 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
         }
         }
     }
+
+    // ---- Shapes that move: casts and characters ----
+
+    // A shape as Box2D's distance tests take it, in metres from where it is:
+    // the points of its core (its outline's hull is theirs) and how far round
+    // them its outline is.
+    struct Mover {
+        std::vector<b2Vec2> points;
+        f32 radius = 0.0f;
+
+        b2DistanceProxy proxy() const { // it keeps pointing at `points`
+            b2DistanceProxy proxy;
+            proxy.Set(points.data(), static_cast<int32>(points.size()), radius);
+            return proxy;
+        }
+
+        b2AABB aabb(b2Vec2 at) const {
+            b2AABB box{at + points[0], at + points[0]};
+            for (const b2Vec2& point : points) {
+                box.lowerBound = b2Min(box.lowerBound, at + point);
+                box.upperBound = b2Max(box.upperBound, at + point);
+            }
+            box.lowerBound -= b2Vec2(radius, radius);
+            box.upperBound += b2Vec2(radius, radius);
+            return box;
+        }
+
+        // How high (along `up`) its lowest point is.
+        f32 lowest(b2Vec2 at, b2Vec2 up) const {
+            f32 low = b2_maxFloat;
+            for (const b2Vec2& point : points) {
+                low = std::min(low, b2Dot(at + point, up));
+            }
+            return low - radius;
+        }
+    };
+
+    // `shape` as a Mover; `rounded`: a box's corners rounded a little more
+    // (a character's, to slide over seams). None for a chain, or a shape with
+    // no size.
+    std::optional<Mover> mover_of(const PhysicsShape& shape, bool rounded) const {
+        Mover mover;
+        switch (shape.type) {
+        case PhysicsShapeType::Box: {
+            const f32 hx = std::abs(shape.half_extents.x);
+            const f32 hy = std::abs(shape.half_extents.y);
+            const f32 least = meters(std::min(hx, hy));
+            if (!(least > 0.0f)) {
+                return std::nullopt;
+            }
+            const f32 round = std::min(std::max(b2_polygonRadius, rounded ? 0.15f * least : 0.0f), 0.5f * least);
+            mover.radius = round;
+            const f32 cx = hx - units(round);
+            const f32 cy = hy - units(round);
+            for (const Vec2f corner : {Vec2f{-cx, -cy}, Vec2f{cx, -cy}, Vec2f{cx, cy}, Vec2f{-cx, cy}}) {
+                mover.points.push_back(placed(shape, corner));
+            }
+            return mover;
+        }
+        case PhysicsShapeType::Circle:
+            if (!(shape.radius > 0.0f)) {
+                return std::nullopt;
+            }
+            mover.points.push_back(meters(shape.offset));
+            mover.radius = meters(shape.radius);
+            return mover;
+        case PhysicsShapeType::Capsule: {
+            const f32 hx = std::abs(shape.half_extents.x);
+            const f32 hy = std::abs(shape.half_extents.y);
+            const bool across = hx >= hy;
+            const f32 radius = across ? hy : hx;
+            const f32 reach = (across ? hx : hy) - radius;
+            if (!(radius > 0.0f)) {
+                return std::nullopt;
+            }
+            mover.radius = meters(radius);
+            const Vec2f end = across ? Vec2f{reach, 0.0f} : Vec2f{0.0f, reach};
+            mover.points.push_back(placed(shape, end));
+            if (meters(reach) > b2_linearSlop) {
+                mover.points.push_back(placed(shape, {-end.x, -end.y}));
+            } else {
+                mover.points.back() = meters(shape.offset);
+            }
+            return mover;
+        }
+        case PhysicsShapeType::Polygon:
+            mover.points = distinct(placed_points(shape), true);
+            if (mover.points.size() < 3 || std::abs(doubled_area(mover.points)) < 2.0f * b2_linearSlop * b2_linearSlop) {
+                return std::nullopt;
+            }
+            mover.radius = b2_polygonRadius;
+            return mover;
+        case PhysicsShapeType::Chain:
+            return std::nullopt;
+        }
+        return std::nullopt;
+    }
+
+    // A convex piece of something in the world near a mover: one Box2D shape
+    // (a chain's: one edge of it).
+    struct Part {
+        b2Fixture* fixture = nullptr;
+        int32 child = 0;
+        b2Transform xf{};  // its body's, now
+        b2Vec2 shift{0.0f, 0.0f};    // how far it moves in the step (metres)
+        bool dynamic = false;
+        bool one_sided = false;
+        b2Vec2 up{0.0f, 0.0f};       // a one-sided one's top faces this way...
+        f32 top = 0.0f;    // ...and is this high along it
+
+        b2DistanceProxy proxy() const {
+            b2DistanceProxy proxy;
+            proxy.Set(fixture->GetShape(), child);
+            return proxy;
+        }
+
+        // How far outside its shape Box2D's outline of it is (a polygon's
+        // or an edge's skin; a circle has none).
+        f32 skin() const {
+            return fixture->GetShape()->GetType() == b2Shape::e_circle ? 0.0f : b2_polygonRadius;
+        }
+    };
+
+    // The shapes in `box` that `filter` takes; moving ones' shift is for a
+    // step of `dt` at `around` (0: they are taken as they are).
+    std::vector<Part> parts_near(const b2AABB& box, const PhysicsFilter& filter, f32 dt, b2Vec2 around) const {
+        struct Callback final : b2QueryCallback {
+            const Impl& impl;
+            const PhysicsFilter& filter;
+            std::vector<b2Fixture*> found;
+            std::unordered_set<const b2Fixture*> seen;
+
+            Callback(const Impl& impl, const PhysicsFilter& filter)
+                : impl(impl),
+                  filter(filter) {
+            }
+
+            bool ReportFixture(b2Fixture* fixture) override {
+                if (impl.matches(*fixture, filter) && seen.insert(fixture).second) {
+                    found.push_back(fixture);
+                }
+                return true;
+            }
+        };
+        Callback callback{*this, filter};
+        world.QueryAABB(&callback, box);
+
+        std::vector<Part> parts;
+        for (b2Fixture* fixture : callback.found) {
+            const b2Body* body = fixture->GetBody();
+            const b2Shape* shape = fixture->GetShape();
+            const FixtureSlot* slot = slot_of(fixture);
+            Part part{.fixture = fixture, .xf = body->GetTransform(), .dynamic = body->GetType() == b2_dynamicBody};
+            if (body->GetType() != b2_staticBody && dt > 0.0f) {
+                part.shift = dt * body->GetLinearVelocityFromWorldPoint(around);
+            }
+            for (int32 child = 0; child < shape->GetChildCount(); ++child) {
+                b2AABB child_box;
+                shape->ComputeAABB(&child_box, part.xf, child);
+                child_box.lowerBound = b2Min(child_box.lowerBound, child_box.lowerBound + part.shift);
+                child_box.upperBound = b2Max(child_box.upperBound, child_box.upperBound + part.shift);
+                if (!b2TestOverlap(child_box, box)) {
+                    continue;
+                }
+                part.child = child;
+                part.one_sided = false;
+                if (shape->GetType() == b2Shape::e_chain) {
+                    b2EdgeShape edge;
+                    static_cast<const b2ChainShape*>(shape)->GetChildEdge(&edge, child);
+                    if (edge.m_oneSided) {
+                        // Box2D's front of an edge: to the right going from its first point.
+                        b2Vec2 along = edge.m_vertex2 - edge.m_vertex1;
+                        along.Normalize();
+                        part.one_sided = true;
+                        part.up = b2Mul(part.xf.q, b2Vec2(along.y, -along.x));
+                        part.top = b2Dot(b2Mul(part.xf, edge.m_vertex1), part.up);
+                    }
+                } else if (slot && slot->one_sided) {
+                    part.one_sided = true;
+                    part.up = b2Mul(part.xf.q, slot->up);
+                    const b2DistanceProxy proxy = part.proxy();
+                    part.top = -b2_maxFloat;
+                    for (int32 i = 0; i < proxy.m_count; ++i) {
+                        part.top = std::max(part.top, b2Dot(b2Mul(part.xf, proxy.m_vertices[i]), part.up));
+                    }
+                    part.top += proxy.m_radius;
+                }
+                parts.push_back(part);
+            }
+        }
+        return parts;
+    }
+
+    // How far apart a mover at `at` and a shape are (metres, between their
+    // outlines: below 0 they overlap), and which way: `normal` out of the
+    // shape towards the mover, `point` on the shape's outline. `inside`: their
+    // cores overlap, and there is no telling which way.
+    struct Gap {
+        f32 distance = 0.0f;
+        b2Vec2 normal{0.0f, 0.0f};
+        b2Vec2 point{0.0f, 0.0f};
+        bool inside = false;
+    };
+
+    static Gap gap(const b2DistanceProxy& mover, b2Vec2 at, const b2DistanceProxy& other, const b2Transform& other_xf) {
+        b2DistanceInput input;
+        input.proxyA = mover;
+        input.proxyB = other;
+        input.transformA.Set(at, 0.0f);
+        input.transformB = other_xf;
+        input.useRadii = false;
+        b2SimplexCache cache;
+        cache.count = 0;
+        b2DistanceOutput output;
+        b2Distance(&output, &cache, &input);
+        Gap found;
+        const f32 radii = mover.m_radius + other.m_radius;
+        if (output.distance < 1e-6f) {
+            found.inside = true;
+            found.distance = -radii;
+            return found;
+        }
+        found.normal = (1.0f / output.distance) * (output.pointA - output.pointB);
+        found.point = output.pointB + other.m_radius * found.normal;
+        found.distance = output.distance - radii;
+        return found;
+    }
+
+    // How much of `motion` the mover goes from `at` before it is `target` from
+    // the shape, and the gap then; none when it never gets that close going
+    // that way, or starts inside it. The gap between two convex shapes, one
+    // moving in a line, is convex in how far it has gone: each step to where
+    // its tangent reaches `target` never goes past where the gap does, and
+    // once the gap stops closing it never closes.
+    static std::optional<std::pair<f32, Gap>> sweep(const b2DistanceProxy& mover, b2Vec2 at, b2Vec2 motion, const b2DistanceProxy& other,
+                                                     const b2Transform& other_xf, f32 target) {
+        constexpr f32 tolerance = 0.25f * b2_linearSlop;
+        f32 t = 0.0f;
+        Gap found;
+        for (i32 i = 0; i < 32; ++i) {
+            found = gap(mover, at + t * motion, other, other_xf);
+            if (found.inside) {
+                return std::nullopt;
+            }
+            const f32 closing = -b2Dot(motion, found.normal);
+            if (closing <= 1e-7f) {
+                return std::nullopt;
+            }
+            if (found.distance <= target + tolerance) {
+                return std::pair{t, found};
+            }
+            t += (found.distance - target) / closing;
+            if (t > 1.0f) {
+                return std::nullopt;
+            }
+        }
+        return std::pair{t, found};
+    }
+
+    // Whether `part` stops a mover at `at` going along `motion` (`lift`: how
+    // far the part has moved along by then). A one-sided one stops only what
+    // comes down onto it from wholly above its top.
+    static bool stops(const Part& part, const Mover& mover, b2Vec2 at, b2Vec2 motion, bool one_way, b2Vec2 lift = b2Vec2(0.0f, 0.0f)) {
+        if (!part.one_sided) {
+            return true;
+        }
+        if (!one_way || b2Dot(motion, part.up) >= 0.0f) {
+            return false;
+        }
+        return mover.lowest(at, part.up) >= part.top + b2Dot(lift, part.up) - 2.0f * b2_linearSlop;
+    }
+
+    // The mover at `at` taken out of what it overlaps (deeper than
+    // `tolerance`) to `target` from it, the deepest first: a platform that
+    // rose into it, a place it was put. One-sided shapes only when it is
+    // above them.
+    void recover(const Mover& mover, b2Vec2& at, const std::vector<Part>& parts, f32 target, bool one_way) const {
+        const b2DistanceProxy proxy = mover.proxy();
+        for (i32 round = 0; round < 4; ++round) {
+            f32 deepest = 0.0f;
+            b2Vec2 push{0.0f, 0.0f};
+            for (const Part& part : parts) {
+                if (part.one_sided && !(one_way && mover.lowest(at, part.up) >= part.top - 2.0f * b2_linearSlop)) {
+                    continue;
+                }
+                const b2DistanceProxy other = part.proxy();
+                const Gap found = gap(proxy, at, other, part.xf);
+                f32 depth = 0.0f;
+                b2Vec2 way{0.0f, 0.0f};
+                if (found.inside) {
+                    // Their cores overlap: out along the shorter way their boxes say.
+                    const b2AABB mine = mover.aabb(at);
+                    b2AABB theirs;
+                    part.fixture->GetShape()->ComputeAABB(&theirs, part.xf, part.child);
+                    const f32 left = mine.upperBound.x - theirs.lowerBound.x;
+                    const f32 right = theirs.upperBound.x - mine.lowerBound.x;
+                    const f32 above = mine.upperBound.y - theirs.lowerBound.y;
+                    const f32 below = theirs.upperBound.y - mine.lowerBound.y;
+                    const f32 across = std::min(left, right);
+                    const f32 along = std::min(above, below);
+                    if (across < along) {
+                        depth = across + target;
+                        way = {left < right ? -1.0f : 1.0f, 0.0f};
+                    } else {
+                        depth = along + target;
+                        way = {0.0f, above < below ? -1.0f : 1.0f};
+                    }
+                } else if (found.distance < -0.25f * b2_linearSlop) {
+                    depth = target - found.distance;
+                    way = found.normal;
+                }
+                if (depth > deepest) {
+                    deepest = depth;
+                    push = depth * way;
+                }
+            }
+            if (deepest <= 0.0f) {
+                return;
+            }
+            at += push;
+        }
+    }
 };
 
 PhysicsWorld::PhysicsWorld(PhysicsWorldDef def)
@@ -650,6 +1025,7 @@ PhysicsBody PhysicsWorld::create_body(const PhysicsBodyDef& def) {
     body_def.angularDamping = def.angular_damping;
     body_def.gravityScale = def.gravity_scale;
     body_def.fixedRotation = def.fixed_rotation;
+    body_def.allowSleep = def.allow_sleep;
 
     u32 index = 0;
     if (!_impl->free_bodies.empty()) {
@@ -717,6 +1093,8 @@ PhysicsFixture PhysicsWorld::add_fixture(PhysicsBody body, const PhysicsFixtureD
         slot.body = body;
         slot.tag = def.tag;
         slot.sensor = def.sensor;
+        slot.one_sided = def.shape.one_sided && def.shape.type != PhysicsShapeType::Chain;
+        slot.up = b2Vec2(std::sin(def.shape.angle), -std::cos(def.shape.angle)); // -y, turned with the shape
     }
     _impl->each_part(def.shape, [&](const b2Shape& shape, f32 density) {
         b2FixtureDef fixture_def;
@@ -775,6 +1153,11 @@ std::vector<PhysicsFixture> PhysicsWorld::fixtures(PhysicsBody body) const {
         }
     }
     return result;
+}
+
+PhysicsBody PhysicsWorld::body_of(PhysicsFixture fixture) const {
+    const Impl::FixtureSlot* slot = _impl->fixture_slot(fixture);
+    return slot ? slot->body : PhysicsBody{};
 }
 
 u32 PhysicsWorld::shape_parts(PhysicsFixture fixture) const {
@@ -993,7 +1376,7 @@ std::vector<PhysicsFixture> PhysicsWorld::query_point(Vec2f point, PhysicsFilter
         }
 
         bool ReportFixture(b2Fixture* fixture) override {
-            if (filter_matches(*fixture, filter) && fixture->TestPoint(impl.meters(point))) {
+            if (impl.matches(*fixture, filter) && fixture->TestPoint(impl.meters(point))) {
                 const PhysicsFixture found = impl.handle_for(fixture);
                 if (found && seen.insert(fixture_key(found)).second) {
                     results.push_back(found);
@@ -1023,7 +1406,7 @@ std::vector<PhysicsFixture> PhysicsWorld::query_aabb(Rectf rect, PhysicsFilter f
         }
 
         bool ReportFixture(b2Fixture* fixture) override {
-            if (filter_matches(*fixture, filter)) {
+            if (impl.matches(*fixture, filter)) {
                 const PhysicsFixture found = impl.handle_for(fixture);
                 if (found && seen.insert(fixture_key(found)).second) {
                     results.push_back(found);
@@ -1051,7 +1434,7 @@ std::vector<PhysicsRaycastHit> PhysicsWorld::raycast(Vec2f from, Vec2f to, Physi
         }
 
         float ReportFixture(b2Fixture* fixture, const b2Vec2& point, const b2Vec2& normal, float fraction) override {
-            if (!filter_matches(*fixture, filter)) {
+            if (!impl.matches(*fixture, filter)) {
                 return -1.0f;
             }
             hits.push_back({
@@ -1089,7 +1472,7 @@ std::vector<PhysicsDebugShape> PhysicsWorld::debug_shapes(PhysicsFilter filter) 
             continue;
         }
         for (b2Fixture* fixture : slot.parts) {
-            if (!filter_matches(*fixture, filter)) {
+            if (!_impl->matches(*fixture, filter)) {
                 continue;
             }
 
@@ -1159,6 +1542,250 @@ std::vector<PhysicsDebugJoint> PhysicsWorld::debug_joints() const {
         }
     }
     return joints;
+}
+
+Vec2f PhysicsWorld::point_velocity(PhysicsBody body, Vec2f point) const {
+    if (b2Body* body_ptr = _impl->body_ptr(body)) {
+        return _impl->units(body_ptr->GetLinearVelocityFromWorldPoint(_impl->meters(point)));
+    }
+    return {};
+}
+
+std::vector<PhysicsFixture> PhysicsWorld::query_shape(const PhysicsShape& shape, Vec2f at, PhysicsFilter filter) const {
+    std::vector<PhysicsFixture> found;
+    const std::optional<Impl::Mover> mover = _impl->mover_of(shape, false);
+    if (!mover) {
+        return found;
+    }
+    const b2Vec2 where = _impl->meters(at);
+    const b2DistanceProxy proxy = mover->proxy();
+    std::unordered_set<u64> seen;
+    for (const Impl::Part& part : _impl->parts_near(mover->aabb(where), filter, 0.0f, where)) {
+        const Impl::Gap between = Impl::gap(proxy, where, part.proxy(), part.xf);
+        // Overlapping, not touching: past the shape's own outline (not Box2D's skin round it).
+        if (between.inside || between.distance + part.skin() < -0.25f * b2_linearSlop) {
+            const PhysicsFixture fixture = _impl->handle_for(part.fixture);
+            if (fixture && seen.insert(fixture_key(fixture)).second) {
+                found.push_back(fixture);
+            }
+        }
+    }
+    return found;
+}
+
+std::optional<PhysicsShapeHit> PhysicsWorld::cast_shape(const PhysicsShape& shape, Vec2f from, Vec2f to, PhysicsFilter filter) const {
+    const std::optional<Impl::Mover> mover = _impl->mover_of(shape, false);
+    if (!mover) {
+        return std::nullopt;
+    }
+    const b2Vec2 start = _impl->meters(from);
+    const b2Vec2 motion = _impl->meters(to) - start;
+    b2AABB box = mover->aabb(start);
+    const b2AABB end = mover->aabb(start + motion);
+    box.lowerBound = b2Min(box.lowerBound, end.lowerBound);
+    box.upperBound = b2Max(box.upperBound, end.upperBound);
+    const b2DistanceProxy proxy = mover->proxy();
+    std::optional<PhysicsShapeHit> nearest;
+    for (const Impl::Part& part : _impl->parts_near(box, filter, 0.0f, start)) {
+        if (!Impl::stops(part, *mover, start, motion, true)) {
+            continue;
+        }
+        // Up to the shape's own outline (not Box2D's skin round it).
+        const auto hit = Impl::sweep(proxy, start, motion, part.proxy(), part.xf, -part.skin());
+        if (hit && (!nearest || hit->first < nearest->fraction)) {
+            nearest = PhysicsShapeHit{
+                .body = _impl->handle_for(part.fixture->GetBody()),
+                .fixture = _impl->handle_for(part.fixture),
+                .point = _impl->units(hit->second.point - part.skin() * hit->second.normal),
+                .normal = from_b2(hit->second.normal),
+                .fraction = hit->first,
+            };
+        }
+    }
+    return nearest;
+}
+
+PhysicsCharacterMove PhysicsWorld::move_character(const PhysicsCharacterDef& def, Vec2f position, Vec2f velocity, f32 dt, bool on_floor,
+                                                  Vec2f carry) {
+    Impl& impl = *_impl;
+    PhysicsCharacterMove result{.position = position, .velocity = velocity};
+    const std::optional<Impl::Mover> made = impl.mover_of(def.shape, true);
+    if (!made || !std::isfinite(dt) || dt < 0.0f) {
+        return result;
+    }
+    const Impl::Mover& mover = *made;
+    const b2DistanceProxy proxy = mover.proxy();
+    b2Vec2 up(def.up.x, def.up.y);
+    if (!(up.Normalize() > 0.0f)) {
+        up.Set(0.0f, -1.0f);
+    }
+    const f32 floor_cos = std::cos(std::clamp(def.max_slope, 0.0f, 1.5f));
+    const f32 target = def.skin > 0.0f ? impl.meters(def.skin) : 0.02f; // how close it stays (between outlines)
+    const f32 snap = std::max(impl.meters(def.snap), 0.0f);
+    PhysicsFilter filter = def.filter;
+    filter.include_sensors = false;
+
+    b2Vec2 at = impl.meters(position);
+    b2Vec2 speed = impl.meters(velocity); // metres a second
+    const b2Vec2 motion = dt * speed + impl.meters(carry);
+    const bool rising = b2Dot(speed, up) > 0.0f; // of its own (a jump), as it was asked
+
+    // What it can meet: round where it is, as far as it may go.
+    const f32 reach = motion.Length() + snap + 4.0f * target;
+    b2AABB box = mover.aabb(at);
+    box.lowerBound -= b2Vec2(reach, reach);
+    box.upperBound += b2Vec2(reach, reach);
+    const std::vector<Impl::Part> parts = impl.parts_near(box, filter, dt, at);
+
+    // Out of what it is in (a platform rose into it, it was put there).
+    impl.recover(mover, at, parts, target, def.one_way);
+
+    const auto record = [&](const Impl::Part& part, const Impl::Gap& touch, f32 fraction) {
+        result.hits.push_back({
+            .body = impl.handle_for(part.fixture->GetBody()),
+            .fixture = impl.handle_for(part.fixture),
+            .point = impl.units(touch.point - part.skin() * touch.normal),
+            .normal = from_b2(touch.normal),
+            .fraction = fraction,
+        });
+    };
+    // The way along a floor (out of it: `normal`) that `across` (a way across up) goes, as long.
+    const auto along_floor = [](b2Vec2 across, b2Vec2 normal) {
+        const f32 length = across.Length();
+        b2Vec2 tangent(-normal.y, normal.x);
+        if (b2Dot(tangent, across) < 0.0f) {
+            tangent = -tangent;
+        }
+        return length * tangent;
+    };
+
+    // Along its way, sliding along what stops it. Moving shapes are met where
+    // they are as they move (each taken still, the mover moving against it).
+    b2Vec2 remaining = motion;
+    f32 elapsed = 0.0f; // of the step's time
+    bool floor_met = false;
+    for (i32 slide = 0; slide < std::max(def.max_slides, 1) && remaining.LengthSquared() > 1e-12f; ++slide) {
+        const f32 time_left = 1.0f - elapsed;
+        f32 nearest = 1.0f;
+        const Impl::Part* hit_part = nullptr;
+        Impl::Gap hit_gap;
+        for (const Impl::Part& part : parts) {
+            const b2Vec2 relative = remaining - time_left * part.shift;
+            const b2Vec2 lift = elapsed * part.shift;
+            if (!Impl::stops(part, mover, at, relative, def.one_way, lift)) {
+                continue;
+            }
+            b2Transform xf = part.xf;
+            xf.p += lift;
+            const auto hit = Impl::sweep(proxy, at, relative, part.proxy(), xf, target);
+            if (hit && hit->first < nearest) {
+                nearest = hit->first;
+                hit_part = &part;
+                hit_gap = hit->second;
+            }
+        }
+        if (!hit_part) {
+            at += remaining;
+            elapsed = 1.0f;
+            break;
+        }
+        at += nearest * remaining;
+        elapsed += time_left * nearest;
+        record(*hit_part, hit_gap, nearest);
+
+        const b2Vec2 normal = hit_gap.normal;
+        const b2Vec2 part_left = (1.0f - elapsed) * hit_part->shift; // how far the shape still goes
+        b2Vec2 relative = (1.0f - nearest) * (remaining - time_left * hit_part->shift);
+        const f32 rise = b2Dot(normal, up);
+
+        // A dynamic body walked into is pushed on at its speed.
+        if (def.push > 0.0f && hit_part->dynamic) {
+            b2Body* body = hit_part->fixture->GetBody();
+            const b2Vec2 into = -normal;
+            const f32 wanted = def.push * b2Dot(speed, into);
+            const f32 has = b2Dot(body->GetLinearVelocityFromWorldPoint(hit_gap.point), into);
+            if (wanted > has) {
+                body->ApplyLinearImpulse(body->GetMass() * (wanted - has) * into, hit_gap.point, true);
+            }
+        }
+
+        if (rise >= floor_cos) {
+            // A floor: its fall stops, and what goes across up goes on along it.
+            floor_met = true;
+            result.on_floor = true;
+            result.floor_normal = from_b2(normal);
+            result.floor = impl.handle_for(hit_part->fixture->GetBody());
+            if (b2Dot(speed, up) < 0.0f) {
+                speed -= b2Dot(speed, up) * up;
+            }
+            const b2Vec2 across = relative - b2Dot(relative, up) * up;
+            if (def.stop_on_slope) {
+                relative = across.LengthSquared() > 1e-12f ? along_floor(across, normal) : b2Vec2(0.0f, 0.0f);
+            } else if (const f32 into = b2Dot(relative, normal); into < 0.0f) {
+                relative -= into * normal;
+            }
+        } else {
+            if (-rise >= floor_cos) {
+                result.on_ceiling = true;
+            } else {
+                result.on_wall = true;
+                result.wall_normal = from_b2(normal);
+            }
+            if (const f32 into = b2Dot(relative, normal); into < 0.0f) {
+                relative -= into * normal;
+            }
+            if (const f32 into = b2Dot(speed, normal); into < 0.0f) {
+                speed -= into * normal;
+            }
+            // On a floor and not going up of its own, a wall (a slope too
+            // steep) is not climbed by walking into it.
+            if (!result.on_ceiling && (floor_met || on_floor) && !rising) {
+                if (const f32 lift = b2Dot(relative, up); lift > 0.0f) {
+                    relative -= lift * up;
+                }
+                if (const f32 lift = b2Dot(speed, up); lift > 0.0f) {
+                    speed -= lift * up;
+                }
+            }
+        }
+        remaining = relative + part_left;
+    }
+
+    // A floor under it: found just under it, or kept on (snap).
+    if (!floor_met) {
+        const bool snapping = on_floor && snap > 0.0f && b2Dot(speed, up) <= 0.0f;
+        const b2Vec2 probe = -(target + (snapping ? snap : 0.0f)) * up;
+        f32 nearest = 1.0f;
+        const Impl::Part* hit_part = nullptr;
+        Impl::Gap hit_gap;
+        for (const Impl::Part& part : parts) {
+            const b2Vec2 lift = part.shift; // where it is at the step's end
+            if (!Impl::stops(part, mover, at, probe, def.one_way, lift)) {
+                continue;
+            }
+            b2Transform xf = part.xf;
+            xf.p += lift;
+            const auto hit = Impl::sweep(proxy, at, probe, part.proxy(), xf, target);
+            if (hit && hit->first < nearest && b2Dot(hit->second.normal, up) >= floor_cos) {
+                nearest = hit->first;
+                hit_part = &part;
+                hit_gap = hit->second;
+            }
+        }
+        if (hit_part) {
+            at += nearest * probe;
+            result.on_floor = true;
+            result.floor_normal = from_b2(hit_gap.normal);
+            result.floor = impl.handle_for(hit_part->fixture->GetBody());
+            if (b2Dot(speed, up) < 0.0f) {
+                speed -= b2Dot(speed, up) * up;
+            }
+        }
+    }
+
+    result.position = impl.units(at);
+    result.velocity = impl.units(speed);
+    return result;
 }
 
 f32 PhysicsWorld::units_per_meter() const {

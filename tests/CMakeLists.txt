@@ -109,6 +109,8 @@ kin_add_component_test(PHYSICS kin_ecs_physics_tests kin-ecs-physics
     SOURCES ecs_physics_tests.cpp LINK_TARGET kin::physics_ecs)
 kin_add_component_test(PHYSICS kin_ecs_physics_shapes_tests kin-ecs-physics-shapes
     SOURCES ecs_physics_shapes_tests.cpp LINK_TARGET kin::physics_ecs)
+kin_add_component_test(PHYSICS kin_physics_character_tests kin-physics-character
+    SOURCES physics_character_tests.cpp LINK_TARGET kin::physics_ecs)
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)
@@ -487,6 +489,9 @@ target_link_libraries(kin_scene_asset_tests PRIVATE
 add_test(NAME kin-scene-asset COMMAND kin_scene_asset_tests)
 
 kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
+if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)
+    target_link_libraries(kin_entity_scripts_tests PRIVATE kin::physics_ecs) # a character's script
+endif()
 kin_add_component_test(SCRIPTING kin_scripting_tests kin-scripting
     SOURCES scripting_tests.cpp LINK_TARGET kin::scripting_scenes
     DEFINITIONS KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)

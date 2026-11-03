@@ -251,6 +251,13 @@ void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
             if (def.user_id == 0) {
                 def.user_id = static_cast<u64>(entity.id());
             }
+            if (entity.has<CharacterController2D>()) {
+                // The controller moves it: seen by sensors, bumped by bodies, never asleep.
+                def.type = PhysicsBodyType::Dynamic;
+                def.fixed_rotation = true;
+                def.gravity_scale = 0.0f;
+                def.allow_sleep = false;
+            }
             body.body = physics.create_body(def);
         }
 
@@ -473,6 +480,9 @@ void sync_transforms_to_physics_raw(flecs::world& world, PhysicsWorld& physics) 
             const bool teleport = entity.has<PhysicsTeleport>();
             if (teleport) {
                 teleported.push_back(entity);
+                if (CharacterController2D* character = entity.get_mut<CharacterController2D>()) {
+                    character->floor = {}; // what it stood on carries it no more
+                }
             }
             if ((body.sync_to_physics || teleport) && physics.is_alive(body.body)) {
                 const WorldTransform pose = world_pose(entity, transform);
@@ -484,13 +494,104 @@ void sync_transforms_to_physics_raw(flecs::world& world, PhysicsWorld& physics) 
     }
 }
 
+Vec2f unit_or(Vec2f v, Vec2f fallback) {
+    const f32 length = std::hypot(v.x, v.y);
+    return length > 0.0f ? Vec2f{v.x / length, v.y / length} : fallback;
+}
+
+// Characters moved before the step: each body given the velocity that takes
+// it where its move ends (the step moves it there, and what it carries,
+// pushes or touches sees it go).
+void move_characters_raw(flecs::world& world, PhysicsWorld& physics, f32 dt) {
+    world.query<CharacterController2D, const PhysicsBodyComponent>().each(
+        [&](flecs::entity entity, CharacterController2D& character, const PhysicsBodyComponent& body) {
+            if (!physics.is_alive(body.body) || !(dt > 0.0f)) {
+                return;
+            }
+            const PhysicsCollider* shape = nullptr;
+            if (const PhysicsColliderComponent* colliders = entity.get<PhysicsColliderComponent>()) {
+                for (const PhysicsCollider& collider : colliders->colliders) {
+                    if (!collider.def.sensor) {
+                        shape = &collider;
+                        break;
+                    }
+                }
+            }
+            if (!shape) {
+                physics.set_linear_velocity(body.body, {});
+                return;
+            }
+            const Vec2f up = unit_or(character.up, {0.0f, -1.0f});
+            if (!character.on_floor && character.gravity != 0.0f) {
+                character.velocity.x -= up.x * character.gravity * dt;
+                character.velocity.y -= up.y * character.gravity * dt;
+            }
+
+            const Vec2f position = physics.position(body.body);
+            const f32 rotation = physics.rotation(body.body);
+            // What it stands on carries it: as far as its entity moved it since
+            // the last step (all at once), and as the simulation moves it in
+            // this one (along the way, so it is met where it will be).
+            Vec2f start = position;
+            Vec2f carry{};
+            if (character.on_floor && physics.is_alive(character.floor)) {
+                const Vec2f floor_at = physics.position(character.floor);
+                const f32 turned = physics.rotation(character.floor) - character.floor_rotation;
+                const Vec2f from_floor =
+                    rotated({position.x - character.floor_position.x, position.y - character.floor_position.y}, turned);
+                start = {floor_at.x + from_floor.x, floor_at.y + from_floor.y};
+                const Vec2f moving = physics.point_velocity(character.floor, position);
+                carry = {moving.x * dt, moving.y * dt};
+            }
+
+            PhysicsCharacterDef def{
+                .shape = placed_shape(shape->def.shape, {.pos = {}, .rotation = from_physics_angle(rotation), .scale = {1.0f, 1.0f}}),
+                .up = up,
+                .max_slope = to_physics_angle(character.max_slope),
+                .snap = character.snap,
+                .stop_on_slope = character.stop_on_slope,
+                .one_way = character.drop_through <= 0.0f,
+                .push = character.push,
+                .filter = {.category_bits = shape->def.category_bits,
+                           .mask_bits = shape->def.mask_bits,
+                           .include_sensors = false,
+                           .ignore = body.body},
+            };
+            const PhysicsCharacterMove moved =
+                physics.move_character(def, start, character.velocity, dt, character.on_floor, carry);
+            physics.set_linear_velocity(body.body, {(moved.position.x - position.x) / dt, (moved.position.y - position.y) / dt});
+            character.velocity = moved.velocity;
+            character.on_floor = moved.on_floor;
+            character.on_wall = moved.on_wall;
+            character.on_ceiling = moved.on_ceiling;
+            character.floor_normal = moved.floor_normal;
+            character.wall_normal = moved.wall_normal;
+            character.floor = moved.floor;
+            character.drop_through = std::max(character.drop_through - dt, 0.0f);
+        });
+}
+
+// Where each character's floor is after the step: what carries it next.
+void note_character_floors_raw(flecs::world& world, PhysicsWorld& physics) {
+    world.query<CharacterController2D>().each([&](CharacterController2D& character) {
+        if (character.on_floor && physics.is_alive(character.floor)) {
+            character.floor_position = physics.position(character.floor);
+            character.floor_rotation = physics.rotation(character.floor);
+        } else {
+            character.floor = {};
+        }
+    });
+}
+
 void step_physics_raw(flecs::world& world, PhysicsWorld& physics, f32 dt, i32 velocity_iterations, i32 position_iterations) {
     world.query<PhysicsBodyComponent, const PhysicsVelocity>().each([&](const PhysicsBodyComponent& body, const PhysicsVelocity& velocity) {
         if (physics.is_alive(body.body)) {
             physics.set_linear_velocity(body.body, velocity.linear);
         }
     });
+    move_characters_raw(world, physics, dt);
     physics.step(dt, velocity_iterations, position_iterations);
+    note_character_floors_raw(world, physics);
     break_physics_joints_raw(world, physics);
 }
 
@@ -622,6 +723,7 @@ void register_physics_components(EcsWorld& world) {
     raw.component<PhysicsColliderComponent>("PhysicsColliderComponent");
     raw.component<PhysicsJointComponent>("PhysicsJointComponent");
     raw.component<TilemapCollider>("TilemapCollider");
+    raw.component<CharacterController2D>("CharacterController2D");
     raw.component<PhysicsVelocity>("PhysicsVelocity");
     raw.component<PhysicsTeleport>("PhysicsTeleport");
     raw.component<PhysicsContactQueue>("PhysicsContactQueue");
