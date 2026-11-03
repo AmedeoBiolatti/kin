@@ -306,7 +306,7 @@ int main(int argc, char** argv) {
         kin::App app{{.mode = test ? kin::AppMode::Headless : kin::AppMode::Windowed}};
         app.open_gamepads();
         auto& window = app.create_window({.title = "Kin 2D Workshop", .width = 1024, .height = 640, .hidden = test});
-        kin::Renderer2D renderer{kin::make_render_backend(window, false, false)};
+        kin::Renderer2D renderer{kin::make_render_backend(window, false, true)};
         Workshop game{app, window, renderer, root};
         if (test) {
             app.run_for(
