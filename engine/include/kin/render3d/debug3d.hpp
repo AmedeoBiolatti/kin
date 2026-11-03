@@ -24,6 +24,8 @@ struct RenderDebugOptions3D {
     bool retain_scene_instances = true; // false: stream direct scene draws for CPU/cache parity measurements
     bool cache_local_shadow_gather = true; // false: rebuild local caster selection and depth batching
     u32 local_shadow_gather_budget = 4 * 1024 * 1024; // diagnostic CPU payload cap, clamped to 4 MiB
+    bool cache_draw_commands = true; // false: rebuild main draw decisions/order and issue individual draws
+    u32 draw_command_budget = 4 * 1024 * 1024; // CPU plan and GPU material payload caps, each clamped to 4 MiB
     bool freeze_jitter = false;    // hold the first TAA jitter sample
     bool light_grid = true;        // false: every fragment loops over the 16 strongest point and spot lights, as
                                    // before the light grid (to compare with it)

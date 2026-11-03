@@ -69,6 +69,12 @@ struct RenderDebugStats3D : RenderStats3D {
     u64 local_gather_cached_tests = 0, local_gather_cached_copies = 0, local_gather_cache_bytes = 0;
     u32 local_sort_cache_hits = 0, local_sort_cache_misses = 0;
     u64 local_sort_cached_entries = 0;
+    // Main draw decisions/order retained on the CPU; static direct draws can
+    // share a GPU material table and merge consecutive compatible commands.
+    u32 draw_plan_hits = 0, draw_plan_builds = 0, draw_pipeline_hits = 0, draw_pipeline_misses = 0;
+    u32 main_batched_draws = 0, main_merged_draws = 0;
+    u64 draw_plan_bytes = 0, draw_material_gpu_bytes = 0, draw_material_upload_bytes = 0;
+    u64 draw_index_gpu_bytes = 0, draw_index_upload_bytes = 0;
     // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed
     // to the GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one
     // mesh is one). Also counted in draws, instances and triangles above. 0 for a frame without any.

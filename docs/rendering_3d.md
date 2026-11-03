@@ -343,6 +343,53 @@ report reuse independently of whole-map hits. Existing local tests/candidates
 count fresh work only. The Yard CLI exposes `--cache-local-shadow-gather 0|1`;
 benchmark `--mode local-gather` keeps direct retention enabled in both controls.
 
+The native main pass retains draw decisions and source ordering after an unchanged
+command revision has been observed twice. A plan holds up to 8,192 draw refs and
+4 MiB of CPU vector payload, keyed by both scenes' identities, revisions and
+storage. It caches stock material uniforms, texture/sampler compatibility classes
+and pipeline pointers. Target format, samples, TAA, velocity, fog, local-light and
+indexed-storage changes select current pipeline variants; pipeline-cache
+forget/destroy events invalidate saved pointers. Failed pipeline allocations
+remain retryable. Custom shaders keep their live selection/binding path.
+
+The source's complete opaque order is sorted once, then filtered by current
+visibility. Transparent mesh copies and particles still sort by current depth.
+The world/overlay opaque and transparent blocks are assembled in the original
+stable order, without repeatedly sorting the opaque items. Sources resubmitted
+every render retain the immediate path rather than repeatedly build this plan.
+
+For eligible static direct draws, a stock shader can read its material constants
+from a retained GPU table: 64 bytes per source row, at most 4 MiB across eight
+source tables, independently of the CPU cap and existing instance-table budget.
+The vertex shader passes the original retained row to the fragment shader.
+Consecutive commands can then merge when scene, mesh, pipeline, instance table
+and texture/sampler bindings match, even with different scalar PBR values,
+emission or mask cutoffs. Instance colour/tint and picking IDs keep their existing
+records. Neither source draws nor copies are reordered. The ordinary picking,
+depth and shadow passes keep their original refs and lists.
+
+The main pass uploads a compact camera-index list for these runs; its GPU buffer
+is separate from the material cap (at most 256 KiB with the current material-row
+limit). Material tables upload only when source commands change. Moving batches,
+skinning, unlit specialization, custom shaders, wireframes, TAA/LOD, exposed
+instance spans and budget/feature fallbacks use their existing main shaders and
+draws. Camera, light, pose and texture-content edits remain live. Legacy texture
+scale/mip changes and global sampling settings are resolved when binding each
+current texture class. No new public shader ABI is required. `warm_up()` prepares
+the applicable indexed and material-table variants as well as ordinary draws.
+
+`debug.cache_draw_commands = false` selects ordinary main draw preparation and
+submission; `debug.draw_command_budget` reduces the CPU and GPU-material caps,
+each clamped to 4 MiB. The immutable batch-kind flag reused by culling is common
+to both controls. `draw_plan_hits/builds/bytes`, `draw_pipeline_hits/misses`,
+`main_batched_draws`, `main_merged_draws`, `draw_material_gpu_bytes/upload_bytes`
+and `draw_index_gpu_bytes/upload_bytes` expose the work and logical payload.
+Pipeline hits count decisions reused before merging as well as recorded commands.
+These GPU bytes exclude staging and additional driver backings in flight.
+The Yard CLI exposes `--cache-draw-commands 0|1`; benchmark `--mode draw-commands`
+keeps instance and local-gather retention on in both controls and verifies that
+merged commands account exactly for the reduced draw count.
+
 Resident tables also cache transformed culling spheres on the CPU, using 16 bytes/copy and at most **4 MiB per renderer**
 (plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes only
 the union of edited ranges since that table's own bounds revision; new tables and expired history refresh the full array.

@@ -44,6 +44,7 @@ void check(Renderer2D& renderer) {
     auto explicit_batch = InstanceBatch3D::create(
         mesh, std::vector<MeshInstance3D>(16, {Mat4f::translation({-6, -3, 0})})).value_or({});
     Scene3D scene;
+    scene.debug.cache_draw_commands = false; // isolate instance/local selection caches in this fixture
     scene.camera = Camera3D::look_at({0, 1, 13}, {});
     scene.camera.z_far = 60;
     scene.lights.sun.direction = normalize(Vec3f{.5f, 1, .4f});
@@ -282,6 +283,7 @@ void check(Renderer2D& renderer) {
     // With no dynamic casters, a hit produces no gather tasks at all. Empty
     // selections must also be cached, without inventing a row or copy span.
     scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
     scene.camera = Camera3D::look_at({0, 0, 13}, {});
     scene.lights.cache_shadows = false;
     scene.lights.spots.push_back(original_spot);
@@ -317,6 +319,7 @@ void check(Renderer2D& renderer) {
 
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
+    scene.debug.cache_draw_commands = false;
     scene.camera = Camera3D::look_at({0, 0, 10}, {});
     std::vector<MeshInstance3D> outside(8193, {Mat4f::translation({1000, 0, 0})});
     outside[0] = {Mat4f::identity(), colors::white, 1234};

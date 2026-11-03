@@ -269,6 +269,111 @@ records final source/binary hashes and the GPU renderer compile command.
 fix and removal of cache-metadata allocations/redundant scans. Its timings are
 not mixed into the final figures above.
 
+#### Main draw decisions and consecutive instancing
+
+A fresh measured-window CPU profile of `74feed5` (the instance and local gather
+caches enabled) finds 32.5% of main-thread user cycles in camera preparation,
+22.7% in remaining local-shadow preparation, 18.0% in main recording, 8.6% in
+light-grid construction, 7.0% in ordering and 4.7% in local recording. These
+inclusive, period-weighted samples describe Kin's remaining CPU work, not the
+fraction of the cross-engine gap explained by each stage. Profile/provenance
+artifacts are `/tmp/kin-remaining-cpu/`.
+
+The next slice retains the main pass's sorted source order, material constants,
+texture/sampler compatibility classes and pipeline decisions. It filters current
+visibility instead of sorting the same opaque refs, and sorts only transparent
+copies/particles before assembling the same stable world/overlay order. Cached
+pipeline pointers key current target/shading variants and the shared pipeline
+cache's invalidation revision. Immutable submission-kind metadata also avoids
+repeated batch-handle validity calls in culling and scene-table binding. Custom
+shader decisions remain live.
+
+A retained GPU material table makes different scalar PBR values compatible
+within a draw. Static direct copies use their original source row to fetch the
+same 64-byte constants the ordinary draw pushes. Only consecutive commands with
+matching mesh, scene, pipeline, instance storage and texture/sampler bindings
+merge. The compact main index list concatenates their existing camera lists in
+order. Colours, IDs, source refs, picking and shadow lists are unchanged; there
+is no global material regrouping. Both opaque and masked copies use the stock
+shading logic, with their individual alpha cutoffs and emission values.
+
+CPU plans cap at 8,192 refs / 4 MiB; GPU materials cap at eight sources / 4 MiB,
+plus a main index buffer bounded by the admitted material rows (<=256 KiB).
+Two observations admit a stable command revision. Continually rebuilt scenes
+remain immediate; unavailable shader variants, exposed spans, TAA/LOD, custom,
+unlit, wireframe, skinned and over-budget main draws retain their old paths.
+The instance table may fit even when the independent material cap does not;
+that case must still draw completely with per-draw uniforms.
+
+The final same-binary matrix keeps the two preceding caches enabled and changes
+only `--cache-draw-commands 0|1`. Five alternating Medium routes use four helpers,
+CPUs 0–15, 720p 4x MSAA/HDR, 300 warm-up and 1,440 measured frames. Native Vulkan
+runs through Wayland with the NVIDIA ICD; the user's separate preview was closed
+before measurement. No builds, tests, profiler or readbacks run alongside the
+throughput pairs. Reproduce with `tools/benchmark_render3d_direct_cache.py
+--binary <industrial_yard> --output <directory> --mode draw-commands --repeats 5`.
+
+| Median of five run statistics | Command cache off | Command cache on |
+| --- | ---: | ---: |
+| Caller CPU p50 / p95 | 3.522 / 4.071 ms | 3.292 / 3.915 ms |
+| Process CPU p50 / p95 | 4.056 / 4.634 ms | 3.973 / 4.664 ms |
+| Frame interval p50 / p95 | 3.670 / 5.137 ms | 3.523 / 5.439 ms |
+| Main draws, p50 / p95 | 4,211.5 / 6,380 | 162 / 211 |
+| Main material-table draws/frame, p50 | 0 | 8 |
+| Local-shadow draws/frame | 1,140 | 1,140 |
+| CPU plan vector payload | 0 | 894,676 bytes |
+| GPU material payload | 0 | 515,520 bytes |
+| GPU main-index capacity | 0 | 26,532 bytes |
+| Main-index upload/frame, p50 | 0 | 16,682 bytes |
+| Warm plan rebuilds / pipeline misses / material uploads | — | 0 / 0 / 0 |
+
+Main draw p50 falls **96.2%**, preserving source/copy order. Every measured
+frame's reduced draw count is explained exactly by `main_merged_draws`; geometry,
+shadow maps/draws/triangles/casters, skinning, motion, instance uploads and existing
+retained GPU bytes match across all five paired routes. Three decoded captures
+at offsets 0, 540 and 960 are pixel-identical. Logical additional cache payload
+is about **0.85 MiB CPU / 0.52 MiB GPU**, excluding fixed metadata, shader/pipeline
+objects, staging and driver cycle backings. Existing instance uploads remain
+66,048 bytes/frame at p50; the new compact main-index upload is counted separately.
+
+The median paired caller-CPU reduction is **17.9%** (range **6.5–23.4%**), process
+CPU **15.3%** (**2.1–21.1%**), and frame p50 **14.3%** (**4.0–20.3%**). Each paired
+reduction uses the two adjacent runs' p50 values; it differs from dividing the
+table's independently aggregated medians. Absolute timings drift substantially:
+caller CPU in the off control rises from 3.102 to 4.436 ms across the matrix.
+These controls are a new measurement window, not an additive comparison with
+earlier absolute times or a refreshed Unreal ranking. Frame p95 is not
+consistently improved: the median run p95 is 5.137 ms off and 5.439 ms on.
+The remaining camera and local-shadow preparation still visits the
+original refs, and shadow geometry is still redrawn. Fewer main commands alone
+do not remove those costs.
+
+The targeted regression passes on NVIDIA and llvmpipe, requiring exact pixels,
+picks and geometry through heterogeneous scalar materials, mask cutoffs,
+equal-depth surfaces, HDR/MSAA, all four stock fog/light variants, sky, AO/contact,
+poses, texture writes, legacy scale/mip changes, overlays, source moves, raw
+spans, tiny budgets, a material-over-budget instance table, CPU metadata that fits
+while its index scratch exceeds the cap, and same-frame views.
+It also checks unchanged-source zero uploads/decision misses and that a scene
+resubmitted every render never rebuilds a retained plan. CPU and five recipe
+tests pass.
+
+All **271 existing renderer cases pass on NVIDIA in isolated processes**. The
+combined process cannot complete in the current desktop session: GPU device
+creation fails after repeated initialization, at the same point with the
+unchanged pre-implementation binary. This is recorded separately from assertion
+results. The warm-up case itself creates 24 devices, so its twelve unchanged
+cold/warm comparisons run separately via the optional `KIN_TEST_WARM_UP_CONFIG`
+index; normal unfiltered test behavior is unchanged. No assertion was relaxed.
+
+Artifacts are `/tmp/kin-draw-commands/`: `yard/` holds the final paired routes and
+captures; `paired-summary.json` records each reduction; `renderer-cases.json`,
+the runner and per-case logs record the complete isolated suite. Combined-process
+and unchanged-binary failure logs preserve the device issue. Source/binary/shader
+hashes and validation checks are in `source-identity.json` and
+`final-validation.json`. `yard-preflight/` and `yard-before-budget-fix/` are
+preceding measurements, not included in the final figures above.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.

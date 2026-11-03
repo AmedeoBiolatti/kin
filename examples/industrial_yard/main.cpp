@@ -27,7 +27,7 @@ struct Options {
     bool gpu_pass_markers = false, receives = true, validate = false, animation = true, motion = true, glass = true,
          structures = true, shadows = true, taa = false, ao = false, contact = false, profile = false, visible = false,
          preview = false, rebuild = false, batch_static_props = false, retain_scene_instances = true,
-         cache_local_shadow_gather = true;
+         cache_local_shadow_gather = true, cache_draw_commands = true;
 };
 double cpu(bool process) {
 #ifdef __linux__
@@ -52,7 +52,9 @@ public:
                 "direct_bounds_rebuilt,bounds_instance_tests,retained_gpu_bytes,device_waits,local_instance_tests,"
                 "local_task_bytes,local_gather_cache_hits,local_gather_cache_misses,local_gather_cache_builds,"
                 "local_gather_cached_tests,local_gather_cached_copies,local_gather_cache_bytes,local_sort_cache_hits,"
-                "local_sort_cache_misses,local_sort_cached_entries\n";
+                "local_sort_cache_misses,local_sort_cached_entries,draw_plan_hits,draw_plan_builds,draw_pipeline_hits,"
+                "draw_pipeline_misses,main_batched_draws,main_merged_draws,draw_plan_bytes,draw_material_gpu_bytes,"
+                "draw_material_upload_bytes,draw_index_gpu_bytes,draw_index_upload_bytes\n";
     }
     std::string_view name() const override { return "Industrial yard"; }
     void update(SceneContext& ctx) override {
@@ -144,6 +146,10 @@ public:
                  << ',' << st.local_gather_cached_tests << ',' << st.local_gather_cached_copies
                  << ',' << st.local_gather_cache_bytes << ',' << st.local_sort_cache_hits
                  << ',' << st.local_sort_cache_misses << ',' << st.local_sort_cached_entries
+                 << ',' << st.draw_plan_hits << ',' << st.draw_plan_builds << ',' << st.draw_pipeline_hits
+                 << ',' << st.draw_pipeline_misses << ',' << st.main_batched_draws << ',' << st.main_merged_draws
+                 << ',' << st.draw_plan_bytes << ',' << st.draw_material_gpu_bytes << ',' << st.draw_material_upload_bytes
+                 << ',' << st.draw_index_gpu_bytes << ',' << st.draw_index_upload_bytes
                  << '\n';
         }
         if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
@@ -194,6 +200,7 @@ public:
             .field("static_batches", u64(_static.size()))
             .field("retain_scene_instances", _o.retain_scene_instances)
             .field("cache_local_shadow_gather", _o.cache_local_shadow_gather)
+            .field("cache_draw_commands", _o.cache_draw_commands)
             .field("source_triangles", _data.source_triangles)
             .field("scene_triangles", _triangles)
             .field("source_mesh_bytes", _data.mesh_bytes)
@@ -224,6 +231,7 @@ private:
         _scene.debug.gpu_pass_markers = _o.gpu_pass_markers;
         _scene.debug.retain_scene_instances = _o.retain_scene_instances;
         _scene.debug.cache_local_shadow_gather = _o.cache_local_shadow_gather;
+        _scene.debug.cache_draw_commands = _o.cache_draw_commands;
         auto& l = _scene.lights;
         l.points.clear();
         l.spots.clear();
@@ -464,13 +472,14 @@ int main(int argc, char** argv) {
             else if (a == "--batch-static-props")
                 o.batch_static_props = true;
             else if (a == "--receive-shadows" || a == "--animation" || a == "--motion" || a == "--glass" ||
-                     a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" ||
+                     a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" || a == "--cache-draw-commands" ||
                      a == "--structures" || a == "--local-shadows" || a == "--taa" || a == "--ao" || a == "--contact") {
                 auto v = value();
                 if (v != "0" && v != "1")
                     throw std::runtime_error("yard booleans require 0 or 1");
                 bool* p = a == "--retain-scene-instances" ? &o.retain_scene_instances
                           : a == "--cache-local-shadow-gather" ? &o.cache_local_shadow_gather
+                          : a == "--cache-draw-commands" ? &o.cache_draw_commands
                           : a == "--receive-shadows" ? &o.receives
                           : a == "--animation"     ? &o.animation
                           : a == "--motion"        ? &o.motion

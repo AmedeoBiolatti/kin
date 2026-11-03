@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--frames", type=int, default=1440)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--cpus", default="0-15")
-    parser.add_argument("--mode", choices=["direct", "local-gather"], default="direct")
+    parser.add_argument("--mode", choices=["direct", "local-gather", "draw-commands"], default="direct")
     parser.add_argument("--skip-captures", action="store_true")
     args = parser.parse_args()
     if not 1 <= args.repeats <= 20 or not 1 <= args.frames <= 6000 or not 0 <= args.workers <= 4:
@@ -50,8 +50,9 @@ def main():
         command = [str(binary), "--recipe", str(recipe), "--metrics", str(root / (label + ".csv")),
                    "--report=" + str(root / (label + ".json")), "--profile-cpu", "--measured", str(frames),
                    "--workers", str(args.workers), "--retain-scene-instances",
-                   str(int(enabled or args.mode == "local-gather")), "--cache-local-shadow-gather",
-                   str(int(enabled and args.mode == "local-gather")),
+                   str(int(enabled or args.mode != "direct")), "--cache-local-shadow-gather",
+                   str(int(args.mode == "draw-commands" or (enabled and args.mode == "local-gather"))),
+                   "--cache-draw-commands", str(int(enabled and args.mode == "draw-commands")),
                    "--route-offset", str(offset)]
         if args.cpus:
             command = ["taskset", "-c", args.cpus, *command]
@@ -68,6 +69,9 @@ def main():
         if enabled and args.mode == "local-gather" and not capture and not any(
                 int(row["local_gather_cache_hits"]) for row in rows):
             raise RuntimeError(f"{label}: local gather cache never admitted the scene")
+        if enabled and args.mode == "draw-commands" and not capture and not any(
+                int(row["main_merged_draws"]) for row in rows):
+            raise RuntimeError(f"{label}: no main draw commands merged")
         if any(int(row["device_waits"]) for row in rows):
             raise RuntimeError(f"{label}: unexpected device-idle wait")
         result = {"enabled": enabled, "repeat": repeat, "label": label, "capture": capture,
@@ -83,7 +87,9 @@ def main():
     equal_columns = ["route_frame", "draws", "instances", "triangles", "culled", "lights", "spots",
                      "local_shadow_maps", "local_shadow_draws", "local_shadow_triangles", "local_shadow_casters",
                      "skinned_copies", "skin_matrices", "moving_x_sum", "moving_y_sum", "moving_z_sum"]
-    if args.mode == "local-gather":
+    if args.mode == "draw-commands":
+        equal_columns.remove("draws")
+    if args.mode != "direct":
         equal_columns += ["direct_retained_instances", "direct_upload_bytes", "direct_bounds_rebuilt",
                           "bounds_instance_tests", "retained_gpu_bytes", "retained_upload_bytes",
                           "instance_upload_bytes", "feature_bytes", "local_shadow_bytes"]
@@ -94,6 +100,10 @@ def main():
         for key in equal_columns:
             if any(a[key] != b[key] for a, b in zip(pair[False], pair[True])):
                 raise RuntimeError(f"repeat {repeat}: work mismatch in {key}")
+        if args.mode == "draw-commands":
+            for before, after in zip(pair[False], pair[True]):
+                if int(before["draws"]) - int(after["draws"]) != int(after["main_merged_draws"]):
+                    raise RuntimeError(f"repeat {repeat}: merged draw count does not explain draw reduction")
         checks.append({"repeat": repeat, "work_equal": True})
     if not args.skip_captures:
         from PIL import Image
@@ -119,7 +129,7 @@ def main():
                 "dirty": subprocess.check_output(["git", "status", "--short"], cwd=repo, text=True).splitlines(),
                 "environment": {key: env[key] for key in ["KIN_RENDER_BACKEND", "KIN_REQUIRE_GPU_TESTS",
                                 "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "__NV_PRIME_RENDER_OFFLOAD",
-                                "__GLX_VENDOR_LIBRARY_NAME"] if key in env}}
+                                "__GLX_VENDOR_LIBRARY_NAME", "SDL_VIDEODRIVER", "GDK_BACKEND"] if key in env}}
     (root / "summary.json").write_text(json.dumps({"summary": summary, "checks": checks,
                                                    "provenance": identity}, indent=2) + "\n")
     print("All paired work and image checks passed.", flush=True)

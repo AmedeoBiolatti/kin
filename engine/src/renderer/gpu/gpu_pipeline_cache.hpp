@@ -80,6 +80,7 @@ public:
 
     // How many pipelines are made.
     std::size_t size() const { return _entries.size(); }
+    u64 revision() const { return _revision; } // invalidates retained pipeline pointers after forget/destroy
 
     void destroy();
     // Releases the pipelines made with `fragment` (it is being replaced). SDL
@@ -105,6 +106,7 @@ private:
 
     SDL_GPUDevice* _device = nullptr;
     std::vector<Entry> _entries;
+    u64 _revision = 1;
 };
 
 } // namespace kin::gpu

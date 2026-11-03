@@ -456,8 +456,13 @@ private:
         u32 samples;
         MaterialPipeline material;
         bool velocity, skinned;
-        bool fog = false, lights = false, indexed = false;
+        bool fog = false, lights = false, indexed = false, materials = false;
     };
+    struct MaterialUniforms {
+        f32 params[4], pbr[4], maps[4], emission[4];
+    };
+    static_assert(sizeof(MaterialUniforms) == 64);
+    static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;
     SDL_GPUGraphicsPipeline* pipeline(const MeshPipelineRequest& request) const;
@@ -705,6 +710,9 @@ private:
     SDL_GPUTextureFormat _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
     RendererCapabilities3D _capabilities;
     GpuShader _indexed_vertex, _indexed_unlit_vertex, _indexed_unlit_textured_vertex, _indexed_prepass_vertex;
+    GpuShader _draw_material_vertex;
+    std::array<GpuShader, 4> _draw_material_fragments; // base, fog, lights, lights+fog
+    bool _draw_materials_available = false;
     GpuShader _vertex_shader;   // mesh.vert
     GpuShader _fragment_shader; // mesh.frag
     // Optional unlit main-pass variants. Fog, skinning, custom shaders and TAA use the general shaders.
@@ -1071,6 +1079,7 @@ private:
         // `instances`), the scene's matrices, and where the scene's start in the frame's joint buffer. `center` and
         // `radius` are then only a start: a copy's own bound comes from its pose.
         bool skinned = false;
+        bool batch = false; // immutable submission kind, reused with the validated ref layout
         const u32* skin_first = nullptr;
         const Mat4f* joints = nullptr;
         u32 joint_base = 0;
@@ -1094,6 +1103,39 @@ private:
         u64 identity = 0, revision = 0;
         bool operator==(const PreparedKey&) const = default;
     };
+    struct DrawBindingKey {
+        std::array<const ITextureBackend*, 5> textures{};
+        Wrap3D u{}, v{};
+        decltype(Material3D::texture_samplers) sampling{};
+        bool operator==(const DrawBindingKey&) const = default;
+    };
+    struct DrawCommand {
+        MaterialPipeline selection{};
+        MaterialUniforms uniforms{};
+        SDL_GPUGraphicsPipeline* pipeline = nullptr;
+        u64 pipeline_key = ~0ull, pipeline_revision = 0;
+        u32 binding = ~0u;
+    };
+    std::array<PreparedKey, 2> _draw_plan_keys{};
+    std::vector<DrawCommand> _draw_commands;
+    std::vector<DrawBindingKey> _draw_bindings;
+    std::vector<u32> _draw_order;
+    bool _draw_plan_valid = false;
+    void prepare_draw_plan(FrameCtx& ctx);
+    DrawCommand* main_command(FrameCtx& ctx, u32 ref, bool materials);
+    void batch_main_commands(FrameCtx& ctx);
+    void retain_draw_materials(FrameCtx& ctx);
+    struct DrawMaterials {
+        u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
+        std::weak_ptr<const u64> lifetime;
+        std::shared_ptr<GpuBuffer> buffer;
+        bool valid = false;
+    };
+    std::array<DrawMaterials, 8> _draw_material_tables;
+    u64 _draw_material_bytes = 0;
+    std::array<u32, 2> _draw_material_slots{~0u, ~0u};
+    std::vector<u32> _main_draw_list;
+    std::shared_ptr<GpuBuffer> _main_draw_indices;
     // Exact structural validation across clear()/resubmission. Weak mesh owners
     // prevent pointer-reuse mistakes without keeping removed assets resident.
     struct PreparedDraw {
@@ -1323,6 +1365,7 @@ private:
         u32 ref, first, count, scene;
         f32 depth;
         bool particle, transparent;
+        bool materials = false;
     };
     std::vector<MainItem> _main_order;
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first

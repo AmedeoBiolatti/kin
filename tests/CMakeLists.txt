@@ -455,6 +455,8 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
 endif()
 if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     kin_add_test(kin_render3d_direct_cache_tests kin-render3d-direct-cache SOURCES render3d_direct_cache_tests.cpp)
+    kin_add_test(kin_render3d_draw_commands_tests kin-render3d-draw-commands SOURCES render3d_draw_commands_tests.cpp)
+    set_tests_properties(kin-render3d-draw-commands PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     set_tests_properties(kin-render3d-direct-cache PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     kin_add_test(kin_render3d_attachment_graph_tests kin-render3d-attachment-graph SOURCES render3d_attachment_graph_tests.cpp)
     kin_compile_glsl(_attachment_graph_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/attachment_graph/shaders"

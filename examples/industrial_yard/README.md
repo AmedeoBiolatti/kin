@@ -70,6 +70,17 @@ Native profiling controls (default rendering is unchanged):
   with direct scene retention enabled in both controls. The default benchmark
   mode isolates direct retention with local gather caching disabled in both.
 
+- `--cache-draw-commands 0|1` selects ordinary main draw preparation/submission
+  or retained decisions/order and consecutive compatible draw merging (default 1).
+  A bounded GPU material table preserves each copy's PBR values and mask cutoff
+  without changing source order or picking IDs. Add `--mode draw-commands` to the
+  benchmark command to keep the two earlier caches enabled in both controls.
+  It checks identical geometry, shadows, uploads and motion, exact captures, and
+  requires merged commands to explain the entire main draw-count reduction.
+  CSVs/report options identify this mode and expose decision reuse, merged draws,
+  CPU plan bytes, GPU material/index payloads and their upload bytes. The other
+  benchmark modes explicitly disable draw-command caching in both controls.
+
 - `--batch-static-props` groups stationary props by mesh and material in persistent
   `InstanceBatch3D` handles, with one bounds group per batch. Moving props, robots,
   structures, smoke and scene content keep their existing behavior. This exercises
