@@ -294,9 +294,9 @@ Ordinary direct scene draws can share a retained table too. A scene with at leas
 survive a render without resubmission. Built-in opaque/masked, unskinned draws
 share storage while keeping their original material, draw order and picking IDs.
 Packed records and world bounds are reused across camera changes and pose-only
-edits; visibility and shadow membership still run for each consumer. A command
-revision refreshes the scene table and its eligible bounds. This first path does
-not merge colour draws or cache local-shadow gather plans.
+edits. A command revision refreshes the scene table and its eligible bounds.
+Camera/sun visibility still runs for each consumer; fixed local lights can reuse
+static caster selection as described below. Colour draws keep their source order.
 
 Scene tables share the existing 32 MiB/128-table GPU budget and 4 MiB bounds
 budget with explicit batches. Their rows follow `Scene3D::instances()`, including
@@ -314,6 +314,34 @@ for this optimization. The Yard example exposes `--retain-scene-instances 0|1`.
 `direct_bounds_rebuilt` expose useful work/reuse; the instance/upload/bounds
 counts are subsets of the existing retained counters. For alternating full-route
 controls and exact captures, use `tools/benchmark_render3d_direct_cache.py`.
+
+The native stock local-shadow path also caches static direct-source caster
+selection for unchanged spot and point projections. After the same source and
+projection have been observed twice, a bounded CPU plan stores relative copy
+indices in source order. Moving instance batches, skinned casters and other
+ineligible draws are gathered afresh and interleaved with those rows each render.
+The plan keys the weak scene identity, command revision, ref count, exact light
+projection/frustum and reach. Camera-dependent point-face selection remains live;
+sun/moon/GI maps, enabled LOD and explicit prepared consumers keep their existing
+paths. A changed or expired source/projection invalidates its plan, including
+scene moves and edits between views of the same GPU frame.
+
+Depth batching retains its 128-entry locality windows. Exact current comparator
+keys validate a saved sort permutation per window; a changed key sequence is
+sorted again with the original stable tie order. Current records, textures and
+samplers are still bound each render. This cache reuses CPU preparation, including
+when `lights.cache_shadows` is false; it does not retain GPU shadow images.
+
+CPU vector payload is limited to 4 MiB per renderer across 64 source/light-slot
+probes, plus fixed metadata. Unstable projections are observed without allocating
+payload, and pressure falls back to fresh gathering/sorting.
+`debug.cache_local_shadow_gather = false` selects that reference path;
+`debug.local_shadow_gather_budget` can reduce the cap for diagnostics.
+`local_gather_cache_hits/misses/builds`, `local_gather_cached_tests/copies`,
+`local_gather_cache_bytes` and `local_sort_cache_hits/misses/cached_entries`
+report reuse independently of whole-map hits. Existing local tests/candidates
+count fresh work only. The Yard CLI exposes `--cache-local-shadow-gather 0|1`;
+benchmark `--mode local-gather` keeps direct retention enabled in both controls.
 
 Resident tables also cache transformed culling spheres on the CPU, using 16 bytes/copy and at most **4 MiB per renderer**
 (plus small container overhead). Spheres use the same calculations as the immediate path. A batch revision refreshes only

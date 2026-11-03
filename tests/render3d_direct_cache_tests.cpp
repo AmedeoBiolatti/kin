@@ -52,6 +52,8 @@ void check(Renderer2D& renderer) {
     const auto populate = [&](bool changed) {
         scene.clear();
         for (u32 i = 0; i < 512; ++i) {
+            if (i == 128 || i == 384)
+                assert(scene.draw_instanced(explicit_batch, materials[0]));
             const Vec3f at{f32(i % 32) * .65f - 10.f, f32(i / 32) * .65f - 5.f, changed ? -.4f : 0.f};
             assert(scene.draw(mesh, Mat4f::translation(at), materials[(i + u32(changed)) % 3], colors::white,
                               i + 1));
@@ -98,7 +100,9 @@ void check(Renderer2D& renderer) {
         assert(actual.stats.draws == reference.stats.draws && actual.stats.instances == reference.stats.instances &&
                actual.stats.triangles == reference.stats.triangles &&
                actual.stats.shadow_casters == reference.stats.shadow_casters &&
-               actual.stats.local_shadow_casters == reference.stats.local_shadow_casters);
+               actual.stats.local_shadow_casters == reference.stats.local_shadow_casters &&
+               actual.stats.local_shadow_triangles == reference.stats.local_shadow_triangles &&
+               actual.stats.local_shadow_draws == reference.stats.local_shadow_draws);
         assert(actual.stats.direct_retained_instances == 514 && actual.stats.device_waits == 0);
         return actual;
     };
@@ -110,6 +114,49 @@ void check(Renderer2D& renderer) {
     auto stable = compare();
     assert(stable.stats.direct_cache_hits == 1 && stable.stats.direct_upload_bytes == 0 &&
            stable.stats.direct_bounds_rebuilt == 0 && stable.stats.bounds_instance_tests == 2);
+    stable = compare();
+    assert(stable.stats.local_gather_cache_hits == 1 && stable.stats.local_gather_cached_copies > 0 &&
+           stable.stats.local_gather_cached_tests > 0 && stable.stats.local_sort_cache_hits > 0 &&
+           stable.stats.local_gather_cache_bytes <= 4 * 1024 * 1024);
+    // Dynamic refs occur between static rows. They may leave/re-enter a map
+    // without invalidating the static selection or reusing stale sort keys.
+    for (Vec3f at : {Vec3f{1000, 0, 0}, Vec3f{0, 0, 3}, Vec3f{-6, -3, 0}}) {
+        const std::vector<MeshInstance3D> copies(16, {Mat4f::translation(at)});
+        assert(explicit_batch.update(0, copies));
+        stable = compare();
+        assert(stable.stats.local_gather_cache_hits == 1 && stable.stats.direct_bounds_rebuilt == 0);
+    }
+    // Geometry keys include the actual light projection and reach, independently
+    // of the source's draw revision or camera.
+    const auto original_spot = scene.lights.spots.front();
+    for (u32 edit = 0; edit < 4; ++edit) {
+        auto& spot = scene.lights.spots.front();
+        if (edit == 0) spot.position.x += 2;
+        if (edit == 1) spot.radius = 12;
+        if (edit == 2) spot.shadow_near_plane = .4f;
+        if (edit == 3) spot.direction = normalize(Vec3f{-1, -2, -8});
+        const auto changed = compare();
+        assert(changed.stats.local_gather_cache_hits == 0 && changed.stats.local_gather_cache_misses == 1);
+        compare(); // admit the unchanged projection
+        assert(compare().stats.local_gather_cache_hits == 1);
+    }
+    scene.lights.spots.front() = original_spot;
+    compare();
+    compare();
+    // Budget exhaustion and a disabled cache use the live path with the same
+    // records. Restoring the budget admits the source again.
+    scene.debug.local_shadow_gather_budget = 1;
+    auto fallback = compare();
+    assert(fallback.stats.local_gather_cache_hits == 0 && fallback.stats.local_gather_cache_bytes <= 1);
+    scene.debug.local_shadow_gather_budget = 4 * 1024 * 1024;
+    compare();
+    assert(compare().stats.local_gather_cache_hits == 1);
+    scene.debug.cache_local_shadow_gather = false;
+    fallback = compare();
+    assert(fallback.stats.local_gather_cache_hits == 0 && fallback.stats.local_gather_cache_bytes == 0);
+    scene.debug.cache_local_shadow_gather = true;
+    compare();
+    assert(compare().stats.local_gather_cache_hits == 1);
     for (u32 cascades : {1u, 4u}) {
         scene.lights.shadow_area = {{-12, -7, -3}, {12, 7, 4}};
         scene.lights.shadow_resolution = 128;
@@ -122,7 +169,35 @@ void check(Renderer2D& renderer) {
     const std::array moved_pose{Mat4f::translation({.5f, 0, 0})};
     assert(scene.update_joint_matrices(0, moved_pose));
     stable = compare();
-    assert(stable.stats.direct_upload_bytes == 0 && stable.stats.direct_bounds_rebuilt == 0);
+    assert(stable.stats.direct_upload_bytes == 0 && stable.stats.direct_bounds_rebuilt == 0 &&
+           stable.stats.local_gather_cache_hits == 1);
+    // Texture content is live: selection may hit while the whole-map cache
+    // must redraw a mask changed in place.
+    scene.lights.cache_shadows = true;
+    shoot(true);
+    assert(shoot(true).stats.local_shadow_cached > 0);
+    for (u32 i = 0; i < 16; ++i)
+        texels[4 * i + 3] = 255;
+    assert(renderer.update_texture(mask, {}, {4, 4}, texels.data()));
+    const auto mask_changed = shoot(true);
+    assert(mask_changed.stats.local_gather_cache_hits == 1 && mask_changed.stats.local_shadow_drawn > 0);
+    scene.lights.cache_shadows = false;
+    assert(mask_changed.pixels == shoot(false).pixels);
+    compare();
+    // Cube faces have independent slots; camera-dependent wanted faces can
+    // change without treating a previous camera's selection as a new light.
+    scene.lights.points.push_back({.position = {0, 0, 4}, .radius = 30, .shadow_enabled = true});
+    scene.lights.max_shadowed_points = 1;
+    compare();
+    compare();
+    assert(compare().stats.local_gather_cache_hits > 1);
+    for (Vec3f eye : {Vec3f{0, 0, -13}, Vec3f{12, 2, 0}, Vec3f{2, 2, 12}}) {
+        scene.camera = Camera3D::look_at(eye, {});
+        compare();
+        compare();
+        assert(compare().stats.local_gather_cache_hits > 1);
+    }
+    scene.lights.points.clear();
     scene.ambient_occlusion.enabled = true;
     scene.contact_shadows.enabled = true;
     compare();
@@ -204,6 +279,42 @@ void check(Renderer2D& renderer) {
     populate(true);
     assert(after_edit == shoot(false).pixels);
 
+    // With no dynamic casters, a hit produces no gather tasks at all. Empty
+    // selections must also be cached, without inventing a row or copy span.
+    scene = Scene3D{};
+    scene.camera = Camera3D::look_at({0, 0, 13}, {});
+    scene.lights.cache_shadows = false;
+    scene.lights.spots.push_back(original_spot);
+    scene.lights.max_shadowed_spots = 1;
+    scene.lights.local_shadow_resolution = 128;
+    const std::vector<MeshInstance3D> stationary(16, {Mat4f::identity()});
+    for (u32 i = 0; i < 32; ++i)
+        assert(scene.draw_instanced(mesh, stationary, materials[i % 3]));
+    const auto only_static_reference = shoot(false);
+    for (u32 i = 0; i < 3; ++i)
+        shoot(true);
+    const auto only_static = shoot(true);
+    assert(only_static.pixels == only_static_reference.pixels && only_static.stats.local_gather_cache_hits == 1 &&
+           only_static.stats.local_instance_tests == 0 && only_static.stats.local_task_bytes == 0 &&
+           only_static.stats.local_shadow_casters == only_static_reference.stats.local_shadow_casters);
+    // Resident accounting and budget changes also apply when no light maps
+    // are selected, without waiting for another local-shadow render.
+    scene.lights.spots.clear();
+    assert(only_static.stats.local_gather_cache_bytes > 0 &&
+           shoot(true).stats.local_gather_cache_bytes == only_static.stats.local_gather_cache_bytes);
+    scene.debug.local_shadow_gather_budget = 0;
+    assert(shoot(true).stats.local_gather_cache_bytes == 0);
+    scene.debug.local_shadow_gather_budget = 4 * 1024 * 1024;
+    scene.lights.spots.push_back(original_spot);
+    scene.lights.spots.front().direction = {0, 0, 1};
+    const auto empty_reference = shoot(false);
+    for (u32 i = 0; i < 2; ++i)
+        shoot(true);
+    const auto empty = shoot(true);
+    assert(empty.pixels == empty_reference.pixels && empty.stats.local_gather_cache_hits == 1 &&
+           empty.stats.local_gather_cached_copies == 0 && empty.stats.local_shadow_casters == 0 &&
+           empty.stats.local_instance_tests == 0 && empty.stats.local_task_bytes == 0);
+
     // Oversized direct tables stream within the existing 32 MiB budget.
     scene = Scene3D{};
     scene.camera = Camera3D::look_at({0, 0, 10}, {});
@@ -218,7 +329,8 @@ void check(Renderer2D& renderer) {
     assert(oversized.pixels == oversized_reference.pixels && oversized.pick_id == 1234 &&
            oversized_reference.pick_id == 1234);
     std::cout << "direct scene cache: exact pixels/order, mixed records, camera/cascades, pose edits, raw spans, "
-                 "move identity, same-frame views, budget fallback and warmed zero uploads/bounds passed\n";
+                 "move identity, same-frame views, budget fallback, local gather/sort reuse, moving casters/lights, "
+                 "point faces, texture edits and warmed zero uploads/bounds passed\n";
 }
 } // namespace
 

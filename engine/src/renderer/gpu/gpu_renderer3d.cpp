@@ -6071,9 +6071,88 @@ void GpuRenderer3D::build_light_grid(FrameCtx& ctx) {
     _device->upload_storage_buffer(_grid_cells->handle(), 0, cell_bytes, data.data(), /*cycle=*/true);
 }
 
+void GpuRenderer3D::clear_local_gather(LocalGatherCache& cache) {
+    _local_gather_bytes -= cache.bytes();
+    std::vector<LocalGatherCache::Row>().swap(cache.rows);
+    std::vector<u32>().swap(cache.copies);
+    std::vector<u64>().swap(cache.sort_keys);
+    std::vector<u8>().swap(cache.sort_order);
+    std::vector<u16>().swap(cache.sort_counts);
+    cache.valid = false;
+}
+
+void GpuRenderer3D::trim_local_gather(u64 budget) {
+    for (auto& cache : _local_gather_cache) {
+        if (!cache.observed)
+            continue;
+        const auto life = cache.lifetime.lock();
+        if (!life || *life != cache.key.scene) {
+            clear_local_gather(cache);
+            cache = {};
+        }
+    }
+    while (_local_gather_bytes > budget) {
+        LocalGatherCache* oldest = nullptr;
+        for (auto& cache : _local_gather_cache)
+            if (cache.bytes() && (!oldest || cache.frame < oldest->frame))
+                oldest = &cache;
+        if (!oldest)
+            break;
+        clear_local_gather(*oldest);
+    }
+}
+
+bool GpuRenderer3D::same_local_gather_key(const LocalGatherKey& a, const LocalGatherKey& b) {
+    return a.scene == b.scene && a.revision == b.revision && a.refs == b.refs && a.kind == b.kind &&
+           a.bounded == b.bounded && a.radius == b.radius && a.centre.x == b.centre.x &&
+           a.centre.y == b.centre.y && a.centre.z == b.centre.z &&
+           std::memcmp(a.projection.m, b.projection.m, sizeof(a.projection.m)) == 0 &&
+           a.frustum.count == b.frustum.count &&
+           std::memcmp(a.frustum.planes.data(), b.frustum.planes.data(), a.frustum.count * sizeof(Vec4f)) == 0;
+}
+
+GpuRenderer3D::LocalGatherCache* GpuRenderer3D::local_gather_plan(const FrameCtx& ctx, const LocalView& view,
+                                                               u32 refs, bool& ready) {
+    ready = false;
+    if (ctx.public_local || view.moon || view.gi_sun || !view.wanted)
+        return nullptr;
+    const auto& source = ctx.scene;
+    const LocalGatherKey key{source.draw_identity(), source.draw_revision(), refs, view.kind,
+                             view.view_projection, view.frustum, view.centre, view.radius, view.bounded};
+    LocalGatherCache* cell = nullptr;
+    const u64 frame = _owner->_frame_serial;
+    for (auto& cache : _local_gather_cache) {
+        if (cache.observed && cache.key.scene == key.scene && cache.slot == view.cache) {
+            cell = &cache;
+            break;
+        }
+        // Keep active scenes/slots independent. A full set falls back to fresh
+        // gathering instead of evicting another view of this/last GPU frame.
+        if (!cache.observed || (cache.frame + 1 < frame && (!cell || cache.frame < cell->frame)))
+            cell = &cache;
+    }
+    if (!cell)
+        return nullptr;
+    ready = cell->observed && cell->slot == view.cache && same_local_gather_key(cell->key, key);
+    if (!ready) {
+        clear_local_gather(*cell);
+        cell->key = key;
+        cell->lifetime = source.draw_lifetime();
+        cell->slot = view.cache;
+        cell->observed = true;
+    }
+    cell->frame = frame;
+    return cell;
+}
+
 void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     RenderDebugStats3D& stats = ctx.stats;
     const Lights3D& lights = ctx.scene.lights;
+    const u64 gather_budget = ctx.scene.debug.cache_local_shadow_gather
+                                  ? std::min<u32>(ctx.scene.debug.local_shadow_gather_budget, 4 * 1024 * 1024)
+                                  : 0;
+    trim_local_gather(gather_budget);
+    stats.local_gather_cache_bytes = _local_gather_bytes;
     if (_local_views.empty()) {
         return;
     }
@@ -6085,9 +6164,12 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     std::vector<u8> caster(_refs.size(), 0);
     constexpr u32 local_chunk = 2048;
     JobSystem* jobs = _owner->_jobs;
-    bool any_skinned = false;
+    bool any_skinned = false, direct = false;
+    u32 main_refs = 0;
     for (u32 r = 0; r < _refs.size(); ++r) {
         const DrawRef& ref = _refs[r];
+        main_refs += ref.scene == 0;
+        direct = direct || (ref.scene == 0 && ref.direct);
         if (ref.scene != 0 || !casts_into_local(ref.draw->material)) {
             continue;
         }
@@ -6097,24 +6179,54 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         caster[r] = 1;
         any_skinned = any_skinned || ref.skinned;
     }
+    constexpr u32 view_limit = max_local_shadow_layers + max_shadow_cascades + 1;
+    std::array<LocalGatherCache*, view_limit> plans{};
+    std::array<u8, view_limit> ready{}, hits{};
+    u32 fresh_views = 0, cached_views = 0;
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        if (!_local_views[v].wanted)
+            continue;
+        if (gather_budget && direct) {
+            bool stable = false;
+            plans[v] = local_gather_plan(ctx, _local_views[v], main_refs, stable);
+            ready[v] = stable;
+            if (plans[v]) {
+                hits[v] = plans[v]->valid;
+                if (hits[v]) {
+                    ++stats.local_gather_cache_hits;
+                    stats.local_gather_cached_tests += plans[v]->tests;
+                    stats.local_gather_cached_copies += plans[v]->copies.size();
+                } else {
+                    ++stats.local_gather_cache_misses;
+                }
+            }
+        }
+        hits[v] ? ++cached_views : ++fresh_views;
+    }
     // Preserve draw/copy order for packing, but schedule ranges containing many copies,
     // not one job for each tiny draw (terrain commonly has thousands of one-copy draws).
     struct Piece2 {
         u32 ref, begin, end, group;
     };
-    std::vector<Piece2> sphere_pieces;
+    std::vector<Piece2> sphere_pieces, dynamic_pieces;
     for (const Piece& p : _pieces) {
         if (!caster[p.ref])
             continue;
-        if (!sphere_pieces.empty()) {
-            Piece2& last = sphere_pieces.back();
-            if (last.ref == p.ref && last.group == p.group && last.end == p.begin &&
-                p.end - last.begin <= local_chunk) {
-                last.end = p.end;
-                continue;
+        const auto append = [&](std::vector<Piece2>& pieces) {
+            if (!pieces.empty()) {
+                Piece2& last = pieces.back();
+                if (last.ref == p.ref && last.group == p.group && last.end == p.begin &&
+                    p.end - last.begin <= local_chunk) {
+                    last.end = p.end;
+                    return;
+                }
             }
-        }
-        sphere_pieces.push_back({p.ref, p.begin, p.end, p.group});
+            pieces.push_back({p.ref, p.begin, p.end, p.group});
+        };
+        if (fresh_views)
+            append(sphere_pieces);
+        if (cached_views && !_refs[p.ref].direct)
+            append(dynamic_pieces);
     }
     const bool cache_on = lights.cache_shadows;
     const GpuFrustum& camera = ctx.frustums[0];
@@ -6145,6 +6257,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     std::vector<u8> seen;
     std::vector<u32> stack;
     std::vector<std::vector<Found>> found(_local_views.size());
+    std::array<u64, view_limit> static_tests{};
     // What each view can see of each caster draw, in tasks of a piece of a draw: all of them in one call to the workers
     // when there are many copies. One classification byte per candidate copy instead of an allocating vector per
     // task/level. Workers own disjoint byte ranges and counts. A flat copy list is packed after they finish; Found only
@@ -6175,16 +6288,14 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             return task.count_bucket == bucket ? task.counts : 0u;
         };
         std::vector<GatherTask> tasks;
-        const std::size_t wanted =
-            std::count_if(_local_views.begin(), _local_views.end(), [](const LocalView& v) { return v.wanted; });
-        tasks.reserve(wanted * sphere_pieces.size());
+        tasks.reserve(fresh_views * sphere_pieces.size() + cached_views * dynamic_pieces.size());
         std::size_t candidates = 0, classified = 0;
         std::vector<u32> batches{0};
         u32 in_batch = 0;
         for (u32 v = 0; v < _local_views.size(); ++v) {
             if (!_local_views[v].wanted)
                 continue;
-            for (const Piece2& piece : sphere_pieces) {
+            for (const Piece2& piece : hits[v] ? dynamic_pieces : sphere_pieces) {
                 const CullGroup* group = piece.group != ~0u ? &_cull_groups[piece.group] : nullptr;
                 if (group && !(group->local_mask & (1u << v))) {
                     stats.local_group_rejected += piece.end - piece.begin;
@@ -6224,6 +6335,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
                 else {
                     classified += n;
                     in_batch += n;
+                    if (ref.direct)
+                        static_tests[v] += n;
                 }
                 stats.local_plane_budget += static_cast<u64>(group ? std::popcount(planes) : view.frustum.count) * n;
                 if (view.bounded && !radius_inside)
@@ -6384,75 +6497,127 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
             for (u32 l = 0; l <= max_mesh_levels; ++l)
                 accepted += count_of(task, l);
         }
+        for (u32 v = 0; v < _local_views.size(); ++v)
+            if (hits[v])
+                accepted += plans[v]->copies.size();
         stats.local_task_bytes =
             tasks.capacity() * sizeof(GatherTask) + level_counts.capacity() * sizeof(level_counts[0]);
         found_copies.resize(accepted);
         std::size_t next = 0;
-        for (std::size_t t = 0; t < tasks.size();) {
-            const std::size_t begin = t;
-            const u32 v = tasks[t].view, r = tasks[t].ref;
-            {
-                // Most meshes (including cluster cuts) use one bucket. Avoid nine counters
-                // and their reductions/prefixes for every tiny terrain draw/view pair.
-                if (tasks[t].count_bucket != rejected) {
-                    u32 count = 0;
-                    for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t)
-                        count += tasks[t].counts;
-                    if (!count)
-                        continue;
-                    found[v].push_back(
-                        {r, 0, {found_copies.data() + next, count}, tasks[begin].count_bucket == cut_bucket, {}});
-                    for (std::size_t k = begin; k < t; ++k) {
-                        const GatherTask& task = tasks[k];
-                        if (!task.counts)
-                            continue;
-                        if (task.counts == task.end - task.begin) {
-                            std::iota(found_copies.begin() + next, found_copies.begin() + next + task.counts,
-                                      task.begin);
-                            next += task.counts;
-                        } else {
-                            for (u32 i = task.begin; i < task.end; ++i)
-                                if (buckets[task.first + i - task.begin] != rejected)
-                                    found_copies[next++] = i;
-                        }
-                    }
-                    continue;
-                }
-            }
-            std::array<u32, max_mesh_levels + 1> counts{};
-            for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t) {
-                for (u32 l = 0; l <= max_mesh_levels; ++l)
-                    counts[l] += count_of(tasks[t], l);
-            }
-            std::array<std::size_t, max_mesh_levels + 1> cursor{};
-            const auto add = [&](u32 bucket, bool clustered) {
-                cursor[bucket] = next;
-                if (!counts[bucket])
+        std::size_t t = 0;
+        for (u32 v = 0; v < _local_views.size(); ++v) {
+            u32 row = 0;
+            const auto append_cached = [&](u32 before) {
+                if (!hits[v])
                     return;
-                found[v].push_back(
-                    {r, clustered ? 0u : bucket, {found_copies.data() + next, counts[bucket]}, clustered, {}});
-                next += counts[bucket];
-            };
-            add(cut_bucket, true);
-            for (u32 l = 0; l < std::max(_refs[r].levels, 1u); ++l)
-                add(l, false);
-            for (std::size_t k = begin; k < t; ++k) {
-                const GatherTask& task = tasks[k];
-                if (task.flags & 2u) {
-                    const u32 n = task.end - task.begin;
-                    std::iota(found_copies.begin() + cursor[0], found_copies.begin() + cursor[0] + n, task.begin);
-                    cursor[0] += n;
-                    continue;
+                const auto& plan = *plans[v];
+                while (row < plan.rows.size() && plan.rows[row].ref < before) {
+                    const auto& cached = plan.rows[row++];
+                    found[v].push_back({cached.ref, 0, {found_copies.data() + next, cached.count}, false, {}});
+                    std::copy_n(plan.copies.data() + cached.first, cached.count, found_copies.data() + next);
+                    next += cached.count;
                 }
-                for (u32 i = task.begin; i < task.end; ++i) {
-                    const u8 bucket = buckets[task.first + i - task.begin];
-                    if (bucket != rejected)
-                        found_copies[cursor[bucket]++] = i;
+            };
+            while (t < tasks.size() && tasks[t].view == v) {
+                const std::size_t begin = t;
+                const u32 r = tasks[t].ref;
+                append_cached(r);
+                {
+                    // Most meshes (including cluster cuts) use one bucket. Avoid nine counters
+                    // and their reductions/prefixes for every tiny terrain draw/view pair.
+                    if (tasks[t].count_bucket != rejected) {
+                        u32 count = 0;
+                        for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t)
+                            count += tasks[t].counts;
+                        if (!count)
+                            continue;
+                        found[v].push_back(
+                            {r, 0, {found_copies.data() + next, count}, tasks[begin].count_bucket == cut_bucket, {}});
+                        for (std::size_t k = begin; k < t; ++k) {
+                            const GatherTask& task = tasks[k];
+                            if (!task.counts)
+                                continue;
+                            if (task.counts == task.end - task.begin) {
+                                std::iota(found_copies.begin() + next, found_copies.begin() + next + task.counts,
+                                          task.begin);
+                                next += task.counts;
+                            } else {
+                                for (u32 i = task.begin; i < task.end; ++i)
+                                    if (buckets[task.first + i - task.begin] != rejected)
+                                        found_copies[next++] = i;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                std::array<u32, max_mesh_levels + 1> counts{};
+                for (; t < tasks.size() && tasks[t].view == v && tasks[t].ref == r; ++t) {
+                    for (u32 l = 0; l <= max_mesh_levels; ++l)
+                        counts[l] += count_of(tasks[t], l);
+                }
+                std::array<std::size_t, max_mesh_levels + 1> cursor{};
+                const auto add = [&](u32 bucket, bool clustered) {
+                    cursor[bucket] = next;
+                    if (!counts[bucket])
+                        return;
+                    found[v].push_back(
+                        {r, clustered ? 0u : bucket, {found_copies.data() + next, counts[bucket]}, clustered, {}});
+                    next += counts[bucket];
+                };
+                add(cut_bucket, true);
+                for (u32 l = 0; l < std::max(_refs[r].levels, 1u); ++l)
+                    add(l, false);
+                for (std::size_t k = begin; k < t; ++k) {
+                    const GatherTask& task = tasks[k];
+                    if (task.flags & 2u) {
+                        const u32 n = task.end - task.begin;
+                        std::iota(found_copies.begin() + cursor[0], found_copies.begin() + cursor[0] + n, task.begin);
+                        cursor[0] += n;
+                        continue;
+                    }
+                    for (u32 i = task.begin; i < task.end; ++i) {
+                        const u8 bucket = buckets[task.first + i - task.begin];
+                        if (bucket != rejected)
+                            found_copies[cursor[bucket]++] = i;
+                    }
                 }
             }
+            append_cached(~0u);
         }
     };
     find_copies();
+
+    // Keep source-relative copy indices. Later packing rewrites its backing
+    // spans to current GPU table slots, and must never mutate the saved plan.
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        if (!plans[v] || hits[v] || !ready[v])
+            continue;
+        auto& plan = *plans[v];
+        u32 rows = 0, copies = 0;
+        for (const auto& f : found[v])
+            if (_refs[f.ref].direct) {
+                ++rows;
+                copies += static_cast<u32>(f.copies.size());
+            }
+        const u64 bytes = u64(rows) * sizeof(LocalGatherCache::Row) + u64(copies) * sizeof(u32);
+        if (bytes > gather_budget - _local_gather_bytes)
+            continue;
+        std::vector<LocalGatherCache::Row>(rows).swap(plan.rows);
+        std::vector<u32>(copies).swap(plan.copies);
+        u32 row = 0, next = 0;
+        for (const auto& f : found[v])
+            if (_refs[f.ref].direct) {
+                const u32 count = static_cast<u32>(f.copies.size());
+                plan.rows[row++] = {f.ref, next, count};
+                std::copy(f.copies.begin(), f.copies.end(), plan.copies.begin() + next);
+                next += count;
+            }
+        plan.tests = static_tests[v];
+        plan.valid = true; // an empty selection is also reusable
+        _local_gather_bytes += plan.bytes();
+        ++stats.local_gather_cache_builds;
+    }
+    stats.local_gather_cache_bytes = _local_gather_bytes;
 
     // Exact: the bytes a view's draw is a function of. The same bytes as in the cache, the same picture.
     const u64 generation_local = _local_generation, generation_moon = _moon_generation,
@@ -6724,7 +6889,8 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
     };
     _local_batch_list.resize(_local_list.size());
     u32 batches = 0, copies = 0;
-    for (LocalView& view : _local_views) {
+    for (u32 v = 0; v < _local_views.size(); ++v) {
+        LocalView& view = _local_views[v];
         if (!view.entry_count) {
             view.entry_first = batches;
             continue;
@@ -6734,9 +6900,58 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         // Keep nearby source draws together: sorting the entire map by mesh
         // destroys caster locality and can increase GPU depth-pass work.
         constexpr std::ptrdiff_t batch_window = 128;
+        LocalGatherCache* sort_plan = plans[v] && plans[v]->valid ? plans[v] : nullptr;
+        if (sort_plan && sort_plan->sort_keys.empty()) {
+            // Each source ref contributes at most one entry with LOD disabled.
+            // Size once for the source, so dynamic visibility causes no growth.
+            const u32 windows = (main_refs + batch_window - 1) / batch_window;
+            const u64 bytes = u64(main_refs) * (sizeof(u64) + sizeof(u8)) + u64(windows) * sizeof(u16);
+            if (bytes <= gather_budget - _local_gather_bytes) {
+                const u64 before = sort_plan->bytes();
+                std::vector<u64>(main_refs).swap(sort_plan->sort_keys);
+                std::vector<u8>(main_refs).swap(sort_plan->sort_order);
+                std::vector<u16>(windows).swap(sort_plan->sort_counts);
+                _local_gather_bytes += sort_plan->bytes() - before;
+            }
+        }
+        if (sort_plan && sort_plan->sort_keys.size() < view.entry_count)
+            sort_plan = nullptr;
+        u32 offset = 0, window = 0;
         for (auto block = first; block != last;) {
             const auto end = block + std::min(batch_window, last - block);
-            std::stable_sort(block, end, shadow_less);
+            const u32 count = static_cast<u32>(end - block);
+            if (sort_plan) {
+                std::array<u64, batch_window> keys;
+                std::array<u8, batch_window> order;
+                std::array<LocalEntry, batch_window> sorted;
+                for (u32 i = 0; i < count; ++i)
+                    keys[i] = (u64(_local_batch_refs[block[i].ref]) << 32) | block[i].level;
+                const bool same = sort_plan->sort_counts[window] == count &&
+                                  std::equal(keys.begin(), keys.begin() + count,
+                                             sort_plan->sort_keys.begin() + offset);
+                if (same) {
+                    std::copy_n(sort_plan->sort_order.data() + offset, count, order.data());
+                    ++stats.local_sort_cache_hits;
+                    stats.local_sort_cached_entries += count;
+                } else {
+                    // The original position breaks ties exactly as stable_sort.
+                    std::iota(order.begin(), order.begin() + count, u8{0});
+                    std::sort(order.begin(), order.begin() + count, [&](u8 a, u8 b) {
+                        return keys[a] != keys[b] ? keys[a] < keys[b] : a < b;
+                    });
+                    std::copy_n(keys.data(), count, sort_plan->sort_keys.data() + offset);
+                    std::copy_n(order.data(), count, sort_plan->sort_order.data() + offset);
+                    sort_plan->sort_counts[window] = static_cast<u16>(count);
+                    ++stats.local_sort_cache_misses;
+                }
+                for (u32 i = 0; i < count; ++i)
+                    sorted[i] = block[order[i]];
+                std::copy_n(sorted.data(), count, block);
+            } else {
+                std::stable_sort(block, end, shadow_less);
+            }
+            offset += count;
+            ++window;
             block = end;
         }
         view.entry_first = batches;
@@ -6759,6 +6974,7 @@ void GpuRenderer3D::build_local_shadows(FrameCtx& ctx) {
         }
     }
     _local_entries.resize(batches);
+    stats.local_gather_cache_bytes = _local_gather_bytes;
     _local_batch_list.swap(_local_list);
     stats.local_copy_bytes = (found_copies.capacity() + _local_list.capacity() + _local_batch_list.capacity() +
                               _local_batch_refs.capacity()) *
@@ -7280,6 +7496,7 @@ void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
             if (ref.scene == s && eligible(ref)) {
                 ref.retained = slot;
                 ref.retained_first = ref.draw->first;
+                ref.direct = true;
                 ref.cached_spheres = table.bounds.data() + ref.draw->first;
             }
         ctx.stats.retained_instances += copies;
@@ -7655,6 +7872,7 @@ void GpuRenderer3D::cull_and_upload(FrameCtx& ctx) {
                          ref.draw->material.casts_shadow && !ref.draw->material.wireframe;
             ref.retained = ~0u;
             ref.retained_first = 0;
+            ref.direct = false;
             ref.cached_spheres = nullptr;
             ref.prepared_records = nullptr;
             ref.prepared_scales = nullptr;

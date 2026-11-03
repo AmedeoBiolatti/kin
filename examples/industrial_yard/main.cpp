@@ -26,7 +26,8 @@ struct Options {
         props = -1, offset = 0;
     bool gpu_pass_markers = false, receives = true, validate = false, animation = true, motion = true, glass = true,
          structures = true, shadows = true, taa = false, ao = false, contact = false, profile = false, visible = false,
-         preview = false, rebuild = false, batch_static_props = false, retain_scene_instances = true;
+         preview = false, rebuild = false, batch_static_props = false, retain_scene_instances = true,
+         cache_local_shadow_gather = true;
 };
 double cpu(bool process) {
 #ifdef __linux__
@@ -48,7 +49,10 @@ public:
                 "shadow_triangles,local_shadow_casters,skinned_copies,skin_matrices,retained_upload_bytes,instance_"
                 "upload_bytes,prepared_reused,prepared_draws,feature_bytes,local_shadow_bytes,moving_x_sum,moving_y_"
                 "sum,moving_z_sum,profile_mono_ms,direct_retained_instances,direct_cache_hits,direct_upload_bytes,"
-                "direct_bounds_rebuilt,bounds_instance_tests,retained_gpu_bytes,device_waits\n";
+                "direct_bounds_rebuilt,bounds_instance_tests,retained_gpu_bytes,device_waits,local_instance_tests,"
+                "local_task_bytes,local_gather_cache_hits,local_gather_cache_misses,local_gather_cache_builds,"
+                "local_gather_cached_tests,local_gather_cached_copies,local_gather_cache_bytes,local_sort_cache_hits,"
+                "local_sort_cache_misses,local_sort_cached_entries\n";
     }
     std::string_view name() const override { return "Industrial yard"; }
     void update(SceneContext& ctx) override {
@@ -135,6 +139,11 @@ public:
                  << ',' << st.direct_retained_instances << ',' << st.direct_cache_hits << ',' << st.direct_upload_bytes
                  << ',' << st.direct_bounds_rebuilt << ',' << st.bounds_instance_tests << ',' << st.retained_gpu_bytes
                  << ',' << st.device_waits
+                 << ',' << st.local_instance_tests << ',' << st.local_task_bytes << ',' << st.local_gather_cache_hits
+                 << ',' << st.local_gather_cache_misses << ',' << st.local_gather_cache_builds
+                 << ',' << st.local_gather_cached_tests << ',' << st.local_gather_cached_copies
+                 << ',' << st.local_gather_cache_bytes << ',' << st.local_sort_cache_hits
+                 << ',' << st.local_sort_cache_misses << ',' << st.local_sort_cached_entries
                  << '\n';
         }
         if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
@@ -184,6 +193,7 @@ public:
             .field("batch_static_props", _o.batch_static_props)
             .field("static_batches", u64(_static.size()))
             .field("retain_scene_instances", _o.retain_scene_instances)
+            .field("cache_local_shadow_gather", _o.cache_local_shadow_gather)
             .field("source_triangles", _data.source_triangles)
             .field("scene_triangles", _triangles)
             .field("source_mesh_bytes", _data.mesh_bytes)
@@ -213,6 +223,7 @@ private:
     void configure() {
         _scene.debug.gpu_pass_markers = _o.gpu_pass_markers;
         _scene.debug.retain_scene_instances = _o.retain_scene_instances;
+        _scene.debug.cache_local_shadow_gather = _o.cache_local_shadow_gather;
         auto& l = _scene.lights;
         l.points.clear();
         l.spots.clear();
@@ -453,12 +464,13 @@ int main(int argc, char** argv) {
             else if (a == "--batch-static-props")
                 o.batch_static_props = true;
             else if (a == "--receive-shadows" || a == "--animation" || a == "--motion" || a == "--glass" ||
-                     a == "--retain-scene-instances" ||
+                     a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" ||
                      a == "--structures" || a == "--local-shadows" || a == "--taa" || a == "--ao" || a == "--contact") {
                 auto v = value();
                 if (v != "0" && v != "1")
                     throw std::runtime_error("yard booleans require 0 or 1");
                 bool* p = a == "--retain-scene-instances" ? &o.retain_scene_instances
+                          : a == "--cache-local-shadow-gather" ? &o.cache_local_shadow_gather
                           : a == "--receive-shadows" ? &o.receives
                           : a == "--animation"     ? &o.animation
                           : a == "--motion"        ? &o.motion

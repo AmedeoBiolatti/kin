@@ -63,6 +63,12 @@ struct RenderDebugStats3D : RenderStats3D {
     // Local preparation vector payload capacities: gather tasks/counts, caster-union slot map,
     // and accepted/upload copy lists (including their simultaneous backing storage).
     u64 local_task_bytes = 0, local_slot_bytes = 0, local_copy_bytes = 0;
+    // CPU-only fixed-light plans. Tests/candidates above count newly gathered
+    // work; cached copies/tests below are reused selections, never GPU map hits.
+    u32 local_gather_cache_hits = 0, local_gather_cache_misses = 0, local_gather_cache_builds = 0;
+    u64 local_gather_cached_tests = 0, local_gather_cached_copies = 0, local_gather_cache_bytes = 0;
+    u32 local_sort_cache_hits = 0, local_sort_cache_misses = 0;
+    u64 local_sort_cached_entries = 0;
     // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed
     // to the GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one
     // mesh is one). Also counted in draws, instances and triangles above. 0 for a frame without any.

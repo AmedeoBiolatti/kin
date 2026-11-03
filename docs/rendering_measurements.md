@@ -195,6 +195,80 @@ target is fixed-light caster membership and cached gather/batch plans, whose
 dependency rules must keep moving casters, masks, poses and camera-dependent
 LOD/reach correct.
 
+#### Fixed-light local caster plans
+
+The next engine slice caches static direct-source membership for stock spot and
+point maps, and exact sort permutations within the existing 128-entry depth
+batching windows. The key includes weak source identity/revision, source ref
+count, actual light projection/frustum and bounded reach. Two identical
+observations admit a projection; continuously changing projections keep empty
+probes. Cache payload is limited to 4 MiB across 64 source/physical-light-slot
+probes. Relative copy indices are replayed into the normal source-order backing
+store, so GPU table replacement does not leave stale instance offsets.
+
+Moving batches, skeletons and ineligible draws still gather live, interleaved
+with the static rows. Sort reuse requires the complete current comparator-key
+sequence and window length to match. Changed keys get the original stable tie
+order; current counts, offsets, textures and bindings are never saved as draw
+records. Camera-dependent wanted cube faces remain live. Sun/moon/GI maps,
+LOD/TAA, exposed spans and explicit prepared consumers keep their prior paths.
+This cache does not skip GPU shadow-map work.
+
+The targeted GPU regression now also covers dynamic refs between static draws,
+batch disappearance/re-entry, position/radius/near-plane/direction changes,
+point faces under camera changes, pose and mask-texture edits during cache hits,
+whole-map caching, disabled/tiny budgets, static-only zero-task hits and empty
+selections. Resident accounting and budget changes apply even with no selected
+local lights. Cache-control metadata uses fixed stack arrays; the existing
+caster scan collects admission metadata without a separate source-ref scan.
+
+Final Release/GCC 15.2 controls use NVIDIA Vulkan, four helpers, CPUs 0–15,
+720p 4x MSAA/HDR, 300 warm-up and 1,440 measured frames, with no concurrent
+build, tests, profiler or capture load. Five pairs alternate order. Direct-scene
+retention is enabled in both; only local gather/sort caching changes. Reproduce
+with `tools/benchmark_render3d_direct_cache.py --binary <industrial_yard>
+--output <directory> --mode local-gather --repeats 5`.
+
+| Median of five run statistics | Gather cache off | Gather cache on |
+| --- | ---: | ---: |
+| Render caller CPU p50 / p95 | 5.940 / 6.724 ms | 4.411 / 4.957 ms |
+| Render process CPU p50 / p95 | 7.532 / 8.478 ms | 5.107 / 5.705 ms |
+| Frame interval p50 / p95 | 6.226 / 11.826 ms | 5.513 / 9.715 ms |
+| Actual local instance tests/frame | 33,348 | 3,712 |
+| Gather-task vector payload | 950,656 bytes | 24,576 bytes |
+| CPU plan payload | 0 | 491,920 bytes |
+| Static accepted copies replayed/frame, p50 | 0 | 14,301 |
+| Sort windows reused/frame, p50 | 0 | 115 |
+| Sort entries reused/frame, p50 | 0 | 14,509 |
+| Local-shadow draws/frame | 1,140 | 1,140 |
+
+The deterministic reductions are **88.9% fewer local instance tests** and
+**97.4% less gather-task storage**, for **0.47 MiB** of resident CPU plan payload
+and no additional GPU retention. Four fixed spot selections hit each frame.
+The warmed sort cache has zero missed windows at p50 and one at p95, allowing
+dynamic caster membership to change. Per-frame geometry, shadow draws/maps/
+triangles/casters, skinning, motion, uploads and retained GPU bytes agree in all
+five paired routes. Three separate captures at offsets 0, 540 and 960 are
+pixel-identical. Explicit device-idle waits remain zero.
+
+The median of the five paired caller-CPU reductions is **27.4%** (range
+**24.7–30.2%**), process CPU **33.6%** (**31.1–36.3%**), and frame interval
+**16.4%** (**10.3–27.5%**). Absolute timings still drift between runs; clocks
+and temperatures were not logged throughout. Use the paired reductions rather
+than infer a controlled-clock result or combine these absolute timings with
+the earlier engine-cache experiment. This is not a refreshed Unreal comparison
+or a GPU timestamp measurement. Caster-list packing, depth-state interning,
+uploads and command recording remain per-render work.
+
+The final complete native 3D suite, targeted NVIDIA and llvmpipe regressions,
+CPU suite and five recipe tests pass. Artifacts are `/tmp/kin-local-gather/`:
+`yard/` contains final commands, CSVs, reports, captures and summaries;
+`paired-summary.json` records each paired reduction; `source-identity.json`
+records final source/binary hashes and the GPU renderer compile command.
+`yard-initial/` preserves the preceding matrix before the no-light accounting
+fix and removal of cache-metadata allocations/redundant scans. Its timings are
+not mixed into the final figures above.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.

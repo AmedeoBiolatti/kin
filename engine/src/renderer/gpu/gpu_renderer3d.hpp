@@ -976,6 +976,42 @@ private:
         bool drawn = false;
         u32 entry_first = 0, entry_count = 0;
     };
+    struct LocalGatherKey {
+        u64 scene = 0, revision = 0;
+        u32 refs = 0, kind = 0;
+        Mat4f projection{};
+        GpuFrustum frustum{};
+        Vec3f centre{};
+        f32 radius = 0;
+        bool bounded = false;
+    };
+    struct LocalGatherCache {
+        LocalGatherKey key;
+        std::weak_ptr<const u64> lifetime;
+        u32 slot = ~0u;
+        u64 frame = 0, tests = 0;
+        bool observed = false, valid = false;
+        struct Row {
+            u32 ref, first, count;
+        };
+        std::vector<Row> rows;
+        std::vector<u32> copies;
+        std::vector<u64> sort_keys;
+        std::vector<u8> sort_order;
+        std::vector<u16> sort_counts;
+        u64 bytes() const {
+            return rows.capacity() * sizeof(Row) + copies.capacity() * sizeof(u32) +
+                   sort_keys.capacity() * sizeof(u64) + sort_order.capacity() + sort_counts.capacity() * sizeof(u16);
+        }
+    };
+    // CPU payload is bounded independently of GPU instance/map retention. Empty
+    // probes admit only projections that remain unchanged across two renders.
+    std::array<LocalGatherCache, 64> _local_gather_cache;
+    u64 _local_gather_bytes = 0;
+    void clear_local_gather(LocalGatherCache& cache);
+    void trim_local_gather(u64 budget);
+    static bool same_local_gather_key(const LocalGatherKey& a, const LocalGatherKey& b);
+    LocalGatherCache* local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs, bool& ready);
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<u32> _local_list;                  // the lists, as uploaded
@@ -1041,6 +1077,7 @@ private:
         u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
         u32 retained = ~0u;                   // bounded retained-table cache entry, or immediate path
         u32 retained_first = 0;               // direct draws share a scene table; explicit batches start at zero
+        bool direct = false;                 // this render reads an immutable direct-scene table
         u32 prepared_first = 0;
         const GpuInstance3D* prepared_records = nullptr;
         const f32* prepared_scales = nullptr;

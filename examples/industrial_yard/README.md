@@ -62,6 +62,14 @@ Native profiling controls (default rendering is unchanged):
   --output /path/to/results` runs five alternating paired routes and three exact
   capture checks using the current power/clock conditions.
 
+- `--cache-local-shadow-gather 0|1` selects fresh local caster selection/sorting
+  or reuse for static direct draws under fixed spot/point projections (default 1).
+  Dynamic batches and skeletons still update every frame. CSVs include actual
+  tests/task bytes, cached selections, sort reuse and bounded CPU cache bytes.
+  Add `--mode local-gather` to the benchmark command above to isolate this cache
+  with direct scene retention enabled in both controls. The default benchmark
+  mode isolates direct retention with local gather caching disabled in both.
+
 - `--batch-static-props` groups stationary props by mesh and material in persistent
   `InstanceBatch3D` handles, with one bounds group per batch. Moving props, robots,
   structures, smoke and scene content keep their existing behavior. This exercises
