@@ -179,6 +179,16 @@ scripts.update(world, ctx.input, ctx.dt);
     it is missing), `has`, `add`, `remove`;
   - `position()`, `set_position(x, y)`, `move(dx, dy)` (an entity with a
     body: its body goes there too), `rotation()`, `set_rotation(degrees)`;
+  - `tween(property, to, seconds[, easing][, options])` moves one of its
+    fields over time ([tweens](animation_system.md#tweens)), for example
+    `self:tween("Transform2D.pos", {x = 300, y = 80}, 0.4, "backout")`. The
+    options are `delay`, `repeats`, `yoyo`, `relative`, `easing`, and
+    `done = function(self) end`, which runs once it gets to its end. It
+    returns the tween's id. `tweening([property])`, `stop_tween(id)` and
+    `stop_tweens([property])` go with it. The game runs `update_tweens`;
+  - `after(seconds, function(self) end)` and `every(seconds, function(self)
+    end)` call back later, until `cancel(id)` or the entity stops running its
+    script. They are not kept in saves;
   - `velocity()` and `set_velocity(vx, vy)`: its `CharacterController2D`'s,
     else its body's (`PhysicsVelocity`); `on_floor()`, `on_wall()` and
     `on_ceiling()`, what its character found in the last step

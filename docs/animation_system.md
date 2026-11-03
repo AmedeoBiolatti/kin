@@ -34,6 +34,46 @@ door.set(kin::Animator{.asset = {"animations/door.kinanim"}, .animation = "open"
 kin::update_animators(world, dt); // each frame
 ```
 
+## Tweens
+
+A tween moves one field from what it is to a value over time: a panel sliding
+in, a card turning over, a coin fading. No animation file is needed
+(`kin/ecs/tween.hpp`).
+
+```cpp
+kin::tween(world, card, {.property = "Transform2D.pos", .to = kin::Vec2f{320, 200},
+                         .seconds = 0.3f, .easing = kin::Easing::BackOut});
+kin::update_tweens(world, dt); // each frame
+```
+
+- **What it moves:** any described field that tracks can set, named the same
+  way. Numbers, pairs and colours move. Whole numbers, checks and text change
+  at its end.
+- **Where it starts:** from the field's value when it starts, after its
+  `delay`, so tweens one after another follow on. `relative` adds `to` to that
+  value.
+- **Repeats:** `repeats` goes again that many times once done (-1: on and on),
+  and `yoyo` goes back the other way each time.
+- **One tween per field:** a new tween of a field stops the one it replaces.
+  `stop_tween(entity, id)` and `stop_tweens(entity[, property])` stop tweens
+  where they are; `tweening(entity[, property])` says whether any are
+  running.
+- **Ended:** a tween that gets to its end is in its entity's
+  `Tweens::ended` until the next `update_tweens`.
+- **Prefabs:** an instance of a prefab gets its own copy of the component it
+  writes.
+
+Tweens and key frames ease the same ways (`Easing`, `easings()`):
+- `step` and `linear`;
+- `easein`, `easeout` and `easeinout` (quadratic);
+- `sine`, `cubic`, `back` (overshoots a little and comes back), `elastic`
+  (springs) and `bounce`, each `in`, `out` or `inout`: `backout`,
+  `bounceout`, `sineinout`.
+
+For things to do later by time, `kin::Timers` (`kin/core/timers.hpp`) runs
+actions `after(seconds, ...)` or `every(seconds, ...)` as the game calls
+`update(dt)`, and `cancel(id)` stops one.
+
 ## Definitions And Players
 
 Definitions are immutable and shared. Per-entity playback state lives on

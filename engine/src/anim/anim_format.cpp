@@ -74,31 +74,15 @@ bool fail(const Line& line, std::string_view msg, std::string& error) {
     return false;
 }
 
+// Unknown: linear.
 Easing parse_easing(std::string_view value) {
-    if (value == "step") {
-        return Easing::Step;
-    }
-    if (value == "easein") {
-        return Easing::EaseIn;
-    }
-    if (value == "easeout") {
-        return Easing::EaseOut;
-    }
-    if (value == "easeinout") {
-        return Easing::EaseInOut;
-    }
-    return Easing::Linear;
+    Easing easing = Easing::Linear;
+    kin::parse_easing(value, easing);
+    return easing;
 }
 
 std::string easing_text(Easing easing) {
-    switch (easing) {
-    case Easing::Step: return "step";
-    case Easing::Linear: return "linear";
-    case Easing::EaseIn: return "easein";
-    case Easing::EaseOut: return "easeout";
-    case Easing::EaseInOut: return "easeinout";
-    }
-    return "linear";
+    return std::string(easing_name(easing));
 }
 
 bool parse_value(const Line& line, std::size_t start, AnimValue& value, Easing& easing, std::string& error) {

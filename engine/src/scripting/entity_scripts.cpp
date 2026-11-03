@@ -7,7 +7,9 @@
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/dialogue.hpp>
 #include <kin/ecs/saving.hpp>
+#include <kin/core/timers.hpp>
 #include <kin/ecs/scene_flow.hpp>
+#include <kin/ecs/tween.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/l10n/localization.hpp>
@@ -294,6 +296,8 @@ struct EntityScripts::Impl {
         u64 generation = 0;
         sol::table self;
         bool started = false;
+        Timers timers; // its self:after and self:every
+        std::unordered_map<u32, sol::protected_function> tween_done; // by tween id
     };
     std::unordered_map<std::string, File> files;
     std::unordered_map<u64, Running> running;
@@ -452,6 +456,99 @@ struct EntityScripts::Impl {
         // Its ParticleSystemComponent's effect burst (or another of its catalog).
         entity["emit"] = [](const ScriptEntity& e, sol::optional<std::string> effect) {
             return emit_particles(EcsEntity{e.live()}, effect.value_or(std::string{}));
+        };
+        // Its tweens (kin/ecs/tween.hpp; the game runs update_tweens).
+        entity["tween"] = [this](const ScriptEntity& e, const std::string& property, const sol::object& to, f32 seconds,
+                                 sol::object easing_or_options, sol::object options_given) {
+            TweenDef def{.property = property, .seconds = seconds};
+            // `to` as the field's kind says (a number, {x, y}, {r, g, b, a}...).
+            const std::size_t dot = property.find('.');
+            const ComponentDescriptor* component = dot == std::string::npos ? nullptr : e.world->components().find(property.substr(0, dot));
+            if (component) {
+                const auto field = std::ranges::find(component->fields, property.substr(dot + 1), &ComponentFieldDescriptor::name);
+                if (field != component->fields.end()) {
+                    const std::optional<ComponentFieldValue> value = from_lua(field->kind, to);
+                    if (!value) {
+                        throw sol::error("tween: " + property + " takes a " + component_field_kind_name(field->kind));
+                    }
+                    std::visit(
+                        [&](const auto& typed) {
+                            using V = std::decay_t<decltype(typed)>;
+                            if constexpr (std::is_constructible_v<AnimValue, V> &&
+                                          (std::is_same_v<V, f32> || std::is_same_v<V, Vec2f> || std::is_same_v<V, Color> ||
+                                           std::is_same_v<V, i32> || std::is_same_v<V, bool> || std::is_same_v<V, std::string>)) {
+                                def.to = typed;
+                            } else {
+                                throw sol::error("tween: " + property + " is not a number, a pair, a colour, true/false or text");
+                            }
+                        },
+                        *value);
+                }
+            }
+            sol::object options = options_given;
+            if (easing_or_options.get_type() == sol::type::string) {
+                if (!parse_easing(easing_or_options.as<std::string>(), def.easing)) {
+                    throw sol::error("tween: no easing is called '" + easing_or_options.as<std::string>() + "'");
+                }
+            } else if (easing_or_options.get_type() == sol::type::table) {
+                options = easing_or_options;
+            }
+            sol::optional<sol::protected_function> done;
+            if (options.get_type() == sol::type::table) {
+                const sol::table given = options.as<sol::table>();
+                def.delay = given.get_or("delay", 0.0f);
+                def.repeats = given.get_or("repeats", 0);
+                def.yoyo = given.get_or("yoyo", false);
+                def.relative = given.get_or("relative", false);
+                if (const sol::object easing = given["easing"]; easing.get_type() == sol::type::string &&
+                                                                !parse_easing(easing.as<std::string>(), def.easing)) {
+                    throw sol::error("tween: no easing is called '" + easing.as<std::string>() + "'");
+                }
+                done = given.get<sol::optional<sol::protected_function>>("done");
+            }
+            std::string error;
+            const u32 id = kin::tween(*e.world, EcsEntity{e.live()}, std::move(def), &error);
+            if (id == 0) {
+                throw sol::error("tween: " + error);
+            }
+            if (done) {
+                if (const auto run = running.find(e.entity.id()); run != running.end()) {
+                    run->second.tween_done[id] = *done;
+                }
+            }
+            return id;
+        };
+        entity["tweening"] = [](const ScriptEntity& e, sol::optional<std::string> property) {
+            return tweening(EcsEntity{e.live()}, property.value_or(""));
+        };
+        entity["stop_tween"] = [](const ScriptEntity& e, u32 id) { return stop_tween(EcsEntity{e.live()}, id); };
+        entity["stop_tweens"] = [](const ScriptEntity& e, sol::optional<std::string> property) {
+            return stop_tweens(EcsEntity{e.live()}, property.value_or(""));
+        };
+        // Its timers: fn(self) after `seconds`, or every `seconds` (until cancelled, or it stops running its script).
+        const auto timer = [this](const ScriptEntity& e, f32 seconds, const sol::protected_function& fn, bool repeat) -> u32 {
+            const u64 id = e.live().id();
+            const auto run = running.find(id);
+            if (run == running.end()) {
+                throw sol::error("timers are a running script's");
+            }
+            std::function<void()> action = [this, id, fn, repeat]() {
+                const auto found = running.find(id);
+                if (found == running.end() || !found->second.self.valid()) {
+                    return;
+                }
+                const auto file = files.find(found->second.path);
+                if (file != files.end() && world && world->raw().is_alive(id)) {
+                    file->second.script->call_function(fn, repeat ? "every" : "after", found->second.self);
+                }
+            };
+            return repeat ? run->second.timers.every(seconds, std::move(action)) : run->second.timers.after(seconds, std::move(action));
+        };
+        entity["after"] = [timer](const ScriptEntity& e, f32 seconds, const sol::protected_function& fn) { return timer(e, seconds, fn, false); };
+        entity["every"] = [timer](const ScriptEntity& e, f32 seconds, const sol::protected_function& fn) { return timer(e, seconds, fn, true); };
+        entity["cancel"] = [this](const ScriptEntity& e, u32 timer_id) {
+            const auto run = running.find(e.entity.id());
+            return run != running.end() && run->second.timers.cancel(timer_id);
         };
         // Its Animator's.
         const auto animator = [](const ScriptEntity& e) {
@@ -1002,6 +1099,29 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         }
         if (entity.is_alive()) {
             file.script->call("on_update", run.self, dt);
+        }
+        // Its tweens that got to their end, and its timers due.
+        if (entity.is_alive()) {
+            const Tweens* tweens = entity.get<Tweens>();
+            std::vector<std::pair<u32, sol::protected_function>> finished;
+            for (auto it = run.tween_done.begin(); it != run.tween_done.end();) {
+                const bool ended = tweens && std::ranges::find(tweens->ended, it->first) != tweens->ended.end();
+                const bool going = tweens && std::ranges::any_of(tweens->running, [&](const Tweens::Running& r) { return r.id == it->first; });
+                if (ended) {
+                    finished.emplace_back(it->first, std::move(it->second));
+                }
+                it = ended || !going ? run.tween_done.erase(it) : std::next(it);
+            }
+            for (const auto& [id, done] : finished) {
+                if (entity.is_alive()) {
+                    file.script->call_function(done, "tween done", run.self);
+                }
+            }
+        }
+        if (entity.is_alive()) {
+            if (const auto found = impl.running.find(entity.id()); found != impl.running.end()) {
+                found->second.timers.update(dt);
+            }
         }
         // What the dialogue told this step (the game clears them once the step has seen them).
         if (impl.dialogue && entity.is_alive() && file.script->has("on_dialogue_event")) {

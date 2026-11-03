@@ -112,6 +112,7 @@ kin_add_component_test(PHYSICS kin_ecs_physics_shapes_tests kin-ecs-physics-shap
 kin_add_component_test(PHYSICS kin_physics_character_tests kin-physics-character
     SOURCES physics_character_tests.cpp LINK_TARGET kin::physics_ecs)
 kin_add_test(kin_ecs_time_tests kin-ecs-time SOURCES ecs_time_tests.cpp)
+kin_add_test(kin_tween_tests kin-tweens SOURCES tween_tests.cpp)
 kin_add_test(kin_ecs_spawn_tests kin-ecs-spawn SOURCES ecs_spawn_tests.cpp)
 kin_add_test(kin_prefab_tests kin-prefab SOURCES prefab_tests.cpp prefab_data_tests.cpp)
 kin_add_test(kin_prefab_structure_tests kin-prefab-structure SOURCES prefab_structure_tests.cpp)

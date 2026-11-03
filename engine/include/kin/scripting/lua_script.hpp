@@ -72,6 +72,11 @@ public:
     // Returns false if it does not, or if the call fails (error() says why).
     template <typename... Args>
     bool call(std::string_view function, Args&&... args);
+    // Calls `function`, a function of this script's state (one it handed
+    // over: a callback), as call() calls one by name; `name` says it in
+    // errors. False if it is not a function, or the call fails.
+    template <typename... Args>
+    bool call_function(const sol::protected_function& function, std::string_view name, Args&&... args);
     // Like call(), and converts the function's first result to R: nullopt if
     // missing, failing, or not an R.
     template <typename R, typename... Args>
@@ -134,6 +139,15 @@ bool LuaScript::call(std::string_view function, Args&&... args) {
     }
     const Budget budget{*this, _lua->lua_state()};
     return check(target(std::forward<Args>(args)...), function);
+}
+
+template <typename... Args>
+bool LuaScript::call_function(const sol::protected_function& function, std::string_view name, Args&&... args) {
+    if (!_lua || !function.valid() || function.get_type() != sol::type::function) {
+        return false;
+    }
+    const Budget budget{*this, _lua->lua_state()};
+    return check(function(std::forward<Args>(args)...), name);
 }
 
 template <typename R, typename... Args>

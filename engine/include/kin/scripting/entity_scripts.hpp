@@ -22,6 +22,13 @@
 //     (adds it when missing); has(component), add(component), remove(component)
 //   position() -> x, y; set_position(x, y); move(dx, dy) (its body goes there too);
 //   rotation(); set_rotation(degrees)
+//   tween(property, to, seconds[, easing][, options]) -> id: one of its fields
+//   ("Transform2D.pos") moved to `to` (kin/ecs/tween.hpp; the game runs
+//   update_tweens); options: delay, repeats, yoyo, relative, easing, done =
+//   function(self) (once it gets to its end); tweening([property]),
+//   stop_tween(id), stop_tweens([property])
+//   after(seconds, fn) -> id, every(seconds, fn) -> id: fn(self) then (every:
+//   each time), until cancel(id) or it stops running its script
 //   velocity() -> vx, vy; set_velocity(vx, vy): its CharacterController2D's,
 //   else its body's (PhysicsVelocity); on_floor(), on_wall(), on_ceiling():
 //   what its CharacterController2D found in the last step
