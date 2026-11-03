@@ -503,6 +503,51 @@ caches and raw per-frame/process logs are retained there. Five lookup-table and
 nine residual/integration CPU contracts pass. This is a static-scene study, not
 production qualification of the generated overlays.
 
+#### Lower source-point budgets
+
+A follow-up compares 4, 8 and 16 total source points against freshly measured
+main/32-point controls, using the identical scene, source radiance, visibility,
+history and probe-ray budgets. Gaussian rules per emitting triangle are 2x1,
+2x2, 4x2 and 4x4 for 4/8/16/32 total points. The generic rectangular-rule
+generator reproduces the previous 32-point helper byte for byte. Every rule
+preserves source area, power and first moments with positive finite weights;
+only the source-quadrature helper changes between experimental tiers.
+
+| Configuration | Frame p50 | Run p50 range | Room SSIM ↑ | Room RGB MAE ↓ | Shadow-crop SSIM ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main | 1.060 ms | 1.059–1.179 ms | 0.9338 | 7.524 | 0.9696 |
+| 4 points | 2.024 ms | 2.024–2.211 ms | 0.9754 | 3.157 | 0.9841 |
+| 8 points | 2.506 ms | 2.505–2.507 ms | 0.9767 | 3.019 | 0.9884 |
+| 16 points | 3.511 ms | 3.503–3.512 ms | 0.9776 | 3.008 | 0.9900 |
+| 32 points | 5.555 ms | 5.515–5.557 ms | 0.9781 | 2.993 | 0.9914 |
+
+The three lower tiers reduce median frame cost by 63.6%/54.9%/36.8% versus the
+fresh 32-point control. Four points retains broad illumination improvements over
+main but creates conspicuous separated shadow bands. Eight has finer bands;
+16 has cleaner transitions and is visually closer to 32, with residual stepping.
+Eight is a useful performance candidate and 16 a cleaner quality candidate.
+Aggregate SSIM understates these localized shadow differences. Maximum channel
+differences from 32 are 31/21/17 levels for 4/8/16; room pixels differing by over
+eight levels on any channel are 1.00%/0.37%/0.14%.
+
+Protocol is three serial cost repeats in varied orders, each 1,200 warm-up plus
+2,400 measured frames, separate captures at phases 2,400/2,573 against both
+denoised Cycles seeds. The room mask/crop remain unchanged. A fixed shadow crop
+at [340,340,595,690] covers the left wall and floor behind the tall block; its
+SSIM is an additional diagnostic, not a general quality score. Lower-budget
+bands are deterministic spatial quadrature error, not stochastic noise.
+Clock/thermal drift affects exact timing; main and four points slow in the last
+repeat. Static-source/geometry scope and untested motion/cuts remain unchanged.
+
+Artifacts are `out/cornell-gi-low-budget-20261103/`: `comparison.png`, enlarged
+`shadows.png`, `index.html`, source builders and runner, `summary.json`,
+`quality-summary.json`, `campaign.json`, `build-record.json`,
+`quadrature-validation.json` and `reconstruction-validation.json`. All 25 jobs
+pass output/settings/count checks. Area/first-moment/control-reproduction
+checks, exact regenerated helpers, unchanged backend, declared sample counts
+and binary/SPIR-V hashes pass for all three new tiers. No production GI code
+or defaults are changed.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
