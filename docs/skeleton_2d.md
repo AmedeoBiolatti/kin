@@ -85,3 +85,46 @@ uses one atlas. External Spine/DragonBones import and editor rigging are not inc
 Asset inventory recognizes Skeleton2D; shipping discovery and async preparation
 follow texture_asset. Broken reloads retain an entity's usable rig; a valid
 replacement resets its pose before the next animation update.
+
+## Blending and layers
+
+Set `SkeletonAnimator2D::fade_seconds` to crossfade when `animation` or
+`blend_space` changes (zero preserves immediate switching). Transitions capture
+the displayed base pose, so interrupting a fade starts from the current result.
+Pausing the animator also pauses its fade. The cached base excludes layers and
+IK; those are applied once after blending. A rig replacement resets this state.
+
+`SkeletonLayer2D` applies one additional clip before IK. `bone` selects a named
+bone; `include_children` includes its subtree. An empty bone selects the whole
+rig. `weight` is clamped to 0..1. Override layers interpolate local transforms;
+`additive=true` applies the clip's translation/rotation/scale difference from the
+rest pose. Layer time, speed, playing and loop are independent of the base.
+For more than one layer, call `layer_skeleton2d` on poses in the game's chosen order.
+
+Native `blend_skeleton2d` mixes weighted clip samples; `blend_skeleton_poses2d`
+mixes two poses. Rotation follows the shortest angular difference. Negative or
+nonfinite weights and invalid samples fail without changing the output. Empty
+or all-zero samples produce the rest pose.
+
+`.kinskel` accepts an optional `blend_spaces` object:
+
+```json
+"blend_spaces": {
+  "movement": {
+    "points": [
+      {"position": {"x": 0, "y": 0}, "clip": "idle"},
+      {"position": {"x": 1, "y": 0}, "clip": "run_right"},
+      {"position": {"x": 0, "y": 1}, "clip": "run_down"}
+    ],
+    "triangles": [[0, 1, 2]]
+  }
+}
+```
+
+Choose `blend_space="movement"` and update `blend_position` from movement input.
+`blend_cycle_seconds` controls a normalized phase shared across clips of different
+durations. One point is constant; two points interpolate along their segment.
+Three or more require explicit nondegenerate triangles, using barycentric weights
+inside and the nearest triangle edge outside. Limits are 64 points/128 triangles
+per space. The loader validates clips, duplicate positions and triangle indices.
+Use `sample_skeleton_blend_space2d` directly for custom animation controllers.

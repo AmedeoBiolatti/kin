@@ -1,7 +1,7 @@
 # Shared built-in shader manifest for engine builds and offline SPIR-V packaging.
 # Put 3D-only shaders in the second list so a 2D build never compiles/embeds them.
 set(_kin_gpu_shader_names_2D
-    textured_quad.vert textured_quad.frag sprite_instanced.vert shader_geometry.vert overdraw_count.frag
+    textured_quad.vert textured_quad.frag sprite_instanced.vert shader_geometry.vert normal_sprite.frag overdraw_count.frag
     overdraw_heat.frag shape.frag shape.vert sdf_shape.frag sdf_shape.vert distance_field.frag mask_composite.frag
     mask_stencil.frag color_output.frag pp_vignette.frag pp_color_grade.frag pp_scanline.frag pp_chroma.frag pp_ascii.frag
     pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag transition_dissolve.frag

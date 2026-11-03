@@ -29,6 +29,25 @@ struct SurfaceGeometry2D {
     Vec2f pivot{.5f, .5f};
     Flip flip = Flip::None;
 };
+struct SurfaceGpuTextures2D {
+    Texture albedo, normal, specular;
+};
+struct NormalLightingGpuCache2D {
+    u64 renderer = 0, fingerprint = 0;
+    ColorSpace color_space = ColorSpace::Gamma;
+    SurfaceGpuTextures2D textures;
+    std::array<std::shared_ptr<const Image>, 3> images;
+    DataBuffer lights;
+    bool used = false;
+};
+std::vector<std::vector<std::array<Vec2f, 4>>> surface_shadow_samples2d(const SurfaceLight2D&,
+                                                                        std::span<const LightOccluder2D>);
+// False requests the portable CPU fallback. Raw unorm textures preserve normal
+// data independently of the renderer's colour space. Light/shadow data is kept
+// immutable for queued draws and rebuilt only when its fingerprint changes.
+bool draw_normal_sprite2d_gpu(Renderer2D&, const SurfaceMaterial2D&, const SurfaceGeometry2D&, Color ambient,
+                              std::span<const SurfaceLight2D>, std::span<const LightOccluder2D>, u64 fingerprint,
+                              NormalLightingGpuCache2D&, SurfaceGpuTextures2D textures = {});
 // Portable reference/CPU forward shading, at source resolution, in linear
 // light. RGB normal maps: +X right, +Y down, +Z toward the viewer. Albedo and
 // light colours are sRGB; normal/specular maps are data. Preserves alpha.

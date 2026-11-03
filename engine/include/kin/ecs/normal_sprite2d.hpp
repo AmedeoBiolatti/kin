@@ -9,12 +9,14 @@ struct NormalSpriteCache2D {
     u64 renderer = 0;
     // Keep hashed image identities alive until replaced, including light shapes.
     std::vector<std::shared_ptr<const Image>> inputs;
+    NormalLightingGpuCache2D gpu;
 };
 // Forward-lit sprite, always collected dynamically. SceneLighting's
 // forward_sprites enables this path and disables the scene-wide light map.
 struct NormalSpriteRenderer2D {
     ComponentAssetRef albedo_asset, normal_asset, specular_asset;
     SurfaceMaterial2D material;
+    SurfaceGpuTextures2D gpu_textures;
     Rectf source{};
     Vec2f offset{}, size{}, pivot{.5f, .5f};
     Color tint = colors::white;

@@ -70,6 +70,16 @@ public:
     // textures), made once and shared. Invalid when it cannot be read: why is
     // in problems(), and it is tried again once its file changes.
     Texture texture(std::string_view path);
+    // Raw UNORM pixels, shared separately from colour textures for material shaders.
+    Texture data_texture(std::string_view path);
+    // GPU payload estimates exclude driver overhead. Live texture handles pin
+    // their allocations; trim never invalidates a component or queued draw.
+    void set_texture_budget(u64 bytes);
+    u64 texture_budget() const { return _texture_budget; }
+    void set_residency_diagnostics(bool enabled) { _residency_diagnostics = enabled; }
+    AssetMemoryReport texture_memory_report() const;
+    std::vector<AssetResidency> texture_residency() const;
+    AssetMemoryReport trim_texture_memory();
     // Renderer-thread upload of pixels decoded by an asynchronous scene load.
     bool prime_texture(std::string_view path, const Image& image);
     std::shared_ptr<const Image> image(std::string_view path);
@@ -140,6 +150,7 @@ private:
         Texture texture;
         FileTime time; // the file's when read
         bool failed = false;
+        u64 last_access = 0;
     };
     // A catalog, and the files it was made of (itself first) with their times.
     template <typename Catalog>
@@ -159,6 +170,10 @@ private:
     Renderer2D& _renderer;
     AssetManager _manager;
     std::unordered_map<std::string, Made, PathHash, std::equal_to<>> _textures;
+    std::unordered_map<std::string, Made, PathHash, std::equal_to<>> _data_textures;
+    u64 _texture_budget = 0, _texture_clock = 0;
+    std::unordered_map<const void*, std::string> _texture_reasons; // refreshed by bind()
+    bool _residency_diagnostics = false;
     std::unordered_map<std::string, Read<SpriteCatalog>, PathHash, std::equal_to<>> _sprite_catalogs;
     std::unordered_map<std::string, Read<SkeletonAsset2D>, PathHash, std::equal_to<>> _skeletons2d;
     std::unordered_map<std::string, Read<AudioCatalog>, PathHash, std::equal_to<>> _audio_catalogs;

@@ -24,7 +24,22 @@ void register_skeleton2d_components(EcsWorld& w) {
         .field("time", &SkeletonAnimator2D::time)
         .field("playing", &SkeletonAnimator2D::playing)
         .field("loop", &SkeletonAnimator2D::loop)
-        .field("finished", &SkeletonAnimator2D::finished);
+        .field("finished", &SkeletonAnimator2D::finished)
+        .field("fade_seconds", &SkeletonAnimator2D::fade_seconds)
+        .field("blend_space", &SkeletonAnimator2D::blend_space)
+        .field("blend_position", &SkeletonAnimator2D::blend_position)
+        .field("blend_cycle_seconds", &SkeletonAnimator2D::blend_cycle_seconds);
+    w.components()
+        .native<SkeletonLayer2D>("SkeletonLayer2D")
+        .field("animation", &SkeletonLayer2D::animation)
+        .field("bone", &SkeletonLayer2D::bone)
+        .field("speed", &SkeletonLayer2D::speed)
+        .field("time", &SkeletonLayer2D::time)
+        .field("weight", &SkeletonLayer2D::weight)
+        .field("playing", &SkeletonLayer2D::playing)
+        .field("loop", &SkeletonLayer2D::loop)
+        .field("additive", &SkeletonLayer2D::additive)
+        .field("include_children", &SkeletonLayer2D::include_children);
     w.components()
         .native<SkeletonIK2D>("SkeletonIK2D")
         .field("root", &SkeletonIK2D::root)
@@ -74,18 +89,32 @@ void update_skeletons2d(EcsWorld& w, f32 dt) {
         // Acquire owned components before retaining any component pointer.
         if (e.has<SkeletonAnimator2D>())
             e.get_mut<SkeletonAnimator2D>();
+        if (e.has<SkeletonLayer2D>())
+            e.get_mut<SkeletonLayer2D>();
         r = e.get_mut<SkeletonRenderer2D>();
         if (auto* a = e.get_mut<SkeletonAnimator2D>()) {
-            if (a->animation != a->current) {
-                a->current = a->animation;
+            if (a->current_rig != r->skeleton) {
+                a->current_rig = r->skeleton;
+                a->current.clear();
+                a->fade_from = {};
+                a->base_pose = {};
+                a->fade_elapsed = 0;
+            }
+            const auto selection = a->blend_space.empty() ? a->animation : "@space:" + a->blend_space;
+            if (selection != a->current) {
+                a->fade_from = a->current.empty() ? SkeletonPose2D{} : a->base_pose;
+                a->fade_elapsed = 0;
+                a->current = selection;
                 a->time = 0;
                 a->finished = false;
             }
             const auto clip = r->skeleton->clips.find(a->animation);
-            if (clip != r->skeleton->clips.end() && std::isfinite(a->speed) && std::isfinite(a->time)) {
+            const bool space = !a->blend_space.empty() && r->skeleton->blend_spaces.contains(a->blend_space) &&
+                               std::isfinite(a->blend_cycle_seconds) && a->blend_cycle_seconds > 0;
+            if ((space || clip != r->skeleton->clips.end()) && std::isfinite(a->speed) && std::isfinite(a->time)) {
                 if (a->playing)
                     a->time += dt * a->speed;
-                const auto duration = clip->second.duration;
+                const auto duration = space ? a->blend_cycle_seconds : clip->second.duration;
                 a->finished = !a->loop && (a->speed >= 0 ? a->time >= duration : a->time <= 0);
                 if (a->loop) {
                     a->time = std::fmod(a->time, duration);
@@ -93,7 +122,52 @@ void update_skeletons2d(EcsWorld& w, f32 dt) {
                         a->time += duration;
                 } else
                     a->time = std::clamp(a->time, 0.0f, duration);
-                sample_skeleton2d(*r->skeleton, a->animation, a->time, a->loop, r->pose);
+                if (space)
+                    sample_skeleton_blend_space2d(*r->skeleton, a->blend_space, a->blend_position, a->time / duration,
+                                                  a->loop, r->pose);
+                else
+                    sample_skeleton2d(*r->skeleton, a->animation, a->time, a->loop, r->pose);
+                if (!a->fade_from.local.empty() && std::isfinite(a->fade_seconds) && a->fade_seconds > 0) {
+                    if (a->playing)
+                        a->fade_elapsed += dt;
+                    blend_skeleton_poses2d(*r->skeleton, a->fade_from, r->pose, a->fade_elapsed / a->fade_seconds,
+                                           r->pose);
+                    if (a->fade_elapsed >= a->fade_seconds)
+                        a->fade_from = {};
+                } else
+                    a->fade_from = {};
+                a->base_pose = r->pose;
+            }
+        }
+        if (auto* layer = e.get_mut<SkeletonLayer2D>(); layer && !layer->animation.empty() &&
+                                                        std::isfinite(layer->speed) && std::isfinite(layer->time) &&
+                                                        std::isfinite(layer->weight)) {
+            if (!e.has<SkeletonAnimator2D>())
+                r->pose.reset(*r->skeleton);
+            if (layer->current != layer->animation) {
+                layer->current = layer->animation;
+                layer->time = 0;
+            }
+            if (layer->playing)
+                layer->time += dt * layer->speed;
+            if (const auto clip = r->skeleton->clips.find(layer->animation); clip != r->skeleton->clips.end()) {
+                if (layer->loop) {
+                    layer->time = std::fmod(layer->time, clip->second.duration);
+                    if (layer->time < 0)
+                        layer->time += clip->second.duration;
+                } else
+                    layer->time = std::clamp(layer->time, 0.0f, clip->second.duration);
+                SkeletonPose2D pose;
+                if (sample_skeleton2d(*r->skeleton, layer->animation, layer->time, layer->loop, pose)) {
+                    std::vector<u8> mask(r->skeleton->bones.size(), layer->bone.empty() ? 1 : 0);
+                    for (std::size_t i = 0; i < mask.size(); ++i) {
+                        const auto parent = r->skeleton->bones[i].parent;
+                        if (r->skeleton->bones[i].name == layer->bone ||
+                            (layer->include_children && parent >= 0 && mask[parent]))
+                            mask[i] = 1;
+                    }
+                    layer_skeleton2d(*r->skeleton, pose, layer->weight, mask, layer->additive, r->pose);
+                }
             }
         }
         if (const auto* ik = e.get<SkeletonIK2D>(); ik && ik->enabled) {

@@ -28,6 +28,18 @@ releases may change APIs.
   so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
+- [Lua 2D workflows](lua_2d_workflows.md) in both scene and entity scripts:
+  checked property tweens, input contexts/rebinding and saved profiles, prefab
+  leases, staged scene loads, controller ownership/rumble, and memory diagnostics.
+  Includes a [playable workshop](../examples/2d_workflow/README.md) with imported
+  sprites, accessible controls and an automated playthrough for loose/packed content.
+- GPU forward lighting for normal sprites on SDL_GPU, with shared raw material
+  textures, storage-buffer lights/shadows/cookies and the existing CPU fallback.
+- Skeletal crossfades, interrupted transitions, masked override/additive layers
+  and normalized-phase triangulated blend spaces in native `.kinskel` assets.
+- AssetManager payload budgets, LRU eviction and dependency/root diagnostics;
+  Assets2D texture budgets, residency estimates and component retention reasons.
+
 - [2D runtime workflows](2d_workflows.md): consuming/modal input contexts, rebinding
   capture/conflicts and saved overrides; per-player controllers, reconnects, haptics
   and family prompts; prefab prewarming/reuse with stale lease/script guards;

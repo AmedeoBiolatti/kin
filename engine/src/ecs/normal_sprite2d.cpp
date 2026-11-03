@@ -4,6 +4,7 @@
 #include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/lighting.hpp>
 #include <kin/ecs/normal_sprite2d.hpp>
+#include <kin/renderer/renderer2d.hpp>
 
 namespace kin {
 void register_normal_sprite2d_components(EcsWorld& w) {
@@ -73,10 +74,21 @@ void bind_normal_sprites2d(EcsWorld& w, Assets2D& assets) {
         if (!old.specular_asset.id.empty())
             if (auto image = assets.image(old.specular_asset.id))
                 material.specular = image;
-        if (material.albedo != old.material.albedo || material.normal != old.material.normal ||
-            material.specular != old.material.specular || !old.cache) {
+        auto gpu = old.gpu_textures;
+        if (assets.renderer().capabilities().shader_geometry && assets.renderer().capabilities().data_buffers) {
+            if (!old.albedo_asset.id.empty())
+                gpu.albedo = assets.data_texture(old.albedo_asset.id);
+            if (!old.normal_asset.id.empty())
+                gpu.normal = assets.data_texture(old.normal_asset.id);
+            if (!old.specular_asset.id.empty())
+                gpu.specular = assets.data_texture(old.specular_asset.id);
+        }
+        if (gpu.albedo != old.gpu_textures.albedo || gpu.normal != old.gpu_textures.normal ||
+            gpu.specular != old.gpu_textures.specular || material.albedo != old.material.albedo ||
+            material.normal != old.material.normal || material.specular != old.material.specular || !old.cache) {
             auto* r = e.get_mut<NormalSpriteRenderer2D>();
             r->material = std::move(material);
+            r->gpu_textures = std::move(gpu);
             if (!r->cache)
                 r->cache = std::make_shared<NormalSpriteCache2D>();
             assets.changed();
@@ -227,6 +239,7 @@ bool submit_normal_sprite2d(RenderQueue& queue, flecs::entity entity, const Worl
             hash.add(p);
     }
     const auto cache = r.cache ? r.cache : std::make_shared<NormalSpriteCache2D>();
+    const auto gpu = r.gpu_textures;
     const auto pass = r.layer >= layer_value(RenderLayer::Debug)     ? render_pass_mask::debug
                       : r.layer >= layer_value(RenderLayer::UI)      ? render_pass_mask::ui
                       : r.layer >= layer_value(RenderLayer::Effects) ? render_pass_mask::effects
@@ -234,7 +247,19 @@ bool submit_normal_sprite2d(RenderQueue& queue, flecs::entity entity, const Worl
     queue.custom(
         {.layer = r.layer, .order = r.order, .y = pos.y, .use_y = r.y_sort, .pass_mask = pass},
         [cache, fingerprint = hash.value, material, g, ambient, lights = std::move(lights),
-         occluders = std::move(occluders)](Renderer2D& renderer) {
+         occluders = std::move(occluders), gpu](Renderer2D& renderer) {
+            const bool gpu_inputs_changed =
+                cache->gpu.fingerprint != fingerprint || cache->gpu.renderer != renderer.id();
+            if (draw_normal_sprite2d_gpu(renderer, material, g, ambient, lights, occluders, fingerprint, cache->gpu,
+                                         gpu)) {
+                if (gpu_inputs_changed) {
+                    cache->inputs = {material.albedo, material.normal, material.specular};
+                    for (const auto& light : lights)
+                        if (light.shape)
+                            cache->inputs.push_back(light.shape);
+                }
+                return;
+            }
             if (!cache->texture || cache->fingerprint != fingerprint || cache->renderer != renderer.id()) {
                 const auto image = shade_normal_sprite2d(material, g, ambient, lights, occluders);
                 if (!image.valid())

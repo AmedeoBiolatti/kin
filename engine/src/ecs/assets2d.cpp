@@ -73,7 +73,7 @@ bool Assets2D::prime_texture(std::string_view path, const Image& image) {
     auto texture = _renderer.create_texture_from_rgba(image.rgba.data(), image.size);
     if (!texture)
         return false;
-    _textures[std::string(path)] = Made{std::move(texture), file_time(path), false};
+    _textures[std::string(path)] = Made{std::move(texture), file_time(path), false, ++_texture_clock};
     _manager.reserve_storage<Image>(path);
     _manager.replace_loaded<Image>(path, image);
     _read[std::string(path)] = file_time(path);
@@ -120,10 +120,11 @@ Texture Assets2D::texture(std::string_view path) {
         return {};
     }
     if (const auto found = _textures.find(path); found != _textures.end()) {
+        found->second.last_access = ++_texture_clock;
         return found->second.texture;
     }
     std::string key(path);
-    Made made{.texture = {}, .time = file_time(path), .failed = false};
+    Made made{.texture = {}, .time = file_time(path), .failed = false, .last_access = ++_texture_clock};
     const std::filesystem::path file = _manager.resolve(path);
     try {
         const std::string ext = lowercase_extension(path);
@@ -488,11 +489,47 @@ bool Assets2D::bind(EcsWorld& world) {
             binder(world, *this);
         }
     }
+    _texture_reasons.clear();
+    if (_residency_diagnostics || _texture_budget) {
+        const auto note = [&](const Texture& texture, const std::string& reason) {
+            if (texture)
+                _texture_reasons.try_emplace(texture.backend().get(), reason);
+        };
+        const auto owner = [](flecs::entity entity) {
+            return entity.name().size() ? std::string(entity.name().c_str()) : std::to_string(entity.id());
+        };
+        world.raw().each(
+            [&](flecs::entity e, const TextureRenderer& r) { note(r.texture, owner(e) + ".TextureRenderer.asset"); });
+        world.raw().each([&](flecs::entity e, const NormalSpriteRenderer2D& r) {
+            note(r.gpu_textures.albedo, owner(e) + ".NormalSpriteRenderer2D.albedo_asset");
+            note(r.gpu_textures.normal, owner(e) + ".NormalSpriteRenderer2D.normal_asset");
+            note(r.gpu_textures.specular, owner(e) + ".NormalSpriteRenderer2D.specular_asset");
+        });
+        world.raw().each([&](flecs::entity e, const SkeletonRenderer2D& r) {
+            note(r.texture, owner(e) + ".SkeletonRenderer2D.asset -> " + r.asset.id);
+        });
+        world.raw().each([&](flecs::entity e, const SpriteRenderer& r) {
+            if (r.sprite.catalog)
+                for (const auto& [id, image] : r.sprite.catalog->textures())
+                    note(image.texture, owner(e) + ".SpriteRenderer.asset -> " + r.asset.id);
+        });
+    }
+    if (_manager.memory_budget())
+        _manager.trim_memory();
+    if (_texture_budget)
+        trim_texture_memory();
     return std::exchange(_bound_changed, false);
 }
 
 std::vector<std::string> Assets2D::reload_changed() {
     std::vector<std::string> changed;
+    for (auto made = _data_textures.begin(); made != _data_textures.end();) {
+        if (file_time(made->first) != made->second.time) {
+            changed.push_back(made->first);
+            made = _data_textures.erase(made);
+        } else
+            ++made;
+    }
     for (auto made = _textures.begin(); made != _textures.end();) {
         if (file_time(made->first) != made->second.time) {
             changed.push_back(made->first);

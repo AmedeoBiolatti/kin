@@ -148,6 +148,40 @@ ordinary strong ownership. It does not break arbitrary shared-pointer cycles
 inside asset values. `Assets2D`, described below, has its own scene-owned cache;
 this collector manages `AssetManager`/`AssetServer` storage.
 
+## Memory budgets and residency
+
+`AssetManager::set_memory_budget(bytes)` enables LRU eviction of unowned storage;
+zero disables the budget. Loads and AssetServer pumps trim automatically. Call
+`trim_memory()` between frames after releasing other handles. Eviction preserves
+external handles, pending jobs and the complete graph of declared dependencies.
+Unowned reverse dependants are evicted together with a dependency, preventing
+reuse of a partially evicted cached parent. Unowned dependency cycles are evictable.
+
+`memory_report()` returns resident/budget/pinned bytes and `over_budget`;
+`trim_memory()` also returns the number evicted. An overrun is valid when live
+owners prevent eviction. `residency()` returns deterministic rows with payload
+bytes, last access, external reference counts, dependencies and a retaining chain
+from one external root. These are cache-storage references, not heap-wide tracing.
+
+Image and skeleton loaders register payload sizers. For game types, use
+`register_memory_sizer<T>([](const T& value) -> u64 { ... })`; types without a
+sizer use `sizeof(T)` and are marked `size_estimated`. Payload accounting excludes
+allocator/driver overhead and memory allocated outside the registered value.
+
+`Assets2D::set_texture_budget(bytes)`, `texture_memory_report()`,
+`texture_residency()` and `trim_texture_memory()` cover its color and raw material
+texture caches separately. Estimates use base-level format/block size, excluding
+mip chains and driver overhead. Bind trims after components receive their handles.
+Live components, queued draws and catalogs pin textures; catalog pins remain until
+their owning cache is released. This budget does not collect the scene's catalog,
+font or shader caches, nor GPU resources created directly by game code.
+`set_residency_diagnostics(true)` records representative component/asset reasons
+on bind; a positive texture budget enables that collection automatically.
+
+Lua exposes the same reports under `asset_memory`; the
+[workshop demo](../examples/2d_workflow/README.md) displays residency and applies
+budget pressure while preserving its visible actors and room.
+
 ## Importing authoring assets
 
 `tools/import_2d_assets.py` converts Aseprite exports/native documents, PNG sprite

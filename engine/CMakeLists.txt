@@ -40,8 +40,10 @@ add_library(kin_engine STATIC
     src/anim/track.cpp
     src/anim/tween.cpp
     src/anim/skeleton2d.cpp
+    src/anim/skeleton_blend2d.cpp
     src/anim/value.cpp
     src/assets/asset_manager.cpp
+    src/assets/asset_memory.cpp
     src/assets/asset_server.cpp
     src/assets/bake_cache.cpp
     src/assets/image.cpp
@@ -53,6 +55,7 @@ add_library(kin_engine STATIC
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
     src/ecs/assets2d.cpp
+    src/ecs/asset_memory2d.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -112,6 +115,7 @@ add_library(kin_engine STATIC
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp
     src/renderer/normal_lighting2d.cpp
+    src/renderer/normal_lighting2d_gpu.cpp
     src/renderer/post_blur.cpp
     src/renderer/path.cpp
     src/renderer/shape.cpp
@@ -272,6 +276,7 @@ if(KIN_ENABLE_SCRIPTING)
 
     add_library(kin_scripting_scenes STATIC
         src/scripting/script_engine.cpp
+        src/scripting/lua_workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp
         src/scripting/entity_scripts.cpp)

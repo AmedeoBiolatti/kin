@@ -159,7 +159,10 @@ void test_runtime() {
     };
     assert(at(6, 6, 0) > 240 && at(6, 6, 2) == 0);
     assert(at(28, 6, 2) > 240);
-    assert(surface.get<NormalSpriteRenderer2D>()->cache->texture);
+    assert(surface.get<NormalSpriteRenderer2D>()->cache->texture ||
+           surface.get<NormalSpriteRenderer2D>()->cache->gpu.used);
+    if (renderer.capabilities().shader_geometry && renderer.capabilities().data_buffers)
+        assert(surface.get<NormalSpriteRenderer2D>()->cache->gpu.used);
     const auto previous = surface.get<NormalSpriteRenderer2D>()->cache->texture;
     render_world(world, renderer);
     assert(surface.get<NormalSpriteRenderer2D>()->cache->texture == previous);

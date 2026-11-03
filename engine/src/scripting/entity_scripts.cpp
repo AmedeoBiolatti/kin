@@ -17,6 +17,7 @@
 #include <kin/prefab/prefab_asset.hpp>
 #include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>
+#include <kin/scripting/workflows2d.hpp>
 #if KIN_ENABLE_PHYSICS
 #include <kin/ecs/physics.hpp>
 #endif
@@ -294,6 +295,7 @@ void teleport(EcsEntity entity) {
 
 struct EntityScripts::Impl {
     EntityScriptsConfig config;
+    std::shared_ptr<ScriptWorkflows2D> workflows;
 
     // A script file read, and the times of the files it was read from.
     struct File {
@@ -330,6 +332,17 @@ struct EntityScripts::Impl {
     std::string calling; // the script being called, for its problems
 
     void bind(sol::state& lua) {
+        bind_lua_workflows2d(lua, [this] { return workflows; });
+        lua.registry()["kin.entity"] = [this](EcsEntity entity, std::function<bool()>) {
+            if (!world || entity.raw().world().c_ptr() != world->raw().c_ptr())
+                throw sol::error("foreign pool entity");
+            return ScriptEntity{world, entity.raw()};
+        };
+        lua.registry()["kin.unwrap_entity"] = [this](const ScriptEntity& entity) {
+            if (entity.world != world)
+                throw sol::error("foreign tween entity");
+            return EcsEntity{entity.live()};
+        };
         sol::usertype<ScriptEntity> entity = lua.new_usertype<ScriptEntity>("Entity", sol::no_constructor);
         entity["id"] = [](const ScriptEntity& e) { return static_cast<f64>(e.entity.id()); };
         entity["alive"] = &ScriptEntity::alive;
@@ -1047,10 +1060,21 @@ void EntityScripts::set_saves(SceneSaves* saves) {
     });
 }
 
+void EntityScripts::set_workflows(std::shared_ptr<ScriptWorkflows2D> workflows) {
+    _impl->workflows = std::move(workflows);
+}
+std::shared_ptr<ScriptWorkflows2D> EntityScripts::workflows() const {
+    return _impl->workflows;
+}
 void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     Impl& impl = *_impl;
     impl.world = &world;
     impl.input = &input;
+    if (!impl.workflows)
+        impl.workflows = std::make_shared<ScriptWorkflows2D>(world, impl.config.content);
+    if (&impl.workflows->world() != &world)
+        throw std::invalid_argument("workflow services belong to another world");
+    impl.workflows->advance(input, dt);
     if (impl.config.check_frames > 0 && ++impl.frames >= impl.config.check_frames) {
         impl.frames = 0;
         impl.reload_changed();

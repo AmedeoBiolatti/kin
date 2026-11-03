@@ -184,6 +184,9 @@ kin_add_test(kin_scene_workflow2d_tests kin-scene-workflow2d SOURCES scene_workf
 kin_add_test(kin_navigation2d_tests kin-navigation2d SOURCES navigation2d_tests.cpp)
 kin_add_test(kin_accessibility_tests kin-accessibility SOURCES accessibility_tests.cpp)
 kin_add_test(kin_animation_lighting2d_tests kin-animation-lighting2d SOURCES animation_lighting2d_tests.cpp)
+kin_add_test(kin_advanced_workflow2d_tests kin-advanced-workflow2d SOURCES advanced_workflow2d_tests.cpp)
+kin_add_test(kin_normal_lighting2d_gpu_tests kin-normal-lighting2d-gpu SOURCES normal_lighting2d_gpu_tests.cpp)
+set_tests_properties(kin-normal-lighting2d-gpu PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 kin_add_test(kin_asset_lifetime_tests kin-asset-lifetime SOURCES asset_lifetime_tests.cpp)
 kin_add_test(kin_anim_player_tests kin-anim-player SOURCES anim_player_tests.cpp)
 kin_add_test(kin_anim_event_tests kin-anim-events SOURCES anim_event_tests.cpp anim_event_consumer_tests.cpp)
@@ -610,6 +613,7 @@ kin_add_test(kin_scene_tests kin-scene SOURCES scene_tests.cpp)
 kin_add_test(kin_scene_asset_tests kin-scene-asset SOURCES scene_asset_tests.cpp)
 
 kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
+kin_add_component_test(SCRIPTING kin_lua_workflows2d_tests kin-lua-workflows2d SOURCES lua_workflows2d_tests.cpp LINK_TARGET kin::scripting_scenes)
 if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_entity_scripts_tests PRIVATE kin::physics_ecs) # a character's script
 endif()

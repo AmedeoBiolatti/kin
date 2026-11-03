@@ -15,8 +15,11 @@
 #include <kin/ecs/time.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scene/scene_manager.hpp>
+#include <kin/scene/scene_preload2d.hpp>
 #include <kin/scripting/script_engine.hpp>
 #include <kin/scripting/script_scene.hpp>
+#include <kin/scripting/workflows2d.hpp>
 #include <optional>
 #include <sol/sol.hpp>
 #include <stdexcept>
@@ -70,6 +73,7 @@ EcsCommandBuffer* current_script_commands() {
 
 struct ScriptEngine::Impl {
     std::unique_ptr<ScriptEngineHost> host;
+    std::shared_ptr<ScriptWorkflows2D> workflows;
     sol::state lua;
     std::filesystem::path asset_root;
     std::vector<std::filesystem::path> dependencies;
@@ -1439,6 +1443,10 @@ ScriptEngine::~ScriptEngine() {
     }
 }
 
+std::shared_ptr<ScriptWorkflows2D> ScriptEngine::workflows() const {
+    return _impl->workflows;
+}
+
 bool ScriptEngine::load_file(const std::filesystem::path& path) {
     const std::filesystem::path absolute = normalized_dependency_path(path);
     return load_file(absolute.parent_path(), absolute);
@@ -1545,17 +1553,34 @@ bool ScriptEngine::call_on_load(ScriptSceneBindings bindings) {
         _impl->host = std::make_unique<ScriptEngineHost>();
     _impl->host->clear_systems();
     static_cast<ScriptSceneBindings&>(*_impl->host) = std::move(bindings);
+    if (_impl->host->workflows) {
+        if (&_impl->host->workflows->world() != _impl->host->world) {
+            _last_error = "workflow services belong to another world";
+            return false;
+        }
+        _impl->workflows = _impl->host->workflows;
+    } else if (!_impl->workflows) {
+        _impl->workflows = std::make_shared<ScriptWorkflows2D>(*_impl->host->world, _impl->asset_root);
+    }
     return call_optional("on_load", ScriptSceneApi{_impl->host.get()});
 }
 
 bool ScriptEngine::call_on_enter(SceneContext& ctx) {
+    if (_impl->workflows)
+        _impl->workflows->configure(&ctx.renderer, ctx.app.gamepads());
     return call_on_enter(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
 bool ScriptEngine::call_on_exit(SceneContext& ctx) {
     return call_on_exit(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
 bool ScriptEngine::call_update(SceneContext& ctx) {
-    return call_update(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
+    if (_impl->workflows)
+        _impl->workflows->configure(&ctx.renderer, ctx.app.gamepads());
+    const bool result = call_update(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
+    if (_impl->workflows)
+        while (auto scene = _impl->workflows->take_scene())
+            ctx.scenes.replace(std::move(scene));
+    return result;
 }
 bool ScriptEngine::call_on_enter(ScriptFrameContext ctx) {
     return call_optional("on_enter", ScriptContextApi{ctx});
@@ -1564,6 +1589,10 @@ bool ScriptEngine::call_on_exit(ScriptFrameContext ctx) {
     return call_optional("on_exit", ScriptContextApi{ctx});
 }
 bool ScriptEngine::call_update(ScriptFrameContext ctx) {
+    if (_impl->workflows) {
+        static const Input absent;
+        _impl->workflows->advance(ctx.input ? *ctx.input : absent, ctx.dt);
+    }
     return call_optional("update", ScriptContextApi{ctx});
 }
 
@@ -1639,6 +1668,10 @@ bool ScriptEngine::call_optional_const(std::string_view name, Args&&... args) co
 }
 
 void ScriptEngine::register_bindings() {
+    bind_lua_workflows2d(_impl->lua, [this] { return _impl->workflows; });
+    _impl->lua.registry()["kin.unwrap_entity"] = [](const sol::object& object) {
+        return scripting_detail::script_entity(object);
+    };
     _impl->lua.registry()["kin.entity"] = [this](EcsEntity e, std::function<bool()> lease) {
         if (!_impl->host || _impl->host->closing || !e || e.raw().world().c_ptr() != _impl->host->world->raw().c_ptr())
             throw std::runtime_error("entity does not belong to this Lua scene");

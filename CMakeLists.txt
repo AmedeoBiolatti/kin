@@ -59,6 +59,7 @@ include(kin_release_contract)
 # kin with add_subdirectory gets the engine alone.
 option(KIN_BUILD_GAMES "Build sample games" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_EXAMPLES "Build interactive performance examples" ${PROJECT_IS_TOP_LEVEL})
+option(KIN_BUILD_2D_WORKFLOW "Build the Lua 2D workshop and its integration test (requires Pillow)" ${KIN_BUILD_EXAMPLES})
 option(KIN_BUILD_BENCHMARKS "Build benchmark executables" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_TESTS "Build kin's tests (with BUILD_TESTING)" ${PROJECT_IS_TOP_LEVEL})
 # "config" registers only the tests whose result depends on how kin is configured
@@ -193,6 +194,9 @@ endif()
 
 if(KIN_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+if(KIN_BUILD_2D_WORKFLOW AND KIN_ENABLE_SCRIPTING AND KIN_ENABLE_IMAGE_IO)
+    add_subdirectory(examples/2d_workflow)
 endif()
 
 if(KIN_BUILD_GAMES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/CMakeLists.txt")

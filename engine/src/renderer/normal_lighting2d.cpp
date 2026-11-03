@@ -66,6 +66,10 @@ bool finite(f32 v) {
     return std::isfinite(v);
 }
 } // namespace
+std::vector<std::vector<std::array<Vec2f, 4>>> surface_shadow_samples2d(const SurfaceLight2D& light,
+                                                                        std::span<const LightOccluder2D> occluders) {
+    return shadows(light, occluders).samples;
+}
 Image shade_normal_sprite2d(const SurfaceMaterial2D& m, const SurfaceGeometry2D& g, Color ambient,
                             std::span<const SurfaceLight2D> lights, std::span<const LightOccluder2D> occluders) {
     if (!m.albedo || !m.albedo->valid() || lights.size() > 256 || !finite(m.normal_strength) || m.normal_strength < 0 ||

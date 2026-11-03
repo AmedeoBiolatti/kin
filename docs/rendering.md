@@ -37,7 +37,15 @@ receives forward lighting and ordinary sprites/shapes/UI remain unlit. Existing
 scenes keep their original lightmap path by default. Without forward_sprites,
 normal sprites draw their albedo for the legacy lightmap to shade.
 
-This first path shades on the CPU on every backend, caching the resulting
+SDL_GPU evaluates diffuse/specular lighting per fragment with the
+`NormalSprite2D` built-in shader. Material images use shared raw UNORM textures;
+normal/specular data stays independent of the output color space. Lights,
+shadow quads, soft-shadow samples and alpha cookies use an immutable storage
+buffer per cached lighting state. Receiver masks preserve all 32 bits. There
+are at most 256 lights per draw and a 32 MiB light-data limit; unsupported
+capabilities or allocation limits select the CPU fallback.
+
+The portable fallback shades on the CPU, caching the resulting
 texture until material, pose, lights or occluders change. It supports up to 256
 lights and 4 million source pixels per sprite. Moving large receivers/lights can
 be expensive; this is not a GPU deferred lighting implementation. Use

@@ -315,6 +315,29 @@ AssetMetadata AssetManager::make_metadata(std::string relative_path) const {
 }
 
 void register_default_asset_loaders(AssetManager& assets) {
+    assets.register_memory_sizer<Image>(
+        [](const Image& image) { return static_cast<u64>(sizeof(Image)) + image.rgba.capacity(); });
+    assets.register_memory_sizer<SkeletonAsset2D>([](const SkeletonAsset2D& rig) {
+        u64 bytes = sizeof(rig) + rig.texture_asset.capacity() + rig.bones.capacity() * sizeof(Bone2D) +
+                    rig.vertices.capacity() * sizeof(SkinVertex2D) + rig.indices.capacity() * sizeof(u32) +
+                    rig.attachments.capacity() * sizeof(BoneAttachment2D);
+        for (const auto& b : rig.bones)
+            bytes += b.name.capacity();
+        for (const auto& b : rig.attachments)
+            bytes += b.name.capacity();
+        for (const auto& [name, clip] : rig.clips) {
+            bytes += name.capacity() + sizeof(clip) + clip.tracks.capacity() * sizeof(BoneTrack2D);
+            for (const auto& t : clip.tracks)
+                bytes += t.keys.capacity() * sizeof(BoneKey2D);
+        }
+        for (const auto& [name, space] : rig.blend_spaces) {
+            bytes += name.capacity() + sizeof(space) + space.points.capacity() * sizeof(SkeletonBlendPoint2D) +
+                     space.triangles.capacity() * sizeof(std::array<u32, 3>);
+            for (const auto& p : space.points)
+                bytes += p.clip.capacity();
+        }
+        return bytes;
+    });
     assets.register_loader<SkeletonAsset2D>([](const std::filesystem::path& path) {
         const auto source = read_content_text(path);
         std::string error;

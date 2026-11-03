@@ -1,0 +1,7 @@
+{
+  "schema": "kin.prefab/1", "id": "pulse", "root": "root",
+  "entities": [{"id": "root", "name": "Pulse", "components": {
+    "Transform2D": {},
+    "SpriteRenderer": {"asset": "sprites/workshop.kinsprites", "sprite": "pulse", "size": {"x": 12, "y": 12}}
+  }}]
+}

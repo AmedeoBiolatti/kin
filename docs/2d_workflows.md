@@ -1,5 +1,9 @@
 # 2D runtime workflows
 
+These services are also available through [both Lua hosts](lua_2d_workflows.md).
+The [2D Workshop](../examples/2d_workflow/README.md) combines them in a playable
+example with an automated playthrough.
+
 These C++ services build on Kin's input maps, prefab recipes, job system and
 path server. Components are reflected, so scene files and entity scripts can
 set their fields. Call service update/pump methods explicitly from your game.

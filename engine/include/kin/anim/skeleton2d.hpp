@@ -40,6 +40,14 @@ struct BoneAttachment2D {
     u32 bone = 0;
     BoneTransform2D transform;
 };
+struct SkeletonBlendPoint2D {
+    Vec2f position{};
+    std::string clip;
+};
+struct SkeletonBlendSpace2D {
+    std::vector<SkeletonBlendPoint2D> points;
+    std::vector<std::array<u32, 3>> triangles; // required for three or more points
+};
 struct SkeletonAsset2D {
     std::string texture_asset; // content-relative atlas
     std::vector<Bone2D> bones;
@@ -47,6 +55,7 @@ struct SkeletonAsset2D {
     std::vector<u32> indices;
     std::vector<BoneAttachment2D> attachments;
     std::map<std::string, SkeletonClip2D, std::less<>> clips;
+    std::map<std::string, SkeletonBlendSpace2D, std::less<>> blend_spaces;
 };
 bool validate_skeleton2d(const SkeletonAsset2D& asset, std::string& error);
 // Native JSON .kinskel format; no external skeleton runtime is required.
@@ -61,6 +70,24 @@ struct SkeletonPose2D {
 // Absolute local keys, linear position/scale and shortest-angle rotation.
 // Unkeyed bones retain their rest transform. False for an unknown clip.
 bool sample_skeleton2d(const SkeletonAsset2D&, std::string_view clip, f32 time, bool loop, SkeletonPose2D&);
+struct SkeletonBlendSample2D {
+    std::string clip;
+    f32 time = 0, weight = 1;
+    bool loop = true;
+};
+// Normalized positive weights; rotations use the shortest arc from the first
+// contributing pose. Failed samples leave the output unchanged.
+bool blend_skeleton2d(const SkeletonAsset2D&, std::span<const SkeletonBlendSample2D>, SkeletonPose2D&);
+bool blend_skeleton_poses2d(const SkeletonAsset2D&, const SkeletonPose2D&, const SkeletonPose2D&, f32 weight,
+                            SkeletonPose2D&);
+// Empty mask affects every bone. Additive layers apply the difference from rest.
+bool layer_skeleton2d(const SkeletonAsset2D&, const SkeletonPose2D& layer, f32 weight, std::span<const u8> mask,
+                      bool additive, SkeletonPose2D& base);
+bool validate_skeleton_blend_space2d(const SkeletonAsset2D&, const SkeletonBlendSpace2D&, std::string& error);
+// Barycentric interpolation, clamped to the closest edge outside the mesh.
+// A common normalized phase keeps clips of different durations synchronized.
+bool sample_skeleton_blend_space2d(const SkeletonAsset2D&, std::string_view space, Vec2f position, f32 phase, bool loop,
+                                   SkeletonPose2D&);
 std::vector<ShaderVertex> deform_skeleton2d(const SkeletonAsset2D&, const SkeletonPose2D&, Color tint = colors::white);
 std::optional<Affine2> skeleton_attachment2d(const SkeletonAsset2D&, const SkeletonPose2D&, std::string_view name);
 // A direct parent/child chain with positive uniform scales. Target is in

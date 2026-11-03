@@ -129,6 +129,8 @@ void AssetServer::pump(PumpMode mode) {
         if (quiescent) {
             for (auto& [key, record] : _assets) record.dependency_pin.reset();
         }
+        if (_manager.memory_budget())
+            _manager.trim_memory();
         if (!_unload_unused) return;
         _manager.unload_unused();
         std::erase_if(_assets, [](const auto& entry) { return entry.second.storage.expired(); });

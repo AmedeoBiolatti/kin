@@ -94,6 +94,7 @@ class SceneDialogue;
 class SceneFlow;
 class SceneSaves;
 class PhysicsWorld;
+class ScriptWorkflows2D;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -127,6 +128,10 @@ public:
     // The game's saves, for the scripts' `save` and their entities' kept
     // values (null: none). They are given the scripts' hooks (set_scripts).
     void set_saves(SceneSaves* saves);
+    // Optional shared renderer/job/controller services; otherwise a native
+    // workflow service is made automatically on the first update.
+    void set_workflows(std::shared_ptr<ScriptWorkflows2D> workflows);
+    std::shared_ptr<ScriptWorkflows2D> workflows() const;
 
 private:
     struct Impl;

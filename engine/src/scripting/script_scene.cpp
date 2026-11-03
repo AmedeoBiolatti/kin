@@ -1,18 +1,17 @@
-#include <kin/scripting/script_scene.hpp>
-
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <kin/core/json.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/scripting/script_engine.hpp>
-
-#include <algorithm>
-#include <cctype>
-#include <filesystem>
+#include <kin/scripting/script_scene.hpp>
+#include <kin/scripting/workflows2d.hpp>
 #include <optional>
-#include <system_error>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -230,6 +229,8 @@ ScriptScene::~ScriptScene() {
 }
 
 void ScriptScene::on_enter(SceneContext& ctx) {
+    if (_script && _script->workflows())
+        _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
     if (_script && !_script->call_on_enter(ctx)) {
         set_script_error(_script->last_error(), "on_enter");
         KIN_LOG_ERROR_F("script", _last_error, (LogFields{{.name = "path", .value = resolved_script_path().string()}}));
@@ -244,6 +245,8 @@ void ScriptScene::on_exit(SceneContext& ctx) {
 }
 
 void ScriptScene::update(SceneContext& ctx) {
+    if (_script && _script->workflows())
+        _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
     if (_config.before_update) {
         _config.before_update(*this, ctx);
     }

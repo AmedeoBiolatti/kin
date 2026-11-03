@@ -18,6 +18,20 @@ struct SkeletonAnimator2D {
     f32 speed = 1, time = 0;
     bool playing = true, loop = true, finished = false;
     std::string current;
+    f32 fade_seconds = 0;
+    std::string blend_space;
+    Vec2f blend_position{};
+    f32 blend_cycle_seconds = 1;
+    SkeletonPose2D fade_from;
+    SkeletonPose2D base_pose; // excludes layers and IK, including during interrupted fades
+    f32 fade_elapsed = 0;
+    std::shared_ptr<const SkeletonAsset2D> current_rig;
+};
+struct SkeletonLayer2D {
+    std::string animation, bone;
+    f32 speed = 1, time = 0, weight = 1;
+    bool playing = true, loop = true, additive = false, include_children = true;
+    std::string current;
 };
 struct SkeletonIK2D {
     std::string root, tip;

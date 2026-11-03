@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 namespace kin {
 
 class IAssetStorage {
 public:
+    std::uint64_t resident_bytes = 0, last_access = 0;
+    bool size_estimated = true;
     virtual ~IAssetStorage() = default;
     virtual bool loaded() const = 0;
     virtual void clear_loaded() = 0;

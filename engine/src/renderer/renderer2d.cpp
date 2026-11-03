@@ -1170,8 +1170,14 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         // descriptor declares (2 for the two-input combine/crossfade shaders).
         const char* file = nullptr;
         u32 samplers = 1;
+        u32 buffers = 0;
         switch (id) {
         case BuiltinShader::Ascii: file = "pp_ascii.frag.spv"; break;
+        case BuiltinShader::NormalSprite2D:
+            file = "normal_sprite.frag.spv";
+            samplers = 3;
+            buffers = 1;
+            break;
         case BuiltinShader::Vignette: file = "pp_vignette.frag.spv"; break;
         case BuiltinShader::ColorGrade: file = "pp_color_grade.frag.spv"; break;
         case BuiltinShader::Scanline: file = "pp_scanline.frag.spv"; break;
@@ -1191,6 +1197,7 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
                 ShaderDesc desc;
                 desc.spirv = {bytes.data(), static_cast<u32>(bytes.size())};
                 desc.num_samplers = samplers;
+                desc.num_storage_buffers = buffers;
                 desc.num_uniform_buffers = 1;
                 handle = create_shader(desc);
             } else {

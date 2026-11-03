@@ -17,6 +17,7 @@ namespace kin {
 class JsonWriter;
 class ScriptScene;
 class ScriptComponentRegistry;
+class ScriptWorkflows2D;
 
 struct ScriptOwned {
     i32 marker = 1;
@@ -32,6 +33,7 @@ struct ScriptSceneBindings {
     std::function<void()> clear_entities;
     std::function<void(Color)> set_background;
     std::function<void()> mark_render_dirty;
+    std::shared_ptr<ScriptWorkflows2D> workflows;
 };
 
 struct ScriptFrameContext {
@@ -66,6 +68,7 @@ public:
 
     const std::string& last_error() const { return _last_error; }
     const std::vector<std::filesystem::path>& script_dependencies() const;
+    std::shared_ptr<ScriptWorkflows2D> workflows() const;
 
 private:
     template <typename... Args>

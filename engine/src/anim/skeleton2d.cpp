@@ -91,6 +91,11 @@ bool validate_skeleton2d(const SkeletonAsset2D& a, std::string& error) {
             }
         }
     }
+    if (a.blend_spaces.size() > 256)
+        return fail("too many blend spaces");
+    for (const auto& [name, space] : a.blend_spaces)
+        if (name.empty() || !validate_skeleton_blend_space2d(a, space, error))
+            return false;
     error.clear();
     return true;
 }
@@ -301,6 +306,28 @@ std::optional<SkeletonAsset2D> parse_skeleton2d(std::string_view text, std::stri
                     clip.tracks.push_back(std::move(track));
                 }
                 a.clips.emplace(name, std::move(clip));
+            }
+        }
+        if (const auto* spaces = doc.find("blend_spaces")) {
+            if (!spaces->is_object() || spaces->members().size() > 256)
+                throw std::runtime_error("invalid blend spaces");
+            for (const auto& [name, value] : spaces->members()) {
+                SkeletonBlendSpace2D space;
+                for (const auto& p : array(value, "points", 64))
+                    space.points.push_back({vector(p, "position"), p.string_at("clip")});
+                for (const auto& t : array(value, "triangles", 128)) {
+                    if (!t.is_array() || t.items().size() != 3)
+                        throw std::runtime_error("invalid blend-space triangle");
+                    std::array<u32, 3> triangle;
+                    for (std::size_t i = 0; i < 3; ++i) {
+                        const auto n = t.items()[i].as_number(-1);
+                        if (n < 0 || n >= space.points.size() || std::floor(n) != n)
+                            throw std::runtime_error("invalid blend-space index");
+                        triangle[i] = static_cast<u32>(n);
+                    }
+                    space.triangles.push_back(triangle);
+                }
+                a.blend_spaces.emplace(name, std::move(space));
             }
         }
         if (!validate_skeleton2d(a, error))
