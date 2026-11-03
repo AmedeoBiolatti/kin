@@ -23,6 +23,7 @@
 namespace kin {
 
 class AssetServer;
+struct AutomationRecorder;
 
 enum class ServerMode {
     // Time only advances when the client calls sim.tick. Single-threaded,
@@ -77,6 +78,14 @@ public:
     f32 fixed_dt() const { return _fixed_dt; }
     i64 frame() const { return _frame; }
     const RunReport& report() const { return _report; }
+    void start_recording(const std::filesystem::path& path, const GameInfo* game = nullptr,
+                         std::optional<u64> seed = {});
+    void set_automation_mode(std::string_view mode) { _automation_mode = mode; }
+    const std::string& automation_mode() const { return _automation_mode; }
+    bool is_recording() const { return _recording != nullptr; }
+    void stop_recording() { _recording.reset(); }
+    void begin_record_command(std::string_view method, const JsonValue& params);
+    void record_command(std::string_view method, const JsonValue& params, const ServerResponse& response);
 
     // Advance exactly one fixed-timestep frame. Queued input actions are applied
     // immediately after begin_frame so the scene observes them this frame.
@@ -179,6 +188,8 @@ private:
     std::deque<FrameTiming> _timings;
     i64 _timed_frames = 0; // frames recorded, the forgotten too
     std::function<void(SceneManager&)> _reset_scenes;
+    std::shared_ptr<AutomationRecorder> _recording;
+    std::string _automation_mode = "driven";
 };
 
 // Routes one command (method + params) to its handler. Transport-agnostic: the
@@ -207,6 +218,7 @@ struct ServerConfig {
     // so existing positional aggregate initialization remains source-compatible.
     AssetServer* asset_server = nullptr;
     bool rendering_3d = false;
+    std::filesystem::path automation_record_path;
 };
 
 // Runs the game as a long-lived command server. Returns a process exit code.

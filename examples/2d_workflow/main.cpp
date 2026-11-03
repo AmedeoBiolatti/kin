@@ -3,13 +3,17 @@
 #include <cmath>
 #include <cstdio>
 #include <kin/assets/content.hpp>
+#include <kin/core/json.hpp>
 #include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/lighting.hpp>
 #include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/skeleton2d.hpp>
 #include <kin/pathfinding/navigation2d.hpp>
 #include <kin/platform/app.hpp>
+#include <kin/platform/input_router.hpp>
 #include <kin/platform/user_data.hpp>
+#include <kin/runtime/run_report.hpp>
+#include <kin/runtime/scene_app.hpp>
 #include <kin/scene/scene_preload2d.hpp>
 #include <kin/scripting/script_engine.hpp>
 #include <kin/scripting/workflows2d.hpp>
@@ -42,7 +46,7 @@ public:
             if (y < 18 || y >= 21)
                 grid->blocked[y * 44 + 22] = 1;
         navigation = std::make_unique<Navigation2D>(world, grid, NavigationOptions2D{.jobs = &jobs});
-        player = world.entities().create({.name = "Player"});
+        player = world.entities().create({.name = "Player", .authored_id = "player"});
         player.set(Transform2D{.pos = {136, 304}});
         player.set(SkeletonRenderer2D{.asset = {"hero.kinskel"}});
         player.set(SkeletonAnimator2D{
@@ -98,10 +102,12 @@ public:
         });
         require(script->load_file(root, "game.lua"), script->last_error());
         require(script->call_on_load({.world = &world, .workflows = services}), script->last_error());
+        sync_input_map();
         ui.set_controller_navigation({});
     }
     void update(f32 dt) {
         require(script->call_update({.dt = dt, .input = &app.input(), .app = &app}), script->last_error());
+        sync_input_map();
         while (auto next = services->take_scene()) {
             room = std::move(next);
             ++commits;
@@ -122,13 +128,16 @@ public:
         if (++frames % 60 == 0)
             assets.reload_changed();
     }
-    void render() {
+    void render(bool present = true) {
         renderer.clear({13, 21, 32, 255});
         if (room)
             render_world(room->ecs(), renderer);
         render_world(world, renderer);
         renderer.fill_rect({704, 0, 320, 640}, {19, 30, 44, 255});
         ui.begin(app.input(), renderer, 1.0f / 60);
+        const auto panel = ui2::make_id("control-room");
+        ui.describe(panel, "group", "Control room", {704, 0, 320, 640});
+        ui.semantic_key(panel, "control_room");
         label("KIN 2D WORKSHOP", {24, 20}, 2.5f);
         label("Move: WASD / left stick   Fire: Space / A", {24, 590}, 1.7f);
         label("Drones find the gap. Pulse them to score.", {24, 614}, 1.5f);
@@ -153,6 +162,8 @@ public:
                            .label = "Reduced motion",
                            .value = ui.reduced_motion()};
         ui2::run(ui, motion);
+        ui.semantic_key(motion.id, "reduced_motion");
+        ui.semantic_parent(motion.id, panel);
         if (motion.changed)
             ui.set_reduced_motion(motion.value);
         label("ACTOR ASSET CACHE", {724, 360}, 1.7f);
@@ -189,7 +200,8 @@ public:
             require(save_image(Image{size, std::move(pixels)}, screenshot), "screenshot write failed");
             screenshot.clear();
         }
-        renderer.present();
+        if (present)
+            renderer.present();
     }
     void action(const std::string& selector, ui2::SemanticAction action = ui2::SemanticAction::Click) {
         std::string error;
@@ -213,8 +225,39 @@ public:
                     recycled, rooms, replans, semantic_actions);
     }
     void capture(std::filesystem::path path) { screenshot = std::move(path); }
+    kin::EcsWorld& ecs() { return world; }
+    ui2::Context& interface() { return ui; }
+    void write_report(JsonWriter& json) const {
+        const auto position = player.get<Transform2D>()->pos;
+        json.field("shots", shots)
+            .field("recycled", recycled)
+            .field("active", active)
+            .field("score", score)
+            .field("rooms", rooms)
+            .field("commits", commits)
+            .field("replans", replans)
+            .field("paused", paused)
+            .field("progress", progress)
+            .field("reduced_motion", ui.reduced_motion())
+            .field("script_error", script->last_error());
+        json.key("player").begin_object().field("x", position.x).field("y", position.y).end_object();
+        const auto stats = jobs.stats();
+        json.key("jobs")
+            .begin_object()
+            .field("queued", static_cast<u64>(stats.queued))
+            .field("running", static_cast<u64>(stats.running))
+            .field("awaiting_pump", static_cast<u64>(stats.awaiting_pump))
+            .end_object();
+    }
 
 private:
+    void sync_input_map() {
+        if (const auto* play = services->input_router().layer("play")) {
+            auto map = play->map;
+            map.bind("next_room", Key::N);
+            app.input().set_map(std::move(map));
+        }
+    }
     void move(f32 x, f32 y, f32 dt) {
         auto* t = player.get_mut<Transform2D>();
         const Vec2f next{std::clamp(t->pos.x + x * 140 * dt, 40.0f, 668.0f),
@@ -235,8 +278,16 @@ private:
         return false;
     }
     bool button(std::string text, Rectf bounds) {
-        ui2::Button button{.id = ui2::make_id(text), .bounds = bounds, .label = std::move(text)};
+        const auto key = text == "Pause" || text == "Resume" ? "pause"
+                         : text == "Fire pulse"              ? "fire"
+                         : text == "Rebind Fire"             ? "rebind"
+                         : text == "Next room"               ? "next_room"
+                         : text == "Cancel"                  ? "cancel_load"
+                                                             : "memory_budget";
+        ui2::Button button{.id = ui2::make_id(key), .bounds = bounds, .label = std::move(text)};
+        ui.semantic_key(button.id, key);
         ui2::run(ui, button);
+        ui.semantic_parent(button.id, ui2::make_id("control-room"));
         return button.clicked;
     }
     void label(std::string text, Vec2f pos, f32 scale) {
@@ -272,6 +323,40 @@ private:
     int shots = 0, recycled = 0, active = 0, score = 0, rooms = 0, commits = 0, replans = 0, semantic_actions = 0,
         frames = 0;
 };
+class WorkshopScene final : public Scene {
+public:
+    explicit WorkshopScene(std::filesystem::path root) : root(std::move(root)) {}
+    std::string_view name() const override { return "Workshop"; }
+    void on_enter(SceneContext& ctx) override {
+        game = std::make_unique<Workshop>(ctx.app, ctx.window, ctx.renderer, root);
+    }
+    void update(SceneContext& ctx) override {
+        try {
+            game->update(ctx.dt);
+        } catch (const std::exception& error) {
+            if (ctx.report)
+                ctx.report->fail(error.what());
+            else
+                throw;
+        }
+    }
+    void render(SceneContext&) override { game->render(false); }
+    kin::EcsWorld* world() override { return game ? &game->ecs() : nullptr; }
+    ui2::Context* ui_context() override { return game ? &game->interface() : nullptr; }
+    void write_report(JsonWriter& json) const override {
+        if (game)
+            game->write_report(json);
+    }
+    void collect_actions(InputActionContext& actions) const override {
+        actions.add("fire", "Fire pulse");
+        actions.add("pause", "Pause/resume");
+        actions.add("next_room", "Load next room");
+    }
+
+private:
+    std::filesystem::path root;
+    std::unique_ptr<Workshop> game;
+};
 } // namespace
 int main(int argc, char** argv) {
     try {
@@ -294,6 +379,29 @@ int main(int argc, char** argv) {
             auto archive = kin::ContentPack::open(pack, &error);
             require(archive != nullptr, error);
             kin::mount_content_pack(root, archive);
+        }
+        auto headless = kin::parse_headless_options(argc, argv);
+        if (headless.server || headless.inspect) {
+            const bool server = headless.server;
+            kin::SceneManager scenes;
+            auto factory = [root](kin::SceneManager& target) { target.push(std::make_unique<WorkshopScene>(root)); };
+            kin::GameInfo info;
+            info.id = "kin.workshop";
+            info.title = "Kin 2D Workshop";
+            info.version = KIN_GAME_VERSION;
+            factory(scenes);
+            if (server)
+                kin::set_user_data_dir_override(std::filesystem::current_path() / "user-data");
+            const auto result =
+                kin::run_scene_app({.window = {.title = "Kin 2D Workshop", .width = 1024, .height = 640},
+                                    .headless = std::move(headless),
+                                    .game = &info,
+                                    .render_headless = true,
+                                    .reset_scenes = factory},
+                                   scenes);
+            if (server)
+                kin::clear_user_data_dir_override();
+            return result;
         }
         auto profile = std::filesystem::temp_directory_path() /
                        ("kin-workshop-test-profile-" +

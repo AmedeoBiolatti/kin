@@ -47,6 +47,9 @@ endfunction()
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME kin-automation-python
+        COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/automation" -v)
+    set_tests_properties(kin-automation-python PROPERTIES TIMEOUT 60)
     kin_add_script_test(kin-rendering-ci-python
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/rendering_ci_tests.py")
     kin_add_script_test(kin-eval-python
@@ -607,6 +610,7 @@ kin_add_component_test(RENDER_PROBE kin_render_probe_tests kin-render-probe SOUR
 kin_add_component_test(DETERMINISM_CHECK kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)
 
 kin_add_component_test(SCENE_SERVER kin_server_tests kin-server SOURCES server_tests.cpp)
+kin_add_component_test(SCENE_SERVER kin_automation_tests kin-automation SOURCES automation_tests.cpp)
 
 kin_add_test(kin_scene_tests kin-scene SOURCES scene_tests.cpp)
 

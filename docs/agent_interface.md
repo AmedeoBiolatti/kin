@@ -7,6 +7,9 @@ This is the reference for the headless and server features. For the testing
 workflow, see [testing.md](testing.md); for the design philosophy, see
 [manifest.md](manifest.md).
 
+For JSON/Lua scenarios, bounded conditions, recording/replay and failure traces,
+see [gameplay automation](automation.md).
+
 Every game built on `run_scene_app` gets this interface from the shared runtime
 flags.
 
@@ -135,19 +138,24 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 
 | Method | Params | Returns |
 |---|---|---|
+| `server.schema` | none | Versioned `kin.automation/1` request/result schemas, method effects and mode flags. |
+| `server.capabilities` | none | Current scene providers, available methods, renderer, fixed dt and RNG key. |
+| `automation.snapshot` | `{world?}` | Frame/failure status, all scene reports/UI and optional registered ECS state. |
 | `game.info` | none | Metadata: id, title, version, window, tags, fields. |
 | `scene.stack` | none | All scenes with index, name, flags, and `has_world`. |
 | `scene.current` | none | Top scene name plus its `write_report` state. |
 | `scene.actions` | none | Available input actions and bindings. |
 | `world.snapshot` | `{scene?, animations?}` | Flecs world JSON plus animation snapshots unless `animations:false`. ECS scenes only; without `scene`, the topmost scene with a world (under overlays such as transitions). |
+| `world.query` | `{scene?, selector?, limit?}` | Filter by ID/authored ID/name/enabled and all/none registered component names; matching count, truncation and entities with decimal string IDs/64-bit fields. |
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
 | `ui.snapshot` | `{scene?}` | Semantic ui2 tree from `Scene::ui_context()`: IDs, labels, roles, values, bounds and interaction flags. |
-| `ui.action` | `{scene?, id, action?, text?}` | Queue `click` (default), `focus`, or `set_text` by author key, exact label or numeric string ID. |
+| `ui.query` | `{scene?, selector?}` | Exact semantic predicates with recursive ancestor `within` scope. |
+| `ui.action` | `{scene?, id?, selector?, action?, text?}` | Queue `click` (default), `focus`, or `set_text`; choose exactly one legacy ID lookup or unique structured selector. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
 | `view.scene` | `{path, content?}` | The top scene shows the scene file `path` in place of its own, as it reads its own (`Scene::view_scene`; a game says how). |
 | `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit; write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |
 | `sim.tick` | `{count?}` | Advance N fixed frames, default 1. Returns frame counter and failure flag. |
-| `sim.reset` | `{seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |
+| `sim.reset` | `{seed?}` | Rebuild scenes, zero frame/report, clear queued/held input while preserving its map; optionally reseed (decimal string above 2^53-1). |
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
 | `input.mouse` | `{x, y, button?, mode?, wheel?, space?, dx?, dy?}` | Move the pointer; optionally click or scroll. `dx`/`dy` (without `x`/`y` if wanted) move the mouse by that many window pixels, as relative mouse mode reports it: a first-person camera turns. |
 | `input.text` | `{text}` | Deliver text input for the next tick. |

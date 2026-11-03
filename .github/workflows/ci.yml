@@ -97,6 +97,8 @@ jobs:
       - uses: ./.github/actions/ccache
         with:
           key: Linux 2D-only build
+      - name: Install 2D import dependencies
+        run: python3 -m pip install -r tools/requirements-imports.txt
       - name: Configure
         env:
           CC: gcc-13
@@ -106,6 +108,13 @@ jobs:
         run: cmake --build --preset 2d
       - name: Test
         run: ctest --preset 2d --timeout 300
+      - name: Upload failed gameplay traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-2d
+          path: build-2d/examples/2d_workflow/automation
+          if-no-files-found: ignore
 
   build:
     needs: select-run
@@ -201,6 +210,8 @@ jobs:
         if: runner.os == 'Linux'
         with:
           packages: glslc
+      - name: Install 2D import dependencies
+        run: python -m pip install -r tools/requirements-imports.txt
 
       - uses: ./.github/actions/ccache
         with:
@@ -243,6 +254,13 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.config || 'Release' }} --output-on-failure -j 4 --timeout 300
+      - name: Upload failed gameplay traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-${{ matrix.name }}
+          path: build/examples/2d_workflow/automation
+          if-no-files-found: ignore
 
       - name: Package recommended SDL software export
         if: matrix.preset == 'hex-shipping'
@@ -448,6 +466,8 @@ jobs:
       - uses: ./.github/actions/linux-deps
         with:
           packages: mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
+      - name: Install 2D import dependencies
+        run: python3 -m pip install -r tools/requirements-imports.txt
 
       # The shards compile the same units, so they share one cache.
       - uses: ./.github/actions/ccache
@@ -480,6 +500,13 @@ jobs:
         env:
           SKIP: ${{ matrix.skip }}
         run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' ${SKIP:+-E "$SKIP"} --output-on-failure --timeout 300 --no-tests=error --output-junit "$PWD/build/ctest.xml"
+      - name: Upload failed gameplay traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-${{ matrix.artifact }}
+          path: build/examples/2d_workflow/automation
+          if-no-files-found: ignore
 
       - name: Rendering graphs with Vulkan core validation
         if: matrix.graphs

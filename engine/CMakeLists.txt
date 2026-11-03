@@ -294,6 +294,7 @@ endif()
 if(KIN_ENABLE_SCENE_SERVER)
     target_sources(kin_engine PRIVATE
         src/runtime/scene_server.cpp
+        src/runtime/automation.cpp
     )
 endif()
 

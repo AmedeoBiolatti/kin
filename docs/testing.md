@@ -30,6 +30,11 @@ For GPU-required 3D tests, software Vulkan, core/synchronization validation,
 sanitizers and CI coverage, see the [rendering validation guide](rendering_validation.md).
 Dummy-driver test passes do not exercise GPU rendering.
 
+For reusable gameplay scenarios, bounded tick conditions, session replay and
+failure bundles, see [gameplay automation](automation.md). The Workshop's
+`kin-workflow-automation` CTest runs JSON/Lua scenarios, both recording paths,
+replay and failure capture through real game processes.
+
 ## Building Tests
 
 Build one test executable:
@@ -489,7 +494,11 @@ response is one line: `{"id": <echoed>, "result": {...}}` or
 | `scene.actions` | Available input actions and their bindings. |
 | `world.snapshot {scene?, animations?}` | Flecs world JSON for an ECS scene (see below). |
 | `animation.diagnostics` | Unresolved-reference diagnostics from the scene's animation library. |
-| `ui.snapshot {scene?}` | Unavailable after legacy `kin/ui` removal; use `world.snapshot` or scene reports. |
+| `ui.snapshot {scene?}` | ui2 semantic elements, bounds, state and supported actions from the scene's UI context. |
+| `ui.query {scene?, selector?}` / `ui.action {scene?, selector, action?}` | Scoped semantic queries and unique, deferred actions. |
+| `world.query {scene?, selector?, limit?}` | Filter registered entities/components by authored ID, name and component names. |
+| `server.schema` / `server.capabilities` | Request/result schemas, method effects and current provider/mode availability. |
+| `automation.snapshot {world?}` | Scene reports/UI and optionally registered ECS state for trace checkpoints. |
 | `view.screenshot {path?}` | Render the current scene and save a PNG; returns path + dimensions. |
 | `view.scene {path, content?}` | The top scene shows another scene file (`Scene::view_scene`); for tools' scene views. |
 | `view.frame {path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene through the given camera and write raw RGBA; returns path + dimensions. |

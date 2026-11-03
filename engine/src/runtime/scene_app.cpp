@@ -176,6 +176,12 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--headless") {
             options.enabled = true;
+        } else if (arg.starts_with("--automation-record=")) {
+            options.automation_record_path = arg.substr(20);
+            options.server = true;
+        } else if (arg == "--automation-record" && i + 1 < argc) {
+            options.automation_record_path = argv[++i];
+            options.server = true;
         } else if (arg == "--render") {
             options.render = true;
         } else if (arg == "--list-actions") {
@@ -707,6 +713,7 @@ struct SceneAppSession::Impl {
                 .reset_scenes = config.reset_scenes,
                 .asset_server = config.asset_server,
                 .rendering_3d = config.rendering_3d,
+                .automation_record_path = config.headless.automation_record_path,
             };
             return run_scene_server(server, scenes);
 #endif

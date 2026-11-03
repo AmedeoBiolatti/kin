@@ -143,7 +143,7 @@ kin_declare_component(PHYSICS DEFAULT ON DESCRIPTION "Build Box2D physics and EC
     EXTERNAL_DEPENDENCIES Box2D TESTS kin-physics kin-ecs-physics kin-physics-component kin-physics-shapes kin-ecs-physics-shapes kin-physics-character)
 kin_declare_component(AUDIO DEFAULT ON DESCRIPTION "Build audio playback, catalogs and ECS integration"
     EXTERNAL_DEPENDENCIES SDL3 TESTS kin-audio kin-audio-component)
-kin_declare_component(SCENE_SERVER DEFAULT ${KIN_ENABLE_AGENT_SERVER} DESCRIPTION "Build the scene automation server (--server)" TESTS kin-server)
+kin_declare_component(SCENE_SERVER DEFAULT ${KIN_ENABLE_AGENT_SERVER} DESCRIPTION "Build the scene automation server (--server)" TESTS kin-server kin-automation)
 kin_declare_component(DEBUG_OVERLAY DEFAULT ${_kin_developer_default} DESCRIPTION "Build the runtime debug overlay UI and shortcuts")
 kin_declare_component(IMAGE_IO DEFAULT ON DESCRIPTION "Build image file codecs and PNG screenshots"
     EXTERNAL_DEPENDENCIES SDL3_image)

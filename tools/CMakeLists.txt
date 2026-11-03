@@ -7,6 +7,10 @@ target_compile_options(kin_pack PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/W4>
 )
 kin_enable_release_optimizations(kin_pack)
+if(KIN_ENABLE_SCRIPTING)
+    add_executable(kin_scenario kin_scenario/main.cpp)
+    target_link_libraries(kin_scenario PRIVATE kin::scripting)
+endif()
 
 if(KIN_EXPERIMENTAL_3D)
     add_executable(kin_vision3d vision3d/main.cpp)

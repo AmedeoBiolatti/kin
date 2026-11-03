@@ -42,3 +42,20 @@ commits, navigation through the gap, six semantic controls and retained assets
 under budget pressure. It runs as `kin-workflow-demo` in CTest. Native SDL_GPU
 runs also assert that the lighting shader executes. Add `--screenshot output.png`
 to save its final frame, or `--content path` to select another content root.
+
+The Workshop also exposes the standard driven scene server and read-only
+windowed inspector. [Gameplay scenarios](../../docs/automation.md) exercise
+scoped UI actions, mapped input, world queries, loading, pause and reset:
+
+```sh
+cmake --build build --target kin_scenario
+python3 tools/automation/kin_test.py run examples/2d_workflow/tests/workshop.json \
+  --out /tmp/workshop-scenario --trace-world --game build/bin/kin_2d_workflow
+python3 tools/automation/kin_test.py replay /tmp/workshop-scenario/commands.jsonl \
+  --out /tmp/workshop-replay --game build/bin/kin_2d_workflow
+ctest --test-dir build -R kin-workflow-automation --output-on-failure
+```
+
+`tests/workshop.lua` uses the same runner with `--lua-compiler build/bin/kin_scenario`.
+`--automation-record session.jsonl --seed=7` writes a native driven RPC recording.
+Server sessions keep rebinding profiles under the session's `user-data` directory.

@@ -28,6 +28,14 @@ releases may change APIs.
   so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
+- [Gameplay automation](automation.md): JSON/Lua scenarios with bounded tick
+  conditions, discoverable request/result schemas, scoped semantic UI selectors,
+  targeted world queries, flushed command recording/replay, declared input
+  identities, JUnit results and offline failure traces. Workshop CTests exercise
+  the complete process/compiler/recording workflow; CI uploads failure evidence.
+- Scene-server reset clears held/queued input while retaining its action map;
+  reset seeds accept decimal strings for the full unsigned 64-bit range.
+
 - [Lua 2D workflows](lua_2d_workflows.md) in both scene and entity scripts:
   checked property tweens, input contexts/rebinding and saved profiles, prefab
   leases, staged scene loads, controller ownership/rumble, and memory diagnostics.

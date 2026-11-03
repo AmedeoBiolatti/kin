@@ -43,6 +43,7 @@ struct HeadlessOptions {
     // headless run. server_mode is "driven" (default) or "realtime";
     // server_transport is "stdio" (default) or "http".
     bool server = false;
+    std::string automation_record_path;
     std::string server_mode = "driven";
     std::string server_transport = "stdio";
     i32 server_port = 8080;

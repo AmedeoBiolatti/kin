@@ -4,10 +4,14 @@
 #include <kin/render3d/renderer3d.hpp>
 #endif
 
+#include "automation_internal.hpp"
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -23,7 +27,6 @@
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/render_view.hpp>
-#include <cctype>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -731,7 +734,18 @@ ServerResponse handle_sim_reset(ServerContext& ctx, const JsonValue& params) {
     }
     std::optional<u64> seed;
     if (const JsonValue* value = params.find("seed")) {
-        seed = static_cast<u64>(value->as_int());
+        if (value->is_string()) {
+            u64 parsed = 0;
+            const auto& text = value->as_string();
+            const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+            if (result.ec != std::errc{} || result.ptr != text.data() + text.size())
+                return error_result("seed must be an unsigned decimal integer");
+            seed = parsed;
+        } else if (value->is_number() && std::isfinite(value->as_number()) && value->as_number() >= 0 &&
+                   value->as_number() <= 9007199254740991.0 && std::floor(value->as_number()) == value->as_number())
+            seed = static_cast<u64>(value->as_number());
+        else
+            return error_result("seed must be an exact integer; use a decimal string above 2^53-1");
     }
     ctx.reset(seed);
     KIN_LOG_INFO_F("server",
@@ -821,6 +835,10 @@ ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) 
 }
 
 ServerResponse handle_ui(ServerContext& ctx, const JsonValue& params, bool action, bool initialize = true) {
+    if (const auto* scene = params.find("scene");
+        scene && (!scene->is_number() || !std::isfinite(scene->as_number()) || scene->as_number() < 0 ||
+                  scene->as_number() >= ctx.scenes().depth() || std::floor(scene->as_number()) != scene->as_number()))
+        return error_result("scene must be an existing integer index");
     const i32 index = static_cast<i32>(params.int_at("scene", ctx.scenes().depth() - 1));
     Scene* scene = ctx.scenes().at_mut(index);
     if (!scene || !scene->ui_context()) return error_result("scene has no semantic UI (Scene::ui_context)");
@@ -843,7 +861,14 @@ ServerResponse handle_ui(ServerContext& ctx, const JsonValue& params, bool actio
             name != "set_number")
             return error_result("UI action must be click, focus, set_text, increment, decrement or set_number");
         std::string error;
-        const auto target = ui.resolve_action(params.string_at("id"), kind, error);
+        if (params.contains("id") && params.contains("selector"))
+            return error_result("use id or selector, not both");
+        const auto structured =
+            params.contains("selector") ? automation_ui_selector(ctx, params, error) : std::optional<ui2::Id>{};
+        if (params.contains("selector") && !structured)
+            return error_result(error);
+        const auto target =
+            ui.resolve_action(structured ? std::to_string(structured->value) : params.string_at("id"), kind, error);
         if (!target) return error_result(error);
         const std::string text = params.string_at("text");
         if (!ctx.queue_ui_action([&ctx, scene, index, id = *target, kind, text] {
@@ -1184,6 +1209,30 @@ void ServerContext::step() {
         .present_ms = ms(end - present_start),
     });
     ++_frame;
+    if (_recording) {
+        _recording->frame(*this);
+        if (!_recording->good())
+            _report.fail(_recording->error);
+    }
+}
+
+void ServerContext::start_recording(const std::filesystem::path& path, const GameInfo* game, std::optional<u64> seed) {
+    if (_recording)
+        throw std::logic_error("automation recording is already active");
+    _recording = std::make_shared<AutomationRecorder>(path, *this, game, seed);
+    if (!_recording->good())
+        throw std::runtime_error(_recording->error);
+}
+void ServerContext::begin_record_command(std::string_view method, const JsonValue& params) {
+    if (_recording)
+        _recording->begin_command(*this, method, params);
+}
+void ServerContext::record_command(std::string_view method, const JsonValue& params, const ServerResponse& response) {
+    if (_recording) {
+        _recording->command(*this, method, params, response);
+        if (!_recording->good())
+            _report.fail(_recording->error);
+    }
 }
 
 void ServerContext::record_frame_timing(FrameTiming timing) {
@@ -1240,16 +1289,22 @@ void ServerContext::reset(std::optional<u64> seed) {
     SceneContext scene_ctx = make_context();
     _scenes.clear();
     _scenes.flush_pending(scene_ctx);
+    const InputMap map = _app.input().map();
+    _app.input() = Input{};
+    _app.input().set_map(map);
+    _tapped_actions.clear();
+    _tapped_buttons.clear();
+    _tapped_keys.clear();
     if (_reset_scenes) {
         _reset_scenes(_scenes);
     }
     _scenes.flush_pending(scene_ctx);
 }
 
-ServerResponse dispatch_server_command(ServerContext& ctx,
-                                       const GameInfo* game,
-                                       std::string_view method,
-                                       const JsonValue& params) {
+static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const GameInfo* game, std::string_view method,
+                                                   const JsonValue& params) {
+    if (auto response = dispatch_automation_command(ctx, game, method, params))
+        return *response;
     if (method == "game.info") {
         return handle_game_info(game, ctx.window_config());
     }
@@ -1312,6 +1367,14 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
         return ok_result("{\"pong\":true}");
     }
     return error_result("unknown method: " + std::string(method));
+}
+
+ServerResponse dispatch_server_command(ServerContext& ctx, const GameInfo* game, std::string_view method,
+                                       const JsonValue& params) {
+    ctx.begin_record_command(method, params);
+    auto response = dispatch_server_command_impl(ctx, game, method, params);
+    ctx.record_command(method, params, response);
+    return response;
 }
 
 namespace {
@@ -1653,6 +1716,10 @@ ServerTransport parse_server_transport(std::string_view text) {
 }
 
 int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
+    if (!config.automation_record_path.empty() && config.mode != ServerMode::Driven) {
+        KIN_LOG_ERROR("server", "automation recording requires driven mode");
+        return 1;
+    }
 #ifndef KIN_EXPERIMENTAL_3D
     if (config.rendering_3d) {
         KIN_LOG_ERROR("server", "3D rendering requested in a 2D-only build");
@@ -1731,6 +1798,16 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
     // Realize the initial scene stack (apply pending push + on_enter) without
     // advancing gameplay, so read endpoints work before the first tick.
     ctx.realize_scenes();
+    ctx.set_automation_mode(config.mode == ServerMode::Driven ? "driven" : "realtime");
+    if (!config.automation_record_path.empty()) {
+        try {
+            ctx.start_recording(config.automation_record_path, config.game, config.seed);
+        } catch (const std::exception& error) {
+            KIN_LOG_ERROR("server", error.what());
+            ctx.shutdown_scenes();
+            return 1;
+        }
+    }
 
     int code = 0;
     if (config.transport == ServerTransport::Http) {
@@ -1939,6 +2016,7 @@ LiveInspector::~LiveInspector() {
 }
 
 void LiveInspector::poll(ServerContext& ctx, const GameInfo* game) {
+    ctx.set_automation_mode("inspect");
     _ctx = &ctx;
     std::deque<std::string> lines;
     bool reading = true;
@@ -2035,6 +2113,8 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
         response = error_result(method + " drives a headless server (--server); this game runs in its window");
     } else if (method == "ui.snapshot") {
         response = handle_ui(ctx, params, false, false); // inspect the last frame without consuming player input
+    } else if (method == "ui.query") {
+        response = *dispatch_automation_command(ctx, game, method, params, false);
     } else {
         response = dispatch_server_command(ctx, game, method, params);
     }
@@ -2048,6 +2128,7 @@ ServerResponse LiveInspector::status(bool stopped) const {
     json.field("frame", _frame);
     json.field("paused", _paused);
     json.field("stopped", stopped);
+    json.field("failed", _ctx && _ctx->report().failed);
     if (_ctx) {
         json.field("fixed_dt", static_cast<f64>(_ctx->fixed_dt()));
         json.field("scene_depth", _ctx->scenes().depth());

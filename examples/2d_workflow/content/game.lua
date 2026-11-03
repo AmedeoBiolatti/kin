@@ -31,7 +31,8 @@ local function fire()
 end
 function update(ctx)
     local command=game.command()
-    local pause_key=paused and input_contexts.pressed('menu','pause') or input_contexts.pressed('play','pause')
+    if command=='' and ctx.input:pressed('next_room') then command='next' end
+    local pause_key=ctx.input:pressed('pause') or (paused and input_contexts.pressed('menu','pause') or input_contexts.pressed('play','pause'))
     if command=='pause' or pause_key then
         paused=not paused
         input_contexts.enable('menu',paused)
@@ -71,7 +72,7 @@ function update(ctx)
         if length>1 then x=x/length;y=y/length end
         if length>.1 then local norm=math.sqrt(x*x+y*y);facing={x=x/norm,y=y/norm} end
         game.move(x,y,ctx.dt)
-        if command=='fire' or input_contexts.pressed('play','fire') then fire() end
+        if command=='fire' or input_contexts.pressed('play','fire') or ctx.input:pressed('fire') then fire() end
     end
     for i=#bullets,1,-1 do
         local bullet=bullets[i]
