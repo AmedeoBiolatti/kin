@@ -102,6 +102,23 @@ std::filesystem::create_directories(dir);
 Clean the directory at the start of tests that assert discovery counts or exact file
 sets. For hot-reload tests, advance the file timestamp explicitly after rewriting.
 
+## Test Profiles
+
+`KIN_TEST_PROFILE` chooses which tests CMake registers (and so builds). `all`, the
+default, registers every test. `config` leaves out the tests listed in
+`KIN_CONFIG_INDEPENDENT_TESTS` in `tests/CMakeLists.txt`: units of pure logic (ECS,
+animation, pathfinding, prefabs, ...) and the Python checks of the tools, whose results
+cannot depend on how kin is configured.
+
+CI uses `config` for the builds that exist to check one set of options (the minimal
+shipping build, the software-renderer and compact exports, direct SDL on Windows). They
+build with link-time optimization, where every test executable costs a link of the
+whole engine, and the default builds (`Linux GCC`, `Linux Clang`, `Windows MSVC`, the
+2D-only build) already run the same tests. A test whose outcome can depend on an option
+must not be added to the list: one that reads a `KIN_ENABLE_*` macro, or goes through the
+renderer, image or font support, the platform layer, a shipping feature or a component.
+A new test is registered in every build until someone lists it.
+
 ## Failure Workflow
 
 Run the last failed tests:

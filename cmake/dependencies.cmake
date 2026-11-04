@@ -330,6 +330,11 @@ if(KIN_ENABLE_IMAGE_IO)
         GIT_REPOSITORY https://github.com/libsdl-org/SDL_image.git
         GIT_TAG release-3.4.4
         GIT_SHALLOW TRUE
+        # Only the vendored libraries for the formats left on above (JPEG and PNG).
+        # AVIF, JXL, TIF and WEBP are off, and their submodules (aom, dav1d,
+        # libjxl, ...) are most of a full checkout's ~1 GB: a configure spent
+        # about three minutes cloning them.
+        GIT_SUBMODULES external/jpeg external/libpng external/zlib
     )
 
     FetchContent_MakeAvailable(SDL3_image)

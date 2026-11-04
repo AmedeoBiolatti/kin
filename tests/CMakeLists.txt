@@ -6,13 +6,54 @@ add_compile_options(
     "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
 )
 
+# KIN_TEST_PROFILE=config (set by the CI builds that check one option set, such
+# as a shipping or size-optimized configuration) skips the tests listed here.
+# Each is a unit of pure logic, or a check of a tool or CMake script that
+# configures its own projects: its result is the same in every configuration,
+# and the default build and the full CI builds run it. A test whose outcome
+# depends on an option (renderer, image or font support, platform layer,
+# shipping features, packaging, a component, or a KIN_ENABLE_* macro in its
+# source) must not be listed.
+if(NOT KIN_TEST_PROFILE MATCHES "^(all|config)$")
+    message(FATAL_ERROR "KIN_TEST_PROFILE must be all or config, not '${KIN_TEST_PROFILE}'")
+endif()
+set(KIN_CONFIG_INDEPENDENT_TESTS
+    kin-anim-core kin-anim-format kin-anim-player kin-anim-state-machine
+    kin-bidi kin-dialogue kin-hex kin-instrumentation kin-jobs kin-serial-jobs
+    kin-math3d kin-navmesh3d kin-owned-scene-session kin-particles kin-path-server
+    kin-pathfinding kin-prefab kin-prefab-structure kin-resource-graph kin-save
+    kin-shapes kin-sprite-animation kin-tilemap kin-tweens
+    kin-ecs kin-ecs-animation kin-ecs-component kin-ecs-editor kin-ecs-entity kin-ecs-events
+    kin-ecs-inspection kin-ecs-lifecycle kin-ecs-spawn kin-ecs-system kin-ecs-time
+    # Python tests of the tools.
+    kin-asset-cooking kin-asset-report kin-bundled-fonts kin-components kin-eval-python
+    kin-release-acceptance-tools kin-release-publishing kin-rendering-ci-python)
+
+function(kin_test_registered test_name result)
+    if(KIN_TEST_PROFILE STREQUAL "config" AND test_name IN_LIST KIN_CONFIG_INDEPENDENT_TESTS)
+        set(${result} FALSE PARENT_SCOPE)
+    else()
+        set(${result} TRUE PARENT_SCOPE)
+    endif()
+endfunction()
+
+# A test that runs a script instead of a test executable.
+function(kin_add_script_test test_name)
+    kin_test_registered(${test_name} registered)
+    if(registered)
+        add_test(NAME ${test_name} COMMAND ${ARGN})
+    endif()
+endfunction()
+
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
-    add_test(NAME kin-rendering-ci-python
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/rendering_ci_tests.py")
-    add_test(NAME kin-eval-python
-        COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/eval" -v)
-    set_tests_properties(kin-eval-python PROPERTIES TIMEOUT 120)
+    kin_add_script_test(kin-rendering-ci-python
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/rendering_ci_tests.py")
+    kin_add_script_test(kin-eval-python
+        "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/eval" -v)
+    if(TEST kin-eval-python)
+        set_tests_properties(kin-eval-python PROPERTIES TIMEOUT 120)
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_GENERATOR STREQUAL "Ninja")
         get_property(component_manifest GLOBAL PROPERTY KIN_COMPONENT_MANIFEST)
         add_test(NAME kin-component-targets
@@ -20,21 +61,25 @@ if(Python3_Interpreter_FOUND)
                 --build "${CMAKE_BINARY_DIR}" --manifest "${component_manifest}"
                 --output "${CMAKE_BINARY_DIR}/component-reports/targets-$<CONFIG>.json")
     endif()
-    add_test(NAME kin-components
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/component_config_tests.py")
-    add_test(NAME kin-release-acceptance-tools
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_acceptance_tests.py")
-    add_test(NAME kin-release-publishing
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_publishing_tests.py")
-    add_test(NAME kin-bundled-fonts
-        COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_bundled_fonts.py")
-    add_test(NAME kin-asset-cooking
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_cooking_tests.py")
-    add_test(NAME kin-asset-report
-        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_report_tests.py")
+    kin_add_script_test(kin-components
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/component_config_tests.py")
+    kin_add_script_test(kin-release-acceptance-tools
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_acceptance_tests.py")
+    kin_add_script_test(kin-release-publishing
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/release_publishing_tests.py")
+    kin_add_script_test(kin-bundled-fonts
+        "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_bundled_fonts.py")
+    kin_add_script_test(kin-asset-cooking
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_cooking_tests.py")
+    kin_add_script_test(kin-asset-report
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_report_tests.py")
 endif()
 
 function(kin_add_test target test_name)
+    kin_test_registered(${test_name} registered)
+    if(NOT registered)
+        return()
+    endif()
     cmake_parse_arguments(TEST "" "LINK_TARGET" "SOURCES;LIBRARIES;DEFINITIONS;COMPILE_OPTIONS" ${ARGN})
     add_executable(${target} ${TEST_SOURCES})
     if(NOT TEST_LINK_TARGET)

@@ -1,0 +1,29 @@
+name: Compiler cache
+description: >-
+  Restores ccache's compiles for this job and, on pushes, saves them. CMake picks
+  ccache up from the CMAKE_C_COMPILER_LAUNCHER and CMAKE_CXX_COMPILER_LAUNCHER
+  environment variables this action sets, for every configure that follows, so
+  presets and -D arguments need no change.
+inputs:
+  key:
+    description: One cache per job; jobs whose compiler flags differ share no hits.
+    required: true
+  max-size:
+    description: ccache's size limit. The repository's caches share 10 GB.
+    default: 400M
+
+runs:
+  using: composite
+  steps:
+    # Pull requests reuse main's cache and never save one: a branch's caches
+    # cannot be read by other branches, so saving them would only crowd main's out.
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ inputs.key }}
+        max-size: ${{ inputs.max-size }}
+        save: ${{ github.event_name == 'push' }}
+    - name: Use ccache for CMake builds
+      shell: bash
+      run: |
+        echo "CMAKE_C_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"
+        echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> "$GITHUB_ENV"

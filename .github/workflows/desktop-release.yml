@@ -1,10 +1,15 @@
 name: Desktop release acceptance
 on:
   workflow_call:
+  # Documentation alone changes no package. (docs/third_party_notices.md is
+  # packaged, so it is included again after the exclusions.) These are not
+  # required checks, so a skipped run does not hold up a merge.
   pull_request:
+    paths: ['**', '!docs/**', '!*.md', 'docs/third_party_notices.md']
   workflow_dispatch:
   push:
     branches: [main, 'ci/**']
+    paths: ['**', '!docs/**', '!*.md', 'docs/third_party_notices.md']
 permissions:
   contents: read
 jobs:
@@ -52,6 +57,11 @@ jobs:
       - name: Configure pinned release policy
         run: cmake --preset ${{ matrix.preset }}
       - name: Build real player package and integration checks
+        env:
+          # The Visual Studio generator compiles one project's sources one at a
+          # time; /MP (the CL variable's options go to every cl.exe) spreads them
+          # over the cores. Not set, it is empty and ignored.
+          CL: ${{ runner.os == 'Windows' && '/MP' || '' }}
         run: cmake --build --preset ${{ matrix.preset }} --parallel 4
       - name: Packaging regressions
         run: ctest --test-dir build/${{ matrix.preset }} -C Release -R "^kin-(desktop-package|examples|components|component-targets|component-config|asset-report|asset-cooking|bundled-fonts|release-acceptance-tools|release-publishing)$" --output-on-failure --timeout 300

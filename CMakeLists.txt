@@ -61,6 +61,12 @@ option(KIN_BUILD_GAMES "Build sample games" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_EXAMPLES "Build interactive performance examples" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_BENCHMARKS "Build benchmark executables" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_TESTS "Build kin's tests (with BUILD_TESTING)" ${PROJECT_IS_TOP_LEVEL})
+# "config" registers only the tests whose result depends on how kin is configured
+# (see tests/CMakeLists.txt), for builds that exist to check one option set. The
+# others behave as in the default build and, with link-time optimization, each
+# costs a link of the whole engine.
+set(KIN_TEST_PROFILE "all" CACHE STRING "Tests to register: all, or config (those that depend on the build's options)")
+set_property(CACHE KIN_TEST_PROFILE PROPERTY STRINGS all config)
 option(KIN_ENABLE_PROFILING "Enable Kin manual profiling macros" OFF)
 option(KIN_ENABLE_RELEASE_PROFILING "Enable Kin manual profiling macros in Release builds" ${_kin_developer_default})
 option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" OFF)
