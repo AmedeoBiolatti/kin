@@ -27,7 +27,7 @@ class Imports(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="kin-import-test-")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()  # Windows may name it short (RUNNER~1)
         self.art = self.root / "art"
         self.art.mkdir()
         self.output = self.root / "content"
@@ -204,21 +204,21 @@ kin_game(check NAME imported IMPORTS "{manifest.as_posix()}")
             self.assertEqual(result.returncode, 0, result.stdout)
 
         run("cmake", "-S", str(project), "-B", str(build), "-DKIN_PACK_CONTENT=OFF", "-DCMAKE_BUILD_TYPE=Release")
-        run("cmake", "--build", str(build), "--target", "check_package")
+        run("cmake", "--build", str(build), "--config", "Release", "--target", "check_package")
         stage = next(path for path in (build / "packages").iterdir() if path.is_dir())
         self.assertEqual((stage / "imported/readme.txt").read_text(), "game content")
         self.assertTrue((stage / "imported" / job["output"]).is_file())
         self.assertFalse((stage / "imported/.kin-import-report.json").exists())
         # An image edit rebuilds the import without a manual configure.
         Image.new("RGBA", (4, 2), (0, 0, 255, 255)).save(self.art / "sheet.png")
-        run("cmake", "--build", str(build), "--target", "check_package")
+        run("cmake", "--build", str(build), "--config", "Release", "--target", "check_package")
         with Image.open(stage / "imported" / job["texture"]) as image:
             self.assertEqual(image.getpixel((2, 2)), (0, 0, 255, 255))
         # A changed manifest changes the output inventory and removes stale assets.
         old_output = job["output"]
         job["output"] = "sprites/renamed.kinsprites"
         self.write("imports.json", {"schema": "kin.imports/1", "imports": [job]})
-        run("cmake", "--build", str(build), "--target", "check_package")
+        run("cmake", "--build", str(build), "--config", "Release", "--target", "check_package")
         self.assertTrue((stage / "imported" / job["output"]).exists())
         self.assertFalse((build / "imported-content/check" / old_output).exists())
 

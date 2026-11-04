@@ -139,8 +139,10 @@ struct LuaLease2D {
                                const auto current = weak.lock();
                                return current && current->resolve(captured);
                            }});
-        if (!result.valid())
-            throw sol::error(result);
+        if (!result.valid()) {
+            sol::error error = result;
+            throw error;
+        }
         return result.get<sol::object>();
     }
 };
@@ -387,7 +389,8 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
             }
             auto result = unwrap(target);
             if (!result.valid()) {
-                throw sol::error(result);
+                sol::error error = result;
+                throw error;
             }
             entity = result.get<EcsEntity>();
         }
