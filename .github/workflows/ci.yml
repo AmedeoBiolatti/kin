@@ -142,6 +142,10 @@ jobs:
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
               -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON -DKIN_PACKAGE_DEBUG_SYMBOLS=ON
+              -DKIN_BUILD_GAME_ECS_GRAPH_DEMO=OFF -DKIN_BUILD_GAME_ECS_PARALLEL_BENCH=OFF
+              -DKIN_BUILD_GAME_ECS_SYSTEMS_DEMO=OFF -DKIN_BUILD_GAME_ISOMETRIC_DEMO=OFF
+              -DKIN_BUILD_GAME_LIGHTING_DEMO=OFF -DKIN_BUILD_GAME_SHAPES_DEMO=OFF
+              -DKIN_BUILD_GAME_TEXT_EDIT_DEMO=OFF
           - name: Linux SDL software shipping baseline
             profile: config
             os: ubuntu-24.04
@@ -398,19 +402,39 @@ jobs:
             build_type: Release
             examples: 'ON'
             tests: '.'
-            skip: '^kin-render3d$'
+            skip: '^kin-render3d-shard-'
             graphs: true
-          - name: Linux GPU (lavapipe, render3d)
-            artifact: gpu-tests-render3d
+          # The three shards of kin-render3d (tests/CMakeLists.txt); a shard
+          # needs only its test executable built.
+          - name: Linux GPU (lavapipe, render3d 1 of 3)
+            artifact: gpu-tests-render3d-1
+            cache: Linux GPU (lavapipe, render3d)
             build_type: Release
             examples: 'OFF'
             target: kin_render3d_tests
-            tests: '^kin-render3d$'
+            tests: '^kin-render3d-shard-0$'
+          - name: Linux GPU (lavapipe, render3d 2 of 3)
+            artifact: gpu-tests-render3d-2
+            cache: Linux GPU (lavapipe, render3d)
+            build_type: Release
+            examples: 'OFF'
+            target: kin_render3d_tests
+            tests: '^kin-render3d-shard-1$'
+          - name: Linux GPU (lavapipe, render3d 3 of 3)
+            artifact: gpu-tests-render3d-3
+            cache: Linux GPU (lavapipe, render3d)
+            build_type: Release
+            examples: 'OFF'
+            target: kin_render3d_tests
+            tests: '^kin-render3d-shard-2$'
           - name: Linux GPU (lavapipe, Debug)
             artifact: gpu-tests-Debug
             build_type: Debug
             examples: 'OFF'
             tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|scene-session3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton|gpu-memory|render3d-.+|(vision3d|outline3d|surface3d|ascii3d|slowlight3d)-graph)$'
+            # render3d-.+ above also matches the shards of the big render3d suite,
+            # which run in the Release jobs only.
+            skip: 'render3d-shard'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -425,9 +449,10 @@ jobs:
         with:
           packages: mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
 
+      # The shards compile the same units, so they share one cache.
       - uses: ./.github/actions/ccache
         with:
-          key: ${{ matrix.name }}
+          key: ${{ matrix.cache || matrix.name }}
 
       - name: Configure
         env:
@@ -439,6 +464,10 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: cmake --build build --parallel 4 ${TARGET:+--target "$TARGET"}
+
+      - name: Every render3d shard has a job
+        if: matrix.graphs
+        run: test "$(ctest --test-dir build -N -R '^kin-render3d-shard-' | grep -c 'Test *#')" -eq 3
 
       - name: Test
         # Release runs every suite with a GPU and the examples enabled, so
@@ -473,8 +502,8 @@ jobs:
           if-no-files-found: warn
 
   # The ruleset requires a check named "Linux GPU (lavapipe)". The Release GPU
-  # jobs above split that work, so this job takes the name and passes when both
-  # of them pass. (The Debug job is not part of it, as before.)
+  # jobs above split that work, so this job takes the name and passes when all
+  # four of them pass. (The Debug job is not part of it, as before.)
   gpu-required:
     name: Linux GPU (lavapipe)
     needs: [select-run, gpu]
@@ -493,8 +522,8 @@ jobs:
             exit 0
           fi
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --paginate \
-            --jq '.jobs[] | select(.name | test("^Linux GPU \\(lavapipe, (Release|render3d)\\)$")) | "\(.name): \(.conclusion)"' | tee jobs.txt
-          test "$(wc -l < jobs.txt)" -eq 2
+            --jq '.jobs[] | select(.name | test("^Linux GPU \\(lavapipe, (Release|render3d [0-9] of 3)\\)$")) | "\(.name): \(.conclusion)"' | tee jobs.txt
+          test "$(wc -l < jobs.txt)" -eq 4
           ! grep -v ': success$' jobs.txt
 
   rendering-sanitizers:

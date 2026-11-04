@@ -431,12 +431,25 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
         DEFINITIONS KIN_TEST_REFERENCE_SCENES="${PROJECT_SOURCE_DIR}/tests/reference/scenes")
     kin_add_test(kin_physics3d_ragdoll_tests kin-physics3d-ragdoll SOURCES physics3d_ragdoll_tests.cpp)
     kin_add_test(kin_physics3d_rope_tests kin-physics3d-rope SOURCES physics3d_rope_tests.cpp)
-    kin_add_test(kin_render3d_tests kin-render3d SOURCES render3d_tests.cpp
-        DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
-                    KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
-    # Some 230 GPU tests: a few minutes on lavapipe here, longer on a CI runner, so
-    # it has its own limit (a TIMEOUT property takes precedence over ctest --timeout).
-    set_tests_properties(kin-render3d PROPERTIES TIMEOUT 1800)
+    # Some 270 tests, most of them GPU: ten minutes on lavapipe on a CI runner. They
+    # are shards of one executable (render3d_tests.cpp, --shard=INDEX/COUNT), so that
+    # CI can run them in parallel jobs: the software GPU already uses every core of
+    # one runner, so shards in one job gain little. ci.yml has a job for each shard
+    # (its "Test" step fails if a shard is missing, and the count is checked there).
+    # A TIMEOUT property takes precedence over ctest --timeout, and a shard is a
+    # fraction of the suite.
+    set(KIN_RENDER3D_TEST_SHARDS 3)
+    math(EXPR _last_shard "${KIN_RENDER3D_TEST_SHARDS} - 1")
+    add_executable(kin_render3d_tests render3d_tests.cpp)
+    target_link_libraries(kin_render3d_tests PRIVATE kin::engine)
+    target_compile_definitions(kin_render3d_tests PRIVATE
+        KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
+        KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    foreach(_shard RANGE 0 ${_last_shard})
+        add_test(NAME kin-render3d-shard-${_shard}
+            COMMAND kin_render3d_tests --shard=${_shard}/${KIN_RENDER3D_TEST_SHARDS})
+        set_tests_properties(kin-render3d-shard-${_shard} PROPERTIES TIMEOUT 1800)
+    endforeach()
 endif()
 if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
     kin_add_test(kin_render3d_attachment_graph_tests kin-render3d-attachment-graph SOURCES render3d_attachment_graph_tests.cpp)
