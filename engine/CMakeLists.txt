@@ -16,6 +16,7 @@ add_library(kin_foundation STATIC
     src/l10n/localization.cpp
     src/l10n/message_format.cpp
     src/platform/log.cpp
+    src/platform/services_active.cpp
 )
 target_compile_features(kin_foundation PUBLIC cxx_std_23)
 target_include_directories(kin_foundation PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -79,6 +80,8 @@ add_library(kin_engine STATIC
     src/platform/gamepad.cpp
     src/platform/resource_paths.cpp
     src/platform/process.cpp
+    src/platform/services.cpp
+    src/platform/services_steam.cpp
     src/platform/user_data.cpp
     src/platform/window.cpp
     src/particles/animation_particles.cpp
@@ -249,7 +252,8 @@ if(KIN_ENABLE_SCRIPTING)
     add_library(kin_scripting STATIC
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
-        src/scripting/lua_script.cpp)
+        src/scripting/lua_script.cpp
+        src/scripting/lua_services.cpp)
     add_library(kin::scripting ALIAS kin_scripting)
     target_link_libraries(kin_scripting PUBLIC kin_foundation Lua::Lua sol2::sol2)
     kin_enable_release_optimizations(kin_scripting)

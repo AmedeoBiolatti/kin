@@ -125,3 +125,9 @@ report checks.
 `kin::user_data_dir(app_id)` (`kin/platform/user_data.hpp`) is the folder for
 settings and saves, per user and per app; `SaveStore` keeps its files there.
 Tests point it elsewhere with `set_user_data_dir_override()`.
+
+## Platform services
+
+Achievements, stats, leaderboards, the overlay, rich presence, DLC and invites,
+from Steam or offline, are `kin/platform/services.hpp`: see
+[platform services](platform_services.md).

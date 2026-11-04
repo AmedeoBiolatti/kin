@@ -168,6 +168,14 @@ GameInfo load_game_info(const std::filesystem::path& path) {
             }
             continue;
         }
+        if (kind == "steam_app_id") {
+            u64 id = 0;
+            if (!(in >> id) || id > 0xffffffffu) {
+                fail("steam_app_id requires a number");
+            }
+            info.steam_app_id = static_cast<u32>(id);
+            continue;
+        }
         if (kind == "tag") {
             const std::string value = read_rest();
             if (value.empty()) {
@@ -229,6 +237,9 @@ bool save_game_info(const GameInfo& info, const std::filesystem::path& path) {
     out << "headless ";
     write_bool(out, info.headless_supported);
     out << '\n';
+    if (info.steam_app_id != 0) {
+        out << "steam_app_id " << info.steam_app_id << '\n';
+    }
     for (const std::string& tag : info.tags) {
         out << "tag " << tag << '\n';
     }
@@ -270,6 +281,9 @@ void write_game_info(std::ostream& out, const GameInfo& info) {
     }
     out << '\n';
     out << "- headless: " << (info.headless_supported ? "yes" : "no") << '\n';
+    if (info.steam_app_id != 0) {
+        out << "- steam_app_id: " << info.steam_app_id << '\n';
+    }
 
     if (!info.tags.empty()) {
         out << "- tags: ";

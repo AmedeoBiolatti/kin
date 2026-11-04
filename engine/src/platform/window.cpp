@@ -329,6 +329,7 @@ void Window::set_text_input_enabled(bool enabled) {
 }
 
 void Window::set_text_input_area(Rectf area, i32 cursor) {
+    _text_input_area = area;
     if (!_handle) {
         return;
     }

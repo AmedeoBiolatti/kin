@@ -1,4 +1,5 @@
 #include "lua_l10n.hpp"
+#include "lua_services.hpp"
 #include "lua_paths.hpp"
 #include "lua_scene_context.hpp"
 
@@ -1644,6 +1645,7 @@ void ScriptEngine::register_bindings() {
         return ScriptEntityApi{_impl->host.get(), e, std::move(lease)};
     };
     scripting_detail::bind_l10n(_impl->lua, true);
+    scripting_detail::bind_services(_impl->lua);
     _impl->lua.new_usertype<ScriptEntityApi>("KinEntity",
         sol::no_constructor,
         "id", script_method(&ScriptEntityApi::id),

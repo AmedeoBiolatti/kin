@@ -422,6 +422,19 @@ struct SceneAppSession::Impl {
                 set_active_localization(prior);
         }
     } localization_reset;
+    // The platform's services (started here from services_config, or the game's).
+    std::unique_ptr<PlatformServices> owned_services;
+    PlatformServices* services = nullptr;
+    struct ServicesReset {
+        PlatformServices* prior = active_services();
+        PlatformServices* installed = nullptr;
+        ~ServicesReset() {
+            if (installed && active_services() == installed)
+                set_active_services(prior);
+        }
+    } services_reset;
+    bool services_pumped = false; // this frame's services->update() ran
+    bool keyboard_shown = false;  // the platform's on-screen keyboard, for the window's text input
     std::optional<GameInfo> game;
     std::string title;
     std::unique_ptr<SceneManager> owned_scenes;
@@ -533,6 +546,78 @@ struct SceneAppSession::Impl {
             KIN_LOG_ERROR("runtime", "scene session shutdown failed");
         }
     }
+    // Starts SceneAppConfig::services_config (offline and in memory for runs
+    // that must not depend on the machine), or takes the game's services.
+    // A value: the run is over (the platform starts the game again).
+    std::optional<int> start_services() {
+        const bool machine_independent = config.headless.enabled || config.headless.list_actions ||
+                                         config.headless.profile_render || config.headless.server ||
+                                         config.headless.check_determinism || config.headless.state_lockstep ||
+                                         config.headless.print_game_info;
+        services = config.services;
+        if (!services) {
+            // Without a config, the game info's: its id and Steam app id.
+            ServicesConfig wanted = config.services_config.value_or(ServicesConfig{});
+            if (config.game) {
+                if (wanted.game_id.empty()) {
+                    wanted.game_id = config.game->id;
+                }
+                if (!config.services_config) {
+                    wanted.steam_app_id = config.game->steam_app_id;
+                }
+            }
+            if (wanted.args.empty()) {
+                wanted.args = config.headless.args;
+            }
+            if (machine_independent) {
+                wanted.offline_only = true;
+                wanted.offline_in_memory = true;
+            }
+            ServicesStart started = ServicesStart::Offline;
+            owned_services = start_platform_services(wanted, &started);
+            if (started == ServicesStart::Restarting) {
+                return 0;
+            }
+            services = owned_services.get();
+        }
+        if (!services) {
+            return std::nullopt;
+        }
+        set_active_services(services);
+        services_reset.installed = services;
+        if (config.localization && config.platform_language && config.headless.locale.empty() &&
+            !machine_independent) {
+            if (const std::string language = services->language(); !language.empty()) {
+                std::vector<std::string> available;
+                for (const LanguageInfo& info : config.localization->languages()) {
+                    available.push_back(info.locale);
+                }
+                const std::vector<std::string> wanted{language};
+                if (const std::string match = match_locale(wanted, available); !match.empty()) {
+                    config.localization->set_locale(match);
+                    KIN_LOG_INFO_F("runtime", "platform language",
+                                   (LogFields{{.name = "language", .value = language},
+                                              {.name = "locale", .value = config.localization->locale()}}));
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    // The platform's on-screen keyboard follows the window's text input.
+    void follow_text_input(Window& window) {
+        if (!services || !config.platform_keyboard) {
+            return;
+        }
+        const bool typing = window.text_input_enabled();
+        if (typing && !keyboard_shown && services->handheld()) {
+            keyboard_shown = services->show_keyboard(KeyboardMode::SingleLine, window.text_input_area());
+        } else if (!typing && keyboard_shown) {
+            services->hide_keyboard();
+            keyboard_shown = false;
+        }
+    }
+
     std::optional<int> dispatch() {
 
         configure_runtime_logging(config.headless, config.game);
@@ -590,6 +675,10 @@ struct SceneAppSession::Impl {
                 l10n.set_locale(l10n.base_locale());
             }
             KIN_LOG_INFO_F("runtime", "locale", (LogFields{{.name = "locale", .value = l10n.locale()}}));
+        }
+
+        if (const std::optional<int> code = start_services()) {
+            return code;
         }
 
         if (config.headless.check_determinism && !config.headless.state_lockstep) {
@@ -860,6 +949,7 @@ struct SceneAppSession::Impl {
                 .rng = root_key,
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
+                .services = services,
             };
             try {
                 scenes.shutdown(shutdown_ctx);
@@ -883,6 +973,7 @@ struct SceneAppSession::Impl {
             }
             frame_start = std::chrono::steady_clock::now();
             frame_prepared = true;
+            services_pumped = false;
             frame_update_total_ms = 0.0;
             frame_update_steps = 0;
             debug_overlay.begin_frame();
@@ -937,6 +1028,7 @@ struct SceneAppSession::Impl {
                 .rng = root_key,
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
+                .services = services,
             };
         };
 
@@ -972,8 +1064,16 @@ struct SceneAppSession::Impl {
                     return; // held by the tool (sim.pause); it still draws
                 }
 #endif
+                // Once a frame, on its first step: the frame's events last
+                // through all its steps, and a frame without steps keeps them
+                // for the next.
+                if (services && !services_pumped) {
+                    services_pumped = true;
+                    services->update();
+                }
                 const auto update_start = std::chrono::steady_clock::now();
                 scenes.update(scene_ctx);
+                follow_text_input(ctx.window);
                 const f64 update_ms = ms_since(update_start);
                 frame_update_total_ms += update_ms;
                 ++frame_update_steps;

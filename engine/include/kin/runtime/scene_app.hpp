@@ -4,6 +4,7 @@
 #include <functional>
 #include <iosfwd>
 #include <kin/platform/log.hpp>
+#include <kin/platform/services.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <memory>
@@ -132,6 +133,22 @@ struct SceneAppConfig {
     // Expose one Renderer3D through SceneContext for normal/headless/server
     // runs. Opt-in: 2D games allocate no 3D renderer. Requires experimental 3D.
     bool rendering_3d = false;
+    // Store or platform services (kin/platform/services.hpp) run_scene_app
+    // starts itself: Steam when services_config (unset: the game info's
+    // steam_app_id) names an app id and Steam answers, else the offline
+    // backend. Headless, server and determinism runs
+    // get the offline backend, in memory, whatever this says. When Steam starts
+    // the game again itself, run_scene_app returns 0 at once.
+    std::optional<ServicesConfig> services_config{};
+    // Or services the game started: borrowed, used as they are.
+    PlatformServices* services = nullptr;
+    // Show the language the player chose for the game on the platform, when
+    // the localization has it and --locale does not say otherwise. Turn off
+    // when the game restores the player's own saved choice.
+    bool platform_language = true;
+    // On a handheld, show the platform's on-screen keyboard while a text field
+    // takes text (Window::set_text_input_enabled), over its area.
+    bool platform_keyboard = true;
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);
