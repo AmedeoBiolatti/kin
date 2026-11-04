@@ -91,8 +91,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Linux dependencies
-        run: .github/scripts/install-linux-deps.sh glslc
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: glslc
       - uses: ./.github/actions/ccache
         with:
           key: Linux 2D-only build
@@ -192,9 +193,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      - uses: ./.github/actions/linux-deps
         if: runner.os == 'Linux'
-        run: .github/scripts/install-linux-deps.sh glslc
+        with:
+          packages: glslc
 
       - uses: ./.github/actions/ccache
         with:
@@ -288,8 +290,8 @@ jobs:
       # SPIR-V is the same on every machine, and glslc does not run in the runtime.
       - name: Compile the shaders
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends glslc
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 -o Acquire::http::Timeout=30 glslc
           cmake -DOUTPUT_DIR="$PWD/spirv" -P cmake/kin_spirv.cmake
 
       # The runtime's CMake is older than kin needs.
@@ -379,8 +381,10 @@ jobs:
           if-no-files-found: error
 
   # The SDL_GPU backend's tests skip without a GPU, so the jobs above never run
-  # them. This one gives them Mesa's software Vulkan driver (lavapipe) and a
-  # virtual X display, and requires them to run.
+  # them. These give them Mesa's software Vulkan driver (lavapipe) and a
+  # virtual X display, and require them to run. The big kin-render3d suite
+  # (7 of the 10 minutes of tests on a runner) has a job of its own, so the
+  # others run beside it instead of before it.
   gpu:
     needs: select-run
     if: needs.select-run.outputs.run == 'true'
@@ -389,11 +393,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux GPU (lavapipe)
+          - name: Linux GPU (lavapipe, Release)
+            artifact: gpu-tests-Release
             build_type: Release
             examples: 'ON'
             tests: '.'
+            skip: '^kin-render3d$'
+            graphs: true
+          - name: Linux GPU (lavapipe, render3d)
+            artifact: gpu-tests-render3d
+            build_type: Release
+            examples: 'OFF'
+            target: kin_render3d_tests
+            tests: '^kin-render3d$'
           - name: Linux GPU (lavapipe, Debug)
+            artifact: gpu-tests-Debug
             build_type: Debug
             examples: 'OFF'
             tests: '^kin-(script-scene3d(-gpu)?|scene-pipeline3d|scene-frame3d|scene-session3d|physics3d(-ecs|-ragdoll|-rope)?|skeleton|gpu-memory|render3d-.+|(vision3d|outline3d|surface3d|ascii3d|slowlight3d)-graph)$'
@@ -406,9 +420,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        # glslc compiles the GPU backend's shaders; without them it cannot start.
-        run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
+      # glslc compiles the GPU backend's shaders; without them it cannot start.
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
 
       - uses: ./.github/actions/ccache
         with:
@@ -421,21 +436,25 @@ jobs:
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF
 
       - name: Build
-        run: cmake --build build --parallel 4
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cmake --build build --parallel 4 ${TARGET:+--target "$TARGET"}
 
       - name: Test
         # Release runs every suite with a GPU and the examples enabled, so
         # new GPU workflows cannot silently fall outside a hand-maintained list.
         # Renderer and particle-shadow suites set longer TIMEOUT properties
         # in tests/CMakeLists.txt, which take precedence over this default.
-        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' --output-on-failure --timeout 300 --no-tests=error --output-junit "$PWD/build/ctest.xml"
+        env:
+          SKIP: ${{ matrix.skip }}
+        run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' ${SKIP:+-E "$SKIP"} --output-on-failure --timeout 300 --no-tests=error --output-junit "$PWD/build/ctest.xml"
 
       - name: Rendering graphs with Vulkan core validation
-        if: matrix.build_type == 'Release'
+        if: matrix.graphs
         run: xvfb-run -a -s "-screen 0 1280x800x24" python3 .github/scripts/rendering-gpu-check.py --build build --mode core --output out/rendering-core
 
       - name: Rendering graphs with Vulkan synchronization validation
-        if: matrix.build_type == 'Release'
+        if: matrix.graphs
         run: xvfb-run -a -s "-screen 0 1280x800x24" python3 .github/scripts/rendering-gpu-check.py --build build --mode sync --output out/rendering-sync
 
       - name: Debug rope presentation on the GPU
@@ -446,12 +465,37 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-tests-${{ matrix.build_type }}
+          name: ${{ matrix.artifact }}
           path: |
             build/ctest.xml
             build/Testing/Temporary/LastTest.log
             out/rendering-*/
           if-no-files-found: warn
+
+  # The ruleset requires a check named "Linux GPU (lavapipe)". The Release GPU
+  # jobs above split that work, so this job takes the name and passes when both
+  # of them pass. (The Debug job is not part of it, as before.)
+  gpu-required:
+    name: Linux GPU (lavapipe)
+    needs: [select-run, gpu]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    steps:
+      - name: The Release GPU jobs passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED: ${{ needs.select-run.outputs.run }}
+        run: |
+          if [ "$SELECTED" != true ]; then
+            echo "CI was not selected for this change."
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs" --paginate \
+            --jq '.jobs[] | select(.name | test("^Linux GPU \\(lavapipe, (Release|render3d)\\)$")) | "\(.name): \(.conclusion)"' | tee jobs.txt
+          test "$(wc -l < jobs.txt)" -eq 2
+          ! grep -v ': success$' jobs.txt
 
   rendering-sanitizers:
     needs: select-run
@@ -467,8 +511,9 @@ jobs:
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@v4
-      - name: Install dependencies
-        run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers glslc xvfb
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: mesa-vulkan-drivers glslc xvfb
       - uses: ./.github/actions/ccache
         with:
           key: Rendering ASAN and UBSAN

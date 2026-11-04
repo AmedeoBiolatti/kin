@@ -23,7 +23,8 @@ ctest --test-dir build -C Release --output-on-failure -j 8
 ```
 
 The required checks are `Linux GCC`, `Linux Clang`, `Windows MSVC` and
-`Linux GPU (lavapipe)`. CI also checks formatting, the 2D-only build, Debug
+`Linux GPU (lavapipe)` (a job that passes when the Release and `render3d` GPU
+jobs, which split that work, both pass). CI also checks formatting, the 2D-only build, Debug
 lavapipe coverage and Linux/Windows shipping builds. The builds cache compiles
 with ccache (a pull request reuses the cache `main` last saved, so the first
 build after a toolchain or dependency change is slow), and are skipped when a

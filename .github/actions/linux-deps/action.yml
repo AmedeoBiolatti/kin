@@ -1,0 +1,47 @@
+name: Linux build dependencies
+description: >-
+  Installs the packages kin builds with (.github/scripts/install-linux-deps.sh)
+  and keeps the downloaded packages in a cache. The runners' Ubuntu mirror
+  sometimes slows to a crawl (37 MB took 15 minutes in one run); with the
+  packages cached, apt downloads nothing.
+inputs:
+  packages:
+    description: Extra packages, as install-linux-deps.sh arguments, separated by spaces.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # The runner image's version is in the key because a new image means newer
+    # package versions, which the cached ones no longer match.
+    - id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        hash=$(printf '%s\n%s\n%s\n' "$PACKAGES" "${ImageVersion:-}" "$(cat .github/scripts/install-linux-deps.sh)" | sha256sum | cut -c1-16)
+        echo "prefix=apt-$hash-" >> "$GITHUB_OUTPUT"
+    - id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/apt-archives/*.deb
+        key: ${{ steps.key.outputs.prefix }}${{ github.run_id }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
+    - id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        archives="$HOME/apt-archives"
+        mkdir -p "$archives"
+        listing() { find "$archives" -maxdepth 1 -name '*.deb' -printf '%f\n' | sort | sha256sum; }
+        before=$(listing)
+        # The packages are words on purpose.
+        KIN_APT_ARCHIVES="$archives" .github/scripts/install-linux-deps.sh $PACKAGES
+        if [ "$before" = "$(listing)" ]; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+    # Only pushes save (see the compiler cache action), and only when apt had to download something.
+    - uses: actions/cache/save@v4
+      if: github.event_name == 'push' && steps.install.outputs.changed == 'true'
+      with:
+        path: ~/apt-archives/*.deb
+        key: ${{ steps.key.outputs.prefix }}${{ github.run_id }}
