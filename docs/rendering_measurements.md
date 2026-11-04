@@ -598,6 +598,71 @@ commands/frame telemetry, source builder and validation runner. Exact source
 reconstruction, declared helper/trace changes, zero-path behavior, source power/
 centroid checks and binary/SPIR-V hashes pass for all four generated variants.
 
+### Independent GI changes on main, 2026-11-04
+
+Four separate archive overlays isolate the proposed portable changes on the
+unchanged CPU-optimized renderer: resolve-only visibility confidence, GI/TAA
+history-reset propagation plus skipped/failed-path invalidation, per-world-probe
+quaternion rotations, and angular reconstruction correction. No candidate includes
+another candidate, the frozen Cornell geometry/emission caches, source quadrature,
+guided sampling, or the residual-pair/composite pipeline. Main's ratio irradiance
+estimator stays unchanged in every case. Angular metadata uses spare atlas alpha
+channels, preserving the original probe-age texel; no new allocation/pass is added.
+
+Same 720p Cornell fixture and two reference seeds as above; two static phases,
+no fitting. Fresh mains-powered timing: three varied-order serial repeats, each
+1,200 warm-up + 2,400 measured frames, CPUs 0–15, RTX 4080 Laptop/Vulkan/TAA.
+All 15 accepted cost jobs record mains online before and after. An earlier
+matrix crossed into battery/P8 at 210/405 MHz and is rejected in full. A separate
+battery attempt was interrupted when the user restored mains; it is excluded too.
+Clocks remain unlocked and run-order/thermal variation is substantial.
+
+| Independent candidate | Frame p50 | Run p50 range | Room SSIM ↑ | Room RGB MAE ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Main | 1.054 ms | 0.858–1.172 ms | 0.9338 | 7.524 |
+| Visibility guard | 1.053 ms | 0.861–1.184 ms | 0.9338 | 7.514 |
+| History reset | 0.957 ms | 0.861–1.057 ms | 0.9338 | 7.524 |
+| Probe rotations | 1.216 ms | 0.979–1.219 ms | 0.9328 | 7.457 |
+| Angular correction | 1.185 ms | 1.068–1.228 ms | 0.9311 | 7.861 |
+
+The guard and reset remain small correctness candidates, not major settled-image
+upgrades. In a direct GPU dispatch with constant-bright probes and fully occluded
+moments, main returns raw irradiance/pi 1; the guard returns the physical target 0
+while preserving coverage 1. Visible constant light stays 1, darkness stays 0 and
+missing support retains coverage 0. Applying the guard to bounce feedback is not
+tested here. Fifteen GPU resolve cases include these positive/negative controls
+and an analytic angular field. Angular correction changes the latter from
+1.36133 to 1.39941 for target 1.4, but worsens real Cornell MAE by 4.5%; it should
+not be promoted alone on this result.
+
+The reset-only images match main RGBA exactly at both static phases; its shaders
+and steady GPU work are unchanged. Its lower measured median is not evidence of
+a speedup: run ranges overlap and clocks/order drift. A diagnostic-only link
+observes the actual resolve history-enable uniform over twelve rendered frames.
+Main incorrectly retains history after same-pose reset, camera cuts and TAA
+re-enabling (frames 1/3/6/10); the candidate matches all expected flags, including
+ordinary continuation, toggles and odd-size resize. Failure invalidation paths
+are source-checked, not exercised by injected allocation/pipeline failures.
+
+Rotations trade mixed still accuracy for better short stationary stability.
+Two 64-frame holds at phases 2,400/2,573 improve in both phases. Mean RMS output
+variation in RGB8 levels is 0.4759 to 0.3185 over the room (33.1% lower), 0.6787 to
+0.3862 in the fixed upper-wall crop [500,170,780,290] (43.1% lower), and 0.6048 to
+0.2815 for its 8x8 block means (53.5% lower). These measurements include TAA jitter
+and probe variation; they do not establish pure GI-noise or moving-camera/light
+response quality. Extra rotation arithmetic costs GPU work; the timings above
+remain exploratory. Keep rotations as an optional quality candidate for broader
+testing rather than selecting a universal default from this one scene.
+
+The large zero-point prototype gain is not reproduced by any isolated candidate;
+remaining emitter/transport changes and interactions still need isolation.
+Artifacts are `out/gi-main-ablation-20261104/`: the HTML/image report, per-phase/
+seed metrics, 25 accepted quality/cost jobs, four stationary clips (256 captures),
+15 GPU resolve controls, two twelve-frame history sequences, rejected timing
+attempts and all source/build/command/hash receipts. Every non-target archive
+member matches main; regenerated sources, binary/SPIR-V hashes and both reset
+image identities pass. No shipping source or defaults change in this study.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
