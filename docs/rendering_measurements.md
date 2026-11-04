@@ -755,6 +755,80 @@ contracts. It, the existing GI resolve/history eligibility checks, and the CPU
 renderer CTest pass; all seventeen selected stock GI/TAA/prepass GPU callbacks
 pass in isolated processes. Validation is `out/gi-surface-port-20261104/`.
 
+#### Full zero-point remainder, 2026-11-04
+
+The history fixes are merged into local main at `4055cd2`. A reverse-ablation
+study rebuilds the complete zero-source-point prototype on that same archive:
+all 129 shader payloads and both settled Cornell captures match the frozen
+prototype exactly. The ray budget stays 4,096 × 128 per render; zero refers to
+explicit source integration, not probe rays. Except for the main-only DC check
+and aggregate runtime variants, each row below removes one component from full.
+Effects are conditional and cannot be added together.
+
+| Fresh 720p variant | Room SSIM | Room MAE | Frame p50 | Run p50 range |
+| --- | ---: | ---: | ---: | ---: |
+| Merged main | 0.96949 | 4.3800 | 1.187 ms | 0.896–1.197 ms |
+| Full zero-point prototype | 0.97280 | 3.2626 | 1.570 ms | 1.215–1.634 ms |
+| Full, no guided rays | 0.97052 | 3.4620 | 1.580 ms | 1.312–1.604 ms |
+| Full, no angular/DC correction | 0.97255 | 3.4838 | 1.395 ms | 1.268–1.403 ms |
+| Full, no exact footprint caches | 0.97277 | 3.3059 | 1.563 ms | 1.420–1.577 ms |
+| Full transport, main one-pass resolve | 0.97275 | 3.2811 | 1.566 ms | 1.430–1.615 ms |
+| Runtime geometry, uniform rays, main resolve | 0.97112 | 3.5670 | 1.451 ms | 1.392–1.548 ms |
+| Main plus angular/DC correction alone | 0.97021 | 4.2682 | 1.250 ms | 1.249–1.375 ms |
+
+Guidance is the largest measured stability contribution. Full uses 96 ordinary
+and 32 emitter-bound rays; removing guidance uses 128 ordinary rays, including
+their distance/classification samples. Across two 64-frame stationary clips,
+room RMS output deviation rises 0.1396 → 0.3182 without guidance, upper-wall
+deviation 0.1481 → 0.4134, and wall 8×8 block-mean deviation 0.0607 → 0.3127.
+Rotations have a smaller effect within this guided chain: room deviation rises
+to 0.1453 without them, while MAE rises only to 3.2728. These are output sRGB
+deviations including TAA jitter/feedback, not motion qualification or pure GI noise.
+
+Angular/DC correction lowers full-chain pixel error but adds measurable work.
+Five extra adjacent full/no-DC pairs alternate order: removing correction lowers
+frame cost by a median **11.9%**, with **6.0–15.9%** individual reductions, while
+MAE increases **6.8%**. Main-only correction now improves error **2.6%** after
+the receiver-history fix, unlike the earlier pre-fix experiment. Guided/MIS
+radiance must retain compatible integration: blindly restoring an unweighted
+ratio denominator gives MAE 13.6068. With uniform rays, ratio and 4/N integration
+instead score essentially identically (MAE 3.46207/3.46203).
+
+Exact footprint caches account for only **1.3%** of full-chain MAE in this scene.
+Filtering absolute versus normalized gradients and feedback-confidence changes
+have tiny settled-Cornell effects; the .98/.9999 history threshold images match.
+Removing the extra zero-source composite changes MAE about **0.6%**, with no
+resolved frame-time win in the drifting matrix. Extending ordinary single-face
+planes unconditionally is rejected (MAE 9.2572). The runtime uniform/one-pass
+aggregate uses no authored footprint/emission tables or source bounds and closes
+about **73%** of the remaining main/full MAE gap, but remains slower than main.
+Runtime emitter bounds with proper invalidation are the next useful guiding
+integration target; the full prototype currently freezes its bound to this scene.
+
+A private reuse optimization preserves angular correction: normalize the sample
+directions and compute angular retention once before the eight-probe loop; read
+each probe's three mean-light metadata channels once for all lighting directions.
+Only resolve/feedback shader payloads change. Both Cornell phases remain **RGBA
+byte-identical** to full. Five further adjacent full/optimized pairs alternate
+order and show **8.0% median lower frame cost**, with **6.9–10.2%** reductions in
+all five pairs. This is a useful performance candidate for the experimental
+angular path; it is not merged into production by this investigation.
+
+Quality keeps the same fixture, settings, two settled phases and two Cycles
+seeds, without exposure fitting. Native matrix timings use three serial varied-
+order repeats, 1,200 warm-up + 2,400 measured whole-frame intervals after a
+separate 10,000-frame conditioning run. Mains remains connected under the
+observed 80 W cap, but clocks and thermals drift; small matrix differences are
+not precise speed claims. No build, profiler, capture readback or scorer overlaps
+throughput. Four Nsight captures return API events but no GPU timing table after
+the offscreen harness exceeds its 8,192 timestamps/frame limit. CPU marker
+durations are not substituted for GPU pass times; exact pass costs remain unknown.
+
+The report, 99 accepted quality/cost jobs, six stationary clips, paired controls,
+eighteen archive/payload isolation checks and source/binary receipts are retained
+under `out/gi-zero-remainder-20261104/`. This follow-up changes no production
+renderer source or defaults. It is one static scene/backend/GPU investigation.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
