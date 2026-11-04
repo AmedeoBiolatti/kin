@@ -25,6 +25,7 @@ layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uSlope; // xyz: 
 layout(set = 1, binding = 2, r16f) uniform writeonly image2D uCoverage; // probe share; the main pass supplies the rest
 
 #define KIN_GI_PROBES
+#define KIN_GI_RESOLVE_VISIBILITY
 #include "kin_gi.inc.glsl"
 
 layout(std140, set = 2, binding = 0) uniform Params {

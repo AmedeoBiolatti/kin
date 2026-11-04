@@ -11047,7 +11047,8 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             }
             ctx.occluded = ao.enabled && stats.ao_dispatches > 0;
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
-            ctx.gi_resolved = ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, ctx.taa, stats);
+            ctx.gi_resolved =
+                ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, ctx.taa && !ctx.taa_reset, stats);
             // (Added to a float picture after the main pass: an HDR view's or temporal anti-aliasing's.)
             ctx.fog_sun =
                 ctx.fog_sun_wanted && ctx.fog && (view->_hdr || ctx.taa) && fog_sun(commands, *view, ctx, stats);
@@ -12000,6 +12001,16 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
         !_fragment_shader) {
         return false;
     }
+    // Only a completed render that resolved GI can supply the next render's lighting history. This also covers
+    // failed geometry/main passes and successful renders with GI disabled, before TAA advances its own history.
+    struct GiHistoryFrame {
+        GpuView3D::Gi& gi;
+        bool resolved = false;
+        ~GiHistoryFrame() {
+            if (!resolved)
+                gi.has_last = false;
+        }
+    } gi_history{view->_gi};
     // The 2D pipeline's colour format changed (set_color_space): the view follows.
     if (view->_output_format != _owner->_target_format && !make_targets(*view)) {
         return false;
@@ -12158,6 +12169,7 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
         stats.shared_mesh_range_reuses = pooled.reused;
         stats.shared_mesh_pages = pooled.pages;
     }
+    gi_history.resolved = ctx.gi_resolved;
     return true;
 }
 

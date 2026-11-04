@@ -663,6 +663,32 @@ attempts and all source/build/command/hash receipts. Every non-target archive
 member matches main; regenerated sources, binary/SPIR-V hashes and both reset
 image identities pass. No shipping source or defaults change in this study.
 
+#### Visibility/history port
+
+The selected fixes are implemented on `opt/gi-visibility-history`, from main
+`ce3d4e6`. `KIN_GI_RESOLVE_VISIBILITY` enables confidence attenuation only in the
+final resolve. Coverage/readiness stay unchanged, with no added ray, texture,
+buffer or pass. All 127 other embedded shader payloads, including feedback,
+match the preceding main-based visibility experiment exactly.
+
+GI history now observes TAA reset, and a completed-render guard invalidates it
+whenever resolve was skipped or the frame failed. Central invalidation also
+catches a main-pass failure after GI resolve had already recorded successfully.
+This replaces the prototype's per-return invalidation approach without adding
+renderer state or a public API.
+
+New `kin-render3d-gi-resolve` GPU checks cover visible/blocked/dark/missing-support
+and background fields, including unchanged coverage for occluded receivers.
+On Linux with GNU/Clang, `kin-render3d-gi-history` observes the actual production
+resolve uniform through test-only linker wrappers. It checks resets, cuts, TAA/
+GI/probe toggles, odd resize, two views, an injected resolve-pass failure and an
+injected later frame failure. The new checks and CPU renderer CTest pass; all
+17 selected existing GI/TAA/prepass GPU callbacks pass in isolated processes.
+A fresh 720p Cornell capture matches the evaluated resolve-only guard RGBA
+exactly. Validation artifacts are `out/gi-port-validation-20261104/` and
+`/tmp/kin-gi-port-{ctest,resolve,history}.log`. No additional performance gain is
+claimed for this implementation port.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
