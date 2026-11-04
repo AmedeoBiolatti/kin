@@ -24,9 +24,12 @@ ctest --test-dir build -C Release --output-on-failure -j 8
 
 The required checks are `Linux GCC`, `Linux Clang`, `Windows MSVC` and
 `Linux GPU (lavapipe)`. CI also checks formatting, the 2D-only build, Debug
-lavapipe coverage and Linux/Windows shipping builds.
-[docs/testing.md](docs/testing.md) covers the test layout and how to keep tests
-fast and deterministic.
+lavapipe coverage and Linux/Windows shipping builds. The builds cache compiles
+with ccache (a pull request reuses the cache `main` last saved, so the first
+build after a toolchain or dependency change is slow), and are skipped when a
+change only touches documentation.
+[docs/testing.md](docs/testing.md) covers the test layout, the test profiles CI
+uses and how to keep tests fast and deterministic.
 
 ## Code guidelines
 

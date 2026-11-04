@@ -7,6 +7,15 @@ if(KIN_ENABLE_LTO)
     set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 endif()
 
+# MSVC debug information for packaged symbols. /Zi writes every compile to a
+# shared PDB, which ccache cannot cache and parallel compiles under Ninja contend
+# for; /Z7 keeps it in the object files and the link writes the one PDB that ships.
+if(CMAKE_C_COMPILER_LAUNCHER OR CMAKE_CXX_COMPILER_LAUNCHER)
+    set(KIN_MSVC_DEBUG_INFORMATION /Z7 CACHE INTERNAL "MSVC debug information format")
+else()
+    set(KIN_MSVC_DEBUG_INFORMATION /Zi CACHE INTERNAL "MSVC debug information format")
+endif()
+
 function(kin_apply_release_policy target)
     get_target_property(applied ${target} KIN_RELEASE_POLICY_APPLIED)
     get_target_property(imported ${target} IMPORTED)
@@ -43,7 +52,7 @@ function(kin_apply_release_policy target)
         # Add debug information without changing Release/MinSizeRel optimization.
         target_compile_options(${target} PRIVATE
             "$<$<AND:${optimized},$<OR:$<COMPILE_LANG_AND_ID:C,GNU,Clang>,$<COMPILE_LANG_AND_ID:CXX,GNU,Clang>>>:-g>"
-            "$<$<AND:${optimized},$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>>:/Zi>")
+            "$<$<AND:${optimized},$<OR:$<COMPILE_LANG_AND_ID:C,MSVC>,$<COMPILE_LANG_AND_ID:CXX,MSVC>>>:${KIN_MSVC_DEBUG_INFORMATION}>")
         if(MSVC)
             target_link_options(${target} PRIVATE "$<${optimized}:/DEBUG:FULL;/OPT:REF;/OPT:ICF>")
         endif()

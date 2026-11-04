@@ -40,6 +40,36 @@ jobs:
               });
               run = data.length === 0;
             }
+            // Documentation alone cannot change a build or a test. The jobs
+            // below are skipped, which counts as passing for required checks
+            // (a workflow-level paths filter would leave them pending).
+            // docs/third_party_notices.md is the exception: packages ship it.
+            const isDocumentation = path =>
+              (path.startsWith('docs/') && path !== 'docs/third_party_notices.md') || /^[^/]+\.md$/.test(path);
+            if (run) {
+              try {
+                let paths = null;
+                if (context.eventName === 'pull_request') {
+                  const files = await github.paginate(github.rest.pulls.listFiles, {
+                    ...context.repo, pull_number: context.payload.pull_request.number, per_page: 100
+                  });
+                  paths = files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
+                } else if (context.eventName === 'push' && !/^0+$/.test(context.payload.before)) {
+                  const {data} = await github.rest.repos.compareCommitsWithBasehead({
+                    ...context.repo, basehead: `${context.payload.before}...${context.payload.after}`, per_page: 100
+                  });
+                  // The comparison lists at most 300 files; a change that large is not documentation.
+                  if (data.files.length < 300)
+                    paths = data.files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
+                }
+                if (paths && paths.length > 0 && paths.every(isDocumentation)) {
+                  core.info(`Only documentation changed (${paths.length} files): skipping the builds.`);
+                  run = false;
+                }
+              } catch (error) {
+                core.warning(`Could not list the changed files, running everything: ${error.message}`);
+              }
+            }
             core.setOutput('run', String(run));
   format-3d:
     needs: select-run
@@ -63,6 +93,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Linux dependencies
         run: .github/scripts/install-linux-deps.sh glslc
+      - uses: ./.github/actions/ccache
+        with:
+          key: Linux 2D-only build
       - name: Configure
         env:
           CC: gcc-13
@@ -96,6 +129,7 @@ jobs:
             os: windows-2022
             options: -DKIN_EXPERIMENTAL_3D=ON
           - name: Linux minimal shipping
+            profile: config
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
@@ -108,6 +142,7 @@ jobs:
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
               -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON -DKIN_PACKAGE_DEBUG_SYMBOLS=ON
           - name: Linux SDL software shipping baseline
+            profile: config
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
@@ -131,6 +166,7 @@ jobs:
               -DKIN_BUILD_GAME_LIGHTING_DEMO=OFF -DKIN_BUILD_GAME_SHAPES_DEMO=OFF
               -DKIN_BUILD_GAME_TEXT_EDIT_DEMO=OFF
           - name: Windows scripting with direct SDL
+            profile: config
             os: windows-2022
             options: >-
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
@@ -140,6 +176,7 @@ jobs:
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
           - name: Linux compact CPU export
+            profile: config
             os: ubuntu-24.04
             cc: gcc-13
             cxx: g++-13
@@ -147,6 +184,7 @@ jobs:
             preset: hex-small-compact
             options: -DKIN_LINUX_VIDEO=x11-wayland
           - name: Windows compact CPU export
+            profile: config
             os: windows-2022
             config: MinSizeRel
             preset: hex-small-compact
@@ -158,12 +196,21 @@ jobs:
         if: runner.os == 'Linux'
         run: .github/scripts/install-linux-deps.sh glslc
 
+      - uses: ./.github/actions/ccache
+        with:
+          key: ${{ matrix.name }}
+
+      # Puts cl on PATH. Windows builds with Ninja, as Linux does, so that ccache
+      # can cache its compiles (it cannot with the Visual Studio generator).
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
       - name: Configure (Linux)
         if: runner.os == 'Linux'
         env:
           CC: ${{ matrix.cc }}
           CXX: ${{ matrix.cxx }}
-        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ${{ matrix.options }}
+        run: cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DKIN_TEST_PROFILE=${{ matrix.profile || 'all' }} ${{ matrix.options }}
 
       - name: Install glslc (Windows)
         if: runner.os == 'Windows'
@@ -177,11 +224,13 @@ jobs:
       - name: Configure (Windows)
         if: runner.os == 'Windows'
         env:
+          CC: cl
+          CXX: cl
           MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
         run: |
           $glslc = (Join-Path $env:MSYS2_LOCATION 'ucrt64/bin/glslc.exe').Replace('\', '/')
           & $glslc --version
-          cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G "Visual Studio 17 2022" -A x64 ${{ matrix.options }} "-DKIN_GLSLC=$glslc"
+          cmake ${{ matrix.preset && format('--preset {0}', matrix.preset) || '' }} -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.config || 'Release' }} -DKIN_TEST_PROFILE=${{ matrix.profile || 'all' }} ${{ matrix.options }} "-DKIN_GLSLC=$glslc"
 
       - name: Build
         run: cmake --build build --config ${{ matrix.config || 'Release' }} --parallel 4
@@ -312,7 +361,11 @@ jobs:
           & $glslc --version
           cmake --preset ship-vs "-DKIN_GLSLC=$glslc"
 
+      # The Visual Studio generator compiles one project's sources one at a time;
+      # /MP (the CL variable's options go to every cl.exe) spreads them over the cores.
       - name: Package
+        env:
+          CL: /MP
         run: cmake --build --preset ship-vs --target signal_siege_package --parallel 4
 
       - name: Run the package from elsewhere
@@ -356,6 +409,10 @@ jobs:
       - name: Install dependencies
         # glslc compiles the GPU backend's shaders; without them it cannot start.
         run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
+
+      - uses: ./.github/actions/ccache
+        with:
+          key: ${{ matrix.name }}
 
       - name: Configure
         env:
@@ -412,6 +469,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: .github/scripts/install-linux-deps.sh mesa-vulkan-drivers glslc xvfb
+      - uses: ./.github/actions/ccache
+        with:
+          key: Rendering ASAN and UBSAN
       - name: Configure rendering-only sanitizer build
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
