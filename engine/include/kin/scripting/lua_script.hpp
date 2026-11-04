@@ -145,8 +145,10 @@ bool LuaScript::call_function(const sol::protected_function& function, std::stri
     if (!_lua || !function.valid() || function.get_type() != sol::type::function) {
         return false;
     }
-    const Budget budget{*this, _lua->lua_state()};
-    return check(function(std::forward<Args>(args)...), name);
+    LuaCall budget{*_runtime, _lua->lua_state(), name};
+    const auto result = function(std::forward<Args>(args)...);
+    budget.result(result.valid());
+    return check(result, name);
 }
 
 template <typename R, typename... Args>
