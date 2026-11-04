@@ -12,6 +12,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -22530,8 +22531,16 @@ void test_gpu_resubmitted_layout() {
 }
 
 const char* test_filter = nullptr;
+// --shard=I/N runs every N-th of the selected tests, from the I-th, so that N
+// processes (CI runs them in N jobs, one set of cores each) split a suite that
+// takes minutes on a software GPU. Each test runs in exactly one of them.
+int shard_index = 0;
+int shard_count = 1;
+int selected_count = 0;
 bool selected(const char* name) {
-    return !test_filter || std::strstr(name, test_filter) != nullptr;
+    if (test_filter && std::strstr(name, test_filter) == nullptr)
+        return false;
+    return selected_count++ % shard_count == shard_index;
 }
 #define RUN(test)                                                                                                      \
     do {                                                                                                               \
@@ -22540,7 +22549,17 @@ bool selected(const char* name) {
     } while (false)
 
 int main(int argc, char** argv) {
-    test_filter = argc > 1 ? argv[1] : nullptr;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strncmp(argv[i], "--shard=", 8) == 0) {
+            if (std::sscanf(argv[i] + 8, "%d/%d", &shard_index, &shard_count) != 2 || shard_count < 1 ||
+                shard_index < 0 || shard_index >= shard_count) {
+                std::fprintf(stderr, "usage: kin_render3d_tests [name-filter] [--shard=INDEX/COUNT]\n");
+                return 2;
+            }
+        } else {
+            test_filter = argv[i];
+        }
+    }
     RUN(test_gpu_public_stats_and_debug_readback());
     RUN(test_meshes_face_out());
     RUN(test_mesh_lod_builder());
