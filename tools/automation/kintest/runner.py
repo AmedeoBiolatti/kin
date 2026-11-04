@@ -317,10 +317,13 @@ class Client:
             raise ConfigurationError("timeout must be finite and in 0..300 seconds")
         self.command[0] = str(Path(shutil.which(self.command[0]) or self.command[0]).resolve())
         for i, arg in enumerate(self.command[1:], 1):
-            if arg in ["--inspect", "--server-mode=realtime", "--server-transport=http"] or (
-                arg in ["--server-mode", "--server-transport"]
-                and i + 1 < len(self.command)
-                and self.command[i + 1] != ("driven" if arg == "--server-mode" else "stdio")
+            if launch and (
+                arg in ["--inspect", "--server-mode=realtime", "--server-transport=http"]
+                or (
+                    arg in ["--server-mode", "--server-transport"]
+                    and i + 1 < len(self.command)
+                    and self.command[i + 1] != ("driven" if arg == "--server-mode" else "stdio")
+                )
             ):
                 raise ConfigurationError("scenarios require the driven stdio server")
             if arg in ["--content", "--pack"] and i + 1 < len(self.command):
@@ -542,6 +545,7 @@ class Client:
                 self.phase = "shutdown"
                 if not self.shutdown_sent:
                     self.call("server.shutdown")
+                self.process.stdin.close()
                 self.process.wait(timeout=2)
             except Exception:
                 if os.name != "nt":
@@ -782,6 +786,8 @@ def replay(client, recording, *, compare=True):
                 raise ScenarioFailure(f"recorded protocol error reproduced: {method}")
             raise ScenarioFailure(f"recorded protocol error no longer reproduced: {method}")
         params = dict(entry.get("params", {}))
+        if method == "dev.reload" and isinstance(entry.get("result", {}).get("changes"), dict):
+            params["changes"] = entry["result"]["changes"]
         if method in ["view.screenshot", "view.frame"]:
             params["path"] = f'replay-{entry.get("sequence", 0)}' + (".png" if method == "view.screenshot" else ".rgba")
         if frames:

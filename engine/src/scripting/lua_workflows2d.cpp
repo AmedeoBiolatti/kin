@@ -1,4 +1,5 @@
 #include "lua_paths.hpp"
+#include "lua_reload_internal.hpp"
 #include "lua_scene_context.hpp"
 
 #include <algorithm>
@@ -20,6 +21,8 @@
 namespace kin {
 namespace {
 void mutable_call() {
+    if (scripting_detail::reload_staging)
+        throw std::runtime_error("workflow mutations are unavailable while preparing reload");
     if (scripting_detail::current_script_commands())
         throw std::runtime_error("workflow mutations run in update(), outside a registered ECS system");
 }
@@ -125,6 +128,8 @@ struct LuaLease2D {
         return p && p->release(lease);
     }
     sol::object entity(sol::this_state state) const {
+        if (scripting_detail::reload_staging)
+            throw std::runtime_error("entity access is unavailable while preparing reload");
         sol::state_view lua{state};
         const auto p = pool.lock();
         const auto* instance = p ? p->resolve(lease) : nullptr;
@@ -188,6 +193,7 @@ sol::table residency_table(sol::state_view lua, const std::vector<AssetResidency
 struct ScriptWorkflows2D::Impl {
     EcsWorld& world;
     std::filesystem::path root;
+    std::shared_ptr<const MemoryContent> content_owner;
     Renderer2D* renderer = nullptr;
     Gamepads* gamepads = nullptr;
     Assets2D* assets = nullptr;
@@ -235,6 +241,10 @@ struct ScriptWorkflows2D::Impl {
         return *result;
     }
 };
+void ScriptWorkflows2D::use_content(std::shared_ptr<const MemoryContent> content) {
+    _impl->content_owner = std::move(content);
+    _impl->root = _impl->content_owner->root();
+}
 ScriptWorkflows2D::ScriptWorkflows2D(EcsWorld& w, std::filesystem::path root)
     : _impl(std::make_unique<Impl>(w, scripting_detail::normalized_path(root))) {}
 ScriptWorkflows2D::~ScriptWorkflows2D() {
@@ -666,5 +676,15 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         return lua.create_table_with("cpu", memory_table(lua, assets.manager().trim_memory()), "gpu",
                                      memory_table(lua, assets.trim_texture_memory()));
     };
+}
+sol::optional<sol::object> scripting_detail::clone_workflow_reload_value(const sol::object& value,
+                                                                         sol::state_view lua) {
+    if (value.is<LuaLease2D>())
+        return sol::make_object(lua, value.as<LuaLease2D>());
+    if (value.is<LuaPreload2D>())
+        return sol::make_object(lua, value.as<LuaPreload2D>());
+    if (value.is<LuaTween2D>())
+        return sol::make_object(lua, value.as<LuaTween2D>());
+    return sol::nullopt;
 }
 } // namespace kin

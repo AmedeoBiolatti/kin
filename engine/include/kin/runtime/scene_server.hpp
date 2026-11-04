@@ -83,6 +83,7 @@ public:
     void set_automation_mode(std::string_view mode) { _automation_mode = mode; }
     const std::string& automation_mode() const { return _automation_mode; }
     bool is_recording() const { return _recording != nullptr; }
+    void enable_development(bool enabled = true) { _development = enabled; }
     void stop_recording() { _recording.reset(); }
     void begin_record_command(std::string_view method, const JsonValue& params);
     void record_command(std::string_view method, const JsonValue& params, const ServerResponse& response);
@@ -190,6 +191,7 @@ private:
     std::function<void(SceneManager&)> _reset_scenes;
     std::shared_ptr<AutomationRecorder> _recording;
     std::string _automation_mode = "driven";
+    bool _development = false;
 };
 
 // Routes one command (method + params) to its handler. Transport-agnostic: the
@@ -219,6 +221,7 @@ struct ServerConfig {
     AssetServer* asset_server = nullptr;
     bool rendering_3d = false;
     std::filesystem::path automation_record_path;
+    bool development = false;
 };
 
 // Runs the game as a long-lived command server. Returns a process exit code.

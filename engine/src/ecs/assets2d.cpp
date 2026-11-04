@@ -36,6 +36,19 @@
 #include <vector>
 
 namespace kin {
+std::unique_ptr<Assets2D> Assets2D::from_snapshot(Renderer2D& renderer, std::shared_ptr<const MemoryContent> snapshot) {
+    auto assets = std::make_unique<Assets2D>(renderer, snapshot->root());
+    assets->_content_owner = std::move(snapshot);
+    return assets;
+}
+std::unique_ptr<Assets2D> Assets2D::for_snapshot(std::shared_ptr<const MemoryContent> snapshot) const {
+    auto next = from_snapshot(_renderer, std::move(snapshot));
+    next->_binders = _binders;
+    next->_residency_diagnostics = _residency_diagnostics;
+    next->set_texture_budget(_texture_budget);
+    next->manager().set_memory_budget(_manager.memory_budget());
+    return next;
+}
 
 namespace {
 

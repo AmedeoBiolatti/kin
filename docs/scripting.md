@@ -127,6 +127,10 @@ gets a fresh budget.
 
 ## Hot reload
 
+For state-preserving, transactional development reload through `reload_state`
+and `on_reload`, see [development sessions](hot_reload.md). The APIs below retain
+their legacy reload behavior outside a development session.
+
 ```cpp
 kin::FileWatcher files;
 rules.watch(files);           // the script and every module it required

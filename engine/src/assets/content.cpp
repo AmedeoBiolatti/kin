@@ -578,6 +578,11 @@ void unmount_all_content_packs() {
     state.list.clear();
 }
 
+std::shared_ptr<const MemoryContent> memory_content_for(const std::filesystem::path& path) {
+    if (auto location = locate_memory(path))
+        return location->content;
+    return {};
+}
 std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path& path) {
     std::optional<PackLocation> location = locate(path);
     return location ? location->pack : nullptr;
@@ -789,7 +794,7 @@ bool SDLCALL stream_close(void* data) {
 } // namespace
 
 SDL_IOStream* open_content_stream(const std::filesystem::path& path) {
-    if (!locate(path)) {
+    if (!locate_memory(path) && !locate(path)) {
         // On disk: SDL reads it as it goes (a large font is not read whole).
         return SDL_IOFromFile(utf8_native(path).c_str(), "rb");
     }

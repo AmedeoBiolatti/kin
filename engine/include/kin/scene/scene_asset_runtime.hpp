@@ -3,9 +3,9 @@
 #include <kin/render3d/errors3d.hpp>
 #endif
 
-#include <kin/scene/scene_asset.hpp>
-
 #include <filesystem>
+#include <kin/runtime/development.hpp>
+#include <kin/scene/scene_asset.hpp>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,6 +38,12 @@ public:
               SceneAssetLoadLimits limits = {});
 
     bool instantiate(EcsWorld& world, SceneInstantiateOptions options = {});
+    // Track an already instantiated, validated authored scene (e.g. a preload).
+    void track_instance(EcsWorld& world, std::filesystem::path path, std::filesystem::path root, SceneAsset definition,
+                        SceneInstance instance);
+    std::unique_ptr<DevelopmentChange> prepare_patch(EcsWorld& world, const std::filesystem::path& revision_root,
+                                                     std::string& error,
+                                                     std::function<bool(EcsWorld&, std::string&)> validate = {});
 #ifdef KIN_EXPERIMENTAL_3D
     Status3D instantiate3d(EcsWorld& world, Assets3D& assets, const SceneBindingOptions3D& options);
 #endif
@@ -71,6 +77,7 @@ private:
     std::filesystem::path _asset_root;
     SceneAsset _scene;
     SceneInstance _instance;
+    SceneDocument _authored;
     std::vector<std::string> _diagnostics;
     std::unordered_map<std::string, std::filesystem::file_time_type> _write_times;
     bool _loaded = false;

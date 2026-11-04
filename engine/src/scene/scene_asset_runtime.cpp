@@ -1,10 +1,9 @@
-#include <kin/scene/scene_asset_runtime.hpp>
-
-#include <kin/platform/log.hpp>
-#include <kin/assets/content.hpp>
-#include <kin/prefab/prefab_asset.hpp>
-
 #include <algorithm>
+#include <kin/assets/content.hpp>
+#include <kin/platform/log.hpp>
+#include <kin/prefab/prefab_asset.hpp>
+#include <kin/scene/live_scene2d.hpp>
+#include <kin/scene/scene_asset_runtime.hpp>
 #include <optional>
 #include <system_error>
 #include <unordered_set>
@@ -81,7 +80,72 @@ bool SceneAssetRuntime::instantiate(EcsWorld& world, SceneInstantiateOptions opt
         return false;
     }
     _instance = std::move(instance);
+    _authored = authored_scene_document(world, _instance);
     return true;
+}
+
+void SceneAssetRuntime::track_instance(EcsWorld& world, std::filesystem::path path, std::filesystem::path root,
+                                       SceneAsset definition, SceneInstance instance) {
+    _scene_path = std::move(path);
+    _asset_root = std::move(root);
+    _scene = std::move(definition);
+    _instance = std::move(instance);
+    _authored = authored_scene_document(world, _instance);
+    _loaded = true;
+    _entity_count = _authored.entities.size();
+    refresh_watches();
+}
+std::unique_ptr<DevelopmentChange>
+SceneAssetRuntime::prepare_patch(EcsWorld& world, const std::filesystem::path& root, std::string& error,
+                                 std::function<bool(EcsWorld&, std::string&)> validate) {
+    try {
+        if (!_loaded)
+            throw std::runtime_error("scene runtime is not loaded");
+        const auto relative = _scene_path.lexically_relative(_asset_root);
+        if (relative.empty() || relative.is_absolute() || *relative.begin() == "..")
+            throw std::runtime_error("scene is outside the development content root");
+        auto candidate = std::make_shared<SceneAssetRuntime>();
+        auto preview = std::make_shared<EcsWorld>();
+        world.components().copy_schema_to(preview->components());
+        if (!candidate->load(root / relative, root, preview->components(), _limits) ||
+            !candidate->instantiate(*preview)) {
+            error = candidate->diagnostics().empty() ? "cannot prepare scene" : candidate->diagnostics().front();
+            return {};
+        }
+        if (validate && !validate(*preview, error))
+            return {};
+        auto plan = prepare_scene_patch2d(world, _authored, candidate->_authored, error);
+        if (!plan)
+            return {};
+        auto shared = std::shared_ptr<DevelopmentChange>{std::move(plan)};
+        return std::make_unique<DevelopmentChange>(
+            DevelopmentChange{shared->activate, shared->rollback, [this, &world, candidate, preview, shared] {
+                                  if (shared->finalize)
+                                      shared->finalize();
+                                  const auto remap = [&](EcsEntity source) {
+                                      const auto id = preview->entities().authored_id(source);
+                                      return id ? world.entities().find_by_authored_id(*id) : EcsEntity{};
+                                  };
+                                  for (auto& root : candidate->_instance.roots)
+                                      root = remap(root);
+                                  for (auto& [id, entity] : candidate->_instance.by_authored_id)
+                                      entity = world.entities().find_by_authored_id(id);
+                                  for (auto& [id, instance] : candidate->_instance.prefab_instances) {
+                                      instance.root = remap(instance.root);
+                                      for (auto& entity : instance.entities)
+                                          entity = remap(entity);
+                                      for (auto& [local, entity] : instance.by_authored_id)
+                                          entity = remap(entity);
+                                      if (auto* component = instance.root.get_mut<PrefabInstanceComponent>())
+                                          component->source = instance.source;
+                                  }
+                                  apply_scene_header(world, candidate->_scene);
+                                  *this = std::move(*candidate);
+                              }});
+    } catch (const std::exception& e) {
+        error = e.what();
+        return {};
+    }
 }
 
 void SceneAssetRuntime::clear(EcsWorld& world) {

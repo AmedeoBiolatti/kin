@@ -35,6 +35,10 @@ failure bundles, see [gameplay automation](automation.md). The Workshop's
 `kin-workflow-automation` CTest runs JSON/Lua scenarios, both recording paths,
 replay and failure capture through real game processes.
 
+`kin-workflow-development` additionally tests live Lua/scene reload, invalid edit
+rollback, active leases/jobs, replay, and actual edits through the development
+launcher/import watcher. See [safe development reload](hot_reload.md).
+
 ## Building Tests
 
 Build one test executable:

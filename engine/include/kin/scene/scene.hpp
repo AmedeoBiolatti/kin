@@ -23,6 +23,7 @@ struct RuntimeDebugOptions;
 struct RunReport;
 struct Camera2D;
 class PlatformServices;
+class DevelopmentSession;
 
 struct SceneContext {
     App& app;
@@ -51,6 +52,7 @@ struct SceneContext {
     // The store's or platform's services (achievements, overlay, ...), from
     // SceneAppConfig::services; null where the host started none.
     PlatformServices* services = nullptr;
+    bool development = false;
 };
 
 class Scene {
@@ -80,6 +82,7 @@ public:
     // The main game UI, for semantic inspection and queued actions. Scenes
     // with a ui2 Context return it here; the server never drives a debug overlay.
     virtual ui2::Context* ui_context() { return nullptr; }
+    virtual DevelopmentSession* development_session() { return nullptr; }
 
     // Optional animation asset library hook for tooling/server diagnostics.
     virtual const AnimationAssetLibrary* animation_library() const { return nullptr; }

@@ -89,6 +89,7 @@ struct HeadlessOptions {
     bool fail_on_text_overflow = false;
     // The command line as given, program first (the check runs it again).
     std::vector<std::string> args;
+    bool development = false;
 };
 
 struct SceneAppConfig {

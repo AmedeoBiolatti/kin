@@ -1,6 +1,7 @@
 #include "lua_l10n.hpp"
 #include "lua_services.hpp"
 #include "lua_paths.hpp"
+#include "lua_reload_internal.hpp"
 #include "lua_scene_context.hpp"
 
 #include <algorithm>
@@ -33,8 +34,13 @@ namespace kin {
 
 struct ScriptEngineHost : ScriptSceneBindings {
     std::vector<SystemId> systems;
+    std::vector<std::pair<SystemDescriptor, std::function<void(SystemContext&)>>> definitions;
+    std::vector<SystemId> replaceable;
     bool closing = false;
+    bool preparing = false;
     EcsWorld& ecs() const {
+        if (preparing)
+            throw std::runtime_error("live world access is unavailable while preparing reload");
         if (closing)
             throw std::runtime_error("script state is closing");
         return *world;
@@ -42,14 +48,20 @@ struct ScriptEngineHost : ScriptSceneBindings {
     const ScriptComponentRegistry* script_components() const { return components; }
     std::filesystem::path resolved_script_path() const { return script_path; }
     void clear_script_entities() const {
+        if (preparing)
+            throw std::runtime_error("cannot clear entities while preparing reload");
         if (clear_entities)
             clear_entities();
     }
     void set_clear_color(Color color) const {
+        if (preparing)
+            throw std::runtime_error("cannot change rendering while preparing reload");
         if (set_background)
             set_background(color);
     }
     void mark_render_cache_dirty(std::string_view) const {
+        if (preparing)
+            throw std::runtime_error("cannot change rendering while preparing reload");
         if (mark_render_dirty)
             mark_render_dirty();
     }
@@ -65,6 +77,7 @@ struct ScriptEngineHost : ScriptSceneBindings {
 };
 
 namespace scripting_detail {
+thread_local bool reload_staging = false;
 thread_local EcsCommandBuffer* script_commands = nullptr;
 EcsCommandBuffer* current_script_commands() {
     return script_commands;
@@ -78,6 +91,8 @@ struct ScriptEngine::Impl {
     std::filesystem::path asset_root;
     std::vector<std::filesystem::path> dependencies;
     std::unordered_set<std::string> dependency_keys;
+    std::function<void(sol::state&)> bind;
+    std::shared_ptr<const void> content_owner;
 };
 
 namespace {
@@ -1089,13 +1104,22 @@ struct ScriptSceneApi {
     }
 
     bool register_system(std::string_view id, sol::table descriptor, sol::protected_function run) {
+        if (scene->preparing) {
+            const auto current = scene->world->systems().snapshots();
+            if (std::ranges::any_of(current, [&](const auto& entry) { return entry.id == id; }) &&
+                std::ranges::find(scene->replaceable, id) == scene->replaceable.end())
+                throw std::runtime_error("reload system ID belongs to another owner");
+            if (scene->definitions.size() >= 128 ||
+                std::ranges::any_of(scene->definitions, [&](const auto& entry) { return entry.first.id == id; }))
+                throw std::runtime_error("duplicate/too many reload system declarations");
+        }
         EcsQueryPlanDescriptor query_descriptor{
             .all = table_strings(descriptor, "all"),
             .none = table_strings(descriptor, "none"),
             .reads = table_strings(descriptor, "reads"),
             .writes = table_strings(descriptor, "writes"),
         };
-        EcsQueryPlan plan = scene->ecs().build_query_plan(query_descriptor);
+        EcsQueryPlan plan = scene->world->build_query_plan(query_descriptor);
         if (!plan.valid) {
             return false;
         }
@@ -1121,44 +1145,49 @@ struct ScriptSceneApi {
             .reads = query_descriptor.reads,
             .writes = query_descriptor.writes,
         });
+        if (scene->preparing) {
+            EcsWorld validation;
+            scene->world->components().copy_schema_to(validation.components());
+            if (validation.systems().register_task(system_descriptor, [](SystemContext&) {}).empty())
+                throw std::runtime_error("invalid reload system descriptor");
+        }
+        auto callback = [scene = scene, plan = std::move(plan), run = std::move(run),
+                         access = std::move(access)](SystemContext& ctx) mutable {
+            for (EcsEntity entity : scene->ecs().query_entities(plan)) {
+                const ScriptSystemAccessContext* previous = current_script_system_access;
+                auto* previous_commands = scripting_detail::script_commands;
+                struct Reset {
+                    const ScriptSystemAccessContext* access;
+                    EcsCommandBuffer* commands;
+                    ~Reset() {
+                        current_script_system_access = access;
+                        scripting_detail::script_commands = commands;
+                    }
+                } reset{previous, previous_commands};
+                current_script_system_access = access.get();
+                scripting_detail::script_commands = ctx.commands;
+                ScriptSystemContextApi system_context{
+                    .scene = scene,
+                    .commands_ptr = ctx.commands,
+                    .delta_time = ctx.dt,
+                    .id = std::string{ctx.system_id},
+                    .phase_name = std::string{system_phase_name(ctx.phase)},
+                    .parallel = ctx.running_parallel,
+                };
+                sol::protected_function_result result = run(ScriptEntityApi{scene, entity}, ctx.dt, system_context);
+                current_script_system_access = previous;
+                if (!result.valid()) {
+                    sol::error error = result;
+                    throw std::runtime_error("system '" + access->system_id +
+                                             "' entity=" + std::to_string(entity.id()) + ": " + error.what());
+                }
+            }
+        };
+        scene->definitions.emplace_back(system_descriptor, callback);
+        if (scene->preparing)
+            return true;
         const bool registered =
-            !scene->ecs()
-                 .systems()
-                 .register_task(std::move(system_descriptor),
-                                [scene = scene, plan = std::move(plan), run = std::move(run),
-                                 access = std::move(access)](SystemContext& ctx) mutable {
-                                    for (EcsEntity entity : scene->ecs().query_entities(plan)) {
-                                        const ScriptSystemAccessContext* previous = current_script_system_access;
-                                        auto* previous_commands = scripting_detail::script_commands;
-                                        struct Reset {
-                                            const ScriptSystemAccessContext* access;
-                                            EcsCommandBuffer* commands;
-                                            ~Reset() {
-                                                current_script_system_access = access;
-                                                scripting_detail::script_commands = commands;
-                                            }
-                                        } reset{previous, previous_commands};
-                                        current_script_system_access = access.get();
-                                        scripting_detail::script_commands = ctx.commands;
-                                        ScriptSystemContextApi system_context{
-                                            .scene = scene,
-                                            .commands_ptr = ctx.commands,
-                                            .delta_time = ctx.dt,
-                                            .id = std::string{ctx.system_id},
-                                            .phase_name = std::string{system_phase_name(ctx.phase)},
-                                            .parallel = ctx.running_parallel,
-                                        };
-                                        sol::protected_function_result result =
-                                            run(ScriptEntityApi{scene, entity}, ctx.dt, system_context);
-                                        current_script_system_access = previous;
-                                        if (!result.valid()) {
-                                            sol::error error = result;
-                                            throw std::runtime_error("system '" + access->system_id + "' entity=" +
-                                                                     std::to_string(entity.id()) + ": " + error.what());
-                                        }
-                                    }
-                                })
-                 .empty();
+            !scene->ecs().systems().register_task(std::move(system_descriptor), std::move(callback)).empty();
         if (registered)
             scene->systems.emplace_back(id);
         return registered;
@@ -1424,6 +1453,7 @@ void scripting_detail::script_component_access(std::string_view component, bool 
 
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind)
     : _impl(std::make_unique<Impl>()) {
+    _impl->bind = bind;
     scripting_detail::bind_script_errors(_impl->lua);
     _impl->lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
     sol::table package = _impl->lua.create_table();
@@ -1440,6 +1470,7 @@ ScriptEngine::~ScriptEngine() {
     if (_impl->host) {
         _impl->host->closing = true;
         _impl->host->clear_systems();
+        _impl->host->definitions.clear();
     }
 }
 
@@ -1452,7 +1483,136 @@ bool ScriptEngine::load_file(const std::filesystem::path& path) {
     return load_file(absolute.parent_path(), absolute);
 }
 
+namespace {
+sol::object reload_copy(const sol::object& value, sol::state_view target, std::size_t& count, int depth = 0) {
+    if (depth > 32 || ++count > 10000)
+        throw std::runtime_error("reload_state exceeds depth/item limit");
+    switch (value.get_type()) {
+    case sol::type::nil:
+        return sol::make_object(target, sol::nil);
+    case sol::type::boolean:
+        return sol::make_object(target, value.as<bool>());
+    case sol::type::string:
+        return sol::make_object(target, value.as<std::string>());
+    case sol::type::number: {
+        value.push();
+        const bool integer = lua_isinteger(value.lua_state(), -1) != 0;
+        lua_pop(value.lua_state(), 1);
+        if (integer)
+            return sol::make_object(target, value.as<lua_Integer>());
+        const double number = value.as<double>();
+        if (!std::isfinite(number))
+            throw std::runtime_error("nonfinite reload state");
+        return sol::make_object(target, number);
+    }
+    case sol::type::table: {
+        auto out = target.create_table();
+        for (const auto& [key, item] : value.as<sol::table>()) {
+            if (key.get_type() != sol::type::string && key.get_type() != sol::type::number)
+                throw std::runtime_error("reload_state keys must be strings or numbers");
+            out.set(reload_copy(key, target, count, depth + 1), reload_copy(item, target, count, depth + 1));
+        }
+        return sol::make_object(target, out);
+    }
+    case sol::type::userdata: {
+        const auto copied = scripting_detail::clone_workflow_reload_value(value, target);
+        if (copied)
+            return *copied;
+        throw std::runtime_error("reload_state contains unsupported userdata; store authored IDs instead");
+    }
+    default:
+        throw std::runtime_error("reload_state cannot contain Lua functions, threads or pointers");
+    }
+}
+} // namespace
+std::unique_ptr<ScriptEngine> ScriptEngine::prepare_reload(const std::filesystem::path& root,
+                                                           const std::filesystem::path& path,
+                                                           std::string& error) const {
+    try {
+        if (!_impl->host)
+            throw std::runtime_error("script has no live scene bindings");
+        if (!path_within_root(root / path, root))
+            throw std::runtime_error("reload script must be inside the candidate content root");
+        auto next = std::make_unique<ScriptEngine>();
+        struct Guard {
+            lua_State* lua;
+            bool previous;
+            int budget = 1000;
+            explicit Guard(lua_State* state) : lua(state), previous(scripting_detail::reload_staging) {
+                scripting_detail::reload_staging = true;
+                lua_pushlightuserdata(lua, &budget);
+                lua_setfield(lua, LUA_REGISTRYINDEX, "kin.reload_budget");
+                lua_sethook(
+                    lua,
+                    [](lua_State* state, lua_Debug*) {
+                        lua_getfield(state, LUA_REGISTRYINDEX, "kin.reload_budget");
+                        auto* remaining = static_cast<int*>(lua_touserdata(state, -1));
+                        lua_pop(state, 1);
+                        if (--*remaining <= 0)
+                            luaL_error(state, "reload instruction budget exceeded");
+                    },
+                    LUA_MASKCOUNT, 1000);
+            }
+            ~Guard() {
+                lua_sethook(lua, nullptr, 0, 0);
+                lua_pushnil(lua);
+                lua_setfield(lua, LUA_REGISTRYINDEX, "kin.reload_budget");
+                scripting_detail::reload_staging = previous;
+            }
+        } guard{next->_impl->lua.lua_state()};
+        if (!next->load_file(root, path))
+            throw std::runtime_error(next->last_error());
+        next->_impl->host = std::make_unique<ScriptEngineHost>();
+        static_cast<ScriptSceneBindings&>(*next->_impl->host) = static_cast<const ScriptSceneBindings&>(*_impl->host);
+        next->_impl->host->script_path = root / path;
+        next->_impl->host->preparing = true;
+        next->_impl->host->replaceable = _impl->host->systems;
+        std::size_t count = 0;
+        auto state = reload_copy(_impl->lua["reload_state"].get<sol::object>(), next->_impl->lua, count);
+        next->_impl->lua["reload_state"] = state;
+        sol::protected_function migrate = next->_impl->lua["on_reload"];
+        if (!migrate.valid())
+            throw std::runtime_error("safe live reload requires on_reload(state, scene); on_load is not rerun");
+        if (!record_result(next->_last_error, "on_reload", migrate(state, ScriptSceneApi{next->_impl->host.get()})))
+            throw std::runtime_error(next->last_error());
+        next->_impl->host->preparing = false;
+        next->_impl->workflows = _impl->workflows;
+        next->_impl->bind = _impl->bind;
+        if (next->_impl->bind)
+            next->_impl->bind(next->_impl->lua);
+        return next;
+    } catch (const std::exception& e) {
+        error = e.what();
+        return {};
+    }
+}
+void ScriptEngine::suspend_systems() {
+    if (_impl->host)
+        _impl->host->clear_systems();
+}
+void ScriptEngine::use_content(std::shared_ptr<const MemoryContent> content) {
+    _impl->asset_root = content->root();
+    _impl->content_owner = content;
+    if (_impl->workflows)
+        _impl->workflows->use_content(std::move(content));
+}
+bool ScriptEngine::activate_systems() {
+    if (!_impl->host)
+        return true;
+    for (const auto& [descriptor, callback] : _impl->host->definitions) {
+        const auto id = _impl->host->world->systems().register_task(descriptor, callback);
+        if (id.empty()) {
+            _last_error = "cannot activate script system " + descriptor.id;
+            return false;
+        }
+        _impl->host->systems.push_back(id);
+    }
+    return true;
+}
+
 bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std::filesystem::path& script_path) {
+    if (auto view = view_content_file(asset_root / script_path))
+        _impl->content_owner = std::move(view->owner);
     _impl->asset_root = normalized_dependency_path(asset_root);
     _impl->dependencies.clear();
     _impl->dependency_keys.clear();

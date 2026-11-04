@@ -4,6 +4,7 @@
 add_library(kin_foundation STATIC
     src/assets/file_watcher.cpp
     src/assets/content.cpp
+    src/runtime/development.cpp
     src/assets/asset_types.cpp
     src/core/json.cpp
     src/core/hash.cpp
@@ -135,6 +136,7 @@ add_library(kin_engine STATIC
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
     src/scene/scene_asset_runtime.cpp
+    src/scene/live_scene2d.cpp
     src/scene/scene_preload2d.cpp
     src/scene/scene_manager.cpp
     src/scene/transitions.cpp
@@ -276,6 +278,7 @@ if(KIN_ENABLE_SCRIPTING)
 
     add_library(kin_scripting_scenes STATIC
         src/scripting/script_engine.cpp
+        src/scripting/script_reload.cpp
         src/scripting/lua_workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp

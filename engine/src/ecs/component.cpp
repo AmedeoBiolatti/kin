@@ -658,6 +658,25 @@ bool EcsComponentRegistry::patch_field(EcsEntity entity, ComponentId id, std::st
     return true;
 }
 
+void EcsComponentRegistry::copy_schema_to(EcsComponentRegistry& destination) const {
+    for (const auto& record : _records) {
+        if (destination.find(record->descriptor.name))
+            continue;
+        if (record->copy_schema)
+            record->copy_schema(destination);
+        else {
+            auto builder = destination.data(record->descriptor.name);
+            for (std::size_t i = 0; i < record->fields.size(); ++i)
+                builder.field(record->fields[i].descriptor.name, record->fields[i].descriptor.kind,
+                              record->data_defaults[i]);
+            auto* copied = destination.find_record(record->descriptor.name);
+            copied->descriptor.fields = record->descriptor.fields;
+            for (std::size_t i = 0; i < record->fields.size(); ++i)
+                copied->fields[i].descriptor = record->fields[i].descriptor;
+        }
+    }
+}
+
 bool EcsComponentRegistry::copy_component(EcsEntity source, std::string_view name,
                                          EcsComponentRegistry& destination, EcsEntity target) const {
     const auto* from = find_record(name);

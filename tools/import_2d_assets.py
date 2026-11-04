@@ -7,6 +7,7 @@ Only this build tool needs Pillow. Games consume ordinary PNG/.kinsprites/
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -573,7 +574,48 @@ class Pipeline:
         self._emit_map(job, cols, rows, size, size, tiles, layers, prefabs)
 
 
+@contextmanager
+def output_lock(output):
+    """Serialize configure/build/watch publishers; the OS releases crash locks."""
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    with (output / ".kin-import.lock").open("a+b") as stream:
+        if stream.seek(0, 2) == 0:
+            stream.write(b"\0")
+            stream.flush()
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            acquire = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            release = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            acquire = lambda: fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            release = lambda: fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                acquire()
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("another import still owns the output directory")
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            release()
+
+
 def build(manifest, output, content=None, aseprite="aseprite", cache_dir=None, statistics=None):
+    with output_lock(Path(output).resolve()):
+        return _build_locked(manifest, output, content, aseprite, cache_dir, statistics)
+
+
+def _build_locked(manifest, output, content=None, aseprite="aseprite", cache_dir=None, statistics=None):
     manifest, output = Path(manifest).resolve(), Path(output).resolve()
     require(output != manifest.parent, "use a dedicated output directory, separate from import sources")
     pipeline = Pipeline(manifest.parent, aseprite)
@@ -599,11 +641,17 @@ def build(manifest, output, content=None, aseprite="aseprite", cache_dir=None, s
     # Validate the entire import before touching any previous output. Each file
     # replacement is atomic, and unchanged outputs retain their modification time.
     pipeline.verify()
+    # A live development session retains its immutable active generation while
+    # this marker exists. Failed publication remains blocked until a successful
+    # import repairs every output and publishes its report.
+    publishing = output / ".kin-import-publishing"
+    atomic_write(publishing, b"kin.import-publication/1\n")
     for name, data in sorted(pipeline.files.items()): atomic_write(output / name, data)
     for name in sorted(set(old) - set(pipeline.files)):
         stale = output / output_path(name)
         if stale.is_file(): stale.unlink()
     atomic_write(report_path, json_bytes(report))
+    publishing.unlink()
     if statistics is not None: statistics.update(hits=cache.hits, misses=cache.misses)
     return report
 

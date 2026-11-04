@@ -5,7 +5,10 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
+#include <kin/scene/live_scene2d.hpp>
+#include <kin/scene/scene_asset_runtime.hpp>
 #include <kin/scripting/script_engine.hpp>
+#include <kin/scripting/script_reload.hpp>
 #include <kin/scripting/script_scene.hpp>
 #include <kin/scripting/workflows2d.hpp>
 #include <optional>
@@ -229,6 +232,91 @@ ScriptScene::~ScriptScene() {
 }
 
 void ScriptScene::on_enter(SceneContext& ctx) {
+    if (ctx.development && !_development) {
+        _development = std::make_unique<DevelopmentSession>(_config.asset_root);
+        if (_script)
+            _script->use_content(_development->active().content);
+        adopt_assets(Assets2D::from_snapshot(ctx.renderer, _development->active().content));
+        assets()->bind(ecs());
+        _development->add_target("scene and assets", [this, &renderer = ctx.renderer](
+                                                         const DevelopmentRevision& revision, std::string& error) {
+            struct State {
+                std::unique_ptr<Assets2D> next, old;
+            };
+            auto state = std::make_shared<State>();
+            state->next = assets() ? assets()->for_snapshot(revision.content)
+                                   : Assets2D::from_snapshot(renderer, revision.content);
+            if (assets()) {
+                state->next->manager().set_memory_budget(assets()->manager().memory_budget());
+                state->next->set_texture_budget(assets()->texture_budget());
+            }
+            std::unique_ptr<DevelopmentChange> scene;
+            const auto validate = [&](EcsWorld& preview, std::string& failure) {
+                state->next->bind(preview);
+                if (state->next->problems().empty())
+                    return true;
+                failure = state->next->problems().begin()->second;
+                return false;
+            };
+            if (_config.scene_runtime) {
+                scene = _config.scene_runtime->prepare_patch(ecs(), revision.content->root(), error, validate);
+                if (!scene)
+                    return std::unique_ptr<DevelopmentChange>{};
+            } else {
+                EcsWorld preview;
+                ecs().components().copy_schema_to(preview.components());
+                if (!instantiate_scene(preview, scene_document_from_world(ecs()), error) || !validate(preview, error))
+                    return std::unique_ptr<DevelopmentChange>{};
+            }
+            auto patch = std::shared_ptr<DevelopmentChange>{std::move(scene)};
+            return std::make_unique<DevelopmentChange>(
+                DevelopmentChange{[this, state, patch](std::string& e) {
+                                      if (patch && !patch->activate(e))
+                                          return false;
+                                      state->old = exchange_assets(std::move(state->next));
+                                      assets()->bind(ecs());
+                                      return true;
+                                  },
+                                  [this, state, patch] {
+                                      if (state->old)
+                                          state->next = exchange_assets(std::move(state->old));
+                                      if (patch)
+                                          patch->rollback();
+                                  },
+                                  [this, patch] {
+                                      if (patch && patch->finalize)
+                                          patch->finalize();
+                                      if (_config.scene_runtime)
+                                          render_config().clear_color = _config.scene_runtime->scene()->clear_color;
+                                      mark_render_cache_dirty("development reload");
+                                  }});
+        });
+        _development->add_target("Lua", [this](const DevelopmentRevision& revision, std::string& error) {
+            auto path = _config.script_path.is_absolute() ? _config.script_path.lexically_relative(_config.asset_root)
+                                                          : _config.script_path;
+            if (_config.scene_runtime) {
+                const auto scene_path =
+                    _config.scene_runtime->scene_path().lexically_relative(_config.scene_runtime->asset_root());
+                const auto loaded = load_scene_asset(revision.content->root() / scene_path, ecs().components());
+                if (!loaded.ok() || loaded.scene->script.empty()) {
+                    error = "candidate scene requires a valid script";
+                    return std::unique_ptr<DevelopmentChange>{};
+                }
+                path = loaded.scene->script;
+            }
+            auto change = prepare_script_reload(_script, revision, path, error);
+            if (change) {
+                auto finalize = std::move(change->finalize);
+                change->finalize = [this, path, finalize = std::move(finalize)] {
+                    if (finalize)
+                        finalize();
+                    _config.script_path = path;
+                    clear_script_error();
+                };
+            }
+            return change;
+        });
+    }
     if (_script && _script->workflows())
         _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
     if (_script && !_script->call_on_enter(ctx)) {
@@ -325,6 +413,13 @@ void ScriptScene::clear_script_entities() {
 }
 
 bool ScriptScene::reload_script() {
+    if (_development) {
+        std::string error;
+        const bool queued = _development->request(error);
+        if (!queued)
+            set_script_error(error, "reload");
+        return queued;
+    }
     KIN_LOG_INFO_F("script",
                    "script reload requested",
                    (LogFields{
@@ -380,6 +475,8 @@ bool ScriptScene::load_script(bool clear_entities) {
 }
 
 void ScriptScene::poll_hot_reload() {
+    if (_development)
+        return;
     if (!_config.hot_reload) {
         return;
     }

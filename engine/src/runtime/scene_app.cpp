@@ -6,8 +6,8 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -15,16 +15,17 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
-#include <optional>
-#include <sstream>
 #include <kin/assets/file_watcher.hpp>
-#include <kin/l10n/localization.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/profile.hpp>
 #include <kin/core/rng.hpp>
+#include <kin/l10n/localization.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/platform/user_data.hpp>
 #include <kin/runtime/debug_overlay.hpp>
+#include <kin/runtime/development.hpp>
+#include <optional>
+#include <sstream>
 #ifdef KIN_ENABLE_RENDER_PROBE
 #include <kin/runtime/render_probe.hpp>
 #endif
@@ -174,6 +175,8 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
+        if (arg == "--dev")
+            options.development = true;
         if (arg == "--headless") {
             options.enabled = true;
         } else if (arg.starts_with("--automation-record=")) {
@@ -714,6 +717,7 @@ struct SceneAppSession::Impl {
                 .asset_server = config.asset_server,
                 .rendering_3d = config.rendering_3d,
                 .automation_record_path = config.headless.automation_record_path,
+                .development = config.headless.development,
             };
             return run_scene_server(server, scenes);
 #endif
@@ -957,6 +961,7 @@ struct SceneAppSession::Impl {
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
                 .services = services,
+                .development = config.headless.development,
             };
             try {
                 scenes.shutdown(shutdown_ctx);
@@ -1036,6 +1041,7 @@ struct SceneAppSession::Impl {
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
                 .services = services,
+                .development = config.headless.development,
             };
         };
 
@@ -1059,6 +1065,10 @@ struct SceneAppSession::Impl {
 #endif
 
                 kin::SceneContext scene_ctx = make_scene_context(ctx);
+                if (scene_ctx.development)
+                    for (i32 i = 0; i < scenes.depth(); ++i)
+                        if (auto* session = scenes.at_mut(i)->development_session())
+                            session->advance(static_cast<u64>(frames_run), window.mode != AppMode::Headless);
                 sync_ui_direction();
 #if KIN_ENABLE_RUNTIME_ASSETS
                 runtime_detail::pump_scene_assets(config.asset_server, window.mode != AppMode::Headless);

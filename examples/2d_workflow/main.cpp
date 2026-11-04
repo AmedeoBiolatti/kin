@@ -12,10 +12,12 @@
 #include <kin/platform/app.hpp>
 #include <kin/platform/input_router.hpp>
 #include <kin/platform/user_data.hpp>
+#include <kin/runtime/development.hpp>
 #include <kin/runtime/run_report.hpp>
 #include <kin/runtime/scene_app.hpp>
 #include <kin/scene/scene_preload2d.hpp>
 #include <kin/scripting/script_engine.hpp>
+#include <kin/scripting/script_reload.hpp>
 #include <kin/scripting/workflows2d.hpp>
 #include <kin/ui2/accessibility.hpp>
 #include <kin/ui2/context.hpp>
@@ -31,11 +33,11 @@ void require(bool value, const std::string& message) {
 class Workshop {
 public:
     Workshop(App& app, Window& window, Renderer2D& renderer, std::filesystem::path root)
-        : app(app), renderer(renderer), assets(renderer, root), access(window, renderer, "Kin 2D Workshop"),
-          services(std::make_shared<ScriptWorkflows2D>(world, root)) {
+        : app(app), renderer(renderer), root(root), assets(std::make_unique<Assets2D>(renderer, root)),
+          access(window, renderer, "Kin 2D Workshop"), services(std::make_shared<ScriptWorkflows2D>(world, root)) {
         register_builtin_editor_components(world);
-        assets.set_residency_diagnostics(true);
-        services->configure(&renderer, app.gamepads(), &assets, &jobs);
+        assets->set_residency_diagnostics(true);
+        services->configure(&renderer, app.gamepads(), assets.get(), &jobs);
         grid = std::make_shared<NavGridSnapshot>();
         grid->cols = 44;
         grid->rows = 36;
@@ -65,7 +67,7 @@ public:
                 .target = {136, 304}, .speed = 66, .radius = 5, .arrival_distance = 18, .neighbour_distance = 30});
             enemies.push_back(enemy);
         }
-        assets.bind(world);
+        assets->bind(world);
         script = std::make_unique<ScriptEngine>([this](sol::state& lua) {
             auto game = lua.create_named_table("game");
             game["position"] = [this] {
@@ -105,8 +107,61 @@ public:
         sync_input_map();
         ui.set_controller_navigation({});
     }
+    void enable_development(std::unique_ptr<DevelopmentSession> session) {
+        development = std::move(session);
+        services->use_content(development->active().content);
+        development->add_target("actor assets", [this](const DevelopmentRevision& revision, std::string& error) {
+            struct State {
+                std::unique_ptr<Assets2D> next, old;
+            };
+            auto state = std::make_shared<State>();
+            state->next = assets->for_snapshot(revision.content);
+            state->next->set_residency_diagnostics(true);
+            state->next->manager().set_memory_budget(assets->manager().memory_budget());
+            state->next->set_texture_budget(assets->texture_budget());
+            kin::EcsWorld preview;
+            world.components().copy_schema_to(preview.components());
+            if (!instantiate_scene(preview, scene_document_from_world(world), error))
+                return std::unique_ptr<DevelopmentChange>{};
+            state->next->bind(preview);
+            if (!state->next->problems().empty()) {
+                error = state->next->problems().begin()->second;
+                return std::unique_ptr<DevelopmentChange>{};
+            }
+            return std::make_unique<DevelopmentChange>(
+                DevelopmentChange{[this, state](std::string&) {
+                                      state->old = std::move(assets);
+                                      assets = std::move(state->next);
+                                      assets->bind(world);
+                                      services->configure(&renderer, app.gamepads(), assets.get(), &jobs);
+                                      return true;
+                                  },
+                                  [this, state] {
+                                      if (state->old) {
+                                          state->next = std::move(assets);
+                                          assets = std::move(state->old);
+                                          assets->bind(world);
+                                          services->configure(&renderer, app.gamepads(), assets.get(), &jobs);
+                                      }
+                                  }});
+        });
+        development->add_target("authored room", [this](const DevelopmentRevision& revision, std::string& error) {
+            if (room)
+                return room->prepare_reload(revision, error);
+            return std::make_unique<DevelopmentChange>(DevelopmentChange{[](std::string&) { return true; }, [] {}});
+        });
+        development->add_target("Lua", [this](const DevelopmentRevision& revision, std::string& error) {
+            return prepare_script_reload(script, revision, "game.lua", error);
+        });
+    }
     void update(f32 dt) {
-        require(script->call_update({.dt = dt, .input = &app.input(), .app = &app}), script->last_error());
+        if (!script->call_update({.dt = dt, .input = &app.input(), .app = &app})) {
+            if (development) {
+                status = script->last_error();
+                return;
+            }
+            require(false, script->last_error());
+        }
         sync_input_map();
         while (auto next = services->take_scene()) {
             room = std::move(next);
@@ -124,9 +179,9 @@ public:
         fire_age += dt;
         player.get_mut<SkeletonLayer2D>()->weight = fire_age < .3f ? 1.0f : 0.0f;
         update_skeletons2d(world, paused ? 0 : dt);
-        assets.bind(world);
-        if (++frames % 60 == 0)
-            assets.reload_changed();
+        assets->bind(world);
+        if (++frames % 60 == 0 && !development)
+            assets->reload_changed();
     }
     void render(bool present = true) {
         renderer.clear({13, 21, 32, 255});
@@ -167,7 +222,7 @@ public:
         if (motion.changed)
             ui.set_reduced_motion(motion.value);
         label("ACTOR ASSET CACHE", {724, 360}, 1.7f);
-        const auto cpu = assets.manager().memory_report(), gpu = assets.texture_memory_report();
+        const auto cpu = assets->manager().memory_report(), gpu = assets->texture_memory_report();
         label("CPU " + std::to_string(cpu.resident_bytes) + " B / " + std::to_string(cpu.budget_bytes) + " B",
               {724, 390}, 1.4f);
         label("GPU " + std::to_string(gpu.resident_bytes) + " B / " + std::to_string(gpu.budget_bytes) + " B",
@@ -179,7 +234,7 @@ public:
                                  : "Budget 0: unlimited",
               {724, 456}, 1.2f);
         f32 y = 480;
-        for (const auto& row : assets.texture_residency()) {
+        for (const auto& row : assets->texture_residency()) {
             label(row.path + "  " + std::to_string(row.bytes) + " B", {724, y}, 1.1f);
             label(row.retained_by.empty() ? "unused; eligible for eviction" : row.retained_by.front(), {724, y + 14},
                   1.0f);
@@ -213,7 +268,7 @@ public:
         require(shots > 0 && recycled == shots && active == 0, "pulse pool/tween lifecycle failed");
         require(replans > 0 && detour, "navigation did not pass through the wall gap");
         require(semantic_actions >= 5 && ui.reduced_motion(), "semantic UI actions did not reach their targets");
-        require(assets.texture_memory_report().over_budget, "live texture budget pressure was not reported");
+        require(assets->texture_memory_report().over_budget, "live texture budget pressure was not reported");
         require(!script->last_error().size(), script->last_error());
         if (renderer.capabilities().data_buffers) {
             bool used = false;
@@ -226,8 +281,10 @@ public:
     }
     void capture(std::filesystem::path path) { screenshot = std::move(path); }
     kin::EcsWorld& ecs() { return world; }
+    DevelopmentSession* dev_session() { return development.get(); }
     ui2::Context& interface() { return ui; }
     void write_report(JsonWriter& json) const {
+        json.field("room_name", room ? room->name() : std::string_view{});
         const auto position = player.get<Transform2D>()->pos;
         json.field("shots", shots)
             .field("recycled", recycled)
@@ -304,13 +361,15 @@ private:
     }
     App& app;
     Renderer2D& renderer;
+    std::filesystem::path root;
     kin::EcsWorld world;
-    Assets2D assets;
+    std::unique_ptr<Assets2D> assets;
     JobSystem jobs{{.single_threaded = true}};
     ui2::Context ui;
     ui2::Accessibility access;
     std::shared_ptr<ScriptWorkflows2D> services;
     std::unique_ptr<ScriptEngine> script;
+    std::unique_ptr<DevelopmentSession> development;
     std::unique_ptr<PreloadedScene2D> room;
     std::shared_ptr<NavGridSnapshot> grid;
     std::unique_ptr<Navigation2D> navigation;
@@ -328,7 +387,12 @@ public:
     explicit WorkshopScene(std::filesystem::path root) : root(std::move(root)) {}
     std::string_view name() const override { return "Workshop"; }
     void on_enter(SceneContext& ctx) override {
-        game = std::make_unique<Workshop>(ctx.app, ctx.window, ctx.renderer, root);
+        if (ctx.development) {
+            auto session = std::make_unique<DevelopmentSession>(root);
+            game = std::make_unique<Workshop>(ctx.app, ctx.window, ctx.renderer, session->active().content->root());
+            game->enable_development(std::move(session));
+        } else
+            game = std::make_unique<Workshop>(ctx.app, ctx.window, ctx.renderer, root);
     }
     void update(SceneContext& ctx) override {
         try {
@@ -340,6 +404,7 @@ public:
                 throw;
         }
     }
+    DevelopmentSession* development_session() override { return game ? game->dev_session() : nullptr; }
     void render(SceneContext&) override { game->render(false); }
     kin::EcsWorld* world() override { return game ? &game->ecs() : nullptr; }
     ui2::Context* ui_context() override { return game ? &game->interface() : nullptr; }
@@ -381,7 +446,7 @@ int main(int argc, char** argv) {
             kin::mount_content_pack(root, archive);
         }
         auto headless = kin::parse_headless_options(argc, argv);
-        if (headless.server || headless.inspect) {
+        if (headless.server || headless.inspect || headless.development) {
             const bool server = headless.server;
             kin::SceneManager scenes;
             auto factory = [root](kin::SceneManager& target) { target.push(std::make_unique<WorkshopScene>(root)); };

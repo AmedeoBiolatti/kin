@@ -27,6 +27,7 @@
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/render_view.hpp>
+#include <kin/runtime/development.hpp>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -1105,6 +1106,10 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
 }
 
 void ServerContext::step() {
+    if (_development)
+        for (i32 i = 0; i < _scenes.depth(); ++i)
+            if (auto* session = _scenes.at_mut(i)->development_session())
+                session->advance(static_cast<u64>(_frame + 1));
     auto ui_action = std::exchange(_pending_ui_action, {});
     if (ui_action) ui_action();
     Input& input = _app.input();
@@ -1255,6 +1260,7 @@ SceneContext ServerContext::make_context() {
         .rng = _rng,
         .report = &_report,
         .renderer3d = _renderer3d,
+        .development = _development,
     };
 }
 
@@ -1797,8 +1803,9 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
 
     // Realize the initial scene stack (apply pending push + on_enter) without
     // advancing gameplay, so read endpoints work before the first tick.
-    ctx.realize_scenes();
+    ctx.enable_development(config.development);
     ctx.set_automation_mode(config.mode == ServerMode::Driven ? "driven" : "realtime");
+    ctx.realize_scenes();
     if (!config.automation_record_path.empty()) {
         try {
             ctx.start_recording(config.automation_record_path, config.game, config.seed);

@@ -297,6 +297,7 @@ struct ComponentRecord {
     // suppression is worth registering: data components have no observer, so a
     // suppression for them would never be consumed and would leak.
     bool observed = false;
+    std::function<void(EcsComponentRegistry&)> copy_schema;
 };
 
 } // namespace detail
@@ -346,6 +347,15 @@ public:
             .fields = {},
         };
         record->type = typeid(T);
+        record->copy_schema = [source =
+                                   std::weak_ptr<detail::ComponentRecord>{record}](EcsComponentRegistry& destination) {
+            if (const auto original = source.lock()) {
+                destination.native<T>(original->descriptor.name);
+                auto* copied = destination.find_record(original->descriptor.name);
+                copied->descriptor.fields = original->descriptor.fields;
+                copied->fields = original->fields;
+            }
+        };
         record->has = [](EcsEntity entity) {
             return entity.get<T>() != nullptr;
         };
@@ -390,6 +400,8 @@ public:
     const ComponentDescriptor* find(ComponentId id) const;
     const ComponentDescriptor* find(std::string_view name) const;
     std::vector<ComponentDescriptor> descriptors() const;
+    void copy_schema_to(EcsComponentRegistry& destination) const;
+    bool has_field_patch_handler() const { return static_cast<bool>(_field_patch_handler); }
 
     bool has(EcsEntity entity, ComponentId id) const;
     bool has(EcsEntity entity, std::string_view name) const;

@@ -14,5 +14,8 @@ if(BUILD_TESTING AND KIN_BUILD_TESTS)
                 --binary $<TARGET_FILE:kin_2d_workflow> --compiler $<TARGET_FILE:kin_scenario>
                 --content "${workflow_content}" --output "${CMAKE_CURRENT_BINARY_DIR}/automation")
         set_tests_properties(kin-workflow-automation PROPERTIES TIMEOUT 180 LABELS "component:SCENE_SERVER;integration")
+        add_test(NAME kin-workflow-development COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/development_integration.py"
+            --binary $<TARGET_FILE:kin_2d_workflow> --content "${workflow_content}" --output "${CMAKE_CURRENT_BINARY_DIR}/development")
+        set_tests_properties(kin-workflow-development PROPERTIES TIMEOUT 180 LABELS "component:SCENE_SERVER;integration")
     endif()
 endif()

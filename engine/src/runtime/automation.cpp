@@ -7,6 +7,7 @@
 #include <kin/core/json.hpp>
 #include <kin/ecs/component.hpp>
 #include <kin/ecs/world.hpp>
+#include <kin/runtime/development.hpp>
 #include <kin/ui2/context.hpp>
 #include <set>
 #include <sstream>
@@ -94,6 +95,10 @@ std::string snapshot(ServerContext& ctx, bool detailed) {
         if (scene->ui_context()) {
             writer.key("ui");
             scene->ui_context()->write_snapshot(writer);
+        }
+        if (auto* development = scene->development_session()) {
+            writer.key("development");
+            development->write_status(writer);
         }
         writer.end_object();
     }
@@ -308,6 +313,8 @@ const JsonValue& automation_protocol() {
       "debug.step":{"effect":"debug","inspect":true,"driven":false,"params":{"type":"object","properties":{"how":{"type":"string","enum":["into","over","out"]}}}}
     },"ui_selector":{"type":"object","properties":{"id":{"type":"string"},"key":{"type":"string"},"role":{"type":"string"},"label":{"type":"string"},"value":{"type":"string"},"visible":{"type":"boolean"},"enabled":{"type":"boolean"},"blocked":{"type":"boolean"},"focused":{"type":"boolean"},"checked":{"type":"boolean"},"within":{"$ref":"#/ui_selector"}},"additionalProperties":false}})JSON");
         const auto results = decode(R"JSON({
+      "dev.status":{"type":"object","required":["generation","attempt","pending","status","error","revision","activation_tick","sources","targets"],"properties":{"generation":{"type":"integer","minimum":0},"attempt":{"type":"integer","minimum":0},"pending":{"type":"boolean"},"status":{"type":"string","enum":["idle","queued","applied","rejected"]},"error":{"type":"string"},"revision":{"type":"string"},"activation_tick":{"type":"integer"},"sources":{"type":"array"},"targets":{"type":"array","items":{"type":"string"}}}},
+      "dev.reload":{"type":"object","required":["queued","generation","changes"],"properties":{"queued":{"type":"boolean"},"generation":{"type":"integer"},"changes":{"type":"object"}}},
       "server.capabilities":{"type":"object","required":["schema","protocol_version","mode","fixed_dt","rng_key","methods","scenes"],"properties":{"schema":{"type":"string"},"protocol_version":{"type":"integer"},"mode":{"type":"string","enum":["driven","realtime","inspect"]},"fixed_dt":{"type":"number"},"rng_key":{"type":"array","items":{"type":"integer"}},"methods":{"type":"object"},"scenes":{"type":"array"},"ui":{"type":"boolean"},"world":{"type":"boolean"},"reset":{"type":"boolean"},"image_io":{"type":"boolean"}}},
       "scene.current":{"type":"object","required":["name","state"],"properties":{"name":{"type":"string"},"state":{"type":"object"}}},
       "scene.stack":{"type":"object","required":["depth","scenes"],"properties":{"depth":{"type":"integer"},"scenes":{"type":"array"}}},
@@ -324,6 +331,10 @@ const JsonValue& automation_protocol() {
     })JSON");
         auto root = document.members();
         auto methods = root.at("methods").members();
+        methods["dev.status"] = decode(
+            R"({"effect":"read","inspect":true,"params":{"type":"object","properties":{"scene":{"type":"integer","minimum":0}}}})");
+        methods["dev.reload"] = decode(
+            R"({"effect":"reload","inspect":true,"params":{"type":"object","properties":{"scene":{"type":"integer","minimum":0},"expected_revision":{"type":"string"},"changes":{"type":"object"}}}})");
         for (auto& [name, entry] : methods) {
             auto fields = entry.members();
             auto params = fields.at("params").members();
@@ -366,9 +377,44 @@ std::optional<ui2::Id> automation_ui_selector(ServerContext& ctx, const JsonValu
 std::optional<ServerResponse> dispatch_automation_command(ServerContext& ctx, const GameInfo*, std::string_view method,
                                                           const J& params, bool initialize) {
     if (method != "server.schema" && method != "server.capabilities" && method != "world.query" &&
-        method != "ui.query" && method != "automation.snapshot")
+        method != "ui.query" && method != "automation.snapshot" && method != "dev.status" && method != "dev.reload")
         return {};
     try {
+        if (method == "dev.status" || method == "dev.reload") {
+            keys(params, method == "dev.status"
+                             ? std::initializer_list<std::string_view>{"scene"}
+                             : std::initializer_list<std::string_view>{"scene", "changes", "expected_revision"});
+            auto index = scene_index(ctx, params);
+            auto* scene = ctx.scenes().at_mut(index);
+            while (scene && !scene->development_session() && !params.contains("scene") && index > 0)
+                scene = ctx.scenes().at_mut(--index);
+            auto* development = scene ? scene->development_session() : nullptr;
+            if (!development)
+                throw std::runtime_error("scene has no development session; start with --dev");
+            if (method == "dev.status") {
+                std::ostringstream out;
+                JsonWriter writer(out, false);
+                development->write_status(writer);
+                return ServerResponse{.result_json = out.str()};
+            }
+            if (const auto* expected = params.find("expected_revision");
+                expected && (!expected->is_string() || expected->as_string() != development->active().id))
+                throw std::runtime_error("development revision changed; refresh dev.status before editing");
+            std::string error;
+            const auto* changes = params.find("changes");
+            if (!(changes ? development->request(*changes, error) : development->request(error)))
+                throw std::runtime_error(error);
+            J recorded;
+            try {
+                recorded = development->pending_changes();
+            } catch (const std::exception& e) {
+                development->reject_request(e.what());
+                throw;
+            }
+            return success(J{O{{"queued", J{true}},
+                               {"generation", J{static_cast<f64>(development->generation())}},
+                               {"changes", std::move(recorded)}}});
+        }
         if (method == "server.schema") {
             keys(params, {});
             return success(automation_protocol());
@@ -401,12 +447,13 @@ std::optional<ServerResponse> dispatch_automation_command(ServerContext& ctx, co
         }
         keys(params, {});
         A scenes;
-        bool any_ui = false, any_world = false;
+        bool any_ui = false, any_world = false, any_development = false;
         for (i32 i = 0; i < ctx.scenes().depth(); ++i) {
             auto* scene = ctx.scenes().at_mut(i);
             const bool ui = scene->ui_context() != nullptr, world = scene->world() != nullptr;
             any_ui |= ui;
             any_world |= world;
+            any_development |= scene->development_session() != nullptr;
             scenes.emplace_back(
                 O{{"index", J{static_cast<f64>(i)}}, {"name", str(scene->name())}, {"ui", J{ui}}, {"world", J{world}}});
         }
@@ -418,6 +465,8 @@ std::optional<ServerResponse> dispatch_automation_command(ServerContext& ctx, co
                 enabled &= any_ui;
             if (name.starts_with("world."))
                 enabled &= any_world;
+            if (name.starts_with("dev."))
+                enabled &= any_development;
             if (name == "sim.reset")
                 enabled &= ctx.can_reset();
             if (name == "view.screenshot")
@@ -436,6 +485,7 @@ std::optional<ServerResponse> dispatch_automation_command(ServerContext& ctx, co
                            {"reset", J{ctx.can_reset()}},
                            {"image_io", J{static_cast<bool>(KIN_ENABLE_IMAGE_IO)}},
                            {"recording", J{ctx.is_recording()}},
+                           {"development", J{any_development}},
                            {"methods", J{std::move(available)}},
                            {"scenes", J{std::move(scenes)}}}});
     } catch (const std::exception& e) {

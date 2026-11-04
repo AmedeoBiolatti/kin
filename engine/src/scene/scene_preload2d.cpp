@@ -133,6 +133,61 @@ struct ScenePreload2D::Impl {
     std::string error;
     Impl(Renderer2D& r, JobSystem& j) : renderer(r), jobs(j) {}
 };
+std::unique_ptr<DevelopmentChange> PreloadedScene2D::prepare_reload(const DevelopmentRevision& revision,
+                                                                    std::string& error) {
+    if (!_runtime) {
+        error = "preloaded scene has no authored runtime";
+        return {};
+    }
+    struct State {
+        std::unique_ptr<Assets2D> next, old;
+        std::shared_ptr<const MemoryContent> before;
+    };
+    auto state = std::make_shared<State>();
+    state->before = _content;
+    auto plan =
+        _runtime->prepare_patch(ecs(), revision.content->root(), error, [&](EcsWorld& preview, std::string& failure) {
+            if (!assets()) {
+                failure = "scene has no renderer asset service";
+                return false;
+            }
+            state->next = assets()->for_snapshot(revision.content);
+            state->next->manager().set_memory_budget(assets()->manager().memory_budget());
+            state->next->set_texture_budget(assets()->texture_budget());
+            state->next->bind(preview);
+            if (!state->next->problems().empty()) {
+                failure = state->next->problems().begin()->second;
+                return false;
+            }
+            return true;
+        });
+    if (!plan)
+        return {};
+    auto shared = std::shared_ptr<DevelopmentChange>{std::move(plan)};
+    return std::make_unique<DevelopmentChange>(DevelopmentChange{[this, state, shared, revision](std::string& e) {
+                                                                     if (!shared->activate(e))
+                                                                         return false;
+                                                                     state->old =
+                                                                         exchange_assets(std::move(state->next));
+                                                                     assets()->bind(ecs());
+                                                                     _content = revision.content;
+                                                                     return true;
+                                                                 },
+                                                                 [this, state, shared] {
+                                                                     if (state->old) {
+                                                                         state->next =
+                                                                             exchange_assets(std::move(state->old));
+                                                                         _content = state->before;
+                                                                     }
+                                                                     shared->rollback();
+                                                                 },
+                                                                 [this, shared] {
+                                                                     if (shared->finalize)
+                                                                         shared->finalize();
+                                                                     _definition = *_runtime->scene();
+                                                                     mark_render_cache_dirty("live authored patch");
+                                                                 }});
+}
 ScenePreload2D::ScenePreload2D(Renderer2D& renderer, JobSystem& jobs, std::filesystem::path root, std::string scene,
                                ScenePreloadOptions2D options)
     : _impl(std::make_unique<Impl>(renderer, jobs)) {
@@ -146,9 +201,12 @@ ScenePreload2D::ScenePreload2D(Renderer2D& renderer, JobSystem& jobs, std::files
     worker_options.register_components = {};
     worker_options.asset_binders.clear();
     worker_options.update = {};
-    s.job = jobs.run(
-        [root = std::move(root), source = s.source, options = std::move(worker_options),
-         progress = s.progress](std::stop_token stop) { return read_bundle(root, source, options, progress, stop); });
+    const auto source_owner = memory_content_for(root);
+    s.job = jobs.run([root = std::move(root), source = s.source, options = std::move(worker_options),
+                      progress = s.progress, source_owner](std::stop_token stop) {
+        (void)source_owner;
+        return read_bundle(root, source, options, progress, stop);
+    });
 }
 ScenePreload2D::~ScenePreload2D() {
     _impl->job.cancel();
@@ -204,6 +262,9 @@ void ScenePreload2D::pump(std::size_t texture_budget) {
                 throw std::runtime_error(s.scene->_instance.diagnostics.front());
             s.scene->render_config().enabled = true;
             s.scene->render_config().clear_color = s.scene->_definition.clear_color;
+            s.scene->_runtime = std::make_unique<SceneAssetRuntime>();
+            s.scene->_runtime->track_instance(s.scene->ecs(), s.bundle.content->root() / s.source,
+                                              s.bundle.content->root(), s.scene->_definition, s.scene->_instance);
             for (const auto& [name, binder] : s.options.asset_binders)
                 s.scene->add_asset_binder(name, binder);
             s.scene->adopt_assets(std::make_unique<Assets2D>(s.renderer, s.bundle.content->root()));

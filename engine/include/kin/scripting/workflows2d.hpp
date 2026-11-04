@@ -16,6 +16,7 @@ class Renderer2D;
 class Gamepads;
 class Assets2D;
 class JobSystem;
+class MemoryContent;
 class PreloadedScene2D;
 
 // Main-thread scene services shared by both Lua hosts. The world, renderer and
@@ -32,6 +33,7 @@ public:
     void advance(const Input& input, f32 dt);
     InputRouter& input_router();
     EcsWorld& world();
+    void use_content(std::shared_ptr<const MemoryContent> content);
     // Lua preload:commit() queues a ready scene here. Native hosts consume it
     // after the script returns; ScriptEngine's SceneContext overload does so.
     std::unique_ptr<PreloadedScene2D> take_scene();

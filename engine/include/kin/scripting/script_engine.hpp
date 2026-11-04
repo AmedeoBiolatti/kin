@@ -18,6 +18,7 @@ class JsonWriter;
 class ScriptScene;
 class ScriptComponentRegistry;
 class ScriptWorkflows2D;
+class MemoryContent;
 
 struct ScriptOwned {
     i32 marker = 1;
@@ -54,6 +55,15 @@ public:
 
     bool load_file(const std::filesystem::path& path);
     bool load_file(const std::filesystem::path& asset_root, const std::filesystem::path& script_path);
+    // Safe live reload: copy reload_state and run on_reload(state, scene) in a
+    // bounded candidate VM. Native mutations are unavailable during migration;
+    // scene:register_system declarations are staged until activate_systems().
+    std::unique_ptr<ScriptEngine> prepare_reload(const std::filesystem::path& asset_root,
+                                                 const std::filesystem::path& script_path, std::string& error) const;
+    void suspend_systems();
+    bool activate_systems();
+    // Pin future module and workflow loads to the active content generation.
+    void use_content(std::shared_ptr<const MemoryContent> content);
 
     bool call_on_load(ScriptScene& scene);
     bool call_on_load(ScriptSceneBindings bindings);

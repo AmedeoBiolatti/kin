@@ -1,16 +1,14 @@
-#include <kin/renderer/shader_compiler.hpp>
-
-#include <kin/platform/log.hpp>
-#include <kin/platform/process.hpp>
-#include <kin/renderer/renderer2d.hpp>
-
 #include <SDL3/SDL.h>
-
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <kin/assets/content.hpp>
+#include <kin/platform/log.hpp>
+#include <kin/platform/process.hpp>
+#include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 
 namespace kin {
 
@@ -49,11 +47,47 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     static std::atomic<u32> counter{0};
     const std::filesystem::path out = std::filesystem::temp_directory_path() /
         ("kin-shader-" + std::to_string(SDL_GetCurrentThreadID()) + "-" + std::to_string(counter++) + ".spv");
+    struct Sources {
+        std::filesystem::path root;
+        ~Sources() {
+            if (!root.empty()) {
+                std::error_code error;
+                std::filesystem::remove_all(root, error);
+            }
+        }
+    } sources;
+    auto compiled_source = source;
+    const auto snapshot = memory_content_for(source);
+    if (snapshot) {
+        try {
+            if (snapshot->files().size() > 4096)
+                return fail("shader snapshot exceeds file limit");
+            auto directory = std::filesystem::path(out.string() + ".sources");
+            while (!std::filesystem::create_directory(directory))
+                directory += "-next";
+            sources.root = std::move(directory);
+            std::size_t bytes = 0;
+            for (const auto& [path, data] : snapshot->files()) {
+                bytes += data.size();
+                if (bytes > 64 * 1024 * 1024)
+                    return fail("shader snapshot exceeds 64 MiB");
+                const auto file = sources.root / path;
+                std::filesystem::create_directories(file.parent_path());
+                std::ofstream stream(file, std::ios::binary);
+                stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+                if (!stream)
+                    return fail("cannot prepare shader source files");
+            }
+            compiled_source = sources.root / source.lexically_relative(snapshot->root());
+        } catch (const std::exception& e) {
+            return fail(e.what());
+        }
+    }
     Process glslc;
     ProcessOptions options;
     options.args = {glslc_path().string(),
-                    stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment",
-                    "-o", out.string(), source.string()};
+                    stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment", "-o",
+                    out.string(), compiled_source.string()};
 #ifdef KIN_SHADER_INCLUDE_DIR
     // `#include "kin_material.inc.glsl"` (3D material shaders) from the engine's own.
     options.args.insert(options.args.begin() + 2, {"-I", KIN_SHADER_INCLUDE_DIR});
@@ -69,6 +103,14 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
         glslc.wait(std::chrono::milliseconds{2});
     }
     messages += glslc.read();
+    if (snapshot) {
+        std::size_t at = 0;
+        const auto root = sources.root.string();
+        while ((at = messages.find(root, at)) != std::string::npos) {
+            messages.replace(at, root.size(), snapshot->root().string());
+            at += snapshot->root().string().size();
+        }
+    }
     if (glslc.exit_code().value_or(-1) != 0) {
         std::filesystem::remove(out);
         return fail(messages.empty() ? std::string{"glslc failed"} : messages);

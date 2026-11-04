@@ -28,6 +28,14 @@ releases may change APIs.
   so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
+- [Safe 2D development reload](hot_reload.md): one-command build/import/watch/run
+  targets, stateful Lua migration with staged system declarations, authored
+  scene/prefab patches, immutable asset generations, rollback and explicit
+  `dev.status` / `dev.reload` automation with recorded revision inputs.
+- Memory-backed SDL streams and GLSL include compilation; queued scene reads
+  retain their source snapshot across reload. Workshop tests cover actual source
+  watching, failed edits, active leases/jobs and recorded replay.
+
 - [Gameplay automation](automation.md): JSON/Lua scenarios with bounded tick
   conditions, discoverable request/result schemas, scoped semantic UI selectors,
   targeted world queries, flushed command recording/replay, declared input

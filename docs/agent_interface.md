@@ -141,6 +141,8 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `server.schema` | none | Versioned `kin.automation/1` request/result schemas, method effects and mode flags. |
 | `server.capabilities` | none | Current scene providers, available methods, renderer, fixed dt and RNG key. |
 | `automation.snapshot` | `{world?}` | Frame/failure status, all scene reports/UI and optional registered ECS state. |
+| `dev.status` | `{scene?}` | Opt-in development generation, revision, pending state, source hashes and last reload diagnostics. |
+| `dev.reload` | `{scene?, changes?, expected_revision?}` | Queue a development reload at the next step; return exact revision edits for replay. Requires `--dev`. |
 | `game.info` | none | Metadata: id, title, version, window, tags, fields. |
 | `scene.stack` | none | All scenes with index, name, flags, and `has_world`. |
 | `scene.current` | none | Top scene name plus its `write_report` state. |

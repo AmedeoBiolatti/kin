@@ -14,6 +14,8 @@
 #include <vector>
 
 namespace kin {
+class DevelopmentSession;
+class SceneAssetRuntime;
 
 class ScriptEngine;
 class ScriptScene;
@@ -95,6 +97,7 @@ struct ScriptSceneConfig {
     bool render_enabled = true;
     Color clear_color = Color::rgb(0, 0, 0);
     RenderProfile profile = top_down_2d_profile();
+    std::shared_ptr<SceneAssetRuntime> scene_runtime;
 };
 
 class ScriptScene : public EcsScene {
@@ -120,6 +123,7 @@ public:
     void set_script_path(std::filesystem::path path);
     void clear_script_entities();
     bool reload_script();
+    DevelopmentSession* development_session() override { return _development.get(); }
 
 private:
     bool load_script(bool clear_entities);
@@ -134,6 +138,7 @@ private:
     bool _script_loaded = false;
     std::string _last_error;
     ScriptDiagnostic _last_diagnostic;
+    std::unique_ptr<DevelopmentSession> _development;
 };
 
 template <typename T>

@@ -47,6 +47,8 @@ endfunction()
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME kin-development-python COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/development" -v)
+    set_tests_properties(kin-development-python PROPERTIES TIMEOUT 60)
     add_test(NAME kin-automation-python
         COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/automation" -v)
     set_tests_properties(kin-automation-python PROPERTIES TIMEOUT 60)
@@ -618,6 +620,7 @@ kin_add_test(kin_scene_asset_tests kin-scene-asset SOURCES scene_asset_tests.cpp
 
 kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
 kin_add_component_test(SCRIPTING kin_lua_workflows2d_tests kin-lua-workflows2d SOURCES lua_workflows2d_tests.cpp LINK_TARGET kin::scripting_scenes)
+kin_add_component_test(SCRIPTING kin_development_tests kin-development SOURCES development_tests.cpp LINK_TARGET kin::scripting_scenes)
 if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_entity_scripts_tests PRIVATE kin::physics_ecs) # a character's script
 endif()

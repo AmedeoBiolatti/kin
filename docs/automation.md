@@ -6,6 +6,9 @@ Workshop includes [JSON](../examples/2d_workflow/tests/workshop.json) and
 [Lua](../examples/2d_workflow/tests/workshop.lua) examples that exercise gameplay,
 semantic UI, world queries, room loading and reset.
 
+[Development sessions](hot_reload.md) add explicit `dev.reload` revisions,
+generation-based waits and reload replay with state-preserving Lua/scene changes.
+
 ## Run a scenario
 
 Build with `KIN_ENABLE_SCENE_SERVER=ON` (the development default). Lua scenario

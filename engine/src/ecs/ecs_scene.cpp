@@ -75,6 +75,11 @@ void EcsScene::add_asset_binder(std::string name, Assets2D::Binder binder) {
     }
 }
 
+std::unique_ptr<Assets2D> EcsScene::exchange_assets(std::unique_ptr<Assets2D> assets) {
+    auto old = std::move(_assets);
+    adopt_assets(std::move(assets));
+    return old;
+}
 void EcsScene::adopt_assets(std::unique_ptr<Assets2D> assets) {
     if (assets) {
         for (const auto& [name, binder] : _asset_binders)

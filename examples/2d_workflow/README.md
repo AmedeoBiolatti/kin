@@ -59,3 +59,9 @@ ctest --test-dir build -R kin-workflow-automation --output-on-failure
 `tests/workshop.lua` uses the same runner with `--lua-compiler build/bin/kin_scenario`.
 `--automation-record session.jsonl --seed=7` writes a native driven RPC recording.
 Server sessions keep rebinding profiles under the session's `user-data` directory.
+
+For [safe live development](../../docs/hot_reload.md), run
+`cmake --build build --target kin_2d_workflow_dev`. It starts the game and import
+watcher together. Lua state, live projectile leases and room progress survive
+accepted edits; invalid Lua/assets retain the running generation. The
+`kin-workflow-development` CTest exercises the complete loop and replay.

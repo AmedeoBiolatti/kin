@@ -46,6 +46,7 @@ class ColorLut;
 class PropertyRegistry;
 class ParticleCatalog;
 class Renderer2D;
+class MemoryContent;
 class Shape;
 class SpriteCatalog;
 struct TilemapAsset;
@@ -57,6 +58,8 @@ public:
     using Binder = std::function<void(EcsWorld&, Assets2D&)>;
 
     Assets2D(Renderer2D& renderer, std::filesystem::path root);
+    static std::unique_ptr<Assets2D> from_snapshot(Renderer2D& renderer, std::shared_ptr<const MemoryContent> snapshot);
+    std::unique_ptr<Assets2D> for_snapshot(std::shared_ptr<const MemoryContent> snapshot) const;
     Assets2D(const Assets2D&) = delete;
     Assets2D& operator=(const Assets2D&) = delete;
 
@@ -168,6 +171,7 @@ private:
     std::optional<std::filesystem::file_time_type> file_time(std::string_view path) const;
 
     Renderer2D& _renderer;
+    std::shared_ptr<const MemoryContent> _content_owner;
     AssetManager _manager;
     std::unordered_map<std::string, Made, PathHash, std::equal_to<>> _textures;
     std::unordered_map<std::string, Made, PathHash, std::equal_to<>> _data_textures;

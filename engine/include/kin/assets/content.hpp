@@ -100,6 +100,8 @@ void unmount_all_content_packs();
 
 // The pack that answers for `path`, or null if it is read from disk.
 std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path& path);
+// Retain the immutable snapshot serving a virtual path (null for disk/packs).
+std::shared_ptr<const MemoryContent> memory_content_for(const std::filesystem::path& path);
 
 // A content file's bytes, from a mounted pack or from disk; nullopt if there is
 // no such file.

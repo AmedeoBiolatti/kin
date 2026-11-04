@@ -113,7 +113,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gameplay-traces-2d
-          path: build-2d/examples/2d_workflow/automation
+          path: |
+            build-2d/examples/2d_workflow/automation
+            build-2d/examples/2d_workflow/development
           if-no-files-found: ignore
 
   build:
@@ -259,7 +261,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gameplay-traces-${{ matrix.name }}
-          path: build/examples/2d_workflow/automation
+          path: |
+            build/examples/2d_workflow/automation
+            build/examples/2d_workflow/development
           if-no-files-found: ignore
 
       - name: Package recommended SDL software export
@@ -505,7 +509,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gameplay-traces-${{ matrix.artifact }}
-          path: build/examples/2d_workflow/automation
+          path: |
+            build/examples/2d_workflow/automation
+            build/examples/2d_workflow/development
           if-no-files-found: ignore
 
       - name: Rendering graphs with Vulkan core validation

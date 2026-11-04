@@ -50,4 +50,14 @@ function(kin_import_2d_assets target)
         COMMENT "Watching ${target} authoring assets" USES_TERMINAL VERBATIM)
     add_dependencies(${target} ${target}_import_2d)
     set_target_properties(${target} PROPERTIES KIN_IMPORTED_CONTENT_DIR "${output}")
+    if(NOT EMSCRIPTEN AND ARG_CONTENT)
+        set(dev_project "${CMAKE_CURRENT_BINARY_DIR}/${target}-$<CONFIG>.dev.json")
+        file(GENERATE OUTPUT "${dev_project}" CONTENT
+"{\n  \"schema\": \"kin.dev/1\",\n  \"build\": \"${CMAKE_BINARY_DIR}\",\n  \"config\": \"$<CONFIG>\",\n  \"target\": \"${target}\",\n  \"command\": [\"$<TARGET_FILE:${target}>\"],\n  \"manifest\": \"${manifest}\",\n  \"content\": \"${content}\",\n  \"output\": \"${output}\"\n}\n")
+        add_custom_target(${target}_dev
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/kin_dev.py"
+                --project "${dev_project}" --no-build
+            DEPENDS ${target} USES_TERMINAL VERBATIM
+            COMMENT "Running ${target} with watched imports and safe live reload")
+    endif()
 endfunction()
