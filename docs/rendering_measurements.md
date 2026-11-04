@@ -689,6 +689,62 @@ exactly. Validation artifacts are `out/gi-port-validation-20261104/` and
 `/tmp/kin-gi-port-{ctest,resolve,history}.log`. No additional performance gain is
 claimed for this implementation port.
 
+#### Receiver-normal history investigation, 2026-11-04
+
+Private overlays from post-port `8921ffb` isolate the remaining Cornell gap.
+The old resolve depth-tests a bilinearly filtered GI-history sample without
+checking the surface normal. Repeated jittered reprojection mixes lighting
+across differently oriented surfaces, creating bright wall/block-edge bands.
+Per-tap depth rejection alone barely changes the image. Requiring all four
+previous full-resolution normals in each half-resolution history tap to agree
+with the current receiver (`dot > .98`) removes most of those bands. Accepted
+taps are renormalized and retain the original .85 history blend.
+
+| Fresh 720p Cornell variant | Room SSIM | Room MAE | Frame p50 | Run p50 range |
+| --- | ---: | ---: | ---: | ---: |
+| Post-port baseline | 0.93377 | 7.514 | 1.054 ms | 0.860–1.157 ms |
+| Per-tap depth only | 0.93380 | 7.521 | 1.059 ms | 0.867–1.067 ms |
+| History disabled | 0.96674 | 4.524 | 1.052 ms | 0.888–1.059 ms |
+| Per-tap depth and normals | 0.96949 | 4.380 | 1.085 ms | 0.884–1.088 ms |
+| + Subvoxel emitter handling | 0.97000 | 4.290 | 1.069 ms | 0.945–1.148 ms |
+| + Nearby ordinary-surface planes | 0.97053 | 3.927 | 1.117 ms | 1.031–1.217 ms |
+| Complete zero-source-point prototype | 0.97280 | 3.263 | 1.415 ms | 1.371–1.535 ms |
+
+The normal check reduces room MAE **41.7%**, closing **73.7%** of the MAE gap
+to the full zero-point prototype. It reuses TAA's previous-normal target with
+one extra sampler binding and shader reads/math, but no added allocation, ray
+or dispatch. All generic overlays retain native emission and main's ratio
+irradiance estimator; the emitter rows form a cumulative ladder on the normal
+check. They do not use authored geometry tables. The full prototype still does,
+and its remaining advantage cannot be attributed to one change by this study.
+
+Quality uses the same geometry, source radiance, settings, two settled phases
+and two denoised Cycles seeds as the preceding study. Three fresh serial timing
+repeats per variant use 1,200 warm-up and 2,400 measured whole-frame intervals.
+Five additional adjacent baseline/fix pairs alternate order: their median
+within-pair difference is **+0.0276 ms / +2.6%**, with individual differences
+from **−1.3% to +10.4%**. Mains remains connected, but GPU temperatures reach
+84–89°C and graphics/memory clocks vary substantially under the observed 80 W
+cap. These are exploratory costs; small differences and emitter-row ordering
+do not establish precise overhead or speed gains. No build, scoring, capture
+readback, profiler or other test application overlaps throughput measurement.
+
+Fourteen raw GPU history cases pass. Matching history yields 2.69922 for the
+known 2.7 blend; wrong-normal history returns current 1 instead of the old
+resolve's incorrect 2.69922. Old-resolve and history-disabled negative controls
+fail their intended cases. Twelve public renderer lifecycle cases pass,
+including cuts, resets, resize, toggles, multiview and moving smooth/thin
+receivers. Two 64-frame stationary phases show room RMS output variation
+0.4755 → 0.4450; the flat upper wall is unchanged (0.6787 → 0.6789). Disabling
+history increases variation. These are functional/stationary checks, not
+moving-camera reference scores or broad scene qualification.
+
+The receiver-normal history check is the strongest next generic port candidate.
+This investigation changes no production renderer source or defaults. Report,
+eight-way image comparison, 45 quality/cost jobs, six stationary clips, source/
+binary receipts and archive/payload isolation checks are retained under
+`out/gi-remaining-quality-20261104/`.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
