@@ -745,6 +745,16 @@ eight-way image comparison, 45 quality/cost jobs, six stationary clips, source/
 binary receipts and archive/payload isolation checks are retained under
 `out/gi-remaining-quality-20261104/`.
 
+The receiver-normal history candidate is now implemented alongside the earlier
+visibility/reset fixes. Resolve binds the existing previous TAA normal target,
+requires its valid history, and performs the evaluated per-tap depth/normal
+rejection. All 128 embedded shader payloads match the tested normal candidate
+exactly, and both fresh Cornell phases match its RGBA output byte for byte.
+The new `kin-render3d-gi-surface-history` CTest includes the fourteen raw history
+contracts. It, the existing GI resolve/history eligibility checks, and the CPU
+renderer CTest pass; all seventeen selected stock GI/TAA/prepass GPU callbacks
+pass in isolated processes. Validation is `out/gi-surface-port-20261104/`.
+
 ### ECS transform and extraction baseline
 
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.

@@ -459,6 +459,8 @@ if(KIN_EXPERIMENTAL_3D AND KIN_HAS_GPU_RENDERER)
         SOURCES "${PROJECT_SOURCE_DIR}/engine/shaders/gi_resolve.comp.glsl")
     kin_embed_files(kin_render3d_gi_tests NAME gi_test_shaders FILES ${_gi_test_spv})
     set_tests_properties(kin-render3d-gi-resolve PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
+    add_test(NAME kin-render3d-gi-surface-history COMMAND kin_render3d_gi_tests surface-history)
+    set_tests_properties(kin-render3d-gi-surface-history PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 180)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_definitions(kin_render3d_gi_tests PRIVATE KIN_TEST_GI_HISTORY_WRAP)
         foreach(_gi_call CreateGPUComputePipeline BeginGPUComputePass BindGPUComputePipeline

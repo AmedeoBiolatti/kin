@@ -53,7 +53,7 @@ struct Fixture {
     gpu::GpuTexture light, slope, coverage;
     SDL_GPUSampler* sampler = nullptr;
     SDL_GPUComputePipeline* pipeline = nullptr;
-    std::vector<float> depth, normals, previous_light, probe_data;
+    std::vector<float> depth, normals, previous_normals, previous_light, probe_data;
     Params params{};
     Fixture(gpu::GpuDevice& dev, int w, int h)
         : device(dev), d(dev.handle()), width(w), height(h), hw((w + 1) / 2), hh((h + 1) / 2) {
@@ -65,6 +65,7 @@ struct Fixture {
         inputs.push_back(dev.create_volume(4, 4, 4, SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT, use));
         inputs.push_back(dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT, use));
         inputs.push_back(dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT, use));
+        inputs.push_back(dev.create_target(w, h, SDL_GPU_TEXTUREFORMAT_R32G32_FLOAT, use));
         light = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, use);
         slope = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, use);
         coverage = dev.create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16_FLOAT, use);
@@ -79,7 +80,7 @@ struct Fixture {
         info.code_size = code.size();
         info.entrypoint = "main";
         info.format = SDL_GPU_SHADERFORMAT_SPIRV;
-        info.num_samplers = 7;
+        info.num_samplers = 8;
         info.num_readwrite_storage_textures = 3;
         info.num_uniform_buffers = 1;
         info.threadcount_x = info.threadcount_y = 8;
@@ -120,6 +121,7 @@ struct Fixture {
         params.probes.centre[3] = -1;
         depth.assign(w * h, projection.apply_projective({0, 0, -1}).z);
         normals.assign(w * h * 2, 0);
+        previous_normals = normals;
         previous_light.assign(hw * hh * 4, 3);
         for (int i = 0; i < hw * hh; ++i)
             previous_light[i * 4 + 3] = 1;
@@ -164,11 +166,16 @@ struct Fixture {
         complete(d, cmd);
         SDL_ReleaseGPUTransferBuffer(d, transfer);
     }
+    void old_normal(int x, int y, float nx, float ny) {
+        previous_normals[(y * width + x) * 2] = nx;
+        previous_normals[(y * width + x) * 2 + 1] = ny;
+    }
     std::array<float, 4> run(int x = 1, int y = 1) {
         upload(0, width, height, 1, depth);
         upload(1, width, height, 1, normals);
         upload(4, 4, 4, 4, probe_data);
         upload(5, hw, hh, 1, previous_light);
+        upload(7, width, height, 1, previous_normals);
         auto* cmd = SDL_AcquireGPUCommandBuffer(d);
         need(cmd, "resolve command failed");
         const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> targets{
@@ -179,7 +186,7 @@ struct Fixture {
         for (auto& input : inputs)
             samples.push_back({input.handle(), sampler});
         SDL_BindGPUComputePipeline(pass, pipeline);
-        SDL_BindGPUComputeSamplers(pass, 0, samples.data(), 7);
+        SDL_BindGPUComputeSamplers(pass, 0, samples.data(), 8);
         SDL_PushGPUComputeUniformData(cmd, 0, &params, sizeof(params));
         SDL_DispatchGPUCompute(pass, (hw + 7) / 8, (hh + 7) / 8, 1);
         SDL_EndGPUComputePass(pass);
@@ -259,6 +266,99 @@ void resolve_contracts(Window& window) {
             need(std::abs(light[c] - expected) < .001f, name + ": wrong raw GI");
         need(std::abs(coverage_at(f) - coverage) < .001f, name + ": wrong coverage");
         std::cout << "GI resolve " << name << ": light " << light[0] << ", coverage " << coverage << '\n';
+    }
+}
+
+void surface_history_contracts(Window& window) {
+    gpu::GpuDevice device(window);
+    gpu_ready = true;
+    for (const std::string name :
+         {"accept", "reject_normal", "partial_footprint", "mixed_receiver", "smooth", "motion_marker", "thin_receiver",
+          "depth_reject", "offscreen", "camera_reprojection", "no_history", "background", "no_support", "odd_extent"}) {
+        const bool odd = name == "odd_extent";
+        Fixture f(device, odd ? 7 : 8, odd ? 5 : 8);
+        float expected = 2.7f;
+        int x = 1, y = 1;
+        if (name == "reject_normal" || name == "partial_footprint") {
+            for (int yy = 0; yy < f.height; ++yy)
+                for (int xx = 0; xx < f.width; ++xx)
+                    f.old_normal(xx, yy, 0, 1);
+            expected = 1;
+            if (name == "partial_footprint") {
+                for (int yy = 2; yy < 4; ++yy)
+                    for (int xx = 2; xx < 4; ++xx)
+                        f.old_normal(xx, yy, 0, 0);
+                for (int i = 0; i < f.hw * f.hh; ++i)
+                    for (int c = 0; c < 3; ++c)
+                        f.previous_light[i * 4 + c] = i == f.hw + 1 ? 3 : 9;
+                expected = 2.7f;
+            }
+        } else if (name == "mixed_receiver") {
+            // One differently facing pixel invalidates each half-resolution history estimate.
+            for (int yy = 0; yy < f.height; yy += 2)
+                for (int xx = 0; xx < f.width; xx += 2)
+                    f.old_normal(xx, yy, 0, 1);
+            expected = 1;
+        } else if (name == "smooth") {
+            for (int yy = 0; yy < f.height; ++yy)
+                for (int xx = 0; xx < f.width; ++xx)
+                    f.old_normal(xx, yy, ((xx + yy) % 3 - 1) * .08f, 0);
+        } else if (name == "motion_marker") {
+            for (int yy = 0; yy < f.height; ++yy)
+                for (int xx = 0; xx < f.width; ++xx)
+                    f.old_normal(xx, yy, 0, 4);
+        } else if (name == "thin_receiver") {
+            auto camera = Camera3D::look_at({0, 0, 0}, {0, 0, -1});
+            camera.projection = Projection3D::Orthographic;
+            camera.height = 1;
+            camera.z_near = .1f;
+            camera.z_far = 10;
+            const auto projection = camera.projection_matrix(1);
+            std::fill(f.depth.begin(), f.depth.end(), projection.apply_projective({0, 0, -1.05f}).z);
+            f.depth[3 * f.width + 3] = projection.apply_projective({0, 0, -1}).z;
+            f.normals[(3 * f.width + 3) * 2 + 1] = 1;
+            for (int yy = 0; yy < f.height; ++yy)
+                for (int xx = 0; xx < f.width; ++xx)
+                    f.old_normal(xx, yy, 0, 1);
+        } else if (name == "depth_reject") {
+            for (int i = 0; i < f.hw * f.hh; ++i)
+                f.previous_light[i * 4 + 3] = 10;
+            expected = 1;
+        } else if (name == "offscreen" || name == "camera_reprojection") {
+            Mat4f previous;
+            std::memcpy(previous.m, f.params.previous, sizeof(previous.m));
+            previous.at(0, 3) += name == "offscreen" ? 4.f : .5f;
+            std::memcpy(f.params.previous, previous.m, sizeof(previous.m));
+            if (name == "offscreen") {
+                expected = 1;
+            } else {
+                for (int yy = 0; yy < f.hh; ++yy)
+                    for (int c = 0; c < 3; ++c)
+                        f.previous_light[(yy * f.hw + 2) * 4 + c] = 7;
+                // Shifted footprint: .25*3 + .75*7, blended .85 with current 1.
+                expected = 5.25f;
+            }
+        } else if (name == "no_history") {
+            f.params.previous_eye[3] = 0;
+            expected = 1;
+        } else if (name == "background") {
+            std::fill(f.depth.begin(), f.depth.end(), 0);
+            expected = 0;
+        } else if (name == "no_support") {
+            std::fill(f.probe_data.begin(), f.probe_data.end(), 0);
+            expected = 0;
+        } else if (odd) {
+            x = f.hw - 1;
+            y = f.hh - 1;
+        }
+        const auto light = f.run(x, y);
+        for (int c = 0; c < 3; ++c)
+            need(std::abs(light[c] - expected) < .012f, name + ": wrong history blend");
+        if (name == "background")
+            need(light[3] == 0, "stale background history depth");
+        if (name == "no_support")
+            need(light[3] < 0, "unsupported receiver reused history");
+        std::cout << "GI surface history " << name << ": light " << light[0] << '\n';
     }
 }
 
@@ -443,6 +543,8 @@ int main(int argc, char** argv) {
         auto& window = app.create_window({.title = "GI regression checks", .width = 96, .height = 72, .hidden = true});
         if (argc == 1)
             resolve_contracts(window);
+        else if (std::string(argv[1]) == "surface-history")
+            surface_history_contracts(window);
 #ifdef KIN_TEST_GI_HISTORY_WRAP
         else if (std::string(argv[1]) == "history")
             history_contracts(window);

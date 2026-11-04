@@ -24,6 +24,8 @@ layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D uSlope; // xyz: 
                                                                          // way faced, over the brightness (world); w: k
 layout(set = 1, binding = 2, r16f) uniform writeonly image2D uCoverage; // probe share; the main pass supplies the rest
 
+layout(set = 0, binding = 7) uniform sampler2D uPastNormals;
+
 #define KIN_GI_PROBES
 #define KIN_GI_RESOLVE_VISIBILITY
 #include "kin_gi.inc.glsl"
@@ -110,18 +112,42 @@ void main() {
     vec4 slope = vec4(g, 1.0 - dot(g, n));
     // The render before's, where the last view put this place, if it held this surface (its depth along that view as
     // this place's, give or take the texel's own spread): most of it kept.
+    // Check each history tap before filtering: depth alone can join differently facing surfaces. Reject mixed
+    // 2 x 2 footprints too, since a half-resolution sample may have stood for any of their receivers under jitter.
     if (params.last_eye.w > 0.5) {
         const vec4 clip = params.last_view_projection * vec4(p, 1.0);
         if (clip.w > 0.0) {
-            const vec2 ndc = clip.xy / clip.w;
-            const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-            if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
-                const vec4 before = textureLod(uLastLight, uv, 0.0);
-                const float expected = dot(p - params.last_eye.xyz, params.last_forward.xyz);
-                if (before.a > 0.0 && abs(before.a - expected) <= 0.03 * expected + spread) {
-                    now = mix(now, before.rgb, 0.85);
-                    slope = mix(slope, textureLod(uLastSlope, uv, 0.0), 0.85);
+            const vec2 uv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+            const ivec2 size = textureSize(uLastLight, 0);
+            const vec2 loc = uv * vec2(size) - 0.5;
+            const ivec2 base = ivec2(floor(loc));
+            const vec2 f = fract(loc);
+            const float expected = dot(p - params.last_eye.xyz, params.last_forward.xyz);
+            vec3 previous_light = vec3(0.0);
+            vec4 previous_slope = vec4(0.0);
+            float total = 0.0;
+            for (int j = 0; j < 4; ++j) {
+                const ivec2 offset = ivec2(j & 1, j >> 1);
+                const ivec2 q = base + offset;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, size))) continue;
+                const vec4 before = texelFetch(uLastLight, q, 0);
+                if (before.a <= 0.0 || abs(before.a - expected) > 0.03 * expected + spread) continue;
+                bool same_surface = true;
+                for (int z = 0; z < 4; ++z) {
+                    const ivec2 at = min(q * 2 + ivec2(z & 1, z >> 1), textureSize(uPastNormals, 0) - 1);
+                    const vec3 old_n = decode_normal(texelFetch(uPastNormals, at, 0).rg);
+                    same_surface = same_surface && dot(n, old_n) > 0.98;
                 }
+                if (!same_surface) continue;
+                const vec2 w = mix(1.0 - f, f, vec2(offset));
+                const float weight = w.x * w.y;
+                previous_light += before.rgb * weight;
+                previous_slope += texelFetch(uLastSlope, q, 0) * weight;
+                total += weight;
+            }
+            if (total > 0.0) {
+                now = mix(now, previous_light / total, 0.85);
+                slope = mix(slope, previous_slope / total, 0.85);
             }
         }
     }
