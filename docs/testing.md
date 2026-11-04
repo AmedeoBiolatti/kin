@@ -3,6 +3,11 @@
 Kin tests are CTest-driven C++ executables under `tests/`, built when kin is the
 top-level project (`KIN_BUILD_TESTS`).
 
+Lua modules and scripted ECS components can run directly through `kin_lua test`,
+with isolated fixtures, controlled time/input, reload assertions and JSON/JUnit
+reports. See [Lua development](lua_development.md#lua-unit-and-component-tests)
+and the runnable [example project](../examples/lua_testing/README.md).
+
 ## Quick Start
 
 Configure, build, and run the full test suite:

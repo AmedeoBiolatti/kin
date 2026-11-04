@@ -28,6 +28,11 @@ releases may change APIs.
   so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
+- [Lua development](lua_development.md): generated typed API/component definitions,
+  static API checks, transactional entity state migration and stop hooks, shared
+  instruction/memory limits and callback profiles, lifetime-scoped tasks and
+  simulation waits, plus an isolated headless module/component test runner with
+  JSON/JUnit reports. Includes a runnable [test project](../examples/lua_testing/README.md).
 - [Safe 2D development reload](hot_reload.md): one-command build/import/watch/run
   targets, stateful Lua migration with staged system declarations, authored
   scene/prefab patches, immutable asset generations, rollback and explicit

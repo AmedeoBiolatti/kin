@@ -98,6 +98,7 @@ struct ScriptSceneConfig {
     Color clear_color = Color::rgb(0, 0, 0);
     RenderProfile profile = top_down_2d_profile();
     std::shared_ptr<SceneAssetRuntime> scene_runtime;
+    LuaRuntimeLimits runtime_limits;
 };
 
 class ScriptScene : public EcsScene {

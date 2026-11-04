@@ -1,3 +1,4 @@
+#include "lua_api_surface.hpp"
 #include "lua_paths.hpp"
 #include "lua_reload_internal.hpp"
 #include "lua_scene_context.hpp"
@@ -676,6 +677,9 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         return lua.create_table_with("cpu", memory_table(lua, assets.manager().trim_memory()), "gpu",
                                      memory_table(lua, assets.trim_texture_memory()));
     };
+    scripting_detail::record_lua_type<LuaTween2D>(lua, "KinTween2D");
+    scripting_detail::record_lua_type<LuaLease2D>(lua, "KinPrefabLease2D");
+    scripting_detail::record_lua_type<LuaPreload2D>(lua, "KinScenePreload2D");
 }
 sol::optional<sol::object> scripting_detail::clone_workflow_reload_value(const sol::object& value,
                                                                          sol::state_view lua) {

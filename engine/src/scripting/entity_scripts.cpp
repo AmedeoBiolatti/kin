@@ -1,3 +1,8 @@
+#include "lua_api_surface.hpp"
+#include "lua_reload_internal.hpp"
+#include "lua_state_copy.hpp"
+
+#include <kin/core/profile.hpp>
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/dialogue.hpp>
@@ -61,6 +66,8 @@ struct ScriptEntity {
         return lifetime == (lease ? lease->generation : 0);
     }
     flecs::entity live() const {
+        if (scripting_detail::reload_staging)
+            throw sol::error("live entity access is unavailable while preparing reload");
         if (!alive()) {
             throw sol::error("the entity is gone");
         }
@@ -312,6 +319,7 @@ struct EntityScripts::Impl {
         Timers timers; // its self:after and self:every
         std::unordered_map<u32, sol::protected_function> tween_done; // by tween id
         u64 lifetime = 0;
+        u64 entity_id = 0;
     };
     std::unordered_map<std::string, File> files;
     std::unordered_map<u64, Running> running;
@@ -321,6 +329,7 @@ struct EntityScripts::Impl {
 
     // What the bindings reach, during an update.
     EcsWorld* world = nullptr;
+    EcsWorld* bound_world = nullptr;
     Input* input = nullptr;
     SceneScreens* screens = nullptr;
     SceneDialogue* dialogue = nullptr;
@@ -805,6 +814,7 @@ struct EntityScripts::Impl {
             kept.set_value(name, std::move(*json));
         };
         lua.safe_script(self_prelude);
+        scripting_detail::record_lua_type<ScriptEntity>(lua, "Entity");
     }
 
     std::shared_ptr<const PrefabAsset> prefab_of(const std::string& path) {
@@ -940,48 +950,189 @@ struct EntityScripts::Impl {
     }
 #endif
 
-    // A script file, read (or read again): false when it does not read.
+    std::unique_ptr<LuaScript> make_script(const std::string& path, std::shared_ptr<bool> staging = {}) {
+        return std::make_unique<LuaScript>(LuaScriptOptions{
+            .setup =
+                [this, staging](sol::state& lua) {
+                    bind(lua);
+                    if (!staging)
+                        return;
+                    // Proxies keep service table identity stable while withholding
+                    // live host access throughout candidate load and migration.
+                    for (const char* name :
+                         {"world", "input", "camera", "ui", "dialogue", "save", "scene", "physics", "tweens",
+                          "input_contexts", "rebind", "pools", "preload", "controllers", "asset_memory", "l10n"}) {
+                        sol::object original = lua[name];
+                        if (original.get_type() != sol::type::table)
+                            continue;
+                        sol::table proxy = lua.create_table();
+                        sol::table meta = lua.create_table();
+                        meta["__index"] = [staging, original](const sol::object&,
+                                                              const sol::object& key) -> sol::object {
+                            if (*staging)
+                                throw sol::error("live services are unavailable while preparing reload");
+                            return original.as<sol::table>()[key];
+                        };
+                        meta["__newindex"] = [](const sol::object&, const sol::object&, const sol::object&) {
+                            throw sol::error("engine service tables are read-only");
+                        };
+                        meta["__metatable"] = false;
+                        proxy[sol::metatable_key] = meta;
+                        lua[name] = proxy;
+                    }
+                },
+            .module_root = config.content,
+            .instruction_limit = config.runtime_limits.instruction_limit,
+            .memory_limit_bytes = config.runtime_limits.memory_limit_bytes,
+            .on_error =
+                [this, path](std::string_view message) {
+                    KIN_LOG_WARN_F("script", "script error",
+                                   (LogFields{{.name = "script", .value = path},
+                                              {.name = "error", .value = std::string(message)}}));
+                    problems[path] = std::string(message);
+                },
+            .on_profile =
+                [](std::string_view name, u64 ns) {
+                    if (auto* session = current_profile_session())
+                        session->record(name, "lua", ns);
+                },
+        });
+    }
+    void remember_times(const std::string& path, File& made) {
+        made.times.clear();
+        for (const auto& dependency : made.script->dependencies())
+            made.times.emplace_back(dependency, time_of(dependency));
+        const auto main = config.content / path;
+        if (std::ranges::none_of(made.times, [&](const auto& entry) { return entry.first == main; }))
+            made.times.emplace_back(main, time_of(main));
+    }
     File& file(const std::string& path) {
         auto [found, fresh] = files.try_emplace(path);
         File& made = found->second;
         if (fresh) {
-            made.script = std::make_unique<LuaScript>(LuaScriptOptions{
-                .setup = [this](sol::state& lua) { bind(lua); },
-                .module_root = config.content,
-                .on_error = [this, path](std::string_view message) {
-                    KIN_LOG_WARN_F("script", "script error", (LogFields{{.name = "script", .value = path}, {.name = "error", .value = std::string(message)}}));
-                    problems[path] = std::string(message);
-                },
-            });
-            read(path, made);
+            made.script = make_script(path);
+            if (made.script->load_file(config.content / path)) {
+                problems.erase(path);
+                ++made.generation;
+            }
+            remember_times(path, made);
         }
         return made;
     }
-
-    void read(const std::string& path, File& made) {
-        if (made.script->load_file(config.content / path)) {
-            problems.erase(path);
+    bool reload(const std::string& path, File& made) {
+        if (!made.script->loaded()) {
+            if (made.script->load_file(config.content / path)) {
+                problems.erase(path);
+                ++made.generation;
+                remember_times(path, made);
+                return true;
+            }
+            remember_times(path, made);
+            return false;
+        }
+        auto* previous_world = world;
+        world = bound_world;
+        struct WorldScope {
+            EcsWorld*& world;
+            EcsWorld* previous;
+            ~WorldScope() { world = previous; }
+        } world_scope{world, previous_world};
+        auto staging = std::make_shared<bool>(true);
+        auto next = make_script(path, staging);
+        struct Guard {
+            bool previous = scripting_detail::reload_staging;
+            Guard() { scripting_detail::reload_staging = true; }
+            ~Guard() { scripting_detail::reload_staging = previous; }
+        } guard;
+        std::map<u64, sol::table> selves; // destroyed before candidate on rejection
+        try {
+            auto limits = config.runtime_limits;
+            limits.instruction_limit =
+                std::min<u64>(limits.instruction_limit ? limits.instruction_limit : 1'000'000, 1'000'000);
+            next->runtime().set_limits(limits);
+            if (!next->load_file(config.content / path))
+                throw std::runtime_error(next->error());
+            std::vector<u64> ids;
+            for (const auto& [id, run] : running)
+                if (run.path == path)
+                    ids.push_back(id);
+            std::ranges::sort(ids);
+            for (u64 id : ids) {
+                auto& run = running.at(id);
+                const auto copied = scripting_detail::copy_lua_data(
+                                        sol::make_object(run.self.lua_state(), run.self), next->lua(),
+                                        [&](const sol::object& value) -> std::optional<sol::object> {
+                                            if (!value.is<ScriptEntity>())
+                                                return {};
+                                            auto entity = value.as<ScriptEntity>();
+                                            if (!entity.alive())
+                                                throw std::runtime_error("reload state contains a stale entity");
+                                            return sol::make_object(next->lua(), entity);
+                                        },
+                                        true)
+                                        .as<sol::table>();
+                auto result = next->call_for<sol::table>("__kin_self", ScriptEntity{world, world->raw().entity(id)});
+                if (!result)
+                    throw std::runtime_error(next->error().empty() ? "script self factory is missing" : next->error());
+                sol::table self = *result;
+                for (const auto& [key, value] : copied)
+                    self[key] = value;
+                if (config.runtime_limits.memory_limit_bytes &&
+                    next->runtime().stats().memory_bytes > config.runtime_limits.memory_limit_bytes)
+                    throw std::runtime_error("entity reload exceeds Lua memory limit");
+                selves.emplace(id, self);
+                next->set_task_owner(std::to_string(id) + ":" + std::to_string(run.lifetime));
+                if (next->has("on_reload") && !next->call("on_reload", self))
+                    throw std::runtime_error(next->error());
+            }
+            next->runtime().set_limits(config.runtime_limits);
+            *staging = false;
+            // No fallible Lua code after this point. Old selves and tasks are
+            // released before the old VM, after every migration has succeeded.
             ++made.generation;
-        }
-        made.times.clear();
-        for (const std::filesystem::path& dependency : made.script->dependencies()) {
-            made.times.emplace_back(dependency, time_of(dependency));
-        }
-        if (made.times.empty()) {
-            made.times.emplace_back(config.content / path, time_of(config.content / path));
+            for (auto& [id, self] : selves) {
+                auto& run = running.at(id);
+                run.self = std::move(self);
+                run.generation = made.generation;
+            }
+            made.script.swap(next);
+            problems.erase(path);
+            remember_times(path, made);
+            return true;
+        } catch (const std::exception& e) {
+            problems[path] = "reload: " + std::string(e.what());
+            remember_times(path, made); // suppress unchanged bad edits
+            return false;
         }
     }
-
+    void stop(const Running& run, std::string_view reason) {
+        auto* previous_world = world;
+        world = bound_world;
+        struct WorldScope {
+            EcsWorld*& world;
+            EcsWorld* previous;
+            ~WorldScope() { world = previous; }
+        } world_scope{world, previous_world};
+        auto found = files.find(run.path);
+        if (found == files.end())
+            return;
+        auto& script = *found->second.script;
+        const auto owner = std::to_string(run.entity_id) + ":" + std::to_string(run.lifetime);
+        script.set_task_owner(owner);
+        if (run.started && script.has("on_stop"))
+            script.call("on_stop", run.self, std::string(reason));
+        script.cancel_tasks(owner);
+    }
     void reload_changed() {
-        for (auto& [path, made] : files) {
-            const bool stale = std::ranges::any_of(made.times, [](const auto& file) { return time_of(file.first) != file.second; });
-            if (stale) {
-                // Its entities' selves let go first: they live in the state a read may replace.
-                std::erase_if(running, [&](const auto& entry) { return entry.second.path == path; });
-                read(path, made); // they start again at the next update
-            }
-        }
-        prefabs.clear(); // read again when next spawned
+        // Stable order makes migration and task registration reproducible.
+        std::vector<std::string> paths;
+        for (auto& [path, made] : files)
+            if (std::ranges::any_of(made.times, [](const auto& file) { return time_of(file.first) != file.second; }))
+                paths.push_back(path);
+        std::ranges::sort(paths);
+        for (const auto& path : paths)
+            reload(path, files.at(path));
+        prefabs.clear();
     }
 };
 
@@ -1005,9 +1156,28 @@ std::size_t EntityScripts::running() const {
 }
 
 void EntityScripts::restart() {
+    for (auto& [id, run] : _impl->running)
+        _impl->stop(run, "restart");
     _impl->running.clear();
 }
 
+bool EntityScripts::reload(std::string_view asset) {
+    const std::string path(asset);
+    auto found = _impl->files.find(path);
+    if (found == _impl->files.end())
+        return false;
+    return _impl->reload(path, found->second);
+}
+std::map<std::string, std::vector<std::string>> EntityScripts::api_surface() const {
+    auto script = _impl->make_script("<api>");
+    return scripting_detail::lua_api_surface(script->lua());
+}
+std::map<std::string, LuaRuntimeStats> EntityScripts::runtime_stats() const {
+    std::map<std::string, LuaRuntimeStats> stats;
+    for (const auto& [path, file] : _impl->files)
+        stats.emplace(path, file.script->runtime().stats());
+    return stats;
+}
 void EntityScripts::set_screens(SceneScreens* screens) {
     _impl->screens = screens;
 }
@@ -1068,6 +1238,7 @@ std::shared_ptr<ScriptWorkflows2D> EntityScripts::workflows() const {
 }
 void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     Impl& impl = *_impl;
+    impl.bound_world = &world;
     impl.world = &world;
     impl.input = &input;
     if (!impl.workflows)
@@ -1091,8 +1262,12 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     // Those that no longer run theirs: gone.
     std::erase_if(impl.running, [&](const auto& entry) {
         const auto found = std::ranges::find_if(scripted, [&](const auto& item) { return item.first.id() == entry.first; });
-        return found == scripted.end() || found->second != entry.second.path;
+        const bool remove = found == scripted.end() || found->second != entry.second.path;
+        if (remove)
+            impl.stop(entry.second, !world.raw().is_alive(entry.first) ? "destroyed" : "disabled_or_removed");
+        return remove;
     });
+    std::ranges::sort(scripted, [](const auto& a, const auto& b) { return a.first.id() < b.first.id(); });
     for (const auto& [entity, path] : scripted) {
         if (!entity.is_alive()) {
             continue;
@@ -1106,16 +1281,21 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         const auto* lease = entity.get<EntityLifetime>();
         const u64 lifetime = lease ? lease->generation : 0;
         if (fresh || run.generation != file.generation || run.lifetime != lifetime) {
+            if (!fresh && run.self.valid())
+                impl.stop(run, "replaced");
             // Its self, in the file's state as read now.
             run = {.path = path, .generation = file.generation, .self = {}, .started = false};
             run.lifetime = lifetime;
-            const sol::protected_function make = file.script->lua()["__kin_self"];
-            const sol::protected_function_result made = make(ScriptEntity{&world, entity});
-            if (!made.valid()) {
+            run.entity_id = entity.id();
+            auto made = file.script->call_for<sol::table>("__kin_self", ScriptEntity{&world, entity});
+            if (!made) {
+                impl.problems[path] =
+                    file.script->error().empty() ? "script self factory is missing" : file.script->error();
                 continue;
             }
-            run.self = made.get<sol::table>();
+            run.self = *made;
         }
+        file.script->set_task_owner(std::to_string(entity.id()) + ":" + std::to_string(lifetime));
         if (!run.started) {
             run.started = true;
             file.script->call("on_start", run.self);
@@ -1209,6 +1389,22 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         }
 #endif
     }
+    std::vector<std::string> paths;
+    for (const auto& [path, file] : impl.files)
+        paths.push_back(path);
+    std::ranges::sort(paths);
+    for (const auto& path : paths)
+        impl.files.at(path).script->advance_tasks(dt, [&](std::string_view owner) {
+            for (const auto& [id, run] : impl.running)
+                if (owner == std::to_string(id) + ":" + std::to_string(run.lifetime)) {
+                    const auto entity = world.raw().entity(id);
+                    const auto* lease = entity.is_alive() ? entity.get<EntityLifetime>() : nullptr;
+                    const auto* component = entity.is_alive() ? entity.get<ScriptComponent>() : nullptr;
+                    return entity.is_alive() && entity.enabled() && component && component->enabled &&
+                           component->asset.id == run.path && run.lifetime == (lease ? lease->generation : 0);
+                }
+            return false;
+        });
     impl.world = nullptr;
     impl.input = nullptr;
 }

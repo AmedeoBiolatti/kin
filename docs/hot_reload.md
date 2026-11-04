@@ -82,8 +82,9 @@ corrected edit; ordinary test runs retain their failure behavior.
 
 `ScriptEngine::prepare_reload` and `prepare_script_reload` provide this contract
 to native hosts. Existing legacy script reload policies remain available outside
-a development session; entity-script instances using their legacy polling path
-still restart. Arbitrary Lua stacks and closures are not migrated.
+a development session. [Entity scripts](lua_development.md#entity-state-and-lifecycle)
+also preserve instance data through a file-level transaction, including their
+polling path. Arbitrary Lua stacks and closures are not migrated.
 
 ## Authored scene and prefab patches
 

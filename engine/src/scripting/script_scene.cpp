@@ -440,7 +440,7 @@ bool ScriptScene::load_script(bool clear_entities) {
                        {.name = "clear_entities", .value = clear_entities ? "true" : "false"},
                        {.name = "hot_reload", .value = _config.hot_reload ? "true" : "false"},
                    }));
-    auto next = std::make_unique<ScriptEngine>(_config.bind);
+    auto next = std::make_unique<ScriptEngine>(_config.bind, _config.runtime_limits);
     if (!next->load_file(_config.asset_root, _config.script_path)) {
         set_script_error(next->last_error(), "load");
         _script_loaded = _script != nullptr;

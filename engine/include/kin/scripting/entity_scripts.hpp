@@ -7,8 +7,9 @@
 // gets on_start(self) once, then on_update(self, dt), and on_contact(self,
 // other) for each body its body began touching, on_contact_end(self, other)
 // for each it stopped touching (with a PhysicsContactQueue).
-// A script whose file changed is read again; its entities start over (a
-// broken edit keeps the last good one running). Nothing a script does stops
+// A changed script is prepared in a fresh VM; entity data carries over and
+// optional on_reload(self) migrates it. Rejected edits retain the live VM.
+// Nothing a script does stops
 // the game: an error is logged, kept in problems(), and that call skipped.
 //
 //     kin::EntityScripts scripts{{.content = kin::content_root()}};
@@ -78,9 +79,9 @@
 // Fields read and set as scene files have them: numbers, true/false, text,
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
-#include <kin/core/types.hpp>
-
 #include <filesystem>
+#include <kin/core/types.hpp>
+#include <kin/scripting/lua_runtime.hpp>
 #include <map>
 #include <memory>
 #include <string>
@@ -99,6 +100,7 @@ class ScriptWorkflows2D;
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
     i32 check_frames = 30;          // script files changed are read again every so many updates (0: never)
+    LuaRuntimeLimits runtime_limits;
 };
 
 class EntityScripts {
@@ -116,6 +118,11 @@ public:
     std::size_t running() const;
     // Forgets every entity's self (all start over at the next update).
     void restart();
+    // Prepare all affected instances in a fresh VM; preserve self data and
+    // keep the active VM on any failure. on_reload(self) is optional.
+    bool reload(std::string_view asset);
+    std::map<std::string, LuaRuntimeStats> runtime_stats() const;
+    std::map<std::string, std::vector<std::string>> api_surface() const;
     // The scene's UI screens, for the scripts' `ui` (null: none).
     void set_screens(SceneScreens* screens);
     // The scene's dialogue, for the scripts' `dialogue` and on_dialogue_event (null: none).

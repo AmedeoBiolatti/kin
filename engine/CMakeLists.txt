@@ -271,7 +271,9 @@ if(KIN_ENABLE_SCRIPTING)
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
         src/scripting/lua_script.cpp
-        src/scripting/lua_services.cpp)
+        src/scripting/lua_services.cpp
+        src/scripting/lua_runtime.cpp
+        src/scripting/lua_tasks.cpp)
     add_library(kin::scripting ALIAS kin_scripting)
     target_link_libraries(kin_scripting PUBLIC kin_foundation Lua::Lua sol2::sol2)
     kin_enable_release_optimizations(kin_scripting)
@@ -279,6 +281,7 @@ if(KIN_ENABLE_SCRIPTING)
     add_library(kin_scripting_scenes STATIC
         src/scripting/script_engine.cpp
         src/scripting/script_reload.cpp
+        src/scripting/lua_state_copy.cpp
         src/scripting/lua_workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp

@@ -18,6 +18,10 @@ Kin runs Lua 5.4 (through sol2) in these hosts:
   binds what a script may ask and do, and calls the functions it defines. Most
   of this page is about `LuaScript`.
 
+See [Lua development](lua_development.md) for generated API definitions, static
+checks, limits/profiling, managed tasks, transactional entity reload and the
+headless Lua test runner.
+
 ## A rules script
 
 ```cpp
@@ -246,8 +250,10 @@ scripts.update(world, ctx.input, ctx.dt);
   another, and `on_contact_end(self, other)` when it stops, when the entity
   has a `PhysicsContactQueue`.
 - Script files are checked for changes every `check_frames` updates. A changed
-  file is read again and its entities start over. If the new version does not
-  read, the last good one keeps running.
+  file is prepared in a fresh VM, preserving each entity's data. Optional
+  `on_reload(self)` migrates it without rerunning `on_start`. Failed edits keep
+  the previous VM and instances. `on_stop(self, reason)` handles removal,
+  disabling, replacement and explicit restart. See [Lua development](lua_development.md).
 - An error never stops the game. The failed call is skipped, the error is
   logged, and `problems()` keeps it by path until the script runs cleanly again.
 

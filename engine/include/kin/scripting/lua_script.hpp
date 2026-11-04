@@ -1,13 +1,12 @@
 #pragma once
 
-#include <kin/core/types.hpp>
-
-#include <sol/sol.hpp>
-
 #include <filesystem>
 #include <functional>
+#include <kin/core/types.hpp>
+#include <kin/scripting/lua_runtime.hpp>
 #include <memory>
 #include <optional>
+#include <sol/sol.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +14,7 @@
 namespace kin {
 
 class FileWatcher;
+class LuaTasks;
 
 // A Lua script for code that does not live in the ECS: a game's rules, AI,
 // balance formulas or level logic, run by plain C++ (e.g. an engine-free
@@ -43,9 +43,11 @@ struct LuaScriptOptions {
     std::filesystem::path module_root;
     // Lua instructions one load or call may run (checked every 1,000); 0: no limit.
     u64 instruction_limit = 50'000'000;
+    u64 memory_limit_bytes = 64 * 1024 * 1024;
     // Told every failure (load or call, with script:line). Default: logged as a
     // warning under "script".
     std::function<void(std::string_view message)> on_error;
+    std::function<void(std::string_view name, u64 elapsed_ns)> on_profile;
 };
 
 // Whether `code` is Lua that reads (it is not run): false, and `error` says
@@ -95,25 +97,18 @@ public:
 
     // The live Lua state, for what this API does not cover. A load replaces it.
     sol::state& lua() { return *_lua; }
+    LuaRuntime& runtime() { return *_runtime; }
+    const LuaRuntime& runtime() const { return *_runtime; }
+    // Tasks advance only on host simulation steps, never on wall time.
+    bool advance_tasks(f32 dt, const std::function<bool(std::string_view)>& owner_alive = {});
+    void set_task_owner(std::string owner);
+    void cancel_tasks(std::string_view owner = {});
+    std::map<std::string, std::vector<std::string>> api_surface() const;
 
 private:
-    // Holds the instruction budget for one load or call, and sets the hooks
-    // the debugger needs (see lua_script.cpp).
-    class Budget {
-    public:
-        Budget(const LuaScript& script, lua_State* state);
-        ~Budget();
-        Budget(const Budget&) = delete;
-        Budget& operator=(const Budget&) = delete;
-
-    private:
-        u64 _remaining;
-        u64* _previous;
-        u64 _previous_call;
-    };
-
     using Dependencies = std::shared_ptr<std::vector<std::filesystem::path>>;
-    std::unique_ptr<sol::state> make_state(const Dependencies& dependencies) const;
+    std::unique_ptr<sol::state> make_state(const Dependencies& dependencies, std::shared_ptr<LuaRuntime>& runtime,
+                                           std::unique_ptr<LuaTasks>& tasks) const;
     bool run(std::string_view code, const std::string& chunk_name, std::vector<std::filesystem::path> dependencies);
     sol::protected_function find(std::string_view function) const;
     bool check(const sol::protected_function_result& result, std::string_view function);
@@ -121,7 +116,9 @@ private:
     void rewatch();
 
     LuaScriptOptions _options;
+    std::shared_ptr<LuaRuntime> _runtime;
     std::unique_ptr<sol::state> _lua;
+    std::unique_ptr<LuaTasks> _tasks; // references released before the VM
     bool _loaded = false;
     std::string _error;
     std::filesystem::path _path;
@@ -137,8 +134,10 @@ bool LuaScript::call(std::string_view function, Args&&... args) {
     if (!target.valid()) {
         return false;
     }
-    const Budget budget{*this, _lua->lua_state()};
-    return check(target(std::forward<Args>(args)...), function);
+    LuaCall budget{*_runtime, _lua->lua_state(), function};
+    const auto result = target(std::forward<Args>(args)...);
+    budget.result(result.valid());
+    return check(result, function);
 }
 
 template <typename... Args>
@@ -156,8 +155,9 @@ std::optional<R> LuaScript::call_for(std::string_view function, Args&&... args) 
     if (!target.valid()) {
         return std::nullopt;
     }
-    const Budget budget{*this, _lua->lua_state()};
+    LuaCall budget{*_runtime, _lua->lua_state(), function};
     const sol::protected_function_result result = target(std::forward<Args>(args)...);
+    budget.result(result.valid());
     if (!check(result, function)) {
         return std::nullopt;
     }

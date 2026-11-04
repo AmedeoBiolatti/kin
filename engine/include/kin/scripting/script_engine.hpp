@@ -1,9 +1,9 @@
 #pragma once
 
-#include <kin/scene/scene.hpp>
-
 #include <filesystem>
 #include <functional>
+#include <kin/scene/scene.hpp>
+#include <kin/scripting/lua_runtime.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,7 +47,7 @@ class ScriptEngine {
 public:
     // `bind` adds the host's own API (e.g. bind_lua_audio) to the fresh state,
     // after kin's bindings and before any script runs.
-    explicit ScriptEngine(const std::function<void(sol::state&)>& bind = {});
+    explicit ScriptEngine(const std::function<void(sol::state&)>& bind = {}, LuaRuntimeLimits limits = {});
     ~ScriptEngine();
 
     ScriptEngine(const ScriptEngine&) = delete;
@@ -75,6 +75,11 @@ public:
     bool call_update(ScriptFrameContext ctx);
     bool call_collect_actions(InputActionContext& actions) const;
     bool call_write_report(JsonWriter& json) const;
+
+    std::map<std::string, std::vector<std::string>> api_surface() const;
+    LuaRuntimeStats runtime_stats() const;
+    void set_runtime_limits(LuaRuntimeLimits limits);
+    void collect_garbage(i32 work = 16);
 
     const std::string& last_error() const { return _last_error; }
     const std::vector<std::filesystem::path>& script_dependencies() const;

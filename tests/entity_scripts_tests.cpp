@@ -109,11 +109,12 @@ end
     assert(scripts.running() == 2);
     (void)other;
 
-    // Changed: read again; its entities start over (another coin).
+    // Changed: preserve the live self and do not rerun on_start.
+    const auto before_reload = hero.get<kin::Transform2D>()->pos;
     write(dir / "scripts/mover.lua", "function on_start(self) self:set_position(-1, -2) end\n");
     fs::last_write_time(dir / "scripts/mover.lua", fs::file_time_type::clock::now() + std::chrono::seconds(5));
     scripts.update(world, input, 0.1f);
-    assert(hero.get<kin::Transform2D>()->pos == (kin::Vec2f{-1, -2}));
+    assert(hero.get<kin::Transform2D>()->pos == before_reload);
     // Its script taken away: it stops.
     hero.raw().remove<kin::ScriptComponent>();
     scripts.update(world, input, 0.1f);

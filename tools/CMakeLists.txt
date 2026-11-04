@@ -10,6 +10,19 @@ kin_enable_release_optimizations(kin_pack)
 if(KIN_ENABLE_SCRIPTING)
     add_executable(kin_scenario kin_scenario/main.cpp)
     target_link_libraries(kin_scenario PRIVATE kin::scripting)
+    add_executable(kin_lua kin_lua/main.cpp)
+    target_link_libraries(kin_lua PRIVATE kin::scripting_scenes)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_custom_target(kin_lua_api
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host scene generate --output "${PROJECT_BINARY_DIR}/lua-api/scene"
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host entity generate --output "${PROJECT_BINARY_DIR}/lua-api/entity"
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host test generate --output "${PROJECT_BINARY_DIR}/lua-api/test"
+            DEPENDS kin_lua VERBATIM)
+    endif()
 endif()
 
 if(KIN_EXPERIMENTAL_3D)
