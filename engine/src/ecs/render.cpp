@@ -289,14 +289,16 @@ void WorldRenderState::submit_groups(RenderQueue& queue, const SpriteRenderOptio
 namespace {
 
 // fn(it, row, world transform, renderer) for each row of a renderer query.
+// A renderer the rows inherit (from a prefab) is one value for all of them.
 template <typename R, typename Fn>
 void each_row(flecs::query<const Transform2D, const WorldTransform, const R, const ClipGroup*>& query, Fn&& fn) {
     query.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto world = it.field<const WorldTransform>(1);
             const auto renderers = it.field<const R>(2);
+            const bool shared = !it.is_self(2);
             for (const auto i : it) {
-                fn(it, static_cast<std::size_t>(i), world[i], renderers[i]);
+                fn(it, static_cast<std::size_t>(i), world[i], renderers[shared ? 0 : i]);
             }
         }
     });
@@ -308,8 +310,9 @@ void each_particles(flecs::query<const P, const ClipGroup*>& query, Fn&& fn) {
     query.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto particles = it.field<const P>(0);
+            const bool shared = !it.is_self(0); // inherited: one for every row
             for (const auto i : it) {
-                fn(it, static_cast<std::size_t>(i), particles[i]);
+                fn(it, static_cast<std::size_t>(i), particles[shared ? 0 : i]);
             }
         }
     });
@@ -574,22 +577,27 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
             const auto world = it.field<const WorldTransform>(1);
             const auto textures = it.field<const TextureRenderer>(2);
             const i32 rows = static_cast<i32>(it.count());
+            // Inherited (from a prefab): one renderer for every row, drawn by the loops below.
+            const bool shared = !it.is_self(2);
             if (it.is_set(3)) {
                 // Clipped: all dynamic, each into its group's queue.
                 if (!statics) {
                     for (const auto i : it) {
                         repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
-                            submit_texture(route(queue, it, i, 3, options), it.entity(i), at, textures[i], options.view);
+                            submit_texture(route(queue, it, i, 3, options), it.entity(i), at, textures[shared ? 0 : i],
+                                           options.view);
                         });
                     }
                 }
                 continue;
             }
-            if (!options.jobs || rows < parallel_min || world[0].parallax) { // a table shares its parent (and any Parallax)
+            if (!options.jobs || rows < parallel_min || world[0].parallax ||
+                shared) { // a table shares its parent (and any Parallax)
                 for (const auto i : it) {
-                    if ((textures[i].static_renderable && !world[i].parallax) == statics) {
+                    const TextureRenderer& texture = textures[shared ? 0 : i];
+                    if ((texture.static_renderable && !world[i].parallax) == statics) {
                         repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
-                            submit_texture(queue, it.entity(i), at, textures[i], options.view);
+                            submit_texture(queue, it.entity(i), at, texture, options.view);
                         });
                     }
                 }

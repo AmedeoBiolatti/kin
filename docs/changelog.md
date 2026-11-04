@@ -538,6 +538,10 @@ releases may change APIs.
 
 ### Fixed
 
+- Every instance of a prefab draws. Where instances inherit the prefab's renderer (rects, sprites, text,
+  particles, textured renderers), only the first instance in each table was drawn, and the others read past the
+  shared value.
+
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
   history stable across views, and restore Windows compilation of Summit, the

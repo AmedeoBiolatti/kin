@@ -476,6 +476,46 @@ void test_render_world_draws_primitives() {
     assert(raw->lines_b[0] == line_b);
 }
 
+// Instances of a prefab share the renderer they inherit from it: each one
+// draws it, where it is.
+void test_prefab_instances_draw_inherited_renderers() {
+    auto backend = std::make_unique<FakeBackend>();
+    FakeBackend* raw = backend.get();
+    kin::Renderer2D renderer{std::move(backend)};
+    kin::Texture texture{std::make_shared<FakeTextureBackend>(kin::Vec2i{8, 8})};
+
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    flecs::entity box = world.raw().prefab("Box");
+    box.set(kin::RectRenderer{.size = {4.0f, 4.0f}, .color = kin::Color::rgb(0, 255, 0)});
+    flecs::entity tile = world.raw().prefab("Tile");
+    tile.set(kin::TextureRenderer{.texture = texture, .size = {8.0f, 8.0f}, .pivot = {0.0f, 0.0f}});
+    const std::vector<float> xs{10.0f, 30.0f, 50.0f};
+    std::vector<flecs::entity> boxes;
+    for (const float x : xs) {
+        boxes.push_back(world.raw().entity().is_a(box).set(kin::Transform2D{{x, 0.0f}}));
+        world.raw().entity().is_a(tile).set(kin::Transform2D{{x, 20.0f}});
+    }
+    assert(!boxes[0].owns<kin::RectRenderer>()); // inherited, not copied
+
+    kin::render_world(world, renderer);
+
+    std::vector<float> rect_x;
+    for (const kin::Rectf& rect : raw->rects) {
+        assert((rect.w == 4.0f && rect.h == 4.0f && rect.y == 0.0f));
+        rect_x.push_back(rect.x);
+    }
+    std::vector<float> draw_x;
+    for (const kin::Rectf& draw : raw->draws) {
+        assert((draw.w == 8.0f && draw.h == 8.0f && draw.y == 20.0f));
+        draw_x.push_back(draw.x);
+    }
+    std::sort(rect_x.begin(), rect_x.end());
+    std::sort(draw_x.begin(), draw_x.end());
+    assert(rect_x == xs);
+    assert(draw_x == xs);
+}
+
 void test_render_world_draws_texture_renderer() {
     auto backend = std::make_unique<FakeBackend>();
     FakeBackend* raw = backend.get();
@@ -1921,6 +1961,7 @@ int main() {
     test_shape_renderer();
     test_render_world_draws_primitives();
     test_render_world_draws_texture_renderer();
+    test_prefab_instances_draw_inherited_renderers();
     test_sprite_pivot_offsets_and_y_sort();
     test_sprite_renderer_tint_rotation_and_pivot_reach_commands();
     test_clip_groups_cut_and_keep_children_together();
