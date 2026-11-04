@@ -1,14 +1,21 @@
+#include <kin/renderer/shader_compiler.hpp>
+
+#include <kin/assets/content.hpp>
+#include <kin/platform/log.hpp>
+#include <kin/platform/process.hpp>
+#include <kin/renderer/renderer2d.hpp>
+
 #include <SDL3/SDL.h>
+
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
-#include <kin/assets/content.hpp>
-#include <kin/platform/log.hpp>
-#include <kin/platform/process.hpp>
-#include <kin/renderer/renderer2d.hpp>
-#include <kin/renderer/shader_compiler.hpp>
+#include <stdexcept>
+#include <string_view>
 
 namespace kin {
 
@@ -23,6 +30,58 @@ std::filesystem::path glslc_path() {
 #else
     return {};
 #endif
+}
+
+// What glslc reads of a content snapshot: the shader and what it may include.
+bool shader_source_file(std::string_view path) {
+    constexpr std::array<std::string_view, 9> extensions{".glsl", ".vert", ".frag", ".comp", ".geom",
+                                                         ".tesc", ".tese", ".inc",  ".h"};
+    return std::ranges::any_of(extensions, [&](std::string_view extension) { return path.ends_with(extension); });
+}
+
+// A directory removed with what is in it when this goes.
+struct ScratchDirectory {
+    std::filesystem::path root;
+
+    ~ScratchDirectory() {
+        if (!root.empty()) {
+            std::error_code error;
+            std::filesystem::remove_all(root, error);
+        }
+    }
+};
+
+// The snapshot's shader sources written under a new directory next to `out`
+// (glslc reads files); the source's path there. An error when they can't be.
+std::filesystem::path write_shader_sources(const MemoryContent& snapshot, const std::filesystem::path& source,
+                                           const std::filesystem::path& out, ScratchDirectory& sources) {
+    constexpr std::size_t max_files = 4096;
+    constexpr std::size_t max_bytes = 64 * 1024 * 1024;
+    std::filesystem::path directory{out.string() + ".sources"};
+    while (!std::filesystem::create_directory(directory)) {
+        directory += "-next";
+    }
+    sources.root = directory;
+    const std::string relative = source.lexically_relative(snapshot.root()).generic_string();
+    std::size_t files = 0;
+    std::size_t bytes = 0;
+    for (const auto& [path, data] : snapshot.files()) {
+        if (path != relative && !shader_source_file(path)) {
+            continue;
+        }
+        bytes += data.size();
+        if (++files > max_files || bytes > max_bytes) {
+            throw std::runtime_error("shader sources exceed 4096 files or 64 MiB");
+        }
+        const std::filesystem::path file = directory / path;
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream stream(file, std::ios::binary);
+        stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!stream) {
+            throw std::runtime_error("cannot prepare shader source files");
+        }
+    }
+    return directory / relative;
 }
 
 } // namespace
@@ -47,38 +106,13 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     static std::atomic<u32> counter{0};
     const std::filesystem::path out = std::filesystem::temp_directory_path() /
         ("kin-shader-" + std::to_string(SDL_GetCurrentThreadID()) + "-" + std::to_string(counter++) + ".spv");
-    struct Sources {
-        std::filesystem::path root;
-        ~Sources() {
-            if (!root.empty()) {
-                std::error_code error;
-                std::filesystem::remove_all(root, error);
-            }
-        }
-    } sources;
-    auto compiled_source = source;
-    const auto snapshot = memory_content_for(source);
+    // A shader in a content snapshot (a dev reload's): glslc reads files.
+    ScratchDirectory sources;
+    std::filesystem::path compiled_source = source;
+    const std::shared_ptr<const MemoryContent> snapshot = memory_content_for(source);
     if (snapshot) {
         try {
-            if (snapshot->files().size() > 4096)
-                return fail("shader snapshot exceeds file limit");
-            auto directory = std::filesystem::path(out.string() + ".sources");
-            while (!std::filesystem::create_directory(directory))
-                directory += "-next";
-            sources.root = std::move(directory);
-            std::size_t bytes = 0;
-            for (const auto& [path, data] : snapshot->files()) {
-                bytes += data.size();
-                if (bytes > 64 * 1024 * 1024)
-                    return fail("shader snapshot exceeds 64 MiB");
-                const auto file = sources.root / path;
-                std::filesystem::create_directories(file.parent_path());
-                std::ofstream stream(file, std::ios::binary);
-                stream.write(data.data(), static_cast<std::streamsize>(data.size()));
-                if (!stream)
-                    return fail("cannot prepare shader source files");
-            }
-            compiled_source = sources.root / source.lexically_relative(snapshot->root());
+            compiled_source = write_shader_sources(*snapshot, source, out, sources);
         } catch (const std::exception& e) {
             return fail(e.what());
         }
@@ -86,8 +120,8 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     Process glslc;
     ProcessOptions options;
     options.args = {glslc_path().string(),
-                    stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment", "-o",
-                    out.string(), compiled_source.string()};
+                    stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment",
+                    "-o", out.string(), compiled_source.string()};
 #ifdef KIN_SHADER_INCLUDE_DIR
     // `#include "kin_material.inc.glsl"` (3D material shaders) from the engine's own.
     options.args.insert(options.args.begin() + 2, {"-I", KIN_SHADER_INCLUDE_DIR});
@@ -104,11 +138,12 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     }
     messages += glslc.read();
     if (snapshot) {
-        std::size_t at = 0;
-        const auto root = sources.root.string();
-        while ((at = messages.find(root, at)) != std::string::npos) {
-            messages.replace(at, root.size(), snapshot->root().string());
-            at += snapshot->root().string().size();
+        // Errors name the snapshot's files, not their copies.
+        const std::string copies = sources.root.string();
+        const std::string original = snapshot->root().string();
+        for (std::size_t at = messages.find(copies); at != std::string::npos; at = messages.find(copies, at)) {
+            messages.replace(at, copies.size(), original);
+            at += original.size();
         }
     }
     if (glslc.exit_code().value_or(-1) != 0) {

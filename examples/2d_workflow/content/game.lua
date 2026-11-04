@@ -11,6 +11,7 @@ function on_load(scene)
 key fire Space
 pad fire a
 key pause Escape
+key next_room N
 axis horizontal - key:A
 axis horizontal + key:D
 axis horizontal stick left_x
@@ -36,8 +37,10 @@ local function fire()
 end
 function update(ctx)
     local command=game.command()
-    if command=='' and ctx.input:pressed('next_room') then command='next' end
-    local pause_key=ctx.input:pressed('pause') or (state.paused and input_contexts.pressed('menu','pause') or input_contexts.pressed('play','pause'))
+    -- The contexts are the one source: the game mirrors 'play' into its Input map,
+    -- so automation's input.action presses what they read.
+    if command=='' and input_contexts.pressed('play','next_room') then command='next' end
+    local pause_key=input_contexts.pressed(state.paused and 'menu' or 'play','pause')
     if command=='pause' or pause_key then
         state.paused=not state.paused
         input_contexts.enable('menu',state.paused)
@@ -77,7 +80,7 @@ function update(ctx)
         if length>1 then x=x/length;y=y/length end
         if length>.1 then local norm=math.sqrt(x*x+y*y);state.facing={x=x/norm,y=y/norm} end
         game.move(x*MOVE_SCALE,y*MOVE_SCALE,ctx.dt)
-        if command=='fire' or input_contexts.pressed('play','fire') or ctx.input:pressed('fire') then fire() end
+        if command=='fire' or input_contexts.pressed('play','fire') then fire() end
     end
     for i=#state.bullets,1,-1 do
         local bullet=state.bullets[i]

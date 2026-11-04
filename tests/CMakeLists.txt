@@ -183,16 +183,17 @@ kin_add_test(kin_instrumentation_tests kin-instrumentation
         "$<$<CXX_COMPILER_ID:MSVC>:/Od>"
 )
 kin_add_test(kin_anim_core_tests kin-anim-core SOURCES anim_core_tests.cpp)
-kin_add_test(kin_anim_tween_tests kin-anim-tween SOURCES anim_tween_tests.cpp)
 kin_add_test(kin_input_workflow_tests kin-input-workflow SOURCES input_workflow_tests.cpp)
 kin_add_test(kin_scene_workflow2d_tests kin-scene-workflow2d SOURCES scene_workflow2d_tests.cpp)
 kin_add_test(kin_navigation2d_tests kin-navigation2d SOURCES navigation2d_tests.cpp)
+kin_add_test(kin_prefab_pool2d_tests kin-prefab-pool2d SOURCES prefab_pool2d_tests.cpp)
 kin_add_test(kin_accessibility_tests kin-accessibility SOURCES accessibility_tests.cpp)
 kin_add_test(kin_animation_lighting2d_tests kin-animation-lighting2d SOURCES animation_lighting2d_tests.cpp)
 kin_add_test(kin_advanced_workflow2d_tests kin-advanced-workflow2d SOURCES advanced_workflow2d_tests.cpp)
 kin_add_test(kin_normal_lighting2d_gpu_tests kin-normal-lighting2d-gpu SOURCES normal_lighting2d_gpu_tests.cpp)
 set_tests_properties(kin-normal-lighting2d-gpu PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 kin_add_test(kin_asset_lifetime_tests kin-asset-lifetime SOURCES asset_lifetime_tests.cpp)
+kin_add_test(kin_memory_content_tests kin-memory-content SOURCES memory_content_tests.cpp)
 kin_add_test(kin_anim_player_tests kin-anim-player SOURCES anim_player_tests.cpp)
 kin_add_test(kin_anim_event_tests kin-anim-events SOURCES anim_event_tests.cpp anim_event_consumer_tests.cpp)
 kin_add_test(kin_anim_state_machine_tests kin-anim-state-machine SOURCES anim_state_machine_tests.cpp)
@@ -612,7 +613,6 @@ kin_add_component_test(RENDER_PROBE kin_render_probe_tests kin-render-probe SOUR
 kin_add_component_test(DETERMINISM_CHECK kin_determinism_tests kin-determinism SOURCES determinism_tests.cpp)
 
 kin_add_component_test(SCENE_SERVER kin_server_tests kin-server SOURCES server_tests.cpp)
-kin_add_component_test(SCENE_SERVER kin_automation_tests kin-automation SOURCES automation_tests.cpp)
 
 kin_add_test(kin_scene_tests kin-scene SOURCES scene_tests.cpp)
 
@@ -625,7 +625,10 @@ if(KIN_ENABLE_SCRIPTING AND Python3_Interpreter_FOUND AND TARGET kin_lua)
     add_test(NAME kin-lua-tooling COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/lua_tooling_tests.py" "$<TARGET_FILE:kin_lua>")
     set_tests_properties(kin-lua-tooling PROPERTIES TIMEOUT 90 LABELS "component:SCRIPTING")
 endif()
-kin_add_component_test(SCRIPTING kin_development_tests kin-development SOURCES development_tests.cpp LINK_TARGET kin::scripting_scenes)
+if(KIN_ENABLE_SCRIPTING)
+    kin_add_component_test(DEVELOPMENT kin_development_tests kin-development SOURCES development_tests.cpp
+        LINK_TARGET kin::scripting_scenes)
+endif()
 if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_entity_scripts_tests PRIVATE kin::physics_ecs) # a character's script
 endif()

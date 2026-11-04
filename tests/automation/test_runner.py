@@ -241,7 +241,7 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(ScenarioFailure, "incomplete"):
             replay(target, [{"kind": "request", "sequence": 123, "method": "input.action", "params": {"name": "fire"}}])
 
-    def test_replayed_protocol_errors_and_manual_shutdown(self):
+    def test_replayed_protocol_errors_and_header(self):
         client = self.client()
         with self.assertRaisesRegex(ScenarioFailure, "reproduced"):
             replay(
@@ -250,24 +250,11 @@ class Tests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ScenarioFailure, "changed"):
             replay(client, [{"kind": "command", "ok": False, "method": "absent", "error": "different error"}])
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(ROOT / "tools/automation/kin_test.py"),
-                "record",
-                "--out",
-                str(self.root / "manual"),
-                "--game",
-                sys.executable,
-                str(FAKE),
-            ],
-            input='{"id":17,"method":"server.shutdown"}\n',
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads(result.stdout)["id"], 17)
+        # One header shape for every writer, whatever the handshake answered.
+        header = loads((client.out / "commands.jsonl").read_text().splitlines()[0])
+        self.assertEqual((header["kind"], header["game_id"], header["renderer"]), ("header", "fake", "fake"))
+        self.assertEqual(header["rng_key"], [0, 0])
+        self.assertFalse(any(e.get("kind") == "identity" for e in client.events))
 
     def test_world_trace_and_xml_controls(self):
         import xml.etree.ElementTree as ET

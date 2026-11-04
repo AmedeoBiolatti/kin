@@ -14,7 +14,8 @@ uses. Optional APIs and reflected component fields come from the live bindings:
 cmake --build build --target kin_lua_api
 ```
 
-This creates `build/lua-api/scene`, `build/lua-api/entity` and `build/lua-api/test`, each containing
+This creates `build/lua-api/scene`, `build/lua-api/entity`, `build/lua-api/test` and
+`build/lua-api/scenario` (gameplay scenario files, `scenario{...}`), each containing
 `kin.lua`, `api.json` and a sample `.luarc.json`. Add the appropriate directory to
 your editor's Lua workspace library. Use one host per script workspace; entity
 and scene scripts expose different entity APIs. For example, a project
@@ -84,13 +85,18 @@ checked entity references and supported workflow handles survive. Cycles,
 closures, raw pointers and unsupported userdata reject the edit. Limits are 32
 levels, 10,000 copied values and 4 MiB of strings per copied root.
 
-Candidate top-level code and migration cannot call live engine services or
-mutate entities. Any parse, budget, copy or migration failure keeps the old VM,
+Candidate top-level code and migration cannot call live engine services
+(`world`, `input`, `ui`, `save`, ... raise an error) or mutate entities; the
+service tables themselves are the same plain tables a fresh VM has. Any parse,
+budget, copy or migration failure keeps the old VM,
 instance data and tasks. All instances of one file activate together. Module
 edits trigger the same file-level transaction. Independent script files reload
 individually; this does not add a multi-file transaction to legacy polling.
 The scene host's `reload_state` / `on_reload(saved, scene)` contract remains
-described in [development sessions](hot_reload.md).
+described in [development sessions](hot_reload.md). Should a rolled-back scene
+script's systems fail to register again, that script halts
+(`ScriptEngine::halt`): its systems stay removed and every call fails with the
+reason, which the host reports as a script error.
 
 Automatic polling uses `EntityScriptsConfig::check_frames`; native hosts can
 call `EntityScripts::reload(asset)` explicitly, including with polling disabled.
@@ -104,7 +110,7 @@ is destroyed.
 
 `LuaRuntimeLimits` defaults to 50 million instructions per entry and a 64 MiB Lua
 heap per VM. Zero disables the corresponding limit. Configure rule scripts with
-`LuaScriptOptions::instruction_limit` / `memory_limit_bytes`, entity scripts with
+`LuaScriptOptions::limits`, entity scripts with
 `EntityScriptsConfig::runtime_limits`, scenes with
 `ScriptSceneConfig::runtime_limits`, or native scene engines through their
 constructor / `set_runtime_limits`.
@@ -112,9 +118,10 @@ constructor / `set_runtime_limits`.
 Loads, callbacks, Lua ECS systems, predicates and task resumes use the shared
 instruction/debugger hook. Nested calls share the caller's remaining budget. Task resumes also share a
 step budget.
-After budget exhaustion, `pcall` cannot keep an infinite loop running. Candidate
-entity loads and migration callbacks are capped at one million instructions;
-scene reload preparation has a shared one million instruction budget. Explicit
+After budget exhaustion, `pcall` cannot keep an infinite loop running. Reload
+preparation is capped at one million instructions (or the configured limit, if
+lower): a scene script's load and `on_reload` together, an entity script's load,
+then each instance's migration (its self and `on_reload`) on its own. Explicit
 GC steps also install the hook, although Lua itself disables hooks while running
 `__gc` metamethods. Use lifecycle hooks for scripted cleanup and keep finalizers
 short; instruction limits cannot interrupt `__gc` or a blocking native function.
@@ -135,9 +142,9 @@ denied allocations and per-callback calls, failures, elapsed time and allocated
 bytes. Callback allocations include nested calls. GC metrics measure explicit
 host steps; automatic GC time is included in its enclosing callback's time.
 Simulation task steps perform incremental GC. Native hosts can request a bounded
-step with `collect_garbage` / `LuaRuntime::collect`. Scene and entity hosts also record callbacks in an active native profile session.
-Plain hosts can supply `LuaScriptOptions::on_profile`. Timing data stays in native
-diagnostics and test reports, outside deterministic gameplay APIs.
+step with `LuaRuntime::collect`. Every host records its calls in the active native
+profile session (`kin/core/profile.hpp`, category `lua`). Timing data stays in
+native diagnostics and test reports, outside deterministic gameplay APIs.
 
 ## Tasks and waits
 
@@ -155,11 +162,11 @@ end)
 -- job:error(); job:cancel(); task.cancel(job)
 ```
 
-`task.await` supports native tweens, preload requests, other tasks, and objects
-with a compatible `state()` contract. Waiting observes completion; preloaded
-scenes still require an explicit `commit()`. Cancellation/failure and timeouts
-fail the waiting task. Animation completion can use `task.until_` with a checked
-animation-state predicate.
+`task.await` waits for anything with `state()` and `error()`: tweens
+(`tweens.to`, `tweens.of`), preload requests and other tasks. It finishes at
+`completed` (`ready` for a preload); preloaded scenes still require an explicit
+`commit()`. Cancellation/failure and timeouts fail the waiting task. Animation
+completion can use `task.until_` with a checked animation-state predicate.
 
 Tasks start on the next scheduler advance, in registration order, and resume at
 most once per advance. Tasks created during an advance start the following one.
@@ -170,15 +177,19 @@ available.
 
 `ScriptEngine::call_update` and `EntityScripts::update` advance their tasks.
 Plain `LuaScript` hosts call `advance_tasks(dt)`. Entity callbacks automatically
-scope new tasks to the entity's lifetime; tasks created by those tasks inherit
-the owner. Destruction, disabling, removal, pool reuse and explicit restart cancel
-owned tasks. Scene exit cancels scene tasks. Standalone hosts can use
-`set_task_owner`, `cancel_tasks` and the `advance_tasks` owner-validation callback.
+scope new tasks to their entity (an entity script's `self:after`, `self:every`
+and a `self:tween`'s `done` are such tasks); tasks created by those tasks
+inherit the owner. Destruction, disabling, removal, pool reuse and explicit
+restart cancel owned tasks. Scene exit cancels scene tasks. Standalone hosts can
+use `set_task_owner(owner)` (a number; 0: none), `cancel_tasks([owner])` and the
+`advance_tasks` owner-validation callback.
 
 Accepted reload cancels old Lua tasks. Persisted task handles become cancelled
 tokens in the candidate VM; recreate work in `on_reload`. Coroutine stacks and
-closures are not migrated. Native tween/preload jobs keep their existing reload
-semantics. Rejected edits retain active tasks.
+closures are not migrated, and neither are an entity script's timers or tween
+`done` callbacks (tasks too): the tweens themselves go on. Tween and preload
+handles kept in reload state keep following their native work. Rejected edits
+retain active tasks.
 
 ## Lua unit and component tests
 
@@ -233,6 +244,8 @@ or cancel it explicitly. Entity/scene tasks may remain active at fixture teardow
 Plain Lua tables/functions can stand in for a module's game-specific services.
 
 Exit codes are 0 for success, 1 for failed tests/checks, and 2 for CLI/setup errors.
+`kin_lua scenario file.lua` compiles a [gameplay scenario](automation.md) to its
+JSON (exit 2 on errors).
 JSON and JUnit reports include all cases; JSON also includes Lua runtime profiles.
 `--instructions N` and `--memory BYTES` configure test VMs and fixture hosts.
 `kin-lua-runtime` and `kin-lua-tooling` run these regression checks under CTest.

@@ -30,8 +30,15 @@ int main() {
     original = {};
     assert(manager.unload_unused() == 1);
 
+    // Evicting an entry whose file does not exist reports it Missing, as unload() does.
+    manager.register_memory_sizer<Data>([](const Data&) { return u64{8}; });
+    { auto gone = manager.load_handle<Data>("gone"); }
+    manager.set_memory_budget(1);
+    assert(!manager.loaded<Data>("gone") && manager.metadata("gone")->status == AssetStatus::Missing);
+    manager.set_memory_budget(0);
+
     JobSystem jobs{{.single_threaded = true}};
-    AssetServer server{manager, {.jobs = &jobs, .unload_unused = true}};
+    AssetServer server{manager, {.jobs = &jobs}};
     int async_loads = 0;
     server.register_async_loader<Data>([&](const auto& path, LoadContext& ctx) {
         ++async_loads;
@@ -42,10 +49,14 @@ int main() {
     auto root = server.load_async<Data>("root");
     server.drain();
     assert(root && server.ready<Data>("root") && manager.loaded<Data>("leaf"));
+    const auto* edges = manager.dependencies(server.key_for<Data>("root"));
+    assert(edges && *edges == std::vector<std::string>{server.key_for<Data>("leaf")});
     assert(manager.unload_unused() == 0);
     root = {};
     server.drain();
+    assert(manager.unload_unused() == 2); // the unreferenced cycle
     assert(!manager.loaded<Data>("root") && !manager.loaded<Data>("leaf"));
+    assert(!manager.dependencies(server.key_for<Data>("root")));
     assert(server.load_state<Data>("root") == LoadState::NotLoaded);
 
     async_loads = 0;
@@ -54,6 +65,7 @@ int main() {
     assert(manager.unload_unused() == 0); // completed parent survives its pending child
     for (int frame = 0; frame < 4; ++frame) server.pump(AssetServer::PumpMode::Budgeted);
     assert(async_loads == 2 && server.stats().pending == 0);
+    assert(manager.unload_unused() == 2);
     assert(!manager.loaded<Data>("root") && !manager.loaded<Data>("leaf"));
 
     // Scope pins an asynchronous load even before a shared() view is available.
@@ -62,11 +74,12 @@ int main() {
     assert(manager.unload_unused() == 0);
     server.drain();
     assert(manager.loaded<Data>("pending"));
-    scope.clear(); server.drain();
-    assert(!manager.loaded<Data>("pending"));
+    scope.clear();
+    server.drain();
+    assert(manager.unload_unused() == 1 && !manager.loaded<Data>("pending"));
 
     server.load_async<Data>("orphan"); // no caller retains this pending job
     assert(manager.unload_unused() == 0); // the job owns its storage until applied
     server.drain();
-    assert(!manager.loaded<Data>("orphan"));
+    assert(manager.unload_unused() == 1 && !manager.loaded<Data>("orphan"));
 }

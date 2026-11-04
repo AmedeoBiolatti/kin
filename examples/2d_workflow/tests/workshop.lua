@@ -1,4 +1,4 @@
-test {
+scenario {
     name = 'Workshop Lua scenario', seed = 7,
     requires = {'ui', 'world', 'reset'},
     dependencies = {'../content', '../art'},

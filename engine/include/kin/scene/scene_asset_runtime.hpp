@@ -3,9 +3,13 @@
 #include <kin/render3d/errors3d.hpp>
 #endif
 
-#include <filesystem>
-#include <kin/runtime/development.hpp>
+#include <kin/assets/development_revision.hpp>
 #include <kin/scene/scene_asset.hpp>
+
+#include <filesystem>
+#include <functional>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,8 +43,21 @@ public:
 
     bool instantiate(EcsWorld& world, SceneInstantiateOptions options = {});
     // Track an already instantiated, validated authored scene (e.g. a preload).
-    void track_instance(EcsWorld& world, std::filesystem::path path, std::filesystem::path root, SceneAsset definition,
+    void track_instance(std::filesystem::path path, std::filesystem::path root, SceneAsset definition,
                         SceneInstance instance);
+    // Development reloads (kin/runtime/development.hpp) patch the live world
+    // with what changed between the scene as loaded and as edited, so they
+    // need the scene as loaded: this records it, from a fresh copy of the
+    // loaded scene, for prepare_patch. Instantiation does not, to keep loads
+    // that are never reloaded cheap. Call it right after loading, before the
+    // files can change. False, with diagnostics(), if the copy fails.
+    bool track_authored(const EcsComponentRegistry& schema);
+    bool tracks_authored() const { return _authored.has_value(); }
+    // The live patch from the loaded scene to the one at the same path under
+    // `revision_root`: only fields edited since loading change, and entity
+    // identities and other runtime state stay. `validate` checks the
+    // candidate's preview world first. Finalizing makes this runtime the
+    // candidate's. Needs track_authored().
     std::unique_ptr<DevelopmentChange> prepare_patch(EcsWorld& world, const std::filesystem::path& revision_root,
                                                      std::string& error,
                                                      std::function<bool(EcsWorld&, std::string&)> validate = {});
@@ -52,6 +69,9 @@ public:
     SceneAssetRuntimeChange poll_changes() const;
 #if KIN_ENABLE_SCRIPTING
     bool reload(ScriptScene& scene);
+    // Deprecated: re-instantiates the scene when its files change. Use a
+    // development session instead (`--dev`, kin/runtime/development.hpp, which
+    // calls prepare_patch); this does nothing while the scene has one.
     bool reload_if_changed(ScriptScene& scene);
 #endif
 
@@ -77,7 +97,7 @@ private:
     std::filesystem::path _asset_root;
     SceneAsset _scene;
     SceneInstance _instance;
-    SceneDocument _authored;
+    std::optional<SceneDocument> _authored; // the loaded scene, for prepare_patch
     std::vector<std::string> _diagnostics;
     std::unordered_map<std::string, std::filesystem::file_time_type> _write_times;
     bool _loaded = false;

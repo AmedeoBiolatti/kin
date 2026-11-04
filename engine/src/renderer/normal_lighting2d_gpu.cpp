@@ -1,38 +1,115 @@
+#include <kin/renderer/normal_lighting2d.hpp>
+
+#include "normal_lighting2d_internal.hpp"
+
 #include <algorithm>
 #include <cmath>
-#include <kin/renderer/normal_lighting2d.hpp>
 #include <map>
 
 namespace kin {
-bool draw_normal_sprite2d_gpu(Renderer2D& renderer, const SurfaceMaterial2D& m, const SurfaceGeometry2D& g,
-                              Color ambient, std::span<const SurfaceLight2D> lights,
-                              std::span<const LightOccluder2D> occluders, u64 fingerprint,
+namespace {
+
+using namespace normal_lighting2d_detail;
+using Vec4 = std::array<f32, 4>;
+
+// Per light, in the buffer: position, height, radius | colour, intensity |
+// direction, directional, rotation | shadow strength, samples, first sample
+// header, shaped | shape offset, width, height, mask (low 16 bits) | mask
+// (high 16 bits). The shader reads it so (normal_sprite.frag.glsl).
+constexpr std::size_t vectors_per_light = 6;
+// 32 MiB, so offsets stay exact as floats.
+constexpr std::size_t max_vectors = 2 * 1024 * 1024;
+constexpr f32 radians_per_degree = 0.01745329252f;
+
+} // namespace
+
+bool normal_lighting2d_gpu_supported(const RendererBackendCapabilities& capabilities) {
+    return capabilities.shader_geometry && capabilities.data_buffers && capabilities.data_textures;
+}
+
+SurfaceLightBuffer2D pack_surface_lights2d(Renderer2D& renderer, std::span<const SurfaceLight2D> lights,
+                                           std::span<const LightOccluder2D> occluders) {
+    SurfaceLightBuffer2D packed{.renderer = renderer.id()};
+    if (!normal_lighting2d_gpu_supported(renderer.capabilities())) {
+        return packed;
+    }
+    const std::vector<const SurfaceLight2D*> usable = usable_lights(lights);
+    std::vector<Vec4> data(std::max<std::size_t>(1, usable.size() * vectors_per_light));
+    std::map<const Image*, std::size_t> shapes; // where each shape's alpha is, shared by its lights
+    for (std::size_t i = 0; i < usable.size(); ++i) {
+        const SurfaceLight2D& light = *usable[i];
+        const LinearColor color = to_linear(light.color);
+        const std::size_t at = i * vectors_per_light;
+        const u32 mask = static_cast<u32>(light.mask);
+        data[at] = {light.position.x, light.position.y, light.height, light.radius};
+        data[at + 1] = {color.r, color.g, color.b, std::min(light.intensity, max_light_intensity)};
+        data[at + 2] = {light.direction.x, light.direction.y, light.directional ? 1.0f : 0.0f,
+                        light.rotation * radians_per_degree};
+        data[at + 4][3] = static_cast<f32>(mask & 65535);
+        data[at + 5][0] = static_cast<f32>(mask >> 16);
+        const auto samples = shadow_samples(light, occluders);
+        if (samples.size() > max_vectors - data.size()) {
+            return packed;
+        }
+        const std::size_t headers = data.size();
+        data.resize(headers + samples.size());
+        data[at + 3] = {light.shadow_strength, static_cast<f32>(samples.size()), static_cast<f32>(headers), 0};
+        for (std::size_t s = 0; s < samples.size(); ++s) {
+            if (samples[s].size() > (max_vectors - data.size()) / 2) {
+                return packed;
+            }
+            data[headers + s] = {static_cast<f32>(data.size()), static_cast<f32>(samples[s].size()), 0, 0};
+            for (const auto& quad : samples[s]) {
+                data.push_back({quad[0].x, quad[0].y, quad[1].x, quad[1].y});
+                data.push_back({quad[2].x, quad[2].y, quad[3].x, quad[3].y});
+            }
+        }
+        if (!light.directional && light.shape && light.shape->valid()) {
+            if (!shapes.contains(light.shape.get())) {
+                const std::size_t pixels = light.shape->rgba.size() / 4;
+                const std::size_t count = (pixels + 3) / 4;
+                if (count > max_vectors - data.size()) {
+                    return packed;
+                }
+                const std::size_t start = data.size();
+                shapes[light.shape.get()] = start;
+                data.resize(start + count);
+                for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+                    data[start + pixel / 4][pixel % 4] = light.shape->rgba[pixel * 4 + 3] / 255.0f;
+                }
+            }
+            data[at + 3][3] = 1;
+            data[at + 4][0] = static_cast<f32>(shapes.at(light.shape.get()));
+            data[at + 4][1] = static_cast<f32>(light.shape->size.x);
+            data[at + 4][2] = static_cast<f32>(light.shape->size.y);
+        }
+    }
+    packed.buffer = renderer.create_data_buffer(data.size() * sizeof(Vec4), data.data());
+    packed.lights = packed.buffer.valid() ? static_cast<u32>(usable.size()) : 0;
+    return packed;
+}
+
+bool draw_normal_sprite2d_gpu(Renderer2D& renderer, const SurfaceMaterial2D& material,
+                              const SurfaceGeometry2D& geometry, Color ambient, const SurfaceLightBuffer2D& lights,
                               NormalLightingGpuCache2D& cache, SurfaceGpuTextures2D supplied) {
     cache.used = false;
-    const auto caps = renderer.capabilities();
-    if (!caps.shader_geometry || !caps.data_buffers || !caps.data_textures || !m.albedo || !m.albedo->valid() ||
-        lights.size() > 256)
+    if (!normal_lighting2d_gpu_supported(renderer.capabilities()) || !lights.buffer.valid() ||
+        lights.renderer != renderer.id()) {
         return false;
-    const auto shader = renderer.builtin_shader(BuiltinShader::NormalSprite2D);
-    if (!shader)
+    }
+    const ShaderHandle shader = renderer.builtin_shader(BuiltinShader::NormalSprite2D);
+    const std::optional<Rectf> found = surface_source(material, geometry);
+    if (!shader || !found) {
         return false;
-    auto source = g.source;
-    if (source.w <= 0 || source.h <= 0)
-        source = {0, 0, static_cast<f32>(m.albedo->size.x), static_cast<f32>(m.albedo->size.y)};
-    if (!std::isfinite(g.dest.x) || !std::isfinite(g.dest.y) || !std::isfinite(g.dest.w) || !std::isfinite(g.dest.h) ||
-        g.dest.w <= 0 || g.dest.h <= 0 || !std::isfinite(g.rotation) || !std::isfinite(g.pivot.x) ||
-        !std::isfinite(g.pivot.y) || !std::isfinite(source.x) || !std::isfinite(source.y) || !std::isfinite(source.w) ||
-        !std::isfinite(source.h) || source.x < 0 || source.y < 0 || source.w < 1 || source.h < 1 ||
-        source.x + source.w > m.albedo->size.x || source.y + source.h > m.albedo->size.y ||
-        !std::isfinite(m.normal_strength) || m.normal_strength < 0 || !std::isfinite(m.specular_strength) ||
-        m.specular_strength < 0 || !std::isfinite(m.shininess) || m.shininess <= 0)
-        return false;
+    }
+    const Rectf source = *found;
     if (cache.renderer != renderer.id()) {
         cache = {};
         cache.renderer = renderer.id();
     }
-    const std::array<std::shared_ptr<const Image>, 3> images{m.albedo, m.normal, m.specular};
-    std::array<Texture*, 3> textures{&cache.textures.albedo, &cache.textures.normal, &cache.textures.specular};
+    // The material's textures: those supplied, else made from its images (white for none).
+    const std::array<std::shared_ptr<const Image>, 3> images{material.albedo, material.normal, material.specular};
+    const std::array<Texture*, 3> textures{&cache.textures.albedo, &cache.textures.normal, &cache.textures.specular};
     const std::array<Texture, 3> provided{supplied.albedo, supplied.normal, supplied.specular};
     for (std::size_t i = 0; i < 3; ++i) {
         if (provided[i]) {
@@ -41,115 +118,58 @@ bool draw_normal_sprite2d_gpu(Renderer2D& renderer, const SurfaceMaterial2D& m, 
             continue;
         }
         if (cache.images[i] != images[i] || !*textures[i]) {
-            if (images[i] && images[i]->valid())
+            if (images[i] && images[i]->valid()) {
                 *textures[i] = renderer.create_texture(images[i]->size, TextureFormat::Rgba8, images[i]->rgba.data());
-            else {
-                const u8 pixel[4] = {255, 255, 255, 255};
-                *textures[i] = renderer.create_texture({1, 1}, TextureFormat::Rgba8, pixel);
+            } else {
+                const u8 white[4] = {255, 255, 255, 255};
+                *textures[i] = renderer.create_texture({1, 1}, TextureFormat::Rgba8, white);
             }
             cache.images[i] = images[i];
         }
-        if (!*textures[i])
+        if (!*textures[i]) {
             return false;
-    }
-    if (!cache.lights.valid() || cache.fingerprint != fingerprint) {
-        using V = std::array<f32, 4>;
-        std::vector<V> data(std::max<std::size_t>(1, lights.size() * 6));
-        std::map<const Image*, std::size_t> cookies;
-        constexpr std::size_t max_vectors = 2 * 1024 * 1024; // 32 MiB, offsets remain exact as floats
-        for (std::size_t i = 0; i < lights.size(); ++i) {
-            const auto& l = lights[i];
-            if (!std::isfinite(l.position.x) || !std::isfinite(l.position.y) || !std::isfinite(l.radius) ||
-                l.radius <= 0 || !std::isfinite(l.height) || !std::isfinite(l.intensity) || l.intensity < 0 ||
-                !std::isfinite(l.direction.x) || !std::isfinite(l.direction.y) || !std::isfinite(l.shadow_strength) ||
-                !std::isfinite(l.shadow_softness) || l.shadow_softness < 0 || !std::isfinite(l.rotation))
-                return false;
-            const auto color = to_linear(l.color);
-            const auto at = i * 6;
-            const auto mask = static_cast<u32>(l.mask);
-            data[at] = {l.position.x, l.position.y, l.height, l.radius};
-            data[at + 1] = {color.r, color.g, color.b, l.intensity};
-            data[at + 2] = {l.direction.x, l.direction.y, l.directional ? 1.0f : 0.0f, l.rotation * .01745329252f};
-            data[at + 4][3] = static_cast<f32>(mask & 65535);
-            data[at + 5][0] = static_cast<f32>(mask >> 16);
-            const auto samples = surface_shadow_samples2d(l, occluders);
-            if (samples.size() > max_vectors - data.size())
-                return false;
-            const auto headers = data.size();
-            data.resize(headers + samples.size());
-            data[at + 3] = {l.shadow_strength, static_cast<f32>(samples.size()), static_cast<f32>(headers), 0};
-            for (std::size_t s = 0; s < samples.size(); ++s) {
-                if (samples[s].size() > (max_vectors - data.size()) / 2)
-                    return false;
-                data[headers + s] = {static_cast<f32>(data.size()), static_cast<f32>(samples[s].size()), 0, 0};
-                for (const auto& q : samples[s]) {
-                    data.push_back({q[0].x, q[0].y, q[1].x, q[1].y});
-                    data.push_back({q[2].x, q[2].y, q[3].x, q[3].y});
-                }
-            }
-            if (!l.directional && l.shape && l.shape->valid()) {
-                if (!cookies.contains(l.shape.get())) {
-                    const auto count = (l.shape->rgba.size() / 4 + 3) / 4;
-                    if (count > max_vectors - data.size())
-                        return false;
-                    const auto start = data.size();
-                    cookies[l.shape.get()] = start;
-                    data.resize(start + count);
-                    for (std::size_t pixel = 0; pixel < l.shape->rgba.size() / 4; ++pixel)
-                        data[start + pixel / 4][pixel % 4] = l.shape->rgba[pixel * 4 + 3] / 255.0f;
-                }
-                data[at + 3][3] = 1;
-                data[at + 4][0] = static_cast<f32>(cookies.at(l.shape.get()));
-                data[at + 4][1] = static_cast<f32>(l.shape->size.x);
-                data[at + 4][2] = static_cast<f32>(l.shape->size.y);
-            }
         }
-        auto buffer = renderer.create_data_buffer(data.size() * sizeof(V), data.data());
-        if (!buffer.valid())
-            return false;
-        cache.lights = std::move(buffer);
-        cache.fingerprint = fingerprint;
     }
-    const bool fx = (static_cast<int>(g.flip) & static_cast<int>(Flip::X)) != 0,
-               fy = (static_cast<int>(g.flip) & static_cast<int>(Flip::Y)) != 0;
-    const auto rotation = Affine2::rotation(g.rotation);
-    const auto pivot = Vec2f{g.dest.x + g.dest.w * g.pivot.x, g.dest.y + g.dest.h * g.pivot.y};
+    const bool flip_x = flips_x(geometry.flip);
+    const bool flip_y = flips_y(geometry.flip);
     std::array<ShaderVertex, 4> vertices;
     constexpr Vec2f corners[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    const Vec2f image{static_cast<f32>(material.albedo->size.x), static_cast<f32>(material.albedo->size.y)};
     for (std::size_t i = 0; i < 4; ++i) {
-        const auto p = corners[i];
-        const auto q =
-            rotation.apply_vector({g.dest.x + p.x * g.dest.w - pivot.x, g.dest.y + p.y * g.dest.h - pivot.y});
-        const Vec2f world{q.x + pivot.x, q.y + pivot.y};
-        if (!std::isfinite(world.x) || !std::isfinite(world.y))
+        const Vec2f corner = corners[i];
+        const Vec2f world = surface_point(geometry, corner);
+        if (!std::isfinite(world.x) || !std::isfinite(world.y)) {
             return false;
+        }
         vertices[i] = {.position = world,
-                       .uv = {(source.x + (fx ? 1 - p.x : p.x) * source.w) / m.albedo->size.x,
-                              (source.y + (fy ? 1 - p.y : p.y) * source.h) / m.albedo->size.y},
+                       .uv = {(source.x + (flip_x ? 1 - corner.x : corner.x) * source.w) / image.x,
+                              (source.y + (flip_y ? 1 - corner.y : corner.y) * source.h) / image.y},
                        .custom = {world.x, world.y, 0, 0}};
     }
+    const Affine2 rotation = Affine2::rotation(geometry.rotation);
+    const LinearColor ambient_light = to_linear(ambient);
+    const LinearColor tint = to_linear(material.tint);
+    const u32 mask = static_cast<u32>(material.light_mask);
     ShaderParams params;
-    params.uniforms.resize(24);
-    const auto a = to_linear(ambient), t = to_linear(m.tint);
-    const auto mask = static_cast<u32>(m.light_mask);
-    params.uniforms = {a.r,
-                       a.g,
-                       a.b,
+    // As normal_sprite.frag.glsl's Material block.
+    params.uniforms = {ambient_light.r,
+                       ambient_light.g,
+                       ambient_light.b,
                        1,
-                       t.r,
-                       t.g,
-                       t.b,
-                       t.a,
-                       m.normal_strength,
-                       m.specular_strength,
-                       m.shininess,
-                       static_cast<f32>(lights.size()),
+                       tint.r,
+                       tint.g,
+                       tint.b,
+                       tint.a,
+                       material.normal_strength,
+                       material.specular_strength,
+                       material.shininess,
+                       static_cast<f32>(lights.lights),
                        rotation.a,
                        rotation.b,
-                       fx ? -1.0f : 1.0f,
-                       fy ? -1.0f : 1.0f,
-                       m.normal && m.normal->valid() ? 1.0f : 0.0f,
-                       m.specular && m.specular->valid() ? 1.0f : 0.0f,
+                       flip_x ? -1.0f : 1.0f,
+                       flip_y ? -1.0f : 1.0f,
+                       material.normal && material.normal->valid() ? 1.0f : 0.0f,
+                       material.specular && material.specular->valid() ? 1.0f : 0.0f,
                        renderer.color_space() == ColorSpace::Linear ? 1.0f : 0.0f,
                        static_cast<f32>(mask & 65535),
                        static_cast<f32>(mask >> 16),
@@ -158,10 +178,10 @@ bool draw_normal_sprite2d_gpu(Renderer2D& renderer, const SurfaceMaterial2D& m, 
                        0};
     const std::array<u32, 6> indices{0, 1, 2, 0, 2, 3};
     const std::array<Texture, 3> sources{cache.textures.albedo, cache.textures.normal, cache.textures.specular};
-    const std::array<DataBuffer, 1> buffers{cache.lights};
+    const std::array<DataBuffer, 1> buffers{lights.buffer};
     renderer.draw_shader_geometry(vertices, indices, shader, params, sources, buffers);
     cache.used = true;
-    cache.color_space = renderer.color_space();
     return true;
 }
+
 } // namespace kin

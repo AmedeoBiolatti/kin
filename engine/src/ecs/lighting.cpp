@@ -8,6 +8,27 @@
 #include <cmath>
 
 namespace kin {
+namespace {
+
+// Where a light is: its entity's place, the larger of its scales, its turn.
+struct PlacedLight {
+    Vec2f position{};
+    f32 scale = 1.0f;
+    f32 rotation = 0.0f;
+};
+
+bool shining(const LightComponent& light) {
+    return light.enabled && light.radius > 0.0f && light.intensity > 0.0f;
+}
+
+PlacedLight placed_light(flecs::entity entity, const LightComponent& light) {
+    const WorldTransform placed = current_world_transform(entity);
+    return {.position = placed.pos,
+            .scale = std::max(std::abs(placed.scale.x), std::abs(placed.scale.y)),
+            .rotation = placed.rotation + light.rotation};
+}
+
+} // namespace
 
 std::string_view tonemap_name(Tonemap tonemap) {
     switch (tonemap) {
@@ -47,8 +68,12 @@ std::optional<OccluderShape> occluder_shape_named(std::string_view name) {
 }
 
 const SceneLighting* scene_lighting(EcsWorld& world) {
+    return scene_lighting(world.raw());
+}
+
+const SceneLighting* scene_lighting(flecs::world& world) {
     const SceneLighting* found = nullptr;
-    world.raw().each([&](const SceneLighting& lighting) {
+    world.each([&](const SceneLighting& lighting) {
         if (!found && lighting.enabled) {
             found = &lighting;
         }
@@ -63,22 +88,58 @@ std::vector<Light2D> scene_lights(EcsWorld& world, const Affine2& to_screen) {
     const f32 view_turn = std::atan2(to_screen.b, to_screen.a) * degrees;
     std::vector<Light2D> lights;
     world.raw().each([&](flecs::entity entity, const LightComponent& light) {
-        if (!light.enabled || light.radius <= 0.0f || light.intensity <= 0.0f) {
+        if (!shining(light)) {
             return;
         }
-        const WorldTransform placed = current_world_transform(entity);
-        const f32 scale = std::max(std::abs(placed.scale.x), std::abs(placed.scale.y));
+        const PlacedLight placed = placed_light(entity, light);
         lights.push_back({
-            .position = to_screen.apply(placed.pos),
-            .radius = light.radius * scale * view_scale,
+            .position = to_screen.apply(placed.position),
+            .radius = light.radius * placed.scale * view_scale,
             .color = light.color,
             .intensity = light.intensity,
             .shape = light.shape,
-            .rotation = placed.rotation + light.rotation + view_turn,
+            .rotation = placed.rotation + view_turn,
             .shadows = light.shadows,
             .shadow_strength = light.shadow_strength,
-            .shadow_softness = std::max(light.shadow_softness, 0.0f) * scale * view_scale,
+            .shadow_softness = std::max(light.shadow_softness, 0.0f) * placed.scale * view_scale,
         });
+    });
+    return lights;
+}
+
+std::vector<SurfaceLight2D> scene_surface_lights(flecs::world& world) {
+    std::vector<SurfaceLight2D> lights;
+    world.each([&](flecs::entity entity, const LightComponent& light) {
+        if (!shining(light)) {
+            return;
+        }
+        const PlacedLight placed = placed_light(entity, light);
+        lights.push_back({.position = placed.position,
+                          .height = light.height * placed.scale,
+                          .radius = light.radius * placed.scale,
+                          .intensity = light.intensity,
+                          .color = light.color,
+                          .mask = light.mask,
+                          .shadows = light.shadows,
+                          .shadow_strength = light.shadow_strength,
+                          .shadow_softness = std::max(light.shadow_softness, 0.0f) * placed.scale,
+                          .shape = light.shape_image,
+                          .rotation = placed.rotation});
+    });
+    world.each([&](flecs::entity entity, const DirectionalLight2D& light) {
+        if (!light.enabled || light.intensity <= 0.0f) {
+            return;
+        }
+        const WorldTransform placed = current_world_transform(entity);
+        lights.push_back({.height = light.elevation,
+                          .intensity = light.intensity,
+                          .color = light.color,
+                          .mask = light.mask,
+                          .directional = true,
+                          .direction = Affine2::rotation(placed.rotation).apply_vector(light.direction),
+                          .shadows = light.shadows,
+                          .shadow_strength = light.shadow_strength,
+                          .shadow_softness = std::max(light.shadow_softness, 0.0f)});
     });
     return lights;
 }
@@ -156,8 +217,12 @@ std::vector<LightOccluder2D> occluder_outlines(EcsEntity handle, const Affine2& 
 }
 
 std::vector<LightOccluder2D> scene_occluders(EcsWorld& world, const Affine2& to_screen) {
+    return scene_occluders(world.raw(), to_screen);
+}
+
+std::vector<LightOccluder2D> scene_occluders(flecs::world& world, const Affine2& to_screen) {
     std::vector<flecs::entity> occluding;
-    world.raw().each([&](flecs::entity entity, const LightOccluder& occluder) {
+    world.each([&](flecs::entity entity, const LightOccluder& occluder) {
         if (occluder.enabled) {
             occluding.push_back(entity);
         }

@@ -44,8 +44,9 @@ seconds); `--interval` controls polling (0.25 seconds). Ordinary running scenes
 pick up generated files through Assets2D::reload_changed. Preloaded scenes retain
 their immutable snapshots.
 
-Per-job output blobs are cached using tool/options/version keys, with verified
-source and artifact hashes. Unrelated jobs remain cache hits; unchanged outputs
+Per-job output blobs are cached using tool/options/version keys (for native
+Aseprite jobs, a hash of the executable, computed once per version of it), with
+verified source and artifact hashes. Unrelated jobs remain cache hits; unchanged outputs
 keep their mtimes. The default cache is `.kin-import-cache` in the output directory;
 `--cache directory` selects another store. Deleting it is safe. Hit/miss metrics
 are CLI diagnostics; generated reports remain deterministic.
@@ -145,7 +146,8 @@ unmanaged files. Output paths and existing parent symlinks must remain within
 the generated root. The report is excluded from packs and shipped directories.
 
 The importer builds all outputs in memory before writing. It is intended for
-game-sized batches with bounded textures/maps, rather than a streaming importer
-for arbitrary-sized worlds. There is no editor import database or persistent
-artifact cache yet. The Aseprite subprocess path is covered with an exporter
-fixture; actual `.aseprite` export requires a locally installed Aseprite.
+game-sized batches with bounded textures/maps (a map has at most 4,194,304
+cells), rather than a streaming importer for arbitrary-sized worlds. There is no
+editor import database yet. Import failures raise `AssetImportError` when the
+tool is used as a Python module. The Aseprite subprocess path is covered with an
+exporter fixture; actual `.aseprite` export requires a locally installed Aseprite.

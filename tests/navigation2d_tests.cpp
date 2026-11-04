@@ -81,7 +81,6 @@ void test_stuck_and_lifetime() {
     navigation.update(.02f);
     assert(e.get<NavigationAgent2D>()->unreachable && e.get<NavigationAgent2D>()->velocity.x == 0);
 }
-} // namespace
 void test_avoidance() {
     kin::EcsWorld world;
     auto g = grid();
@@ -135,9 +134,30 @@ void test_moving_target() {
         navigation.update(.02f);
     assert(actor.get<NavigationAgent2D>()->arrived && std::abs(actor.get<Transform2D>()->pos.x - 45.0005f) < .0002f);
 }
+// A child agent moves in its parent's space: positions are composed up the hierarchy.
+void test_parented_agent() {
+    kin::EcsWorld world;
+    auto g = grid();
+    std::fill(g->blocked.begin(), g->blocked.end(), 0);
+    Navigation2D navigation{world, g};
+    auto parent = world.entities().create();
+    parent.set(Transform2D{.pos = {10, 0}});
+    auto actor = world.entities().create();
+    actor.set(Transform2D{.pos = {15, 25}});
+    assert(world.entities().reparent(actor, parent));
+    actor.set(NavigationAgent2D{
+        .target = {45, 25}, .speed = 20, .radius = 1, .arrival_distance = .1f, .waypoint_distance = .05f});
+    for (int i = 0; i < 200 && !actor.get<NavigationAgent2D>()->arrived; ++i)
+        navigation.update(.02f);
+    assert(actor.get<NavigationAgent2D>()->arrived);
+    assert(std::abs(current_world_transform(actor).pos.x - 45) < .11f);
+    assert(std::abs(actor.get<Transform2D>()->pos.x - 35) < .11f);
+}
+} // namespace
 int main() {
     test_follow_and_replan();
     test_stuck_and_lifetime();
     test_avoidance();
     test_moving_target();
+    test_parented_agent();
 }

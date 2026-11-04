@@ -11,8 +11,7 @@ struct PrefabLease2D {
     friend bool operator==(PrefabLease2D, PrefabLease2D) = default;
 };
 struct PrefabPoolOptions2D {
-    std::size_t capacity = 32;
-    std::function<void(EcsWorld&, const PrefabInstance&)> on_acquire;
+    std::size_t capacity = 32; // 1..PrefabPool2D::max_capacity
     // Release game-owned subscriptions/resources here. Owned components are
     // removed afterward, invoking native OnRemove cleanup (including physics).
     std::function<void(EcsWorld&, const PrefabInstance&)> on_release;
@@ -24,6 +23,9 @@ struct PrefabPoolOptions2D {
 // intentionally retain their identity and cannot themselves reject old leases.
 class PrefabPool2D {
 public:
+    // The most slots a pool has; every one is instantiated up front.
+    static constexpr std::size_t max_capacity = 65536;
+
     PrefabPool2D(EcsWorld& world, PrefabAsset prefab, PrefabPoolOptions2D options = {});
     ~PrefabPool2D();
     PrefabPool2D(const PrefabPool2D&) = delete;

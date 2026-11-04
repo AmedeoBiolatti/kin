@@ -87,6 +87,10 @@ struct ScriptSceneConfig {
     // Binds the host's own API into each fresh Lua state (every load and
     // reload), before the script runs: e.g. kin::bind_lua_audio.
     std::function<void(sol::state&)> bind;
+    // Deprecated: polls the script's files and reloads Lua in place. Use a
+    // development session instead (`--dev`, kin/runtime/development.hpp), which
+    // reloads scene, assets and Lua together and safely; this one is off while
+    // a session runs and stays for existing games.
     bool hot_reload =
 #ifdef NDEBUG
         false;

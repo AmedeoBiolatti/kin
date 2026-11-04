@@ -18,6 +18,8 @@ if(KIN_ENABLE_ACCESSIBILITY)
         target_link_libraries(kin_accesskit INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
     endif()
     target_link_libraries(kin_engine PRIVATE kin_accesskit)
+    # The platform adapter, built only here; ui2's bridge builds its tree with it.
+    target_sources(kin_engine PRIVATE src/platform/accesskit_adapter.cpp)
     # Source-local definition avoids rebuilding every engine consumer when toggled.
     set_property(SOURCE src/ui2/accessibility.cpp APPEND PROPERTY COMPILE_DEFINITIONS KIN_HAS_ACCESSKIT)
     foreach(license LICENSE-APACHE LICENSE-MIT LICENSE.chromium)

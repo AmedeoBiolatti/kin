@@ -1,111 +1,105 @@
+#include <kin/scripting/workflows2d.hpp>
+
 #include "lua_api_surface.hpp"
 #include "lua_paths.hpp"
 #include "lua_reload_internal.hpp"
 #include "lua_scene_context.hpp"
+#include "lua_workflows2d_internal.hpp"
 
-#include <algorithm>
-#include <cctype>
-#include <cmath>
-#include <deque>
-#include <kin/anim/binding.hpp>
-#include <kin/anim/tween.hpp>
 #include <kin/ecs/assets2d.hpp>
 #include <kin/ecs/lifecycle.hpp>
+#include <kin/ecs/tween.hpp>
 #include <kin/platform/input_router.hpp>
-#include <kin/platform/user_data.hpp>
 #include <kin/prefab/prefab_pool2d.hpp>
 #include <kin/scene/scene_preload2d.hpp>
-#include <kin/scripting/workflows2d.hpp>
+#include <kin/scripting/lua_values.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <deque>
 #include <sol/sol.hpp>
 #include <stdexcept>
+#include <type_traits>
+#include <variant>
 
 namespace kin {
+
 namespace {
+
 void mutable_call() {
     if (scripting_detail::reload_staging)
         throw std::runtime_error("workflow mutations are unavailable while preparing reload");
     if (scripting_detail::current_script_commands())
         throw std::runtime_error("workflow mutations run in update(), outside a registered ECS system");
 }
-bool same_lifetime(EcsEntity e, u64 generation) {
-    if (!e.alive())
-        return false;
-    const auto* life = e.get<EntityLifetime>();
-    return generation == (life ? life->generation : 0);
-}
-AnimValue value_from_lua(AnimValueKind kind, const sol::object& value) {
-    switch (kind) {
-    case AnimValueKind::Float: {
-        const auto v = value.as<f32>();
-        if (!std::isfinite(v))
-            throw sol::error("non-finite tween value");
-        return v;
-    }
-    case AnimValueKind::Int:
-        return value.as<i32>();
-    case AnimValueKind::Bool:
-        return value.as<bool>();
-    case AnimValueKind::String:
-        return value.as<std::string>();
-    case AnimValueKind::Vec2: {
-        const auto t = value.as<sol::table>();
-        const Vec2f v{t["x"], t["y"]};
-        if (!std::isfinite(v.x) || !std::isfinite(v.y))
-            throw sol::error("non-finite tween vector");
-        return v;
-    }
-    case AnimValueKind::Color: {
-        const auto t = value.as<sol::table>();
-        const auto channel = [&](const char* key, int fallback) {
-            return static_cast<u8>(std::clamp(t[key].get_or(fallback), 0, 255));
-        };
-        return Color{channel("r", 255), channel("g", 255), channel("b", 255), channel("a", 255)};
-    }
-    }
-    throw sol::error("unsupported tween value");
-}
-struct LuaTween2D {
-    std::shared_ptr<Tween> tween;
+
+// The world's shared services (ScriptWorkflows2D::shared), held weakly: the
+// Lua hosts using them own them.
+struct WorldWorkflows2D {
+    std::weak_ptr<ScriptWorkflows2D> services;
+};
+
+// A tween started from Lua (kin::tween), followed until it ends. The services
+// settle it after each update_tweens, so its state outlives Tweens::ended.
+struct LuaTweenState {
+    enum class Phase : u8 { Running, Completed, Cancelled };
     EcsEntity entity;
-    u64 generation = 0;
-    std::shared_ptr<PropertyRegistry> properties;
-    std::shared_ptr<std::vector<ComponentId>> required = std::make_shared<std::vector<ComponentId>>();
-    std::function<void(const std::shared_ptr<Tween>&)> activate;
-    LuaTween2D& to(const std::string& key, const sol::object& destination, f32 seconds,
-                   sol::optional<std::string> easing) {
+    u64 lifetime = 0;
+    u32 id = 0;
+    Phase phase = Phase::Running;
+    std::string reason; // why it was cancelled
+};
+
+void settle(LuaTweenState& tween) {
+    if (tween.phase != LuaTweenState::Phase::Running) {
+        return;
+    }
+    if (!same_lifetime(tween.entity, tween.lifetime)) {
+        tween.phase = LuaTweenState::Phase::Cancelled;
+        tween.reason = "the tween's entity is gone";
+        return;
+    }
+    const Tweens* tweens = tween.entity.get<Tweens>();
+    if (tweens && std::ranges::find(tweens->ended, tween.id) != tweens->ended.end()) {
+        tween.phase = LuaTweenState::Phase::Completed;
+        return;
+    }
+    const auto running = [&](const Tweens::Running& item) { return item.id == tween.id; };
+    if (!tweens || std::ranges::none_of(tweens->running, running)) {
+        tween.phase = LuaTweenState::Phase::Cancelled; // stopped, or replaced by a tween of the same field
+        tween.reason = "the tween was stopped";
+    }
+}
+
+// What tweens.to returns: task.await(tween) waits for it.
+struct LuaTween2D {
+    std::shared_ptr<LuaTweenState> state;
+
+    std::string phase() const {
+        switch (state->phase) {
+        case LuaTweenState::Phase::Running:
+            return "running";
+        case LuaTweenState::Phase::Completed:
+            return "completed";
+        case LuaTweenState::Phase::Cancelled:
+            return "cancelled";
+        }
+        return "cancelled";
+    }
+
+    bool cancel() {
         mutable_call();
-        if (!same_lifetime(entity, generation))
-            throw sol::error("stale tween entity");
-        const auto* found = properties->find(key);
-        if (!found || !entity.raw().has(found->component))
-            throw sol::error("unknown or missing tween property: " + key);
-        Easing curve = Easing::Linear;
-        if (easing && !parse_easing(*easing, curve))
-            throw sol::error("unknown tween easing");
-        const auto access = *found;
-        const auto e = entity;
-        const auto life = generation;
-        const auto guards = required;
-        guards->push_back(access.component);
-        auto live = [e, life, guards] {
-            return same_lifetime(e, life) &&
-                   std::ranges::all_of(*guards, [&](auto component) { return e.raw().has(component); });
-        };
-        tween->while_alive(live).property([e, access] { return access.get(e.raw().get(access.component)); },
-                                          [e, access, live](const AnimValue& value) mutable {
-                                              if (!e.raw().owns(access.component))
-                                                  e.raw().set_ptr(access.component, e.raw().get(access.component));
-                                              if (!live())
-                                                  return;
-                                              if (auto* data = e.raw().get_mut(access.component)) {
-                                                  access.set(data, value);
-                                                  e.raw().modified(access.component);
-                                              }
-                                          },
-                                          value_from_lua(access.kind, destination), seconds, curve);
-        return *this;
+        settle(*state);
+        if (state->phase != LuaTweenState::Phase::Running) {
+            return false;
+        }
+        stop_tween(state->entity, state->id);
+        state->phase = LuaTweenState::Phase::Cancelled;
+        state->reason = "the tween was cancelled";
+        return true;
     }
 };
+
 struct DeferredLeaseRelease2D {
     std::function<void()> enqueue;
     ~DeferredLeaseRelease2D() {
@@ -205,8 +199,8 @@ struct ScriptWorkflows2D::Impl {
     const Input* input = nullptr;
     InputRouter router;
     InputRebinder rebinder;
-    std::map<std::string, InputMap> defaults;
-    std::vector<std::shared_ptr<Tween>> tweens;
+    std::vector<std::shared_ptr<LuaTweenState>> tweens; // followed until they end
+    std::vector<const void*> stepped;                   // the hosts that called step() since it last ran
     std::map<std::string, std::shared_ptr<PrefabPool2D>> pools;
     std::map<std::string, std::string> pool_sources;
     std::vector<std::pair<std::weak_ptr<PrefabPool2D>, PrefabLease2D>> released_leases;
@@ -235,8 +229,16 @@ struct ScriptWorkflows2D::Impl {
             own_jobs = std::make_unique<JobSystem>(JobSystemConfig{.workers = 1});
         return *own_jobs;
     }
-    InputRouter::Layer& layer(const std::string& name) {
-        auto* result = router.layer(name);
+    LuaTween2D follow(EcsEntity entity, u32 id) {
+        auto state = std::make_shared<LuaTweenState>();
+        state->entity = entity;
+        state->lifetime = entity_lifetime(entity);
+        state->id = id;
+        tweens.push_back(state);
+        return LuaTween2D{std::move(state)};
+    }
+    const InputRouter::Layer& layer(const std::string& name) const {
+        const auto* result = router.layer(name);
         if (!result)
             throw sol::error("unknown input context: " + name);
         return *result;
@@ -248,11 +250,30 @@ void ScriptWorkflows2D::use_content(std::shared_ptr<const MemoryContent> content
 }
 ScriptWorkflows2D::ScriptWorkflows2D(EcsWorld& w, std::filesystem::path root)
     : _impl(std::make_unique<Impl>(w, scripting_detail::normalized_path(root))) {}
+
 ScriptWorkflows2D::~ScriptWorkflows2D() {
-    for (const auto& request : _impl->requests)
+    for (const auto& request : _impl->requests) {
         request->cancel();
-    for (const auto& tween : _impl->tweens)
-        tween->cancel();
+    }
+}
+
+std::shared_ptr<ScriptWorkflows2D> ScriptWorkflows2D::shared(EcsWorld& world, const std::filesystem::path& content,
+                                                             std::shared_ptr<ScriptWorkflows2D> given) {
+    if (given && &given->world() != &world) {
+        throw std::invalid_argument("workflow services belong to another world");
+    }
+    world.raw().component<WorldWorkflows2D>("WorldWorkflows2D");
+    const WorldWorkflows2D* slot = world.raw().get<WorldWorkflows2D>();
+    if (std::shared_ptr<ScriptWorkflows2D> current = slot ? slot->services.lock() : nullptr) {
+        if (given && given != current) {
+            throw std::invalid_argument("the world already shares other 2D workflow services");
+        }
+        return current;
+    }
+    std::shared_ptr<ScriptWorkflows2D> services =
+        given ? std::move(given) : std::make_shared<ScriptWorkflows2D>(world, content);
+    world.raw().set<WorldWorkflows2D>({services});
+    return services;
 }
 void ScriptWorkflows2D::configure(Renderer2D* renderer, Gamepads* gamepads, Assets2D* assets, JobSystem* jobs) {
     if (_impl->renderer && renderer && _impl->renderer != renderer)
@@ -275,10 +296,17 @@ EcsWorld& ScriptWorkflows2D::world() {
 InputRouter& ScriptWorkflows2D::input_router() {
     return _impl->router;
 }
-void ScriptWorkflows2D::advance(const Input& input, f32 dt) {
+void ScriptWorkflows2D::step(const void* host, const Input& input, f32 dt) {
     if (!std::isfinite(dt) || dt < 0)
         throw std::invalid_argument("invalid workflow dt");
     auto& p = *_impl;
+    // Every host sharing the services calls this each step; the first call of
+    // a step does the work (a host that calls again begins the next step).
+    if (!p.stepped.empty() && std::ranges::find(p.stepped, host) == p.stepped.end()) {
+        p.stepped.push_back(host);
+        return;
+    }
+    p.stepped.assign(1, host);
     // Lua GC can run inside a system transaction. Defer dropped leases until
     // this main-thread boundary instead of mutating the ECS from a finalizer.
     const auto released = std::exchange(p.released_leases, {});
@@ -288,10 +316,11 @@ void ScriptWorkflows2D::advance(const Input& input, f32 dt) {
     p.input = &input;
     p.router.update(input);
     p.rebinder.update(input, dt);
-    const auto stepping = p.tweens; // property observers may schedule another tween
-    for (const auto& tween : stepping)
-        tween->advance(dt);
-    std::erase_if(p.tweens, [](const auto& tween) { return tween->finished() || tween->cancelled(); });
+    update_tweens(p.world, dt);
+    std::erase_if(p.tweens, [](const std::shared_ptr<LuaTweenState>& tween) {
+        settle(*tween);
+        return tween->phase != LuaTweenState::Phase::Running;
+    });
     if (p.jobs)
         p.jobs->pump();
     if (p.own_jobs)
@@ -308,12 +337,19 @@ void ScriptWorkflows2D::advance(const Input& input, f32 dt) {
                state == SceneLoadState2D::Failed;
     });
     if (auto* assets = p.assets ? p.assets : p.own_assets.get()) {
-        if (assets->manager().memory_budget())
+        if (assets->manager().over_memory_budget()) {
             assets->manager().trim_memory();
-        if (assets->texture_budget())
+        }
+        if (assets->over_texture_budget()) {
             assets->trim_texture_memory();
+        }
     }
 }
+
+void ScriptWorkflows2D::leave(const void* host) {
+    std::erase(_impl->stepped, host);
+}
+
 std::unique_ptr<PreloadedScene2D> ScriptWorkflows2D::take_scene() {
     if (_impl->ready.empty())
         return {};
@@ -328,84 +364,58 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
             throw sol::error("2D workflows require a loaded scene");
         return result;
     };
-    lua.new_usertype<LuaTween2D>(
-        "KinTween2D", sol::no_constructor, "to", sol::policies(&LuaTween2D::to, sol::returns_self()), "wait",
-        sol::policies(
-            [](LuaTween2D& t, f32 seconds) {
-                mutable_call();
-                t.tween->wait(seconds);
-            },
-            sol::returns_self()),
-        "parallel",
-        sol::policies(
-            [](LuaTween2D& t) {
-                mutable_call();
-                t.tween->parallel();
-            },
-            sol::returns_self()),
-        "pause",
-        [](LuaTween2D& t) {
-            mutable_call();
-            t.tween->pause();
-        },
-        "resume",
-        [](LuaTween2D& t) {
-            mutable_call();
-            t.tween->resume();
-        },
-        "cancel",
-        [](LuaTween2D& t) {
-            mutable_call();
-            t.tween->cancel();
-        },
-        "restart",
-        [](LuaTween2D& t) {
-            mutable_call();
-            t.activate(t.tween);
-            t.tween->restart();
-        },
-        "paused", [](const LuaTween2D& t) { return t.tween->paused(); }, "finished",
-        [](const LuaTween2D& t) { return t.tween->finished(); }, "cancelled",
-        [](const LuaTween2D& t) { return t.tween->cancelled(); });
-    lua.create_named_table("tweens")["to"] = [get](sol::object object, const std::string& key, sol::object destination,
-                                                   f32 seconds, sol::optional<std::string> easing,
-                                                   sol::this_state state) {
-        mutable_call();
-        auto service = get();
-        auto& p = *service->_impl;
+    // clang-format off
+    scripting_detail::new_api_type<LuaTween2D>(lua, "KinTween2D",
+        sol::no_constructor,
+        "state", &LuaTween2D::phase,
+        "error", [](const LuaTween2D& tween) { return tween.state->reason; },
+        "cancel", &LuaTween2D::cancel);
+    // clang-format on
+    // The entity a tween moves: a name, an entity, or a table holding one (a self).
+    const auto tween_target = [](EcsWorld& world, sol::object target, sol::this_state state) {
         EcsEntity entity;
-        if (object.is<std::string>())
-            entity = p.world.entities().find_by_name(object.as<std::string>());
-        else {
+        if (target.is<std::string>()) {
+            entity = world.entities().find_by_name(target.as<std::string>());
+        } else {
             sol::state_view lua{state};
-            if (object.get_type() == sol::type::table)
-                object = object.as<sol::table>()["entity"].get<sol::object>();
+            if (target.get_type() == sol::type::table) {
+                target = target.as<sol::table>()["entity"].get<sol::object>();
+            }
             sol::protected_function unwrap = lua.registry()["kin.unwrap_entity"];
-            if (!unwrap.valid())
+            if (!unwrap.valid()) {
                 throw sol::error("this Lua host accepts entity names for tweens");
-            auto result = unwrap(object);
-            if (!result.valid())
+            }
+            auto result = unwrap(target);
+            if (!result.valid()) {
                 throw sol::error(result);
+            }
             entity = result.get<EcsEntity>();
         }
-        if (!entity.alive() || entity.raw().world().c_ptr() != p.world.raw().c_ptr())
+        if (!entity || entity.raw().world().c_ptr() != world.raw().c_ptr()) {
             throw sol::error("stale or foreign tween entity");
-        auto properties = std::make_shared<PropertyRegistry>();
-        register_builtin_properties(*properties, p.world);
-        register_described_properties(*properties, p.world);
-        const auto* life = entity.get<EntityLifetime>();
-        LuaTween2D result{std::make_shared<Tween>(), entity, life ? life->generation : 0, std::move(properties)};
-        result.activate = [weak = std::weak_ptr<ScriptWorkflows2D>(service)](const std::shared_ptr<Tween>& tween) {
-            auto owner = weak.lock();
-            if (!owner)
-                throw sol::error("tween service has closed");
-            auto& active = owner->_impl->tweens;
-            if (std::ranges::find(active, tween) == active.end())
-                active.push_back(tween);
-        };
-        result.to(key, destination, seconds, easing);
-        p.tweens.push_back(result.tween);
-        return result;
+        }
+        return entity;
+    };
+    sol::table tweens = lua.create_named_table("tweens");
+    tweens["to"] = [get, tween_target](sol::object target, const std::string& property, const sol::object& to,
+                                       f32 seconds, const sol::object& easing_or_options, const sol::object& options,
+                                       sol::this_state state) {
+        mutable_call();
+        auto& p = *get()->_impl;
+        const EcsEntity entity = tween_target(p.world, std::move(target), state);
+        std::string error;
+        const u32 id =
+            tween(p.world, entity,
+                  scripting_detail::lua_tween_def(p.world, property, to, seconds, easing_or_options, options), &error);
+        if (id == 0) {
+            throw sol::error("tween: " + error);
+        }
+        return p.follow(entity, id);
+    };
+    // A tween an entity script started (self:tween's id), to wait for.
+    tweens["of"] = [get, tween_target](sol::object target, u32 id, sol::this_state state) {
+        auto& p = *get()->_impl;
+        return p.follow(tween_target(p.world, std::move(target), state), id);
     };
     auto contexts = lua.create_named_table("input_contexts");
     contexts["push"] = [get](const std::string& name, const std::string& text, sol::optional<bool> modal,
@@ -416,18 +426,19 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         if (name.empty() || !parse_input_map(text, map, error))
             throw sol::error("invalid input context: " + error);
         auto& p = *get()->_impl;
-        p.defaults[name] = map;
+        if (p.router.layer(name))
+            throw sol::error("input context already exists: " + name);
         p.router.push({name, std::move(map), true, consume.value_or(true), modal.value_or(false)});
     };
     contexts["remove"] = [get](const std::string& name) {
         mutable_call();
-        auto& p = *get()->_impl;
-        p.defaults.erase(name);
-        return p.router.remove(name);
+        return get()->_impl->router.remove(name);
     };
     contexts["enable"] = [get](const std::string& name, bool enabled) {
         mutable_call();
-        get()->_impl->layer(name).enabled = enabled;
+        auto& p = *get()->_impl;
+        p.layer(name);
+        p.router.set_enabled(name, enabled);
     };
     contexts["held"] = [get](const std::string& name, const std::string& action) {
         return get()->_impl->router.action(name, action).held;
@@ -442,37 +453,39 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         return get()->_impl->router.axis(name, axis);
     };
     contexts["overrides"] = [get](const std::string& name) {
-        auto& p = *get()->_impl;
-        return serialize_input_overrides(p.defaults.at(name), p.layer(name).map);
+        const auto& layer = get()->_impl->layer(name);
+        return serialize_input_overrides(layer.defaults, layer.map);
     };
     contexts["apply_overrides"] = [get](const std::string& name, const std::string& text) {
         mutable_call();
         auto& p = *get()->_impl;
         InputMap map;
         std::string error;
-        if (!apply_input_overrides(text, p.defaults.at(name), map, error))
+        if (!apply_input_overrides(text, p.layer(name).defaults, map, error))
             throw sol::error(error);
-        p.layer(name).map = std::move(map);
+        p.router.set_map(name, std::move(map));
     };
-    auto save_path = [](const std::string& name) {
-        if (name.empty() || name.size() > 80 ||
-            !std::ranges::all_of(name, [](unsigned char c) { return std::isalnum(c) || c == '_' || c == '-'; }))
-            throw sol::error("invalid input profile name");
-        return user_data_dir("kin") / "input" / (name + ".json");
+    // The running game's own profile folder (input_profile_path), beside its saves.
+    auto save_path = [](const std::string& profile) {
+        std::string error;
+        auto path = input_profile_path(profile, error);
+        if (path.empty())
+            throw sol::error(error);
+        return path;
     };
     contexts["save"] = [get, save_path](const std::string& name, const std::string& profile) {
         mutable_call();
-        auto& p = *get()->_impl;
-        return save_input_overrides(p.defaults.at(name), p.layer(name).map, save_path(profile));
+        const auto& layer = get()->_impl->layer(name);
+        return save_input_overrides(layer.defaults, layer.map, save_path(profile));
     };
     contexts["load"] = [get, save_path](const std::string& name, const std::string& profile) {
         mutable_call();
         auto& p = *get()->_impl;
         std::string error;
         InputMap map;
-        if (!load_input_overrides(p.defaults.at(name), map, save_path(profile), error))
+        if (!load_input_overrides(p.layer(name).defaults, map, save_path(profile), error))
             throw sol::error(error);
-        p.layer(name).map = std::move(map);
+        p.router.set_map(name, std::move(map));
     };
     auto rebind = lua.create_named_table("rebind");
     rebind["begin"] = [get](const std::string& action, sol::optional<f32> timeout) {
@@ -516,21 +529,29 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         if (text != "reject" && text != "replace" && text != "allow")
             throw sol::error("unknown conflict policy");
         std::string error;
-        if (!p.rebinder.apply(p.layer(name).map,
+        InputMap map = p.layer(name).map;
+        if (!p.rebinder.apply(map,
                               text == "allow"     ? RebindConflict::Allow
                               : text == "replace" ? RebindConflict::Replace
                                                   : RebindConflict::Reject,
                               error))
             throw sol::error(error);
+        p.router.set_map(name, std::move(map));
     };
-    lua.new_usertype<LuaLease2D>("KinPrefabLease2D", sol::no_constructor, "alive", &LuaLease2D::alive, "release",
-                                 &LuaLease2D::release, "entity", &LuaLease2D::entity);
+    // clang-format off
+    scripting_detail::new_api_type<LuaLease2D>(lua, "KinPrefabLease2D",
+        sol::no_constructor,
+        "alive", &LuaLease2D::alive,
+        "release", &LuaLease2D::release,
+        "entity", &LuaLease2D::entity);
+    // clang-format on
     auto pools = lua.create_named_table("pools");
     pools["create"] = [get](const std::string& name, const std::string& path, std::size_t capacity) {
         mutable_call();
         auto& p = *get()->_impl;
-        if (name.empty() || capacity == 0 || capacity > 4096)
-            throw sol::error("invalid prefab pool");
+        if (name.empty()) {
+            throw sol::error("a prefab pool needs a name");
+        }
         if (p.pools.contains(name)) {
             if (p.pool_sources.at(name) == path && p.pools.at(name)->capacity() == capacity)
                 return;
@@ -539,10 +560,13 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         auto source = load_prefab_asset(p.content_path(path), p.world.components());
         if (!source.ok())
             throw sol::error(source.diagnostics.empty() ? "cannot load prefab" : source.diagnostics.front());
-        auto pool = std::make_shared<PrefabPool2D>(p.world, std::move(*source.prefab),
-                                                   PrefabPoolOptions2D{.capacity = capacity});
-        if (!pool->error().empty())
-            throw sol::error(pool->error());
+        std::shared_ptr<PrefabPool2D> pool;
+        try {
+            pool = std::make_shared<PrefabPool2D>(p.world, std::move(*source.prefab),
+                                                  PrefabPoolOptions2D{.capacity = capacity});
+        } catch (const std::exception& error) {
+            throw sol::error(std::string("pools.create: ") + error.what());
+        }
         p.pool_sources[name] = path;
         p.pools.emplace(name, std::move(pool));
     };
@@ -572,20 +596,21 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         p.pool_sources.erase(name);
         return p.pools.erase(name) != 0;
     };
-    lua.new_usertype<LuaPreload2D>(
-        "KinScenePreload2D", sol::no_constructor, "state",
-        [](const LuaPreload2D& load) { return std::string(load_state(load.request->state())); }, "progress",
-        [](const LuaPreload2D& load) { return load.request->progress(); }, "error",
-        [](const LuaPreload2D& load) { return load.request->error(); }, "cancel",
-        [](LuaPreload2D& load) {
+    // clang-format off
+    scripting_detail::new_api_type<LuaPreload2D>(lua, "KinScenePreload2D",
+        sol::no_constructor,
+        "state", [](const LuaPreload2D& load) { return std::string(load_state(load.request->state())); },
+        "progress", [](const LuaPreload2D& load) { return load.request->progress(); },
+        "error", [](const LuaPreload2D& load) { return load.request->error(); },
+        "cancel", [](LuaPreload2D& load) {
             mutable_call();
             load.request->cancel();
         },
-        "commit",
-        [](LuaPreload2D& load) {
+        "commit", [](LuaPreload2D& load) {
             mutable_call();
             return load.commit();
         });
+    // clang-format on
     lua.create_named_table("preload")["scene"] = [get](const std::string& path) {
         mutable_call();
         auto service = get();
@@ -677,10 +702,59 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         return lua.create_table_with("cpu", memory_table(lua, assets.manager().trim_memory()), "gpu",
                                      memory_table(lua, assets.trim_texture_memory()));
     };
-    scripting_detail::record_lua_type<LuaTween2D>(lua, "KinTween2D");
-    scripting_detail::record_lua_type<LuaLease2D>(lua, "KinPrefabLease2D");
-    scripting_detail::record_lua_type<LuaPreload2D>(lua, "KinScenePreload2D");
 }
+TweenDef scripting_detail::lua_tween_def(EcsWorld& world, const std::string& property, const sol::object& to,
+                                         f32 seconds, const sol::object& easing_or_options,
+                                         const sol::object& options_given) {
+    TweenDef def{.property = property, .seconds = seconds};
+    // `to` as the field's kind says (a number, {x, y}, {r, g, b, a}...).
+    const std::size_t dot = property.find('.');
+    const ComponentDescriptor* component =
+        dot == std::string::npos ? nullptr : world.components().find(property.substr(0, dot));
+    if (component) {
+        const auto field =
+            std::ranges::find(component->fields, property.substr(dot + 1), &ComponentFieldDescriptor::name);
+        if (field != component->fields.end()) {
+            const std::optional<ComponentFieldValue> value = component_value_from_lua(field->kind, to);
+            if (!value) {
+                throw sol::error("tween: " + property + " takes a " + component_field_kind_name(field->kind));
+            }
+            std::visit(
+                [&](const auto& typed) {
+                    using V = std::decay_t<decltype(typed)>;
+                    if constexpr (std::is_same_v<V, f32> || std::is_same_v<V, Vec2f> || std::is_same_v<V, Color> ||
+                                  std::is_same_v<V, i32> || std::is_same_v<V, bool> || std::is_same_v<V, std::string>) {
+                        def.to = typed;
+                    } else {
+                        throw sol::error("tween: " + property +
+                                         " is not a number, a pair, a colour, true/false or text");
+                    }
+                },
+                *value);
+        }
+    }
+    sol::object options = options_given;
+    if (easing_or_options.get_type() == sol::type::string) {
+        if (!parse_easing(easing_or_options.as<std::string>(), def.easing)) {
+            throw sol::error("tween: no easing is called '" + easing_or_options.as<std::string>() + "'");
+        }
+    } else if (easing_or_options.get_type() == sol::type::table) {
+        options = easing_or_options;
+    }
+    if (options.get_type() == sol::type::table) {
+        const sol::table given = options.as<sol::table>();
+        def.delay = given.get_or("delay", 0.0f);
+        def.repeats = given.get_or("repeats", 0);
+        def.yoyo = given.get_or("yoyo", false);
+        def.relative = given.get_or("relative", false);
+        if (const sol::object easing = given["easing"];
+            easing.get_type() == sol::type::string && !parse_easing(easing.as<std::string>(), def.easing)) {
+            throw sol::error("tween: no easing is called '" + easing.as<std::string>() + "'");
+        }
+    }
+    return def;
+}
+
 sol::optional<sol::object> scripting_detail::clone_workflow_reload_value(const sol::object& value,
                                                                          sol::state_view lua) {
     if (value.is<LuaLease2D>())

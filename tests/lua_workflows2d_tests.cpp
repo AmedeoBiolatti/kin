@@ -31,7 +31,9 @@ void scene_host(Renderer2D& renderer) {
             assert(old and old:alive() and not pools.acquire('coins'))
             old_entity=old:entity()
             tween=tweens.to(old_entity,'Transform2D.pos',{x=12,y=3},1,'linear')
-            chained=tweens.to('Aux','Transform2D.pos',{x=10,y=20},1):parallel():to('RectRenderer.size',{x=4,y=4},1):wait(.1)
+            -- Two tweens at once: one per field (sequences are tasks that await each).
+            chained=tweens.to('Aux','Transform2D.pos',{x=10,y=20},1)
+            sized=tweens.to('Aux','RectRenderer.size',{x=4,y=4},1,{easing='linear'})
             collectgarbage('collect')
             tweens.to('Inherited','Transform2D.pos',{x=8,y=0},.2)
         end
@@ -44,6 +46,8 @@ void scene_host(Renderer2D& renderer) {
                 assert(#controllers.devices()==0 and not controllers.state(1).connected)
                 assert(not controllers.rumble(1,1,1,30))
                 assert(not pcall(input_contexts.save,'game','../escape'))
+                local known,message=pcall(input_contexts.overrides,'missing')
+                assert(not known and tostring(message):find('unknown input context',1,true))
             elseif frame==2 then
                 assert(rebind.state()=='captured' and rebind.candidate()=='key:Enter')
                 assert(#rebind.conflicts('game')==1)
@@ -64,7 +68,8 @@ void scene_host(Renderer2D& renderer) {
                 assert(request:progress()==1 and request:commit() and not request:commit())
             end
             if frame==5 then
-                assert(tween:cancelled() and chained:cancelled() and fresh:alive() and pools.active('coins')==1)
+                assert(tween:state()=='cancelled' and chained:state()=='cancelled' and sized:state()=='running')
+                assert(fresh:alive() and pools.active('coins')==1)
                 asset_memory.budget(1024,1024)
                 local report=asset_memory.report()
                 assert(report.cpu.budget_bytes==1024 and report.gpu.budget_bytes==1024)
@@ -106,7 +111,7 @@ void scene_host(Renderer2D& renderer) {
         std::fprintf(stderr, "%s\n", script.last_error().c_str());
         std::abort();
     }
-    auxiliary.remove<Transform2D>(); // all parallel-step components must be guarded
+    auxiliary.remove<Transform2D>(); // a tween whose component goes ends, cancelled
     input.begin_frame();
     input.set_key_pressed(Key::Enter);
     if (!script.call_update({.dt = .5f, .input = &input})) {
@@ -136,11 +141,11 @@ void entity_host() {
             self.lease=pools.acquire('coins')
             local root=self.lease:entity()
             assert(root:alive())
-            self.tween=tweens.to(self,'Transform2D.pos',{x=10,y=20},1)
+            self.tween=tweens.to(self,'Transform2D.pos',{x=10,y=20},1,'linear')
         end
         function on_update(self,dt)
             if self:get('Transform2D').pos.x>=10 then
-                assert(self.tween:finished() and self.lease:release())
+                assert(self.tween:state()=='completed' and self.lease:release())
                 self:set('ScriptComponent',{enabled=false})
             end
         end
@@ -166,11 +171,14 @@ int main() {
     while (!std::filesystem::create_directory(profile))
         profile += "-next";
     set_user_data_dir_override(profile);
+    set_user_data_game_id("kin.lua-workflows-test"); // input profiles go to the game's folder
     App app{{.mode = AppMode::Headless}};
     auto& window = app.create_window({.width = 16, .height = 16, .hidden = true});
     Renderer2D renderer{window};
     scene_host(renderer);
     entity_host();
+    assert(std::filesystem::exists(game_data_dir("kin.lua-workflows-test") / "input" / "workflow-test.json"));
+    set_user_data_game_id({});
     std::filesystem::remove_all(profile);
     clear_user_data_dir_override();
 }

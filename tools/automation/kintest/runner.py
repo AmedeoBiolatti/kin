@@ -9,12 +9,13 @@ from pathlib import Path
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
+
+from .process import end_process_group, stop_process_group
 
 
 class ScenarioFailure(RuntimeError):
@@ -94,20 +95,14 @@ def validate(value, schema, path="$"):
             validate(item, schema["items"], f"{path}[{i}]")
 
 
-def _keys(value, allowed, where):
-    if not isinstance(value, dict):
-        raise ConfigurationError(f"{where}: expected an object")
-    unknown = value.keys() - set(allowed)
-    if unknown:
-        raise ConfigurationError(f"{where}: unknown fields {sorted(unknown)}")
-
-
 def load_scenario(path, lua_compiler=None):
     path = Path(path).resolve()
     if path.suffix == ".lua":
         if not lua_compiler:
-            raise ConfigurationError("Lua scenarios require --lua-compiler /path/to/kin_scenario")
-        proc = subprocess.run([str(lua_compiler), str(path)], capture_output=True, text=True, timeout=15)
+            raise ConfigurationError("Lua scenarios require --lua-compiler /path/to/kin_lua")
+        proc = subprocess.run(
+            [str(lua_compiler), "scenario", str(path)], capture_output=True, text=True, timeout=15
+        )
         if proc.returncode:
             raise ConfigurationError(proc.stderr.strip() or "Lua scenario compilation failed")
         case = loads(proc.stdout)
@@ -119,74 +114,95 @@ def load_scenario(path, lua_compiler=None):
     return case
 
 
+OPERATORS = ["eq", "ne", "lt", "le", "gt", "ge", "approx", "exists", "absent", "contains"]
+_BOUND = {"type": "integer", "minimum": 0, "maximum": 1000000}
+_CONDITION = {
+    "type": "object",
+    "required": ["observe"],
+    "properties": {
+        "observe": {"type": "string"},
+        "params": {"type": "object"},
+        "path": {"type": "string"},
+        "op": {"type": "string", "enum": OPERATORS},
+        "value": {},
+        "tolerance": {"type": "number", "minimum": 0},
+        "within": _BOUND,
+        "ticks": _BOUND,
+    },
+    "additionalProperties": False,
+}
+_STEP = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "call": {"type": "string"},
+        "params": {"type": "object"},
+        "tick": _BOUND,
+        "expect": _CONDITION,
+        "wait": _CONDITION,
+        "always": _CONDITION,
+        "capture": {"type": "string"},
+    },
+    "additionalProperties": False,
+}
+SCENARIO_SCHEMA = {
+    "type": "object",
+    "required": ["schema", "name", "steps"],
+    "properties": {
+        "schema": {"type": "string", "enum": ["kin.scenario/1"]},
+        "name": {"type": "string"},
+        "seed": {"anyOf": [{"type": "integer", "minimum": 0, "maximum": 2**64 - 1}, {"type": "string"}]},
+        "requires": {"type": "array", "items": {"type": "string"}},
+        "dependencies": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": _STEP},
+    },
+    "additionalProperties": False,
+}
+CONDITION_KINDS = ["expect", "wait", "always"]
+SAFE_STEM = re.compile(r"[A-Za-z0-9_-]+")
+
+
 def check_scenario(case):
+    """SCENARIO_SCHEMA plus the rules a schema cannot say."""
     try:
         json.dumps(case, allow_nan=False)
     except (ValueError, TypeError) as error:
         raise ConfigurationError(f"scenario is not finite JSON: {error}") from error
-    _keys(case, ["schema", "name", "seed", "requires", "dependencies", "steps"], "scenario")
-    if case.get("schema") != "kin.scenario/1" or not isinstance(case.get("name"), str) or not case["name"]:
-        raise ConfigurationError("scenario requires schema kin.scenario/1 and a name")
+    validate(case, SCENARIO_SCHEMA, "scenario")
+    if not case["name"]:
+        raise ConfigurationError("scenario requires a name")
     seed = case.get("seed", 0)
-    if isinstance(seed, str) and seed.isdecimal():
-        seed = int(seed)
-    if type(seed) is not int or not 0 <= seed <= 2**64 - 1:
+    if isinstance(seed, str) and (not seed.isdecimal() or int(seed) > 2**64 - 1):
         raise ConfigurationError("seed must be an unsigned 64-bit integer or decimal string")
-    for name in ["requires", "dependencies"]:
-        if not isinstance(case.get(name, []), list) or any(not isinstance(v, str) for v in case.get(name, [])):
-            raise ConfigurationError(f"{name} must be a string array")
-    steps = case.get("steps")
-    if not isinstance(steps, list) or not 1 <= len(steps) <= 10000:
+    if not 1 <= len(case["steps"]) <= 10000:
         raise ConfigurationError("scenario requires 1..10000 steps")
-    for i, step in enumerate(steps):
-        _keys(step, ["name", "call", "params", "tick", "expect", "wait", "always", "capture"], f"step {i}")
-        operations = step.keys() & {"call", "tick", "expect", "wait", "always", "capture"}
+    for i, step in enumerate(case["steps"]):
+        operations = step.keys() & {"call", "tick", "capture", *CONDITION_KINDS}
         if len(operations) != 1 or ("params" in step and "call" not in step):
             raise ConfigurationError(f"step {i}: choose one operation")
-        if "name" in step and not isinstance(step["name"], str):
-            raise ConfigurationError(f"step {i}: name must be text")
-        if "call" in step and (not isinstance(step["call"], str) or not isinstance(step.get("params", {}), dict)):
-            raise ConfigurationError(f"step {i}: invalid call")
-        if "tick" in step and (type(step["tick"]) is not int or not 0 <= step["tick"] <= 1000000):
-            raise ConfigurationError(f"step {i}: tick must be 0..1000000")
-        if "capture" in step and (
-            not isinstance(step["capture"], str)
-            or not step["capture"]
-            or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for c in step["capture"])
-        ):
+        if "capture" in step and not SAFE_STEM.fullmatch(step["capture"]):
             raise ConfigurationError(f"step {i}: capture must be a safe filename stem")
-        for kind in ["expect", "wait", "always"]:
+        for kind in CONDITION_KINDS:
             if kind in step:
-                condition = step[kind]
-                _keys(
-                    condition,
-                    ["observe", "params", "path", "op", "value", "tolerance", "within", "ticks"],
-                    f"step {i} condition",
-                )
-                if not isinstance(condition.get("observe"), str) or not isinstance(condition.get("params", {}), dict):
-                    raise ConfigurationError(f"step {i}: condition requires an observe method")
-                if not isinstance(condition.get("path", ""), str) or (
-                    condition.get("path") and not condition["path"].startswith("/")
-                ):
-                    raise ConfigurationError("condition path must be a JSON Pointer")
-                if re.search(r"~(?![01])", condition.get("path", "")):
-                    raise ConfigurationError("invalid JSON Pointer escape")
-                op = condition.get("op", "eq")
-                if op not in ["eq", "ne", "lt", "le", "gt", "ge", "approx", "exists", "absent", "contains"]:
-                    raise ConfigurationError(f"unknown assertion operator: {op}")
-                if op not in ["exists", "absent"] and "value" not in condition:
-                    raise ConfigurationError("condition requires value")
-                if op == "approx" and (
-                    type(condition.get("tolerance")) not in (int, float)
-                    or not math.isfinite(condition["tolerance"])
-                    or condition["tolerance"] < 0
-                ):
-                    raise ConfigurationError("approx requires a finite nonnegative tolerance")
-                bound = "within" if kind == "wait" else "ticks" if kind == "always" else None
-                if bound and (type(condition.get(bound)) is not int or not 0 <= condition[bound] <= 1000000):
-                    raise ConfigurationError(f"{kind} requires {bound}=0..1000000")
-                if kind != "wait" and "within" in condition or kind != "always" and "ticks" in condition:
-                    raise ConfigurationError("condition has a bound for a different assertion type")
+                check_condition(step[kind], kind, f"step {i}")
+
+
+def check_condition(condition, kind, where):
+    path = condition.get("path", "")
+    if path and not path.startswith("/"):
+        raise ConfigurationError(f"{where}: condition path must be a JSON Pointer")
+    if re.search(r"~(?![01])", path):
+        raise ConfigurationError(f"{where}: invalid JSON Pointer escape")
+    op = condition.get("op", "eq")
+    if op not in ["exists", "absent"] and "value" not in condition:
+        raise ConfigurationError(f"{where}: condition requires value")
+    if op == "approx" and "tolerance" not in condition:
+        raise ConfigurationError(f"{where}: approx requires a finite nonnegative tolerance")
+    bound = {"wait": "within", "always": "ticks"}.get(kind)
+    if bound and bound not in condition:
+        raise ConfigurationError(f"{where}: {kind} requires {bound}=0..1000000")
+    if any(other in condition for other in ["within", "ticks"] if other != bound):
+        raise ConfigurationError(f"{where}: condition has a bound for a different assertion type")
 
 
 MISSING = object()
@@ -295,7 +311,25 @@ def identities(command, dependencies):
 
 
 class Client:
-    def __init__(self, command, out, *, seed=0, dependencies=(), timeout=15, launch=True, trace_world=False):
+    """A driven stdio scene server, every exchange journaled to commands.jsonl.
+
+    The journal starts with the kin.automation-recording/1 header the native
+    recorder (--automation-record) writes, plus this run's command line and
+    build/content identities. With `expected_identity` (a recording's), the run
+    is refused before launching when the binary or declared content differs."""
+
+    def __init__(
+        self,
+        command,
+        out,
+        *,
+        seed=0,
+        dependencies=(),
+        timeout=15,
+        launch=True,
+        trace_world=False,
+        expected_identity=None,
+    ):
         self.out = Path(out).resolve()
         self.out.mkdir(parents=True, exist_ok=True)
         self.timeout, self.frame, self.phase, self.index = timeout, 0, "bootstrap", 0
@@ -341,21 +375,11 @@ class Client:
         if any(Path(p).is_dir() and self.out.is_relative_to(Path(p)) for p in dependencies):
             raise ConfigurationError("output directory must be outside declared content/dependency directories")
         inventory = identities(self.command, dependencies)
-        self.dependencies, self.initial_identity = dependencies, inventory
-        self.journal = (self.out / "commands.jsonl").open("w", encoding="utf-8")
-        self._emit(
-            {
-                "kind": "header",
-                "schema": "kin.automation-recording/1",
-                "seed": str(seed),
-                "command": self.command,
-                "dependencies": [str(Path(p).resolve()) for p in dependencies],
-                "identity": inventory,
-                "declared_content_verified": bool(dependencies),
-                "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                "python": sys.version.split()[0],
-            }
-        )
+        if expected_identity is not None and inventory != expected_identity:
+            raise ConfigurationError("recording binary/content identity changed; use --allow-identity-change explicitly")
+        self.seed, self.dependencies, self.initial_identity = seed, dependencies, inventory
+        self.game_info = {}
+        self.journal, self._unwritten = None, []  # lines emitted before the header
         self.stderr = (self.out / "stderr.log").open("w", encoding="utf-8")
         try:
             self.process = subprocess.Popen(
@@ -375,7 +399,6 @@ class Client:
             )
         except Exception:
             self.stderr.close()
-            self.journal.close()
             raise
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
@@ -386,10 +409,11 @@ class Client:
             if self.protocol.get("schema") != "kin.automation/1" or self.protocol.get("version") != 1:
                 raise ConfigurationError("unsupported automation protocol")
             self.capabilities = self.call("server.capabilities")
+            self.game_info = self.call("game.info")
         except Exception:
             self.close()
             raise
-        self._emit({"kind": "identity", "capabilities": self.capabilities})
+        self._open_journal()
         dump(self.out / "schema.json", self.protocol)
         dump(self.out / "capabilities.json", self.capabilities)
         self.phase = "scenario"
@@ -409,8 +433,46 @@ class Client:
                 )
             else:
                 self.events.append(record)
+            if self.journal is None:
+                self._unwritten.append(encoded)
+            else:
+                self.journal.write(encoded)
+                self.journal.flush()
+
+    def header(self):
+        capabilities = self.capabilities or {}
+        return {
+            "kind": "header",
+            "schema": "kin.automation-recording/1",
+            "seed": str(self.seed),
+            "fixed_dt": capabilities.get("fixed_dt"),
+            "rng_key": capabilities.get("rng_key"),
+            "renderer": capabilities.get("renderer"),
+            "game_id": self.game_info.get("id", ""),
+            "game_version": self.game_info.get("version", ""),
+            "command": self.command,
+            "dependencies": self.dependencies,
+            "identity": self.initial_identity,
+            "declared_content_verified": bool(self.dependencies),
+            "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+            "python": sys.version.split()[0],
+        }
+
+    def _open_journal(self):
+        """The header needs the handshake's answers; what came before follows it."""
+        header = self.header()
+        encoded = json.dumps(header, ensure_ascii=True, allow_nan=False) + "\n"
+        with self._journal_lock:
+            if self.journal is not None:
+                return
+            self.journal = (self.out / "commands.jsonl").open("w", encoding="utf-8")
             self.journal.write(encoded)
+            self.journal.writelines(self._unwritten)
             self.journal.flush()
+            self._unwritten = []
+            self.events.appendleft(header)
+            self.total_events += 1
+            self.recorded_bytes += len(encoded)
 
     def timeline(self):
         with self._journal_lock:
@@ -538,6 +600,7 @@ class Client:
     def close(self):
         if self.closed:
             return self.process.returncode
+        self._open_journal()
         if self.process.poll() is None:
             try:
                 if self.broken:
@@ -548,30 +611,9 @@ class Client:
                 self.process.stdin.close()
                 self.process.wait(timeout=2)
             except Exception:
-                if os.name != "nt":
-                    try:
-                        os.killpg(self.process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                else:
-                    self.process.terminate()
-                try:
-                    self.process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    if os.name != "nt":
-                        try:
-                            os.killpg(self.process.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                    else:
-                        self.process.kill()
-                    self.process.wait(timeout=2)
+                stop_process_group(self.process)
         self.closed = True
-        if os.name != "nt":
-            try:
-                os.killpg(self.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        end_process_group(self.process)
         self._reader.join(timeout=2)
         self._errors.join(timeout=2)
         for stream in [self.process.stdin, self.process.stdout, self.process.stderr, self.stderr, self.journal]:
@@ -583,10 +625,14 @@ class Runner:
     def __init__(self, client):
         self.client, self.steps = client, []
 
-    def observe(self, condition):
+    def check_read_only(self, condition):
+        """Conditions only read: an observed method with effects would change what it tests."""
         descriptor = self.client.protocol["methods"].get(condition["observe"], {})
         if descriptor.get("effect") not in ["read", "layout"]:
             raise ConfigurationError("conditions may only observe read/layout methods")
+
+    def observe(self, condition):
+        self.check_read_only(condition)
         result = self.client.call(condition["observe"], condition.get("params", {}))
         actual = pointer(result, condition.get("path", ""))
         return matches(actual, condition), actual
@@ -622,12 +668,11 @@ class Runner:
                 raise ConfigurationError("the scenario runner owns process shutdown")
             if "call" in step:
                 self.client.validate_request(step["call"], step.get("params", {}))
-            for kind in ["expect", "wait", "always"]:
+            for kind in CONDITION_KINDS:
                 if kind in step:
                     condition = step[kind]
                     self.client.validate_request(condition["observe"], condition.get("params", {}))
-                    if self.client.protocol["methods"][condition["observe"]]["effect"] not in ["read", "layout"]:
-                        raise ConfigurationError("conditions may only observe read/layout methods")
+                    self.check_read_only(condition)
         self.client.call("automation.snapshot", {"world": self.client.trace_world})
         for i, step in enumerate(case["steps"]):
             entry = {"index": i, "name": step.get("name", f"Step {i + 1}"), "frame_before": self.client.frame}
@@ -640,7 +685,7 @@ class Runner:
                 elif "capture" in step:
                     self.client.call("view.screenshot", {"path": step["capture"] + ".png"})
                 else:
-                    kind = next(k for k in ["expect", "wait", "always"] if k in step)
+                    kind = next(k for k in CONDITION_KINDS if k in step)
                     self.condition(step[kind], kind)
                 entry["ok"] = True
                 self.client.call("automation.snapshot", {"world": self.client.trace_world})

@@ -1,40 +1,49 @@
 #pragma once
+
+#include <kin/assets/asset_scope.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/ecs_scene.hpp>
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
 
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace kin {
+
 enum class SceneLoadState2D { Loading, Uploading, Ready, Failed, Cancelled, Taken };
+
 struct ScenePreloadOptions2D {
-    std::size_t max_files = 1024;
-    u64 max_bytes = 256ull * 1024 * 1024;
-    std::vector<std::string> additional_assets; // dynamic script/game dependencies
-    std::function<void(EcsWorld&)> register_components;
-    std::vector<std::pair<std::string, Assets2D::Binder>> asset_binders; // renderer-thread preparation
-    std::function<void(EcsWorld&, SceneContext&)> update;
+    // Binders for the game's own asset components, run on the renderer thread.
+    std::vector<std::pair<std::string, Assets2D::Binder>> asset_binders;
 };
+
+// A scene ScenePreload2D prepared: its own world, assets and content snapshot.
 class PreloadedScene2D : public EcsScene {
 public:
     std::string_view name() const override { return _definition.name; }
-    void update(SceneContext& ctx) override {
-        if (_update)
-            _update(ecs(), ctx);
-        else
-            ecs().run_frame(ctx.dt);
-    }
-    const SceneInstance& instance() const { return _runtime ? _runtime->instance() : _instance; }
+    void update(SceneContext& ctx) override { ecs().run_frame(ctx.dt); }
+    const SceneInstance& instance() const { return _runtime->instance(); }
+    // A development reload target (kin/runtime/development.hpp) for this
+    // scene: its authored entities and assets from `revision`.
     std::unique_ptr<DevelopmentChange> prepare_reload(const DevelopmentRevision& revision, std::string& error);
     const std::filesystem::path& content_root() const { return _content->root(); }
+    // Keeps the images the preload uploaded in its assets' manager, so a memory
+    // budget does not evict them while the scene lives. A development reload,
+    // which gives the scene new assets, empties it.
+    const AssetScope& preloaded_assets() const { return _preloaded; }
 
 private:
     friend class ScenePreload2D;
+
     std::shared_ptr<const MemoryContent> _content;
     SceneAsset _definition;
-    SceneInstance _instance;
     std::unique_ptr<SceneAssetRuntime> _runtime;
-    std::function<void(EcsWorld&, SceneContext&)> _update;
+    AssetScope _preloaded;
 };
 
 // A renderer-thread request handle. File reads and image decoding run on jobs;
@@ -58,4 +67,5 @@ private:
     struct Impl;
     std::unique_ptr<Impl> _impl;
 };
+
 } // namespace kin

@@ -34,6 +34,11 @@ bool horizontal(UiLayoutAxis axis) {
     return axis == UiLayoutAxis::Horizontal;
 }
 
+// What a box is to assistive technology: a focusable one acts as a button.
+std::string_view box_role(bool focusable) {
+    return focusable ? "button" : "group";
+}
+
 // Axis 0 is vertical (y), 1 horizontal (x), as ScrollRecord's arrays.
 f32& along(Vec2f& v, i32 axis) {
     return axis == 0 ? v.y : v.x;
@@ -136,7 +141,7 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
     }
     out.bounds = record->second.rect;
     const Rectf visible = record->second.visible;
-    describe(id, style.focusable ? "button" : "group", {}, visible, style.enabled, style.focusable);
+    describe(id, box_role(style.focusable), {}, visible, style.enabled, style.focusable);
     out.pressed_outside = _any_press && !contains(visible, pointer()) && !press_inside(id);
     if (!style.interactive || !style.enabled || !_input) {
         return out;
@@ -170,8 +175,7 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
         out.secondary_clicked = true;
     }
     // Enter or Space on the focused box clicks it, unless a text field has the keys.
-    if (style.focusable && out.focused && !_wants_text_input_last &&
-        (key_pressed(Key::Enter) || key_pressed(Key::KeypadEnter) || key_pressed(Key::Space))) {
+    if (style.focusable && keyboard_activated(out)) {
         out.clicked = true;
     }
 
@@ -923,8 +927,12 @@ void Context::record_compose(const std::vector<i32>& clip_of, const std::vector<
         record.row_height = c.row_height;
         record.key_context = c.key_context;
         record.frame = frame;
-        if (!element(c.id)) describe(c.id, c.focusable ? "button" : "group", {}, record.visible, c.enabled, c.focusable);
-        if (auto* semantic = element(c.id)) {
+        SemanticElement* semantic = element(c.id);
+        if (!semantic) {
+            describe(c.id, box_role(c.focusable), {}, record.visible, c.enabled, c.focusable);
+            semantic = element(c.id);
+        }
+        if (semantic) {
             semantic->bounds = to_screen(record.visible);
             semantic->visible = record.visible.w > 0 && record.visible.h > 0;
             semantic->parent = parent;

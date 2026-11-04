@@ -236,6 +236,12 @@ bool pad_control_held(const GamepadState& pad, PadControl control);
 // for a binding or an axis that is not in its map (an editor trying one).
 bool binding_held(const Input& input, InputBinding binding);
 f32 axis_value(const Input& input, const InputAxis& axis);
+// Whether `binding` went down this simulation step (its modifiers not asked):
+// the sticky press Input::pressed() reads, which survives frames that run no
+// step. For code that runs once per step, as gameplay does.
+bool binding_pressed(const Input& input, InputBinding binding);
+// A controller's analog input as it reads (-1 to 1, triggers 0 to 1), no dead zone.
+f32 pad_axis_raw(const GamepadState& pad, PadAxis axis);
 
 // A binding as an input file writes it in an axis: "key:A", "mouse:MouseLeft", "pad:dpad_left".
 std::string binding_text(InputBinding binding);
@@ -278,6 +284,7 @@ public:
 
 private:
     friend class Input;
+    friend class InputRouter; // reads the maps in place every step
 
     std::unordered_map<std::string, std::vector<InputBinding>> _bindings;
     std::unordered_map<std::string, InputAxis> _axes;
@@ -458,10 +465,13 @@ public:
     // and axes bound to a controller read.
     void set_gamepad(const GamepadState& state);
     const GamepadState& gamepad() const { return _pad; }
-    bool pad_pressed(PadControl control) const;
+    // Whether a controller's control went down this rendered frame, for
+    // render-time UI (as frame_pressed(Key) is for keys).
+    bool pad_frame_pressed(PadControl control) const;
 
 private:
     friend class App;
+    friend bool binding_pressed(const Input& input, InputBinding binding);
     // Test-only access to the step-aware begin_frame(bool); the public begin_frame()
     // always advances, so tests need this seam to emulate 0-step (advance=false) frames.
     friend struct InputFrameTestHook;

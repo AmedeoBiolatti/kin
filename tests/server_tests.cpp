@@ -9,6 +9,9 @@
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#if KIN_ENABLE_DEVELOPMENT
+#include <kin/runtime/development.hpp>
+#endif
 #include <kin/runtime/scene_server.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <kin/ui2/context.hpp>
@@ -17,6 +20,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <fstream>
@@ -645,11 +649,20 @@ void test_controller_menu_scene() {
         menu.update(ctx);
         menu.render(ctx);
     };
+    // A frame with the controller read as App reads it: after the frame begins
+    // (ui2 takes accept/back as this frame's presses, as it does keys).
+    const auto pad_frame = [&](const kin::GamepadState& state) {
+        app.input().begin_frame();
+        app.input().set_gamepad(state);
+        menu.update(ctx);
+        menu.render(ctx);
+    };
     frame();
     kin::GamepadState pad{.connected = true, .buttons = 1u << static_cast<kin::u8>(kin::GamepadButton::DPadDown)};
-    app.input().set_gamepad(pad); frame();
+    pad_frame(pad);
     pad.buttons = 1u << static_cast<kin::u8>(kin::GamepadButton::A);
-    app.input().set_gamepad(pad); frame(); frame();
+    pad_frame(pad);
+    frame();
     assert(play == 0 && options == 1); // update + render never double-activate
     pad.buttons = 1u << static_cast<kin::u8>(kin::GamepadButton::B);
     app.input().set_gamepad(pad);
@@ -1121,7 +1134,8 @@ void test_server_tears_down_scenes_before_returning() {
     assert(scenes.depth() == 0);
 }
 
-// --inspect: a windowed game answers between frames, and is held and stepped.
+// The live inspector reads the last frame's UI without laying it out again,
+// which would consume the player's input.
 void test_live_semantic_snapshot_preserves_player_input() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     auto& window = app.create_window({.title = "semantic inspector", .width = 160, .height = 100, .hidden = true});
@@ -1149,6 +1163,7 @@ void test_live_semantic_snapshot_preserves_player_input() {
     ctx.shutdown_scenes();
 }
 
+// --inspect: a windowed game answers between frames, and is held and stepped.
 void test_live_inspector() {
     kin::App app{{.mode = kin::AppMode::Headless}};
     kin::Window& window = app.create_window({.title = "inspected", .width = 32, .height = 32, .hidden = true});
@@ -1357,6 +1372,233 @@ void test_live_inspector_debugs_scripts() {
     assert(!debugger.waiting() && !debugger.armed() && debugger.breakpoints()->empty());
 }
 
+// The automation methods (kin.automation/1) on a world + semantic UI probe.
+struct AutomationHealth {
+    kin::i32 value = 12;
+    kin::u64 serial = ~kin::u64{0};
+};
+
+class AutomationProbeScene final : public kin::Scene {
+public:
+    explicit AutomationProbeScene(std::filesystem::path development_root = {}) {
+        _world.components()
+            .native<AutomationHealth>("Health")
+            .field("value", &AutomationHealth::value)
+            .field("serial", &AutomationHealth::serial);
+        _world.entities().create({.name = "Hero", .authored_id = "hero"}).set(AutomationHealth{});
+#if KIN_ENABLE_DEVELOPMENT
+        if (!development_root.empty()) {
+            _development = std::make_unique<kin::DevelopmentSession>(development_root);
+        }
+#else
+        (void)development_root;
+#endif
+    }
+    kin::EcsWorld* world() override { return &_world; }
+    kin::ui2::Context* ui_context() override { return &_ui; }
+#if KIN_ENABLE_DEVELOPMENT
+    kin::DevelopmentSession* development_session() override { return _development.get(); }
+#endif
+    void update(kin::SceneContext& ctx) override { draw(ctx); }
+    void render(kin::SceneContext& ctx) override { draw(ctx); }
+    void write_report(kin::JsonWriter& json) const override {
+        json.field("clicks", clicks).field("wide", ~kin::u64{0});
+    }
+    int clicks = 0;
+
+private:
+    void draw(kin::SceneContext& ctx) {
+        _ui.begin(ctx.input, ctx.renderer, ctx.dt);
+        for (int i = 0; i < 2; ++i) {
+            const auto group = kin::ui2::make_id(i == 0 ? "left" : "right");
+            _ui.describe(group, "group", i == 0 ? "Left" : "Right", {float(i * 100), 0, 100, 100});
+            _ui.semantic_key(group, i == 0 ? "left" : "right");
+            kin::ui2::Button button{.id = kin::ui2::make_id(i == 0 ? "fire-left" : "fire-right"),
+                                    .bounds = {float(i * 100), 0, 80, 20},
+                                    .label = "Fire",
+                                    .enabled = i == 0};
+            _ui.semantic_key(button.id, i == 0 ? "fire-left" : "fire-right");
+            kin::ui2::run(_ui, button);
+            _ui.semantic_parent(button.id, group);
+            clicks += button.clicked;
+        }
+        _ui.end();
+    }
+
+    kin::EcsWorld _world;
+    kin::ui2::Context _ui;
+#if KIN_ENABLE_DEVELOPMENT
+    std::unique_ptr<kin::DevelopmentSession> _development;
+#endif
+};
+
+kin::JsonValue parse_or_fail(std::string_view text) {
+    auto parsed = kin::parse_json(text);
+    assert(parsed.ok());
+    return std::move(*parsed.value);
+}
+
+kin::JsonValue call(kin::ServerContext& ctx, std::string_view method, std::string_view params = "{}") {
+    const auto response = kin::dispatch_server_command(ctx, nullptr, method, parse_or_fail(params));
+    if (!response.ok) {
+        std::fprintf(stderr, "%s: %s\n", std::string(method).c_str(), response.error.c_str());
+    }
+    assert(response.ok);
+    return parse_or_fail(response.result_json);
+}
+
+void reject(kin::ServerContext& ctx, std::string_view method, std::string_view params) {
+    assert(!kin::dispatch_server_command(ctx, nullptr, method, parse_or_fail(params)).ok);
+}
+
+void test_automation_methods() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    auto& window = app.create_window({.width = 240, .height = 120, .hidden = true});
+    kin::Renderer2D renderer{window};
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<AutomationProbeScene>());
+    kin::ServerContext ctx{app, window, renderer, scenes, {}, kin::make_key(7), 1.0f / 60, false};
+    ctx.realize_scenes();
+    ctx.set_reset_factory([](auto& manager) { manager.push(std::make_unique<AutomationProbeScene>()); });
+    auto schema = call(ctx, "server.schema");
+    assert(schema.string_at("schema") == "kin.automation/1" && schema.find("methods")->contains("ui.query"));
+    // Every advertised method is dispatched (none is unknown to the server).
+    for (const auto& [name, descriptor] : schema.find("methods")->members()) {
+        if (!descriptor.bool_at("driven", true) || name == "server.shutdown") {
+            continue;
+        }
+        // Parameters each handler refuses or ignores harmlessly (no file is written).
+        const auto response = kin::dispatch_server_command(
+            ctx, nullptr, name, parse_or_fail(R"({"path":"../outside.png","count":-1,"name":""})"));
+        assert(response.ok || response.error.find("unknown method") == std::string::npos);
+    }
+    ctx.reset(std::nullopt);
+    auto caps = call(ctx, "server.capabilities");
+    assert(caps.bool_at("ui") && caps.bool_at("world") && caps.bool_at("reset"));
+    assert(caps.find("methods")->bool_at("ui.action") && !caps.find("methods")->bool_at("sim.step"));
+    auto entities = call(ctx, "world.query", R"({"selector":{"authored_id":"hero","all":["Health"]}})");
+    assert(entities.int_at("count") == 1 && !entities.bool_at("truncated"));
+    const auto& hero = entities.find("entities")->items().front();
+    assert(hero.find("id")->is_string());
+    bool precise = false;
+    for (const auto& component : hero.find("components")->items()) {
+        for (const auto& field : component.find("fields")->items()) {
+            if (field.string_at("name") == "serial") {
+                precise = field.string_at("value") == "18446744073709551615";
+            }
+        }
+    }
+    assert(precise);
+    assert(call(ctx, "world.query", R"({"selector":{"none":["Health"]}})").int_at("count") == 0);
+    assert(call(ctx, "world.query", R"({"limit":1})").bool_at("truncated") == false);
+    reject(ctx, "world.query", R"({"selector":{"all":["Missing"]}})");
+    reject(ctx, "world.query", R"({"limit":1.5})");
+    reject(ctx, "world.query", R"({"limit":1e99})");
+    auto ui = call(ctx, "ui.query", R"({"selector":{"role":"button","label":"Fire"}})");
+    assert(ui.int_at("count") == 2);
+    auto scoped = call(ctx, "ui.query", R"({"selector":{"role":"button","within":{"key":"left"}}})");
+    assert(scoped.int_at("count") == 1);
+    reject(ctx, "ui.action", R"({"selector":{"role":"button","label":"Fire"}})");
+    reject(ctx, "ui.action", R"({"selector":{"key":"fire-right"}})");
+    reject(ctx, "ui.action", R"({"id":"Fire","selector":{"key":"fire-left"}})");
+    reject(ctx, "ui.action", R"({"selector":{"key":"fire-left"},"action":"set_number","text":"many"})");
+    reject(ctx, "ui.query", R"({"selector":{"key":"absent","within":{"typo":true}}})");
+    reject(ctx, "ui.query", R"({"selector":{"enabled":"yes"}})");
+    call(ctx, "ui.action", R"({"selector":{"key":"fire-left","within":{"key":"left"}}})");
+    auto* probe = static_cast<AutomationProbeScene*>(scenes.top_mut());
+    assert(probe->clicks == 0);
+    ctx.step();
+    assert(probe->clicks == 1);
+    call(ctx, "ui.action", R"({"selector":{"key":"fire-left"},"action":"focus"})");
+    ctx.step();
+    assert(call(ctx, "ui.query", R"({"selector":{"focused":true}})").int_at("count") == 1);
+    ctx.set_automation_mode(kin::AutomationMode::Inspect);
+    caps = call(ctx, "server.capabilities");
+    assert(caps.string_at("mode") == "inspect");
+    assert(!caps.find("methods")->bool_at("ui.action") && caps.find("methods")->bool_at("sim.step"));
+    ctx.set_automation_mode(kin::AutomationMode::Driven);
+
+    // Recording: one header shape, each command, each step's checkpoint.
+    const auto path =
+        std::filesystem::temp_directory_path() /
+        ("kin-automation-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".jsonl");
+    ctx.start_recording(path, nullptr, 7);
+    call(ctx, "ui.action", R"({"selector":{"key":"fire-left"}})");
+    call(ctx, "sim.tick", R"({"count":1})");
+    call(ctx, "scene.current");
+    ctx.stop_recording();
+    {
+        std::ifstream file(path);
+        std::string line;
+        int requests = 0;
+        int commands = 0;
+        int frames = 0;
+        bool header = false;
+        bool wide = false;
+        while (std::getline(file, line)) {
+            const auto row = parse_or_fail(line);
+            const std::string kind = row.string_at("kind");
+            if (kind == "header") {
+                header =
+                    row.string_at("seed") == "7" && row.find("rng_key") && row.find("fixed_dt") && row.find("game_id");
+            }
+            requests += kind == "request";
+            commands += kind == "command";
+            frames += kind == "frame";
+            wide |= line.find("18446744073709551615") != std::string::npos;
+        }
+        assert(header && requests == 3 && commands == 3 && frames == 1 && wide);
+    }
+    std::filesystem::remove(path);
+
+    call(ctx, "input.key", R"({"name":"Space","mode":"hold"})");
+    ctx.step();
+    assert(app.input().held(kin::Key::Space));
+    const kin::InputMap old_map = app.input().map();
+    reject(ctx, "sim.reset", R"({"seed":9007199254740992})");
+    reject(ctx, "sim.reset", R"({"seed":"18446744073709551616"})");
+    reject(ctx, "sim.reset", R"({"seed":-1})");
+    call(ctx, "sim.reset", R"({"seed":"18446744073709551615"})");
+    assert(!app.input().held(kin::Key::Space) && app.input().map() == old_map && ctx.frame() == 0);
+    assert(ctx.rng() == kin::make_key(~kin::u64{0}));
+    ctx.step();
+    assert(!app.input().held(kin::Key::Space));
+    ctx.shutdown_scenes();
+}
+
+#if KIN_ENABLE_DEVELOPMENT
+// automation.snapshot carries a development session's summary, not its sources:
+// recordings and scenario steps would otherwise copy every content file's hash.
+void test_development_status_endpoints() {
+    const auto root = std::filesystem::temp_directory_path() /
+                      ("kin-dev-status-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root);
+    std::ofstream(root / "value.txt") << "one";
+    {
+        kin::App app{{.mode = kin::AppMode::Headless}};
+        auto& window = app.create_window({.width = 64, .height = 64, .hidden = true});
+        kin::Renderer2D renderer{window};
+        kin::SceneManager scenes;
+        scenes.push(std::make_unique<AutomationProbeScene>(root));
+        kin::ServerContext ctx{app, window, renderer, scenes, {}, kin::make_key(7), 1.0f / 60, false};
+        ctx.realize_scenes();
+        assert(call(ctx, "server.capabilities").bool_at("development"));
+        const auto status = call(ctx, "dev.status");
+        assert(status.find("sources")->items().size() == 1 && status.find("targets"));
+        const auto snapshot = call(ctx, "automation.snapshot");
+        const auto* development = snapshot.find("scenes")->items().front().find("development");
+        assert(development && development->string_at("revision") == status.string_at("revision"));
+        assert(!development->contains("sources") && !development->contains("targets"));
+        const auto queued = call(ctx, "dev.reload", R"({"changes":{"value.txt":"two"}})");
+        assert(queued.bool_at("queued") && queued.find("changes")->contains("value.txt"));
+        reject(ctx, "dev.reload", R"({"expected_revision":"stale"})");
+        ctx.shutdown_scenes();
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+#endif
+
 int main() {
     test_json_parser();
     test_driven_server();
@@ -1380,5 +1622,9 @@ int main() {
     test_server_tears_down_scenes_before_returning();
     test_live_inspector();
     test_live_semantic_snapshot_preserves_player_input();
+    test_automation_methods();
+#if KIN_ENABLE_DEVELOPMENT
+    test_development_status_endpoints();
+#endif
     return 0;
 }

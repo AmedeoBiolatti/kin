@@ -8914,26 +8914,33 @@ void test_controller_and_semantic_ui() {
         run(ui, a); run(ui, b); run(ui, disabled); run(ui, text);
         ui.end();
     };
+    // A rendered frame with the controller as it is now.
+    const auto step = [&](const GamepadState& state) {
+        input.begin_frame();
+        input.set_gamepad(state);
+        draw();
+    };
     draw();
     assert(ui.elements().size() == 4);
     GamepadState pad{.connected = true};
-    const auto set_button = [&](GamepadButton b, bool down) {
-        const u32 mask = 1u << static_cast<u8>(b);
-        if (down) pad.buttons |= mask; else pad.buttons &= ~mask;
-    };
-    set_button(GamepadButton::DPadDown, true);
-    input.set_gamepad(pad); draw();
+    pad.set_button(GamepadButton::DPadDown, true);
+    step(pad);
     assert(ui.state().focused() == a.id && ui.controller_active());
-    set_button(GamepadButton::DPadDown, false);
-    input.set_gamepad(pad); draw();
-    set_button(GamepadButton::DPadDown, true);
-    input.set_gamepad(pad); draw();
+    const auto focused_element = [&](Id id) {
+        return std::ranges::find(ui.elements(), id, &SemanticElement::id)->focused;
+    };
+    assert(focused_element(a.id) && !focused_element(b.id)); // as end() left the focus
+    pad.set_button(GamepadButton::DPadDown, false);
+    step(pad);
+    pad.set_button(GamepadButton::DPadDown, true);
+    step(pad);
     assert(ui.state().focused() == b.id); // the disabled button is excluded
-    set_button(GamepadButton::A, true);
-    input.set_gamepad(pad); draw();
+    pad.set_button(GamepadButton::A, true);
+    step(pad);
     assert(b.clicked && !a.clicked);
-    draw(); assert(!b.clicked); // a held accept never double-activates
-    input.set_gamepad({});
+    step(pad);
+    assert(!b.clicked); // a held accept never double-activates
+    step({});
     std::string error;
     assert(!ui.queue_action("Locked", SemanticAction::Click, {}, error));
     assert(ui.queue_action("Play", SemanticAction::Click, {}, error));
@@ -8954,15 +8961,78 @@ void test_controller_and_semantic_ui() {
     ui.state().set_focused(a.id);
     ui.set_controller_navigation({.repeat_delay = 0.03f, .repeat_interval = 0.02f});
     pad = {.connected = true, .left_y = -1};
-    input.set_gamepad(pad); draw();
+    step(pad);
     assert(ui.state().focused() == b.id);
     draw(); draw();
     assert(ui.state().focused() == b.id); // no enabled target below
-    set_button(GamepadButton::B, true);
+    pad.set_button(GamepadButton::B, true);
+    input.begin_frame();
     input.set_gamepad(pad);
     ui.begin(input, renderer, 0.016f);
     assert(ui.back_requested()); ui.end();
-    input.set_gamepad({});
+    step({});
+
+    // Enter, keypad Enter and Space activate the focused control.
+    Context keys;
+    Toggle toggle{.id = make_id("music"), .bounds = {10, 130, 100, 25}, .label = "Music"};
+    for (const Key key : {Key::Enter, Key::KeypadEnter, Key::Space}) {
+        keys.state().set_focused(toggle.id);
+        input.begin_frame();
+        input.set_key_pressed(key);
+        keys.begin(input, renderer, 0.016f);
+        run(keys, toggle);
+        keys.end();
+        input.set_key_released(key);
+    }
+    assert(toggle.value); // three presses: on, off, on
+
+    // Assistive numbers arrive whole (by id, as an adapter queues them).
+    Slider volume{.id = make_id("volume"), .bounds = {10, 170, 100, 20}, .value = .5f};
+    const auto slide = [&] {
+        input.begin_frame();
+        keys.begin(input, renderer, 0.016f);
+        run(keys, volume);
+        keys.end();
+    };
+    slide();
+    assert(keys.queue_action(volume.id, SemanticAction::SetNumber, {}, 0.1234567, error));
+    assert(!keys.queue_action(volume.id, SemanticAction::SetText, "loud", 0, error)); // not a text input
+    slide();
+    assert(std::abs(volume.value - 0.1234567f) < 1e-7f && volume.changed);
+    assert(keys.elements().front().value == number_text(volume.value)); // its value as text
+}
+
+void test_semantic_elements_follow_each_frame() {
+    using namespace kin;
+    using namespace kin::ui2;
+    Renderer2D renderer = make_renderer();
+    Input input;
+    Context ui;
+    Button first{.id = make_id("first"), .bounds = {0, 0, 80, 20}, .label = "A long label that does not fit SSO"};
+    Button second{.id = make_id("second"), .bounds = {0, 30, 80, 20}, .label = "Second"};
+    bool both = true;
+    const auto draw = [&] {
+        ui.begin(input, renderer, 0.016f);
+        ui.semantic_key(second.id, "second_key"); // before the widget: kept until it is described
+        if (both) {
+            run(ui, first);
+        }
+        run(ui, second);
+        ui.semantic_label(second.id, "Named"); // after: applied at once
+        ui.end();
+    };
+    draw();
+    assert(ui.elements().size() == 2 && ui.elements()[1].key == "second_key" && ui.elements()[1].label == "Named");
+    both = false;
+    draw();
+    // Only this frame's elements, in the order described; nothing of the last frame's first button.
+    assert(ui.elements().size() == 1 && ui.elements()[0].id == second.id && ui.elements()[0].key == "second_key");
+    std::string error;
+    assert(!ui.queue_action(first.id, SemanticAction::Click, {}, 0, error)); // not built this frame
+    both = true;
+    draw();
+    assert(ui.elements().size() == 2 && ui.elements()[0].label == first.label && ui.elements()[0].key.empty());
+    assert(ui.elements()[0].focusable && !ui.elements()[0].numeric_value);
 }
 
 void test_semantics_respect_modals_and_clipping() {
@@ -9033,6 +9103,7 @@ void test_semantic_text_edit() {
 
 int main() {
     test_controller_and_semantic_ui();
+    test_semantic_elements_follow_each_frame();
     test_semantics_respect_modals_and_clipping();
     test_semantic_text_edit();
     test_screen_text_keys();

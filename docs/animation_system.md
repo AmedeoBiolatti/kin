@@ -46,6 +46,11 @@ kin::tween(world, card, {.property = "Transform2D.pos", .to = kin::Vec2f{320, 20
 kin::update_tweens(world, dt); // each frame
 ```
 
+Where Lua scripts run, their world's script services step the world's tweens
+once per simulation step (`ScriptWorkflows2D`, before the scripts' updates), so
+do not call `update_tweens` as well. Scripts start tweens with `self:tween` and
+`tweens.to` ([Lua 2D workflows](lua_2d_workflows.md#property-tweens)).
+
 - **What it moves:** any described field that tracks can set, named the same
   way. Numbers, pairs and colours move. Whole numbers, checks and text change
   at its end.
@@ -72,43 +77,21 @@ Tweens and key frames ease the same ways (`Easing`, `easings()`):
 
 For things to do later by time, `kin::Timers` (`kin/core/timers.hpp`) runs
 actions `after(seconds, ...)` or `every(seconds, ...)` as the game calls
-`update(dt)`, and `cancel(id)` stops one.
+`update(dt)`, and `cancel(id)` stops one. Scripts use tasks instead
+(`self:after`, `self:every`, `task.wait`), which a reload or a stopped script
+cancels.
 
-### Sequenced tweens
+Sequences are tasks too: await one tween after another, or start several and
+await each for a parallel step:
 
-`kin::Tween` (`kin/anim/tween.hpp`) animates values chosen at runtime. Keep the
-tween with the object that owns the effect and call `advance(dt)` from its update:
-
-```cpp
-kin::Vec2f position{};
-kin::f32 opacity = 1.0f;
-kin::Tween enter;
-enter.to(position, kin::Vec2f{200, 80}, 0.3f, kin::Easing::EaseOut)
-     .parallel().to(opacity, 0.5f, 0.2f)
-     .wait(0.1f)
-     .call([] { /* arrival effect */ });
-// Each update:
-enter.advance(dt);
+```lua
+task.run(function()
+    task.await(tweens.to(card, 'Transform2D.pos', {x=320,y=200}, 0.3, 'backout'))
+    local fade = tweens.to(card, 'SpriteRenderer.tint', {r=255,g=255,b=255,a=0}, 0.2)
+    local turn = tweens.to(card, 'Transform2D.rotation', 180, 0.2)
+    task.await(fade); task.await(turn)
+end)
 ```
-
-Steps run in sequence. `parallel()` puts the next step alongside the preceding
-group; the following step starts after the longest member finishes. A large dt
-continues through subsequent steps. Each property captures its starting value
-when its step begins. Floats, `Vec2f`, `Color`, `i32`, bools and strings use the
-existing animation interpolation rules; integers, bools and strings change at the end.
-
-`pause()`, `resume()`, `cancel()`, `restart()`, `finished()` and `cancelled()`
-control playback. Restart captures new starting values when the steps run again.
-Build the sequence before the first advance; appending after playback starts is
-an error. Durations and dt must be finite and nonnegative. Callbacks execute on
-the advancing thread, once per traversal, and may cancel or restart the tween.
-
-`to` holds a reference: its value must outlive playback. For targets that can
-disappear, use `property(getter, setter, destination, seconds, easing)` with
-accessors that reacquire the target, and `while_alive(predicate)` to cancel when
-it is gone. The getter must return the same `AnimValue` alternative as the
-destination. Tweens are explicitly stepped C++ objects; they are not registered
-with a global scheduler or automatically bound to Lua entities.
 
 ## Definitions And Players
 

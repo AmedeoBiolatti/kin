@@ -5,7 +5,7 @@
 #include "lua_reload_internal.hpp"
 #include "lua_scene_context.hpp"
 #include "lua_state_copy.hpp"
-#include "lua_tasks.hpp"
+#include "lua_vm.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -13,7 +13,6 @@
 #include <functional>
 #include <kin/assets/content.hpp>
 #include <kin/core/json.hpp>
-#include <kin/core/profile.hpp>
 #include <kin/dialogue/dialogue.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
@@ -42,9 +41,8 @@ struct ScriptEngineHost : ScriptSceneBindings {
     std::vector<std::pair<SystemDescriptor, std::function<void(SystemContext&)>>> definitions;
     std::vector<SystemId> replaceable;
     bool closing = false;
-    bool preparing = false;
     EcsWorld& ecs() const {
-        if (preparing)
+        if (scripting_detail::reload_staging)
             throw std::runtime_error("live world access is unavailable while preparing reload");
         if (closing)
             throw std::runtime_error("script state is closing");
@@ -53,19 +51,19 @@ struct ScriptEngineHost : ScriptSceneBindings {
     const ScriptComponentRegistry* script_components() const { return components; }
     std::filesystem::path resolved_script_path() const { return script_path; }
     void clear_script_entities() const {
-        if (preparing)
+        if (scripting_detail::reload_staging)
             throw std::runtime_error("cannot clear entities while preparing reload");
         if (clear_entities)
             clear_entities();
     }
     void set_clear_color(Color color) const {
-        if (preparing)
+        if (scripting_detail::reload_staging)
             throw std::runtime_error("cannot change rendering while preparing reload");
         if (set_background)
             set_background(color);
     }
     void mark_render_cache_dirty(std::string_view) const {
-        if (preparing)
+        if (scripting_detail::reload_staging)
             throw std::runtime_error("cannot change rendering while preparing reload");
         if (mark_render_dirty)
             mark_render_dirty();
@@ -90,24 +88,19 @@ EcsCommandBuffer* current_script_commands() {
 } // namespace scripting_detail
 
 struct ScriptEngine::Impl {
+    explicit Impl(LuaRuntimeLimits limits) : vm(limits) {}
+    sol::state& lua() { return *vm.lua; }
+    LuaRuntime& runtime() { return vm.runtime; }
+
     std::unique_ptr<ScriptEngineHost> host;
     std::shared_ptr<ScriptWorkflows2D> workflows;
-    LuaRuntime runtime;
-    std::unique_ptr<sol::state> state =
-        std::make_unique<sol::state>(sol::default_at_panic, LuaRuntime::allocator, &runtime);
-    sol::state& lua() { return *state; }
-    ~Impl() {
-        tasks.reset();
-        LuaCall budget{runtime, state->lua_state(), "vm.close", 1'000'000};
-        budget.closing();
-        state.reset();
-    }
-    std::unique_ptr<LuaTasks> tasks;
+    LuaVm vm;
     std::filesystem::path asset_root;
     std::vector<std::filesystem::path> dependencies;
     std::unordered_set<std::string> dependency_keys;
     std::function<void(sol::state&)> bind;
     std::shared_ptr<const void> content_owner;
+    std::string halted; // why every call fails (halt)
 };
 
 namespace {
@@ -192,18 +185,25 @@ struct ScriptSystemAccessContext {
 
 thread_local const ScriptSystemAccessContext* current_script_system_access = nullptr;
 
+// The components the scene API knows itself, by their short and full names.
+struct ScriptComponentName {
+    std::string_view alias;
+    std::string_view name;
+    ScriptComponentKind kind;
+};
+
+constexpr ScriptComponentName script_component_names[] = {
+    {"transform", "Transform2D", ScriptComponentKind::Transform},
+    {"rect", "RectRenderer", ScriptComponentKind::Rect},
+    {"line", "LineRenderer", ScriptComponentKind::Line},
+    {"script_owned", "ScriptOwned", ScriptComponentKind::ScriptOwned},
+};
+
 ScriptComponentKind component_kind(std::string_view name) {
-    if (name == "transform" || name == "Transform2D") {
-        return ScriptComponentKind::Transform;
-    }
-    if (name == "rect" || name == "RectRenderer") {
-        return ScriptComponentKind::Rect;
-    }
-    if (name == "line" || name == "LineRenderer") {
-        return ScriptComponentKind::Line;
-    }
-    if (name == "script_owned" || name == "ScriptOwned") {
-        return ScriptComponentKind::ScriptOwned;
+    for (const ScriptComponentName& known : script_component_names) {
+        if (name == known.alias || name == known.name) {
+            return known.kind;
+        }
     }
     return ScriptComponentKind::Unknown;
 }
@@ -242,12 +242,11 @@ bool contains_component_name(const std::vector<std::string>& names, std::string_
 }
 
 std::string canonical_component_name(std::string_view component) {
-    switch (component_kind(component)) {
-    case ScriptComponentKind::Transform: return "Transform2D";
-    case ScriptComponentKind::Rect: return "RectRenderer";
-    case ScriptComponentKind::Line: return "LineRenderer";
-    case ScriptComponentKind::ScriptOwned: return "ScriptOwned";
-    case ScriptComponentKind::Unknown: return std::string{component};
+    const ScriptComponentKind kind = component_kind(component);
+    for (const ScriptComponentName& known : script_component_names) {
+        if (known.kind == kind) {
+            return std::string{known.name};
+        }
     }
     return std::string{component};
 }
@@ -1119,7 +1118,7 @@ struct ScriptSceneApi {
     }
 
     bool register_system(std::string_view id, sol::table descriptor, sol::protected_function run) {
-        if (scene->preparing) {
+        if (scripting_detail::reload_staging) {
             const auto current = scene->world->systems().snapshots();
             if (std::ranges::any_of(current, [&](const auto& entry) { return entry.id == id; }) &&
                 std::ranges::find(scene->replaceable, id) == scene->replaceable.end())
@@ -1160,7 +1159,7 @@ struct ScriptSceneApi {
             .reads = query_descriptor.reads,
             .writes = query_descriptor.writes,
         });
-        if (scene->preparing) {
+        if (scripting_detail::reload_staging) {
             EcsWorld validation;
             scene->world->components().copy_schema_to(validation.components());
             if (validation.systems().register_task(system_descriptor, [](SystemContext&) {}).empty())
@@ -1201,7 +1200,7 @@ struct ScriptSceneApi {
             }
         };
         scene->definitions.emplace_back(system_descriptor, callback);
-        if (scene->preparing)
+        if (scripting_detail::reload_staging)
             return true;
         const bool registered =
             !scene->ecs().systems().register_task(std::move(system_descriptor), std::move(callback)).empty();
@@ -1469,20 +1468,12 @@ void scripting_detail::script_component_access(std::string_view component, bool 
 }
 
 ScriptEngine::ScriptEngine(const std::function<void(sol::state&)>& bind, LuaRuntimeLimits limits)
-    : _impl(std::make_unique<Impl>()) {
-    _impl->runtime.set_limits(limits);
-    _impl->runtime.set_profile_sink([](std::string_view name, u64 ns) {
-        if (auto* session = current_profile_session())
-            session->record(name, "lua", ns);
-    });
+    : _impl(std::make_unique<Impl>(limits)) {
     _impl->bind = bind;
-    scripting_detail::bind_script_errors(_impl->lua());
-    _impl->lua().open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string);
     sol::table package = _impl->lua().create_table();
     package["loaded"] = _impl->lua().create_table();
     package["path"] = "";
     _impl->lua()["package"] = package;
-    _impl->tasks = std::make_unique<LuaTasks>(_impl->lua(), _impl->runtime);
     register_bindings();
     if (bind) {
         bind(_impl->lua());
@@ -1494,6 +1485,9 @@ ScriptEngine::~ScriptEngine() {
         _impl->host->closing = true;
         _impl->host->clear_systems();
         _impl->host->definitions.clear();
+    }
+    if (_impl->workflows) {
+        _impl->workflows->leave(this);
     }
 }
 
@@ -1514,25 +1508,19 @@ std::unique_ptr<ScriptEngine> ScriptEngine::prepare_reload(const std::filesystem
             throw std::runtime_error("script has no live scene bindings");
         if (!path_within_root(root / path, root))
             throw std::runtime_error("reload script must be inside the candidate content root");
-        auto next = std::make_unique<ScriptEngine>(std::function<void(sol::state&)>{}, _impl->runtime.limits());
-        struct Guard {
-            bool previous = scripting_detail::reload_staging;
-            Guard() { scripting_detail::reload_staging = true; }
-            ~Guard() { scripting_detail::reload_staging = previous; }
-        } guard;
-        LuaCall budget{next->_impl->runtime, next->_impl->lua().lua_state(), "reload.prepare", 1'000'000};
-        budget.result(false);
+        auto next = std::make_unique<ScriptEngine>(std::function<void(sol::state&)>{}, _impl->runtime().limits());
+        const scripting_detail::ReloadStaging staging;
+        const LuaInstructionBudget budget{lua_maintenance_budget};
         if (!next->load_file(root, path))
             throw std::runtime_error(next->last_error());
         next->_impl->host = std::make_unique<ScriptEngineHost>();
         static_cast<ScriptSceneBindings&>(*next->_impl->host) = static_cast<const ScriptSceneBindings&>(*_impl->host);
-        next->_impl->host->runtime = &next->_impl->runtime;
+        next->_impl->host->runtime = &next->_impl->runtime();
         next->_impl->host->script_path = root / path;
-        next->_impl->host->preparing = true;
         next->_impl->host->replaceable = _impl->host->systems;
         sol::object state;
         {
-            LuaNativeAllocations native{next->_impl->runtime};
+            LuaNativeAllocations native{next->_impl->runtime()};
             state = scripting_detail::copy_lua_data(_impl->lua().globals().raw_get<sol::object>("reload_state"),
                                                     next->_impl->lua());
             auto* lua = next->_impl->lua().lua_state();
@@ -1542,20 +1530,19 @@ std::unique_ptr<ScriptEngine> ScriptEngine::prepare_reload(const std::filesystem
             lua_rawset(lua, -3);
             lua_pop(lua, 1);
         }
-        const auto memory_limit = next->_impl->runtime.limits().memory_limit_bytes;
-        if (memory_limit && next->_impl->runtime.stats().memory_bytes > memory_limit)
+        if (next->_impl->runtime().memory_exceeded())
             throw std::runtime_error("scene reload exceeds Lua memory limit");
         sol::protected_function migrate = next->_impl->lua().globals().raw_get<sol::object>("on_reload");
         if (!migrate.valid())
             throw std::runtime_error("safe live reload requires on_reload(state, scene); on_load is not rerun");
-        if (!record_result(next->_last_error, "on_reload", migrate(state, ScriptSceneApi{next->_impl->host.get()})))
+        LuaCall call{next->_impl->runtime(), next->_impl->vm.state(), "on_reload"};
+        if (!record_result(next->_last_error, "on_reload",
+                           call.invoke(migrate, state, ScriptSceneApi{next->_impl->host.get()})))
             throw std::runtime_error(next->last_error());
-        next->_impl->host->preparing = false;
         next->_impl->workflows = _impl->workflows;
         next->_impl->bind = _impl->bind;
         if (next->_impl->bind)
             next->_impl->bind(next->_impl->lua());
-        budget.result(true);
         return next;
     } catch (const std::exception& e) {
         error = e.what();
@@ -1566,6 +1553,13 @@ void ScriptEngine::suspend_systems() {
     if (_impl->host)
         _impl->host->clear_systems();
 }
+
+void ScriptEngine::halt(std::string reason) {
+    suspend_systems();
+    _impl->halted = std::move(reason);
+    _last_error = _impl->halted;
+}
+
 void ScriptEngine::use_content(std::shared_ptr<const MemoryContent> content) {
     _impl->asset_root = content->root();
     _impl->content_owner = content;
@@ -1575,6 +1569,8 @@ void ScriptEngine::use_content(std::shared_ptr<const MemoryContent> content) {
 bool ScriptEngine::activate_systems() {
     if (!_impl->host)
         return true;
+    if (!_impl->halted.empty())
+        return false;
     for (const auto& [descriptor, callback] : _impl->host->definitions) {
         const auto id = _impl->host->world->systems().register_task(descriptor, callback);
         if (id.empty()) {
@@ -1587,7 +1583,7 @@ bool ScriptEngine::activate_systems() {
 }
 
 bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std::filesystem::path& script_path) {
-    LuaNativeAllocations setup{_impl->runtime};
+    LuaNativeAllocations setup{_impl->runtime()};
     if (auto view = view_content_file(asset_root / script_path))
         _impl->content_owner = std::move(view->owner);
     _impl->asset_root = normalized_dependency_path(asset_root);
@@ -1611,10 +1607,8 @@ bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std:
         }
         record_dependency(*module_path);
 
-        LuaCall budget{_impl->runtime, state, "module.load"};
-        budget.compiling();
-        budget.result(false);
-        std::optional<sol::load_result> read = load_lua_file(lua, *module_path);
+        LuaCall call{_impl->runtime(), state, "module.load"};
+        std::optional<sol::load_result> read = call.compile([&] { return load_lua_file(lua, *module_path); });
         if (!read) {
             throw std::runtime_error("cannot open " + module_path->string());
         }
@@ -1624,9 +1618,7 @@ bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std:
             throw std::runtime_error(error.what());
         }
         sol::protected_function chunk = loaded;
-        budget.compiling(false);
-        sol::protected_function_result result = chunk(module);
-        budget.result(result.valid());
+        sol::protected_function_result result = call.invoke(chunk, module);
         if (!result.valid()) {
             sol::error error = result;
             throw std::runtime_error(error.what());
@@ -1649,15 +1641,12 @@ bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std:
     }
     record_dependency(resolved_script);
 
-    const auto memory_limit = _impl->runtime.limits().memory_limit_bytes;
-    if (memory_limit && _impl->runtime.stats().memory_bytes > memory_limit) {
+    if (_impl->runtime().memory_exceeded()) {
         _last_error = "Lua memory limit exceeded during binding setup";
         return false;
     }
-    LuaCall budget{_impl->runtime, _impl->lua().lua_state(), "script.load"};
-    budget.compiling();
-    budget.result(false);
-    std::optional<sol::load_result> read = load_lua_file(_impl->lua(), resolved_script);
+    LuaCall call{_impl->runtime(), _impl->vm.state(), "script.load"};
+    std::optional<sol::load_result> read = call.compile([&] { return load_lua_file(_impl->lua(), resolved_script); });
     if (!read) {
         _last_error = "cannot open " + resolved_script.string();
         return false;
@@ -1670,10 +1659,7 @@ bool ScriptEngine::load_file(const std::filesystem::path& asset_root, const std:
     }
 
     sol::protected_function script = loaded;
-    budget.compiling(false);
-    auto result = script();
-    budget.result(result.valid());
-    return record_result(_last_error, "script", result);
+    return record_result(_last_error, "script", call.invoke(script));
 }
 
 const std::vector<std::filesystem::path>& ScriptEngine::script_dependencies() const {
@@ -1704,32 +1690,25 @@ bool ScriptEngine::call_on_load(ScriptSceneBindings bindings) {
     }
     if (!_impl->host)
         _impl->host = std::make_unique<ScriptEngineHost>();
-    _impl->host->runtime = &_impl->runtime;
+    _impl->host->runtime = &_impl->runtime();
     _impl->host->clear_systems();
     static_cast<ScriptSceneBindings&>(*_impl->host) = std::move(bindings);
-    if (_impl->host->workflows) {
-        if (&_impl->host->workflows->world() != _impl->host->world) {
-            _last_error = "workflow services belong to another world";
-            return false;
-        }
-        _impl->workflows = _impl->host->workflows;
-    } else if (!_impl->workflows) {
-        _impl->workflows = std::make_shared<ScriptWorkflows2D>(*_impl->host->world, _impl->asset_root);
+    try {
+        _impl->workflows = ScriptWorkflows2D::shared(*_impl->host->world, _impl->asset_root, _impl->host->workflows);
+    } catch (const std::exception& e) {
+        _last_error = e.what();
+        return false;
     }
     return call_optional("on_load", ScriptSceneApi{_impl->host.get()});
 }
 
 bool ScriptEngine::call_on_enter(SceneContext& ctx) {
-    if (_impl->workflows)
-        _impl->workflows->configure(&ctx.renderer, ctx.app.gamepads());
     return call_on_enter(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
 bool ScriptEngine::call_on_exit(SceneContext& ctx) {
     return call_on_exit(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
 }
 bool ScriptEngine::call_update(SceneContext& ctx) {
-    if (_impl->workflows)
-        _impl->workflows->configure(&ctx.renderer, ctx.app.gamepads());
     const bool result = call_update(ScriptFrameContext{ctx.dt, &ctx.input, &ctx.app});
     if (_impl->workflows)
         while (auto scene = _impl->workflows->take_scene())
@@ -1741,25 +1720,33 @@ bool ScriptEngine::call_on_enter(ScriptFrameContext ctx) {
 }
 bool ScriptEngine::call_on_exit(ScriptFrameContext ctx) {
     const bool result = call_optional("on_exit", ScriptContextApi{ctx});
-    _impl->tasks->cancel();
+    _impl->vm.tasks->cancel_all();
     return result;
 }
 bool ScriptEngine::call_update(ScriptFrameContext ctx) {
+    if (!_impl->halted.empty()) {
+        _last_error = _impl->halted;
+        return false;
+    }
     if (_impl->workflows) {
         static const Input absent;
-        _impl->workflows->advance(ctx.input ? *ctx.input : absent, ctx.dt);
+        _impl->workflows->step(this, ctx.input ? *ctx.input : absent, ctx.dt);
     }
-    if (!_impl->tasks->advance(ctx.dt, _last_error))
+    if (!_impl->vm.tasks->advance(ctx.dt, _last_error))
         return false;
-    _impl->runtime.collect(_impl->lua().lua_state());
+    _impl->vm.collect();
     return call_optional("update", ScriptContextApi{ctx});
 }
 
 bool ScriptEngine::call_collect_actions(InputActionContext& actions) const {
-    return call_optional_const("collect_actions", ScriptActionsApi{&actions});
+    return call_optional("collect_actions", ScriptActionsApi{&actions});
 }
 
 bool ScriptEngine::call_write_report(JsonWriter& json) const {
+    if (!_impl->halted.empty()) {
+        _last_error = _impl->halted;
+        return false;
+    }
     sol::object object = _impl->lua().globals().raw_get<sol::object>("write_report");
     if (object.get_type() == sol::type::nil) {
         return true;
@@ -1770,9 +1757,8 @@ bool ScriptEngine::call_write_report(JsonWriter& json) const {
     }
 
     sol::protected_function function = object;
-    LuaCall budget{_impl->runtime, _impl->lua().lua_state(), "write_report"};
-    sol::protected_function_result result = function();
-    budget.result(result.valid());
+    LuaCall call{_impl->runtime(), _impl->vm.state(), "write_report"};
+    sol::protected_function_result result = call.invoke(function);
     if (!result.valid()) {
         return record_result(_last_error, "write_report", result);
     }
@@ -1801,7 +1787,11 @@ bool ScriptEngine::call_write_report(JsonWriter& json) const {
 }
 
 template <typename... Args>
-bool ScriptEngine::call_optional(std::string_view name, Args&&... args) {
+bool ScriptEngine::call_optional(std::string_view name, Args&&... args) const {
+    if (!_impl->halted.empty()) {
+        _last_error = _impl->halted;
+        return false;
+    }
     sol::object object = _impl->lua().globals().raw_get<sol::object>(std::string{name});
     if (object.get_type() == sol::type::nil) {
         return true;
@@ -1811,55 +1801,71 @@ bool ScriptEngine::call_optional(std::string_view name, Args&&... args) {
         return false;
     }
     sol::protected_function function = object;
-    LuaCall budget{_impl->runtime, _impl->lua().lua_state(), name};
-    auto result = function(std::forward<Args>(args)...);
-    budget.result(result.valid());
-    return record_result(_last_error, name, result);
+    LuaCall call{_impl->runtime(), _impl->vm.state(), name};
+    return record_result(_last_error, name, call.invoke(function, std::forward<Args>(args)...));
 }
 
-template <typename... Args>
-bool ScriptEngine::call_optional_const(std::string_view name, Args&&... args) const {
-    sol::object object = _impl->lua().globals().raw_get<sol::object>(std::string{name});
-    if (object.get_type() == sol::type::nil) {
-        return true;
+LuaApiSurface ScriptEngine::api_surface() const {
+    LuaApiSurface surface = scripting_detail::lua_api_surface(_impl->lua());
+    for (const ScriptComponentName& known : script_component_names) {
+        surface.component_aliases.emplace(known.alias, known.name);
     }
-    if (object.get_type() != sol::type::function) {
-        _last_error = std::string{name} + " is not a function";
-        return false;
-    }
-    sol::protected_function function = object;
-    LuaCall budget{_impl->runtime, _impl->lua().lua_state(), name};
-    auto result = function(std::forward<Args>(args)...);
-    budget.result(result.valid());
-    return record_result(_last_error, name, result);
+    surface.component_fields = {
+        {"Transform2D", {{"x", "f32"}, {"y", "f32"}}},
+        {"RectRenderer",
+         {{"w", "f32"},
+          {"h", "f32"},
+          {"r", "u8"},
+          {"g", "u8"},
+          {"b", "u8"},
+          {"layer", "i32"},
+          {"order", "i32"},
+          {"visible", "bool"}}},
+        {"LineRenderer",
+         {{"ax", "f32"},
+          {"ay", "f32"},
+          {"bx", "f32"},
+          {"by", "f32"},
+          {"r", "u8"},
+          {"g", "u8"},
+          {"b", "u8"},
+          {"layer", "i32"},
+          {"order", "i32"},
+          {"visible", "bool"}}},
+        {"ScriptOwned", {}},
+    };
+    surface.callbacks = {
+        {"on_load", {"KinScene"}},   {"on_reload", {"any", "KinScene"}}, {"on_enter", {"KinContext"}},
+        {"on_exit", {"KinContext"}}, {"update", {"KinContext"}},         {"collect_actions", {"KinActions"}},
+        {"write_report", {}},
+    };
+    return surface;
 }
 
-std::map<std::string, std::vector<std::string>> ScriptEngine::api_surface() const {
-    return scripting_detail::lua_api_surface(_impl->lua());
-}
 LuaRuntimeStats ScriptEngine::runtime_stats() const {
-    return _impl->runtime.stats();
+    return _impl->runtime().stats();
 }
+
 void ScriptEngine::set_runtime_limits(LuaRuntimeLimits limits) {
-    _impl->runtime.set_limits(limits);
-}
-void ScriptEngine::collect_garbage(i32 work) {
-    _impl->runtime.collect(_impl->lua().lua_state(), work);
+    _impl->runtime().set_limits(limits);
 }
 
 void ScriptEngine::register_bindings() {
-    bind_lua_workflows2d(_impl->lua(), [this] { return _impl->workflows; });
-    _impl->lua().registry()["kin.unwrap_entity"] = [](const sol::object& object) {
+    sol::state& lua = _impl->lua();
+    bind_lua_workflows2d(lua, [this] { return _impl->workflows; });
+    lua.registry()["kin.unwrap_entity"] = [](const sol::object& object) {
         return scripting_detail::script_entity(object);
     };
-    _impl->lua().registry()["kin.entity"] = [this](EcsEntity e, std::function<bool()> lease) {
+    lua.registry()["kin.entity"] = [this](EcsEntity e, std::function<bool()> lease) {
         if (!_impl->host || _impl->host->closing || !e || e.raw().world().c_ptr() != _impl->host->world->raw().c_ptr())
             throw std::runtime_error("entity does not belong to this Lua scene");
         return ScriptEntityApi{_impl->host.get(), e, std::move(lease)};
     };
-    scripting_detail::bind_l10n(_impl->lua(), true);
-    scripting_detail::bind_services(_impl->lua());
-    _impl->lua().new_usertype<ScriptEntityApi>("KinEntity",
+    scripting_detail::bind_l10n(lua, true);
+    scripting_detail::bind_services(lua);
+    using scripting_detail::new_api_type;
+    // clang-format off
+    new_api_type<ScriptEntityApi>(lua, "KinEntity",
         sol::no_constructor,
         "id", script_method(&ScriptEntityApi::id),
         "name", script_method(&ScriptEntityApi::name),
@@ -1884,64 +1890,75 @@ void ScriptEngine::register_bindings() {
         "set_line", script_method(&ScriptEntityApi::set_line),
         "get_line", script_method(&ScriptEntityApi::get_line));
 
-    _impl->lua().new_usertype<ScriptDeferredEntityApi>("KinDeferredEntity", sol::no_constructor, "index",
-                                                       script_property(&ScriptDeferredEntityApi::index));
+    new_api_type<ScriptDeferredEntityApi>(lua, "KinDeferredEntity",
+        sol::no_constructor,
+        "index", script_property(&ScriptDeferredEntityApi::index));
 
-    _impl->lua().new_usertype<ScriptCommandBufferApi>(
-        "KinCommandBuffer", sol::no_constructor, "valid", script_property(&ScriptCommandBufferApi::valid), "size",
-        script_property(&ScriptCommandBufferApi::size), "create", script_method(&ScriptCommandBufferApi::create),
-        "destroy", script_method(&ScriptCommandBufferApi::destroy), "add", script_method(&ScriptCommandBufferApi::add),
-        "remove", script_method(&ScriptCommandBufferApi::remove), "patch",
-        script_method(&ScriptCommandBufferApi::patch));
+    new_api_type<ScriptCommandBufferApi>(lua, "KinCommandBuffer",
+        sol::no_constructor,
+        "valid", script_property(&ScriptCommandBufferApi::valid),
+        "size", script_property(&ScriptCommandBufferApi::size),
+        "create", script_method(&ScriptCommandBufferApi::create),
+        "destroy", script_method(&ScriptCommandBufferApi::destroy),
+        "add", script_method(&ScriptCommandBufferApi::add),
+        "remove", script_method(&ScriptCommandBufferApi::remove),
+        "patch", script_method(&ScriptCommandBufferApi::patch));
 
-    _impl->lua().new_usertype<ScriptSystemContextApi>(
-        "KinSystemContext", sol::no_constructor, "dt", script_property(&ScriptSystemContextApi::dt), "system_id",
-        script_property(&ScriptSystemContextApi::system_id), "phase", script_property(&ScriptSystemContextApi::phase),
-        "running_parallel", script_property(&ScriptSystemContextApi::running_parallel), "commands",
-        script_property(&ScriptSystemContextApi::commands));
+    new_api_type<ScriptSystemContextApi>(lua, "KinSystemContext",
+        sol::no_constructor,
+        "dt", script_property(&ScriptSystemContextApi::dt),
+        "system_id", script_property(&ScriptSystemContextApi::system_id),
+        "phase", script_property(&ScriptSystemContextApi::phase),
+        "running_parallel", script_property(&ScriptSystemContextApi::running_parallel),
+        "commands", script_property(&ScriptSystemContextApi::commands));
 
-    _impl->lua().new_usertype<ScriptSceneApi>(
-        "KinScene", sol::no_constructor, "entity", script_method(&ScriptSceneApi::entity), "find",
-        script_method(&ScriptSceneApi::find), "authored", script_method(&ScriptSceneApi::authored), "entities",
-        script_method(&ScriptSceneApi::entities), "with", script_method(&ScriptSceneApi::with), "count",
-        script_method(&ScriptSceneApi::count), "register_system", script_method(&ScriptSceneApi::register_system),
-        "clear_script_entities", script_method(&ScriptSceneApi::clear_script_entities), "set_clear_color",
-        script_method(&ScriptSceneApi::set_clear_color), "mark_render_cache_dirty",
-        script_method(&ScriptSceneApi::mark_render_cache_dirty));
+    new_api_type<ScriptSceneApi>(lua, "KinScene",
+        sol::no_constructor,
+        "entity", script_method(&ScriptSceneApi::entity),
+        "find", script_method(&ScriptSceneApi::find),
+        "authored", script_method(&ScriptSceneApi::authored),
+        "entities", script_method(&ScriptSceneApi::entities),
+        "with", script_method(&ScriptSceneApi::with),
+        "count", script_method(&ScriptSceneApi::count),
+        "register_system", script_method(&ScriptSceneApi::register_system),
+        "clear_script_entities", script_method(&ScriptSceneApi::clear_script_entities),
+        "set_clear_color", script_method(&ScriptSceneApi::set_clear_color),
+        "mark_render_cache_dirty", script_method(&ScriptSceneApi::mark_render_cache_dirty));
 
-    _impl->lua().new_usertype<ScriptInputApi>(
-        "KinInput", sol::no_constructor, "pressed", script_method(&ScriptInputApi::pressed), "held",
-        script_method(&ScriptInputApi::held), "released", script_method(&ScriptInputApi::released));
+    new_api_type<ScriptInputApi>(lua, "KinInput",
+        sol::no_constructor,
+        "pressed", script_method(&ScriptInputApi::pressed),
+        "held", script_method(&ScriptInputApi::held),
+        "released", script_method(&ScriptInputApi::released));
 
-    _impl->lua().new_usertype<ScriptAppApi>("KinApp", sol::no_constructor, "quit", script_method(&ScriptAppApi::quit));
+    new_api_type<ScriptAppApi>(lua, "KinApp",
+        sol::no_constructor,
+        "quit", script_method(&ScriptAppApi::quit));
 
-    _impl->lua().new_usertype<ScriptContextApi>(
-        "KinContext", sol::no_constructor, "dt", script_property(&ScriptContextApi::dt), "input",
-        script_property(&ScriptContextApi::input), "app", script_property(&ScriptContextApi::app));
+    new_api_type<ScriptContextApi>(lua, "KinContext",
+        sol::no_constructor,
+        "dt", script_property(&ScriptContextApi::dt),
+        "input", script_property(&ScriptContextApi::input),
+        "app", script_property(&ScriptContextApi::app));
 
-    _impl->lua().new_usertype<ScriptActionsApi>("KinActions", sol::no_constructor, "add",
-                                                script_method(&ScriptActionsApi::add));
+    new_api_type<ScriptActionsApi>(lua, "KinActions",
+        sol::no_constructor,
+        "add", script_method(&ScriptActionsApi::add));
 
-    _impl->lua().new_usertype<ScriptDialoguePlayerApi>(
-        "KinDialoguePlayer", sol::constructors<ScriptDialoguePlayerApi()>(), "load",
-        script_method(&ScriptDialoguePlayerApi::load), "start", script_method(&ScriptDialoguePlayerApi::start),
-        "advance", script_method(&ScriptDialoguePlayerApi::advance), "choose_index",
-        script_method(&ScriptDialoguePlayerApi::choose_index), "choose_id",
-        script_method(&ScriptDialoguePlayerApi::choose_id), "skip_line",
-        script_method(&ScriptDialoguePlayerApi::skip_line), "reset", script_method(&ScriptDialoguePlayerApi::reset),
-        "ended", script_property(&ScriptDialoguePlayerApi::ended), "current_node",
-        script_property(&ScriptDialoguePlayerApi::current_node), "view", script_method(&ScriptDialoguePlayerApi::view),
+    new_api_type<ScriptDialoguePlayerApi>(lua, "KinDialoguePlayer",
+        sol::constructors<ScriptDialoguePlayerApi()>(),
+        "load", script_method(&ScriptDialoguePlayerApi::load),
+        "start", script_method(&ScriptDialoguePlayerApi::start),
+        "advance", script_method(&ScriptDialoguePlayerApi::advance),
+        "choose_index", script_method(&ScriptDialoguePlayerApi::choose_index),
+        "choose_id", script_method(&ScriptDialoguePlayerApi::choose_id),
+        "skip_line", script_method(&ScriptDialoguePlayerApi::skip_line),
+        "reset", script_method(&ScriptDialoguePlayerApi::reset),
+        "ended", script_property(&ScriptDialoguePlayerApi::ended),
+        "current_node", script_property(&ScriptDialoguePlayerApi::current_node),
+        "view", script_method(&ScriptDialoguePlayerApi::view),
         "consume_events", script_method(&ScriptDialoguePlayerApi::consume_events));
-    scripting_detail::record_lua_type<ScriptEntityApi>(_impl->lua(), "KinEntity");
-    scripting_detail::record_lua_type<ScriptDeferredEntityApi>(_impl->lua(), "KinDeferredEntity");
-    scripting_detail::record_lua_type<ScriptCommandBufferApi>(_impl->lua(), "KinCommandBuffer");
-    scripting_detail::record_lua_type<ScriptSystemContextApi>(_impl->lua(), "KinSystemContext");
-    scripting_detail::record_lua_type<ScriptSceneApi>(_impl->lua(), "KinScene");
-    scripting_detail::record_lua_type<ScriptInputApi>(_impl->lua(), "KinInput");
-    scripting_detail::record_lua_type<ScriptAppApi>(_impl->lua(), "KinApp");
-    scripting_detail::record_lua_type<ScriptContextApi>(_impl->lua(), "KinContext");
-    scripting_detail::record_lua_type<ScriptActionsApi>(_impl->lua(), "KinActions");
-    scripting_detail::record_lua_type<ScriptDialoguePlayerApi>(_impl->lua(), "KinDialoguePlayer");
+    // clang-format on
 }
 
 } // namespace kin

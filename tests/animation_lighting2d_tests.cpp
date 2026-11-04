@@ -62,6 +62,62 @@ void test_lighting() {
     image = shade_normal_sprite2d(material, geometry, colors::black, std::span{&light, 1});
     assert(image.rgba[0] > 100); // shaped lights fill their rotated square, including corners
 }
+// A light that can't be used is skipped, not the sprite: values not finite,
+// no radius; a negative softness is a sharp light, as in light maps. Past
+// max_surface_lights, lights are skipped too. Intensity is capped as there.
+void test_light_values() {
+    const SurfaceMaterial2D material{.albedo = pixel(colors::white), .normal = pixel({128, 128, 255, 255})};
+    const SurfaceGeometry2D geometry{.dest = {9, -.5f, 1, 1}};
+    const f32 nan = std::numeric_limits<f32>::quiet_NaN();
+    const LightOccluder2D wall{.points = {{100, 100}, {101, 100}, {101, 101}, {100, 101}}};
+    const std::vector<SurfaceLight2D> lights{
+        {.position = {nan, 0}},
+        {.height = 1, .radius = 0, .directional = true},
+        {.height = nan, .directional = true},
+        {.height = 1, .directional = true, .direction = {0, 0}, .shadows = true, .shadow_softness = -4}};
+    auto image = shade_normal_sprite2d(material, geometry, colors::black, lights, std::span{&wall, 1});
+    assert(image.valid() && image.rgba[0] > 250);
+    std::vector<SurfaceLight2D> many(max_surface_lights, SurfaceLight2D{.intensity = 0});
+    many.push_back({.height = 1, .directional = true, .direction = {0, 0}});
+    image = shade_normal_sprite2d(material, geometry, colors::black, many);
+    assert(image.valid() && image.rgba[0] == 0); // the last is past the limit
+    const SurfaceMaterial2D dim{.albedo = pixel(Color::rgb(20, 20, 20)), .normal = material.normal};
+    SurfaceLight2D bright{.height = 1, .intensity = 100, .directional = true, .direction = {0, 0}};
+    const auto capped = shade_normal_sprite2d(dim, geometry, colors::black, std::span{&bright, 1});
+    bright.intensity = max_light_intensity;
+    const auto most = shade_normal_sprite2d(dim, geometry, colors::black, std::span{&bright, 1});
+    bright.intensity = 1;
+    const auto once = shade_normal_sprite2d(dim, geometry, colors::black, std::span{&bright, 1});
+    assert(capped.rgba == most.rgba && most.rgba[0] > once.rgba[0]);
+}
+// One SceneLighting rule: the first enabled one is the scene's, lighting the
+// world by a light map or, with forward_sprites, normal-mapped sprites (so
+// never both). The gathered lights are kept while nothing changes.
+void test_forward_lighting_gather() {
+    kin::EcsWorld world;
+    register_builtin_editor_components(world);
+    auto map = world.entities().create();
+    map.set(SceneLighting{.ambient = colors::black});
+    auto forward = world.entities().create();
+    forward.set(SceneLighting{.ambient = Color::rgb(10, 20, 30), .forward_sprites = true});
+    auto sun = world.entities().create();
+    sun.set(DirectionalLight2D{.direction = {0, 0}});
+    auto lighting = gather_normal_sprite_lighting2d(world.raw());
+    assert(scene_lighting(world) == map.get<SceneLighting>());
+    assert(lighting->lights.empty() && lighting->ambient == colors::white); // unlit: the light map lights them
+    map.get_mut<SceneLighting>()->enabled = false;
+    lighting = gather_normal_sprite_lighting2d(world.raw(), lighting);
+    assert(lighting->lights.size() == 1 && lighting->ambient == Color::rgb(10, 20, 30));
+    assert(gather_normal_sprite_lighting2d(world.raw(), lighting) == lighting);
+    sun.get_mut<DirectionalLight2D>()->direction = {1, 0};
+    assert(gather_normal_sprite_lighting2d(world.raw(), lighting) != lighting);
+    // A light with values that can't be used costs only itself.
+    auto torch = world.entities().create();
+    torch.set(Transform2D{});
+    torch.set(LightComponent{.shadows = true, .shadow_softness = -5});
+    lighting = gather_normal_sprite_lighting2d(world.raw(), lighting);
+    assert(lighting->lights.size() == 2 && lighting->lights[0].shadow_softness == 0);
+}
 SkeletonAsset2D rig() {
     SkeletonAsset2D a;
     a.bones = {{"upper", -1, {}, 10}, {"lower", 0, {.position = {10, 0}}, 10}};
@@ -123,9 +179,13 @@ void test_runtime() {
     sun.set(DirectionalLight2D{.direction = {0, 0}});
     auto surface = world.entities().create();
     surface.set(Transform2D{.pos = {4, 4}});
+    // A light that can't be used is skipped (not every sprite).
+    auto broken = world.entities().create();
+    broken.set(Transform2D{.pos = {40, 4}});
+    broken.set(LightComponent{.height = std::numeric_limits<f32>::quiet_NaN(), .mask = 0});
     NormalSpriteRenderer2D normal;
-    normal.material.albedo = pixel({255, 0, 0, 255});
-    normal.material.normal = pixel({128, 128, 255, 255});
+    normal.albedo = pixel({255, 0, 0, 255});
+    normal.normal = pixel({128, 128, 255, 255});
     normal.size = {8, 8};
     normal.pivot = {0, 0};
     surface.set(normal);
@@ -159,13 +219,12 @@ void test_runtime() {
     };
     assert(at(6, 6, 0) > 240 && at(6, 6, 2) == 0);
     assert(at(28, 6, 2) > 240);
-    assert(surface.get<NormalSpriteRenderer2D>()->cache->texture ||
-           surface.get<NormalSpriteRenderer2D>()->cache->gpu.used);
-    if (renderer.capabilities().shader_geometry && renderer.capabilities().data_buffers)
-        assert(surface.get<NormalSpriteRenderer2D>()->cache->gpu.used);
-    const auto previous = surface.get<NormalSpriteRenderer2D>()->cache->texture;
+    const auto& cache = *surface.get<NormalSpriteRenderer2D>()->cache;
+    const bool gpu = normal_lighting2d_gpu_supported(renderer.capabilities());
+    assert(gpu ? cache.gpu.used : cache.shaded.size() == 1 && cache.shaded[0].texture);
+    const Texture previous = gpu ? Texture{} : cache.shaded[0].texture;
     render_world(world, renderer);
-    assert(surface.get<NormalSpriteRenderer2D>()->cache->texture == previous);
+    assert(gpu || cache.shaded[0].texture == previous);
     sun.get_mut<DirectionalLight2D>()->mask = 0;
     renderer.clear(colors::black);
     render_world(world, renderer);
@@ -190,9 +249,61 @@ void test_runtime() {
         assert(std::abs(at(4, 4, 0) - 128) <= 2 && std::abs(at(4, 4, 1) - 64) <= 2 && std::abs(at(4, 4, 2) - 32) <= 2);
     }
 }
+// Prefab instances inherit their prefab's renderers: each is drawn (where
+// it is), and normal-mapped ones keep their shaded images per instance, so
+// they are not shaded again each frame.
+void test_prefab_instances() {
+    App app{{.mode = AppMode::Headless}};
+    auto& window = app.create_window({.width = 48, .height = 32, .hidden = true});
+    Renderer2D renderer{make_render_backend(window, false, false)};
+    kin::EcsWorld world;
+    register_builtin_editor_components(world);
+    world.entities().create().set(SceneLighting{.ambient = colors::black, .forward_sprites = true});
+    world.entities().create().set(DirectionalLight2D{.direction = {0, 0}});
+    NormalSpriteRenderer2D sprite;
+    sprite.albedo = pixel({255, 0, 0, 255});
+    sprite.size = {8, 8};
+    sprite.pivot = {0, 0};
+    flecs::entity tile = world.raw().prefab("Tile");
+    tile.set(sprite);
+    flecs::entity box = world.raw().prefab("Box");
+    box.set(RectRenderer{.size = {8, 8}, .color = Color::rgb(0, 255, 0)});
+    std::vector<flecs::entity> tiles;
+    for (const f32 x : {2.0f, 20.0f}) {
+        tiles.push_back(world.raw().entity().is_a(tile).set(Transform2D{.pos = {x, 2}}));
+        world.raw().entity().is_a(box).set(Transform2D{.pos = {x + 4, 22}});
+    }
+    assert(!tiles[0].owns<NormalSpriteRenderer2D>());
+    std::vector<u8> pixels;
+    Vec2i size;
+    auto at = [&](int x, int y, int channel) {
+        return pixels[(static_cast<std::size_t>(y) * size.x + x) * 4 + channel];
+    };
+    const auto& cache = *tiles[0].get<NormalSpriteRenderer2D>()->cache;
+    std::vector<Texture> first;
+    for (int frame = 0; frame < 3; ++frame) {
+        renderer.clear(colors::black);
+        render_world(world, renderer);
+        assert(renderer.read_rgba({0, 0, 48, 32}, pixels, size));
+        assert(at(4, 4, 0) > 240 && at(22, 4, 0) > 240);   // both tiles
+        assert(at(6, 24, 1) > 240 && at(24, 24, 1) > 240); // both boxes
+        if (normal_lighting2d_gpu_supported(renderer.capabilities())) {
+            assert(cache.gpu.used);
+            continue;
+        }
+        assert(cache.shaded.size() == 2);
+        if (frame == 0) {
+            first = {cache.shaded[0].texture, cache.shaded[1].texture};
+        }
+        assert(cache.shaded[0].texture == first[0] && cache.shaded[1].texture == first[1]);
+    }
+}
 } // namespace
 int main() {
     test_lighting();
+    test_light_values();
+    test_forward_lighting_gather();
     test_skeleton();
     test_runtime();
+    test_prefab_instances();
 }

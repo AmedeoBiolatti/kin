@@ -30,13 +30,19 @@ namespace kin {
 // `shadow_softness` is the light's size, its shadows' edges blurred as by a
 // light that big (four shadows from around it, averaged).
 
+// The most a light's intensity counts for (1 adds its colour in full at its
+// centre). Light maps and normal-mapped sprites (normal_lighting2d.hpp) cap
+// it the same.
+inline constexpr f32 max_light_intensity = 4.0f;
+
 struct Light2D {
     // Centre, in the coordinates apply() is called in (usually logical pixels).
     Vec2f position{};
     // Nothing further than this is lit. The light fades smoothly to zero there.
     f32 radius = 128.0f;
     Color color = colors::white;
-    // Scales the light; 1 adds `color` in full at the centre. Up to 4.
+    // Scales the light; 1 adds `color` in full at the centre. Up to
+    // max_light_intensity.
     f32 intensity = 1.0f;
     // Optional light shape drawn instead of the round falloff, stretched over the
     // light's 2 * radius square: its alpha is how much light reaches each point.
@@ -66,6 +72,17 @@ std::vector<Vec2f> clockwise(std::vector<Vec2f> points);
 // for each edge facing away from it (each edge, for an occluder not `lit`),
 // the quad from it out along the light's rays.
 std::vector<std::array<Vec2f, 4>> shadow_quads(Vec2f light, f32 reach, std::span<const LightOccluder2D> occluders);
+
+// The same for a light infinitely far away (a sun): `toward` is the direction
+// from the scene to it (any length), and each quad reaches `reach` back from
+// its edge. None when `toward` is zero (the light straight above).
+std::vector<std::array<Vec2f, 4>> directional_shadow_quads(Vec2f toward, f32 reach,
+                                                           std::span<const LightOccluder2D> occluders);
+
+// Where a light casts its shadows from, as offsets from its centre in units of
+// its `shadow_softness`: its centre alone when that is 0 or less (sharp
+// shadows), else four points around it, each casting a quarter of them.
+std::span<const Vec2f> shadow_sample_offsets(f32 softness);
 
 class LightLayer {
 public:

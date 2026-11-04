@@ -17,8 +17,8 @@ Assets2D binds the rig/atlas. Each renderer owns its pose; inherited prefab
 components acquire their own copy before updating. Render collectors submit the
 deformed mesh dynamically with hierarchy transforms, sorting, culling and clip
 groups. Renderer2D::draw_textured_geometry draws indexed meshes with normalized
-UVs on SDL, SDL_GPU and WebGL2. Check capabilities().textured_geometry on custom
-backends; the compact backend does not implement it.
+UVs on SDL, SDL_GPU and WebGL2; it returns false where a backend can't (the
+compact backend).
 
 Animators support clip selection, speed, pause, loop/once, time seeking and a
 finished flag. Changing animation resets time. Keys interpolate local position
@@ -77,8 +77,11 @@ UVs, and texture_asset relative to the content root:
 At most 256 bones, 65536 vertices and four nonnegative influences per vertex.
 Parents precede children (-1 is a root). Skin vertices are rest positions in
 skeleton space; the loader normalizes weights and validates indices, key ordering,
-unique names and nonsingular bind transforms. C++ assets should pass
-validate_skeleton2d and remain immutable while poses refer to them. Keys contain
+unique names and nonsingular bind transforms, and works out each bone's inverse
+bind transform once. Rigs built in C++ should go through prepare_skeleton2d
+(which validates them and does the same; their poses otherwise work the bind
+transforms out on every evaluate) and remain immutable while poses refer to them.
+Sampling and blending trust a validated rig: they don't validate it again. Keys contain
 absolute local transforms; omitted fields use the bone's rest transform. One rig
 uses one atlas. External Spine/DragonBones import and editor rigging are not included.
 
@@ -93,6 +96,8 @@ Set `SkeletonAnimator2D::fade_seconds` to crossfade when `animation` or
 the displayed base pose, so interrupting a fade starts from the current result.
 Pausing the animator also pauses its fade. The cached base excludes layers and
 IK; those are applied once after blending. A rig replacement resets this state.
+update_skeletons2d samples, crossfades and layers local transforms only and
+evaluates each pose once, before IK (which evaluates its chain again).
 
 `SkeletonLayer2D` applies one additional clip before IK. `bone` selects a named
 bone; `include_children` includes its subtree. An empty bone selects the whole

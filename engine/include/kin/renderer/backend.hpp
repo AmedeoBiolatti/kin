@@ -88,7 +88,6 @@ struct RendererBackendCapabilities {
     bool blend_modes = false;
     bool min_max_blend = false;    // BlendMode::Max and Min honoured
     bool shader_geometry = false;  // draw_shader_geometry() draws
-    bool textured_geometry = false; // arbitrary textured 2D triangles
     bool data_buffers = false;     // create_data_buffer() and shaders reading them
     bool compute = false;          // compute shaders (Renderer2D::dispatch_compute)
     bool transforms = false;       // set_transform() honoured (Renderer2D::push_transform)
@@ -460,6 +459,8 @@ public:
     // (before viewports and clips, which it leaves alone). A backend that
     // reports capabilities().transforms honours it.
     virtual void set_transform(const Affine2&) {}
+    // Indexed textured triangles (Renderer2D::draw_textured_geometry, which
+    // checks them first); false where the backend can't.
     virtual bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) {
         return false;
     }

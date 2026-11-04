@@ -13,6 +13,17 @@ struct EntityLifetime {
     u64 generation = 0;
 };
 
+// The entity's incarnation (0 for one that is never recycled).
+inline u64 entity_lifetime(EcsEntity entity) {
+    const EntityLifetime* lifetime = entity.get<EntityLifetime>();
+    return lifetime ? lifetime->generation : 0;
+}
+
+// Whether `entity` is alive and still the incarnation a reference captured.
+inline bool same_lifetime(EcsEntity entity, u64 generation) {
+    return entity && entity_lifetime(entity) == generation;
+}
+
 struct SceneEntity {
 };
 

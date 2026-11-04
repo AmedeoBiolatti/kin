@@ -15,9 +15,22 @@ import re
 import subprocess
 import sys
 
-# Parameter/return documentation supplements the live binding inventory. Entries
-# are checked against that inventory; unavailable optional APIs are omitted.
+# Parameter/return documentation supplements the live binding inventory
+# (`kin_lua api`: members, which are properties, component aliases and shapes,
+# callbacks). lua_tooling_tests checks both ways that every binding has an entry
+# and every entry a binding. A property's entry is "-> its type". "_G" holds the
+# global functions a host adds (test, scenario).
 SIGNATURES = {
+    "_G": {
+        "test": "name:string,fn:KinTestBody",
+        "scenario": "case:table",
+        "call": "method:string,params?:table -> table",
+        "expect": "condition:table -> table",
+        "wait_until": "condition:table -> table",
+        "always": "condition:table -> table",
+        "tick": "count:integer -> table",
+        "capture": "name:string -> table",
+    },
     "t": {
         "spawn": "name:string,components?:table -> integer",
         "get": "id:integer,component:string -> table|nil",
@@ -102,6 +115,13 @@ SIGNATURES = {
         "trigger": "name:string",
         "state": "-> string",
         "emit": "effect?:string -> boolean",
+        "tween": "property:string,destination:any,seconds:number,easing?:string|table,options?:table -> integer",
+        "tweening": "property?:string -> boolean",
+        "stop_tween": "id:integer -> boolean",
+        "stop_tweens": "property?:string -> integer",
+        "after": "seconds:number,fn:KinSelfCallback -> KinTask",
+        "every": "seconds:number,fn:KinSelfCallback -> KinTask",
+        "cancel": "timer:KinTask -> boolean",
     },
     "KinScene": {
         "entity": "name?:string -> KinEntity",
@@ -129,6 +149,17 @@ SIGNATURES = {
         "reset": "",
         "view": "-> table",
         "consume_events": "-> table[]",
+        "ended": "-> boolean",
+        "current_node": "-> string",
+    },
+    "KinContext": {"dt": "-> number", "input": "-> KinInput", "app": "-> KinApp"},
+    "KinDeferredEntity": {"index": "-> integer"},
+    "KinSystemContext": {
+        "dt": "-> number",
+        "system_id": "-> string",
+        "phase": "-> string",
+        "running_parallel": "-> boolean",
+        "commands": "-> KinCommandBuffer",
     },
     "KinActions": {"add": "action:string,label?:string"},
     "KinCommandBuffer": {
@@ -137,16 +168,10 @@ SIGNATURES = {
         "add": "entity:KinEntity|KinDeferredEntity|integer,component:string -> KinCommandBuffer",
         "remove": "entity:KinEntity|KinDeferredEntity|integer,component:string",
         "patch": "entity:KinEntity|KinDeferredEntity|integer,component:string,fields:table",
-        "flush": "",
-        "clear": "",
+        "size": "-> integer",
+        "valid": "-> boolean",
     },
-    "KinTween2D": {
-        "to": "property:string,destination:any,seconds:number,easing?:string -> KinTween2D",
-        "wait": "seconds:number -> KinTween2D",
-        "parallel": "-> KinTween2D",
-        **{name: "" for name in ("pause", "resume", "cancel", "restart")},
-        **{name: "-> boolean" for name in ("paused", "finished", "cancelled")},
-    },
+    "KinTween2D": {"state": "-> string", "error": "-> string", "cancel": "-> boolean"},
     "KinPrefabLease2D": {
         "alive": "-> boolean",
         "release": "-> boolean",
@@ -160,7 +185,8 @@ SIGNATURES = {
         "commit": "-> boolean",
     },
     "tweens": {
-        "to": "entity:string|userdata|table,property:string,destination:any,seconds:number,easing?:string -> KinTween2D"
+        "to": "entity:string|userdata|table,property:string,destination:any,seconds:number,easing?:string|table,options?:table -> KinTween2D",
+        "of": "entity:string|userdata|table,id:integer -> KinTween2D",
     },
     "input": {
         **{
@@ -270,19 +296,6 @@ SIGNATURES = {
         "tr": "key:string,values?:table -> string",
     },
 }
-PROPERTIES = {
-    "KinDialoguePlayer": {"ended": "boolean", "current_node": "string"},
-    "KinContext": {"dt": "number", "input": "KinInput", "app": "KinApp"},
-    "KinDeferredEntity": {"index": "integer"},
-    "KinSystemContext": {
-        "dt": "number",
-        "system_id": "string",
-        "phase": "string",
-        "running_parallel": "boolean",
-        "commands": "KinCommandBuffer",
-    },
-    "KinCommandBuffer": {"size": "integer", "valid": "boolean"},
-}
 FIELD_TYPES = {
     "bool": "boolean",
     "string": "string",
@@ -295,7 +308,15 @@ FIELD_TYPES = {
     "vec3f": "table",
     "quatf": "table",
 }
-CALLABLE_TYPES = {"KinTaskBody", "KinPredicate", "KinSystemCallback"}
+CALLABLE_TYPES = {"KinTaskBody", "KinPredicate", "KinSystemCallback", "KinSelfCallback", "KinTestBody"}
+
+
+def properties(api, table):
+    """The members of `table` read as fields, with their types."""
+    return {
+        member: signature(table, member)[1]
+        for member in api.get("properties", {}).get(table, ())
+    }
 
 
 def signature(table, member):
@@ -326,33 +347,24 @@ def schema(native, host, components=()):
 
 
 def get_fields(api, name):
-    if api["host"] == "scene":
-        legacy = {
-            "Transform2D": ("x", "y"),
-            "RectRenderer": ("w", "h", "r", "g", "b", "layer", "order", "visible"),
-            "LineRenderer": (
-                "ax",
-                "ay",
-                "bx",
-                "by",
-                "r",
-                "g",
-                "b",
-                "layer",
-                "order",
-                "visible",
-            ),
+    """The fields get() returns: the host's own shape of a component, else its schema's."""
+    shape = api.get("component_shapes", {}).get(name)
+    if shape is not None:
+        return {
+            field: {"kind": kind, "readonly": False, "description": ""}
+            for field, kind in shape.items()
         }
-        if name in legacy:
-            return {
-                field: {
-                    "kind": "bool" if field == "visible" else "f32",
-                    "readonly": False,
-                    "description": "",
-                }
-                for field in legacy[name]
-            }
     return api["components"][name]
+
+
+def canonical_component(api, name):
+    """A component's own name for one of the host's short names ("transform")."""
+    return api.get("component_aliases", {}).get(name, name)
+
+
+def is_tag(api, name):
+    """Whether get() of the component reads true or nil (a shape without fields)."""
+    return api.get("component_shapes", {}).get(name) == {}
 
 
 def generate(api):
@@ -371,7 +383,12 @@ def generate(api):
     ]
     names = list(api["components"])
     lines.extend(
-        ["---@alias KinTaskBody fun()", "---@alias KinPredicate fun(): boolean"]
+        [
+            "---@alias KinTaskBody fun()",
+            "---@alias KinTestBody fun()",
+            "---@alias KinPredicate fun(): boolean",
+            "---@alias KinSelfCallback fun(self: Entity)",
+        ]
     )
     if "KinSystemContext" in api["tables"]:
         lines.append(
@@ -381,13 +398,13 @@ def generate(api):
         lines.append("---@alias Entity KinEntity")
     elif api["host"] == "entity":
         lines.append("---@alias KinEntity Entity")
-    if api["host"] == "test":
-        lines.extend(
-            [
-                "---@param name string",
-                "---@param fn fun()",
-                "function test(name, fn) end",
-            ]
+    for function in api.get("functions", ()):
+        params, returns = signature("_G", function)
+        lines.extend(f"---@param {name} {typ}" for name, typ in params)
+        if returns:
+            lines.append("---@return " + returns)
+        lines.append(
+            f"function {function}({', '.join(name.rstrip('?') for name, _ in params)}) end"
         )
     lines.append("---@alias KinComponentName " + "|".join(repr(name) for name in names))
     for name, fields in api["components"].items():
@@ -410,10 +427,9 @@ def generate(api):
     for table, members in api["tables"].items():
         cls = table if table[0].isupper() else "KinAPI_" + table
         lines.append(f"---@class {cls}")
+        fields = properties(api, table)
         lines.extend(
-            f"---@field {member} {typ}"
-            for member, typ in PROPERTIES.get(table, {}).items()
-            if member in members
+            f"---@field {member} {typ}" for member, typ in fields.items() if member in members
         )
         lines.append(
             f"local {table} = {{}}"
@@ -421,23 +437,16 @@ def generate(api):
             else f"{table} = {{}}"
         )
         for member in members:
-            prop = PROPERTIES.get(table, {}).get(member)
-            if prop:
+            if member in fields:
                 continue
             params, returns = signature(table, member)
             if table == "KinEntity" and member == "get":
-                for alias, canonical in {
-                    "transform": "Transform2D",
-                    "rect": "RectRenderer",
-                    "line": "LineRenderer",
-                }.items():
-                    lines.append(
-                        f"---@overload fun(self: KinEntity, component: '{alias}'): KinGet_{canonical}?"
-                    )
-                for alias in ("script_owned", "ScriptOwned"):
-                    lines.append(
-                        f"---@overload fun(self: KinEntity, component: '{alias}'): boolean|nil"
-                    )
+                for alias, canonical in api.get("component_aliases", {}).items():
+                    for name in {alias, canonical}:
+                        result = "boolean|nil" if is_tag(api, canonical) else f"KinGet_{canonical}?"
+                        lines.append(
+                            f"---@overload fun(self: KinEntity, component: '{name}'): {result}"
+                        )
             if table in ("Entity", "KinEntity") and member in (
                 "get",
                 "component",
@@ -666,8 +675,8 @@ def check_source(source, api):
             if member.value not in tables[typ]:
                 report(member, f"unknown {typ} member '{member.value}'")
                 return None, i
-            if member.value in PROPERTIES.get(typ, {}):
-                typ = PROPERTIES[typ][member.value]
+            if member.value in api.get("properties", {}).get(typ, ()):
+                typ = signature(typ, member.value)[1]
                 continue
             if i >= len(ts) or ts[i].value != "(":
                 return None, i
@@ -728,14 +737,10 @@ def check_source(source, api):
                 if len(name_arg) == 1 and name_arg[0].kind == "string":
                     name = name_arg[0].value
                     if typ == "KinEntity" and member.value in ("get", "has", "remove"):
-                        if name in ("script_owned", "ScriptOwned"):
+                        name = canonical_component(api, name)
+                        if is_tag(api, name):
                             typ, i = "boolean", end
                             continue
-                        name = {
-                            "transform": "Transform2D",
-                            "rect": "RectRenderer",
-                            "line": "LineRenderer",
-                        }.get(name, name)
                     if name not in components:
                         report(name_arg[0], f"unknown component '{name}'")
                     elif member.value in ("get", "component"):
@@ -806,31 +811,11 @@ def check_source(source, api):
                 for arg in args:
                     if arg:
                         symbols[arg[0].value] = None
-                callback = {
-                    "on_load": "KinScene",
-                    "on_reload": None,
-                    "on_enter": "KinContext",
-                    "on_exit": "KinContext",
-                    "update": "KinContext",
-                }
-                if api["host"] == "entity":
-                    callback = {
-                        name: "Entity"
-                        for name in (
-                            "on_start",
-                            "on_update",
-                            "on_contact",
-                            "on_contact_end",
-                            "on_stop",
-                            "on_reload",
-                            "on_load",
-                            "on_dialogue_event",
-                        )
-                    }
-                if args and args[0] and callback.get(name):
-                    symbols[args[0][0].value] = callback[name]
-                if api["host"] == "scene" and name == "on_reload" and len(args) > 1:
-                    symbols[args[1][0].value] = "KinScene"
+                # A host callback's parameters have the types the host passes.
+                passed = api.get("callbacks", {}).get(name, ())
+                for arg, typ in zip(args, passed):
+                    if arg and typ in tables:
+                        symbols[arg[0].value] = typ
         elif value in ("if", "for", "while", "repeat"):
             scopes.append((value, symbols.copy()))
             if value in ("for", "while"):
@@ -862,7 +847,9 @@ def main():
     parser.add_argument(
         "--native", type=Path, required=True, help="built kin_lua executable"
     )
-    parser.add_argument("--host", choices=("scene", "entity", "test"), default="scene")
+    parser.add_argument(
+        "--host", choices=("scene", "entity", "test", "scenario"), default="scene"
+    )
     parser.add_argument(
         "--components",
         type=Path,

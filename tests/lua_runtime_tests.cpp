@@ -9,6 +9,7 @@
 #include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>
 #include <kin/scripting/script_engine.hpp>
+#include <kin/scripting/script_reload.hpp>
 #include <kin/scripting/workflows2d.hpp>
 namespace {
 namespace fs = std::filesystem;
@@ -17,7 +18,7 @@ void write(const fs::path& path, const std::string& code) {
     std::ofstream(path) << code;
 }
 void limits_and_profiles() {
-    kin::LuaScript script{{.instruction_limit = 10000, .on_error = [](std::string_view) {}}};
+    kin::LuaScript script{{.limits = {.instruction_limit = 10000}, .on_error = [](std::string_view) {}}};
     assert(script.load_string(R"lua(
         function loop() while true do pcall(function() while true do end end) end end
         function memory() return string.rep('x',1024*1024) end
@@ -44,7 +45,7 @@ void limits_and_profiles() {
     script.runtime().collect(script.lua().lua_state(), 1024);
     script.runtime().collect(script.lua().lua_state(), 1024);
     assert(script.call_for<double>("ok") == 1.25);
-    kin::LuaScript tiny{{.memory_limit_bytes = 128 * 1024, .on_error = [](std::string_view) {}}};
+    kin::LuaScript tiny{{.limits = {.memory_limit_bytes = 128 * 1024}, .on_error = [](std::string_view) {}}};
     assert(!tiny.load_string("local value=string.rep('x',1024*1024)"));
     tiny.runtime().set_limits({5000, 256 * 1024});
     assert(tiny.load_string("function ok() return true end"));
@@ -52,7 +53,7 @@ void limits_and_profiles() {
            tiny.runtime().limits().memory_limit_bytes == 256 * 1024);
 }
 void tasks() {
-    kin::LuaScript script{{.instruction_limit = 10000, .on_error = [](std::string_view) {}}};
+    kin::LuaScript script{{.limits = {.instruction_limit = 10000}, .on_error = [](std::string_view) {}}};
     assert(script.load_string(R"lua(
         stage=0
         handle=task.run(function()
@@ -85,11 +86,11 @@ void tasks() {
     assert(script.call("open"));
     assert(script.advance_tasks(0.1f));
     assert(script.call_for<int>("probe") == 4 && script.call_for<std::string>("state") == "completed");
-    script.set_task_owner("hero:1");
+    script.set_task_owner(7);
     assert(script.call("spawn_owned"));
-    assert(script.advance_tasks(0.1f, [](std::string_view) { return false; }));
+    assert(script.advance_tasks(0.1f, [](kin::u64 owner) { return owner != 7; }));
     assert(script.call_for<std::string>("owned_state") == "cancelled");
-    script.set_task_owner("");
+    script.set_task_owner(0);
     assert(script.call("bad"));
     assert(!script.advance_tasks(0.1f));
     assert(script.call_for<std::string>("bad_state") == "failed");
@@ -178,9 +179,19 @@ void entity_reload(const fs::path& root) {
             assert(self.job:state()=='cancelled')
             self.count=self.count+10
         end
+        function on_update(self,dt)
+            -- A reloaded state's services are the plain tables a fresh one has.
+            local fields=0
+            for _ in pairs(world) do fields=fields+1 end
+            assert(fields>0 and getmetatable(world)==nil, 'world is not a plain table after reload')
+            world.custom=true
+            self.count=self.count+1
+            self:set_position(self.count,self.fraction)
+        end
     )lua");
     assert(scripts.reload("entity.lua"));
     scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
     assert(a.get<kin::Transform2D>()->pos.x == 12 && b.get<kin::Transform2D>()->pos.x == 12);
     write(root / "entity.lua",
           initial + "function on_reload(self) self.count=500; if self.which=='B' then error('reject') end end");
@@ -201,6 +212,58 @@ void entity_reload(const fs::path& root) {
     scripts.restart();
     assert(audit.get<kin::Transform2D>()->pos.x == 2);
 }
+// A reload drops the old VM's timers and tween callbacks: none runs (into a
+// closed state) afterwards, while the tween itself, the entity's, goes on.
+void entity_reload_drops_callbacks(const fs::path& root) {
+    const std::string initial = R"lua(
+        function on_start(self)
+            self:every(0.1, function(self) world.find('Audit'):move(1,0) end)
+            self:tween('Transform2D.pos',{x=50,y=0},0.3,{done=function(self) world.find('Audit'):move(100,0) end})
+        end
+    )lua";
+    write(root / "callbacks.lua", initial);
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    auto audit = world.entity("Audit").set(kin::Transform2D{});
+    auto mover =
+        world.entity("Mover").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "callbacks.lua"}});
+    kin::Input input;
+    kin::EntityScripts scripts{{.content = root, .check_frames = 0}};
+    scripts.update(world, input, 0.1f); // on_start
+    scripts.update(world, input, 0.1f); // the first tick
+    assert(audit.get<kin::Transform2D>()->pos.x == 1);
+    write(root / "callbacks.lua", initial + "function on_reload(self) end");
+    assert(scripts.reload("callbacks.lua"));
+    for (int step = 0; step < 6; ++step) {
+        scripts.update(world, input, 0.1f);
+    }
+    assert(scripts.problems().empty());
+    assert(audit.get<kin::Transform2D>()->pos.x == 1);
+    assert(std::abs(mover.get<kin::Transform2D>()->pos.x - 50) < 0.001f);
+}
+
+// A reload rolled back after the old script's systems were taken leaves the
+// old script halted (its calls fail, saying why), not the process ended.
+void rollback_halts(const fs::path& root) {
+    write(root / "systems.lua", R"lua(
+        function on_load(scene) scene:register_system('mover',{all={'Transform2D'}},function() end) end
+        function on_reload(saved,scene) scene:register_system('other',{all={'Transform2D'}},function() end) end
+    )lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    world.entity().set(kin::Transform2D{});
+    auto active = std::make_unique<kin::ScriptEngine>();
+    assert(active->load_file(root, "systems.lua"));
+    assert(active->call_on_load(kin::ScriptSceneBindings{.world = &world}));
+    std::string error;
+    auto next = active->prepare_reload(root, "systems.lua", error);
+    assert(next && kin::activate_script(active, next, error));
+    assert(!world.systems().register_task({.id = "mover"}, [](kin::SystemContext&) {}).empty());
+    kin::rollback_script(active, next, true);
+    assert(!active->call_update(kin::ScriptFrameContext{0.1f}));
+    assert(active->last_error().find("rollback") != std::string::npos);
+    assert(!active->activate_systems());
+}
 } // namespace
 int main() {
     const auto root = fs::temp_directory_path() / "kin-lua-runtime-tests";
@@ -211,5 +274,7 @@ int main() {
     scene_limits(root);
     scene_await(root);
     entity_reload(root);
+    entity_reload_drops_callbacks(root);
+    rollback_halts(root);
     fs::remove_all(root);
 }

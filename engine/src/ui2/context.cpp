@@ -339,10 +339,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
                  input.mouse_frame_pressed(MouseButton::Middle);
     begin_navigation();
-    _elements.clear();
-    _element_indices.clear();
-    _semantic_keys.clear();
-    _semantic_labels.clear();
+    begin_semantics();
     // State not asked for all last frame belonged to something no longer built.
     if (!_states.empty()) {
         const u64 frame = _state.frame();
@@ -481,6 +478,9 @@ void Context::end() {
     }
     finish_semantics();
     finish_focus();
+    for (SemanticElement& e : _elements) {
+        e.focused = _state.is_focused(e.id); // as focus moves settled
+    }
     _semantic_action.reset(); // a removed/disabled target never fires on a later frame
     // Frame invariant: every push must have a matching pop by end(). A leftover entry means a
     // forgotten pop_clip()/pop_draw_scope(), which silently mis-clips everything drawn after it.
@@ -584,25 +584,32 @@ void Context::report_overflow(std::string_view widget, Rectf bounds, Vec2f wante
 
 Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
     Interaction out;
-    if (id && !element(id)) describe(id, "region", {}, bounds);
+    if (id && !element(id)) {
+        describe(id, "region", {}, bounds);
+    }
     check_region_id(id);
     if (!_input) {
         return out;
     }
-    if (const auto* e = element(id); e && e->blocked) return out;
-    const bool pointer_allowed = !_modal_blocking ||
-        contains(!_modal_stack.empty() ? _modal_stack.back() : _modal_bounds, screen_pointer());
+    const SemanticElement* semantic = element(id);
+    if (semantic && semantic->blocked) {
+        return out;
+    }
+    const bool pointer_allowed =
+        !_modal_blocking || contains(!_modal_stack.empty() ? _modal_stack.back() : _modal_bounds, screen_pointer());
 
     z += _region_z_base;
     const Vec2f p = pointer();
     // Not where the clips it draws under hide it (a field scrolled out of its panel).
-    if (pointer_allowed && contains(bounds, p) && (_clip_stack.empty() || contains(_clip_stack.back(), screen_pointer()))) {
+    if (pointer_allowed && contains(bounds, p) &&
+        (_clip_stack.empty() || contains(_clip_stack.back(), screen_pointer()))) {
         _state.register_hit(id, z);
     }
 
     out.hot = pointer_allowed && _state.is_hot(id);
     out.focused = _state.is_focused(id);
     out.quiet_focus = out.focused && !_state.focus_visible();
+
     const bool press = pointer_pressed(button);
     const bool release = pointer_released(button);
 
@@ -625,8 +632,7 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
         _state.clear_active();
     }
     if (_semantic_action && _semantic_action->id == id && _semantic_action->action == SemanticAction::Click) {
-        const auto* e = element(id);
-        if (e && e->enabled && e->visible && !e->blocked) {
+        if (semantic && semantic->available()) {
             out.clicked = out.pressed = out.released = true;
             _state.set_focused(id);
             out.focused = true;
@@ -1069,14 +1075,18 @@ bool Context::key_typed(Key key) const {
 }
 
 bool Context::action_pressed(std::string_view action) const {
-    if (_input && _input->frame_pressed(action)) return true;
-    if (action == "menu_up") return controller_key(Key::Up);
-    if (action == "menu_down") return controller_key(Key::Down);
-    if (action == "menu_left") return controller_key(Key::Left);
-    if (action == "menu_right") return controller_key(Key::Right);
-    if (action == "accept" || action == "menu_accept") return controller_key(Key::Enter);
-    if (action == "quit" || action == "cancel") return controller_key(Key::Escape);
-    return false;
+    if (_input && _input->frame_pressed(action)) {
+        return true;
+    }
+    // A controller drives the menu actions ui2's widgets read.
+    const Key key = action == "menu_up"      ? Key::Up
+                    : action == "menu_down"  ? Key::Down
+                    : action == "menu_left"  ? Key::Left
+                    : action == "menu_right" ? Key::Right
+                    : action == "accept"     ? Key::Enter
+                    : action == "quit"       ? Key::Escape
+                                             : Key::Unknown;
+    return key != Key::Unknown && controller_key(key);
 }
 
 bool Context::modifier_held(KeyModifiers modifiers) const {

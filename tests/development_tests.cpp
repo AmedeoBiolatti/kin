@@ -243,6 +243,9 @@ void prefabs() {
     player.get_mut<Stats>()->runtime.push_back(9);
     auto content = MemoryContent::create({{"scene.kinscene", scene}, {"unit.kinprefab", after}});
     std::string error;
+    // Loads keep no authored copy unless asked: a patch needs one.
+    assert(!runtime.tracks_authored() && !runtime.prepare_patch(world, content->root(), error));
+    assert(runtime.track_authored(world.components()) && runtime.tracks_authored());
     auto plan = runtime.prepare_patch(world, content->root(), error);
     if (!plan)
         std::fprintf(stderr, "prefab: %s\n", error.c_str());
@@ -356,12 +359,18 @@ void disk_watch() {
                                                                      },
                                                                      [] {}});
     });
-    scratch.write("value.txt", "new");
+    // The watcher compares sizes and times, as FileWatcher does.
+    scratch.write("value.txt", "newer");
     session.advance(1, true);
-    assert(applied == 0);
+    assert(applied == 0); // seen once: it may still be being written
     std::this_thread::sleep_for(std::chrono::milliseconds(160));
     session.advance(2, true);
     assert(applied == 1 && session.generation() == 1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(160));
+    session.advance(3, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(160));
+    session.advance(4, true);
+    assert(applied == 1); // an unchanged folder does not reload again
 }
 } // namespace
 int main() {

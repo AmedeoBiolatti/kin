@@ -80,15 +80,84 @@ std::unique_ptr<Assets2D> EcsScene::exchange_assets(std::unique_ptr<Assets2D> as
     adopt_assets(std::move(assets));
     return old;
 }
+
 void EcsScene::adopt_assets(std::unique_ptr<Assets2D> assets) {
     if (assets) {
-        for (const auto& [name, binder] : _asset_binders)
+        for (const auto& [name, binder] : _asset_binders) {
             assets->add_binder(name, binder);
+        }
         _render_config.asset_root = assets->root();
     }
     _assets = std::move(assets);
     _asset_frames = 0;
     mark_render_cache_dirty("preloaded assets");
+}
+
+std::unique_ptr<DevelopmentChange> EcsScene::prepare_asset_reload(const DevelopmentRevision& revision,
+                                                                  const ScenePatchPreparer& prepare_scene,
+                                                                  std::function<void()> on_finalize,
+                                                                  std::string& error) {
+    if (!_assets) {
+        error = "the scene has no assets to reload";
+        return {};
+    }
+    std::unique_ptr<Assets2D> candidate;
+    const AssetPreviewCheck check = [&](EcsWorld& preview, std::string& failure) {
+        candidate = prepare_reload_assets(*_assets, revision, preview, failure);
+        return candidate != nullptr;
+    };
+    std::shared_ptr<DevelopmentChange> patch;
+    if (prepare_scene) {
+        patch = prepare_scene(check, error);
+        if (!patch) {
+            return {};
+        }
+    } else {
+        EcsWorld preview;
+        ecs().components().copy_schema_to(preview.components());
+        if (!instantiate_scene(preview, scene_document_from_world(ecs()), error) || !check(preview, error)) {
+            return {};
+        }
+    }
+    if (!candidate) {
+        error = "the scene patch did not check the reloaded assets";
+        return {};
+    }
+    struct Swap {
+        std::unique_ptr<Assets2D> next;
+        std::unique_ptr<Assets2D> previous;
+    };
+    auto swap = std::make_shared<Swap>(Swap{.next = std::move(candidate), .previous = {}});
+    return std::make_unique<DevelopmentChange>(DevelopmentChange{
+        .activate =
+            [this, swap, patch](std::string& failure) {
+                if (patch && !patch->activate(failure)) {
+                    return false;
+                }
+                swap->previous = exchange_assets(std::move(swap->next));
+                _assets->bind(ecs());
+                return true;
+            },
+        .rollback =
+            [this, swap, patch] {
+                if (swap->previous) {
+                    swap->next = exchange_assets(std::move(swap->previous));
+                }
+                if (patch) {
+                    patch->rollback();
+                }
+            },
+        .finalize =
+            [this, patch, on_finalize = std::move(on_finalize)] {
+                if (patch && patch->finalize) {
+                    patch->finalize();
+                }
+                if (on_finalize) {
+                    on_finalize();
+                }
+                mark_render_cache_dirty("development reload");
+            },
+    });
 }
 
 void EcsScene::bind_assets(SceneContext& ctx) {
@@ -339,6 +408,17 @@ void EcsScene::render(SceneContext& ctx) {
         debug->render_stats = frame_stats;
     }
 
+}
+
+std::unique_ptr<Assets2D> prepare_reload_assets(const Assets2D& current, const DevelopmentRevision& revision,
+                                                EcsWorld& preview, std::string& error) {
+    auto candidate = current.for_snapshot(revision.content);
+    candidate->bind(preview);
+    if (auto problem = candidate->first_problem()) {
+        error = std::move(*problem);
+        return {};
+    }
+    return candidate;
 }
 
 } // namespace kin

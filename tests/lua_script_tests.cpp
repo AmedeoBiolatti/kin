@@ -100,7 +100,7 @@ void test_print_goes_to_the_log(const std::vector<kin::LogEvent>& events) {
 }
 
 void test_instruction_limit_stops_runaway_scripts() {
-    kin::LuaScript script{{.instruction_limit = 100'000}};
+    kin::LuaScript script{{.limits = {.instruction_limit = 100'000}}};
     assert(script.load_string("function spin() while true do end end\nfunction one() return 1 end"));
     assert(!script.call("spin"));
     assert(contains(script.error(), "instruction limit"));
@@ -298,7 +298,7 @@ void test_debugger_stops_and_steps(const fs::path& dir) {
 
     // The instruction budget still stops a loop while lines are watched.
     set_breakpoints({100});
-    kin::LuaScript runaway{{.instruction_limit = 10'000}};
+    kin::LuaScript runaway{{.limits = {.instruction_limit = 10'000}}};
     assert(runaway.load_string("function spin() while true do end end"));
     assert(!runaway.call("spin") && contains(runaway.error(), "instruction limit"));
 

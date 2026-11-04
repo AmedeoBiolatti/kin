@@ -10,6 +10,7 @@
 //     move = {pad.left_x, pad.left_y};             // -1 to 1, y up is positive (forward)
 
 #include <kin/core/types.hpp>
+
 #include <memory>
 #include <span>
 #include <string>
@@ -87,12 +88,20 @@ private:
         GamepadState state;
         bool joined = false;
     };
+    // What the last update() saw of a device: whether it held Start.
+    struct Seen {
+        u32 id = 0;
+        bool start = false;
+    };
     std::vector<Player> _players;
     std::vector<GamepadDevice> _devices;
+    std::vector<Seen> _previous;        // the update before
+    std::vector<u32> _reserved, _owned; // update()'s scratch
 };
 
-// Reads the first connected controller. Starts SDL's gamepad subsystem when made and stops it when destroyed; where there is
-// none (or the subsystem cannot start) poll() reports `connected == false` and nothing else.
+// Reads the connected controllers: player 1's, else the first, as poll()'s state. Starts SDL's gamepad subsystem when
+// made and stops it when destroyed; where there is none (or the subsystem cannot start) poll() reports `connected ==
+// false`.
 class Gamepads {
 public:
     Gamepads();
@@ -100,12 +109,16 @@ public:
     Gamepads(const Gamepads&) = delete;
     Gamepads& operator=(const Gamepads&) = delete;
 
-    // The state now. Call it once a frame or a fixed step; it looks for a controller about once a second while there is none.
+    // The state now. Call it once a frame or a fixed step; it looks for newly connected controllers about once a second
+    // (every 60 polls), and lets go of disconnected ones at once.
     const GamepadState& poll();
     // The device's name ("" with none).
     const char* name() const;
     std::span<const GamepadDevice> devices() const;
     GamepadPlayers& players();
+    // Whether a fresh Start press joins its controller to the first free player slot (on by default); off, only
+    // players().join() assigns them.
+    void set_join_on_start(bool join);
     // Starts both motors for duration_ms; zero duration stops. False when the
     // device is disconnected, lacks rumble, or the strengths are non-finite.
     bool rumble(u32 device, f32 low, f32 high, u32 duration_ms);

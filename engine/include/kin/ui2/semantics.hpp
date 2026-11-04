@@ -1,10 +1,14 @@
 #pragma once
 
 #include <kin/ui2/state.hpp>
+
 #include <optional>
 #include <string>
+#include <string_view>
 
-namespace kin { class JsonWriter; }
+namespace kin {
+class JsonWriter;
+}
 namespace kin::ui2 {
 
 struct SemanticElement {
@@ -20,12 +24,20 @@ struct SemanticElement {
     bool visible = true;
     bool blocked = false; // outside the active modal or focus trap
     bool focusable = false;
-    bool focused = false;
+    bool focused = false; // as Context::end() left it
     bool checked = false;
     std::optional<f64> numeric_value, numeric_min, numeric_max, numeric_step;
+
+    // Whether it can take an action now: enabled, visible and not blocked.
+    bool available() const { return enabled && visible && !blocked; }
 };
 
 enum class SemanticAction { Click, Focus, SetText, Increment, Decrement, SetNumber };
+
+// Whether a role has `action`: every role clicks and focuses; set_text needs a
+// text input ("text_input", "text_edit"), increment/decrement/set_number a
+// slider or number input ("slider", "spinbutton").
+bool semantic_role_accepts(std::string_view role, SemanticAction action);
 
 struct ControllerNavigation {
     bool enabled = true;

@@ -1,18 +1,19 @@
 #pragma once
 
-#include <cstdint>
-#include <filesystem>
-#include <functional>
 #include <kin/assets/asset_handle.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/platform/log.hpp>
-#include <limits>
+
+#include <cstdint>
+#include <filesystem>
+#include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <typeindex>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -45,16 +46,16 @@ enum class AssetType {
     TileMap,
     Dialogue,
     Prefab,
-    Scene,      // .kinscene
-    Audio,      // a sound: .wav, .ogg, .mp3, .flac
-    Font,       // .ttf, .otf
-    Model,      // a 3D model: .glb, .gltf
-    TileSet,    // .kintileset: tiles maps share
-    Shape,      // .svg: a vector shape (SVG-lite)
-    Shader,     // .glsl (.frag.glsl), .spv: a fragment shader
-    ColorLut,   // .cube: a colour look (a LUT image is an Image)
-    UiScreen,   // .kinui: a UI screen
-    UiTheme,    // .kintheme: a UI look
+    Scene,  // .kinscene
+    Audio,  // a sound: .wav, .ogg, .mp3, .flac
+    Font,   // .ttf, .otf
+    Model,  // a 3D model: .glb, .gltf
+    TileSet, // .kintileset: tiles maps share
+    Shape,   // .svg: a vector shape (SVG-lite)
+    Shader,  // .glsl (.frag.glsl), .spv: a fragment shader
+    ColorLut, // .cube: a colour look (a LUT image is an Image)
+    UiScreen, // .kinui: a UI screen
+    UiTheme,  // .kintheme: a UI look
     Skeleton2D, // .kinskel: a 2D skeleton, weighted mesh and clips
 };
 
@@ -90,6 +91,11 @@ struct AssetMemoryReport {
     std::size_t evicted = 0;
     bool over_budget = false;
 };
+// Totals of residency rows: their payload, the part live owners retain, and
+// whether the payload exceeds `budget_bytes` (0: no budget).
+AssetMemoryReport summarize_residency(std::span<const AssetResidency> rows, u64 budget_bytes);
+// Least recently used first, ties by key: the order budgets evict in.
+bool least_recent_first(const AssetResidency& a, const AssetResidency& b);
 
 class AssetManager {
 public:
@@ -220,8 +226,9 @@ public:
         describe_memory<T>(*storage);
         _loaded_paths[key] = std::string(relative_path);
         record_loaded_metadata(std::string(relative_path), storage->data);
-        if (_memory_budget)
+        if (over_memory_budget()) {
             trim_memory();
+        }
         return true;
     }
 
@@ -231,7 +238,11 @@ public:
     // transitive async dependencies stay resident. Unreferenced cycles can be
     // collected. Returns the number of cache entries released.
     std::size_t unload_unused();
+    // The cache keys an entry depends on (AssetServer records what its loaders
+    // require). Retention follows these edges; empty `dependencies` removes them.
     void set_dependencies(std::string key, std::vector<std::string> dependencies);
+    // Null when the entry has no recorded dependencies.
+    const std::vector<std::string>* dependencies(std::string_view key) const;
     // Zero is unlimited. Budget overruns are reported when live owners prevent
     // eviction; live handles and their transitive dependencies are never invalidated.
     void set_memory_budget(u64 bytes) {
@@ -239,6 +250,9 @@ public:
         trim_memory();
     }
     u64 memory_budget() const { return _memory_budget; }
+    // Whether the cached payload exceeds the budget now. Cheap: per-frame
+    // callers check it before trim_memory().
+    bool over_memory_budget() const;
     AssetMemoryReport trim_memory();
     std::vector<AssetResidency> residency() const;
     AssetMemoryReport memory_report() const;
@@ -297,8 +311,9 @@ private:
                            {.name = "status", .value = "Loaded"},
                        }));
         AssetHandle<T> handle{storage};
-        if (_memory_budget)
+        if (over_memory_budget()) {
             trim_memory();
+        }
         return handle;
     }
 
@@ -327,6 +342,17 @@ private:
     }
 
     AssetMetadata make_metadata(std::string relative_path) const;
+
+    // Every entry a live owner keeps resident (handles, shared() views, pending
+    // loads, and what they depend on), mapped to the entry retaining it: empty
+    // for an owned entry itself. Visited in key order, so chains are stable.
+    using Retainers = std::unordered_map<std::string, std::string>;
+    Retainers retainers() const;
+    AssetMemoryReport memory_totals(const Retainers& retained) const;
+    // Drops cache entries and their edges, then refreshes their paths' metadata.
+    void erase_entries(const std::vector<std::string>& keys);
+    // Loaded while another type still caches the path; else Discovered or Missing.
+    void refresh_metadata_status(const std::vector<std::string>& paths);
 
     template<typename T>
     static constexpr AssetType asset_type_for() {

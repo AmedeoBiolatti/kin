@@ -1,7 +1,13 @@
 #pragma once
+
+#include <kin/assets/development_revision.hpp>
 #include <kin/ecs/component.hpp>
-#include <kin/runtime/development.hpp>
+
+#include <memory>
+#include <string>
+
 namespace kin {
+
 struct SceneInstance;
 SceneDocument authored_scene_document(EcsWorld& world, const SceneInstance& instance);
 // Three-way authored patch: only fields changed between the two documents

@@ -1,28 +1,43 @@
 # Lua 2D workflows
 
-Both `ScriptEngine` and `EntityScripts` bind these tables automatically.
-Services belong to one live world, and must be stepped once per simulation frame.
-`ScriptEngine::call_update` and `EntityScripts::update` perform that step before
-calling Lua. Do not step a shared service twice through two hosts in one frame;
-choose one owner or use separate services for their respective worlds.
+Both `ScriptEngine` and `EntityScripts` bind these tables automatically. Their
+services (`ScriptWorkflows2D`) are the world's: one per world, shared by every
+Lua host bound to it (`ScriptWorkflows2D::shared`), so a scene script and the
+entity scripts of one world see the same input contexts, pools and tweens.
+`ScriptEngine::call_update` and `EntityScripts::update` step them before calling
+Lua; with both hosts on a world they still advance once per simulation step.
 Workflow mutations belong in ordinary update/start callbacks; registered ECS
 systems reject them so a failed system cannot escape its command transaction.
 
 ## Property tweens
 
 ```lua
-local tween = tweens.to(actor, 'Transform2D.pos', {x=120,y=40}, .3, 'easeout')
-tween:parallel():to('RectRenderer.color', {r=255,g=180,b=60,a=255}, .3)
-tween:wait(.2):to('Transform2D.pos', {x=80,y=40}, .2)
--- tween:pause(), :resume(), :restart(), :cancel(), :paused(), :finished(), :cancelled()
+local move = tweens.to(actor, 'Transform2D.pos', {x=120,y=40}, .3, 'easeout')
+local glow = tweens.to(actor, 'RectRenderer.color', {r=255,g=180,b=60,a=255}, .3,
+                       {delay=.1, repeats=1, yoyo=true})
+task.run(function()
+    task.await(move)                                            -- one after another
+    task.await(tweens.to(actor, 'Transform2D.pos', {x=80,y=40}, .2))
+end)
+-- move:state() is 'running', 'completed' or 'cancelled'; move:cancel(); move:error()
 ```
 
-Targets can be host entity userdata, entity-script `self`, or an entity name.
-Properties use the described component fields and their exact value kinds.
-Easing uses Kin's `step`, `linear`, `easein`, `easeout`, `easeinout` names.
-Build the sequence before its first step. Removal of any required component,
-destruction or pool reuse cancels it before further writes. Lua callbacks are
-not retained in native tweens, so replacing a Lua VM leaves no callback into it.
+`tweens.to(target, property, to, seconds[, easing][, options])` starts an ECS
+tween ([kin/ecs/tween.hpp](animation_system.md)), as an entity script's
+`self:tween` does, with the same options: `delay`, `repeats`, `yoyo`,
+`relative`, `easing`. Targets can be host entity userdata, entity-script `self`,
+or an entity name. Properties use the described component fields and their
+value kinds; easing names are `easings()`'s (`linear`, `easeout`, `backout`...),
+`easeout` when none is given.
+The world's services step every tween once per simulation step.
+
+The handle is for `task.await`: sequences are tasks that await one tween after
+another; a parallel step starts several tweens and awaits each. A tween is
+`cancelled` when its handle cancels it, when another tween of the same field
+replaces it or `self:stop_tween(s)` stops it, or when its entity or component
+goes (destruction, pool reuse); awaiting a cancelled tween fails the task.
+`tweens.of(entity, id)` is the handle of a tween `self:tween` started. Handles
+hold no Lua callback, so replacing a Lua VM leaves none into the old one.
 
 ## Input contexts and rebinding
 
@@ -34,22 +49,26 @@ local fire = input_contexts.pressed('game', 'fire')
 local move = input_contexts.axis('game', 'move')
 ```
 
-`push(name, input_file_text [, modal [, consume]])` installs/replaces a layer.
-`remove`, `enable`, `held`, `pressed`, `released`, `axis` follow InputRouter.
+`push(name, input_file_text [, modal [, consume]])` installs a layer (a name in
+use is an error). `remove`, `enable`, `held`, `pressed`, `released`, `axis`
+follow InputRouter; an unknown context name is a Lua error.
 Changes take effect at the next workflow step. Raw `input` remains available.
 
 `rebind.begin(action [, timeout=10])` starts capture using the latest input frame.
 `state()` returns `idle`, `listening`, `captured`, `cancelled` or `timed_out`.
 `candidate()` returns a binding token; `conflicts(context)` returns action names.
 `apply(context [, 'reject'|'replace'|'allow'])` installs a captured candidate or
-raises an error. `cancel()` stops capture. Initially held controls are ignored
-until released, and Escape cancels.
+raises an error; the binding replaces the action's bindings on its own device
+only. `cancel()` stops capture. Initially held controls are ignored until
+released, and Escape cancels.
 
 `input_contexts.overrides(context)` returns the JSON differences from the pushed
 defaults. `apply_overrides(context, json)` validates before applying.
-`save(context, profile)` and `load(context, profile)` use
-`user_data_dir("kin")/input/<profile>.json`; profile names contain only letters,
-digits, `_` and `-`. No arbitrary file-writing path is exposed.
+`save(context, profile)` and `load(context, profile)` use the game's own
+`input_profile_path(profile)`, `user_data_dir("kin")/<game id>/input/<profile>.json`
+beside its saves, and fail until the host set the id
+(`kin::set_user_data_game_id`). Profile names contain only letters, digits, `_`
+and `-`. No arbitrary file-writing path is exposed.
 
 ## Prefab pools and staged scenes
 
@@ -67,7 +86,8 @@ end
 `active(name)` counts current leases; `destroy(name)` destroys a pool.
 Creating the same name/recipe/capacity again is idempotent, including after an
 entity-script reload. Changing a pool requires explicit destruction first.
-Recipes are rooted in the host's content directory. Capacity is 1..4096.
+Recipes are rooted in the host's content directory. Capacity is
+1..`PrefabPool2D::max_capacity` (65536); a pool that cannot be made is a Lua error.
 Keep the lease while its entity is in use. A lease dropped by Lua GC is released
 at the next workflow step; finalizers never mutate a running ECS transaction.
 
@@ -108,13 +128,14 @@ scope and estimates follow [the native memory APIs](assets.md#memory-budgets-and
 
 CPU-only hosts get tweens, contexts and pools automatically. Renderer-dependent
 services require configuration. ScriptScene supplies its renderer, gamepads and
-scene Assets2D cache. EntityScripts and custom hosts can provide them explicitly:
+scene Assets2D cache. Custom hosts configure the world's services, made by the
+first host that needs them or by the game:
 
 ```cpp
-auto workflows = std::make_shared<kin::ScriptWorkflows2D>(world, content_root);
+auto workflows = kin::ScriptWorkflows2D::shared(world, content_root);
 workflows->configure(&renderer, app.gamepads(), &assets, &jobs);
-entity_scripts.set_workflows(workflows);
-// Or ScriptSceneBindings{.world=&world, .workflows=workflows}.
+// The scene script and entity scripts of `world` use these. A host may also
+// hand in its own: ScriptSceneBindings{.world=&world, .workflows=workflows}.
 ```
 
 Omitted jobs are created lazily on the first preload. A missing Assets2D service

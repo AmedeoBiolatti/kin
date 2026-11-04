@@ -1,9 +1,10 @@
 #pragma once
 
-#include <filesystem>
-#include <functional>
 #include <kin/scene/scene.hpp>
 #include <kin/scripting/lua_runtime.hpp>
+
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,6 +35,8 @@ struct ScriptSceneBindings {
     std::function<void()> clear_entities;
     std::function<void(Color)> set_background;
     std::function<void()> mark_render_dirty;
+    // The world's 2D services, if the host made them (ScriptWorkflows2D::shared
+    // makes them otherwise; every Lua host bound to the world shares them).
     std::shared_ptr<ScriptWorkflows2D> workflows;
 };
 
@@ -62,6 +65,9 @@ public:
                                                  const std::filesystem::path& script_path, std::string& error) const;
     void suspend_systems();
     bool activate_systems();
+    // Stops the script for good (its systems removed): every later call fails
+    // with `reason` as last_error(). A failed reload rollback ends here.
+    void halt(std::string reason);
     // Pin future module and workflow loads to the active content generation.
     void use_content(std::shared_ptr<const MemoryContent> content);
 
@@ -76,21 +82,19 @@ public:
     bool call_collect_actions(InputActionContext& actions) const;
     bool call_write_report(JsonWriter& json) const;
 
-    std::map<std::string, std::vector<std::string>> api_surface() const;
+    // What the state binds and which callbacks it calls, for kin_lua api.
+    LuaApiSurface api_surface() const;
     LuaRuntimeStats runtime_stats() const;
     void set_runtime_limits(LuaRuntimeLimits limits);
-    void collect_garbage(i32 work = 16);
 
     const std::string& last_error() const { return _last_error; }
     const std::vector<std::filesystem::path>& script_dependencies() const;
+    // The world's 2D services, once on_load bound the engine to a world.
     std::shared_ptr<ScriptWorkflows2D> workflows() const;
 
 private:
     template <typename... Args>
-    bool call_optional(std::string_view name, Args&&... args);
-
-    template <typename... Args>
-    bool call_optional_const(std::string_view name, Args&&... args) const;
+    bool call_optional(std::string_view name, Args&&... args) const;
 
     void register_bindings();
     void record_dependency(const std::filesystem::path& path);

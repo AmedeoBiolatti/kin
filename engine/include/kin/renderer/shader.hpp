@@ -121,7 +121,8 @@ enum class BuiltinShader {
     TransitionWipe,
     TransitionIris,
     TransitionCrossfade, // 2-input: outgoing + incoming
-    Ascii,               // GPU glyph conversion; uniforms[0..3] = columns, rows, coloured, intensity
+    Ascii, // GPU glyph conversion; uniforms[0..3] = columns, rows, coloured, intensity
+    // Normal-mapped sprites (normal_lighting2d.hpp): 3 inputs and a data buffer.
     NormalSprite2D,
 };
 

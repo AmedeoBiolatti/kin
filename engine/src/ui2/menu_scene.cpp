@@ -107,7 +107,9 @@ void MenuScene::update(SceneContext& ctx) {
     ctx.input.consume_frame_edges();
 
     if (menu.cancelled) {
-        if (_config.cancel) _config.cancel(ctx);
+        if (_config.cancel) {
+            _config.cancel(ctx);
+        }
         return;
     }
 
@@ -151,7 +153,9 @@ void MenuScene::render(SceneContext& ctx) {
     if (menu.activated >= 0) {
         _render_activated = menu.activated;
     }
-    if (menu.cancelled) _render_cancelled = true;
+    if (menu.cancelled) {
+        _render_cancelled = true;
+    }
 
     if (!_config.hint.empty()) {
         const f32 y = _config.hint_y >= 0.0f ? _config.hint_y : _config.size.y - 69.5f;

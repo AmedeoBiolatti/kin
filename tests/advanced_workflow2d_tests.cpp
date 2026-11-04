@@ -1,7 +1,10 @@
+#include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <filesystem>
 #include <kin/assets/asset_server.hpp>
 #include <kin/ecs/assets2d.hpp>
+#include <kin/ecs/lighting.hpp>
 #include <kin/ecs/skeleton2d.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/renderer2d.hpp>
@@ -112,6 +115,15 @@ void skeletons() {
     bad = a.blend_spaces["move"];
     bad.points[0].clip = "missing";
     assert(!validate_skeleton_blend_space2d(a, bad, error));
+    // A prepared rig poses as one that isn't: preparing only works out its inverse binds once.
+    SkeletonAsset2D prepared = rig();
+    assert(prepare_skeleton2d(prepared, error) && prepared.inverse_bind.size() == prepared.bones.size());
+    SkeletonPose2D slow, fast;
+    assert(sample_skeleton_blend_space2d(rig(), "move", {.25f, .25f}, .5f, true, slow));
+    assert(sample_skeleton_blend_space2d(prepared, "move", {.25f, .25f}, .5f, true, fast));
+    for (std::size_t i = 0; i < slow.skin.size(); ++i) {
+        assert(near(slow.skin[i].tx, fast.skin[i].tx) && near(slow.skin[i].a, fast.skin[i].a));
+    }
     kin::EcsWorld world;
     register_builtin_editor_components(world);
     auto actor = world.entities().create();
@@ -155,10 +167,47 @@ void textures() {
     assert(assets.texture_memory_report().over_budget && live);
     live = {};
     assert(assets.trim_texture_memory().evicted == 1 && assets.texture_residency().empty());
+    // Colour and data textures share the budget: the least recently used goes first.
+    assets.set_texture_budget(0);
+    assert(assets.prime_texture("c.png", pixels));
+    auto data = assets.data_texture("c.png");
+    auto colour = assets.texture("c.png");
+    data = {};
+    colour = {};
+    assets.set_texture_budget(16);
+    const auto rows = assets.texture_residency();
+    assert(!assets.over_texture_budget() && rows.size() == 1 && rows[0].key == "color:c.png");
+}
+// An image or skeleton that cannot be read is a reported problem, not an
+// exception out of bind(); it is not read again until its file changes.
+void unreadable_assets() {
+    App app{{.mode = AppMode::Headless}};
+    auto& window = app.create_window({.width = 16, .height = 16, .hidden = true});
+    Renderer2D renderer{make_render_backend(window, false, false)};
+    const auto root = std::filesystem::temp_directory_path() / "kin-advanced-workflow2d-unreadable";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    Assets2D assets{renderer, root};
+    assert(!assets.image("shape.png") && assets.problems().contains("shape.png"));
+    assert(!assets.image("shape.png") && !assets.data_texture("shape.png"));
+    assert(!assets.skeleton2d("rig.kinskel") && assets.problems().contains("rig.kinskel"));
+    kin::EcsWorld world;
+    auto light = world.entities().create();
+    light.set(LightComponent{.shape_asset = {"shape.png"}});
+    assets.bind(world); // must not throw
+    assert(!light.get<LightComponent>()->shape && !light.get<LightComponent>()->shape_image);
+    assert(save_image({{2, 2}, std::vector<u8>(16, 255)}, root / "shape.png"));
+    const auto changed = assets.reload_changed();
+    assert(std::ranges::find(changed, std::string{"shape.png"}) != changed.end());
+    assets.bind(world);
+    assert(assets.image("shape.png") && light.get<LightComponent>()->shape);
+    assert(!assets.problems().contains("shape.png"));
+    std::filesystem::remove_all(root);
 }
 } // namespace
 int main() {
     memory();
     skeletons();
     textures();
+    unreadable_assets();
 }

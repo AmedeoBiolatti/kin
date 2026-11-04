@@ -654,10 +654,9 @@ void Editor::draw(const Interaction& it) {
 
 void Editor::run() {
     _w.result = {};
-    _ctx.describe(_w.id, _w.read_only ? "text_view" : "text_edit", _w.placeholder, _w.bounds,
-                  _w.enabled, true, _s.text);
-    if (!_w.read_only) {
-        if (const auto text = _ctx.take_text_action(_w.id)) edit(0, _s.text.size(), *text, EditKind::Other);
+    _ctx.describe(_w.id, _w.read_only ? "text_view" : "text_edit", _w.placeholder, _w.bounds, _w.enabled, true);
+    if (const auto text = _w.read_only ? std::nullopt : _ctx.take_text_action(_w.id)) {
+        edit(0, _s.text.size(), *text, EditKind::Other);
     }
     _s.caret = utf8_floor(_s.text, _s.caret);
     _s.selection_anchor = _s.selection_anchor == UiTextInputState::unset_selection
@@ -698,8 +697,7 @@ void Editor::run() {
         : _s.active             ? UiButtonState::Focused
                                 : UiButtonState::Normal;
     draw(it);
-    _ctx.describe(_w.id, _w.read_only ? "text_view" : "text_edit", _w.placeholder, _w.bounds,
-                  _w.enabled, true, _s.text);
+    _ctx.semantic_state(_w.id, _s.text);
 }
 
 } // namespace

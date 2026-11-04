@@ -1,12 +1,14 @@
 #pragma once
 
-#include <filesystem>
-#include <functional>
 #include <kin/core/types.hpp>
 #include <kin/scripting/lua_runtime.hpp>
+
+#include <sol/sol.hpp>
+
+#include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
-#include <sol/sol.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,7 +16,7 @@
 namespace kin {
 
 class FileWatcher;
-class LuaTasks;
+struct LuaVm;
 
 // A Lua script for code that does not live in the ECS: a game's rules, AI,
 // balance formulas or level logic, run by plain C++ (e.g. an engine-free
@@ -41,13 +43,13 @@ struct LuaScriptOptions {
     std::function<void(sol::state&)> setup;
     // Where require("a.b") finds a/b.lua. Empty: require is not available.
     std::filesystem::path module_root;
-    // Lua instructions one load or call may run (checked every 1,000); 0: no limit.
-    u64 instruction_limit = 50'000'000;
-    u64 memory_limit_bytes = 64 * 1024 * 1024;
+    // Lua instructions one load or call may run (checked every 1,000) and the
+    // bytes the state may hold; 0: no limit. runtime().set_limits() changes
+    // them for the loads that follow.
+    LuaRuntimeLimits limits;
     // Told every failure (load or call, with script:line). Default: logged as a
     // warning under "script".
     std::function<void(std::string_view message)> on_error;
-    std::function<void(std::string_view name, u64 elapsed_ns)> on_profile;
 };
 
 // Whether `code` is Lua that reads (it is not run): false, and `error` says
@@ -74,11 +76,6 @@ public:
     // Returns false if it does not, or if the call fails (error() says why).
     template <typename... Args>
     bool call(std::string_view function, Args&&... args);
-    // Calls `function`, a function of this script's state (one it handed
-    // over: a callback), as call() calls one by name; `name` says it in
-    // errors. False if it is not a function, or the call fails.
-    template <typename... Args>
-    bool call_function(const sol::protected_function& function, std::string_view name, Args&&... args);
     // Like call(), and converts the function's first result to R: nullopt if
     // missing, failing, or not an R.
     template <typename R, typename... Args>
@@ -96,19 +93,26 @@ public:
     void watch(FileWatcher& files);
 
     // The live Lua state, for what this API does not cover. A load replaces it.
-    sol::state& lua() { return *_lua; }
-    LuaRuntime& runtime() { return *_runtime; }
-    const LuaRuntime& runtime() const { return *_runtime; }
-    // Tasks advance only on host simulation steps, never on wall time.
-    bool advance_tasks(f32 dt, const std::function<bool(std::string_view)>& owner_alive = {});
-    void set_task_owner(std::string owner);
-    void cancel_tasks(std::string_view owner = {});
-    std::map<std::string, std::vector<std::string>> api_surface() const;
+    sol::state& lua();
+    // Its limits, memory and per-call profiles (a load starts a fresh one,
+    // with the same limits).
+    LuaRuntime& runtime();
+    const LuaRuntime& runtime() const;
+
+    // The script's `task`s, stepped only by the host's simulation, never wall
+    // time. A task belongs to the owner set when it starts (0: none); one
+    // whose owner is not owner_alive(owner) is cancelled.
+    bool advance_tasks(f32 dt, const std::function<bool(u64)>& owner_alive = {});
+    void set_task_owner(u64 owner);
+    void cancel_tasks();
+    void cancel_tasks(u64 owner);
+
+    // What the state binds, for kin_lua api.
+    LuaApiSurface api_surface() const;
 
 private:
     using Dependencies = std::shared_ptr<std::vector<std::filesystem::path>>;
-    std::unique_ptr<sol::state> make_state(const Dependencies& dependencies, std::shared_ptr<LuaRuntime>& runtime,
-                                           std::unique_ptr<LuaTasks>& tasks) const;
+    std::unique_ptr<LuaVm> make_vm(const Dependencies& dependencies) const;
     bool run(std::string_view code, const std::string& chunk_name, std::vector<std::filesystem::path> dependencies);
     sol::protected_function find(std::string_view function) const;
     bool check(const sol::protected_function_result& result, std::string_view function);
@@ -116,9 +120,7 @@ private:
     void rewatch();
 
     LuaScriptOptions _options;
-    std::shared_ptr<LuaRuntime> _runtime;
-    std::unique_ptr<sol::state> _lua;
-    std::unique_ptr<LuaTasks> _tasks; // references released before the VM
+    std::unique_ptr<LuaVm> _vm;
     bool _loaded = false;
     std::string _error;
     std::filesystem::path _path;
@@ -134,21 +136,9 @@ bool LuaScript::call(std::string_view function, Args&&... args) {
     if (!target.valid()) {
         return false;
     }
-    LuaCall budget{*_runtime, _lua->lua_state(), function};
-    const auto result = target(std::forward<Args>(args)...);
-    budget.result(result.valid());
+    LuaCall call{runtime(), lua().lua_state(), function};
+    const auto result = call.invoke(target, std::forward<Args>(args)...);
     return check(result, function);
-}
-
-template <typename... Args>
-bool LuaScript::call_function(const sol::protected_function& function, std::string_view name, Args&&... args) {
-    if (!_lua || !function.valid() || function.get_type() != sol::type::function) {
-        return false;
-    }
-    LuaCall budget{*_runtime, _lua->lua_state(), name};
-    const auto result = function(std::forward<Args>(args)...);
-    budget.result(result.valid());
-    return check(result, name);
 }
 
 template <typename R, typename... Args>
@@ -157,9 +147,8 @@ std::optional<R> LuaScript::call_for(std::string_view function, Args&&... args) 
     if (!target.valid()) {
         return std::nullopt;
     }
-    LuaCall budget{*_runtime, _lua->lua_state(), function};
-    const sol::protected_function_result result = target(std::forward<Args>(args)...);
-    budget.result(result.valid());
+    LuaCall call{runtime(), lua().lua_state(), function};
+    const sol::protected_function_result result = call.invoke(target, std::forward<Args>(args)...);
     if (!check(result, function)) {
         return std::nullopt;
     }

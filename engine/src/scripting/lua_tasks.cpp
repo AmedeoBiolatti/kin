@@ -5,37 +5,61 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+
 namespace kin {
+
 struct LuaTasks::Job {
     sol::thread thread;
     std::shared_ptr<Result> result;
-    std::string owner;
-    std::string waiting;
-    sol::object value;
+    u64 owner = 0;
+    Wait waiting = Wait::None;
+    sol::object predicate;
     f64 seconds = 0, timeout = -1;
     i64 frames = 0;
 };
+
+std::string_view LuaTasks::state_name(State state) {
+    switch (state) {
+    case State::Pending:
+        return "pending";
+    case State::Running:
+        return "running";
+    case State::Waiting:
+        return "waiting";
+    case State::Completed:
+        return "completed";
+    case State::Cancelled:
+        return "cancelled";
+    case State::Failed:
+        return "failed";
+    }
+    return "failed";
+}
+
+bool LuaTasks::finished(State state) {
+    return state == State::Completed || state == State::Cancelled || state == State::Failed;
+}
+
+void LuaTasks::cancel(Result& result) {
+    if (!finished(result.state)) {
+        result.cancelled = true;
+        result.state = State::Cancelled;
+    }
+}
+
 LuaTasks::LuaTasks(sol::state& lua, LuaRuntime& runtime) : _lua(lua), _runtime(runtime) {
-    lua.new_usertype<Handle>(
-        "KinTask", sol::no_constructor, "state", [](const Handle& h) { return h.value->state; }, "error",
-        [](const Handle& h) { return h.value->error; }, "cancel",
-        [](Handle& h) {
-            if (h.value->state == "pending" || h.value->state == "running" || h.value->state == "waiting") {
-                h.value->cancelled = true;
-                h.value->state = "cancelled";
-            }
-        });
-    scripting_detail::record_lua_type<Handle>(lua, "KinTask");
+    scripting_detail::new_api_type<Handle>(
+        lua, "KinTask", sol::no_constructor, "state",
+        [](const Handle& handle) { return std::string(state_name(handle.value->state)); }, "error",
+        [](const Handle& handle) { return handle.value->error; }, "cancel",
+        [](Handle& handle) { cancel(*handle.value); });
     auto table = lua.create_named_table("task");
     table["run"] = [this](sol::protected_function fn) { return run(std::move(fn)); };
-    table["cancel"] = [](Handle& h) {
-        if (h.value->state == "pending" || h.value->state == "running" || h.value->state == "waiting") {
-            h.value->cancelled = true;
-            h.value->state = "cancelled";
-        }
-    };
+    table["cancel"] = [](Handle& handle) { cancel(*handle.value); };
     // Keep coroutine primitives private: only managed tasks can yield.
     lua.open_libraries(sol::lib::coroutine);
+    // task.await waits for anything with state() and error(): a task, a tween
+    // (tweens.to) or a scene preload.
     lua.script(R"lua(
         local yield = coroutine.yield
         function task.wait(seconds)
@@ -53,33 +77,34 @@ LuaTasks::LuaTasks(sol::state& lua, LuaRuntime& runtime) : _lua(lua), _runtime(r
         end
         function task.await(handle, timeout)
             return task.until_(function()
-                if handle.finished then
-                    if handle:cancelled() then error('awaited tween was cancelled') end
-                    return handle:finished()
-                end
                 local state = handle:state()
-                if state=='failed' or state=='cancelled' then error(handle:error() or state) end
-                return state=='completed' or state=='ready' or state=='finished'
+                if state=='failed' or state=='cancelled' then error(handle:error() ~= '' and handle:error() or state) end
+                return state=='completed' or state=='ready'
             end, timeout)
         end
         coroutine = nil
     )lua");
 }
+
 LuaTasks::~LuaTasks() {
-    cancel();
+    cancel_all();
 }
+
 std::optional<sol::object> LuaTasks::clone_reload(const sol::object& value, sol::state_view target) {
-    if (!value.is<Handle>())
+    if (!value.is<Handle>()) {
         return {};
+    }
     auto result = std::make_shared<Result>();
-    result->state = "cancelled";
+    result->state = State::Cancelled;
     result->error = "task cancelled by reload; restart it in on_reload";
     result->cancelled = true;
     return sol::make_object(target, Handle{std::move(result)});
 }
+
 LuaTasks::Handle LuaTasks::run(sol::protected_function function) {
-    if (_jobs.size() >= 1024)
+    if (_jobs.size() >= 1024) {
         throw std::runtime_error("Lua task limit reached (1024)");
+    }
     auto job = std::make_unique<Job>();
     job->thread = sol::thread::create(_lua.lua_state());
     job->result = std::make_shared<Result>();
@@ -89,43 +114,58 @@ LuaTasks::Handle LuaTasks::run(sol::protected_function function) {
     _jobs.push_back(std::move(job));
     return result;
 }
-void LuaTasks::cancel(std::string_view owner) {
-    for (auto& job : _jobs)
-        if (owner.empty() || job->owner == owner) {
-            job->result->cancelled = true;
-            job->result->state = "cancelled";
-        }
+
+void LuaTasks::cancel_all() {
+    for (auto& job : _jobs) {
+        cancel(*job->result);
+    }
 }
+
+void LuaTasks::cancel(u64 owner) {
+    for (auto& job : _jobs) {
+        if (job->owner == owner) {
+            cancel(*job->result);
+        }
+    }
+}
+
 bool LuaTasks::ready(Job& job, f32 dt) {
-    if (job.waiting == "time") {
+    switch (job.waiting) {
+    case Wait::None:
+        return true;
+    case Wait::Time:
         job.seconds -= dt;
         return job.seconds <= 1e-7;
-    }
-    if (job.waiting == "frames")
+    case Wait::Frames:
         return --job.frames <= 0;
-    if (job.waiting == "predicate") {
+    case Wait::Predicate: {
         LuaCall call{_runtime, _lua.lua_state(), "task.predicate"};
-        sol::protected_function fn = job.value;
-        auto result = fn();
-        call.result(result.valid());
-        if (!result.valid())
+        sol::protected_function predicate = job.predicate;
+        auto result = call.invoke(predicate);
+        if (!result.valid()) {
             throw sol::error(result);
-        if (result.get_type() != sol::type::boolean)
+        }
+        if (result.get_type() != sol::type::boolean) {
             throw std::runtime_error("task predicate must return a boolean");
-        if (result.get<bool>())
+        }
+        if (result.get<bool>()) {
             return true;
+        }
         if (job.timeout >= 0) {
             job.timeout -= dt;
-            if (job.timeout <= 1e-7)
+            if (job.timeout <= 1e-7) {
                 throw std::runtime_error("task wait timed out");
+            }
         }
         return false;
     }
+    }
     return true;
 }
+
 void LuaTasks::resume(Job& job) {
     auto* co = job.thread.thread_state();
-    job.result->state = "running";
+    job.result->state = State::Running;
     LuaCall call{_runtime, co, "task.resume"};
     int count = 0;
     const int status = lua_resume(co, _lua.lua_state(), 0, &count);
@@ -135,67 +175,73 @@ void LuaTasks::resume(Job& job) {
         throw std::runtime_error(message ? message : "Lua task failed");
     }
     if (status == LUA_OK) {
-        job.result->state = "completed";
+        job.result->state = State::Completed;
         lua_settop(co, 0);
         return;
     }
-    if (count < 2 || lua_type(co, -count) != LUA_TSTRING)
+    if (count < 2 || lua_type(co, -count) != LUA_TSTRING) {
         throw std::runtime_error("task yielded an invalid wait");
-    job.waiting = lua_tostring(co, -count);
+    }
+    const std::string_view wait = lua_tostring(co, -count);
     job.timeout = count >= 3 && lua_isnumber(co, -count + 2) ? lua_tonumber(co, -count + 2) : -1;
-    if (job.waiting == "time")
+    if (wait == "time") {
+        job.waiting = Wait::Time;
         job.seconds = lua_tonumber(co, -count + 1);
-    else if (job.waiting == "frames")
+    } else if (wait == "frames") {
+        job.waiting = Wait::Frames;
         job.frames = lua_tointeger(co, -count + 1);
-    else if (job.waiting == "predicate")
-        job.value = sol::stack::get<sol::object>(co, -count + 1);
-    else
+    } else if (wait == "predicate") {
+        job.waiting = Wait::Predicate;
+        job.predicate = sol::stack::get<sol::object>(co, -count + 1);
+    } else {
         throw std::runtime_error("task yielded an unknown wait");
+    }
     lua_pop(co, count);
-    job.result->state = "waiting";
+    job.result->state = State::Waiting;
 }
-bool LuaTasks::advance(f32 dt, std::string& error, const std::function<bool(std::string_view)>& alive) {
+
+bool LuaTasks::advance(f32 dt, std::string& error, const std::function<bool(u64)>& alive) {
     if (!std::isfinite(dt) || dt < 0) {
         error = "task step requires finite nonnegative dt";
         return false;
     }
     LuaCall step{_runtime, _lua.lua_state(), "task.step"};
     bool success = true;
-    const auto owner = _owner;
+    const u64 owner = _owner;
     const auto count = _jobs.size(); // tasks spawned during this step start next step
     for (std::size_t i = 0; i < count; ++i) {
         auto& job = *_jobs[i]; // unique_ptr pointees survive vector growth
-        if (job.result->cancelled || (alive && !job.owner.empty() && !alive(job.owner))) {
-            job.result->state = "cancelled";
+        if (job.result->cancelled || (alive && job.owner != 0 && !alive(job.owner))) {
+            job.result->state = State::Cancelled;
             continue;
         }
         try {
             _owner = job.owner;
             if (ready(job, dt)) {
-                job.value = sol::object{};
+                job.predicate = sol::object{};
                 resume(job);
             }
-            if (job.result->cancelled)
-                job.result->state = "cancelled";
+            if (job.result->cancelled) {
+                job.result->state = State::Cancelled;
+            }
         } catch (const std::exception& e) {
-            job.result->state = "failed";
+            job.result->state = State::Failed;
             job.result->error = e.what();
             error = job.result->error;
             success = false;
         }
         if (step.exhausted()) {
             success = false;
-            if (error.empty())
+            if (error.empty()) {
                 error = "task step instruction budget exhausted";
+            }
             break;
         }
     }
     _owner = owner;
-    std::erase_if(_jobs, [](const auto& job) {
-        const auto& state = job->result->state;
-        return state == "completed" || state == "cancelled" || state == "failed";
-    });
+    std::erase_if(_jobs, [](const auto& job) { return finished(job->result->state); });
     step.result(success);
     return success;
 }
+
 } // namespace kin

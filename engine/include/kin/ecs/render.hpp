@@ -30,6 +30,7 @@ struct TextRenderer;
 struct ShaderEffect;
 struct SkeletonRenderer2D;
 struct NormalSpriteRenderer2D;
+struct NormalSpriteLighting2D;
 
 // Where an entity sits relative to its parent (flecs ChildOf), or to the world
 // without one: scaled, then turned (degrees, clockwise), then moved to `pos`.
@@ -301,6 +302,9 @@ public:
 private:
     // TextureRenderer entities (static or dynamic ones), in parallel when options.jobs is set.
     void collect_textures(RenderQueue& queue, const SpriteRenderOptions& options, bool statics);
+    // SkeletonRenderer2D and NormalSpriteRenderer2D entities (always dynamic).
+    void collect_skeletons_and_normal_sprites(RenderQueue& queue, const SpriteRenderOptions& options,
+                                              const EcsRenderFilter& include);
     // Clip groups (ClipGroup): each one's queue, made or reused for this collect.
     RenderQueue& group_queue(flecs::entity owner, const SpriteRenderOptions& options);
     // Where row `row` of a table goes: its group's queue (its own ClipGroup or
@@ -332,6 +336,8 @@ private:
     flecs::query<const Transform2D, const WorldTransform, const SkeletonRenderer2D, const ClipGroup*> _skeletons;
     flecs::query<const Transform2D, const WorldTransform, const NormalSpriteRenderer2D, const ClipGroup*>
         _normal_sprites;
+    // The lights the last collect's normal-mapped sprites were drawn with.
+    std::shared_ptr<NormalSpriteLighting2D> _normal_sprite_lighting;
     flecs::query<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*> _rects;
     flecs::query<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*> _lines;
     flecs::query<const Transform2D, const WorldTransform, const ShapeRenderer, const ClipGroup*> _shapes;

@@ -7,8 +7,8 @@
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/layout.hpp>
 #include <kin/ui2/scale.hpp>
-#include <kin/ui2/state.hpp>
 #include <kin/ui2/semantics.hpp>
+#include <kin/ui2/state.hpp>
 #include <kin/ui2/theme.hpp>
 #include <kin/ui2/widgets.hpp>
 
@@ -514,10 +514,16 @@ public:
     // `button` selects which mouse button drives pressed/released/active; defaults to Left.
     // Note: `active` state is shared across buttons — only one widget can be active at a time.
     Interaction region(Id id, Rectf bounds, i32 z = 0, MouseButton button = MouseButton::Left);
-    // Custom controls describe themselves before region(), then update their
-    // reported value after handling input. Built-in controls do this themselves.
+    // Custom controls describe themselves before region() (what they are, their
+    // name, bounds and whether they are enabled), then report what they show
+    // after handling input with semantic_state(). Built-in controls do both.
     void describe(Id id, std::string_view role, std::string_view label, Rectf bounds,
                   bool enabled = true, bool focusable = false, std::string_view value = {}, bool checked = false);
+    // The value (and checked state) a described control shows now.
+    void semantic_state(Id id, std::string_view value, bool checked = false);
+    // Whether Enter, keypad Enter or Space (or a controller's accept) activates
+    // the control `it` came from: it is focused and no text field has the keys.
+    bool keyboard_activated(const Interaction& it) const;
     void semantic_key(Id id, std::string_view key);
     // Accessible name independent of visible text, for icon buttons and fields.
     // Call before or after the widget each frame.
@@ -531,7 +537,11 @@ public:
     // Matches an author-facing key, decimal numeric id, or exact label. An
     // ambiguous/disabled/hidden target is refused. Actions expire at end().
     bool queue_action(std::string_view selector, SemanticAction action, std::string text, std::string& error);
+    // The same for a target known by id (an assistive adapter's): SetText
+    // takes `text`, SetNumber `number`.
+    bool queue_action(Id target, SemanticAction action, std::string text, f64 number, std::string& error);
     std::optional<Id> resolve_action(std::string_view selector, SemanticAction action, std::string& error) const;
+    bool action_pending() const { return _semantic_action.has_value(); }
     std::optional<std::string> take_text_action(Id id);
     void cancel_action() { _semantic_action.reset(); }
     void set_controller_navigation(ControllerNavigation options) { _controller_options = options; }
@@ -542,12 +552,6 @@ public:
     }
     bool reduced_motion() const { return _reduced_motion; }
     bool back_requested() const { return _controller_back; }
-    std::string_view accept_prompt() const {
-        return _controller_active ? gamepad_button_label(_previous_pad.family, GamepadButton::A) : "Enter";
-    }
-    std::string_view back_prompt() const {
-        return _controller_active ? gamepad_button_label(_previous_pad.family, GamepadButton::B) : "Esc";
-    }
 
     void open_modal(Id id);
     void close_modal(Id id);
@@ -1084,7 +1088,6 @@ private:
     bool _glass_captured = false;             // capture attempted this frame
     Theme _theme;
     bool _reduced_motion = false;
-    std::unordered_map<u64, std::string> _semantic_labels;
     DebugOptions _debug{};
     std::vector<Diagnostic> _diagnostics;
     std::vector<DrawScopeEntry> _draw_scopes; // declared widget bounds; check_draw tests against back()
@@ -1192,25 +1195,51 @@ private:
     std::vector<std::string> _actions; // fired this frame
     bool _wants_text_input_last = false;
     bool _focus_moved = false;
+    // The semantic tree: this frame's elements are _elements[0, _element_count),
+    // in the order described. Slots and their strings are reused frame to frame;
+    // _element_slots (kept across frames, stamped) finds an id's slot.
+    struct ElementSlot {
+        std::size_t index = 0;
+        u64 frame = 0;
+    };
+    // semantic_key()/semantic_label() for an id, kept for when it is described.
+    struct SemanticOverride {
+        std::string key;
+        std::string label;
+        u64 frame = 0;
+    };
     std::vector<SemanticElement> _elements;
-    std::unordered_map<u64, std::size_t> _element_indices;
-    std::unordered_map<u64, std::string> _semantic_keys;
-    struct PendingSemanticAction { Id id; SemanticAction action; std::string text; };
+    std::size_t _element_count = 0;
+    std::unordered_map<u64, ElementSlot> _element_slots;
+    std::unordered_map<u64, SemanticOverride> _semantic_overrides;
+    struct PendingSemanticAction {
+        Id id;
+        SemanticAction action;
+        std::string text;
+        f64 number = 0;
+    };
     std::optional<PendingSemanticAction> _semantic_action;
+    enum class NavDirection : u8 { None, Up, Right, Down, Left };
     ControllerNavigation _controller_options{};
-    GamepadState _previous_pad{};
-    i32 _controller_direction = 0; // Up, Right, Down, Left: 1..4
-    i32 _held_direction = 0;
+    NavDirection _controller_direction = NavDirection::None; // a move this frame
+    NavDirection _held_direction = NavDirection::None;
     f32 _controller_repeat = 0;
     bool _controller_accept = false;
     bool _controller_back = false;
     bool _controller_active = false;
+    // Set when a widget asks for the direction's key (key_pressed): it took the
+    // move, so focus navigation does not also run.
     mutable bool _controller_direction_consumed = false;
     void begin_navigation();
+    void begin_semantics();
     void finish_semantics();
     bool controller_key(Key key) const;
     void finish_navigation();
+    SemanticElement& claim_element(Id id);
+    SemanticOverride& semantic_override(Id id);
     SemanticElement* element(Id id);
+    const SemanticElement* element(Id id) const;
+    std::optional<Id> resolve_action(const SemanticElement* target, SemanticAction action, std::string& error) const;
     bool _any_press = false; // a mouse button went down this frame (before widgets took it)
     f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
     i32 _region_z_base = 0;  // added to region()'s z while end_layout() runs a widget in floating boxes

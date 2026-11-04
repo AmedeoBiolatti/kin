@@ -11,7 +11,9 @@ class AssetScope {
 public:
     template <typename T>
     AssetHandle<T> keep(AssetHandle<T> handle) {
-        if (handle._storage) _assets.push_back(handle._storage);
+        if (auto entry = handle.keepalive()) {
+            _assets.push_back(std::move(entry));
+        }
         return handle;
     }
     template <typename T>
@@ -24,8 +26,9 @@ public:
     }
     void clear() { _assets.clear(); }
     std::size_t size() const { return _assets.size(); }
+
 private:
-    std::vector<std::shared_ptr<IAssetStorage>> _assets;
+    std::vector<std::shared_ptr<const void>> _assets;
 };
 
 } // namespace kin

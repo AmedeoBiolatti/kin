@@ -275,6 +275,8 @@ sources, external dependencies and owned tests. `KIN_EXPERIMENTAL_3D` currently
 requires scripting for its scene-session lifecycle and a GPU-capable renderer.
 `KIN_ENABLE_SCENE_SERVER` controls the server component and honors the existing
 `KIN_ENABLE_AGENT_SERVER` option as its default.
+`KIN_ENABLE_DEVELOPMENT` builds development sessions (`--dev`, safe live
+reload; [hot reload](hot_reload.md)); shipping builds turn it off.
 
 `kin::engine` remains the umbrella target. Narrow consumers can link
 `kin::audio`, `kin::physics` or `kin::scripting`; ECS/render/scene adapters are

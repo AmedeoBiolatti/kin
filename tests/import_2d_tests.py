@@ -120,19 +120,19 @@ class Imports(unittest.TestCase):
         data = json.loads(path.read_text())
         data["layers"][0]["data"][0] |= 0x80000000
         self.write("map.tmj", data)
-        with self.assertRaisesRegex(imports.ImportError, "flipped/rotated"):
+        with self.assertRaisesRegex(imports.AssetImportError, "flipped/rotated"):
             self.build([job])
         self.assertEqual(before, (self.output / job["output"]).read_bytes())
 
     def test_output_escape_and_duplicate_ids_rejected(self):
         job = {"kind": "atlas", "sprites": [{"id": "tile", "source": "sheet.png"}],
                "output": "../escape.kinsprites", "texture": "atlas.png"}
-        with self.assertRaisesRegex(imports.ImportError, "relative content path"):
+        with self.assertRaisesRegex(imports.AssetImportError, "relative content path"):
             self.build([job])
         self.assertFalse((self.root / "escape.kinsprites").exists())
         job["output"] = "atlas.kinsprites"
         job["sprites"] *= 2
-        with self.assertRaisesRegex(imports.ImportError, "duplicate sprite id"):
+        with self.assertRaisesRegex(imports.AssetImportError, "duplicate sprite id"):
             self.build([job])
 
     def test_stale_generated_files_removed_but_unmanaged_files_kept(self):
@@ -152,7 +152,7 @@ class Imports(unittest.TestCase):
             (self.output / "images").symlink_to(outside, target_is_directory=True)
         except OSError:
             self.skipTest("directory symlinks unavailable")
-        with self.assertRaisesRegex(imports.ImportError, "symlink escapes"):
+        with self.assertRaisesRegex(imports.AssetImportError, "symlink escapes"):
             self.build([job])
         self.assertFalse(any(outside.iterdir()))
         self.assertFalse((self.output / "sprites").exists())
@@ -262,7 +262,7 @@ kin_game(check NAME imported IMPORTS "{manifest.as_posix()}")
             Image.new("RGBA", (4, 2), (0, 0, 255, 255)).save(path)
             return image
         with mock.patch.object(imports.Pipeline, "image", edit_after_read):
-            with self.assertRaisesRegex(imports.ImportError, "source changed"):
+            with self.assertRaisesRegex(imports.AssetImportError, "source changed"):
                 self.build([job])
         self.assertEqual((self.output / job["texture"]).read_bytes(), before)
         self.build([job])

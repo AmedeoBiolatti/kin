@@ -34,21 +34,23 @@ driver allocations, mip chains and other independent caches.
 KIN_RENDER_BACKEND=sdl SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
   build/bin/kin_2d_workflow --self-test
 cmake --build build --target kin_2d_workflow_content
-build/bin/kin_2d_workflow --self-test --pack build/bin/kin_2d_workflow.kinpak
+build/bin/kin_2d_workflow --self-test --content=build/bin/kin_2d_workflow.kinpak
 ```
 
 The 480-frame playthrough checks projectile reuse, stale leases, two prepared-room
 commits, navigation through the gap, six semantic controls and retained assets
 under budget pressure. It runs as `kin-workflow-demo` in CTest. Native SDL_GPU
-runs also assert that the lighting shader executes. Add `--screenshot output.png`
-to save its final frame, or `--content path` to select another content root.
+runs also assert that the lighting shader executes. Add `--screenshot=output.png`
+to save its final frame, or `--content=path` (a folder or a `.kinpak`) to select
+other content. Without `--self-test` it runs through `run_scene_app` like any
+kin game, windowed, headless or as a server; controllers are opened by its scene.
 
 The Workshop also exposes the standard driven scene server and read-only
 windowed inspector. [Gameplay scenarios](../../docs/automation.md) exercise
 scoped UI actions, mapped input, world queries, loading, pause and reset:
 
 ```sh
-cmake --build build --target kin_scenario
+cmake --build build --target kin_lua
 python3 tools/automation/kin_test.py run examples/2d_workflow/tests/workshop.json \
   --out /tmp/workshop-scenario --trace-world --game build/bin/kin_2d_workflow
 python3 tools/automation/kin_test.py replay /tmp/workshop-scenario/commands.jsonl \
@@ -56,9 +58,12 @@ python3 tools/automation/kin_test.py replay /tmp/workshop-scenario/commands.json
 ctest --test-dir build -R kin-workflow-automation --output-on-failure
 ```
 
-`tests/workshop.lua` uses the same runner with `--lua-compiler build/bin/kin_scenario`.
+`tests/workshop.lua` uses the same runner with `--lua-compiler build/bin/kin_lua`.
 `--automation-record session.jsonl --seed=7` writes a native driven RPC recording.
-Server sessions keep rebinding profiles under the session's `user-data` directory.
+Rebinding profiles go to the game's own folder (`kin.workshop`, beside its saves);
+server sessions keep them under the session's `user-data` directory. The game copies
+its `play` input context into Input whenever the context changes, so mapped
+`input.action`s press what the context reads.
 
 For [safe live development](../../docs/hot_reload.md), run
 `cmake --build build --target kin_2d_workflow_dev`. It starts the game and import

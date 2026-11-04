@@ -9,6 +9,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / "automation"))
+from kintest.process import stop_process_group  # noqa: E402
+
 
 def project(path):
     path = Path(path).resolve()
@@ -29,29 +32,6 @@ def project(path):
     if Path(value["output"]).is_relative_to(Path(value["content"])):
         raise ValueError("development output must be outside source content")
     return value
-
-
-def stop(process):
-    if process is None:
-        return
-    if os.name != "nt":
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-    elif process.poll() is None:
-        process.terminate()
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        if os.name != "nt":
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        else:
-            process.kill()
-        process.wait(timeout=2)
 
 
 def run(value, *, build=True, game_args=()):
@@ -83,8 +63,8 @@ def run(value, *, build=True, game_args=()):
             time.sleep(0.05)
         return game.returncode
     finally:
-        stop(game)
-        stop(watcher)
+        stop_process_group(game)
+        stop_process_group(watcher)
 
 
 def main(argv=None):

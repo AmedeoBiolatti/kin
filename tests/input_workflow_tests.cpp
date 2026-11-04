@@ -1,6 +1,7 @@
 #include <SDL3/SDL.h>
 #include <cassert>
 #include <kin/platform/input_router.hpp>
+#include <kin/platform/user_data.hpp>
 #include <limits>
 
 using namespace kin;
@@ -12,17 +13,19 @@ void routing() {
     InputRouter router;
     router.push({.name = "game", .map = game});
     router.push({.name = "menu", .map = menu, .enabled = false, .modal = true});
+    assert(router.layer("menu")->defaults == menu); // what overrides are relative to
+    const u64 pushed = router.revision();
     input.set_key_pressed(Key::Space);
     router.update(input);
     assert(router.action("game", "fire").pressed);
-    router.layer("menu")->enabled = true;
+    assert(router.set_enabled("menu", true) && router.revision() == pushed); // only maps move it
+    assert(!router.set_enabled("missing", true));
     router.update(input);
     assert(!router.action("game", "fire").held && router.action("game", "fire").released);
     assert(router.action("menu", "accept").held);
     input.advance_step_edges();
     router.update(input);
     assert(!router.action("menu", "accept").pressed);
-    router.layer("menu")->modal = false;
     input.set_key_released(Key::Space);
     router.update(input);
     assert(router.action("menu", "accept").released);
@@ -30,10 +33,29 @@ void routing() {
     input.set_key_pressed(Key::Space);
     router.update(input);
     assert(router.action("menu", "accept").pressed && !router.action("game", "fire").pressed);
-    router.remove("menu");
+    assert(router.remove("menu") && router.revision() != pushed);
     input.advance_step_edges();
     router.update(input);
     assert(router.action("game", "fire").held && !router.action("game", "fire").pressed);
+
+    // A layer that is not modal stops only the controls it uses.
+    InputMap jump = game;
+    jump.bind("jump", Key::W);
+    InputRouter layered;
+    layered.push({.name = "game", .map = jump});
+    layered.push({.name = "ui", .map = menu});
+    Input both;
+    both.set_key_pressed(Key::Space);
+    both.set_key_pressed(Key::W);
+    layered.update(both);
+    assert(layered.action("ui", "accept").pressed && !layered.action("game", "fire").held);
+    assert(layered.action("game", "jump").pressed);
+    // A new map drops the results of what it no longer has.
+    const u64 before_map = layered.revision();
+    assert(layered.set_map("game", game) && layered.revision() != before_map);
+    layered.update(both);
+    assert(!layered.action("game", "jump").held && layered.layer("game")->defaults == jump);
+
     InputMap analogue, digital;
     analogue.set_axis({.name = "move", .sticks = {{.axis = PadAxis::LeftX}}});
     digital.bind("right", PadControl::LeftStickRight);
@@ -48,6 +70,7 @@ void routing() {
     reverse.push({.name = "ui", .map = analogue});
     reverse.update(input);
     assert(reverse.axis("ui", "move") > .8f && !reverse.action("game", "right").held);
+    input.set_gamepad({});
 
     InputRebinder rebind;
     rebind.begin(input, "fire");
@@ -57,21 +80,41 @@ void routing() {
     rebind.update(input, 0);
     input.begin_frame();
     input.set_key_pressed(Key::Enter);
+    input.consume_frame_edges(); // a frame that ran no step: the step still sees the press
+    game.bind("fire", PadControl::A);
     game.bind("confirm", Key::Enter);
     assert(rebind.update(input, 0) == RebindState::Captured);
     auto before = game;
     std::string error;
     assert(!rebind.apply(game, RebindConflict::Reject, error) && game == before);
     assert(rebind.apply(game, RebindConflict::Replace, error));
-    assert(!game.bindings("confirm") && game.bindings("fire")->front().code == static_cast<i32>(Key::Enter));
+    assert(!game.bindings("confirm"));
+    // The key replaced Fire's keys; its controller button stays.
+    const auto& fire = *game.bindings("fire");
+    assert(fire.size() == 2 &&
+           fire.front() == (InputBinding{InputBindingDevice::Gamepad, static_cast<i32>(PadControl::A)}));
+    assert(fire.back() == (InputBinding{InputBindingDevice::Key, static_cast<i32>(Key::Enter)}));
     const auto overrides = serialize_input_overrides(before, game);
     InputMap restored;
     assert(apply_input_overrides(overrides, before, restored, error) && restored == game);
-    const auto save = std::filesystem::temp_directory_path() / "kin-test-input-overrides.json";
+
+    // Profiles live in the game's own folder, beside its saves.
+    const auto data = std::filesystem::temp_directory_path() / "kin-input-workflow-user-data";
+    std::filesystem::remove_all(data);
+    set_user_data_dir_override(data);
+    assert(input_profile_path("keys", error).empty() && !error.empty()); // no game id yet
+    set_user_data_game_id("kin.input-test");
+    assert(input_profile_path("../escape", error).empty());
+    const auto save = input_profile_path("keys", error);
+    assert(save == game_data_dir("kin.input-test") / "input" / "keys.json");
+    assert(save.string().find("kin.input-test") != std::string::npos);
     assert(save_input_overrides(before, game, save));
     assert(save_input_overrides(before, game, save)); // atomic replacement of an existing file
+    assert(!std::filesystem::exists(std::filesystem::path(save.string() + ".tmp")));
     assert(load_input_overrides(before, restored, save, error) && restored == game);
-    std::filesystem::remove(save);
+    set_user_data_game_id({});
+    clear_user_data_dir_override();
+    std::filesystem::remove_all(data);
     const auto good = restored;
     assert(!apply_input_overrides("{}", before, restored, error) && restored == good);
     input.begin_frame();
@@ -81,6 +124,7 @@ void routing() {
     input.set_key_pressed(Key::Escape);
     assert(rebind.update(input, 0) == RebindState::Cancelled);
 }
+
 void ownership() {
     GamepadPlayers players{2};
     GamepadDevice a{1, "first", "same model", {.connected = true}};

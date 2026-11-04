@@ -343,7 +343,6 @@ RendererBackendCapabilities SdlRenderer2DBackend::capabilities() const {
         .render_targets = true,
         .blend_modes = true,
         .min_max_blend = _min_max_blend,
-        .textured_geometry = true,
         .transforms = true,
         .shapes = true,
         .masks = true,
@@ -683,8 +682,9 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
 bool SdlRenderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
                                                   std::span<const u32> indices) {
     const auto* backend = as_sdl(texture.backend().get());
-    if (!backend || !backend->handle())
+    if (!backend || !backend->handle()) {
         return false;
+    }
     flush_batch();
     _shape_vertices.clear();
     _shape_vertices.reserve(vertices.size());

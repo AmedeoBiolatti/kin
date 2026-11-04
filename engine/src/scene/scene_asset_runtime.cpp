@@ -1,10 +1,13 @@
-#include <algorithm>
-#include <kin/assets/content.hpp>
+#include <kin/scene/scene_asset_runtime.hpp>
+
 #include <kin/platform/log.hpp>
+#include <kin/assets/content.hpp>
 #include <kin/prefab/prefab_asset.hpp>
 #include <kin/scene/live_scene2d.hpp>
-#include <kin/scene/scene_asset_runtime.hpp>
+
+#include <algorithm>
 #include <optional>
+#include <stdexcept>
 #include <system_error>
 #include <unordered_set>
 
@@ -80,30 +83,51 @@ bool SceneAssetRuntime::instantiate(EcsWorld& world, SceneInstantiateOptions opt
         return false;
     }
     _instance = std::move(instance);
-    _authored = authored_scene_document(world, _instance);
+    _authored.reset();
     return true;
 }
 
-void SceneAssetRuntime::track_instance(EcsWorld& world, std::filesystem::path path, std::filesystem::path root,
-                                       SceneAsset definition, SceneInstance instance) {
+void SceneAssetRuntime::track_instance(std::filesystem::path path, std::filesystem::path root, SceneAsset definition,
+                                       SceneInstance instance) {
     _scene_path = std::move(path);
     _asset_root = std::move(root);
     _scene = std::move(definition);
     _instance = std::move(instance);
-    _authored = authored_scene_document(world, _instance);
+    _authored.reset();
     _loaded = true;
-    _entity_count = _authored.entities.size();
+    _entity_count = _instance.by_authored_id.size();
     refresh_watches();
 }
+
+bool SceneAssetRuntime::track_authored(const EcsComponentRegistry& schema) {
+    _diagnostics.clear();
+    // A fresh copy of the loaded scene: the live one may have changed since.
+    EcsWorld preview;
+    schema.copy_schema_to(preview.components());
+    SceneAssetRuntime copy = *this;
+    copy._instance = {};
+    if (!copy.instantiate(preview, {.update_scene_header = false})) {
+        _diagnostics = copy._diagnostics;
+        return false;
+    }
+    _authored = authored_scene_document(preview, copy._instance);
+    return true;
+}
+
 std::unique_ptr<DevelopmentChange>
 SceneAssetRuntime::prepare_patch(EcsWorld& world, const std::filesystem::path& root, std::string& error,
                                  std::function<bool(EcsWorld&, std::string&)> validate) {
     try {
-        if (!_loaded)
+        if (!_loaded) {
             throw std::runtime_error("scene runtime is not loaded");
+        }
+        if (!_authored) {
+            throw std::runtime_error("scene runtime does not track its authored scene (track_authored)");
+        }
         const auto relative = _scene_path.lexically_relative(_asset_root);
-        if (relative.empty() || relative.is_absolute() || *relative.begin() == "..")
+        if (relative.empty() || relative.is_absolute() || *relative.begin() == "..") {
             throw std::runtime_error("scene is outside the development content root");
+        }
         auto candidate = std::make_shared<SceneAssetRuntime>();
         auto preview = std::make_shared<EcsWorld>();
         world.components().copy_schema_to(preview->components());
@@ -112,36 +136,48 @@ SceneAssetRuntime::prepare_patch(EcsWorld& world, const std::filesystem::path& r
             error = candidate->diagnostics().empty() ? "cannot prepare scene" : candidate->diagnostics().front();
             return {};
         }
-        if (validate && !validate(*preview, error))
+        if (validate && !validate(*preview, error)) {
             return {};
-        auto plan = prepare_scene_patch2d(world, _authored, candidate->_authored, error);
-        if (!plan)
+        }
+        candidate->_authored = authored_scene_document(*preview, candidate->_instance);
+        auto plan = prepare_scene_patch2d(world, *_authored, *candidate->_authored, error);
+        if (!plan) {
             return {};
+        }
         auto shared = std::shared_ptr<DevelopmentChange>{std::move(plan)};
+        // After the patch the live entities stand for the candidate's: point
+        // its instance at them and become it.
+        const auto adopt = [this, &world, candidate, preview, shared] {
+            if (shared->finalize) {
+                shared->finalize();
+            }
+            const auto remap = [&](EcsEntity source) {
+                const auto id = preview->entities().authored_id(source);
+                return id ? world.entities().find_by_authored_id(*id) : EcsEntity{};
+            };
+            for (auto& entity : candidate->_instance.roots) {
+                entity = remap(entity);
+            }
+            for (auto& [id, entity] : candidate->_instance.by_authored_id) {
+                entity = world.entities().find_by_authored_id(id);
+            }
+            for (auto& [id, instance] : candidate->_instance.prefab_instances) {
+                instance.root = remap(instance.root);
+                for (auto& entity : instance.entities) {
+                    entity = remap(entity);
+                }
+                for (auto& [local, entity] : instance.by_authored_id) {
+                    entity = remap(entity);
+                }
+                if (auto* component = instance.root.get_mut<PrefabInstanceComponent>()) {
+                    component->source = instance.source;
+                }
+            }
+            apply_scene_header(world, candidate->_scene);
+            *this = std::move(*candidate);
+        };
         return std::make_unique<DevelopmentChange>(
-            DevelopmentChange{shared->activate, shared->rollback, [this, &world, candidate, preview, shared] {
-                                  if (shared->finalize)
-                                      shared->finalize();
-                                  const auto remap = [&](EcsEntity source) {
-                                      const auto id = preview->entities().authored_id(source);
-                                      return id ? world.entities().find_by_authored_id(*id) : EcsEntity{};
-                                  };
-                                  for (auto& root : candidate->_instance.roots)
-                                      root = remap(root);
-                                  for (auto& [id, entity] : candidate->_instance.by_authored_id)
-                                      entity = world.entities().find_by_authored_id(id);
-                                  for (auto& [id, instance] : candidate->_instance.prefab_instances) {
-                                      instance.root = remap(instance.root);
-                                      for (auto& entity : instance.entities)
-                                          entity = remap(entity);
-                                      for (auto& [local, entity] : instance.by_authored_id)
-                                          entity = remap(entity);
-                                      if (auto* component = instance.root.get_mut<PrefabInstanceComponent>())
-                                          component->source = instance.source;
-                                  }
-                                  apply_scene_header(world, candidate->_scene);
-                                  *this = std::move(*candidate);
-                              }});
+            DevelopmentChange{.activate = shared->activate, .rollback = shared->rollback, .finalize = adopt});
     } catch (const std::exception& e) {
         error = e.what();
         return {};

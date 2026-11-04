@@ -1,5 +1,5 @@
-#include <kin/anim/skeleton2d.hpp>
 #include <kin/assets/asset_manager.hpp>
+#include <kin/anim/skeleton2d.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/l10n/localization.hpp>
 #include <sstream>
@@ -19,8 +19,8 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
-#include <utility>
 #include <unordered_set>
+#include <utility>
 
 namespace kin {
 
@@ -155,72 +155,84 @@ void AssetManager::clear() {
 
 void AssetManager::unload(std::string_view relative_path) {
     const std::string suffix = ":" + std::string(relative_path);
-    std::size_t removed = 0;
-    for (auto it = _assets.begin(); it != _assets.end();) {
-        if (it->first.ends_with(suffix)) {
-            it->second->clear_loaded();
-            _loaded_paths.erase(it->first);
-            _dependencies.erase(it->first);
-            it = _assets.erase(it);
-            ++removed;
-        } else {
-            ++it;
+    std::vector<std::string> keys;
+    for (const auto& [key, asset] : _assets) {
+        if (key.ends_with(suffix)) {
+            keys.push_back(key);
         }
     }
+    erase_entries(keys);
 
     const std::string path{relative_path};
-    if (auto found = _metadata.find(path); found != _metadata.end()) {
-        found->second.status = status_for_path(resolve(path));
-    }
+    refresh_metadata_status({path});
     KIN_LOG_DEBUG_F("asset",
                     "asset unloaded",
                     (LogFields{
                         {.name = "path", .value = path},
-                        {.name = "count", .value = std::to_string(removed)},
+                        {.name = "count", .value = std::to_string(keys.size())},
                     }));
 }
 
 void AssetManager::set_dependencies(std::string key, std::vector<std::string> dependencies) {
-    _dependencies[std::move(key)] = std::move(dependencies);
+    if (dependencies.empty()) {
+        _dependencies.erase(key);
+    } else {
+        _dependencies[std::move(key)] = std::move(dependencies);
+    }
+}
+
+const std::vector<std::string>* AssetManager::dependencies(std::string_view key) const {
+    const auto found = _dependencies.find(std::string{key});
+    return found == _dependencies.end() ? nullptr : &found->second;
 }
 
 std::size_t AssetManager::unload_unused() {
-    std::unordered_set<std::string> retained;
-    std::vector<std::string> pending;
+    const Retainers retained = retainers();
+    std::vector<std::string> unused;
     for (const auto& [key, storage] : _assets) {
-        // Pending jobs are also owners. Never release their storage mid-load.
-        if (storage.use_count() > 1) pending.push_back(key);
+        if (!retained.contains(key)) {
+            unused.push_back(key);
+        }
     }
-    while (!pending.empty()) {
-        std::string key = std::move(pending.back());
-        pending.pop_back();
-        if (!retained.insert(key).second) continue;
-        if (const auto it = _dependencies.find(key); it != _dependencies.end())
-            pending.insert(pending.end(), it->second.begin(), it->second.end());
-    }
-    std::size_t removed = 0;
-    for (auto it = _assets.begin(); it != _assets.end();) {
-        if (retained.contains(it->first)) { ++it; continue; }
-        const auto path = _loaded_paths.find(it->first);
-        if (path != _loaded_paths.end()) {
-            if (auto m = _metadata.find(path->second); m != _metadata.end())
-                m->second.status = status_for_path(resolve(path->second));
+    erase_entries(unused);
+    return unused.size();
+}
+
+void AssetManager::erase_entries(const std::vector<std::string>& keys) {
+    std::vector<std::string> paths;
+    for (const std::string& key : keys) {
+        const auto asset = _assets.find(key);
+        if (asset == _assets.end()) {
+            continue;
+        }
+        asset->second->clear_loaded();
+        if (const auto path = _loaded_paths.find(key); path != _loaded_paths.end()) {
+            paths.push_back(path->second);
             _loaded_paths.erase(path);
         }
-        _dependencies.erase(it->first);
-        it = _assets.erase(it);
-        ++removed;
+        _dependencies.erase(key);
+        _assets.erase(asset);
     }
-    // Metadata is keyed by path, while cache entries also include the type.
-    // Collecting one interpretation must not hide another retained one.
+    refresh_metadata_status(paths);
+}
+
+void AssetManager::refresh_metadata_status(const std::vector<std::string>& paths) {
+    if (paths.empty()) {
+        return;
+    }
+    // Metadata is per path, cache entries per type and path: releasing one
+    // interpretation of a file must not hide another that is still cached.
+    std::unordered_set<std::string_view> cached;
     for (const auto& [key, path] : _loaded_paths) {
-        const auto asset = _assets.find(key);
-        if (asset != _assets.end() && asset->second->loaded()) {
-            if (auto metadata = _metadata.find(path); metadata != _metadata.end())
-                metadata->second.status = AssetStatus::Loaded;
+        if (const auto asset = _assets.find(key); asset != _assets.end() && asset->second->loaded()) {
+            cached.insert(path);
         }
     }
-    return removed;
+    for (const std::string& path : paths) {
+        if (const auto metadata = _metadata.find(path); metadata != _metadata.end()) {
+            metadata->second.status = cached.contains(path) ? AssetStatus::Loaded : status_for_path(resolve(path));
+        }
+    }
 }
 
 void AssetManager::discover() {
@@ -320,7 +332,8 @@ void register_default_asset_loaders(AssetManager& assets) {
     assets.register_memory_sizer<SkeletonAsset2D>([](const SkeletonAsset2D& rig) {
         u64 bytes = sizeof(rig) + rig.texture_asset.capacity() + rig.bones.capacity() * sizeof(Bone2D) +
                     rig.vertices.capacity() * sizeof(SkinVertex2D) + rig.indices.capacity() * sizeof(u32) +
-                    rig.attachments.capacity() * sizeof(BoneAttachment2D);
+                    rig.attachments.capacity() * sizeof(BoneAttachment2D) +
+                    rig.inverse_bind.capacity() * sizeof(Affine2);
         for (const auto& b : rig.bones)
             bytes += b.name.capacity();
         for (const auto& b : rig.attachments)

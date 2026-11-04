@@ -23,7 +23,7 @@
 namespace kin {
 
 class AssetServer;
-struct AutomationRecorder;
+class AutomationRecorder;
 
 enum class ServerMode {
     // Time only advances when the client calls sim.tick. Single-threaded,
@@ -33,6 +33,16 @@ enum class ServerMode {
     // between frames from a background reader.
     Realtime,
 };
+
+// How automation reaches the game: a driven or realtime server (--server), or
+// the live inspector of a game playing in its window (--inspect), which only
+// answers reads and debugger commands.
+enum class AutomationMode {
+    Driven,
+    Realtime,
+    Inspect,
+};
+std::string_view automation_mode_name(AutomationMode mode);
 
 enum class ServerTransport {
     // Newline-delimited JSON-RPC over stdin/stdout. Single client.
@@ -78,15 +88,17 @@ public:
     f32 fixed_dt() const { return _fixed_dt; }
     i64 frame() const { return _frame; }
     const RunReport& report() const { return _report; }
+    // Writes every command and each step's checkpoint to a JSONL recording at
+    // `path` (docs/automation.md) until stop_recording(). Throws if it cannot.
     void start_recording(const std::filesystem::path& path, const GameInfo* game = nullptr,
                          std::optional<u64> seed = {});
-    void set_automation_mode(std::string_view mode) { _automation_mode = mode; }
-    const std::string& automation_mode() const { return _automation_mode; }
-    bool is_recording() const { return _recording != nullptr; }
-    void enable_development(bool enabled = true) { _development = enabled; }
     void stop_recording() { _recording.reset(); }
-    void begin_record_command(std::string_view method, const JsonValue& params);
-    void record_command(std::string_view method, const JsonValue& params, const ServerResponse& response);
+    bool is_recording() const { return _recording != nullptr; }
+    // How the server is driven, as server.capabilities reports it.
+    void set_automation_mode(AutomationMode mode) { _automation_mode = mode; }
+    AutomationMode automation_mode() const { return _automation_mode; }
+    // Scenes get SceneContext::development, and their development sessions advance before each step.
+    void enable_development(bool enabled) { _development = enabled; }
 
     // Advance exactly one fixed-timestep frame. Queued input actions are applied
     // immediately after begin_frame so the scene observes them this frame.
@@ -166,7 +178,11 @@ private:
         KeyModifiers modifiers = KeyModifiers::None;
     };
 
+    friend ServerResponse dispatch_server_command(ServerContext&, const GameInfo*, std::string_view, const JsonValue&);
+
     SceneContext make_context();
+    void begin_record_command(std::string_view method, const JsonValue& params);
+    void record_command(std::string_view method, const JsonValue& params, const ServerResponse& response);
 
     App& _app;
     Window& _window;
@@ -190,7 +206,7 @@ private:
     i64 _timed_frames = 0; // frames recorded, the forgotten too
     std::function<void(SceneManager&)> _reset_scenes;
     std::shared_ptr<AutomationRecorder> _recording;
-    std::string _automation_mode = "driven";
+    AutomationMode _automation_mode = AutomationMode::Driven;
     bool _development = false;
 };
 

@@ -8,8 +8,7 @@ target_compile_options(kin_pack PRIVATE
 )
 kin_enable_release_optimizations(kin_pack)
 if(KIN_ENABLE_SCRIPTING)
-    add_executable(kin_scenario kin_scenario/main.cpp)
-    target_link_libraries(kin_scenario PRIVATE kin::scripting)
+    # kin_lua: API listing, syntax checks, Lua tests and scenario compiles (docs/lua_development.md).
     add_executable(kin_lua kin_lua/main.cpp)
     target_link_libraries(kin_lua PRIVATE kin::scripting_scenes)
     find_package(Python3 QUIET COMPONENTS Interpreter)
@@ -21,6 +20,8 @@ if(KIN_ENABLE_SCRIPTING)
                 --native "$<TARGET_FILE:kin_lua>" --host entity generate --output "${PROJECT_BINARY_DIR}/lua-api/entity"
             COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
                 --native "$<TARGET_FILE:kin_lua>" --host test generate --output "${PROJECT_BINARY_DIR}/lua-api/test"
+            COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/kin_lua.py"
+                --native "$<TARGET_FILE:kin_lua>" --host scenario generate --output "${PROJECT_BINARY_DIR}/lua-api/scenario"
             DEPENDS kin_lua VERBATIM)
     endif()
 endif()

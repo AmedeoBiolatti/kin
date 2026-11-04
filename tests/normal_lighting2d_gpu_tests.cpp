@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <vector>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/build.hpp>
 #include <kin/renderer/normal_lighting2d.hpp>
@@ -10,7 +12,7 @@ int main() {
     App app{{.mode = AppMode::Headless}};
     auto& window = app.create_window({.width = 32, .height = 32, .hidden = true});
     Renderer2D renderer{make_render_backend(window, false, false)};
-    if (!renderer.capabilities().shader_geometry || !renderer.capabilities().data_buffers)
+    if (!normal_lighting2d_gpu_supported(renderer.capabilities()))
         return 77;
     Image albedo{{8, 8}, std::vector<u8>(8 * 8 * 4)}, normal = albedo, specular = albedo, cookie = albedo;
     for (int y = 0; y < 8; ++y)
@@ -56,10 +58,9 @@ int main() {
                                                  .intensity = .6f,
                                                  .shape = std::make_shared<Image>(cookie),
                                                  .rotation = 30}}};
-    u64 fingerprint = 1;
     for (auto space : {ColorSpace::Gamma, ColorSpace::Linear}) {
         assert(renderer.set_color_space(space));
-        for (int variant = 0; variant < 8; ++variant) {
+        for (int variant = 0; variant < 9; ++variant) {
             SurfaceGeometry2D geometry{.source = {1, 1, 6, 6},
                                        .dest = {12, 12, 6, 6},
                                        .rotation = variant == 4 ? 90.0f : 0.0f,
@@ -72,7 +73,12 @@ int main() {
             material.tint.a = variant == 7 ? 128 : 255;
             const auto shadows =
                 variant == 5 ? std::span<const LightOccluder2D>{} : std::span<const LightOccluder2D>{blockers};
-            const auto image = shade_normal_sprite2d(material, geometry, {40, 50, 70, 255}, lights, shadows);
+            // Variant 8: a light that can't be used, skipped by both.
+            std::vector<SurfaceLight2D> list(lights.begin(), lights.end());
+            if (variant == 8) {
+                list.insert(list.begin(), SurfaceLight2D{.height = std::numeric_limits<f32>::quiet_NaN()});
+            }
+            const auto image = shade_normal_sprite2d(material, geometry, {40, 50, 70, 255}, list, shadows);
             assert(image.valid());
             auto texture = renderer.create_texture_from_rgba(image.rgba.data(), image.size);
             renderer.clear(colors::black);
@@ -83,8 +89,9 @@ int main() {
             assert(renderer.read_rgba({0, 0, 32, 32}, expected, size));
             renderer.clear(colors::black);
             NormalLightingGpuCache2D cache;
-            assert(draw_normal_sprite2d_gpu(renderer, material, geometry, {40, 50, 70, 255}, lights, shadows,
-                                            fingerprint++, cache) &&
+            const SurfaceLightBuffer2D packed = pack_surface_lights2d(renderer, list, shadows);
+            assert(packed.buffer.valid() && packed.lights == lights.size());
+            assert(draw_normal_sprite2d_gpu(renderer, material, geometry, {40, 50, 70, 255}, packed, cache) &&
                    cache.used);
             assert(renderer.read_rgba({0, 0, 32, 32}, actual, size));
             int maximum = 0;

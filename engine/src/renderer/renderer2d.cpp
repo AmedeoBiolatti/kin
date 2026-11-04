@@ -1107,17 +1107,23 @@ bool Renderer2D::write_data_buffer(const DataBuffer& buffer, std::size_t offset,
 bool Renderer2D::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
                                         std::span<const u32> indices) {
     if (!texture || vertices.empty() || indices.empty() || indices.size() % 3 || vertices.size() > 1048576 ||
-        indices.size() > 3145728)
+        indices.size() > 3145728) {
         return false;
-    if (texture.format() != TextureFormat::Rgba8 && !texture_format_compressed(texture.format()))
+    }
+    if (texture.format() != TextureFormat::Rgba8 && !texture_format_compressed(texture.format())) {
         return false;
-    for (const auto& v : vertices)
+    }
+    for (const ShaderVertex& v : vertices) {
         if (!std::isfinite(v.position.x) || !std::isfinite(v.position.y) || !std::isfinite(v.uv.x) ||
-            !std::isfinite(v.uv.y))
+            !std::isfinite(v.uv.y)) {
             return false;
-    for (const auto i : indices)
-        if (i >= vertices.size())
+        }
+    }
+    for (const u32 i : indices) {
+        if (i >= vertices.size()) {
             return false;
+        }
+    }
     return _backend->draw_textured_geometry(texture, vertices, indices);
 }
 

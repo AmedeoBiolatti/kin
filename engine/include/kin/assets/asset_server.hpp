@@ -63,8 +63,6 @@ struct AssetServerConfig {
     int worker_count = 0;
     // Where loads run. Null: default_job_system(), shared with the rest of kin.
     JobSystem* jobs = nullptr;
-    // Release unreferenced loaded assets after pump(), on its calling thread.
-    bool unload_unused = false;
 };
 
 // Async loader signature. Distinct from AssetManager's synchronous Loader<T>:
@@ -156,7 +154,6 @@ public:
 private:
     struct AssetRecord {
         LoadState state = LoadState::NotLoaded;
-        std::vector<std::string> dependencies;
         // Storage identity separates generations when AssetManager unloads or
         // clears an asset while an async request is still running.
         std::weak_ptr<IAssetStorage> storage;
@@ -209,11 +206,11 @@ private:
     int _tasks = 0;   // tasks submitted and not yet finished
     std::vector<Job<void>> _task_handles;
     bool _stopping = false;
-    bool _unload_unused = false;
 
     u64 _next_id = 1;
-    // One server-owned record keeps lifecycle and dependency edges together.
-    // Manager storage remains the shared data owner used by sync and async APIs.
+    // Server-owned lifecycle records. Manager storage remains the shared data
+    // owner used by sync and async APIs, and AssetManager keeps the dependency
+    // edges this server records (AssetManager::dependencies).
     std::unordered_map<std::string, AssetRecord> _assets;
     std::unordered_map<std::type_index, std::shared_ptr<void>> _async_loaders;
     std::vector<AssetEvent> _events;
@@ -289,12 +286,14 @@ void AssetServer::commit(TypedLoadJob<T>& job) {
 
     // Enqueue dependencies discovered by the loader and record the edges. This
     // runs on the main thread, so load_async (and its cache access) is safe.
-    if (!job.ctx.deps.empty()) record->second.dependency_pin = job.storage;
-    std::vector<std::string>& edges = record->second.dependencies;
+    if (!job.ctx.deps.empty()) {
+        record->second.dependency_pin = job.storage;
+    }
+    std::vector<std::string> edges;
     for (auto& thunk : job.ctx.deps) {
         edges.push_back(thunk(*this));
     }
-    _manager.set_dependencies(job.key, edges);
+    _manager.set_dependencies(job.key, std::move(edges));
 }
 
 template<typename T>
@@ -318,8 +317,8 @@ AssetHandle<T> AssetServer::load_async(std::string_view relative_path) {
     // edges instead of trusting stale lifecycle data.
     record.state = LoadState::Loading;
     record.storage = storage;
-    record.dependencies.clear();
     record.dependency_pin.reset();
+    _manager.set_dependencies(key, {});
 
     auto job = std::make_unique<TypedLoadJob<T>>();
     job->request_id = next_request_id();

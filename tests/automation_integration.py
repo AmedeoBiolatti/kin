@@ -1,4 +1,4 @@
-"""Exercise the real Workshop, compiler, scenario runner and both replay writers."""
+"""Exercise the real Workshop, compiler, scenario runner and both recording writers."""
 
 import argparse
 import json
@@ -78,39 +78,26 @@ def main():
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     records = [json.loads(line) for line in tape.read_text().splitlines()]
-    assert (
-        records[0]["seed"] == "7"
-        and any(r["kind"] == "request" for r in records)
-        and any(r["kind"] == "frame" for r in records)
-    )
+    header = records[0]
+    assert header["seed"] == "7" and {"fixed_dt", "rng_key", "renderer", "game_id", "game_version"} <= header.keys()
+    assert any(r["kind"] == "request" for r in records) and any(r["kind"] == "frame" for r in records)
     cli("replay", tape, "native-replay")
-    # Interactive RPC recording is also a usable manual reproduction surface.
-    manual = out / "manual"
-    proc = subprocess.run(
-        [sys.executable, str(CLI), "record", "--out", str(manual), "--seed", "7", "--game", *game],
-        input="".join(json.dumps(r) + "\n" for r in requests),
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    cli("replay", manual / "commands.jsonl", "manual-replay")
     # The compiler runs a bounded, file-free Lua sandbox, rejects values that
     # cannot become JSON, and fails loops instead of hanging the runner.
     for i, code in enumerate(
         [
-            'test{name="bad",steps={function()end}}',
+            'scenario{name="bad",steps={function()end}}',
             "while true do end",
-            'test{name="bad",steps={[1]={tick=1},[3]={tick=1}}}',
-            'test{name=os.execute("echo bad")}',
+            'scenario{name="bad",steps={[1]={tick=1},[3]={tick=1}}}',
+            'scenario{name=os.execute("echo bad")}',
         ]
     ):
         path = out / f"bad-{i}.lua"
         path.write_text(code)
-        proc = subprocess.run([str(args.compiler), str(path)], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run([str(args.compiler), "scenario", str(path)], capture_output=True, text=True, timeout=10)
         assert proc.returncode != 0, code
     print(
-        f"Gameplay scenarios, Lua, both recordings/replays, failure artifacts and compiler checks passed. Artifacts: {out}"
+        f"Gameplay scenarios, Lua, both recording writers, replays, failure artifacts and compiler checks passed. Artifacts: {out}"
     )
 
 

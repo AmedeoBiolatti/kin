@@ -21,29 +21,71 @@ class LuaToolingTests(unittest.TestCase):
         cls.scene = kin_lua.schema(NATIVE, "scene")
         cls.entity = kin_lua.schema(NATIVE, "entity")
         cls.test_api = kin_lua.schema(NATIVE, "test")
+        cls.scenario_api = kin_lua.schema(NATIVE, "scenario")
+        cls.hosts = (cls.scene, cls.entity, cls.test_api, cls.scenario_api)
 
     def diagnostics(self, code, host="scene"):
         api = self.scene if host == "scene" else self.entity
         return "\n".join(message for _, message in kin_lua.check_source(code, api))
 
     def test_all_bindings_documented_and_definitions_compile(self):
-        for api in (self.scene, self.entity, self.test_api):
-            missing = [
-                (table, member)
-                for table, members in api["tables"].items()
-                for member in members
-                if member not in kin_lua.SIGNATURES.get(table, {})
-                and member not in kin_lua.PROPERTIES.get(table, {})
-            ]
-            self.assertEqual(missing, [])
+        # Every binding has a signature, and every signature a binding (in some
+        # host): the documentation cannot drift from the build either way.
+        bound = {
+            (table, member)
+            for api in self.hosts
+            for table, members in api["tables"].items()
+            for member in members
+        } | {("_G", name) for api in self.hosts for name in api["functions"]}
+        documented = {
+            (table, member)
+            for table, members in kin_lua.SIGNATURES.items()
+            for member in members
+        }
+        self.assertEqual(sorted(bound - documented), [], "bindings without a signature")
+        self.assertEqual(sorted(documented - bound), [], "signatures without a binding")
+        for api in self.hosts:
             with tempfile.TemporaryDirectory() as directory:
                 out = Path(directory) / "kin.lua"
                 out.write_text(kin_lua.generate(api))
                 subprocess.run([NATIVE, "check", out], check=True, capture_output=True)
                 text = out.read_text()
                 self.assertIn("---@class KinComponent_Transform2D", text)
-                self.assertIn("component: 'Transform2D'", text)
-                self.assertIn("---@param seconds number", text)
+                if api["host"] != "scenario":
+                    self.assertIn("component: 'Transform2D'", text)
+                    self.assertIn("---@param seconds number", text)
+        scenario = kin_lua.generate(self.scenario_api)
+        self.assertIn("function scenario(case) end", scenario)
+        self.assertIn("function wait_until(condition) end", scenario)
+        self.assertEqual(self.scene["component_aliases"]["transform"], "Transform2D")
+        self.assertIn("KinContext", self.scene["properties"])
+        self.assertEqual(self.entity["callbacks"]["on_update"], ["Entity", "number"])
+
+    def test_scenarios_compile_to_automation_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "case.lua"
+            file.write_text(
+                "scenario{name='walk',steps={tick(2),call('input.action',{name='jump'}),"
+                "wait_until{observe='scene.current',path='/state/x',value=1,within=4}}}"
+            )
+            result = subprocess.run(
+                [NATIVE, "scenario", file], capture_output=True, text=True, timeout=10
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            case = json.loads(result.stdout)
+            self.assertEqual(case["schema"], "kin.scenario/1")
+            self.assertEqual(case["steps"][0], {"tick": 2})
+            self.assertEqual(case["steps"][2]["wait"]["within"], 4)
+            for code in (
+                "test{name='old entry point',steps={}}",
+                "scenario{name='bad',steps={function() end}}",
+                "scenario{name='holes',steps={[1]={tick=1},[3]={tick=1}}}",
+            ):
+                file.write_text(code)
+                result = subprocess.run(
+                    [NATIVE, "scenario", file], capture_output=True, text=True, timeout=10
+                )
+                self.assertNotEqual(result.returncode, 0, code)
 
     def test_project_components_and_method_call_syntax(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -151,6 +193,18 @@ class LuaToolingTests(unittest.TestCase):
             local x=alias.x
             e:has('script_owned')
         end"""
+            ),
+            "",
+        )
+        self.assertEqual(
+            self.diagnostics(
+                """function on_start(self)
+            local id=self:tween('Transform2D.pos',{x=1,y=2},0.5,{done=function(self) end})
+            self:stop_tween(id)
+            local timer=self:every(0.5,function(self) end)
+            self:cancel(timer)
+        end""",
+                "entity",
             ),
             "",
         )

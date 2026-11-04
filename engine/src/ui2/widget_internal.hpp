@@ -43,7 +43,10 @@ bool takes_keys(Context& ctx, Id id, bool without_focus);
 // A press on one of a widget's parts (a row) gives the widget the focus,
 // without a focus ring.
 void focus_on_press(Context& ctx, Id id, bool pressed);
-
+// A focusable control's semantics before it reads input (Context::describe),
+// and, while enabled, its place in the Tab and controller focus order. It
+// reports what it shows afterwards with Context::semantic_state.
+void describe_control(Context& ctx, Id id, std::string_view role, std::string_view label, Rectf bounds, bool enabled);
 
 f32 clamp_margin(f32 margin, f32 limit);
 Sprite image_sprite(const Image& widget);

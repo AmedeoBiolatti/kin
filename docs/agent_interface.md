@@ -152,7 +152,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `animation.diagnostics` | none | Unresolved-reference diagnostics from the scene's animation library. |
 | `ui.snapshot` | `{scene?}` | Semantic ui2 tree from `Scene::ui_context()`: IDs, labels, roles, values, bounds and interaction flags. |
 | `ui.query` | `{scene?, selector?}` | Exact semantic predicates with recursive ancestor `within` scope. |
-| `ui.action` | `{scene?, id?, selector?, action?, text?}` | Queue `click` (default), `focus`, or `set_text`; choose exactly one legacy ID lookup or unique structured selector. |
+| `ui.action` | `{scene?, id?, selector?, action?, text?}` | Queue `click` (default), `focus`, `set_text`, `increment`, `decrement` or `set_number` (`text` holds the number) for the next tick; choose exactly one of an ID lookup or a unique structured selector. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
 | `view.scene` | `{path, content?}` | The top scene shows the scene file `path` in place of its own, as it reads its own (`Scene::view_scene`; a game says how). |
 | `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit; write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |

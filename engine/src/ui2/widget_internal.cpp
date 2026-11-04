@@ -208,7 +208,9 @@ void normalize_text_state(UiTextInputState& state) {
 }
 
 bool takes_keys(Context& ctx, Id id, bool without_focus) {
-    if (!ctx.accepts_input(id)) return false;
+    if (!ctx.accepts_input(id)) {
+        return false;
+    }
     if (id) {
         ctx.register_focusable(id);
     }
@@ -219,6 +221,13 @@ bool takes_keys(Context& ctx, Id id, bool without_focus) {
 void focus_on_press(Context& ctx, Id id, bool pressed) {
     if (pressed && id) {
         ctx.state().set_focused(id, false);
+    }
+}
+
+void describe_control(Context& ctx, Id id, std::string_view role, std::string_view label, Rectf bounds, bool enabled) {
+    ctx.describe(id, role, label, bounds, enabled, true);
+    if (enabled) {
+        ctx.register_focusable(id);
     }
 }
 

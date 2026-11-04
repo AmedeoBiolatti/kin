@@ -1,7 +1,7 @@
 # Kin gameplay test runner
 
-`kin_test.py` runs JSON/Lua scenarios, records driven scene-server sessions and
-replays JSONL recordings. It uses Python 3.9+ without third-party packages.
+`kin_test.py` runs JSON/Lua scenarios, recording each driven scene-server
+session, and replays JSONL recordings (its own or a game's `--automation-record`). It uses Python 3.9+ without third-party packages.
 
 ```sh
 python3 tools/automation/kin_test.py run examples/2d_workflow/tests/workshop.json \

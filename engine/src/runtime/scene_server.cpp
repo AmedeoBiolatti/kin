@@ -1,5 +1,4 @@
 #include <kin/runtime/scene_server.hpp>
-#include <kin/ui2/context.hpp>
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/renderer3d.hpp>
 #endif
@@ -8,10 +7,7 @@
 #include "runtime_internal.hpp"
 
 #include <algorithm>
-#include <cctype>
-#include <charconv>
 #include <chrono>
-#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <deque>
@@ -27,7 +23,8 @@
 #include <kin/ecs/world.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/renderer/render_view.hpp>
-#include <kin/runtime/development.hpp>
+#include <kin/ui2/context.hpp>
+#include <cctype>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -36,6 +33,10 @@
 
 namespace kin {
 namespace {
+
+using runtime_detail::error_result;
+using runtime_detail::exact_integer;
+using runtime_detail::ok_result;
 
 constexpr i64 MAX_TICKS_PER_CALL = 1'000'000;
 
@@ -365,16 +366,6 @@ void write_animation_diagnostics(JsonWriter& json, const std::vector<AnimationDi
         json.end_object();
     }
     json.end_array();
-}
-
-// Builds a result object string for a handler. The lambda receives the writer
-// already inside the top-level object scope is NOT assumed; callers open it.
-ServerResponse ok_result(const std::string& json) {
-    return {.ok = true, .error = {}, .result_json = json};
-}
-
-ServerResponse error_result(std::string message) {
-    return {.ok = false, .error = std::move(message), .result_json = {}};
 }
 
 ServerResponse handle_game_info(const GameInfo* game, const WindowedAppConfig& window) {
@@ -735,18 +726,17 @@ ServerResponse handle_sim_reset(ServerContext& ctx, const JsonValue& params) {
     }
     std::optional<u64> seed;
     if (const JsonValue* value = params.find("seed")) {
+        u64 parsed = 0;
         if (value->is_string()) {
-            u64 parsed = 0;
-            const auto& text = value->as_string();
-            const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
-            if (result.ec != std::errc{} || result.ptr != text.data() + text.size())
+            if (!runtime_detail::parse_u64(value->as_string(), parsed)) {
                 return error_result("seed must be an unsigned decimal integer");
+            }
             seed = parsed;
-        } else if (value->is_number() && std::isfinite(value->as_number()) && value->as_number() >= 0 &&
-                   value->as_number() <= 9007199254740991.0 && std::floor(value->as_number()) == value->as_number())
-            seed = static_cast<u64>(value->as_number());
-        else
+        } else if (const auto exact = exact_integer(*value, 0, 9007199254740991)) {
+            seed = static_cast<u64>(*exact);
+        } else {
             return error_result("seed must be an exact integer; use a decimal string above 2^53-1");
+        }
     }
     ctx.reset(seed);
     KIN_LOG_INFO_F("server",
@@ -832,56 +822,6 @@ ServerResponse handle_frame_timing(ServerContext& ctx, const JsonValue& params) 
     if (const JsonValue* reset = params.find("reset"); reset && reset->as_bool()) {
         ctx.clear_frame_timings();
     }
-    return ok_result(out.str());
-}
-
-ServerResponse handle_ui(ServerContext& ctx, const JsonValue& params, bool action, bool initialize = true) {
-    if (const auto* scene = params.find("scene");
-        scene && (!scene->is_number() || !std::isfinite(scene->as_number()) || scene->as_number() < 0 ||
-                  scene->as_number() >= ctx.scenes().depth() || std::floor(scene->as_number()) != scene->as_number()))
-        return error_result("scene must be an existing integer index");
-    const i32 index = static_cast<i32>(params.int_at("scene", ctx.scenes().depth() - 1));
-    Scene* scene = ctx.scenes().at_mut(index);
-    if (!scene || !scene->ui_context()) return error_result("scene has no semantic UI (Scene::ui_context)");
-    if (!action && initialize && scene->ui_context()->elements().empty()) {
-        // Render-driven UI needs its first layout even in a non-rendering server.
-        ctx.render_frame();
-        scene = ctx.scenes().at_mut(index);
-        if (!scene || !scene->ui_context()) return error_result("scene has no semantic UI (Scene::ui_context)");
-    }
-    auto& ui = *scene->ui_context();
-    if (action) {
-        const std::string name = params.string_at("action", "click");
-        const auto kind = name == "click"        ? ui2::SemanticAction::Click
-                          : name == "focus"      ? ui2::SemanticAction::Focus
-                          : name == "increment"  ? ui2::SemanticAction::Increment
-                          : name == "decrement"  ? ui2::SemanticAction::Decrement
-                          : name == "set_number" ? ui2::SemanticAction::SetNumber
-                                                 : ui2::SemanticAction::SetText;
-        if (name != "click" && name != "focus" && name != "set_text" && name != "increment" && name != "decrement" &&
-            name != "set_number")
-            return error_result("UI action must be click, focus, set_text, increment, decrement or set_number");
-        std::string error;
-        if (params.contains("id") && params.contains("selector"))
-            return error_result("use id or selector, not both");
-        const auto structured =
-            params.contains("selector") ? automation_ui_selector(ctx, params, error) : std::optional<ui2::Id>{};
-        if (params.contains("selector") && !structured)
-            return error_result(error);
-        const auto target =
-            ui.resolve_action(structured ? std::to_string(structured->value) : params.string_at("id"), kind, error);
-        if (!target) return error_result(error);
-        const std::string text = params.string_at("text");
-        if (!ctx.queue_ui_action([&ctx, scene, index, id = *target, kind, text] {
-                if (ctx.scenes().at_mut(index) != scene || !scene->ui_context()) return;
-                std::string ignored;
-                scene->ui_context()->queue_action(std::to_string(id.value), kind, text, ignored);
-            })) return error_result("a UI action is already pending; advance a frame first");
-        return ok_result("{\"queued\":true}");
-    }
-    std::ostringstream out;
-    JsonWriter json(out, false);
-    ui.write_snapshot(json);
     return ok_result(out.str());
 }
 
@@ -1072,7 +1012,9 @@ void ServerContext::queue_action(std::string name, std::string mode) {
 }
 
 bool ServerContext::queue_ui_action(std::function<void()> action) {
-    if (_pending_ui_action) return false;
+    if (_pending_ui_action) {
+        return false;
+    }
     _pending_ui_action = std::move(action);
     return true;
 }
@@ -1106,12 +1048,13 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
 }
 
 void ServerContext::step() {
-    if (_development)
-        for (i32 i = 0; i < _scenes.depth(); ++i)
-            if (auto* session = _scenes.at_mut(i)->development_session())
-                session->advance(static_cast<u64>(_frame + 1));
+    if (_development) {
+        runtime_detail::advance_development(_scenes, static_cast<u64>(_frame + 1), false);
+    }
     auto ui_action = std::exchange(_pending_ui_action, {});
-    if (ui_action) ui_action();
+    if (ui_action) {
+        ui_action();
+    }
     Input& input = _app.input();
     input.begin_frame();
 
@@ -1202,8 +1145,9 @@ void ServerContext::step() {
         // A hidden/paused UI may not have begun a frame. Its queued action must
         // still expire on this step instead of firing when it reappears.
         for (i32 index = 0; index < _scenes.depth(); ++index) {
-            if (auto* scene = _scenes.at_mut(index); scene && scene->ui_context())
+            if (auto* scene = _scenes.at_mut(index); scene && scene->ui_context()) {
                 scene->ui_context()->cancel_action();
+            }
         }
     }
     const auto end = clock::now();
@@ -1216,27 +1160,35 @@ void ServerContext::step() {
     ++_frame;
     if (_recording) {
         _recording->frame(*this);
-        if (!_recording->good())
-            _report.fail(_recording->error);
+        if (!_recording->good()) {
+            _report.fail(_recording->error());
+        }
     }
 }
 
 void ServerContext::start_recording(const std::filesystem::path& path, const GameInfo* game, std::optional<u64> seed) {
-    if (_recording)
-        throw std::logic_error("automation recording is already active");
-    _recording = std::make_shared<AutomationRecorder>(path, *this, game, seed);
-    if (!_recording->good())
-        throw std::runtime_error(_recording->error);
-}
-void ServerContext::begin_record_command(std::string_view method, const JsonValue& params) {
-    if (_recording)
-        _recording->begin_command(*this, method, params);
-}
-void ServerContext::record_command(std::string_view method, const JsonValue& params, const ServerResponse& response) {
     if (_recording) {
-        _recording->command(*this, method, params, response);
-        if (!_recording->good())
-            _report.fail(_recording->error);
+        throw std::logic_error("automation recording is already active");
+    }
+    _recording = std::make_shared<AutomationRecorder>(path, *this, game, seed);
+    if (!_recording->good()) {
+        throw std::runtime_error(_recording->error());
+    }
+}
+
+void ServerContext::begin_record_command(std::string_view method, const JsonValue& params) {
+    if (_recording) {
+        _recording->begin_command(*this, method, params);
+    }
+}
+
+void ServerContext::record_command(std::string_view method, const JsonValue& params, const ServerResponse& response) {
+    if (!_recording) {
+        return;
+    }
+    _recording->command(*this, method, params, response);
+    if (!_recording->good()) {
+        _report.fail(_recording->error());
     }
 }
 
@@ -1309,8 +1261,9 @@ void ServerContext::reset(std::optional<u64> seed) {
 
 static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const GameInfo* game, std::string_view method,
                                                    const JsonValue& params) {
-    if (auto response = dispatch_automation_command(ctx, game, method, params))
+    if (auto response = dispatch_automation_command(ctx, method, params)) {
         return *response;
+    }
     if (method == "game.info") {
         return handle_game_info(game, ctx.window_config());
     }
@@ -1347,10 +1300,6 @@ static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const Gam
     if (method == "input.key") {
         return handle_input_key(ctx, params);
     }
-    if (method == "ui.snapshot") {
-        return handle_ui(ctx, params, false);
-    }
-    if (method == "ui.action") return handle_ui(ctx, params, true);
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);
     }
@@ -1721,6 +1670,18 @@ ServerTransport parse_server_transport(std::string_view text) {
     return text == "http" ? ServerTransport::Http : ServerTransport::Stdio;
 }
 
+std::string_view automation_mode_name(AutomationMode mode) {
+    switch (mode) {
+    case AutomationMode::Driven:
+        return "driven";
+    case AutomationMode::Realtime:
+        return "realtime";
+    case AutomationMode::Inspect:
+        return "inspect";
+    }
+    return "driven";
+}
+
 int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
     if (!config.automation_record_path.empty() && config.mode != ServerMode::Driven) {
         KIN_LOG_ERROR("server", "automation recording requires driven mode");
@@ -1804,7 +1765,7 @@ int run_scene_server(const ServerConfig& config, SceneManager& scenes) {
     // Realize the initial scene stack (apply pending push + on_enter) without
     // advancing gameplay, so read endpoints work before the first tick.
     ctx.enable_development(config.development);
-    ctx.set_automation_mode(config.mode == ServerMode::Driven ? "driven" : "realtime");
+    ctx.set_automation_mode(config.mode == ServerMode::Driven ? AutomationMode::Driven : AutomationMode::Realtime);
     ctx.realize_scenes();
     if (!config.automation_record_path.empty()) {
         try {
@@ -2023,7 +1984,7 @@ LiveInspector::~LiveInspector() {
 }
 
 void LiveInspector::poll(ServerContext& ctx, const GameInfo* game) {
-    ctx.set_automation_mode("inspect");
+    ctx.set_automation_mode(AutomationMode::Inspect);
     _ctx = &ctx;
     std::deque<std::string> lines;
     bool reading = true;
@@ -2118,10 +2079,9 @@ void LiveInspector::answer(ServerContext& ctx, const GameInfo* game, std::string
     } else if (method == "sim.tick" || method == "sim.reset" || method.starts_with("input.") ||
                method.starts_with("view.") || method == "ui.action") {
         response = error_result(method + " drives a headless server (--server); this game runs in its window");
-    } else if (method == "ui.snapshot") {
-        response = handle_ui(ctx, params, false, false); // inspect the last frame without consuming player input
-    } else if (method == "ui.query") {
-        response = *dispatch_automation_command(ctx, game, method, params, false);
+    } else if (method == "ui.snapshot" || method == "ui.query") {
+        // The last frame's UI: laying one out here would consume the player's input.
+        response = *dispatch_automation_command(ctx, method, params, false);
     } else {
         response = dispatch_server_command(ctx, game, method, params);
     }

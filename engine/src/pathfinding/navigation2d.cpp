@@ -1,10 +1,12 @@
+#include <kin/pathfinding/navigation2d.hpp>
+
 #include <kin/core/jobs.hpp>
 #include <kin/ecs/lifecycle.hpp>
 #include <kin/ecs/render.hpp>
-#include <kin/pathfinding/navigation2d.hpp>
 #if KIN_ENABLE_PHYSICS
 #include <kin/ecs/physics.hpp>
 #endif
+
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -23,19 +25,6 @@ Vec2f mul(Vec2f a, f32 b) {
 }
 Vec2f add(Vec2f a, Vec2f b) {
     return {a.x + b.x, a.y + b.y};
-}
-WorldTransform transform(EcsEntity entity) {
-    std::vector<Transform2D> parents;
-    for (std::size_t guard = 0; entity && guard < 256; ++guard, entity = entity.parent())
-        parents.push_back(entity.get<Transform2D>() ? *entity.get<Transform2D>() : Transform2D{});
-    WorldTransform result;
-    for (auto it = parents.rbegin(); it != parents.rend(); ++it)
-        result = compose(result, *it);
-    return result;
-}
-u64 lifetime(EcsEntity entity) {
-    const auto* value = entity.get<EntityLifetime>();
-    return value ? value->generation : 0;
 }
 } // namespace
 void register_navigation2d_components(EcsWorld& world) {
@@ -63,7 +52,7 @@ void register_navigation2d_components(EcsWorld& world) {
 Navigation2D::Navigation2D(EcsWorld& world, std::shared_ptr<const NavGridSnapshot> snapshot,
                            NavigationOptions2D options)
     : _world(world), _options(options) {
-    if (options.requests_per_step < 1 || !options.max_agents)
+    if (options.requests_per_step < 1)
         throw std::invalid_argument("invalid navigation budget");
     register_navigation2d_components(world);
     set_snapshot(std::move(snapshot));
@@ -81,7 +70,7 @@ void Navigation2D::set_snapshot(std::shared_ptr<const NavGridSnapshot> snapshot)
     _entries.clear();
     _snapshot = std::move(snapshot);
 }
-bool Navigation2D::free(Vec2f p, f32 radius) const {
+bool Navigation2D::fits(Vec2f p, f32 radius) const {
     if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(radius) || radius < 0)
         return false;
     const auto& grid = *_snapshot;
@@ -102,7 +91,7 @@ bool Navigation2D::free(Vec2f p, f32 radius) const {
             }
     return true;
 }
-bool Navigation2D::clear(Vec2f a, Vec2f b, f32 radius) const {
+bool Navigation2D::sweep_clear(Vec2f a, Vec2f b, f32 radius) const {
     const f32 distance = length(sub(b, a));
     if (!std::isfinite(distance) || distance > _snapshot->tile_size * 512)
         return false;
@@ -110,33 +99,48 @@ bool Navigation2D::clear(Vec2f a, Vec2f b, f32 radius) const {
     if (steps > 4096)
         return false;
     for (std::size_t i = 1; i <= std::max<std::size_t>(1, steps); ++i)
-        if (!free(add(a, mul(sub(b, a), static_cast<f32>(i) / std::max<std::size_t>(1, steps))), radius))
+        if (!fits(add(a, mul(sub(b, a), static_cast<f32>(i) / std::max<std::size_t>(1, steps))), radius))
             return false;
     return true;
 }
-Navigation2D::Server& Navigation2D::server(i32 radius) {
+PathServer& Navigation2D::server(i32 radius) {
     if (auto it = _servers.find(radius); it != _servers.end())
-        return it->second;
+        return *it->second;
     auto inflated = std::make_shared<NavGridSnapshot>(*_snapshot);
     const f32 world_radius = radius * _snapshot->tile_size / 8;
     for (i32 y = 0; y < inflated->rows; ++y)
         for (i32 x = 0; x < inflated->cols; ++x)
             inflated->blocked[static_cast<std::size_t>(y) * inflated->cols + x] =
-                !free(inflated->tile_center({x, y}), world_radius);
+                !fits(inflated->tile_center({x, y}), world_radius);
     auto paths =
         std::make_unique<PathServer>(PathServerConfig{.jobs = _options.jobs ? _options.jobs : &default_job_system()});
-    paths->set_snapshot(inflated);
-    return _servers.emplace(radius, Server{inflated, std::move(paths)}).first->second;
+    paths->set_snapshot(std::move(inflated)); // the server keeps the snapshot
+    return *_servers.emplace(radius, std::move(paths)).first->second;
 }
+
+void Navigation2D::cancel(Entry& entry) {
+    if (entry.request) {
+        if (const auto found = _servers.find(entry.radius); found != _servers.end())
+            found->second->cancel(entry.request);
+        entry.request = 0;
+    }
+}
+
+void Navigation2D::raise(bool& flag, bool now, EcsId entity, NavigationEventKind2D kind) {
+    if (now && !flag)
+        _events.push_back({entity, kind});
+    flag = now;
+}
+
 void Navigation2D::update(f32 dt) {
     if (!std::isfinite(dt) || dt < 0)
         throw std::invalid_argument("invalid navigation dt");
     _events.clear();
-    for (auto& [radius, server] : _servers)
-        server.paths->drain(PathServer::DrainMode::BarrierOnAdmitted, [&](PathServerResult&& result) {
+    for (auto& [radius, paths] : _servers)
+        paths->drain(PathServer::DrainMode::BarrierOnAdmitted, [&](PathServerResult&& result) {
             auto found = _entries.find(result.user_key);
             auto entity = _world.entity_by_id(result.user_key);
-            if (found == _entries.end() || !entity || lifetime(entity) != found->second.lifetime ||
+            if (found == _entries.end() || !same_lifetime(entity, found->second.lifetime) ||
                 found->second.radius != radius || found->second.request != result.request_id)
                 return;
             const auto* current = entity.get<NavigationAgent2D>();
@@ -149,17 +153,13 @@ void Navigation2D::update(f32 dt) {
             // Agents can request a tighter arrival tolerance: finish that short
             // segment ourselves, with the same radius/obstacle checks as motion.
             if (found->second.path.empty() &&
-                clear(transform(entity).pos, found->second.request_target, current->radius))
+                sweep_clear(current_world_transform(entity).pos, found->second.request_target, current->radius))
                 found->second.path.push_back(found->second.request_target);
             if (!found->second.path.empty() && found->second.path.back() != found->second.request_target)
                 found->second.path.push_back(found->second.request_target);
             if (auto* agent = entity.get_mut<NavigationAgent2D>();
-                agent && agent->target == found->second.request_target) {
-                const bool was = agent->unreachable;
-                agent->unreachable = found->second.path.empty();
-                if (agent->unreachable && !was)
-                    _events.push_back({entity.id(), NavigationEventKind2D::Unreachable});
-            }
+                agent && agent->target == found->second.request_target)
+                raise(agent->unreachable, found->second.path.empty(), entity.id(), NavigationEventKind2D::Unreachable);
         });
     struct Actor {
         EcsEntity entity;
@@ -171,10 +171,8 @@ void Navigation2D::update(f32 dt) {
     std::vector<Actor> actors;
     _world.query<NavigationAgent2D, Transform2D>().each_entity(
         [&](EcsEntity entity, const NavigationAgent2D& agent, const Transform2D&) {
-            actors.push_back({entity, transform(entity).pos, agent});
+            actors.push_back({entity, current_world_transform(entity).pos, agent});
         });
-    if (actors.size() > _options.max_agents)
-        throw std::runtime_error("navigation agent limit exceeded");
     std::ranges::sort(actors, {}, [](const Actor& a) { return a.entity.id(); });
     std::set<EcsId> seen;
     for (auto& actor : actors) {
@@ -192,14 +190,10 @@ void Navigation2D::update(f32 dt) {
             nonnegative(a.repath_interval) && nonnegative(a.stuck_seconds) &&
             std::isfinite(length(sub(a.target, actor.position))) && std::isfinite(a.speed * dt);
         const auto radius = valid ? static_cast<i32>(std::ceil(a.radius * 8 / _snapshot->tile_size)) : 0;
-        const bool changed = fresh || e.lifetime != lifetime(actor.entity) || e.radius != radius;
-        if (changed) {
-            if (e.request && _servers.contains(e.radius))
-                _servers.at(e.radius).paths->cancel(e.request);
-            e = {.lifetime = lifetime(actor.entity),
-                 .radius = radius,
-                 .target = a.target,
-                 .last_position = actor.position};
+        const u64 lifetime = entity_lifetime(actor.entity);
+        if (fresh || e.lifetime != lifetime || e.radius != radius) {
+            cancel(e);
+            e = {.lifetime = lifetime, .radius = radius, .target = a.target, .last_position = actor.position};
             a.arrived = a.stuck = a.unreachable = false;
         }
         if (valid && e.target != a.target) {
@@ -211,39 +205,28 @@ void Navigation2D::update(f32 dt) {
         a.velocity = {};
         if (!valid || !a.enabled) {
             if (!valid) {
-                if (e.request && _servers.contains(e.radius))
-                    _servers.at(e.radius).paths->cancel(e.request);
-                e.request = 0;
+                cancel(e);
                 e.path.clear();
             }
-            if (!valid && !a.unreachable)
-                _events.push_back({id, NavigationEventKind2D::Unreachable});
-            a.unreachable = !valid;
+            raise(a.unreachable, !valid, id, NavigationEventKind2D::Unreachable);
             continue;
         }
         const auto distance = length(sub(a.target, actor.position));
         if (distance <= a.arrival_distance) {
-            if (!a.arrived)
-                _events.push_back({id, NavigationEventKind2D::Arrived});
-            a.arrived = true;
+            raise(a.arrived, true, id, NavigationEventKind2D::Arrived);
             a.stuck = a.unreachable = false;
-            if (e.request)
-                server(radius).paths->cancel(e.request);
-            e.request = 0;
+            cancel(e);
             e.path.clear();
             continue;
         }
         a.arrived = false;
-        if (!free(a.target, a.radius)) {
-            if (!a.unreachable)
-                _events.push_back({id, NavigationEventKind2D::Unreachable});
-            a.unreachable = true;
+        if (!fits(a.target, a.radius)) {
+            raise(a.unreachable, true, id, NavigationEventKind2D::Unreachable);
             continue;
         }
         if (!e.request && e.retry == 0 && (e.path.empty() || a.stuck || e.target != e.request_target)) {
             e.request_target = a.target;
-            e.request =
-                server(radius).paths->submit({.start_world = actor.position, .goal_world = a.target, .user_key = id});
+            e.request = server(radius).submit({.start_world = actor.position, .goal_world = a.target, .user_key = id});
             e.retry = std::max(0.01f, a.repath_interval);
             _events.push_back({id, NavigationEventKind2D::Replanned});
         }
@@ -265,10 +248,7 @@ void Navigation2D::update(f32 dt) {
         else
             e.stalled = 0;
         e.last_position = actor.position;
-        const bool stuck = e.stalled >= std::max(0.01f, a.stuck_seconds);
-        if (stuck && !a.stuck)
-            _events.push_back({id, NavigationEventKind2D::Stuck});
-        a.stuck = stuck;
+        raise(a.stuck, e.stalled >= std::max(0.01f, a.stuck_seconds), id, NavigationEventKind2D::Stuck);
     }
     for (auto& actor : actors) {
         auto& a = actor.agent;
@@ -301,12 +281,12 @@ void Navigation2D::update(f32 dt) {
             velocity = mul(velocity, a.speed / speed);
         if (!a.enabled || a.arrived || a.unreachable || !actor.valid)
             velocity = {};
-        if (actor.valid && dt > 0 &&
-            !clear(actor.position, add(actor.position, mul(velocity, dt)), std::max(0.0f, a.radius))) {
+        // Blocked: slide along one axis. A valid agent's radius is never negative.
+        if (actor.valid && dt > 0 && !sweep_clear(actor.position, add(actor.position, mul(velocity, dt)), a.radius)) {
             Vec2f x{velocity.x, 0}, y{0, velocity.y};
-            velocity = clear(actor.position, add(actor.position, mul(x, dt)), std::max(0.0f, a.radius))   ? x
-                       : clear(actor.position, add(actor.position, mul(y, dt)), std::max(0.0f, a.radius)) ? y
-                                                                                                          : Vec2f{};
+            velocity = sweep_clear(actor.position, add(actor.position, mul(x, dt)), a.radius)   ? x
+                       : sweep_clear(actor.position, add(actor.position, mul(y, dt)), a.radius) ? y
+                                                                                                : Vec2f{};
         }
         a.velocity = velocity;
         if (a.apply_motion && actor.valid) {
@@ -318,24 +298,22 @@ void Navigation2D::update(f32 dt) {
             }
 #endif
             if (!physics && dt > 0) {
-                auto pose = transform(actor.entity);
+                auto pose = current_world_transform(actor.entity);
                 pose.pos = add(pose.pos, mul(velocity, dt));
-                auto local =
-                    to_local(actor.entity.parent() ? transform(actor.entity.parent()) : WorldTransform{}, pose);
-                actor.entity.set(local);
+                const EcsEntity parent = actor.entity.parent();
+                actor.entity.set(to_local(parent ? current_world_transform(parent) : WorldTransform{}, pose));
             }
         }
         actor.entity.set(a);
     }
-    std::erase_if(_entries, [&](const auto& item) {
+    std::erase_if(_entries, [&](auto& item) {
         if (seen.contains(item.first))
             return false;
-        if (item.second.request && _servers.contains(item.second.radius))
-            _servers.at(item.second.radius).paths->cancel(item.second.request);
+        cancel(item.second);
         return true;
     });
     i32 budget = _options.requests_per_step;
-    for (auto& [radius, server] : _servers)
-        budget -= server.paths->admit(0, budget);
+    for (auto& [radius, paths] : _servers)
+        budget -= paths->admit(0, budget);
 }
 } // namespace kin

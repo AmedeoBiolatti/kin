@@ -23,6 +23,7 @@ schema = {
 for method, effect in [
     ("server.schema", "read"),
     ("server.capabilities", "read"),
+    ("game.info", "read"),
     ("server.status", "read"),
     ("scene.current", "read"),
     ("automation.snapshot", "read"),
@@ -54,7 +55,17 @@ for line in sys.stdin:
     if method == "server.schema":
         result = schema
     elif method == "server.capabilities":
-        result = {"ui": True, "world": True, "reset": True, "image_io": True, "rng_key": [seed, 0]}
+        result = {
+            "ui": True,
+            "world": True,
+            "reset": True,
+            "image_io": True,
+            "rng_key": [seed, 0],
+            "fixed_dt": 1 / 60,
+            "renderer": "fake",
+        }
+    elif method == "game.info":
+        result = {"id": "fake", "version": "1"}
     elif method == "server.status":
         result = {"frame": frame, "failed": False}
     elif method == "scene.current":

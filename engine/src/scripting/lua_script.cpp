@@ -1,31 +1,32 @@
+#include <kin/scripting/lua_script.hpp>
+
 #include "lua_api_surface.hpp"
 #include "lua_l10n.hpp"
 #include "lua_services.hpp"
 #include "lua_paths.hpp"
-#include "lua_tasks.hpp"
+#include "lua_vm.hpp"
+
+#include <kin/assets/file_watcher.hpp>
+#include <kin/platform/log.hpp>
 
 #include <algorithm>
-#include <atomic>
-#include <cstdio>
-#include <kin/assets/file_watcher.hpp>
-#include <kin/core/script_debugger.hpp>
-#include <kin/platform/log.hpp>
-#include <kin/scripting/lua_script.hpp>
 #include <stdexcept>
 #include <utility>
 
 namespace kin {
 
 namespace {
+
 std::string error_text(const sol::protected_function_result& result) {
     const sol::error error = result;
     return error.what();
 }
+
 } // namespace
 
 LuaScript::LuaScript(LuaScriptOptions options)
     : _options(std::move(options)), _dependencies(std::make_shared<std::vector<std::filesystem::path>>()) {
-    _lua = make_state(_dependencies, _runtime, _tasks);
+    _vm = make_vm(_dependencies);
 }
 
 LuaScript::~LuaScript() {
@@ -34,24 +35,11 @@ LuaScript::~LuaScript() {
             _files->unwatch(id);
         }
     }
-    _tasks.reset();
-    if (_lua) {
-        LuaCall budget{*_runtime, _lua->lua_state(), "vm.close", 1'000'000};
-        budget.closing();
-        _lua.reset();
-    }
 }
 
-std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependencies,
-                                                  std::shared_ptr<LuaRuntime>& runtime,
-                                                  std::unique_ptr<LuaTasks>& tasks) const {
-    const auto limits =
-        _runtime ? _runtime->limits() : LuaRuntimeLimits{_options.instruction_limit, _options.memory_limit_bytes};
-    runtime = std::make_shared<LuaRuntime>(limits);
-    runtime->set_profile_sink(_options.on_profile);
-    auto lua = std::make_unique<sol::state>(sol::default_at_panic, LuaRuntime::allocator, runtime.get());
-    scripting_detail::bind_script_errors(*lua);
-    lua->open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string, sol::lib::utf8);
+std::unique_ptr<LuaVm> LuaScript::make_vm(const Dependencies& dependencies) const {
+    auto vm = std::make_unique<LuaVm>(_vm ? _vm->runtime.limits() : _options.limits);
+    sol::state* lua = vm->lua.get();
     // Nothing that reads the world outside the script, or makes up numbers.
     for (const char* name : {"dofile", "loadfile", "load", "require", "collectgarbage"}) {
         (*lua)[name] = sol::lua_nil;
@@ -115,11 +103,10 @@ std::unique_ptr<sol::state> LuaScript::make_state(const Dependencies& dependenci
         };
     }
 
-    tasks = std::make_unique<LuaTasks>(*lua, *runtime);
     if (_options.setup) {
         _options.setup(*lua);
     }
-    return lua;
+    return vm;
 }
 
 bool LuaScript::load_file(const std::filesystem::path& path) {
@@ -151,72 +138,68 @@ bool LuaScript::load_string(std::string_view code, std::string_view name) {
 }
 
 bool LuaScript::run(std::string_view code, const std::string& chunk_name, std::vector<std::filesystem::path> dependencies) {
-    // A fresh state, replacing the current one only if the script loads and runs.
+    // A fresh state, replacing the current one only if the script loads and
+    // runs (a rejected one closes, with its tasks, when it goes).
     auto fresh_dependencies = std::make_shared<std::vector<std::filesystem::path>>(std::move(dependencies));
-    std::shared_ptr<LuaRuntime> fresh_runtime;
-    std::unique_ptr<LuaTasks> fresh_tasks;
-    std::unique_ptr<sol::state> fresh = make_state(fresh_dependencies, fresh_runtime, fresh_tasks);
-    // Task references must close before their VM, including a rejected candidate.
-    struct Cleanup {
-        std::unique_ptr<LuaTasks>& tasks;
-        std::unique_ptr<sol::state>& lua;
-        std::shared_ptr<LuaRuntime>& runtime;
-        ~Cleanup() {
-            tasks.reset();
-            if (lua) {
-                LuaCall budget{*runtime, lua->lua_state(), "vm.close", 1'000'000};
-                budget.closing();
-                lua.reset();
-            }
-        }
-    } cleanup{fresh_tasks, fresh, fresh_runtime};
-    LuaCall budget{*fresh_runtime, fresh->lua_state(), "script.load"};
-    budget.compiling();
-    budget.result(false);
-    sol::load_result chunk = fresh->load(code, chunk_name);
-    if (!chunk.valid()) {
-        const sol::error error = chunk;
-        fail(error.what());
-        return false;
-    }
-    sol::protected_function script = chunk;
-    budget.compiling(false);
+    std::unique_ptr<LuaVm> fresh = make_vm(fresh_dependencies);
     {
-        const sol::protected_function_result result = script();
-        budget.result(result.valid());
+        LuaCall call{fresh->runtime, fresh->state(), "script.load"};
+        sol::load_result chunk = call.compile([&] { return fresh->lua->load(code, chunk_name); });
+        if (!chunk.valid()) {
+            const sol::error error = chunk;
+            fail(error.what());
+            return false;
+        }
+        sol::protected_function script = chunk;
+        const sol::protected_function_result result = call.invoke(script);
         if (!result.valid()) {
             fail(error_text(result));
             return false;
         }
     }
     _dependencies = std::move(fresh_dependencies);
-    // Close objects in the old VM before closing the VM/accountant.
-    _tasks.reset();
-    _lua.swap(fresh);
-    _runtime.swap(fresh_runtime);
-    _tasks = std::move(fresh_tasks);
+    _vm.swap(fresh); // the old state closes here
     _loaded = true;
     _error.clear();
     return true;
 }
 
-bool LuaScript::advance_tasks(f32 dt, const std::function<bool(std::string_view)>& alive) {
+sol::state& LuaScript::lua() {
+    return *_vm->lua;
+}
+
+LuaRuntime& LuaScript::runtime() {
+    return _vm->runtime;
+}
+
+const LuaRuntime& LuaScript::runtime() const {
+    return _vm->runtime;
+}
+
+bool LuaScript::advance_tasks(f32 dt, const std::function<bool(u64)>& owner_alive) {
     std::string error;
-    if (!_tasks->advance(dt, error, alive)) {
+    if (!_vm->tasks->advance(dt, error, owner_alive)) {
         fail("task: " + error);
         return false;
     }
-    _runtime->collect(_lua->lua_state());
+    _vm->collect();
     return true;
 }
-void LuaScript::set_task_owner(std::string owner) {
-    _tasks->owner(std::move(owner));
+
+void LuaScript::set_task_owner(u64 owner) {
+    _vm->tasks->set_owner(owner);
 }
-void LuaScript::cancel_tasks(std::string_view owner) {
-    _tasks->cancel(owner);
+
+void LuaScript::cancel_tasks() {
+    _vm->tasks->cancel_all();
 }
-std::map<std::string, std::vector<std::string>> LuaScript::api_surface() const {
-    return scripting_detail::lua_api_surface(*_lua);
+
+void LuaScript::cancel_tasks(u64 owner) {
+    _vm->tasks->cancel(owner);
+}
+
+LuaApiSurface LuaScript::api_surface() const {
+    return scripting_detail::lua_api_surface(*_vm->lua);
 }
 
 bool LuaScript::has(std::string_view function) const {
@@ -227,7 +210,7 @@ sol::protected_function LuaScript::find(std::string_view function) const {
     if (!_loaded) {
         return {};
     }
-    const sol::object value = _lua->globals().raw_get<sol::object>(std::string(function));
+    const sol::object value = _vm->lua->globals().raw_get<sol::object>(std::string(function));
     if (value.get_type() != sol::type::function) {
         return {};
     }

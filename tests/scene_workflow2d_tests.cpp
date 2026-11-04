@@ -115,6 +115,11 @@ void preload_test() {
     assert(sprite && sprite->sprite.catalog);
     assert(sprite->sprite.catalog->textures().at("atlas").texture ==
            loaded->assets()->texture("a.png")); // no hidden catalog re-upload
+    // The preload's images stay resident under a memory budget while the scene lives.
+    assert(loaded->preloaded_assets().size() == 2);
+    loaded->assets()->manager().set_memory_budget(1);
+    assert(loaded->assets()->manager().loaded<Image>("a.png") && loaded->assets()->manager().loaded<Image>("b.png"));
+    loaded->assets()->manager().set_memory_budget(0);
 #endif
     source.reset(); // prepared scene owns a full content snapshot
     assert(content_file_exists(loaded->content_root() / "scene.kinscene"));
@@ -126,6 +131,18 @@ void preload_test() {
     failed.pump();
     assert(failed.state() == SceneLoadState2D::Failed && !failed.error().empty());
     assert(!loaded->instance().by_authored_id.empty()); // failure never replaces the active scene
+    // A development reload of the room applies its new clear colour too.
+    auto edited = files;
+    const std::string header = R"({"schema":"kin.scene/1","name":"Loaded",)";
+    assert(edited["scene.kinscene"].starts_with(header));
+    edited["scene.kinscene"].insert(header.size(), R"("clear_color":[10,20,30],)");
+    std::string error;
+    auto reload = loaded->prepare_reload({.content = MemoryContent::create(edited), .id = "edited"}, error);
+    assert(reload && reload->activate(error));
+    reload->finalize();
+    const Color clear = loaded->render_config().clear_color;
+    assert(clear.r == 10 && clear.g == 20 && clear.b == 30);
+    assert(!loaded->instance().by_authored_id.empty() && loaded->preloaded_assets().size() == 0);
     JobSystem workers;
     ScenePreload2D threaded{renderer, workers, loaded->content_root(), "scene.kinscene"};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);

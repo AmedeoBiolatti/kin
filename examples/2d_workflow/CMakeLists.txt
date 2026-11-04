@@ -6,12 +6,12 @@ kin_game(kin_2d_workflow TITLE "Kin 2D Workshop"
 if(BUILD_TESTING AND KIN_BUILD_TESTS)
     add_test(NAME kin-workflow-demo COMMAND kin_2d_workflow --self-test)
     set_tests_properties(kin-workflow-demo PROPERTIES TIMEOUT 60 LABELS "component:SCRIPTING;integration")
-    if(KIN_ENABLE_SCENE_SERVER AND TARGET kin_scenario)
+    if(KIN_ENABLE_SCENE_SERVER AND TARGET kin_lua)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         get_target_property(workflow_content kin_2d_workflow KIN_IMPORTED_CONTENT_DIR)
         add_test(NAME kin-workflow-automation
             COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/automation_integration.py"
-                --binary $<TARGET_FILE:kin_2d_workflow> --compiler $<TARGET_FILE:kin_scenario>
+                --binary $<TARGET_FILE:kin_2d_workflow> --compiler $<TARGET_FILE:kin_lua>
                 --content "${workflow_content}" --output "${CMAKE_CURRENT_BINARY_DIR}/automation")
         set_tests_properties(kin-workflow-automation PROPERTIES TIMEOUT 180 LABELS "component:SCENE_SERVER;integration")
         add_test(NAME kin-workflow-development COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/development_integration.py"

@@ -12,17 +12,17 @@ generation-based waits and reload replay with state-preserving Lua/scene changes
 ## Run a scenario
 
 Build with `KIN_ENABLE_SCENE_SERVER=ON` (the development default). Lua scenario
-files additionally require scripting and the `kin_scenario` compiler. The Python
+files additionally require scripting and `kin_lua` (`kin_lua scenario`). The Python
 runner needs Python 3.9+ and uses only its standard library. The Workshop's asset
 import step separately needs Pillow from `tools/requirements-imports.txt`.
 
 ```sh
 cmake -S . -B build -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_2D_WORKFLOW=ON
-cmake --build build --target kin_2d_workflow kin_scenario
+cmake --build build --target kin_2d_workflow kin_lua
 python3 tools/automation/kin_test.py run examples/2d_workflow/tests/workshop.json \
   --out /tmp/workshop-run --trace-world --game build/bin/kin_2d_workflow
 python3 tools/automation/kin_test.py run examples/2d_workflow/tests/workshop.lua \
-  --out /tmp/workshop-lua --lua-compiler build/bin/kin_scenario \
+  --out /tmp/workshop-lua --lua-compiler build/bin/kin_lua \
   --game build/bin/kin_2d_workflow
 ```
 
@@ -76,9 +76,11 @@ current state. Actions are issued once; only read/layout observations are retrie
 Conditions never use wall-clock sleeps. `--timeout` (15 seconds by default) is a
 separate deadline for a protocol response and catches hung/crashed processes.
 
-Lua files build the same data through `test{...}`, `call(method, params)`,
-`expect{...}`, `wait_until{...}`, `always{...}`, `tick(n)` and `capture(stem)`.
-The compiler uses Kin's Lua sandbox and a 500,000-instruction budget. It rejects
+Lua files build the same data through `scenario{...}`, `call(method, params)`,
+`expect{...}`, `wait_until{...}`, `always{...}`, `tick(n)` and `capture(stem)`;
+`kin_lua scenario file.lua` prints the JSON, and `tools/kin_lua.py --host scenario
+generate` writes editor definitions for these functions. The compiler uses Kin's
+Lua sandbox and a 500,000-instruction budget. It rejects
 holes, mixed object/array tables, functions, nonfinite values and excessive
 nesting. Omit empty optional arrays: an empty Lua table becomes a JSON object.
 Use decimal strings for seeds above 2^53-1 to avoid Lua/JSON floating-point loss.
@@ -114,8 +116,10 @@ are decimal strings in this endpoint. Prefer authored IDs across resets.
 {"method":"world.query","params":{"selector":{"authored_id":"player","all":["Transform2D"]},"limit":8}}
 ```
 
-`automation.snapshot` collects frame/failure status and every scene's report/UI.
-`world:true` adds registered ECS snapshots. Existing `world.snapshot` retains its
+`automation.snapshot` collects frame/failure status and every scene's report/UI,
+and a development session's summary (generation, status, revision, error; its
+source list and hashes are in `dev.status`). `world:true` adds registered ECS
+snapshots. Existing `world.snapshot` retains its
 original format, including numeric IDs. The windowed inspector exposes these
 read queries without enabling input mutations; UI queries use its latest layout.
 `sim.reset` clears queued/held input and frame/report history, preserves the input
@@ -125,34 +129,36 @@ map, rebuilds scenes and optionally reseeds. Seeds above 2^53-1 must be strings.
 
 Every Python run writes a flushed `commands.jsonl` session. It records requests
 before sending them, responses, checkpoints, steps, failed assertions and stderr
-logs. A crash therefore retains the last in-flight request. Seed, executable
-SHA-256, command arguments, declared dependencies and runner identity accompany
-the recording. Scenario `dependencies` are relative to the scenario file;
-`--dependency PATH` adds further files/directories. Existing `--content`/`--pack`
-arguments are included automatically. Directory hashing excludes dot paths and
-`__pycache__`; explicitly list any such inputs that matter. Script arguments,
-system libraries, environment variables and implicit file reads are not inferred.
-The output directory must be outside declared dependency directories.
+logs. A crash therefore retains the last in-flight request. Scenario
+`dependencies` are relative to the scenario file; `--dependency PATH` adds
+further files/directories. Existing `--content`/`--pack` arguments are included
+automatically. Directory hashing excludes dot paths and `__pycache__`; explicitly
+list any such inputs that matter. Script arguments, system libraries, environment
+variables and implicit file reads are not inferred. The output directory must be
+outside declared dependency directories.
+
+Games can also write a native recording with `--automation-record session.jsonl`
+(driven mode only), or `ServerContext::start_recording`, whoever sends the
+commands. Both writers start with the same `kin.automation-recording/1` header:
+`seed` (a decimal string, or null when the run had none), `fixed_dt`, `rng_key`,
+`renderer`, `game_id` and `game_version`. Python sessions add their `command`,
+declared `dependencies` and the `identity` (SHA-256) of the executable and those
+dependencies; native recordings do not hash anything, and add a checkpoint of
+every scene's report/UI after each tick. These surfaces record scene-server
+commands, not physical window/controller input.
 
 ```sh
 python3 tools/automation/kin_test.py replay /tmp/workshop-run/commands.jsonl \
   --out /tmp/workshop-replay --game build/bin/kin_2d_workflow
-python3 tools/automation/kin_test.py record --seed 7 --out /tmp/manual-session \
-  --dependency path/to/content --game build/bin/kin_2d_workflow
+python3 tools/automation/kin_test.py replay session.jsonl --seed 7 \
+  --out /tmp/native-replay --game build/bin/kin_2d_workflow
 ```
 
-`record` proxies manually entered JSON-RPC lines on stdin, echoing responses with
-the caller's ID. Finish with `server.shutdown` or EOF. Games can also write a
-native recording with `--automation-record session.jsonl` (driven mode only), or
-`ServerContext::start_recording`. Native recordings include seed/RNG, dt,
-game version, requests, results and per-tick reports/UI; they do not hash the
-executable/content. Supply `--seed` when a native header has no raw seed.
-These surfaces record scene-server commands, not physical window/controller input.
-
-Replay checks initial RNG/fixed dt, native game ID/version where supplied, and
-Python build/content identities, then issues the recorded requests in order.
-Changed identities/arguments require explicit
-`--allow-identity-change`. End-of-run hashing also detects declared content
+Replay refuses to launch when a recorded identity no longer matches, then checks
+the command arguments, initial RNG key, fixed dt and game ID/version the header
+holds, and issues the recorded requests in order. Changed identities, arguments
+or game versions require explicit `--allow-identity-change`. Supply `--seed`
+when a native header has none. End-of-run hashing also detects declared content
 changed during a run. Captures get new paths inside the replay directory.
 Response comparisons exclude timings, capability/schema discovery, raw world
 snapshots and capture filenames. Native recordings also compare the report/UI
@@ -184,9 +190,9 @@ fields and identify their coverage. The HTML retains the last 2,000 events,
 linking large records as separate JSON artifacts; the complete JSONL is bounded
 at 256 MiB. Raw stderr is capped at 64 MiB and each protocol line at 16 MiB.
 
-`kin-automation`, `kin-automation-python` and `kin-workflow-automation` cover the
+`kin-server`, `kin-automation-python` and `kin-workflow-automation` cover the
 native API, process driver and real Workshop/compiler/recording workflow. The
 Workshop test is registered when its target, scene server and Lua compiler are
 enabled. Desktop and GPU CI install import dependencies and upload Workshop
-failure traces. The runner does not start the read-only inspector or an HTTP
+failure traces (jobs that build the examples). The runner does not start the read-only inspector or an HTTP
 server; use the [agent interface](agent_interface.md) for those interactive modes.

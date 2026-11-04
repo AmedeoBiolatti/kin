@@ -24,12 +24,15 @@
 //   position() -> x, y; set_position(x, y); move(dx, dy) (its body goes there too);
 //   rotation(); set_rotation(degrees)
 //   tween(property, to, seconds[, easing][, options]) -> id: one of its fields
-//   ("Transform2D.pos") moved to `to` (kin/ecs/tween.hpp; the game runs
-//   update_tweens); options: delay, repeats, yoyo, relative, easing, done =
-//   function(self) (once it gets to its end); tweening([property]),
-//   stop_tween(id), stop_tweens([property])
-//   after(seconds, fn) -> id, every(seconds, fn) -> id: fn(self) then (every:
-//   each time), until cancel(id) or it stops running its script
+//   ("Transform2D.pos") moved to `to` (kin/ecs/tween.hpp; stepped by the
+//   world's script services, ScriptWorkflows2D); options: delay, repeats,
+//   yoyo, relative, easing, done = function(self) (once it gets to its end);
+//   tweening([property]), stop_tween(id), stop_tweens([property])
+//   after(seconds, fn) -> task, every(seconds, fn) -> task: fn(self) then
+//   (every: each time, at most once a step), until cancel(task) or it stops
+//   running its script; these and tween's done run as the script's tasks
+//   (kin/scripting/lua_script.hpp), so a reload drops them (restart them in
+//   on_reload)
 //   velocity() -> vx, vy; set_velocity(vx, vy): its CharacterController2D's,
 //   else its body's (PhysicsVelocity); on_floor(), on_wall(), on_ceiling():
 //   what its CharacterController2D found in the last step
@@ -79,9 +82,10 @@
 // Fields read and set as scene files have them: numbers, true/false, text,
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
-#include <filesystem>
 #include <kin/core/types.hpp>
 #include <kin/scripting/lua_runtime.hpp>
+
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <string>
@@ -95,7 +99,6 @@ class SceneDialogue;
 class SceneFlow;
 class SceneSaves;
 class PhysicsWorld;
-class ScriptWorkflows2D;
 
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
@@ -122,7 +125,8 @@ public:
     // keep the active VM on any failure. on_reload(self) is optional.
     bool reload(std::string_view asset);
     std::map<std::string, LuaRuntimeStats> runtime_stats() const;
-    std::map<std::string, std::vector<std::string>> api_surface() const;
+    // What a script's state binds and the callbacks it gets, for kin_lua api.
+    LuaApiSurface api_surface() const;
     // The scene's UI screens, for the scripts' `ui` (null: none).
     void set_screens(SceneScreens* screens);
     // The scene's dialogue, for the scripts' `dialogue` and on_dialogue_event (null: none).
@@ -135,10 +139,6 @@ public:
     // The game's saves, for the scripts' `save` and their entities' kept
     // values (null: none). They are given the scripts' hooks (set_scripts).
     void set_saves(SceneSaves* saves);
-    // Optional shared renderer/job/controller services; otherwise a native
-    // workflow service is made automatically on the first update.
-    void set_workflows(std::shared_ptr<ScriptWorkflows2D> workflows);
-    std::shared_ptr<ScriptWorkflows2D> workflows() const;
 
 private:
     struct Impl;

@@ -11,6 +11,7 @@ import unittest
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(TOOLS))
+from asset_dependencies import discover
 from make_asset_report_fixture import create_fixture, create_dependency_fixture
 from report_game_assets import analyze
 
@@ -155,7 +156,6 @@ class DependencyTrackingTests(unittest.TestCase):
         return analyze(self.assets, self.manifest)
 
     def test_native_skeleton_atlas_dependency(self):
-        from asset_dependencies import discover
         (self.assets / "hero.kinskel").write_text(json.dumps({"schema":"kin.skeleton2d/1", "texture_asset":"textures/hero.png"}))
         result = discover(self.assets, "hero.kinskel", {"hero.kinskel", "textures/hero.png"}, dict)
         self.assertTrue(result["complete"])

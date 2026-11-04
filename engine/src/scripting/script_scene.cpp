@@ -1,20 +1,22 @@
-#include <algorithm>
-#include <cctype>
-#include <filesystem>
+#include <kin/scripting/script_scene.hpp>
+
 #include <kin/core/json.hpp>
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
-#include <kin/scene/live_scene2d.hpp>
+#include <kin/runtime/development.hpp>
 #include <kin/scene/scene_asset_runtime.hpp>
 #include <kin/scripting/script_engine.hpp>
 #include <kin/scripting/script_reload.hpp>
-#include <kin/scripting/script_scene.hpp>
 #include <kin/scripting/workflows2d.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <optional>
+#include <system_error>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -232,64 +234,37 @@ ScriptScene::~ScriptScene() {
 }
 
 void ScriptScene::on_enter(SceneContext& ctx) {
+#if KIN_ENABLE_DEVELOPMENT
     if (ctx.development && !_development) {
         _development = std::make_unique<DevelopmentSession>(_config.asset_root);
-        if (_script)
+        if (_script) {
             _script->use_content(_development->active().content);
+        }
         adopt_assets(Assets2D::from_snapshot(ctx.renderer, _development->active().content));
         assets()->bind(ecs());
-        _development->add_target("scene and assets", [this, &renderer = ctx.renderer](
-                                                         const DevelopmentRevision& revision, std::string& error) {
-            struct State {
-                std::unique_ptr<Assets2D> next, old;
-            };
-            auto state = std::make_shared<State>();
-            state->next = assets() ? assets()->for_snapshot(revision.content)
-                                   : Assets2D::from_snapshot(renderer, revision.content);
-            if (assets()) {
-                state->next->manager().set_memory_budget(assets()->manager().memory_budget());
-                state->next->set_texture_budget(assets()->texture_budget());
+        SceneAssetRuntime* scene_runtime = _config.scene_runtime.get();
+        if (scene_runtime && scene_runtime->loaded() && !scene_runtime->tracks_authored() &&
+            !scene_runtime->track_authored(ecs().components())) {
+            const auto& diagnostics = scene_runtime->diagnostics();
+            KIN_LOG_WARN("development", "the scene cannot reload: " +
+                                            (diagnostics.empty() ? std::string("unknown error") : diagnostics.front()));
+        }
+        _development->add_target("scene and assets", [this](const DevelopmentRevision& revision, std::string& error) {
+            SceneAssetRuntime* runtime = _config.scene_runtime.get();
+            ScenePatchPreparer prepare_scene;
+            if (runtime) {
+                prepare_scene = [&](const AssetPreviewCheck& check, std::string& failure) {
+                    return runtime->prepare_patch(ecs(), revision.content->root(), failure, check);
+                };
             }
-            std::unique_ptr<DevelopmentChange> scene;
-            const auto validate = [&](EcsWorld& preview, std::string& failure) {
-                state->next->bind(preview);
-                if (state->next->problems().empty())
-                    return true;
-                failure = state->next->problems().begin()->second;
-                return false;
-            };
-            if (_config.scene_runtime) {
-                scene = _config.scene_runtime->prepare_patch(ecs(), revision.content->root(), error, validate);
-                if (!scene)
-                    return std::unique_ptr<DevelopmentChange>{};
-            } else {
-                EcsWorld preview;
-                ecs().components().copy_schema_to(preview.components());
-                if (!instantiate_scene(preview, scene_document_from_world(ecs()), error) || !validate(preview, error))
-                    return std::unique_ptr<DevelopmentChange>{};
-            }
-            auto patch = std::shared_ptr<DevelopmentChange>{std::move(scene)};
-            return std::make_unique<DevelopmentChange>(
-                DevelopmentChange{[this, state, patch](std::string& e) {
-                                      if (patch && !patch->activate(e))
-                                          return false;
-                                      state->old = exchange_assets(std::move(state->next));
-                                      assets()->bind(ecs());
-                                      return true;
-                                  },
-                                  [this, state, patch] {
-                                      if (state->old)
-                                          state->next = exchange_assets(std::move(state->old));
-                                      if (patch)
-                                          patch->rollback();
-                                  },
-                                  [this, patch] {
-                                      if (patch && patch->finalize)
-                                          patch->finalize();
-                                      if (_config.scene_runtime)
-                                          render_config().clear_color = _config.scene_runtime->scene()->clear_color;
-                                      mark_render_cache_dirty("development reload");
-                                  }});
+            return prepare_asset_reload(
+                revision, prepare_scene,
+                [this, runtime] {
+                    if (runtime) {
+                        render_config().clear_color = runtime->scene()->clear_color;
+                    }
+                },
+                error);
         });
         _development->add_target("Lua", [this](const DevelopmentRevision& revision, std::string& error) {
             auto path = _config.script_path.is_absolute() ? _config.script_path.lexically_relative(_config.asset_root)
@@ -308,8 +283,9 @@ void ScriptScene::on_enter(SceneContext& ctx) {
             if (change) {
                 auto finalize = std::move(change->finalize);
                 change->finalize = [this, path, finalize = std::move(finalize)] {
-                    if (finalize)
+                    if (finalize) {
                         finalize();
+                    }
                     _config.script_path = path;
                     clear_script_error();
                 };
@@ -317,8 +293,10 @@ void ScriptScene::on_enter(SceneContext& ctx) {
             return change;
         });
     }
-    if (_script && _script->workflows())
+#endif
+    if (_script && _script->workflows()) {
         _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
+    }
     if (_script && !_script->call_on_enter(ctx)) {
         set_script_error(_script->last_error(), "on_enter");
         KIN_LOG_ERROR_F("script", _last_error, (LogFields{{.name = "path", .value = resolved_script_path().string()}}));
@@ -333,8 +311,9 @@ void ScriptScene::on_exit(SceneContext& ctx) {
 }
 
 void ScriptScene::update(SceneContext& ctx) {
-    if (_script && _script->workflows())
+    if (_script && _script->workflows()) {
         _script->workflows()->configure(&ctx.renderer, ctx.app.gamepads(), assets());
+    }
     if (_config.before_update) {
         _config.before_update(*this, ctx);
     }
@@ -413,13 +392,16 @@ void ScriptScene::clear_script_entities() {
 }
 
 bool ScriptScene::reload_script() {
+#if KIN_ENABLE_DEVELOPMENT
     if (_development) {
         std::string error;
         const bool queued = _development->request(error);
-        if (!queued)
+        if (!queued) {
             set_script_error(error, "reload");
+        }
         return queued;
     }
+#endif
     KIN_LOG_INFO_F("script",
                    "script reload requested",
                    (LogFields{
@@ -475,9 +457,7 @@ bool ScriptScene::load_script(bool clear_entities) {
 }
 
 void ScriptScene::poll_hot_reload() {
-    if (_development)
-        return;
-    if (!_config.hot_reload) {
+    if (_development || !_config.hot_reload) {
         return;
     }
 

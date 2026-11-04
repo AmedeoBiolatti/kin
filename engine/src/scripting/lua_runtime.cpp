@@ -1,14 +1,23 @@
+#include <kin/scripting/lua_runtime.hpp>
+
+#include "lua_paths.hpp"
+#include "lua_vm.hpp"
+
+#include <kin/core/profile.hpp>
+#include <kin/core/script_debugger.hpp>
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
-#include <kin/core/script_debugger.hpp>
-#include <kin/scripting/lua_runtime.hpp>
 #include <limits>
 #include <sol/sol.hpp>
 #include <utility>
+
 namespace kin {
+
 namespace {
+
 // The budget of the load or call running on this thread (null: no limit). The
 // count hook takes 1,000 instructions from it at a time and stops the script
 // with an error when it runs out.
@@ -338,8 +347,14 @@ void line_hook(lua_State* state, lua_Debug* at) {
 }
 
 void script_hook(lua_State* state, lua_Debug* at) {
-    if (at->event == LUA_HOOKCALL && t_runtime && t_runtime->over_memory_limit()) {
-        luaL_error(state, "Lua memory limit exceeded");
+    if (at->event == LUA_HOOKCALL || at->event == LUA_HOOKTAILCALL) {
+        // Once per entry, at its first call: the host's arguments are on the
+        // heap by then. Further in, the allocator refuses what would exceed
+        // the limit itself, so later calls run without this hook.
+        lua_sethook(state, script_hook, lua_gethookmask(state) & ~LUA_MASKCALL, lua_gethookcount(state));
+        if (t_runtime && t_runtime->over_memory_limit()) {
+            luaL_error(state, "Lua memory limit exceeded");
+        }
     } else if (at->event == LUA_HOOKCOUNT) {
         count_hook(state);
     } else if (at->event == LUA_HOOKLINE) {
@@ -348,6 +363,7 @@ void script_hook(lua_State* state, lua_Debug* at) {
 }
 
 } // namespace
+
 void* LuaRuntime::allocator(void* context, void* pointer, size_t old_size, size_t new_size) {
     auto& vm = *static_cast<LuaRuntime*>(context);
     const u64 old = pointer ? old_size : 0;
@@ -374,26 +390,31 @@ void* LuaRuntime::allocator(void* context, void* pointer, size_t old_size, size_
         vm._stats.memory_bytes = base + new_size;
         vm._stats.peak_memory_bytes = std::max(vm._stats.peak_memory_bytes, vm._stats.memory_bytes);
         ++vm._stats.allocations;
-        if (new_size > old)
+        if (new_size > old) {
             vm._stats.allocated_bytes += new_size - old;
+        }
     }
     return next;
 }
+
 LuaRuntimeStats LuaRuntime::stats() const {
     auto result = _stats;
-    for (const auto& [name, profile] : _profiles)
+    for (const auto& [name, profile] : _profiles) {
         result.callbacks.push_back(profile);
+    }
     return result;
 }
+
 void LuaRuntime::collect(lua_State* state, i32 work) {
     const auto start = std::chrono::steady_clock::now();
-    LuaCall budget{*this, state, "vm.gc", 1'000'000};
+    LuaCall budget{*this, state, "vm.gc", lua_maintenance_budget};
     LuaNativeAllocations cleanup{*this};
     lua_gc(state, LUA_GCSTEP, std::clamp(work, 1, 1024));
     ++_stats.gc_steps;
     _stats.gc_ns +=
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
 }
+
 LuaCall::LuaCall(LuaRuntime& runtime, lua_State* state, std::string_view name, u64 limit)
     : _runtime(runtime), _state(state), _name(name), _remaining(limit ? limit : runtime.limits().instruction_limit),
       _previous(t_budget), _previous_call(t_call), _allocated(runtime._stats.allocated_bytes),
@@ -414,9 +435,11 @@ LuaCall::LuaCall(LuaRuntime& runtime, lua_State* state, std::string_view name, u
                      (runtime.limits().memory_limit_bytes ? LUA_MASKCALL : 0);
     lua_sethook(state, mask ? script_hook : nullptr, mask, hook_interval);
 }
+
 LuaCall::~LuaCall() {
-    if (_previous && _limited)
+    if (_previous && _limited) {
         *_previous = std::min(*_previous, _remaining);
+    }
     t_budget = _previous;
     t_call = _previous_call;
     if (_state) {
@@ -428,19 +451,57 @@ LuaCall::~LuaCall() {
     t_runtime = _previous_runtime;
     const auto ns = static_cast<u64>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _start).count());
-    const auto key = _runtime._profiles.size() < 128 || _runtime._profiles.contains(_name) ? _name : "<other>";
-    auto& p = _runtime._profiles[key];
-    p.name = key;
-    ++p.calls;
-    p.failures += !_success || exhausted();
-    p.total_ns += ns;
-    p.max_ns = std::max(p.max_ns, ns);
-    p.allocated_bytes += _runtime._stats.allocated_bytes - _allocated;
-    if (_runtime._profile_sink) {
-        try {
-            _runtime._profile_sink(_name, ns);
-        } catch (...) { /* Profiling cannot break VM teardown. */
-        }
+    auto found = _runtime._profiles.find(_name);
+    if (found == _runtime._profiles.end()) {
+        std::string key = _runtime._profiles.size() < 128 ? _name : std::string("<other>");
+        found = _runtime._profiles.try_emplace(key, LuaCallbackProfile{.name = key}).first;
+    }
+    LuaCallbackProfile& profile = found->second;
+    ++profile.calls;
+    profile.failures += !_success || exhausted();
+    profile.total_ns += ns;
+    profile.max_ns = std::max(profile.max_ns, ns);
+    profile.allocated_bytes += _runtime._stats.allocated_bytes - _allocated;
+    if (ProfileSession* session = current_profile_session()) {
+        session->record(_name, "lua", ns);
     }
 }
+
+void LuaCall::closing() {
+    if (_state) {
+        // Native binding finalizers must be able to release their Lua
+        // registry entries even when the rejected VM is over its budget.
+        --_runtime._protected_depth;
+        _state = nullptr;
+    }
+}
+
+LuaVm::LuaVm(LuaRuntimeLimits limits)
+    : runtime(limits), lua(std::make_unique<sol::state>(sol::default_at_panic, LuaRuntime::allocator, &runtime)) {
+    scripting_detail::bind_script_errors(*lua);
+    lua->open_libraries(sol::lib::base, sol::lib::math, sol::lib::table, sol::lib::string, sol::lib::utf8);
+    tasks = std::make_unique<LuaTasks>(*lua, runtime);
+}
+
+LuaVm::~LuaVm() {
+    tasks.reset(); // task references are released before their VM
+    LuaCall close{runtime, state(), "vm.close", lua_maintenance_budget};
+    close.closing();
+    lua.reset();
+}
+
+LuaInstructionBudget::LuaInstructionBudget(u64 limit) : _remaining(limit), _previous(t_budget) {
+    if (_previous) {
+        _remaining = std::min(_remaining, *_previous);
+    }
+    t_budget = &_remaining;
+}
+
+LuaInstructionBudget::~LuaInstructionBudget() {
+    if (_previous) {
+        *_previous = std::min(*_previous, _remaining);
+    }
+    t_budget = _previous;
+}
+
 } // namespace kin

@@ -19,8 +19,7 @@ std::string_view load_state_name(LoadState state) {
 AssetServer::AssetServer(AssetManager& manager, AssetServerConfig config)
     : _manager(manager),
       _jobs(config.jobs ? config.jobs : &default_job_system()),
-      _max_tasks(config.worker_count > 0 ? config.worker_count : 2),
-      _unload_unused(config.unload_unused) {
+      _max_tasks(config.worker_count > 0 ? config.worker_count : 2) {
     KIN_LOG_INFO_F("asset",
                    "asset server created",
                    (LogFields{{.name = "max_loads", .value = std::to_string(_max_tasks)}}));
@@ -127,13 +126,13 @@ void AssetServer::pump(PumpMode mode) {
             quiescent = _queue.empty() && _active == 0 && _completed.empty();
         }
         if (quiescent) {
-            for (auto& [key, record] : _assets) record.dependency_pin.reset();
+            for (auto& [key, record] : _assets) {
+                record.dependency_pin.reset();
+            }
         }
-        if (_manager.memory_budget())
+        if (_manager.over_memory_budget()) {
             _manager.trim_memory();
-        if (!_unload_unused) return;
-        _manager.unload_unused();
-        std::erase_if(_assets, [](const auto& entry) { return entry.second.storage.expired(); });
+        }
     };
 
     if (mode == PumpMode::Budgeted) {
@@ -213,8 +212,8 @@ bool AssetServer::ready_key(const std::string& key, std::set<std::string>& visit
     if (!visiting.insert(key).second) {
         return true; // cycle guard: already proven on this path
     }
-    if (const auto asset = _assets.find(key); asset != _assets.end()) {
-        for (const std::string& child : asset->second.dependencies) {
+    if (const std::vector<std::string>* children = _manager.dependencies(key)) {
+        for (const std::string& child : *children) {
             if (!ready_key(child, visiting)) {
                 return false;
             }

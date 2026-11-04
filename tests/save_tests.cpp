@@ -47,6 +47,30 @@ void test_user_data_override_and_roots() {
     std::filesystem::remove_all(temp);
 }
 
+// The atomic writer SaveStore and input profiles share, and the game's folder.
+void test_write_user_file() {
+    const std::filesystem::path temp = unique_temp_root("user-file");
+    kin::set_user_data_dir_override(temp);
+    assert(kin::game_data_dir("sample_game") == kin::SaveStore({.game_id = "sample_game"}).root());
+    const std::filesystem::path file = kin::game_data_dir("sample_game") / "input" / "keys.json";
+    std::string error;
+    assert(kin::write_user_file(file, "first", &error) && error.empty());
+    assert(kin::write_user_file(file, "second")); // replaces the file whole
+    {
+        // Closed before the folder goes: ntfs-3g blocks removing a tree with a file open in it.
+        std::ifstream in{file, std::ios::binary};
+        const std::string text{std::istreambuf_iterator<char>(in), {}};
+        assert(text == "second" && !std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
+    }
+    // A folder where the file should be: nothing written, the reason given.
+    assert(!kin::write_user_file(temp / "kin", "x", &error) && !error.empty());
+    kin::set_user_data_game_id("sample_game");
+    assert(kin::user_data_game_id() == "sample_game");
+    kin::set_user_data_game_id({});
+    kin::clear_user_data_dir_override();
+    std::filesystem::remove_all(temp);
+}
+
 void test_id_validation() {
     assert(kin::valid_save_id("slot_1-A"));
     assert(!kin::valid_save_id(""));
@@ -336,6 +360,7 @@ void test_json_values() {
 
 int main() {
     test_user_data_override_and_roots();
+    test_write_user_file();
     test_id_validation();
     test_settings();
     test_slots();

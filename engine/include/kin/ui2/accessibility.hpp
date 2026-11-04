@@ -1,7 +1,9 @@
 #pragma once
 
 #include <kin/ui2/semantics.hpp>
+
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace kin {
@@ -22,11 +24,12 @@ public:
     Accessibility& operator=(const Accessibility&) = delete;
     void update(Context& context);
     void announce(std::string text, bool assertive = false);
-    // Thread-safe entry point for alternative assistive input adapters. False
-    // for unavailable/disabled targets or a full queue. Revalidated on dispatch.
+    // Thread-safe entry point for alternative assistive input adapters (SetText
+    // takes `text`, SetNumber a number in it). False for unavailable/disabled
+    // targets, a malformed number or a full queue. Revalidated on dispatch.
     bool request_action(Id id, SemanticAction action, std::string text = {});
+    // What the last update() showed, in window pixels.
     std::vector<SemanticElement> snapshot() const;
-    bool native_available() const;
 
 private:
     struct Impl;

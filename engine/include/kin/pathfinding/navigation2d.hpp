@@ -32,7 +32,6 @@ struct NavigationEvent2D {
 struct NavigationOptions2D {
     JobSystem* jobs = nullptr;
     i32 requests_per_step = 8;
-    std::size_t max_agents = 4096;
 };
 void register_navigation2d_components(EcsWorld& world);
 
@@ -56,17 +55,19 @@ private:
         std::size_t next = 0;
         f32 retry = 0, stalled = 0;
     };
-    struct Server {
-        std::shared_ptr<const NavGridSnapshot> grid;
-        std::unique_ptr<PathServer> paths;
-    };
-    bool free(Vec2f position, f32 radius) const;
-    bool clear(Vec2f from, Vec2f to, f32 radius) const;
-    Server& server(i32 radius);
+    // Whether a circle at `position` touches no blocked cell, and whether one
+    // moving from `from` to `to` stays clear all the way.
+    bool fits(Vec2f position, f32 radius) const;
+    bool sweep_clear(Vec2f from, Vec2f to, f32 radius) const;
+    // The path server for a radius bucket, made with its inflated snapshot.
+    PathServer& server(i32 radius);
+    void cancel(Entry& entry);
+    // Sets `flag` to `now`, telling `kind` when it becomes true.
+    void raise(bool& flag, bool now, EcsId entity, NavigationEventKind2D kind);
     EcsWorld& _world;
     NavigationOptions2D _options;
     std::shared_ptr<const NavGridSnapshot> _snapshot;
-    std::map<i32, Server> _servers;
+    std::map<i32, std::unique_ptr<PathServer>> _servers;
     std::map<EcsId, Entry> _entries;
     std::vector<NavigationEvent2D> _events;
 };

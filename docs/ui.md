@@ -19,7 +19,9 @@ cmake -S . -B build -DKIN_ENABLE_ACCESSIBILITY=ON \
 Use the upstream 0.23.2 desktop static library or build that tag with
 `cargo build --release --locked`. The library must match the target platform and
 runtime. Kin adds desktop system libraries and packages the retained AccessKit
-license texts.
+license texts. The platform half (the window's AccessKit adapter) lives in
+`engine/src/platform/accesskit_adapter.cpp`, built only with this option; ui2's
+bridge builds the tree from the UI's semantics.
 
 Create one bridge per window after its renderer, and destroy it first:
 
@@ -43,11 +45,11 @@ toggles and menu items accept activation. Custom controls should describe their
 semantics and implement Context's matching action helpers.
 
 Native callbacks queue actions across threads without accessing UI state. The
-main thread revalidates targets and applies one action to the next UI frame.
-Removed/disabled/modal-blocked targets cannot activate. native_available() reports
-adapter initialization, not an attached screen reader. snapshot/request_action
-also work with native support disabled. Mobile adapters and rich-text caret/
-selection accessibility are not implemented.
+main thread revalidates targets and applies one action to the next UI frame
+(`Context::queue_action(Id, ...)`, numbers passed whole). Removed/disabled/
+modal-blocked targets cannot activate. snapshot/request_action also work with
+native support disabled. Mobile adapters and rich-text caret/selection
+accessibility are not implemented.
 
 set_reduced_motion(true) makes surface transitions immediate; share that setting
 with your game's tween policy. OS preference detection is not automatic.
@@ -395,9 +397,11 @@ Pass dt to `ui.begin(input, renderer, dt)` for held-direction repeat. Configure
 dead zone and repeat timing with `set_controller_navigation({.dead_zone = 0.5f,
 .repeat_delay = 0.4f, .repeat_interval = 0.1f})`, or disable it with
 `{.enabled = false}`. `back_requested()` lets custom screens handle cancellation.
-`controller_active()`, `accept_prompt()` and `back_prompt()` expose the last
-navigation device and generic button names; pointer presses and keyboard
-Tab/Enter switch prompts back. Platform-specific glyphs can be supplied by the game.
+`controller_active()` says whether the controller was the last to navigate
+(pointer presses and keyboard Tab/Enter switch it back), for button prompts;
+`kin::gamepad_button_label(family, button)` names a button for a controller family.
+Accept and back read the controller's presses this rendered frame
+(`Input::pad_frame_pressed`), as keys do; held directions repeat.
 
 ## Charts
 
@@ -784,10 +788,19 @@ ui.describe(id, "button", "Inventory", bounds, enabled, true);
 ui.semantic_key(id, "inventory");
 ui.register_focusable(id);
 auto interaction = ui.region(id, bounds);
+bool activated = interaction.clicked || ui.keyboard_activated(interaction); // Enter/Space/accept
+ui.semantic_state(id, value_text, checked); // after input: what it shows now
 ```
 
-`describe` can be called again after input to report the new value.
-`queue_action(selector, action, text, error)` supports in-process automation;
+Roles the built-in controls use, which AccessKit maps: `button`, `toggle`,
+`slider`, `spinbutton`, `text_input`, `text_edit`, `text_view`, `text`, `menu`,
+`menu_item`, `group` and `region` (any other is a group). Every role takes
+click and focus; set_text needs `text_input`/`text_edit`, the numeric actions
+`slider`/`spinbutton` (`semantic_role_accepts`). Elements keep their slots from
+frame to frame, so describing a control costs no allocation once its strings
+have grown; `focused` is as `end()` left the focus.
+`queue_action(selector, action, text, error)` supports in-process automation, and
+`queue_action(id, action, text, number, error)` an adapter that holds ids;
 `write_snapshot` serializes the same tree. Keep assertable game state in
 `Scene::write_report` and inspect ECS scenes through `world.snapshot` alongside it.
 

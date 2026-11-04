@@ -5,6 +5,13 @@ authored scene/prefab patches and staged asset caches. A candidate revision is
 prepared before the running game changes; accepted targets activate together
 between updates. Rejected edits leave the active generation running.
 
+Development sessions are kin's live-reload path for 2D games. The older
+per-file paths, `ScriptSceneConfig::hot_reload` polling and
+`SceneAssetRuntime::reload_if_changed`, are deprecated: they keep working for
+existing games and stay off while a session runs. Sessions are built with
+`KIN_ENABLE_DEVELOPMENT` (on in development builds, off for shipping like the
+scene server); without it, `--dev` logs a warning and the game runs unchanged.
+
 ## One-command Workshop development
 
 ```sh
@@ -34,8 +41,10 @@ python3 tools/kin_dev.py --project build/examples/2d_workflow/kin_2d_workflow-De
 
 Other native games with a content/import manifest get a `<target>_dev` target.
 They opt into transactional reload through `DevelopmentSession`; `ScriptScene`
-and the Workshop supply this integration. Native C++ changes still require a
-build and restart.
+and the Workshop supply this integration. An `EcsScene` adds its assets (and its
+authored scene) as one target with `prepare_asset_reload`; a host that keeps its
+own `Assets2D` builds the candidate with `prepare_reload_assets`. Native C++
+changes still require a build and restart.
 
 ## Stateful Lua contract
 
@@ -97,11 +106,16 @@ state. Runtime children of deleted authored entities are detached rather than
 deleted. Reflected constraints and reference targets are checked before commit.
 Read-only fields remain owned by the runtime.
 
-Supply the loaded runtime through `ScriptSceneConfig::scene_runtime` to combine
-its scene/prefab changes with the scene's Lua and asset reload. It must be the
-runtime that owns that scene's instantiated authored entities. The Workshop also
-uses `PreloadedScene2D::prepare_reload` for its current room. Ordinary preloaded
-scenes remain immutable unless the host explicitly enables this development path.
+The patch compares against the scene as loaded, which the runtime keeps only
+when asked: `SceneAssetRuntime::track_authored` records it from a fresh copy of
+the loaded scene, so loads that are never reloaded (shipping, 3D) do not pay for
+it. Supply the loaded runtime through `ScriptSceneConfig::scene_runtime` to
+combine its scene/prefab changes with the scene's Lua and asset reload; the
+scene tracks it when its session starts. It must be the runtime that owns that
+scene's instantiated authored entities. The Workshop also uses
+`PreloadedScene2D::prepare_reload` for its current room, clear colour included.
+Ordinary preloaded scenes remain immutable unless the host explicitly enables
+this development path.
 
 Within a development session, `ScriptScene::reload_script` queues a revision;
 check generation/status after advancing. Legacy scene-file polling defers to the
@@ -132,10 +146,11 @@ Import publication creates `.kin-import-publishing` until every output and the
 report have been published. Development capture refuses an incomplete import;
 a process lock serializes simultaneous configure/build/watch importers and is
 released by the OS if a publisher exits.
-A failed publication stays blocked until a successful import repairs it. Direct
-disk saves settle across two content checks, at least 150 ms apart. A rejected
-revision is retried after a source change or an explicit request. Virtual edits
-are retained until disk content actually changes.
+A failed publication stays blocked until a successful import repairs it. The
+watcher compares file sizes and times, at most every 150 ms, and reads the
+folder only once an edit has kept them for two looks, as `FileWatcher` does. A
+rejected revision is retried after a source change or an explicit request.
+Virtual edits are retained until disk content actually changes.
 
 Snapshots are limited to 4,096 files / 64 MiB. Hidden files/directories are omitted
 and symlinks are rejected. Development watching requires loose source content;
@@ -165,7 +180,8 @@ supports larger changes within the snapshot limit.
 
 A queued response is not activation success. Wait for the next generation or
 check the resulting rejected status with the scenario runner's bounded conditions.
-`automation.snapshot` includes development status for failure traces. Driven mode
+`automation.snapshot` (and each step of a native recording) carries the session's
+summary for failure traces; the source list and hashes stay in `dev.status`. Driven mode
 never automatically watches disk; reloads happen at recorded command boundaries.
 Windowed `--dev --inspect` also allows these explicit development commands.
 

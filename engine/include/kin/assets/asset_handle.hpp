@@ -42,8 +42,11 @@ public:
         return valid() ? std::shared_ptr<const T>{_storage, &_storage->data} : std::shared_ptr<const T>{};
     }
 
+    // Keeps the cache entry resident (AssetManager::unload_unused and memory
+    // budgets leave it alone), even before an asynchronous load completes.
+    std::shared_ptr<const void> keepalive() const { return _storage; }
+
 private:
-    friend class AssetScope;
     std::shared_ptr<AssetStorage<T>> _storage;
 };
 

@@ -124,7 +124,7 @@ matters. A host that wants randomness should bind its own, seeded from the
 run's `RngKey`.
 
 Every load and call has an **instruction budget**
-(`LuaScriptOptions::instruction_limit`, 50 million by default, checked every
+(`LuaScriptOptions::limits.instruction_limit`, 50 million by default, checked every
 1,000 instructions; 0 turns it off). A script stuck in a loop fails that call
 with "instruction limit reached" instead of freezing the game; the next call
 gets a fresh budget.
@@ -192,11 +192,15 @@ scripts.update(world, ctx.input, ctx.dt);
     `self:tween("Transform2D.pos", {x = 300, y = 80}, 0.4, "backout")`. The
     options are `delay`, `repeats`, `yoyo`, `relative`, `easing`, and
     `done = function(self) end`, which runs once it gets to its end. It
-    returns the tween's id. `tweening([property])`, `stop_tween(id)` and
-    `stop_tweens([property])` go with it. The game runs `update_tweens`;
+    returns the tween's id (`tweens.of(self, id)` is a handle to await).
+    `tweening([property])`, `stop_tween(id)` and `stop_tweens([property])` go
+    with it. The world's script services step tweens, once a simulation step;
   - `after(seconds, function(self) end)` and `every(seconds, function(self)
-    end)` call back later, until `cancel(id)` or the entity stops running its
-    script. They are not kept in saves;
+    end)` call back later, until `cancel(timer)` or the entity stops running
+    its script. They return the timer (a [task](lua_development.md#tasks-and-waits)):
+    its time counts from the next step, and `every` fires at most once a step.
+    They, and a tween's `done`, are the script's tasks: not kept in saves, and
+    dropped by a reload (restart them in `on_reload`);
   - `velocity()` and `set_velocity(vx, vy)`: its `CharacterController2D`'s,
     else its body's (`PhysicsVelocity`); `on_floor()`, `on_wall()` and
     `on_ceiling()`, what its character found in the last step

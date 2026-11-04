@@ -1,17 +1,38 @@
+#include <kin/prefab/prefab_pool2d.hpp>
+
+#include <kin/ecs/lifecycle.hpp>
+
 #include <algorithm>
 #include <atomic>
-#include <kin/ecs/lifecycle.hpp>
-#include <kin/prefab/prefab_pool2d.hpp>
 #include <set>
 #include <stdexcept>
+#include <string>
 
 namespace kin {
+
+namespace {
+
+// Marks the pool busy while it mutates (component hooks and the release
+// callback run then), and clears the mark however that ends.
+class BusyScope {
+public:
+    explicit BusyScope(bool& busy) : _busy(busy) { _busy = true; }
+    ~BusyScope() { _busy = false; }
+    BusyScope(const BusyScope&) = delete;
+    BusyScope& operator=(const BusyScope&) = delete;
+
+private:
+    bool& _busy;
+};
+
+} // namespace
+
 PrefabPool2D::PrefabPool2D(EcsWorld& world, PrefabAsset prefab, PrefabPoolOptions2D options)
     : _world(world), _prefab(std::move(prefab)), _options(std::move(options)) {
     static std::atomic<u64> next{1};
     _id = next.fetch_add(1);
-    if (_options.capacity == 0 || _options.capacity > 65536)
-        throw std::invalid_argument("pool capacity must be 1..65536");
+    if (_options.capacity == 0 || _options.capacity > max_capacity)
+        throw std::invalid_argument("pool capacity must be 1.." + std::to_string(max_capacity));
     try {
         _slots.reserve(_options.capacity);
         for (std::size_t i = 0; i < _options.capacity; ++i) {
@@ -72,11 +93,7 @@ std::optional<PrefabLease2D> PrefabPool2D::acquire(PrefabSpawn spawn) {
         _error = "reentrant pool mutation";
         return std::nullopt;
     }
-    _mutating = true;
-    struct Reset {
-        bool& value;
-        ~Reset() { value = false; }
-    } reset{_mutating};
+    const BusyScope busy{_mutating};
     for (std::size_t i = 0; i < _slots.size(); ++i) {
         auto& slot = _slots[i];
         if (slot.active)
@@ -93,15 +110,6 @@ std::optional<PrefabLease2D> PrefabPool2D::acquire(PrefabSpawn spawn) {
         for (auto entity : slot.instance.entities)
             entity.set(EntityLifetime{slot.generation});
         slot.active = true;
-        try {
-            if (_options.on_acquire)
-                _options.on_acquire(_world, slot.instance);
-        } catch (...) {
-            slot.active = false;
-            clear(slot);
-            _error = "pool acquire callback failed";
-            return std::nullopt;
-        }
         _error.clear();
         return PrefabLease2D{_id, static_cast<u32>(i), slot.generation};
     }
@@ -113,11 +121,7 @@ bool PrefabPool2D::release(PrefabLease2D lease) {
         _error = "invalid, stale or reentrant pool release";
         return false;
     }
-    _mutating = true;
-    struct Reset {
-        bool& value;
-        ~Reset() { value = false; }
-    } reset{_mutating};
+    const BusyScope busy{_mutating};
     auto& slot = _slots[lease.slot];
     slot.active = false;
     bool clean = true;

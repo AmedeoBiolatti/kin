@@ -4,12 +4,12 @@
 add_library(kin_foundation STATIC
     src/assets/file_watcher.cpp
     src/assets/content.cpp
-    src/runtime/development.cpp
     src/assets/asset_types.cpp
     src/core/json.cpp
     src/core/hash.cpp
     src/core/jobs.cpp
     src/core/json_value.cpp
+    src/core/profile.cpp
     src/core/script_debugger.cpp
     src/core/utf8.cpp
     src/l10n/gettext.cpp
@@ -39,7 +39,6 @@ add_library(kin_engine STATIC
     src/anim/registry.cpp
     src/anim/state_machine.cpp
     src/anim/track.cpp
-    src/anim/tween.cpp
     src/anim/skeleton2d.cpp
     src/anim/skeleton_blend2d.cpp
     src/anim/value.cpp
@@ -52,7 +51,6 @@ add_library(kin_engine STATIC
     src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
-    src/core/profile.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
     src/ecs/assets2d.cpp
@@ -282,6 +280,7 @@ if(KIN_ENABLE_SCRIPTING)
         src/scripting/script_engine.cpp
         src/scripting/script_reload.cpp
         src/scripting/lua_state_copy.cpp
+        src/scripting/lua_values.cpp
         src/scripting/lua_workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp
@@ -302,6 +301,9 @@ if(KIN_ENABLE_SCENE_SERVER)
         src/runtime/scene_server.cpp
         src/runtime/automation.cpp
     )
+endif()
+if(KIN_ENABLE_DEVELOPMENT)
+    target_sources(kin_engine PRIVATE src/runtime/development.cpp)
 endif()
 
 # These usage requirements also reach game sources and their final link.

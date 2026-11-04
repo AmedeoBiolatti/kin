@@ -58,6 +58,12 @@ int main() {
     frame();
     frame();
     assert(std::abs(slider.value - .9f) < .001f);
+    assert(!bridge.request_action(slider.id, ui2::SemanticAction::SetNumber, "loud")); // not a number
+    assert(bridge.request_action(slider.id, ui2::SemanticAction::SetNumber, "0.1234567"));
+    frame();
+    frame();
+    assert(std::abs(slider.value - 0.1234567f) < 1e-7f); // the number arrives whole, not as 6-decimal text
+    assert(!bridge.snapshot().at(0).focused && bridge.snapshot().at(1).focused); // as end() left the focus
     ui.set_reduced_motion(true);
     assert(ui.reduced_motion());
     ui2::InteractiveSurfaceStyle style;

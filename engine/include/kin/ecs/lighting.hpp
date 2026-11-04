@@ -20,6 +20,11 @@
 //
 //     torch.set(kin::LightComponent{.radius = 200, .shadows = true});
 //     crate.set(kin::LightOccluder{.shape = kin::OccluderShape::Box, .size = {32, 32}});
+//
+// Forward lighting: a SceneLighting with `forward_sprites` lights
+// normal-mapped sprites (NormalSpriteRenderer2D, kin/ecs/normal_sprite2d.hpp)
+// per pixel by its LightComponents and DirectionalLight2Ds instead: there is
+// no light map, and other renderers stay unlit.
 
 #include <kin/core/affine.hpp>
 #include <kin/ecs/component.hpp>
@@ -27,6 +32,7 @@
 #include <kin/renderer/color.hpp>
 #include <kin/renderer/color_grading.hpp>
 #include <kin/renderer/lighting.hpp>
+#include <kin/renderer/normal_lighting2d.hpp>
 #include <kin/renderer/texture.hpp>
 
 #include <memory>
@@ -38,12 +44,11 @@
 namespace kin {
 
 class Renderer2D;
-struct Image;
 
 struct LightComponent {
     Color color = colors::white;
     f32 radius = 128.0f;   // nothing further is lit (in the entity's units)
-    f32 intensity = 1.0f;  // 1 adds `color` in full at the centre; up to 4
+    f32 intensity = 1.0f;  // 1 adds `color` in full at the centre; up to max_light_intensity (4)
     // An image (its alpha) shaping the light over its 2 * radius square in
     // place of the round falloff: cones, flashlights, windows. Assets2D binds
     // `shape_asset` to `shape`.
@@ -54,9 +59,28 @@ struct LightComponent {
     bool shadows = false;        // LightOccluders cast its shadows
     f32 shadow_strength = 1.0f;  // how much light they take: 1 all of it, 0 none
     f32 shadow_softness = 0.0f;  // the light's size (in its entity's units): soft edges; 0 sharp
-    f32 height = 64.0f;          // above the sprite plane, for normal-mapped receivers
-    i32 mask = -1;               // forward-lit receiver bit mask
+    // For forward lighting: how high above the sprites it is, and which of
+    // them it lights (those whose light_mask shares a bit with it).
+    f32 height = 64.0f;
+    i32 mask = -1;
+    // The image of `shape_asset`, which forward lighting shades with; Assets2D
+    // binds it only while the scene's SceneLighting has forward_sprites.
     std::shared_ptr<const Image> shape_image;
+};
+
+// A light infinitely far away (a sun or a moon), for forward lighting only:
+// it lights every normal-mapped sprite from `direction` (toward the light, in
+// world space, turned with its entity) at `elevation` above them.
+struct DirectionalLight2D {
+    Vec2f direction{-.3f, -.5f};
+    f32 elevation = 1;
+    f32 intensity = 1;
+    Color color = colors::white;
+    i32 mask = -1;
+    bool enabled = true;
+    bool shadows = false;
+    f32 shadow_strength = 1;
+    f32 shadow_softness = 0;
 };
 
 enum class OccluderShape : u8 {
@@ -90,7 +114,8 @@ struct SceneLighting {
     Color ambient = Color::rgb(40, 44, 64);
     // Light-map pixels per screen unit (lights are smooth: half is plenty).
     f32 resolution = 0.5f;
-    bool forward_sprites = false; // NormalSpriteRenderer2D shades itself; other renderers are unlit
+    // Forward lighting (see above) instead of a light map.
+    bool forward_sprites = false;
 };
 
 struct ColorGrade {
@@ -111,13 +136,19 @@ struct ColorGrade {
 std::string_view tonemap_name(Tonemap tonemap);
 std::optional<Tonemap> tonemap_named(std::string_view name);
 
-// The world's first enabled SceneLighting; null when it has none.
+// The world's first enabled SceneLighting; null when it has none. Both the
+// light map and forward lighting go by it.
 const SceneLighting* scene_lighting(EcsWorld& world);
+const SceneLighting* scene_lighting(flecs::world& world);
 // Its enabled lights, as LightLayer takes them, `to_screen` taking the world
 // to where they are drawn (a camera's view transform; identity for none).
 std::vector<Light2D> scene_lights(EcsWorld& world, const Affine2& to_screen);
 // Its enabled occluders' outlines, as LightLayer takes them, through `to_screen` too.
 std::vector<LightOccluder2D> scene_occluders(EcsWorld& world, const Affine2& to_screen);
+std::vector<LightOccluder2D> scene_occluders(flecs::world& world, const Affine2& to_screen);
+// Its enabled LightComponents and DirectionalLight2Ds as forward lighting
+// takes them, in world coordinates (placed as scene_lights places them).
+std::vector<SurfaceLight2D> scene_surface_lights(flecs::world& world);
 // One entity's (none without an enabled LightOccluder): editors draw them.
 std::vector<LightOccluder2D> occluder_outlines(EcsEntity entity, const Affine2& to_screen);
 // The world lit, as EcsScene does it: `area` (in the coordinates drawn in,

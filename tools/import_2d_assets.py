@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import functools
 import hashlib
 import io
 import json
@@ -21,8 +22,15 @@ import tempfile
 import time
 
 
-class ImportError(ValueError):
+class AssetImportError(ValueError):
     pass
+
+
+@functools.lru_cache(maxsize=None)
+def file_digest(path, modified_ns, size):
+    """SHA-256 of a large file (the Aseprite executable), once per version of it."""
+    del modified_ns, size  # cache key only
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 class ImportCache:
@@ -35,7 +43,10 @@ class ImportCache:
     def key(self, job, source_root, aseprite):
         Image = pillow()
         executable = shutil.which(aseprite) if job.get("source", "").endswith((".ase", ".aseprite")) else None
-        exporter = hashlib.sha256(Path(executable).read_bytes()).hexdigest() if executable and Path(executable).is_file() else aseprite
+        exporter = aseprite
+        if executable and Path(executable).is_file():
+            stat = Path(executable).stat()
+            exporter = file_digest(str(Path(executable).resolve()), stat.st_mtime_ns, stat.st_size)
         return hashlib.sha256(json_bytes({"job": job, "root": str(source_root), "tool": self.tool_hash,
                                          "pillow": Image.__version__, "aseprite": exporter})).hexdigest()
 
@@ -66,7 +77,12 @@ class ImportCache:
 
 def require(condition, message):
     if not condition:
-        raise ImportError(message)
+        raise AssetImportError(message)
+
+
+def map_cells(cols, rows):
+    require(cols * rows <= 4194304, "map exceeds 4 million cells")
+    return cols, rows
 
 
 def token(value):
@@ -101,7 +117,7 @@ def pillow():
     try:
         from PIL import Image
     except ModuleNotFoundError as error:
-        raise ImportError("2D imports need Pillow: install tools/requirements-imports.txt") from error
+        raise AssetImportError("2D imports need Pillow: install tools/requirements-imports.txt") from error
     return Image
 
 
@@ -336,11 +352,10 @@ class Pipeline:
                             f"source changed between import jobs; retry: {path}")
                 self.fingerprints.update(fingerprints)
             except (KeyError, TypeError, ValueError, OSError) as error:
-                raise ImportError(f"import {index} ({job.get('source', job.get('output', '?'))}): {error}") from error
+                raise AssetImportError(f"import {index} ({job.get('source', job.get('output', '?'))}): {error}") from error
 
     def _emit_map(self, job, cols, rows, tw, th, tiles, layers, prefabs, grid=None):
         Image = pillow()
-        require(cols * rows <= 4194304, "map exceeds 4 million cells")
         require(tiles and len(tiles) <= 65535, "map must contain 1..65535 tile definitions")
         output = output_path(job["output"])
         require(output.endswith(".kintilemap"), "map output must end in .kintilemap")
@@ -394,9 +409,7 @@ class Pipeline:
         orientation = data.get("orientation", "orthogonal")
         require(orientation in ("orthogonal", "hexagonal"), "only orthogonal and regular hexagonal Tiled maps are supported")
         require(data.get("renderorder", "right-down") == "right-down", "only right-down Tiled render order is supported")
-        cols = integer(data["width"], "map width", 1)
-        rows = integer(data["height"], "map height", 1)
-        require(cols * rows <= 4194304, "map exceeds 4 million cells")
+        cols, rows = map_cells(integer(data["width"], "map width", 1), integer(data["height"], "map height", 1))
         tw = integer(data["tilewidth"], "tile width", 1, 8192)
         th = integer(data["tileheight"], "tile height", 1, 8192)
         grid = None
@@ -507,9 +520,8 @@ class Pipeline:
         require(len(grid_sizes) == 1, "LDtk tile layers must share one grid size")
         size = integer(next(iter(grid_sizes)), "LDtk grid size", 1, 8192)
         require(level["pxWid"] % size == 0 and level["pxHei"] % size == 0, "LDtk level dimensions must be grid aligned")
-        cols, rows = level["pxWid"] // size, level["pxHei"] // size
-        integer(cols, "LDtk columns", 1); integer(rows, "LDtk rows", 1)
-        require(cols*rows <= 4194304, "map exceeds 4 million cells")
+        cols, rows = map_cells(integer(level["pxWid"] // size, "LDtk columns", 1),
+                               integer(level["pxHei"] // size, "LDtk rows", 1))
         definitions = {entry["uid"]: entry for entry in data.get("defs", {}).get("tilesets", [])}
         tiles, tile_ids, layers, prefabs = [], {}, [], []
 
@@ -611,12 +623,12 @@ def output_lock(output):
 
 
 def build(manifest, output, content=None, aseprite="aseprite", cache_dir=None, statistics=None):
-    with output_lock(Path(output).resolve()):
-        return _build_locked(manifest, output, content, aseprite, cache_dir, statistics)
-
-
-def _build_locked(manifest, output, content=None, aseprite="aseprite", cache_dir=None, statistics=None):
     manifest, output = Path(manifest).resolve(), Path(output).resolve()
+    with output_lock(output):
+        return _publish(manifest, output, content, aseprite, cache_dir, statistics)
+
+
+def _publish(manifest, output, content, aseprite, cache_dir, statistics):
     require(output != manifest.parent, "use a dedicated output directory, separate from import sources")
     pipeline = Pipeline(manifest.parent, aseprite)
     cache = ImportCache(cache_dir if cache_dir is not None else output / ".kin-import-cache")
@@ -633,8 +645,9 @@ def _build_locked(manifest, output, content=None, aseprite="aseprite", cache_dir
     old = json.loads(report_path.read_text()).get("files", {}) if report_path.exists() else {}
     report = {"schema": "kin.import-report/1", "files": {
         name: hashlib.sha256(data).hexdigest() for name, data in sorted(pipeline.files.items())}}
+    # Pipeline.aseprite already dropped the CLI's temporary export files.
     report["dependencies"] = sorted(os.path.relpath(path, manifest.parent) for path in pipeline.dependencies
-                                    if path.exists() and not str(path).startswith(tempfile.gettempdir()+"/kin-aseprite-"))
+                                    if path.exists())
     # Resolve existing parent symlinks before writing or deleting anything.
     for name in set(old) | set(pipeline.files):
         require((output / output_path(name)).resolve().is_relative_to(output), "output symlink escapes the content directory")
@@ -722,7 +735,7 @@ class ImportWatcher:
             report = build(self.manifest, self.output, self.content, self.aseprite, self.cache_dir, stats)
             self.last_error = None
             return {"ok": True, "files": len(report["files"]), "cache": stats}
-        except (ImportError, OSError, json.JSONDecodeError) as error:
+        except (AssetImportError, OSError, json.JSONDecodeError) as error:
             self.last_error = str(error)
             return {"ok": False, "error": self.last_error}
 
@@ -753,7 +766,7 @@ def main():
     try:
         stats = {}
         report = build(args.manifest, args.output, args.content, args.aseprite, args.cache, stats)
-    except (ImportError, OSError, json.JSONDecodeError) as error:
+    except (AssetImportError, OSError, json.JSONDecodeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}), file=sys.stderr)
         return 1
     print(json.dumps({"ok": True, "files": len(report["files"]), "cache": stats}))

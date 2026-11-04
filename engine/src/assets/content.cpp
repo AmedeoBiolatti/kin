@@ -1,4 +1,9 @@
+#include <kin/assets/content.hpp>
+
+#include <kin/platform/log.hpp>
+
 #include <SDL3/SDL.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -6,8 +11,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <kin/assets/content.hpp>
-#include <kin/platform/log.hpp>
 #include <mutex>
 #include <shared_mutex>
 #include <stdexcept>
@@ -171,6 +174,9 @@ struct Mount {
     // the pack this way.
     std::filesystem::path canonical;
     std::shared_ptr<const ContentPack> pack;
+    // Set for a MemoryContent's pack: it unmounts itself when it is destroyed.
+    std::weak_ptr<const MemoryContent> memory;
+    bool from_memory = false;
 };
 
 std::filesystem::path canonical_form(const std::filesystem::path& point) {
@@ -184,42 +190,18 @@ struct Mounts {
     std::vector<Mount> list; // longest mount point first, so nested mounts win
 };
 
-struct MemoryMounts {
-    std::shared_mutex mutex;
-    std::vector<std::weak_ptr<const MemoryContent>> list;
-};
-MemoryMounts& memory_mounts() {
-    static MemoryMounts state;
-    return state;
-}
-struct MemoryLocation {
-    std::shared_ptr<const MemoryContent> content;
-    std::string inner;
-};
-std::optional<MemoryLocation> locate_memory(const std::filesystem::path& path) {
-    auto& state = memory_mounts();
-    std::shared_lock lock{state.mutex};
-    const auto query = normalized(path);
-    for (const auto& weak : state.list)
-        if (auto content = weak.lock()) {
-            const auto relative = query.lexically_relative(content->root());
-            const auto inner = relative.generic_string();
-            if (!inner.empty() && inner != ".." && !inner.starts_with("../") && !relative.is_absolute())
-                return MemoryLocation{std::move(content), inner == "." ? "" : inner};
-        }
-    return std::nullopt;
-}
-
 Mounts& mounts() {
     static Mounts state;
     return state;
 }
 
 // Where `path` is in a mounted pack: the pack, and the path inside it ("" for
-// the mount point itself).
+// the mount point itself). Locked only after the mounts' lock is released: the
+// last owner of a MemoryContent unmounts it.
 struct PackLocation {
     std::shared_ptr<const ContentPack> pack;
     std::string inner;
+    std::weak_ptr<const MemoryContent> memory;
 };
 
 std::optional<PackLocation> locate(const std::filesystem::path& path) {
@@ -246,7 +228,7 @@ std::optional<PackLocation> locate(const std::filesystem::path& path) {
             inner = inside(mount.canonical);
         }
         if (inner) {
-            return PackLocation{mount.pack, std::move(*inner)};
+            return PackLocation{mount.pack, std::move(*inner), mount.memory};
         }
     }
     return std::nullopt;
@@ -421,10 +403,16 @@ const ContentPack::Entry* ContentPack::find_ignoring_case(std::string_view path)
 }
 
 std::span<const std::byte> ContentPack::bytes(const Entry& entry) const {
+    if (_memory_owner) {
+        return _memory_bytes[static_cast<std::size_t>(&entry - _entries.data())];
+    }
     return {_data + entry.offset, static_cast<std::size_t>(entry.size)};
 }
 
 bool ContentPack::verify(std::string* error) const {
+    if (_memory_owner) {
+        return true; // made from bytes in memory: there is no file to go bad
+    }
     for (const Entry& entry : _entries) {
         const std::span<const std::byte> data = bytes(entry);
         if (crc32_update(0, data.data(), data.size()) != entry.crc32) {
@@ -540,29 +528,56 @@ ContentPackWriteResult write_content_pack(const std::filesystem::path& dir, cons
 
 // --- Mounts and reads ------------------------------------------------------
 
-void mount_content_pack(const std::filesystem::path& mount_point, std::shared_ptr<const ContentPack> pack) {
+namespace {
+
+void add_mount(Mount entry) {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
-    const std::filesystem::path point = normalized(mount_point);
-    std::erase_if(state.list, [&](const Mount& m) { return m.point == point; });
-    state.list.push_back({point, canonical_form(point), std::move(pack)});
+    std::erase_if(state.list, [&](const Mount& m) { return m.point == entry.point; });
+    state.list.push_back(std::move(entry));
     std::ranges::stable_sort(state.list, std::greater<>{}, [](const Mount& m) { return m.point.native().size(); });
 }
 
+} // namespace
+
+void mount_content_pack(const std::filesystem::path& mount_point, std::shared_ptr<const ContentPack> pack) {
+    const std::filesystem::path point = normalized(mount_point);
+    add_mount({.point = point, .canonical = canonical_form(point), .pack = std::move(pack)});
+}
+
 std::shared_ptr<const MemoryContent> MemoryContent::create(Files files) {
-    for (const auto& [name, bytes] : files)
-        if (!valid_entry_path(name))
+    for (const auto& [name, bytes] : files) {
+        if (!valid_entry_path(name)) {
             throw std::invalid_argument("invalid memory content path: " + name);
+        }
+    }
     static std::atomic<u64> next{1};
-    auto content = std::make_shared<MemoryContent>();
+    std::shared_ptr<MemoryContent> content{new MemoryContent};
     content->_root =
         normalized(std::filesystem::temp_directory_path() / ".kin-memory-content" / std::to_string(next.fetch_add(1)));
-    content->_files = std::move(files);
-    auto& state = memory_mounts();
-    std::unique_lock lock{state.mutex};
-    std::erase_if(state.list, [](const auto& weak) { return weak.expired(); });
-    state.list.push_back(content);
+    content->_files = std::make_shared<const Files>(std::move(files));
+    // A map keeps its files in path order, as a pack's index is.
+    std::shared_ptr<ContentPack> pack{new ContentPack};
+    pack->_file = content->_root;
+    pack->_memory_owner = content->_files;
+    for (const auto& [name, bytes] : *content->_files) {
+        pack->_entries.push_back({.path = name, .offset = 0, .size = bytes.size(), .crc32 = 0});
+        pack->_memory_bytes.push_back(std::as_bytes(std::span{bytes.data(), bytes.size()}));
+    }
+    content->_pack = pack;
+    // Its root is a name, not a folder: no canonical form to find on disk.
+    add_mount({.point = content->_root,
+               .canonical = content->_root,
+               .pack = std::move(pack),
+               .memory = content,
+               .from_memory = true});
     return content;
+}
+
+MemoryContent::~MemoryContent() {
+    Mounts& state = mounts();
+    std::unique_lock lock{state.mutex};
+    std::erase_if(state.list, [&](const Mount& m) { return m.pack == _pack; });
 }
 
 void unmount_content_pack(const std::filesystem::path& mount_point) {
@@ -575,13 +590,13 @@ void unmount_content_pack(const std::filesystem::path& mount_point) {
 void unmount_all_content_packs() {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
-    state.list.clear();
+    // Live MemoryContents stay mounted: they unmount themselves.
+    std::erase_if(state.list, [](const Mount& m) { return !m.from_memory; });
 }
 
 std::shared_ptr<const MemoryContent> memory_content_for(const std::filesystem::path& path) {
-    if (auto location = locate_memory(path))
-        return location->content;
-    return {};
+    const std::optional<PackLocation> location = locate(path);
+    return location ? location->memory.lock() : nullptr;
 }
 std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path& path) {
     std::optional<PackLocation> location = locate(path);
@@ -589,10 +604,6 @@ std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path&
 }
 
 std::optional<std::string> read_content_file(const std::filesystem::path& path) {
-    if (auto location = locate_memory(path)) {
-        const auto found = location->content->files().find(location->inner);
-        return found == location->content->files().end() ? std::nullopt : std::optional(found->second);
-    }
     if (const std::optional<PackLocation> location = locate(path)) {
         const ContentPack::Entry* entry = find_entry(*location);
         if (!entry) {
@@ -620,12 +631,6 @@ std::optional<std::string> read_content_text(const std::filesystem::path& path) 
 }
 
 std::optional<ContentBytes> view_content_file(const std::filesystem::path& path) {
-    if (auto location = locate_memory(path)) {
-        const auto found = location->content->files().find(location->inner);
-        if (found == location->content->files().end())
-            return std::nullopt;
-        return ContentBytes{std::as_bytes(std::span{found->second.data(), found->second.size()}), location->content};
-    }
     if (const std::optional<PackLocation> location = locate(path)) {
         const ContentPack::Entry* entry = find_entry(*location);
         if (!entry) {
@@ -642,8 +647,6 @@ std::optional<ContentBytes> view_content_file(const std::filesystem::path& path)
 }
 
 bool content_file_exists(const std::filesystem::path& path) {
-    if (auto location = locate_memory(path))
-        return location->content->files().contains(location->inner);
     if (const std::optional<PackLocation> location = locate(path)) {
         return !location->inner.empty() && location->pack->find(location->inner);
     }
@@ -652,13 +655,6 @@ bool content_file_exists(const std::filesystem::path& path) {
 }
 
 bool content_directory_exists(const std::filesystem::path& path) {
-    if (auto location = locate_memory(path)) {
-        const auto prefix = location->inner.empty() ? "" : location->inner + "/";
-        if (prefix.empty())
-            return true;
-        const auto it = location->content->files().lower_bound(prefix);
-        return it != location->content->files().end() && it->first.starts_with(prefix);
-    }
     if (const std::optional<PackLocation> location = locate(path)) {
         if (location->inner.empty()) {
             return true;
@@ -675,10 +671,6 @@ bool content_directory_exists(const std::filesystem::path& path) {
 }
 
 std::optional<u64> content_file_size(const std::filesystem::path& path) {
-    if (auto location = locate_memory(path)) {
-        const auto found = location->content->files().find(location->inner);
-        return found == location->content->files().end() ? std::nullopt : std::optional<u64>(found->second.size());
-    }
     if (const std::optional<PackLocation> location = locate(path)) {
         const ContentPack::Entry* entry = location->inner.empty() ? nullptr : location->pack->find(location->inner);
         return entry ? std::optional<u64>{entry->size} : std::nullopt;
@@ -693,16 +685,6 @@ std::optional<u64> content_file_size(const std::filesystem::path& path) {
 
 std::vector<std::filesystem::path> list_content_files(const std::filesystem::path& dir, bool recursive) {
     std::vector<std::filesystem::path> files;
-    if (auto location = locate_memory(dir)) {
-        const auto prefix = location->inner.empty() ? "" : location->inner + "/";
-        for (auto it = location->content->files().lower_bound(prefix);
-             it != location->content->files().end() && it->first.starts_with(prefix); ++it) {
-            const auto rest = it->first.substr(prefix.size());
-            if (recursive || rest.find('/') == std::string::npos)
-                files.push_back(dir / rest);
-        }
-        return files;
-    }
     if (const std::optional<PackLocation> location = locate(dir)) {
         const std::string prefix = location->inner.empty() ? std::string{} : location->inner + "/";
         const auto& entries = location->pack->entries();
@@ -794,7 +776,7 @@ bool SDLCALL stream_close(void* data) {
 } // namespace
 
 SDL_IOStream* open_content_stream(const std::filesystem::path& path) {
-    if (!locate_memory(path) && !locate(path)) {
+    if (!locate(path)) {
         // On disk: SDL reads it as it goes (a large font is not read whole).
         return SDL_IOFromFile(utf8_native(path).c_str(), "rb");
     }

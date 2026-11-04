@@ -8,9 +8,6 @@
 #include <vector>
 
 namespace kin {
-namespace ui2 {
-class Accessibility;
-}
 
 using WindowId = u32;
 
@@ -157,7 +154,7 @@ public:
     void set_cursor(SystemCursor cursor);
 
 private:
-    friend class ui2::Accessibility;
+    friend class AccessKitAdapter;
     friend class SdlRenderer2DBackend;
     friend class WebGL2Renderer2DBackend;
     friend class WebGLDevice;

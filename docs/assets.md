@@ -136,11 +136,14 @@ assets.unload_unused();
 ```
 
 Destroying the scope also releases its pins. A handle kept elsewhere continues
-to own its asset. To collect after every `pump()`/`drain()` instead, construct
-`AssetServer` with `AssetServerConfig{.unload_unused = true}`. Collection runs
-after completed jobs release their temporary references. Completed parents stay
-pinned until the server's current dependency batch is quiescent. Unload/clear remain
-explicit invalidation operations, including for handles that still exist.
+to own its asset; `AssetHandle::keepalive()` is the type-erased reference a scope
+holds. Collect after `pump()`/`drain()` once completed jobs have released their
+temporary references: completed parents stay pinned until the server's current
+dependency batch is quiescent. The dependency edges the server records live in
+the manager (`AssetManager::dependencies(key)`). Unload/clear remain explicit
+invalidation operations, including for handles that still exist. A released
+entry's path reports `Discovered`, or `Missing` when its file is gone, unless
+another type still caches it.
 
 Keep a handle or shared view when retaining a loaded value; a borrowed `const T&`
 does not pin it. Dependency retention covers declared async dependencies and
@@ -151,8 +154,9 @@ this collector manages `AssetManager`/`AssetServer` storage.
 ## Memory budgets and residency
 
 `AssetManager::set_memory_budget(bytes)` enables LRU eviction of unowned storage;
-zero disables the budget. Loads and AssetServer pumps trim automatically. Call
-`trim_memory()` between frames after releasing other handles. Eviction preserves
+zero disables the budget. Loads and AssetServer pumps trim automatically when the
+cache is over budget. Call `trim_memory()` between frames after releasing other
+handles; `over_memory_budget()` is a cheap check for per-frame callers. Eviction preserves
 external handles, pending jobs and the complete graph of declared dependencies.
 Unowned reverse dependants are evicted together with a dependency, preventing
 reuse of a partially evicted cached parent. Unowned dependency cycles are evictable.
@@ -162,8 +166,12 @@ reuse of a partially evicted cached parent. Unowned dependency cycles are evicta
 owners prevent eviction. `residency()` returns deterministic rows with payload
 bytes, last access, external reference counts, dependencies and a retaining chain
 from one external root. These are cache-storage references, not heap-wide tracing.
+`summarize_residency(rows, budget)` totals any rows (the CPU and texture reports
+both do), and `least_recent_first` is the order budgets evict in.
 
-Image and skeleton loaders register payload sizers. For game types, use
+Image and skeleton (`.kinskel`) loaders register payload sizers; `Assets2D::image()`
+and `Assets2D::skeleton2d()` read through the manager, so their pixels and rigs
+count toward its budget. For game types, use
 `register_memory_sizer<T>([](const T& value) -> u64 { ... })`; types without a
 sizer use `sizeof(T)` and are marked `size_estimated`. Payload accounting excludes
 allocator/driver overhead and memory allocated outside the registered value.
@@ -171,12 +179,14 @@ allocator/driver overhead and memory allocated outside the registered value.
 `Assets2D::set_texture_budget(bytes)`, `texture_memory_report()`,
 `texture_residency()` and `trim_texture_memory()` cover its color and raw material
 texture caches separately. Estimates use base-level format/block size, excluding
-mip chains and driver overhead. Bind trims after components receive their handles.
-Live components, queued draws and catalogs pin textures; catalog pins remain until
-their owning cache is released. This budget does not collect the scene's catalog,
-font or shader caches, nor GPU resources created directly by game code.
-`set_residency_diagnostics(true)` records representative component/asset reasons
-on bind; a positive texture budget enables that collection automatically.
+mip chains and driver overhead. Bind trims, after components receive their
+handles, when `over_texture_budget()`. Live components, queued draws and catalogs
+pin textures; catalog pins remain until their owning cache is released. This
+budget does not collect the scene's catalog, font or shader caches, nor GPU
+resources created directly by game code. `set_residency_diagnostics(true)`
+records representative component/asset reasons on bind (pinning never depends
+on it). `for_snapshot()` gives a reload's next `Assets2D` the same binders,
+both budgets and the diagnostics setting.
 
 Lua exposes the same reports under `asset_memory`; the
 [workshop demo](../examples/2d_workflow/README.md) displays residency and applies
@@ -349,6 +359,15 @@ that is the source folder. Once it ships, it is a `.kinpak` archive mounted in
 the folder's place. Every loader reads through the content layer, so the same
 relative paths work either way. `discover()` lists a pack's files as it lists
 a folder's. See [shipping](shipping.md).
+
+A `kin::MemoryContent` is a pack made in memory: `MemoryContent::create(files)`
+takes relative paths and their bytes, and mounts them at the snapshot's own
+`root()` for as long as it lives. Reads under that root (`read_content_file`,
+`view_content_file`, `list_content_files`, `open_content_stream`, ...) serve it
+exactly as they serve a `.kinpak`; views keep their bytes alive after the
+snapshot is gone, and `memory_content_for(path)` returns the snapshot that
+answers for a path. `unmount_all_content_packs()` leaves live snapshots
+mounted. Development reloads and scene preloads read through these snapshots.
 
 ## Compressed textures
 

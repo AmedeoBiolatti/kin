@@ -101,7 +101,7 @@ void theme_styles(const Theme& theme, TextInput& widget) {
 void run(Context& ctx, TextInput& widget) {
     const KeepStyles keep(widget); // the caller's styles, back when it is done
     theme_styles(ctx.theme(), widget);
-    ctx.describe(widget.id, "text_input", {}, widget.bounds, widget.enabled, true, widget.state.text);
+    ctx.describe(widget.id, "text_input", {}, widget.bounds, widget.enabled, true);
     const auto text_action = ctx.take_text_action(widget.id);
     if (text_action) {
         widget.state.text = *text_action;
@@ -111,7 +111,9 @@ void run(Context& ctx, TextInput& widget) {
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.result = edit_text_input(ctx, widget.state, widget.bounds, widget.text_style, widget.style, it, widget.enabled);
-    if (text_action) widget.result.changed = true;
+    if (text_action) {
+        widget.result.changed = true;
+    }
     if (widget.enabled) {
         if (it.hot || it.active) {
             ctx.set_cursor(SystemCursor::Text);
@@ -122,7 +124,7 @@ void run(Context& ctx, TextInput& widget) {
         }
     }
     draw_text_input(ctx, widget.bounds, widget.state, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.state.active));
-    ctx.describe(widget.id, "text_input", {}, widget.bounds, widget.enabled, true, widget.state.text);
+    ctx.semantic_state(widget.id, widget.state.text);
 }
 
 // NumberInput as the theme makes it look: its styles merged with the theme's.
@@ -132,8 +134,7 @@ void theme_styles(const Theme& theme, NumberInput& widget) {
 }
 
 void run(Context& ctx, NumberInput& widget) {
-    ctx.describe(widget.id, "spinbutton", {}, widget.bounds, widget.enabled, true, number_text(widget.value));
-    if (widget.enabled) ctx.register_focusable(widget.id);
+    describe_control(ctx, widget.id, "spinbutton", {}, widget.bounds, widget.enabled);
     const KeepStyles keep(widget); // the caller's styles, back when it is done
     theme_styles(ctx.theme(), widget);
     const auto show = [&] {
@@ -170,19 +171,20 @@ void run(Context& ctx, NumberInput& widget) {
             show();
         }
     }
-    if (widget.enabled)
-        if (const auto value = ctx.take_numeric_action(widget.id, widget.value, widget.min, widget.max, widget.step)) {
-            widget.changed |= widget.value != static_cast<f32>(*value);
-            widget.value = static_cast<f32>(*value);
-            show();
-        }
+    if (const auto value = widget.enabled
+                               ? ctx.take_numeric_action(widget.id, widget.value, widget.min, widget.max, widget.step)
+                               : std::nullopt) {
+        widget.changed |= widget.value != static_cast<f32>(*value);
+        widget.value = static_cast<f32>(*value);
+        show();
+    }
     if (widget.invalid) {
         widget.style.surface.normal.border = ctx.theme().colors.solid_danger;
         widget.style.surface.focused.border = ctx.theme().colors.solid_danger;
     }
 
     draw_text_input(ctx, widget.bounds, widget.text, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.text.active));
-    ctx.describe(widget.id, "spinbutton", {}, widget.bounds, widget.enabled, true, number_text(widget.value));
+    ctx.semantic_state(widget.id, number_text(widget.value));
     ctx.semantic_numeric(widget.id, widget.value, widget.min, widget.max, widget.step);
 }
 
