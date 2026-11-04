@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 NATIVE = Path(sys.argv[1]).resolve()
+PHYSICS = "--no-physics" not in sys.argv[2:]  # without it, kin_lua binds no physics table
 sys.argv = [sys.argv[0]]
 sys.path.insert(0, str(ROOT / "tools"))
 import kin_lua  # noqa: E402
@@ -41,6 +42,7 @@ class LuaToolingTests(unittest.TestCase):
             (table, member)
             for table, members in kin_lua.SIGNATURES.items()
             for member in members
+            if PHYSICS or table != "physics"
         }
         self.assertEqual(sorted(bound - documented), [], "bindings without a signature")
         self.assertEqual(sorted(documented - bound), [], "signatures without a binding")

@@ -1,6 +1,7 @@
 #include <kin/assets/content.hpp>
 
 #include <cassert>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -62,6 +63,31 @@ void test_invalid_paths() {
     assert(rejects({{"../escape.txt", ""}}) && rejects({{"/absolute.txt", ""}}) && rejects({{"a\\b.txt", ""}}));
 }
 
+// Code that resolves paths (scripts do) reaches the files through the temp
+// folder's canonical name too: Windows may give it as RUNNER~1, POSIX through a link.
+void test_canonical_root() {
+#ifndef _WIN32 // links need privileges there
+    namespace fs = std::filesystem;
+    const fs::path temp = fs::temp_directory_path();
+    const fs::path real = temp / "kin-memory-content-real";
+    const fs::path link = temp / "kin-memory-content-link";
+    fs::remove_all(real);
+    fs::remove(link);
+    fs::create_directories(real);
+    fs::create_directory_symlink(real, link);
+    const char* previous = std::getenv("TMPDIR");
+    const std::string kept = previous ? previous : "";
+    setenv("TMPDIR", link.c_str(), 1);
+    const auto content = MemoryContent::create({{"a.txt", "linked"}});
+    previous ? setenv("TMPDIR", kept.c_str(), 1) : unsetenv("TMPDIR");
+    assert(content->root().string().starts_with(fs::absolute(link).lexically_normal().string()));
+    const fs::path canonical = fs::weakly_canonical(content->root());
+    assert(canonical != content->root() && read_content_file(canonical / "a.txt") == "linked");
+    fs::remove(link);
+    fs::remove_all(real);
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -69,4 +95,5 @@ int main() {
     test_listing_keeps_non_ascii_names();
     test_lifetime();
     test_invalid_paths();
+    test_canonical_root();
 }

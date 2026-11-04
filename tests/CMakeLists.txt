@@ -623,7 +623,8 @@ kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOU
 kin_add_component_test(SCRIPTING kin_lua_workflows2d_tests kin-lua-workflows2d SOURCES lua_workflows2d_tests.cpp LINK_TARGET kin::scripting_scenes)
 kin_add_component_test(SCRIPTING kin_lua_runtime_tests kin-lua-runtime SOURCES lua_runtime_tests.cpp LINK_TARGET kin::scripting_scenes)
 if(KIN_ENABLE_SCRIPTING AND Python3_Interpreter_FOUND AND TARGET kin_lua)
-    add_test(NAME kin-lua-tooling COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/lua_tooling_tests.py" "$<TARGET_FILE:kin_lua>")
+    add_test(NAME kin-lua-tooling COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/lua_tooling_tests.py" "$<TARGET_FILE:kin_lua>"
+        "$<IF:$<BOOL:${KIN_ENABLE_PHYSICS}>,--physics,--no-physics>")
     set_tests_properties(kin-lua-tooling PROPERTIES TIMEOUT 90 LABELS "component:SCRIPTING")
 endif()
 if(KIN_ENABLE_SCRIPTING)

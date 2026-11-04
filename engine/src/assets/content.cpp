@@ -565,9 +565,10 @@ std::shared_ptr<const MemoryContent> MemoryContent::create(Files files) {
         pack->_memory_bytes.push_back(std::as_bytes(std::span{bytes.data(), bytes.size()}));
     }
     content->_pack = pack;
-    // Its root is a name, not a folder: no canonical form to find on disk.
+    // Its root is a name, not a folder, but under the temp folder, which a path
+    // canonical code resolves may name differently (a symlink, RUNNER~1).
     add_mount({.point = content->_root,
-               .canonical = content->_root,
+               .canonical = canonical_form(content->_root),
                .pack = std::move(pack),
                .memory = content,
                .from_memory = true});
