@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 
 project(kin VERSION 0.2.6 LANGUAGES C CXX)
 
+# On Windows, the Python on PATH (the one `python -m pip install` installs
+# Pillow into) before the newest one in the registry.
+if(NOT DEFINED Python3_FIND_REGISTRY)
+    set(Python3_FIND_REGISTRY LAST)
+endif()
+
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 23)

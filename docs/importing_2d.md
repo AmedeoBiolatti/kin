@@ -129,6 +129,8 @@ one polygon or rectangle per tile can supply collision. Layer `collision` and
 `navigation` properties default to true. LDtk IntGrid collision is explicit:
 `solid_values` selects solid values by layer name. IntGrid values remain available
 as `int_grid_value` tile metadata on an invisible collision/navigation layer.
+A map with solid tiles gets a `TilemapCollider` in its scene, so loading that
+scene needs `KIN_ENABLE_PHYSICS`.
 Custom entity properties/fields belong on the mapped prefab in this version.
 
 Format references: [Aseprite CLI](https://www.aseprite.org/docs/cli/),

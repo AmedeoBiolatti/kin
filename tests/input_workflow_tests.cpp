@@ -187,5 +187,7 @@ void virtual_devices() {
 int main() {
     routing();
     ownership();
+#if KIN_TEST_SDL_GAMEPAD
     virtual_devices();
+#endif
 }

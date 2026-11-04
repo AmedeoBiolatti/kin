@@ -68,7 +68,7 @@ void test_lighting() {
 void test_light_values() {
     const SurfaceMaterial2D material{.albedo = pixel(colors::white), .normal = pixel({128, 128, 255, 255})};
     const SurfaceGeometry2D geometry{.dest = {9, -.5f, 1, 1}};
-    const f32 nan = std::numeric_limits<f32>::quiet_NaN();
+    constexpr f32 nan = std::numeric_limits<f32>::quiet_NaN();
     const LightOccluder2D wall{.points = {{100, 100}, {101, 100}, {101, 101}, {100, 101}}};
     const std::vector<SurfaceLight2D> lights{
         {.position = {nan, 0}},
@@ -218,7 +218,9 @@ void test_runtime() {
         return pixels[(static_cast<std::size_t>(y) * size.x + x) * 4 + channel];
     };
     assert(at(6, 6, 0) > 240 && at(6, 6, 2) == 0);
+#if !KIN_HAS_COMPACT_RENDERER // draws no textured meshes
     assert(at(28, 6, 2) > 240);
+#endif
     const auto& cache = *surface.get<NormalSpriteRenderer2D>()->cache;
     const bool gpu = normal_lighting2d_gpu_supported(renderer.capabilities());
     assert(gpu ? cache.gpu.used : cache.shaded.size() == 1 && cache.shaded[0].texture);

@@ -143,7 +143,8 @@ bool LuaTasks::ready(Job& job, f32 dt) {
         sol::protected_function predicate = job.predicate;
         auto result = call.invoke(predicate);
         if (!result.valid()) {
-            throw sol::error(result);
+            sol::error error = result;
+            throw error;
         }
         if (result.get_type() != sol::type::boolean) {
             throw std::runtime_error("task predicate must return a boolean");

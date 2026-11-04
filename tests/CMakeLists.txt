@@ -183,7 +183,8 @@ kin_add_test(kin_instrumentation_tests kin-instrumentation
         "$<$<CXX_COMPILER_ID:MSVC>:/Od>"
 )
 kin_add_test(kin_anim_core_tests kin-anim-core SOURCES anim_core_tests.cpp)
-kin_add_test(kin_input_workflow_tests kin-input-workflow SOURCES input_workflow_tests.cpp)
+kin_add_test(kin_input_workflow_tests kin-input-workflow SOURCES input_workflow_tests.cpp
+    DEFINITIONS KIN_TEST_SDL_GAMEPAD=$<BOOL:${KIN_ENABLE_SDL_GAMEPAD}>)
 kin_add_test(kin_scene_workflow2d_tests kin-scene-workflow2d SOURCES scene_workflow2d_tests.cpp)
 kin_add_test(kin_navigation2d_tests kin-navigation2d SOURCES navigation2d_tests.cpp)
 kin_add_test(kin_prefab_pool2d_tests kin-prefab-pool2d SOURCES prefab_pool2d_tests.cpp)

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <map>
 #include <set>
 #include <stdexcept>

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <string>
 
 void validate(const std::filesystem::path& root) {
 #if KIN_ENABLE_IMAGE_IO
@@ -28,8 +29,12 @@ void validate(const std::filesystem::path& root) {
         assert(map.tileset.sheet.tile_w == 2 && map.tileset.sheet.tile_h == 2);
         assert(map.tileset.tile(2) && map.tileset.tile(2)->frame == 1);
         auto scene = kin::load_scene_asset(root / (std::string("maps/") + name + ".kinscene"), world.components());
+#if KIN_ENABLE_PHYSICS
         for (const auto& problem : scene.diagnostics) std::cerr << problem << '\n';
         assert(scene.ok());
+#else // its solid tiles' TilemapCollider is a physics component
+        for (const auto& problem : scene.diagnostics) assert(problem.find("TilemapCollider") != std::string::npos);
+#endif
     }
 }
 

@@ -48,7 +48,7 @@ class LauncherTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()  # Windows may name it short (RUNNER~1)
         self.content = self.root / "content"
         self.content.mkdir()
         (self.content / "game.lua").write_text("initial")

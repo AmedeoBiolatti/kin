@@ -196,12 +196,14 @@ void unreadable_assets() {
     light.set(LightComponent{.shape_asset = {"shape.png"}});
     assets.bind(world); // must not throw
     assert(!light.get<LightComponent>()->shape && !light.get<LightComponent>()->shape_image);
+#if KIN_ENABLE_IMAGE_IO // the file, once readable, is picked up
     assert(save_image({{2, 2}, std::vector<u8>(16, 255)}, root / "shape.png"));
     const auto changed = assets.reload_changed();
     assert(std::ranges::find(changed, std::string{"shape.png"}) != changed.end());
     assets.bind(world);
     assert(assets.image("shape.png") && light.get<LightComponent>()->shape);
     assert(!assets.problems().contains("shape.png"));
+#endif
     std::filesystem::remove_all(root);
 }
 } // namespace
