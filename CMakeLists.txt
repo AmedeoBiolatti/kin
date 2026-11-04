@@ -95,6 +95,7 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT KIN_LINUX_VIDEO STREQUAL "auto
     message(FATAL_ERROR "KIN_LINUX_VIDEO=${KIN_LINUX_VIDEO} requires a Linux target")
 endif()
 option(KIN_ENABLE_LTO "Enable interprocedural optimization in optimized configurations" OFF)
+option(KIN_LTO_TESTS "Link-time optimize test executables too (GCC links them without LTO otherwise: a slow link of the whole engine each)" OFF)
 option(KIN_PACKAGE_DEBUG_SYMBOLS "Generate debug information and a separate desktop symbols archive" OFF)
 option(KIN_PACKAGE_STRIP "Strip installed package binaries (keep build originals)" OFF)
 set(KIN_RENDERER "auto" CACHE STRING "Renderer included in this build: auto, software, gpu, compact, webgl2")

@@ -82,6 +82,7 @@ function(kin_add_test target test_name)
     endif()
     cmake_parse_arguments(TEST "" "LINK_TARGET" "SOURCES;LIBRARIES;DEFINITIONS;COMPILE_OPTIONS" ${ARGN})
     add_executable(${target} ${TEST_SOURCES})
+    set_property(TARGET ${target} PROPERTY KIN_LINK_WITHOUT_LTO TRUE) # see cmake/kin_release.cmake
     if(NOT TEST_LINK_TARGET)
         set(TEST_LINK_TARGET kin::engine)
     endif()
@@ -441,6 +442,7 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set(KIN_RENDER3D_TEST_SHARDS 3)
     math(EXPR _last_shard "${KIN_RENDER3D_TEST_SHARDS} - 1")
     add_executable(kin_render3d_tests render3d_tests.cpp)
+    set_property(TARGET kin_render3d_tests PROPERTY KIN_LINK_WITHOUT_LTO TRUE)
     target_link_libraries(kin_render3d_tests PRIVATE kin::engine)
     target_compile_definitions(kin_render3d_tests PRIVATE
         KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
@@ -560,15 +562,7 @@ if(KIN_BUILD_BENCHMARKS)
     kin_enable_release_optimizations(kin_bench)
 endif()
 
-add_executable(kin_runtime_tests
-    runtime_tests.cpp
-)
-
-target_link_libraries(kin_runtime_tests PRIVATE
-    kin::engine
-)
-
-add_test(NAME kin-runtime COMMAND kin_runtime_tests)
+kin_add_test(kin_runtime_tests kin-runtime SOURCES runtime_tests.cpp)
 kin_add_test(kin_owned_scene_session_tests kin-owned-scene-session SOURCES owned_scene_session_tests.cpp)
 
 kin_add_component_test(RENDER_PROBE kin_render_probe_tests kin-render-probe SOURCES render_probe_tests.cpp)
@@ -576,25 +570,9 @@ kin_add_component_test(DETERMINISM_CHECK kin_determinism_tests kin-determinism S
 
 kin_add_component_test(SCENE_SERVER kin_server_tests kin-server SOURCES server_tests.cpp)
 
-add_executable(kin_scene_tests
-    scene_tests.cpp
-)
+kin_add_test(kin_scene_tests kin-scene SOURCES scene_tests.cpp)
 
-target_link_libraries(kin_scene_tests PRIVATE
-    kin::engine
-)
-
-add_test(NAME kin-scene COMMAND kin_scene_tests)
-
-add_executable(kin_scene_asset_tests
-    scene_asset_tests.cpp
-)
-
-target_link_libraries(kin_scene_asset_tests PRIVATE
-    kin::engine
-)
-
-add_test(NAME kin-scene-asset COMMAND kin_scene_asset_tests)
+kin_add_test(kin_scene_asset_tests kin-scene-asset SOURCES scene_asset_tests.cpp)
 
 kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
 if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)

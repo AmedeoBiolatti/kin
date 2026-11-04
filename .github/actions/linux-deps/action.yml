@@ -12,14 +12,15 @@ inputs:
 runs:
   using: composite
   steps:
-    # The runner image's version is in the key because a new image means newer
-    # package versions, which the cached ones no longer match.
+    # The key does not name the runner image: runners roll over to a new image
+    # while others still run the old one, and a cached package that no longer
+    # matches the index is simply not used (apt downloads the newer one).
     - id: key
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
       run: |
-        hash=$(printf '%s\n%s\n%s\n' "$PACKAGES" "${ImageVersion:-}" "$(cat .github/scripts/install-linux-deps.sh)" | sha256sum | cut -c1-16)
+        hash=$(printf '%s\n%s\n' "$PACKAGES" "$(cat .github/scripts/install-linux-deps.sh)" | sha256sum | cut -c1-16)
         echo "prefix=apt-$hash-" >> "$GITHUB_OUTPUT"
     - id: restore
       uses: actions/cache/restore@v4
