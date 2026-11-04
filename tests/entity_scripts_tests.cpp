@@ -10,6 +10,7 @@
 #include <kin/ecs/saving.hpp>
 #include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/script.hpp>
+#include <kin/ecs/tween.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/scene/scene_asset.hpp>
@@ -322,6 +323,66 @@ end
 
 } // namespace
 
+// A script's tweens (their done callbacks; one stopped never says it is
+// done) and timers (every, after, cancel); mistakes said.
+void test_tweens_and_timers() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_tween_test";
+    fs::remove_all(dir);
+    write(dir / "scripts/tweener.lua", R"lua(
+function on_start(self)
+    self.ticks = 0
+    self:tween("Transform2D.pos", {x = 100, y = 0}, 0.5, "linear", {done = function(self) self.moved = true end})
+    self:tween("RectRenderer.color", {r = 0, g = 0, b = 0, a = 0}, 0.2, {delay = 0.2})
+    self.tick = self:every(0.1, function(self) self.ticks = self.ticks + 1 end)
+    self:after(0.35, function(self)
+        assert(self:cancel(self.tick))
+        self.stopped_at = self.ticks
+    end)
+    assert(self:tweening() and self:tweening("Transform2D.pos") and not self:tweening("Transform2D.rotation"))
+    local ok, err = pcall(function() self:tween("Transform2D.pos", 3, 1) end)
+    assert(not ok and tostring(err):find("Transform2D.pos takes"), tostring(err))
+    ok, err = pcall(function() self:tween("Transform2D.pos", {x = 1, y = 1}, 1, "wobbly") end)
+    assert(not ok and tostring(err):find("wobbly"), tostring(err))
+    ok, err = pcall(function() self:tween("Transform2D.spin", 1, 1) end)
+    assert(not ok and tostring(err):find("spin"), tostring(err))
+end
+
+function on_update(self, dt)
+    self.frames = (self.frames or 0) + 1
+    if self.frames == 7 then
+        assert(self.moved, "its done ran")
+        assert(self.ticks == 3 and self.stopped_at == 3, "ticks: " .. self.ticks)
+        assert(not self:tweening())
+        local x = self:position()
+        assert(x == 100, "moved to " .. x)
+        assert(self:get("RectRenderer").color.a == 0, "faded")
+        self.never = false
+        local id = self:tween("Transform2D.rotation", 90, 1, {done = function(self) self.never = true end})
+        assert(id > 0 and self:stop_tweens("Transform2D.rotation") == 1)
+    end
+    if self.frames == 9 then
+        assert(not self.never, "a stopped tween is not done")
+        self:set("RectRenderer", {size = {x = 9, y = 9}})
+    end
+end
+)lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const kin::EcsEntity box = world.entity("Box").set(kin::Transform2D{}).set(kin::RectRenderer{}).set(kin::ScriptComponent{.asset = {.id = "scripts/tweener.lua"}});
+    kin::Input input;
+    kin::EntityScripts scripts{{.content = dir}};
+    for (int frame = 0; frame < 9; ++frame) {
+        kin::update_tweens(world, 0.1f);
+        scripts.update(world, input, 0.1f);
+        for (const auto& [path, problem] : scripts.problems()) {
+            std::fprintf(stderr, "frame %d: %s: %s\n", frame + 1, path.c_str(), problem.c_str());
+        }
+        assert(scripts.problems().empty());
+    }
+    assert(box.get<kin::RectRenderer>()->size == (kin::Vec2f{9.0f, 9.0f}));
+    fs::remove_all(dir);
+}
+
 #if KIN_ENABLE_PHYSICS
 // A character's script: it reads what its CharacterController2D found, sets
 // its velocity, asks the physics what is where (rays, casts, overlaps; masks,
@@ -419,6 +480,7 @@ int main() {
     test_scene_go();
     test_saves();
     test_camera_shake();
+    test_tweens_and_timers();
 #if KIN_ENABLE_PHYSICS
     test_physics_scripts();
 #endif

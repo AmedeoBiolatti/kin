@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Tweens and timers ([tweens](animation_system.md#tweens)). `kin::tween(world, entity, {.property =
+  "Transform2D.pos", .to = ..., .seconds, .easing})` moves any described field that animations can set, from what
+  it is when it starts (after its `delay`), `relative`ly, with `repeats` and `yoyo`; a new tween of a field replaces
+  the one before; `update_tweens(world, dt)` runs them, `stop_tween`, `stop_tweens` and `tweening` go with it, and
+  those that got to their end are in `Tweens::ended`. `Easing` gains sine, cubic, back, elastic and bounce, each in,
+  out and in-out, for animation keys too (`easings()` lists them all). `kin::Timers` runs actions `after` or `every`
+  so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
+  `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
+  handed over.
+
 - 2D characters, shape queries and one-way platforms ([2D physics](physics_2d.md)). `CharacterController2D` moves
   an entity as its game says, Godot's move-and-slide way: along `velocity` (and its own `gravity`), sliding along
   what stops it, knowing floors from walls and ceilings by `max_slope`, walking up slopes at its speed, kept on

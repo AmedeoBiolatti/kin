@@ -70,6 +70,7 @@ add_library(kin_engine STATIC
     src/ecs/text.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
+    src/ecs/tween.cpp
     src/ecs/ui2.cpp
     src/ecs/ui2_sync.cpp
     src/platform/app.cpp
