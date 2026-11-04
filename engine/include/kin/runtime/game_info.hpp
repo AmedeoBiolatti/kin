@@ -45,6 +45,9 @@ struct GameInfo {
     std::string icon{};
     GameWindowInfo window{};
     bool headless_supported = true;
+    // Its Steam app id ("steam_app_id 480"): run_scene_app starts Steam's
+    // services with it (kin/platform/services.hpp); 0: none.
+    u32 steam_app_id = 0;
     std::vector<std::string> tags{};
     std::vector<GameInfoField> fields{};
     std::optional<InputMap> input_map{};

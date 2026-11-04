@@ -63,6 +63,55 @@ function(kin_add_component_test component target test_name)
 endfunction()
 
 kin_add_test(kin_component_tests kin-component-config SOURCES component_tests.cpp)
+# Platform services (kin/platform/services.hpp). The Steam backend opens a
+# stand-in for Steam's library, built here with the same file name.
+if(NOT EMSCRIPTEN AND KIN_ENABLE_SCRIPTING)
+    add_library(kin_fake_steam_api SHARED fake_steam_api.cpp)
+    target_include_directories(kin_fake_steam_api PRIVATE "${PROJECT_SOURCE_DIR}/engine/src/platform")
+    target_link_libraries(kin_fake_steam_api PRIVATE kin::components)
+    target_compile_features(kin_fake_steam_api PRIVATE cxx_std_23)
+    target_include_directories(kin_fake_steam_api PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+    if(WIN32)
+        set(_kin_fake_steam_name steam_api64)
+    else()
+        set(_kin_fake_steam_name steam_api)
+    endif()
+    set_target_properties(kin_fake_steam_api PROPERTIES OUTPUT_NAME ${_kin_fake_steam_name}
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fake_steam"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fake_steam"
+        CXX_VISIBILITY_PRESET hidden)
+    kin_add_test(kin_platform_services_tests kin-platform-services SOURCES platform_services_tests.cpp
+        DEFINITIONS "KIN_FAKE_STEAM_DIR=\"$<TARGET_FILE_DIR:kin_fake_steam_api>\""
+                    "KIN_FAKE_STEAM_FILE=\"$<TARGET_FILE_NAME:kin_fake_steam_api>\"")
+    add_dependencies(kin_platform_services_tests kin_fake_steam_api)
+    target_include_directories(kin_platform_services_tests PRIVATE "${PROJECT_SOURCE_DIR}/engine/src/platform")
+endif()
+# The Steam declarations against the Steamworks SDK's own headers, where a
+# build is given one (it is not redistributable, so CI has none).
+set(KIN_STEAMWORKS_SDK_DIR "" CACHE PATH "Steamworks SDK folder (holding public/steam), for steam_abi_check")
+if(KIN_STEAMWORKS_SDK_DIR)
+    if(NOT EXISTS "${KIN_STEAMWORKS_SDK_DIR}/public/steam/steam_api_flat.h")
+        message(FATAL_ERROR "KIN_STEAMWORKS_SDK_DIR has no public/steam/steam_api_flat.h: ${KIN_STEAMWORKS_SDK_DIR}")
+    endif()
+    add_library(kin_steam_abi_check OBJECT steam_abi_check.cpp)
+    target_include_directories(kin_steam_abi_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/src/platform"
+        "${PROJECT_SOURCE_DIR}/engine/include" "${KIN_STEAMWORKS_SDK_DIR}/public")
+    target_link_libraries(kin_steam_abi_check PRIVATE kin::components)
+    target_compile_features(kin_steam_abi_check PRIVATE cxx_std_23)
+    # Valve's own library, loaded the way games load it.
+    if(TARGET kin_platform_services_tests)
+        if(WIN32)
+            set(_kin_real_steam "${KIN_STEAMWORKS_SDK_DIR}/redistributable_bin/win64")
+        elseif(APPLE)
+            set(_kin_real_steam "${KIN_STEAMWORKS_SDK_DIR}/redistributable_bin/osx")
+        else()
+            set(_kin_real_steam "${KIN_STEAMWORKS_SDK_DIR}/redistributable_bin/linux64")
+        endif()
+        target_compile_definitions(kin_platform_services_tests PRIVATE "KIN_REAL_STEAM_DIR=\"${_kin_real_steam}\"")
+        add_test(NAME kin-platform-services-real-steam COMMAND kin_platform_services_tests --real-steam)
+    endif()
+endif()
+
 kin_add_test(kin_core_tests kin-core SOURCES core_tests.cpp)
 kin_add_test(kin_math3d_tests kin-math3d SOURCES math3d_tests.cpp)
 kin_add_test(kin_render3d_api_tests kin-render3d-api SOURCES render3d_api_tests.cpp)

@@ -7,6 +7,18 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Platform services ([platform services](platform_services.md)). `kin::PlatformServices` is what a store offers a
+  game, the same whichever runs it: the player, their language, achievements, stats, leaderboards, rich presence,
+  the overlay, the on-screen keyboard, DLC and invitations to join (`JoinRequested` events, `join_on_launch`).
+  Steam is the first backend: kin opens Steam's API library at run time, so it builds without the Steamworks SDK
+  and a game runs with or without Steam. The offline backend answers everywhere else, keeping achievements, stats
+  and best scores beside the player's saves. `run_scene_app` starts them from the game info's new `steam_app_id`
+  (or `SceneAppConfig::services_config`), quits when Steam starts the game again, pumps them once a frame, shows
+  Steam's language for the game, and on Steam Deck the floating keyboard follows text fields; scenes get
+  `SceneContext::services`, scripts a `services` table. `kin_game` gains `STEAM_APP_ID` (a `steam_appid.txt` in
+  development builds) and `STEAM_REDIST` (ships the library). `kin::FakeServices` is for games' tests;
+  `kin_steam_abi_check` checks kin's Steam declarations against an SDK (`KIN_STEAMWORKS_SDK_DIR`).
+
 - Tweens and timers ([tweens](animation_system.md#tweens)). `kin::tween(world, entity, {.property =
   "Transform2D.pos", .to = ..., .seconds, .easing})` moves any described field that animations can set, from what
   it is when it starts (after its `delay`), `relative`ly, with `repeats` and `yoyo`; a new tween of a field replaces

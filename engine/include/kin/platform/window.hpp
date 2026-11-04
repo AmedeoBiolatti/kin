@@ -144,6 +144,9 @@ public:
     // puts its candidate list beside it rather than in a corner. `cursor` is
     // the caret's x within `area`.
     void set_text_input_area(Rectf area, i32 cursor = 0);
+    // The last area set_text_input_area was given (where an on-screen keyboard
+    // must not cover).
+    Rectf text_input_area() const { return _text_input_area; }
 
     // The pointer's shape while it is over this window. The pointer is shared
     // by every window, so this changes it only while it is over this one; call
@@ -162,6 +165,7 @@ private:
 
     void* _handle = nullptr;
     bool _close_requested = false;
+    Rectf _text_input_area{};
     std::array<void*, 11> _cursors{}; // made on first use, one per SystemCursor
     std::unique_ptr<Chrome> _chrome; // read by the system's hit test, from the event thread
 };

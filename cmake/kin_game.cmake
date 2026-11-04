@@ -57,6 +57,10 @@ endfunction()
 #       [INFO <project.kin>]   # its game info: TITLE, VERSION and ICON default to its title,
 #                              # version and icon (the .ico beside its icon PNG, in the content)
 #       [FILES <file> ...]     # more files to ship beside the executable (a readme, ...)
+#       [STEAM_APP_ID <id>]    # its Steam app id (default: the game info's steam_app_id)
+#       [STEAM_REDIST <dir>]   # Steam's API library to ship beside it: the SDK's
+#                              # redistributable_bin folder, a folder holding the
+#                              # library, or the library itself (docs/platform_services.md)
 #       [NO_CONTENT])          # the game has no content folder
 #
 # On the target it sets KIN_GAME_TITLE, KIN_GAME_VERSION, KIN_GAME_ICON (the
@@ -69,6 +73,9 @@ endfunction()
 #                      (with KIN_PACK_CONTENT; built with the game in shipping builds)
 #   <target>_package   packages/<name>-<version>-<platform>.zip (.tar.gz on Linux):
 #                      the executable, its content, and the license texts it must carry
+# With a Steam app id, KIN_GAME_STEAM_APP_ID (a number) and, outside shipping
+# builds, a steam_appid.txt beside the executable, so Steam lets the game start
+# from the build folder instead of starting it again through Steam.
 # and install rules for the component <target>.
 
 set(_KIN_ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
@@ -131,8 +138,41 @@ END
     target_sources(${target} PRIVATE "${rc}")
 endfunction()
 
+# Steam's API library for this platform in `where` (the SDK's
+# redistributable_bin, a folder holding it, or the file).
+function(_kin_game_steam_library out_var where)
+    get_filename_component(where "${where}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    if(WIN32)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(name steam_api64.dll)
+            set(sdk_folder win64)
+        else()
+            set(name steam_api.dll)
+            set(sdk_folder .)
+        endif()
+    elseif(APPLE)
+        set(name libsteam_api.dylib)
+        set(sdk_folder osx)
+    else()
+        set(name libsteam_api.so)
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+            set(sdk_folder linuxarm64)
+        else()
+            set(sdk_folder linux64)
+        endif()
+    endif()
+    foreach(candidate IN ITEMS "${where}" "${where}/${name}" "${where}/${sdk_folder}/${name}")
+        if(EXISTS "${candidate}" AND NOT IS_DIRECTORY "${candidate}")
+            set(${out_var} "${candidate}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    message(FATAL_ERROR "kin_game: no ${name} in ${where} (nor in ${sdk_folder}/)")
+endfunction()
+
 function(kin_game target)
-    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO" "FILES;RUNTIME_TARGETS" ${ARGN})
+    cmake_parse_arguments(ARG "NO_CONTENT" "CONTENT;NAME;TITLE;VERSION;ICON;MANIFEST;INFO;STEAM_APP_ID;STEAM_REDIST"
+        "FILES;RUNTIME_TARGETS" ${ARGN})
     if(NOT ARG_NAME)
         set(ARG_NAME "${target}")
     endif()
@@ -153,6 +193,8 @@ function(kin_game target)
         foreach(line IN LISTS info_lines)
             if(line MATCHES "^title[ \t]+(.+)$" AND NOT ARG_TITLE)
                 string(STRIP "${CMAKE_MATCH_1}" ARG_TITLE)
+            elseif(line MATCHES "^steam_app_id[ \t]+([0-9]+)" AND NOT ARG_STEAM_APP_ID)
+                set(ARG_STEAM_APP_ID "${CMAKE_MATCH_1}")
             elseif(line MATCHES "^version[ \t]+(.+)$" AND NOT ARG_VERSION)
                 string(STRIP "${CMAKE_MATCH_1}" ARG_VERSION)
             elseif(line MATCHES "^icon[ \t]+(.+)$")
@@ -190,6 +232,24 @@ function(kin_game target)
         string(REPLACE "\"" "\\\"" value "${value}")
         target_compile_definitions(${target} PRIVATE "KIN_GAME_${key}=\"${value}\"")
     endforeach()
+    if(ARG_STEAM_APP_ID)
+        if(NOT ARG_STEAM_APP_ID MATCHES "^[0-9]+$")
+            message(FATAL_ERROR "kin_game(${target}): STEAM_APP_ID must be a number: ${ARG_STEAM_APP_ID}")
+        endif()
+        target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=${ARG_STEAM_APP_ID})
+        if(NOT KIN_SHIPPING AND NOT EMSCRIPTEN)
+            file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${target}>/steam_appid.txt" CONTENT "${ARG_STEAM_APP_ID}\n")
+        endif()
+    else()
+        target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=0)
+    endif()
+    if(ARG_STEAM_REDIST AND NOT EMSCRIPTEN)
+        _kin_game_steam_library(steam_library "${ARG_STEAM_REDIST}")
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${steam_library}" "$<TARGET_FILE_DIR:${target}>"
+            VERBATIM)
+        install(FILES "${steam_library}" DESTINATION . COMPONENT ${target})
+    endif()
     if(ARG_NO_CONTENT)
         set(content "")
     elseif(NOT KIN_SHIPPING AND NOT EMSCRIPTEN)

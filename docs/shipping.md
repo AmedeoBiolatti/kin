@@ -245,7 +245,9 @@ checks that it asks for nothing newer than glibc 2.31, and runs it in the
 runtime.
 
 **Steam.** The package's folder is a depot as it is: the executable, its pack
-and `licenses/`.
+and `licenses/`, and with `kin_game(... STEAM_REDIST <dir>)` Steam's API library.
+Achievements, the overlay, rich presence and the rest are in
+[platform services](platform_services.md).
 
 ## Licenses
 

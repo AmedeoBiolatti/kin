@@ -20,6 +20,7 @@ class Renderer3D;
 struct RuntimeDebugOptions;
 struct RunReport;
 struct Camera2D;
+class PlatformServices;
 
 struct SceneContext {
     App& app;
@@ -45,6 +46,9 @@ struct SceneContext {
     // Optional shared 3D renderer, owned by the runtime. Null unless requested
     // by SceneAppConfig::rendering_3d (and always null in a 2D-only build).
     Renderer3D* renderer3d = nullptr;
+    // The store's or platform's services (achievements, overlay, ...), from
+    // SceneAppConfig::services; null where the host started none.
+    PlatformServices* services = nullptr;
 };
 
 class Scene {
