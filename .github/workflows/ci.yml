@@ -458,7 +458,10 @@ jobs:
         env:
           CC: gcc-13
           CXX: g++-13
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF
+        # The Debug tests with full -g filled the runner's disk while linking
+        # (No space left on device); -g1 keeps backtraces and asserts, at a
+        # third of the size. Asserts stay on in Debug whatever the debug info.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DKIN_EXPERIMENTAL_3D=ON -DKIN_BUILD_EXAMPLES=${{ matrix.examples }} -DKIN_BUILD_GAMES=OFF ${{ matrix.build_type == 'Debug' && '-DCMAKE_C_FLAGS_DEBUG=-g1 -DCMAKE_CXX_FLAGS_DEBUG=-g1' || '' }}
 
       - name: Build
         env:
