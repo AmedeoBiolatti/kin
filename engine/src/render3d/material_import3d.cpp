@@ -1,3 +1,5 @@
+#include "material_import3d_impl.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -216,16 +218,8 @@ private:
     size_t _at = 0;
 };
 
-std::string read_file(const std::filesystem::path& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in)
-        throw std::runtime_error("cannot read " + path.string());
-    return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
-}
-
-u8 byte(f32 v) {
-    return u8(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f));
-}
+using material_import::byte;
+using material_import::read_file;
 
 // --- Godot's StandardMaterial3D / ORMMaterial3D ---
 
@@ -303,14 +297,8 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
         if (const auto* name = m.find("resource_name");
             name && name->kind == GodotValue::Kind::String && !name->text.empty())
             imported.name = name->text;
-        auto& notes = imported.notes;
-        const auto note = [&](std::string what) {
-            if (std::find(notes.begin(), notes.end(), what) == notes.end())
-                notes.push_back(std::move(what));
-        };
-        const std::filesystem::path content = std::filesystem::absolute(options.content).lexically_normal();
-        const std::filesystem::path out = std::filesystem::absolute(options.out).lexically_normal();
-        const std::string stem = source.stem().string();
+        material_import::Context x(imported, options, source.stem().string());
+        const auto note = [&](std::string what) { x.note(std::move(what)); };
 
         // Physical light units: emission in nits (emission_intensity), as the project says.
         bool physical = false;
@@ -352,63 +340,13 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
             }
             return file;
         };
-        const auto inside = [&](const std::filesystem::path& file) {
-            const auto relative = file.lexically_relative(content);
-            return !relative.empty() && *relative.begin() != "..";
+        const auto place = [&](const std::filesystem::path& file) { return x.place(file); };
+        const auto made = [&](const std::string& suffix, const Image& image) { return x.made(suffix, image); };
+        const auto load = [&](const std::filesystem::path& file, const std::string& role) {
+            return x.load(file, role);
         };
-        // A file kin reads where it is (inside the content), else a copy in `out`.
-        const auto place = [&](const std::filesystem::path& file) -> std::filesystem::path {
-            if (inside(file))
-                return file.lexically_relative(content);
-            const auto copy = out / "textures" / file.filename();
-            if (options.write) {
-                std::filesystem::create_directories(copy.parent_path());
-                std::filesystem::copy_file(file, copy, std::filesystem::copy_options::overwrite_existing);
-            }
-            imported.written.push_back(copy);
-            return copy.lexically_relative(content);
-        };
-        const auto made = [&](const std::string& suffix, const Image& image) -> std::filesystem::path {
-            const auto file = out / "textures" / (stem + suffix + ".png");
-            if (options.write && !save_image(image, file))
-                throw std::runtime_error("cannot write " + file.string());
-            imported.written.push_back(file);
-            return file.lexically_relative(content);
-        };
-        // A texture's pixels, for what is made from it; none (said) where they can't be read (a DDS: kin uploads
-        // those as they are, but does not decode them), and the map is left out.
-        const auto load = [&](const std::filesystem::path& file, const std::string& role) -> std::optional<Image> {
-            std::string extension = file.extension().string();
-            std::transform(extension.begin(), extension.end(), extension.begin(),
-                           [](unsigned char c) { return char(std::tolower(c)); });
-            if (extension == ".dds" || extension == ".ktx" || extension == ".ktx2") {
-                note(role + ": " + file.filename().string() +
-                     " is GPU-compressed (kin uploads those as they are, but does not decode them to repack): left "
-                     "out, its factor kept");
-                return std::nullopt;
-            }
-            Image image;
-            try {
-                image = load_image(file);
-            } catch (const std::exception&) {
-                image = {};
-            }
-            if (!image.valid()) {
-                note(role + ": " + file.filename().string() +
-                     " can't be decoded to repack (as a PNG it could be): left out, its factor kept");
-                return std::nullopt;
-            }
-            return image;
-        };
-        // Godot's channel selectors: 0 red, 1 green, 2 blue, 3 alpha, 4 grayscale (the mean of RGB).
-        const auto channel = [](const Image& image, size_t pixel, int which) -> u8 {
-            const u8* p = &image.rgba[pixel * 4];
-            return which >= 0 && which < 4 ? p[which] : u8((u32(p[0]) + p[1] + p[2] + 1) / 3);
-        };
-        // `image` sampled at the nearest texel of a picture of `size`.
-        const auto texel = [](const Image& image, Vec2i size, int x, int y) {
-            return size_t((y * image.size.y / size.y) * image.size.x + x * image.size.x / size.x);
-        };
+        using material_import::channel; // Godot's channel selectors are these: R, G, B, A, grayscale
+        using material_import::texel;
 
         // The sampler of every map: texture_filter (0 nearest, 1 linear, then each with mipmaps, then anisotropic)
         // and texture_repeat.
@@ -599,19 +537,7 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
         p.uv_scale = Vec2f{scale[0], scale[1]};
         p.uv_offset = Vec2f{offset[0], offset[1]};
 
-        imported.file = out / (stem + ".kinmaterials");
-        // What is written is what kin reads: the file parsed back before it is written.
-        const std::string written = write_materials3d_asset(imported.asset);
-        if (const auto check = parse_materials3d_asset(written, imported.file); !check)
-            throw std::runtime_error("the import does not read back: " +
-                                     (check.diagnostics.empty() ? std::string("?") : check.diagnostics.front()));
-        if (options.write) {
-            std::filesystem::create_directories(out);
-            std::ofstream file(imported.file, std::ios::binary);
-            file << written;
-            if (!file)
-                throw std::runtime_error("cannot write " + imported.file.string());
-        }
+        x.finish();
         result.value = std::move(imported);
     } catch (const std::exception& error) {
         result.diagnostics.push_back(source.string() + ": " + error.what());

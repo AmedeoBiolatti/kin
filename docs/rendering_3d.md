@@ -3482,7 +3482,29 @@ maps made. What kin does not show as Godot does is printed as a note for each ma
 scattering, proximity and distance fade, refraction, detail maps, front-face culling,
 subtract and multiply blending, ...), not dropped silently. Maps a material needs repacked but kin cannot decode (DDS,
 KTX) are left out with their factor kept, and said. Every file written is read back through
-`parse_materials3d_asset` first. Unity's and Unreal's materials are next (docs/material_graph_plan.md).
+`parse_materials3d_asset` first.
+
+`kin_import_material unity <material.mat | folder> --project <the folder holding Assets/> ...` (and
+`import_unity_material()`) does the same for Unity's materials, read by their shader's properties: URP's Lit (Simple
+Lit and Baked Lit as dielectrics of their smoothness, Unlit unlit), the built-in pipeline's Standard, HDRP's Lit; a
+custom shader's or Shader Graph's material by the usual property names, with a note. Textures are found by GUID
+through the project's `.meta` files. Mapped:
+
+- base colour and map, and the base map's tiling and offset as the material's UV transform (Unity reads every map
+  with it; a map tiled differently is noted);
+- metallic and smoothness: kin's roughness is 1 - smoothness. With the metallic map (R metallic, A smoothness, or the
+  albedo's alpha by `_SmoothnessTextureChannel`) the import makes kin's map from it, the smoothness factor (Standard's
+  gloss map scale) in it; HDRP's mask map is remapped by its `_MetallicRemap`, `_SmoothnessRemap` and `_AORemap`
+  ranges;
+- normal map and scale; occlusion (Unity's G, moved to R) and its strength; emission with the `_EMISSION` keyword
+  (the colour in linear light, times its map; HDRP's colour is linear already, in its physical units: noted);
+- opaque, cut-out (`_AlphaClip`, Standard's Cutout), transparent (alpha; additive; premultiplied and multiply noted),
+  `_Cull` (off: double-sided; HDRP's `_DoubleSidedEnable`), `_ReceiveShadows`.
+
+TIFF and PSD maps (frequent in Unity projects; kin's images don't read them) are decoded by the import's own reader
+(baseline TIFF: strips or tiles, uncompressed, LZW, PackBits, Deflate, the horizontal predictor, 8/16-bit and float;
+PSD's composited picture) and written as PNG. Unity's Shader Graphs themselves, its HLSL shaders, detail, parallax and
+clear-coat maps are noted. Unreal's materials are next (docs/material_graph_plan.md).
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,
