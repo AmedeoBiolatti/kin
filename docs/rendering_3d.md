@@ -3451,6 +3451,16 @@ variant and a blue variant selected by a standard prefab override. Both share on
 barrel model. The fire pit selects the ember variant from the same material asset.
 The expedition's existing imported appearance remains unchanged.
 
+### Tiling (a material's UV transform)
+
+`Material3D::uv_scale` and `uv_offset` move where every map of the material is read: the mesh's UV times the scale,
+plus the offset (Godot's `uv1_scale` / `uv1_offset`, Unity's tiling and offset), in every pass: the lit and unlit
+colour, the normal map's frame, a cut-out's coverage in the main, shadow, pick, pre- and visibility passes and the
+temporal anti-aliasing's coverage. `.kinmaterials` take them as `"uv_scale": [x, y]` and `"uv_offset": [x, y]`. A
+glTF model's `KHR_texture_transform` is applied to its UVs when it loads, as before; these apply on top. Not yet: the
+GI's voxels read the base map untransformed (a tiled map's mean colour is much the same), and WebGL2 ignores them.
+Identity (the default) reads exactly what it read before.
+
 ### Importing other engines' materials
 
 `kin_import_material godot <material.tres | folder> --project <godot project> --content <kin content root> --out
@@ -3464,12 +3474,12 @@ as the studio. Every field kin has is written, so the file replaces a model's im
   map with the map, scaled by the brightest texel), its energy times, with the project's physical light units, its
   intensity in nits;
 - transparency (alpha; scissor as a cut-out at its threshold; hash as a cut-out at a half; depth pre-pass as alpha),
-  the add blend mode, cull mode (disabled is double-sided), unshaded, receiving shadows, and the texture filter and
-  repeat as every map's sampler.
+  the add blend mode, cull mode (disabled is double-sided), unshaded, receiving shadows, `uv1_scale` and `uv1_offset`
+  (`Material3D::uv_scale`, `uv_offset`), and the texture filter and repeat as every map's sampler.
 
 Maps inside the content root are referenced where they are; others are copied into `<out>/textures`, beside the
 maps made. What kin does not show as Godot does is printed as a note for each material (backlight, subsurface
-scattering, proximity and distance fade, refraction, detail maps, `uv1_scale` and `uv1_offset`, front-face culling,
+scattering, proximity and distance fade, refraction, detail maps, front-face culling,
 subtract and multiply blending, ...), not dropped silently. Maps a material needs repacked but kin cannot decode (DDS,
 KTX) are left out with their factor kept, and said. Every file written is read back through
 `parse_materials3d_asset` first. Unity's and Unreal's materials are next (docs/material_graph_plan.md).

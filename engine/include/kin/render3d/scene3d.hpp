@@ -231,6 +231,11 @@ struct Material3D {
     // above. A `shader` takes its place. The shadow, pick and pre-passes still cut a Blend3D::Mask out by the base
     // colour's alpha, not the surface's.
     SurfaceShader3D surface{};
+    // Where every map is read: the mesh's UV times `uv_scale`, plus `uv_offset` (tiling, as Godot's uv1_scale and
+    // Unity's tiling and offset). A transform the model's glTF gives (KHR_texture_transform) is in its UVs already.
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f uv_offset{0.0f, 0.0f};
+    bool uv_identity() const { return uv_scale.x == 1 && uv_scale.y == 1 && uv_offset.x == 0 && uv_offset.y == 0; }
 
     void set_emission(LinearRgb color, f32 strength = 1.0f) {
         emission_color = color;

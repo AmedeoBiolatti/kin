@@ -17,7 +17,7 @@ layout(location = 0) out vec4 FragNormalVelocity;
 void main() {
     const float motion_footprint = 0.25 * length(fwidth(vCurrent.xy / vCurrent.z));
     vec2 normal = octahedral(kin_prepass_normal());
-    if (vAlpha * texture(uBase, vUV).a < material.cutoff.x) {
+    if (vAlpha * texture(uBase, vUV * material.uv.xy + material.uv.zw).a < material.cutoff.x) {
         discard;
     }
     // Carry independent geometry motion in the normal's unused range. AO

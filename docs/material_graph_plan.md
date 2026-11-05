@@ -170,6 +170,7 @@ picture), 113 by name, every field agrees but: 12 lights whose emission is off i
 switches them on: noted), 3 glass of the add blend mode (bake.py made them opaque; the import is Godot's), 2 that
 need a DDS map repacked.
 
-**Engine gaps the import found.** A material-level UV transform (Godot's uv1_scale/offset, Unity's tiling, glTF's
-KHR_texture_transform is baked into the mesh's UVs today); decoding BC-compressed DDS to repack; backlight,
+**Engine gaps the import found.** A material-level UV transform: done (`Material3D::uv_scale`, `uv_offset`, every
+pass; the Bistro byte-identical; `test_gpu_material_uv_transform`: offset and scale equal to the shifted or repeated
+texture, lit, unlit, cut-out and its shadow, to the pixel). Decoding BC-compressed DDS to repack; backlight,
 subsurface, clearcoat, refraction, detail maps (graph territory).

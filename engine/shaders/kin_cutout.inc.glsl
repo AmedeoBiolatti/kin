@@ -3,4 +3,5 @@
 layout(set = 2, binding = 0) uniform sampler2D uBase;
 layout(set = 3, binding = 0) uniform Cutoff {
     vec4 cutoff; // x: the alpha below which nothing is drawn
+    vec4 uv;     // xy: the maps' scale, zw: their offset (Material3D::uv_scale, uv_offset)
 } material;

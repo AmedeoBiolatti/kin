@@ -102,6 +102,12 @@ bool taa_material_hash(u64& key, const Material3D& material, const ITextureBacke
     taa_hash(key, material.shader_params);
     taa_hash(key, material.wrap_u);
     taa_hash(key, material.wrap_v);
+    if (!material.uv_identity()) {
+        taa_hash(key, material.uv_scale.x);
+        taa_hash(key, material.uv_scale.y);
+        taa_hash(key, material.uv_offset.x);
+        taa_hash(key, material.uv_offset.y);
+    }
     const auto shader = material.shader.backend().get();
     taa_hash(key, shader);
     if (const auto surface = material.surface.backend().get())
@@ -341,8 +347,9 @@ static_assert(sizeof(TaaUniforms) == 80);
 // shadow_mask.frag's and pick_mask.frag's.
 struct CutoffUniforms {
     f32 cutoff[4]; // the alpha below which nothing is drawn
+    f32 uv[4];     // the maps' scale and offset (Material3D::uv_scale, uv_offset)
 };
-static_assert(sizeof(CutoffUniforms) == 16);
+static_assert(sizeof(CutoffUniforms) == 32);
 // The sky's and the fog's (kin_sky.inc.glsl's KinSky and kin_fog.inc.glsl's KinFog, vec4s all, so no padding to get
 // wrong).
 struct AtmosphereUniforms {
@@ -1694,8 +1701,9 @@ GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3
     const auto* surface = custom ? nullptr : dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
     const bool general_emission =
         material.emits_light() && (material.emission_mode == EmissionMode3D::Independent || material.emissive_texture);
+    // (The unlit shaders read the base map as the UV has it: a material that moves it takes the stock ones.)
     const Unlit unlit = _unlit_available && (material.unlit || material.wireframe) && !general_emission && !custom &&
-                                !surface && !skinned && !taa && !velocity && !fog
+                                !surface && material.uv_identity() && !skinned && !taa && !velocity && !fog
                             ? (material.texture ? Unlit::Textured : Unlit::Colour)
                             : Unlit::Off;
     return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material), surface};
@@ -1730,7 +1738,8 @@ GpuRenderer3D::MaterialUniforms GpuRenderer3D::material_uniforms(const Material3
             {material.normal ? 1.0f : 0.0f, material.emissive_texture ? 1.0f : 0.0f,
              pass_of(material) == Pass::Opaque ? 1.0f : 0.0f, pass_of(material) == Pass::Additive ? 1.0f : 0.0f},
             {material.emission_color.r, material.emission_color.g, material.emission_color.b,
-             material.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f}};
+             material.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f},
+            {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_pipeline(SDL_GPUTextureFormat format, u32 samples, bool velocity) const {
@@ -5279,7 +5288,8 @@ void GpuRenderer3D::bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPas
     const SDL_GPUTextureSamplerBinding base =
         texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]);
     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
-    const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f}};
+    const CutoffUniforms u{{material.alpha_cutoff, 0.0f, 0.0f, 0.0f},
+                           {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
     SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
 }
 
@@ -10882,8 +10892,10 @@ bool GpuRenderer3D::reactive_pass(FrameCtx& ctx) {
                 taa_hash(ctx.coverage_key, effect);
                 taa_hash(ctx.coverage_key, ref.instances[i].transform);
             }
-            const Vec4f flags{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0};
-            SDL_PushGPUFragmentUniformData(ctx.commands, 0, &flags, sizeof(flags));
+            const std::array<Vec4f, 2> flags{
+                Vec4f{custom ? 1.0f : 0.0f, changed ? 1.0f : 0.0f, 0, 0},
+                Vec4f{material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y}};
+            SDL_PushGPUFragmentUniformData(ctx.commands, 0, flags.data(), sizeof(flags));
             if (ref.clustered) {
                 draw_cluster_copies(ref, ctx.commands, pass, binder, u, nullptr);
                 if (_gc.active) {

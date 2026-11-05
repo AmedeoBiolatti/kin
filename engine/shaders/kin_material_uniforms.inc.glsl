@@ -8,6 +8,7 @@ struct KinDrawMaterial {
     vec4 pbr;
     vec4 maps;
     vec4 emission;
+    vec4 uv; // xy: the maps' scale, zw: their offset (Material3D::uv_scale, uv_offset)
 };
 layout(location = 9) flat in uint vMaterial;
 #if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
@@ -27,6 +28,7 @@ layout(set = 3, binding = 1) uniform Material {
     vec4 pbr;    // x: metallic, y: roughness, z: normal scale, w: occlusion strength
     vec4 maps;   // x: has a normal map, y: has an emissive map, z: opaque (it is in the occlusion pre-pass), w: additive
     vec4 emission; // xyz: linear RGB factor, w: independent emission (otherwise legacy base-relative)
+    vec4 uv;       // xy: the maps' scale, zw: their offset (Material3D::uv_scale, uv_offset)
 #ifdef KIN_SURFACE
     vec4 surface[4]; // a surface shader's: Material3D::shader_params (kin_surface_param)
 #endif

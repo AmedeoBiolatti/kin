@@ -141,6 +141,12 @@ vec2 environment_uv(vec3 d) {
     return vec2(0.5 + atan(d.z, d.x) / (2.0 * PI), 0.5 - asin(clamp(d.y, -1.0, 1.0)) / PI);
 }
 
+// Where a fragment reads the material's maps: its UV times the material's scale, plus its offset (one for all the maps,
+// as glTF's KHR_texture_transform has it when they agree; identity: the UV as it is, exactly).
+vec2 kin_map_uv() {
+    return vUV * material.uv.xy + material.uv.zw;
+}
+
 // The normal bent by the map. The tangent frame comes from how the world
 // position and the UVs change across the pixel, so meshes need no tangents:
 // the directions u and v increase in, solved from the two derivatives (the
@@ -148,7 +154,8 @@ vec2 environment_uv(vec3 d) {
 // runs down. `front` is -1 seen from behind, where the whole frame turns.
 vec3 mapped_normal(vec3 n, float front) {
     const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
-    const vec2 duv1 = dFdx(vUV), duv2 = dFdy(vUV);
+    const vec2 uv = kin_map_uv();
+    const vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
     const float det = duv1.x * duv2.y - duv2.x * duv1.y;
     if (abs(det) < 1e-20) {
         return n; // no UVs to go by here
@@ -157,7 +164,7 @@ vec3 mapped_normal(vec3 n, float front) {
     vec3 b = (dp2 * duv1.x - dp1 * duv2.x) * sign(det);
     t = normalize(t - n * dot(n, t));
     b = normalize(b - n * dot(n, b));
-    vec3 m = texture(uNormalMap, vUV).xyz * 2.0 - 1.0;
+    vec3 m = texture(uNormalMap, uv).xyz * 2.0 - 1.0;
     // No normal of the map points into the surface: where z would (every texel of a map of two channels, BC5, whose
     // blue reads 0), the map holds x and y only, and z is what makes the normal a unit one.
     if (m.z < 0.0) {
@@ -194,7 +201,7 @@ float contact_shadow() {
 // The base colour in linear light and its alpha: the vertex, instance and
 // material colours times the base texture.
 vec4 kin_base_color() {
-    vec4 tex = texture(uBase, vUV);
+    vec4 tex = texture(uBase, kin_map_uv());
     if (frame.flags.y > 0.5) {
         tex.rgb = decode(tex.rgb);
     }
@@ -231,12 +238,12 @@ vec3 kin_position() {
     return vWorld;
 }
 vec2 kin_uv() {
-    return vUV;
+    return kin_map_uv(); // as the maps read it
 }
 
 // The material's metallic (x) and roughness (y), the factors times the map.
 vec2 kin_metallic_roughness() {
-    const vec3 mr = texture(uMetalRough, vUV).rgb;
+    const vec3 mr = texture(uMetalRough, kin_map_uv()).rgb;
     return vec2(clamp(material.pbr.x * mr.b, 0.0, 1.0),
                 // A floor on the roughness: a perfect mirror would be a single bright pixel.
                 clamp(material.pbr.y * mr.g, 0.045, 1.0));
@@ -244,7 +251,7 @@ vec2 kin_metallic_roughness() {
 
 // How much ambient light the occlusion map lets through.
 float kin_occlusion() {
-    return mix(1.0, texture(uOcclusion, vUV).r, material.pbr.w);
+    return mix(1.0, texture(uOcclusion, kin_map_uv()).r, material.pbr.w);
 }
 
 // The material's own light for a surface of colour `base`: its share of the
@@ -252,7 +259,7 @@ float kin_occlusion() {
 vec3 kin_emissive(vec3 base) {
     vec3 own = material.emission.w > 0.5 ? vec3(1.0) : base;
     if (material.maps.y > 0.5) {
-        own = texture(uEmissive, vUV).rgb;
+        own = texture(uEmissive, kin_map_uv()).rgb;
         if (frame.flags.y > 0.5) {
             own = decode(own);
         }
