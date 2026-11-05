@@ -215,6 +215,46 @@ void push_quit() {
 
 // Asked to quit while the app holds closing: it goes on, told, until it quits
 // itself (or forgets the request); not held, it stops at once.
+void push_event(SDL_EventType type) {
+    SDL_Event event{};
+    event.type = type;
+    SDL_PushEvent(&event); // app events go to event watchers as they are pushed
+}
+
+// The system's app events (phones): given to the handler as they come; in the
+// background nothing steps or draws, and the time away is not played after.
+void test_app_events() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    std::vector<kin::AppEvent> seen;
+    app.on_app_event([&](kin::AppEvent event) { seen.push_back(event); });
+    int steps = 0;
+    int drawn = 0;
+    app.start_loop([&](float) { ++steps; }, [&](float) { ++drawn; });
+    assert(app.step_loop(1.0f / 60.0f) && steps == 1 && drawn == 1);
+
+    push_event(SDL_EVENT_WILL_ENTER_BACKGROUND);
+    push_event(SDL_EVENT_DID_ENTER_BACKGROUND);
+    assert(seen == std::vector{kin::AppEvent::Background} && app.in_background());
+    assert(app.step_loop(1.0f / 60.0f) && steps == 1 && drawn == 1); // away: nothing
+
+    push_event(SDL_EVENT_WILL_ENTER_FOREGROUND);
+    push_event(SDL_EVENT_DID_ENTER_FOREGROUND);
+    assert(seen.size() == 2 && seen[1] == kin::AppEvent::Foreground && !app.in_background());
+    // The next frame's time is the time away (5 s here): drawn, not played.
+    assert(app.step_loop(5.0f) && steps == 1 && drawn == 2);
+    assert(app.step_loop(1.0f / 60.0f) && steps == 2 && drawn == 3);
+
+    push_event(SDL_EVENT_LOW_MEMORY);
+    assert(seen.size() == 3 && seen[2] == kin::AppEvent::LowMemory && app.running());
+
+    // Ending the app is not asked about, even held.
+    app.hold_close(true);
+    push_event(SDL_EVENT_TERMINATING);
+    assert(seen.size() == 4 && seen[3] == kin::AppEvent::Terminating);
+    assert(!app.step_loop(1.0f / 60.0f) && !app.running());
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+}
+
 void test_close_held() {
     {
         kin::App app{{.mode = kin::AppMode::Headless}};
@@ -625,6 +665,7 @@ int main() {
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
     test_close_held();
+    test_app_events();
     test_mouse_motion_reaches_one_step();
 
     kin::App app{{.mode = kin::AppMode::Headless}};

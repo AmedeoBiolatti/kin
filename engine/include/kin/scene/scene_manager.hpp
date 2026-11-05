@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/platform/app.hpp>
 #include <kin/scene/scene.hpp>
 
 #include <memory>
@@ -26,6 +27,11 @@ public:
     // before renderer/device destruction, so scene-owned resources release in
     // a valid backend lifetime.
     void shutdown(SceneContext& ctx);
+
+    // Gives an app event to every scene in the stack, the top one first
+    // (Scene::on_app_background and the rest; Terminating is a Background
+    // for scenes, the app then shuts them down as usual).
+    void app_event(SceneContext& ctx, AppEvent event);
 
     bool empty() const { return _stack.empty(); }
     i32 depth() const { return static_cast<i32>(_stack.size()); }

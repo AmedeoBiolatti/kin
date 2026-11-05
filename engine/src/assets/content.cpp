@@ -30,6 +30,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+#if defined(__ANDROID__)
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <jni.h>
+#endif
 
 #include "content_io.hpp"
 
@@ -271,11 +276,84 @@ ContentPack::~ContentPack() {
         CloseHandle(static_cast<HANDLE>(_mapping));
     }
 #else
+#if defined(__ANDROID__)
+    if (_mapping) {
+        AAsset_close(static_cast<AAsset*>(_mapping)); // its buffer is _data
+        return;
+    }
+#endif
     if (_data) {
         munmap(const_cast<std::byte*>(_data), _size);
     }
 #endif
 }
+
+#if defined(__ANDROID__)
+namespace {
+
+// The app's AssetManager, from SDL's activity; kept for the life of the process.
+AAssetManager* android_asset_manager() {
+    static AAssetManager* const manager = []() -> AAssetManager* {
+        auto* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        auto activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (!env || !activity) {
+            return nullptr;
+        }
+        AAssetManager* result = nullptr;
+        jclass type = env->GetObjectClass(activity);
+        jmethodID get_assets = env->GetMethodID(type, "getAssets", "()Landroid/content/res/AssetManager;");
+        jobject assets = get_assets ? env->CallObjectMethod(activity, get_assets) : nullptr;
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        if (assets) {
+            // The native manager is valid while its Java object is: keep that alive.
+            result = AAssetManager_fromJava(env, env->NewGlobalRef(assets));
+            env->DeleteLocalRef(assets);
+        }
+        env->DeleteLocalRef(type);
+        env->DeleteLocalRef(activity);
+        return result;
+    }();
+    return manager;
+}
+
+} // namespace
+
+std::shared_ptr<const ContentPack> ContentPack::open_android_asset(std::string_view name, std::string* error) {
+    const std::string asset_name{name};
+    const std::string shown = "apk:" + asset_name;
+    AAssetManager* manager = android_asset_manager();
+    if (!manager) {
+        set_error(error, "no Android asset manager for " + shown);
+        return nullptr;
+    }
+    AAsset* asset = AAssetManager_open(manager, asset_name.c_str(), AASSET_MODE_BUFFER);
+    if (!asset) {
+        set_error(error, "cannot open " + shown);
+        return nullptr;
+    }
+    std::shared_ptr<ContentPack> pack{new ContentPack};
+    pack->_file = std::filesystem::path{"/android_asset"} / asset_name;
+    pack->_mapping = asset; // closed by the destructor
+    // A stored (uncompressed) asset's buffer is the APK's own mapped bytes; a
+    // compressed one would be inflated into memory here.
+    pack->_data = static_cast<const std::byte*>(AAsset_getBuffer(asset));
+    pack->_size = static_cast<std::size_t>(AAsset_getLength64(asset));
+    if (!pack->_data) {
+        set_error(error, "cannot map " + shown);
+        return nullptr;
+    }
+    if (pack->_size < HeaderSize) {
+        set_error(error, shown + " is not a kin pack (too short)");
+        return nullptr;
+    }
+    if (!read_index(*pack, shown, error)) {
+        return nullptr;
+    }
+    return pack;
+}
+#endif
 
 std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path& file, std::string* error) {
     std::shared_ptr<ContentPack> pack{new ContentPack};
@@ -329,17 +407,24 @@ std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path
     pack->_data = static_cast<const std::byte*>(data);
     pack->_size = static_cast<std::size_t>(info.st_size);
 #endif
+    if (!read_index(*pack, name, error)) {
+        return nullptr;
+    }
+    return pack;
+}
 
+bool ContentPack::read_index(ContentPack& pack_ref, const std::string& name, std::string* error) {
+    ContentPack* const pack = &pack_ref;
     const std::byte* base = pack->_data;
     if (std::memcmp(base, PackMagic.data(), PackMagic.size()) != 0) {
         set_error(error, name + " is not a kin pack");
-        return nullptr;
+        return false;
     }
     const u32 version = read_le<u32>(base + 8);
     if (version != PackVersion) {
         set_error(error, name + " is pack version " + std::to_string(version) + "; this build reads version " +
                              std::to_string(PackVersion));
-        return nullptr;
+        return false;
     }
     const u32 count = read_le<u32>(base + 12);
     const u64 index_offset = read_le<u64>(base + 16);
@@ -347,19 +432,19 @@ std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path
     const u32 index_crc = read_le<u32>(base + 28);
     if (index_offset < HeaderSize || index_offset > pack->_size || index_size > pack->_size - index_offset) {
         set_error(error, name + " is damaged (index out of range)");
-        return nullptr;
+        return false;
     }
     const std::byte* index = base + index_offset;
     if (crc32_update(0, index, index_size) != index_crc) {
         set_error(error, name + " is damaged (index checksum)");
-        return nullptr;
+        return false;
     }
     pack->_entries.reserve(count);
     std::size_t at = 0;
     for (u32 i = 0; i < count; ++i) {
         if (index_size - at < EntryFixedSize) {
             set_error(error, name + " is damaged (index too short)");
-            return nullptr;
+            return false;
         }
         Entry entry;
         entry.offset = read_le<u64>(index + at);
@@ -369,25 +454,25 @@ std::shared_ptr<const ContentPack> ContentPack::open(const std::filesystem::path
         at += EntryFixedSize;
         if (index_size - at < length) {
             set_error(error, name + " is damaged (index too short)");
-            return nullptr;
+            return false;
         }
         entry.path.assign(reinterpret_cast<const char*>(index + at), length);
         at += length;
         if (!valid_entry_path(entry.path)) {
             set_error(error, name + " has an invalid path: " + entry.path);
-            return nullptr;
+            return false;
         }
         if (entry.offset < HeaderSize || entry.offset > index_offset || entry.size > index_offset - entry.offset) {
             set_error(error, name + " is damaged (" + entry.path + " out of range)");
-            return nullptr;
+            return false;
         }
         if (!pack->_entries.empty() && pack->_entries.back().path >= entry.path) {
             set_error(error, name + " is damaged (index out of order at " + entry.path + ")");
-            return nullptr;
+            return false;
         }
         pack->_entries.push_back(std::move(entry));
     }
-    return pack;
+    return true;
 }
 
 const ContentPack::Entry* ContentPack::find(std::string_view path) const {
@@ -889,6 +974,24 @@ std::filesystem::path find_content_root(const ContentSearch& search, int argc, c
         }
         tried.push_back(search.dev_dir.string());
     }
+#if defined(__ANDROID__)
+    // An Android app's content is a pack in its APK's assets (kin_android_app).
+    {
+        const std::string asset = search.name + ".kinpak";
+        std::string why;
+        if (std::shared_ptr<const ContentPack> pack = ContentPack::open_android_asset(asset, &why)) {
+            const std::filesystem::path root = std::filesystem::path{"/android_asset"} / search.name;
+            KIN_LOG_INFO_F("content", "content pack",
+                           (LogFields{{.name = "pack", .value = "apk:" + asset},
+                                      {.name = "root", .value = root.string()},
+                                      {.name = "files", .value = std::to_string(pack->entries().size())},
+                                      {.name = "from", .value = "the APK"}}));
+            mount_content_pack(root, std::move(pack));
+            return remember(root);
+        }
+        tried.push_back(why);
+    }
+#endif
     const std::filesystem::path beside = executable_dir();
     const std::filesystem::path pack = beside / (search.name + ".kinpak");
     std::error_code error;

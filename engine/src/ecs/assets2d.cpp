@@ -419,12 +419,14 @@ bool Assets2D::make_shader(const std::string& path, ShaderMade& made) {
     made.spv_time = spirv_file ? made.time : file_time(spv_path);
     std::optional<std::vector<u8>> spirv;
     std::string error;
-    if (!spirv_file && shader_compiler_available()) {
+    // glslc reads files on disk: a source in a pack (no time) is not one, and
+    // its .spv, in the pack beside it, is used instead.
+    if (!spirv_file && made.time && shader_compiler_available()) {
         spirv = compile_glsl(_manager.resolve(path), ShaderStage::Fragment, &error);
-    } else if (made.spv_time) {
-        if (const std::optional<std::string> bytes = read_content_file(_manager.resolve(spv_path))) {
-            spirv = std::vector<u8>(bytes->begin(), bytes->end());
-        }
+    } else if (const std::optional<std::string> bytes = read_content_file(_manager.resolve(spv_path))) {
+        // From the folder or a pack (a pack's files have no time: spv_time is
+        // empty there, though the .spv is in it).
+        spirv = std::vector<u8>(bytes->begin(), bytes->end());
     } else {
         error = "no glslc to compile it, and no " + spv_path + " beside it";
     }

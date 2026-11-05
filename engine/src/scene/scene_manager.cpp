@@ -124,6 +124,29 @@ void SceneManager::flush_pending(SceneContext& ctx) {
     apply_pending(ctx);
 }
 
+void SceneManager::app_event(SceneContext& ctx, AppEvent event) {
+    // Terminating comes after Background on phones; a scene that saved then
+    // need not again, but one that only saves on exit gets the chance here.
+    std::exception_ptr failure;
+    for (auto it = _stack.rbegin(); it != _stack.rend(); ++it) {
+        try {
+            switch (event) {
+            case AppEvent::Background:
+            case AppEvent::Terminating: (*it)->on_app_background(ctx); break;
+            case AppEvent::Foreground: (*it)->on_app_foreground(ctx); break;
+            case AppEvent::LowMemory: (*it)->on_low_memory(ctx); break;
+            }
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+    }
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
+}
+
 void SceneManager::shutdown(SceneContext& ctx) {
     std::exception_ptr failure;
     _pending.clear();

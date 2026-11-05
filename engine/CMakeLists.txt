@@ -27,6 +27,10 @@ if(KIN_ENABLE_THREADS)
     find_package(Threads REQUIRED)
     target_link_libraries(kin_foundation PUBLIC Threads::Threads)
 endif()
+if(ANDROID)
+    # Content packs are read from the APK's assets (AAssetManager).
+    target_link_libraries(kin_foundation PUBLIC android)
+endif()
 kin_enable_release_optimizations(kin_foundation)
 
 add_library(kin_engine STATIC

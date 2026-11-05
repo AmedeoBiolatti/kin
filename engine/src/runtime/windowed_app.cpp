@@ -68,6 +68,12 @@ struct WindowedAppSession::Impl {
         }
         if (config.input_map)
             app.input().set_map(*config.input_map);
+        app.on_app_event([this](AppEvent event) {
+            if (config.app_event) {
+                auto frame = context((config.fixed_dt > 0 ? config.fixed_dt : default_fixed_dt), 0);
+                config.app_event(frame, event);
+            }
+        });
         app.start_loop([this](f32 dt) { on_update(dt); }, [this](f32 alpha) { on_render(alpha); });
     }
     ~Impl() {
@@ -104,6 +110,7 @@ struct WindowedAppSession::Impl {
         }
         update = {};
         render = {};
+        app.on_app_event({});
     }
 };
 

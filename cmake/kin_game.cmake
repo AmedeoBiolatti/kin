@@ -1,4 +1,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/kin_packaging.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/kin_android.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kin_web.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kin_import_2d.cmake")
 
@@ -284,7 +285,7 @@ function(kin_game target)
     else()
         target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=0 KIN_GAME_STORE="")
     endif()
-    if(ARG_STEAM_APP_ID AND NOT KIN_SHIPPING)
+    if(ARG_STEAM_APP_ID AND NOT KIN_SHIPPING AND NOT ANDROID)
         file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${target}>/steam_appid.txt" CONTENT "${ARG_STEAM_APP_ID}\n")
     else()
         # None from a build before (another store's, or a development one): with it, Steam
@@ -293,7 +294,7 @@ function(kin_game target)
             COMMAND "${CMAKE_COMMAND}" -E rm -f "$<TARGET_FILE_DIR:${target}>/steam_appid.txt"
             VERBATIM)
     endif()
-    if(ARG_STEAM_REDIST AND NOT EMSCRIPTEN)
+    if(ARG_STEAM_REDIST AND NOT EMSCRIPTEN AND NOT ANDROID)
         _kin_game_steam_library(steam_library "${ARG_STEAM_REDIST}")
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${steam_library}" "$<TARGET_FILE_DIR:${target}>"
@@ -302,12 +303,18 @@ function(kin_game target)
     endif()
     if(ARG_NO_CONTENT)
         set(content "")
-    elseif(NOT KIN_SHIPPING AND NOT EMSCRIPTEN)
+    elseif(NOT KIN_SHIPPING AND NOT EMSCRIPTEN AND NOT ANDROID)
+        # (An Android app cannot see the build machine's folders.)
         target_compile_definitions(${target} PRIVATE KIN_GAME_CONTENT_DIR="${content}")
     endif()
 
     if(EMSCRIPTEN)
         kin_package_web_game(${target} CONTENT "${content}" NAME "${ARG_NAME}")
+        return()
+    endif()
+    if(ANDROID)
+        kin_android_app(${target} CONTENT "${content}" NAME "${ARG_NAME}" TITLE "${ARG_TITLE}"
+            VERSION "${ARG_VERSION}")
         return()
     endif()
 
