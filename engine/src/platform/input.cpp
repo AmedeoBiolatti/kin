@@ -282,7 +282,36 @@ std::string_view binding_name(InputBinding binding) {
     if (binding.device == InputBindingDevice::Gamepad) {
         return pad_control_name(static_cast<PadControl>(binding.code));
     }
+    if (binding.device == InputBindingDevice::Touch) {
+        return touch_control_name(static_cast<TouchControl>(binding.code));
+    }
     return mouse_button_name(to_mouse_button(binding.code));
+}
+
+std::string_view touch_control_name(TouchControl control) {
+    switch (control) {
+    case TouchControl::Tap: return "tap";
+    case TouchControl::DoubleTap: return "double_tap";
+    case TouchControl::LongPress: return "long_press";
+    case TouchControl::SwipeLeft: return "swipe_left";
+    case TouchControl::SwipeRight: return "swipe_right";
+    case TouchControl::SwipeUp: return "swipe_up";
+    case TouchControl::SwipeDown: return "swipe_down";
+    case TouchControl::TwoFingerTap: return "two_finger_tap";
+    case TouchControl::Count: break;
+    }
+    return "unknown";
+}
+
+bool parse_touch_control(std::string_view name, TouchControl& out) {
+    const std::string target = lower_copy(name);
+    for (u8 code = 0; code < static_cast<u8>(TouchControl::Count); ++code) {
+        if (touch_control_name(static_cast<TouchControl>(code)) == target) {
+            out = static_cast<TouchControl>(code);
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string_view pad_control_name(PadControl control) {
@@ -355,6 +384,7 @@ std::string binding_text(InputBinding binding) {
     case InputBindingDevice::Key: return "key:" + std::string(key_name(to_key(binding.code)));
     case InputBindingDevice::MouseButton: return "mouse:" + std::string(mouse_button_name(to_mouse_button(binding.code)));
     case InputBindingDevice::Gamepad: return "pad:" + std::string(pad_control_name(static_cast<PadControl>(binding.code)));
+    case InputBindingDevice::Touch: return "touch:" + std::string(touch_control_name(static_cast<TouchControl>(binding.code)));
     }
     return {};
 }
@@ -378,6 +408,12 @@ std::optional<InputBinding> parse_binding_text(std::string_view text) {
         PadControl control = PadControl::A;
         return parse_pad_control(name, control)
                    ? std::optional(InputBinding{.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)})
+                   : std::nullopt;
+    }
+    if (device == "touch") {
+        TouchControl control = TouchControl::Tap;
+        return parse_touch_control(name, control)
+                   ? std::optional(InputBinding{.device = InputBindingDevice::Touch, .code = static_cast<i32>(control)})
                    : std::nullopt;
     }
     return std::nullopt;
@@ -484,6 +520,19 @@ bool parse_input_map(std::string_view text, InputMap& out, std::string& error) {
             map.bind(action, button);
             continue;
         }
+        if (kind == "touch") {
+            std::string action;
+            std::string control_name;
+            if (!(in >> action >> control_name)) {
+                return fail("touch requires action and gesture name");
+            }
+            TouchControl control = TouchControl::Tap;
+            if (!parse_touch_control(control_name, control)) {
+                return fail("unknown touch gesture");
+            }
+            map.bind(action, control);
+            continue;
+        }
         if (kind == "pad") {
             std::string action;
             std::string control_name;
@@ -508,7 +557,7 @@ bool parse_input_map(std::string_view text, InputMap& out, std::string& error) {
             if (what == "-" || what == "+") {
                 const std::optional<InputBinding> binding = parse_binding_text(value);
                 if (!binding) {
-                    return fail("unknown axis binding (key:<Key>, mouse:<button>, pad:<control>)");
+                    return fail("unknown axis binding (key:<Key>, mouse:<button>, pad:<control>, touch:<gesture>)");
                 }
                 (what == "-" ? axis.negative : axis.positive).push_back(*binding);
             } else if (what == "stick") {
@@ -548,6 +597,8 @@ std::string serialize_input_map(const InputMap& map) {
                 out << '\n';
             } else if (binding.device == InputBindingDevice::MouseButton) {
                 out << "mouse " << action.name << ' ' << mouse_button_name(to_mouse_button(binding.code)) << '\n';
+            } else if (binding.device == InputBindingDevice::Touch) {
+                out << "touch " << action.name << ' ' << touch_control_name(static_cast<TouchControl>(binding.code)) << '\n';
             } else {
                 out << "pad " << action.name << ' ' << pad_control_name(static_cast<PadControl>(binding.code)) << '\n';
             }
@@ -639,9 +690,33 @@ void Input::advance_step_edges() {
     for (Buttons<pad_control_count>& pad : _pads) {
         pad.advance_step();
     }
+    advance_touch_step(false);
     _mouse_wheel_y = 0.0f;
     _mouse_wheel_x = 0.0f;
     _mouse_motion = {};
+}
+
+// What a step reads of touch, used up: the gestures' edges, fingers lifted,
+// pinch and pan. At a frame's start (`frame_start`), gestures made before the
+// frame before are let go, so a step sees each held, then released.
+void Input::advance_touch_step(bool frame_start) {
+    _touch_controls.advance_step();
+    if (frame_start) {
+        for (const std::size_t control : _touch_release_ready) {
+            _touch_controls.set(control, false);
+        }
+        _touch_release_ready = std::exchange(_touch_release, {});
+    }
+    _touches_ended.clear();
+    _pinch = 1.0f;
+    _pan = {};
+}
+
+void Input::clear_touch_frame() {
+    _touch_controls.clear_frame();
+    _frame_touches_ended.clear();
+    _frame_pinch = 1.0f;
+    _frame_pan = {};
 }
 
 void Input::consume_frame_edges() {
@@ -651,6 +726,7 @@ void Input::consume_frame_edges() {
         pad.clear_frame();
     }
     _mouse.clear_frame();
+    clear_touch_frame();
     _frame_mouse_wheel_y = 0.0f;
     _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
@@ -669,6 +745,7 @@ void Input::begin_frame(bool advance_transients) {
         }
         _mouse.advance_step();
         _mouse.clear_frame();
+        advance_touch_step(true);
         // App::run already used the step wheel up in that step (advance_step_edges);
         // this clears it for callers that step without it (run_for, tests).
         _mouse_wheel_y = 0.0f;
@@ -704,11 +781,13 @@ void Input::begin_frame(bool advance_transients) {
     for (Buttons<pad_control_count>& pad : _pads) {
         pad.clear_frame();
     }
+    clear_touch_frame();
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
     _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
     _text_input.clear();
+    apply_pointer_touch();
 }
 
 void Input::process_native_event(const void* native_event) {
@@ -726,7 +805,37 @@ void Input::process_native_event(const void* native_event) {
     } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(event.key.scancode)) {
         _keys.set(event.key.scancode, false);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
+    } else if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
+               event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {
+        // Where on the window: the system gives 0..1 of its size.
+        Vec2f pos{event.tfinger.x, event.tfinger.y};
+        if (SDL_Window* window = SDL_GetWindowFromID(event.tfinger.windowID)) {
+            int w = 0;
+            int h = 0;
+            SDL_GetWindowSize(window, &w, &h);
+            pos = {event.tfinger.x * static_cast<f32>(w), event.tfinger.y * static_cast<f32>(h)};
+        }
+        _touch_now = std::max(_touch_now, static_cast<f64>(event.tfinger.timestamp) * 1e-9);
+        // One id for a finger whatever screen it is on.
+        const u64 id = static_cast<u64>(event.tfinger.fingerID) ^ (static_cast<u64>(event.tfinger.touchID) << 32);
+        if (event.type == SDL_EVENT_FINGER_DOWN) {
+            touch_down(id, pos, static_cast<WindowId>(event.tfinger.windowID));
+        } else if (event.type == SDL_EVENT_FINGER_MOTION) {
+            touch_moved(id, pos);
+        } else {
+            touch_moved(id, pos);
+            if (event.type == SDL_EVENT_FINGER_CANCELED) {
+                claim_touch(id); // taken away: no tap, no click
+            }
+            touch_up(id);
+        }
+    } else if ((event.type == SDL_EVENT_MOUSE_MOTION && event.motion.which == SDL_TOUCH_MOUSEID) ||
+               ((event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) &&
+                event.button.which == SDL_TOUCH_MOUSEID) ||
+               (event.type == SDL_EVENT_MOUSE_WHEEL && event.wheel.which == SDL_TOUCH_MOUSEID)) {
+        // The mouse the system makes from a finger: the finger is read itself.
     } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+        _pointer_is_touch = false;
         _last_mouse_motion_event_time_ns = event.motion.timestamp;
         _mouse_motion.x += event.motion.xrel;
         _mouse_motion.y += event.motion.yrel;
@@ -736,6 +845,7 @@ void Input::process_native_event(const void* native_event) {
         _mouse_window = static_cast<WindowId>(event.motion.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && valid_mouse_button(event.button.button)) {
+        _pointer_is_touch = false;
         _mouse.set(event.button.button, true);
         _drag_start[event.button.button] = {event.button.x, event.button.y};
         _mouse_pos = {event.button.x, event.button.y};
@@ -1044,6 +1154,10 @@ void InputMap::bind(std::string_view action, MouseButton button) {
                                {.name = "binding", .value = std::string{mouse_button_name(button)}}}));
 }
 
+void InputMap::bind(std::string_view action, TouchControl control) {
+    _bindings[std::string(action)].push_back({.device = InputBindingDevice::Touch, .code = static_cast<i32>(control)});
+}
+
 void InputMap::bind(std::string_view action, PadControl control) {
     _bindings[std::string(action)].push_back({.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)});
 }
@@ -1307,6 +1421,10 @@ bool Input::binding_edge(const Reach& reach, InputBinding binding, Edge edge) co
         const u8 button = binding_mouse_button(binding);
         return reach.keyboard && valid_mouse_button(button) && _mouse.test(button, edge);
     }
+    case InputBindingDevice::Touch: {
+        const auto control = static_cast<std::size_t>(binding.code);
+        return reach.keyboard && binding.code >= 0 && control < touch_control_count && _touch_controls.test(control, edge);
+    }
     case InputBindingDevice::Gamepad: {
         const std::size_t control = pad_index(binding);
         if (control >= pad_control_count) {
@@ -1524,6 +1642,234 @@ bool Input::pad_frame_pressed(PadControl control, i32 player) const {
         return std::ranges::any_of(_pads, [index](const Buttons<pad_control_count>& pad) { return pad.frame_pressed[index]; });
     }
     return player < max_input_players && _pads[static_cast<std::size_t>(player) + 1].frame_pressed[index];
+}
+
+// --- touch ---------------------------------------------------------------------------
+
+namespace {
+// How gestures are told apart (window pixels, seconds).
+constexpr f32 touch_slop = 12.0f;           // moving less is holding still
+constexpr f64 tap_seconds = 0.3;
+constexpr f64 double_tap_seconds = 0.35;    // between two taps
+constexpr f32 double_tap_distance = 40.0f;
+constexpr f64 long_press_seconds = 0.5;
+constexpr f64 swipe_seconds = 0.5;
+constexpr f32 swipe_distance = 60.0f;
+
+f32 distance(Vec2f a, Vec2f b) {
+    return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
+}
+
+// The two unclaimed fingers when exactly two are down (for pinch and pan).
+std::optional<std::pair<const TouchPoint*, const TouchPoint*>> two_fingers(const std::vector<TouchPoint>& touches) {
+    const TouchPoint* a = nullptr;
+    const TouchPoint* b = nullptr;
+    for (const TouchPoint& t : touches) {
+        if (t.claimed) continue;
+        if (!a) a = &t;
+        else if (!b) b = &t;
+        else return std::nullopt;
+    }
+    if (!a || !b) return std::nullopt;
+    return std::pair{a, b};
+}
+} // namespace
+
+const TouchPoint* Input::touch(u64 id) const {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    return found != _touches.end() ? &*found : nullptr;
+}
+
+bool Input::touch_pressed(TouchControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < touch_control_count && _touch_controls.test(index, Edge::Pressed);
+}
+
+bool Input::touch_frame_pressed(TouchControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < touch_control_count && _touch_controls.frame_pressed[index];
+}
+
+void Input::make_gesture(TouchControl control) {
+    const auto index = static_cast<std::size_t>(control);
+    _touch_controls.press(index);
+    if (std::ranges::find(_touch_release, index) == _touch_release.end()) {
+        _touch_release.push_back(index);
+    }
+    std::erase(_touch_release_ready, index); // made again: held on
+}
+
+void Input::set_touch_down(u64 id, Vec2f pos, WindowId window) {
+    touch_down(id, pos, window);
+}
+
+void Input::set_touch_moved(u64 id, Vec2f pos) {
+    touch_moved(id, pos);
+}
+
+void Input::set_touch_up(u64 id) {
+    touch_up(id);
+}
+
+void Input::touch_down(u64 id, Vec2f pos, WindowId window) {
+    if (touch(id)) {
+        touch_up(id); // never saw it lifted
+    }
+    _touches.push_back({.id = id, .pos = pos, .start = pos, .window = window, .down_at = _touch_now});
+    _strokes.push_back({.id = id, .down_at = _touch_now, .start = pos});
+    const auto unclaimed = std::ranges::count_if(_touches, [](const TouchPoint& t) { return !t.claimed; });
+    if (unclaimed >= 2) {
+        for (TouchStroke& stroke : _strokes) {
+            stroke.multi = true; // no tap or swipe of one finger now
+        }
+        _two_down_at = unclaimed == 2 ? _touch_now : -1.0;
+        _two_moved = false;
+        // A second finger: a pinch, not a press on what the first is over.
+        if (_pointer_touch) {
+            cancel_pointer_press();
+        }
+        return;
+    }
+    if (!_pointer_touch && unclaimed == 1) { // the only finger no control has
+        // The pointer goes there now and presses a frame later, so UI sees it
+        // over what it touches first, as a mouse is before it clicks.
+        _pointer_touch = id;
+        _pointer_is_touch = true;
+        set_mouse_pos(pos, window);
+        _pointer_press_pending = true;
+    }
+}
+
+void Input::touch_moved(u64 id, Vec2f pos) {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    if (found == _touches.end()) {
+        return;
+    }
+    const Vec2f was = found->pos;
+    // Two fingers: how their spread and middle change.
+    if (const auto two = two_fingers(_touches); two && !found->claimed) {
+        const TouchPoint& other = two->first->id == id ? *two->second : *two->first;
+        const f32 before = distance(was, other.pos);
+        const f32 after = distance(pos, other.pos);
+        if (before > 1.0f && after > 1.0f) {
+            _pinch *= after / before;
+            _frame_pinch *= after / before;
+        }
+        const Vec2f moved{(pos.x - was.x) * 0.5f, (pos.y - was.y) * 0.5f};
+        _pan = {_pan.x + moved.x, _pan.y + moved.y};
+        _frame_pan = {_frame_pan.x + moved.x, _frame_pan.y + moved.y};
+    }
+    found->pos = pos;
+    if (const auto stroke = std::ranges::find(_strokes, id, &TouchStroke::id); stroke != _strokes.end()) {
+        stroke->travel = std::max(stroke->travel, distance(pos, stroke->start));
+        if (stroke->multi && stroke->travel > touch_slop) {
+            _two_moved = true;
+        }
+    }
+    if (_pointer_touch == id) {
+        set_mouse_motion({pos.x - was.x, pos.y - was.y});
+        set_mouse_pos(pos, found->window);
+    }
+}
+
+void Input::touch_up(u64 id) {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    if (found == _touches.end()) {
+        return;
+    }
+    const TouchPoint point = *found;
+    _touches.erase(found);
+    _touches_ended.push_back(point);
+    _frame_touches_ended.push_back(point);
+    if (_pointer_touch == id) {
+        if (_pointer_press_pending) {
+            _pointer_release_pending = true; // a tap within a frame: pressed next frame, let go the one after
+        } else {
+            _mouse.set(to_sdl_mouse_button(MouseButton::Left), false); // the click, if it was one
+        }
+        _pointer_touch.reset();
+    }
+    const auto stroke = std::ranges::find(_strokes, id, &TouchStroke::id);
+    if (stroke == _strokes.end()) {
+        return; // claimed
+    }
+    const TouchStroke s = *stroke;
+    _strokes.erase(stroke);
+    const f64 held = _touch_now - s.down_at;
+    if (!s.multi && !s.long_pressed) {
+        const Vec2f d{point.pos.x - s.start.x, point.pos.y - s.start.y};
+        if (held <= tap_seconds && s.travel <= touch_slop) {
+            make_gesture(TouchControl::Tap);
+            if (_last_tap && _touch_now - _last_tap->first <= double_tap_seconds &&
+                distance(_last_tap->second, point.pos) <= double_tap_distance) {
+                make_gesture(TouchControl::DoubleTap);
+                _last_tap.reset();
+            } else {
+                _last_tap = std::pair{_touch_now, point.pos};
+            }
+        } else if (held <= swipe_seconds && std::max(std::abs(d.x), std::abs(d.y)) >= swipe_distance) {
+            if (std::abs(d.x) >= 2.0f * std::abs(d.y)) {
+                make_gesture(d.x < 0 ? TouchControl::SwipeLeft : TouchControl::SwipeRight);
+            } else if (std::abs(d.y) >= 2.0f * std::abs(d.x)) {
+                make_gesture(d.y < 0 ? TouchControl::SwipeUp : TouchControl::SwipeDown);
+            }
+        }
+    }
+    // Both of two fingers up, soon and still: a two-finger tap.
+    if (_strokes.empty()) {
+        if (_two_down_at >= 0.0 && !_two_moved && _touch_now - _two_down_at <= tap_seconds) {
+            make_gesture(TouchControl::TwoFingerTap);
+        }
+        _two_down_at = -1.0;
+        _two_moved = false;
+    }
+}
+
+void Input::cancel_pointer_press() {
+    if (_pointer_press_pending) {
+        _pointer_press_pending = _pointer_release_pending = false;
+    } else {
+        const u8 left = to_sdl_mouse_button(MouseButton::Left);
+        _mouse.cur[left] = _mouse.prev[left] = _mouse.pressed[left] = _mouse.frame_pressed[left] = false;
+    }
+    _pointer_touch.reset();
+}
+
+// At a frame's start: the pointer's press a frame after its finger came, and
+// a quick tap's release the frame after that.
+void Input::apply_pointer_touch() {
+    const u8 left = to_sdl_mouse_button(MouseButton::Left);
+    if (_pointer_release_pending && !_pointer_press_pending) {
+        _mouse.set(left, false);
+        _pointer_release_pending = false;
+    }
+    if (_pointer_press_pending) {
+        _mouse.set(left, true);
+        _drag_start[left] = _mouse_pos;
+        _pointer_press_pending = false;
+    }
+}
+
+void Input::claim_touch(u64 id) {
+    const auto found = std::ranges::find(_touches, id, &TouchPoint::id);
+    if (found == _touches.end() || found->claimed) {
+        return;
+    }
+    found->claimed = true;
+    std::erase_if(_strokes, [id](const TouchStroke& s) { return s.id == id; });
+    if (_pointer_touch == id) {
+        cancel_pointer_press(); // let go of what it pressed without clicking it
+    }
+}
+
+void Input::update_touch(f64 now) {
+    _touch_now = std::max(_touch_now, now);
+    for (TouchStroke& stroke : _strokes) {
+        if (!stroke.multi && !stroke.long_pressed && stroke.travel <= touch_slop && _touch_now - stroke.down_at >= long_press_seconds) {
+            stroke.long_pressed = true;
+            make_gesture(TouchControl::LongPress);
+        }
+    }
 }
 
 } // namespace kin

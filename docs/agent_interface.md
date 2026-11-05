@@ -164,6 +164,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.text` | `{text}` | Deliver text input for the next tick. |
 | `input.drop` | `{path, x?, y?, space?}` | Drop a file on the window at `x`, `y` (or where the pointer is), as from the desktop: `Input::take_dropped_files` has it at the next tick. |
 | `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
+| `input.touch` | `{x, y, id?, mode?, space?}` | A finger at `x`, `y` (logical UI space, or `space: "window"`): `mode` `down`, `move`, `up`, or `tap` (the default: down this tick, up at the start of the next). `id` tells fingers apart. Touch's time is the ticks' (frame × fixed dt), so a long press is a finger held down over enough ticks. |
 | `input.pad` | `{player?, button?, mode?, left_x?, left_y?, right_x?, right_y?, left_trigger?, right_trigger?, connected?}` | Drive a player's game controller (`player` 0 to 7, default 0) as a real one: a `button` (`a`, `start`, `dpad_left`, ...) with `mode` `press`, `hold` or `release`, and sticks (-1 to 1, y up) and triggers (0 to 1), kept until changed. The game reads it as that player's controller (`Input::player_gamepad`), and the first player's (else the lowest driven) as `Input::gamepad()`. Driven once, it is plugged in until `connected: false` (or `sim.reset`). |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
 | `frame.timing` | `{since?, reset?}` | Update, render and present wall time over the last 600 ticks (or frames drawn, inspected): `last`, `mean` and `max`, in ms. With `since` (a frame number; -1 for all kept), `history` lists each frame after it, oldest first: `frame`, `update_ms`, `render_ms`, `present_ms`, `interval_ms` (since the frame before began; 0 when ticked). `reset` clears the history after reporting. |
@@ -240,7 +241,7 @@ tool closes stdin the script goes on and its breakpoints are cleared.
 
 ## Input
 
-Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.pad`, `input.drop`) is queued and applied
+Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.pad`, `input.touch`, `input.drop`) is queued and applied
 on the next `sim.tick`, after `begin_frame`, so the scene observes it that frame.
 A `press` is a tap: held for that tick and released at the start of the next
 one, which sees the release, as with a real button. A ui2 click completes on that

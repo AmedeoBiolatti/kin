@@ -9006,6 +9006,58 @@ void test_navigation_by_actions_and_players() {
     ui.end();
 }
 
+// A finger is the pointer: a tap clicks a button; between touches nothing is
+// hovered; prompts name touch gestures, and Device names them while a finger
+// is the pointer.
+void test_touch_pointer() {
+    using namespace kin;
+    using namespace kin::ui2;
+    Renderer2D renderer = make_renderer();
+    Context ui;
+    Input input;
+    InputMap map;
+    map.bind("jump", Key::Space);
+    map.bind("jump", TouchControl::Tap);
+    map.bind("dash", TouchControl::SwipeRight);
+    input.set_map(map);
+    Button play{.id = make_id("play"), .bounds = {10, 10, 100, 30}, .label = "Play"};
+    const auto draw = [&] {
+        ui.begin(input, renderer, 0.016f);
+        run(ui, play);
+        ui.end();
+    };
+    input.begin_frame();
+    draw();
+    // A quick tap, down and up within one frame: over it first, pressed, let go.
+    input.begin_frame();
+    input.set_touch_down(1, {40, 20});
+    input.set_touch_up(1);
+    draw();
+    input.begin_frame();
+    draw();
+    assert(play.interaction.hot && play.interaction.active);
+    input.begin_frame();
+    draw();
+    assert(play.clicked);
+    input.begin_frame();
+    draw();
+    assert(!play.clicked);
+    input.begin_frame();
+    draw();
+    assert(!play.interaction.hot); // the finger is gone: nothing under it (hot follows the frame before)
+    // The mouse again: hovered where it is.
+    input.begin_frame();
+    input.set_mouse_pos({40, 20});
+    draw();
+    assert(!input.pointer_is_touch() || !play.interaction.hot); // set_mouse_pos is not a mouse event
+    std::string said;
+    input.begin_frame();
+    ui.begin(input, renderer, 0.016f);
+    assert(ui.prompt_for_action("dash") == "Swipe Right");
+    assert(ui.prompt_for_action("jump", {.mode = PromptBindingMode::Device}) == "Tap"); // a finger is the pointer
+    ui.end();
+}
+
 void test_controller_and_semantic_ui() {
     using namespace kin;
     using namespace kin::ui2;
@@ -9210,6 +9262,7 @@ void test_semantic_text_edit() {
 
 int main() {
     test_controller_and_semantic_ui();
+    test_touch_pointer();
     test_navigation_by_actions_and_players();
     test_semantic_elements_follow_each_frame();
     test_semantics_respect_modals_and_clipping();

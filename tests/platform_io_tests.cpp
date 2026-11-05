@@ -172,16 +172,86 @@ void test_process_errors_apart() {
 // Launched and left: it runs on its own (and would after this program ends).
 void test_launch() {
     const std::filesystem::path mark = std::filesystem::temp_directory_path() / "kin_launch_test_mark.txt";
-    std::filesystem::remove(mark);
+    std::error_code ignored;
+    std::filesystem::remove(mark, ignored);
     std::string error;
     assert(kin::launch({self, "--touch", mark.string()}, {}, &error) && error.empty());
+    // The mark is there once the child has written all of it: it exists as
+    // soon as the child opens it, still empty.
+    const auto written = [&] {
+        std::ifstream in(mark);
+        std::string text;
+        std::getline(in, text);
+        return text == "touched";
+    };
     const auto until = std::chrono::steady_clock::now() + 10s;
-    while (!std::filesystem::exists(mark) && std::chrono::steady_clock::now() < until) {
+    while (!written() && std::chrono::steady_clock::now() < until) {
         SDL_Delay(5);
     }
-    assert(std::filesystem::exists(mark));
-    std::filesystem::remove(mark);
+    assert(written());
+    // On Windows a file another process still has open cannot be deleted
+    // (and the throwing remove() ended this program without a word, 0xc0000409):
+    // try again until the child has let it go.
+    std::error_code removed;
+    while (!std::filesystem::remove(mark, removed) && std::filesystem::exists(mark) &&
+           std::chrono::steady_clock::now() < until) {
+        SDL_Delay(5);
+    }
+    assert(!std::filesystem::exists(mark));
     assert(!kin::launch({}, {}, &error) && !error.empty());
+}
+
+// Fingers from the system: down, moving and up; the mouse events it makes
+// from them are not used (the finger is the pointer itself), a real mouse
+// turns the pointer back.
+void test_touch_events() {
+    kin::Input input;
+    SDL_Event down{};
+    down.type = SDL_EVENT_FINGER_DOWN;
+    down.tfinger.touchID = 1;
+    down.tfinger.fingerID = 7;
+    down.tfinger.x = 30.0f; // no window: as given
+    down.tfinger.y = 40.0f;
+    down.tfinger.timestamp = 2'000'000'000;
+    kin::InputFrameTestHook::event(input, down);
+    assert(input.touches().size() == 1 && (input.touches()[0].pos == kin::Vec2f{30, 40}) && input.touches()[0].down_at == 2.0);
+    input.begin_frame(); // its press
+    assert(input.pointer_is_touch() && input.mouse_held(kin::MouseButton::Left));
+    SDL_Event fake{};
+    fake.type = SDL_EVENT_MOUSE_BUTTON_UP;
+    fake.button.which = SDL_TOUCH_MOUSEID;
+    fake.button.button = SDL_BUTTON_LEFT;
+    fake.button.x = 500.0f;
+    kin::InputFrameTestHook::event(input, fake);
+    SDL_Event fake_motion{};
+    fake_motion.type = SDL_EVENT_MOUSE_MOTION;
+    fake_motion.motion.which = SDL_TOUCH_MOUSEID;
+    fake_motion.motion.x = 500.0f;
+    kin::InputFrameTestHook::event(input, fake_motion);
+    assert(input.mouse_held(kin::MouseButton::Left) && input.pointer_is_touch() && (input.mouse_pos() == kin::Vec2f{30, 40}));
+    SDL_Event moved = down;
+    moved.type = SDL_EVENT_FINGER_MOTION;
+    moved.tfinger.x = 32.0f;
+    kin::InputFrameTestHook::event(input, moved);
+    assert((input.mouse_pos() == kin::Vec2f{32, 40}) && (input.mouse_motion() == kin::Vec2f{2, 0}));
+    SDL_Event up = moved;
+    up.type = SDL_EVENT_FINGER_UP;
+    up.tfinger.timestamp = 2'100'000'000;
+    kin::InputFrameTestHook::event(input, up);
+    assert(input.touches().empty() && input.touch_pressed(kin::TouchControl::Tap) && input.mouse_released(kin::MouseButton::Left));
+    // Taken away by the system: no tap, no click.
+    input.advance_step_edges();
+    input.begin_frame();
+    kin::InputFrameTestHook::event(input, down);
+    SDL_Event cancelled = down;
+    cancelled.type = SDL_EVENT_FINGER_CANCELED;
+    kin::InputFrameTestHook::event(input, cancelled);
+    assert(input.touches().empty() && !input.touch_pressed(kin::TouchControl::Tap) && !input.mouse_released(kin::MouseButton::Left));
+    SDL_Event mouse{};
+    mouse.type = SDL_EVENT_MOUSE_MOTION;
+    mouse.motion.x = 5.0f;
+    kin::InputFrameTestHook::event(input, mouse);
+    assert(!input.pointer_is_touch() && (input.mouse_pos() == kin::Vec2f{5, 0}));
 }
 
 void test_dropped_files() {
@@ -256,6 +326,7 @@ int main(int argc, char** argv) {
     test_process_errors_apart();
     test_launch();
     test_dropped_files();
+    test_touch_events();
     test_file_dialogs();
     return 0;
 }

@@ -897,6 +897,34 @@ std::optional<Key> parse_key_name(std::string_view name) {
     return std::nullopt;
 }
 
+// A finger on the window: down, moved, up, or a tap, at `x`, `y` (logical
+// UI space, or "space": "window"); `id` tells fingers apart.
+ServerResponse handle_input_touch(ServerContext& ctx, const JsonValue& params) {
+    const JsonValue* x = params.find("x");
+    const JsonValue* y = params.find("y");
+    if (!x || !y || !x->is_number() || !y->is_number()) {
+        return error_result("input.touch requires numbers 'x' and 'y'");
+    }
+    const std::string mode = params.string_at("mode", "tap");
+    if (mode != "down" && mode != "move" && mode != "up" && mode != "tap") {
+        return error_result("mode must be 'down', 'move', 'up', or 'tap'");
+    }
+    Vec2f pos{static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
+    if (params.string_at("space", "logical") != "window") {
+        pos = ctx.renderer().logical_to_window(pos);
+    }
+    const JsonValue* id = params.find("id");
+    const u64 finger = id && id->is_number() ? static_cast<u64>(std::max(0.0, id->as_number())) : 0;
+    ctx.queue_touch(finger, pos, mode);
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "touch");
+    json.field("mode", std::string_view{mode});
+    json.end_object();
+    return ok_result(out.str());
+}
+
 // A player's game controller, driven: a button tapped or held, sticks and
 // triggers set, or it unplugged. The game reads it as it reads a real one.
 ServerResponse handle_input_pad(ServerContext& ctx, const JsonValue& params) {
@@ -1092,6 +1120,12 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
     _pending.push_back({PendingInput::Kind::Drop, std::move(path), {}, window_pos, 0.0f});
 }
 
+void ServerContext::queue_touch(u64 id, Vec2f window_pos, std::string mode) {
+    PendingInput in{PendingInput::Kind::Touch, {}, std::move(mode), window_pos, 0.0f};
+    in.touch = id;
+    _pending.push_back(std::move(in));
+}
+
 void ServerContext::queue_pad(PadInput pad) {
     PendingInput in{PendingInput::Kind::Pad, {}, pad.mode, {}, 0.0f};
     in.pad = std::move(pad);
@@ -1124,6 +1158,11 @@ void ServerContext::step() {
     for (const auto& [player, button] : _tapped_pad_buttons) {
         _pads[static_cast<std::size_t>(player)].set_button(button, false);
     }
+    input.update_touch(static_cast<f64>(_frame) * static_cast<f64>(_fixed_dt)); // the steps' time
+    for (const u64 id : _tapped_touches) {
+        input.set_touch_up(id);
+    }
+    _tapped_touches.clear();
     _tapped_actions.clear();
     _tapped_buttons.clear();
     _tapped_keys.clear();
@@ -1167,6 +1206,19 @@ void ServerContext::step() {
             break;
         case PendingInput::Kind::Drop:
             input.add_dropped_file({.path = in.text, .pos = in.pos, .window = _window.id()});
+            break;
+        case PendingInput::Kind::Touch:
+            if (in.mode == "move") {
+                input.set_touch_moved(in.touch, in.pos);
+            } else if (in.mode == "up") {
+                input.set_touch_moved(in.touch, in.pos);
+                input.set_touch_up(in.touch);
+            } else {
+                input.set_touch_down(in.touch, in.pos, _window.id());
+                if (in.mode == "tap") {
+                    _tapped_touches.push_back(in.touch);
+                }
+            }
             break;
         case PendingInput::Kind::Pad: {
             const auto at = static_cast<std::size_t>(in.pad.player);
@@ -1350,6 +1402,7 @@ void ServerContext::reset(std::optional<u64> seed) {
     _pads = {};
     _driven_pads = {};
     _tapped_pad_buttons.clear();
+    _tapped_touches.clear();
     if (_reset_scenes) {
         _reset_scenes(_scenes);
     }
@@ -1399,6 +1452,9 @@ static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const Gam
     }
     if (method == "input.pad") {
         return handle_input_pad(ctx, params);
+    }
+    if (method == "input.touch") {
+        return handle_input_touch(ctx, params);
     }
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);

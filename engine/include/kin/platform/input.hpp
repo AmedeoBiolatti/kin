@@ -171,6 +171,34 @@ enum class InputBindingDevice {
     Key,
     MouseButton,
     Gamepad, // code: a PadControl
+    Touch,   // code: a TouchControl
+};
+
+// A gesture on a touch screen an action can be bound to ("touch jump tap").
+// Each is pressed the moment it is made, held for the step after, and then
+// released.
+enum class TouchControl : u8 {
+    Tap,          // a finger down and up again quickly, without moving far
+    DoubleTap,    // a second tap soon after one, near it (the first is a Tap too)
+    LongPress,    // a finger held still a while (once, while it stays down)
+    SwipeLeft,    // a finger moved quickly a long way, mostly one way, and lifted
+    SwipeRight,
+    SwipeUp,
+    SwipeDown,
+    TwoFingerTap, // two fingers down and up together, without moving far
+    Count,
+};
+
+// A finger on a touch screen while it is down (Input::touches).
+struct TouchPoint {
+    u64 id = 0;        // the same while it is down
+    Vec2f pos{};       // window pixels, like Input::mouse_pos()
+    Vec2f start{};     // where it went down
+    WindowId window = 0;
+    f64 down_at = 0.0; // when it went down (seconds, the time update_touch() was given)
+    bool claimed = false; // an on-screen control has it: it is not the pointer (Input::claim_touch)
+
+    friend bool operator==(const TouchPoint&, const TouchPoint&) = default;
 };
 
 struct InputBinding {
@@ -225,6 +253,8 @@ std::string_view mouse_button_name(MouseButton button);
 std::string_view binding_name(InputBinding binding);
 std::string_view pad_control_name(PadControl control); // "a", "dpad_left", "left_stick_up", "left_trigger"
 std::string_view pad_axis_name(PadAxis axis);         // "left_x", "right_trigger"
+std::string_view touch_control_name(TouchControl control); // "tap", "double_tap", "swipe_left", "two_finger_tap"
+bool parse_touch_control(std::string_view name, TouchControl& out);
 bool parse_key(std::string_view name, Key& out);
 bool parse_mouse_button(std::string_view name, MouseButton& out);
 bool parse_pad_control(std::string_view name, PadControl& out);
@@ -267,6 +297,7 @@ public:
     void bind(std::string_view action, std::initializer_list<Key> keys);
     void bind(std::string_view action, MouseButton button);
     void bind(std::string_view action, PadControl control);
+    void bind(std::string_view action, TouchControl control);
     // Its bindings, all of them (none: it is gone).
     void set_bindings(std::string_view action, std::vector<InputBinding> bindings);
     void unbind(std::string_view action);
@@ -447,6 +478,47 @@ public:
     void set_text_composition(std::string_view text, i32 cursor = -1);
     std::string clipboard_text() const;
 
+    // Touch. The fingers down now, in the order they went down. The first one
+    // down that no on-screen control has claimed is the pointer: it moves the
+    // mouse and holds its left button, so ui2 and anything reading the mouse
+    // work with a finger (the mouse events the system makes from touches are
+    // not used). Gestures are TouchControls an input file binds actions to
+    // ("touch jump tap"); App::run tells them the time each frame
+    // (update_touch), so a long press is seen while the finger stays down.
+    const std::vector<TouchPoint>& touches() const { return _touches; }
+    const TouchPoint* touch(u64 id) const;
+    // Fingers lifted since a fixed step last read them (as pressed()), and
+    // this rendered frame; as they were last.
+    const std::vector<TouchPoint>& touches_ended() const { return _touches_ended; }
+    const std::vector<TouchPoint>& frame_touches_ended() const { return _frame_touches_ended; }
+    // Whether the pointer is a finger (the last thing to move it was a
+    // touch): UI shows no hover while none is down, prompts name touch.
+    bool pointer_is_touch() const { return _pointer_is_touch; }
+    // A finger is the pointer now: down, or its press or tap still to come
+    // (the press lands a frame after the finger, so UI sees it over what it
+    // touches first).
+    bool pointer_touch_active() const { return _pointer_touch || _pointer_press_pending || _pointer_release_pending; }
+    // An on-screen control takes a finger: it stops being the pointer (a
+    // press it began is let go without a click) and no gesture counts it.
+    void claim_touch(u64 id);
+    // Gestures by name, as bindings read them, and two fingers' pinch and
+    // pan: how much their spread grew (1 none, 2 twice as far apart) and how
+    // far their middle moved, since a fixed step last read them, and since
+    // the last rendered frame.
+    bool touch_pressed(TouchControl control) const;
+    bool touch_frame_pressed(TouchControl control) const;
+    f32 touch_pinch() const { return _pinch; }
+    f32 frame_touch_pinch() const { return _frame_pinch; }
+    Vec2f touch_pan() const { return _pan; }
+    Vec2f frame_touch_pan() const { return _frame_pan; }
+    // The time now, in seconds, for the gestures that need it (a long press).
+    void update_touch(f64 now);
+    // A finger, as the system would report it, at the time update_touch was
+    // last given: for tests and agents.
+    void set_touch_down(u64 id, Vec2f pos, WindowId window = 0);
+    void set_touch_moved(u64 id, Vec2f pos);
+    void set_touch_up(u64 id);
+
     // Files dropped since they were last taken, oldest first. Taking clears
     // them, so each drop is handled once however frames and updates interleave.
     std::vector<DroppedFile> take_dropped_files();
@@ -600,6 +672,45 @@ private:
     std::array<bool, KEY_COUNT> _key_frame_repeated = {};
 
     Buttons<MOUSE_BUTTON_COUNT> _mouse;
+
+    // Touch: the fingers, the pointer's, gestures as buttons and what they
+    // were made from.
+    static constexpr std::size_t touch_control_count = static_cast<std::size_t>(TouchControl::Count);
+    std::vector<TouchPoint> _touches;
+    std::vector<TouchPoint> _touches_ended;
+    std::vector<TouchPoint> _frame_touches_ended;
+    std::optional<u64> _pointer_touch; // the finger that is the pointer
+    bool _pointer_is_touch = false;
+    bool _pointer_press_pending = false;   // the pointer finger's press, at the next frame start
+    bool _pointer_release_pending = false; // and a quick tap's release, the frame after
+    Buttons<touch_control_count> _touch_controls;
+    std::vector<std::size_t> _touch_release;       // gestures made since the last frame start
+    std::vector<std::size_t> _touch_release_ready; // and before: let go at the next
+    f64 _touch_now = 0.0;
+    struct TouchStroke {
+        u64 id = 0;
+        f64 down_at = 0.0;
+        Vec2f start{};
+        f32 travel = 0.0f;      // the furthest it got from start
+        bool long_pressed = false;
+        bool multi = false;     // another finger was down with it
+    };
+    std::vector<TouchStroke> _strokes;
+    std::optional<std::pair<f64, Vec2f>> _last_tap; // when and where, for a double tap
+    f64 _two_down_at = -1.0;   // when a second finger went down (-1: not now)
+    bool _two_moved = false;
+    f32 _pinch = 1.0f;
+    f32 _frame_pinch = 1.0f;
+    Vec2f _pan{};
+    Vec2f _frame_pan{};
+    void touch_down(u64 id, Vec2f pos, WindowId window);
+    void touch_moved(u64 id, Vec2f pos);
+    void touch_up(u64 id);
+    void make_gesture(TouchControl control);
+    void advance_touch_step(bool frame_start);
+    void cancel_pointer_press();
+    void apply_pointer_touch();
+    void clear_touch_frame();
     // Press edges claimed by a widget this frame: cleared at the next begin_frame even
     // on a 0-step frame, so a claimed press does not re-fire while it persists.
     std::array<bool, MOUSE_BUTTON_COUNT> _mouse_frame_pressed_consumed = {};

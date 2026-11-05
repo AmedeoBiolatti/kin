@@ -195,6 +195,9 @@ SIGNATURES = {
         "axis": "name:string,player?:integer -> number",
         "mouse": "-> number,number",
         "player": "-> integer",
+        "touches": "-> table",
+        "pinch": "-> number",
+        "pan": "-> number,number",
     },
     "world": {
         "find": "name:string -> Entity|nil",

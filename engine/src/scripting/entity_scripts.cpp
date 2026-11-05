@@ -450,6 +450,26 @@ struct EntityScripts::Impl {
         };
         // Whose input this script's entity reads (0: anyone).
         input_table["player"] = [this]() { return player + 1; };
+        // The fingers down, {id, x, y, start_x, start_y} each; two fingers'
+        // pinch (1: none) and pan since the last step. Gestures are actions
+        // an input file binds ("touch jump tap").
+        input_table["touches"] = [this](sol::this_state state) {
+            sol::state_view lua{state};
+            sol::table list = lua.create_table();
+            if (input) {
+                i32 at = 1;
+                for (const TouchPoint& t : input->touches()) {
+                    list[at++] = lua.create_table_with("id", static_cast<f64>(t.id), "x", t.pos.x, "y", t.pos.y, "start_x", t.start.x,
+                                                       "start_y", t.start.y);
+                }
+            }
+            return list;
+        };
+        input_table["pinch"] = [this]() { return input ? input->touch_pinch() : 1.0f; };
+        input_table["pan"] = [this]() {
+            const Vec2f moved = input ? input->touch_pan() : Vec2f{};
+            return std::make_tuple(moved.x, moved.y);
+        };
         input_table["mouse"] = [this]() {
             const Vec2f at = input ? input->mouse_pos() : Vec2f{};
             return std::make_tuple(at.x, at.y);
