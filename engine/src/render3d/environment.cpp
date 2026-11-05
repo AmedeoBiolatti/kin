@@ -127,7 +127,24 @@ MaterialShader3D Renderer3D::compile_material_shader_operation(const std::filesy
     return shader;
 }
 
-std::string surface_shader_source(std::string_view surface) {
+bool surface_has_alpha(std::string_view surface) {
+    return surface.find("kin_surface_alpha") != std::string_view::npos;
+}
+
+std::string surface_shader_source(std::string_view surface, SurfaceVariant3D variant) {
+    if (u32(variant) >= surface_mask_variant3d && variant != SurfaceVariant3D::Count) {
+        // A cut-out pass's shader: its body (inputs, the cut-out's resources, main), then the surface's alpha.
+        static constexpr const char* bodies[] = {"kin_shadow_mask.inc.glsl", "kin_pick_mask.inc.glsl",
+                                                 "kin_prepass_mask.inc.glsl", "kin_prepass_velocity_mask.inc.glsl",
+                                                 "kin_visibility_mask.inc.glsl"};
+        std::string source = std::string("#version 450 core\n#define KIN_SURFACE_MASK\n"
+                                         "#define KIN_SURFACE_ALPHA kin_surface_alpha\n#include \"") +
+                             bodies[u32(variant) - surface_mask_variant3d] + "\"\n#line 1\n";
+        source += surface;
+        if (!surface.empty() && surface.back() != '\n')
+            source += '\n';
+        return source;
+    }
     // KIN_SURFACE before the first half: its Material block then holds the surface's parameters. The surface's own
     // lines are numbered from 1, so glslc's messages point into its file.
     std::string source = "#version 450 core\n"
@@ -176,6 +193,8 @@ std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant) {
         return std::span<const char* const>{materials}.first(4);
     case SurfaceVariant3D::MaterialLightsFog:
         return materials;
+    default: // the cut-outs' (their wrapper defines what they need)
+        break;
     case SurfaceVariant3D::Count:
         break;
     }
@@ -229,27 +248,35 @@ SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& su
     if (!_backend) {
         why = "3D is not available";
     } else {
-        // glslc compiles files: the wrapped source goes to one beside the others it makes.
+        // glslc compiles files: each variant's wrapped source goes to one (the main ones share theirs).
         static std::atomic<u32> counter{0};
-        const std::filesystem::path wrapped = std::filesystem::temp_directory_path() /
-                                              ("kin-surface-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) +
-                                               "-" + std::to_string(counter++) + ".frag.glsl");
-        {
-            std::ofstream out(wrapped, std::ios::binary);
-            out << surface_shader_source(surface);
-        }
+        const std::string stem =
+            "kin-surface-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + "-" + std::to_string(counter++);
+        const bool alpha = surface_has_alpha(surface);
         std::array<std::vector<u8>, surface_variant_count3d> compiled;
+        std::vector<std::filesystem::path> files;
         bool ok = true;
         for (u32 i = 0; i < surface_variant_count3d && ok; ++i) { // (all of them, the merged draws' too)
+            const bool mask = i >= surface_mask_variant3d;
+            if (mask && !alpha)
+                continue;
+            const auto file = std::filesystem::temp_directory_path() /
+                              (stem + (mask ? "-" + std::to_string(i) : std::string()) + ".frag.glsl");
+            if (std::ranges::find(files, file) == files.end()) {
+                std::ofstream out(file, std::ios::binary);
+                out << surface_shader_source(surface, SurfaceVariant3D(i));
+                files.push_back(file);
+            }
             // Optimised, as cooked graphs are: what development sees is what a game ships.
             auto spirv =
-                compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)), true);
+                compile_glsl(file, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)), true);
             ok = spirv.has_value();
             if (ok)
                 compiled[i] = std::move(*spirv);
         }
         std::error_code ignored;
-        std::filesystem::remove(wrapped, ignored);
+        for (const auto& file : files)
+            std::filesystem::remove(file, ignored);
         if (ok) {
             std::array<std::span<const u8>, surface_variant_count3d> views;
             for (u32 i = 0; i < surface_variant_count3d; ++i)

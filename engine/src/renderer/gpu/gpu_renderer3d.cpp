@@ -1550,8 +1550,16 @@ u32 GpuRenderer3D::usable_samples(u32 wanted, SDL_GPUTextureFormat format) const
     return 1;
 }
 
+const GpuSurfaceShader3D* GpuRenderer3D::cutout_surface(const Material3D& material) {
+    if (material.blend != Blend3D::Mask || material.shader.backend())
+        return nullptr;
+    const auto* surface = dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
+    return surface && surface->masks() ? surface : nullptr;
+}
+
 SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                                          bool skinned, bool indexed) const {
+                                                          bool skinned, bool indexed,
+                                                          const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available)
         return nullptr;
     return _owner->_pipelines.get(
@@ -1559,7 +1567,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat d
                                   : skinned ? _prepass_skinned_vertex_shader
                                             : _prepass_vertex_shader)
                                      .handle(),
-                       .fragment = (mask ? _prepass_mask_shader : _prepass_shader).handle(),
+                       .fragment = mask && surface ? surface->mask(SurfaceVariant3D::PrepassMask)
+                                                   : (mask ? _prepass_mask_shader : _prepass_shader).handle(),
                        .blend = GpuBlendMode::Replace,
                        .format = ao_normal_format,
                        .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
@@ -1602,14 +1611,16 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
         SDL_GPUShader* vertex =
             skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
                     : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle();
-        return _owner->_pipelines.get(GpuPipelineKey{.vertex = vertex,
-                                                     .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
-                                                     .blend = GpuBlendMode::Replace,
-                                                     .layout = layout,
-                                                     .depth_stencil = _shadow_format,
-                                                     .depth = GpuDepthTest::TestWrite,
-                                                     .cull = cull ? GpuCull::Back : GpuCull::None,
-                                                     .depth_only = true});
+        return _owner->_pipelines.get(
+            GpuPipelineKey{.vertex = vertex,
+                           .fragment = mask && surface ? surface->mask(SurfaceVariant3D::ShadowMask)
+                                                       : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+                           .blend = GpuBlendMode::Replace,
+                           .layout = layout,
+                           .depth_stencil = _shadow_format,
+                           .depth = GpuDepthTest::TestWrite,
+                           .cull = cull ? GpuCull::Back : GpuCull::None,
+                           .depth_only = true});
     }
     if (pass == Pass::Occluder) {
         // Lod3D::occlusion's depth of the frame's opaque meshes, when no pre-pass draws one: the shadow pass's shaders
@@ -1617,7 +1628,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
         return _owner->_pipelines.get(GpuPipelineKey{
             .vertex = skinned ? (mask ? _shadow_mask_skinned_vertex_shader : _shadow_skinned_vertex_shader).handle()
                               : (mask ? _shadow_mask_vertex_shader : _shadow_vertex_shader).handle(),
-            .fragment = (mask ? _shadow_mask_shader : _shadow_shader).handle(),
+            .fragment = mask && surface ? surface->mask(SurfaceVariant3D::ShadowMask)
+                                        : (mask ? _shadow_mask_shader : _shadow_shader).handle(),
             .blend = GpuBlendMode::Replace,
             .layout = layout,
             .depth_stencil = _ao_depth_format,
@@ -1626,23 +1638,26 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
             .depth_only = true});
     }
     if (pass == Pass::Prepass)
-        return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed);
+        return geometry_pipeline(_ao_depth_format, cull, mask, skinned, indexed, surface);
     if (pass == Pass::Pick || pass == Pass::Visibility) {
         // The pick fragment shaders read vWorld and vId, which mesh.vert and mesh_skinned.vert both write.
-        return _owner->_pipelines.get(
-            GpuPipelineKey{.vertex = (indexed   ? _indexed_vertex
-                                      : skinned ? _mesh_skinned_vertex_shader
-                                                : _vertex_shader)
-                                         .handle(),
-                           .fragment = (pass == Pass::Visibility ? (mask ? _visibility_mask_shader : _visibility_shader)
-                                                                 : (mask ? _pick_mask_shader : _pick_shader))
-                                           .handle(),
-                           .blend = GpuBlendMode::Replace,
-                           .format = pass == Pass::Visibility ? format : pick_format,
-                           .layout = layout,
-                           .depth_stencil = pass == Pass::Visibility ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : _depth_format,
-                           .depth = GpuDepthTest::TestWrite,
-                           .cull = cull ? GpuCull::Back : GpuCull::None});
+        return _owner->_pipelines.get(GpuPipelineKey{
+            .vertex = (indexed   ? _indexed_vertex
+                       : skinned ? _mesh_skinned_vertex_shader
+                                 : _vertex_shader)
+                          .handle(),
+            .fragment = mask && surface
+                            ? surface->mask(pass == Pass::Visibility ? SurfaceVariant3D::VisibilityMask
+                                                                     : SurfaceVariant3D::PickMask)
+                            : (pass == Pass::Visibility ? (mask ? _visibility_mask_shader : _visibility_shader)
+                                                        : (mask ? _pick_mask_shader : _pick_shader))
+                                  .handle(),
+            .blend = GpuBlendMode::Replace,
+            .format = pass == Pass::Visibility ? format : pick_format,
+            .layout = layout,
+            .depth_stencil = pass == Pass::Visibility ? SDL_GPU_TEXTUREFORMAT_D32_FLOAT : _depth_format,
+            .depth = GpuDepthTest::TestWrite,
+            .cull = cull ? GpuCull::Back : GpuCull::None});
     }
     // Opaque: written over what is there, alpha and all; transparent: blended,
     // tested against the depth but not writing it; wireframes over the faces.
@@ -1817,14 +1832,15 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::sky_velocity_pipeline(SDL_GPUTextureForm
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                                          bool skinned) const {
+                                                          bool skinned, const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
     // The pre-pass with velocity: one sample, the normal and the velocity in four floats.
     return _owner->_pipelines.get(GpuPipelineKey{
         .vertex = (skinned ? _prepass_velocity_skinned_vertex_shader : _prepass_velocity_vertex_shader).handle(),
-        .fragment = (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
+        .fragment = mask && surface ? surface->mask(SurfaceVariant3D::PrepassVelocityMask)
+                                    : (mask ? _prepass_velocity_mask_shader : _prepass_velocity_shader).handle(),
         .blend = GpuBlendMode::Replace,
         .format = hdr_format,
         .layout = skinned ? GpuVertexLayout::SkinnedMeshVertices : GpuVertexLayout::MeshVertices,
@@ -2311,9 +2327,16 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
             // variants' 15 samplers and 4 storage buffers (shadows, GI, the light grid, the area lights), one
             // uniform block more with fog; the velocity variants the same as the others; the merged draws' (as
             // mesh_material.frag's) their draws' records after them, and the surface's parameters after those.
-            const bool lights = (i & 2) != 0, fog = (i & 1) != 0, merged = i >= surface_required_variants3d;
-            const u32 uniforms = (lights ? 3 : 2) + u32(fog), samplers = lights ? 15 : 10,
-                      storage = (lights ? 4 : 0) + (merged ? 2 : 0);
+            const bool lights = (i & 2) != 0, fog = (i & 1) != 0,
+                       merged = i >= surface_required_variants3d && i < surface_mask_variant3d,
+                       mask = i >= surface_mask_variant3d;
+            // A cut-out's: the five maps and the cut-out block (the visibility pass's query block too).
+            const u32 uniforms =
+                          mask ? 1 + u32(i == u32(SurfaceVariant3D::VisibilityMask)) : (lights ? 3 : 2) + u32(fog),
+                      samplers = mask     ? 5
+                                 : lights ? 15
+                                          : 10,
+                      storage = mask ? 0 : (lights ? 4 : 0) + (merged ? 2 : 0);
             for (const auto& r : layout->resources)
                 if ((r.kind == ShaderResourceKind::SampledTexture && (r.set != 2 || r.binding >= samplers)) ||
                     (r.kind == ShaderResourceKind::StorageBuffer &&
@@ -5293,6 +5316,26 @@ SDL_GPUTextureSamplerBinding GpuRenderer3D::texture_binding(const Texture& textu
 
 // What a pass with cut-outs binds for one: the base colour's alpha, and the cutoff.
 void GpuRenderer3D::bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material) {
+    if (cutout_surface(material)) {
+        // A surface's cut-out: all five maps, and its parameters, the sRGB decoding and the time after the cutoff.
+        const std::array<SDL_GPUTextureSamplerBinding, 5> maps{
+            texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]),
+            texture_binding(material.metallic_roughness, material.wrap_u, material.wrap_v,
+                            material.texture_samplers[1]),
+            texture_binding(material.normal, material.wrap_u, material.wrap_v, material.texture_samplers[2]),
+            texture_binding(material.occlusion, material.wrap_u, material.wrap_v, material.texture_samplers[3]),
+            texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v, material.texture_samplers[4])};
+        SDL_BindGPUFragmentSamplers(pass, 0, maps.data(), u32(maps.size()));
+        struct {
+            f32 cutoff[4], uv[4], surface[16];
+        } u{{material.alpha_cutoff, _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f,
+             _cutout_time, 0.0f},
+            {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y},
+            {}};
+        std::memcpy(u.surface, material.shader_params.data(), sizeof(u.surface));
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof(u));
+        return;
+    }
     const SDL_GPUTextureSamplerBinding base =
         texture_binding(material.texture, material.wrap_u, material.wrap_v, material.texture_samplers[0]);
     SDL_BindGPUFragmentSamplers(pass, 0, &base, 1);
@@ -5329,6 +5372,7 @@ bool scene_has_soft_particles(const Scene3D& scene) {
 } // namespace
 
 void GpuRenderer3D::setup_frame(FrameCtx& ctx) {
+    _cutout_time = ctx.scene.time;
     GpuView3D* view = ctx.view;
     const Scene3D& scene = ctx.scene;
     RenderDebugStats3D& stats = ctx.stats;
@@ -7239,10 +7283,17 @@ bool GpuRenderer3D::local_shadow_pass(FrameCtx& ctx) {
                 continue;
             }
             const u32 variant = u32(!caster.double_sided) | (u32(cutout) << 1) | (u32(ref.skinned) << 2);
-            SDL_GPUGraphicsPipeline*& p = pipelines[variant];
-            if (!p)
-                p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
-                             false, ref.skinned);
+            // (A surface's own cut-out is its pipeline, not one of the pass's few.)
+            const GpuSurfaceShader3D* own = cutout_surface(caster);
+            SDL_GPUGraphicsPipeline* surfaced =
+                own ? pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, true, nullptr,
+                               false, ref.skinned, false, false, Unlit::Off, false, own)
+                    : nullptr;
+            SDL_GPUGraphicsPipeline*& cached = pipelines[variant];
+            if (!own && !cached)
+                cached = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                                  false, ref.skinned);
+            SDL_GPUGraphicsPipeline* p = own ? surfaced : cached;
             if (!p) {
                 complete = false;
                 continue;
@@ -9250,8 +9301,9 @@ void GpuRenderer3D::occluder_pass(FrameCtx& ctx) {
                 }
                 const Material3D& occluder = ref.draw->material;
                 const bool cutout = occluder.blend == Blend3D::Mask;
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided,
-                                                      Pass::Occluder, cutout, nullptr, false, ref.skinned);
+                SDL_GPUGraphicsPipeline* p =
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !occluder.double_sided, Pass::Occluder, cutout, nullptr,
+                             false, ref.skinned, false, false, Unlit::Off, false, cutout_surface(occluder));
                 if (!p) {
                     continue;
                 }
@@ -10380,8 +10432,9 @@ bool GpuRenderer3D::shadow_pass(FrameCtx& ctx) {
                 if (ref.skinned && (!storage || !ctx.joints || !ctx.joint_offsets)) {
                     continue;
                 }
-                SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided,
-                                                      Pass::Shadow, cutout, nullptr, false, ref.skinned);
+                SDL_GPUGraphicsPipeline* p =
+                    pipeline(SDL_GPU_TEXTUREFORMAT_INVALID, 1, !caster.double_sided, Pass::Shadow, cutout, nullptr,
+                             false, ref.skinned, false, false, Unlit::Off, false, cutout_surface(caster));
                 if (!p) {
                     complete = false;
                     continue;
@@ -10784,7 +10837,8 @@ void GpuRenderer3D::draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* target_pass,
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
-        SDL_GPUGraphicsPipeline* p = velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned);
+        SDL_GPUGraphicsPipeline* p =
+            velocity_pipeline(depth_format, !occluder.double_sided, cutout, ref.skinned, cutout_surface(occluder));
         if (!p) {
             continue;
         }
@@ -10988,8 +11042,8 @@ bool GpuRenderer3D::draw_geometry(FrameCtx& ctx, SDL_GPURenderPass* prepass, SDL
         }
         const Material3D& occluder = ref.draw->material;
         const bool cutout = occluder.blend == Blend3D::Mask;
-        SDL_GPUGraphicsPipeline* p =
-            geometry_pipeline(depth, !occluder.double_sided, cutout, ref.skinned, ref.retained != ~0u);
+        SDL_GPUGraphicsPipeline* p = geometry_pipeline(depth, !occluder.double_sided, cutout, ref.skinned,
+                                                       ref.retained != ~0u, cutout_surface(occluder));
         if (!p) {
             complete = false;
             continue;
@@ -11866,7 +11920,7 @@ void GpuRenderer3D::pick_pass(FrameCtx& ctx) {
                 const bool cutout = picked.blend == Blend3D::Mask;
                 SDL_GPUGraphicsPipeline* p =
                     pipeline(pick_format, 1, !picked.double_sided, Pass::Pick, cutout, nullptr, false, ref.skinned,
-                             false, false, Unlit::Off, ref.retained != ~0u);
+                             false, false, Unlit::Off, ref.retained != ~0u, cutout_surface(picked));
                 if (!p) {
                     continue;
                 }
@@ -11999,9 +12053,9 @@ bool GpuRenderer3D::render_visibility(const VisibilityTargets3D& targets, IPrepa
             }
             const Material3D& picked = ref.draw->material;
             const bool cutout = picked.blend == Blend3D::Mask;
-            SDL_GPUGraphicsPipeline* p =
-                pipeline(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 1, !picked.double_sided, Pass::Visibility, cutout,
-                         nullptr, false, ref.skinned, false, false, Unlit::Off, ref.retained != ~0u);
+            SDL_GPUGraphicsPipeline* p = pipeline(SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, 1, !picked.double_sided,
+                                                  Pass::Visibility, cutout, nullptr, false, ref.skinned, false, false,
+                                                  Unlit::Off, ref.retained != ~0u, cutout_surface(picked));
             if (!p) {
                 complete = false;
                 break;

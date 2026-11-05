@@ -58,6 +58,11 @@ struct CompiledMaterialGraph3D {
     std::string surface; // the surface shader: `void kin_surface(inout KinSurface s)` (surface_shader_source's input)
     std::vector<MaterialGraphParameter3D> parameters;
     std::vector<MaterialGraphError3D> errors;
+    // What compiles but is not all it could be: an alpha the cut-out passes can't compute (they then cut by the base
+    // map's alpha), naming the node.
+    std::vector<MaterialGraphError3D> warnings;
+    // Its alpha, in the shadow, occluder, pick, pre- and visibility passes too (kin_surface_alpha in `surface`).
+    bool cutout = false;
     bool ok() const { return errors.empty(); }
 };
 

@@ -25,10 +25,13 @@ uint instance_index() {
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out float vAlpha; // the instance's and the vertex's
+layout(location = 2) out vec3 vWorld;  // for a surface's cut-out (kin_cutout.inc.glsl)
 
 void main() {
     const Instance instance = instances[instance_index()];
-    gl_Position = draw.view_projection * (instance.model * vec4(aPos, 1.0));
+    const vec4 world = instance.model * vec4(aPos, 1.0);
+    gl_Position = draw.view_projection * world;
+    vWorld = world.xyz;
     vUV = aUV;
     vAlpha = instance.color.a * aColor.a;
 }

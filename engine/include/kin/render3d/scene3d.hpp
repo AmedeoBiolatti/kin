@@ -97,8 +97,10 @@ private:
 
 // A surface shader's variants (docs/material_graph_plan.md): the function that sets what kin shades, compiled into
 // each of kin's own mesh fragment shaders, in this order. The defines each is compiled with, after #version, are
-// surface_variant_defines's. The last four (merged draws: mesh_material.frag's) are optional: without them a surface's
-// draws are not merged with others of the same mesh.
+// surface_variant_defines's (and surface_shader_source(surface, variant)'s wrapper). After the eight every surface has:
+// the merged draws' four (mesh_material.frag's: without them a surface's draws are not merged with others of the same
+// mesh) and the cut-outs' five (shadow_mask.frag ... visibility_mask.frag's, for a surface that defines
+// kin_surface_alpha: without them its cut-outs in those passes follow the base map's alpha), all optional.
 enum class SurfaceVariant3D : u8 {
     Plain,
     Fog,
@@ -112,9 +114,14 @@ enum class SurfaceVariant3D : u8 {
     MaterialFog,
     MaterialLights,
     MaterialLightsFog,
+    ShadowMask,
+    PickMask,
+    PrepassMask,
+    PrepassVelocityMask,
+    VisibilityMask,
     Count
 };
-inline constexpr u32 surface_required_variants3d = 8;
+inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask);
 inline constexpr u32 surface_variant_count3d = u32(SurfaceVariant3D::Count);
 
 // The backend's copy of a surface shader (Renderer3D::create_surface_shader).

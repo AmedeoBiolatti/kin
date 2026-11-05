@@ -154,11 +154,11 @@ void every_node_compiles() {
                          ("kin-graph-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::create_directories(dir);
     const fs::path file = dir / "every.frag.glsl";
-    {
-        std::ofstream out(file);
-        out << surface_shader_source(g.surface);
-    }
-    for (u32 v = 0; v < surface_variant_count3d; ++v) {
+    for (u32 v = 0; v < surface_mask_variant3d; ++v) {
+        {
+            std::ofstream out(file);
+            out << surface_shader_source(g.surface, SurfaceVariant3D(v));
+        }
         std::string why;
         if (!compile_glsl(file, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(v)))) {
             std::cerr << "variant " << v << ": " << why << '\n' << g.surface << '\n';
@@ -168,7 +168,7 @@ void every_node_compiles() {
     std::error_code ignored;
     fs::remove_all(dir, ignored);
     std::cout << "every node type (" << material_graph_nodes3d().size() << ") compiles in all "
-              << surface_variant_count3d << " variants\n";
+              << surface_mask_variant3d << " shading variants\n";
 }
 
 // The graph docs/rendering_3d.md ("Material graphs") shows compiles, and so does its GLSL (with glslc).
@@ -243,8 +243,12 @@ void cooked() {
     if (shader_compiler_available()) {
         const auto now = cook_material_graph3d(graph("", "", R"("roughness": 0.25)"), &why);
         CHECK(now.has_value());
-        for (const auto& v : now->spirv)
+        for (u32 i = 0; i < surface_mask_variant3d; ++i) {
+            const auto& v = now->spirv[i];
             CHECK(v.size() > 20 && v[0] == 3 && v[1] == 2 && v[2] == 35 && v[3] == 7);
+        }
+        for (u32 i = surface_mask_variant3d; i < surface_variant_count3d; ++i)
+            CHECK(now->spirv[i].empty()); // no alpha: no cut-out variants
         CHECK(!cook_material_graph3d(graph("", "", R"("roughness": "nowhere")"), &why) && contains(why, "nowhere"));
     }
 #ifdef KIN_TEST_COOKED_GRAPH
@@ -258,6 +262,48 @@ void cooked() {
 #endif
 }
 
+// The alpha in the cut-out passes: a graph's alpha of what they have (UV, position, vertex alpha, time, parameters,
+// maps, noise) is compiled for them too, and its cut-out variants compile; one of what they don't have (the view, a
+// fresnel) compiles with a warning naming its node, and no cut-out variants.
+void cutouts() {
+    const auto dissolve = compile_material_graph3d(graph(
+        R"({"name": "amount", "type": "float", "default": 0.5},
+           {"name": "albedo", "type": "texture", "slot": "base"})",
+        R"({"id": "map", "type": "texture", "texture": "albedo"},
+           {"id": "noise", "type": "noise_value", "inputs": {"p": "position", "scale": 3}},
+           {"id": "wave", "type": "sin", "inputs": {"x": "time"}},
+           {"id": "edge", "type": "add", "inputs": {"a": "amount", "b": "wave"}},
+           {"id": "keep", "type": "step", "inputs": {"edge": "edge", "x": "noise"}},
+           {"id": "alpha", "type": "multiply", "inputs": {"a": "keep", "b": "surface.alpha"}})",
+        R"("alpha": "alpha", "base_color": "map.rgb")"));
+    for (const auto& e : dissolve.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(dissolve.ok() && dissolve.cutout && dissolve.warnings.empty());
+    CHECK(surface_has_alpha(dissolve.surface) && contains(dissolve.surface, "#ifdef KIN_SURFACE_MASK"));
+    CHECK(contains(dissolve.surface, "material.cutoff.z") && contains(dissolve.surface, "(vertex_alpha * texture(uBase, uv).a)"));
+    const auto rim = compile_material_graph3d(graph("",
+        R"({"id": "edge", "type": "fresnel"}, {"id": "a", "type": "one_minus", "inputs": {"x": "edge"}})",
+        R"("alpha": "a")"));
+    CHECK(rim.ok() && !rim.cutout && !surface_has_alpha(rim.surface) && rim.warnings.size() == 1 &&
+          rim.warnings[0].node == "edge" && contains(rim.warnings[0].message, "base map's alpha"));
+    const auto plain = compile_material_graph3d(graph("", "", R"("roughness": 0.5)"));
+    CHECK(plain.ok() && !plain.cutout && plain.warnings.empty());
+    if (!shader_compiler_available())
+        return;
+    std::string why;
+    const auto cooked = cook_material_graph3d(graph(
+        R"({"name": "amount", "type": "float", "default": 0.5})",
+        R"({"id": "noise", "type": "noise_value", "inputs": {"p": "position", "scale": 3}},
+           {"id": "keep", "type": "step", "inputs": {"edge": "amount", "x": "noise"}})",
+        R"("alpha": "keep")"), &why);
+    if (!cooked)
+        std::cerr << why << '\n';
+    CHECK(cooked.has_value() && cooked->graph.cutout);
+    for (u32 i = 0; i < surface_variant_count3d; ++i)
+        CHECK(cooked->spirv[i].size() > 20);
+    std::cout << "a graph's alpha compiles into the 5 cut-out passes\n";
+}
+
 } // namespace
 
 int main() {
@@ -266,6 +312,7 @@ int main() {
     every_node_compiles();
     documented_example();
     cooked();
+    cutouts();
     std::cout << "material graph tests passed\n";
     return 0;
 }

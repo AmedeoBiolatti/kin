@@ -4903,6 +4903,112 @@ void test_gpu_surface_batching() {
     });
 }
 
+// A material graph's alpha in the cut-out passes: a plane cut into squares by a checker of nodes (no texture) draws,
+// shadows, occludes (ambient occlusion's pre-pass, the velocity pre-pass of temporal anti-aliasing) and picks as the
+// same plane cut by a checker texture's alpha (a stock cut-out) does; and its shadow has the holes (a plane cut by
+// nothing casts another).
+void test_gpu_material_graph_cutout() {
+    with_gpu("test_gpu_material_graph_cutout", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_material_graph_cutout", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_graph_cutout_test";
+        std::filesystem::create_directories(dir);
+        std::ofstream{dir / "holes.kingraph"} << R"({"schema": "kin.material-graph/1", "name": "holes",
+            "nodes": [{"id": "squares", "type": "checker", "inputs": {"scale": 4}}],
+            "outputs": {"alpha": "squares"}})";
+        auto holes = r3d.compile_material_graph(dir / "holes.kingraph");
+        if (!holes) {
+            std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+            assert(false);
+        }
+        assert(holes->graph.cutout);
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
+        // The checker as a texture's alpha: texel (x, y) opaque where x + y is odd, as kin_graph_checker.
+        std::array<kin::u8, 4 * 4 * 4> texels{};
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) {
+                kin::u8* t = &texels[(y * 4 + x) * 4];
+                t[0] = t[1] = t[2] = 255;
+                t[3] = (x + y) & 1 ? 255 : 0;
+            }
+        const kin::Texture checker = renderer.create_texture_from_rgba(texels.data(), {4, 4});
+        const kin::TextureSampler3D nearest{.wrap_u = kin::Wrap3D::Repeat,
+                                            .wrap_v = kin::Wrap3D::Repeat,
+                                            .min = kin::TextureFilter3D::Nearest,
+                                            .mag = kin::TextureFilter3D::Nearest,
+                                            .mip = kin::MipFilter3D::None};
+        kin::Material3D stock{
+            .color = Color::rgb(220, 120, 60), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = checker};
+        stock.texture_samplers[0] = nearest;
+        kin::Material3D graphed{.color = Color::rgb(220, 120, 60), .double_sided = true, .blend = kin::Blend3D::Mask};
+        graphed.surface = holes->surface;
+        kin::Material3D whole = graphed;
+        whole.blend = kin::Blend3D::Opaque;
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+        struct Setup {
+            const char* name;
+            bool ao, taa;
+        };
+        const auto shoot = [&](const kin::Material3D& m, const Setup& setup) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, -4.0f}, {0.0f, 0.0f, -0.6f}, 50.0f);
+            scene.lights.sun = {.direction = {0.0f, 1.0f, 0.6f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.shadow_area = {{-4, -2, -4}, {4, 3, 4}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+            scene.ambient_occlusion = {.enabled = setup.ao, .radius = 1.0f};
+            scene.taa = {.enabled = setup.taa};
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({6.0f, 1.0f, 6.0f}),
+                             {.color = Color::rgb(200, 200, 200)}, kin::colors::white, 1);
+            (void)scene.draw(plane, Mat4f::translation({0.0f, 1.0f, 0.0f}) * Mat4f::scaling({1.6f, 1.0f, 1.6f}), m,
+                             kin::colors::white, 7);
+            kin::View3D fresh = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+            kin::View3D& v = setup.taa ? fresh : view;
+            Pixels p = shoot_view(renderer, r3d, v, scene);
+            renderer.present();
+            std::vector<kin::u32> picks;
+            for (int y = 10; y < 120; y += 6)
+                for (int x = 10; x < 160; x += 6) {
+                    const auto hit = r3d.pick(v, {x, y});
+                    picks.push_back(hit && hit->hit ? hit->id : 0);
+                }
+            return std::pair{p, picks};
+        };
+        const auto differing = [](const Pixels& a, const Pixels& b) {
+            int n = 0;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x) {
+                    const Color p = a.at(x, y), q = b.at(x, y);
+                    n += std::abs(int(p.r) - q.r) + std::abs(int(p.g) - q.g) + std::abs(int(p.b) - q.b) > 6 ? 1 : 0;
+                }
+            return n;
+        };
+        for (const Setup& setup : {Setup{"plain", false, false}, Setup{"ambient occlusion", true, false},
+                                   Setup{"temporal anti-aliasing", false, true}}) {
+            const auto [a, a_picks] = shoot(stock, setup);
+            const auto [b, b_picks] = shoot(graphed, setup);
+            const auto [c, c_picks] = shoot(whole, setup);
+            int pick_differ = 0, through = 0;
+            for (size_t i = 0; i < a_picks.size(); ++i) {
+                pick_differ += a_picks[i] != b_picks[i] ? 1 : 0;
+                through += b_picks[i] == 1 && c_picks[i] == 7 ? 1 : 0; // the ground, through a hole
+            }
+            const int cut = differing(a, b), solid = differing(b, c);
+            std::cerr << "graph cut-out (" << setup.name << "): " << cut << " pixels from the stock cut-out, " << solid
+                      << " from the uncut plane; picks: " << pick_differ << " differ, " << through
+                      << " through holes\n";
+            assert(cut < 40 && "the graph's cut-out draws, shadows and occludes as the stock one");
+            assert(solid > 400 && "the holes are there (in the plane and its shadow)");
+            assert(pick_differ <= 2 && through > 5 && "picks go through the graph's holes");
+        }
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    });
+}
+
 // A material's UV transform (Material3D::uv_scale, uv_offset) moves where every pass reads its maps: offset by half,
 // a texture of two texels draws what the swapped texture draws without it; scaled by two, what the texture repeated
 // twice does: the lit colour (lit and unlit), a cut-out's coverage in the main pass and in the sun's shadow it casts.
@@ -5069,14 +5175,15 @@ void test_gpu_surface_shader() {
         // The same surface, its variants made at build time (kin_compile_surface_shader): the same picture.
         {
             std::array<std::span<const kin::u8>, kin::surface_variant_count3d> variants;
-            const std::array<const char*, kin::surface_variant_count3d> names{
+            // (Its variants without the cut-outs': the tint surface defines no alpha of its own.)
+            const std::array<const char*, kin::surface_mask_variant3d> names{
                 "surface_tint.plain.spv",           "surface_tint.fog.spv",
                 "surface_tint.lights.spv",          "surface_tint.lights_fog.spv",
                 "surface_tint.velocity.spv",        "surface_tint.velocity_fog.spv",
                 "surface_tint.velocity_lights.spv", "surface_tint.velocity_lights_fog.spv",
                 "surface_tint.material.spv",        "surface_tint.material_fog.spv",
                 "surface_tint.material_lights.spv", "surface_tint.material_lights_fog.spv"};
-            for (kin::u32 i = 0; i < kin::surface_variant_count3d; ++i) {
+            for (kin::u32 i = 0; i < names.size(); ++i) {
                 const auto bytes = surface_test_shaders(names[i]);
                 assert(!bytes.empty());
                 variants[i] = {reinterpret_cast<const kin::u8*>(bytes.data()), bytes.size()};
@@ -23245,6 +23352,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_material_uv_transform());
     RUN(test_gpu_material_graph());
     RUN(test_gpu_surface_batching());
+    RUN(test_gpu_material_graph_cutout());
     RUN(test_gpu_skinned_matches_cpu());
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());
