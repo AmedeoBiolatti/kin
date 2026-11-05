@@ -27,5 +27,8 @@ layout(set = 3, binding = 1) uniform Material {
     vec4 pbr;    // x: metallic, y: roughness, z: normal scale, w: occlusion strength
     vec4 maps;   // x: has a normal map, y: has an emissive map, z: opaque (it is in the occlusion pre-pass), w: additive
     vec4 emission; // xyz: linear RGB factor, w: independent emission (otherwise legacy base-relative)
+#ifdef KIN_SURFACE
+    vec4 surface[4]; // a surface shader's: Material3D::shader_params (kin_surface_param)
+#endif
 } material;
 #endif

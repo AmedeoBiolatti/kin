@@ -9,7 +9,8 @@ constexpr auto disabled = "SPIR-V shader APIs are unavailable on this renderer";
 
 bool shader_compiler_available() { return false; }
 
-std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path&, ShaderStage, std::string* error) {
+std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path&, ShaderStage, std::string* error,
+                                            std::span<const char* const>) {
     if (error) *error = disabled;
     return std::nullopt;
 }

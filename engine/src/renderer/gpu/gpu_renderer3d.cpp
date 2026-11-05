@@ -104,6 +104,8 @@ bool taa_material_hash(u64& key, const Material3D& material, const ITextureBacke
     taa_hash(key, material.wrap_v);
     const auto shader = material.shader.backend().get();
     taa_hash(key, shader);
+    if (const auto surface = material.surface.backend().get())
+        taa_hash(key, surface);
     if (const auto* inputs = dynamic_cast<const GpuMaterialInputs3D*>(material.inputs.backend().get()))
         taa_hash(key, inputs->signature);
     return taa_texture_hash(key, texture);
@@ -1560,7 +1562,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::geometry_pipeline(SDL_GPUTextureFormat d
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass,
                                                  bool mask, SDL_GPUShader* custom, bool velocity, bool skinned,
-                                                 bool fog, bool lights, Unlit unlit, bool indexed) const {
+                                                 bool fog, bool lights, Unlit unlit, bool indexed,
+                                                 const GpuSurfaceShader3D* surface) const {
     if (skinned && !_skinning_available) {
         return nullptr;
     }
@@ -1650,7 +1653,8 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
     const bool fogged = fog && !custom && _fog_available && (!velocity || _mesh_velocity_fog_shader);
     // The light variants (P3b), likewise (they have their own fog variants).
     const bool lit = lights && !custom && _lights_available && (!velocity || _mesh_velocity_light_shader);
-    SDL_GPUShader* fragment = custom ? custom
+    SDL_GPUShader* fragment = custom    ? custom
+                              : surface ? surface->variants[4 * u32(velocity) + 2 * u32(lit) + u32(fogged)].handle()
                               : velocity
                                   ? (lit ? (fogged ? _mesh_velocity_light_fog_shader : _mesh_velocity_light_shader)
                                          : (fogged ? _mesh_velocity_fog_shader : _mesh_velocity_shader))
@@ -1686,13 +1690,15 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(SDL_GPUTextureFormat format, u3
 GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3D& material, bool skinned, bool taa,
                                                                  bool velocity, bool fog) const {
     const auto* custom = dynamic_cast<const GpuMaterialShader3D*>(material.shader.backend().get());
+    // A surface shader stands in for the stock shaders (never for a custom one), the unlit ones included.
+    const auto* surface = custom ? nullptr : dynamic_cast<const GpuSurfaceShader3D*>(material.surface.backend().get());
     const bool general_emission =
         material.emits_light() && (material.emission_mode == EmissionMode3D::Independent || material.emissive_texture);
     const Unlit unlit = _unlit_available && (material.unlit || material.wireframe) && !general_emission && !custom &&
-                                !skinned && !taa && !velocity && !fog
+                                !surface && !skinned && !taa && !velocity && !fog
                             ? (material.texture ? Unlit::Textured : Unlit::Colour)
                             : Unlit::Off;
-    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material)};
+    return {custom, unlit, !material.double_sided, material.blend == Blend3D::Mask, pass_of(material), surface};
 }
 
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& request) const {
@@ -1713,7 +1719,7 @@ SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& requ
     }
     return pipeline(request.format, request.samples, m.cull, m.pass, m.mask,
                     m.custom ? m.custom->shader.handle() : nullptr, request.velocity, request.skinned, request.fog,
-                    request.lights, m.unlit, request.indexed);
+                    request.lights, m.unlit, request.indexed, m.custom ? nullptr : m.surface);
 }
 
 GpuRenderer3D::MaterialUniforms GpuRenderer3D::material_uniforms(const Material3D& material, Unlit unlit) {
@@ -2277,6 +2283,40 @@ std::shared_ptr<IMaterialShaderBackend3D> GpuRenderer3D::create_material_shader(
     }
 }
 
+std::shared_ptr<ISurfaceShaderBackend3D>
+GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) {
+    try {
+        auto shader = std::make_shared<GpuSurfaceShader3D>();
+        for (u32 i = 0; i < surface_variant_count3d; ++i) {
+            std::string error;
+            const auto layout = reflect_spirv({spirv[i].data(), static_cast<u32>(spirv[i].size())}, &error);
+            if (!layout || layout->execution_model != 4)
+                throw std::runtime_error("surface shader variants must be reflected fragment modules: " + error);
+            // The stock variant's layout (mesh.frag ... mesh_velocity_light_fog.frag, as made above): the light
+            // variants' 15 samplers and 4 storage buffers (shadows, GI, the light grid, the area lights), one
+            // uniform block more with fog; the velocity variants the same as the others.
+            const bool lights = (i & 2) != 0, fog = (i & 1) != 0;
+            const u32 uniforms = (lights ? 3 : 2) + u32(fog), samplers = lights ? 15 : 10, storage = lights ? 4 : 0;
+            for (const auto& r : layout->resources)
+                if ((r.kind == ShaderResourceKind::SampledTexture && (r.set != 2 || r.binding >= samplers)) ||
+                    (r.kind == ShaderResourceKind::StorageBuffer &&
+                     (r.set != 2 || r.binding < samplers || r.binding >= samplers + storage)) ||
+                    (r.kind == ShaderResourceKind::UniformBuffer && (r.set != 3 || r.binding >= uniforms)))
+                    throw std::runtime_error("surface shader variant " + std::to_string(i) +
+                                             " binds beyond kin's mesh shader layout");
+            shader->variants[i] =
+                GpuShader::from_bytes(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, SDL_GPU_SHADERFORMAT_SPIRV, spirv[i],
+                                      uniforms, samplers, storage);
+        }
+        shader->device = _device->shared();
+        _surface_shaders.push_back(shader); // kept: pipelines name its variants for good
+        return shader;
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: surface shader not made", (LogFields{{.name = "reason", .value = e.what()}}));
+        return {};
+    }
+}
+
 Result3D<MaterialInputs3D> GpuRenderer3D::create_material_inputs(const MaterialShader3D& source,
                                                                  std::span<const Texture> textures,
                                                                  std::span<const DataBuffer> buffers) {
@@ -2326,6 +2366,11 @@ bool GpuRenderer3D::validate_material_inputs(const Scene3D& scene, std::span<con
                 if (draw.material.shader.backend() &&
                     (!shader || !shader->valid() || !shader->shader.belongs_to(_device->handle())))
                     return false;
+                if (const auto& surface = draw.material.surface.backend()) {
+                    const auto* gpu = dynamic_cast<const GpuSurfaceShader3D*>(surface.get());
+                    if (!gpu || !gpu->valid() || !gpu->variants[0].belongs_to(_device->handle()))
+                        return false;
+                }
                 if (draw.material.inputs.backend() && (!inputs || !inputs->valid() || inputs->shader.get() != shader ||
                                                        *inputs->device != _device->handle()))
                     return false;
@@ -7287,7 +7332,7 @@ constexpr u64 retained_budget = 32 * 1024 * 1024;
 void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     const auto& draw = *ref.draw;
     if (!_retained_enabled || !draw.batch || ctx.taa || ctx.scene.lod.occlusion.enabled || ref.skinned ||
-        ref.clustered || ref.levels != 1 || draw.material.shader.backend() ||
+        ref.clustered || ref.levels != 1 || draw.material.shader.backend() || draw.material.surface.backend() ||
         (draw.material.blend != Blend3D::Opaque && draw.material.blend != Blend3D::Mask))
         return;
     const auto& batch = draw.batch;
@@ -7428,8 +7473,9 @@ void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
         return;
     const auto eligible = [](const DrawRef& ref) {
         const auto& draw = *ref.draw;
+        // (Surface shaders have no retained-materials variants yet.)
         return !ref.batch && !ref.skinned && !ref.clustered && ref.levels == 1 && !draw.material.shader.backend() &&
-               !draw.material.wireframe &&
+               !draw.material.surface.backend() && !draw.material.wireframe &&
                (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask);
     };
     for (u32 s = 0; s < ctx.scenes.size(); ++s) {
@@ -9635,7 +9681,7 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
 }
 
 GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bool materials) {
-    if (!_draw_plan_valid || _refs[r].draw->material.shader.backend())
+    if (!_draw_plan_valid || _refs[r].draw->material.shader.backend() || _refs[r].draw->material.surface.backend())
         return nullptr;
     auto& command = _draw_commands[r];
     const auto& ref = _refs[r];
@@ -11469,7 +11515,13 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             if (ref.skinned) {
                 binder.bind_skin(ref.mesh);
             }
-            if (!item.materials || !material_slot_ready) {
+            if (selection.surface) {
+                // A surface shader's block is the stock one with its parameters after it.
+                SurfaceMaterialUniforms m{material_uniforms(material, unlit), {}};
+                std::memcpy(m.surface, material.shader_params.data(), sizeof(m.surface));
+                SDL_PushGPUFragmentUniformData(commands, 1, &m, sizeof(m));
+                material_slot_ready = false;
+            } else if (!item.materials || !material_slot_ready) {
                 const MaterialUniforms m = command ? command->uniforms : material_uniforms(material, unlit);
                 // Batched variants don't read slot 1, but SDL's uniform slot
                 // layout still includes it before fog/local-light slots.

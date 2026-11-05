@@ -488,6 +488,14 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     target_compile_definitions(kin_render3d_tests PRIVATE
         KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"
         KIN_TEST_MATERIAL_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+    # A surface shader's variants made at build time (kin_compile_surface_shader), drawn against the same surface
+    # compiled at run time (test_gpu_surface_shader).
+    kin_compile_surface_shader(_surface_test_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/surface_tests"
+        SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/surface_tint.surface.glsl")
+    if(_surface_test_spv)
+        kin_embed_files(kin_render3d_tests NAME surface_test_shaders FILES ${_surface_test_spv})
+        target_compile_definitions(kin_render3d_tests PRIVATE KIN_TEST_SURFACE_SPIRV)
+    endif()
     foreach(_shard RANGE 0 ${_last_shard})
         add_test(NAME kin-render3d-shard-${_shard}
             COMMAND kin_render3d_tests --shard=${_shard}/${KIN_RENDER3D_TEST_SHARDS})

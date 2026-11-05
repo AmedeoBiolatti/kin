@@ -1,10 +1,16 @@
+#include <array>
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <kin/assets/content.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/shader_compiler.hpp>
 #include <optional>
 #include <string>
+#include <vector>
 
 extern "C" {
 float* kin_hdr_load(const unsigned char* bytes, int size, int* width, int* height);
@@ -116,6 +122,132 @@ MaterialShader3D Renderer3D::compile_material_shader_operation(const std::filesy
     }
     if (!shader)
         fail3d(_errors, "Renderer3D::compile_material_shader(" + source.string() + ")", why);
+    else
+        _errors.clear();
+    return shader;
+}
+
+std::string surface_shader_source(std::string_view surface) {
+    // KIN_SURFACE before the first half: its Material block then holds the surface's parameters. The surface's own
+    // lines are numbered from 1, so glslc's messages point into its file.
+    std::string source = "#version 450 core\n"
+                         "#define KIN_SURFACE kin_surface\n"
+                         "#include \"kin_mesh_surface.inc.glsl\"\n"
+                         "#line 1\n";
+    source += surface;
+    if (!surface.empty() && surface.back() != '\n')
+        source += '\n';
+    source += "#include \"kin_mesh_main.inc.glsl\"\n";
+    return source;
+}
+
+std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant) {
+    // As mesh.frag, mesh_fog.frag, mesh_light.frag ... mesh_velocity_light_fog.frag define them.
+    static constexpr std::array<const char*, 5> all{"KIN_VELOCITY", "KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID",
+                                                    "KIN_FOG"};
+    static constexpr std::array<const char*, 4> lights_fog{"KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID", "KIN_FOG"};
+    static constexpr std::array<const char*, 2> velocity_fog{"KIN_VELOCITY", "KIN_FOG"};
+    const std::span<const char* const> every{all}, lit{lights_fog}, moving{velocity_fog};
+    switch (variant) {
+    case SurfaceVariant3D::Plain:
+        return {};
+    case SurfaceVariant3D::Fog:
+        return lit.subspan(3, 1);
+    case SurfaceVariant3D::Lights:
+        return lit.first(3);
+    case SurfaceVariant3D::LightsFog:
+        return lit;
+    case SurfaceVariant3D::Velocity:
+        return moving.first(1);
+    case SurfaceVariant3D::VelocityFog:
+        return moving;
+    case SurfaceVariant3D::VelocityLights:
+        return every.first(4);
+    case SurfaceVariant3D::VelocityLightsFog:
+        return every;
+    case SurfaceVariant3D::Count:
+        break;
+    }
+    return {};
+}
+
+Result3D<SurfaceShader3D>
+Renderer3D::create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) {
+    auto value = create_surface_shader_operation(spirv);
+    return result3d(std::move(value), _errors);
+}
+
+SurfaceShader3D
+Renderer3D::create_surface_shader_operation(std::span<const std::span<const u8>, surface_variant_count3d> spirv) {
+    _errors.clear();
+    if (!_backend) {
+        fail3d(_errors, "Renderer3D::create_surface_shader", "3D is not available");
+        return {};
+    }
+    for (const auto& variant : spirv)
+        if (variant.empty()) {
+            fail3d(_errors, "Renderer3D::create_surface_shader", "empty SPIR-V");
+            return {};
+        }
+    SurfaceShader3D shader{_backend->create_surface_shader(spirv)};
+    if (!shader)
+        fail3d(_errors, "Renderer3D::create_surface_shader", "the backend refused the surface shader");
+    return shader;
+}
+
+Result3D<SurfaceShader3D> Renderer3D::compile_surface_shader(const std::filesystem::path& source) {
+    auto value = compile_surface_shader_operation(source);
+    return result3d(std::move(value), _errors);
+}
+
+SurfaceShader3D Renderer3D::compile_surface_shader_operation(const std::filesystem::path& source) {
+    _errors.clear();
+    std::string why;
+    SurfaceShader3D shader;
+    if (!_backend) {
+        why = "3D is not available";
+    } else {
+        std::ifstream in(source, std::ios::binary);
+        const std::string surface{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+        if (!in.good() && !in.eof()) {
+            why = "the surface could not be read";
+        } else {
+            // glslc compiles files: the wrapped source goes to one beside the others it makes.
+            static std::atomic<u32> counter{0};
+            const std::filesystem::path wrapped =
+                std::filesystem::temp_directory_path() /
+                ("kin-surface-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + "-" +
+                 std::to_string(counter++) + ".frag.glsl");
+            {
+                std::ofstream out(wrapped, std::ios::binary);
+                out << surface_shader_source(surface);
+            }
+            std::array<std::vector<u8>, surface_variant_count3d> compiled;
+            bool ok = true;
+            for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
+                auto spirv =
+                    compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)));
+                ok = spirv.has_value();
+                if (ok)
+                    compiled[i] = std::move(*spirv);
+            }
+            std::error_code ignored;
+            std::filesystem::remove(wrapped, ignored);
+            if (ok) {
+                std::array<std::span<const u8>, surface_variant_count3d> views;
+                for (u32 i = 0; i < surface_variant_count3d; ++i)
+                    views[i] = compiled[i];
+                shader = create_surface_shader_operation(views);
+                if (!shader)
+                    why = "the device refused the surface shader";
+            }
+        }
+    }
+    if (!shader.valid())
+        KIN_LOG_WARN_F("render", "3D: surface shader not made",
+                       (LogFields{{.name = "path", .value = source.string()}, {.name = "reason", .value = why}}));
+    if (!shader)
+        fail3d(_errors, "Renderer3D::compile_surface_shader(" + source.string() + ")", why);
     else
         _errors.clear();
     return shader;

@@ -263,6 +263,42 @@ vec3 kin_emissive(vec3 base) {
     return own * material.params.x;
 }
 
+// --- Surfaces (docs/material_graph_plan.md) ---
+
+// What kin shades at a fragment. kin_stock_surface() makes it from the material and its maps, as kin's own shaders
+// do; a surface shader (KIN_SURFACE, kin_mesh_main.inc.glsl) changes it before kin lights it. `normal` is unit, in
+// world space, on the viewer's side; `roughness` within [0.045, 1] (kin's floor: a perfect mirror is a lone pixel).
+struct KinSurface {
+    vec3 base_color; // linear: a dielectric's diffuse colour, a metal's reflection
+    float alpha;     // straight; Blend3D::Mask discards below the material's cutoff
+    vec3 normal;
+    float metallic;
+    float roughness;
+    float occlusion; // the share of ambient light let through
+    vec3 emission;   // linear light of its own, added after the lighting
+};
+
+#if defined(KIN_SURFACE) && !defined(KIN_DRAW_MATERIALS)
+// A surface shader's parameters (Material3D::shader_params, four at a time).
+vec4 kin_surface_param(int i) {
+    return material.surface[i];
+}
+#endif
+
+KinSurface kin_stock_surface() {
+    KinSurface s;
+    const vec4 base = kin_base_color();
+    s.base_color = base.rgb;
+    s.alpha = base.a;
+    s.normal = kin_normal();
+    const vec2 mr = kin_metallic_roughness();
+    s.metallic = mr.x;
+    s.roughness = mr.y;
+    s.occlusion = kin_occlusion();
+    s.emission = kin_emissive(base.rgb);
+    return s;
+}
+
 // The light of the scene on a surface (linear, what leaves it toward the
 // camera): the sun through its shadow, the fill, the point lights, and the
 // ambient light or environment. Not the surface's own light (kin_emissive).
