@@ -897,6 +897,51 @@ std::optional<Key> parse_key_name(std::string_view name) {
     return std::nullopt;
 }
 
+// A player's game controller, driven: a button tapped or held, sticks and
+// triggers set, or it unplugged. The game reads it as it reads a real one.
+ServerResponse handle_input_pad(ServerContext& ctx, const JsonValue& params) {
+    ServerContext::PadInput pad;
+    const JsonValue* player = params.find("player");
+    pad.player = player && player->is_number() ? static_cast<i32>(player->as_number()) : 0;
+    if (pad.player < 0 || pad.player >= max_input_players) {
+        return error_result("input.pad 'player' is 0 to " + std::to_string(max_input_players - 1));
+    }
+    if (const JsonValue* button = params.find("button")) {
+        PadControl control = PadControl::A;
+        if (!button->is_string() || !parse_pad_control(button->as_string(), control) ||
+            static_cast<u8>(control) >= static_cast<u8>(GamepadButton::Count)) {
+            return error_result("input.pad 'button' is a button: a, b, x, y, back, start, left_stick, right_stick, "
+                                "left_shoulder, right_shoulder or dpad_up/down/left/right (sticks and triggers are values)");
+        }
+        pad.button = control;
+    }
+    pad.mode = params.string_at("mode", "press");
+    if (pad.mode != "press" && pad.mode != "hold" && pad.mode != "release") {
+        return error_result("mode must be 'press', 'hold', or 'release'");
+    }
+    for (u8 a = 0; a <= static_cast<u8>(PadAxis::RightTrigger); ++a) {
+        if (const JsonValue* value = params.find(std::string(pad_axis_name(static_cast<PadAxis>(a))))) {
+            if (!value->is_number()) {
+                return error_result("input.pad axis values are numbers");
+            }
+            const bool trigger = a >= static_cast<u8>(PadAxis::LeftTrigger);
+            pad.axes[a] = std::clamp(static_cast<f32>(value->as_number()), trigger ? 0.0f : -1.0f, 1.0f);
+        }
+    }
+    if (const JsonValue* connected = params.find("connected")) {
+        pad.connected = !connected->is_bool() || connected->as_bool();
+    }
+    const i32 queued_player = pad.player;
+    ctx.queue_pad(std::move(pad));
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "pad");
+    json.field("player", static_cast<f64>(queued_player));
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_input_key(ServerContext& ctx, const JsonValue& params) {
     const std::string name = params.string_at("name");
     const std::optional<Key> key = parse_key_name(name);
@@ -1047,6 +1092,12 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
     _pending.push_back({PendingInput::Kind::Drop, std::move(path), {}, window_pos, 0.0f});
 }
 
+void ServerContext::queue_pad(PadInput pad) {
+    PendingInput in{PendingInput::Kind::Pad, {}, pad.mode, {}, 0.0f};
+    in.pad = std::move(pad);
+    _pending.push_back(std::move(in));
+}
+
 void ServerContext::step() {
     if (_development) {
         runtime_detail::advance_development(_scenes, static_cast<u64>(_frame + 1), false);
@@ -1070,9 +1121,13 @@ void ServerContext::step() {
         input.set_key_released(key);
         input.set_modifier_held(modifiers, false);
     }
+    for (const auto& [player, button] : _tapped_pad_buttons) {
+        _pads[static_cast<std::size_t>(player)].set_button(button, false);
+    }
     _tapped_actions.clear();
     _tapped_buttons.clear();
     _tapped_keys.clear();
+    _tapped_pad_buttons.clear();
 
     for (const PendingInput& in : _pending) {
         switch (in.kind) {
@@ -1113,6 +1168,30 @@ void ServerContext::step() {
         case PendingInput::Kind::Drop:
             input.add_dropped_file({.path = in.text, .pos = in.pos, .window = _window.id()});
             break;
+        case PendingInput::Kind::Pad: {
+            const auto at = static_cast<std::size_t>(in.pad.player);
+            GamepadState& pad = _pads[at];
+            _driven_pads[at] = true;
+            pad.connected = in.pad.connected;
+            if (!pad.connected) {
+                pad = {};
+                break;
+            }
+            f32* values[] = {&pad.left_x, &pad.left_y, &pad.right_x, &pad.right_y, &pad.left_trigger, &pad.right_trigger};
+            for (std::size_t a = 0; a < in.pad.axes.size(); ++a) {
+                if (in.pad.axes[a]) {
+                    *values[a] = *in.pad.axes[a];
+                }
+            }
+            if (in.pad.button) {
+                const auto button = static_cast<GamepadButton>(*in.pad.button);
+                pad.set_button(button, in.mode != "release");
+                if (in.mode == "press") {
+                    _tapped_pad_buttons.emplace_back(in.pad.player, button);
+                }
+            }
+            break;
+        }
         case PendingInput::Kind::Key:
             if (in.mode == "release") {
                 input.set_key_released(in.key);
@@ -1128,6 +1207,21 @@ void ServerContext::step() {
         }
     }
     _pending.clear();
+    // Driven controllers, as App gives real ones: each player's, and the
+    // first player's (else the lowest driven connected) as the controller.
+    if (std::ranges::any_of(_driven_pads, [](bool driven) { return driven; })) {
+        const GamepadState* first = nullptr;
+        for (i32 p = 0; p < max_input_players; ++p) {
+            const auto at = static_cast<std::size_t>(p);
+            if (_driven_pads[at]) {
+                input.set_player_gamepad(p, _pads[at]);
+                if (!first && (_pads[at].connected || p == 0)) {
+                    first = &_pads[at];
+                }
+            }
+        }
+        input.set_gamepad(first && first->connected ? *first : GamepadState{});
+    }
 
     SceneContext scene_ctx = make_context();
     runtime_detail::pump_scene_assets(_asset_server, _render);
@@ -1253,6 +1347,9 @@ void ServerContext::reset(std::optional<u64> seed) {
     _tapped_actions.clear();
     _tapped_buttons.clear();
     _tapped_keys.clear();
+    _pads = {};
+    _driven_pads = {};
+    _tapped_pad_buttons.clear();
     if (_reset_scenes) {
         _reset_scenes(_scenes);
     }
@@ -1299,6 +1396,9 @@ static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const Gam
     }
     if (method == "input.key") {
         return handle_input_key(ctx, params);
+    }
+    if (method == "input.pad") {
+        return handle_input_pad(ctx, params);
     }
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);

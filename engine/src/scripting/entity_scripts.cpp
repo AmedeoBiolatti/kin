@@ -231,6 +231,12 @@ struct EntityScripts::Impl {
     // Values given back by the saves, for entities once they start (by id).
     std::unordered_map<u64, JsonValue> restored;
     std::string calling; // the script being called, for its problems
+    i32 player = -1;     // whose input the entity being run reads (Input's numbers: -1 anyone)
+
+    // A player as a script names it (1 the first, 0 anyone; none: its entity's), as Input numbers them.
+    i32 player_of(const sol::optional<i32>& named) const {
+        return named ? (*named > 0 ? *named - 1 : -1) : player;
+    }
 
     void bind(sol::state& lua) {
         bind_lua_workflows2d(lua, [this] { return workflows; });
@@ -428,10 +434,22 @@ struct EntityScripts::Impl {
         entity["state"] = [animator](const ScriptEntity& e) { return animator(e)->state; };
 
         sol::table input_table = lua.create_named_table("input");
-        input_table["held"] = [this](const std::string& action) { return input && input->held(action); };
-        input_table["pressed"] = [this](const std::string& action) { return input && input->pressed(action); };
-        input_table["released"] = [this](const std::string& action) { return input && input->released(action); };
-        input_table["axis"] = [this](const std::string& name) { return input ? input->axis(name) : 0.0f; };
+        // Each takes a player last (1 the first, 0 anyone), or reads the
+        // player its entity's ScriptComponent names.
+        input_table["held"] = [this](const std::string& action, sol::optional<i32> who) {
+            return input && input->held(player_of(who), action);
+        };
+        input_table["pressed"] = [this](const std::string& action, sol::optional<i32> who) {
+            return input && input->pressed(player_of(who), action);
+        };
+        input_table["released"] = [this](const std::string& action, sol::optional<i32> who) {
+            return input && input->released(player_of(who), action);
+        };
+        input_table["axis"] = [this](const std::string& name, sol::optional<i32> who) {
+            return input ? input->axis(player_of(who), name) : 0.0f;
+        };
+        // Whose input this script's entity reads (0: anyone).
+        input_table["player"] = [this]() { return player + 1; };
         input_table["mouse"] = [this]() {
             const Vec2f at = input ? input->mouse_pos() : Vec2f{};
             return std::make_tuple(at.x, at.y);
@@ -1105,6 +1123,8 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         if (!entity.is_alive()) {
             continue;
         }
+        const ScriptComponent* component = entity.get<ScriptComponent>();
+        impl.player = component && component->player > 0 ? component->player - 1 : -1;
         Impl::File& file = impl.file(path);
         if (!file.script->loaded()) {
             continue; // it does not read: its problem is told
@@ -1202,6 +1222,7 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     }
     impl.world = nullptr;
     impl.input = nullptr;
+    impl.player = -1;
 }
 
 } // namespace kin

@@ -127,7 +127,13 @@ void App::open_gamepads() {
 
 void App::pump_events() {
     if (_gamepads) {
-        _input.set_gamepad(_gamepads->poll()); // it reads the controller itself, apart from the events
+        _input.set_gamepad(_gamepads->poll()); // it reads the controllers itself, apart from the events
+        // Each player's own, for Input's questions about one player.
+        const GamepadPlayers& players = _gamepads->players();
+        for (i32 p = 0; p < max_input_players; ++p) {
+            const auto slot = static_cast<std::size_t>(p);
+            _input.set_player_gamepad(p, slot < players.capacity() ? players.state(slot) : GamepadState{});
+        }
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {

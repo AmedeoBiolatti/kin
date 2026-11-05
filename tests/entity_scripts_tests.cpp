@@ -126,6 +126,62 @@ end
     fs::remove_all(dir);
 }
 
+// Local players: the same script on two characters, each reading its own
+// player's controller; a script naming a player itself.
+void test_player_scripts() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_players";
+    fs::remove_all(dir);
+    write(dir / "scripts/player.lua", R"lua(
+function on_update(self, dt)
+    self:move(input.axis("move_x") * 100 * dt, 0)
+    if input.pressed("jump") then self:set_rotation(input.player() * 10) end
+end
+)lua");
+    write(dir / "scripts/watcher.lua", R"lua(
+function on_update(self, dt)
+    if input.held("jump", 2) then self:set_rotation(45) end
+    if input.player() ~= 0 or input.held("jump", 1) then self:set_rotation(-1) end
+end
+)lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const kin::EcsEntity one =
+        world.entity("One").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/player.lua"}, .player = 1});
+    const kin::EcsEntity two =
+        world.entity("Two").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/player.lua"}, .player = 2});
+    const kin::EcsEntity watcher =
+        world.entity("Watcher").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/watcher.lua"}});
+
+    kin::InputMap map;
+    map.bind("jump", kin::PadControl::A);
+    map.set_axis({.name = "move_x", .sticks = {{.axis = kin::PadAxis::LeftX}}, .dead_zone = 0.0f});
+    kin::Input input;
+    input.set_map(map);
+    kin::GamepadState first{.connected = true};
+    kin::GamepadState second{.connected = true, .left_x = 1.0f};
+    input.set_player_gamepad(0, first);
+    input.set_player_gamepad(1, second);
+
+    kin::EntityScripts scripts{{.content = dir, .check_frames = 1}};
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    assert(near(one.get<kin::Transform2D>()->pos.x, 0.0f) && near(two.get<kin::Transform2D>()->pos.x, 10.0f));
+    input.advance_step_edges();
+
+    second.set_button(kin::GamepadButton::A, true);
+    input.set_player_gamepad(1, second);
+    scripts.update(world, input, 0.1f);
+    assert(near(two.get<kin::Transform2D>()->rotation, 20.0f) && near(one.get<kin::Transform2D>()->rotation, 0.0f));
+    assert(near(watcher.get<kin::Transform2D>()->rotation, 45.0f));
+    input.advance_step_edges();
+    first.set_button(kin::GamepadButton::A, true);
+    input.set_player_gamepad(0, first);
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    assert(near(watcher.get<kin::Transform2D>()->rotation, -1.0f) && near(one.get<kin::Transform2D>()->rotation, 10.0f));
+    fs::remove_all(dir);
+}
+
 // self:emit() bursts its ParticleSystemComponent's effect where it is, or another of its catalog.
 void test_entity_emit() {
     const fs::path dir = fs::temp_directory_path() / "kin_entity_emit_test";
@@ -478,6 +534,7 @@ end
 
 int main() {
     test_entity_scripts();
+    test_player_scripts();
     test_entity_emit();
     test_scene_go();
     test_saves();

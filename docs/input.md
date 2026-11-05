@@ -60,6 +60,41 @@ positive pushed up.
 Without it, or with no controller connected, pad bindings are never held. A
 test or a replay sets the state itself with `Input::set_gamepad`.
 
+## Local players
+
+Several players at one screen each read their own devices through the same
+`Input`. A player's controller is the one their slot of `GamepadPlayers` has
+(joining, reconnecting and rumble are there: [players and
+controllers](2d_workflows.md#players-and-controllers)). App gives each one to
+`Input::set_player_gamepad` every frame. `set_players` says who has the
+keyboard and mouse, and gives a player their own map when two share one
+keyboard, one on WASD and one on the arrows:
+
+```cpp
+ctx.input.set_players({{.keyboard = true}, {}});   // player 0: the keyboard and their controller
+
+if (ctx.input.pressed(1, "jump")) { /* player 1's controller */ }
+const f32 run = ctx.input.axis(0, "move_x");
+if (ctx.input.pressed("pause")) { /* anyone, on any device */ }
+
+ctx.input.set_players({{.keyboard = true, .map = wasd}, {.keyboard = true, .map = arrows}});
+```
+
+- `pressed`, `held`, `released`, `frame_pressed`, `frame_released` and `axis`
+  take a player first. Without one (or with -1) they ask about anyone: every
+  device, with the Input's map, and each player with their own map.
+- A player without a map reads the Input's.
+- With no players set, player 0 has the keyboard and mouse. Until someone
+  joins a controller, the one `set_gamepad` gives (the first) counts as player
+  0's too, so a one-player game sets nothing.
+- `binding_held`, `binding_pressed` and `axis_value` take a player too, and
+  `pad_frame_pressed(control, player)` reads one player's controller (-1: any).
+
+Entity scripts read the player their `ScriptComponent` names (`player`: 0
+anyone, 1 the first...) ([scripting](scripting.md#scripts-on-entities)). Agents
+and tests drive a player's controller with the scene server's `input.pad`
+([agent interface](agent_interface.md)).
+
 ## For editors
 
 `binding_held(input, binding)` and `axis_value(input, axis)` read a binding or an

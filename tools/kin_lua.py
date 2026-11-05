@@ -190,10 +190,11 @@ SIGNATURES = {
     },
     "input": {
         **{
-            name: "action:string -> boolean" for name in ("held", "pressed", "released")
+            name: "action:string,player?:integer -> boolean" for name in ("held", "pressed", "released")
         },
-        "axis": "name:string -> number",
+        "axis": "name:string,player?:integer -> number",
         "mouse": "-> number,number",
+        "player": "-> integer",
     },
     "world": {
         "find": "name:string -> Entity|nil",
