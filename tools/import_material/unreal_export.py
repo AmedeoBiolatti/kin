@@ -54,24 +54,30 @@ class Exporter:
         self.used = set()  # the textures the material being exported names
 
     def texture(self, tex):
-        """The texture exported (once) as PNG; its path relative to the export, with its settings."""
+        """The texture exported (once) as PNG (EXR for float ones); its path relative to the export, with its settings."""
         if tex is None:
             return None
         path = tex.get_path_name().split(".")[0]
         self.used.add(path)
         if path in self.textures:
             return self.textures[path]["file"]
-        rel = "textures" + path + ".png"
-        file = os.path.join(self.out, rel)
-        os.makedirs(os.path.dirname(file), exist_ok=True)
-        task = unreal.AssetExportTask()
-        task.object = tex
-        task.filename = file
-        task.automated = True
-        task.prompt = False
-        task.replace_identical = True
-        task.exporter = unreal.TextureExporterPNG()
-        ok = unreal.Exporter.run_asset_export_task(task) and os.path.exists(file)
+        # PNG, else EXR (float sources), each by the exporter Unreal finds for the file type: it asks the exporter
+        # first, where forcing TextureExporterPNG asserts on a float texture (Assertion failed: SupportsTexture),
+        # taking the editor down.
+        ok, rel = False, None
+        for ext in (".png", ".exr"):
+            rel = "textures" + path + ext
+            file = os.path.join(self.out, rel)
+            os.makedirs(os.path.dirname(file), exist_ok=True)
+            task = unreal.AssetExportTask()
+            task.object = tex
+            task.filename = file
+            task.automated = True
+            task.prompt = False
+            task.replace_identical = True
+            ok = unreal.Exporter.run_asset_export_task(task) and os.path.exists(file)
+            if ok:
+                break
         info = {"file": rel if ok else None, "asset": path}
         for key in ("srgb", "flip_green_channel", "compression_settings"):
             try:
