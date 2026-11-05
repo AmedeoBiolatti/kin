@@ -156,7 +156,8 @@ class Exporter:
                  "default_value", "parameter_name", "luminance_factors", "scale", "levels", "output_min", "output_max",
                  "noise_function", "turbulence", "tiling", "repeat_size", "code", "output_type", "texture",
                  "sampler_type", "coordinate_index", "u_tiling", "v_tiling", "un_mirror_u", "un_mirror_v", "a_is_",
-                 "default_value_bool", "x", "y", "z", "w", "fraction", "const_fraction", "power")
+                 "default_value_bool", "x", "y", "z", "w", "fraction", "const_fraction", "power", "const_min",
+                 "const_max", "const_value", "const_x", "const_y")
         for key in sorted(set(dir(expression)) | set(named)):
             if key.startswith("_") or key in skip:
                 continue

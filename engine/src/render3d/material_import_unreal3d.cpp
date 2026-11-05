@@ -683,6 +683,19 @@ private:
                 return std::nullopt;
             return _b.add("clamp", {{"x", *x}, {"min", *lo}, {"max", *hi}});
         }
+        if (kind == "SmoothStep") { // UE 5's: 0 to 1 smoothly from Min to Max
+            const auto lo = in({"Min"}, num(prop(n, "const_min", 0))), hi = in({"Max"}, num(prop(n, "const_max", 1))),
+                       x = in({"Value"}, num(prop(n, "const_value", 0)));
+            if (!lo || !hi || !x)
+                return std::nullopt;
+            return _b.add("smoothstep", {{"edge0", *lo}, {"edge1", *hi}, {"x", *x}});
+        }
+        if (kind == "Step") { // UE 5's: 1 where X >= Y
+            const auto y = in({"Y"}, num(prop(n, "const_y", 0))), x = in({"X"}, num(prop(n, "const_x", 0)));
+            if (!y || !x)
+                return std::nullopt;
+            return _b.add("step", {{"edge", *y}, {"x", *x}});
+        }
         if (kind == "LinearInterpolate") {
             const auto a = in({"A"}, num(prop(n, "const_a", 0))), b = in({"B"}, num(prop(n, "const_b", 1))),
                        t = in({"Alpha"}, num(prop(n, "const_alpha", 0.5)));
@@ -869,6 +882,10 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         }
         auto& p = imported.asset.base.material;
         p.graph = imported.graph.lexically_relative(x.content);
+        // The graph reads the mesh's UV as its own nodes tile it: Tier 1's tiling (the material's UV transform, which
+        // kin's "uv" input goes through) would tile it twice.
+        p.uv_scale = Vec2f{1, 1};
+        p.uv_offset = Vec2f{0, 0};
         // The material's values of the graph's parameters (an instance's own), and its textures.
         const auto* values = doc.find("parameters");
         for (const auto& param : b.params) {

@@ -485,6 +485,8 @@ void unreal_graphs() {
     }
     CHECK(!mix->graph.empty() && fs::exists(mix->graph) && mix->graph.filename() == "M_GraphMix.kingraph");
     CHECK(mix->asset.base.material.graph == fs::path("kin/M_GraphMix.kingraph"));
+    // Its TextureCoordinate tiles in the graph only (Tier 1 had made it the material's UV transform).
+    CHECK(mix->asset.base.material.uv_scale == Vec2f(1, 1) && mix->asset.base.material.uv_offset == Vec2f(0, 0));
     std::ifstream in(mix->graph);
     const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
     in.close();

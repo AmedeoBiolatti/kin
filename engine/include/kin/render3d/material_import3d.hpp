@@ -69,10 +69,10 @@ Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path&
 //
 // Unreal (an unreal_export.py export's "graph"): constants, scalar, vector and texture parameters, texture samples
 // (normal maps unpacked; DirectX's green turned to kin's), texture coordinates (tiling), Multiply, Add, Subtract,
-// Divide, Min, Max, Power, Clamp, Lerp, One Minus, Abs, Floor, Ceil, Frac, Square Root, Saturate, Normalize, Dot,
-// Cross, Distance, Sine and Cosine (their period), Component Mask, Append, Time, World Position (centimetres),
-// Vertex Color, Camera Vector, Pixel and Vertex Normal, Fresnel, Panner, Desaturation, Reroute, Static Switch
-// (its default).
+// Divide, Min, Max, Power, Clamp, Lerp, Step, SmoothStep, One Minus, Abs, Floor, Ceil, Frac, Square Root, Saturate,
+// Normalize, Dot, Cross, Distance, Sine and Cosine (their period), Component Mask, Append, Time, World Position
+// (centimetres), Vertex Color, Camera Vector, Pixel and Vertex Normal, Fresnel, Panner, Desaturation, Reroute, Static
+// Switch (its default).
 Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& source,
                                                  const MaterialImportOptions3D& options);
 
