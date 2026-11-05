@@ -679,6 +679,26 @@ void SdlRenderer2DBackend::draw_texture(const Texture& texture, Rectf source, Re
     }
 }
 
+bool SdlRenderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                                  std::span<const u32> indices) {
+    const auto* backend = as_sdl(texture.backend().get());
+    if (!backend || !backend->handle()) {
+        return false;
+    }
+    flush_batch();
+    _shape_vertices.clear();
+    _shape_vertices.reserve(vertices.size());
+    for (const auto& v : vertices) {
+        const auto p = _transformed ? _transform.apply(v.position) : v.position;
+        _shape_vertices.push_back({{p.x, p.y}, to_sdl_color(v.color), {v.uv.x, v.uv.y}});
+    }
+    _shape_indices.assign(indices.begin(), indices.end());
+    const TextureBlendScope blend{backend->handle(), _blend};
+    return SDL_RenderGeometry(_handle, backend->handle(), _shape_vertices.data(),
+                              static_cast<int>(_shape_vertices.size()), _shape_indices.data(),
+                              static_cast<int>(_shape_indices.size()));
+}
+
 void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
                                            u32 index_base, Color tint) {
     if (indices.empty() || tint.a == 0) {

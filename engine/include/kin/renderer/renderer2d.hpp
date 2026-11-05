@@ -332,6 +332,10 @@ public:
     // Many quads from one texture, in order: the same pixels as a draw_texture()
     // per sprite, but backends with instancing (SDL_GPU) submit them as one batch.
     void draw_sprites(const Texture& texture, std::span<const SpriteInstance> sprites);
+    // Indexed triangles, UVs normalized to the whole texture. Current transform,
+    // clip and blend apply. False for invalid data or an unsupported backend.
+    bool draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                std::span<const u32> indices);
     // Lets the backend spread large batches over these workers (null: none);
     // returns the job system it replaces. The caller keeps it alive while set.
     JobSystem* set_job_system(JobSystem* jobs);

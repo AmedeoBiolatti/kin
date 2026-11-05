@@ -14,6 +14,8 @@
 #include <vector>
 
 namespace kin {
+class DevelopmentSession;
+class SceneAssetRuntime;
 
 class ScriptEngine;
 class ScriptScene;
@@ -85,6 +87,10 @@ struct ScriptSceneConfig {
     // Binds the host's own API into each fresh Lua state (every load and
     // reload), before the script runs: e.g. kin::bind_lua_audio.
     std::function<void(sol::state&)> bind;
+    // Deprecated: polls the script's files and reloads Lua in place. Use a
+    // development session instead (`--dev`, kin/runtime/development.hpp), which
+    // reloads scene, assets and Lua together and safely; this one is off while
+    // a session runs and stays for existing games.
     bool hot_reload =
 #ifdef NDEBUG
         false;
@@ -95,6 +101,8 @@ struct ScriptSceneConfig {
     bool render_enabled = true;
     Color clear_color = Color::rgb(0, 0, 0);
     RenderProfile profile = top_down_2d_profile();
+    std::shared_ptr<SceneAssetRuntime> scene_runtime;
+    LuaRuntimeLimits runtime_limits;
 };
 
 class ScriptScene : public EcsScene {
@@ -120,6 +128,7 @@ public:
     void set_script_path(std::filesystem::path path);
     void clear_script_entities();
     bool reload_script();
+    DevelopmentSession* development_session() override { return _development.get(); }
 
 private:
     bool load_script(bool clear_entities);
@@ -134,6 +143,7 @@ private:
     bool _script_loaded = false;
     std::string _last_error;
     ScriptDiagnostic _last_diagnostic;
+    std::unique_ptr<DevelopmentSession> _development;
 };
 
 template <typename T>

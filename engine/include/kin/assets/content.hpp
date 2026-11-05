@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -12,6 +13,8 @@
 #include <vector>
 
 namespace kin {
+
+class MemoryContent;
 
 // A game's content (images, sounds, fonts, scripts, data files) is a folder
 // while it is made and, when it ships, either the same folder beside the
@@ -52,10 +55,11 @@ public:
     // An entry's bytes, valid while this pack lives.
     std::span<const std::byte> bytes(const Entry& entry) const;
     // Checks every file against its checksum; false, naming the first bad
-    // file in `error`, if one does not match.
+    // file in `error`, if one does not match. (A MemoryContent's has none.)
     bool verify(std::string* error = nullptr) const;
 
 private:
+    friend class MemoryContent;
     ContentPack() = default;
 
     std::filesystem::path _file;
@@ -63,6 +67,31 @@ private:
     const std::byte* _data = nullptr;
     std::size_t _size = 0;
     [[maybe_unused]] void* _mapping = nullptr; // the mapping's handle, on Windows
+    // A pack made in memory (MemoryContent): each entry's bytes, by index, and their owner.
+    std::vector<std::span<const std::byte>> _memory_bytes;
+    std::shared_ptr<const void> _memory_owner;
+};
+
+// An immutable content snapshot: a pack made in memory, mounted at its own
+// root() for as long as it lives, so the reads below serve it as they serve a
+// .kinpak. Views of its files keep the bytes alive past the snapshot.
+class MemoryContent {
+public:
+    using Files = std::map<std::string, std::string, std::less<>>;
+    static std::shared_ptr<const MemoryContent> create(Files files);
+    MemoryContent(const MemoryContent&) = delete;
+    MemoryContent& operator=(const MemoryContent&) = delete;
+    ~MemoryContent();
+
+    const std::filesystem::path& root() const { return _root; }
+    const Files& files() const { return *_files; }
+
+private:
+    MemoryContent() = default;
+
+    std::filesystem::path _root;
+    std::shared_ptr<const Files> _files;
+    std::shared_ptr<const ContentPack> _pack;
 };
 
 struct ContentPackWriteResult {
@@ -86,6 +115,8 @@ void unmount_all_content_packs();
 
 // The pack that answers for `path`, or null if it is read from disk.
 std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path& path);
+// The MemoryContent that answers for `path` (kept alive by the result), or null.
+std::shared_ptr<const MemoryContent> memory_content_for(const std::filesystem::path& path);
 
 // A content file's bytes, from a mounted pack or from disk; nullopt if there is
 // no such file.

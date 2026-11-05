@@ -1163,6 +1163,28 @@ void GpuRenderer2DBackend::draw_line(Vec2f a, Vec2f b, Color color) {
     _batch.push_quads(corners, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));
 }
 
+bool GpuRenderer2DBackend::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                                  std::span<const u32> indices) {
+    const auto* backend = as_gpu(texture.backend().get());
+    if (!backend || !backend->texture()) {
+        return false;
+    }
+    ensure_frame();
+    retain(texture);
+    _scratch_verts.clear();
+    _scratch_verts.reserve(indices.size());
+    for (const auto i : indices) {
+        const auto& v = vertices[i];
+        const auto p = place(v.position);
+        // The triangle vertex shader decodes sRGB vertex colours, just as for quads.
+        _scratch_verts.push_back({p.x, p.y, v.uv.x, v.uv.y, v.color.r, v.color.g, v.color.b, v.color.a});
+    }
+    const auto blend = backend->premultiplied() ? gpu::GpuBlendMode::Premultiplied : gpu::GpuBlendMode::Alpha;
+    _batch.push(_scratch_verts, nullptr, backend->texture().handle(), current_scissor(), resolve_blend(blend), nullptr,
+                0, sampler_for(*backend));
+    return true;
+}
+
 void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices, std::span<const u32> indices,
                                            u32 index_base, Color tint) {
     if (indices.empty() || tint.a == 0) {

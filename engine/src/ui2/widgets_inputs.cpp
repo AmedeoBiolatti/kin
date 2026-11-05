@@ -101,9 +101,19 @@ void theme_styles(const Theme& theme, TextInput& widget) {
 void run(Context& ctx, TextInput& widget) {
     const KeepStyles keep(widget); // the caller's styles, back when it is done
     theme_styles(ctx.theme(), widget);
+    ctx.describe(widget.id, "text_input", {}, widget.bounds, widget.enabled, true);
+    const auto text_action = ctx.take_text_action(widget.id);
+    if (text_action) {
+        widget.state.text = *text_action;
+        widget.state.caret = widget.state.text.size();
+        widget.state.selection_anchor = widget.state.caret;
+    }
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.result = edit_text_input(ctx, widget.state, widget.bounds, widget.text_style, widget.style, it, widget.enabled);
+    if (text_action) {
+        widget.result.changed = true;
+    }
     if (widget.enabled) {
         if (it.hot || it.active) {
             ctx.set_cursor(SystemCursor::Text);
@@ -114,6 +124,7 @@ void run(Context& ctx, TextInput& widget) {
         }
     }
     draw_text_input(ctx, widget.bounds, widget.state, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.state.active));
+    ctx.semantic_state(widget.id, widget.state.text);
 }
 
 // NumberInput as the theme makes it look: its styles merged with the theme's.
@@ -123,6 +134,7 @@ void theme_styles(const Theme& theme, NumberInput& widget) {
 }
 
 void run(Context& ctx, NumberInput& widget) {
+    describe_control(ctx, widget.id, "spinbutton", {}, widget.bounds, widget.enabled);
     const KeepStyles keep(widget); // the caller's styles, back when it is done
     theme_styles(ctx.theme(), widget);
     const auto show = [&] {
@@ -151,10 +163,19 @@ void run(Context& ctx, NumberInput& widget) {
         }
         show();
     }
-    const i32 steps = (ctx.key_typed(Key::Up) ? 1 : 0) - (ctx.key_typed(Key::Down) ? 1 : 0);
-    if (widget.enabled && steps != 0 && (it.focused || widget.text.active)) {
-        widget.value = std::clamp(widget.value + static_cast<f32>(steps) * widget.step, widget.min, widget.max);
-        widget.changed = true;
+    if (widget.enabled && (it.focused || widget.text.active)) {
+        const i32 steps = (ctx.key_typed(Key::Up) ? 1 : 0) - (ctx.key_typed(Key::Down) ? 1 : 0);
+        if (steps != 0) {
+            widget.value = std::clamp(widget.value + static_cast<f32>(steps) * widget.step, widget.min, widget.max);
+            widget.changed = true;
+            show();
+        }
+    }
+    if (const auto value = widget.enabled
+                               ? ctx.take_numeric_action(widget.id, widget.value, widget.min, widget.max, widget.step)
+                               : std::nullopt) {
+        widget.changed |= widget.value != static_cast<f32>(*value);
+        widget.value = static_cast<f32>(*value);
         show();
     }
     if (widget.invalid) {
@@ -163,6 +184,8 @@ void run(Context& ctx, NumberInput& widget) {
     }
 
     draw_text_input(ctx, widget.bounds, widget.text, widget.text_style, widget.style, frame_color(widget.style, it, widget.enabled, widget.text.active));
+    ctx.semantic_state(widget.id, number_text(widget.value));
+    ctx.semantic_numeric(widget.id, widget.value, widget.min, widget.max, widget.step);
 }
 
 void run_combo_popup(Context& ctx, ComboBox& widget) {

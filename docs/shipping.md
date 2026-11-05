@@ -28,6 +28,7 @@ kin_game(my_game TITLE "My Game")   # content/ beside this CMakeLists.txt
 | Argument | Default | |
 |---|---|---|
 | `CONTENT <dir>` | `content/` | The game's content folder |
+| `IMPORTS <file.json>` | none | Import authoring sources and merge generated native assets with `CONTENT`; see [2D imports](importing_2d.md) |
 | `NAME <name>` | the target | Its name beside the executable: `<name>.kinpak` or `<name>/` |
 | `TITLE <text>` | the name | The product name in the Windows version info |
 | `VERSION <x.y.z>` | the project's | Version info, and the package's name |
@@ -274,6 +275,8 @@ sources, external dependencies and owned tests. `KIN_EXPERIMENTAL_3D` currently
 requires scripting for its scene-session lifecycle and a GPU-capable renderer.
 `KIN_ENABLE_SCENE_SERVER` controls the server component and honors the existing
 `KIN_ENABLE_AGENT_SERVER` option as its default.
+`KIN_ENABLE_DEVELOPMENT` builds development sessions (`--dev`, safe live
+reload; [hot reload](hot_reload.md)); shipping builds turn it off.
 
 `kin::engine` remains the umbrella target. Narrow consumers can link
 `kin::audio`, `kin::physics` or `kin::scripting`; ECS/render/scene adapters are

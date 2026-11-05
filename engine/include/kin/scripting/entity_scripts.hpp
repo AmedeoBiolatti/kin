@@ -7,8 +7,9 @@
 // gets on_start(self) once, then on_update(self, dt), and on_contact(self,
 // other) for each body its body began touching, on_contact_end(self, other)
 // for each it stopped touching (with a PhysicsContactQueue).
-// A script whose file changed is read again; its entities start over (a
-// broken edit keeps the last good one running). Nothing a script does stops
+// A changed script is prepared in a fresh VM; entity data carries over and
+// optional on_reload(self) migrates it. Rejected edits retain the live VM.
+// Nothing a script does stops
 // the game: an error is logged, kept in problems(), and that call skipped.
 //
 //     kin::EntityScripts scripts{{.content = kin::content_root()}};
@@ -23,12 +24,15 @@
 //   position() -> x, y; set_position(x, y); move(dx, dy) (its body goes there too);
 //   rotation(); set_rotation(degrees)
 //   tween(property, to, seconds[, easing][, options]) -> id: one of its fields
-//   ("Transform2D.pos") moved to `to` (kin/ecs/tween.hpp; the game runs
-//   update_tweens); options: delay, repeats, yoyo, relative, easing, done =
-//   function(self) (once it gets to its end); tweening([property]),
-//   stop_tween(id), stop_tweens([property])
-//   after(seconds, fn) -> id, every(seconds, fn) -> id: fn(self) then (every:
-//   each time), until cancel(id) or it stops running its script
+//   ("Transform2D.pos") moved to `to` (kin/ecs/tween.hpp; stepped by the
+//   world's script services, ScriptWorkflows2D); options: delay, repeats,
+//   yoyo, relative, easing, done = function(self) (once it gets to its end);
+//   tweening([property]), stop_tween(id), stop_tweens([property])
+//   after(seconds, fn) -> task, every(seconds, fn) -> task: fn(self) then
+//   (every: each time, at most once a step), until cancel(task) or it stops
+//   running its script; these and tween's done run as the script's tasks
+//   (kin/scripting/lua_script.hpp), so a reload drops them (restart them in
+//   on_reload)
 //   velocity() -> vx, vy; set_velocity(vx, vy): its CharacterController2D's,
 //   else its body's (PhysicsVelocity); on_floor(), on_wall(), on_ceiling():
 //   what its CharacterController2D found in the last step
@@ -79,6 +83,7 @@
 // {x = , y = } pairs and {r = , g = , b = , a = } colours.
 
 #include <kin/core/types.hpp>
+#include <kin/scripting/lua_runtime.hpp>
 
 #include <filesystem>
 #include <map>
@@ -98,6 +103,7 @@ class PhysicsWorld;
 struct EntityScriptsConfig {
     std::filesystem::path content;  // the scripts (and the prefabs they spawn) are read from here
     i32 check_frames = 30;          // script files changed are read again every so many updates (0: never)
+    LuaRuntimeLimits runtime_limits;
 };
 
 class EntityScripts {
@@ -115,6 +121,12 @@ public:
     std::size_t running() const;
     // Forgets every entity's self (all start over at the next update).
     void restart();
+    // Prepare all affected instances in a fresh VM; preserve self data and
+    // keep the active VM on any failure. on_reload(self) is optional.
+    bool reload(std::string_view asset);
+    std::map<std::string, LuaRuntimeStats> runtime_stats() const;
+    // What a script's state binds and the callbacks it gets, for kin_lua api.
+    LuaApiSurface api_surface() const;
     // The scene's UI screens, for the scripts' `ui` (null: none).
     void set_screens(SceneScreens* screens);
     // The scene's dialogue, for the scripts' `dialogue` and on_dialogue_event (null: none).

@@ -38,16 +38,8 @@ std::size_t shown_bytes(const StateItem& item) {
     return std::min(item.bytes.size(), item.component == "(report)" ? max_report_bytes : max_value_bytes);
 }
 
-constexpr char hex_digits[] = "0123456789abcdef";
-
 std::string to_hex(const u8* data, std::size_t size) {
-    std::string out;
-    out.reserve(size * 2);
-    for (std::size_t i = 0; i < size; ++i) {
-        out.push_back(hex_digits[data[i] >> 4]);
-        out.push_back(hex_digits[data[i] & 15]);
-    }
-    return out;
+    return hex_encode({reinterpret_cast<const char*>(data), size});
 }
 
 std::vector<u8> from_hex(std::string_view text) {

@@ -2,10 +2,13 @@
 
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/lighting.hpp>
+#include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/skeleton2d.hpp>
 
 #include <kin/anim/anim_format.hpp>
 #include <kin/anim/binding.hpp>
+#include <kin/anim/skeleton2d.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
@@ -36,6 +39,19 @@
 #include <vector>
 
 namespace kin {
+std::unique_ptr<Assets2D> Assets2D::from_snapshot(Renderer2D& renderer, std::shared_ptr<const MemoryContent> snapshot) {
+    auto assets = std::make_unique<Assets2D>(renderer, snapshot->root());
+    assets->_content_owner = std::move(snapshot);
+    return assets;
+}
+std::unique_ptr<Assets2D> Assets2D::for_snapshot(std::shared_ptr<const MemoryContent> snapshot) const {
+    auto next = from_snapshot(_renderer, std::move(snapshot));
+    next->_binders = _binders;
+    next->_residency_diagnostics = _residency_diagnostics;
+    next->set_texture_budget(_texture_budget);
+    next->manager().set_memory_budget(_manager.memory_budget());
+    return next;
+}
 
 namespace {
 
@@ -67,15 +83,67 @@ std::optional<std::filesystem::file_time_type> Assets2D::file_time(std::string_v
     return error ? std::nullopt : std::optional(time); // in a pack, or gone
 }
 
+bool Assets2D::prime_texture(std::string_view path, const Image& image) {
+    if (path.empty() || !image.valid()) {
+        return false;
+    }
+    auto texture = _renderer.create_texture_from_rgba(image.rgba.data(), image.size);
+    if (!texture) {
+        return false;
+    }
+    const FileTime time = file_time(path);
+    _textures[std::string(path)] = Made{std::move(texture), time, false, ++_texture_clock};
+    _manager.reserve_storage<Image>(path);
+    _manager.replace_loaded<Image>(path, image);
+    _failed_loads.erase(_manager.cache_key<Image>(path));
+    _read[std::string(path)] = time;
+    _problems.erase(std::string(path));
+    ++_version;
+    return true;
+}
+
+template <typename T> std::shared_ptr<const T> Assets2D::load_reported(std::string_view path) {
+    if (path.empty()) {
+        return {};
+    }
+    std::string key = _manager.cache_key<T>(path);
+    if (_failed_loads.contains(key)) {
+        return {};
+    }
+    std::string why;
+    try {
+        if (auto value = _manager.load<T>(path)) {
+            _read.try_emplace(std::string(path), file_time(path));
+            _problems.erase(std::string(path));
+            return value;
+        }
+        why = "it could not be read";
+    } catch (const std::exception& error) {
+        why = error.what();
+    }
+    tell(_problems, std::string(path), std::move(why));
+    _failed_loads.emplace(std::move(key), std::pair{std::string(path), file_time(path)});
+    return {};
+}
+
+std::shared_ptr<const Image> Assets2D::image(std::string_view path) {
+    return load_reported<Image>(path);
+}
+
+std::shared_ptr<const SkeletonAsset2D> Assets2D::skeleton2d(std::string_view path) {
+    return load_reported<SkeletonAsset2D>(path);
+}
+
 Texture Assets2D::texture(std::string_view path) {
     if (path.empty()) {
         return {};
     }
     if (const auto found = _textures.find(path); found != _textures.end()) {
+        found->second.last_access = ++_texture_clock;
         return found->second.texture;
     }
     std::string key(path);
-    Made made{.texture = {}, .time = file_time(path), .failed = false};
+    Made made{.texture = {}, .time = file_time(path), .failed = false, .last_access = ++_texture_clock};
     const std::filesystem::path file = _manager.resolve(path);
     try {
         const std::string ext = lowercase_extension(path);
@@ -92,6 +160,10 @@ Texture Assets2D::texture(std::string_view path) {
                 throw std::runtime_error(error);
             }
             made.texture = _renderer.create_texture_compressed(*image);
+        } else if (_manager.loaded<Image>(path)) {
+            // Its pixels are kept already (image()): make the texture of those.
+            const std::shared_ptr<const Image> image = _manager.load<Image>(path);
+            made.texture = _renderer.create_texture_from_rgba(image->rgba.data(), image->size);
         } else {
             const Image image = load_image(file);
             if (!image.valid()) {
@@ -121,13 +193,23 @@ std::shared_ptr<const SpriteCatalog> Assets2D::sprite_catalog(std::string_view p
     std::string key(path);
     Read<SpriteCatalog> read{.catalog = nullptr, .files = {{key, file_time(path)}}};
     try {
-        // Its images are named from the content root, as the catalog's own path is.
-        auto catalog = std::make_shared<SpriteCatalog>(load_sprite_catalog(_manager, _renderer, _manager.resolve(path)));
-        for (const auto& [id, texture] : catalog->textures()) {
-            if (!texture.path.empty()) {
-                read.files.emplace_back(texture.path, file_time(texture.path));
-                _manager.unload(texture.path); // made a texture: its pixels are not kept
+        // Its images are named from the content root, as the catalog's own path is,
+        // and made textures here, shared with every other user of the image.
+        auto catalog = std::make_shared<SpriteCatalog>(load_sprite_catalog(_manager.resolve(path)));
+        std::vector<std::pair<std::string, std::string>> textures;
+        for (const auto& [id, image] : catalog->textures()) {
+            textures.emplace_back(id, image.path);
+        }
+        for (const auto& [id, image] : textures) {
+            if (image.empty()) {
+                continue;
             }
+            read.files.emplace_back(image, file_time(image));
+            auto gpu = texture(image);
+            if (!gpu) {
+                throw std::runtime_error("sprite catalog texture could not be uploaded: " + image);
+            }
+            catalog->set_texture(id, image, std::move(gpu));
         }
         read.catalog = std::move(catalog);
         _problems.erase(key);
@@ -411,6 +493,8 @@ bool Assets2D::bind(EcsWorld& world) {
     _bound_changed = false;
     bind_texture_renderers(world, *this);
     bind_sprite_renderers(world, *this);
+    bind_skeletons2d(world, *this);
+    bind_normal_sprites2d(world, *this);
     bind_audio_emitters(world, *this);
     bind_particle_systems(world, *this);
     bind_particle_fields(world, *this);
@@ -426,17 +510,60 @@ bool Assets2D::bind(EcsWorld& world) {
             binder(world, *this);
         }
     }
+    _texture_reasons.clear();
+    if (_residency_diagnostics) {
+        const auto note = [&](const Texture& texture, const std::string& reason) {
+            if (texture)
+                _texture_reasons.try_emplace(texture.backend().get(), reason);
+        };
+        const auto owner = [](flecs::entity entity) {
+            return entity.name().size() ? std::string(entity.name().c_str()) : std::to_string(entity.id());
+        };
+        world.raw().each(
+            [&](flecs::entity e, const TextureRenderer& r) { note(r.texture, owner(e) + ".TextureRenderer.asset"); });
+        world.raw().each([&](flecs::entity e, const NormalSpriteRenderer2D& r) {
+            note(r.gpu_textures.albedo, owner(e) + ".NormalSpriteRenderer2D.albedo_asset");
+            note(r.gpu_textures.normal, owner(e) + ".NormalSpriteRenderer2D.normal_asset");
+            note(r.gpu_textures.specular, owner(e) + ".NormalSpriteRenderer2D.specular_asset");
+        });
+        world.raw().each([&](flecs::entity e, const SkeletonRenderer2D& r) {
+            note(r.texture, owner(e) + ".SkeletonRenderer2D.asset -> " + r.asset.id);
+        });
+        world.raw().each([&](flecs::entity e, const SpriteRenderer& r) {
+            if (r.sprite.catalog)
+                for (const auto& [id, image] : r.sprite.catalog->textures())
+                    note(image.texture, owner(e) + ".SpriteRenderer.asset -> " + r.asset.id);
+        });
+    }
+    if (_manager.over_memory_budget()) {
+        _manager.trim_memory();
+    }
+    if (over_texture_budget()) {
+        trim_texture_memory();
+    }
     return std::exchange(_bound_changed, false);
 }
 
 std::vector<std::string> Assets2D::reload_changed() {
     std::vector<std::string> changed;
-    for (auto made = _textures.begin(); made != _textures.end();) {
-        if (file_time(made->first) != made->second.time) {
-            changed.push_back(made->first);
-            made = _textures.erase(made);
+    for (TextureCache* cache : {&_textures, &_data_textures}) {
+        for (auto made = cache->begin(); made != cache->end();) {
+            if (file_time(made->first) != made->second.time) {
+                changed.push_back(made->first);
+                made = cache->erase(made);
+            } else {
+                ++made;
+            }
+        }
+    }
+    // Loads through manager() that failed: tried again once their file changed.
+    for (auto failed = _failed_loads.begin(); failed != _failed_loads.end();) {
+        const auto& [path, time] = failed->second;
+        if (file_time(path) != time) {
+            changed.push_back(path);
+            failed = _failed_loads.erase(failed);
         } else {
-            ++made;
+            ++failed;
         }
     }
     // Catalogs: when they, or the files they were made of, changed.
@@ -736,16 +863,28 @@ void bind_animators(EcsWorld& world, Assets2D& assets) {
 namespace kin {
 
 void bind_lights(EcsWorld& world, Assets2D& assets) {
-    std::vector<std::pair<flecs::entity, Texture>> rebound;
+    struct Bound {
+        flecs::entity entity;
+        Texture texture;
+        std::shared_ptr<const Image> image;
+    };
+    std::vector<Bound> rebound;
+    // The shape's image only for forward lighting, which shades with it.
+    const SceneLighting* lighting = scene_lighting(world);
+    const bool forward = lighting && lighting->forward_sprites;
     world.raw().each([&](flecs::entity entity, const LightComponent& light) {
+        // The image first: the texture is made from the pixels it decoded.
+        std::shared_ptr<const Image> image = forward ? assets.image(light.shape_asset.id) : nullptr;
         Texture shape = assets.texture(light.shape_asset.id);
-        if (!(shape == light.shape)) {
-            rebound.emplace_back(entity, std::move(shape));
+        if (!(shape == light.shape) || image != light.shape_image) {
+            rebound.push_back({entity, std::move(shape), std::move(image)});
         }
     });
-    for (auto& [entity, shape] : rebound) {
+    for (auto& [entity, shape, image] : rebound) {
         EcsEntity owner{entity}; // one from a prefab gets its own copy first
-        owner.get_mut<LightComponent>()->shape = std::move(shape);
+        auto* light = owner.get_mut<LightComponent>();
+        light->shape = std::move(shape);
+        light->shape_image = std::move(image);
         owner.modified<LightComponent>();
     }
 }

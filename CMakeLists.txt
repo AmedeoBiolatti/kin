@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 
 project(kin VERSION 0.2.6 LANGUAGES C CXX)
 
+# On Windows, the Python on PATH (the one `python -m pip install` installs
+# Pillow into) before the newest one in the registry.
+if(NOT DEFINED Python3_FIND_REGISTRY)
+    set(Python3_FIND_REGISTRY LAST)
+endif()
+
 include(CTest)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -59,6 +65,7 @@ include(kin_release_contract)
 # kin with add_subdirectory gets the engine alone.
 option(KIN_BUILD_GAMES "Build sample games" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_EXAMPLES "Build interactive performance examples" ${PROJECT_IS_TOP_LEVEL})
+option(KIN_BUILD_2D_WORKFLOW "Build the Lua 2D workshop and its integration test (requires Pillow)" ${KIN_BUILD_EXAMPLES})
 option(KIN_BUILD_BENCHMARKS "Build benchmark executables" ${PROJECT_IS_TOP_LEVEL})
 option(KIN_BUILD_TESTS "Build kin's tests (with BUILD_TESTING)" ${PROJECT_IS_TOP_LEVEL})
 # "config" registers only the tests whose result depends on how kin is configured
@@ -114,6 +121,7 @@ if(EMSCRIPTEN)
     set(_kin_threads_default OFF)
 endif()
 option(KIN_ENABLE_THREADS "Build the native job worker pool" ${_kin_threads_default})
+option(KIN_ENABLE_ACCESSIBILITY "Expose ui2 to native assistive technology through AccessKit C" OFF)
 if(EMSCRIPTEN AND KIN_ENABLE_THREADS)
     message(FATAL_ERROR "The experimental browser profile requires KIN_ENABLE_THREADS=OFF")
 endif()
@@ -192,6 +200,9 @@ endif()
 
 if(KIN_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+if(KIN_BUILD_2D_WORKFLOW AND KIN_ENABLE_SCRIPTING AND KIN_ENABLE_IMAGE_IO AND KIN_ENABLE_DEVELOPMENT)
+    add_subdirectory(examples/2d_workflow)
 endif()
 
 if(KIN_BUILD_GAMES AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/games/CMakeLists.txt")

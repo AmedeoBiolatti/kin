@@ -149,6 +149,7 @@ private:
     friend class GpuRenderer2DBackend;
     friend class gpu::GpuRenderer3D; // binds materials' textures
     friend class Assets3D; // weak, renderer-scoped texture sharing
+    friend class Assets2D; // texture residency and eviction
 
     const std::shared_ptr<ITextureBackend>& backend() const { return _backend; }
 

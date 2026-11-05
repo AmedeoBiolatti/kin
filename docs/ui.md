@@ -4,6 +4,58 @@
 snapshot path have been removed, so new and existing UI code should include
 `kin/ui2/*` headers and use the `kin::ui2` namespace explicitly.
 
+## Accessibility
+
+`kin/ui2/accessibility.hpp` connects UI semantics to AccessKit C 0.23.2: AT-SPI on
+Linux/Unix, UI Automation on Windows and the macOS accessibility APIs. Native
+support is optional; ordinary builds require neither AccessKit nor Rust:
+
+```sh
+cmake -S . -B build -DKIN_ENABLE_ACCESSIBILITY=ON \
+  -DKIN_ACCESSKIT_INCLUDE_DIR=/path/to/accesskit-c/include \
+  -DKIN_ACCESSKIT_LIBRARY=/path/to/libaccesskit.a
+```
+
+Use the upstream 0.23.2 desktop static library or build that tag with
+`cargo build --release --locked`. The library must match the target platform and
+runtime. Kin adds desktop system libraries and packages the retained AccessKit
+license texts. The platform half (the window's AccessKit adapter) lives in
+`engine/src/platform/accesskit_adapter.cpp`, built only with this option; ui2's
+bridge builds the tree from the UI's semantics.
+
+Create one bridge per window after its renderer, and destroy it first:
+
+```cpp
+kin::ui2::Accessibility accessibility{window, renderer, "My game"};
+// Each frame:
+ui.begin(input, renderer, dt);
+ui.semantic_label(volume_id, "Music volume"); // before or after the widget
+// ...build UI...
+ui.end();
+accessibility.update(ui);
+// On an event:
+accessibility.announce("Settings saved"); // second argument true: assertive
+```
+
+Labels, values, bounds, hierarchy, focus, toggled state and disabled/modal state
+come from UI semantics. Give icon buttons/fields explicit semantic_label names
+every frame. Sliders/number inputs expose numeric ranges/steps and accept
+increment/decrement/set-value. Text inputs accept replacement text; buttons,
+toggles and menu items accept activation. Custom controls should describe their
+semantics and implement Context's matching action helpers.
+
+Native callbacks queue actions across threads without accessing UI state. The
+main thread revalidates targets and applies one action to the next UI frame
+(`Context::queue_action(Id, ...)`, numbers passed whole). Removed/disabled/
+modal-blocked targets cannot activate. snapshot/request_action also work with
+native support disabled. Mobile adapters and rich-text caret/selection
+accessibility are not implemented.
+
+set_reduced_motion(true) makes surface transitions immediate; share that setting
+with your game's tween policy. OS preference detection is not automatic.
+Semantic automation additionally accepts `increment`, `decrement`, `set_number`
+(`text` holds the number), alongside click/focus/set_text.
+
 ## Entry Points
 
 - `kin/ui2/context.hpp` for immediate-mode UI context, drawing, clipping, input,
@@ -330,6 +382,26 @@ text field has the keys, so typing is not taken for commands.
 
 `games/studio_demo` is an editor-style window built this way, and
 `games/nextcode_look` rebuilds next_code's window (menus, icons, title bar).
+
+### Controllers
+
+Call `app.open_gamepads()` to poll a controller. ui2 navigation is enabled by
+default: D-pad/left-stick directions move focus spatially between enabled,
+visible controls; A/Cross accepts and B/Circle backs out. Widgets with directional
+editing or selection consume their directions before focus navigation runs.
+Buttons, toggles, sliders and focusable boxes work with acceptance; menu lists
+use their usual selection/activation paths. A slider uses Left/Right to change
+its value. Existing modal and focus-trap boundaries constrain navigation.
+
+Pass dt to `ui.begin(input, renderer, dt)` for held-direction repeat. Configure
+dead zone and repeat timing with `set_controller_navigation({.dead_zone = 0.5f,
+.repeat_delay = 0.4f, .repeat_interval = 0.1f})`, or disable it with
+`{.enabled = false}`. `back_requested()` lets custom screens handle cancellation.
+`controller_active()` says whether the controller was the last to navigate
+(pointer presses and keyboard Tab/Enter switch it back), for button prompts;
+`kin::gamepad_button_label(family, button)` names a button for a controller family.
+Accept and back read the controller's presses this rendered frame
+(`Input::pad_frame_pressed`), as keys do; held directions repeat.
 
 ## Charts
 
@@ -681,7 +753,54 @@ scrolling, and copy selection are independent of a game's configured logical siz
 
 ## Automation
 
-There is no `ui.snapshot` server method. For automation, expose assertable scene
-state through `Scene::write_report`, inspect ECS scenes through `world.snapshot`,
-and drive UI with `input.mouse`, `input.action`, and `input.text`.
+Return your ui2 context from `Scene::ui_context()` to expose `ui.snapshot` and
+`ui.action`. `MenuScene` already does this. A snapshot reports stable string IDs,
+parent IDs, author keys, role, label, value, clipped logical bounds and
+enabled/visible/blocked/focus/checked flags. String IDs preserve all 64 bits in
+JavaScript clients. Snapshots describe the most recent UI frame; an initially
+empty render-driven context is rendered once to populate its layout.
+
+```json
+{"id":1,"method":"ui.snapshot"}
+{"id":2,"method":"ui.action","params":{"id":"Play","action":"click"}}
+{"id":3,"method":"sim.tick","params":{"count":1}}
+```
+
+The `id` selector matches an exact label, decimal numeric ID, or author key.
+Ambiguous selectors and hidden, disabled, or blocked targets are refused.
+`ui.semantic_key(control.id, "play_button")` assigns an author key for that frame;
+`.kinui` buttons, toggles, sliders and text inputs use their element IDs as keys.
+Actions are `click`, `focus`, and `set_text` (with a `text` string for `TextInput`
+or editable `TextEdit`). `TextEdit` keeps its undo history and byte limit.
+Sliders/number inputs also accept `increment`, `decrement` and `set_number`
+(the finite numeric value is in `text`); snapshots include their numeric range/step.
+One action may be queued per tick; it is rechecked against the next frame and
+expires after that step. Taking a screenshot does not consume it. `--inspect`
+allows snapshots of the last drawn frame and refuses semantic input, as it does
+physical input injection; inspecting never renders an extra UI frame.
+
+Buttons, icon buttons, toggles, sliders, text inputs/edits, number inputs and menu
+rows provide semantics. Labels with IDs report text. Layout boxes report groups
+and focusable controls. Other/custom controls can opt in before `region()`:
+
+```cpp
+ui.describe(id, "button", "Inventory", bounds, enabled, true);
+ui.semantic_key(id, "inventory");
+ui.register_focusable(id);
+auto interaction = ui.region(id, bounds);
+bool activated = interaction.clicked || ui.keyboard_activated(interaction); // Enter/Space/accept
+ui.semantic_state(id, value_text, checked); // after input: what it shows now
+```
+
+Roles the built-in controls use, which AccessKit maps: `button`, `toggle`,
+`slider`, `spinbutton`, `text_input`, `text_edit`, `text_view`, `text`, `menu`,
+`menu_item`, `group` and `region` (any other is a group). Every role takes
+click and focus; set_text needs `text_input`/`text_edit`, the numeric actions
+`slider`/`spinbutton` (`semantic_role_accepts`). Elements keep their slots from
+frame to frame, so describing a control costs no allocation once its strings
+have grown; `focused` is as `end()` left the focus.
+`queue_action(selector, action, text, error)` supports in-process automation, and
+`queue_action(id, action, text, number, error)` an adapter that holds ids;
+`write_snapshot` serializes the same tree. Keep assertable game state in
+`Scene::write_report` and inspect ECS scenes through `world.snapshot` alongside it.
 

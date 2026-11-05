@@ -1,5 +1,10 @@
 # Assets
 
+For runtime input/scene/pool services see [2D workflows](2d_workflows.md). The
+Assets2D binders also load [2D skeletons](skeleton_2d.md) and
+[normal-mapped sprites](rendering.md#normal-mapped-sprites). Authoring hot imports
+and the processed artifact cache are covered in [2D importing](importing_2d.md).
+
 Kin has two complementary asset APIs that share one cache:
 
 - **`AssetManager`** — synchronous, eager loading. `load<T>(path)` blocks, caches,
@@ -106,6 +111,94 @@ kin::SceneAppConfig config;
 config.asset_server = &server;
 return kin::run_scene_app(config, scenes);
 ```
+
+## Asset lifetime
+
+The cache retains assets by default. `AssetManager::unload_unused()` releases
+entries with no external `AssetHandle` or `shared()` view, keeping every
+transitive dependency declared through `LoadContext::require`. Pending jobs pin
+their storage until they finish applying. Dependency graphs may contain cycles;
+a cycle with no external owner is collected. Call collection on the main thread,
+between frames, after releasing handles that are no longer needed.
+
+`kin::AssetScope` (`kin/assets/asset_scope.hpp`) groups strong references for a
+level, menu or loading screen:
+
+```cpp
+kin::AssetScope level;
+auto hero = level.load_async<kin::Image>(server, "images/hero.png");
+// Or level.load<T>(assets, path), or level.keep(existing_handle).
+server.drain();
+// On leaving the level:
+hero = {};
+level.clear();
+assets.unload_unused();
+```
+
+Destroying the scope also releases its pins. A handle kept elsewhere continues
+to own its asset; `AssetHandle::keepalive()` is the type-erased reference a scope
+holds. Collect after `pump()`/`drain()` once completed jobs have released their
+temporary references: completed parents stay pinned until the server's current
+dependency batch is quiescent. The dependency edges the server records live in
+the manager (`AssetManager::dependencies(key)`). Unload/clear remain explicit
+invalidation operations, including for handles that still exist. A released
+entry's path reports `Discovered`, or `Missing` when its file is gone, unless
+another type still caches it.
+
+Keep a handle or shared view when retaining a loaded value; a borrowed `const T&`
+does not pin it. Dependency retention covers declared async dependencies and
+ordinary strong ownership. It does not break arbitrary shared-pointer cycles
+inside asset values. `Assets2D`, described below, has its own scene-owned cache;
+this collector manages `AssetManager`/`AssetServer` storage.
+
+## Memory budgets and residency
+
+`AssetManager::set_memory_budget(bytes)` enables LRU eviction of unowned storage;
+zero disables the budget. Loads and AssetServer pumps trim automatically when the
+cache is over budget. Call `trim_memory()` between frames after releasing other
+handles; `over_memory_budget()` is a cheap check for per-frame callers. Eviction preserves
+external handles, pending jobs and the complete graph of declared dependencies.
+Unowned reverse dependants are evicted together with a dependency, preventing
+reuse of a partially evicted cached parent. Unowned dependency cycles are evictable.
+
+`memory_report()` returns resident/budget/pinned bytes and `over_budget`;
+`trim_memory()` also returns the number evicted. An overrun is valid when live
+owners prevent eviction. `residency()` returns deterministic rows with payload
+bytes, last access, external reference counts, dependencies and a retaining chain
+from one external root. These are cache-storage references, not heap-wide tracing.
+`summarize_residency(rows, budget)` totals any rows (the CPU and texture reports
+both do), and `least_recent_first` is the order budgets evict in.
+
+Image and skeleton (`.kinskel`) loaders register payload sizers; `Assets2D::image()`
+and `Assets2D::skeleton2d()` read through the manager, so their pixels and rigs
+count toward its budget. For game types, use
+`register_memory_sizer<T>([](const T& value) -> u64 { ... })`; types without a
+sizer use `sizeof(T)` and are marked `size_estimated`. Payload accounting excludes
+allocator/driver overhead and memory allocated outside the registered value.
+
+`Assets2D::set_texture_budget(bytes)`, `texture_memory_report()`,
+`texture_residency()` and `trim_texture_memory()` cover its color and raw material
+texture caches separately. Estimates use base-level format/block size, excluding
+mip chains and driver overhead. Bind trims, after components receive their
+handles, when `over_texture_budget()`. Live components, queued draws and catalogs
+pin textures; catalog pins remain until their owning cache is released. This
+budget does not collect the scene's catalog, font or shader caches, nor GPU
+resources created directly by game code. `set_residency_diagnostics(true)`
+records representative component/asset reasons on bind (pinning never depends
+on it). `for_snapshot()` gives a reload's next `Assets2D` the same binders,
+both budgets and the diagnostics setting.
+
+Lua exposes the same reports under `asset_memory`; the
+[workshop demo](../examples/2d_workflow/README.md) displays residency and applies
+budget pressure while preserving its visible actors and room.
+
+## Importing authoring assets
+
+`tools/import_2d_assets.py` converts Aseprite exports/native documents, PNG sprite
+sets, finite Tiled JSON maps and selected LDtk levels into native content. It
+packs sprites into deterministic atlases and integrates with `kin_game(IMPORTS
+...)`, loose content and `.kinpak` packaging. See [2D imports](importing_2d.md)
+for the manifest, build setup and supported format subsets.
 
 ## Assets named by components (2D)
 
@@ -267,6 +360,15 @@ the folder's place. Every loader reads through the content layer, so the same
 relative paths work either way. `discover()` lists a pack's files as it lists
 a folder's. See [shipping](shipping.md).
 
+A `kin::MemoryContent` is a pack made in memory: `MemoryContent::create(files)`
+takes relative paths and their bytes, and mounts them at the snapshot's own
+`root()` for as long as it lives. Reads under that root (`read_content_file`,
+`view_content_file`, `list_content_files`, `open_content_stream`, ...) serve it
+exactly as they serve a `.kinpak`; views keep their bytes alive after the
+snapshot is gone, and `memory_content_for(path)` returns the snapshot that
+answers for a path. `unmount_all_content_packs()` leaves live snapshots
+mounted. Development reloads and scene preloads read through these snapshots.
+
 ## Compressed textures
 
 PNG and JPEG textures are decoded to RGBA8 (4 bytes a texel) and given their
@@ -379,13 +481,11 @@ config.file_watcher = &files; // run_scene_app polls it once per frame
 ## Scope (V1)
 
 Implemented: async loading, handles, `LoadState`, events, dependency loading,
-deterministic drain, frame integration, and default prefab asset discovery/loading
-for `.kinprefab` files.
+deterministic drain, frame integration, optional unused-asset collection, asset
+scopes, manifest-driven 2D imports/atlas packing, and default prefab loading.
 
-Not yet implemented: ref-counted auto-unload (assets are released via
-`AssetManager::unload`/`clear`), and an asset processing pipeline (`.meta`/import
-settings/cached artifacts/multiple sources). Hot-reload `Modified` events are
-reserved but not yet emitted.
+Imports use an explicit build manifest; there is no editor `.meta` database or
+general artifact cache. Hot-reload `Modified` events are reserved but not yet emitted.
 
 ## Shipping inventory and dependency declarations
 

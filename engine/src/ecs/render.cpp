@@ -1,10 +1,14 @@
 #include <kin/ecs/render.hpp>
 
+#include "render_internal.hpp"
+
 #include <kin/core/affine.hpp>
 #include <kin/core/jobs.hpp>
 
+#include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/shader_effect.hpp>
+#include <kin/ecs/skeleton2d.hpp>
 #include <kin/ecs/text.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/platform/log.hpp>
@@ -20,6 +24,12 @@
 
 namespace kin {
 namespace {
+
+using render_detail::flip_for;
+using render_detail::key_for;
+using render_detail::mirrored_pivot;
+using render_detail::to_world;
+using render_detail::turned_bounds;
 
 Vec2f add(Vec2f a, Vec2f b) {
     return {a.x + b.x, a.y + b.y};
@@ -41,29 +51,11 @@ bool plain(const WorldTransform& t) {
     return t.rotation == 0.0f && t.scale == Vec2f{1.0f, 1.0f};
 }
 
-// A point in the entity's own space, in the world.
-Vec2f to_world(const WorldTransform& t, Vec2f local) {
-    if (plain(t)) {
-        return add(t.pos, local);
-    }
-    return add(t.pos, Affine2::trs({}, t.rotation, t.scale).apply_vector(local));
-}
-
 Vec2f resolved_size(const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
     if (sprite.size.x > 0.0f && sprite.size.y > 0.0f) {
         return sprite.size;
     }
     return resolved.size;
-}
-
-// The flags, mirrored again on each axis the transform scales negatively.
-Flip flip_for(const WorldTransform& t, bool flip_x, bool flip_y) {
-    return flip_of(flip_x != (t.scale.x < 0.0f), flip_y != (t.scale.y < 0.0f));
-}
-
-// The pivot as a fraction of the mirrored image: the same point of the world.
-Vec2f mirrored_pivot(Vec2f pivot, Flip flip) {
-    return {flips_x(flip) ? 1.0f - pivot.x : pivot.x, flips_y(flip) ? 1.0f - pivot.y : pivot.y};
 }
 
 Vec2f resolved_pivot(const SpriteRenderer& sprite, const ResolvedSprite& resolved) {
@@ -114,41 +106,6 @@ Rectf texture_draw_rect(const WorldTransform& t, const TextureRenderer& texture,
     return {top_left.x, top_left.y, size.x, size.y};
 }
 
-// What a rectangle turned by `rotation` about `pivot` (a fraction of it) may cover.
-Rectf turned_bounds(Rectf rect, f32 rotation, Vec2f pivot) {
-    if (rotation == 0.0f) {
-        return rect;
-    }
-    const Vec2f p{rect.x + rect.w * pivot.x, rect.y + rect.h * pivot.y};
-    const f32 dx = std::max(std::abs(p.x - rect.x), std::abs(rect.x + rect.w - p.x));
-    const f32 dy = std::max(std::abs(p.y - rect.y), std::abs(rect.y + rect.h - p.y));
-    const f32 r = std::sqrt(dx * dx + dy * dy);
-    return {p.x - r, p.y - r, 2 * r, 2 * r};
-}
-
-u64 pass_mask_for_layer(i32 layer) {
-    if (layer >= layer_value(RenderLayer::Debug)) {
-        return render_pass_mask::debug;
-    }
-    if (layer >= layer_value(RenderLayer::UI)) {
-        return render_pass_mask::ui;
-    }
-    if (layer >= layer_value(RenderLayer::Effects)) {
-        return render_pass_mask::effects;
-    }
-    return render_pass_mask::world;
-}
-
-RenderKey key_for(i32 layer, i32 order, bool y_sort, f32 y) {
-    return {
-        .layer = layer,
-        .order = order,
-        .y = y,
-        .use_y = y_sort,
-        .pass_mask = pass_mask_for_layer(layer),
-    };
-}
-
 } // namespace
 
 WorldRenderState::WorldRenderState(flecs::world& world)
@@ -168,6 +125,10 @@ WorldRenderState::WorldRenderState(flecs::world& world)
                    .term_at(3).self().up().cached().build()),
       _textures(world.query_builder<const Transform2D, const WorldTransform, const TextureRenderer, const ClipGroup*>()
                     .term_at(3).self().up().cached().build()),
+      _skeletons(world.query_builder<const Transform2D, const WorldTransform, const SkeletonRenderer2D, const ClipGroup*>()
+                     .term_at(3).self().up().cached().build()),
+      _normal_sprites(world.query_builder<const Transform2D, const WorldTransform, const NormalSpriteRenderer2D, const ClipGroup*>()
+                          .term_at(3).self().up().cached().build()),
       _rects(world.query_builder<const Transform2D, const WorldTransform, const RectRenderer, const ClipGroup*>()
                  .term_at(3).self().up().cached().build()),
       _lines(world.query_builder<const Transform2D, const WorldTransform, const LineRenderer, const ClipGroup*>()
@@ -234,14 +195,16 @@ void WorldRenderState::submit_groups(RenderQueue& queue, const SpriteRenderOptio
 namespace {
 
 // fn(it, row, world transform, renderer) for each row of a renderer query.
+// A renderer the rows inherit (from a prefab) is one value for all of them.
 template <typename R, typename Fn>
 void each_row(flecs::query<const Transform2D, const WorldTransform, const R, const ClipGroup*>& query, Fn&& fn) {
     query.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto world = it.field<const WorldTransform>(1);
             const auto renderers = it.field<const R>(2);
+            const bool shared = !it.is_self(2);
             for (const auto i : it) {
-                fn(it, static_cast<std::size_t>(i), world[i], renderers[i]);
+                fn(it, static_cast<std::size_t>(i), world[i], renderers[shared ? 0 : i]);
             }
         }
     });
@@ -253,8 +216,9 @@ void each_particles(flecs::query<const P, const ClipGroup*>& query, Fn&& fn) {
     query.run([&](flecs::iter& it) {
         while (it.next()) {
             const auto particles = it.field<const P>(0);
+            const bool shared = !it.is_self(0); // inherited: one for every row
             for (const auto i : it) {
-                fn(it, static_cast<std::size_t>(i), particles[i]);
+                fn(it, static_cast<std::size_t>(i), particles[shared ? 0 : i]);
             }
         }
     });
@@ -359,6 +323,7 @@ void WorldRenderState::collect_all(RenderQueue& queue,
             repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_texture(to(it, i), it.entity(i), at, r, options.view); });
         }
     });
+    collect_skeletons_and_normal_sprites(queue, options, include);
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
         if (wanted(it, i)) {
             repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });
@@ -506,22 +471,27 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
             const auto world = it.field<const WorldTransform>(1);
             const auto textures = it.field<const TextureRenderer>(2);
             const i32 rows = static_cast<i32>(it.count());
+            // Inherited (from a prefab): one renderer for every row, drawn by the loops below.
+            const bool shared = !it.is_self(2);
             if (it.is_set(3)) {
                 // Clipped: all dynamic, each into its group's queue.
                 if (!statics) {
                     for (const auto i : it) {
                         repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
-                            submit_texture(route(queue, it, i, 3, options), it.entity(i), at, textures[i], options.view);
+                            submit_texture(route(queue, it, i, 3, options), it.entity(i), at, textures[shared ? 0 : i],
+                                           options.view);
                         });
                     }
                 }
                 continue;
             }
-            if (!options.jobs || rows < parallel_min || world[0].parallax) { // a table shares its parent (and any Parallax)
+            if (!options.jobs || rows < parallel_min || world[0].parallax ||
+                shared) { // a table shares its parent (and any Parallax)
                 for (const auto i : it) {
-                    if ((textures[i].static_renderable && !world[i].parallax) == statics) {
+                    const TextureRenderer& texture = textures[shared ? 0 : i];
+                    if ((texture.static_renderable && !world[i].parallax) == statics) {
                         repeated(it.entity(i), world[i], options.view, [&](const WorldTransform& at) {
-                            submit_texture(queue, it.entity(i), at, textures[i], options.view);
+                            submit_texture(queue, it.entity(i), at, texture, options.view);
                         });
                     }
                 }
@@ -601,6 +571,32 @@ void WorldRenderState::collect_textures(RenderQueue& queue, const SpriteRenderOp
     });
 }
 
+void WorldRenderState::collect_skeletons_and_normal_sprites(RenderQueue& queue, const SpriteRenderOptions& options,
+                                                            const EcsRenderFilter& include) {
+    const auto to = [&](flecs::iter& it, std::size_t i) -> RenderQueue& { return route(queue, it, i, 3, options); };
+    const auto wanted = [&](flecs::iter& it, std::size_t i) { return !include || include(it.entity(i)); };
+    each_row(_skeletons, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const SkeletonRenderer2D& r) {
+        if (wanted(it, i)) {
+            repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                submit_skeleton2d(to(it, i), it.entity(i), at, r, options.view);
+            });
+        }
+    });
+    if (!_normal_sprites.is_true()) {
+        return;
+    }
+    // The lights, gathered once for every sprite (and kept while they stay the same).
+    _normal_sprite_lighting = gather_normal_sprite_lighting2d(*_world, std::move(_normal_sprite_lighting));
+    each_row(_normal_sprites,
+             [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const NormalSpriteRenderer2D& r) {
+                 if (wanted(it, i)) {
+                     repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) {
+                         submit_normal_sprite2d(to(it, i), it.entity(i), at, r, _normal_sprite_lighting, options.view);
+                     });
+                 }
+             });
+}
+
 void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions options) {
     const u64 existing = queue.submitted(); // the caller's commands, not culled yet
     queue.set_sort(options.sort ? options.sort_mode : RenderSortMode::Submission);
@@ -613,6 +609,7 @@ void WorldRenderState::collect_dynamic(RenderQueue& queue, SpriteRenderOptions o
         }
     });
     collect_textures(queue, options, false);
+    collect_skeletons_and_normal_sprites(queue, options, {});
     each_row(_rects, [&](flecs::iter& it, std::size_t i, const WorldTransform& t, const RectRenderer& r) {
         if (take(it, r.static_renderable, t)) {
             repeated(it.entity(i), t, options.view, [&](const WorldTransform& at) { submit_rect(to(it, i), it.entity(i), at, r, options.view); });

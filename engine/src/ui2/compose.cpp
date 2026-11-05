@@ -34,6 +34,11 @@ bool horizontal(UiLayoutAxis axis) {
     return axis == UiLayoutAxis::Horizontal;
 }
 
+// What a box is to assistive technology: a focusable one acts as a button.
+std::string_view box_role(bool focusable) {
+    return focusable ? "button" : "group";
+}
+
 // Axis 0 is vertical (y), 1 horizontal (x), as ScrollRecord's arrays.
 f32& along(Vec2f& v, i32 axis) {
     return axis == 0 ? v.y : v.x;
@@ -136,6 +141,7 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
     }
     out.bounds = record->second.rect;
     const Rectf visible = record->second.visible;
+    describe(id, box_role(style.focusable), {}, visible, style.enabled, style.focusable);
     out.pressed_outside = _any_press && !contains(visible, pointer()) && !press_inside(id);
     if (!style.interactive || !style.enabled || !_input) {
         return out;
@@ -169,8 +175,7 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
         out.secondary_clicked = true;
     }
     // Enter or Space on the focused box clicks it, unless a text field has the keys.
-    if (style.focusable && out.focused && !_wants_text_input_last &&
-        (key_pressed(Key::Enter) || key_pressed(Key::KeypadEnter) || key_pressed(Key::Space))) {
+    if (style.focusable && keyboard_activated(out)) {
         out.clicked = true;
     }
 
@@ -308,6 +313,8 @@ void Context::begin_compose(Id id, ComposeKind kind, const BoxStyle& style, Layo
         .clip_radius = style.clip_rounded ? style.surface.normal.radius : 0.0f,
         .key_context = std::string(style.key_context),
         .interactive = style.interactive,
+        .enabled = style.enabled,
+        .focusable = style.focusable,
         .window_drag = style.window_drag,
         .z = compose_z(style),
     });
@@ -920,6 +927,16 @@ void Context::record_compose(const std::vector<i32>& clip_of, const std::vector<
         record.row_height = c.row_height;
         record.key_context = c.key_context;
         record.frame = frame;
+        SemanticElement* semantic = element(c.id);
+        if (!semantic) {
+            describe(c.id, box_role(c.focusable), {}, record.visible, c.enabled, c.focusable);
+            semantic = element(c.id);
+        }
+        if (semantic) {
+            semantic->bounds = to_screen(record.visible);
+            semantic->visible = record.visible.w > 0 && record.visible.h > 0;
+            semantic->parent = parent;
+        }
     }
     if (frame % stale_frames == 0) {
         std::erase_if(_compose_records, [frame](const auto& kv) { return kv.second.frame + stale_frames < frame; });
@@ -956,6 +973,12 @@ void Context::request_focus_move(Id from, i32 direction) {
 // At end(): Tab moves focus along this frame's order; the new focus is scrolled
 // into view next frame.
 void Context::finish_focus() {
+    std::erase_if(_focus_order, [&](const FocusEntry& entry) {
+        const auto* e = element(entry.id);
+        return e && (!e->enabled || e->blocked);
+    });
+    if (const auto* focused = element(_state.focused()); focused && (!focused->enabled || focused->blocked))
+        _state.clear_focused();
     std::stable_sort(_focus_order.begin(), _focus_order.end(), [](const FocusEntry& a, const FocusEntry& b) {
         return a.tab_index != b.tab_index ? a.tab_index < b.tab_index : a.order < b.order;
     });
@@ -997,6 +1020,7 @@ void Context::finish_focus() {
         _focus_move = std::pair{_state.focused(), modifier_held(KeyModifiers::Shift) ? -1 : 1};
     }
     _focus_moved = false;
+    finish_navigation();
     if (_focus_move && !_focus_order.empty()) {
         const auto [from, direction] = *_focus_move;
         const i32 n = static_cast<i32>(_focus_order.size());

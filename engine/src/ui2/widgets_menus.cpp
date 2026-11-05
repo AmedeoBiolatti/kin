@@ -115,6 +115,7 @@ void theme_styles(const Theme& theme, MenuList& widget) {
 
 void run(Context& ctx, MenuList& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
+    ctx.describe(widget.id, "menu", {}, widget.bounds, widget.enabled, true);
     widget.activated = -1;
     widget.activated_id.clear();
     widget.hovered = -1;
@@ -144,7 +145,8 @@ void run(Context& ctx, MenuList& widget) {
         selection_normalized = true;
     }
     const i32 previous = widget.selected;
-    const bool keys = widget.enabled && (widget.popup_keys || takes_keys(ctx, widget.id, widget.keys_without_focus));
+    const bool keys = widget.enabled && ctx.accepts_input(widget.id) &&
+                      (widget.popup_keys || takes_keys(ctx, widget.id, widget.keys_without_focus));
     if (keys && ctx.action_pressed("menu_up")) {
         widget.selected = widget.selected < 0 ? next_menu_index(widget.items, 0, -1, widget.wrap)
                                               : next_menu_index(widget.items, widget.selected, -1, widget.wrap);
@@ -212,9 +214,14 @@ void run(Context& ctx, MenuList& widget) {
             continue;
         }
         const Id row_id = make_id(widget.id, static_cast<u64>(i));
+        ctx.describe(row_id, "menu_item", item.label, visible_row, widget.enabled && item.enabled, true, {}, item.checked);
+        ctx.semantic_parent(row_id, widget.id);
+        if (!item.id.empty()) {
+            ctx.semantic_key(row_id, item.id);
+        }
         const Interaction it = ctx.region(row_id, visible_row, widget.z);
         focus_on_press(ctx, widget.id, it.pressed);
-        if (it.hot && item.enabled && widget.enabled) {
+        if ((it.hot || it.clicked) && item.enabled && widget.enabled) {
             widget.selected = i;
             widget.hovered = i;
             widget.hovered_id = menu_item_result_id(item);

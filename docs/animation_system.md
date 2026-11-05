@@ -46,6 +46,11 @@ kin::tween(world, card, {.property = "Transform2D.pos", .to = kin::Vec2f{320, 20
 kin::update_tweens(world, dt); // each frame
 ```
 
+Where Lua scripts run, their world's script services step the world's tweens
+once per simulation step (`ScriptWorkflows2D`, before the scripts' updates), so
+do not call `update_tweens` as well. Scripts start tweens with `self:tween` and
+`tweens.to` ([Lua 2D workflows](lua_2d_workflows.md#property-tweens)).
+
 - **What it moves:** any described field that tracks can set, named the same
   way. Numbers, pairs and colours move. Whole numbers, checks and text change
   at its end.
@@ -72,7 +77,21 @@ Tweens and key frames ease the same ways (`Easing`, `easings()`):
 
 For things to do later by time, `kin::Timers` (`kin/core/timers.hpp`) runs
 actions `after(seconds, ...)` or `every(seconds, ...)` as the game calls
-`update(dt)`, and `cancel(id)` stops one.
+`update(dt)`, and `cancel(id)` stops one. Scripts use tasks instead
+(`self:after`, `self:every`, `task.wait`), which a reload or a stopped script
+cancels.
+
+Sequences are tasks too: await one tween after another, or start several and
+await each for a parallel step:
+
+```lua
+task.run(function()
+    task.await(tweens.to(card, 'Transform2D.pos', {x=320,y=200}, 0.3, 'backout'))
+    local fade = tweens.to(card, 'SpriteRenderer.tint', {r=255,g=255,b=255,a=0}, 0.2)
+    local turn = tweens.to(card, 'Transform2D.rotation', 180, 0.2)
+    task.await(fade); task.await(turn)
+end)
+```
 
 ## Definitions And Players
 

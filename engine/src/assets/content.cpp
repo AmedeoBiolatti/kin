@@ -6,12 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <mutex>
 #include <shared_mutex>
+#include <stdexcept>
 #include <utility>
 
 #if defined(_WIN32)
@@ -172,6 +174,9 @@ struct Mount {
     // the pack this way.
     std::filesystem::path canonical;
     std::shared_ptr<const ContentPack> pack;
+    // Set for a MemoryContent's pack: it unmounts itself when it is destroyed.
+    std::weak_ptr<const MemoryContent> memory;
+    bool from_memory = false;
 };
 
 std::filesystem::path canonical_form(const std::filesystem::path& point) {
@@ -191,10 +196,12 @@ Mounts& mounts() {
 }
 
 // Where `path` is in a mounted pack: the pack, and the path inside it ("" for
-// the mount point itself).
+// the mount point itself). Locked only after the mounts' lock is released: the
+// last owner of a MemoryContent unmounts it.
 struct PackLocation {
     std::shared_ptr<const ContentPack> pack;
     std::string inner;
+    std::weak_ptr<const MemoryContent> memory;
 };
 
 std::optional<PackLocation> locate(const std::filesystem::path& path) {
@@ -221,7 +228,7 @@ std::optional<PackLocation> locate(const std::filesystem::path& path) {
             inner = inside(mount.canonical);
         }
         if (inner) {
-            return PackLocation{mount.pack, std::move(*inner)};
+            return PackLocation{mount.pack, std::move(*inner), mount.memory};
         }
     }
     return std::nullopt;
@@ -396,10 +403,16 @@ const ContentPack::Entry* ContentPack::find_ignoring_case(std::string_view path)
 }
 
 std::span<const std::byte> ContentPack::bytes(const Entry& entry) const {
+    if (_memory_owner) {
+        return _memory_bytes[static_cast<std::size_t>(&entry - _entries.data())];
+    }
     return {_data + entry.offset, static_cast<std::size_t>(entry.size)};
 }
 
 bool ContentPack::verify(std::string* error) const {
+    if (_memory_owner) {
+        return true; // made from bytes in memory: there is no file to go bad
+    }
     for (const Entry& entry : _entries) {
         const std::span<const std::byte> data = bytes(entry);
         if (crc32_update(0, data.data(), data.size()) != entry.crc32) {
@@ -515,13 +528,57 @@ ContentPackWriteResult write_content_pack(const std::filesystem::path& dir, cons
 
 // --- Mounts and reads ------------------------------------------------------
 
-void mount_content_pack(const std::filesystem::path& mount_point, std::shared_ptr<const ContentPack> pack) {
+namespace {
+
+void add_mount(Mount entry) {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
-    const std::filesystem::path point = normalized(mount_point);
-    std::erase_if(state.list, [&](const Mount& m) { return m.point == point; });
-    state.list.push_back({point, canonical_form(point), std::move(pack)});
+    std::erase_if(state.list, [&](const Mount& m) { return m.point == entry.point; });
+    state.list.push_back(std::move(entry));
     std::ranges::stable_sort(state.list, std::greater<>{}, [](const Mount& m) { return m.point.native().size(); });
+}
+
+} // namespace
+
+void mount_content_pack(const std::filesystem::path& mount_point, std::shared_ptr<const ContentPack> pack) {
+    const std::filesystem::path point = normalized(mount_point);
+    add_mount({.point = point, .canonical = canonical_form(point), .pack = std::move(pack)});
+}
+
+std::shared_ptr<const MemoryContent> MemoryContent::create(Files files) {
+    for (const auto& [name, bytes] : files) {
+        if (!valid_entry_path(name)) {
+            throw std::invalid_argument("invalid memory content path: " + name);
+        }
+    }
+    static std::atomic<u64> next{1};
+    std::shared_ptr<MemoryContent> content{new MemoryContent};
+    content->_root =
+        normalized(std::filesystem::temp_directory_path() / ".kin-memory-content" / std::to_string(next.fetch_add(1)));
+    content->_files = std::make_shared<const Files>(std::move(files));
+    // A map keeps its files in path order, as a pack's index is.
+    std::shared_ptr<ContentPack> pack{new ContentPack};
+    pack->_file = content->_root;
+    pack->_memory_owner = content->_files;
+    for (const auto& [name, bytes] : *content->_files) {
+        pack->_entries.push_back({.path = name, .offset = 0, .size = bytes.size(), .crc32 = 0});
+        pack->_memory_bytes.push_back(std::as_bytes(std::span{bytes.data(), bytes.size()}));
+    }
+    content->_pack = pack;
+    // Its root is a name, not a folder, but under the temp folder, which a path
+    // canonical code resolves may name differently (a symlink, RUNNER~1).
+    add_mount({.point = content->_root,
+               .canonical = canonical_form(content->_root),
+               .pack = std::move(pack),
+               .memory = content,
+               .from_memory = true});
+    return content;
+}
+
+MemoryContent::~MemoryContent() {
+    Mounts& state = mounts();
+    std::unique_lock lock{state.mutex};
+    std::erase_if(state.list, [&](const Mount& m) { return m.pack == _pack; });
 }
 
 void unmount_content_pack(const std::filesystem::path& mount_point) {
@@ -534,9 +591,14 @@ void unmount_content_pack(const std::filesystem::path& mount_point) {
 void unmount_all_content_packs() {
     Mounts& state = mounts();
     std::unique_lock lock{state.mutex};
-    state.list.clear();
+    // Live MemoryContents stay mounted: they unmount themselves.
+    std::erase_if(state.list, [](const Mount& m) { return !m.from_memory; });
 }
 
+std::shared_ptr<const MemoryContent> memory_content_for(const std::filesystem::path& path) {
+    const std::optional<PackLocation> location = locate(path);
+    return location ? location->memory.lock() : nullptr;
+}
 std::shared_ptr<const ContentPack> content_pack_for(const std::filesystem::path& path) {
     std::optional<PackLocation> location = locate(path);
     return location ? location->pack : nullptr;

@@ -41,7 +41,10 @@ then <code>sim.tick</code> (4,800 frames) and <code>view.screenshot</code> reque
   graphs and parallel batches, and live world inspection.
 - **2D rendering on SDL3** — sprites, tilemaps (including isometric), particles,
   2D lighting, post-processing, and an animation system with state machines.
-- **UI (ui2)** — immediate-style widgets, layout, and themes.
+- **UI (ui2)** — immediate-style widgets, layout, themes, controller navigation,
+  and semantic automation.
+- **2D workflows** — runtime tweens, Aseprite/Tiled/LDtk imports, sprite atlas
+  packing, and asset scopes with optional unused-asset collection.
 - **Physics** with Box2D, **scripting** in Lua (sol2), **audio**, **pathfinding**
   (square and hex grids), **hex grid** coordinates and layouts, **dialogue**,
   **save data**, hot-reloadable **assets**, and **background jobs** and parallel

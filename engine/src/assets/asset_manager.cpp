@@ -1,4 +1,5 @@
 #include <kin/assets/asset_manager.hpp>
+#include <kin/anim/skeleton2d.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/l10n/localization.hpp>
 #include <sstream>
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace kin {
@@ -54,6 +56,8 @@ AssetStatus status_for_path(const std::filesystem::path& path) {
 
 AssetType infer_asset_type(const std::filesystem::path& path) {
     const std::string ext = lowercase_extension(path);
+    if (ext == ".kinskel")
+        return AssetType::Skeleton2D;
     // What load_image reads, and the compressed textures (texture_file.hpp).
     if (ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".tga" || ext == ".qoi" ||
         ext == ".gif" || ext == ".ktx2" || ext == ".dds") {
@@ -139,6 +143,7 @@ void AssetManager::clear() {
         asset->clear_loaded();
     }
     _assets.clear();
+    _dependencies.clear();
     _loaded_paths.clear();
     for (auto& [path, metadata] : _metadata) {
         metadata.status = status_for_path(resolve(path));
@@ -150,28 +155,84 @@ void AssetManager::clear() {
 
 void AssetManager::unload(std::string_view relative_path) {
     const std::string suffix = ":" + std::string(relative_path);
-    std::size_t removed = 0;
-    for (auto it = _assets.begin(); it != _assets.end();) {
-        if (it->first.ends_with(suffix)) {
-            it->second->clear_loaded();
-            _loaded_paths.erase(it->first);
-            it = _assets.erase(it);
-            ++removed;
-        } else {
-            ++it;
+    std::vector<std::string> keys;
+    for (const auto& [key, asset] : _assets) {
+        if (key.ends_with(suffix)) {
+            keys.push_back(key);
         }
     }
+    erase_entries(keys);
 
     const std::string path{relative_path};
-    if (auto found = _metadata.find(path); found != _metadata.end()) {
-        found->second.status = status_for_path(resolve(path));
-    }
+    refresh_metadata_status({path});
     KIN_LOG_DEBUG_F("asset",
                     "asset unloaded",
                     (LogFields{
                         {.name = "path", .value = path},
-                        {.name = "count", .value = std::to_string(removed)},
+                        {.name = "count", .value = std::to_string(keys.size())},
                     }));
+}
+
+void AssetManager::set_dependencies(std::string key, std::vector<std::string> dependencies) {
+    if (dependencies.empty()) {
+        _dependencies.erase(key);
+    } else {
+        _dependencies[std::move(key)] = std::move(dependencies);
+    }
+}
+
+const std::vector<std::string>* AssetManager::dependencies(std::string_view key) const {
+    const auto found = _dependencies.find(std::string{key});
+    return found == _dependencies.end() ? nullptr : &found->second;
+}
+
+std::size_t AssetManager::unload_unused() {
+    const Retainers retained = retainers();
+    std::vector<std::string> unused;
+    for (const auto& [key, storage] : _assets) {
+        if (!retained.contains(key)) {
+            unused.push_back(key);
+        }
+    }
+    erase_entries(unused);
+    return unused.size();
+}
+
+void AssetManager::erase_entries(const std::vector<std::string>& keys) {
+    std::vector<std::string> paths;
+    for (const std::string& key : keys) {
+        const auto asset = _assets.find(key);
+        if (asset == _assets.end()) {
+            continue;
+        }
+        asset->second->clear_loaded();
+        if (const auto path = _loaded_paths.find(key); path != _loaded_paths.end()) {
+            paths.push_back(path->second);
+            _loaded_paths.erase(path);
+        }
+        _dependencies.erase(key);
+        _assets.erase(asset);
+    }
+    refresh_metadata_status(paths);
+}
+
+void AssetManager::refresh_metadata_status(const std::vector<std::string>& paths) {
+    if (paths.empty()) {
+        return;
+    }
+    // Metadata is per path, cache entries per type and path: releasing one
+    // interpretation of a file must not hide another that is still cached.
+    std::unordered_set<std::string_view> cached;
+    for (const auto& [key, path] : _loaded_paths) {
+        if (const auto asset = _assets.find(key); asset != _assets.end() && asset->second->loaded()) {
+            cached.insert(path);
+        }
+    }
+    for (const std::string& path : paths) {
+        if (const auto metadata = _metadata.find(path); metadata != _metadata.end()) {
+            metadata->second.status = cached.contains(path) ? AssetStatus::Loaded : status_for_path(resolve(path));
+        }
+    }
 }
 
 void AssetManager::discover() {
@@ -266,6 +327,40 @@ AssetMetadata AssetManager::make_metadata(std::string relative_path) const {
 }
 
 void register_default_asset_loaders(AssetManager& assets) {
+    assets.register_memory_sizer<Image>(
+        [](const Image& image) { return static_cast<u64>(sizeof(Image)) + image.rgba.capacity(); });
+    assets.register_memory_sizer<SkeletonAsset2D>([](const SkeletonAsset2D& rig) {
+        u64 bytes = sizeof(rig) + rig.texture_asset.capacity() + rig.bones.capacity() * sizeof(Bone2D) +
+                    rig.vertices.capacity() * sizeof(SkinVertex2D) + rig.indices.capacity() * sizeof(u32) +
+                    rig.attachments.capacity() * sizeof(BoneAttachment2D) +
+                    rig.inverse_bind.capacity() * sizeof(Affine2);
+        for (const auto& b : rig.bones)
+            bytes += b.name.capacity();
+        for (const auto& b : rig.attachments)
+            bytes += b.name.capacity();
+        for (const auto& [name, clip] : rig.clips) {
+            bytes += name.capacity() + sizeof(clip) + clip.tracks.capacity() * sizeof(BoneTrack2D);
+            for (const auto& t : clip.tracks)
+                bytes += t.keys.capacity() * sizeof(BoneKey2D);
+        }
+        for (const auto& [name, space] : rig.blend_spaces) {
+            bytes += name.capacity() + sizeof(space) + space.points.capacity() * sizeof(SkeletonBlendPoint2D) +
+                     space.triangles.capacity() * sizeof(std::array<u32, 3>);
+            for (const auto& p : space.points)
+                bytes += p.clip.capacity();
+        }
+        return bytes;
+    });
+    assets.register_loader<SkeletonAsset2D>([](const std::filesystem::path& path) {
+        const auto source = read_content_text(path);
+        std::string error;
+        if (!source)
+            throw std::runtime_error("skeleton file could not be read");
+        auto rig = parse_skeleton2d(*source, error);
+        if (!rig)
+            throw std::runtime_error(error);
+        return std::move(*rig);
+    });
     assets.register_loader<Image>([](const std::filesystem::path& path) {
         return load_image(path);
     });

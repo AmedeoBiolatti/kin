@@ -43,6 +43,7 @@ struct HeadlessOptions {
     // headless run. server_mode is "driven" (default) or "realtime";
     // server_transport is "stdio" (default) or "http".
     bool server = false;
+    std::string automation_record_path;
     std::string server_mode = "driven";
     std::string server_transport = "stdio";
     i32 server_port = 8080;
@@ -88,6 +89,7 @@ struct HeadlessOptions {
     bool fail_on_text_overflow = false;
     // The command line as given, program first (the check runs it again).
     std::vector<std::string> args;
+    bool development = false;
 };
 
 struct SceneAppConfig {

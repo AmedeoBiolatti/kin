@@ -7,6 +7,7 @@
 #include <kin/ecs/animator.hpp>
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/lighting.hpp>
+#include <kin/ecs/normal_sprite2d.hpp>
 #include <kin/ecs/particles.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/ecs/render.hpp>
@@ -15,9 +16,11 @@
 #include <kin/ecs/dialogue.hpp>
 #include <kin/ecs/saving.hpp>
 #include <kin/ecs/scene_flow.hpp>
+#include <kin/ecs/skeleton2d.hpp>
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
+#include <kin/pathfinding/navigation2d.hpp>
 #if KIN_ENABLE_AUDIO
 #include <kin/ecs/audio.hpp>
 #endif
@@ -567,6 +570,9 @@ void register_physics2d_editor_components(EcsWorld& world) {
 } // namespace
 
 void register_builtin_editor_components(EcsWorld& world) {
+    register_navigation2d_components(world);
+    register_skeleton2d_components(world);
+    register_normal_sprite2d_components(world);
 #if defined(KIN_EXPERIMENTAL_3D) && KIN_ENABLE_PHYSICS3D
     register_render3d_components(world);
     register_physics3d_components(world);
@@ -946,7 +952,9 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("shadow_softness", &LightComponent::shadow_softness)
             .units("points")
             .range(0.0, 1000.0)
-            .description("The light's size: its shadows' edges soft; 0: sharp.");
+            .description("The light's size: its shadows' edges soft; 0: sharp.")
+            .field("height", &LightComponent::height)
+            .field("mask", &LightComponent::mask);
     }
     if (!world.components().find("LightOccluder")) {
         // What stops lights that cast shadows (kin/ecs/lighting.hpp).
@@ -982,7 +990,8 @@ void register_builtin_editor_components(EcsWorld& world) {
             .description("What is not lit looks like this much light: black is dark, white unlit.")
             .field("resolution", &SceneLighting::resolution)
             .range(0.05, 1.0)
-            .description("Light-map pixels per screen point (lights are smooth: half is plenty).");
+            .description("Light-map pixels per screen point (lights are smooth: half is plenty).")
+            .field("forward_sprites", &SceneLighting::forward_sprites);
     }
     if (!world.components().find("ColorGrade")) {
         // The game's colour output while it is in the scene: exposure and

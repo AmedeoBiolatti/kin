@@ -46,6 +46,7 @@ public:
     void draw_texture(const Texture& texture, Rectf source, Rectf dest) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint) override;
     void draw_texture(const Texture& texture, Rectf source, Rectf dest, Color tint, f32 rotation, Vec2f pivot) override;
+    bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) override;
 
     void fill_rect(Rectf rect, Color color) override;
     void draw_rect(Rectf rect, Color color) override;

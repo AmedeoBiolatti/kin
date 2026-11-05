@@ -52,12 +52,7 @@ bool parse_i32(std::string_view text, i32& value) {
     return parsed.ec == std::errc{} && parsed.ptr == end;
 }
 
-bool parse_u64(std::string_view text, u64& value) {
-    const char* begin = text.data();
-    const char* end = begin + text.size();
-    const auto parsed = std::from_chars(begin, end, value);
-    return parsed.ec == std::errc{} && parsed.ptr == end;
-}
+using runtime_detail::parse_u64;
 
 void write_run_report(std::ostream& out,
                       const RunReport& report,
@@ -176,6 +171,14 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
         const std::string_view arg = argv[i];
         if (arg == "--headless") {
             options.enabled = true;
+        } else if (arg == "--dev") {
+            options.development = true;
+        } else if (arg.starts_with("--automation-record=")) {
+            options.automation_record_path = arg.substr(20);
+            options.server = true;
+        } else if (arg == "--automation-record" && i + 1 < argc) {
+            options.automation_record_path = argv[++i];
+            options.server = true;
         } else if (arg == "--render") {
             options.render = true;
         } else if (arg == "--list-actions") {
@@ -529,6 +532,10 @@ struct SceneAppSession::Impl {
         if (config.game) {
             game.emplace(*config.game);
             config.game = &*game;
+            // Input profiles and other per-game files go under its id.
+            if (!game->id.empty()) {
+                set_user_data_game_id(game->id);
+            }
         }
         if (const auto code = dispatch()) {
             result = *code;
@@ -707,6 +714,8 @@ struct SceneAppSession::Impl {
                 .reset_scenes = config.reset_scenes,
                 .asset_server = config.asset_server,
                 .rendering_3d = config.rendering_3d,
+                .automation_record_path = config.headless.automation_record_path,
+                .development = config.headless.development,
             };
             return run_scene_server(server, scenes);
 #endif
@@ -787,6 +796,12 @@ struct SceneAppSession::Impl {
             KIN_LOG_WARN("runtime", "--inspect requested, but this build has no scene server (KIN_ENABLE_SCENE_SERVER)");
 #endif
         }
+#if !KIN_ENABLE_DEVELOPMENT
+        if (config.headless.development) {
+            KIN_LOG_WARN("runtime",
+                         "--dev requested, but this build has no development sessions (KIN_ENABLE_DEVELOPMENT)");
+        }
+#endif
 
 #if KIN_ENABLE_RUNTIME_PROFILING
 
@@ -950,6 +965,7 @@ struct SceneAppSession::Impl {
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
                 .services = services,
+                .development = config.headless.development,
             };
             try {
                 scenes.shutdown(shutdown_ctx);
@@ -1029,6 +1045,7 @@ struct SceneAppSession::Impl {
                 .report = &run_report,
                 .renderer3d = scene_renderer3d,
                 .services = services,
+                .development = config.headless.development,
             };
         };
 
@@ -1052,6 +1069,10 @@ struct SceneAppSession::Impl {
 #endif
 
                 kin::SceneContext scene_ctx = make_scene_context(ctx);
+                if (scene_ctx.development) {
+                    runtime_detail::advance_development(scenes, static_cast<u64>(frames_run),
+                                                        window.mode != AppMode::Headless);
+                }
                 sync_ui_direction();
 #if KIN_ENABLE_RUNTIME_ASSETS
                 runtime_detail::pump_scene_assets(config.asset_server, window.mode != AppMode::Headless);

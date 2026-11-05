@@ -1,0 +1,66 @@
+# Authoring inputs are build-time dependencies only. Generated content is a
+# normal content root consumed by kin_game's existing loose/pack/web exporters.
+include_guard(GLOBAL)
+function(kin_import_2d_assets target)
+    cmake_parse_arguments(ARG "" "MANIFEST;CONTENT;OUTPUT" "" ${ARGN})
+    if(NOT TARGET ${target} OR NOT ARG_MANIFEST OR NOT ARG_OUTPUT OR ARG_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "kin_import_2d_assets(target MANIFEST file OUTPUT directory [CONTENT directory])")
+    endif()
+    if(NOT DEFINED Python3_FIND_REGISTRY)
+        set(Python3_FIND_REGISTRY LAST) # the Python on PATH first, as in kin's CMakeLists.txt
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    get_filename_component(manifest "${ARG_MANIFEST}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    get_filename_component(import_root "${manifest}" DIRECTORY)
+    get_filename_component(output "${ARG_OUTPUT}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+    set(tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/import_2d_assets.py")
+    set(command "${Python3_EXECUTABLE}" "${tool}" "${manifest}" --output "${output}")
+    set(content_files)
+    if(ARG_CONTENT)
+        get_filename_component(content "${ARG_CONTENT}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+        list(APPEND command --content "${content}")
+        file(GLOB_RECURSE content_files CONFIGURE_DEPENDS "${content}/*")
+    endif()
+    # Configure once so packaging discovers every generated file; subsequent
+    # builds only rerun when a tracked source, manifest or importer changes.
+    execute_process(COMMAND ${command} RESULT_VARIABLE status OUTPUT_VARIABLE summary ERROR_VARIABLE errors)
+    if(NOT status EQUAL 0)
+        message(FATAL_ERROR "2D asset import failed for ${target} (Python: ${Python3_EXECUTABLE}): ${errors}")
+    endif()
+    file(READ "${output}/.kin-import-report.json" report)
+    string(JSON count LENGTH "${report}" dependencies)
+    set(dependencies "${manifest}" "${tool}" ${content_files})
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${manifest}" "${tool}")
+    if(count GREATER 0)
+        math(EXPR last "${count}-1")
+        foreach(index RANGE ${last})
+            string(JSON relative GET "${report}" dependencies ${index})
+            get_filename_component(source "${relative}" ABSOLUTE BASE_DIR "${import_root}")
+            list(APPEND dependencies "${source}")
+            if(source MATCHES "\\.(json|tsj|tmj|ldtk|ldtkl)$")
+                set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${source}")
+            endif()
+        endforeach()
+    endif()
+    set(stamp "${CMAKE_CURRENT_BINARY_DIR}/${target}-imports.stamp")
+    add_custom_command(OUTPUT "${stamp}"
+        COMMAND ${command}
+        COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
+        DEPENDS ${dependencies}
+        COMMENT "Importing ${target} 2D assets" VERBATIM)
+    add_custom_target(${target}_import_2d DEPENDS "${stamp}")
+    add_custom_target(${target}_watch_2d COMMAND ${command} --watch
+        COMMENT "Watching ${target} authoring assets" USES_TERMINAL VERBATIM)
+    add_dependencies(${target} ${target}_import_2d)
+    set_target_properties(${target} PROPERTIES KIN_IMPORTED_CONTENT_DIR "${output}")
+    if(NOT EMSCRIPTEN AND ARG_CONTENT)
+        set(dev_project "${CMAKE_CURRENT_BINARY_DIR}/${target}-$<CONFIG>.dev.json")
+        file(GENERATE OUTPUT "${dev_project}" CONTENT
+"{\n  \"schema\": \"kin.dev/1\",\n  \"build\": \"${CMAKE_BINARY_DIR}\",\n  \"config\": \"$<CONFIG>\",\n  \"target\": \"${target}\",\n  \"command\": [\"$<TARGET_FILE:${target}>\"],\n  \"manifest\": \"${manifest}\",\n  \"content\": \"${content}\",\n  \"output\": \"${output}\"\n}\n")
+        add_custom_target(${target}_dev
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/kin_dev.py"
+                --project "${dev_project}" --no-build
+            DEPENDS ${target} USES_TERMINAL VERBATIM
+            COMMENT "Running ${target} with watched imports and safe live reload")
+    endif()
+endfunction()

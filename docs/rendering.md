@@ -1,5 +1,61 @@
 # Rendering And Sprites
 
+## Normal-mapped sprites
+
+Normal-mapped sprites are lit per pixel ("forward" lighting): Lambert diffuse,
+Blinn-Phong specular, point and directional lights, receiver masks, light shapes
+and the same polygon occluders as light maps, in linear light, alpha kept.
+Albedo and light colours are sRGB; normal and specular maps are data. Normals
+encode +X right, +Y down, +Z toward the viewer.
+
+For scenes, use `kin/ecs/normal_sprite2d.hpp`:
+
+```cpp
+world.entity("lighting").set(kin::SceneLighting{
+    .ambient = kin::Color::rgb(40, 44, 64), .forward_sprites = true});
+world.entity("sun").set(kin::DirectionalLight2D{.direction = {-.3f, -.5f}, .elevation = 1});
+actor.set(kin::NormalSpriteRenderer2D{
+    .albedo_asset = {"images/hero.png"}, .normal_asset = {"images/hero_n.png"},
+    .specular_asset = {"images/hero_s.png"}, .specular_strength = .3f});
+```
+
+Assets2D binds the images (`albedo`, `normal`, `specular`; set them yourself
+from C++ otherwise). Normal sprites go through the render queue with the other
+renderers: sorted, culled, placed by their entity's transform, clipped, flipped,
+from atlas source regions. source_pos/source_size are reflected for scene files;
+C++ uses `source`. Maps share normalized atlas UVs and may have different
+resolutions. A missing normal map is a flat surface; specular strength defaults
+to zero. The specular map's red channel scales the highlight; `shininess`
+narrows it. Prefab instances share their prefab's NormalSpriteRenderer2D.
+
+The scene's SceneLighting is its first enabled one, for light maps and forward
+lighting alike: with `forward_sprites` there is no light map, normal sprites are
+lit by its ambient and lights, and other renderers stay unlit; without it, normal
+sprites draw unlit for the light map to shade. Sprites on the UI layer and above
+are always unlit. Point lights are LightComponents (`height` above the sprites,
+`mask`), their shapes' images too (Assets2D binds those only for forward
+lighting). Directional lights (DirectionalLight2D) shine from `direction`,
+turned with their entity, at `elevation`. Only intersecting light/receiver mask
+bits contribute. LightOccluders stop both; a soft light's shadows come from the
+same four points around it as in light maps. Intensity is capped at
+`max_light_intensity` (4), as in light maps. A light with values that can't be
+used (not finite, no radius, negative intensity) is skipped; a negative
+`shadow_softness` is a sharp light. At most 256 lights light a sprite.
+
+The lights are gathered once per collect, not per sprite, and kept while they
+stay the same. On SDL_GPU (`normal_lighting2d_gpu_supported()`), the
+`NormalSprite2D` built-in shader lights each fragment: `pack_surface_lights2d()`
+packs the lights, shadow quads and light shapes into one storage buffer that
+every sprite drawn with them shares (up to 32 MiB), and `draw_normal_sprite2d_gpu()`
+draws a sprite with it. Material images are raw UNORM textures, so normal data
+does not depend on the colour space. Receiver masks keep all 32 bits.
+
+Elsewhere `shade_normal_sprite2d()` shades the sprite on the CPU at source
+resolution (up to 4 million pixels), the reference the GPU path is tested
+against; scenes keep each entity's result until its material, placement or
+lights change. Moving large sprites or lights is expensive there: it is not a
+deferred renderer. Use shade_normal_sprite2d directly to bake lit images.
+
 The experimental [WebGL2 browser target](web.md) implements a subset of this API;
 its capabilities and build instructions are documented separately.
 

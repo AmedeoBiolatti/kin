@@ -109,11 +109,12 @@ end
     assert(scripts.running() == 2);
     (void)other;
 
-    // Changed: read again; its entities start over (another coin).
+    // Changed: preserve the live self and do not rerun on_start.
+    const auto before_reload = hero.get<kin::Transform2D>()->pos;
     write(dir / "scripts/mover.lua", "function on_start(self) self:set_position(-1, -2) end\n");
     fs::last_write_time(dir / "scripts/mover.lua", fs::file_time_type::clock::now() + std::chrono::seconds(5));
     scripts.update(world, input, 0.1f);
-    assert(hero.get<kin::Transform2D>()->pos == (kin::Vec2f{-1, -2}));
+    assert(hero.get<kin::Transform2D>()->pos == before_reload);
     // Its script taken away: it stops.
     hero.raw().remove<kin::ScriptComponent>();
     scripts.update(world, input, 0.1f);
@@ -324,7 +325,9 @@ end
 } // namespace
 
 // A script's tweens (their done callbacks; one stopped never says it is
-// done) and timers (every, after, cancel); mistakes said.
+// done) and timers (every, after, cancel); mistakes said. Tweens advance with
+// the world's script services; timers count the steps after the one that
+// starts them and fire once a step at most.
 void test_tweens_and_timers() {
     const fs::path dir = fs::temp_directory_path() / "kin_entity_tween_test";
     fs::remove_all(dir);
@@ -334,7 +337,7 @@ function on_start(self)
     self:tween("Transform2D.pos", {x = 100, y = 0}, 0.5, "linear", {done = function(self) self.moved = true end})
     self:tween("RectRenderer.color", {r = 0, g = 0, b = 0, a = 0}, 0.2, {delay = 0.2})
     self.tick = self:every(0.1, function(self) self.ticks = self.ticks + 1 end)
-    self:after(0.35, function(self)
+    self:after(0.3, function(self)
         assert(self:cancel(self.tick))
         self.stopped_at = self.ticks
     end)
@@ -372,7 +375,6 @@ end
     kin::Input input;
     kin::EntityScripts scripts{{.content = dir}};
     for (int frame = 0; frame < 9; ++frame) {
-        kin::update_tweens(world, 0.1f);
         scripts.update(world, input, 0.1f);
         for (const auto& [path, problem] : scripts.problems()) {
             std::fprintf(stderr, "frame %d: %s: %s\n", frame + 1, path.c_str(), problem.c_str());

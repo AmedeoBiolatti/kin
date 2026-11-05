@@ -338,6 +338,8 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _pixel_scale = renderer.content_scale();
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
                  input.mouse_frame_pressed(MouseButton::Middle);
+    begin_navigation();
+    begin_semantics();
     // State not asked for all last frame belonged to something no longer built.
     if (!_states.empty()) {
         const u64 frame = _state.frame();
@@ -399,7 +401,7 @@ SurfaceStyle Context::resolve_animated(Id id, const InteractiveSurfaceStyle& sty
     // Instant: no dt (2-arg begin / tests), no duration, or no id. Touch no state so apps
     // that never animate (the common case) don't churn the retained map; a later animated
     // frame just snaps from the target on first use.
-    if (_dt <= 0.0f || dur <= 0.0f || !static_cast<bool>(id)) {
+    if (_reduced_motion || _dt <= 0.0f || dur <= 0.0f || !static_cast<bool>(id)) {
         return target;
     }
     const u64 frame = _state.frame();
@@ -474,7 +476,12 @@ void Context::end() {
         !_state.focused_this_frame() && !blocked_by_modal) {
         _state.clear_focused();
     }
+    finish_semantics();
     finish_focus();
+    for (SemanticElement& e : _elements) {
+        e.focused = _state.is_focused(e.id); // as focus moves settled
+    }
+    _semantic_action.reset(); // a removed/disabled target never fires on a later frame
     // Frame invariant: every push must have a matching pop by end(). A leftover entry means a
     // forgotten pop_clip()/pop_draw_scope(), which silently mis-clips everything drawn after it.
     if (_debug.detect_invariants) {
@@ -577,25 +584,29 @@ void Context::report_overflow(std::string_view widget, Rectf bounds, Vec2f wante
 
 Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
     Interaction out;
+    if (id && !element(id)) {
+        describe(id, "region", {}, bounds);
+    }
     check_region_id(id);
     if (!_input) {
         return out;
     }
-    if (_modal_blocking) {
-        const Rectf allowed = !_modal_stack.empty() ? _modal_stack.back() : _modal_bounds;
-        if (!contains(allowed, screen_pointer())) {
-            return out;
-        }
+    const SemanticElement* semantic = element(id);
+    if (semantic && semantic->blocked) {
+        return out;
     }
+    const bool pointer_allowed =
+        !_modal_blocking || contains(!_modal_stack.empty() ? _modal_stack.back() : _modal_bounds, screen_pointer());
 
     z += _region_z_base;
     const Vec2f p = pointer();
     // Not where the clips it draws under hide it (a field scrolled out of its panel).
-    if (contains(bounds, p) && (_clip_stack.empty() || contains(_clip_stack.back(), screen_pointer()))) {
+    if (pointer_allowed && contains(bounds, p) &&
+        (_clip_stack.empty() || contains(_clip_stack.back(), screen_pointer()))) {
         _state.register_hit(id, z);
     }
 
-    out.hot = _state.is_hot(id);
+    out.hot = pointer_allowed && _state.is_hot(id);
     out.focused = _state.is_focused(id);
     out.quiet_focus = out.focused && !_state.focus_visible();
 
@@ -619,6 +630,14 @@ Interaction Context::region(Id id, Rectf bounds, i32 z, MouseButton button) {
         out.released = true;
         out.clicked = out.hot;
         _state.clear_active();
+    }
+    if (_semantic_action && _semantic_action->id == id && _semantic_action->action == SemanticAction::Click) {
+        if (semantic && semantic->available()) {
+            out.clicked = out.pressed = out.released = true;
+            _state.set_focused(id);
+            out.focused = true;
+        }
+        _semantic_action.reset();
     }
     return out;
 }
@@ -1048,15 +1067,26 @@ f32 Context::mouse_wheel_x() const {
 }
 
 bool Context::key_pressed(Key key) const {
-    return _input && _input->frame_pressed(key);
+    return (_input && _input->frame_pressed(key)) || controller_key(key);
 }
 
 bool Context::key_typed(Key key) const {
-    return _input && (_input->frame_pressed(key) || _input->frame_repeated(key));
+    return (_input && (_input->frame_pressed(key) || _input->frame_repeated(key))) || controller_key(key);
 }
 
 bool Context::action_pressed(std::string_view action) const {
-    return _input && _input->frame_pressed(action);
+    if (_input && _input->frame_pressed(action)) {
+        return true;
+    }
+    // A controller drives the menu actions ui2's widgets read.
+    const Key key = action == "menu_up"      ? Key::Up
+                    : action == "menu_down"  ? Key::Down
+                    : action == "menu_left"  ? Key::Left
+                    : action == "menu_right" ? Key::Right
+                    : action == "accept"     ? Key::Enter
+                    : action == "quit"       ? Key::Escape
+                                             : Key::Unknown;
+    return key != Key::Unknown && controller_key(key);
 }
 
 bool Context::modifier_held(KeyModifiers modifiers) const {

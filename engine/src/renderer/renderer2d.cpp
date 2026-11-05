@@ -1104,6 +1104,29 @@ bool Renderer2D::write_data_buffer(const DataBuffer& buffer, std::size_t offset,
     }
 }
 
+bool Renderer2D::draw_textured_geometry(const Texture& texture, std::span<const ShaderVertex> vertices,
+                                        std::span<const u32> indices) {
+    if (!texture || vertices.empty() || indices.empty() || indices.size() % 3 || vertices.size() > 1048576 ||
+        indices.size() > 3145728) {
+        return false;
+    }
+    if (texture.format() != TextureFormat::Rgba8 && !texture_format_compressed(texture.format())) {
+        return false;
+    }
+    for (const ShaderVertex& v : vertices) {
+        if (!std::isfinite(v.position.x) || !std::isfinite(v.position.y) || !std::isfinite(v.uv.x) ||
+            !std::isfinite(v.uv.y)) {
+            return false;
+        }
+    }
+    for (const u32 i : indices) {
+        if (i >= vertices.size()) {
+            return false;
+        }
+    }
+    return _backend->draw_textured_geometry(texture, vertices, indices);
+}
+
 void Renderer2D::draw_shader_geometry(std::span<const ShaderVertex> vertices, std::span<const u32> indices,
                                       ShaderHandle shader, const ShaderParams& params,
                                       std::span<const Texture> sources, std::span<const DataBuffer> buffers) {
@@ -1153,8 +1176,14 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
         // descriptor declares (2 for the two-input combine/crossfade shaders).
         const char* file = nullptr;
         u32 samplers = 1;
+        u32 buffers = 0;
         switch (id) {
         case BuiltinShader::Ascii: file = "pp_ascii.frag.spv"; break;
+        case BuiltinShader::NormalSprite2D:
+            file = "normal_sprite.frag.spv";
+            samplers = 3;
+            buffers = 1;
+            break;
         case BuiltinShader::Vignette: file = "pp_vignette.frag.spv"; break;
         case BuiltinShader::ColorGrade: file = "pp_color_grade.frag.spv"; break;
         case BuiltinShader::Scanline: file = "pp_scanline.frag.spv"; break;
@@ -1174,6 +1203,7 @@ ShaderHandle Renderer2D::builtin_shader(BuiltinShader id) {
                 ShaderDesc desc;
                 desc.spirv = {bytes.data(), static_cast<u32>(bytes.size())};
                 desc.num_samplers = samplers;
+                desc.num_storage_buffers = buffers;
                 desc.num_uniform_buffers = 1;
                 handle = create_shader(desc);
             } else {

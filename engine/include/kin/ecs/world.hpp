@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -80,7 +81,9 @@ public:
 
     template <typename T>
     EcsEntity& set(T&& value) {
-        _entity.set<T>(std::forward<T>(value));
+        // T is a reference for an lvalue: given to flecs, its set(T&&) and set(const T&)
+        // become one signature, which MSVC emits twice (LNK1179 duplicate COMDAT).
+        _entity.set<std::remove_cvref_t<T>>(std::forward<T>(value));
         return *this;
     }
 

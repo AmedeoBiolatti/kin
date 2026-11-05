@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -29,6 +30,7 @@ class ParticleCatalog;
 struct PrefabAsset;
 class SpriteCatalog;
 class TileMap;
+struct SkeletonAsset2D;
 
 enum class AssetType {
     Unknown,
@@ -54,6 +56,7 @@ enum class AssetType {
     ColorLut, // .cube: a colour look (a LUT image is an Image)
     UiScreen, // .kinui: a UI screen
     UiTheme,  // .kintheme: a UI look
+    Skeleton2D, // .kinskel: a 2D skeleton, weighted mesh and clips
 };
 
 enum class AssetStatus {
@@ -75,6 +78,25 @@ std::string_view asset_type_name(AssetType type);
 std::string_view asset_status_name(AssetStatus status);
 AssetType infer_asset_type(const std::filesystem::path& path);
 
+struct AssetResidency {
+    std::string key, path;
+    u64 bytes = 0, last_access = 0;
+    std::size_t external_references = 0;
+    bool loaded = false, size_estimated = true;
+    std::vector<std::string> retained_by; // root -> ... -> this entry
+    std::vector<std::string> dependencies;
+};
+struct AssetMemoryReport {
+    u64 resident_bytes = 0, budget_bytes = 0, pinned_bytes = 0;
+    std::size_t evicted = 0;
+    bool over_budget = false;
+};
+// Totals of residency rows: their payload, the part live owners retain, and
+// whether the payload exceeds `budget_bytes` (0: no budget).
+AssetMemoryReport summarize_residency(std::span<const AssetResidency> rows, u64 budget_bytes);
+// Least recently used first, ties by key: the order budgets evict in.
+bool least_recent_first(const AssetResidency& a, const AssetResidency& b);
+
 class AssetManager {
 public:
     struct Stats {
@@ -95,6 +117,12 @@ public:
                         (LogFields{{.name = "type", .value = std::string{asset_type_name(asset_type_for<T>())}}}));
     }
 
+    template <typename T> void register_memory_sizer(std::function<u64(const T&)> sizer) {
+        if (!sizer)
+            throw std::invalid_argument("memory sizer is empty");
+        _memory_sizers[typeid(T)] = std::make_shared<std::function<u64(const T&)>>(std::move(sizer));
+    }
+
     template<typename T>
     std::shared_ptr<const T> load(std::string_view relative_path) {
         return load_handle<T>(relative_path).shared();
@@ -106,6 +134,7 @@ public:
         if (auto found = _assets.find(key); found != _assets.end()) {
             auto storage = std::static_pointer_cast<AssetStorage<T>>(found->second);
             if (storage->is_loaded) {
+                storage->last_access = ++_access_clock;
                 KIN_LOG_DEBUG_F("asset",
                                 "asset cache hit",
                                 (LogFields{
@@ -194,13 +223,39 @@ public:
         auto storage = std::static_pointer_cast<AssetStorage<T>>(found->second);
         storage->data = std::move(value);
         storage->is_loaded = true;
+        describe_memory<T>(*storage);
         _loaded_paths[key] = std::string(relative_path);
         record_loaded_metadata(std::string(relative_path), storage->data);
+        if (over_memory_budget()) {
+            trim_memory();
+        }
         return true;
     }
 
     void clear();
     void unload(std::string_view relative_path);
+    // Main-thread collection. External handles/shared() values are roots; their
+    // transitive async dependencies stay resident. Unreferenced cycles can be
+    // collected. Returns the number of cache entries released.
+    std::size_t unload_unused();
+    // The cache keys an entry depends on (AssetServer records what its loaders
+    // require). Retention follows these edges; empty `dependencies` removes them.
+    void set_dependencies(std::string key, std::vector<std::string> dependencies);
+    // Null when the entry has no recorded dependencies.
+    const std::vector<std::string>* dependencies(std::string_view key) const;
+    // Zero is unlimited. Budget overruns are reported when live owners prevent
+    // eviction; live handles and their transitive dependencies are never invalidated.
+    void set_memory_budget(u64 bytes) {
+        _memory_budget = bytes;
+        trim_memory();
+    }
+    u64 memory_budget() const { return _memory_budget; }
+    // Whether the cached payload exceeds the budget now. Cheap: per-frame
+    // callers check it before trim_memory().
+    bool over_memory_budget() const;
+    AssetMemoryReport trim_memory();
+    std::vector<AssetResidency> residency() const;
+    AssetMemoryReport memory_report() const;
     void discover();
 
     const std::filesystem::path& root() const { return _root; }
@@ -212,6 +267,15 @@ public:
     const AssetMetadata* metadata(std::string_view relative_path) const;
 
 private:
+    template <typename T> void describe_memory(AssetStorage<T>& storage) {
+        const auto found = _memory_sizers.find(typeid(T));
+        storage.size_estimated = found == _memory_sizers.end();
+        storage.resident_bytes =
+            found == _memory_sizers.end()
+                ? sizeof(T)
+                : (*std::static_pointer_cast<std::function<u64(const T&)>>(found->second))(storage.data);
+        storage.last_access = ++_access_clock;
+    }
     // Runs the loader for `storage`, fills and caches it, records metadata, and
     // returns a handle. Shared by the fresh-load and async-completion paths.
     template<typename T>
@@ -234,6 +298,7 @@ private:
             throw;
         }
         storage->is_loaded = true;
+        describe_memory<T>(*storage);
         _assets[key] = storage;
         _loaded_paths[key] = std::string(relative_path);
         record_loaded_metadata(std::string(relative_path), storage->data);
@@ -245,7 +310,11 @@ private:
                            {.name = "type", .value = std::string{asset_type_name(asset_type_for<T>())}},
                            {.name = "status", .value = "Loaded"},
                        }));
-        return AssetHandle<T>{storage};
+        AssetHandle<T> handle{storage};
+        if (over_memory_budget()) {
+            trim_memory();
+        }
+        return handle;
     }
 
     template<typename T>
@@ -274,6 +343,17 @@ private:
 
     AssetMetadata make_metadata(std::string relative_path) const;
 
+    // Every entry a live owner keeps resident (handles, shared() views, pending
+    // loads, and what they depend on), mapped to the entry retaining it: empty
+    // for an owned entry itself. Visited in key order, so chains are stable.
+    using Retainers = std::unordered_map<std::string, std::string>;
+    Retainers retainers() const;
+    AssetMemoryReport memory_totals(const Retainers& retained) const;
+    // Drops cache entries and their edges, then refreshes their paths' metadata.
+    void erase_entries(const std::vector<std::string>& keys);
+    // Loaded while another type still caches the path; else Discovered or Missing.
+    void refresh_metadata_status(const std::vector<std::string>& paths);
+
     template<typename T>
     static constexpr AssetType asset_type_for() {
         if constexpr (std::is_same_v<T, Image>) {
@@ -290,6 +370,8 @@ private:
             return AssetType::Particles;
         } else if constexpr (std::is_same_v<T, SpriteCatalog>) {
             return AssetType::SpriteCatalog;
+        } else if constexpr (std::is_same_v<T, SkeletonAsset2D>) {
+            return AssetType::Skeleton2D;
         } else if constexpr (std::is_same_v<T, AudioCatalog>) {
             return AssetType::AudioCatalog;
         } else if constexpr (std::is_same_v<T, TileMap>) {
@@ -303,7 +385,10 @@ private:
 
     std::filesystem::path _root;
     std::unordered_map<std::type_index, std::shared_ptr<void>> _loaders;
+    std::unordered_map<std::type_index, std::shared_ptr<void>> _memory_sizers;
+    u64 _memory_budget = 0, _access_clock = 0;
     std::unordered_map<std::string, std::shared_ptr<IAssetStorage>> _assets;
+    std::unordered_map<std::string, std::vector<std::string>> _dependencies;
     std::unordered_map<std::string, std::string> _loaded_paths;
     std::unordered_map<std::string, AssetMetadata> _metadata;
 };

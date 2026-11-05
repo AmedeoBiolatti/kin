@@ -1,0 +1,147 @@
+{
+  "schema": "kin.scene/1",
+  "name": "Azure",
+  "entities": [
+    {
+      "id": "lighting",
+      "components": {
+        "SceneLighting": {
+          "forward_sprites": true,
+          "ambient": {
+            "r": 70,
+            "g": 74,
+            "b": 88,
+            "a": 255
+          }
+        }
+      }
+    },
+    {
+      "id": "floor",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 24,
+            "y": 72
+          }
+        },
+        "NormalSpriteRenderer2D": {
+          "albedo_asset": "images/floor.png",
+          "normal_asset": "images/normal.png",
+          "specular_asset": "images/specular.png",
+          "pivot": {
+            "x": 0,
+            "y": 0
+          },
+          "size": {
+            "x": 656,
+            "y": 488
+          },
+          "specular_strength": 0.25
+        }
+      }
+    },
+    {
+      "id": "lamp",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 240,
+            "y": 240
+          }
+        },
+        "LightComponent": {
+          "radius": 340,
+          "height": 100,
+          "color": {
+            "r": 90,
+            "g": 190,
+            "b": 255,
+            "a": 255
+          },
+          "intensity": 2,
+          "shadows": true,
+          "shadow_softness": 3
+        }
+      }
+    },
+    {
+      "id": "sun",
+      "components": {
+        "DirectionalLight2D": {
+          "direction": {
+            "x": 0.2,
+            "y": -0.5
+          },
+          "intensity": 0.3
+        }
+      }
+    },
+    {
+      "id": "wall208",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 360,
+            "y": 208
+          }
+        },
+        "RectRenderer": {
+          "offset": {
+            "x": -8,
+            "y": -80.0
+          },
+          "size": {
+            "x": 16,
+            "y": 160
+          },
+          "color": {
+            "r": 53,
+            "g": 75,
+            "b": 96,
+            "a": 255
+          }
+        },
+        "LightOccluder": {
+          "size": {
+            "x": 16,
+            "y": 160
+          }
+        }
+      }
+    },
+    {
+      "id": "wall424",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 360,
+            "y": 424
+          }
+        },
+        "RectRenderer": {
+          "offset": {
+            "x": -8,
+            "y": -88.0
+          },
+          "size": {
+            "x": 16,
+            "y": 176
+          },
+          "color": {
+            "r": 53,
+            "g": 75,
+            "b": 96,
+            "a": 255
+          }
+        },
+        "LightOccluder": {
+          "size": {
+            "x": 16,
+            "y": 176
+          }
+        }
+      }
+    }
+  ]
+}

@@ -46,9 +46,11 @@ class ColorLut;
 class PropertyRegistry;
 class ParticleCatalog;
 class Renderer2D;
+class MemoryContent;
 class Shape;
 class SpriteCatalog;
 struct TilemapAsset;
+struct SkeletonAsset2D;
 
 class Assets2D {
 public:
@@ -56,6 +58,11 @@ public:
     using Binder = std::function<void(EcsWorld&, Assets2D&)>;
 
     Assets2D(Renderer2D& renderer, std::filesystem::path root);
+    // Assets read from an immutable content snapshot, which they keep alive.
+    static std::unique_ptr<Assets2D> from_snapshot(Renderer2D& renderer, std::shared_ptr<const MemoryContent> snapshot);
+    // The same, configured as this one: its binders, both memory budgets and
+    // residency diagnostics (a reload's next generation needs nothing else).
+    std::unique_ptr<Assets2D> for_snapshot(std::shared_ptr<const MemoryContent> snapshot) const;
     Assets2D(const Assets2D&) = delete;
     Assets2D& operator=(const Assets2D&) = delete;
 
@@ -69,9 +76,32 @@ public:
     // textures), made once and shared. Invalid when it cannot be read: why is
     // in problems(), and it is tried again once its file changes.
     Texture texture(std::string_view path);
+    // Raw UNORM pixels, shared separately from colour textures for material shaders.
+    Texture data_texture(std::string_view path);
+    // GPU payload estimates exclude driver overhead. Live texture handles pin
+    // their allocations; trim never invalidates a component or queued draw.
+    void set_texture_budget(u64 bytes);
+    u64 texture_budget() const { return _texture_budget; }
+    // Whether the textures made exceed the budget now. Cheap: per-frame callers
+    // check it before trim_texture_memory().
+    bool over_texture_budget() const;
+    // Names the components holding each texture in texture_residency() (bind()
+    // records them; off by default, as it walks the world each bind).
+    void set_residency_diagnostics(bool enabled) { _residency_diagnostics = enabled; }
+    AssetMemoryReport texture_memory_report() const;
+    std::vector<AssetResidency> texture_residency() const;
+    AssetMemoryReport trim_texture_memory();
+    // Renderer-thread upload of pixels decoded by an asynchronous scene load.
+    bool prime_texture(std::string_view path, const Image& image);
+    // An image's pixels, read through manager() (they count toward its memory
+    // budget). Null when it cannot be read: why is in problems(), and it is
+    // tried again once its file changes.
+    std::shared_ptr<const Image> image(std::string_view path);
     // A sprite catalog (.kinsprites) with its images made textures; read again
     // when it or one of its images changes. Null when it cannot be read.
     std::shared_ptr<const SpriteCatalog> sprite_catalog(std::string_view path);
+    // A 2D skeleton (.kinskel), read through manager() as image() is.
+    std::shared_ptr<const SkeletonAsset2D> skeleton2d(std::string_view path);
     // An audio catalog (.kinaudio), or a sound file (WAV, Ogg, ...) as a
     // catalog of one cue named by its path. Null when it cannot be read (or
     // kin was built without audio).
@@ -123,6 +153,13 @@ public:
 
     // Why an asset could not be read, by its path.
     const std::map<std::string, std::string>& problems() const { return _problems; }
+    // The first of problems() (by path), nullopt when there is none.
+    std::optional<std::string> first_problem() const {
+        if (_problems.empty()) {
+            return std::nullopt;
+        }
+        return _problems.begin()->second;
+    }
     // Bumped when a texture is made or read again.
     u64 version() const { return _version; }
 
@@ -135,6 +172,7 @@ private:
         Texture texture;
         FileTime time; // the file's when read
         bool failed = false;
+        u64 last_access = 0;
     };
     // A catalog, and the files it was made of (itself first) with their times.
     template <typename Catalog>
@@ -149,11 +187,25 @@ private:
         std::size_t operator()(std::string_view path) const { return std::hash<std::string_view>{}(path); }
     };
 
+    using TextureCache = std::unordered_map<std::string, Made, PathHash, std::equal_to<>>;
+
     std::optional<std::filesystem::file_time_type> file_time(std::string_view path) const;
+    // A load through manager() that reports instead of throwing: null, with why
+    // in problems(), and not tried again until the file changes.
+    template <typename T> std::shared_ptr<const T> load_reported(std::string_view path);
+    AssetResidency texture_row(std::string_view kind, const std::string& path, const Made& made) const;
 
     Renderer2D& _renderer;
+    std::shared_ptr<const MemoryContent> _content_owner;
     AssetManager _manager;
-    std::unordered_map<std::string, Made, PathHash, std::equal_to<>> _textures;
+    TextureCache _textures;
+    TextureCache _data_textures;
+    u64 _texture_budget = 0, _texture_clock = 0;
+    std::unordered_map<const void*, std::string> _texture_reasons; // refreshed by bind()
+    bool _residency_diagnostics = false;
+    // Loads through manager() that failed, by cache key: the path and its file's
+    // time then (tried again once that changes).
+    std::unordered_map<std::string, std::pair<std::string, FileTime>> _failed_loads;
     std::unordered_map<std::string, Read<SpriteCatalog>, PathHash, std::equal_to<>> _sprite_catalogs;
     std::unordered_map<std::string, Read<AudioCatalog>, PathHash, std::equal_to<>> _audio_catalogs;
     std::unordered_map<std::string, Read<ParticleCatalog>, PathHash, std::equal_to<>> _particle_catalogs;

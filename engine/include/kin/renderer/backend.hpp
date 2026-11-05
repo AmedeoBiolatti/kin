@@ -459,6 +459,11 @@ public:
     // (before viewports and clips, which it leaves alone). A backend that
     // reports capabilities().transforms honours it.
     virtual void set_transform(const Affine2&) {}
+    // Indexed textured triangles (Renderer2D::draw_textured_geometry, which
+    // checks them first); false where the backend can't.
+    virtual bool draw_textured_geometry(const Texture&, std::span<const ShaderVertex>, std::span<const u32>) {
+        return false;
+    }
     // Anti-aliased triangles (Renderer2D::draw_shape): each vertex's colour
     // times `tint`, faded out over the pixel past the outline by its `edge`
     // (measured on the GPU, or from the transform's scale where shaders cannot

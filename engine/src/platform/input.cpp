@@ -1322,17 +1322,8 @@ bool Input::pressed(std::string_view action) const {
     }
 
     return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
-                (_key_pressed[scancode] || (_key_cur[scancode] && !_key_prev[scancode]));
-        }
-        if (binding.device == InputBindingDevice::Gamepad) {
-            const std::size_t control = pad_index(binding);
-            return control < pad_control_count && (_pad_pressed[control] || (_pad_cur[control] && !_pad_prev[control]));
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && (_mouse_pressed[button] || (_mouse_cur[button] && !_mouse_prev[button]));
+        return (binding.device != InputBindingDevice::Key || modifier_held(binding.modifiers)) &&
+               binding_pressed(*this, binding);
     });
 }
 
@@ -1441,6 +1432,31 @@ bool pad_control_held(const GamepadState& pad, PadControl control) {
     }
 }
 
+bool binding_pressed(const Input& input, InputBinding binding) {
+    switch (binding.device) {
+    case InputBindingDevice::Key: return input.pressed(to_key(binding.code));
+    case InputBindingDevice::MouseButton: return input.mouse_pressed(to_mouse_button(binding.code));
+    case InputBindingDevice::Gamepad: {
+        const std::size_t control = pad_index(binding);
+        return control < Input::pad_control_count &&
+               (input._pad_pressed[control] || (input._pad_cur[control] && !input._pad_prev[control]));
+    }
+    }
+    return false;
+}
+
+f32 pad_axis_raw(const GamepadState& pad, PadAxis axis) {
+    switch (axis) {
+    case PadAxis::LeftX: return pad.left_x;
+    case PadAxis::LeftY: return pad.left_y;
+    case PadAxis::RightX: return pad.right_x;
+    case PadAxis::RightY: return pad.right_y;
+    case PadAxis::LeftTrigger: return pad.left_trigger;
+    case PadAxis::RightTrigger: return pad.right_trigger;
+    }
+    return 0.0f;
+}
+
 bool binding_held(const Input& input, InputBinding binding) {
     switch (binding.device) {
     case InputBindingDevice::Key: return input.held(to_key(binding.code));
@@ -1462,15 +1478,7 @@ f32 axis_value(const Input& input, const InputAxis& axis) {
     if (pad.connected) {
         const f32 dead = std::clamp(axis.dead_zone, 0.0f, 0.95f);
         for (const InputAxisStick& stick : axis.sticks) {
-            f32 raw = 0.0f;
-            switch (stick.axis) {
-            case PadAxis::LeftX: raw = pad.left_x; break;
-            case PadAxis::LeftY: raw = pad.left_y; break;
-            case PadAxis::RightX: raw = pad.right_x; break;
-            case PadAxis::RightY: raw = pad.right_y; break;
-            case PadAxis::LeftTrigger: raw = pad.left_trigger; break;
-            case PadAxis::RightTrigger: raw = pad.right_trigger; break;
-            }
+            f32 raw = pad_axis_raw(pad, stick.axis);
             if (stick.inverted) {
                 raw = -raw;
             }
@@ -1496,6 +1504,11 @@ void Input::set_gamepad(const GamepadState& state) {
         }
         _pad_cur[control] = now;
     }
+}
+
+bool Input::pad_frame_pressed(PadControl control) const {
+    const auto index = static_cast<std::size_t>(control);
+    return index < pad_control_count && _pad_frame_pressed[index];
 }
 
 f32 Input::axis(std::string_view name) const {

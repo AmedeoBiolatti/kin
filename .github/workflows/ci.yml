@@ -97,6 +97,8 @@ jobs:
       - uses: ./.github/actions/ccache
         with:
           key: Linux 2D-only build
+      - name: Install 2D import dependencies
+        run: python3 -m pip install -r tools/requirements-imports.txt
       - name: Configure
         env:
           CC: gcc-13
@@ -106,6 +108,15 @@ jobs:
         run: cmake --build --preset 2d
       - name: Test
         run: ctest --preset 2d --timeout 300
+      - name: Upload failed gameplay traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-2d
+          path: |
+            build-2d/examples/2d_workflow/automation
+            build-2d/examples/2d_workflow/development
+          if-no-files-found: ignore
 
   build:
     needs: select-run
@@ -138,7 +149,7 @@ jobs:
             options: >-
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_BENCHMARKS=OFF
               -DKIN_ENABLE_SCRIPTING=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
-              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEVELOPMENT=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
               -DKIN_ENABLE_LTO=ON -DKIN_PACKAGE_STRIP=ON -DKIN_PACKAGE_DEBUG_SYMBOLS=ON
@@ -160,7 +171,7 @@ jobs:
               -DKIN_LINUX_VIDEO=x11-wayland
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_BUILD_BENCHMARKS=OFF
               -DKIN_ENABLE_SCRIPTING=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
-              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEVELOPMENT=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_IMAGE_IO=OFF -DKIN_ENABLE_TTF=OFF
               -DKIN_ENABLE_RUNTIME_ASSETS=OFF -DKIN_ENABLE_RUNTIME_PROFILING=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
@@ -177,7 +188,7 @@ jobs:
               -DKIN_BUILD_EXAMPLES=OFF -DKIN_ENABLE_PHYSICS=OFF -DKIN_ENABLE_AUDIO=OFF
               -DKIN_ENABLE_SDL_DYNAMIC_API=OFF
               -DKIN_ENABLE_SDL_GAMEPAD=OFF -DKIN_ENABLE_SDL_DESKTOP_SERVICES=OFF
-              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
+              -DKIN_ENABLE_SCENE_SERVER=OFF -DKIN_ENABLE_DEVELOPMENT=OFF -DKIN_ENABLE_DEBUG_OVERLAY=OFF
               -DKIN_ENABLE_RELEASE_PROFILING=OFF -DKIN_ENABLE_RENDER_PROBE=OFF
               -DKIN_ENABLE_DETERMINISM_CHECK=OFF -DKIN_ENABLE_SIZE_OPTIMIZATIONS=ON
           - name: Linux compact CPU export
@@ -201,6 +212,9 @@ jobs:
         if: runner.os == 'Linux'
         with:
           packages: glslc
+      - name: Install 2D import dependencies
+        if: ${{ !contains(matrix.options, 'KIN_BUILD_EXAMPLES=OFF') }}
+        run: python -m pip install -r tools/requirements-imports.txt
 
       - uses: ./.github/actions/ccache
         with:
@@ -243,6 +257,15 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C ${{ matrix.config || 'Release' }} --output-on-failure -j 4 --timeout 300
+      - name: Upload failed gameplay traces
+        if: ${{ failure() && !contains(matrix.options, 'KIN_BUILD_EXAMPLES=OFF') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-${{ matrix.name }}
+          path: |
+            build/examples/2d_workflow/automation
+            build/examples/2d_workflow/development
+          if-no-files-found: ignore
 
       - name: Package recommended SDL software export
         if: matrix.preset == 'hex-shipping'
@@ -448,6 +471,9 @@ jobs:
       - uses: ./.github/actions/linux-deps
         with:
           packages: mesa-vulkan-drivers vulkan-validationlayers glslc xvfb
+      - name: Install 2D import dependencies
+        if: matrix.examples == 'ON'
+        run: python3 -m pip install -r tools/requirements-imports.txt
 
       # The shards compile the same units, so they share one cache.
       - uses: ./.github/actions/ccache
@@ -480,6 +506,15 @@ jobs:
         env:
           SKIP: ${{ matrix.skip }}
         run: xvfb-run -a -s "-screen 0 1280x800x24" ctest --test-dir build -R '${{ matrix.tests }}' ${SKIP:+-E "$SKIP"} --output-on-failure --timeout 300 --no-tests=error --output-junit "$PWD/build/ctest.xml"
+      - name: Upload failed gameplay traces
+        if: ${{ failure() && matrix.examples == 'ON' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gameplay-traces-${{ matrix.artifact }}
+          path: |
+            build/examples/2d_workflow/automation
+            build/examples/2d_workflow/development
+          if-no-files-found: ignore
 
       - name: Rendering graphs with Vulkan core validation
         if: matrix.graphs

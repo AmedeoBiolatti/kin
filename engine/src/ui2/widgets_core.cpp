@@ -841,6 +841,7 @@ void run(Context& ctx, Panel& widget) {
 }
 
 void run(Context& ctx, Label& widget) {
+    ctx.describe(widget.id, "text", widget.text, widget.bounds);
     TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
     std::string_view text = widget.text;
     FittedText fitted;
@@ -922,9 +923,10 @@ void theme_styles(const Theme& theme, Button& widget) {
 }
 
 void run(Context& ctx, Button& widget) {
+    describe_control(ctx, widget.id, "button", widget.label, widget.bounds, widget.enabled);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
-    widget.clicked = it.clicked && widget.enabled;
+    widget.clicked = widget.enabled && (it.clicked || ctx.keyboard_activated(it));
     const WidgetStyle style = themed_widget_style(widget.style, ctx.theme().button);
     const TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
 
@@ -1026,13 +1028,15 @@ void theme_styles(const Theme& theme, Toggle& widget) {
 
 void run(Context& ctx, Toggle& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
+    describe_control(ctx, widget.id, "toggle", widget.label, widget.bounds, widget.enabled);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.changed = false;
-    if (it.clicked && widget.enabled) {
+    if (widget.enabled && (it.clicked || ctx.keyboard_activated(it))) {
         widget.value = !widget.value;
         widget.changed = true;
     }
+    ctx.semantic_state(widget.id, {}, widget.value);
     const WidgetStyle style = themed_widget_style(widget.style, ctx.theme().input);
     const TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
 
@@ -1061,11 +1065,32 @@ void theme_styles(const Theme& theme, Slider& widget) {
 
 void run(Context& ctx, Slider& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
+    describe_control(ctx, widget.id, "slider", {}, widget.bounds, widget.enabled);
     const WidgetStyle style = themed_widget_style(widget.style, ctx.theme().input);
     const SliderLayoutMetrics metrics = slider_layout_metrics(widget, ctx.theme().preset);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.changed = false;
+
+    // What Left/Right and assistive increments move it by: its step, else a hundredth.
+    const f32 step = widget.step > 0 ? widget.step : (widget.max - widget.min) / 100.0f;
+    if (it.focused && widget.enabled && widget.max > widget.min) {
+        const f32 before = widget.value;
+        if (ctx.key_pressed(Key::Left)) {
+            widget.value -= step;
+        }
+        if (ctx.key_pressed(Key::Right)) {
+            widget.value += step;
+        }
+        widget.value = std::clamp(widget.value, widget.min, widget.max);
+        widget.changed = widget.value != before;
+    }
+    if (widget.enabled && widget.max > widget.min) {
+        if (const auto value = ctx.take_numeric_action(widget.id, widget.value, widget.min, widget.max, step)) {
+            widget.changed |= widget.value != static_cast<f32>(*value);
+            widget.value = static_cast<f32>(*value);
+        }
+    }
 
     if (it.active && widget.enabled && widget.max > widget.min) {
         const f32 norm = std::clamp((ctx.pointer().x - widget.bounds.x) / std::max(1.0f, widget.bounds.w), 0.0f, 1.0f);
@@ -1080,6 +1105,8 @@ void run(Context& ctx, Slider& widget) {
         }
     }
 
+    ctx.semantic_state(widget.id, number_text(widget.value));
+    ctx.semantic_numeric(widget.id, widget.value, widget.min, widget.max, step);
     const f32 norm = widget.max > widget.min
                          ? std::clamp((widget.value - widget.min) / (widget.max - widget.min), 0.0f, 1.0f)
                          : 0.0f;
@@ -1171,11 +1198,12 @@ void theme_styles(const Theme& theme, IconButton& widget) {
 
 void run(Context& ctx, IconButton& widget) {
     const auto mirror = ctx.mirror_if_right_to_left(widget.bounds); // right to left: mirrored inside
+    describe_control(ctx, widget.id, "button", widget.label, widget.bounds, widget.enabled);
     const KeepStyles keep(widget); // the caller's styles, back when it is done
     theme_styles(ctx.theme(), widget);
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
-    widget.clicked = it.clicked && widget.enabled;
+    widget.clicked = widget.enabled && (it.clicked || ctx.keyboard_activated(it));
 
     ctx.surface(widget.bounds, ctx.resolve_animated(widget.id, widget.style.surface, it, false, widget.enabled));
 

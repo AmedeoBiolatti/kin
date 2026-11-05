@@ -22,12 +22,75 @@ releases may change APIs.
 - Tweens and timers ([tweens](animation_system.md#tweens)). `kin::tween(world, entity, {.property =
   "Transform2D.pos", .to = ..., .seconds, .easing})` moves any described field that animations can set, from what
   it is when it starts (after its `delay`), `relative`ly, with `repeats` and `yoyo`; a new tween of a field replaces
-  the one before; `update_tweens(world, dt)` runs them, `stop_tween`, `stop_tweens` and `tweening` go with it, and
-  those that got to their end are in `Tweens::ended`. `Easing` gains sine, cubic, back, elastic and bounce, each in,
-  out and in-out, for animation keys too (`easings()` lists them all). `kin::Timers` runs actions `after` or `every`
-  so many seconds. Entity scripts get `self:tween(...)` (a `done` callback among its options), `tweening`,
-  `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
-  handed over.
+  the one before; `update_tweens(world, dt)` runs them (where Lua scripts run, their script services do, once a
+  step), `stop_tween`, `stop_tweens` and `tweening` go with it, and those that got to their end are in
+  `Tweens::ended`. `Easing` gains sine, cubic, back, elastic and bounce, each in, out and in-out, for animation keys
+  too (`easings()` lists them all). `kin::Timers` runs actions `after` or `every` so many seconds. Entity scripts
+  get `self:tween(...)` (a `done` callback among its options), `tweening`, `stop_tween`, `stop_tweens`, and
+  `after`, `every` and `cancel`, which are the entity's tasks: a reload or the entity's end drops them, with its
+  tweens' `done` callbacks.
+- [Lua development](lua_development.md): `kin_lua api` writes typed definitions of what a host binds (functions,
+  properties, callbacks, component aliases and shapes), and `kin_lua.py` checks scripts against them, a test keeping
+  the two in step both ways. Entity state migrates transactionally on reload, with stop hooks. `LuaRuntimeLimits`
+  (instructions and memory) and per-callback profiles are shared by every host; tasks belong to an entity and wait on
+  simulation time, frames, conditions or tweens. An isolated headless module/component test runner writes JSON and
+  JUnit reports, with a runnable [test project](../examples/lua_testing/README.md). `kin/scripting/lua_values.hpp`
+  converts component values and JSON to and from Lua. A reload whose rollback fails halts the script host
+  (`ScriptEngine::halt`) instead of ending the process.
+- [Development sessions](hot_reload.md) (`--dev`; component `KIN_ENABLE_DEVELOPMENT`, off in the shipping and
+  minimal presets): one-command build/import/watch/run targets, stateful Lua migration with staged system
+  declarations, authored scene and prefab patches, immutable asset generations and rollback, with `dev.status` /
+  `dev.reload` automation and recorded revision inputs. Hosts reload assets through one checked step,
+  `EcsScene::prepare_asset_reload` or `prepare_reload_assets`. `ScriptSceneConfig::hot_reload` and
+  `SceneAssetRuntime::reload_if_changed` still work but are deprecated in favour of development sessions.
+- `MemoryContent` mounts files held in memory as a content pack. Memory-backed SDL streams and GLSL include
+  compilation; queued scene reads keep their source snapshot across a reload. Workshop tests cover real source
+  watching, failed edits, active leases and jobs, and recorded replay.
+
+- [Gameplay automation](automation.md): scenarios in Lua (`scenario{...}`, compiled by `kin_lua scenario`) or JSON,
+  with bounded tick conditions, discoverable request/result schemas, scoped semantic UI selectors, targeted world
+  queries, command recording and replay (one header shape whichever side records), declared input identities,
+  JUnit results and offline failure traces. Workshop CTests run the whole process/compiler/recording workflow, and
+  CI uploads what failed.
+- Scene-server reset clears held/queued input while retaining its action map;
+  reset seeds accept decimal strings for the full unsigned 64-bit range.
+
+- [Lua 2D workflows](lua_2d_workflows.md) in both scene and entity scripts, which share one set of services per
+  world (`ScriptWorkflows2D::shared`): property tweens (`tweens.to` returns a handle that `task.await` waits on),
+  input contexts, rebinding and profiles saved per game, prefab leases, staged scene loads, controller ownership
+  and rumble, and memory diagnostics. Includes a [playable workshop](../examples/2d_workflow/README.md) with
+  imported sprites, accessible controls and an automated playthrough for loose and packed content.
+- GPU forward lighting for normal sprites on SDL_GPU: lights gathered once a frame into one shared buffer, raw
+  material textures shared between sprites, shadows and light shapes, and the existing CPU path as the fallback.
+- Skeletal crossfades, interrupted transitions, masked override/additive layers and normalized-phase triangulated
+  blend spaces in native `.kinskel` assets.
+- AssetManager memory budgets (`trim_memory` evicts the least recently used payloads, only when over budget) and
+  dependency/root diagnostics; Assets2D texture budgets, residency estimates and component retention reasons.
+
+- [2D runtime workflows](2d_workflows.md): input contexts that consume or block what is below them
+  (`InputRouter`), rebinding per device with capture and conflicts, and saved overrides; per-player controllers,
+  reconnects, haptics and family prompts; prefab prewarming and reuse (`PrefabPool2D`) with stale lease/script
+  guards; staged async scene preparation, cancellation and bounded image uploads; grid navigation agents with
+  radius clearance, replanning, events and local steering.
+- `kin::game_data_dir(id)` is a game's folder of user data (SaveStore's), and `write_user_file` writes a file
+  there whole or not at all; saves and input profiles use both.
+- [Incremental 2D imports](importing_2d.md#watching-and-incremental-processing): verified content-addressed job
+  caching, debounced watch targets, corrupt-cache recovery, and the last good outputs kept when sources fail or
+  change mid-import.
+- [Accessible UI](ui.md#accessibility): an optional AccessKit desktop bridge, accessible names, announcements,
+  numeric control actions and reduced-motion surface transitions.
+- [Normal-mapped sprites](rendering.md#normal-mapped-sprites): CPU forward diffuse/specular shading, directional
+  lights, receiver masks and polygon shadows.
+- [2D skeletal animation](skeleton_2d.md): native rigs/clips, weighted meshes, attachments, two-bone IK and
+  asset/ECS integration, with textured triangle drawing on SDL, SDL_GPU and WebGL2.
+
+- [Controller UI](ui.md#controllers) navigation and semantic [UI automation](ui.md#automation): spatial focus,
+  repeat, accept/back, modal boundaries, `Scene::ui_context`, `ui.snapshot` and deferred `ui.action` by stable ID,
+  label or `.kinui` key. Live inspection reads UI without consuming player input.
+- Manifest-driven [2D imports](importing_2d.md) for Aseprite, PNG atlases, finite Tiled maps and selected LDtk
+  levels, with native scene/tilemap output and `kin_game(IMPORTS ...)` rebuild/package integration.
+- [Asset lifetime](assets.md#asset-lifetime): `AssetScope`, dependency-aware `unload_unused` and temporary
+  dependency-batch pins that keep in-flight cycles safe.
 
 - Global illumination's emitters are area lights by default (`GlobalIllumination3D::emitters`, `GiEmitters3D::Exact`;
   [3D rendering](rendering_3d.md), "Global illumination"). An emissive surface the GI numbers lights what the camera
@@ -480,6 +543,10 @@ releases may change APIs.
 
 ### Fixed
 
+- Every instance of a prefab draws. Where instances inherit the prefab's renderer (rects, sprites, text,
+  particles, textured renderers), only the first instance in each table was drawn, and the others read past the
+  shared value.
+
 - Preserve transparent TAA motion on software GPUs by routing colour-only particle
   and custom material shaders through the velocity pre-pass. Keep particle-shadow
   history stable across views, and restore Windows compilation of Summit, the
@@ -733,6 +800,9 @@ releases may change APIs.
   GPU when more than two are pending.
 
 ### Changed
+
+- `LuaScriptOptions::instruction_limit` is `LuaScriptOptions::limits.instruction_limit`: a `LuaRuntimeLimits`, which
+  holds the memory limit too and is what every Lua host uses.
 
 - `kin/ui2/widgets.hpp`'s editor widgets (docks, splitters, breadcrumbs, the
   asset browser, log console, status bar, property inspectors and grids, node

@@ -9,6 +9,7 @@ add_library(kin_foundation STATIC
     src/core/hash.cpp
     src/core/jobs.cpp
     src/core/json_value.cpp
+    src/core/profile.cpp
     src/core/script_debugger.cpp
     src/core/utf8.cpp
     src/l10n/gettext.cpp
@@ -38,8 +39,11 @@ add_library(kin_engine STATIC
     src/anim/registry.cpp
     src/anim/state_machine.cpp
     src/anim/track.cpp
+    src/anim/skeleton2d.cpp
+    src/anim/skeleton_blend2d.cpp
     src/anim/value.cpp
     src/assets/asset_manager.cpp
+    src/assets/asset_memory.cpp
     src/assets/asset_server.cpp
     src/assets/bake_cache.cpp
     src/assets/image.cpp
@@ -47,10 +51,10 @@ add_library(kin_engine STATIC
     src/core/bidi.cpp
     src/core/hex.cpp
     src/core/instrumentation.cpp
-    src/core/profile.cpp
     src/dialogue/dialogue.cpp
     src/dialogue/dialogue_graph.cpp
     src/ecs/assets2d.cpp
+    src/ecs/asset_memory2d.cpp
     src/ecs/component.cpp
     src/ecs/component_schema.cpp
     src/ecs/editor.cpp
@@ -68,6 +72,8 @@ add_library(kin_engine STATIC
     src/ecs/saving.cpp
     src/ecs/scene_flow.cpp
     src/ecs/sprite_animator.cpp
+    src/ecs/skeleton2d.cpp
+    src/ecs/normal_sprite2d.cpp
     src/ecs/text.cpp
     src/ecs/system.cpp
     src/ecs/time.cpp
@@ -76,6 +82,7 @@ add_library(kin_engine STATIC
     src/ecs/ui2_sync.cpp
     src/platform/app.cpp
     src/platform/input.cpp
+    src/platform/input_router.cpp
     src/platform/file_dialogs.cpp
     src/platform/gamepad.cpp
     src/platform/resource_paths.cpp
@@ -91,8 +98,10 @@ add_library(kin_engine STATIC
     src/pathfinding/hex_pathfinding.cpp
     src/pathfinding/navmesh3d.cpp
     src/pathfinding/path_server.cpp
+    src/pathfinding/navigation2d.cpp
     src/pathfinding/pathfinding.cpp
     src/prefab/prefab_asset.cpp
+    src/prefab/prefab_pool2d.cpp
     src/prefab/prefab_structure.cpp
     src/renderer/animation_import.cpp
     src/renderer/cached_target.cpp
@@ -104,6 +113,8 @@ add_library(kin_engine STATIC
     src/renderer/render_queue.cpp
     src/renderer/render_view.cpp
     src/renderer/lighting.cpp
+    src/renderer/normal_lighting2d.cpp
+    src/renderer/normal_lighting2d_gpu.cpp
     src/renderer/post_blur.cpp
     src/renderer/path.cpp
     src/renderer/shape.cpp
@@ -123,6 +134,8 @@ add_library(kin_engine STATIC
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
     src/scene/scene_asset_runtime.cpp
+    src/scene/live_scene2d.cpp
+    src/scene/scene_preload2d.cpp
     src/scene/scene_manager.cpp
     src/scene/transitions.cpp
     src/save/save_store.cpp
@@ -131,6 +144,8 @@ add_library(kin_engine STATIC
     src/ui2/layout.cpp
     src/ui2/menu_scene.cpp
     src/ui2/state.cpp
+    src/ui2/semantics.cpp
+    src/ui2/accessibility.cpp
     src/ui2/context.cpp
     src/ui2/compose.cpp
     src/ui2/composed.cpp
@@ -160,6 +175,7 @@ add_library(kin_engine_components INTERFACE)
 add_library(kin::engine ALIAS kin_engine_components)
 target_link_libraries(kin_engine_components INTERFACE kin_engine)
 target_link_libraries(kin_engine PUBLIC kin_foundation)
+include(kin_accessibility)
 
 target_sources(kin_engine PRIVATE src/renderer/shader_params.cpp)
 if(KIN_HAS_SDL_RENDERER)
@@ -253,13 +269,19 @@ if(KIN_ENABLE_SCRIPTING)
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
         src/scripting/lua_script.cpp
-        src/scripting/lua_services.cpp)
+        src/scripting/lua_services.cpp
+        src/scripting/lua_runtime.cpp
+        src/scripting/lua_tasks.cpp)
     add_library(kin::scripting ALIAS kin_scripting)
     target_link_libraries(kin_scripting PUBLIC kin_foundation Lua::Lua sol2::sol2)
     kin_enable_release_optimizations(kin_scripting)
 
     add_library(kin_scripting_scenes STATIC
         src/scripting/script_engine.cpp
+        src/scripting/script_reload.cpp
+        src/scripting/lua_state_copy.cpp
+        src/scripting/lua_values.cpp
+        src/scripting/lua_workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp
         src/scripting/entity_scripts.cpp)
@@ -277,7 +299,11 @@ endif()
 if(KIN_ENABLE_SCENE_SERVER)
     target_sources(kin_engine PRIVATE
         src/runtime/scene_server.cpp
+        src/runtime/automation.cpp
     )
+endif()
+if(KIN_ENABLE_DEVELOPMENT)
+    target_sources(kin_engine PRIVATE src/runtime/development.cpp)
 endif()
 
 # These usage requirements also reach game sources and their final link.

@@ -154,6 +154,7 @@ public:
     void set_cursor(SystemCursor cursor);
 
 private:
+    friend class AccessKitAdapter;
     friend class SdlRenderer2DBackend;
     friend class WebGL2Renderer2DBackend;
     friend class WebGLDevice;

@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 namespace kin {
 
 class IAssetStorage {
 public:
+    std::uint64_t resident_bytes = 0, last_access = 0;
+    bool size_estimated = true;
     virtual ~IAssetStorage() = default;
     virtual bool loaded() const = 0;
     virtual void clear_loaded() = 0;
@@ -38,6 +41,10 @@ public:
     std::shared_ptr<const T> shared() const {
         return valid() ? std::shared_ptr<const T>{_storage, &_storage->data} : std::shared_ptr<const T>{};
     }
+
+    // Keeps the cache entry resident (AssetManager::unload_unused and memory
+    // budgets leave it alone), even before an asynchronous load completes.
+    std::shared_ptr<const void> keepalive() const { return _storage; }
 
 private:
     std::shared_ptr<AssetStorage<T>> _storage;

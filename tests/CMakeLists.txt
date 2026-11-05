@@ -47,6 +47,11 @@ endfunction()
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME kin-development-python COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/development" -v)
+    set_tests_properties(kin-development-python PROPERTIES TIMEOUT 60)
+    add_test(NAME kin-automation-python
+        COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/automation" -v)
+    set_tests_properties(kin-automation-python PROPERTIES TIMEOUT 60)
     kin_add_script_test(kin-rendering-ci-python
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/rendering_ci_tests.py")
     kin_add_script_test(kin-eval-python
@@ -73,6 +78,11 @@ if(Python3_Interpreter_FOUND)
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_cooking_tests.py")
     kin_add_script_test(kin-asset-report
         "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/asset_report_tests.py")
+    add_executable(kin_import_2d_native_tests import_2d_native_tests.cpp)
+    target_link_libraries(kin_import_2d_native_tests PRIVATE kin::engine)
+    add_test(NAME kin-import-2d
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/import_2d_tests.py"
+            --validator "$<TARGET_FILE:kin_import_2d_native_tests>")
 endif()
 
 function(kin_add_test target test_name)
@@ -173,6 +183,18 @@ kin_add_test(kin_instrumentation_tests kin-instrumentation
         "$<$<CXX_COMPILER_ID:MSVC>:/Od>"
 )
 kin_add_test(kin_anim_core_tests kin-anim-core SOURCES anim_core_tests.cpp)
+kin_add_test(kin_input_workflow_tests kin-input-workflow SOURCES input_workflow_tests.cpp
+    DEFINITIONS KIN_TEST_SDL_GAMEPAD=$<BOOL:${KIN_ENABLE_SDL_GAMEPAD}>)
+kin_add_test(kin_scene_workflow2d_tests kin-scene-workflow2d SOURCES scene_workflow2d_tests.cpp)
+kin_add_test(kin_navigation2d_tests kin-navigation2d SOURCES navigation2d_tests.cpp)
+kin_add_test(kin_prefab_pool2d_tests kin-prefab-pool2d SOURCES prefab_pool2d_tests.cpp)
+kin_add_test(kin_accessibility_tests kin-accessibility SOURCES accessibility_tests.cpp)
+kin_add_test(kin_animation_lighting2d_tests kin-animation-lighting2d SOURCES animation_lighting2d_tests.cpp)
+kin_add_test(kin_advanced_workflow2d_tests kin-advanced-workflow2d SOURCES advanced_workflow2d_tests.cpp)
+kin_add_test(kin_normal_lighting2d_gpu_tests kin-normal-lighting2d-gpu SOURCES normal_lighting2d_gpu_tests.cpp)
+set_tests_properties(kin-normal-lighting2d-gpu PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
+kin_add_test(kin_asset_lifetime_tests kin-asset-lifetime SOURCES asset_lifetime_tests.cpp)
+kin_add_test(kin_memory_content_tests kin-memory-content SOURCES memory_content_tests.cpp)
 kin_add_test(kin_anim_player_tests kin-anim-player SOURCES anim_player_tests.cpp)
 kin_add_test(kin_anim_event_tests kin-anim-events SOURCES anim_event_tests.cpp anim_event_consumer_tests.cpp)
 kin_add_test(kin_anim_state_machine_tests kin-anim-state-machine SOURCES anim_state_machine_tests.cpp)
@@ -598,6 +620,17 @@ kin_add_test(kin_scene_tests kin-scene SOURCES scene_tests.cpp)
 kin_add_test(kin_scene_asset_tests kin-scene-asset SOURCES scene_asset_tests.cpp)
 
 kin_add_component_test(SCRIPTING kin_entity_scripts_tests kin-entity-scripts SOURCES entity_scripts_tests.cpp LINK_TARGET kin::scripting_scenes)
+kin_add_component_test(SCRIPTING kin_lua_workflows2d_tests kin-lua-workflows2d SOURCES lua_workflows2d_tests.cpp LINK_TARGET kin::scripting_scenes)
+kin_add_component_test(SCRIPTING kin_lua_runtime_tests kin-lua-runtime SOURCES lua_runtime_tests.cpp LINK_TARGET kin::scripting_scenes)
+if(KIN_ENABLE_SCRIPTING AND Python3_Interpreter_FOUND AND TARGET kin_lua)
+    add_test(NAME kin-lua-tooling COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/lua_tooling_tests.py" "$<TARGET_FILE:kin_lua>"
+        "$<IF:$<BOOL:${KIN_ENABLE_PHYSICS}>,--physics,--no-physics>")
+    set_tests_properties(kin-lua-tooling PROPERTIES TIMEOUT 90 LABELS "component:SCRIPTING")
+endif()
+if(KIN_ENABLE_SCRIPTING)
+    kin_add_component_test(DEVELOPMENT kin_development_tests kin-development SOURCES development_tests.cpp
+        LINK_TARGET kin::scripting_scenes)
+endif()
 if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_entity_scripts_tests PRIVATE kin::physics_ecs) # a character's script
 endif()

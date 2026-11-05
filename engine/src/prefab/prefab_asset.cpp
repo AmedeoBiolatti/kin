@@ -401,6 +401,44 @@ bool set_runtime_name(EcsWorld& world, EcsEntity entity, std::string_view name) 
     return true;
 }
 
+// A prefab entity's runtime name: the spawn's for the root, else its authored name or id.
+std::string_view runtime_entity_name(const PrefabAsset& prefab, const PrefabEntityAsset& entity,
+                                     const PrefabSpawn& spawn) {
+    if (entity.id == prefab.root && !spawn.name.empty()) {
+        return spawn.name;
+    }
+    return entity.name.empty() ? std::string_view{entity.id} : std::string_view{entity.name};
+}
+
+// Parents a registered instance's entities as the prefab says (its root under
+// the spawn's parent) and applies their authored components. False, with why
+// in instance.diagnostics, when one cannot be.
+bool link_prefab_entities(EcsWorld& world, const PrefabAsset& prefab, PrefabInstance& instance,
+                          const PrefabSpawn& spawn, EcsComponentRegistry& components) {
+    for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
+        EcsEntity entity = instance.by_authored_id.at(prefab_entity.id);
+        if (!prefab_entity.parent.empty() &&
+            !world.entities().reparent(entity, instance.by_authored_id.at(prefab_entity.parent))) {
+            instance.diagnostics.push_back(world.entities().last_error());
+            return false;
+        }
+    }
+    if (spawn.parent && instance.root && !world.entities().reparent(instance.root, spawn.parent)) {
+        instance.diagnostics.push_back(world.entities().last_error());
+        return false;
+    }
+    for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
+        EcsEntity entity = instance.by_authored_id.at(prefab_entity.id);
+        for (const PrefabComponentAsset& component : prefab_entity.components) {
+            if (!apply_component_fields(entity, resolve_prefab_component_refs(component, instance.by_authored_id),
+                                        components, instance.diagnostics)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 PrefabLoadResult load_prefab_asset(const std::filesystem::path& path,
@@ -647,12 +685,8 @@ PrefabInstance instantiate_prefab(EcsWorld& world,
 
     instance.entities.reserve(prefab.entities.size());
     for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
-        std::string runtime_name = prefab_entity.name.empty() ? prefab_entity.id : prefab_entity.name;
-        if (prefab_entity.id == prefab.root && !spawn.name.empty()) {
-            runtime_name = spawn.name;
-        }
         EcsEntity entity{world.raw().entity()};
-        set_runtime_name(world, entity, runtime_name);
+        set_runtime_name(world, entity, runtime_entity_name(prefab, prefab_entity, spawn));
         entity.raw().is_a(compiled->by_id.at(prefab_entity.id).raw());
         instance.entities.push_back(entity);
         instance.by_authored_id[prefab_entity.id] = entity;
@@ -672,32 +706,9 @@ PrefabInstance instantiate_prefab(EcsWorld& world,
         world.events().emit_entity(EcsEventKind::EntityCreated, entity);
     }
 
-    for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
-        EcsEntity entity = instance.by_authored_id.at(prefab_entity.id);
-        if (!prefab_entity.parent.empty()) {
-            if (!world.entities().reparent(entity, instance.by_authored_id.at(prefab_entity.parent))) {
-                instance.diagnostics.push_back(world.entities().last_error());
-                rollback_prefab_instance(world, instance);
-                return instance;
-            }
-        }
-    }
-    if (spawn.parent && instance.root) {
-        if (!world.entities().reparent(instance.root, spawn.parent)) {
-            instance.diagnostics.push_back(world.entities().last_error());
-            rollback_prefab_instance(world, instance);
-            return instance;
-        }
-    }
-
-    for (const PrefabEntityAsset& prefab_entity : prefab.entities) {
-        EcsEntity entity = instance.by_authored_id.at(prefab_entity.id);
-        for (const PrefabComponentAsset& component : prefab_entity.components) {
-            if (!apply_component_fields(entity, resolve_prefab_component_refs(component, instance.by_authored_id), components, instance.diagnostics)) {
-                rollback_prefab_instance(world, instance);
-                return instance;
-            }
-        }
+    if (!link_prefab_entities(world, prefab, instance, spawn, components)) {
+        rollback_prefab_instance(world, instance);
+        return instance;
     }
 
     for (const auto& [entity_id, component_overrides] : overrides.entities) {
@@ -717,6 +728,33 @@ PrefabInstance instantiate_prefab(EcsWorld& world,
         return instance;
     }
     return instance;
+}
+
+bool restore_prefab_instance(EcsWorld& world, const PrefabAsset& source, PrefabInstance& instance,
+                             const PrefabSpawn& spawn) {
+    const auto& prefab = resolved_prefab_asset(source);
+    instance.diagnostics.clear();
+    for (const auto& item : prefab.entities) {
+        const auto found = instance.by_authored_id.find(item.id);
+        if (found == instance.by_authored_id.end() || !found->second) {
+            instance.diagnostics.push_back("pooled prefab entity is no longer alive: " + item.id);
+            return false;
+        }
+    }
+    for (const auto& item : prefab.entities) {
+        auto entity = instance.by_authored_id.at(item.id);
+        set_runtime_name(world, entity, runtime_entity_name(prefab, item, spawn));
+        if (!world.entities().register_existing(entity, runtime_authored_id(spawn, item.id))) {
+            instance.diagnostics.push_back(world.entities().last_error());
+            return false;
+        }
+        entity.enable();
+    }
+    if (!link_prefab_entities(world, prefab, instance, spawn, world.components())) {
+        return false;
+    }
+    apply_spawn_transform(instance.root, spawn.pos, world.components(), instance.diagnostics);
+    return instance.diagnostics.empty();
 }
 
 PrefabInstance PrefabInstanceRegistry::instantiate(EcsWorld& world,

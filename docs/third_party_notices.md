@@ -21,6 +21,7 @@ fonts and additional libraries through its `LICENSE_FILES` argument.
 | [SDL_image](https://github.com/libsdl-org/SDL_image) | 3.4.4 | zlib | Sam Lantinga |
 | [SDL_ttf](https://github.com/libsdl-org/SDL_ttf) | 3.2.2 | zlib | Sam Lantinga |
 | [flecs](https://github.com/SanderMertens/flecs) | 4.0.5 | MIT | Sander Mertens |
+| [AccessKit C](https://github.com/AccessKit/accesskit-c/tree/0.23.2) (optional `KIN_ENABLE_ACCESSIBILITY`) | 0.23.2 (`99023c87eca49531a8e1efc4657e35779257a463`) | MIT or Apache-2.0, with BSD Chromium-derived definitions | AccessKit contributors |
 | [Box2D](https://github.com/erincatto/box2d) | 2.4.1 | MIT | Erin Catto |
 | [Lua](https://www.lua.org) | 5.4.6 | MIT | Lua.org, PUC-Rio |
 | [sol2](https://github.com/ThePhD/sol2) | 3.3.1 | MIT | Rapptz, ThePhD, and contributors |
@@ -72,6 +73,12 @@ THE SOFTWARE.
 ```
 
 ## Libraries bundled by SDL_image and SDL_ttf
+
+AccessKit is an externally supplied library. Its license texts are retained in
+[`docs/licenses/accesskit`](licenses/accesskit) and included by the desktop package
+helper when enabled. When building your own AccessKit static distribution, also
+retain the notices for its Rust dependencies. Kin does not fetch or build Rust
+dependencies during ordinary configuration.
 
 Kin builds SDL_image and SDL_ttf with their vendored libraries enabled, so these
 are compiled in as well:
