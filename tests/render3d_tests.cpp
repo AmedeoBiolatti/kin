@@ -4654,6 +4654,139 @@ void test_gpu_material_shader() {
     });
 }
 
+#ifdef KIN_TEST_SURFACE_SPIRV
+#include "surface_test_shaders.hpp"
+#endif
+
+// A surface shader (Material3D::surface; tests/shaders/*.surface.glsl, compiled by glslc now into every variant of
+// kin's mesh shader): one that leaves the surface as it is draws exactly what the material draws without it, plain,
+// fogged, with the light shaders (a shadowed spot light) and with the velocity's (temporal anti-aliasing); one that
+// changes it is lit as kin lights its own (its parameters reach it); unlit, it is its colour plus its emission; a
+// surface that doesn't compile is refused with glslc's messages.
+void test_gpu_surface_shader() {
+    with_gpu("test_gpu_surface_shader", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_surface_shader", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+        const kin::SurfaceShader3D identity =
+            r3d.compile_surface_shader(dir / "surface_identity.surface.glsl").value_or({});
+        if (!identity.valid()) {
+            std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+            assert(false && "the identity surface did not compile");
+        }
+        const kin::SurfaceShader3D tint = r3d.compile_surface_shader(dir / "surface_tint.surface.glsl").value_or({});
+        assert(tint.valid() && !(tint == identity));
+        const std::filesystem::path broken = std::filesystem::temp_directory_path() / "kin_broken.surface.glsl";
+        std::ofstream{broken} << "void kin_surface(inout KinSurface s) { s.base_color = nonsense; }\n";
+        assert(!r3d.compile_surface_shader(broken).value_or({}).valid());
+        const std::string why = kin::diagnostics3d_text(r3d.diagnostics());
+        assert(why.find("nonsense") != std::string::npos && "glslc's message names the error");
+        std::filesystem::remove(broken);
+
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        struct Setup {
+            const char* name;
+            bool fog, spot, taa;
+        };
+        const auto shoot = [&](const kin::Material3D& material, const Setup& setup) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
+            scene.lights.ambient = {0.1f, 0.12f, 0.2f};
+            scene.add_point_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
+            if (setup.spot)
+                scene.add_spot_light({.position = {1.5f, 1.5f, 3.0f},
+                                      .direction = {-0.4f, -0.4f, -1.0f},
+                                      .color = {0.5f, 2.0f, 3.0f},
+                                      .radius = 8.0f,
+                                      .inner_angle = 10.0f,
+                                      .outer_angle = 25.0f,
+                                      .shadow_enabled = true});
+            if (setup.fog)
+                scene.fog = {.enabled = true, .density = 0.2f, .start = 3.0f};
+            scene.taa = {.enabled = setup.taa};
+            (void)scene.draw(sphere, Mat4f::identity(), material);
+            // With temporal anti-aliasing, a view of its own: no history of the picture before (another material's,
+            // which this one's would not take).
+            kin::View3D fresh = setup.taa ? r3d.create_view({160, 120}, {.samples = 1}).value_or({}) : kin::View3D{};
+            Pixels p = shoot_view(renderer, r3d, setup.taa ? fresh : view, scene);
+            renderer.present();
+            if (setup.spot)
+                assert(r3d.debug_stats().lights_variant && "the light shaders drew it");
+            return p;
+        };
+        const kin::Material3D plain{
+            .color = Color::rgb(220, 120, 80), .emissive = 0.2f, .metallic = 0.3f, .roughness = 0.4f};
+        kin::Material3D same = plain;
+        same.surface = identity;
+        for (const Setup& setup :
+             {Setup{"plain", false, false, false}, Setup{"fog", true, false, false},
+              Setup{"lights", false, true, false}, Setup{"lights and fog", true, true, false},
+              Setup{"velocity", false, false, true}, Setup{"velocity and lights", true, true, true}}) {
+            const Pixels stock = shoot(plain, setup), surfaced = shoot(same, setup);
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x) {
+                    const Color a = stock.at(x, y), b = surfaced.at(x, y);
+                    if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
+                        std::cerr << setup.name << ": (" << x << ", " << y << ") stock " << int(a.r) << ' ' << int(a.g)
+                                  << ' ' << int(a.b) << ", surface " << int(b.r) << ' ' << int(b.g) << ' ' << int(b.b)
+                                  << '\n';
+                        assert(false && "the identity surface draws what the material draws");
+                    }
+                }
+        }
+
+        // A surface of its own: only green, rough, glowing red toward +x.
+        kin::Material3D tinted = plain;
+        tinted.surface = tint;
+        tinted.shader_params = {0.0f, 1.0f, 0.0f, 1.0f, 0.8f, 0.0f, 0.0f, 0.0f};
+        const Pixels green = shoot(tinted, {"tint", false, true, false});
+        const Color middle = green.at(80, 60), right = green.at(100, 60), left = green.at(60, 60);
+        assert(middle.g > 40 && middle.b < middle.g && "the base colour's green, lit");
+        assert(right.r > left.r + 30 && "the glow where the surface faces +x");
+        tinted.shader_params[4] = 0.0f;
+        const Color dark = shoot(tinted, {"tint", false, true, false}).at(100, 60);
+        assert(dark.r + 20 < right.r && "the parameters reach the surface");
+
+#ifdef KIN_TEST_SURFACE_SPIRV
+        // The same surface, its variants made at build time (kin_compile_surface_shader): the same picture.
+        {
+            std::array<std::span<const kin::u8>, kin::surface_variant_count3d> variants;
+            const std::array<const char*, kin::surface_variant_count3d> names{
+                "surface_tint.plain.spv",           "surface_tint.fog.spv",
+                "surface_tint.lights.spv",          "surface_tint.lights_fog.spv",
+                "surface_tint.velocity.spv",        "surface_tint.velocity_fog.spv",
+                "surface_tint.velocity_lights.spv", "surface_tint.velocity_lights_fog.spv"};
+            for (kin::u32 i = 0; i < kin::surface_variant_count3d; ++i) {
+                const auto bytes = surface_test_shaders(names[i]);
+                assert(!bytes.empty());
+                variants[i] = {reinterpret_cast<const kin::u8*>(bytes.data()), bytes.size()};
+            }
+            kin::Material3D built = tinted;
+            built.surface = r3d.create_surface_shader(variants).value_or({});
+            assert(built.surface.valid());
+            built.shader_params[4] = 0.8f;
+            tinted.shader_params[4] = 0.8f;
+            for (const Setup& setup :
+                 {Setup{"built", true, true, false}, Setup{"built velocity", false, false, true}}) {
+                const Pixels a = shoot(tinted, setup), b = shoot(built, setup);
+                assert(a.rgba == b.rgba && "a surface made at build time draws what it does compiled at run time");
+            }
+        }
+#endif
+
+        // Unlit: the surface's colour as it is, plus its emission.
+        kin::Material3D flat{.color = Color::rgb(50, 100, 200), .unlit = true};
+        flat.surface = identity;
+        const Color shown = shoot(flat, {"unlit", false, false, false}).at(80, 60);
+        expect(shown, Color::rgb(50, 100, 200), "an unlit surface's colour", 1);
+    });
+}
+
 // --- Temporal anti-aliasing (G2d) ---
 
 // The jitter: Halton (2, 3) from its second element, in pixels in [-0.5, 0.5),
@@ -22793,6 +22926,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());
+    RUN(test_gpu_surface_shader());
     RUN(test_gpu_skinned_matches_cpu());
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());

@@ -1498,6 +1498,42 @@ development. Resource layouts are reflected and validated; automatic 3D shader h
 Signal Breach's hit shields (`examples/shaders/shield.frag.glsl`: Fresnel rim
 and climbing lines, additive) are one. For a custom HDR pipeline, use explicit surface attachments and the public bloom/output operations below.
 
+### Surface shaders
+
+A custom shader replaces kin's whole fragment shader, and with it what kin's own shaders have and it does not: the
+global illumination, the light grid (it keeps the 16 strongest point and spot lights), the fog and light variants
+and the velocity for temporal anti-aliasing. A surface shader (`Material3D::surface`) keeps all of that: it is one
+function, compiled into each of kin's mesh fragment shaders, that changes the surface kin shades. The material
+graph (docs/material_graph_plan.md) is built on it.
+
+```glsl
+// rust.surface.glsl: no #version, no main
+void kin_surface(inout KinSurface s) {
+    const float rust = smoothstep(0.4, 0.6, fract(sin(dot(floor(kin_position().xz * 8.0), vec2(12.9, 78.2))) * 43758.5));
+    s.base_color = mix(s.base_color, kin_surface_param(0).rgb, rust);
+    s.roughness = mix(s.roughness, 0.9, rust);
+    s.metallic *= 1.0 - rust;
+}
+```
+
+`s` arrives as kin's material makes it (`kin_stock_surface()`: the colours times the base map, the normal bent by
+the normal map, metallic and roughness times their map, the occlusion map, the emission), so a function that
+changes nothing draws exactly what the material draws without one. Its fields: `base_color` (linear), `alpha`
+(straight: a `Blend3D::Mask` discards below the cutoff), `normal` (unit, world space, on the viewer's side),
+`metallic`, `roughness` (keep it within [0.045, 1]), `occlusion` and `emission` (linear light of its own). After
+the function, kin lights it (`kin_lit`) and adds the emission, or, for an `unlit` material, shows its colour plus
+its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
+(`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
+`uNormalMap`, `uOcclusion`, `uEmissive`), and reads `Material3D::shader_params` as `kin_surface_param(0..3)`.
+
+`r3d.compile_surface_shader(path)` compiles the file now with glslc (development); a game ships its variants
+compiled at build time with `kin_compile_surface_shader(<var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl)`
+(`cmake/kin_embed.cmake`), which lists the eight `.spv` files in `SurfaceVariant3D`'s order for
+`r3d.create_surface_shader(variants)`. `surface_shader_source()` and `surface_variant_defines()` say what each
+variant is. A `shader` takes the surface's place. Not yet: the shadow, pick and pre-passes still cut a cut-out by
+the base colour's alpha (not the surface's); surface materials skip the retained-instance and merged-draw paths
+(one draw each, as custom shaders); WebGL2 has no surface shaders.
+
 ### Custom lighting responses
 
 A custom native material can replace the direct-light response while retaining stock material sampling, ambient/IBL, emission and output handling. Define `KIN_DIRECT_LIGHT` before including `kin_material.inc.glsl`, then implement the named function with signature `vec3 response(Surface surface, KinLight light)`. No new sampler or uniform slots are required. Existing custom shaders and stock shaders keep their original path when the macro is absent.

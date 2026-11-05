@@ -176,6 +176,19 @@ public:
     std::vector<ShaderResourceInfo> textures, buffers;
     bool valid() const override { return bool(shader); }
 };
+// A material's surface shader (Material3D::surface): its variants, in SurfaceVariant3D's order, each standing for the
+// stock mesh fragment shader of the same defines (mesh.frag ... mesh_velocity_light_fog.frag) with its layout.
+class GpuSurfaceShader3D final : public ISurfaceShaderBackend3D {
+public:
+    std::array<GpuShader, surface_variant_count3d> variants;
+    SharedDevice device;
+    bool valid() const override {
+        for (const auto& variant : variants)
+            if (!variant)
+                return false;
+        return true;
+    }
+};
 class GpuMaterialInputs3D final : public IMaterialInputsBackend3D {
 public:
     SharedDevice device;
@@ -434,6 +447,8 @@ public:
                                                 std::shared_ptr<const MeshClusters3D> clusters) override;
     std::shared_ptr<IEnvironmentBackend3D> create_environment(Vec2i size, std::span<const f32> rgb) override;
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
+    std::shared_ptr<ISurfaceShaderBackend3D>
+    create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) override;
     Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
                                                       std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
@@ -499,13 +514,15 @@ private:
     SDL_GPUGraphicsPipeline* pipeline(SDL_GPUTextureFormat format, u32 samples, bool cull, Pass pass, bool mask = false,
                                       SDL_GPUShader* custom = nullptr, bool velocity = false, bool skinned = false,
                                       bool fog = false, bool lights = false, Unlit unlit = Unlit::Off,
-                                      bool indexed = false) const;
+                                      bool indexed = false, const GpuSurfaceShader3D* surface = nullptr) const;
     // Pure requests shared by actual draws and conservative warm-up variants.
     struct MaterialPipeline {
         const GpuMaterialShader3D* custom;
         Unlit unlit;
         bool cull, mask;
         Pass pass;
+        // A surface shader's variants in place of the stock ones (never with `custom`, which takes its place).
+        const GpuSurfaceShader3D* surface = nullptr;
     };
     struct MeshPipelineRequest {
         SDL_GPUTextureFormat format;
@@ -518,6 +535,12 @@ private:
         f32 params[4], pbr[4], maps[4], emission[4];
     };
     static_assert(sizeof(MaterialUniforms) == 64);
+    // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param).
+    struct SurfaceMaterialUniforms {
+        MaterialUniforms material;
+        f32 surface[16];
+    };
+    static_assert(sizeof(SurfaceMaterialUniforms) == 128);
     static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;
@@ -1109,7 +1132,8 @@ private:
     u32 _anisotropy = 1;
     i32 _lod_bias = 0;
     std::vector<std::shared_ptr<GpuMaterialShader3D>> _material_shaders;
-    std::shared_ptr<GpuBuffer> _instances;    // grows
+    std::vector<std::shared_ptr<GpuSurfaceShader3D>> _surface_shaders; // kept, as _material_shaders
+    std::shared_ptr<GpuBuffer> _instances;                             // grows
     std::shared_ptr<GpuBuffer> _caster_lists; // the cascades' lists of copies (indices into _instances); grows
     std::array<f32, 256> _srgb_to_linear{};
 
