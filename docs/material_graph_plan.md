@@ -184,3 +184,16 @@ tiling through the material UV transform. TIFF (LZW, Deflate, PackBits, predicto
 4096 x 4096 LZW TIFFs fetched and imported end to end (maps checked by eye). Not verifiable here (no Unity): that
 colour properties are stored in gamma as the inspector shows them and become linear by the sRGB curve (assumed,
 not checked against Unity), HDR emission colours the same: to check on a Unity install before relying on emission.
+
+**Done: Unreal Tier 1.** `tools/import_material/unreal_export.py` (inside Unreal 5.8's editor, headless; nothing
+saved) + `import_unreal_material()` (`kin_import_material unreal`): outputs as affine terms of one texture channel
+(constants, parameters with the instance's values, samples and their tiling, Multiply/Add/Subtract/OneMinus/Mask,
+a Lerp by a constant 0 or 1); ORM maps used as they are; DirectX normals flipped unless the texture flips them;
+one-colour maps folded. BistroUE (engines/unreal: 121 materials, made from kin's own Bistro content) exported in 1 min
+42 s and imported: 121 of 121; against kin's original glTF materials every difference is explained (one-colour maps
+folded into the colour, exactly; the night lights' emission behind the game's parameter collection, noted; additive
+glass as BistroUE has it). `unreal_probe.py` builds 7 materials of other shapes in a scratch project
+(engines/unreal/out/MaterialProbe); their export is `tests/fixtures/unreal`.
+
+Tier 1 is done for the three engines. Next: P2 (the graph and its compiler), with the node set the three share, so
+that Tier 2 (Godot VisualShader, Unity Shader Graph, Unreal material graphs beyond affine terms) maps onto it.

@@ -1,10 +1,11 @@
 // kin_import_material: other engines' materials as kin's .kinmaterials (kin/render3d/material_import3d.hpp).
 //
-//   kin_import_material godot|unity <material | folder> --project <its project> --content <kin content root>
+//   kin_import_material godot|unity|unreal <material | folder> --project <its project> --content <kin content root>
 //                       --out <folder in the content> [--dry-run] [--quiet]
 //
-// A folder is searched for Godot's StandardMaterial3D / ORMMaterial3D resources (.tres) or Unity's materials (.mat);
-// each is written to <out>, in the folder it is in under the one searched. Every material's notes (what kin does not
+// A folder is searched for Godot's StandardMaterial3D / ORMMaterial3D resources (.tres), Unity's materials (.mat) or
+// Unreal's as tools/import_material/unreal_export.py exports them (.json; --project: that export's folder); each is
+// written to <out>, in the folder it is in under the one searched. Every material's notes (what kin does not
 // show as the source does) are printed; the exit status is 1 when one could not be imported.
 #include <algorithm>
 #include <cstdio>
@@ -22,9 +23,9 @@ namespace fs = std::filesystem;
 namespace {
 
 int usage() {
-    std::cerr
-        << "usage: kin_import_material godot|unity <material | folder> --project <dir> --content <dir> --out <dir>"
-           " [--dry-run] [--quiet]\n";
+    std::cerr << "usage: kin_import_material godot|unity|unreal <material | folder> --project <dir> --content <dir> "
+                 "--out <dir>"
+                 " [--dry-run] [--quiet]\n";
     return 2;
 }
 
@@ -40,9 +41,10 @@ bool godot_material(const fs::path& file) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || (std::string_view(argv[1]) != "godot" && std::string_view(argv[1]) != "unity"))
+    const std::string_view engine = argc >= 2 ? argv[1] : "";
+    if (argc < 3 || (engine != "godot" && engine != "unity" && engine != "unreal"))
         return usage();
-    const bool unity = std::string_view(argv[1]) == "unity";
+    const bool unity = engine == "unity", unreal = engine == "unreal";
     const fs::path input = argv[2];
     kin::MaterialImportOptions3D options;
     bool quiet = false;
@@ -69,8 +71,9 @@ int main(int argc, char** argv) {
     if (fs::is_directory(input)) {
         for (const auto& entry : fs::recursive_directory_iterator(input))
             if (entry.is_regular_file() &&
-                (unity ? entry.path().extension() == ".mat"
-                       : entry.path().extension() == ".tres" && godot_material(entry.path())))
+                (unity    ? entry.path().extension() == ".mat"
+                 : unreal ? entry.path().extension() == ".json"
+                          : entry.path().extension() == ".tres" && godot_material(entry.path())))
                 jobs.emplace_back(entry.path(), options.out / entry.path().parent_path().lexically_relative(input));
         std::sort(jobs.begin(), jobs.end());
     } else {
@@ -82,7 +85,9 @@ int main(int argc, char** argv) {
     for (const auto& [source, out] : jobs) {
         auto job = options;
         job.out = out;
-        const auto result = unity ? kin::import_unity_material(source, job) : kin::import_godot_material(source, job);
+        const auto result = unity    ? kin::import_unity_material(source, job)
+                            : unreal ? kin::import_unreal_material(source, job)
+                                     : kin::import_godot_material(source, job);
         if (!result) {
             ++failed;
             for (const auto& d : result.diagnostics)

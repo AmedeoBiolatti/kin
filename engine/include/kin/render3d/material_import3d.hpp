@@ -50,4 +50,14 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
 Result3D<ImportedMaterial3D> import_unity_material(const std::filesystem::path& source,
                                                    const MaterialImportOptions3D& options);
 
+// An Unreal material or material instance, from the kin.unreal-material/1 file tools/import_material/unreal_export.py
+// writes inside Unreal's editor (`project`: that export's folder, its textures' PNGs under it). Each output's
+// expressions are read as bias + gain x a texture's channel: constants, parameters (the instance's values), texture
+// samples (their UV tiling), Multiply, Add, Subtract, One Minus, component masks, a Lerp by a constant 0 or 1; anything
+// else is noted. Base colour (linear), metallic and roughness (an ORM map as kin's, else packed), occlusion, normal
+// (DirectX's green flipped, unless the texture flips it on import), emission, opacity from the base map's alpha,
+// blend mode (opaque, masked, translucent, additive), two-sided, unlit; one-colour maps folded into their factor.
+Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path& source,
+                                                    const MaterialImportOptions3D& options);
+
 } // namespace kin

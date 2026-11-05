@@ -3,7 +3,8 @@
 // one map, occlusion moved to R, an added emission colour put into its map); what kin can't show is noted; files that
 // aren't such materials are refused. With KIN_TEST_GODOT_PROJECT (a Godot project folder), every material of it is
 // imported (a dry run); with KIN_TEST_UNITY_PROJECT, every .mat of a Unity project. Unity's .mat: URP Lit, Standard,
-// HDRP Lit, their maps packed, tiling, emission, surfaces; TIFF and PSD pictures decoded.
+// HDRP Lit, their maps packed, tiling, emission, surfaces; TIFF and PSD pictures decoded; Unreal's, as
+// tools/import_material/unreal_export.py exports them.
 #include <kin/assets/image.hpp>
 #include <kin/render3d/material_asset3d.hpp>
 #include <kin/render3d/material_import3d.hpp>
@@ -410,6 +411,55 @@ void unity_corpus() {
     CHECK(count > 0 && failed == 0);
 }
 
+// Unreal's materials as unreal_export.py exports them (tests/fixtures/unreal: what unreal_probe.py made in Unreal 5.8):
+// a tinted, tiled base map with an ORM map and a DirectX normal map, and an instance changing the tint; one minus a
+// gloss map as roughness; a two-sided cut-out by the base map's alpha; additive glow; unlit; an unreadable Lerp.
+void unreal_materials() {
+    Scratch scratch;
+    const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto load = [&](const char* name) {
+        auto r = import_unreal_material(project / "Probe" / (std::string(name) + ".json"), options);
+        if (!r) {
+            for (const auto& d : r.diagnostics)
+                std::cerr << d << '\n';
+            CHECK(false);
+        }
+        return std::move(*r);
+    };
+    const auto orm = load("M_ORM");
+    const auto& p = orm.asset.base.material;
+    CHECK(orm.notes.empty());
+    CHECK(p.color->r == 255 && p.color->g == 188 && p.color->b == 137); // the linear tint (1, 0.5, 0.25), as sRGB
+    CHECK(*p.uv_scale == (Vec2f{2, 3}) && *p.metallic == 1.0f && *p.roughness == 1.0f);
+    CHECK(p.metallic_roughness->asset == p.occlusion->asset && !p.metallic_roughness->asset.empty()); // the ORM map
+    const Image source = load_image(project / "textures/Game/Probe/Textures/T_NormalDX.png");
+    const Image normal = load_image(content / p.normal->asset);
+    for (size_t i = 0; i < 16; ++i) // DirectX's green flipped
+        CHECK(normal.rgba[i * 4 + 1] == 255 - source.rgba[i * 4 + 1] && normal.rgba[i * 4] == source.rgba[i * 4]);
+    CHECK(load("MI_ORM_Green").asset.base.material.color->g == 255);
+
+    const auto gloss = load("M_Gloss");
+    const auto& g = gloss.asset.base.material;
+    CHECK(std::abs(*g.metallic - 0.8f) < 1e-6f && *g.roughness == 1.0f && g.color->r == 124);
+    const Image packed = load_image(content / g.metallic_roughness->asset);
+    for (int x = 0; x < 4; ++x)
+        CHECK(std::abs(int(packed.rgba[x * 4 + 1]) - (255 - 64 * x)) <= 1); // one minus the gloss map's alpha
+
+    const auto cut = load("M_Cutout").asset.base.material;
+    CHECK(*cut.blend == Blend3D::Mask && *cut.double_sided && std::abs(*cut.alpha_cutoff - 0.4f) < 1e-6f &&
+          !cut.texture->asset.empty());
+    const auto glow = load("M_Glow").asset.base.material;
+    CHECK(*glow.blend == Blend3D::Additive && *glow.emissive == 1.0f && glow.emission_color->r == 5.0f &&
+          glow.emission_color->g == 2.5f && glow.color->r == 0);
+    const auto unlit = load("M_Unlit").asset.base.material;
+    CHECK(*unlit.unlit && !unlit.texture->asset.empty());
+    const auto lerp = load("M_Lerp");
+    CHECK(has_note(lerp, "BaseColor: a Lerp"));
+    write(content / "bad.json", "{\"schema\": \"something else\"}");
+    CHECK(!import_unreal_material(content / "bad.json", options).ok());
+}
+
 void corpus() {
     const char* project = std::getenv("KIN_TEST_GODOT_PROJECT");
     if (!project)
@@ -444,6 +494,7 @@ int main() {
     writer_round_trip();
     unity_materials();
     pictures();
+    unreal_materials();
     corpus();
     unity_corpus();
     std::cout << "material import tests passed\n";
