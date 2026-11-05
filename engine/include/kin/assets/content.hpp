@@ -41,6 +41,11 @@ public:
     // Opens and checks the index of `file`; null, with the reason in `error`,
     // if it is not a pack this build can read.
     static std::shared_ptr<const ContentPack> open(const std::filesystem::path& file, std::string* error = nullptr);
+#if defined(__ANDROID__)
+    // Opens `name`, a file in the app's APK assets ("game.kinpak"), in place:
+    // stored uncompressed (kin_android_app does), it is read from the APK itself.
+    static std::shared_ptr<const ContentPack> open_android_asset(std::string_view name, std::string* error = nullptr);
+#endif
 
     ContentPack(const ContentPack&) = delete;
     ContentPack& operator=(const ContentPack&) = delete;
@@ -61,12 +66,15 @@ public:
 private:
     friend class MemoryContent;
     ContentPack() = default;
+    // Checks the header and reads the index of the bytes at _data.
+    static bool read_index(ContentPack& pack, const std::string& name, std::string* error);
 
     std::filesystem::path _file;
     std::vector<Entry> _entries;
     const std::byte* _data = nullptr;
     std::size_t _size = 0;
-    [[maybe_unused]] void* _mapping = nullptr; // the mapping's handle, on Windows
+    // The mapping's handle on Windows; the open AAsset of an Android APK pack.
+    [[maybe_unused]] void* _mapping = nullptr;
     // A pack made in memory (MemoryContent): each entry's bytes, by index, and their owner.
     std::vector<std::span<const std::byte>> _memory_bytes;
     std::shared_ptr<const void> _memory_owner;

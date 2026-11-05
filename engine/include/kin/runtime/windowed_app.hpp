@@ -51,6 +51,10 @@ struct WindowedAppConfig {
     // Called after the loop exits while the renderer and its device are still
     // alive. Scene runtimes use this to release scene-owned GPU/SDL resources.
     std::function<void(FrameContext&)> shutdown;
+    // Called as the system sends the app an AppEvent (App::on_app_event): to
+    // the background, back, short of memory, ending. Scene runtimes give it to
+    // their scenes (Scene::on_app_background and the rest).
+    std::function<void(FrameContext&, AppEvent)> app_event;
 };
 
 struct FrameContext {

@@ -1072,6 +1072,15 @@ struct SceneAppSession::Impl {
                 .development = config.headless.development,
             };
         };
+        // The system's app events (phones: background, foreground, low memory)
+        // go to the game's own handler, if it gave one, then to every scene.
+        window.app_event = [this, user = std::move(window.app_event)](FrameContext& ctx, AppEvent event) {
+            if (user) {
+                user(ctx, event);
+            }
+            kin::SceneContext scene_ctx = make_scene_context(ctx);
+            scenes.app_event(scene_ctx, event);
+        };
 
         driver = std::make_unique<WindowedAppSession>(
             window,

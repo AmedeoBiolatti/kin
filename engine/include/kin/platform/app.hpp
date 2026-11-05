@@ -7,7 +7,10 @@
 
 #include <functional>
 #include <memory>
+#include <string_view>
 #include <vector>
+
+union SDL_Event;
 
 namespace kin {
 
@@ -78,6 +81,25 @@ struct AppFrameStats {
     f32 idle_wait = 0.0f; // seconds waited for an event before this frame (wait_for_events)
 };
 
+// What the system does to the whole app (phones, mainly: the desktop sends
+// none of these), given to App::on_app_event as it happens.
+enum class AppEvent : u8 {
+    // The app is leaving the screen (home button, another app, screen off) and
+    // then stops until it returns, if it does: the system may end it without
+    // asking while it is away. Save what the player would lose here; the frame
+    // goes on after this, and only then does the app stop.
+    Background,
+    // Back on the screen after Background.
+    Foreground,
+    // The system is short of memory: drop caches that can be made again.
+    LowMemory,
+    // The system is ending the app (after Background): the loop stops at once,
+    // even with closing held (hold_close).
+    Terminating,
+};
+
+std::string_view app_event_name(AppEvent event);
+
 class App {
 public:
     explicit App(AppConfig config = {});
@@ -121,6 +143,13 @@ public:
     bool close_asked() const { return _close_asked; }
     void forget_close() { _close_asked = false; }
 
+    // Called on the app's thread when an AppEvent arrives, before the rest of
+    // that frame (its fixed steps may not run); one handler, replaced by the next.
+    void on_app_event(std::function<void(AppEvent)> handler) { _app_event = std::move(handler); }
+    // Between Background and Foreground: the app is not on the screen, so it
+    // neither steps nor draws.
+    bool in_background() const { return _in_background; }
+
     bool running() const { return _running; }
     bool headless() const { return _config.mode == AppMode::Headless; }
     const AppFrameStats& frame_stats() const { return _frame_stats; }
@@ -147,6 +176,8 @@ public:
 
 private:
     void pump_events();
+    void app_event(AppEvent event);
+    static bool watch_app_events(void* userdata, ::SDL_Event* event); // an SDL_EventFilter
     void handle_window_close(WindowId window_id);
 
     AppConfig _config;
@@ -165,6 +196,9 @@ private:
     bool wait_for_change();
     bool _running = false;
     bool _hold_close = false;
+    std::function<void(AppEvent)> _app_event;
+    bool _in_background = false;
+    bool _forget_elapsed = false; // the next frame's time is time away, not play
     std::unique_ptr<Gamepads> _gamepads;
     bool _close_asked = false;
     bool _wait_for_events = false;

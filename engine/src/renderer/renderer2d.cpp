@@ -76,6 +76,11 @@ struct Renderer2D::OpenClip {
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     const auto choice = requested_renderer();
+#if defined(__ANDROID__)
+    // A phone draws at its display's rate, never faster: frames it cannot show
+    // only drain the battery and heat it (App::set_max_fps lowers the rate).
+    vsync = true;
+#endif
 #if KIN_HAS_WEBGL2_RENDERER
     return std::make_unique<WebGL2Renderer2DBackend>(window, vsync);
 #elif KIN_HAS_COMPACT_RENDERER

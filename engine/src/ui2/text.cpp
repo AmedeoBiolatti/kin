@@ -298,6 +298,11 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
 #ifdef __EMSCRIPTEN__
             "/kin/fonts/ui.ttf", // a browser has none of the system's: kin_game's (cmake/kin_web.cmake)
 #endif
+#ifdef __ANDROID__
+            "/system/fonts/Roboto-Regular.ttf",
+            "/system/fonts/NotoSans-Regular.ttf",
+            "/system/fonts/DroidSans.ttf",
+#endif
             "C:/Windows/Fonts/segoeui.ttf",
             "C:/Windows/Fonts/arial.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -306,6 +311,11 @@ const std::filesystem::path& system_ui_font_path(bool bold) {
         });
         result.bold = first_existing({
             std::getenv("KIN_UI_FONT_BOLD"),
+#ifdef __ANDROID__
+            "/system/fonts/Roboto-Bold.ttf",
+            "/system/fonts/NotoSans-Bold.ttf",
+            "/system/fonts/DroidSans-Bold.ttf",
+#endif
             "C:/Windows/Fonts/segoeuib.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",

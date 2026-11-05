@@ -66,6 +66,16 @@ public:
     virtual void on_suspend(SceneContext&) {}
     virtual void on_resume(SceneContext&) {}
 
+    // The app itself leaving the screen and returning (phones: the home button,
+    // another app, the screen turned off), given to every scene in the stack.
+    // The system may end an app in the background without another word, so
+    // save the player's progress in on_app_background. (on_suspend/on_resume
+    // are about another scene covering this one, not about the app.)
+    virtual void on_app_background(SceneContext&) {}
+    virtual void on_app_foreground(SceneContext&) {}
+    // The system is short of memory: release what can be loaded again.
+    virtual void on_low_memory(SceneContext&) {}
+
     virtual void update(SceneContext&) {}
     virtual void render(SceneContext&) {}
     virtual void collect_actions(InputActionContext&) const {}

@@ -80,6 +80,9 @@ ui2::Font debug_font() {
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/Library/Fonts/Arial.ttf",
+            "/system/fonts/DroidSansMono.ttf", // Android
+            "/system/fonts/CutiveMono.ttf",
+            "/system/fonts/Roboto-Regular.ttf",
         };
         for (const std::filesystem::path& path : candidates) {
             if (!std::filesystem::exists(path)) {
