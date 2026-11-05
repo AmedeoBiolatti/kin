@@ -12,7 +12,8 @@
  "parameters": {
   "scalar": {},
   "vector": {},
-  "texture": {}
+  "texture": {},
+  "switch": {}
  },
  "inputs": {
   "EmissiveColor": {
@@ -46,6 +47,7 @@
    }
   }
  },
+ "functions": {},
  "textures": {
   "textures/Game/Probe/Textures/T_Albedo.png": {
    "asset": "/Game/Probe/Textures/T_Albedo",

@@ -21,7 +21,8 @@
   },
   "texture": {
    "Albedo": "textures/Game/Probe/Textures/T_Albedo.png"
-  }
+  },
+  "switch": {}
  },
  "inputs": {
   "BaseColor": {
@@ -197,11 +198,13 @@
     "inputs": {
      "A": {
       "node": "MaterialExpressionLinearInterpolate_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      },
      "B": {
       "node": "MaterialExpressionVertexColor_0",
-      "output": ""
+      "output": "RGB",
+      "output_index": 0
      }
     }
    },
@@ -215,15 +218,18 @@
     "inputs": {
      "A": {
       "node": "MaterialExpressionTextureSampleParameter2D_0",
-      "output": "RGB"
+      "output": "RGB",
+      "output_index": 0
      },
      "B": {
       "node": "MaterialExpressionVectorParameter_0",
-      "output": "RGB"
+      "output": "RGB",
+      "output_index": 0
      },
      "Alpha": {
       "node": "MaterialExpressionFresnel_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -233,12 +239,14 @@
      "const_coordinate": 0,
      "parameter_name": "Albedo",
      "sampler_type": "SAMPLERTYPE_COLOR",
+     "sort_priority": 32,
      "texture": "textures/Game/Probe/Textures/T_Albedo.png"
     },
     "inputs": {
      "UVs": {
       "node": "MaterialExpressionPanner_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -252,7 +260,8 @@
     "inputs": {
      "Coordinate": {
       "node": "MaterialExpressionTextureCoordinate_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -276,7 +285,8 @@
       0.10000000149011612,
       1.0
      ],
-     "parameter_name": "Tint"
+     "parameter_name": "Tint",
+     "sort_priority": 32
     },
     "inputs": {}
    },
@@ -299,7 +309,8 @@
     "inputs": {
      "None": {
       "node": "MaterialExpressionClamp_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -312,7 +323,8 @@
     "inputs": {
      "None": {
       "node": "MaterialExpressionPower_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -324,7 +336,8 @@
     "inputs": {
      "Base": {
       "node": "MaterialExpressionTextureSample_0",
-      "output": "G"
+      "output": "G",
+      "output_index": 2
      }
     }
    },
@@ -343,11 +356,13 @@
     "inputs": {
      "A": {
       "node": "MaterialExpressionComponentMask_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      },
      "B": {
       "node": "MaterialExpressionSine_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -362,7 +377,8 @@
     "inputs": {
      "None": {
       "node": "MaterialExpressionWorldPosition_0",
-      "output": "XYZ"
+      "output": "RGB",
+      "output_index": 0
      }
     }
    },
@@ -379,7 +395,8 @@
     "inputs": {
      "None": {
       "node": "MaterialExpressionTime_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -400,11 +417,13 @@
     "inputs": {
      "A": {
       "node": "MaterialExpressionTextureSample_1",
-      "output": "RGB"
+      "output": "RGB",
+      "output_index": 0
      },
      "B": {
       "node": "MaterialExpressionConstant3Vector_0",
-      "output": ""
+      "output": "RGB",
+      "output_index": 0
      }
     }
    },
@@ -449,6 +468,7 @@
    }
   }
  },
+ "functions": {},
  "textures": {
   "textures/Game/Probe/Textures/T_Albedo.png": {
    "asset": "/Game/Probe/Textures/T_Albedo",

@@ -91,7 +91,8 @@ layering of base, part and variant patches unchanged:
    are simple enough for two dialects. Until then, WebGL2 draws a graph material as its stock fallback (its proxy
    colour and the parameters' texture as base).
 8. **Static switches (later).** Unreal compiles a permutation for each combination of compile-time booleans. They
-   multiply the variants, so v1 has none: graph branches on uniforms only.
+   multiply the variants, so v1 has none: graph branches on uniforms only. (The Unreal import resolves them when it
+   imports: one kin graph per set of switch values.)
 
 ## The editor (kin-studio)
 
@@ -260,7 +261,7 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   parameters, samples (normal maps unpacked, DirectX green flipped unless the texture flips it), coordinates and
   their tiling, the arithmetic and unary nodes, Lerp, Clamp, Power, Dot, Cross, Distance, masks, AppendVector, Time,
   World Position (cm), Vertex Color, Camera Vector, normals, Fresnel, Panner, Desaturation, Reroute, Static Switch
-  (its default). BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
+  (see below for functions and switch values). BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the
@@ -283,3 +284,20 @@ block, the cut-out block and the merged draws' table (64 floats a copy) carry al
 version 3's merged-draw variants (the old table stride) are left out, so those draws go unmerged. Fab after it: 28
 full graphs, 73 partial, 6 Tier 1 (all > 5 textures); 41 graphs cooked by glslc. Tests: the merged and unmerged
 tint at floats 56-63 draw what the tint at 0-7 does; a cut-out scale at float 63; 16 vec4s compile, a 17th is refused.
+
+**Unreal functions and static switches (2026-11-06).** `unreal_export.py` writes each called Material Function's graph
+(`"functions"`: its nodes, inputs and outputs by name) and the static switch values (`parameters.switch`: an
+instance's, else the material's default). Unreal's Python can't read two things, so they come from the asset's T3D
+text (`ObjectExporterT3D`): a Named Reroute usage's declaration, and which output and mask each input takes (the API
+names the first connection's output for every input from the same node: R and G of one parameter both came out as the
+whole vector). The import inlines each call as a child graph (its pins feed the function's inputs; an unconnected
+input takes its preview value, cut to its type), follows reroutes, resolves switches (from parameters, constants,
+reroutes) and names the graph file for the switches it read (`M_Function__Green_on.kingraph`), so an instance never
+overwrites its parent's graph. Nodes added: Round, Rotator, CameraPositionWS, PixelDepth, Feature Level and Quality
+switches (SM6/Epic), ReflectionVectorWS, ScreenPosition, InverseLinearInterpolate, ConstantBiasScale, Sign, Tangent;
+DotProduct and CrossProduct were misnamed. Fab (107 materials, 52 distinct functions): 40 full graphs, 49 partial, 17
+Tier 1 (16 sample more than five textures, which the inlined functions reach; one fills more than 64 floats). What
+makes the partial ones partial, counted by output: Custom HLSL (35), BumpOffset (24), DepthFade (19), SceneDepth (16),
+LandscapeLayerCoords and Material Parameter Collections (13 each), Transform (11), ObjectPositionWS (9); outputs kin's
+graph lacks (World Position Offset, Specular, Refraction); clear coat. Tests: the probe's M_Function (MF_Tint inlined,
+its Amount the preview 0.5) and MI_Function_On (the switch on: green, its own graph; the parent's unchanged).

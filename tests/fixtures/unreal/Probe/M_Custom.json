@@ -12,7 +12,8 @@
  "parameters": {
   "scalar": {},
   "vector": {},
-  "texture": {}
+  "texture": {},
+  "switch": {}
  },
  "inputs": {
   "BaseColor": {
@@ -41,5 +42,6 @@
    }
   }
  },
+ "functions": {},
  "textures": {}
 }

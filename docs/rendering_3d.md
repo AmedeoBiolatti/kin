@@ -3635,8 +3635,11 @@ and combines; the headers list them); an output fed by a node kin has no counter
 (Unreal, Unity: Godot's ShaderMaterials have none) and is noted, naming the node. A graph that doesn't compile in
 kin, or samples more than the five textures kin's material has slots for, falls back to Tier 1, said.
 
-- Unreal: `unreal_export.py` writes the whole graph; World Position is centimetres (scaled from kin's metres), normal
-  maps are DirectX's (flipped), a Static Switch takes its default.
+- Unreal: `unreal_export.py` writes the whole graph, and the graphs of the Material Functions it calls (inlined by
+  the import: a function input left unconnected takes its preview value); World Position is centimetres (scaled from
+  kin's metres), normal maps are DirectX's (flipped). A Static Switch takes the material's or instance's value, else
+  its default: an instance that changes one gets a graph of its own, named for the switches on and off
+  (`M_Rock__Moss_on.kingraph`). Named Reroutes are followed to their declarations.
 - Unity: Shader Graph 10 and later (`.shadergraph`, sub-graphs inlined; older files fall back to Tier 1); Unity's
   vector widths are kept (an unconnected default is cut to what it is added to); a Keyword node follows the
   material's keywords (the graph is written per set of keywords on: `Lit__GLOW.kingraph`); a texture's colour space

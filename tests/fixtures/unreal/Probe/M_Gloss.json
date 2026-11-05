@@ -12,7 +12,8 @@
  "parameters": {
   "scalar": {},
   "vector": {},
-  "texture": {}
+  "texture": {},
+  "switch": {}
  },
  "inputs": {
   "BaseColor": {
@@ -75,7 +76,8 @@
     "inputs": {
      "None": {
       "node": "MaterialExpressionTextureSample_0",
-      "output": "A"
+      "output": "A",
+      "output_index": 4
      }
     }
    },
@@ -104,6 +106,7 @@
    }
   }
  },
+ "functions": {},
  "textures": {
   "textures/Game/Probe/Textures/T_Gloss.png": {
    "asset": "/Game/Probe/Textures/T_Gloss",
