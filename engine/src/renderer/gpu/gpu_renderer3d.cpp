@@ -1006,7 +1006,7 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
         for (u32 i = 0; i < names.size(); ++i)
             _draw_material_fragments[i] =
                 GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, names[i], 2 + u32(i & 1) + u32(i >= 2),
-                                         i >= 2 ? 15 : 10, i >= 2 ? 3 : 1);
+                                         i >= 2 ? 15 : 10, i >= 2 ? 5 : 1);
         _draw_materials_available = true;
     } catch (const std::exception& e) {
         KIN_LOG_WARN_F("render", "3D: retained draw materials unavailable",
@@ -1428,19 +1428,20 @@ GpuRenderer3D::GpuRenderer3D(GpuRenderer2DBackend& owner, GpuDevice& device) : _
     if (_shadow_format != SDL_GPU_TEXTUREFORMAT_INVALID && _no_shadow) {
         try {
             // (And the light grid's two storage buffers: its lights, its cells and their lists.)
+            // (And the area lights' LTC tables and emitters, for their reflections.)
             _mesh_light_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_light.frag.spv",
                                                           /*uniform_buffers=*/3,
-                                                          /*samplers=*/15, /*storage_buffers=*/2);
+                                                          /*samplers=*/15, /*storage_buffers=*/4);
             _mesh_light_fog_shader = GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT,
                                                               "mesh_light_fog.frag.spv", /*uniform_buffers=*/4,
-                                                              /*samplers=*/15, /*storage_buffers=*/2);
+                                                              /*samplers=*/15, /*storage_buffers=*/4);
             if (_mesh_velocity_shader) {
                 _mesh_velocity_light_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light.frag.spv",
-                                             /*uniform_buffers=*/3, /*samplers=*/15, /*storage_buffers=*/2);
+                                             /*uniform_buffers=*/3, /*samplers=*/15, /*storage_buffers=*/4);
                 _mesh_velocity_light_fog_shader =
                     GpuShader::from_embedded(device, SDL_GPU_SHADERSTAGE_FRAGMENT, "mesh_velocity_light_fog.frag.spv",
-                                             /*uniform_buffers=*/4, /*samplers=*/15, /*storage_buffers=*/2);
+                                             /*uniform_buffers=*/4, /*samplers=*/15, /*storage_buffers=*/4);
             }
             _lights_available = true;
             _capabilities.local_shadows = true;
@@ -2150,6 +2151,11 @@ std::shared_ptr<IMeshBackend3D> GpuRenderer3D::create_mesh(const MeshData3D& sou
                     }
                 }
                 mesh->gi_runs[r] = box;
+            }
+            mesh->gi_triangles.reserve(triangles * 3);
+            for (std::size_t i = 0; i < triangles * 3; ++i) {
+                const std::size_t v = data.indices.empty() ? i : data.indices[i];
+                mesh->gi_triangles.push_back(v < vertex_count ? data.vertices[v].position : Vec3f{});
             }
         }
         mesh->clusters = std::move(clusters);
@@ -3102,6 +3108,17 @@ u64 GpuRenderer3D::feature_bytes(const GpuView3D& view) const {
     bytes += gi.coverage ? static_cast<u64>(gi.coverage.width()) * gi.coverage.height() * 2 : 0u;
     for (const std::shared_ptr<GpuBuffer>& b :
          {gi.owners, gi.seeds, gi.rays, gi.place_list, gi.batch_list, gi.light_list}) {
+        bytes += b ? b->size() : 0u;
+    }
+    // The area lights': each voxel's light from them, their light on the view and the render before's, and their
+    // hierarchies, emitters and lists.
+    bytes += gi.area_cache ? voxels * 8 : 0u;
+    for (const GpuTexture* t : {&gi.area, &gi.area_before}) {
+        bytes += *t ? static_cast<u64>(t->width()) * t->height() * 8 : 0u;
+    }
+    for (const std::shared_ptr<GpuBuffer>& b :
+         {gi.area_triangles, gi.area_nodes, gi.area_emitters, gi.area_explicit, gi.area_scene, gi.area_shading,
+          gi.area_retry_args, gi.area_retry_list}) {
         bytes += b ? b->size() : 0u;
     }
     return bytes;
@@ -10048,6 +10065,9 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
     // The probes are in the scene's world: the overlay keeps the sky's light.
     if (ctx.gi_resolved && s == 0) {
         f.gi[0] = 1.0f;
+        f.gi[1] = ctx.view->_gi.area_resolved ? 1.0f : 0.0f;
+        f.gi[2] = ctx.view->_gi.area_resolved ? static_cast<f32>(ctx.view->_gi.area_emitter_count) : 0.0f;
+        f.gi[3] = ctx.scene.global_illumination.probes.intensity;
     }
 
     SDL_PushGPUFragmentUniformData(ctx.commands, slot, &f, sizeof(f));
@@ -11058,6 +11078,7 @@ void GpuRenderer3D::prepass(FrameCtx& ctx) {
             ctx.contacted = want_contact && stats.contact_dispatches > 0;
             ctx.gi_resolved =
                 ctx.gi_lit && gi_resolve(commands, *view, scene, ctx.main_projection, ctx.taa && !ctx.taa_reset, stats);
+            view->_gi.area_resolved = ctx.gi_resolved && gi_area(commands, *view, scene, ctx.main_projection, stats);
             // (Added to a float picture after the main pass: an HDR view's or temporal anti-aliasing's.)
             ctx.fog_sun =
                 ctx.fog_sun_wanted && ctx.fog && (view->_hdr || ctx.taa) && fog_sun(commands, *view, ctx, stats);
@@ -11196,6 +11217,11 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
     // The light grid's buffers, bound with the light variants' samplers (build_light_grid made them).
     const std::array<SDL_GPUBuffer*, 2> grid_buffers{_grid_lights ? _grid_lights->handle() : nullptr,
                                                      _grid_cells ? _grid_cells->handle() : nullptr};
+    // The area lights' LTC tables and emitters (kin_area_specular), dummies without.
+    const bool area_reflections = view->_gi.area_resolved && view->_gi.area_shading && _area_ltc;
+    const std::array<SDL_GPUBuffer*, 2> area_buffers{
+        area_reflections ? _area_ltc->handle() : (_area_dummy ? _area_dummy->handle() : nullptr),
+        area_reflections ? view->_gi.area_shading->handle() : (_area_dummy ? _area_dummy->handle() : nullptr)};
     bool custom_lights_bound = false;
     const auto begin_scene = [&](u32 s) {
         const f32 lo = s == 0 ? 0.0f : overlay_split, hi = s == 0 && ctx.overlaid ? overlay_split : 1.0f;
@@ -11389,6 +11415,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                     SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), custom ? 12u : lit_variant ? 15u : 10u);
                     if (lit_variant) {
                         SDL_BindGPUFragmentStorageBuffers(pass, 0, grid_buffers.data(), 2);
+                        SDL_BindGPUFragmentStorageBuffers(pass, 2, area_buffers.data(), 2);
                     }
                 }
                 bound_textures = textures;
@@ -11399,7 +11426,7 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
             if (item.materials) {
                 SDL_GPUBuffer* buffer = _draw_material_tables[_draw_material_slots[ref.scene]].buffer->handle();
                 if (buffer != bound_draw_materials) {
-                    SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 2 : 0, &buffer, 1);
+                    SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 4 : 0, &buffer, 1);
                     bound_draw_materials = buffer;
                 }
             }

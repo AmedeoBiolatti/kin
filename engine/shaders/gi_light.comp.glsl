@@ -32,8 +32,28 @@ layout(std430, set = 0, binding = 9) readonly buffer Blocks {
 layout(std430, set = 0, binding = 10) readonly buffer Emitters {
     float strengths[]; // each emitter's emissive strength this render (an emissive voxel's alpha: its number, from 1)
 };
+// Area lights (GlobalIllumination3D::area_lights): the emitters lit exactly (kin_area_light.inc.glsl), and for each
+// GI emitter whether it is one of them (its voxels' own glow then stays out: the light it gives is counted here).
+layout(std430, set = 0, binding = 11) readonly buffer AreaTriangles {
+    vec4 kin_area_triangles[];
+};
+layout(std430, set = 0, binding = 12) readonly buffer AreaNodes {
+    vec4 kin_area_nodes[];
+};
+layout(std430, set = 0, binding = 13) readonly buffer AreaEmitters {
+    vec4 kin_area_emitters[];
+};
+layout(std430, set = 0, binding = 14) readonly buffer AreaExplicit {
+    uint explicit_emitters[]; // a GI emitter's (from its number - 1): 1 when lit as an area light
+};
+layout(std430, set = 0, binding = 15) readonly buffer AreaScene {
+    vec4 kin_area_scene[]; // the copies' hierarchy, then the copies
+};
 layout(set = 1, binding = 0, rgba16f) uniform writeonly image3D uRadiance;     // the light leaving its front
 layout(set = 1, binding = 1, rgba16f) uniform writeonly image3D uRadianceBack; // and its back, if it has one
+// Area lights: each voxel's front's light from them, at the probes' strength, and in the alpha the epoch it is for
+// (Params.area.y); a 1 x 1 x 1 stand-in (never touched) without them. The probes' strength is applied after.
+layout(set = 1, binding = 2, rgba16f) uniform image3D uAreaCache;
 
 #define KIN_GI_SCENE
 #define KIN_GI_PROBES
@@ -41,7 +61,8 @@ layout(set = 1, binding = 1, rgba16f) uniform writeonly image3D uRadianceBack; /
 
 layout(std140, set = 2, binding = 0) uniform Params {
     KinGiScene scene;
-    uvec4 count;         // x: the lights in Lights, y: the blocks in Blocks
+    uvec4 count;         // x: the lights in Lights, y: the blocks in Blocks, z: how many of them come first, made this
+                         // render (their area light is found afresh)
     vec4 sun_direction;  // xyz: toward the sun (unit); w: its shadow's strength (0 to 1)
     vec4 sun_colour;     // rgb; w: 1 with a sun
     vec4 fill_direction; // xyz: toward the fill light (unit)
@@ -49,7 +70,18 @@ layout(std140, set = 2, binding = 0) uniform Params {
     KinGiProbes probes;  // counts.w: 1 when the probes have light to give
     mat4 sun_matrix;     // the GI's sun map's view and projection
     vec4 sun_map;        // x: 1 with the map, y: its depth bias, z: a texel (uv), w: a texel (world)
+    vec4 area;           // x: area-light emitters, y: with area lights, the cache's epoch (1 to 1024; 0 without),
+                         // z: GI emitters in AreaExplicit, w: where
+                         // the copies start in AreaScene
+    vec4 area_scene;     // the same, then the settled hierarchy's first node and triangle, 1 when there is one
 } p;
+
+float kin_area_strength(uint gi_emitter) {
+    return strengths[gi_emitter - 1u];
+}
+
+#define KIN_AREA_LINES 2
+#include "kin_area_light.inc.glsl"
 
 // How much of a light along `l` (unit) reaches the side facing `n` of the voxel at `at` (world) of a level whose voxels
 // are `cell` wide: the cosine, and 0 where a surface is in the way. Rays start 1.8 voxels out from the surface, past
@@ -158,6 +190,11 @@ vec3 reaching(vec3 world, float cell, vec3 n) {
     return light;
 }
 
+// The area lights' light on the side facing `n` (over pi): shadow rays from a voxel out, past the surface it holds.
+vec3 area_reaching(vec3 world, float cell, vec3 n) {
+    return kin_area_light(uint(p.area.x), uvec4(p.area_scene), world, n, world + n * cell);
+}
+
 void main() {
     const uint i = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
     const uint entry = i >> 9u;
@@ -184,10 +221,32 @@ void main() {
     const vec4 normal = texelFetch(uNormal, voxel, 0);
     const vec3 n = normalize(normal.xyz * 2.0 - 1.0);
     const vec4 glow = texelFetch(uEmission, voxel, 0);
-    const vec3 emission = glow.a > 0.5 ? glow.rgb * strengths[uint(glow.a + 0.5) - 1u] : glow.rgb;
-    imageStore(uRadiance, voxel, vec4(min(albedo.rgb * reaching(world, cell, n) + emission, vec3(65000.0)), 1.0));
+    const uint emitter = uint(glow.a + 0.5);
+    const bool exact = emitter > 0u && p.area.y > 0.5 && emitter <= uint(p.area.z) &&
+                       explicit_emitters[emitter - 1u] != 0u; // lit as an area light: its glow is not the probes'
+    const vec3 emission = exact ? vec3(0.0) : (glow.a > 0.5 ? glow.rgb * strengths[emitter - 1u] : glow.rgb);
+    // The area lights' (the front's kept from render to render while their scene and strengths stay, but for the
+    // blocks made this render).
+    vec3 area = vec3(0.0), area_back = vec3(0.0);
+    if (p.area.y > 0.5) {
+        const vec4 kept = imageLoad(uAreaCache, voxel);
+        if (entry >= p.count.z && abs(kept.a - p.area.y) < 0.5) {
+            area = kept.rgb;
+        } else {
+            area = area_reaching(world, cell, n);
+            imageStore(uAreaCache, voxel, vec4(min(area, vec3(65000.0)), p.area.y));
+        }
+        if (normal.a > 0.75) {
+            area_back = area_reaching(world, cell, -n);
+        }
+        area *= p.probes.bias.z;
+        area_back *= p.probes.bias.z;
+    }
+    imageStore(uRadiance, voxel,
+               vec4(min(albedo.rgb * (reaching(world, cell, n) + area) + emission, vec3(65000.0)), 1.0));
     // A voxel with faces both ways (a double-sided material, a wall thinner than a voxel): its back's own light.
     imageStore(uRadianceBack, voxel,
-               normal.a > 0.75 ? vec4(min(albedo.rgb * reaching(world, cell, -n) + emission, vec3(65000.0)), 1.0)
-                               : vec4(0.0));
+               normal.a > 0.75
+                   ? vec4(min(albedo.rgb * (reaching(world, cell, -n) + area_back) + emission, vec3(65000.0)), 1.0)
+                   : vec4(0.0));
 }

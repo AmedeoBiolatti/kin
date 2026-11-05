@@ -517,6 +517,12 @@ struct GiProbes3D {
 // it and Renderer3D::read_gi_scene reads it back. Off by default; off, the picture and the cost are as without it.
 // Needs compute (RendererCapabilities3D::global_illumination); else off, with a line in the log the first time it is
 // asked for.
+// How the GI's emissive surfaces light the scene (GlobalIllumination3D::emitters). Exact: each is an area light, its
+// light integrated where the camera sees, shadowed exactly (and, more coarsely, on the GI scene's voxels, for the
+// bounces), with its reflections. Probes: they light only through the probes, as everything the probes gather does:
+// cheaper, softer, without contact shadows or reflections of them.
+enum class GiEmitters3D : u8 { Exact, Probes };
+
 struct GlobalIllumination3D {
     bool enabled = false;
     // The box it takes in (the level). Empty: nothing, and the feature is off.
@@ -532,6 +538,31 @@ struct GlobalIllumination3D {
     // characters are lit by it, but neither shade nor light it.
     bool skinned = true;
     GiProbes3D probes{};
+    GiEmitters3D emitters = GiEmitters3D::Exact;
+    // The emitters as area lights (emitters Exact): shadowed by the copies' triangles (a bounding volume hierarchy made
+    // on the CPU when the GI scene's copies change), on the half-size picture gi_resolve lights. Only emitters the GI
+    // numbers, without emissive or base-colour maps; at most `max_emitters` triangles or parallelograms (whole GI
+    // emitters, in the GI's numbering; those past it stay with the probes); skinned copies neither emit nor shade here
+    // (the probes still carry their light). A scene without such emitters costs what it does with Probes. The
+    // reflections share one visibility (the diffuse light's) among the emitters. The light on the view fades out with
+    // the probes' toward their windows' edges.
+    struct AreaLights {
+        u32 max_emitters = 64;
+        // A GI emitter whose largest piece is less than this across (metres; 0: half the first level's voxel) stays
+        // with the probes: a candle's flame, an eye, a firefly, which the voxels hold about as well, and whose
+        // shadows would be finer than them, cost an area light's walk on every texel for little.
+        f32 min_size = 0.0f;
+        // The occluders' triangles: beyond this many (all copies' together), each mesh but the emitters' shades with a
+        // coarser shape of its own (simplified to a half, a quarter... of its triangles: the fewest halvings that fit).
+        // The cost grows with the triangles between a surface and an emitter.
+        u32 max_triangles = 131072;
+        // The share of the view's texels found each render: 1 every texel; 2 half (a checkerboard, alternating); 4 a
+        // quarter (one of each 2 x 2, in turn). The others are taken from where their surface was in the render before
+        // (those whose surface was not seen there are found too). Fewer cost less and lag more where the light or the
+        // shadows move: up to interleave - 1 renders on those texels. Needs the temporal anti-aliasing (its normals of
+        // the render before); without it every texel is found.
+        u32 interleave = 4;
+    } area_lights{};
 };
 
 // A persistent, fixed-size collection. Cheap copies share its CPU records; Scene3D keeps a

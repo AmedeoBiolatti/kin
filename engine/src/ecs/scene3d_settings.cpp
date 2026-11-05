@@ -189,6 +189,23 @@ void register_scene3d_settings(EcsWorld& world) {
         SETTING("gi_probes_per_render", global_illumination.probes.per_render);
         SETTING("gi_hysteresis", global_illumination.probes.hysteresis);
         SETTING("gi_intensity", global_illumination.probes.intensity);
+        builder.property<std::string>(
+            "gi_emitters",
+            [](const auto& v) {
+                return std::string(v.global_illumination.emitters == GiEmitters3D::Probes ? "probes" : "exact");
+            },
+            [](auto& v, const std::string& mode) {
+                if (mode == "exact")
+                    v.global_illumination.emitters = GiEmitters3D::Exact;
+                else if (mode == "probes")
+                    v.global_illumination.emitters = GiEmitters3D::Probes;
+                else
+                    return false;
+                return true;
+            });
+        SETTING("gi_area_max_emitters", global_illumination.area_lights.max_emitters);
+        SETTING("gi_area_max_triangles", global_illumination.area_lights.max_triangles);
+        SETTING("gi_area_interleave", global_illumination.area_lights.interleave);
         SETTING("samples", view.samples);
         SETTING("background", view.background);
         SETTING("hdr", view.hdr);
@@ -317,6 +334,11 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
                  settings.global_illumination.probes.hysteresis <= .99f &&
                  settings.global_illumination.probes.intensity >= 0 &&
                  std::isfinite(settings.global_illumination.probes.intensity) &&
+                 settings.global_illumination.area_lights.max_emitters >= 1 &&
+                 settings.global_illumination.area_lights.max_triangles >= 1 &&
+                 (settings.global_illumination.area_lights.interleave == 1 ||
+                  settings.global_illumination.area_lights.interleave == 2 ||
+                  settings.global_illumination.area_lights.interleave == 4) &&
                  (settings.view.samples == 1 || settings.view.samples == 2 || settings.view.samples == 4 ||
                   settings.view.samples == 8);
         if (!valid)

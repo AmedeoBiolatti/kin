@@ -10,7 +10,9 @@ struct KinDrawMaterial {
     vec4 emission;
 };
 layout(location = 9) flat in uint vMaterial;
-#ifdef KIN_LIGHT_GRID
+#if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
+#define KIN_DRAW_MATERIAL_BINDING 19 // after the light grid's two and the area lights' two
+#elif defined(KIN_LIGHT_GRID)
 #define KIN_DRAW_MATERIAL_BINDING 17
 #else
 #define KIN_DRAW_MATERIAL_BINDING 10

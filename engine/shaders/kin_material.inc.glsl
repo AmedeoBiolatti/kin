@@ -41,7 +41,9 @@ layout(set = 2, binding = 11) uniform sampler2DArrayShadow uMoonShadow;  // dept
 layout(set = 2, binding = 12) uniform sampler2D uGiLight; // rgb: the light facing the surface; a: its depth along the
                                                           // view (less: the probes have none there; 0: no surface)
 layout(set = 2, binding = 13) uniform sampler2D uGiSlope; // the light facing way d is rgb * (w + xyz . d)
-layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe lighting; the rest is ambient/environment
+layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe lighting (.r; .a with frame.gi.y),
+                                                             // the rest ambient; with frame.gi.y, rgb: the area
+                                                             // lights' irradiance over pi (gi_area.comp)
 #endif
 #ifdef KIN_LIGHT_GRID
 // The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
@@ -54,6 +56,11 @@ struct KinGridLight {
     vec4 cone;   // x: 1 / (cos inner - cos outer), y: its shadow's layer (a point light's cube's first; -1: none)
 };
 #ifdef KIN_GI
+// The area lights' reflections (GlobalIllumination3D::area_lights; kin_area_specular): linearly transformed cosines'
+// two GGX tables (64 x 64 each, rows by sqrt(1 - cos(view, normal)), roughness along), and the emitters, 5 vec4 each as
+// gi_area.comp reads them but their radiance at this render's strength.
+layout(std430, set = 2, binding = 17) readonly buffer KinAreaLtc { vec4 kin_area_ltc[]; };
+layout(std430, set = 2, binding = 18) readonly buffer KinAreaShading { vec4 kin_area_shading[]; };
 layout(std430, set = 2, binding = 15) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
 #else
 layout(std430, set = 2, binding = 14) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
@@ -267,18 +274,21 @@ vec3 kin_emissive(vec3 base) {
 // going as the view's jitter moves does not make the light jump. For the way `n` (this surface's normal, its normal
 // map's) for the diffuse (`probed`) and `r` for the reflections (`traced`). False where the probes have no light for it
 // (the sky's stands).
-bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced, out float coverage) {
+// With area lights (frame.gi.y), `area`: their irradiance over pi facing the surface (else 0).
+bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, out vec3 traced, out float coverage,
+                     out vec3 area) {
     const ivec2 size = textureSize(uGiLight, 0);
     const vec2 uv = gl_FragCoord.xy * 0.5 / vec2(size);
     // x, y, z, w: the texels at (0, 1), (1, 1), (1, 0) and (0, 0) from the footprint's first.
     const vec4 depths = textureGather(uGiLight, uv, 3);
     const bool drawn = material.maps.z > 0.5;
-    vec4 light, slope;
+    vec4 light, slope, shares;
     coverage = 0.0;
+    area = vec3(0.0);
     if (all(greaterThan(depths, vec4(0.0))) && (!drawn || all(lessThanEqual(abs(depths - depth), vec4(near))))) {
         light = textureLod(uGiLight, uv, 0.0);
         slope = textureLod(uGiSlope, uv, 0.0);
-        coverage = textureLod(uGiCoverage, uv, 0.0).r;
+        shares = textureLod(uGiCoverage, uv, 0.0);
     } else {
         const vec2 at = uv * vec2(size) - 0.5;
         const vec2 f = fract(at);
@@ -289,6 +299,7 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
         float nearest = 1e30, total = 0.0;
         light = vec4(0.0);
         slope = vec4(0.0);
+        shares = vec4(0.0);
         for (int i = 0; i < 4; ++i) {
             if (depths[i] == 0.0) {
                 continue; // no surface
@@ -302,23 +313,26 @@ bool kin_gi_resolved(vec3 n, vec3 r, float depth, float near, out vec3 probed, o
                 const ivec2 q = clamp(base + offsets[i], ivec2(0), size - 1);
                 light += weight[i] * texelFetch(uGiLight, q, 0);
                 slope += weight[i] * texelFetch(uGiSlope, q, 0);
-                coverage += weight[i] * texelFetch(uGiCoverage, q, 0).r;
+                shares += weight[i] * texelFetch(uGiCoverage, q, 0);
                 total += weight[i];
             }
         }
         if (total > 0.0) {
             light /= total;
             slope /= total;
-            coverage /= total;
+            shares /= total;
         } else if (nearest_one >= 0 && depths[nearest_one] > 0.0) {
             const ivec2 q = clamp(base + offsets[nearest_one], ivec2(0), size - 1);
             light = texelFetch(uGiLight, q, 0);
             slope = texelFetch(uGiSlope, q, 0);
-            coverage = texelFetch(uGiCoverage, q, 0).r;
+            shares = texelFetch(uGiCoverage, q, 0);
         } else {
             return false;
         }
     }
+    coverage = frame.gi.y > 0.5 ? shares.a : shares.r;
+    // The area lights' light fades out with the probes' toward their windows' edges (nothing found past them).
+    area = frame.gi.y > 0.5 ? shares.rgb * clamp(shares.a, 0.0, 1.0) : vec3(0.0);
     probed = light.rgb * clamp(slope.w + dot(slope.xyz, n), 0.0, 4.0);
     traced = light.rgb * clamp(slope.w + dot(slope.xyz, r), 0.0, 4.0);
     return true;
@@ -382,6 +396,91 @@ vec3 kin_spot_light(Surface s, vec3 n, vec3 offset_normal, vec4 at, vec4 colour,
 #else
     return shade(s, toward, colour.rgb * (k * seen));
 #endif
+}
+#endif
+
+#if defined(KIN_GI) && defined(KIN_LIGHT_GRID)
+// An area light's reflection (Heitz et al.'s linearly transformed cosines, three.js's horizon-clipped form): the
+// tables' bilinear fetch, an edge's integral, and a polygon's form from its corners' unit directions (in the
+// surface's frame through LTC's inverse for the GGX lobe; in world space for the diffuse form factor). Wound
+// counter-clockwise as seen from the fragment.
+vec4 kin_ltc_fetch(int table, float roughness, float n_v) {
+    const vec2 at = vec2(clamp(roughness, 0.0, 1.0), sqrt(1.0 - clamp(n_v, 0.0, 1.0))) * 63.0;
+    const ivec2 i = ivec2(floor(at)), j = min(i + 1, ivec2(63));
+    const vec2 f = at - vec2(i);
+    const int base = table * 4096;
+    const vec4 a = kin_area_ltc[base + i.y * 64 + i.x], b = kin_area_ltc[base + i.y * 64 + j.x];
+    const vec4 c = kin_area_ltc[base + j.y * 64 + i.x], d = kin_area_ltc[base + j.y * 64 + j.x];
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+vec3 kin_ltc_edge(vec3 v1, vec3 v2) {
+    const float x = dot(v1, v2), y = abs(x);
+    const float a = 0.8543985 + (0.4965155 + 0.0145206 * y) * y, b = 3.4175940 + (4.1616724 + y) * y;
+    const float v = a / b;
+    const float theta_sintheta = x > 0.0 ? v : 0.5 * inversesqrt(max(1.0 - x * x, 1e-7)) - v;
+    return cross(v1, v2) * theta_sintheta;
+}
+// The horizon-clipped form of the polygon whose corners are seen from the fragment along the unit directions c0..c3
+// (c3 unused for a triangle), `up` the horizon's normal in their space.
+float kin_ltc_form(vec3 c0, vec3 c1, vec3 c2, vec3 c3, bool triangle, vec3 up) {
+    vec3 f = kin_ltc_edge(c0, c1) + kin_ltc_edge(c1, c2);
+    if (triangle) {
+        f += kin_ltc_edge(c2, c0);
+    } else {
+        f += kin_ltc_edge(c2, c3) + kin_ltc_edge(c3, c0);
+    }
+    const float l = length(f);
+    return max((l * l + dot(f, up)) / (l + 1.0), 0.0);
+}
+// The area lights' reflection at the fragment: each emitter's GGX by its LTC, unshadowed, times the share of the
+// diffuse light the exact pass found unshadowed (`shadowed`, gi_area.comp's, over the same lights' unshadowed form
+// factors): one visibility for every emitter, exact where one light dominates.
+vec3 kin_area_specular(Surface s, vec3 n, float roughness, vec3 shadowed) {
+    const vec3 p = vWorld;
+    vec3 t1 = s.v - n * dot(s.v, n);
+    t1 = dot(t1, t1) > 1e-12 ? normalize(t1) : normalize(abs(n.y) < 0.9 ? cross(n, vec3(0, 1, 0)) : cross(n, vec3(1, 0, 0)));
+    const vec3 t2 = -cross(n, t1);
+    const mat3 frame_to = transpose(mat3(t1, t2, n));
+    const vec4 m1 = kin_ltc_fetch(0, roughness, s.n_v), m2 = kin_ltc_fetch(1, roughness, s.n_v);
+    // LTC's inverse transform in the surface's frame, with that frame's turn: one matrix for the corners.
+    const mat3 to_ltc = mat3(vec3(m1.x, 0, m1.y), vec3(0, 1, 0), vec3(m1.z, 0, m1.w)) * frame_to;
+    const vec3 fresnel = s.f0 * m2.x + (vec3(1.0) - s.f0) * m2.y;
+    vec3 diffuse = vec3(0.0), specular = vec3(0.0);
+    const uint emitters = uint(frame.gi.z + 0.5);
+    for (uint e = 0u; e < emitters; ++e) {
+        const vec4 E0 = kin_area_shading[e * 5u], E1 = kin_area_shading[e * 5u + 1u], E2 = kin_area_shading[e * 5u + 2u];
+        const vec4 EN = kin_area_shading[e * 5u + 3u], ER = kin_area_shading[e * 5u + 4u];
+        const bool triangle = E0.w > 0.5;
+        if (EN.w < 0.5 && dot(p - E0.xyz, EN.xyz) <= 0.0) {
+            continue; // behind a one-sided emitter
+        }
+        vec3 q0 = E0.xyz, q1 = E0.xyz + E1.xyz, q2 = E0.xyz + E1.xyz + E2.xyz, q3 = E0.xyz + E2.xyz;
+        if (dot(cross(E1.xyz, E2.xyz), p - q0) < 0.0) {
+            // Counter-clockwise from p: turn it round.
+            const vec3 t = q1;
+            q1 = triangle ? q2 : q3;
+            if (triangle) {
+                q2 = t;
+            } else {
+                q3 = t;
+            }
+        }
+        if (triangle) {
+            q3 = q2; // (a triangle has three corners)
+        }
+        // Wholly below the horizon: neither form sees any of it.
+        if (max(max(dot(q0 - p, n), dot(q1 - p, n)), max(dot(q2 - p, n), dot(q3 - p, n))) <= 0.0) {
+            continue;
+        }
+        const vec3 d0 = normalize(q0 - p), d1 = normalize(q1 - p), d2 = normalize(q2 - p), d3 = normalize(q3 - p);
+        // The form factor, in world space: the surface's frame (t1, t2, n) is left-handed, so its z is -n here.
+        diffuse += ER.rgb * kin_ltc_form(d0, d1, d2, d3, triangle, -n);
+        specular += ER.rgb * kin_ltc_form(normalize(to_ltc * d0), normalize(to_ltc * d1), normalize(to_ltc * d2),
+                                          normalize(to_ltc * d3), triangle, vec3(0.0, 0.0, 1.0));
+    }
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    const float seen = clamp(dot(shadowed, luma) / max(dot(diffuse * frame.gi.w, luma), 1e-6), 0.0, 1.0);
+    return specular * fresnel * s.boost * (frame.gi.w * seen);
 }
 #endif
 
@@ -519,6 +618,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         above = mix(frame.ground_ambient.rgb, frame.ambient.rgb, reflected.y * 0.5 + 0.5);
     }
 #ifdef KIN_GI
+    vec3 area_light = vec3(0.0); // the area lights' (frame.gi.y), a direct light's: not occluded, not the probes'
     // With global illumination's probes the diffuse is theirs: the sky's light where they see it, the light of every
     // surface they see, kept out by walls. The reflections too, in so far as a rough surface's are its surroundings'
     // light along the reflection, blurred: what the probes see that way; a smooth surface keeps the sky's sharp
@@ -529,7 +629,7 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
         const float near = 0.02 * depth + 4.0 * fwidth(depth);
         vec3 probed, traced;
         float coverage;
-        if (kin_gi_resolved(n, r, depth, near, probed, traced, coverage)) {
+        if (kin_gi_resolved(n, r, depth, near, probed, traced, coverage, area_light)) {
             around = mix(around, probed, coverage);
             const vec3 open = frame.environment.w > 0.5
                                   ? textureLod(uEnvIrradiance, environment_uv(r), 0.0).rgb * frame.environment.x
@@ -543,6 +643,14 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
 #endif
     const vec3 dielectric = sky_reflectance(vec3(0.04), ab);
     const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
+#ifdef KIN_GI
+    light += s.diffuse * (vec3(1.0) - dielectric) * area_light;
+#ifdef KIN_LIGHT_GRID
+    if (frame.gi.y > 0.5 && frame.gi.z > 0.5) {
+        light += kin_area_specular(s, n, roughness, area_light);
+    }
+#endif
+#endif
     if (frame.occlusion.x > 0.5 && material.maps.z > 0.5) {
         // Ambient occlusion: the diffuse light by Jimenez et al.'s multi-bounce
         // fit (light bounces between nearby surfaces, the more the brighter
