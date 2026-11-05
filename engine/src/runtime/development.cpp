@@ -85,7 +85,9 @@ std::vector<SourceFile> list_sources(const std::filesystem::path& source) {
 
 void add_stamp(std::string& stamps, std::string_view name, u64 bytes, std::filesystem::file_time_type time) {
     stamps.append(name);
-    stamps += '\0' + std::to_string(bytes) + '\0' + std::to_string(time.time_since_epoch().count()) + '\n';
+    // The clock's count is wider than long long in libc++ (__int128), which to_string has no overload for.
+    const auto ticks = static_cast<long long>(time.time_since_epoch().count());
+    stamps += '\0' + std::to_string(bytes) + '\0' + std::to_string(ticks) + '\n';
 }
 
 // What the watcher compares, without reading a file: each file's size and
