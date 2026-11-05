@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Local players in one Input ([input](input.md#local-players)). App gives `Input` each `GamepadPlayers`
+  player's controller (`set_player_gamepad`, `player_gamepad`). `pressed`, `held`, `released`, `frame_pressed`,
+  `frame_released` and `axis` take a player, and so do `binding_held`, `binding_pressed`, `axis_value` and
+  `pad_frame_pressed`; without one they ask about anyone, as before. `Input::set_players` (`InputPlayer`) says
+  who has the keyboard and mouse, and gives a player their own map when two share one keyboard. With no players
+  set, player 0 has the keyboard, and the first controller until someone joins, so one-player games are
+  unchanged. `ScriptComponent::player` says whose input an entity's script reads. Lua's `input.held`/`pressed`/
+  `released`/`axis` take a player, and `input.player()` says whose. The scene server's `input.pad` drives a
+  player's controller. Inside `Input`, keys, mouse buttons and each controller now share one edge type.
+
 - Platform services ([platform services](platform_services.md)). `kin::PlatformServices` is what a store offers a
   game, the same whichever runs it: the player, their language, achievements, stats, leaderboards, rich presence,
   the overlay, the on-screen keyboard, DLC and invitations to join (`JoinRequested` events, `join_on_launch`).

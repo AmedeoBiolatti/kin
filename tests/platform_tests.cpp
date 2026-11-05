@@ -371,8 +371,100 @@ void test_gamepad_bindings_and_axes() {
     assert(kin::pad_control_name(kin::PadControl::RightTrigger) == "right_trigger");
 }
 
+// Local players: each reads their own controller (GamepadPlayers' slot), the
+// keyboard as set_players says, with their own map when two share it; anyone
+// reads every device; with no players set, player 0 has the keyboard and the
+// controller.
+void test_local_players() {
+    kin::InputMap map;
+    map.bind("jump", kin::Key::Space);
+    map.bind("jump", kin::PadControl::A);
+    map.set_axis({.name = "move_x",
+                  .negative = {*kin::parse_binding_text("key:A")},
+                  .positive = {*kin::parse_binding_text("key:D")},
+                  .sticks = {{.axis = kin::PadAxis::LeftX}}});
+    kin::Input input;
+    input.set_map(map);
+    kin::GamepadState first{.connected = true};
+    kin::GamepadState second{.connected = true};
+    input.set_gamepad(first); // what App gives: player 0's
+    input.set_player_gamepad(0, first);
+    input.set_player_gamepad(1, second);
+    assert(input.player_gamepad(1).connected && !input.player_gamepad(2).connected && !input.player_gamepad(-1).connected);
+
+    // Nobody set: player 0 has the keyboard and the controller; player 1 their own.
+    second.set_button(kin::GamepadButton::A, true);
+    input.set_player_gamepad(1, second);
+    assert(input.pressed("jump") && input.pressed(-1, "jump") && input.pressed(1, "jump") && !input.pressed(0, "jump"));
+    assert(input.pad_frame_pressed(kin::PadControl::A, 1) && input.pad_frame_pressed(kin::PadControl::A, -1) &&
+           !input.pad_frame_pressed(kin::PadControl::A, 0) && !input.pad_frame_pressed(kin::PadControl::A));
+    input.set_key_pressed(kin::Key::Space);
+    assert(input.pressed(0, "jump") && input.pressed(1, "jump") && !input.pressed(2, "jump"));
+    input.advance_step_edges();
+    assert(!input.pressed(1, "jump") && input.held(1, "jump"));
+    input.set_key_released(kin::Key::Space);
+    second.set_button(kin::GamepadButton::A, false);
+    input.set_player_gamepad(1, second);
+    assert(input.released(1, "jump") && input.frame_released(1, "jump") && !input.released(2, "jump"));
+    input.advance_step_edges();
+
+    // Sticks per player; anyone: the furthest pushed.
+    first.left_x = -1.0f;
+    input.set_gamepad(first);
+    input.set_player_gamepad(0, first);
+    second.left_x = 0.6f;
+    input.set_player_gamepad(1, second);
+    assert(input.axis(0, "move_x") == -1.0f && std::abs(input.axis(1, "move_x") - 0.5f) < 1e-4f && input.axis(2, "move_x") == 0.0f);
+    assert(input.axis("move_x") == -1.0f);
+    assert(kin::binding_held(input, *kin::parse_binding_text("pad:left_stick_left"), 0) &&
+           !kin::binding_held(input, *kin::parse_binding_text("pad:left_stick_left"), 1));
+    assert(std::abs(kin::axis_value(input, *map.axis("move_x"), 1) - 0.5f) < 1e-4f);
+
+    // Players set: the keyboard is player 1's now, and player 0 reads only their controller.
+    input.set_players({{}, {.keyboard = true}});
+    input.set_key_pressed(kin::Key::D);
+    assert(input.axis(1, "move_x") == 1.0f && input.axis(0, "move_x") == -1.0f);
+    input.set_key_pressed(kin::Key::Space);
+    assert(input.pressed(1, "jump") && !input.pressed(0, "jump"));
+    assert(kin::binding_pressed(input, *kin::parse_binding_text("key:Space"), 1) &&
+           !kin::binding_pressed(input, *kin::parse_binding_text("key:Space"), 0) &&
+           kin::binding_pressed(input, *kin::parse_binding_text("key:Space")));
+    input.set_key_released(kin::Key::D);
+    input.set_key_released(kin::Key::Space);
+    input.advance_step_edges();
+
+    // One keyboard, two players, each with their own map (WASD, the arrows).
+    kin::InputMap wasd;
+    wasd.set_axis({.name = "move_x", .negative = {*kin::parse_binding_text("key:A")}, .positive = {*kin::parse_binding_text("key:D")}});
+    wasd.bind("fire", kin::Key::F);
+    kin::InputMap arrows;
+    arrows.set_axis({.name = "move_x", .negative = {*kin::parse_binding_text("key:Left")}, .positive = {*kin::parse_binding_text("key:Right")}});
+    arrows.bind("fire", kin::Key::Enter);
+    kin::Input shared;
+    shared.set_players({{.keyboard = true, .map = wasd}, {.keyboard = true, .map = arrows}});
+    shared.set_key_pressed(kin::Key::Left);
+    shared.set_key_pressed(kin::Key::F);
+    assert(shared.axis(0, "move_x") == 0.0f && shared.axis(1, "move_x") == -1.0f);
+    assert(shared.pressed(0, "fire") && !shared.pressed(1, "fire"));
+    assert(shared.axis("move_x") == -1.0f && shared.pressed("fire")); // anyone, through their maps
+    shared.set_key_pressed(kin::Key::D);
+    assert(shared.axis(0, "move_x") == 1.0f && shared.axis(1, "move_x") == -1.0f);
+
+    // Nobody joined: the one controller is player 0's. Once player 1 has one of
+    // their own (and it is what App gives as the controller), it is not.
+    kin::Input lone;
+    lone.set_map(map);
+    kin::GamepadState pad{.connected = true};
+    pad.set_button(kin::GamepadButton::A, true);
+    lone.set_gamepad(pad);
+    assert(lone.held(0, "jump") && !lone.held(1, "jump"));
+    lone.set_player_gamepad(1, pad);
+    assert(!lone.held(0, "jump") && lone.held(1, "jump") && lone.held("jump"));
+}
+
 int main() {
     test_gamepad_bindings_and_axes();
+    test_local_players();
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process
     // environment even when GPU CI exports X11 for the separate 3D tests.

@@ -215,7 +215,13 @@ scripts.update(world, ctx.input, ctx.dt);
 - Fields are read and written the way scene files write them: numbers,
   booleans, strings, `{x, y}` and `{r, g, b, a}` tables.
 - The `input` table reads the input map: `held`, `pressed`, `released` and
-  `axis` by name, and `mouse()` returns x and y ([input](input.md)).
+  `axis` by name, and `mouse()` returns x and y ([input](input.md)). In a game
+  for several players at one screen, each of the four takes a player last (1
+  the first, 0 anyone). Without one it reads the player the entity's
+  `ScriptComponent` names in `player` (0, the default, is anyone), so the same
+  `player.lua` runs player 1's character and player 2's. `player()` says
+  whose input this entity reads. Joining, rumble and button labels are
+  `controllers.*` ([Lua 2D workflows](lua_2d_workflows.md#controllers-and-asset-memory)).
 - The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
   the new prefab instance's root.
 - When the game gives the scripts its physics (`EntityScripts::set_physics`),

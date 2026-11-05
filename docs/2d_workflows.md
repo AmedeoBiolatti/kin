@@ -84,9 +84,11 @@ rumble_player(player, low, high, milliseconds) and rumble(device, ...) return
 false for unavailable/unsupported haptics. Strengths are clamped to 0..1;
 non-finite values are rejected. Zero duration stops the motors.
 gamepad_button_label(family, button) supplies Xbox/PlayStation/Nintendo face-button
-names for the family a state reports (`GamepadState::family`). Legacy Input uses player zero after
-joining, otherwise the first pad. Feed each player's state into a separate Input
-for independent player maps/contexts.
+names for the family a state reports (`GamepadState::family`). App gives Input
+each player's state too, so one Input answers per player: `input.pressed(1,
+"jump")`, `input.axis(1, "move_x")`, with the keyboard and their own maps as
+`Input::set_players` says ([input](input.md#local-players)). `Input::gamepad()`
+is player zero's after joining, otherwise the first pad.
 
 ## Prefab pooling
 
