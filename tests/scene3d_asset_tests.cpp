@@ -67,6 +67,22 @@ void codecs_and_shared_tools() {
     for (auto name : {"Transform3D", "ModelRenderer3D", "SkinnedMeshRenderer", "Animator3D", "PointLight3D",
                       "SpotLight3D", "Collider3D", "RigidBody3D"})
         check(world.components().find(name) != nullptr, "standard registry missing 3D component");
+    // Tools offer models for the renderers' assets, and the camera's projections, as they do for 2D's.
+    const auto field = [&](std::string_view component, std::string_view name) -> const ComponentFieldDescriptor& {
+        const auto* descriptor = world.components().find(component);
+        check(descriptor != nullptr, "3D component not registered");
+        for (const auto& f : descriptor->fields)
+            if (f.name == name)
+                return f;
+        check(false, "3D component field not registered");
+        return descriptor->fields.front();
+    };
+    check(field("ModelRenderer3D", "asset").asset_type == "Model", "ModelRenderer3D.asset is not a Model");
+    check(field("SkinnedMeshRenderer", "asset").asset_type == "Model", "SkinnedMeshRenderer.asset is not a Model");
+    check(field("ParticleEmitter3D", "texture").asset_type == "Image", "ParticleEmitter3D.texture is not an Image");
+    check(field("SceneCamera3D", "projection").choices.size() == 2, "SceneCamera3D.projection has no choices");
+    check(field("SceneCamera3D", "fov").units == "degrees", "SceneCamera3D.fov has no units");
+    check(!field("Transform3D", "rotation").description.empty(), "Transform3D.rotation has no description");
 
     const auto decode = [](ComponentFieldKind kind, std::string_view text) {
         auto json = parse_json(text);

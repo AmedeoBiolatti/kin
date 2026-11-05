@@ -17,36 +17,54 @@ void register_render3d_components(EcsWorld& world) {
         registry.native<Transform3D>("Transform3D")
             .field("position", &Transform3D::position)
             .units("m")
+            .description("Where it is, from its parent (or the world).")
             .field("rotation", &Transform3D::rotation)
-            .field("scale", &Transform3D::scale);
+            .description("How it is turned from its parent: a quaternion (x, y, z, w).")
+            .field("scale", &Transform3D::scale)
+            .description("Its size on each of its axes; 1 is as made.");
     if (!registry.find("ModelRenderer3D"))
         registry.native<ModelRenderer3D>("ModelRenderer3D")
             .field("asset", &ModelRenderer3D::asset)
+            .asset_type("Model")
+            .description("The model drawn: a .glb or .gltf without a skin (one with a skin is SkinnedMeshRenderer's).")
             .field("tint", &ModelRenderer3D::tint)
+            .description("Multiplies its materials' colours.")
             .field("visible", &ModelRenderer3D::visible)
-            .field("id", &ModelRenderer3D::id);
+            .field("id", &ModelRenderer3D::id)
+            .description("What picking answers for it; 0: the entity's own.");
     if (!registry.find("ModelMaterials3D"))
         registry.native<ModelMaterials3D>("ModelMaterials3D")
             .field("asset", &ModelMaterials3D::asset)
-            .field("variant", &ModelMaterials3D::variant);
+            .description("A .kinmaterials file: changes to its model's materials.")
+            .field("variant", &ModelMaterials3D::variant)
+            .description("Which of the file's variants; empty: its base.");
     if (!registry.find("SkinnedMeshRenderer"))
         registry.native<SkinnedMeshRenderer3D>("SkinnedMeshRenderer")
             .field("asset", &SkinnedMeshRenderer3D::asset)
+            .asset_type("Model")
+            .description("The model drawn: a .glb or .gltf with a skin (Animator3D moves its joints).")
             .field("tint", &SkinnedMeshRenderer3D::tint)
+            .description("Multiplies its materials' colours.")
             .field("visible", &SkinnedMeshRenderer3D::visible)
-            .field("id", &SkinnedMeshRenderer3D::id);
+            .field("id", &SkinnedMeshRenderer3D::id)
+            .description("What picking answers for it; 0: the entity's own.");
     if (!registry.find("Animator3D"))
         registry.native<Animator3D>("Animator3D")
             .field("clip", &Animator3D::clip)
+            .description("The model's clip it plays, by name.")
             .field("speed", &Animator3D::speed)
+            .description("1 plays at the clip's own speed.")
             .field("loop", &Animator3D::loop)
             .field("playing", &Animator3D::playing)
             .field("fade_seconds", &Animator3D::fade_seconds)
             .units("s")
+            .description("How long a new clip fades in over the last.")
             .field("apply_root_motion", &Animator3D::apply_root_motion)
             .field("remove_root_motion", &Animator3D::remove_root_motion);
     if (!registry.find("AnimatorAsset3D"))
-        registry.native<AnimatorAsset3D>("AnimatorAsset3D").field("asset", &AnimatorAsset3D::asset);
+        registry.native<AnimatorAsset3D>("AnimatorAsset3D")
+            .field("asset", &AnimatorAsset3D::asset)
+            .description("A kin.animator3d/1 file: its states, blends, layers and IK.");
     const auto light_fields = [&]<class T>(const char* name) {
         if (registry.find(name))
             return;
@@ -59,10 +77,13 @@ void register_render3d_components(EcsWorld& world) {
                  v.color = {c.x, c.y, c.z};
                  return true;
              })
+            .description("Linear; above 1 is brighter.")
             .field("radius", &T::radius)
             .units("m")
+            .description("How far it reaches: nothing is lit beyond.")
             .field("size", &T::size)
             .units("m")
+            .description("The light's own size: a larger one has softer shadows.")
             .field("enabled", &T::enabled);
         b.template property<bool>(
             "shadow_enabled", [](const T& v) { return v.shadow_enabled; },
@@ -96,8 +117,10 @@ void register_render3d_components(EcsWorld& world) {
         if constexpr (std::is_same_v<T, SpotLight3D>) {
             b.field("inner_angle", &T::inner_angle)
                 .units("degrees")
+                .description("Inside it, full light; it fades out to the outer angle.")
                 .field("outer_angle", &T::outer_angle)
-                .units("degrees");
+                .units("degrees")
+                .description("Beyond it, no light.");
         }
     };
     light_fields.template operator()<PointLight3D>("PointLight3D");
