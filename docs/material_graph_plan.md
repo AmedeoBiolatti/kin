@@ -237,3 +237,14 @@ still load, unmerged. Cooked format version 3 (the variant count). A cooked grap
 `test_gpu_surface_batching`: 384 draws merge (over 200 merged) plain, fogged, lit and both; a merged identity
 surface is byte-identical to merged stock materials; merged tinted draws to the same unmerged (each copy's
 parameters); a retained 256-copy batch to the same copies streamed.
+
+**Cut-outs by the graph's alpha.** The stock cut-out shaders (shadow, pick, pre-pass, velocity pre-pass, visibility)
+are now bodies (`kin_<pass>.inc.glsl`) calling `kin_cutout_alpha(uv, position, vertex alpha)`: the base map's alpha,
+or, in a surface's cut-out variant (`KIN_SURFACE_ALPHA`), its `kin_surface_alpha` (declared before main, defined
+after it: GLSL prototypes). The shadow-mask vertex shaders also give the world position. A surface's cut-out variants
+bind its five maps and a longer cut-out block (parameters, the sRGB decoding, `Scene3D::time`). The graph compiler
+compiles the alpha again in a mask mode (uv, position, time, vertex alpha, the base map's alpha, parameters, maps,
+noise; the view, normals, fresnel, triplanar, normal maps and glsl nodes refused, as a warning naming the node).
+Five optional variants (17 in all; cooked only for graphs with a cut-out alpha). `test_gpu_material_graph_cutout`: a
+plane cut by a checker of nodes draws, shadows, occludes (AO pre-pass, TAA velocity pre-pass) and picks byte-identically
+to the same plane cut by a checker texture, and differs from it uncut by ~1,230 pixels (its holes and their shadow).

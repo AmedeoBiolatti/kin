@@ -1530,8 +1530,16 @@ its emission; then fog and output as ever. The function may call every `kin_*` f
 compiled at build time with `kin_compile_surface_shader(<var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl)`
 (`cmake/kin_embed.cmake`), which lists the twelve `.spv` files in `SurfaceVariant3D`'s order for
 `r3d.create_surface_shader(variants)`. `surface_shader_source()` and `surface_variant_defines()` say what each
-variant is. A `shader` takes the surface's place. Not yet: the shadow, pick and pre-passes still cut a cut-out by
-the base colour's alpha (not the surface's); WebGL2 has no surface shaders.
+variant is. A `shader` takes the surface's place. WebGL2 has no surface shaders.
+
+**Cut-outs.** A `Blend3D::Mask` surface cuts its shadow, its occlusion (the pre-passes), its picks and the visibility
+queries by its own alpha where it defines `float kin_surface_alpha(vec2 uv, vec3 position, float vertex_alpha)` under
+`#ifdef KIN_SURFACE_MASK` (the UV as the maps read it, the world position, the copy's and vertex's alpha; it may
+sample the material's five maps, `kin_surface_param` and the noise of `kin_graph_noise.inc.glsl`;
+`material.cutoff.z` is `Scene3D::time`): five more variants (`SurfaceVariant3D::ShadowMask` ...
+`VisibilityMask`, made when the text has it; `CUTOUTS` for `kin_compile_surface_shader`). Without it those passes cut
+by the base map's alpha, as kin's own materials do. Material graphs write it for their `alpha` output when it uses
+only what those passes have (see Material graphs).
 
 Surface materials take kin's batched paths as its own do: a static batch's copies are retained, draws are planned and
 cached, and separate draws of one mesh and surface merge into one (the merged draws' four variants, mesh_material's,
@@ -1583,6 +1591,11 @@ shadowed, fogged and GI-lit as kin's own materials are.
   `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs.
 - **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to
   nothing, too many parameters, two textures in a slot.
+- **Cut-outs**: a graph's `alpha` is compiled again for the shadow, occluder, pick, pre- and visibility passes when
+  it uses only what they have: `uv`, `position`, `time`, `vertex_color`'s alpha, `surface.alpha` (the base map's),
+  parameters, textures, noise and maths (`CompiledMaterialGraph3D::cutout`). One that uses more (the view, a normal,
+  `fresnel`, `triplanar`, `normal_map`, a `glsl` node) compiles with a warning naming the node
+  (`CompiledMaterialGraph3D::warnings`), and its cut-outs in those passes follow the base map's alpha.
 
 `compile_material_graph3d(text)` writes the surface shader's GLSL (`CompiledMaterialGraph3D::surface`) and the
 parameters' layout; `r3d.compile_material_graph(path)` compiles it now (development). Nodes not wired to an output are

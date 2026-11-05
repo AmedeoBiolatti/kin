@@ -92,7 +92,11 @@ private:
 // of a file defining `void kin_surface(inout KinSurface s)` (no #version), between its two halves. Each variant is
 // this compiled as a fragment shader with surface_variant_defines(variant) (glslc's -D, after #version) and kin's
 // shader folder on the include path (KIN_SHADER_INCLUDE_DIR; cmake's kin_compile_surface_shader does both).
-std::string surface_shader_source(std::string_view surface);
+std::string surface_shader_source(std::string_view surface, SurfaceVariant3D variant = SurfaceVariant3D::Plain);
+// Whether a surface's cut-out variants are made: it defines `float kin_surface_alpha(vec2 uv, vec3 position, float
+// vertex_alpha)` (under KIN_SURFACE_MASK: kin_cutout.inc.glsl), as material graphs whose alpha the cut-out passes can
+// compute do.
+bool surface_has_alpha(std::string_view surface);
 // The defines of a surface shader's variant: NAME or NAME=VALUE.
 std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant);
 

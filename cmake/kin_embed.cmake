@@ -8,12 +8,14 @@
 #     machines without glslc. With neither, it skips the shaders and <out_var>
 #     lists only those it has.
 #
-#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl)
+#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl [CUTOUTS])
 #     A 3D surface shader (Material3D::surface; docs/rendering_3d.md, Surface
 #     shaders): its eight variants, each kin's mesh fragment shader with the
 #     source's kin_surface() between its halves, compiled with that variant's
 #     defines, as <dir>/<name>.<variant>.spv. <out_var> lists them in
-#     SurfaceVariant3D's order, as Renderer3D::create_surface_shader takes them.
+#     SurfaceVariant3D's order, as Renderer3D::create_surface_shader takes them
+#     (the merged draws' four after the eight); with CUTOUTS (a surface
+#     defining kin_surface_alpha) the cut-out passes' five after those.
 #     Needs glslc (no KIN_SPIRV_DIR form yet).
 #
 #   kin_cook_material_graph(<out_var> SOURCE <graph> [OUTPUT <file>])
@@ -109,9 +111,11 @@ set(_KIN_SURFACE_DEFINES_material KIN_DRAW_MATERIALS)
 set(_KIN_SURFACE_DEFINES_material_fog KIN_DRAW_MATERIALS KIN_FOG)
 set(_KIN_SURFACE_DEFINES_material_lights KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
 set(_KIN_SURFACE_DEFINES_material_lights_fog KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG)
+# The cut-outs' (CUTOUTS: a surface defining kin_surface_alpha), each its pass's body (kin_<pass>.inc.glsl).
+set(_KIN_SURFACE_MASKS shadow_mask pick_mask prepass_mask prepass_velocity_mask visibility_mask)
 
 function(kin_compile_surface_shader out_var)
-    cmake_parse_arguments(ARG "" "OUTPUT_DIR;SOURCE" "" ${ARGN})
+    cmake_parse_arguments(ARG "CUTOUTS" "OUTPUT_DIR;SOURCE" "" ${ARGN})
     if(NOT ARG_OUTPUT_DIR OR NOT ARG_SOURCE)
         message(FATAL_ERROR "kin_compile_surface_shader: OUTPUT_DIR and SOURCE are required")
     endif()
@@ -151,6 +155,27 @@ function(kin_compile_surface_shader out_var)
             VERBATIM)
         list(APPEND outputs "${output}")
     endforeach()
+    if(ARG_CUTOUTS)
+        foreach(mask IN LISTS _KIN_SURFACE_MASKS)
+            set(mask_wrapper "${ARG_OUTPUT_DIR}/${stem}.${mask}.frag.glsl")
+            file(CONFIGURE OUTPUT "${mask_wrapper}" CONTENT
+"#version 450 core
+#define KIN_SURFACE_MASK
+#define KIN_SURFACE_ALPHA kin_surface_alpha
+#include \"kin_${mask}.inc.glsl\"
+#include \"${name}\"
+")
+            set(output "${ARG_OUTPUT_DIR}/${stem}.${mask}.spv")
+            add_custom_command(
+                OUTPUT "${output}"
+                COMMAND "${KIN_GLSLC}" -fshader-stage=fragment -I "${KIN_SHADER_INCLUDE_DIR}" -I "${folder}"
+                        -o "${output}" "${mask_wrapper}"
+                DEPENDS "${source}" "${mask_wrapper}" ${_KIN_SHADER_INCLUDES}
+                COMMENT "glslc: ${name} (${mask}) -> ${stem}.${mask}.spv"
+                VERBATIM)
+            list(APPEND outputs "${output}")
+        endforeach()
+    endif()
     set(${out_var} "${outputs}" PARENT_SCOPE)
 endfunction()
 

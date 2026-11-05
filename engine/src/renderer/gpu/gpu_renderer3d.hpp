@@ -190,11 +190,20 @@ public:
     }
     // Its merged draws' variants (mesh_material.frag's): optional; without them its draws are not merged.
     bool merges() const {
-        for (u32 i = surface_required_variants3d; i < surface_variant_count3d; ++i)
+        for (u32 i = surface_required_variants3d; i < surface_mask_variant3d; ++i)
             if (!variants[i])
                 return false;
         return true;
     }
+    // Its cut-outs' variants (a surface defining kin_surface_alpha): optional; without them its cut-outs in the
+    // shadow, occluder, pick, pre- and visibility passes follow the base map's alpha.
+    bool masks() const {
+        for (u32 i = surface_mask_variant3d; i < surface_variant_count3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    SDL_GPUShader* mask(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
 };
 class GpuMaterialInputs3D final : public IMaterialInputsBackend3D {
 public:
@@ -569,8 +578,8 @@ private:
     SDL_GPUGraphicsPipeline* fullscreen_additive(SDL_GPUShader* fragment, SDL_GPUTextureFormat format) const;
     // The pre-pass with velocity, into a target of the two-float normal's size
     // and four floats, over a depth of `depth`.
-    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask,
-                                               bool skinned = false) const;
+    SDL_GPUGraphicsPipeline* velocity_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned = false,
+                                               const GpuSurfaceShader3D* surface = nullptr) const;
     u32 usable_samples(u32 wanted, SDL_GPUTextureFormat format) const;
     // The shadow map at `resolution` with up to `layers` layers (one a cascade),
     // made or remade: how many it has (fewer if the device could not make
@@ -675,8 +684,11 @@ private:
     // End of a render: counts the renders each feature's targets went unused and releases those unused for
     // `_release_after`; fills RenderDebugStats3D::feature_bytes.
     void age_targets(FrameCtx& ctx);
+    // The surface whose cut-out variants a cut-out material's passes use (none: the stock cut-out shaders).
+    static const GpuSurfaceShader3D* cutout_surface(const Material3D& material);
+    f32 _cutout_time = 0; // Scene3D::time, for surface cut-outs (bind_cutout)
     SDL_GPUGraphicsPipeline* geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned,
-                                               bool indexed) const;
+                                               bool indexed, const GpuSurfaceShader3D* surface = nullptr) const;
     bool draw_geometry(FrameCtx&, SDL_GPURenderPass*, SDL_GPUTextureFormat depth, bool second);
     void prepass(FrameCtx& ctx); // depth and normals (or velocity), then the occlusion and contact shadows
     void draw_velocity(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 which, SDL_GPUTextureFormat depth_format);
