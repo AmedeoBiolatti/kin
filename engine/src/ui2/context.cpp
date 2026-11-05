@@ -178,6 +178,38 @@ std::string readable_mouse(MouseButton button) {
     return "Mouse";
 }
 
+// A controller's control as a prompt says it.
+std::string readable_pad(PadControl control, bool compact) {
+    switch (control) {
+    case PadControl::A: return "A";
+    case PadControl::B: return "B";
+    case PadControl::X: return "X";
+    case PadControl::Y: return "Y";
+    case PadControl::Back: return "Back";
+    case PadControl::Start: return "Start";
+    case PadControl::LeftStick: return compact ? "L3" : "Left Stick";
+    case PadControl::RightStick: return compact ? "R3" : "Right Stick";
+    case PadControl::LeftShoulder: return compact ? "LB" : "Left Bumper";
+    case PadControl::RightShoulder: return compact ? "RB" : "Right Bumper";
+    case PadControl::DPadUp: return "D-pad Up";
+    case PadControl::DPadDown: return "D-pad Down";
+    case PadControl::DPadLeft: return "D-pad Left";
+    case PadControl::DPadRight: return "D-pad Right";
+    case PadControl::LeftStickLeft: return "Left Stick Left";
+    case PadControl::LeftStickRight: return "Left Stick Right";
+    case PadControl::LeftStickUp: return "Left Stick Up";
+    case PadControl::LeftStickDown: return "Left Stick Down";
+    case PadControl::RightStickLeft: return "Right Stick Left";
+    case PadControl::RightStickRight: return "Right Stick Right";
+    case PadControl::RightStickUp: return "Right Stick Up";
+    case PadControl::RightStickDown: return "Right Stick Down";
+    case PadControl::LeftTrigger: return compact ? "LT" : "Left Trigger";
+    case PadControl::RightTrigger: return compact ? "RT" : "Right Trigger";
+    case PadControl::Count: break;
+    }
+    return "Pad";
+}
+
 std::string prompt_binding_label(InputBinding binding, const PromptOptions& options) {
     std::string result;
     if (any(binding.modifiers)) {
@@ -193,6 +225,8 @@ std::string prompt_binding_label(InputBinding binding, const PromptOptions& opti
     }
     if (binding.device == InputBindingDevice::Key) {
         result += readable_key(static_cast<Key>(binding.code), options.compact);
+    } else if (binding.device == InputBindingDevice::Gamepad) {
+        result += readable_pad(static_cast<PadControl>(binding.code), options.compact);
     } else {
         result += readable_mouse(static_cast<MouseButton>(binding.code));
     }
@@ -378,6 +412,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _wants_text_input_last = _wants_text_input;
     _wants_text_input = false;
     _focus_order.clear();
+    read_navigation();
     _text_input_area.reset();
     _text_input_cursor = 0;
     _root = {};
@@ -957,6 +992,18 @@ std::string Context::prompt_for_action(std::string_view action, const PromptOpti
     if (options.mode == PromptBindingMode::First) {
         return prompt_binding_label(bindings->front(), options);
     }
+    if (options.mode == PromptBindingMode::Device) {
+        // The binding of what the player used last; else the first.
+        const InputDevice used = _input->last_device(options.player);
+        const InputBindingDevice want = used == InputDevice::Gamepad ? InputBindingDevice::Gamepad
+                                        : used == InputDevice::Mouse ? InputBindingDevice::MouseButton
+                                                                     : InputBindingDevice::Key;
+        auto found = std::ranges::find(*bindings, want, &InputBinding::device);
+        if (found == bindings->end() && used != InputDevice::Gamepad) { // the mouse: a key will do
+            found = std::ranges::find_if(*bindings, [](InputBinding b) { return b.device != InputBindingDevice::Gamepad; });
+        }
+        return prompt_binding_label(found != bindings->end() ? *found : bindings->front(), options);
+    }
     std::string result;
     for (std::size_t i = 0; i < bindings->size(); ++i) {
         if (i > 0) {
@@ -1057,6 +1104,50 @@ bool Context::key_typed(Key key) const {
 
 bool Context::action_pressed(std::string_view action) const {
     return _input && _input->frame_pressed(action);
+}
+
+// The directions, accept and back this frame: the map's actions (and the
+// controllers' d-pads, left sticks, A and B) going down, and a direction again
+// while it is held.
+void Context::read_navigation() {
+    _keep_horizontal = false;
+    _keep_vertical = false;
+    if (!_input) {
+        _nav_typed = {};
+        _nav_accept = _nav_back = false;
+        return;
+    }
+    static constexpr std::array<std::string_view, 4> actions{"menu_up", "menu_down", "menu_left", "menu_right"};
+    static constexpr std::array<std::array<PadControl, 2>, 4> pads{{{PadControl::DPadUp, PadControl::LeftStickUp},
+                                                                    {PadControl::DPadDown, PadControl::LeftStickDown},
+                                                                    {PadControl::DPadLeft, PadControl::LeftStickLeft},
+                                                                    {PadControl::DPadRight, PadControl::LeftStickRight}}};
+    const i32 player = _navigation.player;
+    const auto pad = [&](PadControl control) {
+        return _navigation.pads &&
+               binding_held(*_input, {.device = InputBindingDevice::Gamepad, .code = static_cast<i32>(control)}, player);
+    };
+    // The actions' own edges (a tap read once per frame, as action_pressed's);
+    // the controllers' defaults by what was held last frame.
+    for (std::size_t d = 0; d < actions.size(); ++d) {
+        const bool pad_held = pad(pads[d][0]) || pad(pads[d][1]);
+        const bool held = pad_held || _input->held(player, actions[d]);
+        bool typed = _input->frame_pressed(player, actions[d]) || (pad_held && !_nav_held[d]);
+        if (typed) {
+            _nav_repeat_at[d] = _now + _navigation.repeat_delay;
+        } else if (held && _navigation.repeat_every > 0.0 && _now >= _nav_repeat_at[d]) {
+            typed = true;
+            _nav_repeat_at[d] = std::max(_nav_repeat_at[d] + _navigation.repeat_every, _now);
+        }
+        _nav_held[d] = pad_held;
+        _nav_typed[d] = typed;
+    }
+    const bool pad_accept = pad(PadControl::A);
+    const bool pad_back = pad(PadControl::B);
+    _nav_accept = _input->frame_pressed(player, "accept") || (pad_accept && !_nav_accept_held);
+    _nav_back = _input->frame_pressed(player, "quit") || (pad_back && !_nav_back_held);
+    _nav_accept_held = pad_accept;
+    _nav_back_held = pad_back;
 }
 
 bool Context::modifier_held(KeyModifiers modifiers) const {

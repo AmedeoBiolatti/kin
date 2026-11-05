@@ -169,6 +169,10 @@ struct Button {
     TextOverflow overflow = TextOverflow::Visible;
     bool enabled = true;
     i32 z = 0;
+    // In the focus order (Tab, a controller's d-pad; Context::set_navigation),
+    // clicked by Enter, Space or accept while focused.
+    bool focusable = false;
+    i32 tab_index = 0;
     Interaction interaction{};
     bool clicked = false;
 };
@@ -182,6 +186,10 @@ struct Toggle {
     bool value = false;
     bool enabled = true;
     i32 z = 0;
+    // In the focus order (Tab, a controller's d-pad; Context::set_navigation),
+    // clicked by Enter, Space or accept while focused.
+    bool focusable = false;
+    i32 tab_index = 0;
     Interaction interaction{};
     bool changed = false;
 };
@@ -196,6 +204,10 @@ struct Slider {
     WidgetStyle style{};
     bool enabled = true;
     i32 z = 0;
+    // In the focus order; while focused, left and right (keys or the
+    // navigation's) move it a step (no step: a twentieth).
+    bool focusable = false;
+    i32 tab_index = 0;
     Interaction interaction{};
     bool changed = false;
 };
@@ -240,6 +252,10 @@ struct IconButton {
     Color icon_tint = colors::white;
     bool enabled = true;
     i32 z = 0;
+    // In the focus order (Tab, a controller's d-pad; Context::set_navigation),
+    // clicked by Enter, Space or accept while focused.
+    bool focusable = false;
+    i32 tab_index = 0;
     Interaction interaction{};
     bool clicked = false;
 };

@@ -288,6 +288,18 @@ struct ListRange {
     i32 last = 0;
 };
 
+// Moving the focus without a mouse (Context::set_navigation): the input map's
+// menu_up, menu_down, menu_left, menu_right, accept and quit actions, and, with
+// `pads`, a controller's d-pad and left stick, A (accept) and B (back).
+enum class NavDirection : u8 { Up, Down, Left, Right };
+
+struct NavigationOptions {
+    bool pads = true;         // the controllers' d-pads, left sticks, A and B too
+    i32 player = -1;          // whose input moves it (Input's numbers; -1 anyone)
+    f64 repeat_delay = 0.4;   // held, a direction moves again after this (seconds)
+    f64 repeat_every = 0.12;  // and then this often
+};
+
 class Context {
 public:
     Context();
@@ -931,7 +943,28 @@ public:
     // hand Tab on. Tab and Shift+Tab move along it at end() once focus is in it (or
     // any box is focusable), and the box focused is scrolled into view.
     void register_focusable(Id id, i32 tab_index = 0);
+    // A widget in the order with its bounds (drawing coordinates), so that the
+    // directions find it. Like a focusable box, it opts the Context in.
+    void register_focusable(Id id, Rectf bounds, i32 tab_index = 0);
     void request_focus_move(Id from, i32 direction); // at end(): +1 next, -1 previous
+
+    // Directions move the focus at end() to the nearest thing in the order that
+    // way (as last laid out); accept clicks the focused one, as Enter and Space
+    // do; back closes popups, as Esc does. Like Tab they move once focus is in
+    // the order (or anything opts in), and the first direction with nothing
+    // focused focuses the first. Off while a text field has the keys.
+    void set_navigation(NavigationOptions options) { _navigation = options; }
+    const NavigationOptions& navigation() const { return _navigation; }
+    // This frame: a direction pressed (or repeated while held), accept, back.
+    bool nav_typed(NavDirection direction) const { return _nav_typed[static_cast<std::size_t>(direction)]; }
+    bool nav_accept() const { return _nav_accept; }
+    bool nav_back() const { return _nav_back; }
+    // Enter, Space or accept, for the focused widget to click itself (not while
+    // a text field has the keys).
+    bool activate_pressed() const;
+    // A focused widget that uses some directions itself (a slider's left and
+    // right) keeps them this frame: focus does not move that way.
+    void keep_directions(Id id, bool horizontal, bool vertical);
     // True for the frame after Tab (or request_focus_move) moved focus: a text field
     // that is still editing without focus stops.
     bool focus_moved() const { return _focus_moved; }
@@ -1118,6 +1151,7 @@ private:
         i32 tab_index = 0;
         i32 order = 0;          // its layout node (document order), boxes' and fields' alike
         bool box_entry = false; // a focusable box (opts the Context into Tab)
+        std::optional<Rectf> rect; // where it is (a box: as last laid out), for the directions
     };
     struct Reveal {
         Id id{};        // a box, or a list with `row`
@@ -1135,8 +1169,11 @@ private:
     void reveal(const Reveal& target);
     void record_compose(const std::vector<i32>& clip_of, const std::vector<Rectf>& visible_clips);
     void draw_scrollbar(Id id, Rectf track, i32 axis, const ScrollBoxOptions& options);
-    void add_focusable(Id id, i32 tab_index, bool box_entry);
+    void add_focusable(Id id, i32 tab_index, bool box_entry, std::optional<Rectf> rect = std::nullopt);
     void finish_focus();
+    void read_navigation();
+    // The entry nearest `from` going `direction` (-1: none).
+    i32 nearest_focusable(std::size_t from, NavDirection direction) const;
     void dispatch_bindings();
     std::vector<ComposeNode> _compose;
     std::vector<Id> _compose_ids;    // open boxes, innermost last (parent of the next record)
@@ -1153,6 +1190,16 @@ private:
     std::vector<std::string> _actions; // fired this frame
     bool _wants_text_input_last = false;
     bool _focus_moved = false;
+    NavigationOptions _navigation{};
+    std::array<bool, 4> _nav_held{};
+    std::array<bool, 4> _nav_typed{};
+    std::array<f64, 4> _nav_repeat_at{};
+    bool _nav_accept = false;
+    bool _nav_back = false;
+    bool _nav_accept_held = false;
+    bool _nav_back_held = false;
+    bool _keep_horizontal = false; // the focused widget's, this frame
+    bool _keep_vertical = false;
     bool _any_press = false; // a mouse button went down this frame (before widgets took it)
     f32 _pixel_scale = 0.0f; // the renderer's content scale: pixels per unit, edges snapped to them (0: off)
     i32 _region_z_base = 0;  // added to region()'s z while end_layout() runs a widget in floating boxes

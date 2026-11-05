@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -5766,6 +5767,212 @@ void test_compose_focus_ring_for_the_keys_only() {
     assert(second.focused && !second.quiet_focus && ui.state().focus_visible());
 }
 
+// A controller's d-pad moves the focus to the nearest box that way, A clicks
+// it, held it repeats; a focused slider keeps left and right; focusable
+// widgets join; another player's controller does not move it; prompts name
+// the device used last.
+void test_pad_navigation() {
+    Input input;
+    Renderer2D renderer = make_renderer();
+    ui2::Context ui;
+    f64 now = 0.0;
+    ui.set_clock([&] { return now; });
+    std::array<ui2::BoxResult, 4> cell{};
+    const auto build = [&]() {
+        ui.begin(input, renderer);
+        ui.begin_layout({0, 0, 200, 100});
+        {
+            auto grid = ui.box(ui2::make_id("grid"), ui2::vbox().fill().gap(10).passive());
+            {
+                auto top = ui.box(ui2::make_id("top"), ui2::hbox().gap(10).passive());
+                cell[0] = ui.box(ui2::make_id("a"), ui2::hbox().size(50, 20).tab_stop());
+                cell[1] = ui.box(ui2::make_id("b"), ui2::hbox().size(50, 20).tab_stop());
+            }
+            {
+                auto bottom = ui.box(ui2::make_id("bottom"), ui2::hbox().gap(10).passive());
+                cell[2] = ui.box(ui2::make_id("c"), ui2::hbox().size(50, 20).tab_stop());
+                cell[3] = ui.box(ui2::make_id("d"), ui2::hbox().size(50, 20).tab_stop());
+            }
+        }
+        ui.end_layout();
+        ui.end();
+    };
+    GamepadState pad{.connected = true};
+    const auto frame = [&](std::optional<GamepadButton> held) {
+        pad.buttons = 0;
+        if (held) {
+            pad.set_button(*held, true);
+        }
+        input.begin_frame();
+        input.set_gamepad(pad);
+        build();
+    };
+    const auto tap = [&](GamepadButton button) {
+        frame(button);
+        frame(std::nullopt);
+    };
+    const auto focused = [&]() {
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            if (cell[i].focused) return static_cast<int>(i);
+        }
+        return -1;
+    };
+    frame(std::nullopt);
+    frame(std::nullopt); // laid out once: the boxes have places
+    assert(focused() == -1);
+    tap(GamepadButton::DPadDown); // nothing focused: the first
+    assert(focused() == 0 && !cell[0].quiet_focus);
+    tap(GamepadButton::DPadRight);
+    assert(focused() == 1);
+    tap(GamepadButton::DPadDown);
+    assert(focused() == 3);
+    tap(GamepadButton::DPadLeft);
+    assert(focused() == 2);
+    tap(GamepadButton::DPadUp);
+    assert(focused() == 0);
+    tap(GamepadButton::DPadUp); // nothing above: it stays
+    assert(focused() == 0);
+    frame(GamepadButton::A);
+    assert(cell[0].clicked);
+    frame(std::nullopt);
+    assert(!cell[0].clicked);
+    // The stick pushed past halfway is a direction too; held still, once.
+    pad.left_x = 1.0f;
+    frame(std::nullopt);
+    frame(std::nullopt);
+    assert(focused() == 1); // a move shows the frame after it
+    pad.left_x = 0.0f;
+    frame(std::nullopt);
+    // Held: once, again after repeat_delay (0.4 s), then every repeat_every (0.12 s).
+    const auto typed = [&] { return ui.nav_typed(ui2::NavDirection::Down); };
+    frame(GamepadButton::DPadDown);
+    assert(typed());
+    frame(GamepadButton::DPadDown);
+    assert(!typed() && focused() == 3);
+    now += 0.35;
+    frame(GamepadButton::DPadDown);
+    assert(!typed());
+    now += 0.1;
+    frame(GamepadButton::DPadDown);
+    assert(typed());
+    frame(GamepadButton::DPadDown);
+    assert(!typed());
+    now += 0.12;
+    frame(GamepadButton::DPadDown);
+    assert(typed() && focused() == 3); // nothing below: it stays
+    frame(std::nullopt);
+    assert(!typed());
+
+    // Only player 1's controller moves it when the navigation is theirs.
+    input.set_players({{.gamepads = {0}}, {.gamepads = {1}}});
+    ui.set_navigation({.player = 1});
+    tap(GamepadButton::DPadLeft);
+    frame(std::nullopt);
+    assert(focused() == 3);
+    GamepadState other{.connected = true};
+    other.set_button(GamepadButton::DPadLeft, true);
+    input.begin_frame();
+    input.set_gamepad(1, other);
+    build();
+    input.begin_frame();
+    build();
+    assert(focused() == 2);
+    other.buttons = 0;
+    input.set_gamepad(1, other);
+    input.set_players({});
+
+    // The game's own actions move it too (keys here), and without pads only those.
+    InputMap map;
+    map.bind("menu_up", Key::Up);
+    map.bind("accept", Key::E);
+    input.set_map(map);
+    ui.set_navigation({.pads = false});
+    tap(GamepadButton::DPadRight);
+    frame(std::nullopt);
+    assert(focused() == 2);
+    input.begin_frame();
+    input.set_key_pressed(Key::Up);
+    build();
+    input.set_key_released(Key::Up);
+    input.begin_frame();
+    build();
+    assert(focused() == 0);
+    input.begin_frame();
+    input.set_key_pressed(Key::E);
+    build();
+    input.set_key_released(Key::E);
+    assert(cell[0].clicked);
+    ui.set_navigation({});
+
+    // Focusable widgets: a slider keeps left and right, a button below it.
+    ui2::Context form;
+    form.set_clock([&] { return now; });
+    ui2::Slider slider{.id = ui2::make_id("volume"), .bounds = {10, 10, 100, 20}, .value = 0.5f, .step = 0.1f, .focusable = true};
+    ui2::Button ok{.id = ui2::make_id("ok"), .bounds = {10, 50, 100, 20}, .label = "OK", .focusable = true};
+    ui2::Toggle mute{.id = ui2::make_id("mute"), .bounds = {10, 90, 100, 20}, .label = "Mute", .focusable = true};
+    ui2::Button side{.id = ui2::make_id("side"), .bounds = {130, 10, 60, 20}, .label = "Reset", .focusable = true};
+    const auto form_frame = [&](std::optional<GamepadButton> held) {
+        pad.buttons = 0;
+        if (held) {
+            pad.set_button(*held, true);
+        }
+        input.begin_frame();
+        input.set_gamepad(pad);
+        form.begin(input, renderer);
+        ui2::run(form, slider);
+        ui2::run(form, ok);
+        ui2::run(form, mute);
+        ui2::run(form, side);
+        form.end();
+    };
+    const auto form_tap = [&](GamepadButton button) {
+        form_frame(button);
+        form_frame(std::nullopt);
+    };
+    form_frame(std::nullopt);
+    form_tap(GamepadButton::DPadDown);
+    assert(slider.interaction.focused);
+    form_frame(GamepadButton::DPadRight);
+    assert(slider.changed && std::abs(slider.value - 0.6f) < 1e-5f);
+    form_frame(std::nullopt);
+    assert(slider.interaction.focused && !side.interaction.focused); // kept: right was the slider's
+    form_tap(GamepadButton::DPadDown);
+    assert(ok.interaction.focused);
+    form_frame(GamepadButton::A);
+    assert(ok.clicked);
+    form_frame(std::nullopt);
+    form_tap(GamepadButton::DPadDown);
+    form_frame(GamepadButton::A);
+    assert(mute.interaction.focused && mute.changed && mute.value);
+    form_frame(std::nullopt);
+    // B is back.
+    form_frame(GamepadButton::B);
+    assert(form.nav_back() && !form.nav_accept());
+    form_frame(std::nullopt);
+    assert(!form.nav_back());
+
+    // Prompts: a controller binding by its name; the one of the device used last.
+    InputMap prompts;
+    prompts.bind("jump", Key::Space);
+    prompts.bind("jump", PadControl::A);
+    prompts.bind("fire", PadControl::RightTrigger);
+    Input prompt_input;
+    prompt_input.set_map(prompts);
+    ui2::Context prompt_ui;
+    prompt_input.begin_frame();
+    prompt_ui.begin(prompt_input, renderer);
+    assert(prompt_ui.prompt_for_action("fire") == "RT");
+    assert(prompt_ui.prompt_for_action("fire", {.compact = false}) == "Right Trigger");
+    assert(prompt_ui.prompt_for_action("jump", {.mode = ui2::PromptBindingMode::Device}) == "Space");
+    GamepadState used{.connected = true};
+    used.set_button(GamepadButton::A, true);
+    prompt_input.set_gamepad(used);
+    assert(prompt_ui.prompt_for_action("jump", {.mode = ui2::PromptBindingMode::Device}) == "A");
+    prompt_input.set_key_pressed(Key::Space);
+    assert(prompt_ui.prompt_for_action("jump", {.mode = ui2::PromptBindingMode::Device}) == "Space");
+    prompt_ui.end();
+}
+
 // A focus trap (a dialog): Tab goes round what is in it; focus behind it is dropped.
 void test_compose_focus_trap() {
     Input input;
@@ -8820,6 +9027,31 @@ void test_screen_files() {
     assert(screen.text("score") == "Score: 12" && screen.value("volume") == 0.5f);
     screen.set_value("volume", 0.9f);
     assert(screen.value("volume") == 0.9f);
+    // A controller goes through the menu: the d-pad focuses the button, A
+    // clicks it, down goes to the slider, right moves it.
+    const auto pad_frame = [&](std::optional<GamepadButton> held) {
+        GamepadState pad{.connected = true};
+        if (held) pad.set_button(*held, true);
+        input.begin_frame();
+        input.set_mouse_pos({0, 0});
+        input.set_gamepad(pad);
+        ui.begin(input, renderer);
+        screen.draw(ui, {0, 0, 400, 300});
+        ui.end();
+    };
+    ui.state().clear_focused();
+    pad_frame(std::nullopt);
+    pad_frame(GamepadButton::DPadDown);
+    pad_frame(GamepadButton::A);
+    assert(screen.clicked("play"));
+    screen.clear_events();
+    pad_frame(std::nullopt);
+    pad_frame(GamepadButton::DPadDown);
+    pad_frame(std::nullopt);
+    pad_frame(GamepadButton::DPadRight);
+    assert(std::abs(screen.value("volume") - 0.95f) < 1e-4f && screen.changed("volume"));
+    pad_frame(std::nullopt);
+    screen.clear_events();
     // Hidden: not laid out.
     screen.set_visible("menu", false);
     frame({0, 0}, false);
@@ -9004,6 +9236,7 @@ int main() {
     test_compose_clipped_widgets_are_not_hit();
     test_compose_focus_ring_for_the_keys_only();
     test_compose_focus_trap();
+    test_pad_navigation();
     test_compose_scroll_helpers();
     test_compose_box_tooltips();
     test_compose_popups();

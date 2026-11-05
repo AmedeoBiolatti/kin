@@ -127,10 +127,11 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
     if (!id) {
         return out;
     }
-    if (style.focusable && style.enabled) {
-        add_focusable(id, style.tab_index, true);
-    }
     const auto record = _compose_records.find(id.value);
+    if (style.focusable && style.enabled) {
+        add_focusable(id, style.tab_index, true,
+                      record != _compose_records.end() ? std::optional<Rectf>(record->second.rect) : std::nullopt);
+    }
     if (record == _compose_records.end()) {
         return out; // first frame: nowhere to hit yet
     }
@@ -168,9 +169,8 @@ BoxResult Context::compose_interaction(Id id, const BoxStyle& style) {
     if (out.hot && pointer_released(MouseButton::Right)) {
         out.secondary_clicked = true;
     }
-    // Enter or Space on the focused box clicks it, unless a text field has the keys.
-    if (style.focusable && out.focused && !_wants_text_input_last &&
-        (key_pressed(Key::Enter) || key_pressed(Key::KeypadEnter) || key_pressed(Key::Space))) {
+    // Enter, Space or accept on the focused box clicks it, unless a text field has the keys.
+    if (style.focusable && out.focused && activate_pressed()) {
         out.clicked = true;
     }
 
@@ -364,7 +364,7 @@ std::optional<Context::BoxScope> Context::popup(Id id, BoxStyle style, const Pop
         close_popup(id);
         return std::nullopt;
     }
-    if (popup_on_top(id) && (key_pressed(Key::Escape) || action_pressed("quit"))) {
+    if (popup_on_top(id) && (key_pressed(Key::Escape) || action_pressed("quit") || _nav_back)) {
         close_popup(id);
         return std::nullopt;
     }
@@ -933,7 +933,59 @@ void Context::register_focusable(Id id, i32 tab_index) {
     add_focusable(id, tab_index, false);
 }
 
-void Context::add_focusable(Id id, i32 tab_index, bool box_entry) {
+void Context::register_focusable(Id id, Rectf bounds, i32 tab_index) {
+    add_focusable(id, tab_index, true, bounds);
+}
+
+void Context::keep_directions(Id id, bool horizontal, bool vertical) {
+    if (id && id == _state.focused()) {
+        _keep_horizontal = _keep_horizontal || horizontal;
+        _keep_vertical = _keep_vertical || vertical;
+    }
+}
+
+bool Context::activate_pressed() const {
+    return !_wants_text_input_last &&
+           (key_pressed(Key::Enter) || key_pressed(Key::KeypadEnter) || key_pressed(Key::Space) || _nav_accept);
+}
+
+// Of the entries with a place, the one nearest `from`'s going `direction`: ahead
+// of it, scored by how far ahead plus twice how far aside (none aside when they
+// overlap across the way), so the one straight ahead beats a nearer diagonal.
+i32 Context::nearest_focusable(std::size_t from, NavDirection direction) const {
+    const std::optional<Rectf>& start = _focus_order[from].rect;
+    if (!start) {
+        return -1;
+    }
+    const bool vertical = direction == NavDirection::Up || direction == NavDirection::Down;
+    const f32 sign = direction == NavDirection::Down || direction == NavDirection::Right ? 1.0f : -1.0f;
+    const auto centre = [](Rectf r) { return Vec2f{r.x + r.w * 0.5f, r.y + r.h * 0.5f}; };
+    const Vec2f a = centre(*start);
+    i32 best = -1;
+    f32 best_score = std::numeric_limits<f32>::max();
+    for (std::size_t i = 0; i < _focus_order.size(); ++i) {
+        const std::optional<Rectf>& r = _focus_order[i].rect;
+        if (i == from || !r || _focus_order[i].id == _focus_order[from].id) {
+            continue;
+        }
+        const Vec2f b = centre(*r);
+        const f32 ahead = (vertical ? b.y - a.y : b.x - a.x) * sign;
+        if (ahead <= 0.5f) {
+            continue;
+        }
+        const f32 lo = vertical ? std::max(start->x, r->x) : std::max(start->y, r->y);
+        const f32 hi = vertical ? std::min(start->x + start->w, r->x + r->w) : std::min(start->y + start->h, r->y + r->h);
+        const f32 aside = hi > lo ? 0.0f : std::abs(vertical ? b.x - a.x : b.y - a.y);
+        const f32 score = ahead + aside * 2.0f;
+        if (score < best_score) {
+            best_score = score;
+            best = static_cast<i32>(i);
+        }
+    }
+    return best;
+}
+
+void Context::add_focusable(Id id, i32 tab_index, bool box_entry, std::optional<Rectf> rect) {
     if (!id) {
         return;
     }
@@ -946,6 +998,7 @@ void Context::add_focusable(Id id, i32 tab_index, bool box_entry) {
         // places it among them. A box registers before its node is added.
         .order = _running_node >= 0 ? _running_node : static_cast<i32>(_nodes.size()),
         .box_entry = box_entry,
+        .rect = rect,
     });
 }
 
@@ -997,6 +1050,33 @@ void Context::finish_focus() {
         _focus_move = std::pair{_state.focused(), modifier_held(KeyModifiers::Shift) ? -1 : 1};
     }
     _focus_moved = false;
+    // A direction: the nearest that way, or the first when nothing is focused
+    // (an entry without a place moves along the order instead).
+    if (!_focus_move && _input && !_wants_text_input && !_focus_order.empty() &&
+        (opted_in || _focus_trap || position(_state.focused()) >= 0)) {
+        for (u8 d = 0; d < 4; ++d) {
+            const auto direction = static_cast<NavDirection>(d);
+            const bool vertical = direction == NavDirection::Up || direction == NavDirection::Down;
+            if (!_nav_typed[d] || (vertical ? _keep_vertical : _keep_horizontal)) {
+                continue;
+            }
+            const i32 at = position(_state.focused());
+            const bool back = direction == NavDirection::Up || direction == NavDirection::Left;
+            i32 to = at < 0 ? 0 : nearest_focusable(static_cast<std::size_t>(at), direction);
+            if (at >= 0 && to < 0 && !_focus_order[static_cast<std::size_t>(at)].rect) {
+                to = std::clamp(at + (back ? -1 : 1), 0, static_cast<i32>(_focus_order.size()) - 1);
+            }
+            if (to >= 0 && to != at) {
+                const Id target = _focus_order[static_cast<std::size_t>(to)].id;
+                _state.set_focused(target); // its ring shows
+                reveal({target, -1});
+                _focus_moved = true;
+            }
+            break;
+        }
+    }
+    _keep_horizontal = false;
+    _keep_vertical = false;
     if (_focus_move && !_focus_order.empty()) {
         const auto [from, direction] = *_focus_move;
         const i32 n = static_cast<i32>(_focus_order.size());

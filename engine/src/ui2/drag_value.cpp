@@ -70,8 +70,11 @@ DragValueResult Context::drag_value(Id id, Rectf bounds, f64& value, const DragV
     if (options.focusable) {
         register_focusable(id, options.tab_index);
         if (out.focused && !_wants_text_input_last) {
-            const i32 steps = (key_typed(Key::Up) || key_typed(Key::Right) ? 1 : 0) -
-                              (key_typed(Key::Down) || key_typed(Key::Left) ? 1 : 0);
+            // Left and right are its own; up and down too, unless they move the focus.
+            keep_directions(id, true, false);
+            const bool up = (key_typed(Key::Up) && !nav_typed(NavDirection::Up)) || key_typed(Key::Right) || nav_typed(NavDirection::Right);
+            const bool down = (key_typed(Key::Down) && !nav_typed(NavDirection::Down)) || key_typed(Key::Left) || nav_typed(NavDirection::Left);
+            const i32 steps = (up ? 1 : 0) - (down ? 1 : 0);
             if (steps != 0) {
                 const f64 unit = options.step > 0.0 && scale.kind == ScaleKind::Linear ? options.step / (scale.max - scale.min) : 0.01;
                 nudge(static_cast<f64>(steps) * unit * slow);

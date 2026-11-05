@@ -949,13 +949,14 @@ void run(Context& ctx, ListView& widget) {
     const i32 previous = widget.selected;
     const f32 step = metrics.row_height + widget.row_spacing;
     const bool keys = widget.enabled && takes_keys(ctx, widget.id, widget.keys_without_focus);
-    if (keys && ctx.action_pressed("menu_up")) {
+    ctx.keep_directions(widget.id, false, true); // focused, up and down move its selection
+    if (keys && ctx.nav_typed(NavDirection::Up)) {
         widget.selected = widget.selected <= 0 ? (widget.wrap ? count - 1 : 0) : widget.selected - 1;
     }
-    if (keys && ctx.action_pressed("menu_down")) {
+    if (keys && ctx.nav_typed(NavDirection::Down)) {
         widget.selected = widget.selected + 1 >= count ? (widget.wrap ? 0 : count - 1) : widget.selected + 1;
     }
-    if (keys && ctx.action_pressed("accept")) {
+    if (keys && ctx.nav_accept()) {
         widget.activated = true;
     }
     const bool moved_by_keys = widget.selected != previous;
@@ -1144,13 +1145,14 @@ void run(Context& ctx, TreeView& widget) {
     const i32 previous = widget.selected;
     const f32 step = metrics.row_height + widget.row_spacing;
     const bool keys = widget.enabled && takes_keys(ctx, widget.id, widget.keys_without_focus);
-    if (keys && ctx.action_pressed("menu_up")) {
+    ctx.keep_directions(widget.id, false, true); // focused, up and down move its selection
+    if (keys && ctx.nav_typed(NavDirection::Up)) {
         widget.selected = widget.selected <= 0 ? (widget.wrap ? count - 1 : 0) : widget.selected - 1;
     }
-    if (keys && ctx.action_pressed("menu_down")) {
+    if (keys && ctx.nav_typed(NavDirection::Down)) {
         widget.selected = widget.selected + 1 >= count ? (widget.wrap ? 0 : count - 1) : widget.selected + 1;
     }
-    if (keys && ctx.action_pressed("accept")) {
+    if (keys && ctx.nav_accept()) {
         widget.activated = widget.selected;
     }
 

@@ -7,6 +7,16 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- ui2 focus moved by a controller and the menu actions ([ui](ui.md#controllers-and-menu-actions)).
+  `menu_up`/`menu_down`/`menu_left`/`menu_right` and the d-pad or left stick move the focus to the nearest thing
+  that way, and repeat while held. `accept` and A click the focused thing, and `quit` and B close popups and
+  dialogue. `Context::set_navigation` (`NavigationOptions`: `pads`, `player`, repeat timing), `nav_typed`,
+  `nav_accept`, `nav_back`, `activate_pressed`, `keep_directions` and `register_focusable(id, bounds)` go with it.
+  `Button`, `IconButton`, `Toggle` and `Slider` gain `focusable` (a focused slider steps with left and right), and
+  `.kinui` screens' buttons, toggles and sliders are focusable. Lists, scroll boxes and `DialogueView` take the
+  controller as well as the actions. `PromptBindingMode::Device` names the binding of the device used last.
+  Fixed: a controller binding in a prompt read as a mouse button.
+
 - Several game controllers and local players ([input](input.md#several-controllers-and-local-players)).
   `App::open_gamepads` now reads every controller plugged in, up to `max_gamepads` (8), each in a slot it keeps
   while plugged in and gets back when plugged in again; `Gamepads::poll_all`, `name(slot)`, `connected_count` and

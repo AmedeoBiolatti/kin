@@ -314,6 +314,37 @@ arrows (`ListView`, `TreeView`, `IconGrid`, `TabBar`, `MenuBar`, `NodeGraph`)
 take the keys only while focused; `keys_without_focus` lets one have them while
 nothing else is focused too, as `MenuList` and `DialogueView` do.
 
+### Controllers and menu actions
+
+The focus also moves by direction, for a game played with a controller. The
+input map's `menu_up`, `menu_down`, `menu_left` and `menu_right` actions and
+a controller's d-pad and left stick move it to the nearest thing in the order
+that way, as last laid out. Something straight ahead wins over a nearer one
+off to the side. `accept` and the controller's A click the focused thing, as
+Enter and Space do. `quit` and B are back: they close popups and dialogue, as
+Esc does. A direction held moves again after a moment, then steadily. It moves
+when Tab would. The first direction with nothing focused focuses the first in
+the order. It does nothing while a text field has the keys.
+
+```cpp
+ui.set_navigation({.pads = true,         // the controllers' d-pad, stick, A and B, besides the actions
+                   .player = 0,          // only player 0's input moves it (-1, the default: anyone's)
+                   .repeat_delay = 0.4, .repeat_every = 0.12});
+```
+
+`Button`, `IconButton`, `Toggle` and `Slider` take part when `focusable` is set,
+and a `.kinui` screen's buttons, toggles and sliders always do, so a menu built
+in the studio works with a controller. A focused widget that uses some
+directions itself keeps them (`keep_directions`). A focusable `Slider` moves a
+step on left and right, and so do a `DragValue`, a focused scroll box and the
+selection of a focused list. `nav_typed(direction)`, `nav_accept()` and
+`nav_back()` are this frame's, for a widget of the game's own.
+
+`prompt_for_action(action, {.mode = PromptBindingMode::Device})` names the
+binding of the device the player used last: "Space" after the keyboard, "A"
+after a controller. Controller bindings read as the controller labels them
+("A", "LB", "RT", "D-pad Left").
+
 Key bindings fire from where focus is. A box's `key_context` names a scope;
 a binding with that context applies while focus is inside the box, and the
 innermost context wins over outer ones and over global bindings (no context):

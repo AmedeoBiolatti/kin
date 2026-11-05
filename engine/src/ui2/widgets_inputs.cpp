@@ -249,7 +249,7 @@ void run(Context& ctx, ComboBox& widget) {
         ctx.close_popup(widget.id);
         widget.result.closed = true;
     }
-    if (widget.enabled && widget.state.open && ctx.action_pressed("quit")) {
+    if (widget.enabled && widget.state.open && (ctx.action_pressed("quit") || ctx.nav_back())) {
         widget.state.open = false;
         ctx.close_popup(widget.id);
         widget.result.closed = true;

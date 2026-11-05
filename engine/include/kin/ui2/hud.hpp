@@ -58,6 +58,7 @@ struct Meter {
 enum class PromptBindingMode {
     First,
     All,
+    Device, // the binding of the device the player used last (Input::last_device)
 };
 
 struct PromptOptions {
@@ -66,6 +67,7 @@ struct PromptOptions {
     bool compact = true;
     bool brackets = false;
     std::string fallback;
+    i32 player = -1; // whose device, for Device (Input's numbers; -1 anyone)
 };
 
 struct PromptLabel {

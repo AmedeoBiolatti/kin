@@ -103,6 +103,9 @@ if (ctx.input.pressed("pause")) { /* anyone, on any device */ }
   replaces the one going. App sends them to the controllers next frame.
   Without `open_gamepads` they are dropped.
 
+ui2 moves its focus with the d-pad and left stick, and with the `menu_*`,
+`accept` and `quit` actions ([ui](ui.md#controllers-and-menu-actions)).
+
 Entity scripts read the player their `ScriptComponent` names (`player`: 0
 anyone, 1 the first...), and Lua's `input` table can join, leave and rumble
 ([scripting](scripting.md#scripts-on-entities)). Agents and tests drive a slot

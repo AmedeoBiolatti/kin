@@ -79,16 +79,18 @@ ScrollResult scroll_region(Context& ctx,
     }
     if (options.enabled && viewport_it.focused) {
         bool key_changed = false;
-        if (ctx.action_pressed("menu_up") || ctx.key_pressed(Key::Up)) {
+        const Vec2f room = max_scroll_offset(result.state);
+        ctx.keep_directions(id, room.x > 0.0f, room.y > 0.0f); // it scrolls that way, focused
+        if (ctx.nav_typed(NavDirection::Up) || ctx.key_pressed(Key::Up)) {
             key_changed = scroll_by(result.state, {0.0f, -options.wheel_step.y}) || key_changed;
         }
-        if (ctx.action_pressed("menu_down") || ctx.key_pressed(Key::Down)) {
+        if (ctx.nav_typed(NavDirection::Down) || ctx.key_pressed(Key::Down)) {
             key_changed = scroll_by(result.state, {0.0f, options.wheel_step.y}) || key_changed;
         }
-        if (ctx.action_pressed("menu_left") || ctx.key_pressed(Key::Left)) {
+        if (ctx.nav_typed(NavDirection::Left) || ctx.key_pressed(Key::Left)) {
             key_changed = scroll_by(result.state, {-options.wheel_step.x, 0.0f}) || key_changed;
         }
-        if (ctx.action_pressed("menu_right") || ctx.key_pressed(Key::Right)) {
+        if (ctx.nav_typed(NavDirection::Right) || ctx.key_pressed(Key::Right)) {
             key_changed = scroll_by(result.state, {options.wheel_step.x, 0.0f}) || key_changed;
         }
         if (ctx.key_pressed(Key::Home)) {
@@ -925,6 +927,10 @@ void run(Context& ctx, Button& widget) {
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.clicked = it.clicked && widget.enabled;
+    if (widget.focusable && widget.enabled) {
+        ctx.register_focusable(widget.id, widget.bounds, widget.tab_index);
+        widget.clicked = widget.clicked || (it.focused && ctx.activate_pressed());
+    }
     const WidgetStyle style = themed_widget_style(widget.style, ctx.theme().button);
     const TextStyle text_style = themed_text_style(widget.text_style, ctx.theme().body_text);
 
@@ -1029,7 +1035,12 @@ void run(Context& ctx, Toggle& widget) {
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.changed = false;
-    if (it.clicked && widget.enabled) {
+    bool flipped = it.clicked;
+    if (widget.focusable && widget.enabled) {
+        ctx.register_focusable(widget.id, widget.bounds, widget.tab_index);
+        flipped = flipped || (it.focused && ctx.activate_pressed());
+    }
+    if (flipped && widget.enabled) {
         widget.value = !widget.value;
         widget.changed = true;
     }
@@ -1067,6 +1078,23 @@ void run(Context& ctx, Slider& widget) {
     widget.interaction = it;
     widget.changed = false;
 
+    if (widget.focusable && widget.enabled) {
+        ctx.register_focusable(widget.id, widget.bounds, widget.tab_index);
+        if (it.focused && widget.max > widget.min) {
+            ctx.keep_directions(widget.id, true, false); // left and right are its own
+            const bool right = ctx.nav_typed(NavDirection::Right) || ctx.key_typed(Key::Right);
+            const bool left = ctx.nav_typed(NavDirection::Left) || ctx.key_typed(Key::Left);
+            const i32 steps = (right ? 1 : 0) - (left ? 1 : 0);
+            if (steps != 0) {
+                const f32 unit = widget.step > 0.0f ? widget.step : (widget.max - widget.min) / 20.0f;
+                const f32 value = std::clamp(widget.value + static_cast<f32>(steps) * unit, widget.min, widget.max);
+                if (value != widget.value) {
+                    widget.value = value;
+                    widget.changed = true;
+                }
+            }
+        }
+    }
     if (it.active && widget.enabled && widget.max > widget.min) {
         const f32 norm = std::clamp((ctx.pointer().x - widget.bounds.x) / std::max(1.0f, widget.bounds.w), 0.0f, 1.0f);
         f32 value = widget.min + norm * (widget.max - widget.min);
@@ -1097,7 +1125,7 @@ void run(Context& ctx, Slider& widget) {
         ctx.surface(track_rect, fill_surface);
         ctx.pop_clip();
     }
-    const Color frame_border = it.hot
+    const Color frame_border = it.hot || (it.focused && !it.quiet_focus)
                                    ? widget_border(style, WidgetColorState::Focused)
                                    : widget_border(style, WidgetColorState::Normal);
     SurfaceStyle frame_surface = with_fill_border(ctx.theme().input_surface, colors::transparent, frame_border);
@@ -1176,6 +1204,10 @@ void run(Context& ctx, IconButton& widget) {
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     widget.clicked = it.clicked && widget.enabled;
+    if (widget.focusable && widget.enabled) {
+        ctx.register_focusable(widget.id, widget.bounds, widget.tab_index);
+        widget.clicked = widget.clicked || (it.focused && ctx.activate_pressed());
+    }
 
     ctx.surface(widget.bounds, ctx.resolve_animated(widget.id, widget.style.surface, it, false, widget.enabled));
 
@@ -1630,10 +1662,10 @@ void run(Context& ctx, DialogueView& widget) {
     const bool keys = takes_keys(ctx, widget.id, widget.keys_without_focus);
     if (widget.model.choices.empty() && widget.model.active && !widget.model.ended) {
         const Interaction it = ctx.region(make_id(widget.id, "advance"), body.w > 0.0f && body.h > 0.0f ? body : content, widget.z);
-        widget.advance_requested = it.clicked || (keys && ctx.action_pressed("accept"));
+        widget.advance_requested = it.clicked || (keys && ctx.nav_accept());
     }
-    widget.skip_requested = keys && ctx.action_pressed("menu_right");
-    widget.closed_requested = widget.closed_requested || (keys && ctx.action_pressed("quit"));
+    widget.skip_requested = keys && ctx.nav_typed(NavDirection::Right);
+    widget.closed_requested = widget.closed_requested || (keys && ctx.nav_back());
 }
 
 void run(Context& ctx, Nameplate& widget) {

@@ -714,6 +714,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
         live.button->id = make_id(id, "button");
         live.button->label = shown_text();
         live.button->enabled = enabled;
+        live.button->focusable = true; // a game's menu: a controller moves through it
         if (!e.style.empty()) {
             live.button->text_style = text_style;
         }
@@ -748,6 +749,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
         live.toggle->label = shown_text();
         live.toggle->value = s && s->checked ? *s->checked : e.checked;
         live.toggle->enabled = enabled;
+        live.toggle->focusable = true;
         ctx.widget(*live.toggle, inside);
         break;
     }
@@ -759,6 +761,7 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
         live.slider->step = e.step;
         live.slider->value = std::clamp(s && s->value ? *s->value : e.value, std::min(e.min, e.max), std::max(e.min, e.max));
         live.slider->enabled = enabled;
+        live.slider->focusable = true;
         ctx.widget(*live.slider, inside);
         break;
     }
