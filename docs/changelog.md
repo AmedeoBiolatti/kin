@@ -7,6 +7,23 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Touch ([input](input.md#touch)). Fingers from the system (`SDL_EVENT_FINGER_*`) are `Input::touches()` (id,
+  position, where and when each went down) and `touches_ended()`. The first unclaimed finger is the pointer: it moves
+  the mouse and holds its left button, so ui2 and mouse-reading code work with a finger. Its press lands a frame
+  later, so UI sees it over what it touches first; before, a tap clicked nothing in ui2. The system's mouse events
+  made from touches are dropped. Gestures are `TouchControl`s bound in the input map (`touch jump tap`; double tap,
+  long press, four swipes, two-finger tap): pressed when made, held a step, released. Two fingers' `touch_pinch()`
+  and `touch_pan()` (step and frame readings). `claim_touch(id)` takes a finger for an on-screen control,
+  `pointer_is_touch()` says a finger is the pointer, and `update_touch(now)` (App calls it) times long presses. ui2
+  shows no hover between touches and names touch bindings in prompts (`PromptBindingMode::Device` too). Lua:
+  `input.touches()`, `input.pinch()`, `input.pan()`. Scene server: `input.touch {x, y, id, mode}`.
+
+- 3D scenes drawn through a tool's camera ([agent interface](agent_interface.md)). `view.frame` takes a
+  `camera3d` (`position` [x, y, z], `rotation` as a quaternion [x, y, z, w], `fov`, `near`) in place of a 2D
+  camera's `x`, `y` and `zoom`, and hands it to the new `Scene::set_view_camera3d` (false by default: a scene that
+  draws no 3D world refuses it, with why). Kin Studio's scene view draws a 3D scene with the game's own code so.
+  The 3D components also carry their inspector hints (`ModelRenderer3D.asset` a Model, units, choices, descriptions).
+
 - The game's list of achievements, stats and leaderboards ([platform services](platform_services.md#the-games-list)):
   `content/services.kinservices` (`kin.services/1`), read by `load_services_catalog`, gives each an id of the game's
   and its id on each store, with names and descriptions as translation keys, hidden achievements and their

@@ -164,6 +164,11 @@ public:
         bool connected = true;
     };
     void queue_pad(PadInput pad);
+    // Queue a finger for the next step at window-space pos: mode "down",
+    // "move", "up", or "tap" (down this step, up at the start of the next).
+    // Its time is the steps' (frame * fixed dt), so a long press is a finger
+    // held over enough steps.
+    void queue_touch(u64 id, Vec2f window_pos, std::string mode);
 
     // Wall time of recent frames, oldest first: a driven server's steps, or the
     // frames a game run with --inspect draws (frame.timing reports them).
@@ -183,7 +188,7 @@ public:
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion, Drop, Pad };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion, Drop, Pad, Touch };
         Kind kind;
         std::string text;  // action name / button name / text input / dropped file
         std::string mode;  // press / hold / release
@@ -192,6 +197,7 @@ private:
         Key key = Key::Unknown;
         KeyModifiers modifiers = KeyModifiers::None;
         PadInput pad{};
+        u64 touch = 0; // a finger's id
     };
 
     friend ServerResponse dispatch_server_command(ServerContext&, const GameInfo*, std::string_view, const JsonValue&);
@@ -222,6 +228,7 @@ private:
     std::array<GamepadState, max_input_players> _pads{};
     std::array<bool, max_input_players> _driven_pads{};
     std::vector<std::pair<i32, GamepadButton>> _tapped_pad_buttons;
+    std::vector<u64> _tapped_touches;
     std::deque<FrameTiming> _timings;
     i64 _timed_frames = 0; // frames recorded, the forgotten too
     std::function<void(SceneManager&)> _reset_scenes;

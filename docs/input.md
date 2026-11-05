@@ -31,7 +31,7 @@ axis move_y stick -left_y
 axis move_x deadzone 0.2
 ```
 
-- `key`, `mouse` and `pad` bind an action. Keys may name modifiers after them
+- `key`, `mouse`, `pad` and `touch` bind an action (`touch jump tap`). Keys may name modifiers after them
   (`ctrl`, `alt`, `shift`).
 - An axis's `-` and `+` lines give what sets it to -1 and to 1 while held (both:
   0), as `key:`, `mouse:` or `pad:` bindings.
@@ -94,6 +94,40 @@ Entity scripts read the player their `ScriptComponent` names (`player`: 0
 anyone, 1 the first...) ([scripting](scripting.md#scripts-on-entities)). Agents
 and tests drive a player's controller with the scene server's `input.pad`
 ([agent interface](agent_interface.md)).
+
+## Touch
+
+Fingers on a touch screen (a phone through the web export, a laptop's screen,
+the Steam Deck's) reach the game three ways:
+
+- **The pointer.** The first finger down that no on-screen control has
+  claimed moves the mouse and holds its left button, so ui2, buttons, sliders
+  and anything that reads the mouse work with a finger. Its press lands a
+  frame after the finger, so UI sees the finger over what it touches first, as
+  a mouse is before it clicks. A tap within one frame is pressed at the next
+  frame start and let go the frame after. A second finger turns it into a
+  pinch: the press is let go without a click. `pointer_is_touch()` says the
+  pointer is a finger. ui2 then shows no hover while none is down. The mouse
+  events the system makes from touches are not used.
+- **Gestures**, bound like keys: `touch jump tap`, also `double_tap`,
+  `long_press` (held still half a second), `swipe_left`, `swipe_right`,
+  `swipe_up`, `swipe_down` and `two_finger_tap`. Each is pressed when made,
+  held for the step after, then released. So `pressed("jump")` sees a tap
+  once, in update(), however frames and steps interleave.
+- **The fingers themselves.** `touches()` lists the fingers down (id, position,
+  where and when each went down), and `touches_ended()` the ones lifted since a
+  step last read them (`frame_touches_ended()` for this rendered frame). Two
+  fingers' `touch_pinch()` (how much their spread grew: 2 is twice as far
+  apart) and `touch_pan()` (how far their middle moved) have a step reading
+  and a frame reading, as the wheel does.
+
+`claim_touch(id)` takes a finger for an on-screen control: it stops being
+the pointer (a press it began is let go without a click) and no gesture
+counts it. App gives touch the time each frame (`update_touch`), so a finger
+held still becomes a long press without moving. A test or an agent makes
+fingers with `set_touch_down`, `set_touch_moved` and `set_touch_up`, or the
+scene server's `input.touch`. Lua has `input.touches()`, `input.pinch()` and
+`input.pan()`.
 
 ## For editors
 

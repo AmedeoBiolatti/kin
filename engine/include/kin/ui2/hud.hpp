@@ -58,7 +58,8 @@ struct Meter {
 enum class PromptBindingMode {
     First,
     All,
-    Device, // a controller's binding while the controller navigates (Context::controller_active), else a key's
+    Device, // a controller's binding while the controller navigates (Context::controller_active), a touch
+            // gesture's while the pointer is a finger (Input::pointer_is_touch), else a key's
 };
 
 struct PromptOptions {

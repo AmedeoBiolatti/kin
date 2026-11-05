@@ -1,4 +1,5 @@
 #include <kin/runtime/scene_server.hpp>
+#include <kin/render3d/camera3d.hpp> // view.frame's camera3d (its fields only: in 2D builds too)
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/renderer3d.hpp>
 #endif
@@ -7,6 +8,8 @@
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <vector>
+#include <cmath>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -657,7 +660,9 @@ ServerResponse handle_view_scene(ServerContext& ctx, const JsonValue& params) {
 // at `width` x `height` through a camera centred on world point (x, y), `zoom`
 // screen units a world unit, turned `rotation` degrees; its pixels written to
 // `path` (in the working folder) as they are: rows of RGBA bytes, top first.
-// The camera stays for later frames (screenshots too).
+// The camera stays for later frames (screenshots too). A 3D scene's:
+// {path, width, height, camera3d: {position: [x, y, z], rotation: [x, y, z, w],
+// fov, near}} (Scene::set_view_camera3d), in place of x, y, zoom, rotation.
 ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
     Scene* scene = ctx.scenes().top_mut();
     if (!scene) {
@@ -682,13 +687,58 @@ ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
         ctx.window().set_size(size);
         ctx.window().sync(); // sized later on some systems (X11)
     }
-    Camera2D camera;
-    camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
-    camera.zoom = static_cast<f32>(zoom);
-    camera.rotation = static_cast<f32>(params.number_at("rotation", 0.0));
-    camera.look_at({static_cast<f32>(params.number_at("x", 0.0)), static_cast<f32>(params.number_at("y", 0.0))});
-    if (!scene->set_view_camera(&camera)) {
-        return error_result("the scene has no world to draw through another camera");
+    if (const JsonValue* given = params.find("camera3d")) {
+        // A 3D camera: where it is, its turn (a quaternion), its field of view and near plane.
+        const auto numbers = [&](std::string_view key, std::size_t count) -> std::optional<std::vector<f32>> {
+            const JsonValue* value = given->find(key);
+            if (!value) {
+                return std::vector<f32>{};
+            }
+            if (!value->is_array() || value->items().size() != count) {
+                return std::nullopt;
+            }
+            std::vector<f32> out;
+            for (const JsonValue& item : value->items()) {
+                if (!item.is_number() || !std::isfinite(item.as_number())) {
+                    return std::nullopt;
+                }
+                out.push_back(static_cast<f32>(item.as_number()));
+            }
+            return out;
+        };
+        const std::optional<std::vector<f32>> position = numbers("position", 3);
+        const std::optional<std::vector<f32>> rotation = numbers("rotation", 4);
+        const f64 fov = given->number_at("fov", 60.0);
+        const f64 near_plane = given->number_at("near", 0.1); // (not `near`: a macro on Windows)
+        if (!given->is_object() || !position || !rotation || !(fov > 0.0 && fov < 180.0) || !(near_plane > 0.0)) {
+            return error_result("view.frame's camera3d needs position [x, y, z], rotation [x, y, z, w], fov between 0 and 180 and near above 0");
+        }
+        Camera3D camera;
+        if (position->size() == 3) {
+            camera.position = {(*position)[0], (*position)[1], (*position)[2]};
+        }
+        if (rotation->size() == 4) {
+            const f32 length = std::sqrt((*rotation)[0] * (*rotation)[0] + (*rotation)[1] * (*rotation)[1] +
+                                         (*rotation)[2] * (*rotation)[2] + (*rotation)[3] * (*rotation)[3]);
+            if (!(length > 1e-6f)) {
+                return error_result("view.frame's camera3d rotation is not a turn (its length is 0)");
+            }
+            camera.rotation = {(*rotation)[0] / length, (*rotation)[1] / length, (*rotation)[2] / length, (*rotation)[3] / length};
+        }
+        camera.fov = static_cast<f32>(fov);
+        camera.z_near = static_cast<f32>(near_plane);
+        if (!scene->set_view_camera3d(&camera)) {
+            return error_result("the scene has no 3D world to draw through another camera");
+        }
+    } else {
+        Camera2D camera;
+        camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
+        camera.zoom = static_cast<f32>(zoom);
+        camera.rotation = static_cast<f32>(params.number_at("rotation", 0.0));
+        camera.look_at({static_cast<f32>(params.number_at("x", 0.0)), static_cast<f32>(params.number_at("y", 0.0))});
+        if (!scene->set_view_camera(&camera)) {
+            return error_result("the scene has no world to draw through another camera");
+        }
     }
     ctx.render_frame();
     std::vector<u8> pixels;
@@ -897,6 +947,34 @@ std::optional<Key> parse_key_name(std::string_view name) {
     return std::nullopt;
 }
 
+// A finger on the window: down, moved, up, or a tap, at `x`, `y` (logical
+// UI space, or "space": "window"); `id` tells fingers apart.
+ServerResponse handle_input_touch(ServerContext& ctx, const JsonValue& params) {
+    const JsonValue* x = params.find("x");
+    const JsonValue* y = params.find("y");
+    if (!x || !y || !x->is_number() || !y->is_number()) {
+        return error_result("input.touch requires numbers 'x' and 'y'");
+    }
+    const std::string mode = params.string_at("mode", "tap");
+    if (mode != "down" && mode != "move" && mode != "up" && mode != "tap") {
+        return error_result("mode must be 'down', 'move', 'up', or 'tap'");
+    }
+    Vec2f pos{static_cast<f32>(x->as_number()), static_cast<f32>(y->as_number())};
+    if (params.string_at("space", "logical") != "window") {
+        pos = ctx.renderer().logical_to_window(pos);
+    }
+    const JsonValue* id = params.find("id");
+    const u64 finger = id && id->is_number() ? static_cast<u64>(std::max(0.0, id->as_number())) : 0;
+    ctx.queue_touch(finger, pos, mode);
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "touch");
+    json.field("mode", std::string_view{mode});
+    json.end_object();
+    return ok_result(out.str());
+}
+
 // A player's game controller, driven: a button tapped or held, sticks and
 // triggers set, or it unplugged. The game reads it as it reads a real one.
 ServerResponse handle_input_pad(ServerContext& ctx, const JsonValue& params) {
@@ -1092,6 +1170,12 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
     _pending.push_back({PendingInput::Kind::Drop, std::move(path), {}, window_pos, 0.0f});
 }
 
+void ServerContext::queue_touch(u64 id, Vec2f window_pos, std::string mode) {
+    PendingInput in{PendingInput::Kind::Touch, {}, std::move(mode), window_pos, 0.0f};
+    in.touch = id;
+    _pending.push_back(std::move(in));
+}
+
 void ServerContext::queue_pad(PadInput pad) {
     PendingInput in{PendingInput::Kind::Pad, {}, pad.mode, {}, 0.0f};
     in.pad = std::move(pad);
@@ -1124,6 +1208,11 @@ void ServerContext::step() {
     for (const auto& [player, button] : _tapped_pad_buttons) {
         _pads[static_cast<std::size_t>(player)].set_button(button, false);
     }
+    input.update_touch(static_cast<f64>(_frame) * static_cast<f64>(_fixed_dt)); // the steps' time
+    for (const u64 id : _tapped_touches) {
+        input.set_touch_up(id);
+    }
+    _tapped_touches.clear();
     _tapped_actions.clear();
     _tapped_buttons.clear();
     _tapped_keys.clear();
@@ -1167,6 +1256,19 @@ void ServerContext::step() {
             break;
         case PendingInput::Kind::Drop:
             input.add_dropped_file({.path = in.text, .pos = in.pos, .window = _window.id()});
+            break;
+        case PendingInput::Kind::Touch:
+            if (in.mode == "move") {
+                input.set_touch_moved(in.touch, in.pos);
+            } else if (in.mode == "up") {
+                input.set_touch_moved(in.touch, in.pos);
+                input.set_touch_up(in.touch);
+            } else {
+                input.set_touch_down(in.touch, in.pos, _window.id());
+                if (in.mode == "tap") {
+                    _tapped_touches.push_back(in.touch);
+                }
+            }
             break;
         case PendingInput::Kind::Pad: {
             const auto at = static_cast<std::size_t>(in.pad.player);
@@ -1350,6 +1452,7 @@ void ServerContext::reset(std::optional<u64> seed) {
     _pads = {};
     _driven_pads = {};
     _tapped_pad_buttons.clear();
+    _tapped_touches.clear();
     if (_reset_scenes) {
         _reset_scenes(_scenes);
     }
@@ -1399,6 +1502,9 @@ static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const Gam
     }
     if (method == "input.pad") {
         return handle_input_pad(ctx, params);
+    }
+    if (method == "input.touch") {
+        return handle_input_touch(ctx, params);
     }
     if (method == "view.screenshot") {
         return handle_view_screenshot(ctx, params);

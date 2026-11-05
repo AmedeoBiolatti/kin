@@ -383,6 +383,13 @@ text field has the keys, so typing is not taken for commands.
 `games/studio_demo` is an editor-style window built this way, and
 `games/nextcode_look` rebuilds next_code's window (menus, icons, title bar).
 
+### Touch
+
+A finger is the pointer ([touch](input.md#touch)): a tap clicks, a finger held
+on a slider drags it. Nothing is hovered and no tooltip shows while no finger is
+down. `prompt_for_action` names touch bindings ("Tap", "Swipe Right"), and
+`PromptBindingMode::Device` names them while the pointer is a finger.
+
 ### Controllers
 
 Call `app.open_gamepads()` to poll a controller. ui2 navigation is enabled by

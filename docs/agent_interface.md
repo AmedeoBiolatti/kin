@@ -156,7 +156,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `ui.action` | `{scene?, id?, selector?, action?, text?}` | Queue `click` (default), `focus`, `set_text`, `increment`, `decrement` or `set_number` (`text` holds the number) for the next tick; choose exactly one of an ID lookup or a unique structured selector. |
 | `view.screenshot` | `{path?}` | Render the current scene and save a PNG. Returns path and dimensions. |
 | `view.scene` | `{path, content?}` | The top scene shows the scene file `path` in place of its own, as it reads its own (`Scene::view_scene`; a game says how). |
-| `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit; write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |
+| `view.frame` | `{path?, width, height, x?, y?, zoom?, rotation?}` or `{path?, width, height, camera3d: {position?, rotation?, fov?, near?}}` | Draw the top scene at `width`x`height` through a camera centred on world (x, y), `zoom` screen units a world unit (`Scene::set_view_camera`); or, a 3D scene, through a 3D camera at `position` [x, y, z], turned by the quaternion `rotation` [x, y, z, w], `fov` degrees top to bottom (`Scene::set_view_camera3d`). Write its pixels to `path` as raw RGBA rows, top first. Returns path and dimensions. |
 | `sim.tick` | `{count?}` | Advance N fixed frames, default 1. Returns frame counter and failure flag. |
 | `sim.reset` | `{seed?}` | Rebuild scenes, zero frame/report, clear queued/held input while preserving its map; optionally reseed (decimal string above 2^53-1). |
 | `input.action` | `{name, mode?}` | Queue an action for the next tick. `mode`: `press`, `hold`, or `release`. |
@@ -164,6 +164,7 @@ Replies carry `Access-Control-Allow-Origin: *`; `OPTIONS` preflight is handled.
 | `input.text` | `{text}` | Deliver text input for the next tick. |
 | `input.drop` | `{path, x?, y?, space?}` | Drop a file on the window at `x`, `y` (or where the pointer is), as from the desktop: `Input::take_dropped_files` has it at the next tick. |
 | `input.key` | `{name, mode?, modifiers?}` | Queue a key by name (`Enter`, `Left`, `PageDown`, `A`, ...), with `modifiers` such as `["ctrl","shift"]` held alongside it. `mode`: `press`, `hold`, or `release`. |
+| `input.touch` | `{x, y, id?, mode?, space?}` | A finger at `x`, `y` (logical UI space, or `space: "window"`): `mode` `down`, `move`, `up`, or `tap` (the default: down this tick, up at the start of the next). `id` tells fingers apart. Touch's time is the ticks' (frame × fixed dt), so a long press is a finger held down over enough ticks. |
 | `input.pad` | `{player?, button?, mode?, left_x?, left_y?, right_x?, right_y?, left_trigger?, right_trigger?, connected?}` | Drive a player's game controller (`player` 0 to 7, default 0) as a real one: a `button` (`a`, `start`, `dpad_left`, ...) with `mode` `press`, `hold` or `release`, and sticks (-1 to 1, y up) and triggers (0 to 1), kept until changed. The game reads it as that player's controller (`Input::player_gamepad`), and the first player's (else the lowest driven) as `Input::gamepad()`. Driven once, it is plugged in until `connected: false` (or `sim.reset`). |
 | `server.status` | none | Frame counter, fixed dt, scene depth, failure flag. |
 | `frame.timing` | `{since?, reset?}` | Update, render and present wall time over the last 600 ticks (or frames drawn, inspected): `last`, `mean` and `max`, in ms. With `since` (a frame number; -1 for all kept), `history` lists each frame after it, oldest first: `frame`, `update_ms`, `render_ms`, `present_ms`, `interval_ms` (since the frame before began; 0 when ticked). `reset` clears the history after reporting. |
@@ -240,7 +241,7 @@ tool closes stdin the script goes on and its breakpoints are cleared.
 
 ## Input
 
-Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.pad`, `input.drop`) is queued and applied
+Injected input (`input.action`, `input.mouse`, `input.text`, `input.key`, `input.pad`, `input.touch`, `input.drop`) is queued and applied
 on the next `sim.tick`, after `begin_frame`, so the scene observes it that frame.
 A `press` is a tap: held for that tick and released at the start of the next
 one, which sees the release, as with a real button. A ui2 click completes on that
