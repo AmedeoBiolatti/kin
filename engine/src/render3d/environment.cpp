@@ -279,4 +279,14 @@ Result3D<MaterialGraphShader3D> Renderer3D::compile_material_graph(const std::fi
     return result3d(std::move(made), {});
 }
 
+Result3D<MaterialGraphShader3D> Renderer3D::create_material_graph(const CookedMaterialGraph3D& cooked) {
+    std::array<std::span<const u8>, surface_variant_count3d> views;
+    for (u32 i = 0; i < surface_variant_count3d; ++i)
+        views[i] = cooked.spirv[i];
+    MaterialGraphShader3D made{create_surface_shader_operation(views), cooked.graph};
+    if (!made.surface)
+        return result3d(MaterialGraphShader3D{}, _errors);
+    return result3d(std::move(made), {});
+}
+
 } // namespace kin

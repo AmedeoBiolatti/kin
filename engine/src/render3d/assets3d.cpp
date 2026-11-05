@@ -10,6 +10,7 @@
 #include <kin/render3d/material_asset3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/renderer/renderer2d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <limits>
 #include <list>
 
@@ -69,6 +70,7 @@ Model3D cpu_model(const std::filesystem::path& path, std::string& why) {
 // What a material names as its shader where nothing draws (a session without 3D): a handle, so that the material binds
 // as it would with 3D, that no renderer is ever given.
 struct CpuMaterialShader final : IMaterialShaderBackend3D {};
+struct CpuSurfaceShader final : ISurfaceShaderBackend3D {};
 
 } // namespace
 
@@ -95,6 +97,12 @@ struct Assets3D::Data {
         std::weak_ptr<IMaterialShaderBackend3D> shader;
     };
     std::list<ShaderEntry> shaders;
+    struct GraphEntry {
+        std::filesystem::path path;
+        std::weak_ptr<ISurfaceShaderBackend3D> surface;
+        CompiledMaterialGraph3D graph;
+    };
+    std::list<GraphEntry> graphs;
     Renderer3D* renderer;
     std::filesystem::path root;
     Limits limits;
@@ -131,6 +139,9 @@ void Assets3D::clear() {
 void Assets3D::invalidate(const std::filesystem::path& source) {
     const auto path = (_data->root / source).lexically_normal();
     _data->shaders.remove_if([&](const auto& entry) { return entry.path == path || entry.shader.expired(); });
+    _data->graphs.remove_if([&](const auto& entry) {
+        return entry.path == path || entry.path.string() + ".spv" == path.string() || entry.surface.expired();
+    });
     std::vector<std::filesystem::path> owners{path};
     _data->models.remove_if([&](const auto& entry) {
         const auto storage = entry.storage.lock();
@@ -155,6 +166,7 @@ Assets3D::Stats Assets3D::stats() const {
     s.texture_entries = _data->textures.size();
     s.material_entries = _data->materials.size();
     s.shader_entries = _data->shaders.size();
+    s.graph_entries = _data->graphs.size();
     return s;
 }
 
@@ -212,6 +224,93 @@ MaterialShader3D Assets3D::load_material_shader_operation(const std::filesystem:
                why.empty() ? "shader load failed" : why);
     return result;
 }
+Result3D<MaterialGraphShader3D> Assets3D::load_material_graph(const std::filesystem::path& path) {
+    _data->errors.clear();
+    std::string why;
+    auto result = load_material_graph_impl(path, &why);
+    if (!result.surface)
+        fail3d(_data->errors, "Assets3D::load_material_graph(" + path.string() + ")",
+               why.empty() ? "material graph load failed" : why);
+    return result3d(std::move(result), _data->errors);
+}
+
+MaterialGraphShader3D Assets3D::load_material_graph_impl(const std::filesystem::path& source, std::string* error) {
+    auto& d = *_data;
+    const auto path = (d.root / source).lexically_normal();
+    const auto fail = [&](std::string why) {
+        if (error)
+            *error = std::move(why);
+        return MaterialGraphShader3D{};
+    };
+    for (auto it = d.graphs.begin(); it != d.graphs.end(); ++it)
+        if (it->path == path)
+            if (auto surface = it->surface.lock()) {
+                ++d.counters.graph_hits;
+                d.graphs.splice(d.graphs.end(), d.graphs, it);
+                if (error)
+                    error->clear();
+                return {SurfaceShader3D{std::move(surface)}, it->graph};
+            }
+    ++d.counters.graph_loads;
+    const std::filesystem::path cooked_path = path.string() + ".spv";
+    const auto cooked_size = content_file_size(cooked_path), source_size = content_file_size(path);
+    // The cooked file when there is no source (a shipped game) or it is not older than the source.
+    bool use_cooked = cooked_size.has_value();
+    if (use_cooked && source_size) {
+        std::error_code a, b;
+        const auto cooked_time = std::filesystem::last_write_time(cooked_path, a);
+        const auto source_time = std::filesystem::last_write_time(path, b);
+        use_cooked = a || b || cooked_time >= source_time;
+    }
+    MaterialGraphShader3D made;
+    if (use_cooked) {
+        const auto bytes = read_content_file(cooked_path);
+        std::string why;
+        const auto cooked =
+            bytes ? unpack_cooked_material_graph3d({reinterpret_cast<const u8*>(bytes->data()), bytes->size()}, &why)
+                  : std::nullopt;
+        if (!cooked)
+            return fail(cooked_path.string() + ": " + (why.empty() ? "unreadable" : why));
+        if (d.renderer->available()) {
+            auto r = d.renderer->create_material_graph(*cooked);
+            if (!r)
+                return fail(cooked_path.string() + ": the surface shader was refused");
+            made = std::move(*r);
+        } else {
+            made = {SurfaceShader3D{std::make_shared<CpuSurfaceShader>()}, cooked->graph};
+        }
+    } else if (source_size) {
+        const auto text = read_content_file(path);
+        if (!text)
+            return fail("cannot read " + path.string());
+        if (!d.renderer->available()) {
+            made.graph = compile_material_graph3d(*text);
+            if (!made.graph.ok())
+                return fail(path.string() + ": " + made.graph.errors.front().node + ": " +
+                            made.graph.errors.front().message);
+            made.surface = SurfaceShader3D{std::make_shared<CpuSurfaceShader>()};
+        } else if (!shader_compiler_available()) {
+            return fail(path.string() + ": not cooked (" + cooked_path.filename().string() +
+                        ": kin_material_graph cook, kin_cook_material_graph) and no glslc to compile it");
+        } else {
+            auto r = d.renderer->compile_material_graph(path);
+            if (!r)
+                return fail(diagnostics3d_text(r.diagnostics));
+            made = std::move(*r);
+        }
+    } else {
+        return fail("no material graph " + path.string() + " (nor " + cooked_path.filename().string() + ")");
+    }
+    if (d.limits.shaders) {
+        while (d.graphs.size() >= d.limits.shaders)
+            d.graphs.pop_front();
+        d.graphs.push_back({path, made.surface.backend(), made.graph});
+    }
+    if (error)
+        error->clear();
+    return made;
+}
+
 Result3D<AssetHandle<MaterialBinding3D>> Assets3D::load_materials(const std::filesystem::path& path,
                                                                   const std::shared_ptr<const Model3D>& model,
                                                                   std::string_view variant) {

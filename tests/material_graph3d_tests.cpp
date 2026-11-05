@@ -204,6 +204,56 @@ void documented_example() {
     CHECK(ok);
 }
 
+// The layout a cooked graph carries, and the cooked file: read back as written; damaged files refused. With glslc, a
+// graph cooked now (every variant SPIR-V); with cmake's kin_cook_material_graph (KIN_TEST_COOKED_GRAPH), one cooked at
+// build time, which reads back with its parameters.
+void cooked() {
+    const auto g = compile_material_graph3d(graph(
+        R"({"name": "tint", "type": "color", "default": [0.25, 0.5, 0.75, 1]},
+           {"name": "scale", "type": "vec2", "default": [2, 3]},
+           {"name": "noise", "type": "texture", "slot": "occlusion", "role": "data"})",
+        R"({"id": "t", "type": "texture", "texture": "noise"})", R"("base_color": "tint.rgb", "alpha": "t.r")"));
+    CHECK(g.ok());
+    std::string why;
+    const auto back = read_material_graph_layout3d(write_material_graph_layout3d(g), &why);
+    CHECK(back && back->name == "test" && back->parameters.size() == 3);
+    for (size_t i = 0; i < 3; ++i) {
+        const auto &a = g.parameters[i], &b = back->parameters[i];
+        CHECK(a.name == b.name && a.type == b.type && a.offset == b.offset && a.size == b.size && a.value == b.value &&
+              a.slot == b.slot && a.srgb == b.srgb && a.data == b.data);
+    }
+    CHECK(material_graph_params3d(*back) == material_graph_params3d(g));
+    CookedMaterialGraph3D made{g, {}};
+    for (auto& v : made.spirv)
+        v = {3, 2, 35, 7, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    auto bytes = pack_cooked_material_graph3d(made);
+    const auto unpacked = unpack_cooked_material_graph3d(bytes, &why);
+    CHECK(unpacked && unpacked->graph.parameters.size() == 3 && unpacked->spirv[7] == made.spirv[7]);
+    auto cut = bytes;
+    cut.resize(cut.size() - 3);
+    CHECK(!unpack_cooked_material_graph3d(cut, &why) && contains(why, "cut short"));
+    auto wrong = bytes;
+    wrong[0] = 'X';
+    CHECK(!unpack_cooked_material_graph3d(wrong));
+    CHECK(!read_material_graph_layout3d("{\"schema\": \"x\"}"));
+    if (shader_compiler_available()) {
+        const auto now = cook_material_graph3d(graph("", "", R"("roughness": 0.25)"), &why);
+        CHECK(now.has_value());
+        for (const auto& v : now->spirv)
+            CHECK(v.size() > 20 && v[0] == 3 && v[1] == 2 && v[2] == 35 && v[3] == 7);
+        CHECK(!cook_material_graph3d(graph("", "", R"("roughness": "nowhere")"), &why) && contains(why, "nowhere"));
+    }
+#ifdef KIN_TEST_COOKED_GRAPH
+    std::ifstream in(KIN_TEST_COOKED_GRAPH, std::ios::binary);
+    const std::vector<u8> file{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    const auto built = unpack_cooked_material_graph3d(file, &why);
+    if (!built)
+        std::cerr << why << '\n';
+    CHECK(built && built->graph.parameters.size() == 1 && built->graph.parameters[0].name == "tint");
+    std::cout << "the graph cooked at build time reads back\n";
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -211,6 +261,7 @@ int main() {
     errors();
     every_node_compiles();
     documented_example();
+    cooked();
     std::cout << "material graph tests passed\n";
     return 0;
 }

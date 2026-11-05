@@ -4,6 +4,7 @@
 #include <kin/assets/asset_handle.hpp>
 #include <kin/render3d/errors3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <kin/render3d/model3d.hpp>
 #include <memory>
 
@@ -43,6 +44,8 @@ public:
         u64 material_hits = 0, material_loads = 0;
         std::size_t shader_entries = 0;
         u64 shader_hits = 0, shader_loads = 0;
+        std::size_t graph_entries = 0;
+        u64 graph_hits = 0, graph_loads = 0;
     };
 
     explicit Assets3D(Renderer3D& renderer, std::filesystem::path root = ".");
@@ -63,6 +66,11 @@ public:
     // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials
     // naming a shader still bind.
     Result3D<MaterialShader3D> load_material_shader(const std::filesystem::path& path);
+    // A material graph (kin.material-graph/1; docs/rendering_3d.md, Material graphs): its cooked form, `<path>.spv`
+    // (kin_material_graph cook, cmake's kin_cook_material_graph), when there is one at least as new as the source;
+    // else the source compiled now with glslc (development). Without 3D, a stand-in surface with the graph's layout.
+    // Cached by path until invalidated (the source or the cooked file).
+    Result3D<MaterialGraphShader3D> load_material_graph(const std::filesystem::path& path);
     // Patches imported materials without cloning any model/mesh. Empty variant
     // selects the base layer. Invalidate changed sources explicitly before rebinding.
     Result3D<AssetHandle<MaterialBinding3D>> load_materials(const std::filesystem::path& path,
@@ -97,6 +105,7 @@ private:
     AssetHandle<Model3D> load_model_impl(const std::filesystem::path&, const MeshOptions3D&, std::string*);
     Texture load_texture_impl(const std::filesystem::path&, bool, bool, std::string*);
     MaterialShader3D load_material_shader_impl(const std::filesystem::path&, std::string*);
+    MaterialGraphShader3D load_material_graph_impl(const std::filesystem::path&, std::string*);
     AssetHandle<MaterialBinding3D> load_materials_impl(const std::filesystem::path&,
                                                        const std::shared_ptr<const Model3D>&, std::string_view,
                                                        std::string*);

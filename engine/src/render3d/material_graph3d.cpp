@@ -1,11 +1,18 @@
 // Material graphs into surface shaders (kin/render3d/material_graph3d.hpp).
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/render3d/material_graph3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <set>
 #include <sstream>
 
@@ -827,6 +834,192 @@ const std::vector<MaterialGraphNode3D>& material_graph_nodes3d() {
         return l;
     }();
     return list;
+}
+
+namespace {
+const char* type_name(GraphType3D t) {
+    switch (t) {
+    case GraphType3D::Float:
+        return "float";
+    case GraphType3D::Vec2:
+        return "vec2";
+    case GraphType3D::Vec3:
+        return "vec3";
+    case GraphType3D::Vec4:
+        return "vec4";
+    case GraphType3D::Texture:
+        return "texture";
+    }
+    return "float";
+}
+constexpr const char* slot_names[] = {"base", "metallic_roughness", "normal", "occlusion", "emissive"};
+} // namespace
+
+std::string write_material_graph_layout3d(const CompiledMaterialGraph3D& graph) {
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object().field("schema", "kin.material-graph-layout/1").field("name", graph.name);
+    json.key("parameters").begin_array();
+    for (const auto& p : graph.parameters) {
+        json.begin_object().field("name", p.name).field("type", type_name(p.type));
+        if (p.type == GraphType3D::Texture) {
+            json.field("slot", slot_names[u32(p.slot)]).field("srgb", p.srgb).field("data", p.data);
+        } else {
+            json.field("offset", p.offset).field("size", p.size);
+            json.key("value").begin_array();
+            for (u32 i = 0; i < p.size; ++i)
+                json.value(f64(p.value[i]));
+            json.end_array();
+        }
+        json.end_object();
+    }
+    json.end_array().end_object();
+    return out.str();
+}
+
+std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_view text, std::string* why) {
+    const auto fail = [&](std::string w) -> std::optional<CompiledMaterialGraph3D> {
+        if (why)
+            *why = std::move(w);
+        return std::nullopt;
+    };
+    const auto parsed = parse_json(text);
+    if (!parsed.ok() || !parsed.value->find("schema") ||
+        parsed.value->find("schema")->as_string() != "kin.material-graph-layout/1")
+        return fail("not a kin.material-graph-layout/1 layout");
+    CompiledMaterialGraph3D g;
+    g.name = parsed.value->find("name") ? parsed.value->find("name")->as_string() : "";
+    const auto* list = parsed.value->find("parameters");
+    if (!list || !list->is_array())
+        return fail("a layout without parameters");
+    for (const auto& item : list->items()) {
+        MaterialGraphParameter3D p;
+        p.name = item.find("name") ? item.find("name")->as_string() : "";
+        const std::string type = item.find("type") ? item.find("type")->as_string() : "";
+        bool known = false;
+        for (const auto t :
+             {GraphType3D::Float, GraphType3D::Vec2, GraphType3D::Vec3, GraphType3D::Vec4, GraphType3D::Texture})
+            if (type == type_name(t))
+                p.type = t, known = true;
+        if (!known || p.name.empty())
+            return fail("a parameter of unknown type or no name");
+        if (p.type == GraphType3D::Texture) {
+            const std::string slot = item.find("slot") ? item.find("slot")->as_string() : "";
+            const auto* at = std::find(std::begin(slot_names), std::end(slot_names), slot);
+            if (at == std::end(slot_names))
+                return fail("a texture of unknown slot");
+            p.slot = MaterialMap3D(at - std::begin(slot_names));
+            p.srgb = item.bool_at("srgb", true);
+            p.data = item.bool_at("data", false);
+            p.size = 0;
+        } else {
+            p.offset = u32(item.int_at("offset", 0));
+            p.size = u32(item.int_at("size", 1));
+            if (p.offset + p.size > 16 || p.size < 1 || p.size > 4)
+                return fail("a parameter beyond shader_params");
+            if (const auto* v = item.find("value"); v && v->is_array())
+                for (size_t i = 0; i < std::min<size_t>(4, v->items().size()); ++i)
+                    p.value[i] = f32(v->items()[i].as_number());
+        }
+        g.parameters.push_back(p);
+    }
+    return g;
+}
+
+// KINGRAPH, the version, the layout's bytes, then each variant's: lengths little-endian u32.
+std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked) {
+    std::vector<u8> out{'K', 'I', 'N', 'G', 'R', 'A', 'P', 'H'};
+    const auto u32le = [&](u32 v) {
+        for (int i = 0; i < 4; ++i)
+            out.push_back(u8(v >> (8 * i)));
+    };
+    u32le(1);
+    const std::string layout = write_material_graph_layout3d(cooked.graph);
+    u32le(u32(layout.size()));
+    out.insert(out.end(), layout.begin(), layout.end());
+    for (const auto& v : cooked.spirv) {
+        u32le(u32(v.size()));
+        out.insert(out.end(), v.begin(), v.end());
+    }
+    return out;
+}
+
+std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<const u8> bytes, std::string* why) {
+    const auto fail = [&](std::string w) -> std::optional<CookedMaterialGraph3D> {
+        if (why)
+            *why = std::move(w);
+        return std::nullopt;
+    };
+    size_t at = 8;
+    const auto u32le = [&]() -> std::optional<u32> {
+        if (at + 4 > bytes.size())
+            return std::nullopt;
+        const u32 v = u32(bytes[at]) | u32(bytes[at + 1]) << 8 | u32(bytes[at + 2]) << 16 | u32(bytes[at + 3]) << 24;
+        at += 4;
+        return v;
+    };
+    if (bytes.size() < 16 || std::memcmp(bytes.data(), "KINGRAPH", 8) != 0)
+        return fail("not a cooked material graph");
+    if (u32le() != 1u)
+        return fail("a cooked material graph of another version");
+    const auto layout_size = u32le();
+    if (!layout_size || at + *layout_size > bytes.size())
+        return fail("a cooked material graph cut short");
+    CookedMaterialGraph3D cooked;
+    std::string layout_why;
+    auto layout =
+        read_material_graph_layout3d({reinterpret_cast<const char*>(bytes.data() + at), *layout_size}, &layout_why);
+    if (!layout)
+        return fail(layout_why);
+    cooked.graph = std::move(*layout);
+    at += *layout_size;
+    for (auto& v : cooked.spirv) {
+        const auto n = u32le();
+        if (!n || *n < 20 || at + *n > bytes.size() || bytes[at] != 3 || bytes[at + 1] != 2 || bytes[at + 2] != 35 ||
+            bytes[at + 3] != 7)
+            return fail("a cooked material graph whose SPIR-V is cut short or not SPIR-V");
+        v.assign(bytes.begin() + std::ptrdiff_t(at), bytes.begin() + std::ptrdiff_t(at + *n));
+        at += *n;
+    }
+    return cooked;
+}
+
+std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view text, std::string* why) {
+    const auto fail = [&](std::string w) -> std::optional<CookedMaterialGraph3D> {
+        if (why)
+            *why = std::move(w);
+        return std::nullopt;
+    };
+    CookedMaterialGraph3D cooked;
+    cooked.graph = compile_material_graph3d(text);
+    if (!cooked.graph.ok()) {
+        std::string all;
+        for (const auto& e : cooked.graph.errors)
+            all += (all.empty() ? "" : "\n") + (e.node.empty() ? std::string() : e.node + ": ") + e.message;
+        return fail(all);
+    }
+    static std::atomic<u32> counter{0};
+    const std::filesystem::path file = std::filesystem::temp_directory_path() /
+                                       ("kin-graph-cook-" + std::to_string(counter++) + "-" +
+                                        std::to_string(reinterpret_cast<std::uintptr_t>(&cooked)) + ".frag.glsl");
+    {
+        std::ofstream out(file, std::ios::binary);
+        out << surface_shader_source(cooked.graph.surface);
+    }
+    std::string w;
+    bool ok = true;
+    for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
+        auto spirv = compile_glsl(file, ShaderStage::Fragment, &w, surface_variant_defines(SurfaceVariant3D(i)));
+        ok = spirv.has_value();
+        if (ok)
+            cooked.spirv[i] = std::move(*spirv);
+    }
+    std::error_code ignored;
+    std::filesystem::remove(file, ignored);
+    if (!ok)
+        return fail(w);
+    cooked.graph.surface.clear();
+    return cooked;
 }
 
 } // namespace kin

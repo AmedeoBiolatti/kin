@@ -16,6 +16,13 @@
 #     SurfaceVariant3D's order, as Renderer3D::create_surface_shader takes them.
 #     Needs glslc (no KIN_SPIRV_DIR form yet).
 #
+#   kin_cook_material_graph(<out_var> SOURCE <graph> [OUTPUT <file>])
+#     A material graph (kin.material-graph/1) cooked at build time by the
+#     kin_material_graph tool (glslc): its layout and every variant's SPIR-V in
+#     one file, by default <binary dir>/<graph's name>.spv. A game ships it
+#     beside the graph in its content as <graph>.spv, where
+#     Assets3D::load_material_graph looks.
+#
 #   kin_embed_files(<target> NAME <function> [NAMESPACE <ns>] FILES <file> ...)
 #     Builds the files into <target>, readable by file name through
 #       #include "<function>.hpp"
@@ -137,6 +144,32 @@ function(kin_compile_surface_shader out_var)
         list(APPEND outputs "${output}")
     endforeach()
     set(${out_var} "${outputs}" PARENT_SCOPE)
+endfunction()
+
+function(kin_cook_material_graph out_var)
+    cmake_parse_arguments(ARG "" "SOURCE;OUTPUT" "" ${ARGN})
+    if(NOT ARG_SOURCE)
+        message(FATAL_ERROR "kin_cook_material_graph: SOURCE is required")
+    endif()
+    if(NOT TARGET kin_material_graph OR NOT KIN_GLSLC)
+        message(WARNING "kin_cook_material_graph: no kin_material_graph tool or glslc for ${ARG_SOURCE}")
+        set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
+    get_filename_component(source "${ARG_SOURCE}" ABSOLUTE)
+    get_filename_component(name "${source}" NAME)
+    set(output "${ARG_OUTPUT}")
+    if(NOT output)
+        set(output "${CMAKE_CURRENT_BINARY_DIR}/${name}.spv")
+    endif()
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${CMAKE_COMMAND}" -E env "KIN_GLSLC=${KIN_GLSLC}" $<TARGET_FILE:kin_material_graph> cook "${source}"
+                "${output}"
+        DEPENDS "${source}" kin_material_graph ${_KIN_SHADER_INCLUDES}
+        COMMENT "kin_material_graph: ${name} -> ${name}.spv"
+        VERBATIM)
+    set(${out_var} "${output}" PARENT_SCOPE)
 endfunction()
 
 function(kin_embed_files target)
