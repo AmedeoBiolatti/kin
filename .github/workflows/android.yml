@@ -45,9 +45,7 @@ jobs:
               "ndk;29.0.14206865" "platforms;android-35" "build-tools;35.0.0" > /dev/null
       - name: Configure
         shell: bash
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/29.0.14206865
-        run: tools/android/configure.sh
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865" tools/android/configure.sh
       - name: Build hex_demo's APK
         run: cmake --build out/build-android --target hex_demo_apk --parallel 4
       - name: Check the APK
