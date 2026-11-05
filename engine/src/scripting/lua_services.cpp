@@ -127,8 +127,9 @@ void bind_services(sol::state_view lua) {
         }
         return sol::nullopt;
     };
-    t["progress"] = [](const std::string& id, u32 current, u32 max) {
-        return active() && active()->show_progress(id, current, max);
+    // Without a most: the catalog's (services_catalog.hpp).
+    t["progress"] = [](const std::string& id, u32 current, const sol::optional<u32>& max) {
+        return active() && active()->show_progress(id, current, max.value_or(0));
     };
     t["set_stat"] = [](const std::string& id, sol::stack_object value) {
         PlatformServices* s = active();

@@ -125,6 +125,52 @@ Without services, every call returns `false` or `nil`. What the platform says
 (the overlay, events) is not part of a game's deterministic state. Keep it out of
 rollback and lockstep simulation.
 
+## The game's list
+
+A game can list its achievements, stats and leaderboards in
+`content/services.kinservices` (`kin/platform/services_catalog.hpp`). Each has
+an id of the game's own, and the id each store gave it where that differs.
+Steam's API names can be the game's ids; other stores make ids of their own.
+The game asks by its ids, whichever store runs it.
+
+```json
+{
+  "schema": "kin.services/1",
+  "achievements": [
+    {"id": "ALL_COINS", "name": "achievement.all_coins", "description": "achievement.all_coins.how",
+     "progress": 5, "stores": {"steam": "ACH_ALL_COINS"}},
+    {"id": "SECRET_ROOM", "hidden": true}
+  ],
+  "stats": [{"id": "coins", "type": "int"}, {"id": "best_time", "type": "float"}],
+  "leaderboards": [{"id": "speedrun", "sort": "ascending", "display": "milliseconds"}]
+}
+```
+
+| Field | Of | Does |
+|---|---|---|
+| `id` | all | The game's id: 1 to 128 characters, once in its kind |
+| `name`, `description` | all (`description`: achievements) | Translation keys, for the game's own lists and for tools. The store shows what is set up on it. |
+| `hidden` | achievements | Shown only once unlocked |
+| `progress` | achievements | The most `show_progress` counts to, so the game can leave it out |
+| `type` | stats | `int` (default) or `float` |
+| `sort`, `display` | leaderboards | `descending` (default: higher is better) or `ascending`; `number` (default), `seconds` or `milliseconds` |
+| `stores` | all | A store's name (`steam`, as `backend()` says it) to its id there |
+
+Give `run_scene_app` the catalog (`SceneAppConfig::services_catalog`, read with
+`load_services_catalog`), and the game's services are asked by it
+(`catalog_services`):
+
+- each id becomes the store's, and events name the game's ids again;
+- an id the list doesn't have is refused (`false`, `0`, none) and said once in
+  the log, where the list has that kind. A kind it lists none of goes as it is;
+- a stat is set as its type says (`set_stat("best_time", 41)` sets 41.0);
+- a leaderboard is made with its sort and display, whatever `upload_score` is
+  given;
+- `show_progress(id, 3)` (Lua: `services.progress(id, 3)`) counts to the
+  listed `progress`.
+
+The offline backend keeps everything by the game's ids.
+
 ## Steam
 
 kin opens Steam's API library at run time: `steam_api64.dll` on Windows,

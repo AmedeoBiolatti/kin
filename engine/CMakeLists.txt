@@ -88,6 +88,7 @@ add_library(kin_engine STATIC
     src/platform/resource_paths.cpp
     src/platform/process.cpp
     src/platform/services.cpp
+    src/platform/services_catalog.cpp
     src/platform/services_steam.cpp
     src/platform/user_data.cpp
     src/platform/window.cpp

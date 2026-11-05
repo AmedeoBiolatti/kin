@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- The game's list of achievements, stats and leaderboards ([platform services](platform_services.md#the-games-list)):
+  `content/services.kinservices` (`kin.services/1`), read by `load_services_catalog`, gives each an id of the game's
+  and its id on each store, with names and descriptions as translation keys, hidden achievements and their
+  progress, stat types, and leaderboards' sort and display. `SceneAppConfig::services_catalog` has the game's
+  services asked by it (`catalog_services`): ids become the store's and events the game's again; ids not listed
+  are refused and logged once; stats are set as their type says; leaderboards are made as listed. Lua's
+  `services.progress(id, current)` takes the listed most.
+
 - A store for each build ([platform services](platform_services.md#steam)). The cache variable `KIN_GAME_STORE`
   (`auto`, `steam`, `none`) says which store `kin_game` builds a game for: `none` (itch.io, a download of its own)
   builds in no Steam app id, no `steam_appid.txt` and no Steam library, whatever the game info says; `steam` fails

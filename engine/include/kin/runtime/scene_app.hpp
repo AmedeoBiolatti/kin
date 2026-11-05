@@ -5,6 +5,7 @@
 #include <iosfwd>
 #include <kin/platform/log.hpp>
 #include <kin/platform/services.hpp>
+#include <kin/platform/services_catalog.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/scene/scene_manager.hpp>
 #include <memory>
@@ -151,6 +152,10 @@ struct SceneAppConfig {
     std::optional<ServicesConfig> services_config{};
     // Or services the game started: borrowed, used as they are.
     PlatformServices* services = nullptr;
+    // The game's achievements, stats and leaderboards (content/services.kinservices):
+    // its services asked by the game's ids, each turned into the store's
+    // (catalog_services). Null: the ids go to the store as they are.
+    const ServicesCatalog* services_catalog = nullptr;
     // Show the language the player chose for the game on the platform, when
     // the localization has it and --locale does not say otherwise. Turn off
     // when the game restores the player's own saved choice.
