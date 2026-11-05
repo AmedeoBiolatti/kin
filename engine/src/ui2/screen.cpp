@@ -16,7 +16,8 @@
 namespace kin::ui2 {
 namespace {
 
-constexpr std::array kind_names{"box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer", "dialogue"};
+constexpr std::array kind_names{"box",    "panel",      "label",  "button",   "image",       "progress",    "toggle",
+                                "slider", "text_input", "spacer", "dialogue", "touch_stick", "touch_button"};
 
 struct NamedAnchor {
     std::string_view name;
@@ -124,7 +125,7 @@ struct Reader {
         const std::optional<ScreenKind> kind = screen_kind_named(json.string_at("kind", "box"));
         if (!kind) {
             return fail(label, "no kind '" + json.string_at("kind") + "' (box, panel, label, button, image, progress, toggle, slider, "
-                               "text_input, spacer, dialogue)");
+                               "text_input, spacer, dialogue, touch_stick, touch_button)");
         }
         out.kind = *kind;
         for (const auto& [key, value] : json.members()) {
@@ -200,6 +201,16 @@ struct Reader {
                 out.checked = value.as_bool();
             } else if (key == "hint") {
                 out.hint = value.as_string();
+            } else if (key == "action") {
+                out.action = value.as_string();
+            } else if (key == "axis_x") {
+                out.axis_x = value.as_string();
+            } else if (key == "axis_y") {
+                out.axis_y = value.as_string();
+            } else if (key == "radius") {
+                out.radius = std::max(0.0f, static_cast<f32>(value.as_number()));
+            } else if (key == "fixed") {
+                out.fixed = value.as_bool();
             } else {
                 return fail(label, "no field '" + key + "'");
             }
@@ -272,6 +283,11 @@ void write_element(JsonWriter& out, const ScreenElement& e) {
     if (e.step != 0.0f) out.key("step").value(static_cast<f64>(e.step));
     if (e.checked) out.field("checked", true);
     if (!e.hint.empty()) out.field("hint", e.hint);
+    if (!e.action.empty()) out.field("action", e.action);
+    if (!e.axis_x.empty()) out.field("axis_x", e.axis_x);
+    if (!e.axis_y.empty()) out.field("axis_y", e.axis_y);
+    if (e.radius != 0.0f) out.key("radius").value(static_cast<f64>(e.radius));
+    if (e.fixed) out.field("fixed", true);
     if (!e.children.empty()) {
         out.key("children").begin_array();
         for (const ScreenElement& child : e.children) {
@@ -610,6 +626,13 @@ void UiScreen::draw(Context& ctx, Rectf bounds, const ScreenAssets& assets) {
                 s.changed = true;
             }
             break;
+        case ScreenKind::TouchStick:
+            s.stick = *live.stick;
+            break;
+        case ScreenKind::TouchButton:
+            s.touch = *live.touch;
+            s.clicked = s.clicked || live.touch->pressed;
+            break;
         default:
             break;
         }
@@ -790,6 +813,35 @@ void UiScreen::element(Context& ctx, const ScreenElement& e, const std::string& 
     case ScreenKind::Spacer:
         ctx.spacer(inside);
         break;
+    case ScreenKind::TouchStick: {
+        Live& live = _live.emplace_back(Live{.id = e.id, .kind = e.kind});
+        live.stick = std::make_unique<TouchStick>(s ? s->stick : TouchStick{});
+        live.stick->id = make_id(id, "stick");
+        live.stick->axis_x = e.axis_x.empty() ? "move_x" : e.axis_x;
+        live.stick->axis_y = e.axis_y.empty() ? "move_y" : e.axis_y;
+        live.stick->radius = e.radius > 0.0f ? e.radius : 64.0f;
+        live.stick->floating = !e.fixed;
+        if (!enabled) {
+            break; // holds nothing, and a control not run lets go
+        }
+        ctx.widget(*live.stick, inside);
+        break;
+    }
+    case ScreenKind::TouchButton: {
+        Live& live = _live.emplace_back(Live{.id = e.id, .kind = e.kind});
+        live.touch = std::make_unique<TouchButton>(s ? s->touch : TouchButton{});
+        live.touch->id = make_id(id, "touch");
+        live.touch->action = e.action;
+        live.touch->label = shown_text();
+        if (!e.style.empty()) {
+            live.touch->text_style = text_style;
+        }
+        if (!enabled) {
+            break;
+        }
+        ctx.widget(*live.touch, inside);
+        break;
+    }
     }
 }
 

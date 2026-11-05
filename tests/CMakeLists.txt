@@ -236,6 +236,7 @@ kin_add_test(kin_prefab_structure_tests kin-prefab-structure SOURCES prefab_stru
 kin_add_test(kin_ecs_lifecycle_tests kin-ecs-lifecycle SOURCES ecs_lifecycle_tests.cpp)
 kin_add_test(kin_ui2_tests kin-ui2 SOURCES ui2_tests.cpp)
 kin_add_test(kin_ui2_text_edit_tests kin-ui2-text-edit SOURCES ui2_text_edit_tests.cpp)
+kin_add_test(kin_ui2_touch_controls_tests kin-ui2-touch-controls SOURCES ui2_touch_controls_tests.cpp)
 kin_add_test(kin_ui2_text_tests kin-ui2-text SOURCES ui2_text_tests.cpp)
 kin_add_test(kin_ui2_theme_file_tests kin-ui2-theme-file SOURCES ui2_theme_file_tests.cpp)
 kin_add_test(kin_dialogue_tests kin-dialogue SOURCES dialogue_tests.cpp)

@@ -519,6 +519,19 @@ public:
     void set_touch_moved(u64 id, Vec2f pos);
     void set_touch_up(u64 id);
 
+    // On-screen controls (ui2::TouchStick, ui2::TouchButton, a screen's
+    // touch_stick and touch_button): the actions and axes they hold, by name,
+    // whatever the map binds them to. They are one more device of the player
+    // with the keyboard, so held(), pressed(), axis() and the rest read them
+    // with the usual edges. Set each frame while the control is shown: one not
+    // set for a whole frame is let go (a control no longer drawn holds
+    // nothing). Up to max_screen_actions actions.
+    static constexpr std::size_t max_screen_actions = 32;
+    void set_screen_action(std::string_view action, bool held);
+    void set_screen_axis(std::string_view name, f32 value);
+    bool screen_action_held(std::string_view action) const;
+    f32 screen_axis(std::string_view name) const;
+
     // Files dropped since they were last taken, oldest first. Taking clears
     // them, so each drop is handled once however frames and updates interleave.
     std::vector<DroppedFile> take_dropped_files();
@@ -703,6 +716,19 @@ private:
     f32 _frame_pinch = 1.0f;
     Vec2f _pan{};
     Vec2f _frame_pan{};
+    // The on-screen controls' actions (a slot each, by name) and axes, and
+    // whether each was set since the last frame start.
+    std::vector<std::string> _screen_action_names;
+    Buttons<max_screen_actions> _screen_actions;
+    std::array<bool, max_screen_actions> _screen_action_set{};
+    struct ScreenAxis {
+        std::string name;
+        f32 value = 0.0f;
+        bool set = false;
+    };
+    std::vector<ScreenAxis> _screen_axes;
+    bool screen_edge(std::string_view action, Edge edge) const;
+    void release_unset_screen_controls();
     void touch_down(u64 id, Vec2f pos, WindowId window);
     void touch_moved(u64 id, Vec2f pos);
     void touch_up(u64 id);

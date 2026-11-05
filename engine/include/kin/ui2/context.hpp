@@ -607,6 +607,11 @@ public:
     // after the first and in the same place. Boxes have BoxResult::double_clicked.
     bool double_click(Id id);
 
+    // What begin() was given (null outside a frame): for widgets that read
+    // more than the pointer (the fingers: kin/ui2/touch_controls.hpp).
+    Input* input() const { return _input; }
+    Renderer2D* renderer() const { return _renderer; }
+
     // Pointer / input access in logical space.
     Vec2f pointer() const;
     bool pointer_pressed(MouseButton button = MouseButton::Left) const;

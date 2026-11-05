@@ -89,8 +89,9 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
 
 ## Known gaps
 
-- On-screen controls (a stick and buttons over the game) and touch scrolling
-  of ui2 scroll boxes.
+- Touch scrolling of ui2 scroll boxes.
+- UI scale: the window's points are its pixels (2340x1080 on the A55, 450 dpi),
+  so UI laid out in points is small on a phone.
 - The first frame after returning to the screen logs one Vulkan
   `dequeueBuffer failed` while SDL_GPU replaces the old surface's swapchain;
   drawing continues.
