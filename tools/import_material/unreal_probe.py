@@ -207,6 +207,44 @@ def main():
     MEL.connect_material_property(c, "", P.MP_BASE_COLOR)
     MEL.recompile_material(m)
 
+    # A material function (inlined by the import): Result = Color x Amount, Amount left to its preview (0.5).
+    f = TOOLS.create_asset("MF_Tint", "/Game/Probe", unreal.MaterialFunction, unreal.MaterialFunctionFactoryNew())
+    colour_in = MEL.create_material_expression_in_function(f, unreal.MaterialExpressionFunctionInput, -400, 0)
+    colour_in.set_editor_property("input_name", "Color")
+    colour_in.set_editor_property("input_type", unreal.FunctionInputType.FUNCTION_INPUT_VECTOR3)
+    amount_in = MEL.create_material_expression_in_function(f, unreal.MaterialExpressionFunctionInput, -400, 200)
+    amount_in.set_editor_property("input_name", "Amount")
+    amount_in.set_editor_property("input_type", unreal.FunctionInputType.FUNCTION_INPUT_SCALAR)
+    amount_in.set_editor_property("use_preview_value_as_default", True)
+    preview = amount_in.get_editor_property("preview_value")  # (Vector4f takes no constructor arguments)
+    preview.set_editor_property("x", 0.5)
+    amount_in.set_editor_property("preview_value", preview)
+    times = MEL.create_material_expression_in_function(f, unreal.MaterialExpressionMultiply, -200, 0)
+    MEL.connect_material_expressions(colour_in, "", times, "A")
+    MEL.connect_material_expressions(amount_in, "", times, "B")
+    result = MEL.create_material_expression_in_function(f, unreal.MaterialExpressionFunctionOutput, 0, 0)
+    result.set_editor_property("output_name", "Result")
+    MEL.connect_material_expressions(times, "", result, "")
+    MEL.update_material_function(f)
+    # Its call, and a static switch parameter choosing the base colour (off: the call; on: green); an instance on.
+    m = material("M_Function")
+    call = node(m, unreal.MaterialExpressionMaterialFunctionCall)
+    call.set_material_function(f)
+    tint = node(m, unreal.MaterialExpressionVectorParameter, parameter_name="Tint",
+                default_value=unreal.LinearColor(0.8, 0.4, 0.2, 1.0))
+    MEL.connect_material_expressions(tint, "", call, "Color")
+    switch = node(m, unreal.MaterialExpressionStaticSwitchParameter, parameter_name="Green", default_value=False)
+    MEL.connect_material_expressions(call, "Result", switch, "False")
+    MEL.connect_material_expressions(node(m, unreal.MaterialExpressionConstant3Vector,
+                                          constant=unreal.LinearColor(0, 1, 0, 1)), "", switch, "True")
+    MEL.connect_material_property(switch, "", P.MP_BASE_COLOR)
+    MEL.recompile_material(m)
+    mi = TOOLS.create_asset("MI_Function_On", "/Game/Probe", unreal.MaterialInstanceConstant,
+                            unreal.MaterialInstanceConstantFactoryNew())
+    MEL.set_material_instance_parent(mi, m)
+    MEL.set_material_instance_static_switch_parameter_value(mi, "Green", True)
+    MEL.update_material_instance(mi)
+
     exporter = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unreal_export.py")
     sys.argv = [exporter, "--content", "/Game/Probe", "--out", out]
     runpy.run_path(exporter, run_name="__main__")

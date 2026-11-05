@@ -14,7 +14,8 @@
    "Mix": 0.5
   },
   "vector": {},
-  "texture": {}
+  "texture": {},
+  "switch": {}
  },
  "inputs": {
   "BaseColor": {
@@ -57,11 +58,13 @@
     "inputs": {
      "A": {
       "node": "MaterialExpressionTextureSample_0",
-      "output": "RGB"
+      "output": "RGB",
+      "output_index": 0
      },
      "Alpha": {
       "node": "MaterialExpressionScalarParameter_0",
-      "output": ""
+      "output": "",
+      "output_index": 0
      }
     }
    },
@@ -78,7 +81,8 @@
     "class": "MaterialExpressionScalarParameter",
     "props": {
      "default_value": 0.5,
-     "parameter_name": "Mix"
+     "parameter_name": "Mix",
+     "sort_priority": 32
     },
     "inputs": {}
    }
@@ -90,6 +94,7 @@
    }
   }
  },
+ "functions": {},
  "textures": {
   "textures/Game/Probe/Textures/T_Albedo.png": {
    "asset": "/Game/Probe/Textures/T_Albedo",

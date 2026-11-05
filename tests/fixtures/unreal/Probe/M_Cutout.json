@@ -12,7 +12,8 @@
  "parameters": {
   "scalar": {},
   "vector": {},
-  "texture": {}
+  "texture": {},
+  "switch": {}
  },
  "inputs": {
   "BaseColor": {
@@ -61,6 +62,7 @@
    }
   }
  },
+ "functions": {},
  "textures": {
   "textures/Game/Probe/Textures/T_Cutout.png": {
    "asset": "/Game/Probe/Textures/T_Cutout",

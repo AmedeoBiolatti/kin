@@ -13,6 +13,7 @@ with its sRGB, compression and green-flip settings. Nothing in the project is ch
 """
 import json
 import os
+import re
 import sys
 
 import unreal
@@ -52,6 +53,8 @@ class Exporter:
         self.out = out
         self.textures = {}
         self.used = set()  # the textures the material being exported names
+        self.functions = {}  # material functions' graphs, by path (each exported once)
+        self.declarations = {}  # each asset's named reroute usages -> their declarations (from its T3D)
 
     def texture(self, tex):
         """The texture exported (once) as PNG (EXR for float ones); its path relative to the export, with its settings."""
@@ -163,7 +166,9 @@ class Exporter:
                  "noise_function", "turbulence", "tiling", "repeat_size", "code", "output_type", "texture",
                  "sampler_type", "coordinate_index", "u_tiling", "v_tiling", "un_mirror_u", "un_mirror_v", "a_is_",
                  "default_value_bool", "x", "y", "z", "w", "fraction", "const_fraction", "power", "const_min",
-                 "const_max", "const_value", "const_x", "const_y")
+                 "const_max", "const_value", "const_x", "const_y", "material_function", "declaration", "input_name",
+                 "input_type", "preview_value", "use_preview_value_as_default", "sort_priority", "output_name",
+                 "value", "bias", "clamp_result")
         for key in sorted(set(dir(expression)) | set(named)):
             if key.startswith("_") or key in skip:
                 continue
@@ -177,20 +182,30 @@ class Exporter:
                 out[key] = str(v)
             elif isinstance(v, unreal.LinearColor):
                 out[key] = colour(v)
-            elif isinstance(v, (unreal.Vector, unreal.Vector4)) or type(v).__name__ in ("Vector4", "Vector4d"):
-                out[key] = [float(getattr(v, c)) for c in ("x", "y", "z", "w") if hasattr(v, c)]
+            elif isinstance(v, (unreal.Vector, unreal.Vector4)) or type(v).__name__ in ("Vector4", "Vector4d", "Vector4f"):
+                c = [float(getattr(v, k)) for k in ("x", "y", "z", "w") if hasattr(v, k)]
+                if not c:  # (Vector4f has its fields as editor properties only)
+                    for k in ("x", "y", "z", "w"):
+                        try:
+                            c.append(float(v.get_editor_property(k)))
+                        except Exception:
+                            break
+                out[key] = c
             elif isinstance(v, unreal.Vector2D):
                 out[key] = [float(v.x), float(v.y)]
             elif isinstance(v, unreal.EnumBase):
                 out[key] = enum_name(v)
             elif isinstance(v, unreal.Texture):
                 out[key] = self.texture(v)
+            elif isinstance(v, unreal.MaterialFunctionInterface):
+                out[key] = self.function(v)  # its path; its graph in the document's "functions"
+            elif isinstance(v, unreal.MaterialExpression):
+                out[key] = v.get_name()  # an expression it refers to (a named reroute's declaration)
         return out
 
-    def graph(self, base):
-        """The base material's expressions as a graph: each by its name, its class, settings and inputs (each the
-        expression and output feeding it, by name), and the outputs each feeds (kin_import_material's graph import)."""
-        nodes = {}
+    def walker(self, nodes, inputs_of):
+        """A visit(expression) adding each expression reached (by its name) to `nodes`: its class, settings and inputs
+        (the expression and output feeding each, by the input's name); `inputs_of(expression)` lists its inputs."""
 
         def visit(expression):
             name = expression.get_name()
@@ -203,7 +218,7 @@ class Exporter:
             except Exception:
                 names = []
             try:
-                inputs = MEL.get_inputs_for_material_expression(base, expression)
+                inputs = inputs_of(expression)
             except Exception:
                 inputs = []
             for i, source in enumerate(inputs):
@@ -216,6 +231,144 @@ class Exporter:
                 key = names[i] if i < len(names) and names[i] else str(i)
                 n["inputs"][key] = {"node": visit(source), "output": str(out)}
             return name
+
+        return visit
+
+    def function(self, func):
+        """A material function's graph, exported once: its expressions as a material's, its inputs and outputs (each
+        name -> its FunctionInput / FunctionOutput expression). A function instance's is its parent's."""
+        path = func.get_path_name().split(".")[0]
+        if path in self.functions:
+            return path
+        self.functions[path] = None  # (a function calling itself stops here)
+        base = func
+        instance = getattr(unreal, "MaterialFunctionInstance", None)
+        while instance is not None and isinstance(base, instance):
+            parent = base.get_editor_property("parent")
+            if parent is None:
+                break
+            base = parent
+        g = {"nodes": {}, "inputs": {}, "outputs": {}}
+        try:
+            expressions = MEL.get_material_function_expressions(base)
+        except Exception as e:
+            g["error"] = str(e)
+            self.functions[path] = g
+            return path
+        visit = self.walker(g["nodes"], lambda e: MEL.get_inputs_for_material_function_expression(base, e))
+        for e in expressions:
+            cls = e.get_class().get_name()
+            if cls == "MaterialExpressionFunctionInput":
+                g["inputs"][str(e.get_editor_property("input_name"))] = visit(e)
+            elif cls == "MaterialExpressionFunctionOutput":
+                g["outputs"][str(e.get_editor_property("output_name"))] = visit(e)
+        self.link_reroutes(base, g["nodes"], visit)
+        self.functions[path] = g
+        return path
+
+    def t3d(self, asset):
+        """What Python can't read of an asset's expressions, from its T3D text (ObjectExporterT3D), once an asset:
+        each named reroute usage's declaration, and each expression's inputs in order (source, output index, mask)."""
+        path = asset.get_path_name()
+        if path in self.declarations:
+            return self.declarations[path]
+        found = {"declarations": {}, "inputs": {}}
+        file = os.path.join(self.out, ".asset.t3d")
+        task = unreal.AssetExportTask()
+        task.object = asset
+        task.filename = file
+        task.automated = True
+        task.prompt = False
+        task.replace_identical = True
+        task.exporter = unreal.ObjectExporterT3D()
+        try:
+            if unreal.Exporter.run_asset_export_task(task):
+                current = None
+                for line in open(file, encoding="utf-8", errors="replace"):
+                    # (T3D lists each object twice: a Class= block, then its properties under Name= alone)
+                    b = re.search(r'Begin Object (?:Class=\S+ )?Name="([^"]+)"', line)
+                    if b:
+                        current = b.group(1)
+                        continue
+                    if line.strip().startswith("End Object"):
+                        current = None
+                        continue
+                    if not current:
+                        continue
+                    d = re.search(r"^\s*Declaration=\S*'[^']*:([A-Za-z0-9_]+)'", line)
+                    if d:
+                        found["declarations"][current] = d.group(1)
+                    for e in re.finditer(r"Expression=\"[^\"]*'[^']*?([A-Za-z0-9_]+)'\"([^)]*)", line):
+                        rest = e.group(2)
+                        index = re.search(r"OutputIndex=(\d+)", rest)
+                        mask = "".join(c for c in "RGBA" if ("Mask%s=1" % c) in rest) if "Mask=1" in rest else ""
+                        found["inputs"].setdefault(current, []).append((e.group(1), int(index.group(1)) if index else 0,
+                                                                        mask))
+        except Exception as e:
+            unreal.log_warning("unreal_export: no T3D of %s (%s)" % (path, e))
+        finally:
+            if os.path.exists(file):
+                os.remove(file)
+        self.declarations[path] = found
+        return found
+
+    def link_reroutes(self, asset, nodes, visit):
+        """The T3D's part of a graph. Each named reroute usage's declaration (the usage's Declaration isn't readable from Python), from the T3D;
+        a declaration reached only through its usages is visited too (and the usages it reaches, until none is left).
+        Then the channels of inputs one source feeds more than once: Python's output name is the first input's for all
+        (GetInputNodeOutputNameForMaterialExpression), the T3D has each one's mask."""
+        if any(n["class"] == "MaterialExpressionNamedRerouteUsage" for n in nodes.values()):
+            path = asset.get_path_name()
+            links = self.t3d(asset)["declarations"]
+            while True:
+                todo = [k for k, n in nodes.items()
+                        if n["class"] == "MaterialExpressionNamedRerouteUsage" and "declaration" not in n["props"]
+                        and links.get(k)]
+                if not todo:
+                    break
+                for u in todo:
+                    d = links[u]
+                    nodes[u]["props"]["declaration"] = d
+                    if d not in nodes:
+                        for where in (path + ":" + d, path + ":MaterialEditorOnlyData_0." + d):
+                            e = unreal.find_object(None, where)
+                            if e is not None:
+                                visit(e)
+                                break
+        # Every input's channels by its mask (renamed channels, "UV scale_H", are R, G, B or A to the import), and
+        # its output's index: the k-th input from a source is the k-th the T3D lists from it.
+        t3d = self.t3d(asset)["inputs"]
+        for k, n in nodes.items():
+            listed = t3d.get(k, [])
+            if not listed or not n["inputs"]:
+                continue
+            for source in {i["node"] for i in n["inputs"].values()}:
+                ours = [i for i in n["inputs"].values() if i["node"] == source]
+                theirs = [t for t in listed if t[0] == source]
+                if len(theirs) != len(ours):
+                    continue
+                for i, t in zip(ours, theirs):
+                    if t[2]:
+                        i["output"] = t[2]
+                    i["output_index"] = t[1]
+
+    def functions_of(self, graph):
+        """The functions a graph calls, and those they call, by path."""
+        found, todo = {}, [graph]
+        while todo:
+            g = todo.pop()
+            for n in (g or {}).get("nodes", {}).values():
+                p = n["props"].get("material_function")
+                if isinstance(p, str) and p not in found and self.functions.get(p) is not None:
+                    found[p] = self.functions[p]
+                    todo.append(found[p])
+        return found
+
+    def graph(self, base):
+        """The base material's expressions as a graph: each by its name, its class, settings and inputs (each the
+        expression and output feeding it, by name), and the outputs each feeds (kin_import_material's graph import)."""
+        nodes = {}
+        visit = self.walker(nodes, lambda e: MEL.get_inputs_for_material_expression(base, e))
 
         outputs = {}
         for key, prop in PROPERTIES.items():
@@ -233,6 +386,7 @@ class Exporter:
             except Exception:
                 out = ""
             outputs[key] = {"node": visit(node), "output": str(out)}
+        self.link_reroutes(base, nodes, visit)
         return {"nodes": nodes, "outputs": outputs}
 
     def material(self, asset):
@@ -282,6 +436,20 @@ class Exporter:
             tex = (MEL.get_material_instance_texture_parameter_value(asset, name) if instance
                    else MEL.get_material_default_texture_parameter_value(asset, name))
             params["texture"][str(name)] = self.texture(tex)
+        # Static switches (an instance's own values over its parents' and the defaults): they choose the graph.
+        params["switch"] = {}
+        try:
+            names = MEL.get_static_switch_parameter_names(asset)
+        except Exception:
+            names = []
+        for name in names or []:
+            try:
+                v = (MEL.get_material_instance_static_switch_parameter_value(asset, name)
+                     if isinstance(asset, unreal.MaterialInstanceConstant)
+                     else MEL.get_material_default_static_switch_parameter_value(base, name))
+                params["switch"][str(name)] = bool(v)
+            except Exception:
+                pass
         doc["parameters"] = params
         inputs = {}
         for key, prop in PROPERTIES.items():
@@ -301,8 +469,11 @@ class Exporter:
             inputs[key] = self.node(base, node, out, DEPTH)
         doc["inputs"] = inputs
         doc["graph"] = self.graph(base)
+        doc["functions"] = self.functions_of(doc["graph"])
+        # The textures it names, its functions' too (a function exported for an earlier material marked them then).
+        files = {n["props"].get("texture") for f in doc["functions"].values() for n in f["nodes"].values()}
         doc["textures"] = {i["file"]: {k: v for k, v in i.items() if k != "file"}
-                           for p, i in self.textures.items() if i["file"] and p in self.used}
+                           for p, i in self.textures.items() if i["file"] and (p in self.used or i["file"] in files)}
         return doc
 
 

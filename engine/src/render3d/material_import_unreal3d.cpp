@@ -7,6 +7,7 @@
 #include <kin/core/json_value.hpp>
 #include <kin/render3d/material_graph3d.hpp>
 #include <map>
+#include <memory>
 #include <set>
 #include <string_view>
 
@@ -482,6 +483,10 @@ class UnrealGraph {
 public:
     UnrealGraph(const JsonValue& doc, GraphBuilder& b, material_import::Context& x)
         : _doc(doc), _b(b), _x(x), _nodes(doc.find("graph") ? doc.find("graph")->find("nodes") : nullptr) {}
+    // A material function's graph, inlined where `call` (a MaterialFunctionCall of `caller`'s) calls it.
+    UnrealGraph(UnrealGraph& caller, const JsonValue& call, const JsonValue& function)
+        : _doc(caller._doc), _b(caller._b), _x(caller._x), _nodes(function.find("nodes")), _root(&caller.root()),
+          _caller(&caller), _call(&call), _depth(caller._depth + 1) {}
 
     // The textures the graph names (each a parameter of its own): the export's file, and whether it is a normal map.
     struct Texture {
@@ -495,14 +500,17 @@ public:
         const auto key = node + "|" + pin;
         if (const auto it = _done.find(key); it != _done.end())
             return it->second;
-        if (_visiting.contains(node)) {
+        if (_visiting.contains(key)) {
             why = node + " feeds itself";
             return std::nullopt;
         }
-        _visiting.insert(node);
-        auto v = translate(node, why);
-        _visiting.erase(node);
-        if (v)
+        _visiting.insert(key);
+        const JsonValue* n = this->node(node);
+        const bool call =
+            n && n->find("class") && n->find("class")->as_string() == "MaterialExpressionMaterialFunctionCall";
+        auto v = call ? function_call(node, *n, pin, why) : translate(node, why);
+        _visiting.erase(key);
+        if (v && !call)
             v = swizzle(*v, pin);
         if (v)
             _done[key] = *v;
@@ -510,6 +518,110 @@ public:
     }
 
 private:
+    UnrealGraph& root() { return _root ? *_root : *this; }
+    // What feeds `n`'s input `name` (its JSON), or null.
+    static const JsonValue* connected(const JsonValue& n, const std::string& name) {
+        const auto* inputs = n.find("inputs");
+        return inputs && inputs->is_object() ? inputs->find(name) : nullptr;
+    }
+    std::optional<std::string> source_value(const JsonValue& in, std::string& why) {
+        return value(in.find("node") ? in.find("node")->as_string() : "",
+                     in.find("output") ? in.find("output")->as_string() : "", why);
+    }
+    // A material function's call: the function's graph inlined (one per call: its inputs are the call's), the value of
+    // its output `pin` (its first where the pin is unnamed).
+    std::optional<std::string> function_call(const std::string& name, const JsonValue& n, const std::string& pin,
+                                             std::string& why) {
+        const std::string path = text(n, "material_function");
+        const auto* functions = _doc.find("functions");
+        const JsonValue* function = functions && !path.empty() ? functions->find(path) : nullptr;
+        if (!function || !function->is_object() || function->find("error")) {
+            why = name + ": its material function " + (path.empty() ? std::string("(not exported)") : path) +
+                  " is not in the export";
+            return std::nullopt;
+        }
+        if (_depth >= 16) {
+            why = name + ": material functions 16 deep";
+            return std::nullopt;
+        }
+        auto& child = _children[name];
+        if (!child)
+            child = std::make_unique<UnrealGraph>(*this, n, *function);
+        const auto* outputs = function->find("outputs");
+        const JsonValue* out = nullptr;
+        if (outputs && outputs->is_object()) {
+            out = pin.empty() ? nullptr : outputs->find(pin);
+            if (!out && !outputs->members().empty())
+                out = &outputs->members().begin()->second;
+        }
+        if (!out || !out->is_string()) {
+            why = name + ": " + path + " has no output " + pin;
+            return std::nullopt;
+        }
+        std::string inner;
+        auto v = child->value(out->as_string(), "", inner);
+        if (!v)
+            why = std::filesystem::path(path).filename().string() + " > " + inner;
+        return v;
+    }
+    // A static boolean's value at import (a StaticBool, a StaticBoolParameter by the material's values, a function's
+    // static input by its call), or none.
+    std::optional<bool> static_bool(const JsonValue& in) {
+        return static_bool_of(in.find("node") ? in.find("node")->as_string() : "");
+    }
+    std::optional<bool> static_bool_of(const std::string& name, int hops = 0) {
+        const JsonValue* n = node(name);
+        if (!n || hops > 64)
+            return std::nullopt;
+        const std::string cls = n->find("class") ? n->find("class")->as_string() : "";
+        if (cls == "MaterialExpressionNamedRerouteUsage")
+            return static_bool_of(text(*n, "declaration"), hops + 1);
+        if (cls == "MaterialExpressionReroute" || cls == "MaterialExpressionNamedRerouteDeclaration") {
+            const auto* inputs = n->find("inputs");
+            if (!inputs || !inputs->is_object() || inputs->members().empty())
+                return std::nullopt;
+            const auto& first = inputs->members().begin()->second;
+            return static_bool_of(first.find("node") ? first.find("node")->as_string() : "", hops + 1);
+        }
+        if (cls == "MaterialExpressionStaticBool")
+            return prop(*n, "value", 0) != 0;
+        if (cls == "MaterialExpressionStaticBoolParameter" || cls == "MaterialExpressionStaticSwitchParameter")
+            return switch_value(*n);
+        if (cls == "MaterialExpressionFunctionInput" && _caller) {
+            if (const auto* given = connected(*_call, text(*n, "input_name")))
+                return _caller->static_bool(*given);
+            if (const auto* preview = connected(*n, "Preview"))
+                return static_bool(*preview);
+            const auto* p = n->find("props") ? n->find("props")->find("preview_value") : nullptr;
+            return p && p->is_array() && !p->items().empty() && p->items()[0].as_number() != 0;
+        }
+        return std::nullopt;
+    }
+    // A static switch parameter's value: the material's (an instance's own), else its default.
+    bool switch_value(const JsonValue& n) {
+        const auto* params = _doc.find("parameters");
+        const auto* switches = params ? params->find("switch") : nullptr;
+        const std::string name = text(n, "parameter_name");
+        const auto* given = switches ? switches->find(name) : nullptr;
+        const bool fallback = prop(n, "default_value", 0) != 0;
+        const bool on = given && given->is_bool() ? given->as_bool() : fallback;
+        if (on != fallback)
+            root().switched[name] = on;
+        return on;
+    }
+
+public:
+    // The static switches set otherwise than their defaults (they make another graph: its file is named by them).
+    std::map<std::string, bool> switched;
+
+private:
+    // A GLSL expression of its own (kin's glsl node), `width` floats.
+    std::string glsl(const std::string& expr, int width, std::vector<std::pair<std::string, std::string>> inputs) {
+        static const char* types[] = {"float", "float", "vec2", "vec3", "vec4"};
+        return _b.add(
+            "glsl", std::move(inputs),
+            {{"glsl", GraphBuilder::quote(expr)}, {"result", GraphBuilder::quote(types[std::clamp(width, 1, 4)])}});
+    }
     std::string swizzle(const std::string& ref, std::string pin) {
         for (auto& c : pin)
             c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -584,7 +696,7 @@ private:
         }
         const JsonValue& n = *found;
         const std::string cls = n.find("class") ? n.find("class")->as_string() : "";
-        const std::string kind = cls.rfind("MaterialExpression", 0) == 0 ? cls.substr(18) : cls;
+        std::string kind = cls.rfind("MaterialExpression", 0) == 0 ? cls.substr(18) : cls;
         const auto num = GraphBuilder::number;
         const auto in = [&](std::initializer_list<const char*> names, std::optional<std::string> fallback = {}) {
             return input(n, names, std::move(fallback), why);
@@ -597,7 +709,7 @@ private:
             return _b.add(type, {{"a", *x}, {"b", *y}});
         };
         const auto unary = [&](const char* type) -> std::optional<std::string> {
-            const auto x = in({"", "None", "Input"});
+            const auto x = in({"", "None", "Input", "VectorInput"}); // (Normalize's is VectorInput)
             return x ? std::optional{_b.add(type, {{"x", *x}})} : std::nullopt;
         };
         if (kind == "Constant")
@@ -612,6 +724,108 @@ private:
             return param(text(n, "parameter_name"), "float", {prop(n, "default_value", 0), 0, 0, 0});
         if (kind == "VectorParameter")
             return param(text(n, "parameter_name"), "color", colour(n, "default_value"));
+        if (kind == "TextureSample" || kind == "TextureSampleParameter2D") {
+            if (const auto* tex = connected(n, "Tex")) { // a texture object's (a function's texture input)
+                const auto t = source_value(*tex, why);
+                if (!t)
+                    return std::nullopt;
+                if (t->size() < 4 || (*t)[1] != '@') {
+                    why = name + ": its Tex is not a texture object";
+                    return std::nullopt;
+                }
+                const std::string pname = t->substr(2, t->size() - 3);
+                auto& list = root().textures;
+                const auto entry = std::ranges::find(list, pname, &Texture::param);
+                const bool normal = text(n, "sampler_type").find("NORMAL") != std::string::npos;
+                const auto* settings =
+                    _doc.find("textures") && entry != list.end() ? _doc.find("textures")->find(entry->file) : nullptr;
+                if (entry != list.end() && normal) {
+                    entry->normal = true;
+                    entry->srgb = false;
+                }
+                const auto uv = in({"UVs", "Coordinates"}, GraphBuilder::quote("uv"));
+                if (!uv)
+                    return std::nullopt;
+                const std::string sample = _b.add("texture", {{"uv", *uv}}, {{"texture", GraphBuilder::quote(pname)}});
+                if (!normal)
+                    return sample;
+                const std::string unpacked = _b.add("unpack_normal", {{"texel", sample}});
+                const bool flipped = settings && settings->bool_at("flip_green_channel", false);
+                return flipped ? _b.add("multiply", {{"a", unpacked}, {"b", "[1, -1, 1]"}}) : unpacked;
+            }
+        }
+        if (kind == "TextureObject" || kind == "TextureObjectParameter") {
+            // A texture as a value (to a sample's Tex, through functions' texture inputs): "@<parameter>".
+            std::string file = text(n, "texture");
+            std::string pname = text(n, "parameter_name");
+            if (const auto* p = _doc.find("parameters"); p && !pname.empty())
+                if (const auto* t = p->find("texture"); t && t->find(pname) && t->find(pname)->is_string())
+                    file = t->find(pname)->as_string();
+            if (file.empty()) {
+                why = name + ": a texture object of no texture";
+                return std::nullopt;
+            }
+            if (pname.empty())
+                pname = "t_" + std::filesystem::path(file).stem().string();
+            const std::string source = pname;
+            if (const auto known = std::ranges::find(_b.params, source, &GraphBuilder::Param::source);
+                known != _b.params.end())
+                pname = known->name;
+            else
+                pname = _b.safe_name(source);
+            const auto* settings = _doc.find("textures") ? _doc.find("textures")->find(file) : nullptr;
+            auto& list = root().textures;
+            if (std::none_of(list.begin(), list.end(), [&](const Texture& t) { return t.param == pname; }))
+                list.push_back({pname, file, false, settings ? settings->bool_at("srgb", true) : true});
+            if (!_b.has_param(pname))
+                _b.params.push_back({pname, "texture", {}, "", false, source});
+            return GraphBuilder::quote("@" + pname);
+        }
+        if (kind == "FunctionOutput") { // its one input, by whatever name
+            const auto* inputs = n.find("inputs");
+            if (!inputs || !inputs->is_object() || inputs->members().empty()) {
+                why = name + ": a function output fed by nothing";
+                return std::nullopt;
+            }
+            return source_value(inputs->members().begin()->second, why);
+        }
+        if (kind == "FunctionInput") {
+            // The call's input of its name, else its preview (as Unreal uses it by default): an input or its value,
+            // cast to the input's type as Unreal casts it (a vec3 into a Vector2 input: its xy).
+            const std::string input_name = text(n, "input_name");
+            std::string type = text(n, "input_type");
+            for (auto& c : type)
+                c = char(std::toupper(static_cast<unsigned char>(c)));
+            const int width = type.find("VECTOR2") != std::string::npos   ? 2
+                              : type.find("VECTOR3") != std::string::npos ? 3
+                              : type.find("VECTOR4") != std::string::npos ? 4
+                                                                          : 1;
+            const bool value_type = type.find("TEXTURE") == std::string::npos &&
+                                    type.find("BOOL") == std::string::npos &&
+                                    type.find("ATTRIBUTES") == std::string::npos;
+            if (_caller)
+                if (const auto* given = connected(*_call, input_name)) {
+                    std::string outer;
+                    auto v = _caller->source_value(*given, outer);
+                    if (!v)
+                        why = input_name + ": " + outer;
+                    return v && value_type ? std::optional{_b.fit(*v, width)} : v;
+                }
+            if (const auto* preview = connected(n, "Preview")) {
+                auto v = source_value(*preview, why);
+                return v && value_type ? std::optional{_b.fit(*v, width)} : v;
+            }
+            if (type.find("TEXTURE") != std::string::npos) {
+                why = name + ": a texture input not given";
+                return std::nullopt;
+            }
+            const auto* p = n.find("props") ? n.find("props")->find("preview_value") : nullptr;
+            std::vector<f32> c;
+            for (int k = 0; k < width; ++k)
+                c.push_back(p && p->is_array() && size_t(k) < p->items().size() ? f32(p->items()[size_t(k)].as_number())
+                                                                                : 0.0f);
+            return width == 1 ? num(c[0]) : GraphBuilder::vector(c);
+        }
         if (kind == "TextureSample" || kind == "TextureSampleParameter2D") {
             std::string file = text(n, "texture");
             std::string pname = text(n, "parameter_name");
@@ -632,8 +846,9 @@ private:
                 pname = _b.safe_name(source);
             const bool normal = text(n, "sampler_type").find("NORMAL") != std::string::npos;
             const auto* settings = _doc.find("textures") ? _doc.find("textures")->find(file) : nullptr;
-            if (std::none_of(textures.begin(), textures.end(), [&](const Texture& t) { return t.param == pname; }))
-                textures.push_back({pname, file, normal, !normal && settings && settings->bool_at("srgb", true)});
+            auto& list = root().textures;
+            if (std::none_of(list.begin(), list.end(), [&](const Texture& t) { return t.param == pname; }))
+                list.push_back({pname, file, normal, !normal && settings && settings->bool_at("srgb", true)});
             if (!_b.has_param(pname)) // its slot is chosen when all are known
                 _b.params.push_back({pname, "texture", {}, "", false, source});
             const auto uv = in({"UVs", "Coordinates"}, GraphBuilder::quote("uv"));
@@ -670,6 +885,8 @@ private:
             return binary("min", "A", "B", 0, 1);
         if (kind == "Max")
             return binary("max", "A", "B", 0, 1);
+        if (kind == "DotProduct" || kind == "CrossProduct")
+            kind = kind == "DotProduct" ? "Dot" : "Cross"; // (Unreal's class names)
         if (kind == "Dot" || kind == "Cross" || kind == "Distance") {
             const auto a = in({"A"}), b = in({"B"});
             if (!a || !b)
@@ -711,7 +928,8 @@ private:
         }
         static const std::map<std::string, const char*> unaries{
             {"OneMinus", "one_minus"}, {"Abs", "abs"},         {"Floor", "floor"},       {"Ceil", "ceil"},
-            {"Frac", "fract"},         {"SquareRoot", "sqrt"}, {"Saturate", "saturate"}, {"Normalize", "normalize"}};
+            {"Frac", "fract"},         {"SquareRoot", "sqrt"}, {"Saturate", "saturate"}, {"Normalize", "normalize"},
+            {"Sign", "sign"},          {"Tangent", "tan"}};
         if (const auto u = unaries.find(kind); u != unaries.end())
             return unary(u->second);
         if (kind == "Sine" || kind == "Cosine") { // sin(x * 2 pi / period), or of x with no period
@@ -755,6 +973,54 @@ private:
             return GraphBuilder::quote("vertex_color");
         if (kind == "CameraVectorWS")
             return GraphBuilder::quote("view");
+        // Unreal's world in centimetres, as World Position: the eye, the view depth.
+        if (kind == "CameraPositionWS")
+            return glsl("frame.eye.xyz * 100.0", 3, {});
+        if (kind == "PixelDepth")
+            return glsl("dot(kin_position() - frame.eye.xyz, frame.cascade_forward.xyz) * 100.0", 1, {});
+        if (kind == "Round") {
+            const auto x = in({"", "None", "Input"});
+            return x ? std::optional{glsl("round(x)", _b.width(*x), {{"x", *x}})} : std::nullopt;
+        }
+        if (kind == "Rotator") { // the coordinate turned about the centre by time x speed (radians)
+            const auto c = in({"Coordinate"}, GraphBuilder::quote("uv")), t = in({"Time"}, GraphBuilder::quote("time"));
+            if (!c || !t)
+                return std::nullopt;
+            const std::string centre =
+                "[" + num(prop(n, "center_x", 0.5f)) + ", " + num(prop(n, "center_y", 0.5f)) + "]";
+            const std::string angle = _b.add("multiply", {{"a", *t}, {"b", num(prop(n, "speed", 0.25f))}});
+            return glsl("vec2(dot(vec2(cos(a), -sin(a)), p - c), dot(vec2(sin(a), cos(a)), p - c)) + c", 2,
+                        {{"p", _b.fit(*c, 2)}, {"a", angle}, {"c", centre}});
+        }
+        if (kind == "FeatureLevelSwitch" || kind == "QualitySwitch") {
+            // What a desktop GPU compiles (SM6's, SM5's) at the editor's quality (Epic's, High's), else the default.
+            const auto* inputs = n.find("inputs");
+            for (const char* level : {"SM6", "SM5", "Epic", "High", "Default"})
+                if (inputs && inputs->find(level))
+                    return in({level});
+            return in({"Default"});
+        }
+        if (kind == "ConstantBiasScale") { // (x + bias) x scale (Unreal's defaults: 1, 0.5)
+            const auto x = in({"", "None", "Input"});
+            return x ? std::optional{_b.add("multiply",
+                                            {{"a", _b.add("add", {{"a", *x}, {"b", num(prop(n, "bias", 1))}})},
+                                             {"b", num(prop(n, "scale", 0.5f))}})}
+                     : std::nullopt;
+        }
+        if (kind == "InverseLinearInterpolate") { // where Value is between A and B: (value - a) / (b - a)
+            const auto a = in({"A"}, num(prop(n, "const_a", 0))), b = in({"B"}, num(prop(n, "const_b", 1))),
+                       v = in({"Value"}, num(prop(n, "const_value", 0)));
+            if (!a || !b || !v)
+                return std::nullopt;
+            const std::string t = _b.add("divide", {{"a", _b.add("subtract", {{"a", *v}, {"b", *a}})},
+                                                    {"b", _b.add("subtract", {{"a", *b}, {"b", *a}})}});
+            return prop(n, "clamp_result", 0) != 0 ? _b.add("saturate", {{"x", t}}) : t;
+        }
+        if (kind == "ReflectionVectorWS") // the view reflected about the pixel's normal
+            return _b.add("reflect", {{"direction", _b.add("negate", {{"x", GraphBuilder::quote("view")}})},
+                                      {"normal", GraphBuilder::quote("surface.normal")}});
+        if (kind == "ScreenPosition") // its ViewportUV: 0 to 1 across the view, from the top left (kin's screen)
+            return GraphBuilder::quote("screen");
         if (kind == "PixelNormalWS" || kind == "VertexNormalWS")
             return GraphBuilder::quote(kind == "PixelNormalWS" ? "surface.normal" : "normal");
         if (kind == "Fresnel") { // base + (1 - base) x (1 - n.v)^exponent
@@ -784,12 +1050,24 @@ private:
             const std::string grey = _b.add("dot", {{"a", *x}, {"b", lum}});
             return _b.add("mix", {{"a", *x}, {"b", grey}, {"t", *f}});
         }
+        if (kind == "NamedRerouteUsage") // its declaration's
+            if (const std::string declaration = text(n, "declaration"); !declaration.empty())
+                return value(declaration, "", why);
         if (kind == "Reroute" || kind == "NamedRerouteDeclaration" || kind == "NamedRerouteUsage")
             return in({"", "None", "Input"});
         if (kind == "StaticSwitchParameter" || kind == "StaticSwitch") {
-            const bool on = prop(n, "default_value", 0) != 0;
-            _x.note(name + ": a static switch, its default (" + std::string(on ? "true" : "false") + ") taken");
-            return in({on ? "True" : "False", on ? "A" : "B"});
+            // Chosen at import as Unreal chooses it at compile time: a parameter by the material's value (an
+            // instance's own), a switch by its Value (a static bool), else its default.
+            std::optional<bool> on;
+            if (kind == "StaticSwitchParameter")
+                on = switch_value(n);
+            else if (const auto* v = connected(n, "Value"))
+                on = static_bool(*v);
+            if (!on) {
+                on = prop(n, "default_value", 0) != 0;
+                _x.note(name + ": a static switch, its default (" + std::string(*on ? "true" : "false") + ") taken");
+            }
+            return in({*on ? "True" : "False", *on ? "A" : "B"});
         }
         why = name + ": a " + kind + " (kin has no node for it)";
         return std::nullopt;
@@ -799,6 +1077,11 @@ private:
     GraphBuilder& _b;
     material_import::Context& _x;
     const JsonValue* _nodes;
+    UnrealGraph* _root = nullptr;     // a function's: the material's graph (its textures)
+    UnrealGraph* _caller = nullptr;   // a function's: the graph calling it
+    const JsonValue* _call = nullptr; // and the call (its inputs)
+    int _depth = 0;
+    std::map<std::string, std::unique_ptr<UnrealGraph>> _children; // the functions inlined, by call
     std::map<std::string, std::string> _done;
     std::set<std::string> _visiting;
 };
@@ -880,7 +1163,17 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         }
         for (const auto& w : compiled.warnings)
             x.note(w.node + ": " + w.message);
-        imported.graph = x.out / (b.name + ".kingraph");
+        // Its file: the base material's name, and the static switches set otherwise than their defaults (another
+        // graph each: an instance changing one).
+        std::string file_name = b.name;
+        for (const auto& [name, on] : g.switched) {
+            std::string part = name;
+            for (auto& c : part)
+                if (!std::isalnum(static_cast<unsigned char>(c)))
+                    c = '_';
+            file_name += "__" + part + (on ? "_on" : "_off");
+        }
+        imported.graph = x.out / (file_name + ".kingraph");
         if (options.write) {
             std::filesystem::create_directories(x.out);
             std::ofstream file(imported.graph, std::ios::binary);

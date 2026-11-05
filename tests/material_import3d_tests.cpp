@@ -505,11 +505,12 @@ void unreal_graphs() {
         std::cerr << e.node << ": " << e.message << '\n';
     CHECK(g.ok() && g.parameters.size() == 4);
     const auto& s = g.surface;
-    for (const char* expected : {"vec2(0.100000001, 0.0) * vec2(frame.time.x)", "(kin_uv() * vec2(4.0, 4.0))",
-                                 "pow(1.0 - clamp(dot(normalize(s.normal), kin_view()), 0.0, 1.0), 3.0)", "clamp(",
-                                 "0.100000001, 0.899999976)", "(kin_position() * vec3(100.0))", "* 6.28318531",
-                                 "kin_graph_unpack_normal(", "* vec3(1.0, -1.0, 1.0)", "kin_graph_tangent_to_world(",
-                                 "* vColor)", "s.emission = ", "s.normal = ", "s.roughness = ", "s.base_color = "})
+    for (const char* expected :
+         {"vec2(0.100000001, 0.0) * vec2(frame.time.x)", "(kin_uv() * vec2(4.0, 4.0))",
+          "pow(1.0 - clamp(dot(normalize(s.normal), kin_view()), 0.0, 1.0), 3.0)", "clamp(",
+          "0.100000001, 0.899999976)", "(kin_position() * vec3(100.0))", "* 6.28318531", "kin_graph_unpack_normal(",
+          "* vec3(1.0, -1.0, 1.0)", "kin_graph_tangent_to_world(", "* (vColor).xyz)",
+          "s.emission = ", "s.normal = ", "s.roughness = ", "s.base_color = "})
         if (!contains_text(s, expected)) {
             std::cerr << "missing: " << expected << '\n' << s << '\n';
             CHECK(false);
@@ -523,6 +524,26 @@ void unreal_graphs() {
           std::abs(blue->asset.base.material.params.at("Tint").value[0] - 0.1f) < 1e-6f);
     const auto custom = import_unreal_graph(project / "Probe/M_Custom.json", options);
     CHECK(custom && has_note(*custom, "BaseColor: MaterialExpressionCustom_0: a Custom"));
+    // A material function inlined (MF_Tint: Color x Amount, Amount left to its preview value 0.5) behind a static
+    // switch that is off; an instance that turns it on gets a graph of its own (green), not its parent's.
+    const auto surface_of = [](const fs::path& graph) {
+        std::ifstream file(graph);
+        const auto compiled = compile_material_graph3d(
+            std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}});
+        for (const auto& e : compiled.errors)
+            std::cerr << e.node << ": " << e.message << '\n';
+        CHECK(compiled.ok());
+        return compiled.surface;
+    };
+    const auto function = import_unreal_graph(project / "Probe/M_Function.json", options);
+    CHECK(function && function->graph.filename() == "M_Function.kingraph" && function->notes.empty());
+    const std::string tinted = surface_of(function->graph);
+    CHECK(contains_text(tinted, "((p_Tint).xyz * vec3(0.5))") && !contains_text(tinted, "vec3(0.0, 1.0, 0.0)"));
+    const auto on = import_unreal_graph(project / "Probe/MI_Function_On.json", options);
+    CHECK(on && on->graph.filename() == "M_Function__Green_on.kingraph" && on->notes.empty() &&
+          on->asset.base.material.graph == fs::path("kin/M_Function__Green_on.kingraph"));
+    CHECK(contains_text(surface_of(on->graph), "s.base_color = max(vec3(0.0, 1.0, 0.0)"));
+    CHECK(surface_of(function->graph) == tinted); // (the instance left its parent's graph alone)
     // Every Tier 1 fixture imports as a graph too.
     for (const char* name : {"M_ORM", "M_Gloss", "M_Cutout", "M_Glow", "M_Unlit", "M_Lerp", "MI_ORM_Green"}) {
         const auto r = import_unreal_graph(project / "Probe" / (std::string(name) + ".json"), options);
