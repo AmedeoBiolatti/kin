@@ -2,6 +2,7 @@
 // Scene3D::global_illumination's area in windows round the camera, made again where it changes (G5c); the lit scene and
 // the probes (G5b); the debug view and the read-back.
 #include "embedded_gpu_shader.hpp"
+#include "gpu_area_lights3d.hpp"
 #include "gpu_device.hpp"
 #include "gpu_geometry_batch.hpp"
 #include "gpu_renderer2d_backend.hpp"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <kin/platform/log.hpp>
@@ -19,6 +21,7 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <unordered_set>
 
 namespace kin::gpu {
 
@@ -98,6 +101,9 @@ struct GiLightUniforms {
     GiProbeUniforms probes;
     f32 sun_matrix[16]; // the GI's sun map's view and projection (GpuRenderer3D::_gi_sun_matrix)
     f32 sun_map[4];     // x: 1 with the map, y: its depth bias, z: a texel (uv), w: a texel (world)
+    f32 area[4];        // area-light emitters, 1 with area lights, GI emitters in the explicit flags
+    f32 area_scene[4];  // where the copies start in the scene buffer (vec4s); the settled hierarchy's first node and
+                        // first triangle, 1 when there is one (bits are floats: exact below 2^24)
 };
 struct GiLight {
     f32 at[4];     // place, reach
@@ -151,6 +157,8 @@ struct GiResolveUniforms {
 };
 static_assert(sizeof(GiResolveUniforms) == 352);
 
+// Renders a copy stays unchanged before it joins the area lights' settled hierarchy (GpuView3D::Gi::area_seen).
+constexpr u32 area_settle = 8;
 // The most rays a batch casts (16 bytes each in the rays' buffer).
 constexpr u32 max_gi_rays = 1u << 20;
 // The lit scene's turn: each render lights its blocks made again and an eighth of the rest.
@@ -182,6 +190,41 @@ SDL_GPUComputePipeline* make_gi_compute(SDL_GPUDevice* device, std::string_view 
     info.threadcount_y = threads_y;
     info.threadcount_z = 1;
     return SDL_CreateGPUComputePipeline(device, &info);
+}
+
+// The most a transform's 3 x 3 part grows an area: the product of its two largest singular values (the square roots of
+// the two largest eigenvalues of M^T M, a symmetric 3 x 3 matrix's, found in closed form).
+f32 area_growth(const Mat4f& t) {
+    const f64 c[3][3] = {{t.m[0], t.m[1], t.m[2]}, {t.m[4], t.m[5], t.m[6]}, {t.m[8], t.m[9], t.m[10]}}; // columns
+    f64 a[3][3];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            a[i][j] = c[i][0] * c[j][0] + c[i][1] * c[j][1] + c[i][2] * c[j][2];
+        }
+    }
+    const f64 off = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
+    std::array<f64, 3> e{a[0][0], a[1][1], a[2][2]};
+    if (off > 1e-30) {
+        const f64 q = (a[0][0] + a[1][1] + a[2][2]) / 3.0;
+        const f64 p2 =
+            (a[0][0] - q) * (a[0][0] - q) + (a[1][1] - q) * (a[1][1] - q) + (a[2][2] - q) * (a[2][2] - q) + 2.0 * off;
+        const f64 p = std::sqrt(p2 / 6.0);
+        f64 b[3][3];
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                b[i][j] = (a[i][j] - (i == j ? q : 0.0)) / p;
+            }
+        }
+        const f64 det = b[0][0] * (b[1][1] * b[2][2] - b[1][2] * b[2][1]) -
+                        b[0][1] * (b[1][0] * b[2][2] - b[1][2] * b[2][0]) +
+                        b[0][2] * (b[1][0] * b[2][1] - b[1][1] * b[2][0]);
+        const f64 phi = std::acos(std::clamp(det / 2.0, -1.0, 1.0)) / 3.0;
+        e[0] = q + 2.0 * p * std::cos(phi);
+        e[2] = q + 2.0 * p * std::cos(phi + 2.0943951023931957);
+        e[1] = 3.0 * q - e[0] - e[2];
+    }
+    std::sort(e.begin(), e.end());
+    return static_cast<f32>(std::sqrt(std::max(e[1], 0.0) * std::max(e[2], 0.0)) * 1.0001); // (a hair over: a bound)
 }
 
 // Workgroups for `count` threads, a row of at most 32768 (SDL_GPU allows 65535 a dimension) and as many rows as that
@@ -393,13 +436,15 @@ void GpuRenderer3D::make_gi() {
         _gi_voxelize = make_gi_compute(handle, "gi_voxelize.comp.spv", 2, 6, 0, 2);
         _gi_attributes = make_gi_compute(handle, "gi_voxelize_attributes.comp.spv", 2, 8, 3, 0);
         _gi_flood = make_gi_compute(handle, "gi_flood.comp.spv", 1, 1, 1, 1);
-        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 8, 3, 2, 0);
+        _gi_light = make_gi_compute(handle, "gi_light.comp.spv", 8, 8, 3, 0);
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
         _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 8, 0, 3, 0, 8, 8);
+        _gi_area = make_gi_compute(handle, "gi_area.comp.spv", 3, 6, 1, 0, 8, 8);
+        _gi_area_fill = make_gi_compute(handle, "gi_area_fill.comp.spv", 7, 0, 1, 2, 8, 8);
         if (!_gi_clear || !_gi_voxelize || !_gi_attributes || !_gi_flood || !_gi_light || !_gi_place || !_gi_trace ||
-            !_gi_update || !_gi_resolve) {
+            !_gi_update || !_gi_resolve || !_gi_area || !_gi_area_fill) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
         }
         _gi_view_shader = GpuShader::from_embedded(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "gi_view.frag.spv",
@@ -421,6 +466,13 @@ void GpuRenderer3D::make_gi() {
         const std::array<u8, 64> zeros{};
         _gi_empty = std::make_shared<GpuBuffer>(
             _device->create_buffer(SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ, zeros.data(), zeros.size()));
+        _area_ltc = std::make_shared<GpuBuffer>(_device->create_buffer(
+            SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, area_light_ltc, sizeof(f32) * area_light_ltc_floats));
+        _area_dummy = std::make_shared<GpuBuffer>(
+            _device->create_buffer(SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, zeros.data(), zeros.size()));
+        _area_cache_none = _device->create_volume(1, 1, 1, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                                  SDL_GPU_TEXTUREUSAGE_SAMPLER |
+                                                      SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE);
         _gi_available = true;
     } catch (const std::exception& e) {
         KIN_LOG_INFO_F("render", "3D: global illumination not available",
@@ -432,8 +484,9 @@ void GpuRenderer3D::make_gi() {
 
 void GpuRenderer3D::release_gi_pipelines() {
     SDL_GPUDevice* handle = _device->handle();
-    for (SDL_GPUComputePipeline** compute : {&_gi_clear, &_gi_voxelize, &_gi_attributes, &_gi_flood, &_gi_light,
-                                             &_gi_place, &_gi_trace, &_gi_update, &_gi_resolve}) {
+    for (SDL_GPUComputePipeline** compute :
+         {&_gi_clear, &_gi_voxelize, &_gi_attributes, &_gi_flood, &_gi_light, &_gi_place, &_gi_trace, &_gi_update,
+          &_gi_resolve, &_gi_area, &_gi_area_fill}) {
         if (*compute) {
             SDL_ReleaseGPUComputePipeline(handle, *compute);
             *compute = nullptr;
@@ -931,6 +984,293 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         g.copy_order.resize(copies.size());
         std::transform(copies.begin(), copies.end(), g.copy_order.begin(), [](const Copy& c) { return c.hash; });
     }
+    // Area lights (emitters Exact): the copies' triangles and emitters, made again when the copies change; nothing
+    // without a copy that can be one (an emitter the GI numbers, without emissive or base-colour maps), so that such a
+    // scene costs what it does with the probes alone.
+    const auto& area_settings = scene.global_illumination.area_lights;
+    const bool exact = scene.global_illumination.emitters == GiEmitters3D::Exact;
+    // The emitters (each copy's emissive triangles in world space, a group of their own for the pairing) and those of
+    // them that light as area lights: made first, so that without one nothing more is (the occluders' hierarchy
+    // neither).
+    const f32 smallest = area_settings.min_size > 0.0f ? area_settings.min_size : 0.5f * cell;
+    // A GI emitter none of whose copies can have a piece min_size across is never kept, so its triangles are not even
+    // gathered: a bound per copy from its mesh's largest piece (area_light_pieces, found once a mesh) and the most its
+    // transform grows an area (area_growth); nor are those with more pieces than max_emitters. The kept are those the
+    // builder keeps.
+    const auto collect_emitting = [&] {
+        std::unordered_set<u32> possible;
+        std::unordered_map<u32, u32> pieces; // by GI emitter: all its copies' pieces (past max_emitters: never kept)
+        for (const Copy& c : copies) {
+            const Job& j = jobs[c.job];
+            if (j.skinned || j.mesh->gi_triangles.empty() || j.emitter == 0) {
+                continue;
+            }
+            auto [made, unknown] = g.area_pieces.try_emplace(j.mesh->serial);
+            if (unknown) {
+                made->second = area_light_pieces(j.mesh->gi_triangles);
+            }
+            pieces[j.emitter] += made->second.count;
+            if (made->second.largest * area_growth(c.instance->transform) >= smallest * smallest) {
+                possible.insert(j.emitter);
+            }
+        }
+        std::erase_if(possible, [&](u32 e) { return pieces[e] > area_settings.max_emitters; });
+        std::vector<AreaLightEmitterTriangle> emitting;
+        for (u32 ci = 0; ci < copies.size() && !possible.empty(); ++ci) {
+            const Copy& c = copies[ci];
+            const Job& j = jobs[c.job];
+            if (j.skinned || j.mesh->gi_triangles.empty() || j.emitter == 0 || !possible.contains(j.emitter)) {
+                continue;
+            }
+            const std::vector<Vec3f>& corners = j.mesh->gi_triangles;
+            const Mat4f& t = c.instance->transform;
+            const Material3D& m = j.draw->material;
+            const bool independent = m.emission_mode == EmissionMode3D::Independent;
+            if (m.emissive_texture.backend() || (!independent && m.texture.backend())) {
+                continue;
+            }
+            const Color tint = c.instance->tint;
+            const Vec3f radiance = independent ? Vec3f{m.emission_color.r, m.emission_color.g, m.emission_color.b}
+                                               : Vec3f{srgb_to_linear(m.color.r) * srgb_to_linear(tint.r),
+                                                       srgb_to_linear(m.color.g) * srgb_to_linear(tint.g),
+                                                       srgb_to_linear(m.color.b) * srgb_to_linear(tint.b)};
+            const Vec3f c0{t.m[0], t.m[1], t.m[2]}, c1{t.m[4], t.m[5], t.m[6]}, c2{t.m[8], t.m[9], t.m[10]};
+            const bool mirrored = dot(c0, cross(c1, c2)) < 0.0f;
+            for (std::size_t i = 0; i + 2 < corners.size(); i += 3) {
+                const Vec3f a = t.apply(corners[i]), b = t.apply(corners[i + 1]), d = t.apply(corners[i + 2]);
+                emitting.push_back({a, mirrored ? d : b, mirrored ? b : d, radiance, j.emitter, m.double_sided, ci});
+            }
+        }
+        return emitting;
+    };
+    // Made again only when an emitting copy (or what decides which emitters are kept) changed: copies that move
+    // without emitting (a game's characters, every render) change nothing here.
+    if (exact) {
+        u64 signature =
+            0x2545f4914f6cdd1dull + std::bit_cast<u32>(smallest) * 0x9e3779b97f4a7c15ull + area_settings.max_emitters;
+        for (const Copy& c : copies) {
+            if (jobs[c.job].emitter != 0) {
+                signature += (c.hash * 0xff51afd7ed558ccdull) ^ (c.hash >> 29); // order does not matter
+            }
+        }
+        if (!g.area_scanned || signature != g.area_emitter_signature) {
+            g.area_lights = build_area_light_emitters(collect_emitting(), area_settings.max_emitters, smallest);
+            g.area_emitting = g.area_lights.count > 0;
+            g.area_emitter_signature = signature;
+            g.area_scanned = true;
+        }
+    }
+    if (!exact || !g.area_emitting) {
+        if (g.area_triangles || g.area_cache || g.area) {
+            // What the area lights kept, given back (the probes have the emitters now).
+            g.area_triangles = g.area_nodes = g.area_emitters = g.area_explicit = g.area_scene = g.area_shading = {};
+            g.area_retry_args = g.area_retry_list = {};
+            g.area_cache = {};
+            g.area = {};
+            g.area_before = {};
+            g.area_has_before = false;
+            g.area_meshes.clear();
+            g.area_occluders.clear();
+            g.area_pieces.clear();
+            g.area_closed.clear();
+            g.area_seen.clear();
+            g.area_mesh_triangles = {};
+            g.area_mesh_nodes = {};
+            g.area_settled_signature = 0;
+            g.area_settled_triangles = 0;
+        }
+        g.area_built = false;
+        g.area_emitter_count = g.area_explicit_count = 0;
+        g.area_scanned = g.area_scanned && exact; // (the copies may change while the probes have the emitters)
+    } else if (!same_copies || !g.area_built || (g.area_moving > 0 && g.ticks - g.area_last_change >= area_settle)) {
+        if (!same_copies) {
+            g.area_last_change = g.ticks;
+        }
+        // Each mesh's hierarchy once (kept while it is drawn), for the moving copies; the settled ones' when they
+        // change; the copies' and the emitters every time.
+        const bool first = g.area_seen.empty();
+        std::unordered_map<u64, u32> seen;
+        seen.reserve(copies.size());
+        for (const Copy& c : copies) {
+            const auto it = g.area_seen.find(c.hash);
+            seen[c.hash] = it != g.area_seen.end() ? it->second : (first ? g.ticks - area_settle : g.ticks);
+        }
+        g.area_seen = std::move(seen);
+        const auto settled = [&](const Copy& c) { return g.ticks - g.area_seen[c.hash] >= area_settle; };
+        // The occluders' budget (area_lights.max_triangles): the fewest halvings of every mesh's triangles (but the
+        // emitters', which stay whole) that bring all the copies' within it.
+        std::size_t occluding = 0;
+        for (const Copy& c : copies) {
+            occluding += jobs[c.job].skinned ? 0 : jobs[c.job].mesh->gi_triangles.size() / 3;
+        }
+        u32 coarse = 0;
+        while (coarse < 8 && (occluding >> coarse) > std::max<u32>(area_settings.max_triangles, 1)) {
+            ++coarse;
+        }
+        if (coarse != g.area_coarse) {
+            KIN_LOG_INFO_F("render", "3D: area lights' occluders made coarser",
+                           (LogFields{{.name = "triangles", .value = std::to_string(occluding)},
+                                      {.name = "budget", .value = std::to_string(area_settings.max_triangles)},
+                                      {.name = "halvings", .value = std::to_string(coarse)}}));
+            g.area_coarse = coarse;
+        }
+        u64 signature = 0x9e3779b97f4a7c15ull + coarse * 0xc2b2ae3d27d4eb4full;
+        for (const Copy& c : copies) {
+            if (settled(c)) {
+                signature += (c.hash * 0xff51afd7ed558ccdull) ^ (c.hash >> 29); // order does not matter
+            }
+        }
+        const auto gather = [&](bool& made_meshes, std::size_t& used) {
+            std::vector<AreaLightCopy> area_copies;
+            std::vector<AreaLightTriangle> settled_triangles;
+            const bool remake_settled = signature != g.area_settled_signature;
+            constexpr f32 far = std::numeric_limits<f32>::max();
+            Bounds3D settled_box{{far, far, far}, {-far, -far, -far}};
+            used = 0;
+            g.area_moving = 0;
+            for (u32 ci = 0; ci < copies.size(); ++ci) {
+                const Copy& c = copies[ci];
+                const Job& j = jobs[c.job];
+                if (j.skinned || j.mesh->gi_triangles.empty()) {
+                    continue;
+                }
+                const std::vector<Vec3f>& corners = j.mesh->gi_triangles;
+                // Its occluder: its triangles, or (past the budget, but for an emitter's) a coarser shape of them.
+                const u32 level = j.emitter == 0 ? coarse : 0;
+                const u64 occluder = j.mesh->serial * 16 + level;
+                const std::vector<Vec3f>* blockers = &corners;
+                if (level > 0) {
+                    auto [o, made] = g.area_occluders.try_emplace(occluder);
+                    if (made) {
+                        o->second = simplify_area_light_occluder(corners, (corners.size() / 3) >> level);
+                    }
+                    blockers = &o->second;
+                }
+                auto [closed_at, unknown] = g.area_closed.try_emplace(occluder, false);
+                if (unknown) {
+                    closed_at->second = area_light_closed(*blockers);
+                }
+                // (Not for a double-sided material: its inside can be seen, and lit, from within.)
+                const bool closed = closed_at->second && !j.draw->material.double_sided;
+                const Mat4f& t = c.instance->transform;
+                const bool still = settled(c);
+                used += blockers->size() / 3;
+                if (still) {
+                    if (remake_settled) {
+                        const std::vector<Vec3f>& q = *blockers;
+                        for (std::size_t i = 0; i + 2 < q.size(); i += 3) {
+                            settled_triangles.push_back({t.apply(q[i]), t.apply(q[i + 1]), t.apply(q[i + 2]), closed});
+                        }
+                        settled_box.min = {std::min(settled_box.min.x, c.box.min.x),
+                                           std::min(settled_box.min.y, c.box.min.y),
+                                           std::min(settled_box.min.z, c.box.min.z)};
+                        settled_box.max = {std::max(settled_box.max.x, c.box.max.x),
+                                           std::max(settled_box.max.y, c.box.max.y),
+                                           std::max(settled_box.max.z, c.box.max.z)};
+                    }
+                } else {
+                    ++g.area_moving;
+                    // (By mesh and closedness: a mesh drawn double-sided too has a hierarchy of each kind.)
+                    auto [it, fresh] = g.area_meshes.try_emplace(occluder * 2 + (closed ? 1 : 0), std::array<u32, 2>{});
+                    if (fresh) {
+                        const std::vector<Vec3f>& q = *blockers;
+                        std::vector<AreaLightTriangle> own(q.size() / 3);
+                        for (std::size_t i = 0; i < own.size(); ++i) {
+                            own[i] = {q[i * 3], q[i * 3 + 1], q[i * 3 + 2], closed};
+                        }
+                        const AreaLightMesh mesh = build_area_light_mesh(own);
+                        it->second = {static_cast<u32>(g.area_mesh_triangles.size() / area_light_floats_triangle),
+                                      static_cast<u32>(g.area_mesh_nodes.size() / area_light_floats_node)};
+                        g.area_mesh_triangles.insert(g.area_mesh_triangles.end(), mesh.triangles.begin(),
+                                                     mesh.triangles.end());
+                        g.area_mesh_nodes.insert(g.area_mesh_nodes.end(), mesh.nodes.begin(), mesh.nodes.end());
+                        made_meshes = true;
+                    }
+                    area_copies.push_back({t, c.box.min, c.box.max, it->second[1], it->second[0]});
+                }
+            }
+            if (remake_settled) {
+                g.area_settled_signature = signature;
+                g.area_settled_triangles = static_cast<u32>(settled_triangles.size());
+                g.area_settled_box = settled_box;
+                if (!settled_triangles.empty()) {
+                    const AreaLightMesh mesh = build_area_light_mesh(settled_triangles);
+                    g.area_settled_at = {static_cast<u32>(g.area_mesh_triangles.size() / area_light_floats_triangle),
+                                         static_cast<u32>(g.area_mesh_nodes.size() / area_light_floats_node)};
+                    g.area_mesh_triangles.insert(g.area_mesh_triangles.end(), mesh.triangles.begin(),
+                                                 mesh.triangles.end());
+                    g.area_mesh_nodes.insert(g.area_mesh_nodes.end(), mesh.nodes.begin(), mesh.nodes.end());
+                    made_meshes = true;
+                }
+            }
+            if (g.area_settled_triangles > 0) {
+                area_copies.push_back({Mat4f::identity(), g.area_settled_box.min, g.area_settled_box.max,
+                                       g.area_settled_at[1], g.area_settled_at[0], /*world=*/true});
+            }
+            return area_copies;
+        };
+        bool made_meshes = false;
+        std::size_t used = 0;
+        std::vector<AreaLightCopy> area_copies = gather(made_meshes, used);
+        if (g.area_mesh_triangles.size() / area_light_floats_triangle > 2 * used + 65536) {
+            // Mostly meshes no longer drawn: make the kept hierarchies again from those still drawn.
+            g.area_meshes.clear();
+            g.area_closed.clear();
+            g.area_occluders.clear();
+            g.area_pieces.clear();
+            g.area_mesh_triangles.clear();
+            g.area_mesh_nodes.clear();
+            g.area_settled_signature = 0;
+            made_meshes = false;
+            area_copies = gather(made_meshes, used);
+            made_meshes = true;
+        }
+        const auto upload = [&](std::shared_ptr<GpuBuffer>& buffer, const void* bytes, std::size_t size) {
+            const u32 n = static_cast<u32>(std::max<std::size_t>(size, 16));
+            ensure_buffer(buffer, n, 1024, SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ);
+            if (size > 0) {
+                _device->upload_storage_buffer(buffer->handle(), 0, static_cast<u32>(size), bytes, /*cycle=*/true);
+            }
+        };
+        if (made_meshes || !g.area_triangles) {
+            upload(g.area_triangles, g.area_mesh_triangles.data(), g.area_mesh_triangles.size() * sizeof(f32));
+            upload(g.area_nodes, g.area_mesh_nodes.data(), g.area_mesh_nodes.size() * sizeof(f32));
+        }
+        const AreaLightCopies scene_data = build_area_light_copies(area_copies);
+        upload(g.area_scene, scene_data.data.data(), scene_data.data.size() * sizeof(f32));
+        g.area_copies_at = scene_data.node_count * 2;
+        const AreaLightEmitters& lights = g.area_lights;
+        upload(g.area_emitters, lights.data.data(), lights.data.size() * sizeof(f32));
+        std::vector<u32> flags(std::max<std::size_t>(g.emitter_strength.size(), 1), 0u);
+        for (const u32 e : lights.explicit_emitters) {
+            if (e >= 1 && e <= flags.size()) {
+                flags[e - 1] = 1u;
+            }
+        }
+        upload(g.area_explicit, flags.data(), flags.size() * sizeof(u32));
+        g.area_emitter_count = scene_data.copy_count > 0 ? lights.count : 0;
+        // The voxels' kept light is for these emitters and the settled copies' shadows: a new epoch when either
+        // changes, not when only moving copies move (a moving copy's own blocks are made again, and lit afresh; its
+        // shadow on the rest of the voxels follows when the next change comes).
+        if (made_meshes || lights.data != g.area_emitter_data) {
+            g.area_epoch = g.area_epoch % 1024 + 1;
+        }
+        g.area_emitter_data = lights.data;
+        g.area_explicit_count = static_cast<u32>(flags.size());
+        g.area_built = true;
+        if (made_meshes) {
+            KIN_LOG_INFO_F(
+                "render", "3D: area lights' meshes made",
+                (LogFields{{.name = "meshes", .value = std::to_string(g.area_meshes.size())},
+                           {.name = "settled", .value = std::to_string(g.area_settled_triangles)},
+                           {.name = "moving", .value = std::to_string(g.area_moving)},
+                           {.name = "triangles",
+                            .value = std::to_string(g.area_mesh_triangles.size() / area_light_floats_triangle)},
+                           {.name = "copies", .value = std::to_string(scene_data.copy_count)},
+                           {.name = "emitters", .value = std::to_string(lights.count)},
+                           {.name = "explicit", .value = std::to_string(lights.explicit_emitters.size())}}));
+        }
+    }
     // The emitters' strengths this render, for the GI's light and its view.
     {
         const u32 bytes = static_cast<u32>(std::max<std::size_t>(g.emitter_strength.size(), 1) * sizeof(f32));
@@ -1269,9 +1609,230 @@ std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_bindings(const Gpu
         const SDL_GPUTextureSamplerBinding flat{_owner->_white.handle(), _owner->_sampler_linear};
         return {flat, flat, flat};
     }
-    return {SDL_GPUTextureSamplerBinding{g.light.handle(), _gi_linear},
-            SDL_GPUTextureSamplerBinding{g.slope.handle(), _gi_linear},
-            SDL_GPUTextureSamplerBinding{g.coverage.handle(), _gi_linear}};
+    return {
+        SDL_GPUTextureSamplerBinding{g.light.handle(), _gi_linear},
+        SDL_GPUTextureSamplerBinding{g.slope.handle(), _gi_linear},
+        SDL_GPUTextureSamplerBinding{g.area_resolved && g.area ? g.area.handle() : g.coverage.handle(), _gi_linear}};
+}
+
+// gi_area.comp's Params.
+struct GiAreaUniforms {
+    f32 to_world[16];
+    f32 unproject_xy[4];
+    f32 unproject_zw[4];
+    f32 sizes[4];
+    f32 eye[4];
+    f32 area[4];  // emitters, the light's strength, the shadow rays' offset (base, a unit away)
+    f32 scene[4]; // where the copies start in the scene buffer (vec4s); the settled hierarchy (see GiLightUniforms)
+    f32 mode[4];  // x: 0 every texel, 1 half, 2 a quarter; y: the half's parity or the quarter's column; z: its row
+    f32 share[4]; // the share's tiles across, its tiles, the list's first word
+};
+static_assert(sizeof(GiAreaUniforms) == 192);
+// gi_area_fill.comp's Params.
+struct GiAreaFillUniforms {
+    f32 to_world[16];
+    f32 unproject_xy[4];
+    f32 unproject_zw[4];
+    f32 sizes[4];
+    f32 view_projection[16]; // without the jitter
+    f32 last_view_projection[16];
+    f32 last_eye[4]; // w: 1 with a render before
+    f32 last_forward[4];
+    f32 retry[4]; // the share's tiles; this turn's and the other's list's first word; this turn's arguments' first
+    f32 mode[4];  // x: 2 a quarter, else half; y: the half's parity, or the quarter's column (w its row); z: 1
+};
+static_assert(sizeof(GiAreaFillUniforms) == 304);
+
+bool GpuRenderer3D::gi_area(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene,
+                            const Mat4f& projection, RenderDebugStats3D& stats) {
+    GpuView3D::Gi& g = view._gi;
+    if (scene.global_illumination.emitters != GiEmitters3D::Exact || !g.area_built || g.area_emitter_count == 0 ||
+        !_gi_area || !g.coverage || !g.area_triangles || !g.area_nodes || !g.area_emitters || !g.area_scene ||
+        !_gi_emitters) {
+        return false;
+    }
+    const u32 hw = g.coverage.width(), hh = g.coverage.height();
+    const u32 interleave = scene.global_illumination.area_lights.interleave;
+    const bool checker = interleave > 1 && _gi_area_fill;
+    const bool quarter = interleave >= 4;
+    // This render's share as a grid of its own (each texel a thread, packed), in 8 x 8 tiles: half the columns, and a
+    // quarter's half the rows too.
+    const u32 share_across = ((hw + 1) / 2 + 7) / 8,
+              share_tiles = share_across * (((quarter ? (hh + 1) / 2 : hh) + 7) / 8);
+    try {
+        const SDL_GPUTextureUsageFlags usage =
+            SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE;
+        for (GpuTexture* t : {&g.area, &g.area_before}) {
+            if ((t == &g.area || checker) && (!*t || t->width() != hw || t->height() != hh)) {
+                *t = _device->create_target(hw, hh, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT, usage);
+                g.area_has_before = false;
+            }
+        }
+        if (!g.area_retry_list || g.area_retry_texels != hw * hh || g.area_retry_tiles != share_tiles) {
+            const std::array<u32, 8> args{share_tiles, 1, 1, 0, share_tiles, 1, 1, 0};
+            g.area_retry_args = std::make_shared<GpuBuffer>(
+                _device->create_buffer(SDL_GPU_BUFFERUSAGE_INDIRECT | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ |
+                                           SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE,
+                                       args.data(), sizeof(args)));
+            const std::vector<u32> lists(2 * (std::size_t{hw} * hh + 1), 0u);
+            g.area_retry_list = std::make_shared<GpuBuffer>(_device->create_buffer(
+                SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE, lists.data(),
+                static_cast<u32>(lists.size() * sizeof(u32))));
+            g.area_retry_texels = hw * hh;
+            g.area_retry_tiles = share_tiles;
+            g.area_retry_turn = 0;
+        }
+    } catch (const std::exception& e) {
+        KIN_LOG_WARN_F("render", "3D: the area lights' light on the view could not be made",
+                       (LogFields{{.name = "reason", .value = e.what()}}));
+        g.area = {};
+        g.area_before = {};
+        g.area_has_before = false;
+        g.area_retry_list = {};
+        g.area_retry_args = {};
+        return false;
+    }
+    // Interleaved, with a render before (its whole kept, the light's depths both renders', the temporal anti-aliasing's
+    // normals of it): the fill takes what it can from that render and lists the rest, then one dispatch finds this
+    // render's share and the listed texels. Else every texel, in one dispatch.
+    const bool halve = checker && g.area_has_before && g.last_light && g.last_light.width() == hw &&
+                       g.last_light.height() == hh && view._taa_motion;
+    constexpr f32 quarter_x[4] = {0.0f, 1.0f, 1.0f, 0.0f}, quarter_y[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+    const u32 phase = g.area_parity & 3u;
+    if (checker) {
+        std::swap(g.area, g.area_before);
+    }
+    const GiMarker marker{commands, _gpu_markers, "kin3d.gi_area"};
+    // The view-projection without the temporal anti-aliasing's jitter: what the fill measures motion with.
+    const Mat4f steady =
+        scene.camera.projection_matrix(static_cast<f32>(view._size.x) / static_cast<f32>(std::max(view._size.y, 1))) *
+        scene.camera.view();
+    GiAreaUniforms u{};
+    const Camera3D& camera = scene.camera;
+    std::memcpy(u.to_world, camera.view().inverse().m, sizeof(u.to_world));
+    const Mat4f inverse = projection.inverse();
+    const f32 xy[4] = {inverse.at(0, 0), inverse.at(1, 1), inverse.at(0, 3), inverse.at(1, 3)};
+    const f32 zw[4] = {inverse.at(2, 2), inverse.at(2, 3), inverse.at(3, 2), inverse.at(3, 3)};
+    std::memcpy(u.unproject_xy, xy, sizeof(xy));
+    std::memcpy(u.unproject_zw, zw, sizeof(zw));
+    const f32 sizes[4] = {static_cast<f32>(hw), static_cast<f32>(hh), static_cast<f32>(view._ao_depth.width()),
+                          static_cast<f32>(view._ao_depth.height())};
+    std::memcpy(u.sizes, sizes, sizeof(sizes));
+    const f32 eye[4] = {camera.position.x, camera.position.y, camera.position.z, 0.0f};
+    std::memcpy(u.eye, eye, sizeof(eye));
+    // Shadow rays leave a little off the surface: the depth's and the normal's error grow with the distance, and an
+    // orthographic view's with its depth range (its depth is linear over it: 10 km without a far plane, about half a
+    // millimetre a step near the camera, enough for a floor to shade itself).
+    f32 lift = 1e-4f;
+    if (camera.projection == Projection3D::Orthographic) {
+        lift += 5e-7f * (std::isinf(camera.z_far) ? 10000.0f : std::max(camera.z_far - camera.z_near, 0.0f));
+    }
+    const f32 area[4] = {static_cast<f32>(g.area_emitter_count), scene.global_illumination.probes.intensity, lift,
+                         2e-4f};
+    std::memcpy(u.area, area, sizeof(area));
+    u.scene[0] = static_cast<f32>(g.area_copies_at);
+    u.scene[1] = static_cast<f32>(g.area_settled_at[1]);
+    u.scene[2] = static_cast<f32>(g.area_settled_at[0]);
+    u.scene[3] = g.area_settled_triangles > 0 ? 1.0f : 0.0f;
+    u.mode[0] = halve ? (quarter ? 2.0f : 1.0f) : 0.0f;
+    u.mode[1] = quarter ? quarter_x[phase] : static_cast<f32>(g.area_parity & 1u);
+    u.mode[2] = quarter ? quarter_y[phase] : 0.0f;
+    const u32 turn = g.area_retry_turn, list_words = hw * hh + 1;
+    u.share[0] = static_cast<f32>(share_across);
+    u.share[1] = static_cast<f32>(share_tiles);
+    u.share[2] = static_cast<f32>(turn * list_words);
+    if (halve) {
+        GiAreaFillUniforms f{};
+        std::memcpy(f.to_world, u.to_world, sizeof(f.to_world));
+        std::memcpy(f.unproject_xy, u.unproject_xy, sizeof(f.unproject_xy));
+        std::memcpy(f.unproject_zw, u.unproject_zw, sizeof(f.unproject_zw));
+        std::memcpy(f.sizes, u.sizes, sizeof(f.sizes));
+        std::memcpy(f.view_projection, steady.m, sizeof(f.view_projection));
+        std::memcpy(f.last_view_projection, g.area_before_view_projection.m, sizeof(f.last_view_projection));
+        const f32 last_eye[4] = {g.area_before_eye.x, g.area_before_eye.y, g.area_before_eye.z, 1.0f};
+        const f32 last_way[4] = {g.area_before_forward.x, g.area_before_forward.y, g.area_before_forward.z, 0.0f};
+        std::memcpy(f.last_eye, last_eye, sizeof(last_eye));
+        std::memcpy(f.last_forward, last_way, sizeof(last_way));
+        f.retry[0] = static_cast<f32>(share_tiles);
+        f.retry[1] = static_cast<f32>(turn * list_words);
+        f.retry[2] = static_cast<f32>((turn ^ 1u) * list_words);
+        f.retry[3] = static_cast<f32>(turn * 4u);
+        f.mode[0] = quarter ? 2.0f : 1.0f;
+        f.mode[1] = quarter ? quarter_x[phase] : static_cast<f32>(g.area_parity & 1u);
+        f.mode[3] = quarter ? quarter_y[phase] : 0.0f;
+        f.mode[2] = 1.0f; // the render before's normals (view._taa_motion, as gi_resolve reads them)
+        const SDL_GPUStorageTextureReadWriteBinding whole{.texture = g.area.handle(), .cycle = true};
+        const std::array<SDL_GPUStorageBufferReadWriteBinding, 2> lists{
+            SDL_GPUStorageBufferReadWriteBinding{.buffer = g.area_retry_args->handle()},
+            SDL_GPUStorageBufferReadWriteBinding{.buffer = g.area_retry_list->handle()}};
+        SDL_GPUComputePass* fill = SDL_BeginGPUComputePass(commands, &whole, 1, lists.data(), 2);
+        if (!fill) {
+            return false;
+        }
+        const std::array<SDL_GPUTextureSamplerBinding, 7> taken{
+            SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.area_before.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.light.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.last_light.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{g.coverage.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _gi_sampler},
+            SDL_GPUTextureSamplerBinding{view._taa_motion.handle(), _gi_sampler}};
+        SDL_BindGPUComputePipeline(fill, _gi_area_fill);
+        SDL_BindGPUComputeSamplers(fill, 0, taken.data(), static_cast<u32>(taken.size()));
+        SDL_PushGPUComputeUniformData(commands, 0, &f, sizeof(f));
+        SDL_DispatchGPUCompute(fill, (hw + 7) / 8, (hh + 7) / 8, 1);
+        SDL_EndGPUComputePass(fill);
+        ++stats.gi_dispatches;
+    }
+    // (Interleaved, the fill wrote the other texels of this render's whole: kept, no cycling.)
+    const SDL_GPUStorageTextureReadWriteBinding out{.texture = g.area.handle(), .cycle = !halve};
+    SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, &out, 1, nullptr, 0);
+    if (!pass) {
+        return false;
+    }
+    const std::array<SDL_GPUTextureSamplerBinding, 3> samplers{
+        SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _gi_sampler},
+        SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _gi_sampler},
+        SDL_GPUTextureSamplerBinding{g.coverage.handle(), _gi_sampler}};
+    const std::array<SDL_GPUBuffer*, 6> buffers{g.area_triangles->handle(), g.area_nodes->handle(),
+                                                g.area_emitters->handle(),  _gi_emitters->handle(),
+                                                g.area_scene->handle(),     g.area_retry_list->handle()};
+    SDL_BindGPUComputePipeline(pass, _gi_area);
+    SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+    SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), static_cast<u32>(buffers.size()));
+    SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));
+    if (halve) {
+        // The share's tiles and the list's groups, as the fill counted them.
+        SDL_DispatchGPUComputeIndirect(pass, g.area_retry_args->handle(), turn * 4u * sizeof(u32));
+        g.area_retry_turn ^= 1u;
+    } else {
+        SDL_DispatchGPUCompute(pass, (hw + 7) / 8, (hh + 7) / 8, 1);
+    }
+    SDL_EndGPUComputePass(pass);
+    ++stats.gi_dispatches;
+    g.area_before_view_projection = steady;
+    g.area_before_eye = camera.position;
+    g.area_before_forward = camera.forward();
+    g.area_has_before = checker;
+    g.area_parity = quarter ? (g.area_parity + 1u) & 3u : (g.area_parity ^ 1u) & 1u;
+    // The emitters for the main pass's reflections: the GI's strengths of this render applied to their radiance.
+    std::vector<f32> shading(g.area_emitter_data.begin(),
+                             g.area_emitter_data.begin() +
+                                 std::min<std::size_t>(g.area_emitter_data.size(),
+                                                       std::size_t{g.area_emitter_count} * area_light_floats_emitter));
+    for (std::size_t e = 0; e + area_light_floats_emitter <= shading.size(); e += area_light_floats_emitter) {
+        const u32 number = static_cast<u32>(shading[e + 7] + 0.5f);
+        const f32 strength = number > 0 && number <= g.emitter_strength.size() ? g.emitter_strength[number - 1] : 1.0f;
+        for (int c = 16; c < 19; ++c) {
+            shading[e + c] *= strength;
+        }
+    }
+    const u32 bytes = static_cast<u32>(std::max<std::size_t>(shading.size() * sizeof(f32), 16));
+    ensure_buffer(g.area_shading, bytes, 1024, SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ);
+    if (!shading.empty()) {
+        _device->upload_storage_buffer(g.area_shading->handle(), 0, bytes, shading.data(), /*cycle=*/true);
+    }
+    return true;
 }
 
 std::array<SDL_GPUTextureSamplerBinding, 3> GpuRenderer3D::gi_atlases(const GpuView3D& view, bool lit) const {
@@ -1430,6 +1991,8 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
                     _device->create_volume(size[0], size[1], size[2] * levels, SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
                                            SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_WRITE);
             }
+            g.area_cache = {};
+            g.area_epoch = g.area_epoch % 1024 + 1;
             g.probe_counts = counts;
             g.spacing = spacing;
             g.probe_levels = levels;
@@ -1639,10 +2202,37 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             std::memcpy(u.sun_matrix, _gi_sun_matrix.m, sizeof(u.sun_matrix));
             put4(u.sun_map, 1.0f, _gi_sun_bias, 1.0f / static_cast<f32>(_gi_sun_side), _gi_sun_texel);
         }
-        const std::array<SDL_GPUStorageTextureReadWriteBinding, 2> radiance{
+        const bool area_on =
+            scene.global_illumination.emitters == GiEmitters3D::Exact && g.area_built && g.area_emitter_count > 0;
+        if (area_on) {
+            // A new epoch when the strengths changed (the cached light has them in it).
+            if (g.area_strengths != g.emitter_strength) {
+                g.area_strengths = g.emitter_strength;
+                g.area_epoch = g.area_epoch % 1024 + 1;
+            }
+            if (!g.area_cache || g.area_cache.width() != g.radiance.width() ||
+                g.area_cache.height() != g.radiance.height()) {
+                g.area_cache = _device->create_volume(g.radiance.width(), g.radiance.height(), g.size[2] * g.levels,
+                                                      SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT,
+                                                      SDL_GPU_TEXTUREUSAGE_SAMPLER |
+                                                          SDL_GPU_TEXTUREUSAGE_COMPUTE_STORAGE_SIMULTANEOUS_READ_WRITE);
+                g.area_epoch = g.area_epoch % 1024 + 1;
+            }
+            u.count[2] = static_cast<u32>(g.made.size()); // the first entries, made this render: lit afresh
+        }
+        if (area_on) {
+            put4(u.area, static_cast<f32>(g.area_emitter_count), static_cast<f32>(g.area_epoch),
+                 static_cast<f32>(g.area_explicit_count), static_cast<f32>(g.area_copies_at));
+            put4(u.area_scene, static_cast<f32>(g.area_copies_at), static_cast<f32>(g.area_settled_at[1]),
+                 static_cast<f32>(g.area_settled_at[0]), g.area_settled_triangles > 0 ? 1.0f : 0.0f);
+        }
+        // (Without area lights the cache's binding is a 1 x 1 x 1 stand-in, never touched.)
+        const std::array<SDL_GPUStorageTextureReadWriteBinding, 3> radiance{
             SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance.handle()},
-            SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance_back.handle()}};
-        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, radiance.data(), 2, nullptr, 0);
+            SDL_GPUStorageTextureReadWriteBinding{.texture = g.radiance_back.handle()},
+            SDL_GPUStorageTextureReadWriteBinding{.texture = area_on && g.area_cache ? g.area_cache.handle()
+                                                                                     : _area_cache_none.handle()}};
+        SDL_GPUComputePass* pass = SDL_BeginGPUComputePass(commands, radiance.data(), 3, nullptr, 0);
         if (!pass) {
             return false;
         }
@@ -1657,8 +2247,19 @@ bool GpuRenderer3D::gi_probes(SDL_GPUCommandBuffer* commands, GpuView3D& view, c
             probes[2],
             SDL_GPUTextureSamplerBinding{_gi_sun_on && _gi_sun_map ? _gi_sun_map.handle() : _no_shadow.handle(),
                                          _compare_sampler}};
-        const std::array<SDL_GPUBuffer*, 3> buffers{_gi_lights->handle(), g.light_list->handle(),
-                                                    _gi_emitters ? _gi_emitters->handle() : _gi_empty->handle()};
+        const bool area =
+            scene.global_illumination.emitters == GiEmitters3D::Exact && g.area_built && g.area_emitter_count > 0;
+        const auto or_empty = [&](const std::shared_ptr<GpuBuffer>& b) {
+            return area && b ? b->handle() : _gi_empty->handle();
+        };
+        const std::array<SDL_GPUBuffer*, 8> buffers{_gi_lights->handle(),
+                                                    g.light_list->handle(),
+                                                    _gi_emitters ? _gi_emitters->handle() : _gi_empty->handle(),
+                                                    or_empty(g.area_triangles),
+                                                    or_empty(g.area_nodes),
+                                                    or_empty(g.area_emitters),
+                                                    or_empty(g.area_explicit),
+                                                    or_empty(g.area_scene)};
         SDL_BindGPUComputePipeline(pass, _gi_light);
         SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
         SDL_BindGPUComputeStorageBuffers(pass, 0, buffers.data(), static_cast<u32>(buffers.size()));

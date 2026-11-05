@@ -29,6 +29,20 @@ releases may change APIs.
   `stop_tween`, `stop_tweens`, `after`, `every` and `cancel`; `LuaScript::call_function` calls a function a script
   handed over.
 
+- Global illumination's emitters are area lights by default (`GlobalIllumination3D::emitters`, `GiEmitters3D::Exact`;
+  [3D rendering](rendering_3d.md), "Global illumination"). An emissive surface the GI numbers lights what the camera
+  sees with its exact form factor and its shadows (every occluder's blocked stretch of each of 4 lines across it,
+  through a bounding volume hierarchy of the copies' triangles made on the CPU) and its reflections (linearly
+  transformed cosines), and the voxels for the bounces; against Cycles the Cornell box's room is 1.8 levels off
+  instead of 4.4, a room lit by three panels 4.8 instead of 18. `GiEmitters3D::Probes` is the previous behaviour, the
+  probes alone: cheaper (0.13 to 0.63 ms less at 1280 x 720 on an RTX 4080 laptop), softer. A scene without such
+  emitters costs the same either way. `area_lights.max_triangles` keeps dense occluders within a budget (coarser
+  shapes past it), `area_lights.interleave` finds one texel in 4 a render with temporal anti-aliasing (2 or 1 for less
+  lag), `area_lights.max_emitters` caps the emitters (64), `area_lights.min_size` leaves the small ones (a candle's
+  flame) to the probes; authored as `SceneEnvironment3D`'s `gi_emitters`, `gi_area_max_triangles`,
+  `gi_area_interleave` and `gi_area_max_emitters`. `kin_reference` takes `--gi-emitters exact|probes`,
+  `--gi-area-interleave N`, `--gi-area-full` and `--gi-area-max-triangles N`.
+
 - 2D characters, shape queries and one-way platforms ([2D physics](physics_2d.md)). `CharacterController2D` moves
   an entity as its game says, Godot's move-and-slide way: along `velocity` (and its own `gravity`), sliding along
   what stops it, knowing floors from walls and ceilings by `max_slope`, walking up slopes at its speed, kept on

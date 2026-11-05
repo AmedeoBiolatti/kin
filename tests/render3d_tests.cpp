@@ -3980,6 +3980,89 @@ void test_gpu_gi_rooms() {
     });
 }
 
+// The emitters as area lights (GlobalIllumination3D::emitters Exact): a floor under an emissive ceiling panel, a closed
+// box floating between them off the panel's axis. Exact: the box's shadow on the floor is dark against the same spot
+// without the box, darker than the probes alone make it; one texel in four a render (with the temporal anti-aliasing)
+// settles to the picture of every texel; the box drawn double-sided (not culled as a closed mesh) shades the same; a
+// fine ball past the occluders' budget (made coarser) still shades about as itself. Without an emitter, Exact is the
+// probes' picture exactly.
+void test_gpu_gi_area_lights() {
+    with_gpu("test_gpu_gi_area_lights", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        const GiRooms rooms{r3d};
+        const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({1.0f, 0.2f, 1.0f})).value_or({});
+        const kin::Mesh3D ball = r3d.create_mesh(kin::meshes::sphere(0.5f, 64, 32)).value_or({});
+        const kin::Camera3D camera = kin::Camera3D::look_at({0.0f, 9.0f, 3.0f}, {0.0f, 0.0f, 0.0f}, 50.0f);
+        struct Options {
+            kin::GiEmitters3D emitters = kin::GiEmitters3D::Exact;
+            kin::u32 interleave = 4, budget = 131072;
+            bool blocker = true, double_sided = false, ball = false, emitter = true;
+        };
+        const auto scene_of = [&](const Options& o) {
+            kin::Scene3D scene = GiRooms::dark(camera);
+            scene.taa.enabled = r3d.capabilities().temporal_aa;
+            scene.global_illumination = GiRooms::settings({{-4.5f, -0.5f, -4.5f}, {4.5f, 4.5f, 4.5f}}, 0.1f);
+            scene.global_illumination.emitters = o.emitters;
+            scene.global_illumination.area_lights.interleave = o.interleave;
+            scene.global_illumination.area_lights.max_triangles = o.budget;
+            const kin::Material3D grey{.color = Color::rgb(180, 180, 180)};
+            rooms.quad(scene, {0.0f, 0.0f, 0.0f}, 'y', 8.0f, 8.0f, grey);
+            if (o.emitter) {
+                rooms.quad(scene, {-1.5f, 3.95f, 0.0f}, 'Y', 1.0f, 1.0f,
+                           {.color = kin::colors::white, .emissive = 8.0f});
+            } else {
+                scene.lights.ambient = {0.3f, 0.3f, 0.3f};
+            }
+            if (o.blocker) {
+                kin::Material3D m = grey;
+                m.double_sided = o.double_sided;
+                (void)scene.draw(o.ball ? ball : box, Mat4f::translation({0.0f, 2.0f, 0.0f}), m);
+            }
+            return scene;
+        };
+        const auto picture = [&](const Options& o) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            return settle(renderer, r3d, view, scene_of(o), 32);
+        };
+        // The box's shadow: on the line from the panel's middle through the box's, at the floor.
+        const Vec3f shade{1.54f, 0.0f, 0.0f};
+        const auto at = [&](const Pixels& p) { return block_at(p, camera, shade)[1]; };
+        const float lit = at(picture({.blocker = false})), shadowed = at(picture({}));
+        const float probes_lit = at(picture({.emitters = kin::GiEmitters3D::Probes, .blocker = false}));
+        const float probes_shadowed = at(picture({.emitters = kin::GiEmitters3D::Probes}));
+        std::cerr << "gi area lights: the shadow's spot " << shadowed << " of " << lit
+                  << " lit (probes alone: " << probes_shadowed << " of " << probes_lit << ")\n";
+        const Pixels quarter = picture({}), every = picture({.interleave = 1});
+        const Pixels sided = picture({.double_sided = true});
+        const Pixels fine = picture({.ball = true}), coarse = picture({.budget = 1000, .ball = true});
+        float interleaved = 0.0f, culled = 0.0f, coarser = 0.0f, penumbra = 0.0f;
+        for (const Vec3f q : {shade, Vec3f{-1.5f, 0.0f, 0.0f}, Vec3f{2.5f, 0.0f, 1.5f}, Vec3f{1.0f, 0.0f, -1.5f}}) {
+            interleaved =
+                std::max(interleaved, std::abs(block_at(quarter, camera, q)[1] - block_at(every, camera, q)[1]));
+            culled = std::max(culled, std::abs(block_at(quarter, camera, q)[1] - block_at(sided, camera, q)[1]));
+        }
+        // The ball's penumbra, across its shadow's edge.
+        for (float x = 1.7f; x < 2.9f; x += 0.15f) {
+            const Vec3f q{x, 0.0f, 0.0f};
+            coarser = std::max(coarser, std::abs(block_at(fine, camera, q)[1] - block_at(coarse, camera, q)[1]));
+            penumbra = std::max(penumbra, block_at(fine, camera, q)[1]);
+        }
+        std::cerr << "gi area lights: a quarter a render against every texel " << interleaved
+                  << ", closed against double-sided " << culled << ", the coarser ball against the fine " << coarser
+                  << " (the fine ball's shadow " << at(fine) << ", its penumbra up to " << penumbra << ")\n";
+        assert(lit > 30.0f && shadowed < 0.1f * lit);
+        assert(probes_shadowed / probes_lit > shadowed / lit + 0.05f);
+        assert(interleaved <= 2.0f && culled <= 2.0f);
+        assert(at(fine) < 0.1f * lit && penumbra > 0.3f * lit && coarser <= 0.1f * lit);
+        const Pixels none_exact = picture({.emitter = false}),
+                     none_probes = picture({.emitters = kin::GiEmitters3D::Probes, .emitter = false});
+        assert(none_exact.rgba == none_probes.rgba);
+    });
+}
+
 // A tunnel 8 long, 2 wide and 2 high, open at its ends, on a ground under an even sky: without the probes the floor
 // inside has the open sky's light, as the ground outside does; with them, a little through the ends.
 void test_gpu_gi_tunnel() {
@@ -22702,6 +22785,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_gi_view());
     RUN(test_gpu_gi_furnace());
     RUN(test_gpu_gi_rooms());
+    RUN(test_gpu_gi_area_lights());
     RUN(test_gpu_gi_tunnel());
     RUN(test_gpu_gi_bleeding());
     RUN(test_gpu_gi_probes_scroll());

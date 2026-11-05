@@ -3,6 +3,7 @@
 // Renderer3D asks for it. It shares the 2D backend's device, pipeline cache
 // and frame: a view is rendered in the frame's command buffer between the 2D
 // draws around it. Experimental: see docs/3d_plan.md.
+#include "gpu_area_lights3d.hpp"
 #include "gpu_buffer.hpp"
 #include "gpu_mesh_pool.hpp"
 #include "gpu_shader.hpp"
@@ -135,6 +136,8 @@ public:
     // Where global illumination can be had: the box of each run of gi_run_triangles of level 0's triangles (the mesh's
     // space, at rest), so that the GI scene's voxelizer takes only the runs that reach where it changed.
     std::vector<Bounds3D> gi_runs;
+    // And level 0's triangles (three corners each, the mesh's space): the area lights' shadows (gpu_area_lights3d.hpp).
+    std::vector<Vec3f> gi_triangles;
 };
 constexpr u32 gi_run_triangles = 64;
 // The GI scene's emitters: an emissive voxel holds its colour and, in its alpha (half float: whole numbers to 2048
@@ -341,7 +344,60 @@ private:
         // keeps from (the pairs take turns), with that render's view.
         GpuTexture light, slope, last_light, last_slope;
         GpuTexture coverage; // R16F, half size; current window/probe support, without temporal history
-        Vec3f centre{};      // unsnapped camera for continuous clipmap blending
+        // Area lights (GlobalIllumination3D::area_lights; gpu_area_lights3d.hpp): the copies' triangles in a hierarchy
+        // and the emitters as the shaders read them (made again when the copies change), the GI emitters they light
+        // (a flag each), and gi_area.comp's light on the view (RGBA16F, half size: rgb the light, a the coverage).
+        std::shared_ptr<GpuBuffer> area_triangles, area_nodes, area_emitters, area_explicit, area_scene;
+        u32 area_emitter_count = 0, area_explicit_count = 0, area_copies_at = 0; // (vec4s into area_scene)
+        bool area_built = false, area_resolved = false;
+        GpuTexture area;
+        // Interleaved (area_lights.interleave > 1): the render before's whole (area and area_before take turns), the
+        // view it was seen from (without the jitter), and which share is found next (the half's parity, or the
+        // quarter's turn: 0 to 3).
+        GpuTexture area_before;
+        Mat4f area_before_view_projection{};
+        Vec3f area_before_eye{}, area_before_forward{};
+        bool area_has_before = false;
+        u32 area_parity = 0;
+        // The texels the fill could not take from the render before, for gi_area.comp to find (two turns: one listed
+        // this render, the other cleared for the next).
+        std::shared_ptr<GpuBuffer> area_retry_args, area_retry_list;
+        u32 area_retry_turn = 0, area_retry_texels = 0, area_retry_tiles = 0;
+        // The meshes' hierarchies (made once each) in area_triangles and area_nodes, kept here too: by mesh serial,
+        // each one's first triangle and first node; what the buffers hold beyond the meshes still drawn is dropped
+        // when it is as much again.
+        std::unordered_map<u64, std::array<u32, 2>> area_meshes;
+        // Each mesh's occluder past the budget (simplify_area_light_occluder) and whether each occluder closes a volume
+        // (area_light_closed), by mesh serial x 16 + its halvings; the halvings the budget asks for now; whether the
+        // copies hold an emitter (scanned when they change).
+        std::unordered_map<u64, std::vector<Vec3f>> area_occluders;
+        std::unordered_map<u64, bool> area_closed;
+        u32 area_coarse = 0;
+        // The emitters kept as area lights (build_area_light_emitters), made again when an emitting copy changes (its
+        // signature: the emitting copies' hashes and the settings that choose them).
+        AreaLightEmitters area_lights;
+        std::unordered_map<u64, AreaLightPieces> area_pieces; // by mesh serial: area_light_pieces
+        u64 area_emitter_signature = 0;
+        bool area_scanned = false, area_emitting = false;
+        std::vector<f32> area_mesh_triangles, area_mesh_nodes;
+        // Copies that have not changed for area_settle renders (and those there at the first) are settled: their
+        // triangles, in world space, make one hierarchy (one copy in the copies' hierarchy, made again only when the
+        // settled ones change); the others (moving, or new) are copies of their meshes' own. Each copy's (hash's)
+        // first tick; the settled ones' signature, where their hierarchy is, and the render the copies last changed.
+        std::unordered_map<u64, u32> area_seen;
+        // The emitters as the main pass reads them for their reflections (each render: the GI's strengths applied).
+        std::vector<f32> area_emitter_data;
+        std::shared_ptr<GpuBuffer> area_shading;
+        // Each voxel's area light (its front's, before the probes' strength), kept while the epoch stays: the epoch
+        // (1 to 1024, in the alpha) moves on when the area lights' scene or the GI emitters' strengths change.
+        GpuTexture area_cache;
+        u32 area_epoch = 1;
+        std::vector<f32> area_strengths;
+        u64 area_settled_signature = 0;
+        std::array<u32, 2> area_settled_at{};
+        Bounds3D area_settled_box{};
+        u32 area_settled_triangles = 0, area_moving = 0, area_last_change = 0;
+        Vec3f centre{}; // unsnapped camera for continuous clipmap blending
         bool fixed_outer = false;
         Mat4f last_view_projection{};
         Vec3f last_eye{}, last_forward{};
@@ -623,6 +679,10 @@ private:
     // from the render before evens out); true when it was read.
     bool gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
                     bool jittered, RenderDebugStats3D& stats);
+    // GlobalIllumination3D::area_lights: their light on what the pre-pass drew (gi_area.comp), after gi_resolve; true
+    // when it was (the main pass then reads it in the coverage's place).
+    bool gi_area(SDL_GPUCommandBuffer* commands, GpuView3D& view, const Scene3D& scene, const Mat4f& projection,
+                 RenderDebugStats3D& stats);
     // Fog3D::sun_shadows: the share of the fog's air the sun reaches along each ray, walked through the sun's shadow
     // map on what the pre-pass drew (fog_sun.comp), after it; true when it was.
     bool fog_sun(SDL_GPUCommandBuffer* commands, GpuView3D& view, FrameCtx& ctx, RenderDebugStats3D& stats);
@@ -647,6 +707,8 @@ private:
     SDL_GPUComputePipeline* _gi_trace = nullptr;      // gi_probe_trace.comp
     SDL_GPUComputePipeline* _gi_update = nullptr;     // gi_probe_update.comp
     SDL_GPUComputePipeline* _gi_resolve = nullptr;    // gi_resolve.comp
+    SDL_GPUComputePipeline* _gi_area = nullptr;       // gi_area.comp
+    SDL_GPUComputePipeline* _gi_area_fill = nullptr;  // gi_area_fill.comp
     SDL_GPUSampler* _gi_linear = nullptr;             // filtered, clamped on all three axes
     GpuTexture _gi_none;                              // 1 x 1 x 1, zero: the probes' bindings without probes
     GpuShader _gi_view_shader;                        // gi_view.frag
@@ -657,6 +719,9 @@ private:
     // The emitters' strengths (GpuView3D::Gi::emitter_strength) of the last GI scene made: the GI's light and its view
     // read them.
     std::shared_ptr<GpuBuffer> _gi_emitters;
+    // Area lights' reflections in the light variants: the LTC tables, and a buffer bound where there are none.
+    std::shared_ptr<GpuBuffer> _area_ltc, _area_dummy;
+    GpuTexture _area_cache_none; // 1 x 1 x 1: gi_light.comp's cache binding without area lights
     // The sky's triangle into a render pass (mode 0: colour, 1: colour and velocity, 2: velocity only; see the .cpp).
     void draw_sky(FrameCtx& ctx, SDL_GPURenderPass* pass, u32 mode);
     // P3c: the frame's particle batches (the scene's draw_particles, then the weather's), culled, sorted and written to

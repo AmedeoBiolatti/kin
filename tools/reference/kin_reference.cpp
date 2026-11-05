@@ -17,7 +17,8 @@
 //                 [--lod-gpu | --lod-cpu] [--readback] [--gpu-pass-markers] [--lod-room TRIANGLES] [--lod-occlusion]
 //                 [--bake-cache DIR]
 //                 [--gi] [--gi-windows] [--gi-cell C] [--gi-spacing N] [--gi-rays N] [--gi-hysteresis H]
-//                 [--gi-per-render N]
+//                 [--gi-per-render N] [--gi-emitters exact|probes] [--gi-area-lights] [--gi-area-full]
+//                 [--gi-area-interleave N] [--gi-area-max-triangles N]
 //
 // --bake-cache DIR keeps the levels of detail and cluster hierarchies the run builds in DIR
 // (Renderer3D::set_bake_cache), and reads them back on the next run with the same DIR instead of building them: the
@@ -419,6 +420,9 @@ struct Placed {
     // at the frame's time (frame N at N / 60 s, 0 at the picture) times `speed`; `loop` (on by default) wraps, else it
     // holds the last key. `root_motion: "remove"` holds the root joint at rest, so the character animates in place.
     bool animated = false;
+    // A rigid turn (the model's entry `spin_y`: degrees a second about its own vertical axis, frame N at N / 60 s): a
+    // copy that moves every frame, for what keeps up with motion (GlobalIllumination3D::area_lights' hierarchy).
+    double spin_y = 0.0;
     std::size_t clip = 0;
     bool fixed_time = false;
     double time = 0.0;
@@ -1940,8 +1944,11 @@ struct Overrides {
     // --gi-spacing voxels casting --gi-rays rays, keeping --gi-hysteresis, --gi-per-render of them updated a render
     // (0: all, up to a million rays).
     bool gi = false;
-    bool gi_windows = false; // --gi-windows: GlobalIllumination3D's default windows round the camera, as a game has
-                             // them (--gi-cell their first level's voxel, 0.15 else), instead of the one level
+    bool gi_windows = false;     // --gi-windows: GlobalIllumination3D's default windows round the camera, as a game has
+                                 // them (--gi-cell their first level's voxel, 0.15 else), instead of the one level
+    int gi_emitters = -1;        // --gi-emitters exact|probes (GlobalIllumination3D::emitters; --gi-area-lights: exact)
+    int gi_area_interleave = -1; // --gi-area-interleave N (1, 2, 4); --gi-area-full: 1 (every texel every render)
+    long gi_area_max_triangles = -1; // --gi-area-max-triangles N: the occluders' budget before they are made coarser
     double gi_cell = 0.0, gi_hysteresis = -1.0;
     int gi_spacing = 0, gi_rays = 0, gi_per_render = -1;
 };
@@ -2635,6 +2642,23 @@ int main(int argc, char** argv) {
             over.gi_windows = true;
         } else if (a == "--gi") {
             over.gi = true;
+        } else if (a == "--gi-area-lights") {
+            over.gi = true;
+            over.gi_emitters = static_cast<int>(kin::GiEmitters3D::Exact);
+        } else if (a == "--gi-emitters") {
+            over.gi = true;
+            const std::string mode = next();
+            if (mode != "exact" && mode != "probes") {
+                std::fprintf(stderr, "invalid value for %s (exact or probes)\n", a.c_str());
+                return 2;
+            }
+            over.gi_emitters = static_cast<int>(mode == "exact" ? kin::GiEmitters3D::Exact : kin::GiEmitters3D::Probes);
+        } else if (a == "--gi-area-full") {
+            over.gi_area_interleave = 1;
+        } else if (a == "--gi-area-max-triangles") {
+            over.gi_area_max_triangles = std::atol(next().c_str());
+        } else if (a == "--gi-area-interleave") {
+            over.gi_area_interleave = std::atoi(next().c_str());
         } else if (a == "--gi-cell") {
             over.gi = true;
             over.gi_cell = std::atof(next().c_str());
@@ -2759,6 +2783,7 @@ int main(int argc, char** argv) {
                 placed.back().position = vec3(m.find("position"));
                 placed.back().rotation_y = static_cast<float>(m.number_at("rotation_y", 0.0));
                 placed.back().uniform_scale = scale;
+                placed.back().spin_y = m.number_at("spin_y", 0.0);
                 // `grid: {count, columns, spacing: [x, z], time_step}`: the model placed `count` times in rows, each
                 // copy's animation `time_step` seconds on from the one before (the meshes are shared).
                 const kin::JsonValue* grid = m.find("grid");
@@ -3171,6 +3196,16 @@ int main(int argc, char** argv) {
                     over.gi_per_render >= 0 ? static_cast<kin::u32>(over.gi_per_render) : probes.per_render;
                 probes.hysteresis =
                     over.gi_hysteresis >= 0.0 ? static_cast<float>(over.gi_hysteresis) : probes.hysteresis;
+                if (over.gi_emitters >= 0) {
+                    scene.global_illumination.emitters = static_cast<kin::GiEmitters3D>(over.gi_emitters);
+                }
+                if (over.gi_area_max_triangles > 0) {
+                    scene.global_illumination.area_lights.max_triangles =
+                        static_cast<kin::u32>(std::min<long>(over.gi_area_max_triangles, 0xffffffffl));
+                }
+                if (over.gi_area_interleave > 0) {
+                    scene.global_illumination.area_lights.interleave = static_cast<kin::u32>(over.gi_area_interleave);
+                }
             }
             attached.clear();
             if (const kin::JsonValue* points = lights.find("points")) {
@@ -3326,6 +3361,9 @@ int main(int argc, char** argv) {
                     std::vector<Mat4f> matrices;
                     kin::compute_joint_matrices(skeleton, pose, matrices);
                     (void)scene.draw_skinned(p.model, matrices, p.transform);
+                } else if (p.spin_y != 0.0) {
+                    (void)scene.draw(p.model, p.transform * Mat4f::rotation_y(static_cast<float>(
+                                                                p.spin_y * static_cast<double>(time) / 60.0)));
                 } else {
                     (void)scene.draw(p.model, p.transform);
                 }

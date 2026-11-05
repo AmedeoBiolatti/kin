@@ -995,6 +995,36 @@ the plan's G5b results.
   emissives by its exposure) makes nothing again; the light follows within the eight renders the lit scene's blocks
   take in turn. A draw that differs from one already numbered only by its strength (in the same render), or that finds
   no number left, keeps its strength in its voxels, and a change of it is a change of what they are made of.
+- **Emitters as area lights** (`global_illumination.emitters`: `GiEmitters3D::Exact`, the default; `Probes` leaves
+  them to the probes, as on main before, cheaper and softer, without their contact shadows or reflections): each
+  numbered emitter whose material has neither an emissive nor a base-colour map is an area light (two triangles that
+  make a parallelogram as one; at most `area_lights.max_emitters`, 64, whole GI emitters in their numbering, those
+  past it left with the probes; so are those whose largest piece is under `area_lights.min_size` across, by default
+  half the first level's voxel: a candle's flame, an eye, a firefly). Where the camera sees, on gi_resolve's half-size
+  texels, its light is the polygon's exact form factor (clipped to the surface's horizon) times the share of it 4
+  lines across it find unshadowed: each line's shadowed stretches exact (an occluder triangle blocks one interval of a
+  line: Moller-Trumbore's numerators are affine in the place along the emitter), its light along them by 2 Gauss
+  points a stretch, whose error cancels in the share (a large emitter close by, which the lines alone sample poorly,
+  is right where nothing blocks it). The voxels get their light from 2 such lines directly (each voxel's front kept
+  while the area lights' scene and strengths stay), for the bounces: coarse next to a large emitter. The probes no
+  longer carry those emitters' own light (it would count twice); the light on the view fades out with the probes'
+  toward their windows' edges, and is none past them. The occluders are every copy's triangles but skinned ones, in
+  two levels of bounding volume hierarchy (each mesh's in its own space, made once, under the copies'; copies
+  unchanged for 8 renders join one world-space hierarchy), walked with the shaft from the surface to the emitter; a
+  closed single-sided mesh's faces with the surface behind them are skipped (its faces toward it block the same). Past
+  `area_lights.max_triangles` (131,072) occluder triangles in all, each mesh but the emitters' shades with a coarser
+  shape of its own (meshoptimizer's simplifier, halved as many times as it takes). With the temporal anti-aliasing a
+  render finds one texel in `area_lights.interleave` (4; 2 or 1) and takes the others from where their surface was in
+  the render before (by the motion between the two views without the jitter); those it cannot take are found in the
+  same dispatch, and a light or shadow that moves lags up to interleave - 1 renders there. Without it every texel is
+  found. Reflections: each emitter's GGX lobe by linearly transformed cosines (Heitz et al.; three.js's tables, MIT),
+  times the share of the diffuse light found unshadowed (one visibility for every emitter). A scene without such an
+  emitter costs what it does with `Probes`. Error against Cycles (mean levels over the room): the Cornell box 4.4 with
+  the probes alone, 1.8 with area lights; a room lit by three panels of three shapes 18 and 4.8. Cost over the probes
+  alone at 1280 x 720 (RTX 4080 laptop, at 2 GHz): 0.13 ms the Cornell box, 0.63 ms the three-panel room; dense
+  occluders cost more (64 balls of 6,016 triangles round three emitters: 200 ms, 65 within the default budget).
+  Memory: 8 bytes a voxel, 16 bytes a texel at half size and 8 more for the texels to find, 64 bytes an occluder
+  triangle.
 - **The lit scene:** each surface voxel's light: its colour times the sun's and the fill light's, each point and spot
   light's within reach (kin_lit's fall-off and cones) through a ray walked toward the light through the voxels (a
   surface in the way: none), and the probes' light (the bounce of the render before), plus its emission. A double-sided
@@ -1072,7 +1102,8 @@ the plan's G5b results.
   renders without it, as the other features'.
 - **Authored:** `SceneEnvironment3D`'s `gi_enabled`, `gi_min`, `gi_max`, `gi_cell`, `gi_levels`, `gi_side`,
   `gi_height`, `gi_skinned`, `gi_probes`, `gi_probe_spacing`, `gi_probe_rays`, `gi_probes_per_render`,
-  `gi_hysteresis` and `gi_intensity`.
+  `gi_hysteresis`, `gi_intensity`, `gi_emitters` (`"exact"` or `"probes"`), `gi_area_max_emitters`,
+  `gi_area_max_triangles` and `gi_area_interleave`.
 - **Seeing it:** `scene.debug.gi_view` (`GiView3D::Albedo`, `Normal`, `Emission`, `Steps`, `Radiance`, `Irradiance`)
   shows the GI scene traced from the camera instead of the picture: each pixel walks the voxels its ray passes, in
   jumps the distances allow, to the first one a surface is in; `Radiance` is the light leaving it, `Irradiance` the
@@ -1080,7 +1111,7 @@ the plan's G5b results.
   window's order), waiting for the GPU. `debug_stats()` has `gi_voxels` (all the levels', 0 without), `gi_levels`,
   `gi_built`, `gi_blocks`, `gi_copies`, `gi_triangles`, `gi_dispatches`, `gi_probes`, `gi_probes_updated`, `gi_rays`,
   `gi_lit` and `gi_resolved`. With `debug.gpu_pass_markers` each of its passes is a debug group (`kin3d.gi_clear`,
-  `_voxelize`, `_attributes`, `_flood`, `_place`, `_light`, `_trace`, `_update`, `_resolve`).
+  `_voxelize`, `_attributes`, `_flood`, `_place`, `_light`, `_trace`, `_update`, `_resolve`, `_area`).
 - **Cost:** see the plan's G5a to G5c results: the Bistro at 2844 x 1600 on an RTX 4080 laptop, its mannequin
   posed anew each render, about 1.6 ms of GPU a render at full clock and 2.35 throttled (a fifth of the frame without
   it: the GI scene about 15%, the probes 28%, their light on the view 21%, reading it in the main pass 36%).
