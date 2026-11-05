@@ -230,8 +230,9 @@ SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& su
         std::array<std::vector<u8>, surface_variant_count3d> compiled;
         bool ok = true;
         for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
+            // Optimised, as cooked graphs are: what development sees is what a game ships.
             auto spirv =
-                compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)));
+                compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)), true);
             ok = spirv.has_value();
             if (ok)
                 compiled[i] = std::move(*spirv);

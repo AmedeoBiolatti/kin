@@ -1599,7 +1599,9 @@ Numbers go into `shader_params` (a graph's parameters take its place; unnamed on
 a number for a texture, too many numbers and parameters without a graph are errors; `"graph": null` clears the
 surface (and what its parameters did). `Assets3D::load_material_graph(path)` loads graphs, cached by path:
 
-- **cooked**, `<graph>.spv` beside the source: the layout and every variant's SPIR-V in one file, made by
+- **cooked**, `<graph>.spv` beside the source: the layout and every variant's SPIR-V (optimised: glslc -O, as
+  surface shaders compiled at run time are too), deflated, with a hash of what it holds, in one file (about 220 KB:
+  eight shaders of kin's lighting), made by
   `kin_material_graph cook <graph>` or at build time by `kin_cook_material_graph(<var> SOURCE <graph> [OUTPUT
   <file>])` (`cmake/kin_embed.cmake`), when it is at least as new as the source, or the source is gone: what a
   shipped game, which has no glslc, loads;
