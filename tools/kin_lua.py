@@ -245,7 +245,7 @@ SIGNATURES = {
         "unlock": "id:string -> boolean",
         "clear_achievement": "id:string -> boolean",
         "unlocked": "id:string -> boolean|nil",
-        "progress": "id:string,current:integer,max:integer -> boolean",
+        "progress": "id:string,current:integer,max?:integer -> boolean",
         "set_stat": "id:string,value:number -> boolean",
         "add_stat": "id:string,delta:integer -> boolean",
         "stat": "id:string -> number|nil",

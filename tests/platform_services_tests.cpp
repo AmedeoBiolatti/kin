@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <kin/platform/services.hpp>
+#include <kin/platform/services_catalog.hpp>
 #include <kin/platform/user_data.hpp>
 #include <kin/runtime/game_info.hpp>
 #include <kin/runtime/scene_app.hpp>
@@ -507,6 +508,124 @@ void test_scene_app_services() {
     assert(wanted.game_id == "other" && wanted.steam_app_id == 0 && !wanted.offline_only);
 }
 
+constexpr std::string_view catalog_text = R"({
+  "schema": "kin.services/1",
+  "achievements": [
+    {"id": "ALL_COINS", "name": "achievement.all_coins", "description": "achievement.all_coins.how", "progress": 5,
+     "stores": {"fake": "F_COINS", "steam": "ACH_COINS"}},
+    {"id": "SECRET", "hidden": true}
+  ],
+  "stats": [{"id": "coins"}, {"id": "best_time", "type": "float", "stores": {"fake": "F_TIME"}}],
+  "leaderboards": [{"id": "speedrun", "sort": "ascending", "display": "milliseconds", "stores": {"fake": "F_SPEED"}}]
+})";
+
+// The game's list of its achievements, stats and leaderboards: read, written
+// and read again, and what is wrong with one said.
+void test_services_catalog_file() {
+    kin::ServicesCatalog catalog;
+    std::string error;
+    assert(kin::parse_services_catalog(catalog_text, catalog, &error));
+    assert(catalog.achievements.size() == 2 && catalog.stats.size() == 2 && catalog.leaderboards.size() == 1);
+    const kin::ServicesAchievement* coins = catalog.achievement("ALL_COINS");
+    assert(coins && coins->name == "achievement.all_coins" && coins->description == "achievement.all_coins.how");
+    assert(coins->progress == 5 && !coins->hidden && catalog.achievement("SECRET")->hidden);
+    assert(kin::store_id(coins->stores, coins->id, "steam") == "ACH_COINS" && kin::store_id(coins->stores, coins->id, "gog") == "ALL_COINS");
+    assert(catalog.stat("coins")->type == kin::ServicesStatType::Int && catalog.stat("best_time")->type == kin::ServicesStatType::Float);
+    const kin::ServicesLeaderboard* speedrun = catalog.leaderboard("speedrun");
+    assert(speedrun->sort == kin::LeaderboardSort::Ascending && speedrun->display == kin::LeaderboardDisplay::Milliseconds);
+    assert(!catalog.achievement("NOPE") && !catalog.stat("NOPE") && !catalog.leaderboard("NOPE"));
+
+    kin::ServicesCatalog again;
+    assert(kin::parse_services_catalog(kin::write_services_catalog(catalog), again, &error));
+    assert(kin::write_services_catalog(again) == kin::write_services_catalog(catalog));
+    assert(again.achievement("ALL_COINS")->stores.at("steam") == "ACH_COINS" && again.leaderboard("speedrun")->sort == kin::LeaderboardSort::Ascending);
+    kin::ServicesCatalog empty;
+    assert(kin::parse_services_catalog("{}", empty, &error) && empty.achievements.empty());
+
+    for (const char* broken : {"not json", "[]", R"({"schema": "kin.services/9"})", R"({"achievements": {}})",
+                               R"({"achievements": [{"name": "x"}]})", R"({"achievements": [{"id": "A"}, {"id": "A"}]})",
+                               R"({"stats": [{"id": "s", "type": "text"}]})", R"({"leaderboards": [{"id": "b", "sort": "up"}]})",
+                               R"({"leaderboards": [{"id": "b", "display": "hours"}]})", R"({"stats": [{"id": "s", "stores": {"steam": ""}}]})",
+                               R"({"achievements": [{"id": "A", "progress": -1}]})"}) {
+        error.clear();
+        kin::ServicesCatalog bad = catalog;
+        assert(!kin::parse_services_catalog(broken, bad, &error) && !error.empty());
+        assert(bad.achievements.size() == 2); // left as it was
+    }
+}
+
+// The game asks by its ids; the store is asked by its own, and answers by them.
+void test_catalog_services() {
+    kin::ServicesCatalog catalog;
+    assert(kin::parse_services_catalog(catalog_text, catalog));
+    kin::FakeServices fake;
+    const auto services = kin::catalog_services(fake, catalog);
+    assert(services->backend() == "fake");
+
+    assert(services->unlock("ALL_COINS") && fake.calls.back().what == "unlock" && fake.calls.back().id == "F_COINS");
+    assert(services->unlocked("ALL_COINS") == true && fake.unlocked("F_COINS") == true);
+    assert(services->unlock("SECRET") && fake.calls.back().id == "SECRET"); // no id of the store's: the game's
+    const std::size_t asked = fake.calls.size();
+    assert(!services->unlock("NOPE") && !services->unlocked("NOPE").has_value() && fake.calls.size() == asked); // not listed
+    services->update();
+    const auto unlocked = std::ranges::find(services->events(), kin::ServiceEventKind::AchievementUnlocked, &kin::ServiceEvent::kind);
+    assert(unlocked != services->events().end() && unlocked->id == "ALL_COINS");
+
+    // Progress counts to the listed most.
+    assert(services->show_progress("ALL_COINS", 7, 0) && fake.calls.back().id == "F_COINS" && fake.calls.back().value == "5/5");
+    assert(!services->show_progress("SECRET", 1, 0)); // nothing to count to
+
+    // Stats as their types say.
+    assert(services->set_stat("best_time", 41) && fake.stat_float("F_TIME") == 41.0f && services->stat_float("best_time") == 41.0f);
+    assert(services->set_stat("coins", 2.6f) && fake.stat_int("coins") == 3 && services->stat_int("coins") == 3);
+    assert(services->add_stat("coins", 2) && services->stat_int("coins") == 5);
+    assert(!services->set_stat("NOPE", 1));
+
+    // Leaderboards by the store's name, back by the game's.
+    assert(services->upload_score("speedrun", 4100) != 0 && fake.calls.back().id == "F_SPEED");
+    assert(services->upload_score("other", 1) == 0);
+    services->update();
+    fake.send({.kind = kin::ServiceEventKind::LeaderboardScores, .id = "F_SPEED", .ok = true});
+    services->update();
+    assert(services->events().size() == 1 && services->events()[0].id == "speedrun");
+
+    // A kind the catalog lists none of goes as it is.
+    kin::ServicesCatalog achievements_only;
+    achievements_only.achievements = catalog.achievements;
+    const auto passing = kin::catalog_services(fake, achievements_only);
+    assert(passing->set_stat("anything", 1) && fake.calls.back().id == "anything");
+    assert(passing->upload_score("anyboard", 3) != 0 && fake.calls.back().id == "anyboard");
+
+    // Lower is better, as listed: kin's offline backend keeps the best by it.
+    const auto offline = kin::make_offline_services({.offline_in_memory = true});
+    const auto listed = kin::catalog_services(*offline, catalog);
+    listed->upload_score("speedrun", 4100);
+    listed->upload_score("speedrun", 5000); // asked as higher is better: the list says otherwise
+    listed->update();
+    std::vector<bool> changed;
+    for (const kin::ServiceEvent& event : listed->events()) {
+        if (event.kind == kin::ServiceEventKind::LeaderboardUploaded) {
+            assert(event.id == "speedrun");
+            changed.push_back(event.changed);
+        }
+    }
+    assert((changed == std::vector<bool>{true, false}));
+
+    // Scripts ask the same way; progress without a most takes the list's.
+    kin::set_active_services(services.get());
+    kin::LuaScript script;
+    assert(script.load_string(R"(
+        function run()
+            assert(services.progress("ALL_COINS", 2))
+            assert(not services.unlock("NOPE"))
+            return true
+        end
+    )"));
+    assert(script.call_for<bool>("run") == true);
+    assert(fake.calls.back().what == "progress" && fake.calls.back().value == "2/5");
+    kin::set_active_services(nullptr);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -524,6 +643,8 @@ int main(int argc, char** argv) {
     test_lua_services_table();
     test_game_info_steam_app_id();
     test_scene_app_services();
+    test_services_catalog_file();
+    test_catalog_services();
     test_steam_backend_through_the_library();
     return 0;
 }

@@ -470,6 +470,7 @@ struct SceneAppSession::Impl {
     } localization_reset;
     // The platform's services (started here from services_config, or the game's).
     std::unique_ptr<PlatformServices> owned_services;
+    std::unique_ptr<PlatformServices> catalog_wrapper; // over them, by the game's ids (gone first)
     PlatformServices* services = nullptr;
     struct ServicesReset {
         PlatformServices* prior = active_services();
@@ -613,6 +614,10 @@ struct SceneAppSession::Impl {
         }
         if (!services) {
             return std::nullopt;
+        }
+        if (config.services_catalog) {
+            catalog_wrapper = catalog_services(*services, *config.services_catalog);
+            services = catalog_wrapper.get();
         }
         set_active_services(services);
         services_reset.installed = services;
