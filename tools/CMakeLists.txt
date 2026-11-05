@@ -75,6 +75,9 @@ if(KIN_EXPERIMENTAL_3D)
         add_test(NAME kin-ascii3d-graph COMMAND kin_ascii3d --test)
         set_tests_properties(kin-ascii3d-graph PROPERTIES SKIP_RETURN_CODE 77)
     endif()
+    # kin_import_material: Godot's (later Unity's, Unreal's) materials as .kinmaterials (material_import3d.hpp).
+    add_executable(kin_import_material import_material/main.cpp)
+    target_link_libraries(kin_import_material PRIVATE kin::engine)
     add_executable(kin_asset_preview asset_preview/main.cpp)
     target_link_libraries(kin_asset_preview PRIVATE kin::engine)
     kin_compile_glsl(_preview_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/asset_preview/shaders"

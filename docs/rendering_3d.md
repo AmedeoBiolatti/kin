@@ -3451,6 +3451,28 @@ variant and a blue variant selected by a standard prefab override. Both share on
 barrel model. The fire pit selects the ember variant from the same material asset.
 The expedition's existing imported appearance remains unchanged.
 
+### Importing other engines' materials
+
+`kin_import_material godot <material.tres | folder> --project <godot project> --content <kin content root> --out
+<folder>` turns Godot 4 `StandardMaterial3D` and `ORMMaterial3D` resources into `.kinmaterials` files (one each, a
+folder's in its layout), and `import_godot_material()` (`kin/render3d/material_import3d.hpp`) does it for tools such
+as the studio. Every field kin has is written, so the file replaces a model's imported material as a whole:
+
+- albedo colour and map; metallic and roughness, their maps' selected channels packed into kin's one map (G
+  roughness, B metallic; ORM maps as they are); normal map and scale (only with `normal_enabled`); ambient
+  occlusion (its channel moved to R); emission: its colour and map by its operator (an added colour is put into a
+  map with the map, scaled by the brightest texel), its energy times, with the project's physical light units, its
+  intensity in nits;
+- transparency (alpha; scissor as a cut-out at its threshold; hash as a cut-out at a half; depth pre-pass as alpha),
+  the add blend mode, cull mode (disabled is double-sided), unshaded, receiving shadows, and the texture filter and
+  repeat as every map's sampler.
+
+Maps inside the content root are referenced where they are; others are copied into `<out>/textures`, beside the
+maps made. What kin does not show as Godot does is printed as a note for each material (backlight, subsurface
+scattering, proximity and distance fade, refraction, detail maps, `uv1_scale` and `uv1_offset`, front-face culling,
+subtract and multiply blending, ...), not dropped silently. Maps a material needs repacked but kin cannot decode (DDS,
+KTX) are left out with their factor kept, and said. Every file written is read back through
+`parse_materials3d_asset` first. Unity's and Unreal's materials are next (docs/material_graph_plan.md).
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,
