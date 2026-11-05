@@ -3651,6 +3651,31 @@ kin, or samples more than the five textures kin's material has slots for, falls 
   fresnel); an Expression node of one assignment becomes a `glsl` node.
 
 `tools/import_material/godot_probe.gd` (headless Godot) and `make_unity_fixture.py` make the Tier 2 test fixtures.
+
+#### Comparing with the source engines (the material lineup)
+
+`tools/import_material/lineup` renders one small scene in kin, Godot 4 and Unreal 5, so imported materials can be
+compared with the pictures their own engines make. `lineup.json` lays it out: four unlit quads (graph math, textures,
+colour spaces: these should match to the pixel) over four lit spheres (one sun, no ambient), with eight materials
+described in words and made as graphs in both engines.
+
+1. `python3 make_assets.py <folder>`: the textures (PNG) and meshes (`.glb`) all three engines load.
+2. Godot: in a project holding the assets and `godot_lineup.gd`, `godot --headless --path <project> --import`, then
+   `godot --path <project> --script res://godot_lineup.gd -- --out godot.png` (windowed: it renders). It saves the
+   materials as VisualShaders.
+3. Unreal: `unreal_lineup.py` in the editor of a project with AA, GI, reflections, AO and grain off
+   (`LINEUP_DIR=<folder> LINEUP_OUT=unreal.png`; see its header). It saves the materials under `/Game/Lineup`;
+   export them with `unreal_export.py`.
+4. Import each engine's materials with `kin_import_material godot|unreal ... --graphs`, then
+   `kin_material_lineup --scene lineup.json --content <root> --materials <folder> --out kin.png`.
+5. `python3 compare.py lineup.json <reference.png> <candidate.png> <sheet.png>`: each object's mean and largest
+   difference in 8-bit levels, the pixels off by more than 2, PSNR (and FLIP with `flip_evaluator`), and a sheet of
+   the two pictures and their difference.
+
+All three draw linear light encoded to sRGB, with no tone curve. Measured (2026-11-05): kin with Godot's materials
+against Godot, unlit row: at most 1 level apart; kin with Unreal's materials is byte-identical to kin with Godot's;
+the lit spheres differ by about 3-4 levels, from the engines' BRDFs (Godot's Burley diffuse, kin's multiscatter
+boost on metals).
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,
