@@ -43,8 +43,11 @@ target_link_libraries(check PRIVATE kin::components)
         self.configure()
         manifest=self.manifest()
         self.assertEqual(manifest['schema'],'kin.components/1')
-        self.assertEqual(len(manifest['components']),12)
-        self.assertTrue(all(c['enabled'] for c in manifest['components'].values()))
+        self.assertEqual(len(manifest['components']),13)
+        # Every component is on by default but the experimental Python scripts.
+        self.assertTrue(all(c['enabled'] for name, c in manifest['components'].items() if name != 'python'))
+        self.assertFalse(manifest['components']['python']['enabled'])
+        self.assertEqual(manifest['components']['python']['tests'],['kin-python-scripts'])
         self.assertEqual(manifest['components']['audio']['tests'],['kin-audio','kin-audio-component'])
         self.compile()
 
@@ -55,7 +58,8 @@ target_link_libraries(check PRIVATE kin::components)
         self.configure(options=[f'-D{name}=OFF' for name in names])
         self.assertFalse(any(c['enabled'] for c in self.manifest()['components'].values()))
         self.compile()
-        self.configure(options=[f'-D{name}=ON' for name in names])
+        defaults={c['option']:c['enabled'] for c in json.loads(before)['components'].values()}
+        self.configure(options=[f'-D{name}={"ON" if on else "OFF"}' for name, on in defaults.items()])
         self.assertEqual((self.build/'generated/components.json').read_bytes(),before)
         self.compile()
 

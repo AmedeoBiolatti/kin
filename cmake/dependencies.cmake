@@ -454,3 +454,60 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_PHYSICS3D)
         message(FATAL_ERROR "License text not found: ${joltphysics_SOURCE_DIR}/LICENSE")
     endif()
 endif()
+
+# PocketPy (kin/scripting/python_scripts.hpp, docs/python_scripting.md), only with
+# the experimental PYTHON component: a Python 3 interpreter in C, MIT. The
+# release's amalgamation (pocketpy.c and pocketpy.h) and the repository's
+# LICENSE at that tag, each pinned by its hash; engine/src/scripting/pocketpy_sandbox.c
+# compiles it. A folder holding those three files can stand in for the
+# downloads: -DFETCHCONTENT_SOURCE_DIR_POCKETPY=<folder>.
+if(KIN_ENABLE_PYTHON)
+    if(FETCHCONTENT_SOURCE_DIR_POCKETPY)
+        set(FETCHCONTENT_SOURCE_DIR_POCKETPY_HEADER "${FETCHCONTENT_SOURCE_DIR_POCKETPY}")
+        set(FETCHCONTENT_SOURCE_DIR_POCKETPY_LICENSE "${FETCHCONTENT_SOURCE_DIR_POCKETPY}")
+    endif()
+    set(_kin_pocketpy_release https://github.com/pocketpy/pocketpy/releases/download/v2.2.0)
+    FetchContent_Declare(pocketpy
+        URL ${_kin_pocketpy_release}/pocketpy.c
+        URL_HASH SHA256=0f0c19071b4fd0b37cb292e15bea49ca163f151af901b00893d3a2005bb056e6
+        DOWNLOAD_NO_EXTRACT TRUE
+    )
+    FetchContent_Declare(pocketpy_header
+        URL ${_kin_pocketpy_release}/pocketpy.h
+        URL_HASH SHA256=43864cfa090d65b80915467900430dfae52c769f13d6edb137d0227d1fbe03ad
+        DOWNLOAD_NO_EXTRACT TRUE
+    )
+    FetchContent_Declare(pocketpy_license
+        URL https://raw.githubusercontent.com/pocketpy/pocketpy/v2.2.0/LICENSE
+        URL_HASH SHA256=5ad14c41f26ed1b8c9a0039ae566bc7ce00277aec1634220eae5db2bb8fc54ef
+        DOWNLOAD_NO_EXTRACT TRUE
+    )
+    FetchContent_MakeAvailable(pocketpy pocketpy_header pocketpy_license) # files only: nothing to add_subdirectory
+    foreach(_kin_file "${pocketpy_SOURCE_DIR}/pocketpy.c" "${pocketpy_header_SOURCE_DIR}/pocketpy.h"
+                      "${pocketpy_license_SOURCE_DIR}/LICENSE")
+        if(NOT EXISTS "${_kin_file}")
+            message(FATAL_ERROR "PocketPy: ${_kin_file} not found")
+        endif()
+    endforeach()
+    # Its notice: PocketPy's license, then those of the code its amalgamation
+    # carries (fastermath's logarithms, which its math uses; the Mersenne Twister).
+    file(READ "${pocketpy_license_SOURCE_DIR}/LICENSE" _kin_pocketpy_notice)
+    file(READ "${pocketpy_SOURCE_DIR}/pocketpy.c" _kin_pocketpy_code)
+    foreach(_kin_first "Copyright (c) 2012,2013   Axel Kohlmeyer" "Copyright (c) 2011 Mutsuo Saito")
+        string(FIND "${_kin_pocketpy_code}" "${_kin_first}" _kin_begin)
+        if(_kin_begin EQUAL -1)
+            message(FATAL_ERROR "PocketPy: the notice beginning '${_kin_first}' is not in pocketpy.c")
+        endif()
+        string(SUBSTRING "${_kin_pocketpy_code}" ${_kin_begin} 4000 _kin_part)
+        string(FIND "${_kin_part}" "SUCH DAMAGE." _kin_end)
+        if(_kin_end EQUAL -1)
+            message(FATAL_ERROR "PocketPy: the notice beginning '${_kin_first}' has no end")
+        endif()
+        math(EXPR _kin_end "${_kin_end} + 12")
+        string(SUBSTRING "${_kin_part}" 0 ${_kin_end} _kin_part)
+        string(APPEND _kin_pocketpy_notice "\nPocketPy includes code under this notice:\n\n${_kin_part}\n")
+    endforeach()
+    unset(_kin_pocketpy_code)
+    file(WRITE "${CMAKE_BINARY_DIR}/licenses/PocketPy.txt" "${_kin_pocketpy_notice}")
+    set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};PocketPy.txt|${CMAKE_BINARY_DIR}/licenses/PocketPy.txt" CACHE INTERNAL "")
+endif()

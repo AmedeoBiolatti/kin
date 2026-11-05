@@ -296,6 +296,35 @@ if(KIN_ENABLE_SCRIPTING)
     kin_enable_release_optimizations(kin_scripting_scenes)
     target_link_libraries(kin_engine_components INTERFACE kin_scripting_scenes)
 endif()
+if(KIN_ENABLE_PYTHON)
+    # Experimental Python scripting (kin/scripting/python.hpp). PocketPy is
+    # compiled as C11 through kin's sandbox (src/scripting/pocketpy_sandbox.c),
+    # without kin's warnings; only python_*.cpp see its header. A game links
+    # kin::python_scripts itself: kin::engine does not include it.
+    add_library(kin_pocketpy STATIC src/scripting/pocketpy_sandbox.c)
+    set_target_properties(kin_pocketpy PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+    target_include_directories(kin_pocketpy SYSTEM PUBLIC "${pocketpy_header_SOURCE_DIR}" PRIVATE "${pocketpy_SOURCE_DIR}")
+    # No os, io or debugger (files, sockets); a watchdog, which the sandbox turns into an instruction budget.
+    target_compile_definitions(kin_pocketpy PUBLIC PK_ENABLE_OS=0 PK_ENABLE_WATCHDOG=1)
+    # -ffp-contract=off: its software math gives the same bits where a multiply-add could fuse (determinism).
+    target_compile_options(kin_pocketpy PRIVATE "$<$<C_COMPILER_ID:GNU,Clang>:-w;-ffp-contract=off>" "$<$<C_COMPILER_ID:MSVC>:/w>")
+    kin_enable_release_optimizations(kin_pocketpy)
+
+    add_library(kin_python_scripts STATIC
+        src/scripting/python_api.cpp
+        src/scripting/python_host.cpp
+        src/scripting/python_values.cpp)
+    add_library(kin::python_scripts ALIAS kin_python_scripts)
+    target_link_libraries(kin_python_scripts PUBLIC kin_engine PRIVATE kin_pocketpy)
+    # The part of the module kin written in Python (tasks, awaitables).
+    kin_embed_files(kin_python_scripts NAME kin_python_embedded NAMESPACE kin::python_detail
+        FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/python_kin.py"
+              "${CMAKE_CURRENT_SOURCE_DIR}/src/scripting/python_kin.pyi")
+    if(KIN_ENABLE_PHYSICS)
+        target_link_libraries(kin_python_scripts PUBLIC kin_physics) # bodies moved with their entities
+    endif()
+    kin_enable_release_optimizations(kin_python_scripts)
+endif()
 if(KIN_ENABLE_SCENE_SERVER)
     target_sources(kin_engine PRIVATE
         src/runtime/scene_server.cpp
