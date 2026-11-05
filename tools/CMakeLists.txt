@@ -81,6 +81,9 @@ if(KIN_EXPERIMENTAL_3D)
     # kin_material_graph: material graphs checked, written as GLSL, cooked (material_graph3d.hpp).
     add_executable(kin_material_graph material_graph/main.cpp)
     target_link_libraries(kin_material_graph PRIVATE kin::engine)
+    # kin_material_lineup: the material lineup (import_material/lineup) rendered for comparison with Godot and Unreal.
+    add_executable(kin_material_lineup import_material/lineup/main.cpp)
+    target_link_libraries(kin_material_lineup PRIVATE kin::engine)
     add_executable(kin_asset_preview asset_preview/main.cpp)
     target_link_libraries(kin_asset_preview PRIVATE kin::engine)
     kin_compile_glsl(_preview_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/asset_preview/shaders"
