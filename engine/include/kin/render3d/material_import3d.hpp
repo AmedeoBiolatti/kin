@@ -31,6 +31,7 @@ struct ImportedMaterial3D {
     std::filesystem::path file;                 // the .kinmaterials (in `out`)
     std::vector<std::filesystem::path> written; // the textures made or copied
     std::vector<std::string> notes;             // what the source has that kin does not show as it does
+    std::filesystem::path graph;                // a graph import's kin.material-graph/1 file (written in `out`)
 };
 
 // A Godot 4 StandardMaterial3D or ORMMaterial3D (.tres): albedo, metallic and roughness (their maps' channels packed
@@ -59,5 +60,41 @@ Result3D<ImportedMaterial3D> import_unity_material(const std::filesystem::path& 
 // blend mode (opaque, masked, translucent, additive), two-sided, unlit; one-colour maps folded into their factor.
 Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path& source,
                                                     const MaterialImportOptions3D& options);
+
+// Tier 2, the other engines' graphs (docs/material_graph_plan.md): the source's node graph as a kin material graph
+// (written as <its graph's name>.kingraph in `out`, one for every material of one graph), and the material as a
+// .kinmaterials naming it, with its parameters' values and textures, over what the Tier 1 import makes of it (what the
+// graph can't express keeps that). Nodes kin has no counterpart for are noted, naming them, and the outputs they feed
+// left to the Tier 1 values.
+//
+// Unreal (an unreal_export.py export's "graph"): constants, scalar, vector and texture parameters, texture samples
+// (normal maps unpacked; DirectX's green turned to kin's), texture coordinates (tiling), Multiply, Add, Subtract,
+// Divide, Min, Max, Power, Clamp, Lerp, One Minus, Abs, Floor, Ceil, Frac, Square Root, Saturate, Normalize, Dot,
+// Cross, Distance, Sine and Cosine (their period), Component Mask, Append, Time, World Position (centimetres),
+// Vertex Color, Camera Vector, Pixel and Vertex Normal, Fresnel, Panner, Desaturation, Reroute, Static Switch
+// (its default).
+Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& source,
+                                                 const MaterialImportOptions3D& options);
+
+// Unity (a .mat whose shader is a Shader Graph, found by GUID): properties (by their reference names, the material's
+// values), Sample Texture 2D (normal maps unpacked), UV, Tiling And Offset, Add, Subtract, Multiply, Divide, Minimum,
+// Maximum, Power, Lerp, Step, Smoothstep, Clamp, Remap, One Minus, Saturate, Absolute, Negate, Fraction, Floor,
+// Ceiling, Normalize, Square Root, Sine, Cosine, Length, Dot Product, Cross Product, Distance, Split, Combine,
+// Vector 1 to 4, Color, Constant, Slider, Time, Position and Normal Vector and View Direction (world), Vertex Color,
+// Fresnel Effect, Simple, Gradient and Voronoi Noise (kin's, approximately), Branch, Triangle Wave, Redirect, Preview;
+// the URP target's surface (opaque, transparent, alpha clip), two sides and Unlit; the blocks' own values where
+// nothing feeds them.
+Result3D<ImportedMaterial3D> import_unity_graph(const std::filesystem::path& source,
+                                                const MaterialImportOptions3D& options);
+
+// Godot 4 (a ShaderMaterial whose shader is a VisualShader: its own file or inline; StandardMaterial3D and
+// ORMMaterial3D as import_godot_material): the fragment stage's parameters (the material's values), Texture (its
+// own texture or a sampler parameter's), Input (uv, time, color; vertex, normal and view as kin's world ones, said),
+// float and vector constants, operators and functions, Mix, Clamp, Step, SmoothStep, Remap, MultiplyAdd, Dot
+// Product, Length, Distance, Vector Compose and Decompose, Fresnel, UV Func, If, Switch, Compare (scalars),
+// Reroute, Expression (one output, one assignment); Albedo, Alpha, Metallic, Roughness, Emission, AO, Normal Map
+// (and its depth), the alpha scissor threshold; cull and unshaded.
+Result3D<ImportedMaterial3D> import_godot_graph(const std::filesystem::path& source,
+                                                const MaterialImportOptions3D& options);
 
 } // namespace kin

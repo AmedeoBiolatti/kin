@@ -5,7 +5,9 @@
 #include <array>
 #include <cstring>
 #include <kin/core/json_value.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <map>
+#include <set>
 #include <string_view>
 
 namespace kin {
@@ -461,6 +463,439 @@ Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path&
         x.finish();
         result.value = std::move(imported);
     } catch (const std::exception& error) {
+        result.diagnostics.push_back(source.string() + ": " + error.what());
+    }
+    return result;
+}
+
+} // namespace kin
+
+// --- Tier 2: Unreal's material graphs as kin's ---
+
+namespace kin {
+namespace {
+
+using material_import::GraphBuilder;
+
+// The export's graph read into a kin graph: each expression and output pin as a kin reference (JSON text), made once.
+class UnrealGraph {
+public:
+    UnrealGraph(const JsonValue& doc, GraphBuilder& b, material_import::Context& x)
+        : _doc(doc), _b(b), _x(x), _nodes(doc.find("graph") ? doc.find("graph")->find("nodes") : nullptr) {}
+
+    // The textures the graph names (each a parameter of its own): the export's file, and whether it is a normal map.
+    struct Texture {
+        std::string param, file;
+        bool normal = false, srgb = true;
+    };
+    std::vector<Texture> textures;
+
+    // `node`'s value at `pin`, or none, with why.
+    std::optional<std::string> value(const std::string& node, const std::string& pin, std::string& why) {
+        const auto key = node + "|" + pin;
+        if (const auto it = _done.find(key); it != _done.end())
+            return it->second;
+        if (_visiting.contains(node)) {
+            why = node + " feeds itself";
+            return std::nullopt;
+        }
+        _visiting.insert(node);
+        auto v = translate(node, why);
+        _visiting.erase(node);
+        if (v)
+            v = swizzle(*v, pin);
+        if (v)
+            _done[key] = *v;
+        return v;
+    }
+
+private:
+    std::string swizzle(const std::string& ref, std::string pin) {
+        for (auto& c : pin)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+        static const std::set<std::string> pins{"r", "g", "b", "a", "rg", "rgb", "rgba",
+                                                "x", "y", "z", "w", "xy", "xyz", "xyzw"};
+        if (pin.empty() || !pins.contains(pin) || ref.front() != '"')
+            return ref;
+        for (auto& c : pin)
+            c = c == 'r' ? 'x' : c == 'g' ? 'y' : c == 'b' ? 'z' : c == 'a' ? 'w' : c;
+        return _b.member(ref, pin);
+    }
+    const JsonValue* node(const std::string& name) const { return _nodes ? _nodes->find(name) : nullptr; }
+    static f32 prop(const JsonValue& n, const char* key, f32 fallback) {
+        const auto* p = n.find("props");
+        const auto* v = p ? p->find(key) : nullptr;
+        return v && v->is_number() ? f32(v->as_number()) : v && v->is_bool() ? (v->as_bool() ? 1.0f : 0.0f) : fallback;
+    }
+    static std::string text(const JsonValue& n, const char* key) {
+        const auto* p = n.find("props");
+        const auto* v = p ? p->find(key) : nullptr;
+        return v && v->is_string() ? v->as_string() : "";
+    }
+    static std::array<f32, 4> colour(const JsonValue& n, const char* key) {
+        std::array<f32, 4> c{0, 0, 0, 1};
+        const auto* p = n.find("props");
+        const auto* v = p ? p->find(key) : nullptr;
+        if (v && v->is_array())
+            for (size_t i = 0; i < std::min<size_t>(4, v->items().size()); ++i)
+                c[i] = f32(v->items()[i].as_number());
+        return c;
+    }
+    // An input: the expression connected to it (by its name; a lone input by any name), else `fallback` (JSON text).
+    std::optional<std::string> input(const JsonValue& n, std::initializer_list<const char*> names,
+                                     std::optional<std::string> fallback, std::string& why) {
+        const auto* inputs = n.find("inputs");
+        const JsonValue* in = nullptr;
+        if (inputs && inputs->is_object()) {
+            for (const char* name : names)
+                if ((in = inputs->find(name)))
+                    break;
+            // (Unreal names no single input of some nodes: One Minus's, Clamp's first: "None" in the export.)
+            if (!in)
+                for (const char* unnamed : {"None", ""})
+                    if (std::any_of(names.begin(), names.end(),
+                                    [](const char* x) { return !*x || !std::strcmp(x, "None"); }))
+                        if ((in = inputs->find(unnamed)))
+                            break;
+        }
+        if (!in) {
+            if (!fallback)
+                why = "an input not connected";
+            return fallback;
+        }
+        const std::string from = in->find("node") ? in->find("node")->as_string() : "";
+        const std::string pin = in->find("output") ? in->find("output")->as_string() : "";
+        return value(from, pin, why);
+    }
+    std::string param(const std::string& name, const char* type, std::array<f32, 4> value) {
+        if (!_b.has_param(name))
+            _b.params.push_back({name, type, value});
+        return GraphBuilder::quote(name);
+    }
+
+    std::optional<std::string> translate(const std::string& name, std::string& why) {
+        const JsonValue* found = node(name);
+        if (!found) {
+            why = "no expression " + name;
+            return std::nullopt;
+        }
+        const JsonValue& n = *found;
+        const std::string cls = n.find("class") ? n.find("class")->as_string() : "";
+        const std::string kind = cls.rfind("MaterialExpression", 0) == 0 ? cls.substr(18) : cls;
+        const auto num = GraphBuilder::number;
+        const auto in = [&](std::initializer_list<const char*> names, std::optional<std::string> fallback = {}) {
+            return input(n, names, std::move(fallback), why);
+        };
+        const auto binary = [&](const char* type, const char* a, const char* b, f32 ka,
+                                f32 kb) -> std::optional<std::string> {
+            const auto x = in({a}, num(prop(n, "const_a", ka))), y = in({b}, num(prop(n, "const_b", kb)));
+            if (!x || !y)
+                return std::nullopt;
+            return _b.add(type, {{"a", *x}, {"b", *y}});
+        };
+        const auto unary = [&](const char* type) -> std::optional<std::string> {
+            const auto x = in({"", "None", "Input"});
+            return x ? std::optional{_b.add(type, {{"x", *x}})} : std::nullopt;
+        };
+        if (kind == "Constant")
+            return num(prop(n, "r", 0));
+        if (kind == "Constant2Vector")
+            return "[" + num(prop(n, "r", 0)) + ", " + num(prop(n, "g", 0)) + "]";
+        if (kind == "Constant3Vector" || kind == "Constant4Vector") {
+            const auto c = colour(n, "constant");
+            return GraphBuilder::vector({c.data(), kind == "Constant3Vector" ? 3u : 4u});
+        }
+        if (kind == "ScalarParameter")
+            return param(text(n, "parameter_name"), "float", {prop(n, "default_value", 0), 0, 0, 0});
+        if (kind == "VectorParameter")
+            return param(text(n, "parameter_name"), "color", colour(n, "default_value"));
+        if (kind == "TextureSample" || kind == "TextureSampleParameter2D") {
+            std::string file = text(n, "texture");
+            std::string pname = text(n, "parameter_name");
+            if (const auto* p = _doc.find("parameters"); p && !pname.empty())
+                if (const auto* t = p->find("texture"); t && t->find(pname) && t->find(pname)->is_string())
+                    file = t->find(pname)->as_string();
+            if (file.empty()) {
+                why = name + ": a texture sample of no texture";
+                return std::nullopt;
+            }
+            if (pname.empty())
+                pname = "t_" + std::filesystem::path(file).stem().string();
+            for (auto& c : pname)
+                if (!std::isalnum(static_cast<unsigned char>(c)))
+                    c = '_';
+            const bool normal = text(n, "sampler_type").find("NORMAL") != std::string::npos;
+            const auto* settings = _doc.find("textures") ? _doc.find("textures")->find(file) : nullptr;
+            if (std::none_of(textures.begin(), textures.end(), [&](const Texture& t) { return t.param == pname; }))
+                textures.push_back({pname, file, normal, !normal && settings && settings->bool_at("srgb", true)});
+            if (!_b.has_param(pname))
+                _b.params.push_back({pname, "texture", {}, "", false}); // its slot is chosen when all are known
+            const auto uv = in({"UVs", "Coordinates"}, GraphBuilder::quote("uv"));
+            if (!uv)
+                return std::nullopt;
+            const std::string sample = _b.add("texture", {{"uv", *uv}}, {{"texture", GraphBuilder::quote(pname)}});
+            if (!normal)
+                return sample;
+            // Unreal unpacks a normal map's texel; in its tangent space (DirectX's: green down): kin's source turned so
+            // where the texture flips it on import.
+            const std::string unpacked = _b.add("unpack_normal", {{"texel", sample}});
+            const bool flipped = settings && settings->bool_at("flip_green_channel", false);
+            return flipped ? _b.add("multiply", {{"a", unpacked}, {"b", "[1, -1, 1]"}}) : unpacked;
+        }
+        if (kind == "TextureCoordinate") {
+            if (prop(n, "coordinate_index", 0) != 0) {
+                why = name + ": a second UV set (kin's meshes have one)";
+                return std::nullopt;
+            }
+            const f32 u = prop(n, "u_tiling", 1), v = prop(n, "v_tiling", 1);
+            return u == 1 && v == 1 ? GraphBuilder::quote("uv")
+                                    : _b.add("multiply", {{"a", GraphBuilder::quote("uv")},
+                                                          {"b", "[" + num(u) + ", " + num(v) + "]"}});
+        }
+        if (kind == "Multiply")
+            return binary("multiply", "A", "B", 0, 1);
+        if (kind == "Add")
+            return binary("add", "A", "B", 0, 1);
+        if (kind == "Subtract")
+            return binary("subtract", "A", "B", 1, 1);
+        if (kind == "Divide")
+            return binary("divide", "A", "B", 1, 1);
+        if (kind == "Min")
+            return binary("min", "A", "B", 0, 1);
+        if (kind == "Max")
+            return binary("max", "A", "B", 0, 1);
+        if (kind == "Dot" || kind == "Cross" || kind == "Distance") {
+            const auto a = in({"A"}), b = in({"B"});
+            if (!a || !b)
+                return std::nullopt;
+            return _b.add(kind == "Dot" ? "dot" : kind == "Cross" ? "cross" : "distance", {{"a", *a}, {"b", *b}});
+        }
+        if (kind == "Power") {
+            const auto base = in({"Base"}), e = in({"Exponent", "Exp"}, num(prop(n, "const_exponent", 2)));
+            if (!base || !e)
+                return std::nullopt;
+            return _b.add("power", {{"a", *base}, {"b", *e}});
+        }
+        if (kind == "Clamp") {
+            const auto x = in({"", "None", "Input"}), lo = in({"Min"}, num(prop(n, "min_default", 0))),
+                       hi = in({"Max"}, num(prop(n, "max_default", 1)));
+            if (!x || !lo || !hi)
+                return std::nullopt;
+            return _b.add("clamp", {{"x", *x}, {"min", *lo}, {"max", *hi}});
+        }
+        if (kind == "LinearInterpolate") {
+            const auto a = in({"A"}, num(prop(n, "const_a", 0))), b = in({"B"}, num(prop(n, "const_b", 1))),
+                       t = in({"Alpha"}, num(prop(n, "const_alpha", 0.5)));
+            if (!a || !b || !t)
+                return std::nullopt;
+            return _b.add("mix", {{"a", *a}, {"b", *b}, {"t", *t}});
+        }
+        static const std::map<std::string, const char*> unaries{
+            {"OneMinus", "one_minus"}, {"Abs", "abs"},         {"Floor", "floor"},       {"Ceil", "ceil"},
+            {"Frac", "fract"},         {"SquareRoot", "sqrt"}, {"Saturate", "saturate"}, {"Normalize", "normalize"}};
+        if (const auto u = unaries.find(kind); u != unaries.end())
+            return unary(u->second);
+        if (kind == "Sine" || kind == "Cosine") { // sin(x * 2 pi / period), or of x with no period
+            const auto x = in({"", "None", "Input"});
+            if (!x)
+                return std::nullopt;
+            const f32 period = prop(n, "period", 1);
+            const std::string arg = period > 0 ? _b.add("multiply", {{"a", *x}, {"b", num(6.283185307 / period)}}) : *x;
+            return _b.add(kind == "Sine" ? "sin" : "cos", {{"x", arg}});
+        }
+        if (kind == "ComponentMask") {
+            const auto x = in({"", "None", "Input"});
+            if (!x)
+                return std::nullopt;
+            std::string m;
+            for (const auto& [c, k] : {std::pair{"r", 'x'}, {"g", 'y'}, {"b", 'z'}, {"a", 'w'}})
+                if (prop(n, c, 0))
+                    m += k;
+            if (m.empty() || x->front() != '"') {
+                why = name + ": a mask of nothing";
+                return std::nullopt;
+            }
+            return _b.member(*x, m);
+        }
+        if (kind == "AppendVector") {
+            const auto a = in({"A"}), b = in({"B"});
+            if (!a || !b)
+                return std::nullopt;
+            return _b.add("append", {{"a", *a}, {"b", *b}});
+        }
+        if (kind == "Time") {
+            const f32 period = prop(n, "period", 0);
+            return period > 0 ? _b.add("mod", {{"a", GraphBuilder::quote("time")}, {"b", num(period)}})
+                              : GraphBuilder::quote("time");
+        }
+        if (kind == "WorldPosition") {
+            _x.note("World Position: Unreal's centimetres, kin's metres x 100 (the patterns keep their scale)");
+            return _b.add("multiply", {{"a", GraphBuilder::quote("position")}, {"b", "100"}});
+        }
+        if (kind == "VertexColor")
+            return GraphBuilder::quote("vertex_color");
+        if (kind == "CameraVectorWS")
+            return GraphBuilder::quote("view");
+        if (kind == "PixelNormalWS" || kind == "VertexNormalWS")
+            return GraphBuilder::quote(kind == "PixelNormalWS" ? "surface.normal" : "normal");
+        if (kind == "Fresnel") { // base + (1 - base) x (1 - n.v)^exponent
+            const auto e = in({"ExponentIn"}, num(prop(n, "exponent", 5)));
+            const auto base = in({"BaseReflectFractionIn"}, num(prop(n, "base_reflect_fraction", 0.04f)));
+            if (!e || !base)
+                return std::nullopt;
+            const std::string f = _b.add("fresnel", {{"power", *e}});
+            return _b.add("mix", {{"a", *base}, {"b", "1"}, {"t", f}});
+        }
+        if (kind == "Panner") { // the coordinate plus the speed times the time
+            const auto uv = in({"Coordinate"}, GraphBuilder::quote("uv"));
+            const auto t = in({"Time"}, GraphBuilder::quote("time"));
+            const auto speed =
+                in({"Speed"}, "[" + num(prop(n, "speed_x", 0)) + ", " + num(prop(n, "speed_y", 0)) + "]");
+            if (!uv || !t || !speed)
+                return std::nullopt;
+            return _b.add("add", {{"a", *uv}, {"b", _b.add("multiply", {{"a", *speed}, {"b", *t}})}});
+        }
+        if (kind == "Desaturation") {
+            const auto x = in({"", "None", "Input"}), f = in({"Fraction"}, num(prop(n, "const_fraction", 1)));
+            if (!x || !f)
+                return std::nullopt;
+            const auto l = colour(n, "luminance_factors");
+            const std::string lum =
+                (l[0] + l[1] + l[2]) > 0 ? GraphBuilder::vector({l.data(), 3}) : "[0.3, 0.59, 0.11]";
+            const std::string grey = _b.add("dot", {{"a", *x}, {"b", lum}});
+            return _b.add("mix", {{"a", *x}, {"b", grey}, {"t", *f}});
+        }
+        if (kind == "Reroute" || kind == "NamedRerouteDeclaration" || kind == "NamedRerouteUsage")
+            return in({"", "None", "Input"});
+        if (kind == "StaticSwitchParameter" || kind == "StaticSwitch") {
+            const bool on = prop(n, "default_value", 0) != 0;
+            _x.note(name + ": a static switch, its default (" + std::string(on ? "true" : "false") + ") taken");
+            return in({on ? "True" : "False", on ? "A" : "B"});
+        }
+        why = name + ": a " + kind + " (kin has no node for it)";
+        return std::nullopt;
+    }
+
+    const JsonValue& _doc;
+    GraphBuilder& _b;
+    material_import::Context& _x;
+    const JsonValue* _nodes;
+    std::map<std::string, std::string> _done;
+    std::set<std::string> _visiting;
+};
+
+} // namespace
+
+Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& source,
+                                                 const MaterialImportOptions3D& options) {
+    // The Tier 1 import first: what the graph can't express keeps its values.
+    auto result = import_unreal_material(source, options);
+    if (!result)
+        return result;
+    try {
+        const auto parsed = parse_json(read_file(source));
+        const JsonValue& doc = *parsed.value;
+        ImportedMaterial3D& imported = *result.value;
+        material_import::Context x(imported, options, source.stem().string());
+        if (!doc.find("graph")) {
+            x.note("the export has no graph (an older unreal_export.py): its Tier 1 import only");
+            return result;
+        }
+        GraphBuilder b;
+        const std::string base = doc.find("base") ? doc.find("base")->as_string() : source.stem().string();
+        b.name = std::filesystem::path(base).filename().string();
+        UnrealGraph g(doc, b, x);
+        const std::string model = doc.find("shading_model") ? doc.find("shading_model")->as_string() : "";
+        const std::string blend = doc.find("blend_mode") ? doc.find("blend_mode")->as_string() : "";
+        const bool unlit = model == "MSM_UNLIT";
+        const auto* outputs = doc.find("graph")->find("outputs");
+        static const std::vector<std::pair<const char*, const char*>> mapping{
+            {"BaseColor", "base_color"},   {"Metallic", "metallic"},          {"Roughness", "roughness"},
+            {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"}, {"Normal", "normal"},
+            {"Opacity", "alpha"},          {"OpacityMask", "alpha"}};
+        for (const auto& [from, to] : mapping) {
+            const auto* o = outputs ? outputs->find(from) : nullptr;
+            if (!o)
+                continue;
+            if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED") ||
+                (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED"))
+                continue;
+            std::string why;
+            // (The graph's word on this output replaces the Tier 1 import's.)
+            std::erase_if(imported.notes,
+                          [&](const std::string& n) { return n.rfind(std::string(from) + ": ", 0) == 0; });
+            auto v =
+                g.value(o->find("node")->as_string(), o->find("output") ? o->find("output")->as_string() : "", why);
+            if (!v) {
+                x.note(std::string(from) + ": " + why + ": its Tier 1 value kept");
+                continue;
+            }
+            std::string target = unlit && std::string(from) == "EmissiveColor" ? "base_color" : to;
+            if (target == "normal") // Unreal's tangent space (green down) as kin's (+y up), then the world's
+                v = b.add("tangent_to_world", {{"normal", b.add("multiply", {{"a", *v}, {"b", "[1, -1, 1]"}})}});
+            b.outputs[target] = *v;
+        }
+        for (const char* other : {"WorldPositionOffset", "Refraction", "Anisotropy", "Specular"})
+            if (outputs && outputs->find(other))
+                x.note(std::string(other) + ": not in kin's graph outputs");
+        // The textures in kin's five slots (as graph data: the graph reads them; kin's own reading of a slot undone).
+        const auto texture = [&](const GraphBuilder::Param& p) {
+            return *std::ranges::find(g.textures, p.name, &UnrealGraph::Texture::param);
+        };
+        if (!b.assign_slots([&](const GraphBuilder::Param& p) { return texture(p).normal; })) {
+            x.note("its graph samples more than five textures (kin's material has five map slots): its Tier 1 import "
+                   "only");
+            x.finish();
+            return result;
+        }
+        for (auto& p : b.params)
+            if (p.type == "texture")
+                p.srgb = texture(p).srgb;
+        const std::string text = b.write();
+        const auto compiled = compile_material_graph3d(text);
+        if (!compiled.ok()) {
+            x.note("the graph did not compile in kin (" + compiled.errors.front().node + ": " +
+                   compiled.errors.front().message + "): its Tier 1 import only");
+            x.finish();
+            return result;
+        }
+        for (const auto& w : compiled.warnings)
+            x.note(w.node + ": " + w.message);
+        imported.graph = x.out / (b.name + ".kingraph");
+        if (options.write) {
+            std::filesystem::create_directories(x.out);
+            std::ofstream file(imported.graph, std::ios::binary);
+            file << text;
+        }
+        auto& p = imported.asset.base.material;
+        p.graph = imported.graph.lexically_relative(x.content);
+        // The material's values of the graph's parameters (an instance's own), and its textures.
+        const auto* values = doc.find("parameters");
+        for (const auto& param : b.params) {
+            MaterialGraphValue3D v;
+            if (param.type == "texture") {
+                const auto t = std::ranges::find(g.textures, param.name, &UnrealGraph::Texture::param);
+                const auto path = x.readable(x.options.project / t->file, param.name);
+                if (!path)
+                    continue;
+                v.texture = MaterialTexture3D{.asset = *path};
+            } else {
+                const auto* group = values ? values->find(param.type == "float" ? "scalar" : "vector") : nullptr;
+                const auto* given = group ? group->find(param.name) : nullptr;
+                if (!given)
+                    continue;
+                v.count = param.type == "float" ? 1 : 4;
+                if (given->is_number())
+                    v.value[0] = f32(given->as_number());
+                else
+                    for (size_t i = 0; i < std::min<size_t>(4, given->items().size()); ++i)
+                        v.value[i] = f32(given->items()[i].as_number());
+            }
+            p.params[param.name] = v;
+        }
+        x.finish();
+    } catch (const std::exception& error) {
+        result.value.reset();
         result.diagnostics.push_back(source.string() + ": " + error.what());
     }
     return result;

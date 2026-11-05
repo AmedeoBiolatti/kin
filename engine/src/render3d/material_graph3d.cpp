@@ -237,7 +237,25 @@ const std::vector<NodeSpec>& specs() {
                                  parts += (n++ ? ", " : "") + v.expr;
                          return make(std::string(glsl_type(of_width(n))) + "(" + parts + ")", of_width(n));
                      }});
+        s.push_back({"append",
+                     "a vector of a's components then b's (Unreal's AppendVector)",
+                     {{"a", In::Any}, {"b", In::Any}},
+                     false,
+                     [](Compiler&, const std::vector<Value>& in, Type, const std::string&, bool) {
+                         const int n = width(in[0].type) + width(in[1].type);
+                         if (n > 4)
+                             return Value{}; // (more than 4 components: the caller says so)
+                         return make(std::string(glsl_type(of_width(n))) + "(" + in[0].expr + ", " + in[1].expr + ")",
+                                     of_width(n));
+                     }});
         // Textures.
+        s.push_back({"unpack_normal",
+                     "a normal map's texel as a tangent-space normal (+y up), its slope times strength",
+                     {{"texel", In::Vec4}, {"strength", In::Float, "1"}},
+                     false,
+                     [](Compiler&, const std::vector<Value>& in, Type, const std::string&, bool) {
+                         return make("kin_graph_unpack_normal(" + in[0].expr + ", " + in[1].expr + ")", Type::Vec3);
+                     }});
         s.push_back({"texture",
                      "a texture parameter's texel (vec4)",
                      {{"uv", In::Vec2, "\"uv\""}},
@@ -725,7 +743,7 @@ private:
         const std::string type = n.find("type") ? n.find("type")->as_string() : "";
         Value result;
         if (_mask && (type == "normal_map" || type == "tangent_to_world" || type == "triplanar" || type == "fresnel" ||
-                      type == "glsl")) {
+                      type == "glsl" || type == "unpack_normal")) {
             error(id, "a " + type + " node is not in the cut-out passes");
             _visiting.erase(id);
             return {};
@@ -837,7 +855,11 @@ private:
             sampler = samplers[u32(param.slot)];
             srgb = param.srgb;
         }
-        return sp.emit(*this, in, widest, sampler, srgb);
+        Value made = sp.emit(*this, in, widest, sampler, srgb);
+        if (made.expr.empty())
+            error(id, sp.type + ": its inputs make no value (" +
+                          (sp.type == "append" ? std::string("more than 4 components") : std::string("types")) + ")");
+        return made;
     }
 
     // A GLSL expression of its own, its inputs by name: {"type": "glsl", "glsl": "a * 2.0 + b", "result": "vec3",

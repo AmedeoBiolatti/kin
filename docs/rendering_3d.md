@@ -3598,8 +3598,8 @@ through the project's `.meta` files. Mapped:
 
 TIFF and PSD maps (frequent in Unity projects; kin's images don't read them) are decoded by the import's own reader
 (baseline TIFF: strips or tiles, uncompressed, LZW, PackBits, Deflate, the horizontal predictor, 8/16-bit and float;
-PSD's composited picture) and written as PNG. Unity's Shader Graphs themselves, its HLSL shaders, detail, parallax and
-clear-coat maps are noted.
+PSD's composited picture) and written as PNG. Unity's Shader Graphs themselves (see `--graphs` below), its HLSL
+shaders, detail, parallax and clear-coat maps are noted.
 
 Unreal's materials are read in two steps. Inside Unreal's editor, `tools/import_material/unreal_export.py` (its
 Python, headless: `UnrealEditor-Cmd <Project.uproject> -run=pythonscript -EnablePlugins=PythonScriptPlugin
@@ -3622,6 +3622,31 @@ texture channel:
   map that isn't flat is kept.
 
 `tools/import_material/unreal_probe.py` makes the test materials (`tests/fixtures/unreal`) in a scratch project.
+
+#### Node graphs (`--graphs`)
+
+With `--graphs` (`import_unreal_graph()`, `import_unity_graph()`, `import_godot_graph()`) a material's node graph is
+imported too, as a [material graph](#material-graphs) beside it: `<graph>.kingraph`, named by the material's
+`"graph"`, its parameters' values (an Unreal instance's, a Unity material's properties, a Godot material's
+`shader_parameter/`s) in its `"params"`. A common subset of nodes is read (the math, texture samples and their UVs,
+parameters, time, vertex colour, position, normals and view, fresnel, panning, lerps, clamps, steps, remaps, splits
+and combines; the headers list them); an output fed by a node kin has no counterpart for keeps its Tier 1 value
+(Unreal, Unity: Godot's ShaderMaterials have none) and is noted, naming the node. A graph that doesn't compile in
+kin, or samples more than the five textures kin's material has slots for, falls back to Tier 1, said.
+
+- Unreal: `unreal_export.py` writes the whole graph; World Position is centimetres (scaled from kin's metres), normal
+  maps are DirectX's (flipped), a Static Switch takes its default.
+- Unity: Shader Graph 10 and later (`.shadergraph`, sub-graphs inlined; older files fall back to Tier 1); Unity's
+  vector widths are kept (an unconnected default is cut to what it is added to); a Keyword node follows the
+  material's keywords (the graph is written per set of keywords on: `Lit__GLOW.kingraph`); a texture's colour space
+  is its default texture's import setting. Colours are taken as gamma, as Unity's inspector shows them (unchecked
+  against Unity).
+- Godot 4: a `ShaderMaterial` whose shader is a `VisualShader` (its own `.tres` or inline; text `.gdshader`s are
+  refused); its fragment stage; Normal Map is read as Godot reads it (the texel, its depth the strength); Godot's
+  vertex, normal and view are in view space, kin's in the world's (noted: the same where only angles count, as in a
+  fresnel); an Expression node of one assignment becomes a `glsl` node.
+
+`tools/import_material/godot_probe.gd` (headless Godot) and `make_unity_fixture.py` make the Tier 2 test fixtures.
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,

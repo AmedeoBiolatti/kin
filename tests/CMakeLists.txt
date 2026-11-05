@@ -432,7 +432,9 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     # Other engines' materials as kin's (material_import3d.hpp), on the CPU.
     kin_add_test(kin_material_import3d_tests kin-material-import3d SOURCES material_import3d_tests.cpp
         DEFINITIONS KIN_TEST_IMAGES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/images"
-                    KIN_TEST_UNREAL="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unreal")
+                    KIN_TEST_UNREAL="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unreal"
+                    KIN_TEST_UNITY="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unity"
+                    KIN_TEST_GODOT_VISUAL="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/godot_visual")
     target_include_directories(kin_material_import3d_tests PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/render3d)
     kin_add_test(kin_material_assets3d_tests kin-material-assets3d SOURCES material_assets3d_tests.cpp
         DEFINITIONS KIN_TEST_MODELS="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/models"

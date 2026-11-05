@@ -145,6 +145,89 @@ class Exporter:
                 n["inputs"] = inputs
         return n
 
+    def props(self, expression):
+        """An expression's simple settings (numbers, flags, names, colours, vectors, enums), by their Python names."""
+        out = {}
+        skip = ("material_expression_editor_x", "material_expression_editor_y", "material_expression_guid", "desc",
+                "outline", "comment", "show_output_name_on_pin", "collapsed")
+        # (dir() lists the properties Blueprints see; the import's are tried by name too.)
+        named = ("const_a", "const_b", "const_alpha", "const_exponent", "exponent", "base_reflect_fraction", "period",
+                 "speed_x", "speed_y", "const_coordinate", "min_default", "max_default", "r", "g", "b", "a", "constant",
+                 "default_value", "parameter_name", "luminance_factors", "scale", "levels", "output_min", "output_max",
+                 "noise_function", "turbulence", "tiling", "repeat_size", "code", "output_type", "texture",
+                 "sampler_type", "coordinate_index", "u_tiling", "v_tiling", "un_mirror_u", "un_mirror_v", "a_is_",
+                 "default_value_bool", "x", "y", "z", "w", "fraction", "const_fraction", "power")
+        for key in sorted(set(dir(expression)) | set(named)):
+            if key.startswith("_") or key in skip:
+                continue
+            try:
+                v = expression.get_editor_property(key)
+            except Exception:
+                continue
+            if isinstance(v, bool) or isinstance(v, (int, float)):
+                out[key] = v
+            elif isinstance(v, str) or isinstance(v, unreal.Name):
+                out[key] = str(v)
+            elif isinstance(v, unreal.LinearColor):
+                out[key] = colour(v)
+            elif isinstance(v, (unreal.Vector, unreal.Vector4)) or type(v).__name__ in ("Vector4", "Vector4d"):
+                out[key] = [float(getattr(v, c)) for c in ("x", "y", "z", "w") if hasattr(v, c)]
+            elif isinstance(v, unreal.Vector2D):
+                out[key] = [float(v.x), float(v.y)]
+            elif isinstance(v, unreal.EnumBase):
+                out[key] = enum_name(v)
+            elif isinstance(v, unreal.Texture):
+                out[key] = self.texture(v)
+        return out
+
+    def graph(self, base):
+        """The base material's expressions as a graph: each by its name, its class, settings and inputs (each the
+        expression and output feeding it, by name), and the outputs each feeds (kin_import_material's graph import)."""
+        nodes = {}
+
+        def visit(expression):
+            name = expression.get_name()
+            if name in nodes:
+                return name
+            n = {"class": expression.get_class().get_name(), "props": self.props(expression), "inputs": {}}
+            nodes[name] = n
+            try:
+                names = [str(x) for x in MEL.get_material_expression_input_names(expression)]
+            except Exception:
+                names = []
+            try:
+                inputs = MEL.get_inputs_for_material_expression(base, expression)
+            except Exception:
+                inputs = []
+            for i, source in enumerate(inputs):
+                if source is None:
+                    continue
+                try:
+                    out = MEL.get_input_node_output_name_for_material_expression(expression, source)
+                except Exception:
+                    out = ""
+                key = names[i] if i < len(names) and names[i] else str(i)
+                n["inputs"][key] = {"node": visit(source), "output": str(out)}
+            return name
+
+        outputs = {}
+        for key, prop in PROPERTIES.items():
+            p = getattr(unreal.MaterialProperty, prop, None)
+            if p is None:
+                continue
+            try:
+                node = MEL.get_material_property_input_node(base, p)
+            except Exception:
+                node = None
+            if node is None:
+                continue
+            try:
+                out = MEL.get_material_property_input_node_output_name(base, p)
+            except Exception:
+                out = ""
+            outputs[key] = {"node": visit(node), "output": str(out)}
+        return {"nodes": nodes, "outputs": outputs}
+
     def material(self, asset):
         """One Material or MaterialInstance as a kin.unreal-material/1 document."""
         self.used = set()
@@ -210,6 +293,7 @@ class Exporter:
                 out = ""
             inputs[key] = self.node(base, node, out, DEPTH)
         doc["inputs"] = inputs
+        doc["graph"] = self.graph(base)
         doc["textures"] = {i["file"]: {k: v for k, v in i.items() if k != "file"}
                            for p, i in self.textures.items() if i["file"] and p in self.used}
         return doc
