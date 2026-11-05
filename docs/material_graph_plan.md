@@ -227,3 +227,13 @@ surface compiles too, so development draws what ships: an optimised cooked graph
 the stock material) and the payload deflated (stb_image_write's zlib; inflated by stb_image's), with an FNV-1a hash
 of it in the header (a cut or a changed byte is refused); format version 2, version 1 still read. What stays is eight
 shaders' worth of kin's lighting (about 30 KB each, deflated); zlib's 32 KB window can't share them.
+
+**Batching.** Surface materials in the retained-instance path (a static batch's copies: nothing to change but the
+exclusion), the draw plan (cached commands; the surface's 144-byte uniform push reads the material itself, so cached
+commands can't serve old parameters) and the merged draws: four more variants (`SurfaceVariant3D::Material...`,
+mesh_material.frag's defines) that read each copy's parameters from a second table (16 floats a copy, beside the
+draws' material records, made only for scenes with surface draws). Optional: cooked versions 1 and 2 (8 variants)
+still load, unmerged. Cooked format version 3 (the variant count). A cooked graph is now about 330 KB.
+`test_gpu_surface_batching`: 384 draws merge (over 200 merged) plain, fogged, lit and both; a merged identity
+surface is byte-identical to merged stock materials; merged tinted draws to the same unmerged (each copy's
+parameters); a retained 256-copy batch to the same copies streamed.

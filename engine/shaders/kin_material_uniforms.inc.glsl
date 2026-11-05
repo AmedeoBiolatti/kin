@@ -22,6 +22,12 @@ layout(std430, set = 2, binding = KIN_DRAW_MATERIAL_BINDING) readonly buffer Kin
     KinDrawMaterial draw_materials[];
 };
 #define material draw_materials[vMaterial]
+#ifdef KIN_SURFACE
+// A surface shader's parameters, a draw's copy's four after its record's place (Material3D::shader_params).
+layout(std430, set = 2, binding = KIN_DRAW_MATERIAL_BINDING + 1) readonly buffer KinSurfaceParams {
+    vec4 kin_surface_params[];
+};
+#endif
 #else
 layout(set = 3, binding = 1) uniform Material {
     vec4 params; // x: emissive, y: unlit, z: receives the sun's shadow, w: alpha cutoff (0: none)

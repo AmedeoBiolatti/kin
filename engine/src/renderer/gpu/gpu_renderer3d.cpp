@@ -1713,11 +1713,14 @@ GpuRenderer3D::MaterialPipeline GpuRenderer3D::material_pipeline(const Material3
 SDL_GPUGraphicsPipeline* GpuRenderer3D::pipeline(const MeshPipelineRequest& request) const {
     const auto& m = request.material;
     if (request.materials) {
-        if (!_draw_materials_available)
+        if (!_draw_materials_available || (m.surface && !m.surface->merges()))
             return nullptr;
+        const u32 variant = u32(request.fog) + 2 * u32(request.lights);
         return _owner->_pipelines.get(
             GpuPipelineKey{.vertex = _draw_material_vertex.handle(),
-                           .fragment = _draw_material_fragments[u32(request.fog) + 2 * u32(request.lights)].handle(),
+                           .fragment = (m.surface ? m.surface->variants[surface_required_variants3d + variant]
+                                                  : _draw_material_fragments[variant])
+                                           .handle(),
                            .blend = GpuBlendMode::Replace,
                            .format = request.format,
                            .layout = GpuVertexLayout::MeshVertices,
@@ -2298,15 +2301,19 @@ GpuRenderer3D::create_surface_shader(std::span<const std::span<const u8>, surfac
     try {
         auto shader = std::make_shared<GpuSurfaceShader3D>();
         for (u32 i = 0; i < surface_variant_count3d; ++i) {
+            if (i >= surface_required_variants3d && spirv[i].empty())
+                continue; // a merged draws' variant it lacks
             std::string error;
             const auto layout = reflect_spirv({spirv[i].data(), static_cast<u32>(spirv[i].size())}, &error);
             if (!layout || layout->execution_model != 4)
                 throw std::runtime_error("surface shader variants must be reflected fragment modules: " + error);
             // The stock variant's layout (mesh.frag ... mesh_velocity_light_fog.frag, as made above): the light
             // variants' 15 samplers and 4 storage buffers (shadows, GI, the light grid, the area lights), one
-            // uniform block more with fog; the velocity variants the same as the others.
-            const bool lights = (i & 2) != 0, fog = (i & 1) != 0;
-            const u32 uniforms = (lights ? 3 : 2) + u32(fog), samplers = lights ? 15 : 10, storage = lights ? 4 : 0;
+            // uniform block more with fog; the velocity variants the same as the others; the merged draws' (as
+            // mesh_material.frag's) their draws' records after them, and the surface's parameters after those.
+            const bool lights = (i & 2) != 0, fog = (i & 1) != 0, merged = i >= surface_required_variants3d;
+            const u32 uniforms = (lights ? 3 : 2) + u32(fog), samplers = lights ? 15 : 10,
+                      storage = (lights ? 4 : 0) + (merged ? 2 : 0);
             for (const auto& r : layout->resources)
                 if ((r.kind == ShaderResourceKind::SampledTexture && (r.set != 2 || r.binding >= samplers)) ||
                     (r.kind == ShaderResourceKind::StorageBuffer &&
@@ -7343,7 +7350,7 @@ constexpr u64 retained_budget = 32 * 1024 * 1024;
 void GpuRenderer3D::retain_instances(DrawRef& ref, FrameCtx& ctx) {
     const auto& draw = *ref.draw;
     if (!_retained_enabled || !draw.batch || ctx.taa || ctx.scene.lod.occlusion.enabled || ref.skinned ||
-        ref.clustered || ref.levels != 1 || draw.material.shader.backend() || draw.material.surface.backend() ||
+        ref.clustered || ref.levels != 1 || draw.material.shader.backend() ||
         (draw.material.blend != Blend3D::Opaque && draw.material.blend != Blend3D::Mask))
         return;
     const auto& batch = draw.batch;
@@ -7484,9 +7491,8 @@ void GpuRenderer3D::retain_scene_instances(FrameCtx& ctx) {
         return;
     const auto eligible = [](const DrawRef& ref) {
         const auto& draw = *ref.draw;
-        // (Surface shaders have no retained-materials variants yet.)
         return !ref.batch && !ref.skinned && !ref.clustered && ref.levels == 1 && !draw.material.shader.backend() &&
-               !draw.material.surface.backend() && !draw.material.wireframe &&
+               !draw.material.wireframe &&
                (draw.material.blend == Blend3D::Opaque || draw.material.blend == Blend3D::Mask);
     };
     for (u32 s = 0; s < ctx.scenes.size(); ++s) {
@@ -9692,7 +9698,7 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
 }
 
 GpuRenderer3D::DrawCommand* GpuRenderer3D::main_command(FrameCtx& ctx, u32 r, bool materials) {
-    if (!_draw_plan_valid || _refs[r].draw->material.shader.backend() || _refs[r].draw->material.surface.backend())
+    if (!_draw_plan_valid || _refs[r].draw->material.shader.backend())
         return nullptr;
     auto& command = _draw_commands[r];
     const auto& ref = _refs[r];
@@ -9727,6 +9733,8 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
     const auto drop = [&](DrawMaterials& table) {
         if (table.buffer)
             _draw_material_bytes -= table.buffer->size();
+        if (table.surface)
+            _draw_material_bytes -= table.surface->size();
         table = {};
     };
     for (auto& table : _draw_material_tables) {
@@ -9809,6 +9817,34 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
                     }
             };
             _device->upload_storage_buffer(table.buffer->handle(), 0, static_cast<u32>(bytes), nullptr, true, &fill);
+            // Surface shaders' parameters, for a scene with any: 16 floats a copy, in the same places.
+            const bool surfaces = std::any_of(_refs.begin(), _refs.end(), [&](const DrawRef& ref) {
+                return ref.scene == s && ref.direct && ref.draw->material.surface.backend();
+            });
+            const u64 surface_bytes = source->instances().size() * sizeof(f32) * 16;
+            if (!surfaces || (table.surface && table.surface->size() != surface_bytes)) {
+                if (table.surface)
+                    _draw_material_bytes -= table.surface->size();
+                table.surface.reset();
+            }
+            if (surfaces) {
+                if (!table.surface) {
+                    table.surface = std::make_shared<GpuBuffer>(_device->create_buffer(
+                        SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ, nullptr, static_cast<u32>(surface_bytes)));
+                    _draw_material_bytes += surface_bytes;
+                }
+                const std::function<void(std::span<u8>)> params = [&](std::span<u8> out) {
+                    std::memset(out.data(), 0, out.size());
+                    for (const auto& ref : _refs)
+                        if (ref.scene == s && ref.direct && ref.draw->material.surface.backend())
+                            for (u32 i = 0; i < ref.draw->count; ++i)
+                                std::memcpy(out.data() + std::size_t(ref.draw->first + i) * 64,
+                                            ref.draw->material.shader_params.data(), 64);
+                };
+                _device->upload_storage_buffer(table.surface->handle(), 0, static_cast<u32>(surface_bytes), nullptr,
+                                               true, &params);
+                ctx.stats.draw_material_upload_bytes += surface_bytes;
+            }
             table.valid = true;
             table.revision = revision;
             table.upload_frame = frame;
@@ -11484,10 +11520,15 @@ bool GpuRenderer3D::main_pass(FrameCtx& ctx) {
                 bound_binding = command ? command->binding : ~0u;
             }
             if (item.materials) {
-                SDL_GPUBuffer* buffer = _draw_material_tables[_draw_material_slots[ref.scene]].buffer->handle();
+                const auto& table = _draw_material_tables[_draw_material_slots[ref.scene]];
+                SDL_GPUBuffer* buffer = table.buffer->handle();
                 if (buffer != bound_draw_materials) {
                     SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 4 : 0, &buffer, 1);
                     bound_draw_materials = buffer;
+                }
+                if (selection.surface && table.surface) { // (its parameters, after the records)
+                    SDL_GPUBuffer* params = table.surface->handle();
+                    SDL_BindGPUFragmentStorageBuffers(pass, lit_variant ? 5 : 1, &params, 1);
                 }
             }
             if (custom)

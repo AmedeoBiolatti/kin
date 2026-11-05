@@ -147,6 +147,9 @@ std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant) {
                                                     "KIN_FOG"};
     static constexpr std::array<const char*, 4> lights_fog{"KIN_LIGHTS", "KIN_GI", "KIN_LIGHT_GRID", "KIN_FOG"};
     static constexpr std::array<const char*, 2> velocity_fog{"KIN_VELOCITY", "KIN_FOG"};
+    static constexpr std::array<const char*, 5> materials{"KIN_DRAW_MATERIALS", "KIN_LIGHTS", "KIN_GI",
+                                                          "KIN_LIGHT_GRID", "KIN_FOG"};
+    static constexpr std::array<const char*, 2> materials_fog{"KIN_DRAW_MATERIALS", "KIN_FOG"};
     const std::span<const char* const> every{all}, lit{lights_fog}, moving{velocity_fog};
     switch (variant) {
     case SurfaceVariant3D::Plain:
@@ -165,6 +168,14 @@ std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant) {
         return every.first(4);
     case SurfaceVariant3D::VelocityLightsFog:
         return every;
+    case SurfaceVariant3D::Material:
+        return std::span<const char* const>{materials}.first(1);
+    case SurfaceVariant3D::MaterialFog:
+        return materials_fog;
+    case SurfaceVariant3D::MaterialLights:
+        return std::span<const char* const>{materials}.first(4);
+    case SurfaceVariant3D::MaterialLightsFog:
+        return materials;
     case SurfaceVariant3D::Count:
         break;
     }
@@ -184,8 +195,8 @@ Renderer3D::create_surface_shader_operation(std::span<const std::span<const u8>,
         fail3d(_errors, "Renderer3D::create_surface_shader", "3D is not available");
         return {};
     }
-    for (const auto& variant : spirv)
-        if (variant.empty()) {
+    for (u32 i = 0; i < surface_required_variants3d; ++i)
+        if (spirv[i].empty()) {
             fail3d(_errors, "Renderer3D::create_surface_shader", "empty SPIR-V");
             return {};
         }
@@ -229,7 +240,7 @@ SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& su
         }
         std::array<std::vector<u8>, surface_variant_count3d> compiled;
         bool ok = true;
-        for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
+        for (u32 i = 0; i < surface_variant_count3d && ok; ++i) { // (all of them, the merged draws' too)
             // Optimised, as cooked graphs are: what development sees is what a game ships.
             auto spirv =
                 compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)), true);

@@ -1528,11 +1528,15 @@ its emission; then fog and output as ever. The function may call every `kin_*` f
 
 `r3d.compile_surface_shader(path)` compiles the file now with glslc (development); a game ships its variants
 compiled at build time with `kin_compile_surface_shader(<var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl)`
-(`cmake/kin_embed.cmake`), which lists the eight `.spv` files in `SurfaceVariant3D`'s order for
+(`cmake/kin_embed.cmake`), which lists the twelve `.spv` files in `SurfaceVariant3D`'s order for
 `r3d.create_surface_shader(variants)`. `surface_shader_source()` and `surface_variant_defines()` say what each
 variant is. A `shader` takes the surface's place. Not yet: the shadow, pick and pre-passes still cut a cut-out by
-the base colour's alpha (not the surface's); surface materials skip the retained-instance and merged-draw paths
-(one draw each, as custom shaders); WebGL2 has no surface shaders.
+the base colour's alpha (not the surface's); WebGL2 has no surface shaders.
+
+Surface materials take kin's batched paths as its own do: a static batch's copies are retained, draws are planned and
+cached, and separate draws of one mesh and surface merge into one (the merged draws' four variants, mesh_material's,
+read each copy's `shader_params` from a table of their own beside the draws' material records, made only for a scene
+with surface draws). Twelve variants in all; the last four are optional (a surface without them draws unmerged).
 
 ### Material graphs
 
@@ -1600,8 +1604,8 @@ a number for a texture, too many numbers and parameters without a graph are erro
 surface (and what its parameters did). `Assets3D::load_material_graph(path)` loads graphs, cached by path:
 
 - **cooked**, `<graph>.spv` beside the source: the layout and every variant's SPIR-V (optimised: glslc -O, as
-  surface shaders compiled at run time are too), deflated, with a hash of what it holds, in one file (about 220 KB:
-  eight shaders of kin's lighting), made by
+  surface shaders compiled at run time are too), deflated, with a hash of what it holds, in one file (about 330 KB:
+  twelve shaders of kin's lighting), made by
   `kin_material_graph cook <graph>` or at build time by `kin_cook_material_graph(<var> SOURCE <graph> [OUTPUT
   <file>])` (`cmake/kin_embed.cmake`), when it is at least as new as the source, or the source is gone: what a
   shipped game, which has no glslc, loads;

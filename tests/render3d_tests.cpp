@@ -4797,6 +4797,112 @@ void test_gpu_material_graph() {
     });
 }
 
+// Surface materials in kin's batched paths: hundreds of separate draws of one mesh merge into few (the draw plan's
+// material tables, their parameters a table of their own) and draw what they draw unmerged, and what stock materials
+// draw where the surface changes nothing, plain, fogged and with the light shaders; a static batch's copies are
+// retained and draw what the same copies draw streamed.
+void test_gpu_surface_batching() {
+    with_gpu("test_gpu_surface_batching", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_surface_batching", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+        const kin::SurfaceShader3D identity =
+            r3d.compile_surface_shader(dir / "surface_identity.surface.glsl").value_or({});
+        const kin::SurfaceShader3D tint = r3d.compile_surface_shader(dir / "surface_tint.surface.glsl").value_or({});
+        assert(identity.valid() && tint.valid());
+        const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f})).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = kin::colors::black}).value_or({});
+        enum class Kind { Stock, Identity, Tint };
+        const auto scene_of = [&](Kind kind, bool fog, bool spot) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 1, 14}, {});
+            scene.lights.ambient = {0.3f, 0.3f, 0.3f};
+            scene.lights.sun.direction = normalize(kin::Vec3f{0.5f, 1, 0.4f});
+            scene.lights.cache_shadows = false;
+            if (fog)
+                scene.fog = {.enabled = true, .density = 0.025f};
+            if (spot)
+                scene.add_spot_light({.position = {0, 0, 6},
+                                      .direction = {0, 0, -1},
+                                      .color = {2, 1, 0.5f},
+                                      .radius = 14,
+                                      .inner_angle = 20,
+                                      .outer_angle = 35});
+            for (kin::u32 i = 0; i < 384; ++i) {
+                kin::Material3D m{.color = Color::rgb(kin::u8(230 - (i % 4) * 45), kin::u8(40 + (i % 4) * 60), 90)};
+                m.roughness = 0.2f + (i % 4) * 0.2f;
+                if (kind == Kind::Identity)
+                    m.surface = identity;
+                if (kind == Kind::Tint) {
+                    m.surface = tint;
+                    m.shader_params = {
+                        float(i % 3 == 0), float(i % 3 == 1), float(i % 3 == 2), 0.5f, float(i % 5) * 0.2f, 0, 0, 0};
+                }
+                (void)scene.draw(box,
+                                 Mat4f::translation({float(i % 24) * 0.65f - 7.5f, float(i / 24) * 0.65f - 5.0f, 0}), m,
+                                 kin::colors::white, i + 1);
+            }
+            return scene;
+        };
+        const auto shoot = [&](kin::Scene3D& scene, bool cached) {
+            scene.debug.cache_draw_commands = cached;
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return std::pair{p, r3d.debug_stats()};
+        };
+        for (const auto& [fog, spot] :
+             {std::pair{false, false}, std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+            auto stock = scene_of(Kind::Stock, fog, spot), same = scene_of(Kind::Identity, fog, spot),
+                 tinted = scene_of(Kind::Tint, fog, spot);
+            // Each scene drawn in a row (the draw plan is the last scene's: an unchanged one is planned once).
+            const auto settled = [&](kin::Scene3D& scene, bool cached) {
+                shoot(scene, cached);
+                shoot(scene, cached);
+                return shoot(scene, cached);
+            };
+            const auto [stock_merged, stock_stats] = settled(stock, true);
+            const auto [same_merged, same_stats] = settled(same, true);
+            assert(stock_stats.main_merged_draws > 200 && "stock draws merge");
+            assert(same_stats.main_merged_draws > 200 && same_stats.main_batched_draws > 0 && "surface draws merge");
+            assert(same_merged.rgba == stock_merged.rgba && "a merged identity surface draws the stock material");
+            const auto [tint_merged, tint_stats] = settled(tinted, true);
+            const auto [tint_alone, tint_alone_stats] = settled(tinted, false);
+            assert(tint_stats.main_merged_draws > 200 && tint_alone_stats.main_merged_draws == 0);
+            assert(tint_merged.rgba == tint_alone.rgba && "merged surface draws take each copy's parameters");
+            assert(!(tint_merged.rgba == stock_merged.rgba));
+        }
+        // A static batch of a surface material: retained, drawing what the same copies streamed draw.
+        std::vector<kin::MeshInstance3D> copies;
+        for (kin::u32 i = 0; i < 256; ++i)
+            copies.push_back({Mat4f::translation({float(i % 16) * 0.7f - 5.5f, float(i / 16) * 0.5f - 4.0f, 0}),
+                              kin::colors::white, 7});
+        auto batch = kin::InstanceBatch3D::create(box, copies, {{0, kin::u32(copies.size())}}).value_or({});
+        kin::Material3D m{.color = Color::rgb(200, 180, 90)};
+        m.surface = tint;
+        m.shader_params = {0.2f, 1, 0.4f, 0.6f, 0.5f, 0, 0, 0};
+        const auto batched = [&](bool retained) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 12}, {});
+            scene.lights.ambient = {0.3f, 0.3f, 0.3f};
+            if (retained)
+                (void)scene.draw_instanced(batch, m);
+            else
+                (void)scene.draw_instanced_group(box, copies, kin::instance_bounds(box, copies), m);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return std::pair{p, r3d.debug_stats().retained_instances};
+        };
+        batched(true);
+        const auto [retained, kept] = batched(true);
+        const auto [streamed, none] = batched(false);
+        assert(kept == 256 && none == 0 && "the surface material's batch is retained");
+        assert(retained.rgba == streamed.rgba && "a retained surface batch draws what it draws streamed");
+    });
+}
+
 // A material's UV transform (Material3D::uv_scale, uv_offset) moves where every pass reads its maps: offset by half,
 // a texture of two texels draws what the swapped texture draws without it; scaled by two, what the texture repeated
 // twice does: the lit colour (lit and unlit), a cut-out's coverage in the main pass and in the sun's shadow it casts.
@@ -4967,7 +5073,9 @@ void test_gpu_surface_shader() {
                 "surface_tint.plain.spv",           "surface_tint.fog.spv",
                 "surface_tint.lights.spv",          "surface_tint.lights_fog.spv",
                 "surface_tint.velocity.spv",        "surface_tint.velocity_fog.spv",
-                "surface_tint.velocity_lights.spv", "surface_tint.velocity_lights_fog.spv"};
+                "surface_tint.velocity_lights.spv", "surface_tint.velocity_lights_fog.spv",
+                "surface_tint.material.spv",        "surface_tint.material_fog.spv",
+                "surface_tint.material_lights.spv", "surface_tint.material_lights_fog.spv"};
             for (kin::u32 i = 0; i < kin::surface_variant_count3d; ++i) {
                 const auto bytes = surface_test_shaders(names[i]);
                 assert(!bytes.empty());
@@ -23136,6 +23244,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_surface_shader());
     RUN(test_gpu_material_uv_transform());
     RUN(test_gpu_material_graph());
+    RUN(test_gpu_surface_batching());
     RUN(test_gpu_skinned_matches_cpu());
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());
