@@ -2,13 +2,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <kin/assets/content.hpp>
+#include <kin/core/json.hpp>
 #include <kin/core/json_value.hpp>
 #include <kin/ecs/component.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <tuple>
 
@@ -272,6 +276,163 @@ void apply_layer(std::vector<MaterialPatch3D>& patches, const MaterialVariant3D&
     }
 }
 } // namespace
+
+namespace {
+
+// A float as the shortest decimal that reads back as it (0.73, not 0.7300000190734863).
+f64 tidy(f32 v) {
+    char text[32];
+    for (int digits = 6; digits <= 9; ++digits) {
+        std::snprintf(text, sizeof text, "%.*g", digits, double(v));
+        if (std::strtof(text, nullptr) == v)
+            break;
+    }
+    return std::strtod(text, nullptr);
+}
+
+const char* wrap_name(Wrap3D wrap) {
+    return wrap == Wrap3D::Repeat ? "repeat" : wrap == Wrap3D::Mirror ? "mirror" : "clamp";
+}
+
+void write_texture(JsonWriter& json, const MaterialTexture3D& texture) {
+    if (texture.asset.empty()) {
+        json.value_null(); // clears the imported map
+        return;
+    }
+    if (!texture.sampler && !texture.nearest && texture.reset_sampler) {
+        json.value(texture.asset.generic_string());
+        return;
+    }
+    json.begin_object().field("asset", texture.asset.generic_string());
+    if (texture.sampler) {
+        const auto& s = *texture.sampler;
+        const auto filter = [](TextureFilter3D f) { return f == TextureFilter3D::Nearest ? "nearest" : "linear"; };
+        json.key("sampler")
+            .begin_object()
+            .field("wrap_u", wrap_name(s.wrap_u))
+            .field("wrap_v", wrap_name(s.wrap_v))
+            .field("min", filter(s.min))
+            .field("mag", filter(s.mag))
+            .field("mip", s.mip == MipFilter3D::None      ? "none"
+                          : s.mip == MipFilter3D::Nearest ? "nearest"
+                                                          : "linear")
+            .end_object();
+    } else if (!texture.reset_sampler) {
+        json.field("sampler", "inherit");
+    } else {
+        json.field("filter", "nearest");
+    }
+    json.end_object();
+}
+
+void write_patch(JsonWriter& json, const MaterialPatch3D& p) {
+    json.begin_object();
+    if (p.color)
+        json.key("color")
+            .begin_array()
+            .value(u32(p.color->r))
+            .value(u32(p.color->g))
+            .value(u32(p.color->b))
+            .value(u32(p.color->a))
+            .end_array();
+    if (p.shader)
+        json.field("shader", p.shader->generic_string());
+    if (p.shader_params) {
+        json.key("shader_params").begin_array();
+        for (const f32 v : *p.shader_params)
+            json.value(tidy(v));
+        json.end_array();
+    }
+#define NUMBER(name)                                                                                                   \
+    if (p.name)                                                                                                        \
+    json.field(#name, tidy(*p.name))
+    NUMBER(metallic);
+    NUMBER(roughness);
+    NUMBER(emissive);
+    NUMBER(normal_scale);
+    NUMBER(occlusion_strength);
+    NUMBER(alpha_cutoff);
+#undef NUMBER
+#define BOOLEAN(name)                                                                                                  \
+    if (p.name)                                                                                                        \
+    json.field(#name, *p.name)
+    BOOLEAN(unlit);
+    BOOLEAN(double_sided);
+    BOOLEAN(casts_shadow);
+    BOOLEAN(receives_shadow);
+    BOOLEAN(wireframe);
+#undef BOOLEAN
+    if (p.blend)
+        json.field("blend", *p.blend == Blend3D::Alpha      ? "alpha"
+                            : *p.blend == Blend3D::Additive ? "additive"
+                            : *p.blend == Blend3D::Mask     ? "mask"
+                                                            : "opaque");
+    if (p.wrap_u)
+        json.field("wrap_u", wrap_name(*p.wrap_u));
+    if (p.wrap_v)
+        json.field("wrap_v", wrap_name(*p.wrap_v));
+    if (p.emission_mode)
+        json.field("emission_mode", *p.emission_mode == EmissionMode3D::Independent ? "independent" : "base_relative");
+    if (p.emission_color)
+        json.key("emission_color")
+            .begin_array()
+            .value(tidy(p.emission_color->r))
+            .value(tidy(p.emission_color->g))
+            .value(tidy(p.emission_color->b))
+            .end_array();
+#define TEXTURE(name)                                                                                                  \
+    if (p.name) {                                                                                                      \
+        json.key(#name);                                                                                               \
+        write_texture(json, *p.name);                                                                                  \
+    }
+    TEXTURE(texture);
+    TEXTURE(normal);
+    TEXTURE(metallic_roughness);
+    TEXTURE(occlusion);
+    TEXTURE(emissive_texture);
+#undef TEXTURE
+    json.end_object();
+}
+
+void write_layer(JsonWriter& json, const MaterialVariant3D& layer) {
+    json.key("material");
+    write_patch(json, layer.material);
+    if (layer.parts.empty())
+        return;
+    json.key("parts").begin_array();
+    for (const auto& part : layer.parts) {
+        json.begin_object();
+        if (part.index)
+            json.field("part", *part.index);
+        else
+            json.field("part", part.name);
+        json.key("material");
+        write_patch(json, part.material);
+        json.end_object();
+    }
+    json.end_array();
+}
+
+} // namespace
+
+std::string write_materials3d_asset(const MaterialsAsset3D& asset) {
+    std::ostringstream out;
+    JsonWriter json(out);
+    json.begin_object().field("schema", "kin.materials3d/1");
+    write_layer(json, asset.base);
+    if (!asset.variants.empty()) {
+        json.key("variants").begin_object();
+        for (const auto& [name, variant] : asset.variants) {
+            json.key(name).begin_object();
+            write_layer(json, variant);
+            json.end_object();
+        }
+        json.end_object();
+    }
+    json.end_object();
+    out << '\n';
+    return out.str();
+}
 
 Result3D<MaterialsAsset3D> parse_materials3d_asset(std::string_view text, const std::filesystem::path& source) {
     Result3D<MaterialsAsset3D> result;

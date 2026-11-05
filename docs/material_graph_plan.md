@@ -149,3 +149,27 @@ after.
   and its inputs: new varyings).
 - The retained-instance and merged-draw paths (`mesh_material` variants: parameters in `KinDrawMaterials`).
 - A `time` input (the frame uniforms), the object's position, and the parameters by name (P2's compiler).
+
+## Importing (user, 2026-11-05: Tier 1 for Godot, Unity and Unreal, plus a partial Tier 2 grown as needed)
+
+- Tier 1, the standard PBR materials: Godot `StandardMaterial3D` / `ORMMaterial3D` (.tres, text); Unity `.mat`
+  (Standard, URP Lit, HDRP Lit: YAML, textures by GUID through `.meta`; roughness = 1 - smoothness, the
+  metallic/smoothness and mask maps repacked, tiling and offset); Unreal through its editor's Python (material
+  instance parameters and textures; DirectX normal maps' green flipped; centimetres), its glTF exporter's bake as a
+  fallback for anything else.
+- Tier 2, graphs, for a common subset of nodes, unknown nodes falling back to Tier 1 or a bake: Godot VisualShader
+  (and the Godot shading language's fragment()), Unity Shader Graph, Unreal material graphs. kin's node set (P2) is
+  chosen to cover what the three share.
+- Not: Unity HLSL / ShaderLab, Unreal Custom HLSL nodes (baked instead).
+
+**Done: Godot Tier 1.** `import_godot_material()` (`kin/render3d/material_import3d.hpp`), `kin_import_material`
+(tools/import_material), `write_materials3d_asset()` (the .kinmaterials writer the import and the studio share);
+`kin_material_import3d_tests` (fixtures; with KIN_TEST_GODOT_PROJECT a whole project). The Bistro's 116 materials
+all import; against the Bistro port's own converter (games/gallery/bistro/tools/bake.py, validated against Godot by
+picture), 113 by name, every field agrees but: 12 lights whose emission is off in the resource (the game's script
+switches them on: noted), 3 glass of the add blend mode (bake.py made them opaque; the import is Godot's), 2 that
+need a DDS map repacked.
+
+**Engine gaps the import found.** A material-level UV transform (Godot's uv1_scale/offset, Unity's tiling, glTF's
+KHR_texture_transform is baked into the mesh's UVs today); decoding BC-compressed DDS to repack; backlight,
+subsurface, clearcoat, refraction, detail maps (graph territory).

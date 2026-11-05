@@ -48,6 +48,9 @@ struct MaterialsAsset3D {
 // CPU-only; 1 MiB per source, 128 variants, 256 part rules per layer.
 Result3D<MaterialsAsset3D> parse_materials3d_asset(std::string_view text, const std::filesystem::path& source = {});
 Result3D<MaterialsAsset3D> load_materials3d_asset(const std::filesystem::path& source);
+// The asset as a kin.materials3d/1 file's text, which parse_materials3d_asset reads back as it is (its fields, in the
+// parser's names; omitted ones stay omitted).
+std::string write_materials3d_asset(const MaterialsAsset3D& asset);
 
 // Only materials/textures are owned; meshes and models are never copied or
 // pinned. Binding identity prevents stale overrides after a model replacement.
