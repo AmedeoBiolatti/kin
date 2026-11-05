@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <filesystem>
 #include <kin/render3d/errors3d.hpp>
 #include <kin/render3d/scene3d.hpp>
@@ -15,6 +16,14 @@ struct MaterialTexture3D {
     bool reset_sampler = true; // a replacement map uses legacy sampling unless sampler:"inherit" is explicit
 };
 
+// A material graph parameter's value in a .kinmaterials file: 1 to 4 numbers, or a texture (bound to the parameter's
+// map slot).
+struct MaterialGraphValue3D {
+    std::array<f32, 4> value{};
+    u32 count = 0; // numbers given (0: a texture)
+    std::optional<MaterialTexture3D> texture;
+};
+
 // Omitted fields preserve the imported material. Color uses the standard
 // component codec (sRGB bytes); texture roles choose sRGB or linear on binding.
 struct MaterialPatch3D {
@@ -29,6 +38,10 @@ struct MaterialPatch3D {
     std::optional<Vec2f> uv_scale, uv_offset; // Material3D's: every map's tiling
     std::optional<EmissionMode3D> emission_mode;
     std::optional<MaterialTexture3D> texture, metallic_roughness, normal, occlusion, emissive_texture;
+    // A material graph (kin.material-graph/1: Assets3D::load_material_graph) as the surface (empty clears it), and its
+    // parameters' values by name (merged one by one across layers): Material3D::shader_params and its texture slots.
+    std::optional<std::filesystem::path> graph;
+    std::map<std::string, MaterialGraphValue3D> params;
 };
 struct MaterialPartPatch3D {
     // Exactly one selector: an index or a unique imported part name.

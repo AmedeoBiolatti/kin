@@ -211,3 +211,13 @@ within a few pixels of kin's own; errors).
 
 Next: P3 (`.kinmaterials` naming a graph and its parameters' values, cooking graphs at build time, hot reload) and the
 Tier 2 graph imports onto these nodes; P4 the studio's editor.
+
+**P3 (done).** `.kinmaterials` `"graph"` and `"params"` (numbers into shader_params, textures into their slots,
+merged per name across layers; `"graph": null` clears); `Assets3D::load_material_graph` (cooked `<graph>.spv` when at
+least as new as the source or without one; else glslc now; cached; invalidation by source or cooked file reloads);
+the cooked format (`pack/unpack_cooked_material_graph3d`, `cook_material_graph3d`, the layout as
+kin.material-graph-layout/1); `kin_material_graph` (check, glsl, cook, nodes) and cmake's `kin_cook_material_graph`.
+Tests: material_assets3d (bind, merge, clear, errors, draw, edit-and-reload, cooked without glslc, without its
+source, a stale cooked file refused), material_graph3d (layout and pack round trips, damage refused, cook now, cooked
+at build time). Not yet: SPIR-V optimisation (a cooked graph is ~650 KB of 8 unoptimised variants), cut-outs by the
+graph's alpha in shadow/pick passes, the retained draw paths.

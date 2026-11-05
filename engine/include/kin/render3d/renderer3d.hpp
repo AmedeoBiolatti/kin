@@ -96,13 +96,6 @@ std::string surface_shader_source(std::string_view surface);
 // The defines of a surface shader's variant: NAME or NAME=VALUE.
 std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant);
 
-// A material graph compiled (Renderer3D::compile_material_graph): its surface shader, and what the compiler made of it
-// (its parameters' places in Material3D::shader_params: material_graph_params3d).
-struct MaterialGraphShader3D {
-    SurfaceShader3D surface;
-    CompiledMaterialGraph3D graph;
-};
-
 class Renderer3D {
 public:
     // Draws through `renderer`, which must outlive it.
@@ -167,6 +160,8 @@ public:
     // A material graph (kin.material-graph/1: kin/render3d/material_graph3d.hpp) as a surface shader, compiled now
     // (development, as compile_surface_shader). Empty, with the graph's errors (each naming its node) or glslc's.
     Result3D<MaterialGraphShader3D> compile_material_graph(const std::filesystem::path& graph);
+    // A cooked graph (unpack_cooked_material_graph3d) made into its surface shader: what a shipped game does.
+    Result3D<MaterialGraphShader3D> create_material_graph(const CookedMaterialGraph3D& cooked);
     // Shader-specific immutable extra resource bindings. Sampled textures occupy
     // fragment set 2 slots 12..15; read-only storage follows the shader's sampler
     // count. Shapes/types/counts/ownership are validated once here. GPU contents

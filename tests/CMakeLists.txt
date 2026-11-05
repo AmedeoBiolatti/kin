@@ -442,6 +442,12 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
         DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
     # Material graphs (material_graph3d.hpp): the compiler, on the CPU (with glslc: every node type compiled).
     kin_add_test(kin_material_graph3d_tests kin-material-graph3d SOURCES material_graph3d_tests.cpp)
+    kin_cook_material_graph(_cooked_graph SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tinted.kingraph")
+    if(_cooked_graph)
+        add_custom_target(kin_material_graph_cooked DEPENDS ${_cooked_graph})
+        add_dependencies(kin_material_graph3d_tests kin_material_graph_cooked)
+        target_compile_definitions(kin_material_graph3d_tests PRIVATE KIN_TEST_COOKED_GRAPH="${_cooked_graph}")
+    endif()
     # Other engines' materials as kin's (material_import3d.hpp), on the CPU.
     kin_add_test(kin_material_import3d_tests kin-material-import3d SOURCES material_import3d_tests.cpp
         DEFINITIONS KIN_TEST_IMAGES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/images"

@@ -26,6 +26,8 @@
 #include <kin/core/types.hpp>
 #include <kin/render3d/scene3d.hpp>
 #include <map>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -61,9 +63,35 @@ struct CompiledMaterialGraph3D {
 
 CompiledMaterialGraph3D compile_material_graph3d(std::string_view graph);
 
+// A material graph made ready to draw (Renderer3D::compile_material_graph, create_material_graph,
+// Assets3D::load_material_graph): its surface shader, and its layout (its parameters' places in
+// Material3D::shader_params: material_graph_params3d).
+struct MaterialGraphShader3D {
+    SurfaceShader3D surface;
+    CompiledMaterialGraph3D graph;
+};
+
 // Material3D::shader_params for the graph's parameters: each one's default, or its value in `values` (by name).
 std::array<f32, 16> material_graph_params3d(const CompiledMaterialGraph3D& graph,
                                             const std::map<std::string, std::array<f32, 4>>& values = {});
+
+// The parameters' layout as JSON (kin.material-graph-layout/1), and back: what a cooked graph carries beside its
+// SPIR-V, so that a game binds parameters without the graph's source.
+std::string write_material_graph_layout3d(const CompiledMaterialGraph3D& graph);
+std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_view json, std::string* why = nullptr);
+
+// A cooked graph (<graph>.spv beside its source, `kin_material_graph cook`, cmake's kin_cook_material_graph): its
+// layout and its surface shader's variants, compiled (SurfaceVariant3D's order), in one file.
+struct CookedMaterialGraph3D {
+    CompiledMaterialGraph3D graph; // its layout (no source: `surface` empty)
+    std::array<std::vector<u8>, surface_variant_count3d> spirv;
+};
+std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked);
+std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<const u8> bytes,
+                                                                    std::string* why = nullptr);
+// The graph compiled and cooked now by glslc (kin/renderer/shader_compiler.hpp); none, with why (the graph's errors,
+// each naming its node, or glslc's messages).
+std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view graph, std::string* why = nullptr);
 
 struct MaterialGraphNode3D {
     std::string type, summary;

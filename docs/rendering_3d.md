@@ -1580,9 +1580,35 @@ shadowed, fogged and GI-lit as kin's own materials are.
 - **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to
   nothing, too many parameters, two textures in a slot.
 
-`compile_material_graph3d(text)` writes the surface shader's GLSL (`CompiledMaterialGraph3D::surface`, for
-`kin_compile_surface_shader` at build time) and the parameters' layout; `r3d.compile_material_graph(path)` compiles it
-now (development). Nodes not wired to an output are left out.
+`compile_material_graph3d(text)` writes the surface shader's GLSL (`CompiledMaterialGraph3D::surface`) and the
+parameters' layout; `r3d.compile_material_graph(path)` compiles it now (development). Nodes not wired to an output are
+left out.
+
+**As assets.** A `.kinmaterials` file names a graph and its parameters' values, which merge one by one across the
+base, part and variant layers (a variant can change only the tint):
+
+```json
+{"schema": "kin.materials3d/1",
+ "material": {"graph": "materials/rust.kingraph",
+              "params": {"tint": [0.45, 0.2, 0.08, 1], "scale": 4, "albedo": "textures/iron.png"}},
+ "variants": {"wet": {"material": {"params": {"scale": 8}}}, "plain": {"material": {"graph": null}}}}
+```
+
+Numbers go into `shader_params` (a graph's parameters take its place; unnamed ones keep their defaults); a texture
+(a path, or `{"asset", "sampler"}`) is bound in its parameter's slot, sRGB or linear as the graph says. Unknown names,
+a number for a texture, too many numbers and parameters without a graph are errors; `"graph": null` clears the
+surface (and what its parameters did). `Assets3D::load_material_graph(path)` loads graphs, cached by path:
+
+- **cooked**, `<graph>.spv` beside the source: the layout and every variant's SPIR-V in one file, made by
+  `kin_material_graph cook <graph>` or at build time by `kin_cook_material_graph(<var> SOURCE <graph> [OUTPUT
+  <file>])` (`cmake/kin_embed.cmake`), when it is at least as new as the source, or the source is gone: what a
+  shipped game, which has no glslc, loads;
+- else the source, compiled now with glslc (development); without glslc and no cooked file, an error saying so.
+
+Invalidating the graph or its cooked file (`SceneSession3D` does, for watched material files' dependencies) rebinds
+the materials that use it: editing a graph reloads it. `kin_material_graph check <graph>` prints its errors (each
+naming its node) or its parameters; `kin_material_graph glsl <graph> <out>` its GLSL; `kin_material_graph nodes` the
+node types.
 
 ### Custom lighting responses
 

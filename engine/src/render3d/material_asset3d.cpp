@@ -10,6 +10,7 @@
 #include <kin/ecs/component.hpp>
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -103,7 +104,8 @@ MaterialPatch3D patch(const JsonValue& value) {
                    "occlusion",       "emissive_texture",
                    "shader",          "shader_params",
                    "emission_color",  "emission_mode",
-                   "uv_scale",        "uv_offset"});
+                   "uv_scale",        "uv_offset",
+                   "graph",           "params"});
     MaterialPatch3D result;
     if (const auto* v = value.find("emission_mode"))
         result.emission_mode = enumeration<EmissionMode3D>(
@@ -127,6 +129,27 @@ MaterialPatch3D patch(const JsonValue& value) {
         result.uv_scale = pair(*v, "uv_scale");
     if (const auto* v = value.find("uv_offset"))
         result.uv_offset = pair(*v, "uv_offset");
+    if (const auto* v = value.find("graph"))
+        result.graph = v->is_null() ? std::filesystem::path{} : std::filesystem::path{text(*v)};
+    if (const auto* v = value.find("params")) {
+        require(v->is_object() && v->members().size() <= 64, "params must be an object of at most 64 values");
+        for (const auto& [name, item] : v->members()) {
+            MaterialGraphValue3D g;
+            if (item.is_number()) {
+                g.value[0] = number(item, -1e9, 1e9, "params");
+                g.count = 1;
+            } else if (item.is_array()) {
+                require(item.items().size() >= 2 && item.items().size() <= 4, "a param's numbers are 1 to 4");
+                for (size_t i = 0; i < item.items().size(); ++i)
+                    g.value[i] = number(item.items()[i], -1e9, 1e9, "params");
+                g.count = u32(item.items().size());
+            } else {
+                g.texture = texture(item); // a texture parameter's map
+                require(!g.texture->asset.empty(), "a texture param needs a texture");
+            }
+            result.params[name] = g;
+        }
+    }
     if (const auto* v = value.find("shader"))
         result.shader = v->is_null() ? std::filesystem::path{} : std::filesystem::path{text(*v)};
     if (const auto* v = value.find("shader_params")) {
@@ -258,12 +281,15 @@ void merge(MaterialPatch3D& to, const MaterialPatch3D& from) {
     FIELD(wrap_v);
     FIELD(uv_scale);
     FIELD(uv_offset);
+    FIELD(graph);
     FIELD(texture);
     FIELD(normal);
     FIELD(metallic_roughness);
     FIELD(occlusion);
     FIELD(emissive_texture);
 #undef FIELD
+    for (const auto& [name, value] : from.params)
+        to.params[name] = value;
 }
 void apply_layer(std::vector<MaterialPatch3D>& patches, const MaterialVariant3D& layer, const Model3D& model) {
     for (auto& target : patches)
@@ -391,6 +417,25 @@ void write_patch(JsonWriter& json, const MaterialPatch3D& p) {
             .value(tidy(p.emission_color->g))
             .value(tidy(p.emission_color->b))
             .end_array();
+    if (p.graph)
+        p.graph->empty() ? json.key("graph").value_null() : json.field("graph", p.graph->generic_string());
+    if (!p.params.empty()) {
+        json.key("params").begin_object();
+        for (const auto& [name, v] : p.params) {
+            json.key(name);
+            if (v.texture) {
+                write_texture(json, *v.texture);
+            } else if (v.count == 1) {
+                json.value(tidy(v.value[0]));
+            } else {
+                json.begin_array();
+                for (u32 i = 0; i < v.count; ++i)
+                    json.value(tidy(v.value[i]));
+                json.end_array();
+            }
+        }
+        json.end_object();
+    }
     if (p.uv_scale)
         json.key("uv_scale").begin_array().value(tidy(p.uv_scale->x)).value(tidy(p.uv_scale->y)).end_array();
     if (p.uv_offset)
@@ -528,6 +573,19 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         }
         return entry->second;
     };
+    std::map<std::filesystem::path, MaterialGraphShader3D> graphs;
+    const auto resolve_graph = [&](const std::filesystem::path& source) -> const MaterialGraphShader3D& {
+        const auto path = (assets.root() / source).lexically_normal();
+        auto [entry, added] = graphs.try_emplace(path);
+        if (added) {
+            auto loaded = assets.load_material_graph(path);
+            require(bool(loaded), kin::diagnostics3d_text(assets.diagnostics()));
+            entry->second = std::move(*loaded);
+            result.source_files.push_back(path);
+            result.source_files.push_back(path.string() + ".spv"); // its cooked form, when edited, too
+        }
+        return entry->second;
+    };
     result.materials.reserve(model->parts.size());
     for (size_t i = 0; i < patches.size(); ++i) {
         const auto& p = patches[i];
@@ -577,6 +635,64 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
             if (!p.shader->empty()) {
                 material.shader = resolve_shader(*p.shader);
             }
+        }
+        // The graph, then its parameters: their values in shader_params, their textures in their slots.
+        const CompiledMaterialGraph3D* layout = nullptr;
+        if (p.graph) {
+            material.surface = {};
+            if (!p.graph->empty()) {
+                const auto& g = resolve_graph(*p.graph);
+                material.surface = g.surface;
+                layout = &g.graph;
+            }
+        }
+        // (A layer clearing the graph clears what its parameters did, the earlier layers' values with it.)
+        require(p.params.empty() || layout || (p.graph && p.graph->empty()), "params without a graph");
+        if (layout) {
+            std::map<std::string, std::array<f32, 4>> values;
+            for (const auto& [name, v] : p.params) {
+                const auto param = std::ranges::find(layout->parameters, name, &MaterialGraphParameter3D::name);
+                require(param != layout->parameters.end(), "the graph has no parameter '" + name + "'");
+                if (param->type == GraphType3D::Texture) {
+                    require(v.texture.has_value(), "parameter '" + name + "' is a texture");
+                    const u32 slot = u32(param->slot);
+                    Texture bound = resolve(*v.texture, param->srgb);
+                    switch (param->slot) {
+                    case MaterialMap3D::BaseColor:
+                        material.texture = bound;
+                        break;
+                    case MaterialMap3D::MetallicRoughness:
+                        material.metallic_roughness = bound;
+                        break;
+                    case MaterialMap3D::Normal:
+                        material.normal = bound;
+                        break;
+                    case MaterialMap3D::Occlusion:
+                        material.occlusion = bound;
+                        break;
+                    case MaterialMap3D::Emissive:
+                        material.emissive_texture = bound;
+                        break;
+                    default:
+                        break;
+                    }
+                    if (v.texture->reset_sampler) {
+                        material.texture_samplers[slot] = v.texture->sampler;
+                        if (!v.texture->sampler)
+                            material.texture_samplers[slot] =
+                                legacy_sampler3d(v.texture->nearest ? ScaleMode::Nearest : ScaleMode::Mipmapped,
+                                                 material.wrap_u, material.wrap_v);
+                    }
+                } else {
+                    require(v.count >= 1 && v.count <= param->size,
+                            "parameter '" + name + "' takes " + std::to_string(param->size) + " number(s)");
+                    std::array<f32, 4> value = param->value;
+                    for (u32 k = 0; k < v.count; ++k)
+                        value[k] = v.value[k];
+                    values[name] = value;
+                }
+            }
+            material.shader_params = material_graph_params3d(*layout, values);
         }
         result.materials.push_back(std::move(material));
     }
