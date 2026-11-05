@@ -38,6 +38,29 @@
    ]
   }
  },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionTextureSample_0": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_Cutout.png"
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "BaseColor": {
+    "node": "MaterialExpressionTextureSample_0",
+    "output": "RGB"
+   },
+   "OpacityMask": {
+    "node": "MaterialExpressionTextureSample_0",
+    "output": "A"
+   }
+  }
+ },
  "textures": {
   "textures/Game/Probe/Textures/T_Cutout.png": {
    "asset": "/Game/Probe/Textures/T_Cutout",

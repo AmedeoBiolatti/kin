@@ -45,6 +45,51 @@
    ]
   }
  },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionLinearInterpolate_0": {
+    "class": "MaterialExpressionLinearInterpolate",
+    "props": {
+     "const_a": 0.0,
+     "const_alpha": 0.5,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionTextureSample_0",
+      "output": "RGB"
+     },
+     "Alpha": {
+      "node": "MaterialExpressionScalarParameter_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTextureSample_0": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_Albedo.png"
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionScalarParameter_0": {
+    "class": "MaterialExpressionScalarParameter",
+    "props": {
+     "default_value": 0.5,
+     "parameter_name": "Mix"
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "BaseColor": {
+    "node": "MaterialExpressionLinearInterpolate_0",
+    "output": ""
+   }
+  }
+ },
  "textures": {
   "textures/Game/Probe/Textures/T_Albedo.png": {
    "asset": "/Game/Probe/Textures/T_Albedo",

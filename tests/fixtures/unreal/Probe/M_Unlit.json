@@ -27,6 +27,25 @@
    ]
   }
  },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionTextureSample_0": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_Albedo.png"
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "EmissiveColor": {
+    "node": "MaterialExpressionTextureSample_0",
+    "output": "RGB"
+   }
+  }
+ },
  "textures": {
   "textures/Game/Probe/Textures/T_Albedo.png": {
    "asset": "/Game/Probe/Textures/T_Albedo",

@@ -248,3 +248,30 @@ noise; the view, normals, fresnel, triplanar, normal maps and glsl nodes refused
 Five optional variants (17 in all; cooked only for graphs with a cut-out alpha). `test_gpu_material_graph_cutout`: a
 plane cut by a checker of nodes draws, shadows, occludes (AO pre-pass, TAA velocity pre-pass) and picks byte-identically
 to the same plane cut by a checker texture, and differs from it uncut by ~1,230 pixels (its holes and their shadow).
+
+**Tier 2: the three engines' graphs (done, partial node coverage).** `import_unreal_graph`, `import_unity_graph`,
+`import_godot_graph` (`kin_import_material ... --graphs`) write a `.kingraph` beside the `.kinmaterials` and name it
+there, its parameters' values the material's (an instance's, a material's properties); an output the graph can't
+take keeps its Tier 1 value (Unreal, Unity) and is noted, naming the node; a graph that does not compile, or samples
+more than five textures (kin's map slots), falls back to Tier 1. Shared in `material_import3d_impl.hpp`'s
+`GraphBuilder`: the nodes and their widths (as kin's compiler makes them), cutting a value to a port's width, swizzles
+composed, the five slots. Two node types added for them: `append` (Unreal's AppendVector) and `unpack_normal`.
+- Unreal: `unreal_export.py` exports the whole expression graph (each node's class, properties, pins); constants,
+  parameters, samples (normal maps unpacked, DirectX green flipped unless the texture flips it), coordinates and
+  their tiling, the arithmetic and unary nodes, Lerp, Clamp, Power, Dot, Cross, Distance, masks, AppendVector, Time,
+  World Position (cm), Vertex Color, Camera Vector, normals, Fresnel, Panner, Desaturation, Reroute, Static Switch
+  (its default). BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
+- Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
+  the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
+  Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the
+  default textures' `.meta` (`sRGBTexture`); the URP target's surface, alpha clip, two sides, Unlit. BoatAttack: 36
+  of 36 import, 7 graphs, all cooked by glslc; what stops the rest: Custom Function, Object and Camera nodes, a
+  pre-10 sub-graph, the vertex stage, fog. `tools/import_material/make_unity_fixture.py` writes
+  `tests/fixtures/unity`.
+- Godot 4: VisualShader resources (their own file or inline); port numbering, functions, operators and defaults
+  read off Godot 4.7.2's generated code (the output's ports are stable through 4.x: Bent Normal Map was appended
+  last); the fragment stage; Normal Map unpacked as Godot does (its depth the strength); one-assignment Expression
+  nodes as glsl; view-space inputs as kin's world ones (noted); cull, unshaded, alpha scissor.
+  `tools/import_material/godot_probe.gd` makes `tests/fixtures/godot_visual` in a scratch project.
+
+Not verified: any of the three against its engine's render of the same material (structure and glslc only).

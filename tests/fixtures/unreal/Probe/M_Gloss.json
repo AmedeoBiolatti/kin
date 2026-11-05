@@ -48,6 +48,62 @@
    ]
   }
  },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionConstant3Vector_0": {
+    "class": "MaterialExpressionConstant3Vector",
+    "props": {
+     "constant": [
+      0.20000000298023224,
+      0.4000000059604645,
+      0.6000000238418579,
+      1.0
+     ]
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionConstant_0": {
+    "class": "MaterialExpressionConstant",
+    "props": {
+     "r": 0.800000011920929
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionOneMinus_0": {
+    "class": "MaterialExpressionOneMinus",
+    "props": {},
+    "inputs": {
+     "None": {
+      "node": "MaterialExpressionTextureSample_0",
+      "output": "A"
+     }
+    }
+   },
+   "MaterialExpressionTextureSample_0": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_LINEAR_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_Gloss.png"
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "BaseColor": {
+    "node": "MaterialExpressionConstant3Vector_0",
+    "output": ""
+   },
+   "Metallic": {
+    "node": "MaterialExpressionConstant_0",
+    "output": ""
+   },
+   "Roughness": {
+    "node": "MaterialExpressionOneMinus_0",
+    "output": ""
+   }
+  }
+ },
  "textures": {
   "textures/Game/Probe/Textures/T_Gloss.png": {
    "asset": "/Game/Probe/Textures/T_Gloss",

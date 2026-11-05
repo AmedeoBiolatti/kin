@@ -42,5 +42,52 @@
    ]
   }
  },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionMultiply_0": {
+    "class": "MaterialExpressionMultiply",
+    "props": {
+     "const_a": 0.0,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionConstant3Vector_0",
+      "output": ""
+     },
+     "B": {
+      "node": "MaterialExpressionScalarParameter_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionConstant3Vector_0": {
+    "class": "MaterialExpressionConstant3Vector",
+    "props": {
+     "constant": [
+      1.0,
+      0.5,
+      0.0,
+      1.0
+     ]
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionScalarParameter_0": {
+    "class": "MaterialExpressionScalarParameter",
+    "props": {
+     "default_value": 5.0,
+     "parameter_name": "Strength"
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "EmissiveColor": {
+    "node": "MaterialExpressionMultiply_0",
+    "output": ""
+   }
+  }
+ },
  "textures": {}
 }

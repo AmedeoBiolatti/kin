@@ -1,0 +1,472 @@
+{
+ "schema": "kin.unreal-material/1",
+ "name": "M_GraphMix",
+ "path": "/Game/Probe/M_GraphMix",
+ "class": "Material",
+ "parents": [],
+ "base": "/Game/Probe/M_GraphMix",
+ "blend_mode": "BLEND_OPAQUE",
+ "shading_model": "MSM_DEFAULT_LIT",
+ "two_sided": false,
+ "opacity_mask_clip_value": 0.33329999446868896,
+ "parameters": {
+  "scalar": {},
+  "vector": {
+   "Tint": [
+    0.8999999761581421,
+    0.30000001192092896,
+    0.10000000149011612,
+    1.0
+   ]
+  },
+  "texture": {
+   "Albedo": "textures/Game/Probe/Textures/T_Albedo.png"
+  }
+ },
+ "inputs": {
+  "BaseColor": {
+   "class": "MaterialExpressionMultiply",
+   "output": "",
+   "const_a": 0.0,
+   "const_b": 1.0,
+   "inputs": [
+    {
+     "class": "MaterialExpressionLinearInterpolate",
+     "output": "",
+     "const_a": 0.0,
+     "const_b": 1.0,
+     "const_alpha": 0.5,
+     "inputs": [
+      {
+       "class": "MaterialExpressionTextureSampleParameter2D",
+       "output": "RGB",
+       "parameter": "Albedo",
+       "texture": "textures/Game/Probe/Textures/T_Albedo.png",
+       "sampler_type": "SAMPLERTYPE_COLOR",
+       "inputs": [
+        {
+         "class": "MaterialExpressionPanner",
+         "output": "",
+         "inputs": [
+          {
+           "class": "MaterialExpressionTextureCoordinate",
+           "output": "",
+           "index": 0,
+           "u_tiling": 4.0,
+           "v_tiling": 4.0
+          },
+          null,
+          null
+         ]
+        },
+        null
+       ]
+      },
+      {
+       "class": "MaterialExpressionVectorParameter",
+       "output": "RGB",
+       "parameter": "Tint",
+       "value": [
+        0.8999999761581421,
+        0.30000001192092896,
+        0.10000000149011612,
+        1.0
+       ]
+      },
+      {
+       "class": "MaterialExpressionFresnel",
+       "output": "",
+       "inputs": [
+        null,
+        null,
+        null
+       ]
+      }
+     ]
+    },
+    {
+     "class": "MaterialExpressionVertexColor",
+     "output": ""
+    }
+   ]
+  },
+  "Roughness": {
+   "class": "MaterialExpressionOneMinus",
+   "output": "",
+   "inputs": [
+    {
+     "class": "MaterialExpressionClamp",
+     "output": "",
+     "inputs": [
+      {
+       "class": "MaterialExpressionPower",
+       "output": "",
+       "inputs": [
+        {
+         "class": "MaterialExpressionTextureSample",
+         "output": "G",
+         "texture": "textures/Game/Probe/Textures/T_ORM.png",
+         "sampler_type": "SAMPLERTYPE_LINEAR_COLOR",
+         "inputs": [
+          null,
+          null,
+          null
+         ]
+        },
+        null
+       ]
+      },
+      null,
+      null
+     ]
+    }
+   ]
+  },
+  "EmissiveColor": {
+   "class": "MaterialExpressionAppendVector",
+   "output": "",
+   "inputs": [
+    {
+     "class": "MaterialExpressionComponentMask",
+     "output": "",
+     "mask": [
+      true,
+      true,
+      false,
+      false
+     ],
+     "inputs": [
+      {
+       "class": "MaterialExpressionWorldPosition",
+       "output": "XYZ"
+      }
+     ]
+    },
+    {
+     "class": "MaterialExpressionSine",
+     "output": "",
+     "inputs": [
+      {
+       "class": "MaterialExpressionTime",
+       "output": ""
+      }
+     ]
+    }
+   ]
+  },
+  "Normal": {
+   "class": "MaterialExpressionLinearInterpolate",
+   "output": "",
+   "const_a": 0.0,
+   "const_b": 1.0,
+   "const_alpha": 0.5,
+   "inputs": [
+    {
+     "class": "MaterialExpressionTextureSample",
+     "output": "RGB",
+     "texture": "textures/Game/Probe/Textures/T_NormalDX.png",
+     "sampler_type": "SAMPLERTYPE_NORMAL",
+     "inputs": [
+      null,
+      null,
+      null
+     ]
+    },
+    {
+     "class": "MaterialExpressionConstant3Vector",
+     "output": "",
+     "value": [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+     ]
+    },
+    null
+   ]
+  }
+ },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionMultiply_0": {
+    "class": "MaterialExpressionMultiply",
+    "props": {
+     "const_a": 0.0,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionLinearInterpolate_0",
+      "output": ""
+     },
+     "B": {
+      "node": "MaterialExpressionVertexColor_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionLinearInterpolate_0": {
+    "class": "MaterialExpressionLinearInterpolate",
+    "props": {
+     "const_a": 0.0,
+     "const_alpha": 0.5,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionTextureSampleParameter2D_0",
+      "output": "RGB"
+     },
+     "B": {
+      "node": "MaterialExpressionVectorParameter_0",
+      "output": "RGB"
+     },
+     "Alpha": {
+      "node": "MaterialExpressionFresnel_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTextureSampleParameter2D_0": {
+    "class": "MaterialExpressionTextureSampleParameter2D",
+    "props": {
+     "const_coordinate": 0,
+     "parameter_name": "Albedo",
+     "sampler_type": "SAMPLERTYPE_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_Albedo.png"
+    },
+    "inputs": {
+     "UVs": {
+      "node": "MaterialExpressionPanner_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionPanner_0": {
+    "class": "MaterialExpressionPanner",
+    "props": {
+     "const_coordinate": 0,
+     "speed_x": 0.10000000149011612,
+     "speed_y": 0.0
+    },
+    "inputs": {
+     "Coordinate": {
+      "node": "MaterialExpressionTextureCoordinate_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTextureCoordinate_0": {
+    "class": "MaterialExpressionTextureCoordinate",
+    "props": {
+     "coordinate_index": 0,
+     "u_tiling": 4.0,
+     "un_mirror_u": false,
+     "un_mirror_v": false,
+     "v_tiling": 4.0
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionVectorParameter_0": {
+    "class": "MaterialExpressionVectorParameter",
+    "props": {
+     "default_value": [
+      0.8999999761581421,
+      0.30000001192092896,
+      0.10000000149011612,
+      1.0
+     ],
+     "parameter_name": "Tint"
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionFresnel_0": {
+    "class": "MaterialExpressionFresnel",
+    "props": {
+     "base_reflect_fraction": 0.03999999910593033,
+     "exponent": 3.0
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionVertexColor_0": {
+    "class": "MaterialExpressionVertexColor",
+    "props": {},
+    "inputs": {}
+   },
+   "MaterialExpressionOneMinus_0": {
+    "class": "MaterialExpressionOneMinus",
+    "props": {},
+    "inputs": {
+     "None": {
+      "node": "MaterialExpressionClamp_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionClamp_0": {
+    "class": "MaterialExpressionClamp",
+    "props": {
+     "max_default": 0.8999999761581421,
+     "min_default": 0.10000000149011612
+    },
+    "inputs": {
+     "None": {
+      "node": "MaterialExpressionPower_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionPower_0": {
+    "class": "MaterialExpressionPower",
+    "props": {
+     "const_exponent": 2.0
+    },
+    "inputs": {
+     "Base": {
+      "node": "MaterialExpressionTextureSample_0",
+      "output": "G"
+     }
+    }
+   },
+   "MaterialExpressionTextureSample_0": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_LINEAR_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_ORM.png"
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionAppendVector_0": {
+    "class": "MaterialExpressionAppendVector",
+    "props": {},
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionComponentMask_0",
+      "output": ""
+     },
+     "B": {
+      "node": "MaterialExpressionSine_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionComponentMask_0": {
+    "class": "MaterialExpressionComponentMask",
+    "props": {
+     "a": false,
+     "b": false,
+     "g": true,
+     "r": true
+    },
+    "inputs": {
+     "None": {
+      "node": "MaterialExpressionWorldPosition_0",
+      "output": "XYZ"
+     }
+    }
+   },
+   "MaterialExpressionWorldPosition_0": {
+    "class": "MaterialExpressionWorldPosition",
+    "props": {},
+    "inputs": {}
+   },
+   "MaterialExpressionSine_0": {
+    "class": "MaterialExpressionSine",
+    "props": {
+     "period": 1.0
+    },
+    "inputs": {
+     "None": {
+      "node": "MaterialExpressionTime_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTime_0": {
+    "class": "MaterialExpressionTime",
+    "props": {
+     "period": 0.0
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionLinearInterpolate_1": {
+    "class": "MaterialExpressionLinearInterpolate",
+    "props": {
+     "const_a": 0.0,
+     "const_alpha": 0.5,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionTextureSample_1",
+      "output": "RGB"
+     },
+     "B": {
+      "node": "MaterialExpressionConstant3Vector_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTextureSample_1": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_NORMAL",
+     "texture": "textures/Game/Probe/Textures/T_NormalDX.png"
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionConstant3Vector_0": {
+    "class": "MaterialExpressionConstant3Vector",
+    "props": {
+     "constant": [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+     ]
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "BaseColor": {
+    "node": "MaterialExpressionMultiply_0",
+    "output": ""
+   },
+   "Roughness": {
+    "node": "MaterialExpressionOneMinus_0",
+    "output": ""
+   },
+   "EmissiveColor": {
+    "node": "MaterialExpressionAppendVector_0",
+    "output": ""
+   },
+   "Normal": {
+    "node": "MaterialExpressionLinearInterpolate_1",
+    "output": ""
+   }
+  }
+ },
+ "textures": {
+  "textures/Game/Probe/Textures/T_Albedo.png": {
+   "asset": "/Game/Probe/Textures/T_Albedo",
+   "srgb": true,
+   "flip_green_channel": false,
+   "compression_settings": "TC_DEFAULT"
+  },
+  "textures/Game/Probe/Textures/T_ORM.png": {
+   "asset": "/Game/Probe/Textures/T_ORM",
+   "srgb": false,
+   "flip_green_channel": false,
+   "compression_settings": "TC_DEFAULT"
+  },
+  "textures/Game/Probe/Textures/T_NormalDX.png": {
+   "asset": "/Game/Probe/Textures/T_NormalDX",
+   "srgb": false,
+   "flip_green_channel": false,
+   "compression_settings": "TC_NORMALMAP"
+  }
+ }
+}

@@ -1,16 +1,15 @@
 // Material graphs (kin/render3d/material_graph3d.hpp), on the CPU: the compiler's GLSL (parameters packed, dead nodes
 // left out, types cast, outputs as kin takes them), its errors naming their nodes, and, with glslc, every node type
 // compiled into every variant of kin's mesh shader.
-#include <kin/render3d/material_graph3d.hpp>
-#include <kin/render3d/renderer3d.hpp>
-#include <kin/renderer/shader_compiler.hpp>
-
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <kin/render3d/material_graph3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <string>
 
 namespace {
@@ -33,8 +32,8 @@ bool error_at(const CompiledMaterialGraph3D& g, std::string_view node, std::stri
                        [&](const MaterialGraphError3D& e) { return e.node == node && contains(e.message, what); });
 }
 std::string graph(const std::string& parameters, const std::string& nodes, const std::string& outputs) {
-    return R"({"schema": "kin.material-graph/1", "name": "test", "parameters": [)" + parameters +
-           R"(], "nodes": [)" + nodes + R"(], "outputs": {)" + outputs + "}}";
+    return R"({"schema": "kin.material-graph/1", "name": "test", "parameters": [)" + parameters + R"(], "nodes": [)" +
+           nodes + R"(], "outputs": {)" + outputs + "}}";
 }
 
 void compiles() {
@@ -123,11 +122,13 @@ void every_node_compiles() {
         std::string inputs, extra;
         for (const auto& i : n.inputs) {
             if (i == "z" || i == "w")
-                continue; // combine's optional ones
-            const std::string v = i == "direction" || i == "a" || i == "b" || i == "normal" || i == "position" ? "\"view\""
-                                  : i == "uv"                       ? "\"uv\""
-                                  : i == "center" || i == "speed"   ? "[0.5, 0.5]"
-                                                                    : "0.5";
+                continue;                                       // combine's optional ones
+            const std::string v = n.type == "append" ? "\"uv\"" // vec2s: 4 components
+                                  : i == "direction" || i == "a" || i == "b" || i == "normal" || i == "position"
+                                      ? "\"view\""
+                                  : i == "uv"                     ? "\"uv\""
+                                  : i == "center" || i == "speed" ? "[0.5, 0.5]"
+                                                                  : "0.5";
             inputs += std::string(inputs.empty() ? "" : ", ") + "\"" + i + "\": " + v;
         }
         if (n.type == "constant")
@@ -195,8 +196,9 @@ void documented_example() {
         out << surface_shader_source(g.surface);
     }
     std::string why;
-    const bool ok = compile_glsl(file, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D::LightsFog))
-                        .has_value();
+    const bool ok =
+        compile_glsl(file, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D::LightsFog))
+            .has_value();
     std::error_code ignored;
     fs::remove(file, ignored);
     if (!ok)
@@ -280,10 +282,11 @@ void cutouts() {
         std::cerr << e.node << ": " << e.message << '\n';
     CHECK(dissolve.ok() && dissolve.cutout && dissolve.warnings.empty());
     CHECK(surface_has_alpha(dissolve.surface) && contains(dissolve.surface, "#ifdef KIN_SURFACE_MASK"));
-    CHECK(contains(dissolve.surface, "material.cutoff.z") && contains(dissolve.surface, "(vertex_alpha * texture(uBase, uv).a)"));
-    const auto rim = compile_material_graph3d(graph("",
-        R"({"id": "edge", "type": "fresnel"}, {"id": "a", "type": "one_minus", "inputs": {"x": "edge"}})",
-        R"("alpha": "a")"));
+    CHECK(contains(dissolve.surface, "material.cutoff.z") &&
+          contains(dissolve.surface, "(vertex_alpha * texture(uBase, uv).a)"));
+    const auto rim = compile_material_graph3d(
+        graph("", R"({"id": "edge", "type": "fresnel"}, {"id": "a", "type": "one_minus", "inputs": {"x": "edge"}})",
+              R"("alpha": "a")"));
     CHECK(rim.ok() && !rim.cutout && !surface_has_alpha(rim.surface) && rim.warnings.size() == 1 &&
           rim.warnings[0].node == "edge" && contains(rim.warnings[0].message, "base map's alpha"));
     const auto plain = compile_material_graph3d(graph("", "", R"("roughness": 0.5)"));
@@ -291,11 +294,12 @@ void cutouts() {
     if (!shader_compiler_available())
         return;
     std::string why;
-    const auto cooked = cook_material_graph3d(graph(
-        R"({"name": "amount", "type": "float", "default": 0.5})",
-        R"({"id": "noise", "type": "noise_value", "inputs": {"p": "position", "scale": 3}},
+    const auto cooked =
+        cook_material_graph3d(graph(R"({"name": "amount", "type": "float", "default": 0.5})",
+                                    R"({"id": "noise", "type": "noise_value", "inputs": {"p": "position", "scale": 3}},
            {"id": "keep", "type": "step", "inputs": {"edge": "amount", "x": "noise"}})",
-        R"("alpha": "keep")"), &why);
+                                    R"("alpha": "keep")"),
+                              &why);
     if (!cooked)
         std::cerr << why << '\n';
     CHECK(cooked.has_value() && cooked->graph.cutout);

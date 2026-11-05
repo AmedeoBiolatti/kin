@@ -129,6 +129,116 @@
    ]
   }
  },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionMultiply_0": {
+    "class": "MaterialExpressionMultiply",
+    "props": {
+     "const_a": 0.0,
+     "const_b": 1.0
+    },
+    "inputs": {
+     "A": {
+      "node": "MaterialExpressionTextureSampleParameter2D_0",
+      "output": "RGB"
+     },
+     "B": {
+      "node": "MaterialExpressionVectorParameter_0",
+      "output": "RGB"
+     }
+    }
+   },
+   "MaterialExpressionTextureSampleParameter2D_0": {
+    "class": "MaterialExpressionTextureSampleParameter2D",
+    "props": {
+     "const_coordinate": 0,
+     "parameter_name": "Albedo",
+     "sampler_type": "SAMPLERTYPE_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_Albedo.png"
+    },
+    "inputs": {
+     "UVs": {
+      "node": "MaterialExpressionTextureCoordinate_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTextureCoordinate_0": {
+    "class": "MaterialExpressionTextureCoordinate",
+    "props": {
+     "coordinate_index": 0,
+     "u_tiling": 2.0,
+     "un_mirror_u": false,
+     "un_mirror_v": false,
+     "v_tiling": 3.0
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionVectorParameter_0": {
+    "class": "MaterialExpressionVectorParameter",
+    "props": {
+     "default_value": [
+      1.0,
+      0.5,
+      0.25,
+      1.0
+     ],
+     "parameter_name": "Tint"
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionTextureSample_0": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_LINEAR_COLOR",
+     "texture": "textures/Game/Probe/Textures/T_ORM.png"
+    },
+    "inputs": {
+     "UVs": {
+      "node": "MaterialExpressionTextureCoordinate_0",
+      "output": ""
+     }
+    }
+   },
+   "MaterialExpressionTextureSample_1": {
+    "class": "MaterialExpressionTextureSample",
+    "props": {
+     "const_coordinate": 0,
+     "sampler_type": "SAMPLERTYPE_NORMAL",
+     "texture": "textures/Game/Probe/Textures/T_NormalDX.png"
+    },
+    "inputs": {
+     "UVs": {
+      "node": "MaterialExpressionTextureCoordinate_0",
+      "output": ""
+     }
+    }
+   }
+  },
+  "outputs": {
+   "BaseColor": {
+    "node": "MaterialExpressionMultiply_0",
+    "output": ""
+   },
+   "Metallic": {
+    "node": "MaterialExpressionTextureSample_0",
+    "output": "B"
+   },
+   "Roughness": {
+    "node": "MaterialExpressionTextureSample_0",
+    "output": "G"
+   },
+   "Normal": {
+    "node": "MaterialExpressionTextureSample_1",
+    "output": "RGB"
+   },
+   "AmbientOcclusion": {
+    "node": "MaterialExpressionTextureSample_0",
+    "output": "R"
+   }
+  }
+ },
  "textures": {
   "textures/Game/Probe/Textures/T_Albedo.png": {
    "asset": "/Game/Probe/Textures/T_Albedo",
