@@ -291,6 +291,9 @@ public:
     Vec2i output_size() const;
     Vec2f window_to_logical(Vec2f window_px) const;
     Vec2f logical_to_window(Vec2f logical) const;
+    // A window rectangle in drawing coordinates: where to lay UI out inside
+    // Window::safe_area() (`ui.begin_layout(r.window_rect_to_logical(window.safe_area()))`).
+    Rectf window_rect_to_logical(Rectf window_rect) const;
 
     Texture create_texture_from_rgba(const u8* pixels, i32 width, i32 height);
     Texture create_texture_from_rgba(const u8* pixels, Vec2i size);

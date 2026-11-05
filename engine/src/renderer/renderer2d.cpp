@@ -76,6 +76,11 @@ struct Renderer2D::OpenClip {
 
 std::unique_ptr<IRenderer2DBackend> make_render_backend(Window& window, bool vsync, bool allow_gpu) {
     const auto choice = requested_renderer();
+#if defined(__ANDROID__)
+    // A phone draws at its display's rate, never faster: frames it cannot show
+    // only drain the battery and heat it (App::set_max_fps lowers the rate).
+    vsync = true;
+#endif
 #if KIN_HAS_WEBGL2_RENDERER
     return std::make_unique<WebGL2Renderer2DBackend>(window, vsync);
 #elif KIN_HAS_COMPACT_RENDERER
@@ -430,6 +435,12 @@ Vec2f Renderer2D::window_to_logical(Vec2f window_px) const {
 
 Vec2f Renderer2D::logical_to_window(Vec2f logical) const {
     return _backend->logical_to_window(logical);
+}
+
+Rectf Renderer2D::window_rect_to_logical(Rectf window_rect) const {
+    const Vec2f min = window_to_logical(Vec2f{window_rect.x, window_rect.y});
+    const Vec2f max = window_to_logical(Vec2f{window_rect.x + window_rect.w, window_rect.y + window_rect.h});
+    return {min.x, min.y, max.x - min.x, max.y - min.y};
 }
 
 Texture Renderer2D::create_texture_from_rgba(const u8* pixels, i32 width, i32 height) {

@@ -123,11 +123,35 @@ the Steam Deck's) reach the game three ways:
 
 `claim_touch(id)` takes a finger for an on-screen control: it stops being
 the pointer (a press it began is let go without a click) and no gesture
-counts it. App gives touch the time each frame (`update_touch`), so a finger
+counts it. ui2's `TouchStick` and `TouchButton` and the screens'
+`touch_stick` and `touch_button` are such controls ([ui](ui.md#touch)).
+`set_screen_action(action, held)` and `set_screen_axis(name, value)` are how
+they hold the game's actions and axes. These count as one more device of the
+player who has the keyboard, so they hold an action whether or not the map
+binds it. A control sets its value each frame, and one that goes unset for a
+frame is let go. App gives touch the time each frame (`update_touch`), so a finger
 held still becomes a long press without moving. A test or an agent makes
 fingers with `set_touch_down`, `set_touch_moved` and `set_touch_up`, or the
 scene server's `input.touch`. Lua has `input.touches()`, `input.pinch()` and
 `input.pan()`.
+
+On a phone:
+
+- **Back** (the button or the edge swipe) is `Key::Escape`, so whatever
+  leaves a menu or pauses the game on a desktop (the `quit` action, ui2's
+  back, cancelling a rebind) does it there too. On Android kin keeps Back for
+  the game (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`); a game that wants Android's
+  own (leave the app) sets that hint to `"0"` before the App is made.
+- **The safe area.** `Window::safe_area()` is the part of the window that the
+  camera cutout, the system bars and the edge-swipe strips leave free, in
+  window coordinates (the whole window on a desktop). Lay touchable UI out
+  inside it: `ui.begin_layout(renderer.window_rect_to_logical(window.safe_area()))`,
+  or pass that rectangle to `SceneScreens::draw`. A game drawn at a fixed
+  logical size letterboxed to a wider phone usually has the cutout in its bars
+  already.
+- **The on-screen keyboard** opens while a ui2 text field is being edited, as
+  text input starts on a desktop. Putting it away (Back) leaves the field
+  (`ui2::Context::text_input_dismissed()`); touching the field opens it again.
 
 ## For editors
 

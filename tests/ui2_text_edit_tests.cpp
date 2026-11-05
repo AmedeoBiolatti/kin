@@ -1,4 +1,6 @@
 #include <kin/core/utf8.hpp>
+#include <kin/platform/app.hpp>
+#include <kin/platform/window.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/context.hpp>
@@ -660,6 +662,38 @@ void test_text_edit_right_to_left() {
     assert(h.edit.state.caret == 0);
 }
 
+// A phone's keyboard put away (Back) ends the window's text input: the field
+// is left, and the keyboard comes back only when a field is chosen again.
+void test_system_ends_text_input() {
+    kin::App app{{.mode = kin::AppMode::Headless}};
+    kin::Window& window = app.create_window({.title = "text", .width = 320, .height = 180, .hidden = true});
+    Harness h{editor("hello")};
+    h.click(h.at(1));
+    h.ui.apply_text_input(window);
+    assert(h.edit.state.active && window.text_input_enabled());
+    window.set_text_input_enabled(false); // as Android does
+    h.frame();
+    h.ui.apply_text_input(window);
+    assert(!window.text_input_enabled());
+    h.frame();
+    h.ui.apply_text_input(window);
+    assert(!h.edit.state.active && !window.text_input_enabled());
+    h.frame();
+    h.ui.apply_text_input(window);
+    assert(!h.edit.state.active && !window.text_input_enabled());
+    h.click(h.at(2));
+    h.ui.apply_text_input(window);
+    assert(h.edit.state.active && window.text_input_enabled());
+    // Ended by the game: no dismissal.
+    h.edit.state.active = false;
+    h.ui.state().clear_focused();
+    h.frame();
+    h.ui.apply_text_input(window);
+    assert(!window.text_input_enabled());
+    h.frame();
+    assert(!h.ui.text_input_dismissed());
+}
+
 int main() {
     test_carets_in_both_directions();
     test_text_input_right_to_left();
@@ -680,5 +714,6 @@ int main() {
     test_auto_grow_then_scroll();
     test_wrapped_lines_map_the_caret();
     test_context_keeps_state();
+    test_system_ends_text_input();
     return 0;
 }

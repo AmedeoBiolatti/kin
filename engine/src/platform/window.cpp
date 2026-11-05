@@ -136,6 +136,19 @@ Window::Window(const WindowConfig& config) {
     if (config.high_pixel_density) {
         flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
     }
+#if defined(SDL_PLATFORM_ANDROID)
+    // A phone's window is the whole screen, at its own pixels, with the system
+    // bars hidden. The game's shape picks the orientation (a wider window turns
+    // the phone to landscape) unless the game set SDL_HINT_ORIENTATIONS.
+    flags |= SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+    if (const char* orientations = SDL_GetHint(SDL_HINT_ORIENTATIONS); !orientations || !*orientations) {
+        if (config.width > config.height) {
+            SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+        } else if (config.height > config.width) {
+            SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
+        }
+    }
+#endif
 
     const std::string title{config.title};
     _handle = SDL_CreateWindow(title.c_str(), config.width, config.height, flags);
@@ -185,6 +198,15 @@ Vec2i Window::pixel_size() const {
     if (!_handle || !SDL_GetWindowSizeInPixels(to_sdl_window(_handle), &result.x, &result.y))
         return size();
     return result;
+}
+
+Rectf Window::safe_area() const {
+    const Vec2i whole = size();
+    SDL_Rect rect{};
+    if (!_handle || !SDL_GetWindowSafeArea(to_sdl_window(_handle), &rect) || rect.w <= 0 || rect.h <= 0) {
+        return {0.0f, 0.0f, static_cast<f32>(whole.x), static_cast<f32>(whole.y)};
+    }
+    return {static_cast<f32>(rect.x), static_cast<f32>(rect.y), static_cast<f32>(rect.w), static_cast<f32>(rect.h)};
 }
 
 f32 Window::display_scale() const {

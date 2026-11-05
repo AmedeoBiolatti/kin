@@ -390,6 +390,36 @@ on a slider drags it. Nothing is hovered and no tooltip shows while no finger is
 down. `prompt_for_action` names touch bindings ("Tap", "Swipe Right"), and
 `PromptBindingMode::Device` names them while the pointer is a finger.
 
+On-screen controls (`kin/ui2/touch_controls.hpp`) are a stick and buttons drawn
+over the game for a phone. Each follows a finger of its own, so a player can move
+and press at the same time. A finger that lands on one is taken from the pointer
+(`Input::claim_touch`), so it clicks nothing underneath. They hold the game's
+actions and axes by name, whatever the input map binds
+(`Input::set_screen_action`, `set_screen_axis`), so `pressed("jump")` and
+`axis("move_x")` read them in the next `update()`:
+
+```cpp
+ui2::TouchStick stick{.id = ui2::make_id("move"), .bounds = {0, 0, 640, 720}};   // move_x, move_y
+ui2::TouchButton jump{.id = ui2::make_id("jump"), .bounds = {1120, 560, 110, 110}, .action = "jump", .label = "Jump"};
+// each frame, between ui.begin() and ui.end(); keep the structs from frame to frame
+ui2::run(ui, stick);
+ui2::run(ui, jump);
+```
+
+- **The stick** gives -1 to 1 each way, x to the right and y downward, as
+  `axis move_y stick -left_y` reads a controller. `floating` (the default)
+  centres it where the finger lands anywhere in `bounds`, which may be half the
+  screen. Otherwise its middle is the middle of `bounds`. `radius` is how far
+  its knob travels, and `dead_zone` is a fraction of the radius.
+- **A button** holds its action while its finger stays on it (a little past its
+  edge still counts). `held` and `pressed` say so for the frame.
+- **When they show:** `TouchControlsShown::Touch` (the default) shows them while a
+  finger is the pointer, and always on a phone. `Always` shows them on a desktop
+  as well, where the mouse works them. A control that is not run for a frame lets
+  go of what it held.
+- **In a screen file:** the `touch_stick` and `touch_button` elements
+  ([below](#screens-from-data)).
+
 ### Controllers
 
 Call `app.open_gamepads()` to poll a controller. ui2 navigation is enabled by
@@ -681,6 +711,18 @@ A UI screen (a HUD, a menu, a title screen) can be a `.kinui` file
   `text_input` (with a `hint`) and `spacer`.
 - **Dialogue:** a `dialogue` element shows the dialogue the game runs, while
   one runs. See [dialogue](dialogue.md).
+- **On-screen controls** ([touch](#touch)): a `touch_stick` pushes `axis_x` and
+  `axis_y` (`move_x` and `move_y` unless named). `radius` is how far its knob
+  goes (64 points unless given), and with `fixed` its middle is the element's
+  middle rather than where the finger lands. A `touch_button` holds `action`
+  while a finger is on it, and `text` is its label. `clicked(id)` sees a press.
+  They show while touch is in use. Give them anchors so they sit over the game:
+
+  ```json
+  {"id": "move", "kind": "touch_stick", "width": "45%", "height": "grow", "anchor": "bottom_left"},
+  {"id": "talk", "kind": "touch_button", "action": "talk", "text": "Talk", "width": 120, "height": 120,
+   "anchor": "bottom_right", "offset": {"x": -36, "y": -36}}
+  ```
 - **Sizes:** `width` and `height` are `"fit"`, `"grow"` (or `"grow 2"`),
   points, or `"50%"`.
 - **Anchors:** an element with an `anchor` (`top_left` ... `bottom_right`, or

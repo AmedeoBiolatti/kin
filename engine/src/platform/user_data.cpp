@@ -17,6 +17,9 @@
 #endif
 #include <windows.h>
 #endif
+#ifdef __ANDROID__
+#include <SDL3/SDL_system.h>
+#endif
 
 namespace kin {
 namespace {
@@ -55,6 +58,13 @@ std::filesystem::path platform_user_data_root() {
 #if defined(__EMSCRIPTEN__)
     // web/persistent.js mounts the browser's storage there (KIN_WEB_PERSISTENCE).
     return std::filesystem::path{"/persistent"};
+#elif defined(__ANDROID__)
+    // The app's private files folder (/data/user/0/<package>/files): no
+    // permission needed, removed with the app. Android has no HOME.
+    if (const char* internal = SDL_GetAndroidInternalStoragePath()) {
+        return std::filesystem::path{internal};
+    }
+    return std::filesystem::current_path();
 #elif defined(_WIN32)
     if (const char* app_data = std::getenv("APPDATA")) {
         return std::filesystem::path{app_data};

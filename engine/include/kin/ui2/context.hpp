@@ -607,6 +607,11 @@ public:
     // after the first and in the same place. Boxes have BoxResult::double_clicked.
     bool double_click(Id id);
 
+    // What begin() was given (null outside a frame): for widgets that read
+    // more than the pointer (the fingers: kin/ui2/touch_controls.hpp).
+    Input* input() const { return _input; }
+    Renderer2D* renderer() const { return _renderer; }
+
     // Pointer / input access in logical space.
     Vec2f pointer() const;
     bool pointer_pressed(MouseButton button = MouseButton::Left) const;
@@ -628,6 +633,10 @@ public:
     i32 text_composition_cursor() const;
     bool wants_text_input() const { return _wants_text_input; }
     void request_text_input() { _wants_text_input = true; }
+    // The system ended the text input apply_text_input started (a phone's
+    // keyboard put away with Back) since the last frame: text fields leave
+    // editing, and it is not started again until one is chosen again.
+    bool text_input_dismissed() const { return _text_input_dismissed_now; }
     // Where the focused editor's text is (drawing coordinates) and its caret's
     // x there, for the input method's candidate list. Text inputs set it.
     void set_text_input_area(Rectf area, f32 caret_x);
@@ -1099,6 +1108,9 @@ private:
     f32 _debug_last_hue = 0.0f;               // hue of the last debug-tinted fill (font uses its complement)
     Color _surface_fill_under{};              // last opaque fill, used as text background for contrast
     bool _wants_text_input = false;
+    mutable bool _text_input_on = false;        // apply_text_input started it
+    mutable bool _text_input_dismissed = false; // and the system ended it
+    bool _text_input_dismissed_now = false;     // ...since the last frame
     std::optional<Rectf> _text_input_area; // window coordinates
     std::vector<f32> _mirror_axes;          // 2x + w of each mirror scope's bounds, innermost last
     i32 _text_input_cursor = 0;

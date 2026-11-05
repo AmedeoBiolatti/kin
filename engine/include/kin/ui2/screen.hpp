@@ -25,6 +25,17 @@
 // `offset` from it, out of the flow of its siblings. Text may be a
 // translation key (`key`: kin::tr(key), the language's text).
 //
+// On-screen controls for touch screens (kin/ui2/touch_controls.hpp), shown
+// while a finger is the pointer and always on a phone: touch_stick (a finger
+// that lands in it pushes `axis_x` and `axis_y`, move_x and move_y unless
+// named; `radius` how far its knob goes, 64 unless given; `fixed`: its middle
+// is the element's, else where the finger lands) and touch_button (holds
+// `action` while a finger is on it; `text` its label):
+//
+//     {"id": "move", "kind": "touch_stick", "width": "50%", "height": "grow", "anchor": "bottom_left"},
+//     {"id": "jump", "kind": "touch_button", "action": "jump", "text": "Jump", "width": 110, "height": 110,
+//      "anchor": "bottom_right", "offset": {"x": -40, "y": -40}}
+//
 // Draw one with UiScreen between Context::begin() and end():
 //
 //     kin::ui2::UiScreen hud{document};
@@ -38,6 +49,7 @@
 #include <kin/renderer/texture.hpp>
 #include <kin/ui2/context.hpp>
 #include <kin/ui2/layout.hpp>
+#include <kin/ui2/touch_controls.hpp>
 
 #include <deque>
 #include <functional>
@@ -50,9 +62,10 @@
 
 namespace kin::ui2 {
 
-enum class ScreenKind : u8 { Box, Panel, Label, Button, Image, Progress, Toggle, Slider, TextInput, Spacer, Dialogue };
+enum class ScreenKind : u8 { Box, Panel, Label, Button, Image, Progress, Toggle, Slider, TextInput, Spacer, Dialogue, TouchStick, TouchButton };
 
-// "box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer", "dialogue".
+// "box", "panel", "label", "button", "image", "progress", "toggle", "slider", "text_input", "spacer", "dialogue",
+// "touch_stick", "touch_button".
 std::string_view screen_kind_name(ScreenKind kind);
 std::optional<ScreenKind> screen_kind_named(std::string_view name);
 // Whether elements of `kind` hold others (box, panel).
@@ -99,6 +112,11 @@ struct ScreenElement {
     f32 step = 0.0f;
     bool checked = false; // toggle
     std::string hint;     // text_input: shown while it is empty
+    std::string action;   // touch_button: the action it holds
+    std::string axis_x;   // touch_stick: the axes it pushes (empty: move_x, move_y)
+    std::string axis_y;
+    f32 radius = 0.0f;    // touch_stick: how far its knob goes (0: 64)
+    bool fixed = false;   // touch_stick: its middle the element's, not where the finger lands
     std::vector<ScreenElement> children;
 
     friend bool operator==(const ScreenElement&, const ScreenElement&) = default;
@@ -211,6 +229,8 @@ private:
         bool changed = false;
         UiTextInputState input{};
         bool input_made = false;
+        TouchStick stick{};  // a touch_stick's finger, from frame to frame
+        TouchButton touch{}; // a touch_button's
     };
     // Widgets kept until end_layout() writes their results back.
     struct Live {
@@ -220,6 +240,8 @@ private:
         std::unique_ptr<Toggle> toggle;
         std::unique_ptr<Slider> slider;
         std::unique_ptr<TextInput> input;
+        std::unique_ptr<TouchStick> stick;
+        std::unique_ptr<TouchButton> touch;
     };
 
     void element(Context& ctx, const ScreenElement& element, const std::string& path, const ScreenAssets& assets);

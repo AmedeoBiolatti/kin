@@ -1,0 +1,63 @@
+name: Experimental Android
+
+# Builds a game's APK for arm64 phones (docs/android.md), so a change that
+# breaks the NDK build is seen. Nothing runs on a phone here.
+on:
+  push:
+    branches: ['main']
+  pull_request:
+    paths:
+      - 'engine/**'
+      - 'cmake/**'
+      - 'games/hex_demo/**'
+      - 'tools/android/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Android arm64 APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: glslc
+      - uses: ./.github/actions/ccache
+        with:
+          key: Android arm64 APK
+      # The runner's SDK has the platform and build tools; kin needs NDK r29
+      # or newer, which it may not have yet.
+      - name: Install the Android SDK packages
+        shell: bash
+        run: |
+          set +o pipefail # `yes` ends with SIGPIPE
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+              "ndk;29.0.14206865" "platforms;android-35" "build-tools;35.0.0" > /dev/null
+      - name: Configure
+        shell: bash
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865" tools/android/configure.sh
+      - name: Build hex_demo's APK
+        run: cmake --build out/build-android --target hex_demo_apk --parallel 4
+      - name: Check the APK
+        shell: bash
+        run: |
+          apk=out/build-android/android/hex_demo/hex_demo.apk
+          listing=$(unzip -l "$apk")
+          grep -q 'lib/arm64-v8a/libmain.so' <<<"$listing"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify "$apk"
+          ls -l "$apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hex_demo-android-arm64
+          path: out/build-android/android/hex_demo/hex_demo.apk
+          retention-days: 7

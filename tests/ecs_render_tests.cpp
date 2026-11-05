@@ -1,3 +1,4 @@
+#include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/anim/anim_format.hpp>
@@ -29,6 +30,7 @@
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #ifdef _MSC_VER
@@ -1805,6 +1807,58 @@ void test_lights_blends_and_shader_effects() {
     fs::remove_all(dir);
 }
 
+// A shader's .spv is read from a content pack, whose files have no time: a
+// shipped game (and every Android app) has no glslc to compile the .glsl.
+void test_shader_spv_from_pack() {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::temp_directory_path() / "kin_shader_pack_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "content" / "shaders");
+    {
+        std::ofstream glsl(dir / "content" / "shaders" / "fx.frag.glsl");
+        glsl << "#version 450\nvoid main() {}\n";
+    }
+    {
+        // A SPIR-V header: the fake renderer makes no shaders, so only reading it counts.
+        const unsigned char header[] = {0x03, 0x02, 0x23, 0x07, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0};
+        std::ofstream spv(dir / "content" / "shaders" / "fx.frag.spv", std::ios::binary);
+        spv.write(reinterpret_cast<const char*>(header), sizeof header);
+    }
+    assert(kin::write_content_pack(dir / "content", dir / "game.kinpak").ok);
+    std::string why;
+    std::shared_ptr<const kin::ContentPack> pack = kin::ContentPack::open(dir / "game.kinpak", &why);
+    assert(pack);
+    const fs::path root = dir / "game"; // only in the pack
+    kin::mount_content_pack(root, std::move(pack));
+
+    // Read from the pack (only the fake renderer could not make it): with the
+    // build's glslc, if it has one (which cannot read a file in a pack), and
+    // with none, as on a player's machine.
+    const auto read_from_pack = [&] {
+        kin::Renderer2D renderer{std::make_unique<FakeBackend>()};
+        kin::Assets2D assets{renderer, root};
+        (void)assets.shader("shaders/fx.frag.glsl");
+        const auto found = assets.problems().find("shaders/fx.frag.glsl");
+        assert(found != assets.problems().end());
+        assert(found->second.find("renderer could not make it") != std::string::npos);
+    };
+    read_from_pack();
+    const std::string no_glslc = (dir / "no-glslc").string();
+#ifdef _WIN32
+    _putenv_s("KIN_GLSLC", no_glslc.c_str());
+#else
+    setenv("KIN_GLSLC", no_glslc.c_str(), 1);
+#endif
+    read_from_pack();
+#ifdef _WIN32
+    _putenv_s("KIN_GLSLC", "");
+#else
+    unsetenv("KIN_GLSLC");
+#endif
+    kin::unmount_content_pack(root);
+    fs::remove_all(dir);
+}
+
 // A scene's text translated under its own key, or an explicit one, while a
 // language has it.
 void test_scene_text_translated() {
@@ -1982,6 +2036,7 @@ int main() {
     test_assets2d_binds_tilemaps();
     test_scene_shapes_clips_and_text();
     test_lights_blends_and_shader_effects();
+    test_shader_spv_from_pack();
     test_scene_text_translated();
     test_animators();
     test_animators_started_together();

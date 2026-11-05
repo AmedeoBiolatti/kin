@@ -22,6 +22,16 @@ std::string_view app_mode_name(AppMode mode) {
 
 } // namespace
 
+std::string_view app_event_name(AppEvent event) {
+    switch (event) {
+    case AppEvent::Background: return "background";
+    case AppEvent::Foreground: return "foreground";
+    case AppEvent::LowMemory: return "low_memory";
+    case AppEvent::Terminating: return "terminating";
+    }
+    return "unknown";
+}
+
 App::App(AppConfig config)
     : _config(config), _wait_for_events(config.wait_for_events) {
     set_max_fps(config.max_fps);
@@ -31,6 +41,13 @@ App::App(AppConfig config)
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     }
 
+#if defined(SDL_PLATFORM_ANDROID)
+    // Back reaches the game (as Escape, kin/platform/input.hpp) instead of
+    // sending the app away; a game that wants Android's own sets it to "0".
+    if (!SDL_GetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON)) {
+        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+    }
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         const std::string error = std::string("SDL_Init failed: ") + SDL_GetError();
         KIN_LOG_ERROR_F("runtime",
@@ -41,6 +58,7 @@ App::App(AppConfig config)
                         }));
         throw std::runtime_error(error);
     }
+    SDL_AddEventWatch(&App::watch_app_events, this);
     KIN_LOG_INFO_F("runtime",
                    "app initialized",
                    (LogFields{
@@ -61,6 +79,7 @@ App::~App() {
     _update = {};
     _render = {};
     _windows.clear();
+    SDL_RemoveEventWatch(&App::watch_app_events, this);
     SDL_Quit();
 }
 
@@ -152,7 +171,59 @@ void App::pump_events() {
             } else {
                 handle_window_close(static_cast<WindowId>(event.window.windowID));
             }
+        } else if (event.type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED) {
+            if (const Window* window = find_window(static_cast<WindowId>(event.window.windowID))) {
+                const Rectf safe = window->safe_area();
+                const Vec2i size = window->size();
+                KIN_LOG_INFO_F("runtime",
+                               "window safe area",
+                               (LogFields{
+                                   {.name = "size", .value = std::to_string(size.x) + "x" + std::to_string(size.y)},
+                                   {.name = "safe",
+                                    .value = std::to_string(static_cast<int>(safe.x)) + "," + std::to_string(static_cast<int>(safe.y)) +
+                                             " " + std::to_string(static_cast<int>(safe.w)) + "x" +
+                                             std::to_string(static_cast<int>(safe.h))},
+                                   {.name = "scale", .value = std::to_string(window->display_scale())},
+                               }));
+            }
         }
+    }
+}
+
+// SDL does not queue the system's app events: it gives them to event watchers
+// as they happen, inside SDL_PumpEvents on the app's thread, and on Android
+// stops the thread right after Background. So they are handled here, at once.
+bool App::watch_app_events(void* userdata, SDL_Event* event) {
+    App& app = *static_cast<App*>(userdata);
+    switch (event->type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+        // (SDL then sends DID_ENTER_BACKGROUND; one Background is enough.)
+        if (!app._in_background) {
+            app._in_background = true;
+            app.app_event(AppEvent::Background);
+        }
+        break;
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+        if (app._in_background) {
+            app._in_background = false;
+            app._forget_elapsed = true;
+            app.app_event(AppEvent::Foreground);
+        }
+        break;
+    case SDL_EVENT_LOW_MEMORY: app.app_event(AppEvent::LowMemory); break;
+    case SDL_EVENT_TERMINATING:
+        app.app_event(AppEvent::Terminating);
+        app._running = false; // the system is ending the app: no asking
+        break;
+    default: break;
+    }
+    return true;
+}
+
+void App::app_event(AppEvent event) {
+    KIN_LOG_INFO_F("runtime", "app event", (LogFields{{.name = "event", .value = std::string{app_event_name(event)}}}));
+    if (_app_event) {
+        _app_event(event);
     }
 }
 
@@ -203,7 +274,10 @@ bool App::step_loop(f32 elapsed_seconds) {
     const f32 fixed_dt = _config.fixed_dt > 0.0f ? _config.fixed_dt : default_fixed_dt;
     const f32 max_frame_time = std::max(0.0f, _config.max_frame_time);
     const i32 max_steps = std::max(1, _config.max_steps);
-    const f32 raw_frame_time = std::isfinite(elapsed_seconds) ? std::max(0.0f, elapsed_seconds) : 0.0f;
+    f32 raw_frame_time = std::isfinite(elapsed_seconds) ? std::max(0.0f, elapsed_seconds) : 0.0f;
+    if (std::exchange(_forget_elapsed, false)) {
+        raw_frame_time = 0.0f; // the time spent in the background (AppEvent::Foreground)
+    }
     const f32 frame_time = std::min(raw_frame_time, max_frame_time);
     const f32 pacing_wait = _frame_stats.pacing_wait;
     // time_scale paces real time into the accumulator (game-speed control);
@@ -225,6 +299,15 @@ bool App::step_loop(f32 elapsed_seconds) {
 
     _input.begin_frame(_advance_input);
     pump_events();
+    if (_in_background) {
+        // Off the screen until Foreground (an Android app stops in the next
+        // pump_events): no steps, and nothing drawn to a surface that is gone.
+        _accumulator = 0.0f;
+        _snapper.reset();
+        _frame_stats.accumulator_after_update = 0.0f;
+        _advance_input = false;
+        return _running;
+    }
 
     i32 steps = 0;
     while (_running && _accumulator >= fixed_dt && steps < max_steps) {

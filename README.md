@@ -60,7 +60,8 @@ then <code>sim.tick</code> (4,800 frames) and <code>view.screenshot</code> reque
 ## Platforms
 
 Windows (MSVC 2022) and Linux (GCC 13+ or Clang 18+) are supported and built in
-CI. Other platforms SDL3 supports may work but are untested.
+CI. Android (arm64, 2D) is experimental: see [Android builds](docs/android.md).
+Other platforms SDL3 supports may work but are untested.
 
 ## Building
 

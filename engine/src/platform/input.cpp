@@ -690,6 +690,7 @@ void Input::advance_step_edges() {
     for (Buttons<pad_control_count>& pad : _pads) {
         pad.advance_step();
     }
+    _screen_actions.advance_step();
     advance_touch_step(false);
     _mouse_wheel_y = 0.0f;
     _mouse_wheel_x = 0.0f;
@@ -725,6 +726,7 @@ void Input::consume_frame_edges() {
     for (Buttons<pad_control_count>& pad : _pads) {
         pad.clear_frame();
     }
+    _screen_actions.clear_frame();
     _mouse.clear_frame();
     clear_touch_frame();
     _frame_mouse_wheel_y = 0.0f;
@@ -743,6 +745,8 @@ void Input::begin_frame(bool advance_transients) {
         for (Buttons<pad_control_count>& pad : _pads) {
             pad.advance_step();
         }
+        // Not the on-screen controls': they were set after that step, as the
+        // last frame drew, for this frame's steps (advance_step_edges uses them).
         _mouse.advance_step();
         _mouse.clear_frame();
         advance_touch_step(true);
@@ -781,6 +785,8 @@ void Input::begin_frame(bool advance_transients) {
     for (Buttons<pad_control_count>& pad : _pads) {
         pad.clear_frame();
     }
+    _screen_actions.clear_frame();
+    release_unset_screen_controls();
     clear_touch_frame();
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
@@ -792,18 +798,24 @@ void Input::begin_frame(bool advance_transients) {
 
 void Input::process_native_event(const void* native_event) {
     const auto& event = *static_cast<const SDL_Event*>(native_event);
+    // The system's Back key (a phone's Back button or gesture, a keyboard's
+    // Back) is Escape: what leaves a menu or pauses a game on a desktop.
+    const auto scancode = [&]() -> i32 {
+        return event.key.scancode == SDL_SCANCODE_AC_BACK ? SDL_SCANCODE_ESCAPE : event.key.scancode;
+    };
 
-    if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(event.key.scancode)) {
-        if (!_keys.cur[event.key.scancode]) {
+    if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(scancode())) {
+        const i32 key = scancode();
+        if (!_keys.cur[key]) {
             _last_key_press_event_time_ns = event.key.timestamp;
             _last_key_press_detected_time_ns = SDL_GetTicksNS();
         } else if (event.key.repeat) {
-            _key_frame_repeated[event.key.scancode] = true;
+            _key_frame_repeated[key] = true;
         }
-        _keys.set(event.key.scancode, true);
+        _keys.set(key, true);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
-    } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(event.key.scancode)) {
-        _keys.set(event.key.scancode, false);
+    } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(scancode())) {
+        _keys.set(scancode(), false);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
     } else if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
                event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {
@@ -1442,8 +1454,79 @@ bool Input::binding_edge(const Reach& reach, InputBinding binding, Edge edge) co
 }
 
 bool Input::map_edge(const Reach& reach, std::string_view action, Edge edge) const {
+    if (reach.keyboard && screen_edge(action, edge)) {
+        return true; // an on-screen control holds it, bound or not
+    }
     const std::vector<InputBinding>* bindings = reach.map->bindings(action);
     return bindings && std::ranges::any_of(*bindings, [&](InputBinding binding) { return binding_edge(reach, binding, edge); });
+}
+
+bool Input::screen_edge(std::string_view action, Edge edge) const {
+    const auto found = std::ranges::find(_screen_action_names, action);
+    return found != _screen_action_names.end() &&
+           _screen_actions.test(static_cast<std::size_t>(found - _screen_action_names.begin()), edge);
+}
+
+void Input::set_screen_action(std::string_view action, bool is_held) {
+    if (action.empty()) {
+        return;
+    }
+    auto found = std::ranges::find(_screen_action_names, action);
+    if (found == _screen_action_names.end()) {
+        // A slot no control holds any more is taken again.
+        found = std::ranges::find_if(_screen_action_names, [&](const std::string& name) {
+            const auto at = static_cast<std::size_t>(&name - _screen_action_names.data());
+            return !_screen_action_set[at] && !_screen_actions.cur[at] && !_screen_actions.pressed[at] && !_screen_actions.released[at];
+        });
+        if (found == _screen_action_names.end()) {
+            if (_screen_action_names.size() >= max_screen_actions) {
+                return;
+            }
+            _screen_action_names.emplace_back();
+            found = _screen_action_names.end() - 1;
+        }
+        *found = std::string(action);
+    }
+    const auto at = static_cast<std::size_t>(found - _screen_action_names.begin());
+    _screen_actions.set(at, is_held);
+    _screen_action_set[at] = true;
+}
+
+void Input::set_screen_axis(std::string_view name, f32 value) {
+    if (name.empty()) {
+        return;
+    }
+    value = std::isfinite(value) ? std::clamp(value, -1.0f, 1.0f) : 0.0f;
+    const auto found = std::ranges::find(_screen_axes, name, &ScreenAxis::name);
+    if (found != _screen_axes.end()) {
+        found->value = value;
+        found->set = true;
+    } else {
+        _screen_axes.push_back({.name = std::string(name), .value = value, .set = true});
+    }
+}
+
+bool Input::screen_action_held(std::string_view action) const {
+    return screen_edge(action, Edge::Held);
+}
+
+f32 Input::screen_axis(std::string_view name) const {
+    const auto found = std::ranges::find(_screen_axes, name, &ScreenAxis::name);
+    return found != _screen_axes.end() ? found->value : 0.0f;
+}
+
+// At a frame's start: what no control set through the last frame is let go.
+void Input::release_unset_screen_controls() {
+    for (std::size_t at = 0; at < _screen_action_names.size(); ++at) {
+        if (!_screen_action_set[at]) {
+            _screen_actions.set(at, false);
+        }
+    }
+    _screen_action_set.fill(false);
+    std::erase_if(_screen_axes, [](const ScreenAxis& axis) { return !axis.set; });
+    for (ScreenAxis& axis : _screen_axes) {
+        axis.set = false;
+    }
 }
 
 bool Input::action_edge(i32 player, std::string_view action, Edge edge) const {
@@ -1578,15 +1661,16 @@ f32 axis_value(const Input& input, const InputAxis& axis, i32 player) {
 }
 
 f32 Input::player_axis(i32 player, std::string_view name) const {
+    const auto furthest = [](f32 a, f32 b) { return std::abs(b) > std::abs(a) ? b : a; };
     if (player >= 0) {
         const Reach reach = reach_of_player(player);
         const InputAxis* axis = reach.map->axis(name);
-        return axis ? reach_axis(reach, *axis) : 0.0f;
+        const f32 value = axis ? reach_axis(reach, *axis) : 0.0f;
+        return reach.keyboard ? furthest(value, screen_axis(name)) : value; // an on-screen stick
     }
-    const auto furthest = [](f32 a, f32 b) { return std::abs(b) > std::abs(a) ? b : a; };
-    f32 value = 0.0f;
+    f32 value = screen_axis(name);
     if (const InputAxis* axis = _map.axis(name)) {
-        value = reach_axis(everything(), *axis);
+        value = furthest(value, reach_axis(everything(), *axis));
     }
     for (std::size_t p = 0; p < _players.size(); ++p) {
         if (_players[p].map) {
