@@ -16,6 +16,7 @@
 #include <kin/platform/services.hpp>
 #include <kin/platform/user_data.hpp>
 #include <kin/runtime/game_info.hpp>
+#include <kin/runtime/scene_app.hpp>
 #include <kin/scripting/lua_script.hpp>
 #include <limits>
 #include <sol/sol.hpp>
@@ -467,6 +468,45 @@ void test_real_steam_library() {
 }
 #endif
 
+// What run_scene_app starts: the game info's Steam app id; offline (in memory)
+// for headless runs; offline as --services asks, kept beside the saves or not.
+void test_scene_app_services() {
+    const kin::GameInfo game{.id = "vale", .steam_app_id = 480};
+    kin::SceneAppConfig config{.game = &game};
+    kin::ServicesConfig wanted = kin::scene_app_services_config(config);
+    assert(wanted.game_id == "vale" && wanted.steam_app_id == 480 && !wanted.offline_only && !wanted.offline_in_memory);
+
+    char arg0[] = "vale";
+    char offline[] = "--services=offline";
+    char* offline_argv[] = {arg0, offline};
+    config.headless = kin::parse_headless_options(2, offline_argv);
+    assert(config.headless.services == "offline" && !config.headless.enabled);
+    wanted = kin::scene_app_services_config(config);
+    assert(wanted.offline_only && !wanted.offline_in_memory && wanted.game_id == "vale");
+
+    config.headless.services = "memory";
+    wanted = kin::scene_app_services_config(config);
+    assert(wanted.offline_only && wanted.offline_in_memory);
+    kin::ServicesStart start = kin::ServicesStart::Ready;
+    auto services = kin::start_platform_services(wanted, &start);
+    assert(start == kin::ServicesStart::Offline && services->backend() == "offline");
+
+    config.headless.services = "galaxy"; // not one: the game's, and a warning
+    wanted = kin::scene_app_services_config(config);
+    assert(!wanted.offline_only && wanted.steam_app_id == 480);
+
+    config.headless = {};
+    config.headless.enabled = true; // headless: never the machine's Steam
+    wanted = kin::scene_app_services_config(config);
+    assert(wanted.offline_only && wanted.offline_in_memory);
+
+    // A config of the game's own is taken as it is (its Steam app id with it).
+    config.headless = {};
+    config.services_config = kin::ServicesConfig{.game_id = "other", .steam_app_id = 0};
+    wanted = kin::scene_app_services_config(config);
+    assert(wanted.game_id == "other" && wanted.steam_app_id == 0 && !wanted.offline_only);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -483,6 +523,7 @@ int main(int argc, char** argv) {
     test_fake_services_record_calls();
     test_lua_services_table();
     test_game_info_steam_app_id();
+    test_scene_app_services();
     test_steam_backend_through_the_library();
     return 0;
 }

@@ -50,6 +50,13 @@ struct HeadlessOptions {
     // --inspect: played in its window as usual, and answering server commands
     // on stdin/stdout between frames, for a tool watching it (LiveInspector).
     bool inspect = false;
+    // --services=offline: kin's offline platform services, whatever the game
+    // asks for (no Steam: a run from an editor that must not sign in as whoever
+    // runs it, or a build for no store tried as players get it), keeping what
+    // they keep beside the saves; --services=memory: the same, keeping nothing.
+    // Unset: the game's (Steam with a Steam app id). Services the game started
+    // itself (SceneAppConfig::services) are used as they are.
+    std::string services;
     std::string log_path;
     std::optional<LogLevel> log_level;
     std::optional<LogFormat> log_format;
@@ -154,6 +161,11 @@ struct SceneAppConfig {
 };
 
 HeadlessOptions parse_headless_options(int argc, char** argv);
+// The platform services run_scene_app starts for `config` (when it gives none
+// of its own): its services_config, else the game info's id and Steam app id;
+// offline and in memory for headless, server and determinism runs; offline as
+// --services asks.
+ServicesConfig scene_app_services_config(const SceneAppConfig& config);
 
 void write_available_actions(std::ostream& out, const std::vector<AvailableInputAction>& actions);
 

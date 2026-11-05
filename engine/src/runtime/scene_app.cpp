@@ -162,6 +162,47 @@ void configure_runtime_logging(const HeadlessOptions& options, const GameInfo* g
 
 } // namespace
 
+namespace {
+
+// Whether a run must not depend on the machine it runs on (headless, server and
+// determinism runs): offline services in memory, the base language.
+bool scene_app_machine_independent(const HeadlessOptions& headless) {
+    return headless.enabled || headless.list_actions || headless.profile_render || headless.server ||
+           headless.check_determinism || headless.state_lockstep || headless.print_game_info;
+}
+
+} // namespace
+
+ServicesConfig scene_app_services_config(const SceneAppConfig& config) {
+    // Without a config, the game info's: its id and Steam app id.
+    ServicesConfig wanted = config.services_config.value_or(ServicesConfig{});
+    if (config.game) {
+        if (wanted.game_id.empty()) {
+            wanted.game_id = config.game->id;
+        }
+        if (!config.services_config) {
+            wanted.steam_app_id = config.game->steam_app_id;
+        }
+    }
+    if (wanted.args.empty()) {
+        wanted.args = config.headless.args;
+    }
+    if (scene_app_machine_independent(config.headless)) {
+        wanted.offline_only = true;
+        wanted.offline_in_memory = true;
+    }
+    // Asked for on the command line: offline, kept or not.
+    if (config.headless.services == "offline" || config.headless.services == "memory") {
+        wanted.offline_only = true;
+        wanted.offline_in_memory = wanted.offline_in_memory || config.headless.services == "memory";
+    } else if (!config.headless.services.empty()) {
+        KIN_LOG_WARN_F("services", "unknown --services, the game's are used",
+                       (LogFields{{.name = "services", .value = config.headless.services},
+                                  {.name = "known", .value = "offline, memory"}}));
+    }
+    return wanted;
+}
+
 HeadlessOptions parse_headless_options(int argc, char** argv) {
     HeadlessOptions options;
     bool invalid_log_option = false;
@@ -280,6 +321,8 @@ HeadlessOptions parse_headless_options(int argc, char** argv) {
             options.server = true;
         } else if (arg == "--inspect") {
             options.inspect = true;
+        } else if (arg.starts_with("--services=")) {
+            options.services = arg.substr(11);
         } else if (arg.starts_with("--server-mode=")) {
             options.server = true;
             options.server_mode = arg.substr(14);
@@ -557,29 +600,10 @@ struct SceneAppSession::Impl {
     // that must not depend on the machine), or takes the game's services.
     // A value: the run is over (the platform starts the game again).
     std::optional<int> start_services() {
-        const bool machine_independent = config.headless.enabled || config.headless.list_actions ||
-                                         config.headless.profile_render || config.headless.server ||
-                                         config.headless.check_determinism || config.headless.state_lockstep ||
-                                         config.headless.print_game_info;
+        const bool machine_independent = scene_app_machine_independent(config.headless);
         services = config.services;
         if (!services) {
-            // Without a config, the game info's: its id and Steam app id.
-            ServicesConfig wanted = config.services_config.value_or(ServicesConfig{});
-            if (config.game) {
-                if (wanted.game_id.empty()) {
-                    wanted.game_id = config.game->id;
-                }
-                if (!config.services_config) {
-                    wanted.steam_app_id = config.game->steam_app_id;
-                }
-            }
-            if (wanted.args.empty()) {
-                wanted.args = config.headless.args;
-            }
-            if (machine_independent) {
-                wanted.offline_only = true;
-                wanted.offline_in_memory = true;
-            }
+            const ServicesConfig wanted = scene_app_services_config(config);
             ServicesStart started = ServicesStart::Offline;
             owned_services = start_platform_services(wanted, &started);
             if (started == ServicesStart::Restarting) {

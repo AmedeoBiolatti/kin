@@ -54,6 +54,12 @@ field takes text (`Window::set_text_input_enabled`, over
 Headless, server and determinism runs always get the offline backend, in memory,
 so they don't depend on the machine they run on.
 
+`--services=offline` gives a run the offline backend too, whatever the game info
+says: an editor's run that must not sign in to Steam as whoever runs it, or a
+build tried without its store. It keeps what it keeps beside the saves, as a
+player's copy without Steam does. `--services=memory` keeps nothing.
+`kin::scene_app_services_config(config)` says what `run_scene_app` starts.
+
 Without `run_scene_app`:
 
 ```cpp
@@ -154,6 +160,32 @@ quits. `ServicesConfig::steam_restart_through_client = false` turns that off.
 The package folder is then the Steam depot: the executable, its pack, the Steam
 library and `licenses/` ([shipping](shipping.md)). Build Linux depots in the Steam
 Runtime (sniper), as [shipping](shipping.md) says.
+
+**A store for each build.** A game sold on Steam and elsewhere (itch.io, its own
+site) is built once for each, in a build folder of its own, chosen with the
+cache variable `KIN_GAME_STORE`:
+
+| `KIN_GAME_STORE` | The build |
+|---|---|
+| `auto` (default) | For Steam when the game has a Steam app id |
+| `steam` | For Steam; configuring fails without an app id |
+| `none` | For no store: no app id in it, no `steam_appid.txt`, no Steam library |
+
+A build for no store never tries Steam, even on a machine where Steam's
+library can be found: one carrying the app id would ask Steam to start it, and
+quit. The game's code gets `KIN_GAME_STORE`, `"steam"` or `""`. Browser builds
+are for no store. `KIN_STEAM_REDIST` (a cache variable, the SDK's
+`redistributable_bin`) is `STEAM_REDIST` for each Steam build of the folder
+that doesn't give one, so a tool can ship the library without changing the
+game's `CMakeLists.txt`:
+
+```sh
+cmake -B build-steam -DKIN_SHIPPING=ON -DKIN_GAME_STORE=steam -DKIN_STEAM_REDIST=$STEAMWORKS_SDK/redistributable_bin
+cmake -B build-itch  -DKIN_SHIPPING=ON -DKIN_GAME_STORE=none
+```
+
+A build without an app id takes out a `steam_appid.txt` an earlier build left
+beside the executable, and shipping builds never have one.
 
 **Set up on the partner site:**
 

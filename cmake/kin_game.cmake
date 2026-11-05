@@ -84,9 +84,23 @@ endfunction()
 # With a Steam app id, KIN_GAME_STEAM_APP_ID (a number) and, outside shipping
 # builds, a steam_appid.txt beside the executable, so Steam lets the game start
 # from the build folder instead of starting it again through Steam.
+#
+# The store a build is for (KIN_GAME_STORE, a cache variable: one build folder
+# for each store the game is sold in, docs/platform_services.md):
+#   auto    Steam when the game has a Steam app id (the default);
+#   steam   Steam: configuring fails without an app id;
+#   none    no store (itch.io, the game's own download): no Steam app id in it,
+#           no steam_appid.txt and no Steam library, whatever its info says.
+# Its code gets KIN_GAME_STORE: "steam", or "" for none. KIN_STEAM_REDIST (a
+# cache variable) is STEAM_REDIST for every Steam build of the folder that
+# doesn't give one: the Steamworks SDK's redistributable_bin, say.
 # and install rules for the component <target>.
 
 set(_KIN_ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
+
+set(KIN_GAME_STORE "auto" CACHE STRING "The store kin_game builds games for: auto (Steam with a Steam app id), steam or none")
+set_property(CACHE KIN_GAME_STORE PROPERTY STRINGS auto steam none)
+set(KIN_STEAM_REDIST "" CACHE PATH "Steam's API library for Steam builds that give no STEAM_REDIST (the Steamworks SDK's redistributable_bin)")
 
 function(_kin_game_platform out_var)
     string(TOLOWER "${CMAKE_SYSTEM_NAME}" system)
@@ -248,16 +262,36 @@ function(kin_game target)
         string(REPLACE "\"" "\\\"" value "${value}")
         target_compile_definitions(${target} PRIVATE "KIN_GAME_${key}=\"${value}\"")
     endforeach()
+    # The store it is built for: none leaves Steam out, whatever the game info says.
+    if(NOT KIN_GAME_STORE MATCHES "^(auto|steam|none)$")
+        message(FATAL_ERROR "kin_game(${target}): KIN_GAME_STORE is auto, steam or none, not ${KIN_GAME_STORE}")
+    endif()
+    if(KIN_GAME_STORE STREQUAL "none" OR EMSCRIPTEN)
+        set(ARG_STEAM_APP_ID "")
+        set(ARG_STEAM_REDIST "")
+    elseif(KIN_GAME_STORE STREQUAL "steam" AND NOT ARG_STEAM_APP_ID)
+        message(FATAL_ERROR "kin_game(${target}): built for Steam (KIN_GAME_STORE), but the game has no Steam app id: "
+            "steam_app_id in its game info, or STEAM_APP_ID")
+    endif()
+    if(ARG_STEAM_APP_ID AND NOT ARG_STEAM_REDIST AND KIN_STEAM_REDIST)
+        set(ARG_STEAM_REDIST "${KIN_STEAM_REDIST}")
+    endif()
     if(ARG_STEAM_APP_ID)
         if(NOT ARG_STEAM_APP_ID MATCHES "^[0-9]+$")
             message(FATAL_ERROR "kin_game(${target}): STEAM_APP_ID must be a number: ${ARG_STEAM_APP_ID}")
         endif()
-        target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=${ARG_STEAM_APP_ID})
-        if(NOT KIN_SHIPPING AND NOT EMSCRIPTEN)
-            file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${target}>/steam_appid.txt" CONTENT "${ARG_STEAM_APP_ID}\n")
-        endif()
+        target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=${ARG_STEAM_APP_ID} KIN_GAME_STORE="steam")
     else()
-        target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=0)
+        target_compile_definitions(${target} PRIVATE KIN_GAME_STEAM_APP_ID=0 KIN_GAME_STORE="")
+    endif()
+    if(ARG_STEAM_APP_ID AND NOT KIN_SHIPPING)
+        file(GENERATE OUTPUT "$<TARGET_FILE_DIR:${target}>/steam_appid.txt" CONTENT "${ARG_STEAM_APP_ID}\n")
+    else()
+        # None from a build before (another store's, or a development one): with it, Steam
+        # would let a shipping build start outside Steam, and a build for no store try it.
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E rm -f "$<TARGET_FILE_DIR:${target}>/steam_appid.txt"
+            VERBATIM)
     endif()
     if(ARG_STEAM_REDIST AND NOT EMSCRIPTEN)
         _kin_game_steam_library(steam_library "${ARG_STEAM_REDIST}")
