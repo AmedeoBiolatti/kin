@@ -183,8 +183,15 @@ public:
     std::array<GpuShader, surface_variant_count3d> variants;
     SharedDevice device;
     bool valid() const override {
-        for (const auto& variant : variants)
-            if (!variant)
+        for (u32 i = 0; i < surface_required_variants3d; ++i)
+            if (!variants[i])
+                return false;
+        return true;
+    }
+    // Its merged draws' variants (mesh_material.frag's): optional; without them its draws are not merged.
+    bool merges() const {
+        for (u32 i = surface_required_variants3d; i < surface_variant_count3d; ++i)
+            if (!variants[i])
                 return false;
         return true;
     }
@@ -1218,6 +1225,8 @@ private:
         u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
         std::weak_ptr<const u64> lifetime;
         std::shared_ptr<GpuBuffer> buffer;
+        // Surface shaders' parameters, 16 floats a copy beside `buffer`'s records: only for a scene that has them.
+        std::shared_ptr<GpuBuffer> surface;
         bool valid = false;
     };
     std::array<DrawMaterials, 8> _draw_material_tables;

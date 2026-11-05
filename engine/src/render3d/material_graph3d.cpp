@@ -933,8 +933,9 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
     return g;
 }
 
-// KINGRAPH, the version (2), the payload's size and its FNV-1a hash, then the payload deflated (zlib): the layout's
-// bytes, then each variant's, each after its length (little-endian u32). Version 1 is the payload as it is.
+// KINGRAPH, the version (3), the payload's size and its FNV-1a hash, then the payload deflated (zlib): the number of
+// variants, the layout's bytes, then each variant's, each after its length (little-endian u32). Version 2 is the same
+// without the number (8 variants); version 1 that payload as it is.
 static u32 fnv1a(std::span<const u8> bytes) {
     u32 h = 2166136261u;
     for (const u8 b : bytes)
@@ -948,6 +949,7 @@ std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked
         for (int i = 0; i < 4; ++i)
             to.push_back(u8(v >> (8 * i)));
     };
+    u32le(payload, surface_variant_count3d);
     const std::string layout = write_material_graph_layout3d(cooked.graph);
     u32le(payload, u32(layout.size()));
     payload.insert(payload.end(), layout.begin(), layout.end());
@@ -958,12 +960,9 @@ std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked
     std::vector<u8> out{'K', 'I', 'N', 'G', 'R', 'A', 'P', 'H'};
     int size = 0;
     unsigned char* deflated = kin_zlib_deflate(payload.data(), int(payload.size()), &size);
-    if (!deflated) { // (only out of memory) the payload as it is: version 1
-        u32le(out, 1);
-        out.insert(out.end(), payload.begin(), payload.end());
-        return out;
-    }
-    u32le(out, 2);
+    if (!deflated) // (only out of memory)
+        return {};
+    u32le(out, 3);
     u32le(out, u32(payload.size()));
     u32le(out, fnv1a(payload));
     out.insert(out.end(), deflated, deflated + size);
@@ -987,7 +986,7 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
     std::span<const u8> payload;
     if (version == 1) {
         payload = bytes.subspan(12);
-    } else if (version == 2) {
+    } else if (version == 2 || version == 3) {
         if (bytes.size() < 20)
             return fail("a cooked material graph cut short");
         const u32 expected = u32_at(bytes, 12), hash = u32_at(bytes, 16);
@@ -1015,6 +1014,10 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
         at += 4;
         return v;
     };
+    // Versions 1 and 2 hold the 8 variants every surface needs; 3 says how many (the merged draws' too).
+    const auto count = version == 3 ? next() : std::optional<u32>{surface_required_variants3d};
+    if (!count || *count < surface_required_variants3d || *count > surface_variant_count3d)
+        return fail("a cooked material graph of an unknown number of variants");
     const auto layout_size = next();
     if (!layout_size || at + *layout_size > payload.size())
         return fail("a cooked material graph cut short");
@@ -1026,7 +1029,8 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
         return fail(layout_why);
     cooked.graph = std::move(*layout);
     at += *layout_size;
-    for (auto& v : cooked.spirv) {
+    for (u32 i = 0; i < *count; ++i) {
+        auto& v = cooked.spirv[i];
         const auto n = next();
         if (!n || *n < 20 || at + *n > payload.size() || payload[at] != 3 || payload[at + 1] != 2 ||
             payload[at + 2] != 35 || payload[at + 3] != 7)

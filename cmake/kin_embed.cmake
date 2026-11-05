@@ -95,7 +95,8 @@ function(kin_compile_glsl out_var)
 endfunction()
 
 # The variants (SurfaceVariant3D) and their defines, as surface_variant_defines (render3d/environment.cpp) gives them.
-set(_KIN_SURFACE_VARIANTS plain fog lights lights_fog velocity velocity_fog velocity_lights velocity_lights_fog)
+set(_KIN_SURFACE_VARIANTS plain fog lights lights_fog velocity velocity_fog velocity_lights velocity_lights_fog
+    material material_fog material_lights material_lights_fog)
 set(_KIN_SURFACE_DEFINES_plain "")
 set(_KIN_SURFACE_DEFINES_fog KIN_FOG)
 set(_KIN_SURFACE_DEFINES_lights KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
@@ -104,6 +105,10 @@ set(_KIN_SURFACE_DEFINES_velocity KIN_VELOCITY)
 set(_KIN_SURFACE_DEFINES_velocity_fog KIN_VELOCITY KIN_FOG)
 set(_KIN_SURFACE_DEFINES_velocity_lights KIN_VELOCITY KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
 set(_KIN_SURFACE_DEFINES_velocity_lights_fog KIN_VELOCITY KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG)
+set(_KIN_SURFACE_DEFINES_material KIN_DRAW_MATERIALS)
+set(_KIN_SURFACE_DEFINES_material_fog KIN_DRAW_MATERIALS KIN_FOG)
+set(_KIN_SURFACE_DEFINES_material_lights KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
+set(_KIN_SURFACE_DEFINES_material_lights_fog KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG)
 
 function(kin_compile_surface_shader out_var)
     cmake_parse_arguments(ARG "" "OUTPUT_DIR;SOURCE" "" ${ARGN})

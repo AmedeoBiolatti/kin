@@ -285,10 +285,15 @@ struct KinSurface {
     vec3 emission;   // linear light of its own, added after the lighting
 };
 
-#if defined(KIN_SURFACE) && !defined(KIN_DRAW_MATERIALS)
-// A surface shader's parameters (Material3D::shader_params, four at a time).
+#ifdef KIN_SURFACE
+// A surface shader's parameters (Material3D::shader_params, four at a time): the draw's material block's, or, for
+// merged draws (KIN_DRAW_MATERIALS), its copy's in the draws' table.
 vec4 kin_surface_param(int i) {
+#ifdef KIN_DRAW_MATERIALS
+    return kin_surface_params[vMaterial * 4u + uint(i)];
+#else
     return material.surface[i];
+#endif
 }
 #endif
 
