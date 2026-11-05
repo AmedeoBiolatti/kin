@@ -593,11 +593,11 @@ Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& 
                 if (!off)
                     note(key + ": not shown by kin");
             }
+        // Tiling: Godot's UV is the mesh's times uv1_scale plus uv1_offset (their x and y), as kin's.
         const auto scale = m.vector3("uv1_scale", {1, 1, 1});
         const auto offset = m.vector3("uv1_offset", {0, 0, 0});
-        if (scale[0] != 1 || scale[1] != 1 || offset[0] != 0 || offset[1] != 0)
-            note("uv1_scale / uv1_offset: kin's materials have no UV transform yet (the textures are placed as the "
-                 "mesh's UVs are)");
+        p.uv_scale = Vec2f{scale[0], scale[1]};
+        p.uv_offset = Vec2f{offset[0], offset[1]};
 
         imported.file = out / (stem + ".kinmaterials");
         // What is written is what kin reads: the file parsed back before it is written.

@@ -4658,6 +4658,74 @@ void test_gpu_material_shader() {
 #include "surface_test_shaders.hpp"
 #endif
 
+// A material's UV transform (Material3D::uv_scale, uv_offset) moves where every pass reads its maps: offset by half,
+// a texture of two texels draws what the swapped texture draws without it; scaled by two, what the texture repeated
+// twice does: the lit colour (lit and unlit), a cut-out's coverage in the main pass and in the sun's shadow it casts.
+// (Up to the pixels whose UV falls on a texel's edge.) Without one, nothing moves.
+void test_gpu_material_uv_transform() {
+    with_gpu("test_gpu_material_uv_transform", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
+        // Red and opaque | green and clear; and the same swapped, and repeated twice.
+        const kin::u8 halves[8] = {220, 40, 30, 255, 40, 200, 60, 0};
+        const kin::u8 swapped[8] = {40, 200, 60, 0, 220, 40, 30, 255};
+        const kin::u8 twice[16] = {220, 40, 30, 255, 40, 200, 60, 0, 220, 40, 30, 255, 40, 200, 60, 0};
+        const kin::Texture t_halves = renderer.create_texture_from_rgba(halves, {2, 1});
+        const kin::Texture t_swapped = renderer.create_texture_from_rgba(swapped, {2, 1});
+        const kin::Texture t_twice = renderer.create_texture_from_rgba(twice, {4, 1});
+        const kin::TextureSampler3D nearest{.wrap_u = kin::Wrap3D::Repeat,
+                                            .wrap_v = kin::Wrap3D::Repeat,
+                                            .min = kin::TextureFilter3D::Nearest,
+                                            .mag = kin::TextureFilter3D::Nearest,
+                                            .mip = kin::MipFilter3D::None};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](const kin::Texture& texture, kin::Vec2f scale, kin::Vec2f offset, bool unlit) {
+            kin::Material3D m{.unlit = unlit, .texture = texture};
+            m.texture_samplers[0] = nearest;
+            m.uv_scale = scale;
+            m.uv_offset = offset;
+            kin::Material3D cut = m;
+            cut.blend = kin::Blend3D::Mask;
+            cut.double_sided = true;
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, -4.0f}, {0.0f, 0.0f, -0.6f}, 50.0f);
+            scene.lights.sun = {.direction = {0.0f, 1.0f, 0.6f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.shadow_area = {{-4, -2, -4}, {4, 3, 4}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({6.0f, 1.0f, 6.0f}),
+                             {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(plane, Mat4f::translation({0.0f, 1.0f, 0.0f}) * Mat4f::scaling({1.6f, 1.0f, 1.6f}), cut);
+            (void)scene.draw(box, Mat4f::translation({-1.6f, 0.5f, -1.2f}) * Mat4f::scaling({0.8f, 0.8f, 0.8f}), m);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const auto differing = [](const Pixels& a, const Pixels& b) {
+            int n = 0;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x) {
+                    const Color p = a.at(x, y), q = b.at(x, y);
+                    n += std::abs(int(p.r) - q.r) + std::abs(int(p.g) - q.g) + std::abs(int(p.b) - q.b) > 6 ? 1 : 0;
+                }
+            return n;
+        };
+        for (const bool unlit : {false, true}) {
+            const Pixels moved = shoot(t_halves, {1, 1}, {0.5f, 0}, unlit),
+                         shifted = shoot(t_swapped, {1, 1}, {0, 0}, unlit);
+            const Pixels scaled = shoot(t_halves, {2, 1}, {0, 0}, unlit),
+                         repeated = shoot(t_twice, {1, 1}, {0, 0}, unlit);
+            const Pixels plain = shoot(t_halves, {1, 1}, {0, 0}, unlit);
+            const int offset_errors = differing(moved, shifted), scale_errors = differing(scaled, repeated),
+                      moved_from_plain = differing(moved, plain);
+            std::cerr << "uv transform (unlit " << unlit << "): offset " << offset_errors << ", scale " << scale_errors
+                      << " pixels differ; moving it changes " << moved_from_plain << '\n';
+            assert(moved_from_plain > 400 && "the offset moves the maps, the cut-out and its shadow");
+            assert(offset_errors < 40 && scale_errors < 40 && "only texel edges differ");
+        }
+    });
+}
+
 // A surface shader (Material3D::surface; tests/shaders/*.surface.glsl, compiled by glslc now into every variant of
 // kin's mesh shader): one that leaves the surface as it is draws exactly what the material draws without it, plain,
 // fogged, with the light shaders (a shadowed spot light) and with the velocity's (temporal anti-aliasing); one that
@@ -22927,6 +22995,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());
     RUN(test_gpu_surface_shader());
+    RUN(test_gpu_material_uv_transform());
     RUN(test_gpu_skinned_matches_cpu());
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());

@@ -11,7 +11,7 @@ layout(location = 0) out vec2 FragNormal;
 #include "kin_prepass.inc.glsl"
 
 void main() {
-    if (vAlpha * texture(uBase, vUV).a < material.cutoff.x) {
+    if (vAlpha * texture(uBase, vUV * material.uv.xy + material.uv.zw).a < material.cutoff.x) {
         discard;
     }
     FragNormal = octahedral(kin_prepass_normal());

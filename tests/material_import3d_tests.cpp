@@ -172,7 +172,8 @@ uv1_scale = Vector3(2, 2, 1)
     CHECK(p.metallic_roughness && p.occlusion && p.metallic_roughness->asset == p.occlusion->asset);
     CHECK(fs::exists(content / p.metallic_roughness->asset));
     CHECK(*p.emissive == 1.0f && p.emission_color->g > 0.0f && p.emissive_texture->asset.empty()); // no units: x1
-    CHECK(has_note(*orm, "detail_albedo") && has_note(*orm, "uv1_scale"));
+    CHECK(has_note(*orm, "detail_albedo") && !has_note(*orm, "uv1_scale"));
+    CHECK(p.uv_scale->x == 2.0f && p.uv_scale->y == 2.0f && p.uv_offset->x == 0.0f);
     // A dry run writes nothing.
     const auto dry = import_godot_material(
         project / "orm.tres", {.project = project, .content = content, .out = content / "dry", .write = false});
@@ -202,6 +203,8 @@ void writer_round_trip() {
     p.emission_color = LinearRgb{0.5f, 0.25f, 2.0f};
     p.texture = MaterialTexture3D{.asset = "a/b.png", .nearest = true};
     p.normal = MaterialTexture3D{};
+    p.uv_scale = Vec2f{2.0f, 0.5f};
+    p.uv_offset = Vec2f{0.25f, -1.0f};
     asset.base.parts.push_back({.name = "Canvas", .material = {.double_sided = true}});
     asset.variants["wet"].material.roughness = 0.2f;
     const std::string text = write_materials3d_asset(asset);
@@ -211,6 +214,7 @@ void writer_round_trip() {
     const auto& q = back->base.material;
     CHECK(q.color == p.color && q.roughness == p.roughness && q.blend == p.blend && q.emission_color->b == 2.0f);
     CHECK(q.texture->asset == "a/b.png" && q.texture->nearest && q.normal && q.normal->asset.empty());
+    CHECK(q.uv_scale == p.uv_scale && q.uv_offset == p.uv_offset);
     CHECK(back->base.parts.size() == 1 && back->base.parts[0].name == "Canvas" &&
           *back->base.parts[0].material.double_sided);
     CHECK(back->variants.at("wet").material.roughness == 0.2f);

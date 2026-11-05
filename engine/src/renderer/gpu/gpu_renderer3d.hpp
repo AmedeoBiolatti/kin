@@ -532,15 +532,15 @@ private:
         bool fog = false, lights = false, indexed = false, materials = false;
     };
     struct MaterialUniforms {
-        f32 params[4], pbr[4], maps[4], emission[4];
+        f32 params[4], pbr[4], maps[4], emission[4], uv[4];
     };
-    static_assert(sizeof(MaterialUniforms) == 64);
+    static_assert(sizeof(MaterialUniforms) == 80);
     // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param).
     struct SurfaceMaterialUniforms {
         MaterialUniforms material;
         f32 surface[16];
     };
-    static_assert(sizeof(SurfaceMaterialUniforms) == 128);
+    static_assert(sizeof(SurfaceMaterialUniforms) == 144);
     static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;

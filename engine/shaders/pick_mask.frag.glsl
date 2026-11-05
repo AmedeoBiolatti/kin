@@ -10,7 +10,7 @@ layout(location = 0) out vec4 FragColor;
 #include "kin_cutout.inc.glsl"
 
 void main() {
-    if (vColor.a * texture(uBase, vUV).a < material.cutoff.x) {
+    if (vColor.a * texture(uBase, vUV * material.uv.xy + material.uv.zw).a < material.cutoff.x) {
         discard;
     }
     FragColor = vec4(vWorld, uintBitsToFloat(vId));

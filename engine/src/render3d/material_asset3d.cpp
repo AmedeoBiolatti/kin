@@ -102,7 +102,8 @@ MaterialPatch3D patch(const JsonValue& value) {
                    "normal",          "metallic_roughness",
                    "occlusion",       "emissive_texture",
                    "shader",          "shader_params",
-                   "emission_color",  "emission_mode"});
+                   "emission_color",  "emission_mode",
+                   "uv_scale",        "uv_offset"});
     MaterialPatch3D result;
     if (const auto* v = value.find("emission_mode"))
         result.emission_mode = enumeration<EmissionMode3D>(
@@ -118,6 +119,14 @@ MaterialPatch3D patch(const JsonValue& value) {
     } else if (value.find("emissive") && !result.emission_mode) {
         result.emission_mode = EmissionMode3D::BaseRelative; // conversion of existing base-relative material files
     }
+    const auto pair = [](const JsonValue& v, const char* name) {
+        require(v.is_array() && v.items().size() == 2, std::string(name) + " requires two numbers");
+        return Vec2f{number(v.items()[0], -1e4, 1e4, name), number(v.items()[1], -1e4, 1e4, name)};
+    };
+    if (const auto* v = value.find("uv_scale"))
+        result.uv_scale = pair(*v, "uv_scale");
+    if (const auto* v = value.find("uv_offset"))
+        result.uv_offset = pair(*v, "uv_offset");
     if (const auto* v = value.find("shader"))
         result.shader = v->is_null() ? std::filesystem::path{} : std::filesystem::path{text(*v)};
     if (const auto* v = value.find("shader_params")) {
@@ -247,6 +256,8 @@ void merge(MaterialPatch3D& to, const MaterialPatch3D& from) {
     FIELD(blend);
     FIELD(wrap_u);
     FIELD(wrap_v);
+    FIELD(uv_scale);
+    FIELD(uv_offset);
     FIELD(texture);
     FIELD(normal);
     FIELD(metallic_roughness);
@@ -380,6 +391,10 @@ void write_patch(JsonWriter& json, const MaterialPatch3D& p) {
             .value(tidy(p.emission_color->g))
             .value(tidy(p.emission_color->b))
             .end_array();
+    if (p.uv_scale)
+        json.key("uv_scale").begin_array().value(tidy(p.uv_scale->x)).value(tidy(p.uv_scale->y)).end_array();
+    if (p.uv_offset)
+        json.key("uv_offset").begin_array().value(tidy(p.uv_offset->x)).value(tidy(p.uv_offset->y)).end_array();
 #define TEXTURE(name)                                                                                                  \
     if (p.name) {                                                                                                      \
         json.key(#name);                                                                                               \
@@ -538,6 +553,8 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         FIELD(blend);
         FIELD(wrap_u);
         FIELD(wrap_v);
+        FIELD(uv_scale);
+        FIELD(uv_offset);
 #undef FIELD
 #define TEXTURE(name, srgb, slot)                                                                                      \
     if (p.name) {                                                                                                      \
