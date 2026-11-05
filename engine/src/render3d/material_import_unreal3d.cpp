@@ -568,9 +568,12 @@ private:
         return value(from, pin, why);
     }
     std::string param(const std::string& name, const char* type, std::array<f32, 4> value) {
-        if (!_b.has_param(name))
-            _b.params.push_back({name, type, value});
-        return GraphBuilder::quote(name);
+        const auto found = std::ranges::find(_b.params, name, &GraphBuilder::Param::source);
+        if (found != _b.params.end())
+            return GraphBuilder::quote(found->name);
+        const std::string safe = _b.safe_name(name);
+        _b.params.push_back({safe, type, value, "", false, name});
+        return GraphBuilder::quote(safe);
     }
 
     std::optional<std::string> translate(const std::string& name, std::string& why) {
@@ -621,15 +624,18 @@ private:
             }
             if (pname.empty())
                 pname = "t_" + std::filesystem::path(file).stem().string();
-            for (auto& c : pname)
-                if (!std::isalnum(static_cast<unsigned char>(c)))
-                    c = '_';
+            const std::string source = pname;
+            if (const auto known = std::ranges::find(_b.params, source, &GraphBuilder::Param::source);
+                known != _b.params.end())
+                pname = known->name;
+            else
+                pname = _b.safe_name(source);
             const bool normal = text(n, "sampler_type").find("NORMAL") != std::string::npos;
             const auto* settings = _doc.find("textures") ? _doc.find("textures")->find(file) : nullptr;
             if (std::none_of(textures.begin(), textures.end(), [&](const Texture& t) { return t.param == pname; }))
                 textures.push_back({pname, file, normal, !normal && settings && settings->bool_at("srgb", true)});
-            if (!_b.has_param(pname))
-                _b.params.push_back({pname, "texture", {}, "", false}); // its slot is chosen when all are known
+            if (!_b.has_param(pname)) // its slot is chosen when all are known
+                _b.params.push_back({pname, "texture", {}, "", false, source});
             const auto uv = in({"UVs", "Coordinates"}, GraphBuilder::quote("uv"));
             if (!uv)
                 return std::nullopt;
@@ -898,7 +904,7 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
                 v.texture = MaterialTexture3D{.asset = *path};
             } else {
                 const auto* group = values ? values->find(param.type == "float" ? "scalar" : "vector") : nullptr;
-                const auto* given = group ? group->find(param.name) : nullptr;
+                const auto* given = group ? group->find(param.source.empty() ? param.name : param.source) : nullptr;
                 if (!given)
                     continue;
                 v.count = param.type == "float" ? 1 : 4;

@@ -6,6 +6,7 @@
 // HDRP Lit, their maps packed, tiling, emission, surfaces; TIFF and PSD pictures decoded; Unreal's, as
 // tools/import_material/unreal_export.py exports them.
 #include "image_decode3d.hpp"
+#include "material_import3d_impl.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -420,6 +421,15 @@ void unity_corpus() {
     CHECK(count > 0 && failed == 0);
 }
 
+// Source engines' parameter names as graph parameters' (Unreal allows spaces; built-in inputs and node ids are taken).
+void safe_names() {
+    material_import::GraphBuilder b;
+    CHECK(b.safe_name("Albedo Controls") == "Albedo_Controls" && b.safe_name("uv") == "p_uv" &&
+          b.safe_name("n3") == "p_n3" && b.safe_name("3D Tiling") == "p_3D_Tiling" && b.safe_name("name") == "name");
+    b.params.push_back({"Tile_U", "float", {}, "", false, "Tile U"});
+    CHECK(b.safe_name("Tile U") == "Tile_U" && b.safe_name("Tile_U") == "Tile_U_2");
+}
+
 // Unreal's materials as unreal_export.py exports them (tests/fixtures/unreal: what unreal_probe.py made in Unreal 5.8):
 // a tinted, tiled base map with an ORM map and a DirectX normal map, and an instance changing the tint; one minus a
 // gloss map as roughness; a two-sided cut-out by the base map's alpha; additive glow; unlit; an unreadable Lerp.
@@ -702,6 +712,7 @@ int main() {
     unity_materials();
     pictures();
     unreal_materials();
+    safe_names();
     unreal_graphs();
     unity_graphs();
     godot_graphs();

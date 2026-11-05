@@ -20,6 +20,7 @@
 #include <kin/renderer/color.hpp>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -169,8 +170,36 @@ public:
         std::array<f32, 4> value{};
         std::string slot; // a texture's
         bool srgb = false;
+        std::string source; // its name in the source engine, where it isn't a name kin's graphs take
     };
     std::vector<Param> params;
+
+    // A source engine's parameter name as a graph's ("Albedo Controls": "Albedo_Controls"): letters, digits and _, not
+    // a digit first, not a built-in input's or a node id's ("uv", "n3": "p_uv", "p_n3"); unique among the params.
+    std::string safe_name(const std::string& source) const {
+        std::string n;
+        for (const char c : source)
+            n += std::isalnum(static_cast<unsigned char>(c)) || c == '_' ? c : '_';
+        static const std::set<std::string> taken{"uv",   "position", "normal",          "view",   "vertex_color",
+                                                 "time", "screen",   "camera_distance", "surface"};
+        const bool node_id = n.size() > 1 && n[0] == 'n' && std::all_of(n.begin() + 1, n.end(), [](char c) {
+                                 return std::isdigit(static_cast<unsigned char>(c));
+                             });
+        if (n.empty() || std::isdigit(static_cast<unsigned char>(n[0])) || taken.contains(n) || node_id)
+            n = "p_" + n;
+        if (n.size() > 60)
+            n.resize(60);
+        // Another source name made the same: a suffix.
+        const auto clash = [&](const std::string& c) {
+            return std::any_of(params.begin(), params.end(), [&](const Param& p) {
+                return p.name == c && p.source != source && !(p.source.empty() && p.name == source);
+            });
+        };
+        std::string unique = n;
+        for (int k = 2; clash(unique); ++k)
+            unique = n + "_" + std::to_string(k);
+        return unique;
+    }
     std::map<std::string, std::string> outputs; // output -> JSON text
 
     // A node; its id ("n<k>") as a reference's JSON text, with `member` ("rgb", "x") after a dot.
