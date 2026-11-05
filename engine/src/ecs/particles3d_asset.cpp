@@ -28,6 +28,7 @@ void register_particle3d_components(EcsWorld& world) {
     b.field("enabled", &ParticleEmitter3D::enabled)
         .field("emitting", &ParticleEmitter3D::emitting)
         .field("texture", &ParticleEmitter3D::texture_asset)
+        .asset_type("Image")
         .field("texture_nearest", &ParticleEmitter3D::texture_nearest)
         .property<u64>(
             "seed", [](const auto& e) { return e.system.seed(); },

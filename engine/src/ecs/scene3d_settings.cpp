@@ -25,6 +25,7 @@ void register_scene3d_settings(EcsWorld& world) {
                         return false;
                     return true;
                 })
+            .choices({"perspective", "orthographic"})
             .property<f32>(
                 "fov", [](const auto& value) { return value.camera.fov; },
                 [](auto& value, const f32& fov) {
@@ -33,6 +34,8 @@ void register_scene3d_settings(EcsWorld& world) {
                     value.camera.fov = fov;
                     return true;
                 })
+            .units("degrees")
+            .description("A perspective camera's view, top to bottom.")
             .property<f32>(
                 "height", [](const auto& value) { return value.camera.height; },
                 [](auto& value, const f32& height) {
@@ -41,6 +44,8 @@ void register_scene3d_settings(EcsWorld& world) {
                     value.camera.height = height;
                     return true;
                 })
+            .units("m")
+            .description("An orthographic camera's view, top to bottom.")
             .property<f32>(
                 "near", [](const auto& value) { return value.camera.z_near; },
                 [](auto& value, const f32& near) {
@@ -49,6 +54,7 @@ void register_scene3d_settings(EcsWorld& world) {
                     value.camera.z_near = near;
                     return true;
                 })
+            .units("m")
             .property<f32>(
                 "far", [](const auto& value) { return std::isinf(value.camera.z_far) ? 0.0f : value.camera.z_far; },
                 [](auto& value, const f32& far) {
@@ -56,7 +62,9 @@ void register_scene3d_settings(EcsWorld& world) {
                         return false;
                     value.camera.z_far = far == 0 ? std::numeric_limits<f32>::infinity() : far;
                     return true;
-                });
+                })
+            .units("m")
+            .description("Nothing further is drawn; 0: no limit.");
 
     if (!registry.find("SceneEnvironment3D")) {
         auto builder = registry.native<SceneEnvironment3D>("SceneEnvironment3D");
