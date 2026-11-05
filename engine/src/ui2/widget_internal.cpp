@@ -259,6 +259,13 @@ UiTextInputResult edit_text_input(Context& ctx,
     if (!enabled || (state.active && !it.focused && !it.pressed && ctx.focus_moved())) {
         state.active = false; // disabled, or Tab took focus elsewhere
     }
+    if (state.active && !it.pressed && ctx.text_input_dismissed()) {
+        state.active = false; // the system's keyboard put away
+        state.clear_selection();
+        if (it.focused) {
+            ctx.state().clear_focused();
+        }
+    }
 
     // While an input method composes, the keys are its own.
     const bool composing = state.active && !ctx.text_composition().empty();

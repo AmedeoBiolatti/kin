@@ -3,9 +3,9 @@
 Status: experimental, 2026-11-05. 2D games build and run on arm64 phones
 (checked on a Samsung Galaxy A55: Android 16, Xclipse 530, Vulkan 1.3) with
 kin's SDL_GPU renderer on Vulkan. APKs are debug-signed, for sideloading while
-a game is made; there is no release (Play) packaging yet. Touch controls are
-separate work (see [input](input.md)); until then a touch acts as the mouse's
-left button.
+a game is made; there is no release (Play) packaging yet. Touch is read as on
+any touch screen ([input](input.md#touch)): the first finger is the pointer,
+gestures bind like keys; Back is Escape.
 
 ## What is needed
 
@@ -72,6 +72,10 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
 - **Saves:** `user_data_dir` is the app's private files folder
   (`/data/user/0/<id>/files`), removed with the app.
 - **Fonts:** the system UI font is Roboto from `/system/fonts`.
+- **Back, the cutout, the keyboard:** Back is `Key::Escape`; lay UI out in
+  `Window::safe_area()`, clear of the camera cutout and the system's edges; a
+  ui2 text field opens the on-screen keyboard
+  ([input](input.md#touch)).
 - **Logs:** kin's log goes to logcat (tag `SDL/APP`).
 - **Leaving the screen:** the app stops while away (SDL blocks its thread) and
   may be ended there without warning. `App::on_app_event` and the scenes'
@@ -85,10 +89,11 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
 
 ## Known gaps
 
-- Touch input, the Back button (it does nothing yet), safe areas around the
-  camera cutout, and the on-screen keyboard.
+- On-screen controls (a stick and buttons over the game) and touch scrolling
+  of ui2 scroll boxes.
 - The first frame after returning to the screen logs one Vulkan
   `dequeueBuffer failed` while SDL_GPU replaces the old surface's swapchain;
   drawing continues.
 - BC-compressed textures are not checked against the phone's support.
-- 3D, release packaging (AAB, signing), CI.
+- 3D, release packaging (AAB, signing). CI builds hex_demo's APK
+  (.github/workflows/android.yml) but runs nothing on a phone.

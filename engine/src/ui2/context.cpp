@@ -422,6 +422,7 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _surface_fill_under = colors::black;
     _wants_text_input_last = _wants_text_input;
     _wants_text_input = false;
+    _text_input_dismissed_now = std::exchange(_text_input_dismissed, false);
     _focus_order.clear();
     _text_input_area.reset();
     _text_input_cursor = 0;
@@ -1184,9 +1185,17 @@ void Context::set_text_input_area(Rectf area, f32 caret_x) {
 }
 
 void Context::apply_text_input(Window& window) const {
-    if (window.text_input_enabled() != _wants_text_input) {
+    const bool on = window.text_input_enabled();
+    if (_text_input_on && !on && _wants_text_input) {
+        // Ended by the system, not by us: the field is left (next frame), not reopened.
+        _text_input_on = false;
+        _text_input_dismissed = true;
+        return;
+    }
+    if (on != _wants_text_input) {
         window.set_text_input_enabled(_wants_text_input);
     }
+    _text_input_on = _wants_text_input;
     if (_wants_text_input && _text_input_area) {
         window.set_text_input_area(*_text_input_area, _text_input_cursor);
     }

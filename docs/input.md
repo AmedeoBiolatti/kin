@@ -129,6 +129,24 @@ fingers with `set_touch_down`, `set_touch_moved` and `set_touch_up`, or the
 scene server's `input.touch`. Lua has `input.touches()`, `input.pinch()` and
 `input.pan()`.
 
+On a phone:
+
+- **Back** (the button or the edge swipe) is `Key::Escape`, so whatever
+  leaves a menu or pauses the game on a desktop (the `quit` action, ui2's
+  back, cancelling a rebind) does it there too. On Android kin keeps Back for
+  the game (`SDL_HINT_ANDROID_TRAP_BACK_BUTTON`); a game that wants Android's
+  own (leave the app) sets that hint to `"0"` before the App is made.
+- **The safe area.** `Window::safe_area()` is the part of the window that the
+  camera cutout, the system bars and the edge-swipe strips leave free, in
+  window coordinates (the whole window on a desktop). Lay touchable UI out
+  inside it: `ui.begin_layout(renderer.window_rect_to_logical(window.safe_area()))`,
+  or pass that rectangle to `SceneScreens::draw`. A game drawn at a fixed
+  logical size letterboxed to a wider phone usually has the cutout in its bars
+  already.
+- **The on-screen keyboard** opens while a ui2 text field is being edited, as
+  text input starts on a desktop. Putting it away (Back) leaves the field
+  (`ui2::Context::text_input_dismissed()`); touching the field opens it again.
+
 ## For editors
 
 `binding_held(input, binding)` and `axis_value(input, axis)` read a binding or an

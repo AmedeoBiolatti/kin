@@ -437,6 +437,12 @@ Vec2f Renderer2D::logical_to_window(Vec2f logical) const {
     return _backend->logical_to_window(logical);
 }
 
+Rectf Renderer2D::window_rect_to_logical(Rectf window_rect) const {
+    const Vec2f min = window_to_logical(Vec2f{window_rect.x, window_rect.y});
+    const Vec2f max = window_to_logical(Vec2f{window_rect.x + window_rect.w, window_rect.y + window_rect.h});
+    return {min.x, min.y, max.x - min.x, max.y - min.y};
+}
+
 Texture Renderer2D::create_texture_from_rgba(const u8* pixels, i32 width, i32 height) {
     return create_texture_from_rgba(pixels, Vec2i{width, height});
 }

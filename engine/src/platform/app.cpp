@@ -41,6 +41,13 @@ App::App(AppConfig config)
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     }
 
+#if defined(SDL_PLATFORM_ANDROID)
+    // Back reaches the game (as Escape, kin/platform/input.hpp) instead of
+    // sending the app away; a game that wants Android's own sets it to "0".
+    if (!SDL_GetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON)) {
+        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+    }
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         const std::string error = std::string("SDL_Init failed: ") + SDL_GetError();
         KIN_LOG_ERROR_F("runtime",
@@ -163,6 +170,21 @@ void App::pump_events() {
                 _close_asked = true; // the last one: the app decides
             } else {
                 handle_window_close(static_cast<WindowId>(event.window.windowID));
+            }
+        } else if (event.type == SDL_EVENT_WINDOW_SAFE_AREA_CHANGED) {
+            if (const Window* window = find_window(static_cast<WindowId>(event.window.windowID))) {
+                const Rectf safe = window->safe_area();
+                const Vec2i size = window->size();
+                KIN_LOG_INFO_F("runtime",
+                               "window safe area",
+                               (LogFields{
+                                   {.name = "size", .value = std::to_string(size.x) + "x" + std::to_string(size.y)},
+                                   {.name = "safe",
+                                    .value = std::to_string(static_cast<int>(safe.x)) + "," + std::to_string(static_cast<int>(safe.y)) +
+                                             " " + std::to_string(static_cast<int>(safe.w)) + "x" +
+                                             std::to_string(static_cast<int>(safe.h))},
+                                   {.name = "scale", .value = std::to_string(window->display_scale())},
+                               }));
             }
         }
     }

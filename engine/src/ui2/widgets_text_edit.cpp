@@ -681,6 +681,9 @@ void Editor::run() {
         _ctx.set_cursor(SystemCursor::Text);
     }
     handle_mouse(it);
+    if (_s.active && !it.pressed && _ctx.text_input_dismissed()) {
+        stop_editing(); // the system's keyboard put away
+    }
     if (_s.active && _w.enabled) {
         _ctx.request_text_input();
         handle_keys();

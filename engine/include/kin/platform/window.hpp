@@ -104,6 +104,11 @@ public:
     Vec2i size() const;
     Vec2i pixel_size() const;
     f32 display_scale() const;
+    // Where on the window UI can be seen and touched, in the units of size():
+    // the whole window except what the system covers or keeps for itself (a
+    // phone's camera cutout, its bars, the strips at its edges a swipe goes
+    // back from). The whole window on a desktop.
+    Rectf safe_area() const;
     void set_minimum_size(Vec2i size);
     void set_size(Vec2i size);
     void set_size(i32 width, i32 height);
