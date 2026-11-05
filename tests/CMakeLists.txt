@@ -440,6 +440,8 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
     set_tests_properties(kin-particle-assets3d PROPERTIES SKIP_RETURN_CODE 77)
     kin_add_test(kin_physics3d_asset_tests kin-physics3d-assets SOURCES physics3d_asset_tests.cpp
         DEFINITIONS KIN_TEST_SUMMIT="${PROJECT_SOURCE_DIR}/examples/summit/content")
+    # Material graphs (material_graph3d.hpp): the compiler, on the CPU (with glslc: every node type compiled).
+    kin_add_test(kin_material_graph3d_tests kin-material-graph3d SOURCES material_graph3d_tests.cpp)
     # Other engines' materials as kin's (material_import3d.hpp), on the CPU.
     kin_add_test(kin_material_import3d_tests kin-material-import3d SOURCES material_import3d_tests.cpp
         DEFINITIONS KIN_TEST_IMAGES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/images"

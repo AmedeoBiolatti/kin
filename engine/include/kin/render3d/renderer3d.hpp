@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <kin/render3d/backend3d.hpp>
 #include <kin/render3d/camera3d.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <kin/render3d/mesh3d.hpp>
 #include <kin/render3d/model3d.hpp>
 #include <kin/render3d/scene3d.hpp>
@@ -95,6 +96,13 @@ std::string surface_shader_source(std::string_view surface);
 // The defines of a surface shader's variant: NAME or NAME=VALUE.
 std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant);
 
+// A material graph compiled (Renderer3D::compile_material_graph): its surface shader, and what the compiler made of it
+// (its parameters' places in Material3D::shader_params: material_graph_params3d).
+struct MaterialGraphShader3D {
+    SurfaceShader3D surface;
+    CompiledMaterialGraph3D graph;
+};
+
 class Renderer3D {
 public:
     // Draws through `renderer`, which must outlive it.
@@ -156,6 +164,9 @@ public:
     // The same from a surface source file (its `void kin_surface(inout KinSurface s)`), every variant compiled now by
     // glslc (development, as compile_material_shader). Empty, with glslc's messages, when one doesn't compile.
     Result3D<SurfaceShader3D> compile_surface_shader(const std::filesystem::path& source);
+    // A material graph (kin.material-graph/1: kin/render3d/material_graph3d.hpp) as a surface shader, compiled now
+    // (development, as compile_surface_shader). Empty, with the graph's errors (each naming its node) or glslc's.
+    Result3D<MaterialGraphShader3D> compile_material_graph(const std::filesystem::path& graph);
     // Shader-specific immutable extra resource bindings. Sampled textures occupy
     // fragment set 2 slots 12..15; read-only storage follows the shader's sampler
     // count. Shapes/types/counts/ownership are validated once here. GPU contents
@@ -255,6 +266,7 @@ private:
     SurfaceShader3D
     create_surface_shader_operation(std::span<const std::span<const u8>, surface_variant_count3d> spirv);
     SurfaceShader3D compile_surface_shader_operation(const std::filesystem::path& source);
+    SurfaceShader3D compile_surface_text_operation(const std::string& surface, const std::string& label);
     bool resize_operation(View3D& view, Vec2i size);
     bool render_operation(View3D& view, const Scene3D& scene);
     bool warm_up_operation(View3D& view, const Scene3D& scene);

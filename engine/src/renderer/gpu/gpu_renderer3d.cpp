@@ -273,8 +273,9 @@ struct FrameUniforms {
     f32 grid[4];      // x: 1 when the light grid lights this pass, y: a tile's side (pixels), z: the first slice's near
                       // depth, w: slices per unit of the log of depth
     f32 grid_size[4]; // x, y: tiles across and down, z: slices, w: cells (where the lists start)
+    f32 time[4];      // x: Scene3D::time (seconds), for materials that move (a graph's time)
 };
-static_assert(sizeof(FrameUniforms) == 1168);
+static_assert(sizeof(FrameUniforms) == 1184);
 // A light of the light grid (as gi_light.comp's): place and reach, colour and the square of the size, a spot's way and
 // the cosine of its outer angle (a point light: -2), 1 / (cos inner - cos outer) and its shadow's layer (a point
 // light's cube's first; -1: none).
@@ -10077,6 +10078,7 @@ void GpuRenderer3D::push_frame_uniforms(FrameCtx& ctx, u32 s, u32 slot, bool rec
             static_cast<f32>(ctx.grid_cells));
     }
     put(f.eye, ctx.scenes[s]->camera.position, 1.0f);
+    f.time[0] = ctx.scenes[s]->time;
     if (ctx.environment) {
         // The picture turned by the light's rotation; in the overlay's space the
         // directions come back to the scene's first.

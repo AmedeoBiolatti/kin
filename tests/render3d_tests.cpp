@@ -30,6 +30,7 @@
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/ik3d.hpp>
 #include <kin/render3d/local_lights3d.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <kin/render3d/mesh_clusters3d.hpp>
 #include <kin/render3d/mesh_lod3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -4657,6 +4658,130 @@ void test_gpu_material_shader() {
 #ifdef KIN_TEST_SURFACE_SPIRV
 #include "surface_test_shaders.hpp"
 #endif
+
+// A material graph (kin/render3d/material_graph3d.hpp) compiled into a surface shader by
+// Renderer3D::compile_material_graph: a graph of no outputs, and one that remakes kin's base colour (its map times the
+// vertex colour), draw exactly what the material draws; a checker of nodes is drawn in squares; its parameters
+// (shader_params by material_graph_params3d) and Scene3D::time move it; its normal map node shades as kin's normal
+// map does; a broken graph is refused naming its node.
+void test_gpu_material_graph() {
+    with_gpu("test_gpu_material_graph", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_material_graph", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_material_graph_test";
+        std::filesystem::create_directories(dir);
+        const auto graph = [&](const std::string& name, const std::string& parameters, const std::string& nodes,
+                               const std::string& outputs) {
+            const auto file = dir / (name + ".kingraph.json");
+            std::ofstream{file} << R"({"schema": "kin.material-graph/1", "name": ")" << name << R"(", "parameters": [)"
+                                << parameters << R"(], "nodes": [)" << nodes << R"(], "outputs": {)" << outputs << "}}";
+            auto made = r3d.compile_material_graph(file);
+            if (!made) {
+                std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+                assert(false && "the graph did not compile");
+            }
+            return std::move(*made);
+        };
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](const kin::Material3D& material, float time = 0.0f) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
+            scene.lights.ambient = {0.1f, 0.12f, 0.2f};
+            scene.time = time;
+            (void)scene.draw(sphere, Mat4f::identity(), material);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        // A texture of colours, and a normal map of bumps.
+        std::vector<kin::u8> colours(16 * 16 * 4), bumps(16 * 16 * 4);
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x) {
+                kin::u8* c = &colours[(y * 16 + x) * 4];
+                c[0] = kin::u8(40 + 12 * x), c[1] = kin::u8(200 - 10 * y), c[2] = kin::u8(90 + 5 * (x ^ y)), c[3] = 255;
+                kin::u8* n = &bumps[(y * 16 + x) * 4];
+                n[0] = kin::u8(128 + 60 * std::sin(x * 0.8)), n[1] = kin::u8(128 + 60 * std::cos(y * 0.8)), n[2] = 220;
+                n[3] = 255;
+            }
+        const kin::Texture texture = renderer.create_texture_from_rgba(colours.data(), {16, 16});
+        const kin::Texture normal = renderer.create_texture_from_rgba(bumps.data(), {16, 16});
+        const kin::Material3D plain{
+            .color = Color::rgb(230, 200, 180), .texture = texture, .metallic = 0.2f, .roughness = 0.5f};
+        const Pixels stock = shoot(plain);
+        const auto same = [](const Pixels& a, const Pixels& b) { return a.rgba == b.rgba; };
+
+        kin::Material3D empty = plain;
+        empty.surface = graph("empty", "", "", "").surface;
+        assert(same(shoot(empty), stock) && "a graph of no outputs draws the material");
+        kin::Material3D remade = plain;
+        remade.surface = graph("remade", R"({"name": "albedo", "type": "texture", "slot": "base"})",
+                               R"({"id": "map", "type": "texture", "texture": "albedo"},
+                     {"id": "base", "type": "multiply", "inputs": {"a": "map.rgb", "b": "vertex_color.rgb"}})",
+                               R"("base_color": "base")")
+                             .surface;
+        assert(same(shoot(remade), stock) && "a graph remaking the base colour draws the material");
+
+        // A checker, its colour a parameter.
+        const auto checker = graph("checker", R"({"name": "tint", "type": "color", "default": [1, 0, 0, 1]})",
+                                   R"({"id": "squares", "type": "checker", "inputs": {"uv": "moving", "scale": 8}},
+               {"id": "moving", "type": "uv_panner", "inputs": {"speed": [0.0625, 0]}},
+               {"id": "color", "type": "mix", "inputs": {"a": [0.05, 0.05, 0.05], "b": "tint.rgb", "t": "squares"}})",
+                                   R"("base_color": "color", "roughness": 1)");
+        kin::Material3D squares{.unlit = true};
+        squares.surface = checker.surface;
+        squares.shader_params = kin::material_graph_params3d(checker.graph);
+        const Pixels red = shoot(squares);
+        int bright = 0, dark = 0;
+        for (int x = 40; x < 120; ++x) {
+            const Color c = red.at(x, 60);
+            bright += c.r > 150 && c.g < 40 ? 1 : 0;
+            dark += c.r < 100 && c.r == c.g && c.g == c.b ? 1 : 0; // linear 0.05 grey: sRGB 63
+        }
+        assert(bright > 15 && dark > 15 && "the checker's squares");
+        squares.shader_params = kin::material_graph_params3d(checker.graph, {{"tint", {0, 0, 1, 1}}});
+        const Color blue = shoot(squares).at(80, 60);
+        assert(((blue.b > 150 && blue.r < 40) || (blue.r < 100 && blue.r == blue.b)) &&
+               "the parameter reaches the graph");
+        int blues = 0;
+        const Pixels tinted = shoot(squares);
+        for (int x = 40; x < 120; ++x)
+            blues += tinted.at(x, 60).b > 150 && tinted.at(x, 60).r < 40 ? 1 : 0;
+        assert(blues == bright && "the parameter reaches the graph");
+        squares.shader_params = kin::material_graph_params3d(checker.graph);
+        assert(!same(shoot(squares, 1.0f), red) && same(shoot(squares, 0.0f), red) && "time moves it, and only time");
+
+        // The normal map node shades as kin's own normal map.
+        kin::Material3D mapped = plain;
+        mapped.normal = normal;
+        const Pixels kin_mapped = shoot(mapped);
+        kin::Material3D graphed = plain;
+        graphed.normal = normal;
+        graphed.surface = graph("bumps", R"({"name": "bumps", "type": "texture", "slot": "normal"})",
+                                R"({"id": "n", "type": "normal_map", "texture": "bumps"})", R"("normal": "n")")
+                              .surface;
+        const Pixels graph_mapped = shoot(graphed);
+        int differ = 0;
+        for (int y = 0; y < 120; ++y)
+            for (int x = 0; x < 160; ++x) {
+                const Color a = kin_mapped.at(x, y), b = graph_mapped.at(x, y);
+                differ += std::abs(int(a.r) - b.r) + std::abs(int(a.g) - b.g) + std::abs(int(a.b) - b.b) > 3 ? 1 : 0;
+            }
+        assert(differ < 20 && !same(kin_mapped, stock) && "the graph's normal map is kin's");
+
+        const auto broken = dir / "broken.kingraph.json";
+        std::ofstream{broken} << R"({"schema": "kin.material-graph/1", "nodes": [{"id": "bad", "type": "warp"}],
+                                    "outputs": {"base_color": "bad"}})";
+        assert(!r3d.compile_material_graph(broken).value_or({}).surface.valid());
+        assert(kin::diagnostics3d_text(r3d.diagnostics()).find("bad: unknown node type") != std::string::npos);
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    });
+}
 
 // A material's UV transform (Material3D::uv_scale, uv_offset) moves where every pass reads its maps: offset by half,
 // a texture of two texels draws what the swapped texture draws without it; scaled by two, what the texture repeated
@@ -22996,6 +23121,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_material_shader());
     RUN(test_gpu_surface_shader());
     RUN(test_gpu_material_uv_transform());
+    RUN(test_gpu_material_graph());
     RUN(test_gpu_skinned_matches_cpu());
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());

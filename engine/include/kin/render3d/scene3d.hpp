@@ -684,6 +684,9 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
+    // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
+    f32 time = 0.0f;
     // Anisotropic filtering of the materials' mipmapped textures: where a surface is seen at a slant (a street, a
     // floor, a wall along the view), its texture is read with up to this many samples along the slant, from the mip
     // that fits the slant's short side, instead of with one from the mip that fits its long side (which blurs it into
