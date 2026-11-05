@@ -3504,7 +3504,29 @@ through the project's `.meta` files. Mapped:
 TIFF and PSD maps (frequent in Unity projects; kin's images don't read them) are decoded by the import's own reader
 (baseline TIFF: strips or tiles, uncompressed, LZW, PackBits, Deflate, the horizontal predictor, 8/16-bit and float;
 PSD's composited picture) and written as PNG. Unity's Shader Graphs themselves, its HLSL shaders, detail, parallax and
-clear-coat maps are noted. Unreal's materials are next (docs/material_graph_plan.md).
+clear-coat maps are noted.
+
+Unreal's materials are read in two steps. Inside Unreal's editor, `tools/import_material/unreal_export.py` (its
+Python, headless: `UnrealEditor-Cmd <Project.uproject> -run=pythonscript -EnablePlugins=PythonScriptPlugin
+-script="unreal_export.py --content /Game/Path --out <folder>" -nullrhi`) writes each Material and Material Instance
+as a `kin.unreal-material/1` file: its blend mode, shading model, two-sidedness and clip value, its parameters' values
+(an instance's own over its parents'), and the expressions feeding each output a few deep, with the textures they
+name exported as PNG (with their sRGB and green-flip settings). Then `kin_import_material unreal <export.json |
+folder> --project <the export folder> ...` (`import_unreal_material()`) reads each output as bias + gain x one
+texture channel:
+
+- constants, scalar and vector parameters, texture samples (and their TextureCoordinate tiling), Multiply, Add,
+  Subtract, One Minus, Component Mask, and a Lerp whose alpha is exactly 0 or 1; anything else (a varying Lerp, two
+  textures multiplied, a parameter collection, custom HLSL) is noted and that output left at kin's default;
+- base colour (Unreal's colours are linear), metallic and roughness (an ORM map laid out as kin's, R occlusion, G
+  roughness, B metallic, is used as it is; others are packed, bias and gain baked in), occlusion, normal (Unreal's are
+  DirectX's, green down: flipped, unless the texture flips green on import, whose source is then as kin's),
+  emission, opacity from the base map's alpha (masked: a cut-out at the clip value), blend mode (opaque, masked,
+  translucent, additive), two-sided, unlit (its emissive as its colour);
+- one-colour maps (Unreal's white, black and flat-normal placeholders) are folded into their factor; a uniform normal
+  map that isn't flat is kept.
+
+`tools/import_material/unreal_probe.py` makes the test materials (`tests/fixtures/unreal`) in a scratch project.
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,

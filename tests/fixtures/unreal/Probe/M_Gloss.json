@@ -1,0 +1,59 @@
+{
+ "schema": "kin.unreal-material/1",
+ "name": "M_Gloss",
+ "path": "/Game/Probe/M_Gloss",
+ "class": "Material",
+ "parents": [],
+ "base": "/Game/Probe/M_Gloss",
+ "blend_mode": "BLEND_OPAQUE",
+ "shading_model": "MSM_DEFAULT_LIT",
+ "two_sided": false,
+ "opacity_mask_clip_value": 0.33329999446868896,
+ "parameters": {
+  "scalar": {},
+  "vector": {},
+  "texture": {}
+ },
+ "inputs": {
+  "BaseColor": {
+   "class": "MaterialExpressionConstant3Vector",
+   "output": "",
+   "value": [
+    0.20000000298023224,
+    0.4000000059604645,
+    0.6000000238418579,
+    1.0
+   ]
+  },
+  "Metallic": {
+   "class": "MaterialExpressionConstant",
+   "output": "",
+   "value": 0.800000011920929
+  },
+  "Roughness": {
+   "class": "MaterialExpressionOneMinus",
+   "output": "",
+   "inputs": [
+    {
+     "class": "MaterialExpressionTextureSample",
+     "output": "A",
+     "texture": "textures/Game/Probe/Textures/T_Gloss.png",
+     "sampler_type": "SAMPLERTYPE_LINEAR_COLOR",
+     "inputs": [
+      null,
+      null,
+      null
+     ]
+    }
+   ]
+  }
+ },
+ "textures": {
+  "textures/Game/Probe/Textures/T_Gloss.png": {
+   "asset": "/Game/Probe/Textures/T_Gloss",
+   "srgb": false,
+   "flip_green_channel": false,
+   "compression_settings": "TC_DEFAULT"
+  }
+ }
+}

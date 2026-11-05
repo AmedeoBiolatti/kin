@@ -1,0 +1,49 @@
+{
+ "schema": "kin.unreal-material/1",
+ "name": "M_Cutout",
+ "path": "/Game/Probe/M_Cutout",
+ "class": "Material",
+ "parents": [],
+ "base": "/Game/Probe/M_Cutout",
+ "blend_mode": "BLEND_MASKED",
+ "shading_model": "MSM_DEFAULT_LIT",
+ "two_sided": true,
+ "opacity_mask_clip_value": 0.4000000059604645,
+ "parameters": {
+  "scalar": {},
+  "vector": {},
+  "texture": {}
+ },
+ "inputs": {
+  "BaseColor": {
+   "class": "MaterialExpressionTextureSample",
+   "output": "RGB",
+   "texture": "textures/Game/Probe/Textures/T_Cutout.png",
+   "sampler_type": "SAMPLERTYPE_COLOR",
+   "inputs": [
+    null,
+    null,
+    null
+   ]
+  },
+  "OpacityMask": {
+   "class": "MaterialExpressionTextureSample",
+   "output": "A",
+   "texture": "textures/Game/Probe/Textures/T_Cutout.png",
+   "sampler_type": "SAMPLERTYPE_COLOR",
+   "inputs": [
+    null,
+    null,
+    null
+   ]
+  }
+ },
+ "textures": {
+  "textures/Game/Probe/Textures/T_Cutout.png": {
+   "asset": "/Game/Probe/Textures/T_Cutout",
+   "srgb": true,
+   "flip_green_channel": false,
+   "compression_settings": "TC_DEFAULT"
+  }
+ }
+}
