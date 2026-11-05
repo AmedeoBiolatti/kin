@@ -314,6 +314,22 @@ void test_file_dialogs() {
 
 } // namespace
 
+// A phone's Back (the system's Back key) is Escape.
+void test_back_key() {
+    kin::Input input;
+    SDL_Event down{};
+    down.type = SDL_EVENT_KEY_DOWN;
+    down.key.scancode = SDL_SCANCODE_AC_BACK;
+    input.begin_frame();
+    kin::InputFrameTestHook::event(input, down);
+    assert(input.frame_pressed(kin::Key::Escape) && input.held(kin::Key::Escape));
+    SDL_Event up = down;
+    up.type = SDL_EVENT_KEY_UP;
+    input.begin_frame();
+    kin::InputFrameTestHook::event(input, up);
+    assert(!input.held(kin::Key::Escape));
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) {
         return child_main(argc, argv);
@@ -327,6 +343,7 @@ int main(int argc, char** argv) {
     test_launch();
     test_dropped_files();
     test_touch_events();
+    test_back_key();
     test_file_dialogs();
     return 0;
 }

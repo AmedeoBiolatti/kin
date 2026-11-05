@@ -792,18 +792,24 @@ void Input::begin_frame(bool advance_transients) {
 
 void Input::process_native_event(const void* native_event) {
     const auto& event = *static_cast<const SDL_Event*>(native_event);
+    // The system's Back key (a phone's Back button or gesture, a keyboard's
+    // Back) is Escape: what leaves a menu or pauses a game on a desktop.
+    const auto scancode = [&]() -> i32 {
+        return event.key.scancode == SDL_SCANCODE_AC_BACK ? SDL_SCANCODE_ESCAPE : event.key.scancode;
+    };
 
-    if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(event.key.scancode)) {
-        if (!_keys.cur[event.key.scancode]) {
+    if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(scancode())) {
+        const i32 key = scancode();
+        if (!_keys.cur[key]) {
             _last_key_press_event_time_ns = event.key.timestamp;
             _last_key_press_detected_time_ns = SDL_GetTicksNS();
         } else if (event.key.repeat) {
-            _key_frame_repeated[event.key.scancode] = true;
+            _key_frame_repeated[key] = true;
         }
-        _keys.set(event.key.scancode, true);
+        _keys.set(key, true);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
-    } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(event.key.scancode)) {
-        _keys.set(event.key.scancode, false);
+    } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(scancode())) {
+        _keys.set(scancode(), false);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
     } else if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
                event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {

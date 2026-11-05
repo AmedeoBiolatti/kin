@@ -200,6 +200,15 @@ Vec2i Window::pixel_size() const {
     return result;
 }
 
+Rectf Window::safe_area() const {
+    const Vec2i whole = size();
+    SDL_Rect rect{};
+    if (!_handle || !SDL_GetWindowSafeArea(to_sdl_window(_handle), &rect) || rect.w <= 0 || rect.h <= 0) {
+        return {0.0f, 0.0f, static_cast<f32>(whole.x), static_cast<f32>(whole.y)};
+    }
+    return {static_cast<f32>(rect.x), static_cast<f32>(rect.y), static_cast<f32>(rect.w), static_cast<f32>(rect.h)};
+}
+
 f32 Window::display_scale() const {
     const f32 scale = _handle ? SDL_GetWindowDisplayScale(to_sdl_window(_handle)) : 1.0f;
     return std::isfinite(scale) && scale > 0.0f ? scale : 1.0f;

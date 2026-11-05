@@ -95,9 +95,7 @@ Rectf rotated_bounds(Rectf rect, f32 rotation, Vec2f pivot) {
 }
 
 Rectf output_to_logical(Renderer2D& renderer, Rectf rect) {
-    const Vec2f min = renderer.window_to_logical({rect.x, rect.y});
-    const Vec2f max = renderer.window_to_logical({rect.x + rect.w, rect.y + rect.h});
-    return Rectf{min.x, min.y, max.x - min.x, max.y - min.y};
+    return renderer.window_rect_to_logical(rect);
 }
 
 // Pushes the view's camera onto the renderer for a flush, when it zooms or turns.

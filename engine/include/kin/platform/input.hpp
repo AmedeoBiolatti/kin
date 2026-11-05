@@ -30,7 +30,7 @@ class InputMap;
 
 enum class Key {
     Unknown,
-    Escape,
+    Escape, // also the system's Back key: a phone's Back button or gesture
     Space,
     Enter,
     Tab,
