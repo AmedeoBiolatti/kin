@@ -1,3 +1,4 @@
+#include <kin/render3d/camera3d.hpp>
 #include <kin/anim/player.hpp>
 #include <kin/anim/anim_format.hpp>
 #include <kin/core/json.hpp>
@@ -1163,9 +1164,20 @@ public:
     }
     bool set_view_camera(const kin::Camera2D* camera) override {
         _camera = camera ? std::optional<kin::Camera2D>(*camera) : std::nullopt;
+        _camera3d.reset();
+        return true;
+    }
+    // (A 3D camera: red its field of view, green ten times its height, blue a hundred times its turn's y.)
+    bool set_view_camera3d(const kin::Camera3D* camera) override {
+        _camera3d = camera ? std::optional<kin::Camera3D>(*camera) : std::nullopt;
         return true;
     }
     void render(kin::SceneContext& ctx) override {
+        if (_camera3d) {
+            ctx.renderer.clear(kin::Color::rgb(static_cast<kin::u8>(_camera3d->fov), static_cast<kin::u8>(_camera3d->position.y * 10.0f),
+                                               static_cast<kin::u8>(_camera3d->rotation.y * 100.0f + 0.5f)));
+            return;
+        }
         const auto red = static_cast<kin::u8>(_camera ? _camera->zoom * 10.0f : 0.0f);
         const auto green = static_cast<kin::u8>(_camera ? _camera->center().x : 0.0f);
         ctx.renderer.clear(kin::Color::rgb(red, green, 7));
@@ -1174,6 +1186,7 @@ public:
 private:
     std::filesystem::path* _shown;
     std::optional<kin::Camera2D> _camera;
+    std::optional<kin::Camera3D> _camera3d;
 };
 
 void test_view_scene_and_frame() {
@@ -1191,8 +1204,12 @@ void test_view_scene_and_frame() {
         R"({"id":3,"method":"view.scene","params":{"path":"../outside.kinscene"}})" "\n" +
         std::string(R"({"id":4,"method":"view.frame","params":{"path":")") + frame_name +
         R"(","width":32,"height":16,"x":40,"y":5,"zoom":3}})" "\n"
-        R"({"id":5,"method":"view.frame","params":{"width":0,"height":16}})" "\n"
-        R"({"id":6,"method":"server.shutdown"})" "\n");
+        R"({"id":5,"method":"view.frame","params":{"width":0,"height":16}})" "\n" +
+        std::string(R"({"id":6,"method":"view.frame","params":{"path":")") + frame_name + ".3d" +
+        R"(","width":8,"height":4,"camera3d":{"position":[0,4,2],"rotation":[0,0.6,0,0.8],"fov":50}}})" "\n"
+        R"({"id":7,"method":"view.frame","params":{"width":8,"height":4,"camera3d":{"position":[0,1],"fov":50}}})" "\n"
+        R"({"id":8,"method":"view.frame","params":{"width":8,"height":4,"camera3d":{"rotation":[0,0,0,0]}}})" "\n"
+        R"({"id":9,"method":"server.shutdown"})" "\n");
     const int code = kin::run_scene_server({
         .window = {.title = "view", .width = 64, .height = 48},
         .mode = kin::ServerMode::Driven,
@@ -1219,6 +1236,18 @@ void test_view_scene_and_frame() {
     file.close();
     std::filesystem::remove(frame_path);
     assert(response_result(text, 5) == nullptr && text.find("width and height of 1 to 8192") != std::string::npos);
+
+    // Through a 3D camera: where it is, its turn, its field of view; one that is not a camera refused with why.
+    const kin::JsonValue* frame3d = response_result(text, 6);
+    const std::filesystem::path frame3d_path = std::filesystem::path(frame_path) += ".3d";
+    assert(frame3d != nullptr && frame3d->int_at("width") == 8 && std::filesystem::file_size(frame3d_path) == 8u * 4u * 4u);
+    std::ifstream file3d(frame3d_path, std::ios::binary);
+    file3d.read(reinterpret_cast<char*>(pixel), sizeof(pixel));
+    assert(pixel[0] == 50 && pixel[1] == 40 && pixel[2] == 60 && pixel[3] == 255);
+    file3d.close();
+    std::filesystem::remove(frame3d_path);
+    assert(response_result(text, 7) == nullptr && text.find("camera3d needs position [x, y, z]") != std::string::npos);
+    assert(response_result(text, 8) == nullptr && text.find("is not a turn") != std::string::npos);
 }
 
 void test_view_scene_refused_by_default() {
@@ -1228,7 +1257,8 @@ void test_view_scene_refused_by_default() {
     std::istringstream in(
         R"({"id":1,"method":"view.scene","params":{"path":"edited.kinscene"}})" "\n"
         R"({"id":2,"method":"view.frame","params":{"width":8,"height":8}})" "\n"
-        R"({"id":3,"method":"server.shutdown"})" "\n");
+        R"({"id":3,"method":"view.frame","params":{"width":8,"height":8,"camera3d":{}}})" "\n"
+        R"({"id":4,"method":"server.shutdown"})" "\n");
     const int code = kin::run_scene_server({
         .window = {.title = "view", .width = 64, .height = 48},
         .mode = kin::ServerMode::Driven,
@@ -1240,6 +1270,7 @@ void test_view_scene_refused_by_default() {
     // draw through another camera.
     assert(response_result(out.str(), 1) == nullptr && out.str().find("does not show other scene files") != std::string::npos);
     assert(response_result(out.str(), 2) == nullptr && out.str().find("no world to draw") != std::string::npos);
+    assert(response_result(out.str(), 3) == nullptr && out.str().find("no 3D world to draw") != std::string::npos);
 }
 
 } // namespace
