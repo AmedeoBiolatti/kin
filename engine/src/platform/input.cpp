@@ -4,6 +4,8 @@
 #include <kin/core/utf8.hpp>
 #include <kin/platform/log.hpp>
 
+#include "window_points.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -819,13 +821,14 @@ void Input::process_native_event(const void* native_event) {
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
     } else if (event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION ||
                event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {
-        // Where on the window: the system gives 0..1 of its size.
+        // Where on the window, in points: the system gives 0..1 of its size.
         Vec2f pos{event.tfinger.x, event.tfinger.y};
         if (SDL_Window* window = SDL_GetWindowFromID(event.tfinger.windowID)) {
             int w = 0;
             int h = 0;
             SDL_GetWindowSize(window, &w, &h);
-            pos = {event.tfinger.x * static_cast<f32>(w), event.tfinger.y * static_cast<f32>(h)};
+            const f32 scale = detail::window_units_per_point(window);
+            pos = {event.tfinger.x * static_cast<f32>(w) / scale, event.tfinger.y * static_cast<f32>(h) / scale};
         }
         _touch_now = std::max(_touch_now, static_cast<f64>(event.tfinger.timestamp) * 1e-9);
         // One id for a finger whatever screen it is on.
@@ -847,25 +850,29 @@ void Input::process_native_event(const void* native_event) {
                (event.type == SDL_EVENT_MOUSE_WHEEL && event.wheel.which == SDL_TOUCH_MOUSEID)) {
         // The mouse the system makes from a finger: the finger is read itself.
     } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+        // In points (window_points.hpp), as Window::size() is.
+        const f32 scale = detail::window_units_per_point(event.motion.windowID);
         _pointer_is_touch = false;
         _last_mouse_motion_event_time_ns = event.motion.timestamp;
-        _mouse_motion.x += event.motion.xrel;
-        _mouse_motion.y += event.motion.yrel;
-        _frame_mouse_motion.x += event.motion.xrel;
-        _frame_mouse_motion.y += event.motion.yrel;
-        _mouse_pos = {event.motion.x, event.motion.y};
+        _mouse_motion.x += event.motion.xrel / scale;
+        _mouse_motion.y += event.motion.yrel / scale;
+        _frame_mouse_motion.x += event.motion.xrel / scale;
+        _frame_mouse_motion.y += event.motion.yrel / scale;
+        _mouse_pos = {event.motion.x / scale, event.motion.y / scale};
         _mouse_window = static_cast<WindowId>(event.motion.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && valid_mouse_button(event.button.button)) {
+        const f32 scale = detail::window_units_per_point(event.button.windowID);
         _pointer_is_touch = false;
         _mouse.set(event.button.button, true);
-        _drag_start[event.button.button] = {event.button.x, event.button.y};
-        _mouse_pos = {event.button.x, event.button.y};
+        _drag_start[event.button.button] = {event.button.x / scale, event.button.y / scale};
+        _mouse_pos = {event.button.x / scale, event.button.y / scale};
         _mouse_window = static_cast<WindowId>(event.button.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && valid_mouse_button(event.button.button)) {
+        const f32 scale = detail::window_units_per_point(event.button.windowID);
         _mouse.set(event.button.button, false);
-        _mouse_pos = {event.button.x, event.button.y};
+        _mouse_pos = {event.button.x / scale, event.button.y / scale};
         _mouse_window = static_cast<WindowId>(event.button.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
@@ -884,11 +891,13 @@ void Input::process_native_event(const void* native_event) {
         set_text_composition(event.edit.text ? event.edit.text : "", event.edit.start);
         _keyboard_window = static_cast<WindowId>(event.edit.windowID);
     } else if (event.type == SDL_EVENT_DROP_BEGIN || event.type == SDL_EVENT_DROP_POSITION) {
-        _drop_position = Vec2f{event.drop.x, event.drop.y};
+        const f32 scale = detail::window_units_per_point(event.drop.windowID);
+        _drop_position = Vec2f{event.drop.x / scale, event.drop.y / scale};
     } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data) {
         _dropped_files.push_back({
             .path = std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(event.drop.data))),
-            .pos = {event.drop.x, event.drop.y},
+            .pos = {event.drop.x / detail::window_units_per_point(event.drop.windowID),
+                    event.drop.y / detail::window_units_per_point(event.drop.windowID)},
             .window = static_cast<WindowId>(event.drop.windowID),
         });
     } else if (event.type == SDL_EVENT_DROP_COMPLETE) {

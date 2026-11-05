@@ -67,6 +67,15 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
 - **Window:** always fullscreen at the display's pixels, system bars hidden. A
   window wider than tall turns the phone to landscape, taller to portrait,
   unless the game set `SDL_HINT_ORIENTATIONS`.
+- **Points:** a window's coordinates are points, as on macOS. `Window::size()`
+  is the pixels divided by the screen's density: the A55's 2340x1080 pixels at
+  450 dpi are 832x384 points, 2.81 pixels each. `pixel_size()` stays the
+  pixels, and `display_scale()` is pixels per point. UI laid out in points and
+  drawn at `pixel_size() / size()` (the usual `set_content_scale`) is as big as
+  on a desktop and sharp. The mouse, fingers, safe area and keyboard area are
+  in points too. A game drawn at a fixed logical size is scaled to the screen
+  as before. To see a game at a phone's scale on a desktop, run it with
+  `KIN_WINDOW_POINT_SCALE=2.8`.
 - **Frame rate:** always presented with vsync, at the display's rate (120 Hz on
   the A55); `App::set_max_fps` lowers it.
 - **Saves:** `user_data_dir` is the app's private files folder
@@ -90,8 +99,6 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
 ## Known gaps
 
 - Touch scrolling of ui2 scroll boxes.
-- UI scale: the window's points are its pixels (2340x1080 on the A55, 450 dpi),
-  so UI laid out in points is small on a phone.
 - The first frame after returning to the screen logs one Vulkan
   `dequeueBuffer failed` while SDL_GPU replaces the old surface's swapchain;
   drawing continues.

@@ -99,6 +99,12 @@ public:
     Window& operator=(Window&&) = delete;
 
     WindowId id() const;
+    // Its size in points, the unit of its coordinates (the mouse's, the
+    // fingers', safe_area()'s); pixel_size() is what it is drawn at. On a
+    // phone a point is the screen's density of pixels (2.8 at 450 dpi), as on
+    // macOS and iOS, so UI laid out in points is as big as on a desktop.
+    // KIN_WINDOW_POINT_SCALE=<n> sets that density anywhere: a desktop window
+    // then shows a game as a phone would.
     i32 width() const;
     i32 height() const;
     Vec2i size() const;
