@@ -1,7 +1,8 @@
 # Third-Party Notices
 
 Kin's own source is under the [MIT License](../LICENSE). The repository contains no
-third-party code: CMake downloads the dependencies below at configure time (see
+third-party code but one table of data (see [Embedded data](#embedded-data)): CMake downloads the dependencies
+below at configure time (see
 [cmake/dependencies.cmake](../cmake/dependencies.cmake)) and links them statically
 into the engine.
 
@@ -36,6 +37,39 @@ notice are retained; shared/fetched sources are not edited. The guarded patch
 is in [kin_sdl_gpu.cmake](../cmake/kin_sdl_gpu.cmake). The optional direct-API SDL
 variant separately changes its private copy's `SDL_DYNAMIC_API` default; see
 [kin_sdl_direct.cmake](../cmake/kin_sdl_direct.cmake).
+
+## Embedded data
+
+With `KIN_EXPERIMENTAL_3D`, the GI's area lights reflect through the linearly transformed cosines tables of Heitz,
+Dupuy, Hill and Neubelt ("Real-Time Polygonal-Light Shading with Linearly Transformed Cosines", 2016), as
+[three.js](https://github.com/mrdoob/three.js) r160 ships them (`examples/jsm/lights/RectAreaLightUniformsLib.js`):
+[gpu_area_lights_ltc.cpp](../engine/src/renderer/gpu/gpu_area_lights_ltc.cpp), written by
+[tools/gen_area_light_ltc.py](../tools/gen_area_light_ltc.py), compiled into the engine. MIT license, Copyright ©
+2010-2023 three.js authors (also at the top of that file):
+
+```text
+The MIT License
+
+Copyright © 2010-2023 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
 
 ## Libraries bundled by SDL_image and SDL_ttf
 
