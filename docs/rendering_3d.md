@@ -1457,7 +1457,7 @@ weather (P3c)" section and `--preset rain|snow|storm|fire`.
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
-`shader_params`: four vec4s), in place of kin's, for a hologram, a force
+`shader_params`: its first four vec4s), in place of kin's, for a hologram, a force
 field, water. It is GLSL for Vulkan, compiled against kin's include, which
 declares the inputs and uniforms and has the lighting in it:
 
@@ -1524,7 +1524,7 @@ changes nothing draws exactly what the material draws without one. Its fields: `
 the function, kin lights it (`kin_lit`) and adds the emission, or, for an `unlit` material, shows its colour plus
 its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
 (`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
-`uNormalMap`, `uOcclusion`, `uEmissive`), and reads `Material3D::shader_params` as `kin_surface_param(0..3)`.
+`uNormalMap`, `uOcclusion`, `uEmissive`), and reads `Material3D::shader_params` (`surface_param_count3d`: 64 floats) as `kin_surface_param(0..15)`.
 
 `r3d.compile_surface_shader(path)` compiles the file now with glslc (development); a game ships its variants
 compiled at build time with `kin_compile_surface_shader(<var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl)`
@@ -1576,8 +1576,9 @@ shadowed, fogged and GI-lit as kin's own materials are.
 - **Outputs** (`base_color`, `alpha`, `normal` in world space, `metallic`, `roughness`, `occlusion`, `emission`)
   replace the surface's; those not given keep what the material makes. Roughness is kept within [0.045, 1], the
   normal unit, colours non-negative.
-- **Parameters** (`float`, `vec2`, `vec3`, `vec4`, `color`: linear RGBA) take `Material3D::shader_params`' 16 floats,
-  vec3 and vec4 each a vec4 of their own; `material_graph_params3d(graph, {{"name", value}})` fills them from the
+- **Parameters** (`float`, `vec2`, `vec3`, `vec4`, `color`: linear RGBA) take `Material3D::shader_params`' 64 floats
+  (`surface_param_count3d`; enough for Unreal's master materials: 102 of 107 free Fab materials before unused ones
+  are left out), vec3 and vec4 each a vec4 of their own; `material_graph_params3d(graph, {{"name", value}})` fills them from the
   defaults and the values given. Textures take one of the material's map slots (`"slot"`: `base`, `metallic_roughness`,
   `normal`, `occlusion`, `emissive`: the material's `texture`, `metallic_roughness`, ... fields bind them), sampled as
   sRGB (`base`, `emissive`) or linear, or as `"color_space"` says. A texture that isn't the slot's map

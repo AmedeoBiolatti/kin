@@ -16,7 +16,7 @@ layout(set = 3, binding = 0) uniform Cutoff {
     vec4 cutoff; // x: the alpha below which nothing is drawn; a surface's: y 1 to decode sRGB maps, z Scene3D::time
     vec4 uv;     // xy: the maps' scale, zw: their offset (Material3D::uv_scale, uv_offset)
 #ifdef KIN_SURFACE_ALPHA
-    vec4 surface[4]; // Material3D::shader_params
+    vec4 surface[16]; // Material3D::shader_params (surface_param_count3d floats)
 #endif
 } material;
 

@@ -179,6 +179,10 @@ private:
     std::shared_ptr<const IMaterialInputsBackend3D> _backend;
 };
 
+// Material3D::shader_params' floats: a custom `shader` reads the first 16 (four vec4s), a `surface` all of them
+// (kin_surface_param(0..15): a material graph's parameters).
+inline constexpr u32 surface_param_count3d = 64;
+
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
     // Emission strength. BaseRelative (legacy default): a share of the base colour or emissive map.
@@ -228,10 +232,10 @@ struct Material3D {
     Wrap3D wrap_v = Wrap3D::Clamp;
     // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
     // Custom shaders), which may light itself as kin's does or not. It reads
-    // `shader_params` (four vec4s) and all the material's fields above. The
+    // `shader_params`' first 16 floats (four vec4s) and all the material's fields above. The
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
-    std::array<f32, 16> shader_params{};
+    std::array<f32, surface_param_count3d> shader_params{};
     MaterialInputs3D inputs{}; // optional extra sampled textures/read-only buffers for shader
 
     LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
@@ -240,7 +244,7 @@ struct Material3D {
     std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
     // A surface of its own (SurfaceShader3D: docs/rendering_3d.md, Surface shaders): a function that changes what
     // the fields and maps above make before kin shades it, as kin shades its own (lit or `unlit`, fogged, its
-    // lights, global illumination and velocity). It reads `shader_params` (kin_surface_param(0..3)) and the maps
+    // lights, global illumination and velocity). It reads `shader_params` (kin_surface_param(0..15)) and the maps
     // above. A `shader` takes its place. The shadow, pick and pre-passes still cut a Blend3D::Mask out by the base
     // colour's alpha, not the surface's.
     SurfaceShader3D surface{};

@@ -593,7 +593,8 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
 #define FIELD(name)                                                                                                    \
     if (p.name)                                                                                                        \
     material.name = *p.name
-        FIELD(shader_params);
+        if (p.shader_params) // a custom shader's 16 floats (a graph's "params" fill the rest of them below)
+            std::copy(p.shader_params->begin(), p.shader_params->end(), material.shader_params.begin());
         FIELD(color);
         FIELD(metallic);
         FIELD(roughness);

@@ -554,9 +554,9 @@ private:
     // A surface shader's slot 1: the stock block, then Material3D::shader_params (kin_surface_param).
     struct SurfaceMaterialUniforms {
         MaterialUniforms material;
-        f32 surface[16];
+        f32 surface[surface_param_count3d];
     };
-    static_assert(sizeof(SurfaceMaterialUniforms) == 144);
+    static_assert(sizeof(SurfaceMaterialUniforms) == 80 + 4 * surface_param_count3d);
     static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;
@@ -1237,7 +1237,8 @@ private:
         u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
         std::weak_ptr<const u64> lifetime;
         std::shared_ptr<GpuBuffer> buffer;
-        // Surface shaders' parameters, 16 floats a copy beside `buffer`'s records: only for a scene that has them.
+        // Surface shaders' parameters, surface_param_count3d floats a copy beside `buffer`'s records: only for a
+        // scene that has them.
         std::shared_ptr<GpuBuffer> surface;
         bool valid = false;
     };

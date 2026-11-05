@@ -275,3 +275,11 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   `tools/import_material/godot_probe.gd` makes `tests/fixtures/godot_visual` in a scratch project.
 
 Not verified: any of the three against its engine's render of the same material (structure and glslc only).
+
+**Parameters: 64 floats (2026-11-05).** Measured on 107 free Fab materials: 39 fell back to Tier 1 because their
+parameters filled more than 16 floats (master materials: stone, wood, water, up to 110 floats counted). Now
+`surface_param_count3d` = 64 (`Material3D::shader_params`; custom `shader`s still read the first 16): the surface
+block, the cut-out block and the merged draws' table (64 floats a copy) carry all of them. Cooked format version 4;
+version 3's merged-draw variants (the old table stride) are left out, so those draws go unmerged. Fab after it: 28
+full graphs, 73 partial, 6 Tier 1 (all > 5 textures); 41 graphs cooked by glslc. Tests: the merged and unmerged
+tint at floats 56-63 draw what the tint at 0-7 does; a cut-out scale at float 63; 16 vec4s compile, a 17th is refused.

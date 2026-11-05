@@ -5327,7 +5327,7 @@ void GpuRenderer3D::bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPas
             texture_binding(material.emissive_texture, material.wrap_u, material.wrap_v, material.texture_samplers[4])};
         SDL_BindGPUFragmentSamplers(pass, 0, maps.data(), u32(maps.size()));
         struct {
-            f32 cutoff[4], uv[4], surface[16];
+            f32 cutoff[4], uv[4], surface[surface_param_count3d];
         } u{{material.alpha_cutoff, _owner->_color_texture_format == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f,
              _cutout_time, 0.0f},
             {material.uv_scale.x, material.uv_scale.y, material.uv_offset.x, material.uv_offset.y},
@@ -9869,11 +9869,12 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
                     }
             };
             _device->upload_storage_buffer(table.buffer->handle(), 0, static_cast<u32>(bytes), nullptr, true, &fill);
-            // Surface shaders' parameters, for a scene with any: 16 floats a copy, in the same places.
+            // Surface shaders' parameters, for a scene with any: surface_param_count3d floats a copy, in the same
+            // places.
             const bool surfaces = std::any_of(_refs.begin(), _refs.end(), [&](const DrawRef& ref) {
                 return ref.scene == s && ref.direct && ref.draw->material.surface.backend();
             });
-            const u64 surface_bytes = source->instances().size() * sizeof(f32) * 16;
+            const u64 surface_bytes = source->instances().size() * sizeof(f32) * surface_param_count3d;
             if (!surfaces || (table.surface && table.surface->size() != surface_bytes)) {
                 if (table.surface)
                     _draw_material_bytes -= table.surface->size();
@@ -9890,8 +9891,9 @@ void GpuRenderer3D::retain_draw_materials(FrameCtx& ctx) {
                     for (const auto& ref : _refs)
                         if (ref.scene == s && ref.direct && ref.draw->material.surface.backend())
                             for (u32 i = 0; i < ref.draw->count; ++i)
-                                std::memcpy(out.data() + std::size_t(ref.draw->first + i) * 64,
-                                            ref.draw->material.shader_params.data(), 64);
+                                std::memcpy(
+                                    out.data() + std::size_t(ref.draw->first + i) * sizeof(f32) * surface_param_count3d,
+                                    ref.draw->material.shader_params.data(), sizeof(f32) * surface_param_count3d);
                 };
                 _device->upload_storage_buffer(table.surface->handle(), 0, static_cast<u32>(surface_bytes), nullptr,
                                                true, &params);
