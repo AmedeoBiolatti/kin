@@ -15,6 +15,18 @@
 
 namespace {
 using namespace kin;
+// An environment variable set, or removed (null), on POSIX and Windows.
+void set_env(const char* name, const char* value) {
+#ifdef _WIN32
+    _putenv_s(name, value ? value : ""); // an empty value removes it
+#else
+    if (value)
+        setenv(name, value, 1);
+    else
+        unsetenv(name);
+#endif
+}
+
 void check(const auto& value, const char* message) {
     if (!value)
         throw std::runtime_error(message);
@@ -313,7 +325,7 @@ void material_gpu(Renderer2D& renderer) {
         write(scratch.path / "glow.kingraph.spv", std::string(bytes.begin(), bytes.end()));
         const char* glslc = std::getenv("KIN_GLSLC");
         const std::string kept = glslc ? glslc : "";
-        setenv("KIN_GLSLC", "/nonexistent/glslc", 1);
+        set_env("KIN_GLSLC", "/nonexistent/glslc");
         {
             Assets3D shipped{r3d, scratch.path};
             const auto loaded = shipped.load_materials("graph.kinmaterials", model, {}).value_or({});
@@ -330,10 +342,7 @@ void material_gpu(Renderer2D& renderer) {
                       kin::diagnostics3d_text(stale.diagnostics()).find("not cooked") != std::string::npos,
                   "an older cooked graph shadowed its newer source");
         }
-        if (kept.empty())
-            unsetenv("KIN_GLSLC");
-        else
-            setenv("KIN_GLSLC", kept.c_str(), 1);
+        set_env("KIN_GLSLC", kept.empty() ? nullptr : kept.c_str());
     }
     // Sampling belongs to each map: images share by colour/data role, including a legacy nearest material override.
     write(scratch.path / "maps.kinmaterials", R"({"schema":"kin.materials3d/1","material":{
