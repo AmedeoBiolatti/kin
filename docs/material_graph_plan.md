@@ -219,5 +219,11 @@ the cooked format (`pack/unpack_cooked_material_graph3d`, `cook_material_graph3d
 kin.material-graph-layout/1); `kin_material_graph` (check, glsl, cook, nodes) and cmake's `kin_cook_material_graph`.
 Tests: material_assets3d (bind, merge, clear, errors, draw, edit-and-reload, cooked without glslc, without its
 source, a stale cooked file refused), material_graph3d (layout and pack round trips, damage refused, cook now, cooked
-at build time). Not yet: SPIR-V optimisation (a cooked graph is ~650 KB of 8 unoptimised variants), cut-outs by the
+at build time). Not yet: cut-outs by the
 graph's alpha in shadow/pick passes, the retained draw paths.
+
+**Cooked size.** 669 KB to about 220 KB: the variants optimised (glslc -O, which also drops the debug names; run-time
+surface compiles too, so development draws what ships: an optimised cooked graph of no outputs is byte-identical to
+the stock material) and the payload deflated (stb_image_write's zlib; inflated by stb_image's), with an FNV-1a hash
+of it in the header (a cut or a changed byte is refused); format version 2, version 1 still read. What stays is eight
+shaders' worth of kin's lighting (about 30 KB each, deflated); zlib's 32 KB window can't share them.

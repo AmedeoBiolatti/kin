@@ -16,6 +16,13 @@
 #include <set>
 #include <sstream>
 
+extern "C" {
+char* kin_zlib_inflate(const char* bytes, int size, int expected, int* out_size);
+void kin_import_free(void* pixels);
+unsigned char* kin_zlib_deflate(const unsigned char* bytes, int size, int* out_size);
+void kin_deflate_free(void* bytes);
+}
+
 namespace kin {
 namespace {
 
@@ -926,21 +933,41 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
     return g;
 }
 
-// KINGRAPH, the version, the layout's bytes, then each variant's: lengths little-endian u32.
+// KINGRAPH, the version (2), the payload's size and its FNV-1a hash, then the payload deflated (zlib): the layout's
+// bytes, then each variant's, each after its length (little-endian u32). Version 1 is the payload as it is.
+static u32 fnv1a(std::span<const u8> bytes) {
+    u32 h = 2166136261u;
+    for (const u8 b : bytes)
+        h = (h ^ b) * 16777619u;
+    return h;
+}
+
 std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked) {
-    std::vector<u8> out{'K', 'I', 'N', 'G', 'R', 'A', 'P', 'H'};
-    const auto u32le = [&](u32 v) {
+    std::vector<u8> payload;
+    const auto u32le = [](std::vector<u8>& to, u32 v) {
         for (int i = 0; i < 4; ++i)
-            out.push_back(u8(v >> (8 * i)));
+            to.push_back(u8(v >> (8 * i)));
     };
-    u32le(1);
     const std::string layout = write_material_graph_layout3d(cooked.graph);
-    u32le(u32(layout.size()));
-    out.insert(out.end(), layout.begin(), layout.end());
+    u32le(payload, u32(layout.size()));
+    payload.insert(payload.end(), layout.begin(), layout.end());
     for (const auto& v : cooked.spirv) {
-        u32le(u32(v.size()));
-        out.insert(out.end(), v.begin(), v.end());
+        u32le(payload, u32(v.size()));
+        payload.insert(payload.end(), v.begin(), v.end());
     }
+    std::vector<u8> out{'K', 'I', 'N', 'G', 'R', 'A', 'P', 'H'};
+    int size = 0;
+    unsigned char* deflated = kin_zlib_deflate(payload.data(), int(payload.size()), &size);
+    if (!deflated) { // (only out of memory) the payload as it is: version 1
+        u32le(out, 1);
+        out.insert(out.end(), payload.begin(), payload.end());
+        return out;
+    }
+    u32le(out, 2);
+    u32le(out, u32(payload.size()));
+    u32le(out, fnv1a(payload));
+    out.insert(out.end(), deflated, deflated + size);
+    kin_deflate_free(deflated);
     return out;
 }
 
@@ -950,35 +977,61 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
             *why = std::move(w);
         return std::nullopt;
     };
-    size_t at = 8;
-    const auto u32le = [&]() -> std::optional<u32> {
-        if (at + 4 > bytes.size())
-            return std::nullopt;
-        const u32 v = u32(bytes[at]) | u32(bytes[at + 1]) << 8 | u32(bytes[at + 2]) << 16 | u32(bytes[at + 3]) << 24;
-        at += 4;
-        return v;
+    const auto u32_at = [](std::span<const u8> b, size_t at) {
+        return u32(b[at]) | u32(b[at + 1]) << 8 | u32(b[at + 2]) << 16 | u32(b[at + 3]) << 24;
     };
     if (bytes.size() < 16 || std::memcmp(bytes.data(), "KINGRAPH", 8) != 0)
         return fail("not a cooked material graph");
-    if (u32le() != 1u)
+    const u32 version = u32_at(bytes, 8);
+    std::vector<u8> inflated;
+    std::span<const u8> payload;
+    if (version == 1) {
+        payload = bytes.subspan(12);
+    } else if (version == 2) {
+        if (bytes.size() < 20)
+            return fail("a cooked material graph cut short");
+        const u32 expected = u32_at(bytes, 12), hash = u32_at(bytes, 16);
+        if (expected > 256u * 1024 * 1024)
+            return fail("a cooked material graph too large");
+        int size = 0;
+        char* out = kin_zlib_inflate(reinterpret_cast<const char*>(bytes.data() + 20), int(bytes.size() - 20),
+                                     int(expected), &size);
+        if (!out || u32(size) != expected || fnv1a({reinterpret_cast<const u8*>(out), size_t(size)}) != hash) {
+            if (out)
+                kin_import_free(out);
+            return fail("a cooked material graph cut short (it does not inflate)");
+        }
+        inflated.assign(out, out + size);
+        kin_import_free(out);
+        payload = inflated;
+    } else {
         return fail("a cooked material graph of another version");
-    const auto layout_size = u32le();
-    if (!layout_size || at + *layout_size > bytes.size())
+    }
+    size_t at = 0;
+    const auto next = [&]() -> std::optional<u32> {
+        if (at + 4 > payload.size())
+            return std::nullopt;
+        const u32 v = u32_at(payload, at);
+        at += 4;
+        return v;
+    };
+    const auto layout_size = next();
+    if (!layout_size || at + *layout_size > payload.size())
         return fail("a cooked material graph cut short");
     CookedMaterialGraph3D cooked;
     std::string layout_why;
     auto layout =
-        read_material_graph_layout3d({reinterpret_cast<const char*>(bytes.data() + at), *layout_size}, &layout_why);
+        read_material_graph_layout3d({reinterpret_cast<const char*>(payload.data() + at), *layout_size}, &layout_why);
     if (!layout)
         return fail(layout_why);
     cooked.graph = std::move(*layout);
     at += *layout_size;
     for (auto& v : cooked.spirv) {
-        const auto n = u32le();
-        if (!n || *n < 20 || at + *n > bytes.size() || bytes[at] != 3 || bytes[at + 1] != 2 || bytes[at + 2] != 35 ||
-            bytes[at + 3] != 7)
+        const auto n = next();
+        if (!n || *n < 20 || at + *n > payload.size() || payload[at] != 3 || payload[at + 1] != 2 ||
+            payload[at + 2] != 35 || payload[at + 3] != 7)
             return fail("a cooked material graph whose SPIR-V is cut short or not SPIR-V");
-        v.assign(bytes.begin() + std::ptrdiff_t(at), bytes.begin() + std::ptrdiff_t(at + *n));
+        v.assign(payload.begin() + std::ptrdiff_t(at), payload.begin() + std::ptrdiff_t(at + *n));
         at += *n;
     }
     return cooked;
@@ -1009,7 +1062,7 @@ std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view text
     std::string w;
     bool ok = true;
     for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
-        auto spirv = compile_glsl(file, ShaderStage::Fragment, &w, surface_variant_defines(SurfaceVariant3D(i)));
+        auto spirv = compile_glsl(file, ShaderStage::Fragment, &w, surface_variant_defines(SurfaceVariant3D(i)), true);
         ok = spirv.has_value();
         if (ok)
             cooked.spirv[i] = std::move(*spirv);

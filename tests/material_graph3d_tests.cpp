@@ -230,8 +230,12 @@ void cooked() {
     const auto unpacked = unpack_cooked_material_graph3d(bytes, &why);
     CHECK(unpacked && unpacked->graph.parameters.size() == 3 && unpacked->spirv[7] == made.spirv[7]);
     auto cut = bytes;
-    cut.resize(cut.size() - 3);
+    cut.resize(cut.size() / 2); // the data cut, not only zlib's trailing check
     CHECK(!unpack_cooked_material_graph3d(cut, &why) && contains(why, "cut short"));
+    auto flipped = bytes;
+    flipped[flipped.size() / 2] ^= 0x40; // a byte changed: the payload's hash refuses it
+    CHECK(!unpack_cooked_material_graph3d(flipped, &why));
+    CHECK(bytes.size() < 400 && "the payload deflated (8 variants of 24 bytes and the layout)");
     auto wrong = bytes;
     wrong[0] = 'X';
     CHECK(!unpack_cooked_material_graph3d(wrong));

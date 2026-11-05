@@ -4718,6 +4718,20 @@ void test_gpu_material_graph() {
         kin::Material3D empty = plain;
         empty.surface = graph("empty", "", "", "").surface;
         assert(same(shoot(empty), stock) && "a graph of no outputs draws the material");
+        // Cooked (optimised SPIR-V, compressed), as a shipped game loads it: the same picture.
+        {
+            std::string why;
+            const auto cooked =
+                kin::cook_material_graph3d(R"({"schema": "kin.material-graph/1", "nodes": [], "outputs": {}})", &why);
+            assert(cooked.has_value());
+            const auto packed = kin::pack_cooked_material_graph3d(*cooked);
+            const auto unpacked = kin::unpack_cooked_material_graph3d(packed, &why);
+            assert(unpacked.has_value());
+            kin::Material3D shipped = plain;
+            shipped.surface = r3d.create_material_graph(*unpacked).value_or({}).surface;
+            assert(shipped.surface.valid() && same(shoot(shipped), stock) &&
+                   "a cooked graph draws what the material draws");
+        }
         kin::Material3D remade = plain;
         remade.surface = graph("remade", R"({"name": "albedo", "type": "texture", "slot": "base"})",
                                R"({"id": "map", "type": "texture", "texture": "albedo"},
