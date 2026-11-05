@@ -355,7 +355,8 @@ Result3D<ImportedMaterial3D> import_unity_material(const std::filesystem::path& 
         // Base colour and map; its tiling and offset are every map's (Unity's Lit and Standard read all maps with the
         // base map's).
         const std::string base_map = hdrp ? "_BaseColorMap" : first({"_BaseMap", "_MainTex"});
-        const auto base = m.color(hdrp ? "_BaseColor" : first({"_BaseColor", "_Color"})).value_or(std::array<f32, 4>{1, 1, 1, 1});
+        const auto base =
+            m.color(hdrp ? "_BaseColor" : first({"_BaseColor", "_Color"})).value_or(std::array<f32, 4>{1, 1, 1, 1});
         p.color = Color{byte(base[0]), byte(base[1]), byte(base[2]), byte(base[3])};
         const auto albedo = texture_file(base_map);
         const auto albedo_path = albedo ? x.readable(*albedo, base_map) : std::nullopt;
@@ -1350,6 +1351,10 @@ Result3D<ImportedMaterial3D> import_unity_graph(const std::filesystem::path& sou
         }
         auto& p = imported.asset.base.material;
         p.graph = imported.graph.lexically_relative(x.content);
+        // The graph reads the mesh's UV as its own nodes tile it: Tier 1's tiling (the material's UV transform, which
+        // kin's "uv" input goes through) would tile it twice.
+        p.uv_scale = Vec2f{1, 1};
+        p.uv_offset = Vec2f{0, 0};
         // The target: its surface, alpha clip and sides; Unlit.
         if (g.target) {
             const bool transparent = g.target->int_at("m_SurfaceType", 0) == 1;
