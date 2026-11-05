@@ -22,6 +22,7 @@ class Renderer3D;
 struct RuntimeDebugOptions;
 struct RunReport;
 struct Camera2D;
+struct Camera3D;
 class PlatformServices;
 class DevelopmentSession;
 
@@ -107,6 +108,14 @@ public:
     // null: its own again. False when the scene has no world to draw so (the
     // default; EcsScene has).
     virtual bool set_view_camera(const Camera2D* camera) {
+        (void)camera;
+        return false;
+    }
+    // The same for a 3D world (view.frame's camera3d): drawn through `camera`
+    // (where it is, how it is turned, its field of view) instead of the
+    // scene's own cameras; null: its own again. False when the scene draws no
+    // 3D world so (the default).
+    virtual bool set_view_camera3d(const Camera3D* camera) {
         (void)camera;
         return false;
     }

@@ -18,6 +18,12 @@ releases may change APIs.
   shows no hover between touches and names touch bindings in prompts (`PromptBindingMode::Device` too). Lua:
   `input.touches()`, `input.pinch()`, `input.pan()`. Scene server: `input.touch {x, y, id, mode}`.
 
+- 3D scenes drawn through a tool's camera ([agent interface](agent_interface.md)). `view.frame` takes a
+  `camera3d` (`position` [x, y, z], `rotation` as a quaternion [x, y, z, w], `fov`, `near`) in place of a 2D
+  camera's `x`, `y` and `zoom`, and hands it to the new `Scene::set_view_camera3d` (false by default: a scene that
+  draws no 3D world refuses it, with why). Kin Studio's scene view draws a 3D scene with the game's own code so.
+  The 3D components also carry their inspector hints (`ModelRenderer3D.asset` a Model, units, choices, descriptions).
+
 - A store for each build ([platform services](platform_services.md#steam)). The cache variable `KIN_GAME_STORE`
   (`auto`, `steam`, `none`) says which store `kin_game` builds a game for: `none` (itch.io, a download of its own)
   builds in no Steam app id, no `steam_appid.txt` and no Steam library, whatever the game info says; `steam` fails

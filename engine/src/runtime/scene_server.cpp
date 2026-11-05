@@ -1,4 +1,5 @@
 #include <kin/runtime/scene_server.hpp>
+#include <kin/render3d/camera3d.hpp> // view.frame's camera3d (its fields only: in 2D builds too)
 #ifdef KIN_EXPERIMENTAL_3D
 #include <kin/render3d/renderer3d.hpp>
 #endif
@@ -7,6 +8,8 @@
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <vector>
+#include <cmath>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -657,7 +660,9 @@ ServerResponse handle_view_scene(ServerContext& ctx, const JsonValue& params) {
 // at `width` x `height` through a camera centred on world point (x, y), `zoom`
 // screen units a world unit, turned `rotation` degrees; its pixels written to
 // `path` (in the working folder) as they are: rows of RGBA bytes, top first.
-// The camera stays for later frames (screenshots too).
+// The camera stays for later frames (screenshots too). A 3D scene's:
+// {path, width, height, camera3d: {position: [x, y, z], rotation: [x, y, z, w],
+// fov, near}} (Scene::set_view_camera3d), in place of x, y, zoom, rotation.
 ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
     Scene* scene = ctx.scenes().top_mut();
     if (!scene) {
@@ -682,13 +687,58 @@ ServerResponse handle_view_frame(ServerContext& ctx, const JsonValue& params) {
         ctx.window().set_size(size);
         ctx.window().sync(); // sized later on some systems (X11)
     }
-    Camera2D camera;
-    camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
-    camera.zoom = static_cast<f32>(zoom);
-    camera.rotation = static_cast<f32>(params.number_at("rotation", 0.0));
-    camera.look_at({static_cast<f32>(params.number_at("x", 0.0)), static_cast<f32>(params.number_at("y", 0.0))});
-    if (!scene->set_view_camera(&camera)) {
-        return error_result("the scene has no world to draw through another camera");
+    if (const JsonValue* given = params.find("camera3d")) {
+        // A 3D camera: where it is, its turn (a quaternion), its field of view and near plane.
+        const auto numbers = [&](std::string_view key, std::size_t count) -> std::optional<std::vector<f32>> {
+            const JsonValue* value = given->find(key);
+            if (!value) {
+                return std::vector<f32>{};
+            }
+            if (!value->is_array() || value->items().size() != count) {
+                return std::nullopt;
+            }
+            std::vector<f32> out;
+            for (const JsonValue& item : value->items()) {
+                if (!item.is_number() || !std::isfinite(item.as_number())) {
+                    return std::nullopt;
+                }
+                out.push_back(static_cast<f32>(item.as_number()));
+            }
+            return out;
+        };
+        const std::optional<std::vector<f32>> position = numbers("position", 3);
+        const std::optional<std::vector<f32>> rotation = numbers("rotation", 4);
+        const f64 fov = given->number_at("fov", 60.0);
+        const f64 near_plane = given->number_at("near", 0.1); // (not `near`: a macro on Windows)
+        if (!given->is_object() || !position || !rotation || !(fov > 0.0 && fov < 180.0) || !(near_plane > 0.0)) {
+            return error_result("view.frame's camera3d needs position [x, y, z], rotation [x, y, z, w], fov between 0 and 180 and near above 0");
+        }
+        Camera3D camera;
+        if (position->size() == 3) {
+            camera.position = {(*position)[0], (*position)[1], (*position)[2]};
+        }
+        if (rotation->size() == 4) {
+            const f32 length = std::sqrt((*rotation)[0] * (*rotation)[0] + (*rotation)[1] * (*rotation)[1] +
+                                         (*rotation)[2] * (*rotation)[2] + (*rotation)[3] * (*rotation)[3]);
+            if (!(length > 1e-6f)) {
+                return error_result("view.frame's camera3d rotation is not a turn (its length is 0)");
+            }
+            camera.rotation = {(*rotation)[0] / length, (*rotation)[1] / length, (*rotation)[2] / length, (*rotation)[3] / length};
+        }
+        camera.fov = static_cast<f32>(fov);
+        camera.z_near = static_cast<f32>(near_plane);
+        if (!scene->set_view_camera3d(&camera)) {
+            return error_result("the scene has no 3D world to draw through another camera");
+        }
+    } else {
+        Camera2D camera;
+        camera.set_viewport({static_cast<f32>(width), static_cast<f32>(height)});
+        camera.zoom = static_cast<f32>(zoom);
+        camera.rotation = static_cast<f32>(params.number_at("rotation", 0.0));
+        camera.look_at({static_cast<f32>(params.number_at("x", 0.0)), static_cast<f32>(params.number_at("y", 0.0))});
+        if (!scene->set_view_camera(&camera)) {
+            return error_result("the scene has no world to draw through another camera");
+        }
     }
     ctx.render_frame();
     std::vector<u8> pixels;
