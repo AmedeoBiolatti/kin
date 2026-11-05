@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace kin {
@@ -234,8 +235,10 @@ bool pad_control_held(const GamepadState& pad, PadControl control);
 // Whether `binding` is held on `input` (its modifiers not asked), and an
 // axis's value there (-1 to 1): what Input::held() and Input::axis() read,
 // for a binding or an axis that is not in its map (an editor trying one).
-bool binding_held(const Input& input, InputBinding binding);
-f32 axis_value(const Input& input, const InputAxis& axis);
+// `player` as in Input::held(player, ...): -1 anyone (every device), else that
+// player's devices.
+bool binding_held(const Input& input, InputBinding binding, i32 player = -1);
+f32 axis_value(const Input& input, const InputAxis& axis, i32 player = -1);
 
 // A binding as an input file writes it in an axis: "key:A", "mouse:MouseLeft", "pad:dpad_left".
 std::string binding_text(InputBinding binding);
@@ -282,6 +285,21 @@ private:
     std::unordered_map<std::string, std::vector<InputBinding>> _bindings;
     std::unordered_map<std::string, InputAxis> _axes;
 };
+
+// A local player and what they play with (Input::set_players): the keyboard
+// and mouse, controllers by slot (Gamepads), and, when they share a keyboard
+// with another player (one on WASD, one on the arrows), their own actions and
+// axes. Several players may have the keyboard; a controller is one player's.
+struct InputPlayer {
+    bool keyboard = false; // the keyboard and the mouse
+    std::vector<i32> gamepads; // controller slots, 0 to max_gamepads - 1
+    std::optional<InputMap> map; // its own bindings; none: the Input's map
+
+    friend bool operator==(const InputPlayer&, const InputPlayer&) = default;
+};
+
+// The kind of device a player last used (for the prompt to show them).
+enum class InputDevice : u8 { Keyboard, Mouse, Gamepad };
 
 class InputActionContext {
 public:
@@ -453,11 +471,67 @@ public:
     // An axis of the map, -1 to 1 (0 when there is no such axis).
     f32 axis(std::string_view name) const;
 
-    // The game controller's state, as App passes it each frame when it opens
-    // controllers (AppConfig::gamepads), or as a test sets it: what actions
-    // and axes bound to a controller read.
-    void set_gamepad(const GamepadState& state);
-    const GamepadState& gamepad() const { return _pad; }
+    // Local players. With none set there is one, player 0, who plays with
+    // every device: a one-player game sets nothing. Once players are set, each
+    // reads only their own devices, with their own map if they have one:
+    //
+    //     input.set_players({{.keyboard = true}, {.gamepads = {0}}, {.gamepads = {1}}});
+    //     if (input.pressed(1, "jump")) ...      // the first controller's player
+    //     if (input.pressed("pause")) ...        // anyone, on any device
+    //
+    // The questions without a player (held(action), axis(name)) and with
+    // player -1 ask about anyone: every device, the keyboard's and every
+    // controller's, owned or not, with the Input's map, and each player with
+    // their own map.
+    void set_players(std::vector<InputPlayer> players);
+    const std::vector<InputPlayer>& players() const { return _players; }
+    // A player joins at the end, or leaves (those after it move down one):
+    // the number of the one added (0 when it is the first).
+    i32 add_player(InputPlayer player);
+    void remove_player(i32 player);
+    // 1 with no players set (everyone is player 0).
+    i32 player_count() const { return _players.empty() ? 1 : static_cast<i32>(_players.size()); }
+    // The player a controller is given to (-1: nobody's, or nobody is set).
+    i32 player_of_gamepad(i32 slot) const;
+    // Whether the player has something to play with: the keyboard, or a
+    // controller plugged in (false: show "reconnect your controller").
+    bool player_connected(i32 player) const;
+
+    bool pressed(i32 player, std::string_view action) const;
+    bool held(i32 player, std::string_view action) const;
+    bool released(i32 player, std::string_view action) const;
+    bool frame_pressed(i32 player, std::string_view action) const;
+    bool frame_released(i32 player, std::string_view action) const;
+    f32 axis(i32 player, std::string_view name) const;
+
+    // What the player (-1: anyone) last pressed something on: the keyboard,
+    // the mouse or a controller (before anything: the keyboard if they have
+    // it). And their controller pressed last (none yet: their first plugged
+    // in; -1: they have none plugged in).
+    InputDevice last_device(i32 player = -1) const;
+    i32 last_gamepad(i32 player = -1) const;
+
+    // Game controllers' states by slot (0 to max_gamepads - 1), as App passes
+    // them each frame when it opens controllers (App::open_gamepads), or as a
+    // test or a replay sets them: what actions and axes bound to a controller
+    // read. Without a slot: slot 0.
+    void set_gamepad(const GamepadState& state) { set_gamepad(0, state); }
+    void set_gamepad(i32 slot, const GamepadState& state);
+    const GamepadState& gamepad(i32 slot = 0) const;
+    // A controller came into `slot`, or left it, since a fixed step last read
+    // it (edges that last like pressed()'s).
+    bool gamepad_plugged(i32 slot) const;
+    bool gamepad_unplugged(i32 slot) const;
+    // The lowest slot whose `control` was pressed (as pressed()), or -1;
+    // `free_only`: only controllers no player has ("press A to join").
+    i32 gamepad_pressed(PadControl control, bool free_only = false) const;
+
+    // Shakes the controller the player (-1: anyone) last used, `low` (the
+    // heavy motor) and `high` (the light buzz) 0 to 1, for `seconds`; or a slot's.
+    // Asked here and done by App (take_rumble), next frame.
+    void rumble(i32 player, f32 low, f32 high, f32 seconds);
+    void rumble_gamepad(i32 slot, f32 low, f32 high, f32 seconds);
+    std::vector<GamepadRumble> take_rumble() { return std::exchange(_rumble, {}); }
 
 private:
     friend class App;
@@ -468,24 +542,82 @@ private:
     static constexpr i32 KEY_COUNT = 512;
     static constexpr i32 MOUSE_BUTTON_COUNT = 6;
     static constexpr f32 DRAG_THRESHOLD = 4.0f;
+    static constexpr std::size_t pad_control_count = static_cast<std::size_t>(PadControl::Count);
+
+    // Buttons of one device (keys, mouse buttons, a controller's controls)
+    // and their edges, held and changed the same way for all of them.
+    enum class Edge : u8 { Held, Pressed, Released, FramePressed, FrameReleased };
+    template <std::size_t N>
+    struct Buttons {
+        std::array<bool, N> cur{};
+        std::array<bool, N> prev{};
+        std::array<bool, N> pressed{};        // sticky: until a fixed step reads it
+        std::array<bool, N> released{};
+        std::array<bool, N> frame_pressed{};  // until the next rendered frame
+        std::array<bool, N> frame_released{};
+
+        // Held now or not, with an edge when that changed.
+        void set(std::size_t i, bool now) {
+            if (now && !cur[i]) {
+                pressed[i] = true;
+                frame_pressed[i] = true;
+            } else if (!now && cur[i]) {
+                released[i] = true;
+                frame_released[i] = true;
+            }
+            cur[i] = now;
+        }
+        // A press edge even if it was held already (tests, driven input).
+        void press(std::size_t i) {
+            prev[i] = false;
+            cur[i] = true;
+            pressed[i] = true;
+            frame_pressed[i] = true;
+        }
+        bool test(std::size_t i, Edge edge) const {
+            switch (edge) {
+            case Edge::Held: return cur[i];
+            case Edge::Pressed: return pressed[i] || (cur[i] && !prev[i]);
+            case Edge::Released: return released[i] || (!cur[i] && prev[i]);
+            case Edge::FramePressed: return frame_pressed[i];
+            case Edge::FrameReleased: return frame_released[i];
+            }
+            return false;
+        }
+        void advance_step() {
+            prev = cur;
+            pressed.fill(false);
+            released.fill(false);
+        }
+        void clear_frame() {
+            frame_pressed.fill(false);
+            frame_released.fill(false);
+        }
+    };
+
+    // The devices a question reads and the map it reads them with.
+    struct Reach {
+        bool keyboard = false;
+        u32 gamepads = 0; // bit per slot
+        const InputMap* map = nullptr;
+    };
+    Reach reach_of(const InputPlayer& player) const;
+    Reach everything() const;
+    bool binding_edge(const Reach& reach, InputBinding binding, Edge edge) const;
+    bool map_edge(const Reach& reach, std::string_view action, Edge edge) const;
+    bool action_edge(i32 player, std::string_view action, Edge edge) const;
+    f32 reach_axis(const Reach& reach, const InputAxis& axis) const;
+    f32 player_axis(i32 player, std::string_view name) const;
+    friend bool binding_held(const Input&, InputBinding, i32);
+    friend f32 axis_value(const Input&, const InputAxis&, i32);
 
     void begin_frame(bool advance_transients);
     void process_native_event(const void* event);
 
-    std::array<bool, KEY_COUNT> _key_cur = {};
-    std::array<bool, KEY_COUNT> _key_prev = {};
-    std::array<bool, KEY_COUNT> _key_pressed = {};
-    std::array<bool, KEY_COUNT> _key_released = {};
-    std::array<bool, KEY_COUNT> _key_frame_pressed = {};
+    Buttons<KEY_COUNT> _keys;
     std::array<bool, KEY_COUNT> _key_frame_repeated = {};
-    std::array<bool, KEY_COUNT> _key_frame_released = {};
 
-    std::array<bool, MOUSE_BUTTON_COUNT> _mouse_cur = {};
-    std::array<bool, MOUSE_BUTTON_COUNT> _mouse_prev = {};
-    std::array<bool, MOUSE_BUTTON_COUNT> _mouse_pressed = {};
-    std::array<bool, MOUSE_BUTTON_COUNT> _mouse_released = {};
-    std::array<bool, MOUSE_BUTTON_COUNT> _mouse_frame_pressed = {};
-    std::array<bool, MOUSE_BUTTON_COUNT> _mouse_frame_released = {};
+    Buttons<MOUSE_BUTTON_COUNT> _mouse;
     // Press edges claimed by a widget this frame: cleared at the next begin_frame even
     // on a 0-step frame, so a claimed press does not re-fire while it persists.
     std::array<bool, MOUSE_BUTTON_COUNT> _mouse_frame_pressed_consumed = {};
@@ -513,16 +645,22 @@ private:
 
     std::unordered_map<WindowId, Vec2f> _window_mouse_pos;
     InputMap _map;
+    std::vector<InputPlayer> _players;
 
-    // The controller: as last set, and each control as a button (edges as the keys').
-    static constexpr std::size_t pad_control_count = static_cast<std::size_t>(PadControl::Count);
-    GamepadState _pad{};
-    std::array<bool, pad_control_count> _pad_cur = {};
-    std::array<bool, pad_control_count> _pad_prev = {};
-    std::array<bool, pad_control_count> _pad_pressed = {};
-    std::array<bool, pad_control_count> _pad_released = {};
-    std::array<bool, pad_control_count> _pad_frame_pressed = {};
-    std::array<bool, pad_control_count> _pad_frame_released = {};
+    // The controllers by slot: as last set, and each control as a button.
+    std::array<GamepadState, max_gamepads> _pad_states{};
+    std::array<Buttons<pad_control_count>, max_gamepads> _pads{};
+    std::array<bool, max_gamepads> _pad_plugged{};   // sticky, as pressed
+    std::array<bool, max_gamepads> _pad_unplugged{};
+    std::vector<GamepadRumble> _rumble;
+
+    // When each device was last pressed (a count of presses), for last_device().
+    u64 _presses = 0;
+    u64 _keyboard_pressed_at = 0;
+    u64 _mouse_pressed_at = 0;
+    std::array<u64, max_gamepads> _pad_pressed_at{};
+    void note_keyboard() { _keyboard_pressed_at = ++_presses; }
+    void note_mouse() { _mouse_pressed_at = ++_presses; }
 };
 
 } // namespace kin

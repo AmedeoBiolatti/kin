@@ -1,19 +1,26 @@
 #pragma once
 
-// A game controller's state, polled (docs/3d_plan.md, P4a). Opt-in: nothing in kin opens a controller until a `Gamepads` is made,
-// and `Input` is unchanged. The state is plain data, so that a game's input mapper (which turns device state into commands) can be
-// tested with a made-up one and a recording or a network layer can carry it.
+// Game controllers' state, polled (docs/input.md). Opt-in: nothing in kin opens a controller until a `Gamepads` is made (App::open_gamepads
+// makes one), and the state is plain data, so that a game's input mapper (which turns device state into commands) can be tested with a
+// made-up one and a recording or a network layer can carry it.
 //
-//     kin::Gamepads pads;                          // opens the first controller SDL finds, now and when one is plugged in
+//     kin::Gamepads pads;                          // opens every controller SDL finds, now and when one is plugged in
 //     ...each frame (after the window's events are pumped):
-//     const kin::GamepadState& pad = pads.poll();  // connected false when there is none
-//     move = {pad.left_x, pad.left_y};             // -1 to 1, y up is positive (forward)
+//     const auto& all = pads.poll_all();           // by slot; connected false where there is none
+//     move = {all[0].left_x, all[0].left_y};       // -1 to 1, y up is positive (forward)
+//
+// Each controller has a slot (0 to max_gamepads - 1) while it is plugged in: the lowest free one when it comes, or the one it had last
+// time when it comes back (a cable pulled out by mistake keeps its player's place). Slots are what Input and its players name.
 
 #include <kin/core/types.hpp>
 
+#include <array>
 #include <memory>
 
 namespace kin {
+
+// As many controllers as are read at once (local multiplayer seldom has more than four).
+inline constexpr i32 max_gamepads = 8;
 
 enum class GamepadButton : u8 {
     A, // the south face button (Cross)
@@ -51,8 +58,17 @@ struct GamepadState {
     friend bool operator==(const GamepadState&, const GamepadState&) = default;
 };
 
-// Reads the first connected controller. Starts SDL's gamepad subsystem when made and stops it when destroyed; where there is
-// none (or the subsystem cannot start) poll() reports `connected == false` and nothing else.
+// A rumble asked for: both motors, 0 to 1 (`low`: the heavy one, `high`: the light buzz), for `seconds`. A new one replaces the one going.
+struct GamepadRumble {
+    i32 slot = 0;
+    f32 low = 0.0f;
+    f32 high = 0.0f;
+    f32 seconds = 0.0f;
+    friend bool operator==(const GamepadRumble&, const GamepadRumble&) = default;
+};
+
+// Reads every connected controller, each in its slot. Starts SDL's gamepad subsystem when made and stops it when destroyed; where there
+// is none (or the subsystem cannot start) every slot reports `connected == false` and nothing else.
 class Gamepads {
 public:
     Gamepads();
@@ -60,10 +76,17 @@ public:
     Gamepads(const Gamepads&) = delete;
     Gamepads& operator=(const Gamepads&) = delete;
 
-    // The state now. Call it once a frame or a fixed step; it looks for a controller about once a second while there is none.
+    // Every slot's state now. Call it once a frame or a fixed step; it looks for newly plugged controllers a few times a second.
+    const std::array<GamepadState, max_gamepads>& poll_all();
+    // The same, given back as the first connected controller's state (none: a disconnected one): for a one-player game.
     const GamepadState& poll();
-    // The device's name ("" with none).
+    // A slot's device name ("" with none there); without a slot, the first connected one's.
+    const char* name(i32 slot) const;
     const char* name() const;
+    i32 connected_count() const;
+    // Shakes the controller in `slot` (false: none there, or it cannot rumble).
+    bool rumble(i32 slot, f32 low, f32 high, f32 seconds);
+    bool rumble(const GamepadRumble& rumble) { return this->rumble(rumble.slot, rumble.low, rumble.high, rumble.seconds); }
 
 private:
     struct Impl;

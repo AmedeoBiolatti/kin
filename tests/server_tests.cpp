@@ -718,6 +718,78 @@ void test_input_key_drives_a_text_edit() {
 }
 
 // input.drop: a file dropped on the window at a logical point, as from the desktop.
+// Two players on two controllers: each one's jumps and releases, the first's
+// stick, and controllers unplugged, for input.pad.
+class PadProbeScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "PadProbe"; }
+
+    void on_enter(kin::SceneContext& ctx) override {
+        kin::InputMap map;
+        map.bind("jump", kin::PadControl::A);
+        map.set_axis({.name = "move_x", .sticks = {{.axis = kin::PadAxis::LeftX}}, .dead_zone = 0.0f});
+        ctx.input.set_map(map);
+        ctx.input.set_players({{.gamepads = {0}}, {.gamepads = {1}}});
+    }
+
+    void update(kin::SceneContext& ctx) override {
+        for (kin::i32 p = 0; p < 2; ++p) {
+            _jumps[p] += ctx.input.pressed(p, "jump") ? 1 : 0;
+            _releases[p] += ctx.input.released(p, "jump") ? 1 : 0;
+        }
+        _axis = ctx.input.axis(0, "move_x");
+        _unplugged += ctx.input.gamepad_unplugged(0) ? 1 : 0;
+    }
+
+    void write_report(kin::JsonWriter& json) const override {
+        json.field("jumps_1", _jumps[0]).field("jumps_2", _jumps[1]);
+        json.field("releases_2", _releases[1]);
+        json.field("axis_1", static_cast<double>(_axis));
+        json.field("unplugged", _unplugged);
+    }
+
+private:
+    kin::i32 _jumps[2] = {};
+    kin::i32 _releases[2] = {};
+    kin::f32 _axis = 0.0f;
+    kin::i32 _unplugged = 0;
+};
+
+void test_input_pad() {
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<PadProbeScene>());
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"input.pad","params":{"slot":1,"button":"a"}})" "\n"
+        R"({"id":2,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":3,"method":"input.pad","params":{"slot":0,"left_x":-1}})" "\n"
+        R"({"id":4,"method":"sim.tick","params":{"count":2}})" "\n"
+        R"({"id":5,"method":"scene.current"})" "\n"
+        R"({"id":6,"method":"input.pad","params":{"slot":0,"connected":false}})" "\n"
+        R"({"id":7,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":8,"method":"scene.current"})" "\n"
+        R"({"id":9,"method":"input.pad","params":{"slot":9}})" "\n"
+        R"({"id":10,"method":"input.pad","params":{"button":"left_trigger"}})" "\n"
+        R"({"id":11,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "pads", .width = 64, .height = 64},
+        .mode = kin::ServerMode::Driven,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    const std::string text = out.str();
+    const kin::JsonValue* first = response_result(text, 5);
+    assert(first);
+    const kin::JsonValue* state = first->find("state");
+    assert(state && state->find("jumps_1")->as_number() == 0 && state->find("jumps_2")->as_number() == 1);
+    assert(state->find("releases_2")->as_number() == 1 && state->find("axis_1")->as_number() == -1);
+    const kin::JsonValue* second = response_result(text, 8);
+    assert(second && second->find("state")->find("unplugged")->as_number() == 1);
+    assert(second->find("state")->find("axis_1")->as_number() == 0);
+    assert(!response_result(text, 9) && !response_result(text, 10));
+}
+
 void test_input_drop() {
     kin::SceneManager scenes;
     scenes.push(std::make_unique<DropProbeScene>());
@@ -1225,6 +1297,7 @@ int main() {
     test_live_inspector_slow_tool();
     test_live_inspector_debugs_scripts();
     test_input_key_drives_a_text_edit();
+    test_input_pad();
     test_input_drop();
     test_sim_reset();
     test_sim_reset_unsupported_without_factory();

@@ -7,6 +7,20 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Several game controllers and local players ([input](input.md#several-controllers-and-local-players)).
+  `App::open_gamepads` now reads every controller plugged in, up to `max_gamepads` (8), each in a slot it keeps
+  while plugged in and gets back when plugged in again; `Gamepads::poll_all`, `name(slot)`, `connected_count` and
+  `rumble`. `Input` keeps each slot (`set_gamepad(slot, state)`, `gamepad(slot)`, `gamepad_plugged` and
+  `gamepad_unplugged` edges, `gamepad_pressed(control, free_only)` for "press start to join"). `Input::set_players`
+  gives local players their devices (`InputPlayer`: the keyboard and mouse, controller slots, and their own map
+  when two share a keyboard); `pressed`, `held`, `released`, `frame_pressed`, `frame_released` and `axis` take a
+  player, and without one they ask about anyone, as before. With no players set, one player has everything, so
+  one-player games are unchanged. `last_device` and `last_gamepad` tell what a player used last. `rumble(player,
+  low, high, seconds)` shakes it, and App sends it. `ScriptComponent::player` says whose input an entity's script
+  reads. Lua gets a player argument on `input.held`/`pressed`/`released`/`axis`, plus `input.player`, `players`,
+  `join`, `leave`, `free_pad`, `connected` and `rumble`. The scene server gets `input.pad`, which drives a
+  controller in a slot. Inside `Input`, keys, mouse buttons and each controller now share one edge type.
+
 - Platform services ([platform services](platform_services.md)). `kin::PlatformServices` is what a store offers a
   game, the same whichever runs it: the player, their language, achievements, stats, leaderboards, rich presence,
   the overlay, the on-screen keyboard, DLC and invitations to join (`JoinRequested` events, `join_on_launch`).

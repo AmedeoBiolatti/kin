@@ -127,7 +127,16 @@ void App::open_gamepads() {
 
 void App::pump_events() {
     if (_gamepads) {
-        _input.set_gamepad(_gamepads->poll()); // it reads the controller itself, apart from the events
+        // It reads the controllers itself, apart from the events; rumble asked last frame goes out now.
+        const std::array<GamepadState, max_gamepads>& pads = _gamepads->poll_all();
+        for (i32 slot = 0; slot < max_gamepads; ++slot) {
+            _input.set_gamepad(slot, pads[static_cast<std::size_t>(slot)]);
+        }
+        for (const GamepadRumble& rumble : _input.take_rumble()) {
+            _gamepads->rumble(rumble);
+        }
+    } else {
+        _input.take_rumble(); // nothing to shake
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {

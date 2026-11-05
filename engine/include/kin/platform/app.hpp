@@ -112,11 +112,14 @@ public:
     // app quits (quit()) or stays (forget_close()), e.g. after asking about
     // unsaved work. Not held (the default), the app stops at once.
     void hold_close(bool held) { _hold_close = held; }
-    // Game controllers opened (the first one SDL finds, now and when one is
-    // plugged in), their state given to input() each frame: what actions and
-    // axes bound to a controller read. Once is enough; later calls do nothing.
+    // Game controllers opened (every one SDL finds, now and when one is
+    // plugged in, each in its slot), their states given to input() each frame:
+    // what actions and axes bound to a controller read; rumble asked of input()
+    // is sent to them. Once is enough; later calls do nothing.
     void open_gamepads();
     bool gamepads_open() const { return _gamepads != nullptr; }
+    // The controllers opened (their names, how many), or null.
+    Gamepads* gamepads() { return _gamepads.get(); }
     bool close_asked() const { return _close_asked; }
     void forget_close() { _close_asked = false; }
 

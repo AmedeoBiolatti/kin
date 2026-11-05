@@ -8,8 +8,10 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <numeric>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -371,8 +373,209 @@ void test_gamepad_bindings_and_axes() {
     assert(kin::pad_control_name(kin::PadControl::RightTrigger) == "right_trigger");
 }
 
+
+// Several controllers, each in its slot, and local players: who reads which
+// device, with whose map; joining, unplugging, the device used last, rumble.
+void test_local_players() {
+    kin::InputMap map;
+    map.bind("jump", kin::Key::Space);
+    map.bind("jump", kin::PadControl::A);
+    map.bind("start", kin::PadControl::Start);
+    map.set_axis({.name = "move_x",
+                  .negative = {*kin::parse_binding_text("key:A")},
+                  .positive = {*kin::parse_binding_text("key:D")},
+                  .sticks = {{.axis = kin::PadAxis::LeftX}}});
+    kin::Input input;
+    input.set_map(map);
+    kin::GamepadState first{.connected = true};
+    kin::GamepadState second{.connected = true};
+    input.set_gamepad(0, first);
+    input.set_gamepad(1, second);
+    assert(input.gamepad_plugged(0) && input.gamepad_plugged(1) && !input.gamepad_plugged(2));
+    input.advance_step_edges();
+    assert(!input.gamepad_plugged(0));
+
+    // Nobody set: one player, with everything.
+    assert(input.player_count() == 1 && input.players().empty() && input.player_of_gamepad(1) == -1);
+    second.set_button(kin::GamepadButton::A, true);
+    input.set_gamepad(1, second);
+    assert(input.pressed("jump") && input.pressed(0, "jump") && input.pressed(-1, "jump") && !input.pressed(1, "jump"));
+    assert(input.last_device() == kin::InputDevice::Gamepad && input.last_gamepad() == 1);
+    input.advance_step_edges();
+    second.set_button(kin::GamepadButton::A, false);
+    input.set_gamepad(1, second);
+    input.advance_step_edges();
+
+    // Three players: the keyboard's, the first controller's, the second's.
+    input.set_players({{.keyboard = true}, {.gamepads = {0}}, {.gamepads = {1}}});
+    assert(input.player_count() == 3 && input.player_of_gamepad(0) == 1 && input.player_of_gamepad(1) == 2);
+    first.set_button(kin::GamepadButton::A, true);
+    first.left_x = -1.0f;
+    input.set_gamepad(0, first);
+    assert(input.pressed(1, "jump") && input.held(1, "jump") && input.frame_pressed(1, "jump"));
+    assert(!input.pressed(0, "jump") && !input.pressed(2, "jump") && !input.pressed(3, "jump"));
+    assert(input.pressed("jump")); // anyone
+    assert(input.axis(1, "move_x") == -1.0f && input.axis(2, "move_x") == 0.0f && input.axis(0, "move_x") == 0.0f);
+    assert(input.axis("move_x") == -1.0f);
+    assert(kin::binding_held(input, *kin::parse_binding_text("pad:a"), 1) &&
+           !kin::binding_held(input, *kin::parse_binding_text("pad:a"), 2));
+    input.set_key_pressed(kin::Key::Space);
+    assert(input.pressed(0, "jump") && !input.pressed(2, "jump"));
+    assert(input.last_device(0) == kin::InputDevice::Keyboard && input.last_device(1) == kin::InputDevice::Gamepad);
+    assert(input.last_gamepad(0) == -1 && input.last_gamepad(1) == 0 && input.last_gamepad(2) == 1);
+    input.advance_step_edges();
+    assert(!input.pressed(1, "jump") && input.held(1, "jump"));
+    first.set_button(kin::GamepadButton::A, false);
+    input.set_gamepad(0, first);
+    assert(input.released(1, "jump") && input.frame_released(1, "jump") && !input.released(2, "jump"));
+    input.set_key_released(kin::Key::Space);
+    input.advance_step_edges();
+
+    // Press start to join: only a controller nobody has counts as free.
+    kin::GamepadState third{.connected = true};
+    third.set_button(kin::GamepadButton::Start, true);
+    input.set_gamepad(2, third);
+    first.set_button(kin::GamepadButton::Start, true);
+    input.set_gamepad(0, first);
+    assert(input.gamepad_pressed(kin::PadControl::Start) == 0 && input.gamepad_pressed(kin::PadControl::Start, true) == 2);
+    assert(input.gamepad_pressed(kin::PadControl::B) == -1);
+    assert(input.pressed("start")); // a controller nobody has still counts for anyone
+    const kin::i32 joined = input.add_player({.gamepads = {2}});
+    assert(joined == 3 && input.player_count() == 4 && input.pressed(3, "start"));
+    assert(input.gamepad_pressed(kin::PadControl::Start, true) == -1);
+    input.remove_player(1); // the first controller's player leaves: the others move down
+    assert(input.player_count() == 3 && input.player_of_gamepad(1) == 1 && input.player_of_gamepad(2) == 2 &&
+           input.player_of_gamepad(0) == -1);
+    input.advance_step_edges();
+
+    // Unplugged: the edge, and its player has nothing to play with.
+    assert(input.player_connected(1) && input.player_connected(0));
+    input.set_gamepad(1, {});
+    assert(input.gamepad_unplugged(1) && !input.player_connected(1) && !input.gamepad(1).connected);
+    assert(input.gamepad(-1).connected == false && input.gamepad(kin::max_gamepads).connected == false);
+    input.set_gamepad(1, second);
+
+    // Rumble goes to the controller the player used last; the latest of a slot replaces the one before.
+    input.rumble(2, 0.5f, 2.0f, 0.25f);
+    input.rumble(2, 0.25f, 0.75f, 0.5f);
+    input.rumble(0, 1.0f, 1.0f, 1.0f); // the keyboard's player: no controller
+    input.rumble_gamepad(5, 1.0f, 1.0f, 1.0f); // nothing plugged in there
+    const std::vector<kin::GamepadRumble> rumble = input.take_rumble();
+    assert(rumble.size() == 1);
+    assert((rumble[0] == kin::GamepadRumble{.slot = 2, .low = 0.25f, .high = 0.75f, .seconds = 0.5f}));
+    assert(input.take_rumble().empty());
+    input.rumble_gamepad(1, -1.0f, 3.0f, -2.0f);
+    assert((input.take_rumble() == std::vector<kin::GamepadRumble>{{.slot = 1, .low = 0.0f, .high = 1.0f, .seconds = 0.0f}}));
+
+    // One keyboard, two players, each with their own map (WASD, the arrows).
+    kin::InputMap wasd;
+    wasd.set_axis({.name = "move_x", .negative = {*kin::parse_binding_text("key:A")}, .positive = {*kin::parse_binding_text("key:D")}});
+    wasd.bind("fire", kin::Key::F);
+    kin::InputMap arrows;
+    arrows.set_axis({.name = "move_x", .negative = {*kin::parse_binding_text("key:Left")}, .positive = {*kin::parse_binding_text("key:Right")}});
+    arrows.bind("fire", kin::Key::Enter);
+    kin::Input shared;
+    shared.set_players({{.keyboard = true, .map = wasd}, {.keyboard = true, .map = arrows}});
+    shared.set_key_pressed(kin::Key::Left);
+    shared.set_key_pressed(kin::Key::F);
+    assert(shared.axis(0, "move_x") == 0.0f && shared.axis(1, "move_x") == -1.0f);
+    assert(shared.pressed(0, "fire") && !shared.pressed(1, "fire"));
+    assert(shared.axis("move_x") == -1.0f && shared.pressed("fire")); // anyone, through their maps
+    shared.set_key_pressed(kin::Key::D);
+    assert(shared.axis(0, "move_x") == 1.0f && shared.axis(1, "move_x") == -1.0f);
+}
+
+#if KIN_TEST_SDL_GAMEPAD
+namespace virtual_pads {
+int rumbles = 0;
+Uint16 last_low = 0;
+bool rumble(void*, Uint16 low, Uint16) {
+    ++rumbles;
+    last_low = low;
+    return true;
+}
+
+SDL_JoystickID attach(Uint16 product) {
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.vendor_id = 0x1234;
+    desc.product_id = product;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.name = product == 1 ? "kin test pad one" : "kin test pad two";
+    desc.Rumble = rumble;
+    return SDL_AttachVirtualJoystick(&desc);
+}
+} // namespace virtual_pads
+
+// Real SDL controllers (virtual ones): every one read in its own slot, a slot
+// kept for a controller plugged back in, rumble sent to it.
+void test_gamepad_slots() {
+    kin::Gamepads pads;
+    for (int i = 0; i < 20; ++i) {
+        pads.poll_all();
+    }
+    if (pads.connected_count() > 0) {
+        std::cout << "test_gamepad_slots skipped: a real controller is plugged in\n";
+        return;
+    }
+    const auto settle = [&] {
+        for (int i = 0; i < 20; ++i) {
+            pads.poll_all();
+        }
+        return pads.poll_all();
+    };
+    const SDL_JoystickID one = virtual_pads::attach(1);
+    const SDL_JoystickID two = virtual_pads::attach(2);
+    assert(one != 0 && two != 0);
+    auto states = settle();
+    assert(pads.connected_count() == 2 && states[0].connected && states[1].connected && !states[2].connected);
+    assert(std::string_view(pads.name(0)) == "kin test pad one" && std::string_view(pads.name(1)) == "kin test pad two");
+    assert(std::string_view(pads.name()) == "kin test pad one" && std::string_view(pads.name(5)).empty());
+
+    SDL_Joystick* second = SDL_OpenJoystick(two);
+    assert(second != nullptr);
+    SDL_SetJoystickVirtualButton(second, SDL_GAMEPAD_BUTTON_SOUTH, true);
+    SDL_SetJoystickVirtualAxis(second, SDL_GAMEPAD_AXIS_LEFTX, 32767);
+    states = settle();
+    assert(states[1].button(kin::GamepadButton::A) && states[1].left_x > 0.99f && !states[0].button(kin::GamepadButton::A));
+    assert(pads.poll().connected && !pads.poll().button(kin::GamepadButton::A)); // the first connected: slot 0's
+
+    // Through App's path: Input sees each slot, and its rumble reaches the right controller.
+    kin::Input input;
+    for (kin::i32 slot = 0; slot < kin::max_gamepads; ++slot) {
+        input.set_gamepad(slot, states[static_cast<std::size_t>(slot)]);
+    }
+    input.set_players({{.gamepads = {0}}, {.gamepads = {1}}});
+    input.rumble(1, 0.5f, 0.0f, 0.1f);
+    for (const kin::GamepadRumble& r : input.take_rumble()) {
+        assert(r.slot == 1 && pads.rumble(r));
+    }
+    assert(virtual_pads::rumbles == 1 && virtual_pads::last_low == 32768);
+    assert(!pads.rumble(4, 1.0f, 1.0f, 1.0f));
+
+    // The first unplugged: its slot empties, the second keeps its own.
+    assert(SDL_DetachVirtualJoystick(one));
+    states = settle();
+    assert(!states[0].connected && states[1].connected && pads.connected_count() == 1);
+    // A different controller takes a slot never used; the first, plugged back in, gets its own back.
+    const SDL_JoystickID other = virtual_pads::attach(3);
+    states = settle();
+    assert(states[2].connected && !states[0].connected);
+    const SDL_JoystickID back = virtual_pads::attach(1);
+    states = settle();
+    assert(states[0].connected && std::string_view(pads.name(0)) == "kin test pad one");
+    SDL_CloseJoystick(second);
+    SDL_DetachVirtualJoystick(two);
+    SDL_DetachVirtualJoystick(other);
+    SDL_DetachVirtualJoystick(back);
+}
+#endif
+
 int main() {
     test_gamepad_bindings_and_axes();
+    test_local_players();
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process
     // environment even when GPU CI exports X11 for the separate 3D tests.
@@ -385,6 +588,9 @@ int main() {
     test_mouse_wheel_reaches_one_step();
     test_close_held();
     test_mouse_motion_reaches_one_step();
+#if KIN_TEST_SDL_GAMEPAD
+    test_gamepad_slots();
+#endif
 
     kin::App app{{.mode = kin::AppMode::Headless}};
 

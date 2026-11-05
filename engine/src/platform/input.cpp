@@ -635,25 +635,24 @@ void Input::advance_step_edges() {
     // clicks.) Per-frame keyboard edges live exactly one rendered frame; per-frame
     // mouse edges live until the next stepping frame (see begin_frame) so update()-time
     // ui2 can observe a click from a 0-step frame.
-    _key_prev = _key_cur;
-    _key_pressed.fill(false);
-    _key_released.fill(false);
-    _pad_prev = _pad_cur;
-    _pad_pressed.fill(false);
-    _pad_released.fill(false);
+    _keys.advance_step();
+    for (Buttons<pad_control_count>& pad : _pads) {
+        pad.advance_step();
+    }
+    _pad_plugged.fill(false);
+    _pad_unplugged.fill(false);
     _mouse_wheel_y = 0.0f;
     _mouse_wheel_x = 0.0f;
     _mouse_motion = {};
 }
 
 void Input::consume_frame_edges() {
-    _key_frame_pressed.fill(false);
+    _keys.clear_frame();
     _key_frame_repeated.fill(false);
-    _key_frame_released.fill(false);
-    _pad_frame_pressed.fill(false);
-    _pad_frame_released.fill(false);
-    _mouse_frame_pressed.fill(false);
-    _mouse_frame_released.fill(false);
+    for (Buttons<pad_control_count>& pad : _pads) {
+        pad.clear_frame();
+    }
+    _mouse.clear_frame();
     _frame_mouse_wheel_y = 0.0f;
     _frame_mouse_wheel_x = 0.0f;
     _frame_mouse_motion = {};
@@ -666,17 +665,14 @@ void Input::begin_frame(bool advance_transients) {
         // reset, including the per-frame MOUSE edges. At sim rate every frame steps, so
         // this is the only path taken and behaviour is identical to a plain per-frame
         // clear.
-        _key_prev = _key_cur;
-        _key_pressed.fill(false);
-        _key_released.fill(false);
-        _pad_prev = _pad_cur;
-        _pad_pressed.fill(false);
-        _pad_released.fill(false);
-        _mouse_prev = _mouse_cur;
-        _mouse_pressed.fill(false);
-        _mouse_released.fill(false);
-        _mouse_frame_pressed.fill(false);
-        _mouse_frame_released.fill(false);
+        _keys.advance_step();
+        for (Buttons<pad_control_count>& pad : _pads) {
+            pad.advance_step();
+        }
+        _pad_plugged.fill(false);
+        _pad_unplugged.fill(false);
+        _mouse.advance_step();
+        _mouse.clear_frame();
         // App::run already used the step wheel up in that step (advance_step_edges);
         // this clears it for callers that step without it (run_for, tests).
         _mouse_wheel_y = 0.0f;
@@ -694,7 +690,7 @@ void Input::begin_frame(bool advance_transients) {
         // The step wheel keeps adding up until a step reads it.
         for (i32 button = 0; button < MOUSE_BUTTON_COUNT; ++button) {
             if (_mouse_frame_pressed_consumed[button]) {
-                _mouse_frame_pressed[button] = false;
+                _mouse.frame_pressed[button] = false;
             }
         }
     }
@@ -707,11 +703,11 @@ void Input::begin_frame(bool advance_transients) {
     // frame between fixed steps makes menus jump many entries per keypress at high FPS.
     // Keyboard read from update() must use the sticky pressed() API, which already
     // survives 0-step frames.)
-    _key_frame_pressed.fill(false);
+    _keys.clear_frame();
     _key_frame_repeated.fill(false);
-    _key_frame_released.fill(false);
-    _pad_frame_pressed.fill(false);
-    _pad_frame_released.fill(false);
+    for (Buttons<pad_control_count>& pad : _pads) {
+        pad.clear_frame();
+    }
     _mouse_pos_prev = _mouse_pos;
     _frame_mouse_wheel_y = 0.0f;
     _frame_mouse_wheel_x = 0.0f;
@@ -723,22 +719,17 @@ void Input::process_native_event(const void* native_event) {
     const auto& event = *static_cast<const SDL_Event*>(native_event);
 
     if (event.type == SDL_EVENT_KEY_DOWN && valid_scancode(event.key.scancode)) {
-        if (!_key_cur[event.key.scancode]) {
-            _key_pressed[event.key.scancode] = true;
-            _key_frame_pressed[event.key.scancode] = true;
+        if (!_keys.cur[event.key.scancode]) {
             _last_key_press_event_time_ns = event.key.timestamp;
             _last_key_press_detected_time_ns = SDL_GetTicksNS();
+            note_keyboard();
         } else if (event.key.repeat) {
             _key_frame_repeated[event.key.scancode] = true;
         }
-        _key_cur[event.key.scancode] = true;
+        _keys.set(event.key.scancode, true);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
     } else if (event.type == SDL_EVENT_KEY_UP && valid_scancode(event.key.scancode)) {
-        if (_key_cur[event.key.scancode]) {
-            _key_released[event.key.scancode] = true;
-            _key_frame_released[event.key.scancode] = true;
-        }
-        _key_cur[event.key.scancode] = false;
+        _keys.set(event.key.scancode, false);
         _keyboard_window = static_cast<WindowId>(event.key.windowID);
     } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
         _last_mouse_motion_event_time_ns = event.motion.timestamp;
@@ -750,21 +741,16 @@ void Input::process_native_event(const void* native_event) {
         _mouse_window = static_cast<WindowId>(event.motion.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && valid_mouse_button(event.button.button)) {
-        if (!_mouse_cur[event.button.button]) {
-            _mouse_pressed[event.button.button] = true;
-            _mouse_frame_pressed[event.button.button] = true;
+        if (!_mouse.cur[event.button.button]) {
+            note_mouse();
         }
-        _mouse_cur[event.button.button] = true;
+        _mouse.set(event.button.button, true);
         _drag_start[event.button.button] = {event.button.x, event.button.y};
         _mouse_pos = {event.button.x, event.button.y};
         _mouse_window = static_cast<WindowId>(event.button.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
     } else if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && valid_mouse_button(event.button.button)) {
-        if (_mouse_cur[event.button.button]) {
-            _mouse_released[event.button.button] = true;
-            _mouse_frame_released[event.button.button] = true;
-        }
-        _mouse_cur[event.button.button] = false;
+        _mouse.set(event.button.button, false);
         _mouse_pos = {event.button.x, event.button.y};
         _mouse_window = static_cast<WindowId>(event.button.windowID);
         _window_mouse_pos[_mouse_window] = _mouse_pos;
@@ -806,22 +792,22 @@ void Input::add_dropped_file(DroppedFile file) {
 
 bool Input::pressed(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && (_key_pressed[scancode] || (_key_cur[scancode] && !_key_prev[scancode]));
+    return valid_scancode(scancode) && _keys.test(scancode, Edge::Pressed);
 }
 
 bool Input::held(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && _key_cur[scancode];
+    return valid_scancode(scancode) && _keys.cur[scancode];
 }
 
 bool Input::released(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && (_key_released[scancode] || (!_key_cur[scancode] && _key_prev[scancode]));
+    return valid_scancode(scancode) && _keys.test(scancode, Edge::Released);
 }
 
 bool Input::frame_pressed(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && _key_frame_pressed[scancode];
+    return valid_scancode(scancode) && _keys.frame_pressed[scancode];
 }
 
 bool Input::frame_repeated(Key key) const {
@@ -831,16 +817,16 @@ bool Input::frame_repeated(Key key) const {
 
 bool Input::frame_released(Key key) const {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    return valid_scancode(scancode) && _key_frame_released[scancode];
+    return valid_scancode(scancode) && _keys.frame_released[scancode];
 }
 
 bool Input::modifier_held(KeyModifiers modifiers) const {
     if (!any(modifiers)) {
         return true;
     }
-    const bool shift = _key_cur[SDL_SCANCODE_LSHIFT] || _key_cur[SDL_SCANCODE_RSHIFT];
-    const bool ctrl = _key_cur[SDL_SCANCODE_LCTRL] || _key_cur[SDL_SCANCODE_RCTRL];
-    const bool alt = _key_cur[SDL_SCANCODE_LALT] || _key_cur[SDL_SCANCODE_RALT];
+    const bool shift = _keys.cur[SDL_SCANCODE_LSHIFT] || _keys.cur[SDL_SCANCODE_RSHIFT];
+    const bool ctrl = _keys.cur[SDL_SCANCODE_LCTRL] || _keys.cur[SDL_SCANCODE_RCTRL];
+    const bool alt = _keys.cur[SDL_SCANCODE_LALT] || _keys.cur[SDL_SCANCODE_RALT];
     if (has_modifier(modifiers, KeyModifiers::Shift) && !shift) {
         return false;
     }
@@ -860,27 +846,27 @@ Vec2f Input::mouse_pos(WindowId window_id) const {
 
 bool Input::mouse_pressed(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && (_mouse_pressed[raw_button] || (_mouse_cur[raw_button] && !_mouse_prev[raw_button]));
+    return valid_mouse_button(raw_button) && _mouse.test(raw_button, Edge::Pressed);
 }
 
 bool Input::mouse_held(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && _mouse_cur[raw_button];
+    return valid_mouse_button(raw_button) && _mouse.cur[raw_button];
 }
 
 bool Input::mouse_released(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && (_mouse_released[raw_button] || (!_mouse_cur[raw_button] && _mouse_prev[raw_button]));
+    return valid_mouse_button(raw_button) && _mouse.test(raw_button, Edge::Released);
 }
 
 bool Input::mouse_frame_pressed(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && _mouse_frame_pressed[raw_button];
+    return valid_mouse_button(raw_button) && _mouse.frame_pressed[raw_button];
 }
 
 bool Input::mouse_frame_released(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    return valid_mouse_button(raw_button) && _mouse_frame_released[raw_button];
+    return valid_mouse_button(raw_button) && _mouse.frame_released[raw_button];
 }
 
 void Input::consume_mouse_frame_pressed(MouseButton button) {
@@ -894,7 +880,7 @@ void Input::consume_mouse_frame_pressed(MouseButton button) {
 
 bool Input::mouse_dragging(MouseButton button) const {
     const u8 raw_button = to_sdl_mouse_button(button);
-    if (!valid_mouse_button(raw_button) || !_mouse_cur[raw_button]) {
+    if (!valid_mouse_button(raw_button) || !_mouse.cur[raw_button]) {
         return false;
     }
 
@@ -942,14 +928,10 @@ void Input::set_mouse_held(MouseButton button, bool held) {
         return;
     }
 
-    if (held && !_mouse_cur[raw_button]) {
-        _mouse_pressed[raw_button] = true;
-        _mouse_frame_pressed[raw_button] = true;
-    } else if (!held && _mouse_cur[raw_button]) {
-        _mouse_released[raw_button] = true;
-        _mouse_frame_released[raw_button] = true;
+    if (held && !_mouse.cur[raw_button]) {
+        note_mouse();
     }
-    _mouse_cur[raw_button] = held;
+    _mouse.set(raw_button, held);
     if (held) {
         _drag_start[raw_button] = _mouse_pos;
     }
@@ -961,10 +943,8 @@ void Input::set_mouse_pressed(MouseButton button) {
         return;
     }
 
-    _mouse_prev[raw_button] = false;
-    _mouse_cur[raw_button] = true;
-    _mouse_pressed[raw_button] = true;
-    _mouse_frame_pressed[raw_button] = true;
+    note_mouse();
+    _mouse.press(raw_button);
     _drag_start[raw_button] = _mouse_pos;
 }
 
@@ -990,25 +970,21 @@ void Input::set_key_pressed(Key key) {
     if (!valid_scancode(scancode)) {
         return;
     }
-    _key_prev[scancode] = false;
-    _key_cur[scancode] = true;
-    _key_pressed[scancode] = true;
-    _key_frame_pressed[scancode] = true;
+    note_keyboard();
+    _keys.press(scancode);
 }
 
 void Input::set_key_released(Key key) {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    if (!valid_scancode(scancode) || !_key_cur[scancode]) {
+    if (!valid_scancode(scancode) || !_keys.cur[scancode]) {
         return;
     }
-    _key_cur[scancode] = false;
-    _key_released[scancode] = true;
-    _key_frame_released[scancode] = true;
+    _keys.set(scancode, false);
 }
 
 void Input::set_key_repeated(Key key) {
     const SDL_Scancode scancode = to_sdl_scancode(key);
-    if (!valid_scancode(scancode) || !_key_cur[scancode]) {
+    if (!valid_scancode(scancode) || !_keys.cur[scancode]) {
         return;
     }
     _key_frame_repeated[scancode] = true;
@@ -1016,13 +992,13 @@ void Input::set_key_repeated(Key key) {
 
 void Input::set_modifier_held(KeyModifiers modifiers, bool held) {
     if (has_modifier(modifiers, KeyModifiers::Shift)) {
-        _key_cur[SDL_SCANCODE_LSHIFT] = held;
+        _keys.cur[SDL_SCANCODE_LSHIFT] = held;
     }
     if (has_modifier(modifiers, KeyModifiers::Ctrl)) {
-        _key_cur[SDL_SCANCODE_LCTRL] = held;
+        _keys.cur[SDL_SCANCODE_LCTRL] = held;
     }
     if (has_modifier(modifiers, KeyModifiers::Alt)) {
-        _key_cur[SDL_SCANCODE_LALT] = held;
+        _keys.cur[SDL_SCANCODE_LALT] = held;
     }
 }
 
@@ -1283,14 +1259,7 @@ void Input::set_action_held(std::string_view action, bool is_held) {
         const SDL_Scancode scancode = binding_scancode(binding);
         if (binding.device == InputBindingDevice::Key && valid_scancode(scancode)) {
             set_modifier_held(binding.modifiers, is_held);
-            if (is_held && !_key_cur[scancode]) {
-                _key_pressed[scancode] = true;
-                _key_frame_pressed[scancode] = true;
-            } else if (!is_held && _key_cur[scancode]) {
-                _key_released[scancode] = true;
-                _key_frame_released[scancode] = true;
-            }
-            _key_cur[scancode] = is_held;
+            _keys.set(scancode, is_held);
         }
     }
 }
@@ -1308,113 +1277,109 @@ void Input::set_action_pressed(std::string_view action) {
         }
 
         set_modifier_held(binding.modifiers, true);
-        _key_prev[scancode] = false;
-        _key_cur[scancode] = true;
-        _key_pressed[scancode] = true;
-        _key_frame_pressed[scancode] = true;
+        _keys.press(scancode);
     }
+}
+
+Input::Reach Input::everything() const {
+    return {.keyboard = true, .gamepads = (1u << max_gamepads) - 1u, .map = &_map};
+}
+
+Input::Reach Input::reach_of(const InputPlayer& player) const {
+    Reach reach{.keyboard = player.keyboard, .map = player.map ? &*player.map : &_map};
+    for (const i32 slot : player.gamepads) {
+        if (slot >= 0 && slot < max_gamepads) {
+            reach.gamepads |= 1u << slot;
+        }
+    }
+    return reach;
+}
+
+bool Input::binding_edge(const Reach& reach, InputBinding binding, Edge edge) const {
+    switch (binding.device) {
+    case InputBindingDevice::Key: {
+        const SDL_Scancode scancode = binding_scancode(binding);
+        return reach.keyboard && valid_scancode(scancode) && modifier_held(binding.modifiers) && _keys.test(scancode, edge);
+    }
+    case InputBindingDevice::MouseButton: {
+        const u8 button = binding_mouse_button(binding);
+        return reach.keyboard && valid_mouse_button(button) && _mouse.test(button, edge);
+    }
+    case InputBindingDevice::Gamepad: {
+        const std::size_t control = pad_index(binding);
+        if (control >= pad_control_count) {
+            return false;
+        }
+        for (i32 slot = 0; slot < max_gamepads; ++slot) {
+            if (((reach.gamepads >> slot) & 1u) != 0 && _pads[static_cast<std::size_t>(slot)].test(control, edge)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    }
+    return false;
+}
+
+bool Input::map_edge(const Reach& reach, std::string_view action, Edge edge) const {
+    const std::vector<InputBinding>* bindings = reach.map->bindings(action);
+    return bindings && std::ranges::any_of(*bindings, [&](InputBinding binding) { return binding_edge(reach, binding, edge); });
+}
+
+bool Input::action_edge(i32 player, std::string_view action, Edge edge) const {
+    if (player < 0 || (_players.empty() && player == 0)) {
+        if (map_edge(everything(), action, edge)) {
+            return true;
+        }
+        // Players with maps of their own bind actions the Input's map may not have.
+        return std::ranges::any_of(_players, [&](const InputPlayer& p) {
+            return p.map && map_edge(reach_of(p), action, edge);
+        });
+    }
+    if (player >= static_cast<i32>(_players.size())) {
+        return false;
+    }
+    return map_edge(reach_of(_players[static_cast<std::size_t>(player)]), action, edge);
 }
 
 bool Input::pressed(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
-                (_key_pressed[scancode] || (_key_cur[scancode] && !_key_prev[scancode]));
-        }
-        if (binding.device == InputBindingDevice::Gamepad) {
-            const std::size_t control = pad_index(binding);
-            return control < pad_control_count && (_pad_pressed[control] || (_pad_cur[control] && !_pad_prev[control]));
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && (_mouse_pressed[button] || (_mouse_cur[button] && !_mouse_prev[button]));
-    });
+    return action_edge(-1, action, Edge::Pressed);
 }
 
 bool Input::held(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_cur[scancode];
-        }
-        if (binding.device == InputBindingDevice::Gamepad) {
-            const std::size_t control = pad_index(binding);
-            return control < pad_control_count && _pad_cur[control];
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && _mouse_cur[button];
-    });
+    return action_edge(-1, action, Edge::Held);
 }
 
 bool Input::released(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) &&
-                (_key_released[scancode] || (!_key_cur[scancode] && _key_prev[scancode]));
-        }
-        if (binding.device == InputBindingDevice::Gamepad) {
-            const std::size_t control = pad_index(binding);
-            return control < pad_control_count && (_pad_released[control] || (!_pad_cur[control] && _pad_prev[control]));
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && (_mouse_released[button] || (!_mouse_cur[button] && _mouse_prev[button]));
-    });
+    return action_edge(-1, action, Edge::Released);
 }
 
 bool Input::frame_pressed(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
-
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_frame_pressed[scancode];
-        }
-        if (binding.device == InputBindingDevice::Gamepad) {
-            const std::size_t control = pad_index(binding);
-            return control < pad_control_count && _pad_frame_pressed[control];
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && _mouse_frame_pressed[button];
-    });
+    return action_edge(-1, action, Edge::FramePressed);
 }
 
 bool Input::frame_released(std::string_view action) const {
-    const std::vector<InputBinding>* bindings = _map.bindings(action);
-    if (!bindings) {
-        return false;
-    }
+    return action_edge(-1, action, Edge::FrameReleased);
+}
 
-    return std::ranges::any_of(*bindings, [this](InputBinding binding) {
-        if (binding.device == InputBindingDevice::Key) {
-            const SDL_Scancode scancode = binding_scancode(binding);
-            return valid_scancode(scancode) && modifier_held(binding.modifiers) && _key_frame_released[scancode];
-        }
-        if (binding.device == InputBindingDevice::Gamepad) {
-            const std::size_t control = pad_index(binding);
-            return control < pad_control_count && _pad_frame_released[control];
-        }
-        const u8 button = binding_mouse_button(binding);
-        return valid_mouse_button(button) && _mouse_frame_released[button];
-    });
+bool Input::pressed(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::Pressed);
+}
+
+bool Input::held(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::Held);
+}
+
+bool Input::released(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::Released);
+}
+
+bool Input::frame_pressed(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::FramePressed);
+}
+
+bool Input::frame_released(i32 player, std::string_view action) const {
+    return action_edge(player, action, Edge::FrameReleased);
 }
 
 bool pad_control_held(const GamepadState& pad, PadControl control) {
@@ -1441,26 +1406,29 @@ bool pad_control_held(const GamepadState& pad, PadControl control) {
     }
 }
 
-bool binding_held(const Input& input, InputBinding binding) {
-    switch (binding.device) {
-    case InputBindingDevice::Key: return input.held(to_key(binding.code));
-    case InputBindingDevice::MouseButton: return input.mouse_held(to_mouse_button(binding.code));
-    case InputBindingDevice::Gamepad:
-        return binding.code >= 0 && binding.code < static_cast<i32>(PadControl::Count) &&
-               pad_control_held(input.gamepad(), static_cast<PadControl>(binding.code));
+bool binding_held(const Input& input, InputBinding binding, i32 player) {
+    if (player < 0 || (input._players.empty() && player == 0)) {
+        return input.binding_edge(input.everything(), binding, Input::Edge::Held);
     }
-    return false;
+    if (player >= static_cast<i32>(input._players.size())) {
+        return false;
+    }
+    return input.binding_edge(input.reach_of(input._players[static_cast<std::size_t>(player)]), binding, Input::Edge::Held);
 }
 
-f32 axis_value(const Input& input, const InputAxis& axis) {
+f32 Input::reach_axis(const Reach& reach, const InputAxis& axis) const {
     const auto held_any = [&](const std::vector<InputBinding>& bindings) {
-        return std::ranges::any_of(bindings, [&](InputBinding binding) { return binding_held(input, binding); });
+        return std::ranges::any_of(bindings, [&](InputBinding binding) { return binding_edge(reach, binding, Edge::Held); });
     };
     f32 value = (held_any(axis.positive) ? 1.0f : 0.0f) - (held_any(axis.negative) ? 1.0f : 0.0f);
-    // A stick pushed further wins; the dead zone taken off and the rest stretched to the end.
-    const GamepadState& pad = input.gamepad();
-    if (pad.connected) {
-        const f32 dead = std::clamp(axis.dead_zone, 0.0f, 0.95f);
+    // A stick pushed further wins (on any of the controllers reached); the
+    // dead zone taken off and the rest stretched to the end.
+    const f32 dead = std::clamp(axis.dead_zone, 0.0f, 0.95f);
+    for (i32 slot = 0; slot < max_gamepads; ++slot) {
+        const GamepadState& pad = _pad_states[static_cast<std::size_t>(slot)];
+        if (((reach.gamepads >> slot) & 1u) == 0 || !pad.connected) {
+            continue;
+        }
         for (const InputAxisStick& stick : axis.sticks) {
             f32 raw = 0.0f;
             switch (stick.axis) {
@@ -1483,24 +1451,179 @@ f32 axis_value(const Input& input, const InputAxis& axis) {
     return std::clamp(value, -1.0f, 1.0f);
 }
 
-void Input::set_gamepad(const GamepadState& state) {
-    _pad = state;
-    for (std::size_t control = 0; control < pad_control_count; ++control) {
-        const bool now = pad_control_held(state, static_cast<PadControl>(control));
-        if (now && !_pad_cur[control]) {
-            _pad_pressed[control] = true;
-            _pad_frame_pressed[control] = true;
-        } else if (!now && _pad_cur[control]) {
-            _pad_released[control] = true;
-            _pad_frame_released[control] = true;
-        }
-        _pad_cur[control] = now;
+f32 axis_value(const Input& input, const InputAxis& axis, i32 player) {
+    if (player < 0 || (input._players.empty() && player == 0)) {
+        return input.reach_axis(input.everything(), axis);
     }
+    if (player >= static_cast<i32>(input._players.size())) {
+        return 0.0f;
+    }
+    return input.reach_axis(input.reach_of(input._players[static_cast<std::size_t>(player)]), axis);
+}
+
+f32 Input::player_axis(i32 player, std::string_view name) const {
+    const auto furthest = [](f32 a, f32 b) { return std::abs(b) > std::abs(a) ? b : a; };
+    if (player < 0 || (_players.empty() && player == 0)) {
+        f32 value = 0.0f;
+        if (const InputAxis* axis = _map.axis(name)) {
+            value = reach_axis(everything(), *axis);
+        }
+        for (const InputPlayer& p : _players) {
+            if (p.map) {
+                if (const InputAxis* axis = p.map->axis(name)) {
+                    value = furthest(value, reach_axis(reach_of(p), *axis));
+                }
+            }
+        }
+        return value;
+    }
+    if (player >= static_cast<i32>(_players.size())) {
+        return 0.0f;
+    }
+    const Reach reach = reach_of(_players[static_cast<std::size_t>(player)]);
+    const InputAxis* axis = reach.map->axis(name);
+    return axis ? reach_axis(reach, *axis) : 0.0f;
 }
 
 f32 Input::axis(std::string_view name) const {
-    const InputAxis* axis = _map.axis(name);
-    return axis ? axis_value(*this, *axis) : 0.0f;
+    return player_axis(-1, name);
+}
+
+f32 Input::axis(i32 player, std::string_view name) const {
+    return player_axis(player, name);
+}
+
+void Input::set_gamepad(i32 slot, const GamepadState& state) {
+    if (slot < 0 || slot >= max_gamepads) {
+        return;
+    }
+    const auto at = static_cast<std::size_t>(slot);
+    GamepadState& was = _pad_states[at];
+    if (state.connected && !was.connected) {
+        _pad_plugged[at] = true;
+    } else if (!state.connected && was.connected) {
+        _pad_unplugged[at] = true;
+    }
+    was = state;
+    Buttons<pad_control_count>& buttons = _pads[at];
+    for (std::size_t control = 0; control < pad_control_count; ++control) {
+        const bool now = pad_control_held(state, static_cast<PadControl>(control));
+        if (now && !buttons.cur[control]) {
+            _pad_pressed_at[at] = ++_presses;
+        }
+        buttons.set(control, now);
+    }
+}
+
+const GamepadState& Input::gamepad(i32 slot) const {
+    static const GamepadState none{};
+    return slot >= 0 && slot < max_gamepads ? _pad_states[static_cast<std::size_t>(slot)] : none;
+}
+
+bool Input::gamepad_plugged(i32 slot) const {
+    return slot >= 0 && slot < max_gamepads && _pad_plugged[static_cast<std::size_t>(slot)];
+}
+
+bool Input::gamepad_unplugged(i32 slot) const {
+    return slot >= 0 && slot < max_gamepads && _pad_unplugged[static_cast<std::size_t>(slot)];
+}
+
+i32 Input::gamepad_pressed(PadControl control, bool free_only) const {
+    const auto index = static_cast<std::size_t>(control);
+    if (index >= pad_control_count) {
+        return -1;
+    }
+    for (i32 slot = 0; slot < max_gamepads; ++slot) {
+        if (_pads[static_cast<std::size_t>(slot)].test(index, Edge::Pressed) && (!free_only || player_of_gamepad(slot) < 0)) {
+            return slot;
+        }
+    }
+    return -1;
+}
+
+void Input::set_players(std::vector<InputPlayer> players) {
+    _players = std::move(players);
+}
+
+i32 Input::add_player(InputPlayer player) {
+    _players.push_back(std::move(player));
+    return static_cast<i32>(_players.size()) - 1;
+}
+
+void Input::remove_player(i32 player) {
+    if (player >= 0 && player < static_cast<i32>(_players.size())) {
+        _players.erase(_players.begin() + player);
+    }
+}
+
+i32 Input::player_of_gamepad(i32 slot) const {
+    for (std::size_t p = 0; p < _players.size(); ++p) {
+        if (std::ranges::find(_players[p].gamepads, slot) != _players[p].gamepads.end()) {
+            return static_cast<i32>(p);
+        }
+    }
+    return -1;
+}
+
+bool Input::player_connected(i32 player) const {
+    if (player < 0 || (_players.empty() && player == 0)) {
+        return true; // anyone: the keyboard is always there
+    }
+    if (player >= static_cast<i32>(_players.size())) {
+        return false;
+    }
+    const InputPlayer& p = _players[static_cast<std::size_t>(player)];
+    return p.keyboard || std::ranges::any_of(p.gamepads, [this](i32 slot) { return gamepad(slot).connected; });
+}
+
+i32 Input::last_gamepad(i32 player) const {
+    const Reach reach = player < 0 || (_players.empty() && player == 0)
+                            ? everything()
+                            : player < static_cast<i32>(_players.size()) ? reach_of(_players[static_cast<std::size_t>(player)]) : Reach{};
+    i32 best = -1;
+    u64 best_at = 0;
+    for (i32 slot = 0; slot < max_gamepads; ++slot) {
+        const auto at = static_cast<std::size_t>(slot);
+        if (((reach.gamepads >> slot) & 1u) == 0 || !_pad_states[at].connected) {
+            continue;
+        }
+        if (best < 0 || _pad_pressed_at[at] > best_at) {
+            best = slot;
+            best_at = _pad_pressed_at[at];
+        }
+    }
+    return best;
+}
+
+InputDevice Input::last_device(i32 player) const {
+    const Reach reach = player < 0 || (_players.empty() && player == 0)
+                            ? everything()
+                            : player < static_cast<i32>(_players.size()) ? reach_of(_players[static_cast<std::size_t>(player)]) : Reach{};
+    const i32 pad = last_gamepad(player);
+    const u64 pad_at = pad >= 0 ? _pad_pressed_at[static_cast<std::size_t>(pad)] : 0;
+    if (!reach.keyboard) {
+        return InputDevice::Gamepad;
+    }
+    if (pad_at > _keyboard_pressed_at && pad_at > _mouse_pressed_at) {
+        return InputDevice::Gamepad;
+    }
+    return _mouse_pressed_at > _keyboard_pressed_at ? InputDevice::Mouse : InputDevice::Keyboard;
+}
+
+void Input::rumble_gamepad(i32 slot, f32 low, f32 high, f32 seconds) {
+    if (slot < 0 || slot >= max_gamepads || !_pad_states[static_cast<std::size_t>(slot)].connected) {
+        return;
+    }
+    // A new rumble replaces the one going, so only the latest of each slot is kept.
+    std::erase_if(_rumble, [slot](const GamepadRumble& r) { return r.slot == slot; });
+    _rumble.push_back({.slot = slot,
+                       .low = std::clamp(low, 0.0f, 1.0f),
+                       .high = std::clamp(high, 0.0f, 1.0f),
+                       .seconds = std::max(0.0f, seconds)});
+}
+
+void Input::rumble(i32 player, f32 low, f32 high, f32 seconds) {
+    rumble_gamepad(last_gamepad(player), low, high, seconds);
 }
 
 } // namespace kin

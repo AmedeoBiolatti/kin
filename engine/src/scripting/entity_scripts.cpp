@@ -316,6 +316,12 @@ struct EntityScripts::Impl {
     // Values given back by the saves, for entities once they start (by id).
     std::unordered_map<u64, JsonValue> restored;
     std::string calling; // the script being called, for its problems
+    i32 player = -1;     // whose input the entity being run reads (Input's numbers: -1 anyone)
+
+    // A player as a script names it (1 the first, 0 anyone; none: its entity's), as Input numbers them.
+    i32 player_of(const sol::optional<i32>& named) const {
+        return named ? (*named > 0 ? *named - 1 : -1) : player;
+    }
 
     void bind(sol::state& lua) {
         sol::usertype<ScriptEntity> entity = lua.new_usertype<ScriptEntity>("Entity", sol::no_constructor);
@@ -573,10 +579,56 @@ struct EntityScripts::Impl {
         entity["state"] = [animator](const ScriptEntity& e) { return animator(e)->state; };
 
         sol::table input_table = lua.create_named_table("input");
-        input_table["held"] = [this](const std::string& action) { return input && input->held(action); };
-        input_table["pressed"] = [this](const std::string& action) { return input && input->pressed(action); };
-        input_table["released"] = [this](const std::string& action) { return input && input->released(action); };
-        input_table["axis"] = [this](const std::string& name) { return input ? input->axis(name) : 0.0f; };
+        // Each takes a player last (1 the first, 0 anyone), or reads the
+        // player its entity's ScriptComponent names.
+        input_table["held"] = [this](const std::string& action, sol::optional<i32> who) {
+            return input && input->held(player_of(who), action);
+        };
+        input_table["pressed"] = [this](const std::string& action, sol::optional<i32> who) {
+            return input && input->pressed(player_of(who), action);
+        };
+        input_table["released"] = [this](const std::string& action, sol::optional<i32> who) {
+            return input && input->released(player_of(who), action);
+        };
+        input_table["axis"] = [this](const std::string& name, sol::optional<i32> who) {
+            return input ? input->axis(player_of(who), name) : 0.0f;
+        };
+        // Local players: who this script's entity is (0: anyone), how many have
+        // joined (0: none, everyone plays with everything), joining with
+        // "keyboard" or a controller's number (1 the first plugged in) and
+        // leaving, and a controller nobody has whose `control` was pressed
+        // ("press start to join": its number, or nil).
+        input_table["player"] = [this]() { return player + 1; };
+        input_table["players"] = [this]() { return input ? static_cast<i32>(input->players().size()) : 0; };
+        input_table["join"] = [this](const sol::object& device) -> sol::optional<i32> {
+            if (!input) return sol::nullopt;
+            if (device.is<std::string>() && device.as<std::string>() == "keyboard") {
+                const std::vector<InputPlayer>& players = input->players();
+                for (std::size_t p = 0; p < players.size(); ++p) {
+                    if (players[p].keyboard) return static_cast<i32>(p) + 1;
+                }
+                return input->add_player({.keyboard = true}) + 1;
+            }
+            if (!device.is<double>()) throw sol::error("input.join takes \"keyboard\" or a controller's number");
+            const i32 slot = static_cast<i32>(device.as<double>()) - 1;
+            if (slot < 0 || slot >= max_gamepads) throw sol::error("input.join: no controller " + std::to_string(slot + 1));
+            if (const i32 owner = input->player_of_gamepad(slot); owner >= 0) return owner + 1;
+            return input->add_player({.gamepads = {slot}}) + 1;
+        };
+        input_table["leave"] = [this](i32 who) {
+            if (input && who > 0) input->remove_player(who - 1);
+        };
+        input_table["free_pad"] = [this](const std::string& control) -> sol::optional<i32> {
+            PadControl parsed = PadControl::A;
+            if (!parse_pad_control(control, parsed)) throw sol::error("input.free_pad: no control '" + control + "'");
+            const i32 slot = input ? input->gamepad_pressed(parsed, true) : -1;
+            return slot >= 0 ? sol::optional<i32>(slot + 1) : sol::nullopt;
+        };
+        input_table["connected"] = [this](sol::optional<i32> who) { return input && input->player_connected(player_of(who)); };
+        // Shakes the player's controller: `low` the heavy motor, `high` the light buzz, 0 to 1.
+        input_table["rumble"] = [this](f32 low, f32 high, f32 seconds, sol::optional<i32> who) {
+            if (input) input->rumble(player_of(who), low, high, seconds);
+        };
         input_table["mouse"] = [this]() {
             const Vec2f at = input ? input->mouse_pos() : Vec2f{};
             return std::make_tuple(at.x, at.y);
@@ -1061,6 +1113,8 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
         if (!entity.is_alive()) {
             continue;
         }
+        const ScriptComponent* component = entity.get<ScriptComponent>();
+        impl.player = component && component->player > 0 ? component->player - 1 : -1;
         Impl::File& file = impl.file(path);
         if (!file.script->loaded()) {
             continue; // it does not read: its problem is told
@@ -1172,6 +1226,7 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     }
     impl.world = nullptr;
     impl.input = nullptr;
+    impl.player = -1;
 }
 
 } // namespace kin

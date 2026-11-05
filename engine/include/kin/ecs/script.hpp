@@ -18,6 +18,10 @@
 //     function on_contact(self, other)
 //         if other:has("Coin") then other:destroy() end
 //     end
+//
+// In a game for several players at one screen (Input::set_players), `player`
+// says whose input its script's input.* reads: the same player.lua runs
+// player 1's character and player 2's.
 
 #include <kin/ecs/component.hpp>
 
@@ -26,6 +30,7 @@ namespace kin {
 struct ScriptComponent {
     ComponentAssetRef asset; // a .lua file of the content
     bool enabled = true;     // false: not run (a disabled entity's are not either)
+    i32 player = 0;          // whose input it reads: 0 anyone's, 1 the first player's, 2 the second's...
 };
 
 } // namespace kin

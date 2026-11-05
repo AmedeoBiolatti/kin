@@ -9,6 +9,7 @@
 #include <kin/runtime/windowed_app.hpp>
 #include <kin/scene/scene_manager.hpp>
 
+#include <array>
 #include <deque>
 #include <functional>
 #include <iosfwd>
@@ -124,6 +125,18 @@ public:
     void queue_key(Key key, std::string mode, KeyModifiers modifiers);
     // Queue a file dropped on the window at window-space pos, as from the desktop.
     void queue_drop(std::string path, Vec2f window_pos);
+    // Queue a game controller's input in `slot` for the next step: a button
+    // (`button` a GamepadButton's PadControl, mode as for actions), analog
+    // values (sticks -1..1, triggers 0..1; kept until changed), or it
+    // unplugged (`connected` false). A slot driven once stays plugged in.
+    struct PadInput {
+        i32 slot = 0;
+        std::optional<PadControl> button;
+        std::string mode = "press";
+        std::array<std::optional<f32>, 6> axes{}; // by PadAxis
+        bool connected = true;
+    };
+    void queue_pad(PadInput pad);
 
     // Wall time of recent frames, oldest first: a driven server's steps, or the
     // frames a game run with --inspect draws (frame.timing reports them).
@@ -143,7 +156,7 @@ public:
 
 private:
     struct PendingInput {
-        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion, Drop };
+        enum class Kind { Action, MouseMove, MouseButton, Wheel, Text, Key, MouseMotion, Drop, Pad };
         Kind kind;
         std::string text;  // action name / button name / text input / dropped file
         std::string mode;  // press / hold / release
@@ -151,6 +164,7 @@ private:
         f32 value = 0.0f;  // wheel delta
         Key key = Key::Unknown;
         KeyModifiers modifiers = KeyModifiers::None;
+        PadInput pad{};
     };
 
     SceneContext make_context();
@@ -172,6 +186,10 @@ private:
     std::vector<std::string> _tapped_actions;
     std::vector<MouseButton> _tapped_buttons;
     std::vector<std::pair<Key, KeyModifiers>> _tapped_keys;
+    // The controllers driven (input.pad), by slot, and the buttons tapped last step.
+    std::array<GamepadState, max_gamepads> _pads{};
+    std::array<bool, max_gamepads> _driven_pads{};
+    std::vector<std::pair<i32, GamepadButton>> _tapped_pad_buttons;
     std::deque<FrameTiming> _timings;
     i64 _timed_frames = 0; // frames recorded, the forgotten too
     std::function<void(SceneManager&)> _reset_scenes;

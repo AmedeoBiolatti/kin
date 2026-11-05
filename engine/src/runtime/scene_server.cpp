@@ -897,6 +897,51 @@ std::optional<Key> parse_key_name(std::string_view name) {
     return std::nullopt;
 }
 
+// A game controller in a slot, driven: a button tapped or held, sticks and
+// triggers set, or it unplugged. The game reads it as it reads a real one.
+ServerResponse handle_input_pad(ServerContext& ctx, const JsonValue& params) {
+    ServerContext::PadInput pad;
+    const JsonValue* slot = params.find("slot");
+    pad.slot = slot && slot->is_number() ? static_cast<i32>(slot->as_number()) : 0;
+    if (pad.slot < 0 || pad.slot >= max_gamepads) {
+        return error_result("input.pad 'slot' is 0 to " + std::to_string(max_gamepads - 1));
+    }
+    if (const JsonValue* button = params.find("button")) {
+        PadControl control = PadControl::A;
+        if (!button->is_string() || !parse_pad_control(button->as_string(), control) ||
+            static_cast<u8>(control) >= static_cast<u8>(GamepadButton::Count)) {
+            return error_result("input.pad 'button' is a button: a, b, x, y, back, start, left_stick, right_stick, "
+                                "left_shoulder, right_shoulder or dpad_up/down/left/right (sticks and triggers are values)");
+        }
+        pad.button = control;
+    }
+    pad.mode = params.string_at("mode", "press");
+    if (pad.mode != "press" && pad.mode != "hold" && pad.mode != "release") {
+        return error_result("mode must be 'press', 'hold', or 'release'");
+    }
+    for (u8 a = 0; a <= static_cast<u8>(PadAxis::RightTrigger); ++a) {
+        if (const JsonValue* value = params.find(std::string(pad_axis_name(static_cast<PadAxis>(a))))) {
+            if (!value->is_number()) {
+                return error_result("input.pad axis values are numbers");
+            }
+            const bool trigger = a >= static_cast<u8>(PadAxis::LeftTrigger);
+            pad.axes[a] = std::clamp(static_cast<f32>(value->as_number()), trigger ? 0.0f : -1.0f, 1.0f);
+        }
+    }
+    if (const JsonValue* connected = params.find("connected")) {
+        pad.connected = !connected->is_bool() || connected->as_bool();
+    }
+    const i32 queued_slot = pad.slot;
+    ctx.queue_pad(std::move(pad));
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("queued", "pad");
+    json.field("slot", static_cast<f64>(queued_slot));
+    json.end_object();
+    return ok_result(out.str());
+}
+
 ServerResponse handle_input_key(ServerContext& ctx, const JsonValue& params) {
     const std::string name = params.string_at("name");
     const std::optional<Key> key = parse_key_name(name);
@@ -1039,6 +1084,12 @@ void ServerContext::queue_drop(std::string path, Vec2f window_pos) {
     _pending.push_back({PendingInput::Kind::Drop, std::move(path), {}, window_pos, 0.0f});
 }
 
+void ServerContext::queue_pad(PadInput pad) {
+    PendingInput in{PendingInput::Kind::Pad, {}, pad.mode, {}, 0.0f};
+    in.pad = std::move(pad);
+    _pending.push_back(std::move(in));
+}
+
 void ServerContext::step() {
     Input& input = _app.input();
     input.begin_frame();
@@ -1055,9 +1106,13 @@ void ServerContext::step() {
         input.set_key_released(key);
         input.set_modifier_held(modifiers, false);
     }
+    for (const auto& [slot, button] : _tapped_pad_buttons) {
+        _pads[static_cast<std::size_t>(slot)].set_button(button, false);
+    }
     _tapped_actions.clear();
     _tapped_buttons.clear();
     _tapped_keys.clear();
+    _tapped_pad_buttons.clear();
 
     for (const PendingInput& in : _pending) {
         switch (in.kind) {
@@ -1098,6 +1153,30 @@ void ServerContext::step() {
         case PendingInput::Kind::Drop:
             input.add_dropped_file({.path = in.text, .pos = in.pos, .window = _window.id()});
             break;
+        case PendingInput::Kind::Pad: {
+            const auto at = static_cast<std::size_t>(in.pad.slot);
+            GamepadState& pad = _pads[at];
+            _driven_pads[at] = true;
+            pad.connected = in.pad.connected;
+            if (!pad.connected) {
+                pad = {};
+                break;
+            }
+            f32* values[] = {&pad.left_x, &pad.left_y, &pad.right_x, &pad.right_y, &pad.left_trigger, &pad.right_trigger};
+            for (std::size_t a = 0; a < in.pad.axes.size(); ++a) {
+                if (in.pad.axes[a]) {
+                    *values[a] = *in.pad.axes[a];
+                }
+            }
+            if (in.pad.button) {
+                const auto button = static_cast<GamepadButton>(*in.pad.button);
+                pad.set_button(button, in.mode != "release");
+                if (in.mode == "press") {
+                    _tapped_pad_buttons.emplace_back(in.pad.slot, button);
+                }
+            }
+            break;
+        }
         case PendingInput::Kind::Key:
             if (in.mode == "release") {
                 input.set_key_released(in.key);
@@ -1113,6 +1192,11 @@ void ServerContext::step() {
         }
     }
     _pending.clear();
+    for (i32 slot = 0; slot < max_gamepads; ++slot) {
+        if (_driven_pads[static_cast<std::size_t>(slot)]) {
+            input.set_gamepad(slot, _pads[static_cast<std::size_t>(slot)]);
+        }
+    }
 
     SceneContext scene_ctx = make_context();
     runtime_detail::pump_scene_assets(_asset_server, _render);
@@ -1185,6 +1269,14 @@ void ServerContext::reset(std::optional<u64> seed) {
     _report = {};
     _pending.clear();
     _timings.clear();
+    for (i32 slot = 0; slot < max_gamepads; ++slot) {
+        if (_driven_pads[static_cast<std::size_t>(slot)]) {
+            _app.input().set_gamepad(slot, {}); // unplugged
+        }
+    }
+    _pads = {};
+    _driven_pads = {};
+    _tapped_pad_buttons.clear();
 
     SceneContext scene_ctx = make_context();
     _scenes.clear();
@@ -1234,6 +1326,9 @@ ServerResponse dispatch_server_command(ServerContext& ctx,
     }
     if (method == "input.key") {
         return handle_input_key(ctx, params);
+    }
+    if (method == "input.pad") {
+        return handle_input_pad(ctx, params);
     }
     if (method == "ui.snapshot") {
         return handle_ui_snapshot(ctx, params);

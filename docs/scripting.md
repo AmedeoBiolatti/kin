@@ -203,7 +203,23 @@ scripts.update(world, ctx.input, ctx.dt);
 - Fields are read and written the way scene files write them: numbers,
   booleans, strings, `{x, y}` and `{r, g, b, a}` tables.
 - The `input` table reads the input map: `held`, `pressed`, `released` and
-  `axis` by name, and `mouse()` returns x and y ([input](input.md)).
+  `axis` by name, and `mouse()` returns x and y ([input](input.md)). In a game
+  for several players at one screen, each of the four takes a player last (1
+  the first, 0 anyone). Without one it reads the player the entity's
+  `ScriptComponent` names in `player` (0, the default, is anyone), so the same
+  `player.lua` runs player 1's character and player 2's. For the players:
+  - `player()` is the entity's player (0: anyone), and `players()` is how many
+    have joined (0: none, everyone plays with everything);
+  - `join("keyboard")` and `join(pad)` add a player with the keyboard or with
+    a controller (1 is the first slot) and return their number. A controller
+    someone has already returns its player;
+  - `free_pad(control)` is a controller nobody has whose control (`"start"`,
+    `"a"`...) was pressed. It returns its number, or nil: "press start to
+    join";
+  - `leave(player)`, and `connected([player])`: they have the keyboard or a
+    controller plugged in;
+  - `rumble(low, high, seconds[, player])` shakes the controller the player
+    used last. `low` is the heavy motor and `high` the light buzz, 0 to 1.
 - The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
   the new prefab instance's root.
 - When the game gives the scripts its physics (`EntityScripts::set_physics`),

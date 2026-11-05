@@ -240,7 +240,8 @@ if(KIN_ENABLE_SCRIPTING AND KIN_ENABLE_AUDIO)
     target_link_libraries(kin_audio_tests PRIVATE kin::scripting_scenes)
 endif()
 kin_add_component_test(AUDIO kin_audio_component_tests kin-audio-component SOURCES audio_component_tests.cpp LINK_TARGET kin::audio)
-kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp)
+kin_add_test(kin_platform_tests kin-platform SOURCES platform_tests.cpp
+    DEFINITIONS KIN_TEST_SDL_GAMEPAD=$<BOOL:${KIN_ENABLE_SDL_GAMEPAD}>)
 kin_add_test(kin_platform_io_tests kin-platform-io SOURCES platform_io_tests.cpp)
 if(CMAKE_SYSTEM_NAME MATCHES "^(Windows|Linux)$")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_GENERATOR STREQUAL "Ninja" AND

@@ -29,6 +29,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -122,6 +123,72 @@ end
     std::string error;
     assert(kin::check_lua_syntax("local x = 1", "fine.lua", error) && error.empty());
     assert(!kin::check_lua_syntax("function (", "bad.lua", error) && error.find("bad.lua:1") != std::string::npos);
+    fs::remove_all(dir);
+}
+
+// Local players: the same script on two characters, each reading its own
+// player's controller; a lobby joining a free controller; rumble from Lua.
+void test_player_scripts() {
+    const fs::path dir = fs::temp_directory_path() / "kin_entity_scripts_players";
+    fs::remove_all(dir);
+    write(dir / "scripts/player.lua", R"lua(
+function on_update(self, dt)
+    self:move(input.axis("move_x") * 100 * dt, 0)
+    if input.pressed("jump") then input.rumble(0.5, 0.25, 0.2) end
+end
+)lua");
+    write(dir / "scripts/lobby.lua", R"lua(
+function on_update(self, dt)
+    local pad = input.free_pad("start")
+    if pad then self:set_position(input.join(pad), input.players()) end
+    if input.held("jump", 2) then self:set_rotation(45) end
+    if input.player() ~= 0 or input.connected(3) then self:set_rotation(-1) end
+end
+)lua");
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    const kin::EcsEntity one =
+        world.entity("One").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/player.lua"}, .player = 1});
+    const kin::EcsEntity two =
+        world.entity("Two").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/player.lua"}, .player = 2});
+    const kin::EcsEntity lobby = world.entity("Lobby").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/lobby.lua"}});
+
+    kin::InputMap map;
+    map.bind("jump", kin::PadControl::A);
+    map.bind("start", kin::PadControl::Start);
+    map.set_axis({.name = "move_x", .sticks = {{.axis = kin::PadAxis::LeftX}}, .dead_zone = 0.0f});
+    kin::Input input;
+    input.set_map(map);
+    input.set_players({{.gamepads = {0}}, {.gamepads = {1}}});
+    kin::GamepadState first{.connected = true};
+    kin::GamepadState second{.connected = true, .left_x = 1.0f};
+    input.set_gamepad(0, first);
+    input.set_gamepad(1, second);
+
+    kin::EntityScripts scripts{{.content = dir, .check_frames = 1}};
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    assert(near(one.get<kin::Transform2D>()->pos.x, 0.0f) && near(two.get<kin::Transform2D>()->pos.x, 10.0f));
+    assert(input.take_rumble().empty());
+    input.advance_step_edges();
+
+    second.set_button(kin::GamepadButton::A, true);
+    input.set_gamepad(1, second);
+    scripts.update(world, input, 0.1f);
+    const std::vector<kin::GamepadRumble> rumble = input.take_rumble();
+    assert(rumble.size() == 1 && rumble[0].slot == 1 && near(rumble[0].low, 0.5f) && near(rumble[0].seconds, 0.2f));
+    assert(near(lobby.get<kin::Transform2D>()->rotation, 45.0f));
+    input.advance_step_edges();
+
+    // A third controller's start: it joins as player 3.
+    kin::GamepadState third{.connected = true};
+    third.set_button(kin::GamepadButton::Start, true);
+    input.set_gamepad(2, third);
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    assert(input.player_count() == 3 && input.player_of_gamepad(2) == 2);
+    assert(lobby.get<kin::Transform2D>()->pos == (kin::Vec2f{3, 3}));
+    assert(near(lobby.get<kin::Transform2D>()->rotation, -1.0f)); // player 3 is connected
     fs::remove_all(dir);
 }
 
@@ -476,6 +543,7 @@ end
 
 int main() {
     test_entity_scripts();
+    test_player_scripts();
     test_entity_emit();
     test_scene_go();
     test_saves();

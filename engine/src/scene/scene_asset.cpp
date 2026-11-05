@@ -770,7 +770,10 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("asset", &ScriptComponent::asset)
             .asset_type(std::string{asset_type_name(AssetType::Script)})
             .description("A .lua file of the content.")
-            .field("enabled", &ScriptComponent::enabled);
+            .field("enabled", &ScriptComponent::enabled)
+            .field("player", &ScriptComponent::player)
+            .range(0.0, 8.0)
+            .description("Whose input its script reads (input.held, input.axis...): 0 anyone's, 1 the first player's, 2 the second's.");
     }
 #endif
     if (!world.components().find("Animator")) {
