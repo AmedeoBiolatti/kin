@@ -44,6 +44,13 @@ struct ControllerNavigation {
     f32 dead_zone = 0.5f;
     f32 repeat_delay = 0.4f;
     f32 repeat_interval = 0.1f;
+    // Whose controller moves it: Input::player_gamepad(player); -1 the one
+    // Input::gamepad() gives (player 0's, else the first).
+    i32 player = -1;
+    // The input map's menu_up/menu_down/menu_left/menu_right move it too, and
+    // accept and quit accept and back out, on whatever they are bound to (that
+    // player's, with `player`). They do not make controller_active().
+    bool actions = true;
 };
 
 } // namespace kin::ui2

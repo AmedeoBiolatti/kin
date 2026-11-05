@@ -178,6 +178,30 @@ std::string readable_mouse(MouseButton button) {
     return "Mouse";
 }
 
+// A controller's control as a prompt says it: its buttons as the family
+// labels them (gamepad_button_label), sticks' ways and triggers by name.
+std::string readable_pad(PadControl control, GamepadFamily family, bool compact) {
+    const auto code = static_cast<u8>(control);
+    if (code < static_cast<u8>(GamepadButton::Count)) {
+        return std::string(gamepad_button_label(family, static_cast<GamepadButton>(code)));
+    }
+    switch (control) {
+    case PadControl::LeftStickLeft: return "Left Stick Left";
+    case PadControl::LeftStickRight: return "Left Stick Right";
+    case PadControl::LeftStickUp: return "Left Stick Up";
+    case PadControl::LeftStickDown: return "Left Stick Down";
+    case PadControl::RightStickLeft: return "Right Stick Left";
+    case PadControl::RightStickRight: return "Right Stick Right";
+    case PadControl::RightStickUp: return "Right Stick Up";
+    case PadControl::RightStickDown: return "Right Stick Down";
+    case PadControl::LeftTrigger:
+        return family == GamepadFamily::PlayStation ? "L2" : family == GamepadFamily::Nintendo ? "ZL" : compact ? "LT" : "Left Trigger";
+    case PadControl::RightTrigger:
+        return family == GamepadFamily::PlayStation ? "R2" : family == GamepadFamily::Nintendo ? "ZR" : compact ? "RT" : "Right Trigger";
+    default: return "Pad";
+    }
+}
+
 std::string prompt_binding_label(InputBinding binding, const PromptOptions& options) {
     std::string result;
     if (any(binding.modifiers)) {
@@ -193,6 +217,8 @@ std::string prompt_binding_label(InputBinding binding, const PromptOptions& opti
     }
     if (binding.device == InputBindingDevice::Key) {
         result += readable_key(static_cast<Key>(binding.code), options.compact);
+    } else if (binding.device == InputBindingDevice::Gamepad) {
+        result += readable_pad(static_cast<PadControl>(binding.code), options.family, options.compact);
     } else {
         result += readable_mouse(static_cast<MouseButton>(binding.code));
     }
@@ -973,15 +999,27 @@ std::string Context::prompt_for_action(std::string_view action, const PromptOpti
     if (!bindings || bindings->empty()) {
         return options.fallback.empty() ? readable_action(action) : options.fallback;
     }
+    PromptOptions labelled = options;
+    if (labelled.family == GamepadFamily::Generic) {
+        labelled.family = _input->gamepad().family; // the controller's own labels (Cross, not A)
+    }
     if (options.mode == PromptBindingMode::First) {
-        return prompt_binding_label(bindings->front(), options);
+        return prompt_binding_label(bindings->front(), labelled);
+    }
+    if (options.mode == PromptBindingMode::Device) {
+        // The controller's binding while it is what navigates (controller_active), else a key's or the mouse's.
+        const bool pad = _controller_active;
+        const auto found = std::ranges::find_if(*bindings, [pad](InputBinding b) {
+            return (b.device == InputBindingDevice::Gamepad) == pad;
+        });
+        return prompt_binding_label(found != bindings->end() ? *found : bindings->front(), labelled);
     }
     std::string result;
     for (std::size_t i = 0; i < bindings->size(); ++i) {
         if (i > 0) {
             result += options.separator;
         }
-        result += prompt_binding_label((*bindings)[i], options);
+        result += prompt_binding_label((*bindings)[i], labelled);
     }
     return result;
 }
@@ -1066,19 +1104,20 @@ f32 Context::mouse_wheel_x() const {
     return _input ? _input->frame_mouse_wheel_x() : 0.0f;
 }
 
+// Each asks controller_key() whatever the keys say: a widget that takes a
+// direction uses it up, so the focus does not move that way as well.
 bool Context::key_pressed(Key key) const {
-    return (_input && _input->frame_pressed(key)) || controller_key(key);
+    const bool controller = controller_key(key);
+    return (_input && _input->frame_pressed(key)) || controller;
 }
 
 bool Context::key_typed(Key key) const {
-    return (_input && (_input->frame_pressed(key) || _input->frame_repeated(key))) || controller_key(key);
+    const bool controller = controller_key(key);
+    return (_input && (_input->frame_pressed(key) || _input->frame_repeated(key))) || controller;
 }
 
 bool Context::action_pressed(std::string_view action) const {
-    if (_input && _input->frame_pressed(action)) {
-        return true;
-    }
-    // A controller drives the menu actions ui2's widgets read.
+    // A controller (and the map's menu actions) drive the menu actions ui2's widgets read.
     const Key key = action == "menu_up"      ? Key::Up
                     : action == "menu_down"  ? Key::Down
                     : action == "menu_left"  ? Key::Left
@@ -1086,7 +1125,8 @@ bool Context::action_pressed(std::string_view action) const {
                     : action == "accept"     ? Key::Enter
                     : action == "quit"       ? Key::Escape
                                              : Key::Unknown;
-    return key != Key::Unknown && controller_key(key);
+    const bool controller = key != Key::Unknown && controller_key(key);
+    return (_input && _input->frame_pressed(action)) || controller;
 }
 
 bool Context::modifier_held(KeyModifiers modifiers) const {

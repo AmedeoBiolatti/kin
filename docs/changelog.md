@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- ui2 navigation by the menu actions and per player ([ui](ui.md#controllers)). The map's `menu_up`/`menu_down`/
+  `menu_left`/`menu_right` move the focus as the d-pad does, and `accept`/`quit` accept and back out
+  (`ControllerNavigation::actions`). `ControllerNavigation::player` lets one player's controller navigate. A widget
+  that reads a direction now always uses it up, so the focus no longer moves as well when a key or an action also
+  gave it. Prompts name controller bindings as the controller labels them (`PromptOptions::family`), and
+  `PromptBindingMode::Device` names the binding of what navigates. Fixed: a controller binding in a prompt read as
+  a mouse button.
+
 - Local players in one Input ([input](input.md#local-players)). App gives `Input` each `GamepadPlayers`
   player's controller (`set_player_gamepad`, `player_gamepad`). `pressed`, `held`, `released`, `frame_pressed`,
   `frame_released` and `axis` take a player, and so do `binding_held`, `binding_pressed`, `axis_value` and
