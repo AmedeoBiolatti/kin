@@ -629,8 +629,9 @@ private:
                 // vec3 and vec4 start a vec4 of their own, vec2 an even float: each read in one access.
                 const u32 align = param.size >= 3 ? 4 : param.size;
                 used = (used + align - 1) / align * align;
-                if (used + param.size > 16) {
-                    error(param.name, "the parameters fill more than Material3D::shader_params' 16 floats");
+                if (used + param.size > surface_param_count3d) {
+                    error(param.name, "the parameters fill more than Material3D::shader_params' " +
+                                          std::to_string(surface_param_count3d) + " floats");
                     continue;
                 }
                 param.offset = used;
@@ -912,9 +913,9 @@ CompiledMaterialGraph3D compile_material_graph3d(std::string_view graph) {
     return std::move(c.out);
 }
 
-std::array<f32, 16> material_graph_params3d(const CompiledMaterialGraph3D& graph,
-                                            const std::map<std::string, std::array<f32, 4>>& values) {
-    std::array<f32, 16> out{};
+std::array<f32, surface_param_count3d>
+material_graph_params3d(const CompiledMaterialGraph3D& graph, const std::map<std::string, std::array<f32, 4>>& values) {
+    std::array<f32, surface_param_count3d> out{};
     for (const auto& p : graph.parameters) {
         if (p.type == GraphType3D::Texture)
             continue;
@@ -1032,9 +1033,10 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
     return g;
 }
 
-// KINGRAPH, the version (3), the payload's size and its FNV-1a hash, then the payload deflated (zlib): the number of
-// variants, the layout's bytes, then each variant's, each after its length (little-endian u32). Version 2 is the same
-// without the number (8 variants); version 1 that payload as it is.
+// KINGRAPH, the version (4), the payload's size and its FNV-1a hash, then the payload deflated (zlib): the number of
+// variants, the layout's bytes, then each variant's, each after its length (little-endian u32). Version 3 is the same
+// with 16 floats of parameters (the merged draws' variants read them 4 vec4s a copy: not used); version 2 without
+// the number (8 variants); version 1 that payload as it is.
 static u32 fnv1a(std::span<const u8> bytes) {
     u32 h = 2166136261u;
     for (const u8 b : bytes)
@@ -1061,7 +1063,7 @@ std::vector<u8> pack_cooked_material_graph3d(const CookedMaterialGraph3D& cooked
     unsigned char* deflated = kin_zlib_deflate(payload.data(), int(payload.size()), &size);
     if (!deflated) // (only out of memory)
         return {};
-    u32le(out, 3);
+    u32le(out, 4);
     u32le(out, u32(payload.size()));
     u32le(out, fnv1a(payload));
     out.insert(out.end(), deflated, deflated + size);
@@ -1085,7 +1087,7 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
     std::span<const u8> payload;
     if (version == 1) {
         payload = bytes.subspan(12);
-    } else if (version == 2 || version == 3) {
+    } else if (version >= 2 && version <= 4) {
         if (bytes.size() < 20)
             return fail("a cooked material graph cut short");
         const u32 expected = u32_at(bytes, 12), hash = u32_at(bytes, 16);
@@ -1113,8 +1115,8 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
         at += 4;
         return v;
     };
-    // Versions 1 and 2 hold the 8 variants every surface needs; 3 says how many (the merged draws' too).
-    const auto count = version == 3 ? next() : std::optional<u32>{surface_required_variants3d};
+    // Versions 1 and 2 hold the 8 variants every surface needs; 3 and 4 say how many (the merged draws' too).
+    const auto count = version >= 3 ? next() : std::optional<u32>{surface_required_variants3d};
     if (!count || *count < surface_required_variants3d || *count > surface_variant_count3d)
         return fail("a cooked material graph of an unknown number of variants");
     const auto layout_size = next();
@@ -1139,6 +1141,11 @@ std::optional<CookedMaterialGraph3D> unpack_cooked_material_graph3d(std::span<co
         v.assign(payload.begin() + std::ptrdiff_t(at), payload.begin() + std::ptrdiff_t(at + *n));
         at += *n;
     }
+    // Version 3's merged-draw variants read the parameter table at its old stride (16 floats a copy): left out, so
+    // those draws go unmerged; its other variants read the start of today's blocks, as before.
+    if (version == 3)
+        for (u32 i = u32(SurfaceVariant3D::Material); i <= u32(SurfaceVariant3D::MaterialLightsFog); ++i)
+            cooked.spirv[i].clear();
     return cooked;
 }
 

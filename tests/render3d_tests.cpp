@@ -4812,10 +4812,13 @@ void test_gpu_surface_batching() {
         const kin::SurfaceShader3D identity =
             r3d.compile_surface_shader(dir / "surface_identity.surface.glsl").value_or({});
         const kin::SurfaceShader3D tint = r3d.compile_surface_shader(dir / "surface_tint.surface.glsl").value_or({});
-        assert(identity.valid() && tint.valid());
+        // The same, reading the last of shader_params' 64 floats (56 to 63).
+        const kin::SurfaceShader3D tint_high =
+            r3d.compile_surface_shader(dir / "surface_tint_high.surface.glsl").value_or({});
+        assert(identity.valid() && tint.valid() && tint_high.valid());
         const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f})).value_or({});
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = kin::colors::black}).value_or({});
-        enum class Kind { Stock, Identity, Tint };
+        enum class Kind { Stock, Identity, Tint, TintHigh };
         const auto scene_of = [&](Kind kind, bool fog, bool spot) {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0, 1, 14}, {});
@@ -4836,10 +4839,12 @@ void test_gpu_surface_batching() {
                 m.roughness = 0.2f + (i % 4) * 0.2f;
                 if (kind == Kind::Identity)
                     m.surface = identity;
-                if (kind == Kind::Tint) {
-                    m.surface = tint;
-                    m.shader_params = {
+                if (kind == Kind::Tint || kind == Kind::TintHigh) {
+                    const float params[8] = {
                         float(i % 3 == 0), float(i % 3 == 1), float(i % 3 == 2), 0.5f, float(i % 5) * 0.2f, 0, 0, 0};
+                    m.surface = kind == Kind::Tint ? tint : tint_high;
+                    std::copy(std::begin(params), std::end(params),
+                              m.shader_params.begin() + (kind == Kind::Tint ? 0 : 56));
                 }
                 (void)scene.draw(box,
                                  Mat4f::translation({float(i % 24) * 0.65f - 7.5f, float(i / 24) * 0.65f - 5.0f, 0}), m,
@@ -4872,6 +4877,14 @@ void test_gpu_surface_batching() {
             const auto [tint_alone, tint_alone_stats] = settled(tinted, false);
             assert(tint_stats.main_merged_draws > 200 && tint_alone_stats.main_merged_draws == 0);
             assert(tint_merged.rgba == tint_alone.rgba && "merged surface draws take each copy's parameters");
+            // Parameters at the end of shader_params' 64 floats: the same, through the material block and the
+            // merged draws' table.
+            auto tinted_high = scene_of(Kind::TintHigh, fog, spot);
+            const auto [high_merged, high_stats] = settled(tinted_high, true);
+            const auto [high_alone, high_alone_stats] = settled(tinted_high, false);
+            assert(high_stats.main_merged_draws > 200 && high_alone_stats.main_merged_draws == 0);
+            assert(high_merged.rgba == tint_merged.rgba && high_alone.rgba == tint_alone.rgba &&
+                   "a surface reads parameters 56 to 63, merged and not");
             assert(!(tint_merged.rgba == stock_merged.rgba));
         }
         // A static batch of a surface material: retained, drawing what the same copies streamed draw.
@@ -4916,15 +4929,23 @@ void test_gpu_material_graph_cutout() {
         }
         const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_graph_cutout_test";
         std::filesystem::create_directories(dir);
-        std::ofstream{dir / "holes.kingraph"} << R"({"schema": "kin.material-graph/1", "name": "holes",
-            "nodes": [{"id": "squares", "type": "checker", "inputs": {"scale": 4}}],
+        // The checker's scale a parameter at the last of shader_params' 64 floats (after 15 vec4s and a vec3 of
+        // padding): the cut-out passes read it from the end of their block.
+        std::string padding;
+        for (int i = 0; i < 15; ++i)
+            padding += R"({"name": "pad)" + std::to_string(i) + R"(", "type": "vec4"}, )";
+        std::ofstream{dir / "holes.kingraph"}
+            << R"({"schema": "kin.material-graph/1", "name": "holes",
+            "parameters": [)" +
+                   padding + R"({"name": "rest", "type": "vec3"}, {"name": "scale", "type": "float", "default": 4}],
+            "nodes": [{"id": "squares", "type": "checker", "inputs": {"scale": "scale"}}],
             "outputs": {"alpha": "squares"}})";
         auto holes = r3d.compile_material_graph(dir / "holes.kingraph");
         if (!holes) {
             std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
             assert(false);
         }
-        assert(holes->graph.cutout);
+        assert(holes->graph.cutout && holes->graph.parameters.back().offset == 63);
         const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
         const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
         // The checker as a texture's alpha: texel (x, y) opaque where x + y is odd, as kin_graph_checker.
@@ -4946,6 +4967,7 @@ void test_gpu_material_graph_cutout() {
         stock.texture_samplers[0] = nearest;
         kin::Material3D graphed{.color = Color::rgb(220, 120, 60), .double_sided = true, .blend = kin::Blend3D::Mask};
         graphed.surface = holes->surface;
+        graphed.shader_params = kin::material_graph_params3d(holes->graph); // the scale, 4, at float 63
         kin::Material3D whole = graphed;
         whole.blend = kin::Blend3D::Opaque;
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});

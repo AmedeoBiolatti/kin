@@ -36,7 +36,7 @@ layout(set = 3, binding = 1) uniform Material {
     vec4 emission; // xyz: linear RGB factor, w: independent emission (otherwise legacy base-relative)
     vec4 uv;       // xy: the maps' scale, zw: their offset (Material3D::uv_scale, uv_offset)
 #ifdef KIN_SURFACE
-    vec4 surface[4]; // a surface shader's: Material3D::shader_params (kin_surface_param)
+    vec4 surface[16]; // a surface shader's: Material3D::shader_params (kin_surface_param; surface_param_count3d)
 #endif
 } material;
 #endif

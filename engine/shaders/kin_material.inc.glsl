@@ -286,11 +286,11 @@ struct KinSurface {
 };
 
 #ifdef KIN_SURFACE
-// A surface shader's parameters (Material3D::shader_params, four at a time): the draw's material block's, or, for
+// A surface shader's parameters (Material3D::shader_params, four at a time, 16 vec4s): the draw's material block's, or, for
 // merged draws (KIN_DRAW_MATERIALS), its copy's in the draws' table.
 vec4 kin_surface_param(int i) {
 #ifdef KIN_DRAW_MATERIALS
-    return kin_surface_params[vMaterial * 4u + uint(i)];
+    return kin_surface_params[vMaterial * 16u + uint(i)];
 #else
     return material.surface[i];
 #endif

@@ -104,10 +104,14 @@ void errors() {
     CHECK(error_at(bad, "sheen", "not an output"));
     CHECK(error_at(compile_material_graph3d("{\"schema\": \"x\"}"), "", "not a kin.material-graph/1"));
     CHECK(error_at(compile_material_graph3d("nonsense"), "", "not JSON"));
+    // Material3D::shader_params' 64 floats: 16 vec4s fill them (the last at 60), a 17th is refused.
     std::string many;
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < 16; ++i)
         many += std::string(i ? "," : "") + R"({"name": "v)" + std::to_string(i) + R"(", "type": "vec4"})";
-    CHECK(error_at(compile_material_graph3d(graph(many, "", "")), "v4", "16 floats"));
+    const auto full = compile_material_graph3d(graph(many, "", ""));
+    CHECK(full.ok() && full.parameters.back().offset == 60);
+    CHECK(error_at(compile_material_graph3d(graph(many + R"(, {"name": "v16", "type": "float"})", "", "")), "v16",
+                   "64 floats"));
 }
 
 // Every node type, wired into one graph and compiled by glslc into every variant: the GLSL each writes compiles.
@@ -238,6 +242,14 @@ void cooked() {
     flipped[flipped.size() / 2] ^= 0x40; // a byte changed: the payload's hash refuses it
     CHECK(!unpack_cooked_material_graph3d(flipped, &why));
     CHECK(bytes.size() < 400 && "the payload deflated (8 variants of 24 bytes and the layout)");
+    CHECK(bytes[8] == 4 && !unpacked->spirv[u32(SurfaceVariant3D::Material)].empty());
+    // Version 3 (16 floats of parameters): its merged-draw variants left out (they read the table's old stride).
+    auto old = bytes;
+    old[8] = 3; // the hash covers the payload, not the header
+    const auto three = unpack_cooked_material_graph3d(old, &why);
+    CHECK(three && three->spirv[7] == made.spirv[7] && !three->spirv[surface_mask_variant3d].empty());
+    for (u32 i = u32(SurfaceVariant3D::Material); i <= u32(SurfaceVariant3D::MaterialLightsFog); ++i)
+        CHECK(three->spirv[i].empty());
     auto wrong = bytes;
     wrong[0] = 'X';
     CHECK(!unpack_cooked_material_graph3d(wrong));
