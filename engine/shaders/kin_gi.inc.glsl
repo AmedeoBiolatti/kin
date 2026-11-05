@@ -136,6 +136,9 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     const float spacing = g.level[k].w;
     vec3 sum[4] = vec3[4](vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
     float total = 0.0;
+#ifdef KIN_GI_RESOLVE_VISIBILITY
+    float unoccluded_total = 0.0;
+#endif
     float ready = 0.0, possible = 0.0;
     for (int i = 0; i < 8; ++i) {
         const ivec3 offset = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
@@ -158,6 +161,10 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
         const vec3 to_probe = at - p;
         const float facing = (dot(to_probe * inversesqrt(max(dot(to_probe, to_probe), 1e-12)), n) + 1.0) * 0.5;
         float weight = facing * facing + 0.2;
+#ifdef KIN_GI_RESOLVE_VISIBILITY
+        const float base_weight = max(weight, 1e-6);
+        const float base_crushed = base_weight < 0.2 ? base_weight * base_weight * base_weight / 0.04 : base_weight;
+#endif
         const vec3 from_probe = biased - at;
         const float d = length(from_probe);
         const vec2 m = textureLod(uGiMoments, kin_gi_atlas(stored, from_probe / max(d, 1e-6), 16.0, g.counts.xyz,
@@ -174,6 +181,9 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
             weight *= weight * weight / 0.04; // the faintest lose more: a probe that barely sees leaks less
         }
         weight *= share;
+#ifdef KIN_GI_RESOLVE_VISIBILITY
+        unoccluded_total += base_crushed * share;
+#endif
         for (int j = 0; j < count; ++j) {
             sum[j] += weight * textureLod(uGiIrradiance, kin_gi_atlas(stored, ways[j], 8.0, g.counts.xyz, g.bias.w), 0.0).rgb;
         }
@@ -182,6 +192,16 @@ bool kin_gi_level_light(KinGiProbes g, int k, vec3 p, vec3 biased, vec3 n, vec3 
     for (int j = 0; j < 4; ++j) {
         light[j] = total > 0.0 ? sum[j] / total : vec3(0.0);
     }
+#ifdef KIN_GI_RESOLVE_VISIBILITY
+    // Forced visibility-floor weights retain at most .0045 after crushing. Normalizing those tiny weights must
+    // not restore full light behind a blocker. Keep coverage: these probes are ready, rather than missing support
+    // that the caller should replace with ambient light. Bounce feedback retains its original estimator.
+    const float retained = total / max(unoccluded_total, 1e-30);
+    const float confidence = smoothstep(0.0045, 0.05, retained);
+    for (int j = 0; j < 4; ++j) {
+        light[j] *= confidence;
+    }
+#endif
     coverage = possible > 0.0 ? clamp(ready / possible, 0.0, 1.0) : 0.0;
     return total > 0.0;
 }

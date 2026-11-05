@@ -7,6 +7,7 @@ set(_kin_gpu_shader_names_2D
     pp_bloom_bright.frag pp_bloom_blur.frag pp_bloom_combine.frag transition_dissolve.frag
     transition_pixelate.frag transition_wipe.frag transition_iris.frag transition_crossfade.frag)
 set(_kin_gpu_shader_names_3D
+    mesh_material.vert mesh_material.frag mesh_material_fog.frag mesh_material_light.frag mesh_material_light_fog.frag
     mesh_indexed.vert mesh_unlit_indexed.vert mesh_unlit_textured_indexed.vert prepass_indexed.vert mesh.vert
     mesh.frag shadow.vert shadow.frag shadow_mask.vert shadow_mask.frag pick_mask.frag visibility.frag visibility_mask.frag mesh_unlit.vert
     mesh_unlit_textured.vert mesh_unlit.frag mesh_unlit_textured.frag mesh_unlit_mask.frag

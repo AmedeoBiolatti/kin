@@ -16,17 +16,22 @@ enum class GiView3D : u8 { Off, Albedo, Normal, Emission, Steps, Radiance, Irrad
 // Defaults preserve normal rendering and never request a blocking readback.
 // Attach to Scene3D::debug; these are not authored/serialized scene settings.
 struct RenderDebugOptions3D {
-    i32 force_level = -1;          // -1: normal LOD; >=0: force a level/cluster depth
-    bool gpu_culling = true;       // false: compare with the CPU cluster cut
-    bool stats_readback = false;   // waits for GPU cluster counters: profiling only
-    bool gpu_pass_markers = false; // labels for external GPU profilers, no readback
-    bool graph_reference = false;  // execute stock phases in fixed reference order for graph parity checks
-    bool freeze_jitter = false;    // hold the first TAA jitter sample
-    bool light_grid = true;        // false: every fragment loops over the 16 strongest point and spot lights, as
-                                   // before the light grid (to compare with it)
-    bool prepass_depth = true;     // false: the main pass clears its depth and draws it all again, instead of starting
-                                   // from the pre-pass's (to compare with it)
-    bool gi_sun_map = true;        // false: the GI's voxels take the sun's light by their own march, not its sun map
+    i32 force_level = -1;                  // -1: normal LOD; >=0: force a level/cluster depth
+    bool gpu_culling = true;               // false: compare with the CPU cluster cut
+    bool stats_readback = false;           // waits for GPU cluster counters: profiling only
+    bool gpu_pass_markers = false;         // labels for external GPU profilers, no readback
+    bool graph_reference = false;          // execute stock phases in fixed reference order for graph parity checks
+    bool retain_scene_instances = true;    // false: stream direct scene draws for CPU/cache parity measurements
+    bool cache_local_shadow_gather = true; // false: rebuild local caster selection and depth batching
+    u32 local_shadow_gather_budget = 4 * 1024 * 1024; // diagnostic CPU payload cap, clamped to 4 MiB
+    bool cache_draw_commands = true;           // false: rebuild main draw decisions/order and issue individual draws
+    u32 draw_command_budget = 4 * 1024 * 1024; // CPU plan and GPU material payload caps, each clamped to 4 MiB
+    bool freeze_jitter = false;                // hold the first TAA jitter sample
+    bool light_grid = true;    // false: every fragment loops over the 16 strongest point and spot lights, as
+                               // before the light grid (to compare with it)
+    bool prepass_depth = true; // false: the main pass clears its depth and draws it all again, instead of starting
+                               // from the pre-pass's (to compare with it)
+    bool gi_sun_map = true;    // false: the GI's voxels take the sun's light by their own march, not its sun map
     GiView3D gi_view = GiView3D::Off;
 };
 

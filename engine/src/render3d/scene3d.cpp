@@ -446,6 +446,8 @@ bool Scene3D::draw_instanced_operation(const InstanceBatch3D& batch, const Mater
 Result3D<std::span<MeshInstance3D>> Scene3D::add_instances(const Mesh3D& mesh, std::size_t count,
                                                            const Material3D& material) {
     auto value = add_instances_operation(mesh, count, material);
+    if (!value.empty())
+        _instances_exposed = true;
     return result3d(value, _errors);
 }
 
@@ -783,6 +785,7 @@ bool Scene3D::update_joint_matrices_operation(u32 first, std::span<const Mat4f> 
 
 void Scene3D::clear() {
     _errors.clear();
+    _instances_exposed = false;
     touch_draws();
     _draws.clear();
     _instances.clear();

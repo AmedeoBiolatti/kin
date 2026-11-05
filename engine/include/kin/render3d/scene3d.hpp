@@ -760,6 +760,9 @@ public:
         return _draw_stamp.lifetime;
     }
     std::span<const MeshInstance3D> instances() const { return _instances; }
+    // A public add_instances() span may be edited without notification. Renderers
+    // must read those records each render; clear() ends this exposure.
+    bool instances_exposed() const { return _instances_exposed; }
     // After editing a previously returned add_instances() span, invalidate any
     // prepared submission. Fill new spans before prepare(); ordinary rendering
     // continues to read their current values without this notification.
@@ -839,6 +842,7 @@ private:
     std::vector<u32> _skin_offsets;
     std::vector<ParticleDraw> _particle_draws;
     std::vector<ParticleSprite3D> _particle_sprites;
+    bool _instances_exposed = false;
     Diagnostics3D _errors;
     bool fail_submission(std::string_view reason) {
         if (_errors.empty())

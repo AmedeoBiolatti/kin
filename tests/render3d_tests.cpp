@@ -9383,7 +9383,11 @@ void test_gpu_warm_up() {
         {"lit particles, msaa", 4, false, false, false, false, false, false, false, false, false, true, true},
         {.name = "taa + culled particles", .samples = 1, .taa = true, .particles = true, .culled_particles = true},
     };
-    for (const Config& config : configs) {
+    for (std::size_t config_index = 0; config_index < configs.size(); ++config_index) {
+        if (const char* selected = std::getenv("KIN_TEST_WARM_UP_CONFIG");
+            selected && config_index != std::strtoul(selected, nullptr, 10))
+            continue;
+        const Config& config = configs[config_index];
         kin::u32 made[2] = {0, 0};
         for (const bool warm : {false, true}) {
             bool ran = false;

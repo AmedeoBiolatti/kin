@@ -4,6 +4,833 @@ The implementation branch starts at lighting snapshot `77b76c8`. Correctness, CP
 
 ## CPU work
 
+### Industrial Yard CPU investigation, 2026-11-03
+
+The newer cross-engine experiment lives in the sibling `kin-wt/yard-engines`
+worktree, based on `998c1e9`. Its `out/yard-baseline/medium-engines-summary.md`
+reports 720p frame p50 **6.13 ms Kin / 2.67 ms Unreal matched** over three repeats.
+Kin's render caller consumes **5.88 ms thread CPU**. These are frame intervals;
+Unreal's separate game/render/RHI timers do not describe the same scope as Kin's
+caller timer. The original comparison also uses Kin 4x MSAA against Unreal's
+no-AA matched preset, and has no equivalent native Kin GPU timestamp.
+
+A new CPU profile uses the existing Yard binary, NVIDIA Vulkan on the RTX 4080
+Laptop GPU, CPUs 0–15, four helpers, 300 warm-up and 1,440 measured route frames.
+`perf record -F 499 -e cycles:u --call-graph dwarf,8192` records all threads.
+CSV monotonic timestamps select only measured frames; main-thread percentages
+below are inclusive, period-weighted user cycles, not elapsed or GPU times.
+
+| Main-thread work | Share |
+| --- | ---: |
+| Local-shadow culling, caster lists, packing and batching | 42.5% |
+| Camera culling, bounds and instance uploads | 25.7% |
+| Main-pass recording, including its driver calls | 12.5% |
+| Local-light grid | 5.9% |
+| Draw/composition ordering | 5.1% |
+| Local-shadow pass recording | 2.9% |
+| Material-input validation | 1.1% |
+
+This is primarily preparation work. The existing prepared-layout cache hits on
+every measured frame, but explicitly excludes visibility and instance payloads.
+The 7,200 stationary props use individual `Scene3D::draw` records: they do not
+receive `InstanceBatch3D` retained GPU records or persistent world-bound caches.
+Their bounds and camera/shadow instance packing repeat. Local-shadow gathering
+also makes tasks for thousands of tiny draws and sorts caster entries each frame.
+The ECS collection path already groups compatible meshes/materials; this finding
+is specific to the direct submission pattern and is not evidence that ECS
+transform propagation is responsible for this benchmark.
+
+**Tested reduction using existing APIs.** A temporary harness groups stationary
+props by `(mesh, material)` into 64 persistent batches, one spatial group per
+batch. It preserves all prop transforms, materials, 800 moving props, 128 animated
+robots, smoke, lights, 4x MSAA and HDR. Five paired full-route repeats alternate
+baseline/batched/spatial order. Neither `perf` nor image readback runs during
+throughput measurement; thread/process CPU clocks run in every case.
+
+| Median of five run medians | Individual static draws | Retained static batches |
+| --- | ---: | ---: |
+| Frame p50 | 6.268 ms | 3.186 ms |
+| Frame p95 (median of run p95s) | 7.559 ms | 5.388 ms |
+| Render caller thread CPU p50 | 6.017 ms | 1.379 ms |
+| Render process CPU p50, including helpers | 8.047 ms | 1.874 ms |
+| Prepared draw records | 7,429 | 293 |
+| Main-pass draws, p50 | 4,211.5 | 240 |
+| Local-shadow draws | 1,140 | 524 |
+| Streamed instance bytes/frame, p50 | 1,338,560 | 103,360 |
+| Changed retained instance bytes/frame | 102,400 | 102,400 |
+| Recomputed streamed bounds/frame | 8,855 | 1,655 |
+| Local gather task payload capacity | 950,656 bytes | 37,248 bytes |
+| Resident instance GPU payload | 102,400 bytes | 1,024,000 bytes |
+
+Paired thread-CPU reductions range from **73.0% to 79.9%**; process-CPU reductions
+range from **73.0% to 79.5%**. Frame reductions range from 36.0% to 55.0%.
+Clocks/background load are uncontrolled and drift substantially, so these are
+local paired observations, not a new Unreal ranking or a universal speedup.
+Resident GPU records grow by about **0.88 MiB**, avoiding repeated computation
+and streaming. The Medium scene's 64 static plus 64 moving batches exactly fill
+the existing 128-table admission limit; no budget was raised.
+
+Per-frame camera instances/triangles, shadow casters/triangles, joint counts and
+motion sums agree across the entire route. Outside, warehouse and elevated
+captures (route offsets 0, 540 and 960) are decoded-RGBA identical for both
+batching variants. A 16-unit spatial-cell variant cuts median local instance
+tests from 33,348 to 17,610 but increases task payload to 275,840 bytes; its caller
+CPU is 1.857 ms versus 1.379 ms for simple batches. Fewer sphere tests alone do
+not establish a win. Three no-local-shadow and three MSAA-1 controls support the
+preparation diagnosis; their later timing windows are not used as paired feature
+cost estimates.
+
+The example now exposes the successful path as `--batch-static-props` and reports
+its effective batch count. Default comparison submissions remain unchanged.
+After generating the usual Medium recipe, compare otherwise identical commands
+with/without that flag:
+
+```sh
+KIN_RENDER_BACKEND=gpu build/bin/industrial_yard \
+  --recipe /path/to/medium.yrd --metrics /path/to/batched.csv \
+  --report=/path/to/batched.json --profile-cpu --measured 1440 --batch-static-props
+```
+
+**Next renderer work, in order.** Make compatible direct opaque/masked draws
+benefit from retained batching or revision-tracked static records automatically;
+the current ECS buckets provide an existing model. Cache fixed local-light caster
+membership and batch plans before rebuilding tasks, with invalidation for changed
+meshes, transforms, poses, material masks, light projections and camera-dependent
+LOD/reach. Keep static and dynamic dependencies separate: the fixture deliberately
+disables whole-map shadow caching, and one moving caster would invalidate a
+whole cached map anyway. Reuse bounded scratch storage and precomputed sort keys
+after reducing the number of records. The batched path also unlocks existing
+four-sphere SIMD ranges that one-copy draws cannot use. Reprofile those changes
+before adding workers or changing compiler flags. The per-frame public prepared
+scene handle shares work between consumers; it is not a persistent cross-frame
+cache for static scene content.
+
+Artifacts are `/tmp/kin-cpu-investigation/`: measured-window profile summary,
+raw stacks/data, source patch, build commands, per-run CSV/JSON/logs, provenance,
+work checks and exact image comparisons. The original sibling worktree and its
+existing rendering edits were used read-only. At this investigation checkpoint,
+only the example option and these notes changed; no renderer algorithm was replaced.
+
+Final main-source validation separately builds the edited example against the
+existing native renderer libraries. Its default/batched full 1,440-frame routes
+have identical geometry, shadow and motion counters. Three paired captures use
+main's own background settings and agree exactly; an additional TAA/AO/contact
+capture agrees exactly. Rebuilt-command and empty-population runs pass. Small
+and Heavy controls (300 warm-up, 16 measured frames) preserve geometry/shadow/
+motion counts, including Heavy's streamed fallback beyond 128 retained tables;
+these short checks are not scaling measurements. All five recipe tests pass,
+and `git diff --check` is clean. At that checkpoint the renderer library was
+unchanged, so the full renderer suite was not repeated for the example-only option.
+
+### Direct scene retention implementation
+
+Branch `perf/render3d-cpu-preparation` starts at main `998c1e9`. Its first engine
+slice shares one retained table across a source scene's direct opaque/masked
+records while preserving every colour draw's order, material and picking ID.
+It caches packed GPU records, transformed bounds and admission counts by source
+identity/revision; pose-only updates and camera/light changes do not rebuild the
+static payload. Visibility, local-shadow gathering and sorting still run. The
+earlier material-grouped example remains a separate, opt-in experiment: this
+implementation does not claim its much larger CPU reduction.
+
+Admission requires 32 eligible draw records and 256 copies after an unchanged
+render, and shares the existing 32 MiB/128-table GPU and 4 MiB bounds limits.
+Raw mutable spans, TAA, enabled LOD/occlusion, skinned/blended/custom/wireframe
+draws and explicit prepared consumers keep their prior paths. A scene command
+edit refreshes the whole source table; sparse direct-record updates and cached
+light caster plans are subsequent work. The fallback for an additional edit
+after an upload in one GPU frame preserves all earlier views.
+
+The new GPU regression compares decoded pixels and geometry/shadow counters with
+`debug.retain_scene_instances = false`, including mixed masked/opaque/alpha,
+explicit batches, skinning, equal-depth surfaces, one/four sun cascades, local
+shadows, AO/contact, camera and pose edits, raw spans, source moves with a held
+weak-identity token, independent overlay tables, three views around same-frame
+edits, and over-budget streaming. Its warmed static path requires no record
+uploads or repeated static bounds, with no explicit device-idle wait. It passes
+on NVIDIA Vulkan and llvmpipe. The regression exposed a fresh moved-scene table
+mistaken for populated revision zero; checking initialization independently of
+revision fixes it. The CPU suite and five recipe tests also pass.
+
+Fresh same-binary on/off timing runs follow the user's power-setting change;
+the preceding investigation's timings are not their baseline. Both controls use
+four helpers, CPUs 0–15, 720p, default 4x MSAA/HDR, the complete Medium route,
+300 warm-up and 1,440 measured frames. Five alternating pairs run serially,
+with no build, test, profiler or capture load alongside them. Captures follow
+throughput measurement at offsets 0, 540 and 960. Reproduce with
+`tools/benchmark_render3d_direct_cache.py --binary <industrial_yard> --output <directory>`.
+
+| Median of five run medians | Cache off | Cache on |
+| --- | ---: | ---: |
+| Render caller thread CPU p50 | 6.204 ms | 5.728 ms |
+| Render process CPU p50 | 8.220 ms | 7.333 ms |
+| Frame p50 / p95 | 6.477 / 9.257 ms | 5.984 / 8.557 ms |
+| Recomputed bounds/frame | 8,855 | 1,446 |
+| Streamed instance bytes/frame, p50 | 1,338,560 | 66,048 |
+| Direct records retained | 0 | 7,409 |
+| Static table uploads / bounds rebuilt after warm-up | — | 0 / 0 |
+| Resident instance GPU payload | 102,400 bytes | 1,133,440 bytes |
+
+The deterministic reductions are **83.7% fewer bound transformations** and
+**95.1% fewer streamed instance bytes** at p50, for about **0.98 MiB** additional
+live GPU payload. Main draw counts and per-frame geometry, shadows, joints and
+motion sums agree, and all three decoded captures are exact. Local-shadow draw
+counts remain 1,140: the gather/list/sort workload has not been eliminated.
+
+Clocks/background load drift substantially across these runs. The median of the
+five paired thread-CPU reductions is **2.9%** (range **0.5–20.2%**); process-CPU
+reduction is **6.8%** (range **3.8–22.0%**). Paired frame reductions range from
+**−0.2% to 21.5%**, with a 3.8% median. The run-median table alone overstates the
+typical paired gain under that drift. Treat frame throughput as noisy and the
+CPU benefit as modest; the larger example-batching gain above is not achieved
+by this order-preserving slice. An initial version that rescanned admission
+eligibility every frame is archived under `yard-initial`; the final code caches
+that count with the source revision.
+
+The final complete native 3D suite also passes after admission-count reuse.
+Implementation artifacts are `/tmp/kin-cpu-implementation/`: clean build logs,
+full native suite logs, NVIDIA/llvmpipe direct-cache regressions, CPU/recipe logs,
+source identities and `yard/` commands/CSV/captures/summary. The next measured
+target is fixed-light caster membership and cached gather/batch plans, whose
+dependency rules must keep moving casters, masks, poses and camera-dependent
+LOD/reach correct.
+
+#### Fixed-light local caster plans
+
+The next engine slice caches static direct-source membership for stock spot and
+point maps, and exact sort permutations within the existing 128-entry depth
+batching windows. The key includes weak source identity/revision, source ref
+count, actual light projection/frustum and bounded reach. Two identical
+observations admit a projection; continuously changing projections keep empty
+probes. Cache payload is limited to 4 MiB across 64 source/physical-light-slot
+probes. Relative copy indices are replayed into the normal source-order backing
+store, so GPU table replacement does not leave stale instance offsets.
+
+Moving batches, skeletons and ineligible draws still gather live, interleaved
+with the static rows. Sort reuse requires the complete current comparator-key
+sequence and window length to match. Changed keys get the original stable tie
+order; current counts, offsets, textures and bindings are never saved as draw
+records. Camera-dependent wanted cube faces remain live. Sun/moon/GI maps,
+LOD/TAA, exposed spans and explicit prepared consumers keep their prior paths.
+This cache does not skip GPU shadow-map work.
+
+The targeted GPU regression now also covers dynamic refs between static draws,
+batch disappearance/re-entry, position/radius/near-plane/direction changes,
+point faces under camera changes, pose and mask-texture edits during cache hits,
+whole-map caching, disabled/tiny budgets, static-only zero-task hits and empty
+selections. Resident accounting and budget changes apply even with no selected
+local lights. Cache-control metadata uses fixed stack arrays; the existing
+caster scan collects admission metadata without a separate source-ref scan.
+
+Final Release/GCC 15.2 controls use NVIDIA Vulkan, four helpers, CPUs 0–15,
+720p 4x MSAA/HDR, 300 warm-up and 1,440 measured frames, with no concurrent
+build, tests, profiler or capture load. Five pairs alternate order. Direct-scene
+retention is enabled in both; only local gather/sort caching changes. Reproduce
+with `tools/benchmark_render3d_direct_cache.py --binary <industrial_yard>
+--output <directory> --mode local-gather --repeats 5`.
+
+| Median of five run statistics | Gather cache off | Gather cache on |
+| --- | ---: | ---: |
+| Render caller CPU p50 / p95 | 5.940 / 6.724 ms | 4.411 / 4.957 ms |
+| Render process CPU p50 / p95 | 7.532 / 8.478 ms | 5.107 / 5.705 ms |
+| Frame interval p50 / p95 | 6.226 / 11.826 ms | 5.513 / 9.715 ms |
+| Actual local instance tests/frame | 33,348 | 3,712 |
+| Gather-task vector payload | 950,656 bytes | 24,576 bytes |
+| CPU plan payload | 0 | 491,920 bytes |
+| Static accepted copies replayed/frame, p50 | 0 | 14,301 |
+| Sort windows reused/frame, p50 | 0 | 115 |
+| Sort entries reused/frame, p50 | 0 | 14,509 |
+| Local-shadow draws/frame | 1,140 | 1,140 |
+
+The deterministic reductions are **88.9% fewer local instance tests** and
+**97.4% less gather-task storage**, for **0.47 MiB** of resident CPU plan payload
+and no additional GPU retention. Four fixed spot selections hit each frame.
+The warmed sort cache has zero missed windows at p50 and one at p95, allowing
+dynamic caster membership to change. Per-frame geometry, shadow draws/maps/
+triangles/casters, skinning, motion, uploads and retained GPU bytes agree in all
+five paired routes. Three separate captures at offsets 0, 540 and 960 are
+pixel-identical. Explicit device-idle waits remain zero.
+
+The median of the five paired caller-CPU reductions is **27.4%** (range
+**24.7–30.2%**), process CPU **33.6%** (**31.1–36.3%**), and frame interval
+**16.4%** (**10.3–27.5%**). Absolute timings still drift between runs; clocks
+and temperatures were not logged throughout. Use the paired reductions rather
+than infer a controlled-clock result or combine these absolute timings with
+the earlier engine-cache experiment. This is not a refreshed Unreal comparison
+or a GPU timestamp measurement. Caster-list packing, depth-state interning,
+uploads and command recording remain per-render work.
+
+The final complete native 3D suite, targeted NVIDIA and llvmpipe regressions,
+CPU suite and five recipe tests pass. Artifacts are `/tmp/kin-local-gather/`:
+`yard/` contains final commands, CSVs, reports, captures and summaries;
+`paired-summary.json` records each paired reduction; `source-identity.json`
+records final source/binary hashes and the GPU renderer compile command.
+`yard-initial/` preserves the preceding matrix before the no-light accounting
+fix and removal of cache-metadata allocations/redundant scans. Its timings are
+not mixed into the final figures above.
+
+#### Main draw decisions and consecutive instancing
+
+A fresh measured-window CPU profile of `74feed5` (the instance and local gather
+caches enabled) finds 32.5% of main-thread user cycles in camera preparation,
+22.7% in remaining local-shadow preparation, 18.0% in main recording, 8.6% in
+light-grid construction, 7.0% in ordering and 4.7% in local recording. These
+inclusive, period-weighted samples describe Kin's remaining CPU work, not the
+fraction of the cross-engine gap explained by each stage. Profile/provenance
+artifacts are `/tmp/kin-remaining-cpu/`.
+
+The next slice retains the main pass's sorted source order, material constants,
+texture/sampler compatibility classes and pipeline decisions. It filters current
+visibility instead of sorting the same opaque refs, and sorts only transparent
+copies/particles before assembling the same stable world/overlay order. Cached
+pipeline pointers key current target/shading variants and the shared pipeline
+cache's invalidation revision. Immutable submission-kind metadata also avoids
+repeated batch-handle validity calls in culling and scene-table binding. Custom
+shader decisions remain live.
+
+A retained GPU material table makes different scalar PBR values compatible
+within a draw. Static direct copies use their original source row to fetch the
+same 64-byte constants the ordinary draw pushes. Only consecutive commands with
+matching mesh, scene, pipeline, instance storage and texture/sampler bindings
+merge. The compact main index list concatenates their existing camera lists in
+order. Colours, IDs, source refs, picking and shadow lists are unchanged; there
+is no global material regrouping. Both opaque and masked copies use the stock
+shading logic, with their individual alpha cutoffs and emission values.
+
+CPU plans cap at 8,192 refs / 4 MiB; GPU materials cap at eight sources / 4 MiB,
+plus a main index buffer bounded by the admitted material rows (<=256 KiB).
+Two observations admit a stable command revision. Continually rebuilt scenes
+remain immediate; unavailable shader variants, exposed spans, TAA/LOD, custom,
+unlit, wireframe, skinned and over-budget main draws retain their old paths.
+The instance table may fit even when the independent material cap does not;
+that case must still draw completely with per-draw uniforms.
+
+The final same-binary matrix keeps the two preceding caches enabled and changes
+only `--cache-draw-commands 0|1`. Five alternating Medium routes use four helpers,
+CPUs 0–15, 720p 4x MSAA/HDR, 300 warm-up and 1,440 measured frames. Native Vulkan
+runs through Wayland with the NVIDIA ICD; the user's separate preview was closed
+before measurement. No builds, tests, profiler or readbacks run alongside the
+throughput pairs. Reproduce with `tools/benchmark_render3d_direct_cache.py
+--binary <industrial_yard> --output <directory> --mode draw-commands --repeats 5`.
+
+| Median of five run statistics | Command cache off | Command cache on |
+| --- | ---: | ---: |
+| Caller CPU p50 / p95 | 3.522 / 4.071 ms | 3.292 / 3.915 ms |
+| Process CPU p50 / p95 | 4.056 / 4.634 ms | 3.973 / 4.664 ms |
+| Frame interval p50 / p95 | 3.670 / 5.137 ms | 3.523 / 5.439 ms |
+| Main draws, p50 / p95 | 4,211.5 / 6,380 | 162 / 211 |
+| Main material-table draws/frame, p50 | 0 | 8 |
+| Local-shadow draws/frame | 1,140 | 1,140 |
+| CPU plan vector payload | 0 | 894,676 bytes |
+| GPU material payload | 0 | 515,520 bytes |
+| GPU main-index capacity | 0 | 26,532 bytes |
+| Main-index upload/frame, p50 | 0 | 16,682 bytes |
+| Warm plan rebuilds / pipeline misses / material uploads | — | 0 / 0 / 0 |
+
+Main draw p50 falls **96.2%**, preserving source/copy order. Every measured
+frame's reduced draw count is explained exactly by `main_merged_draws`; geometry,
+shadow maps/draws/triangles/casters, skinning, motion, instance uploads and existing
+retained GPU bytes match across all five paired routes. Three decoded captures
+at offsets 0, 540 and 960 are pixel-identical. Logical additional cache payload
+is about **0.85 MiB CPU / 0.52 MiB GPU**, excluding fixed metadata, shader/pipeline
+objects, staging and driver cycle backings. Existing instance uploads remain
+66,048 bytes/frame at p50; the new compact main-index upload is counted separately.
+
+The median paired caller-CPU reduction is **17.9%** (range **6.5–23.4%**), process
+CPU **15.3%** (**2.1–21.1%**), and frame p50 **14.3%** (**4.0–20.3%**). Each paired
+reduction uses the two adjacent runs' p50 values; it differs from dividing the
+table's independently aggregated medians. Absolute timings drift substantially:
+caller CPU in the off control rises from 3.102 to 4.436 ms across the matrix.
+These controls are a new measurement window, not an additive comparison with
+earlier absolute times or a refreshed Unreal ranking. Frame p95 is not
+consistently improved: the median run p95 is 5.137 ms off and 5.439 ms on.
+The remaining camera and local-shadow preparation still visits the
+original refs, and shadow geometry is still redrawn. Fewer main commands alone
+do not remove those costs.
+
+The targeted regression passes on NVIDIA and llvmpipe, requiring exact pixels,
+picks and geometry through heterogeneous scalar materials, mask cutoffs,
+equal-depth surfaces, HDR/MSAA, all four stock fog/light variants, sky, AO/contact,
+poses, texture writes, legacy scale/mip changes, overlays, source moves, raw
+spans, tiny budgets, a material-over-budget instance table, CPU metadata that fits
+while its index scratch exceeds the cap, and same-frame views.
+It also checks unchanged-source zero uploads/decision misses and that a scene
+resubmitted every render never rebuilds a retained plan. CPU and five recipe
+tests pass.
+
+All **271 existing renderer cases pass on NVIDIA in isolated processes**. The
+combined process cannot complete in the current desktop session: GPU device
+creation fails after repeated initialization, at the same point with the
+unchanged pre-implementation binary. This is recorded separately from assertion
+results. The warm-up case itself creates 24 devices, so its twelve unchanged
+cold/warm comparisons run separately via the optional `KIN_TEST_WARM_UP_CONFIG`
+index; normal unfiltered test behavior is unchanged. No assertion was relaxed.
+
+Artifacts are `/tmp/kin-draw-commands/`: `yard/` holds the final paired routes and
+captures; `paired-summary.json` records each reduction; `renderer-cases.json`,
+the runner and per-case logs record the complete isolated suite. Combined-process
+and unchanged-binary failure logs preserve the device issue. Source/binary/shader
+hashes and validation checks are in `source-identity.json` and
+`final-validation.json`. `yard-preflight/` and `yard-before-budget-fix/` are
+preceding measurements, not included in the final figures above.
+
+### Cornell GI across Kin, Godot and Unreal, 2026-11-03
+
+The three CPU optimization commits are merged into local main at `427b594`,
+after updating from `origin/main`. A fresh main build passes the CPU renderer,
+direct-instance/local-shadow cache and draw-command GPU regressions.
+
+The comparison uses one static 1280x720 Cornell view on the RTX 4080 Laptop GPU,
+Vulkan release builds, TAA, no MSAA, black ambient/background and no explicit
+lights: only the original ceiling panel emits. All consumers receive the same
+materials, emission, camera and 82 triangles. The original interior faces are
+preserved; closed 2 cm exterior wall slabs and a uniform 10x geometry/camera scale
+make the shared fixture suitable for distance-field GI. Fresh Cycles references
+use this same adapted asset.
+
+| Renderer / GI profile | Frame p50 | Frame p95 | Crop SSIM, higher better | Room RGB MAE, lower better |
+| --- | ---: | ---: | ---: | ---: |
+| Kin stock GI | 0.950 ms | 1.214 ms | 0.934 | 7.51 |
+| Godot 4.7.2 Forward+ / SDFGI | 0.526 ms | 1.051 ms | 0.730 | 38.77 |
+| Unreal 5.8.4 Shipping / software Lumen | 2.483 ms | 2.571 ms | 0.971 | 8.09 |
+
+Timing figures are medians of three rotated, serial repeats, each with 1,200
+warm-up and 2,400 measured frames, CPUs 0–15. No builds or captures overlap cost
+runs. Run p50 ranges are 0.851–1.047 ms Kin, 0.523–0.619 ms Godot and
+2.455–2.655 ms Unreal. These are full-frame intervals, including each adapter and
+presentation; unlike individual engine CPU/GPU columns, that scope is comparable.
+Clocks are unlocked on a shared desktop. Cold import, shader compilation, mesh
+distance-field generation and initial GI convergence are excluded.
+
+Quality is captured separately after 2,400 warm-up frames. Scores average two
+independent 1,024-sample denoised Cycles references, without exposure or color
+fitting. SSIM uses the repository's 11x11 Gaussian luminance implementation on
+the same room crop. MAE is in 8-bit sRGB levels on reference room pixels, excluding
+black background and the clipped emitter. The denoised references agree to
+SSIM 0.9991 / room MAE 0.147; raw reference seeds and their scores are retained.
+
+Kin is about 2.6x Lumen's throughput in this configuration, retaining broad
+illumination/color bleeding with bright edge leaks and wall banding. Lumen has
+cleaner shadows and fewer localized artifacts; Kin's slightly lower average
+color error alone does not establish better overall quality. Godot SDFGI is
+fastest, with pronounced lighting/shadow discontinuities and excessive back-wall
+brightness. These profiles do not have equal image quality and do not establish
+a general engine ranking. This small static scene exercises GI rather than the
+many-object CPU submission workload optimized above; temporal stability is untested.
+
+Kin uses 128 rays and up to 4,096 probe updates/render, with TAA sharpness 0.
+Godot uses a 0.1 m minimum SDFGI cell, four cascades, occlusion, bounce feedback
+0.5 and its half-resolution GI project setting. Unreal uses Epic software Lumen,
+100% screen percentage, TAA and mesh distance-field resolution scale 4, with
+AO/bloom/motion blur/occlusion queries off. Initial Godot VoxelGI 128/256 bakes
+underlit the panel-only fixture through dynamic-range and black-ambient controls;
+those diagnostics are excluded from the main ranking, not evidence that another
+VoxelGI setup cannot render Cornell correctly.
+
+Session artifacts are `out/cornell-engines-20261103/`: `index.html` and
+`comparison.png` show the images; `campaign.json`, `speed-summary.json`,
+`quality-summary.json` and `final-summary.json` record commands, checks, effective
+settings, binary/content hashes and scores. Scene preparation, the release Godot
+pack, Unreal adapter sources/build logs, per-frame logs and both raw/denoised
+reference seeds are retained there.
+
+### Experimental Cornell GI quality/cost, 2026-11-03
+
+`exp/gi-yard` and `quality/gi-response` both identify `6d75304`. Its better
+Cornell result comes from a generated static-source/residual-history prototype,
+not the branch's default renderer. The reviewed generator chain was rebuilt as
+isolated archive overlays on optimized main `63e1fef` (renderer `427b594`).
+Both source quadrature tiers include the immutable emission-lookup SSBO fix.
+No shipping GI code or defaults were changed for this study.
+
+The fixture, authored emission, camera, TAA, raster sample count and two Cycles
+references are identical to the engine comparison above. Fresh serial cost runs
+use three rotated repeats, each 1,200 warm-up + 2,400 measured frames at 720p,
+CPUs 0–15, release Vulkan, RTX 4080 Laptop. Captures/readbacks and memory sampling
+are separate from throughput. Quality averages phases 2,400/2,573 against both
+1,024-sample denoised reference seeds, with the same room crop/mask and no fitting.
+
+| GI configuration | Frame p50 | Run p50 range | Crop SSIM ↑ | Room RGB MAE ↓ | Process VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Optimized main | 1.059 ms | 0.856–1.060 ms | 0.9338 | 7.524 | 483 MiB |
+| Experimental, 32 source points | 5.181 ms | 3.930–5.567 ms | 0.9781 | 2.993 | 534 MiB |
+| Experimental, 128 source points | 17.845 ms | 14.809–17.946 ms | 0.9784 | 2.987 | 534 MiB |
+
+The 32-point tier removes most of main's wall bands and bright edge leaks,
+reducing room color error by 60.2%, at 4.89x main's median frame cost. Its interval
+is 71.0% below 128 points with only a small aggregate quality difference. The
+two tiers differ by a mean 0.0288 RGB levels out of 255 across the full frames;
+the largest channel difference is eight levels, localized near shadow edges.
+For this static scene, 32 points is the useful experimental tier.
+
+The prototype separates authored emission from feedback, improves probe
+reconstruction, keeps signed indirect residuals in history and recomposes current
+direct source lighting after history. It integrates the actual emissive triangles
+with visibility against the frozen opaque triangle cache. Half-resolution source
+integration/visibility, extra transport treatment and the composite dispatch add
+GPU work. Probe budgets remain 51,984 probes, 4,096 updates x 128 rays/render,
+with 3,326,976 voxels. After subtracting main's interval, extra cost grows 4.07x
+for 4x the source points, supporting source integration as the next target.
+This does not assign individual GPU-pass durations.
+
+Median CPU render-call scopes are 0.124/0.182/0.229 ms for main/32/128;
+presentation/backpressure scopes are 0.883/4.946/17.456 ms. Most added interval
+appears as GPU backpressure rather than CPU submission. The next experiment
+should cache static source irradiance/visibility in surface or world space with
+explicit invalidation, or adapt source samples around penumbrae. These are
+proposals, not measured improvements. The branch's earlier BVH/full-table-buffer
+pilots did not establish a win.
+
+VRAM is per-PID NVML from a separate 1,200 + 2,400-frame run per tier, excluding
+the last buffered progress block. Main/32/128 have 44/230/739 bounded samples;
+GNOME Shell is the only other observed GPU PID. The lookup buffer is 30,624 bytes
+for 696 emission entries. The old pre-SSBO prototype is not measured here.
+
+Unlocked clocks and thermals vary substantially: startup observations span
+77–86 C, and the memory lane holds around 1,290 MHz graphics. Run ranges are
+retained; exact timings and ratios are exploratory, not fixed-clock claims.
+These results exclude source-cache construction, shader compilation and cold
+convergence. The source/opaque geometry caches are immutable; arbitrary scenes,
+dynamic sources/geometry, motion and cuts are untested by this campaign. Two
+static capture phases do not establish temporal stability. Earlier Godot/Unreal
+times remain a separate campaign, not part of this fresh speed ranking.
+
+Artifacts: `out/cornell-gi-tradeoff-20261103/index.html` and `comparison.png`;
+`summary.json`, `quality-summary.json`, `campaign.json`, `build-record.json` and
+`memory-summary.json` retain metrics, phases/seeds, commands, source/binary/shader
+hashes, clocks and bounded windows. The isolated builder, runners, staged source
+caches and raw per-frame/process logs are retained there. Five lookup-table and
+nine residual/integration CPU contracts pass. This is a static-scene study, not
+production qualification of the generated overlays.
+
+#### Lower source-point budgets
+
+A follow-up compares 4, 8 and 16 total source points against freshly measured
+main/32-point controls, using the identical scene, source radiance, visibility,
+history and probe-ray budgets. Gaussian rules per emitting triangle are 2x1,
+2x2, 4x2 and 4x4 for 4/8/16/32 total points. The generic rectangular-rule
+generator reproduces the previous 32-point helper byte for byte. Every rule
+preserves source area, power and first moments with positive finite weights;
+only the source-quadrature helper changes between experimental tiers.
+
+| Configuration | Frame p50 | Run p50 range | Room SSIM ↑ | Room RGB MAE ↓ | Shadow-crop SSIM ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main | 1.060 ms | 1.059–1.179 ms | 0.9338 | 7.524 | 0.9696 |
+| 4 points | 2.024 ms | 2.024–2.211 ms | 0.9754 | 3.157 | 0.9841 |
+| 8 points | 2.506 ms | 2.505–2.507 ms | 0.9767 | 3.019 | 0.9884 |
+| 16 points | 3.511 ms | 3.503–3.512 ms | 0.9776 | 3.008 | 0.9900 |
+| 32 points | 5.555 ms | 5.515–5.557 ms | 0.9781 | 2.993 | 0.9914 |
+
+The three lower tiers reduce median frame cost by 63.6%/54.9%/36.8% versus the
+fresh 32-point control. Four points retains broad illumination improvements over
+main but creates conspicuous separated shadow bands. Eight has finer bands;
+16 has cleaner transitions and is visually closer to 32, with residual stepping.
+Eight is a useful performance candidate and 16 a cleaner quality candidate.
+Aggregate SSIM understates these localized shadow differences. Maximum channel
+differences from 32 are 31/21/17 levels for 4/8/16; room pixels differing by over
+eight levels on any channel are 1.00%/0.37%/0.14%.
+
+Protocol is three serial cost repeats in varied orders, each 1,200 warm-up plus
+2,400 measured frames, separate captures at phases 2,400/2,573 against both
+denoised Cycles seeds. The room mask/crop remain unchanged. A fixed shadow crop
+at [340,340,595,690] covers the left wall and floor behind the tall block; its
+SSIM is an additional diagnostic, not a general quality score. Lower-budget
+bands are deterministic spatial quadrature error, not stochastic noise.
+Clock/thermal drift affects exact timing; main and four points slow in the last
+repeat. Static-source/geometry scope and untested motion/cuts remain unchanged.
+
+Artifacts are `out/cornell-gi-low-budget-20261103/`: `comparison.png`, enlarged
+`shadows.png`, `index.html`, source builders and runner, `summary.json`,
+`quality-summary.json`, `campaign.json`, `build-record.json`,
+`quadrature-validation.json` and `reconstruction-validation.json`. All 25 jobs
+pass output/settings/count checks. Area/first-moment/control-reproduction
+checks, exact regenerated helpers, unchanged backend, declared sample counts
+and binary/SPIR-V hashes pass for all three new tiers. No production GI code
+or defaults are changed.
+
+#### Zero, one and two source points
+
+A further fresh campaign tests zero explicit source quadrature, one area-weighted
+panel centroid and one centroid per emitting triangle (two total). Main and the
+same 8-point binary are freshly measured controls. One/two preserve source area,
+power and first moments; the one-point rule requires the verified uniform,
+coplanar panel with common normal and sidedness.
+
+Zero has two explicitly different meanings. Simply removing quadrature while
+still subtracting primary emission from probe rays leaves the room black apart
+from the panel. That literal-zero ablation is captured at both phases and is
+excluded from the timing ranking. The usable zero-point fallback keeps primary
+emission in the probe rays, so probes carry full source and bounce lighting;
+the explicit source helper returns constant zero without surface/visibility work.
+This fallback changes the trace subtraction policy as well as the helper, so it
+is an algorithm variation rather than a sample-count-only comparison.
+
+| Configuration | Frame p50 | Run p50 range | Room SSIM ↑ | Room RGB MAE ↓ | Shadow-crop SSIM ↑ |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Main | 1.054 ms | 0.888–1.054 ms | 0.9338 | 7.524 | 0.9696 |
+| 0, full-probe fallback | 1.439 ms | 1.248–1.440 ms | 0.9728 | 3.263 | 0.9824 |
+| 1, panel centroid | 1.705 ms | 1.588–1.730 ms | 0.9701 | 3.639 | 0.9693 |
+| 2, triangle centroids | 1.806 ms | 1.626–1.814 ms | 0.9730 | 3.250 | 0.9780 |
+| 8 points | 2.448 ms | 2.399–2.510 ms | 0.9767 | 3.019 | 0.9884 |
+
+The zero-point fallback costs 41.2% less per frame than 8 points and 36.6% more
+than main, with 56.6% less room RGB error than main. It keeps most broad visual
+improvements and smoother probe shadows, with blurred contacts and some residual
+edge leakage. One point creates a hard shadow and is worse than zero on both
+cost and aggregate error. Two points create split shadows, adding cost for little
+aggregate improvement over zero and worse shadow-crop SSIM. The zero fallback is
+the useful new candidate for further work. It still retains the prototype's
+paired history resources and source-composite pass; removing that overhead is
+unmeasured. The literal-zero ablation has room SSIM 0.0087 and MAE 59.344.
+
+All 27 jobs pass count/settings/output checks: 15 serial cost runs (three varied
+orders, 1,200 warm-up + 2,400 measured frames) and 12 separate quality captures
+(phases 2,400/2,573, including the ablation). The two 1,024-sample denoised Cycles
+seeds, crop/mask, fixed shadow ROI and no-fitting policy remain unchanged.
+All cases retain 51,984 probes, 4,096 updates x 128 rays, TAA and 82 triangles at
+720p on RTX 4080 Laptop/Vulkan. Startup/thermal drift affects exact timings.
+These are static-source/geometry results; motion/cuts and general runtime
+invalidation remain untested. No production GI code or defaults change.
+
+Artifacts: `out/cornell-gi-min-budget-20261103/` contains the full-room and enlarged
+shadow contact sheets, HTML report, literal-zero image, per-phase/seed metrics,
+commands/frame telemetry, source builder and validation runner. Exact source
+reconstruction, declared helper/trace changes, zero-path behavior, source power/
+centroid checks and binary/SPIR-V hashes pass for all four generated variants.
+
+### Independent GI changes on main, 2026-11-04
+
+Four separate archive overlays isolate the proposed portable changes on the
+unchanged CPU-optimized renderer: resolve-only visibility confidence, GI/TAA
+history-reset propagation plus skipped/failed-path invalidation, per-world-probe
+quaternion rotations, and angular reconstruction correction. No candidate includes
+another candidate, the frozen Cornell geometry/emission caches, source quadrature,
+guided sampling, or the residual-pair/composite pipeline. Main's ratio irradiance
+estimator stays unchanged in every case. Angular metadata uses spare atlas alpha
+channels, preserving the original probe-age texel; no new allocation/pass is added.
+
+Same 720p Cornell fixture and two reference seeds as above; two static phases,
+no fitting. Fresh mains-powered timing: three varied-order serial repeats, each
+1,200 warm-up + 2,400 measured frames, CPUs 0–15, RTX 4080 Laptop/Vulkan/TAA.
+All 15 accepted cost jobs record mains online before and after. An earlier
+matrix crossed into battery/P8 at 210/405 MHz and is rejected in full. A separate
+battery attempt was interrupted when the user restored mains; it is excluded too.
+Clocks remain unlocked and run-order/thermal variation is substantial.
+
+| Independent candidate | Frame p50 | Run p50 range | Room SSIM ↑ | Room RGB MAE ↓ |
+| --- | ---: | ---: | ---: | ---: |
+| Main | 1.054 ms | 0.858–1.172 ms | 0.9338 | 7.524 |
+| Visibility guard | 1.053 ms | 0.861–1.184 ms | 0.9338 | 7.514 |
+| History reset | 0.957 ms | 0.861–1.057 ms | 0.9338 | 7.524 |
+| Probe rotations | 1.216 ms | 0.979–1.219 ms | 0.9328 | 7.457 |
+| Angular correction | 1.185 ms | 1.068–1.228 ms | 0.9311 | 7.861 |
+
+The guard and reset remain small correctness candidates, not major settled-image
+upgrades. In a direct GPU dispatch with constant-bright probes and fully occluded
+moments, main returns raw irradiance/pi 1; the guard returns the physical target 0
+while preserving coverage 1. Visible constant light stays 1, darkness stays 0 and
+missing support retains coverage 0. Applying the guard to bounce feedback is not
+tested here. Fifteen GPU resolve cases include these positive/negative controls
+and an analytic angular field. Angular correction changes the latter from
+1.36133 to 1.39941 for target 1.4, but worsens real Cornell MAE by 4.5%; it should
+not be promoted alone on this result.
+
+The reset-only images match main RGBA exactly at both static phases; its shaders
+and steady GPU work are unchanged. Its lower measured median is not evidence of
+a speedup: run ranges overlap and clocks/order drift. A diagnostic-only link
+observes the actual resolve history-enable uniform over twelve rendered frames.
+Main incorrectly retains history after same-pose reset, camera cuts and TAA
+re-enabling (frames 1/3/6/10); the candidate matches all expected flags, including
+ordinary continuation, toggles and odd-size resize. Failure invalidation paths
+are source-checked, not exercised by injected allocation/pipeline failures.
+
+Rotations trade mixed still accuracy for better short stationary stability.
+Two 64-frame holds at phases 2,400/2,573 improve in both phases. Mean RMS output
+variation in RGB8 levels is 0.4759 to 0.3185 over the room (33.1% lower), 0.6787 to
+0.3862 in the fixed upper-wall crop [500,170,780,290] (43.1% lower), and 0.6048 to
+0.2815 for its 8x8 block means (53.5% lower). These measurements include TAA jitter
+and probe variation; they do not establish pure GI-noise or moving-camera/light
+response quality. Extra rotation arithmetic costs GPU work; the timings above
+remain exploratory. Keep rotations as an optional quality candidate for broader
+testing rather than selecting a universal default from this one scene.
+
+The large zero-point prototype gain is not reproduced by any isolated candidate;
+remaining emitter/transport changes and interactions still need isolation.
+Artifacts are `out/gi-main-ablation-20261104/`: the HTML/image report, per-phase/
+seed metrics, 25 accepted quality/cost jobs, four stationary clips (256 captures),
+15 GPU resolve controls, two twelve-frame history sequences, rejected timing
+attempts and all source/build/command/hash receipts. Every non-target archive
+member matches main; regenerated sources, binary/SPIR-V hashes and both reset
+image identities pass. No shipping source or defaults change in this study.
+
+#### Visibility/history port
+
+The selected fixes are implemented on `opt/gi-visibility-history`, from main
+`ce3d4e6`. `KIN_GI_RESOLVE_VISIBILITY` enables confidence attenuation only in the
+final resolve. Coverage/readiness stay unchanged, with no added ray, texture,
+buffer or pass. All 127 other embedded shader payloads, including feedback,
+match the preceding main-based visibility experiment exactly.
+
+GI history now observes TAA reset, and a completed-render guard invalidates it
+whenever resolve was skipped or the frame failed. Central invalidation also
+catches a main-pass failure after GI resolve had already recorded successfully.
+This replaces the prototype's per-return invalidation approach without adding
+renderer state or a public API.
+
+New `kin-render3d-gi-resolve` GPU checks cover visible/blocked/dark/missing-support
+and background fields, including unchanged coverage for occluded receivers.
+On Linux with GNU/Clang, `kin-render3d-gi-history` observes the actual production
+resolve uniform through test-only linker wrappers. It checks resets, cuts, TAA/
+GI/probe toggles, odd resize, two views, an injected resolve-pass failure and an
+injected later frame failure. The new checks and CPU renderer CTest pass; all
+17 selected existing GI/TAA/prepass GPU callbacks pass in isolated processes.
+A fresh 720p Cornell capture matches the evaluated resolve-only guard RGBA
+exactly. Validation artifacts are `out/gi-port-validation-20261104/` and
+`/tmp/kin-gi-port-{ctest,resolve,history}.log`. No additional performance gain is
+claimed for this implementation port.
+
+#### Receiver-normal history investigation, 2026-11-04
+
+Private overlays from post-port `8921ffb` isolate the remaining Cornell gap.
+The old resolve depth-tests a bilinearly filtered GI-history sample without
+checking the surface normal. Repeated jittered reprojection mixes lighting
+across differently oriented surfaces, creating bright wall/block-edge bands.
+Per-tap depth rejection alone barely changes the image. Requiring all four
+previous full-resolution normals in each half-resolution history tap to agree
+with the current receiver (`dot > .98`) removes most of those bands. Accepted
+taps are renormalized and retain the original .85 history blend.
+
+| Fresh 720p Cornell variant | Room SSIM | Room MAE | Frame p50 | Run p50 range |
+| --- | ---: | ---: | ---: | ---: |
+| Post-port baseline | 0.93377 | 7.514 | 1.054 ms | 0.860–1.157 ms |
+| Per-tap depth only | 0.93380 | 7.521 | 1.059 ms | 0.867–1.067 ms |
+| History disabled | 0.96674 | 4.524 | 1.052 ms | 0.888–1.059 ms |
+| Per-tap depth and normals | 0.96949 | 4.380 | 1.085 ms | 0.884–1.088 ms |
+| + Subvoxel emitter handling | 0.97000 | 4.290 | 1.069 ms | 0.945–1.148 ms |
+| + Nearby ordinary-surface planes | 0.97053 | 3.927 | 1.117 ms | 1.031–1.217 ms |
+| Complete zero-source-point prototype | 0.97280 | 3.263 | 1.415 ms | 1.371–1.535 ms |
+
+The normal check reduces room MAE **41.7%**, closing **73.7%** of the MAE gap
+to the full zero-point prototype. It reuses TAA's previous-normal target with
+one extra sampler binding and shader reads/math, but no added allocation, ray
+or dispatch. All generic overlays retain native emission and main's ratio
+irradiance estimator; the emitter rows form a cumulative ladder on the normal
+check. They do not use authored geometry tables. The full prototype still does,
+and its remaining advantage cannot be attributed to one change by this study.
+
+Quality uses the same geometry, source radiance, settings, two settled phases
+and two denoised Cycles seeds as the preceding study. Three fresh serial timing
+repeats per variant use 1,200 warm-up and 2,400 measured whole-frame intervals.
+Five additional adjacent baseline/fix pairs alternate order: their median
+within-pair difference is **+0.0276 ms / +2.6%**, with individual differences
+from **−1.3% to +10.4%**. Mains remains connected, but GPU temperatures reach
+84–89°C and graphics/memory clocks vary substantially under the observed 80 W
+cap. These are exploratory costs; small differences and emitter-row ordering
+do not establish precise overhead or speed gains. No build, scoring, capture
+readback, profiler or other test application overlaps throughput measurement.
+
+Fourteen raw GPU history cases pass. Matching history yields 2.69922 for the
+known 2.7 blend; wrong-normal history returns current 1 instead of the old
+resolve's incorrect 2.69922. Old-resolve and history-disabled negative controls
+fail their intended cases. Twelve public renderer lifecycle cases pass,
+including cuts, resets, resize, toggles, multiview and moving smooth/thin
+receivers. Two 64-frame stationary phases show room RMS output variation
+0.4755 → 0.4450; the flat upper wall is unchanged (0.6787 → 0.6789). Disabling
+history increases variation. These are functional/stationary checks, not
+moving-camera reference scores or broad scene qualification.
+
+The receiver-normal history check is the strongest next generic port candidate.
+This investigation changes no production renderer source or defaults. Report,
+eight-way image comparison, 45 quality/cost jobs, six stationary clips, source/
+binary receipts and archive/payload isolation checks are retained under
+`out/gi-remaining-quality-20261104/`.
+
+The receiver-normal history candidate is now implemented alongside the earlier
+visibility/reset fixes. Resolve binds the existing previous TAA normal target,
+requires its valid history, and performs the evaluated per-tap depth/normal
+rejection. All 128 embedded shader payloads match the tested normal candidate
+exactly, and both fresh Cornell phases match its RGBA output byte for byte.
+The new `kin-render3d-gi-surface-history` CTest includes the fourteen raw history
+contracts. It, the existing GI resolve/history eligibility checks, and the CPU
+renderer CTest pass; all seventeen selected stock GI/TAA/prepass GPU callbacks
+pass in isolated processes. Validation is `out/gi-surface-port-20261104/`.
+
+#### Full zero-point remainder, 2026-11-04
+
+The history fixes are merged into local main at `4055cd2`. A reverse-ablation
+study rebuilds the complete zero-source-point prototype on that same archive:
+all 129 shader payloads and both settled Cornell captures match the frozen
+prototype exactly. The ray budget stays 4,096 × 128 per render; zero refers to
+explicit source integration, not probe rays. Except for the main-only DC check
+and aggregate runtime variants, each row below removes one component from full.
+Effects are conditional and cannot be added together.
+
+| Fresh 720p variant | Room SSIM | Room MAE | Frame p50 | Run p50 range |
+| --- | ---: | ---: | ---: | ---: |
+| Merged main | 0.96949 | 4.3800 | 1.187 ms | 0.896–1.197 ms |
+| Full zero-point prototype | 0.97280 | 3.2626 | 1.570 ms | 1.215–1.634 ms |
+| Full, no guided rays | 0.97052 | 3.4620 | 1.580 ms | 1.312–1.604 ms |
+| Full, no angular/DC correction | 0.97255 | 3.4838 | 1.395 ms | 1.268–1.403 ms |
+| Full, no exact footprint caches | 0.97277 | 3.3059 | 1.563 ms | 1.420–1.577 ms |
+| Full transport, main one-pass resolve | 0.97275 | 3.2811 | 1.566 ms | 1.430–1.615 ms |
+| Runtime geometry, uniform rays, main resolve | 0.97112 | 3.5670 | 1.451 ms | 1.392–1.548 ms |
+| Main plus angular/DC correction alone | 0.97021 | 4.2682 | 1.250 ms | 1.249–1.375 ms |
+
+Guidance is the largest measured stability contribution. Full uses 96 ordinary
+and 32 emitter-bound rays; removing guidance uses 128 ordinary rays, including
+their distance/classification samples. Across two 64-frame stationary clips,
+room RMS output deviation rises 0.1396 → 0.3182 without guidance, upper-wall
+deviation 0.1481 → 0.4134, and wall 8×8 block-mean deviation 0.0607 → 0.3127.
+Rotations have a smaller effect within this guided chain: room deviation rises
+to 0.1453 without them, while MAE rises only to 3.2728. These are output sRGB
+deviations including TAA jitter/feedback, not motion qualification or pure GI noise.
+
+Angular/DC correction lowers full-chain pixel error but adds measurable work.
+Five extra adjacent full/no-DC pairs alternate order: removing correction lowers
+frame cost by a median **11.9%**, with **6.0–15.9%** individual reductions, while
+MAE increases **6.8%**. Main-only correction now improves error **2.6%** after
+the receiver-history fix, unlike the earlier pre-fix experiment. Guided/MIS
+radiance must retain compatible integration: blindly restoring an unweighted
+ratio denominator gives MAE 13.6068. With uniform rays, ratio and 4/N integration
+instead score essentially identically (MAE 3.46207/3.46203).
+
+Exact footprint caches account for only **1.3%** of full-chain MAE in this scene.
+Filtering absolute versus normalized gradients and feedback-confidence changes
+have tiny settled-Cornell effects; the .98/.9999 history threshold images match.
+Removing the extra zero-source composite changes MAE about **0.6%**, with no
+resolved frame-time win in the drifting matrix. Extending ordinary single-face
+planes unconditionally is rejected (MAE 9.2572). The runtime uniform/one-pass
+aggregate uses no authored footprint/emission tables or source bounds and closes
+about **73%** of the remaining main/full MAE gap, but remains slower than main.
+Runtime emitter bounds with proper invalidation are the next useful guiding
+integration target; the full prototype currently freezes its bound to this scene.
+
+A private reuse optimization preserves angular correction: normalize the sample
+directions and compute angular retention once before the eight-probe loop; read
+each probe's three mean-light metadata channels once for all lighting directions.
+Only resolve/feedback shader payloads change. Both Cornell phases remain **RGBA
+byte-identical** to full. Five further adjacent full/optimized pairs alternate
+order and show **8.0% median lower frame cost**, with **6.9–10.2%** reductions in
+all five pairs. This is a useful performance candidate for the experimental
+angular path; it is not merged into production by this investigation.
+
+Quality keeps the same fixture, settings, two settled phases and two Cycles
+seeds, without exposure fitting. Native matrix timings use three serial varied-
+order repeats, 1,200 warm-up + 2,400 measured whole-frame intervals after a
+separate 10,000-frame conditioning run. Mains remains connected under the
+observed 80 W cap, but clocks and thermals drift; small matrix differences are
+not precise speed claims. No build, profiler, capture readback or scorer overlaps
+throughput. Four Nsight captures return API events but no GPU timing table after
+the offscreen harness exceeds its 8,192 timestamps/frame limit. CPU marker
+durations are not substituted for GPU pass times; exact pass costs remain unknown.
+
+The report, 99 accepted quality/cost jobs, six stationary clips, paired controls,
+eighteen archive/payload isolation checks and source/binary receipts are retained
+under `out/gi-zero-remainder-20261104/`. This follow-up changes no production
+renderer source or defaults. It is one static scene/backend/GPU investigation.
+
+### ECS transform and extraction baseline
+
 Release/GCC 15.2; four transform barriers plus scene clear/collection, 10,000 and 100,000 flat entities. The table is the median of five exploratory repeats, each with 50 warm-up and 150 measured frames. It excludes GPU rendering, physics, animation and arbitrary placement callbacks. Thermal/background conditions were not controlled sufficiently for a release performance claim.
 
 | 100,000 entities | Static p50 | 1-percent-edit p50 | Transform visits/frame | Extraction visits/frame |

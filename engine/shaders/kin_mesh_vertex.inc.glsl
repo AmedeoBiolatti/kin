@@ -56,6 +56,9 @@ layout(location = 1) out vec4 vColor;
 layout(location = 2) out vec2 vUV;
 layout(location = 3) out vec3 vWorld;
 layout(location = 4) flat out uint vId; // the copy's pick id, plus one (0: none)
+#ifdef KIN_DRAW_MATERIALS
+layout(location = 9) flat out uint vMaterial;
+#endif
 
 #include "kin_srgb.inc.glsl"
 
@@ -66,11 +69,10 @@ void main() {
     // arguments carry the copy's slot as the first instance with first.x 0: that
     // relies on the instance index including it, which Vulkan and Metal do and
     // Direct3D 12 does not, so the renderer keeps the cut on the CPU there.
-#ifdef KIN_VELOCITY
     const uint at = instance_at(draw.first.x + uint(gl_InstanceIndex));
     Instance instance = instances[at];
-#else
-    Instance instance = instances[instance_at(draw.first.x + uint(gl_InstanceIndex))];
+#ifdef KIN_DRAW_MATERIALS
+    vMaterial = at;
 #endif
 #ifdef KIN_SKIN
     // The vertex posed by its joints, in the model's space; the copy's transform places that.

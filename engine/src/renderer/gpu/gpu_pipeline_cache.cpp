@@ -84,6 +84,7 @@ GpuPipelineCache::~GpuPipelineCache() {
 }
 
 void GpuPipelineCache::forget(SDL_GPUShader* fragment) {
+    ++_revision;
     std::erase_if(_entries, [&](const Entry& e) {
         if (e.key.fragment != fragment) {
             return false;
@@ -96,6 +97,7 @@ void GpuPipelineCache::forget(SDL_GPUShader* fragment) {
 }
 
 void GpuPipelineCache::destroy() {
+    ++_revision;
     if (_device) {
         for (Entry& e : _entries) {
             if (e.pipeline) {

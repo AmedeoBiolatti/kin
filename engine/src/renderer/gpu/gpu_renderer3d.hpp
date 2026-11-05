@@ -456,8 +456,13 @@ private:
         u32 samples;
         MaterialPipeline material;
         bool velocity, skinned;
-        bool fog = false, lights = false, indexed = false;
+        bool fog = false, lights = false, indexed = false, materials = false;
     };
+    struct MaterialUniforms {
+        f32 params[4], pbr[4], maps[4], emission[4];
+    };
+    static_assert(sizeof(MaterialUniforms) == 64);
+    static MaterialUniforms material_uniforms(const Material3D& material, Unlit unlit);
     MaterialPipeline material_pipeline(const Material3D& material, bool skinned, bool taa, bool velocity,
                                        bool fog) const;
     SDL_GPUGraphicsPipeline* pipeline(const MeshPipelineRequest& request) const;
@@ -705,6 +710,9 @@ private:
     SDL_GPUTextureFormat _shadow_format = SDL_GPU_TEXTUREFORMAT_INVALID; // depth that can be sampled
     RendererCapabilities3D _capabilities;
     GpuShader _indexed_vertex, _indexed_unlit_vertex, _indexed_unlit_textured_vertex, _indexed_prepass_vertex;
+    GpuShader _draw_material_vertex;
+    std::array<GpuShader, 4> _draw_material_fragments; // base, fog, lights, lights+fog
+    bool _draw_materials_available = false;
     GpuShader _vertex_shader;   // mesh.vert
     GpuShader _fragment_shader; // mesh.frag
     // Optional unlit main-pass variants. Fog, skinning, custom shaders and TAA use the general shaders.
@@ -976,6 +984,42 @@ private:
         bool drawn = false;
         u32 entry_first = 0, entry_count = 0;
     };
+    struct LocalGatherKey {
+        u64 scene = 0, revision = 0;
+        u32 refs = 0, kind = 0;
+        Mat4f projection{};
+        GpuFrustum frustum{};
+        Vec3f centre{};
+        f32 radius = 0;
+        bool bounded = false;
+    };
+    struct LocalGatherCache {
+        LocalGatherKey key;
+        std::weak_ptr<const u64> lifetime;
+        u32 slot = ~0u;
+        u64 frame = 0, tests = 0;
+        bool observed = false, valid = false;
+        struct Row {
+            u32 ref, first, count;
+        };
+        std::vector<Row> rows;
+        std::vector<u32> copies;
+        std::vector<u64> sort_keys;
+        std::vector<u8> sort_order;
+        std::vector<u16> sort_counts;
+        u64 bytes() const {
+            return rows.capacity() * sizeof(Row) + copies.capacity() * sizeof(u32) +
+                   sort_keys.capacity() * sizeof(u64) + sort_order.capacity() + sort_counts.capacity() * sizeof(u16);
+        }
+    };
+    // CPU payload is bounded independently of GPU instance/map retention. Empty
+    // probes admit only projections that remain unchanged across two renders.
+    std::array<LocalGatherCache, 64> _local_gather_cache;
+    u64 _local_gather_bytes = 0;
+    void clear_local_gather(LocalGatherCache& cache);
+    void trim_local_gather(u64 budget);
+    static bool same_local_gather_key(const LocalGatherKey& a, const LocalGatherKey& b);
+    LocalGatherCache* local_gather_plan(const FrameCtx& ctx, const LocalView& view, u32 refs, bool& ready);
     std::vector<LocalView> _local_views;
     std::vector<LocalEntry> _local_entries;
     std::vector<u32> _local_list;                  // the lists, as uploaded
@@ -1035,11 +1079,14 @@ private:
         // `instances`), the scene's matrices, and where the scene's start in the frame's joint buffer. `center` and
         // `radius` are then only a start: a copy's own bound comes from its pose.
         bool skinned = false;
+        bool batch = false; // immutable submission kind, reused with the validated ref layout
         const u32* skin_first = nullptr;
         const Mat4f* joints = nullptr;
         u32 joint_base = 0;
         u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
         u32 retained = ~0u;                   // bounded retained-table cache entry, or immediate path
+        u32 retained_first = 0;               // direct draws share a scene table; explicit batches start at zero
+        bool direct = false;                  // this render reads an immutable direct-scene table
         u32 prepared_first = 0;
         const GpuInstance3D* prepared_records = nullptr;
         const f32* prepared_scales = nullptr;
@@ -1056,6 +1103,39 @@ private:
         u64 identity = 0, revision = 0;
         bool operator==(const PreparedKey&) const = default;
     };
+    struct DrawBindingKey {
+        std::array<const ITextureBackend*, 5> textures{};
+        Wrap3D u{}, v{};
+        decltype(Material3D::texture_samplers) sampling{};
+        bool operator==(const DrawBindingKey&) const = default;
+    };
+    struct DrawCommand {
+        MaterialPipeline selection{};
+        MaterialUniforms uniforms{};
+        SDL_GPUGraphicsPipeline* pipeline = nullptr;
+        u64 pipeline_key = ~0ull, pipeline_revision = 0;
+        u32 binding = ~0u;
+    };
+    std::array<PreparedKey, 2> _draw_plan_keys{};
+    std::vector<DrawCommand> _draw_commands;
+    std::vector<DrawBindingKey> _draw_bindings;
+    std::vector<u32> _draw_order;
+    bool _draw_plan_valid = false;
+    void prepare_draw_plan(FrameCtx& ctx);
+    DrawCommand* main_command(FrameCtx& ctx, u32 ref, bool materials);
+    void batch_main_commands(FrameCtx& ctx);
+    void retain_draw_materials(FrameCtx& ctx);
+    struct DrawMaterials {
+        u64 scene = 0, revision = 0, upload_frame = ~0ull, used_frame = 0;
+        std::weak_ptr<const u64> lifetime;
+        std::shared_ptr<GpuBuffer> buffer;
+        bool valid = false;
+    };
+    std::array<DrawMaterials, 8> _draw_material_tables;
+    u64 _draw_material_bytes = 0;
+    std::array<u32, 2> _draw_material_slots{~0u, ~0u};
+    std::vector<u32> _main_draw_list;
+    std::shared_ptr<GpuBuffer> _main_draw_indices;
     // Exact structural validation across clear()/resubmission. Weak mesh owners
     // prevent pointer-reuse mistakes without keeping removed assets resident.
     struct PreparedDraw {
@@ -1073,6 +1153,8 @@ private:
         u64 revision;
     };
     std::array<PreparedKey, 2> _prepared_keys{};
+    // Admission history is independent of the bounded draw-layout cache.
+    std::array<std::array<u64, 2>, 2> _direct_sources{};
     std::vector<PreparedBatch> _prepared_batches; // <=128 entries, not per copy
     bool _prepared_valid = false;
     u32 _prepared_total = 0;
@@ -1085,6 +1167,9 @@ private:
             layout = 0; // the GPU frame (submission) it was last claimed in; the batch layout_revision it holds
         Color color{};
         std::weak_ptr<const void> lifetime;
+        std::weak_ptr<const u64> scene_lifetime;
+        bool direct = false;
+        u32 direct_instances = 0;
         std::shared_ptr<GpuBuffer> buffer; // null: a free entry (evicted), dropped at the next collection
         u64 bounds_revision = 0;
         std::vector<Vec4f>
@@ -1122,6 +1207,7 @@ private:
     std::shared_ptr<GpuBuffer> _retained_indices;
     GpuInstance3D pack_instance(const MeshInstance3D& instance, Color material) const;
     void retain_instances(DrawRef& ref, FrameCtx& ctx);
+    void retain_scene_instances(FrameCtx& ctx);
     void cache_instance_bounds(DrawRef& ref, RenderDebugStats3D& stats);
     struct CullGroup {
         u32 first = 0, end = 0; // relative to the draw
@@ -1279,6 +1365,7 @@ private:
         u32 ref, first, count, scene;
         f32 depth;
         bool particle, transparent;
+        bool materials = false;
     };
     std::vector<MainItem> _main_order;
     std::vector<std::pair<f32, u32>> _sorted; // an alpha draw's copies, furthest first

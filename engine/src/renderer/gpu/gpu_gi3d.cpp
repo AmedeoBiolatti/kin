@@ -397,7 +397,7 @@ void GpuRenderer3D::make_gi() {
         _gi_place = make_gi_compute(handle, "gi_probe_place.comp.spv", 1, 1, 3, 0);
         _gi_trace = make_gi_compute(handle, "gi_probe_trace.comp.spv", 7, 1, 0, 1);
         _gi_update = make_gi_compute(handle, "gi_probe_update.comp.spv", 0, 2, 3, 0, 16, 16);
-        _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 7, 0, 3, 0, 8, 8);
+        _gi_resolve = make_gi_compute(handle, "gi_resolve.comp.spv", 8, 0, 3, 0, 8, 8);
         if (!_gi_clear || !_gi_voxelize || !_gi_attributes || !_gi_flood || !_gi_light || !_gi_place || !_gi_trace ||
             !_gi_update || !_gi_resolve) {
             throw std::runtime_error(std::string{"compute pipelines not made: "} + SDL_GetError());
@@ -1296,8 +1296,8 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
     // anti-aliasing's jitter (without, nothing moves under a texel: it would only lag).
     std::swap(g.light, g.last_light);
     std::swap(g.slope, g.last_slope);
-    const bool keep =
-        jittered && g.has_last && g.last_light && g.last_light.width() == hw && g.last_light.height() == hh;
+    const bool keep = jittered && view._taa_valid && view._taa_motion && g.has_last && g.last_light &&
+                      g.last_light.width() == hw && g.last_light.height() == hh;
     try {
         if (!g.light || g.light.width() != hw || g.light.height() != hh) {
             const SDL_GPUTextureUsageFlags usage =
@@ -1355,14 +1355,15 @@ bool GpuRenderer3D::gi_resolve(SDL_GPUCommandBuffer* commands, GpuView3D& view, 
         return false;
     }
     const SDL_GPUTextureSamplerBinding flat{_owner->_white.handle(), _owner->_sampler_linear};
-    const std::array<SDL_GPUTextureSamplerBinding, 7> samplers{
+    const std::array<SDL_GPUTextureSamplerBinding, 8> samplers{
         SDL_GPUTextureSamplerBinding{view._ao_depth.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{view._ao_normals.handle(), _gi_sampler},
         SDL_GPUTextureSamplerBinding{g.irradiance.handle(), _gi_linear},
         SDL_GPUTextureSamplerBinding{g.moments.handle(), _gi_linear},
         SDL_GPUTextureSamplerBinding{g.probe_data.handle(), _gi_sampler},
         keep ? SDL_GPUTextureSamplerBinding{g.last_light.handle(), _gi_linear} : flat,
-        keep ? SDL_GPUTextureSamplerBinding{g.last_slope.handle(), _gi_linear} : flat};
+        keep ? SDL_GPUTextureSamplerBinding{g.last_slope.handle(), _gi_linear} : flat,
+        keep ? SDL_GPUTextureSamplerBinding{view._taa_motion.handle(), _gi_sampler} : flat};
     SDL_BindGPUComputePipeline(pass, _gi_resolve);
     SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
     SDL_PushGPUComputeUniformData(commands, 0, &u, sizeof(u));

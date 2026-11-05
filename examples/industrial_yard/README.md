@@ -54,6 +54,43 @@ renderer, window, jobs or GPU resources; it does not require `--metrics`.
 
 Native profiling controls (default rendering is unchanged):
 
+- `--retain-scene-instances 0|1` selects the streamed reference or automatic direct
+  scene-record retention (default 1). This keeps independent draw order and scene
+  content. CSVs include direct retention/cache/upload/bounds counters, total bounds
+  transformations, resident instance bytes and explicit device-idle waits.
+  `python3 tools/benchmark_render3d_direct_cache.py --binary build/bin/industrial_yard
+  --output /path/to/results` runs five alternating paired routes and three exact
+  capture checks using the current power/clock conditions.
+
+- `--cache-local-shadow-gather 0|1` selects fresh local caster selection/sorting
+  or reuse for static direct draws under fixed spot/point projections (default 1).
+  Dynamic batches and skeletons still update every frame. CSVs include actual
+  tests/task bytes, cached selections, sort reuse and bounded CPU cache bytes.
+  Add `--mode local-gather` to the benchmark command above to isolate this cache
+  with direct scene retention enabled in both controls. The default benchmark
+  mode isolates direct retention with local gather caching disabled in both.
+
+- `--cache-draw-commands 0|1` selects ordinary main draw preparation/submission
+  or retained decisions/order and consecutive compatible draw merging (default 1).
+  A bounded GPU material table preserves each copy's PBR values and mask cutoff
+  without changing source order or picking IDs. Add `--mode draw-commands` to the
+  benchmark command to keep the two earlier caches enabled in both controls.
+  It checks identical geometry, shadows, uploads and motion, exact captures, and
+  requires merged commands to explain the entire main draw-count reduction.
+  CSVs/report options identify this mode and expose decision reuse, merged draws,
+  CPU plan bytes, GPU material/index payloads and their upload bytes. The other
+  benchmark modes explicitly disable draw-command caching in both controls.
+
+- `--batch-static-props` groups stationary props by mesh and material in persistent
+  `InstanceBatch3D` handles, with one bounds group per batch. Moving props, robots,
+  structures, smoke and scene content keep their existing behavior. This exercises
+  retained GPU records, cached bounds and batched culling/submission; the default
+  continues to submit stationary props individually for the engine comparison.
+  Reports include `batch_static_props` and `static_batches`. The Medium scene uses
+  64 static and 64 moving batches, filling the renderer's current 128-table retention
+  budget; other populations may fall back to streamed records. See the
+  [CPU investigation](../../docs/rendering_measurements.md#industrial-yard-cpu-investigation-2026-11-03).
+
 - `--gpu-pass-markers` labels GPU passes for external profilers without readback.
 
 - `--visible` shows an uncapped window and exits after warm-up + measured frames.

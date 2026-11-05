@@ -38,6 +38,10 @@ struct RenderDebugStats3D : RenderStats3D {
     // Tables given up this render for other batches (least recently drawn first), and draws that wanted one but found
     // no room.
     u32 retained_evictions = 0, retained_refused = 0;
+    // Direct scene records share one table without changing draw/composition order.
+    // These are subsets of the retained/bounds counters above and below.
+    u32 direct_retained_instances = 0, direct_cache_hits = 0;
+    u64 direct_upload_bytes = 0, direct_bounds_rebuilt = 0;
     // Device-wide GPU waits (SDL_WaitForGPUIdle) inside this render(): 0 in an ordinary frame.
     u32 device_waits = 0;
     // CPU sphere storage: resident-table cache (<=4 MiB), compact transient allocation,
@@ -59,6 +63,18 @@ struct RenderDebugStats3D : RenderStats3D {
     // Local preparation vector payload capacities: gather tasks/counts, caster-union slot map,
     // and accepted/upload copy lists (including their simultaneous backing storage).
     u64 local_task_bytes = 0, local_slot_bytes = 0, local_copy_bytes = 0;
+    // CPU-only fixed-light plans. Tests/candidates above count newly gathered
+    // work; cached copies/tests below are reused selections, never GPU map hits.
+    u32 local_gather_cache_hits = 0, local_gather_cache_misses = 0, local_gather_cache_builds = 0;
+    u64 local_gather_cached_tests = 0, local_gather_cached_copies = 0, local_gather_cache_bytes = 0;
+    u32 local_sort_cache_hits = 0, local_sort_cache_misses = 0;
+    u64 local_sort_cached_entries = 0;
+    // Main draw decisions/order retained on the CPU; static direct draws can
+    // share a GPU material table and merge consecutive compatible commands.
+    u32 draw_plan_hits = 0, draw_plan_builds = 0, draw_pipeline_hits = 0, draw_pipeline_misses = 0;
+    u32 main_batched_draws = 0, main_merged_draws = 0;
+    u64 draw_plan_bytes = 0, draw_material_gpu_bytes = 0, draw_material_upload_bytes = 0;
+    u64 draw_index_gpu_bytes = 0, draw_index_upload_bytes = 0;
     // Skinned copies (Scene3D::draw_skinned): those the camera sees (drawn by the main pass), the joint matrices handed
     // to the GPU for all of the frame's skinned copies, and the main pass's draw calls for them (a run of copies of one
     // mesh is one). Also counted in draws, instances and triangles above. 0 for a frame without any.
