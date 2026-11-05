@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- A store for each build ([platform services](platform_services.md#steam)). The cache variable `KIN_GAME_STORE`
+  (`auto`, `steam`, `none`) says which store `kin_game` builds a game for: `none` (itch.io, a download of its own)
+  builds in no Steam app id, no `steam_appid.txt` and no Steam library, whatever the game info says; `steam` fails
+  without an app id. Games get `KIN_GAME_STORE` (`"steam"` or `""`). `KIN_STEAM_REDIST` ships Steam's library in
+  every Steam build that gives no `STEAM_REDIST`. A build without an app id takes out a `steam_appid.txt` left by
+  an earlier one. `--services=offline` (or `memory`) runs a game on kin's offline services, not Steam's;
+  `scene_app_services_config` says what `run_scene_app` starts.
+
 - ui2 navigation by the menu actions and per player ([ui](ui.md#controllers)). The map's `menu_up`/`menu_down`/
   `menu_left`/`menu_right` move the focus as the d-pad does, and `accept`/`quit` accept and back out
   (`ControllerNavigation::actions`). `ControllerNavigation::player` lets one player's controller navigate. A widget

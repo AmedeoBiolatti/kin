@@ -34,6 +34,7 @@ an explicit `--seed`.
 | `--seed=N` / `--seed N` | Seed the run's root RNG key (`SceneContext::rng`, default 0). |
 | `--max-fps=N` / `--max-fps N` | Cap a windowed run at N frames a second (0: uncapped), over the game's own setting. Headless runs are never paced. |
 | `--report[=PATH]` | Write the JSON run report to PATH (`-` for stdout). Implies headless. |
+| `--services=offline` / `--services=memory` | Platform services from kin's offline backend, not Steam's, kept beside the saves or in memory only ([platform services](platform_services.md)). Headless runs always get them in memory. |
 | `--list-actions` | Print available input actions and bindings, then quit. |
 | `--game-info` / `--list-info` | Print game metadata, then quit. |
 | `--profile-render` | Run 600 frames and print a render timing table. |
