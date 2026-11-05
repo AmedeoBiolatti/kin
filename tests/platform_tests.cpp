@@ -462,8 +462,157 @@ void test_local_players() {
     assert(!lone.held(0, "jump") && lone.held(1, "jump") && lone.held("jump"));
 }
 
+// Touch: fingers down and up, the first the pointer; gestures as bindings
+// (tap, double tap, long press, swipes, a two-finger tap); pinch and pan; a
+// claimed finger is neither; the input file's touch lines.
+void test_touch() {
+    kin::InputMap map;
+    map.bind("jump", kin::TouchControl::Tap);
+    map.bind("zoom", kin::TouchControl::DoubleTap);
+    map.bind("menu", kin::TouchControl::LongPress);
+    map.bind("next", kin::TouchControl::SwipeRight);
+    map.bind("back", kin::TouchControl::TwoFingerTap);
+    kin::Input input;
+    input.set_map(map);
+    const auto step = [&] {
+        input.advance_step_edges();
+        input.begin_frame();
+    };
+
+    // A tap: down and up, still and quick. The finger is the pointer meanwhile.
+    input.update_touch(10.0);
+    input.set_touch_down(1, {100, 100}, 3);
+    assert(input.touches().size() == 1 && input.touch(1) && input.touch(1)->down_at == 10.0);
+    // The pointer is there at once; its press lands at the next frame start.
+    assert(input.pointer_is_touch() && input.pointer_touch_active() && !input.mouse_held(kin::MouseButton::Left));
+    assert((input.mouse_pos() == kin::Vec2f{100, 100}) && input.mouse_window() == 3 && !input.pressed("jump"));
+    input.begin_frame();
+    assert(input.mouse_held(kin::MouseButton::Left) && input.mouse_pressed(kin::MouseButton::Left));
+    input.update_touch(10.1);
+    input.set_touch_moved(1, {104, 101});
+    input.set_touch_up(1);
+    assert(input.pressed("jump") && input.frame_pressed("jump") && input.touch_pressed(kin::TouchControl::Tap));
+    assert(!input.pressed("zoom") && input.mouse_released(kin::MouseButton::Left) && input.touches().empty());
+    assert(input.touches_ended().size() == 1 && (input.touches_ended()[0].pos == kin::Vec2f{104, 101}));
+    step();
+    assert(!input.pressed("jump") && input.held("jump") && input.touches_ended().empty()); // held a step
+    step();
+    assert(input.released("jump") && !input.held("jump"));
+    step();
+    assert(!input.released("jump"));
+
+    // Another tap soon after, near it: a double tap (and a tap).
+    input.update_touch(10.3);
+    input.set_touch_down(2, {110, 100});
+    input.set_touch_up(2);
+    assert(input.pressed("zoom") && input.pressed("jump"));
+    step();
+    // A third right after is a tap again, not another double tap.
+    input.set_touch_down(3, {110, 100});
+    input.set_touch_up(3);
+    assert(input.pressed("jump") && !input.pressed("zoom"));
+    step();
+
+    // Held still: a long press, once, and no tap when it lifts.
+    input.update_touch(20.0);
+    input.set_touch_down(4, {50, 50});
+    input.update_touch(20.4);
+    assert(!input.pressed("menu"));
+    input.update_touch(20.6);
+    assert(input.pressed("menu"));
+    step();
+    input.update_touch(21.5);
+    assert(!input.pressed("menu"));
+    input.set_touch_up(4);
+    assert(!input.pressed("jump"));
+    step();
+
+    // Quickly a long way right: a swipe, not a tap.
+    input.update_touch(30.0);
+    input.set_touch_down(5, {200, 200});
+    input.update_touch(30.15);
+    input.set_touch_moved(5, {320, 215});
+    input.set_touch_up(5);
+    assert(input.pressed("next") && !input.pressed("jump") && input.touch_pressed(kin::TouchControl::SwipeRight));
+    step();
+    // Slowly: not a swipe.
+    input.set_touch_down(6, {200, 200});
+    input.update_touch(31.0);
+    input.set_touch_moved(6, {320, 200});
+    input.set_touch_up(6);
+    assert(!input.pressed("next"));
+    step();
+
+    // Two fingers: no pointer press (a pinch, not a click), their pinch and pan.
+    input.update_touch(40.0);
+    input.set_touch_down(7, {100, 100});
+    input.begin_frame(); // the first one's press
+    assert(input.mouse_held(kin::MouseButton::Left));
+    input.set_touch_down(8, {200, 100});
+    assert(!input.mouse_held(kin::MouseButton::Left) && !input.mouse_pressed(kin::MouseButton::Left) &&
+           !input.mouse_released(kin::MouseButton::Left));
+    input.set_touch_moved(8, {300, 100});
+    assert(std::abs(input.touch_pinch() - 2.0f) < 1e-4f && std::abs(input.frame_touch_pinch() - 2.0f) < 1e-4f);
+    assert((input.touch_pan() == kin::Vec2f{50, 0}));
+    input.set_touch_up(7);
+    input.set_touch_up(8);
+    assert(!input.pressed("back") && !input.pressed("jump")); // they moved
+    step();
+    assert(input.touch_pinch() == 1.0f && (input.touch_pan() == kin::Vec2f{}));
+    // Down and up together, still: a two-finger tap.
+    input.update_touch(41.0);
+    input.set_touch_down(9, {100, 100});
+    input.set_touch_down(10, {140, 100});
+    input.update_touch(41.1);
+    input.set_touch_up(9);
+    input.set_touch_up(10);
+    assert(input.pressed("back") && !input.pressed("jump"));
+    step();
+
+    // Claimed by an on-screen control: let go without a click, no gesture.
+    input.update_touch(50.0);
+    input.set_touch_down(11, {10, 10});
+    input.claim_touch(11);
+    input.begin_frame();
+    assert(input.touch(11)->claimed && !input.mouse_held(kin::MouseButton::Left) && !input.mouse_pressed(kin::MouseButton::Left));
+    input.set_touch_up(11);
+    assert(!input.pressed("jump") && !input.mouse_released(kin::MouseButton::Left));
+    step();
+    // A finger down while a claimed one is held is the pointer.
+    input.set_touch_down(12, {10, 10});
+    input.claim_touch(12);
+    input.set_touch_down(13, {60, 60});
+    input.begin_frame();
+    assert(input.mouse_held(kin::MouseButton::Left) && (input.mouse_pos() == kin::Vec2f{60, 60}));
+    input.set_touch_up(13);
+    input.set_touch_up(12);
+    step();
+
+    // A tap within one frame: pressed at the next frame start, let go the one after.
+    input.set_touch_down(14, {70, 70});
+    input.set_touch_up(14);
+    assert(!input.mouse_held(kin::MouseButton::Left) && input.pointer_touch_active());
+    input.begin_frame();
+    assert(input.mouse_held(kin::MouseButton::Left) && input.mouse_frame_pressed(kin::MouseButton::Left));
+    input.begin_frame();
+    assert(!input.mouse_held(kin::MouseButton::Left) && input.mouse_frame_released(kin::MouseButton::Left) &&
+           !input.pointer_touch_active());
+    step();
+
+    // Written and read.
+    const std::string text = kin::serialize_input_map(map);
+    assert(text.find("touch jump tap\n") != std::string::npos && text.find("touch back two_finger_tap\n") != std::string::npos);
+    kin::InputMap read;
+    std::string error;
+    assert(kin::parse_input_map(text, read, error) && read == map);
+    assert(!kin::parse_input_map("touch jump wave\n", read, error) && error.find("line 1") != std::string::npos);
+    assert(kin::binding_text(*kin::parse_binding_text("touch:swipe_left")) == "touch:swipe_left");
+    assert(kin::binding_name({.device = kin::InputBindingDevice::Touch, .code = 2}) == "long_press");
+}
+
 int main() {
     test_gamepad_bindings_and_axes();
+    test_touch();
     test_local_players();
     // This CPU/event-injection suite creates several App lifetimes. SDL_Quit
     // resets hints between them, so retain the headless driver in the process

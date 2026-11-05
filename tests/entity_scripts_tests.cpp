@@ -179,6 +179,24 @@ end
     scripts.update(world, input, 0.1f);
     assert(scripts.problems().empty());
     assert(near(watcher.get<kin::Transform2D>()->rotation, -1.0f) && near(one.get<kin::Transform2D>()->rotation, 10.0f));
+
+    // Touch: the fingers down, and two fingers' pinch.
+    write(dir / "scripts/fingers.lua", R"lua(
+function on_update(self, dt)
+    local fingers = input.touches()
+    if #fingers == 2 then
+        local pan_x, pan_y = input.pan()
+        self:set_position(fingers[2].x, input.pinch() * 10 + pan_x)
+    end
+end
+)lua");
+    const kin::EcsEntity hand = world.entity("Hand").set(kin::Transform2D{}).set(kin::ScriptComponent{.asset = {.id = "scripts/fingers.lua"}});
+    input.set_touch_down(1, {100, 100});
+    input.set_touch_down(2, {200, 100});
+    input.set_touch_moved(2, {300, 100});
+    scripts.update(world, input, 0.1f);
+    assert(scripts.problems().empty());
+    assert(hand.get<kin::Transform2D>()->pos == (kin::Vec2f{300, 70})); // pinch 2 * 10 + pan 50
     fs::remove_all(dir);
 }
 

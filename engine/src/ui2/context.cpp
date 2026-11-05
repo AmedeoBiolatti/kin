@@ -202,6 +202,21 @@ std::string readable_pad(PadControl control, GamepadFamily family, bool compact)
     }
 }
 
+std::string readable_touch(TouchControl control) {
+    switch (control) {
+    case TouchControl::Tap: return "Tap";
+    case TouchControl::DoubleTap: return "Double Tap";
+    case TouchControl::LongPress: return "Long Press";
+    case TouchControl::SwipeLeft: return "Swipe Left";
+    case TouchControl::SwipeRight: return "Swipe Right";
+    case TouchControl::SwipeUp: return "Swipe Up";
+    case TouchControl::SwipeDown: return "Swipe Down";
+    case TouchControl::TwoFingerTap: return "Two-Finger Tap";
+    case TouchControl::Count: break;
+    }
+    return "Touch";
+}
+
 std::string prompt_binding_label(InputBinding binding, const PromptOptions& options) {
     std::string result;
     if (any(binding.modifiers)) {
@@ -219,6 +234,8 @@ std::string prompt_binding_label(InputBinding binding, const PromptOptions& opti
         result += readable_key(static_cast<Key>(binding.code), options.compact);
     } else if (binding.device == InputBindingDevice::Gamepad) {
         result += readable_pad(static_cast<PadControl>(binding.code), options.family, options.compact);
+    } else if (binding.device == InputBindingDevice::Touch) {
+        result += readable_touch(static_cast<TouchControl>(binding.code));
     } else {
         result += readable_mouse(static_cast<MouseButton>(binding.code));
     }
@@ -1007,11 +1024,15 @@ std::string Context::prompt_for_action(std::string_view action, const PromptOpti
         return prompt_binding_label(bindings->front(), labelled);
     }
     if (options.mode == PromptBindingMode::Device) {
-        // The controller's binding while it is what navigates (controller_active), else a key's or the mouse's.
-        const bool pad = _controller_active;
-        const auto found = std::ranges::find_if(*bindings, [pad](InputBinding b) {
-            return (b.device == InputBindingDevice::Gamepad) == pad;
-        });
+        // The controller's binding while it is what navigates (controller_active), a touch gesture's while
+        // the pointer is a finger, else a key's or the mouse's.
+        const InputBindingDevice want = _controller_active         ? InputBindingDevice::Gamepad
+                                        : _input->pointer_is_touch() ? InputBindingDevice::Touch
+                                                                     : InputBindingDevice::Key;
+        auto found = std::ranges::find(*bindings, want, &InputBinding::device);
+        if (found == bindings->end() && want == InputBindingDevice::Key) {
+            found = std::ranges::find(*bindings, InputBindingDevice::MouseButton, &InputBinding::device);
+        }
         return prompt_binding_label(found != bindings->end() ? *found : bindings->front(), labelled);
     }
     std::string result;
@@ -1027,6 +1048,12 @@ std::string Context::prompt_for_action(std::string_view action, const PromptOpti
 Vec2f Context::screen_pointer() const {
     if (!_input) {
         return {};
+    }
+    // A finger is only over something while it is down (and on the frame it
+    // lifts, for the click): nothing is hovered, no tooltip shows, between.
+    if (_input->pointer_is_touch() && !_input->pointer_touch_active() && !_input->mouse_held(MouseButton::Left) &&
+        !_input->mouse_frame_released(MouseButton::Left)) {
+        return {-1.0e9f, -1.0e9f};
     }
     return _renderer ? _renderer->window_to_logical(_input->mouse_pos()) : _input->mouse_pos();
 }

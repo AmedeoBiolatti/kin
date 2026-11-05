@@ -7,6 +7,17 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Touch ([input](input.md#touch)). Fingers from the system (`SDL_EVENT_FINGER_*`) are `Input::touches()` (id,
+  position, where and when each went down) and `touches_ended()`. The first unclaimed finger is the pointer: it moves
+  the mouse and holds its left button, so ui2 and mouse-reading code work with a finger. Its press lands a frame
+  later, so UI sees it over what it touches first; before, a tap clicked nothing in ui2. The system's mouse events
+  made from touches are dropped. Gestures are `TouchControl`s bound in the input map (`touch jump tap`; double tap,
+  long press, four swipes, two-finger tap): pressed when made, held a step, released. Two fingers' `touch_pinch()`
+  and `touch_pan()` (step and frame readings). `claim_touch(id)` takes a finger for an on-screen control,
+  `pointer_is_touch()` says a finger is the pointer, and `update_touch(now)` (App calls it) times long presses. ui2
+  shows no hover between touches and names touch bindings in prompts (`PromptBindingMode::Device` too). Lua:
+  `input.touches()`, `input.pinch()`, `input.pan()`. Scene server: `input.touch {x, y, id, mode}`.
+
 - A store for each build ([platform services](platform_services.md#steam)). The cache variable `KIN_GAME_STORE`
   (`auto`, `steam`, `none`) says which store `kin_game` builds a game for: `none` (itch.io, a download of its own)
   builds in no Steam app id, no `steam_appid.txt` and no Steam library, whatever the game info says; `steam` fails

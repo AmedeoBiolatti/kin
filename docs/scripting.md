@@ -225,6 +225,10 @@ scripts.update(world, ctx.input, ctx.dt);
   `player.lua` runs player 1's character and player 2's. `player()` says
   whose input this entity reads. Joining, rumble and button labels are
   `controllers.*` ([Lua 2D workflows](lua_2d_workflows.md#controllers-and-asset-memory)).
+  `touches()` lists the fingers down (`{id, x, y, start_x, start_y}`), and
+  `pinch()` and `pan()` give two fingers' pinch (1: none) and pan since the
+  last step. Gestures are actions an input file binds (`touch jump tap`;
+  [touch](input.md#touch)).
 - The `world` table has `find(name)` and `spawn(prefab, x, y)`, which returns
   the new prefab instance's root.
 - When the game gives the scripts its physics (`EntityScripts::set_physics`),

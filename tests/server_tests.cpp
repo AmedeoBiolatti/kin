@@ -923,6 +923,73 @@ void test_input_pad() {
     assert(!response_result(text, 9) && !response_result(text, 10));
 }
 
+// Taps, a long press and a finger's position, for input.touch.
+class TouchProbeScene final : public kin::Scene {
+public:
+    std::string_view name() const override { return "TouchProbe"; }
+
+    void on_enter(kin::SceneContext& ctx) override {
+        kin::InputMap map;
+        map.bind("jump", kin::TouchControl::Tap);
+        map.bind("menu", kin::TouchControl::LongPress);
+        ctx.input.set_map(map);
+    }
+
+    void update(kin::SceneContext& ctx) override {
+        _taps += ctx.input.pressed("jump") ? 1 : 0;
+        _menus += ctx.input.pressed("menu") ? 1 : 0;
+        _fingers = static_cast<kin::i32>(ctx.input.touches().size());
+        if (!ctx.input.touches().empty()) {
+            _x = ctx.input.touches()[0].pos.x;
+        }
+    }
+
+    void write_report(kin::JsonWriter& json) const override {
+        json.field("taps", _taps).field("menus", _menus).field("fingers", _fingers);
+        json.field("x", static_cast<double>(_x));
+    }
+
+private:
+    kin::i32 _taps = 0;
+    kin::i32 _menus = 0;
+    kin::i32 _fingers = 0;
+    kin::f32 _x = 0.0f;
+};
+
+void test_input_touch() {
+    kin::SceneManager scenes;
+    scenes.push(std::make_unique<TouchProbeScene>());
+    std::ostringstream out;
+    std::istringstream in(
+        R"({"id":1,"method":"input.touch","params":{"x":10,"y":10,"space":"window"}})" "\n"
+        R"({"id":2,"method":"sim.tick","params":{"count":2}})" "\n"
+        R"({"id":3,"method":"input.touch","params":{"id":2,"x":30,"y":10,"mode":"down","space":"window"}})" "\n"
+        R"({"id":4,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":5,"method":"scene.current"})" "\n"
+        R"({"id":6,"method":"sim.tick","params":{"count":40}})" "\n"
+        R"({"id":7,"method":"input.touch","params":{"id":2,"x":31,"y":10,"mode":"up","space":"window"}})" "\n"
+        R"({"id":8,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":9,"method":"scene.current"})" "\n"
+        R"({"id":10,"method":"input.touch","params":{"x":1}})" "\n"
+        R"({"id":11,"method":"server.shutdown"})" "\n");
+    const int code = kin::run_scene_server({
+        .window = {.title = "touch", .width = 64, .height = 64},
+        .mode = kin::ServerMode::Driven,
+        .in = &in,
+        .out = &out,
+    }, scenes);
+    assert(code == 0);
+    const std::string text = out.str();
+    const kin::JsonValue* held = response_result(text, 5);
+    assert(held && held->find("state")->find("taps")->as_number() == 1 && held->find("state")->find("fingers")->as_number() == 1);
+    assert(held->find("state")->find("x")->as_number() == 30);
+    const kin::JsonValue* after = response_result(text, 9);
+    // Held still over many steps: a long press, and no tap when it lifts.
+    assert(after && after->find("state")->find("menus")->as_number() == 1 && after->find("state")->find("taps")->as_number() == 1);
+    assert(after->find("state")->find("fingers")->as_number() == 0);
+    assert(!response_result(text, 10));
+}
+
 void test_input_drop() {
     kin::SceneManager scenes;
     scenes.push(std::make_unique<DropProbeScene>());
@@ -1691,6 +1758,7 @@ int main() {
     test_live_inspector_debugs_scripts();
     test_input_key_drives_a_text_edit();
     test_input_pad();
+    test_input_touch();
     test_input_drop();
     test_sim_reset();
     test_sim_reset_unsupported_without_factory();

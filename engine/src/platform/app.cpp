@@ -126,6 +126,7 @@ void App::open_gamepads() {
 }
 
 void App::pump_events() {
+    _input.update_touch(static_cast<f64>(SDL_GetTicksNS()) * 1e-9); // a finger held still becomes a long press
     if (_gamepads) {
         _input.set_gamepad(_gamepads->poll()); // it reads the controllers itself, apart from the events
         // Each player's own, for Input's questions about one player.
