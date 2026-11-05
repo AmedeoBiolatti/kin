@@ -172,15 +172,32 @@ void test_process_errors_apart() {
 // Launched and left: it runs on its own (and would after this program ends).
 void test_launch() {
     const std::filesystem::path mark = std::filesystem::temp_directory_path() / "kin_launch_test_mark.txt";
-    std::filesystem::remove(mark);
+    std::error_code ignored;
+    std::filesystem::remove(mark, ignored);
     std::string error;
     assert(kin::launch({self, "--touch", mark.string()}, {}, &error) && error.empty());
+    // The mark is there once the child has written all of it: it exists as
+    // soon as the child opens it, still empty.
+    const auto written = [&] {
+        std::ifstream in(mark);
+        std::string text;
+        std::getline(in, text);
+        return text == "touched";
+    };
     const auto until = std::chrono::steady_clock::now() + 10s;
-    while (!std::filesystem::exists(mark) && std::chrono::steady_clock::now() < until) {
+    while (!written() && std::chrono::steady_clock::now() < until) {
         SDL_Delay(5);
     }
-    assert(std::filesystem::exists(mark));
-    std::filesystem::remove(mark);
+    assert(written());
+    // On Windows a file another process still has open cannot be deleted
+    // (and the throwing remove() ended this program without a word, 0xc0000409):
+    // try again until the child has let it go.
+    std::error_code removed;
+    while (!std::filesystem::remove(mark, removed) && std::filesystem::exists(mark) &&
+           std::chrono::steady_clock::now() < until) {
+        SDL_Delay(5);
+    }
+    assert(!std::filesystem::exists(mark));
     assert(!kin::launch({}, {}, &error) && !error.empty());
 }
 
