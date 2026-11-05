@@ -8899,6 +8899,113 @@ void test_screen_text_keys() {
     assert(file.strings.size() == 2 && file.strings.at("ui.hud.play") == "Play" && file.strings.at("ui.hud.name.hint") == "Your name");
 }
 
+// The map's menu actions move the focus as a controller does, without making
+// the controller active; a widget that takes a direction uses it up; one
+// player's controller can be the one that navigates; prompts name controller
+// bindings as the controller labels them, and the device navigating.
+void test_navigation_by_actions_and_players() {
+    using namespace kin;
+    using namespace kin::ui2;
+    Renderer2D renderer = make_renderer();
+    Context ui;
+    Input input;
+    InputMap map;
+    map.bind("menu_down", Key::S);
+    map.bind("menu_right", Key::D);
+    map.bind("accept", Key::E);
+    map.bind("quit", Key::Q);
+    map.bind("jump", Key::Space);
+    map.bind("jump", PadControl::A);
+    map.bind("fire", PadControl::RightTrigger);
+    input.set_map(map);
+    Button a{.id = make_id("play"), .bounds = {10, 10, 100, 25}, .label = "Play"};
+    Slider volume{.id = make_id("volume"), .bounds = {10, 50, 100, 20}, .value = 0.5f, .step = 0.1f};
+    Button reset{.id = make_id("reset"), .bounds = {130, 50, 60, 20}, .label = "Reset"};
+    const auto draw = [&] {
+        ui.begin(input, renderer, 0.016f);
+        run(ui, a); run(ui, volume); run(ui, reset);
+        ui.end();
+    };
+    const auto tap = [&](Key key) {
+        input.begin_frame();
+        input.set_key_pressed(key);
+        draw();
+        input.begin_frame();
+        input.set_key_released(key);
+        draw();
+    };
+    draw();
+    tap(Key::S); // nothing focused: the first
+    assert(ui.state().focused() == a.id && !ui.controller_active());
+    tap(Key::S);
+    assert(ui.state().focused() == volume.id);
+    input.begin_frame();
+    input.set_key_pressed(Key::D); // the slider's: it moves, the focus stays
+    draw();
+    assert(volume.changed && std::abs(volume.value - 0.6f) < 1e-5f);
+    input.begin_frame();
+    input.set_key_released(Key::D);
+    draw();
+    assert(ui.state().focused() == volume.id);
+    ui.state().set_focused(a.id);
+    input.begin_frame();
+    input.set_key_pressed(Key::E);
+    draw();
+    assert(a.clicked);
+    input.set_key_released(Key::E);
+    input.begin_frame();
+    input.set_key_pressed(Key::Q);
+    ui.begin(input, renderer, 0.016f);
+    assert(ui.back_requested());
+    ui.end();
+    input.set_key_released(Key::Q);
+    ui.set_controller_navigation({.actions = false});
+    tap(Key::S);
+    assert(ui.state().focused() == a.id); // the actions off: S does nothing
+
+    // Only player 1's controller navigates.
+    ui.set_controller_navigation({.player = 1});
+    GamepadState down{.connected = true};
+    down.set_button(GamepadButton::DPadDown, true);
+    const auto pads = [&](const GamepadState& first, const GamepadState& second) {
+        input.begin_frame();
+        input.set_gamepad(first);
+        input.set_player_gamepad(0, first);
+        input.set_player_gamepad(1, second);
+        draw();
+    };
+    const GamepadState idle{.connected = true};
+    pads(down, idle);
+    pads(idle, idle);
+    assert(ui.state().focused() == a.id);
+    pads(idle, down);
+    assert(ui.state().focused() == volume.id && ui.controller_active());
+    pads(idle, idle);
+    ui.set_controller_navigation({});
+
+    // Prompts: controller bindings as the controller labels them; Device: what navigates.
+    const auto prompt = [&](std::string_view action, PromptOptions options = {}) {
+        input.begin_frame();
+        ui.begin(input, renderer, 0.016f);
+        std::string said = ui.prompt_for_action(action, options);
+        ui.end();
+        return said;
+    };
+    assert(prompt("fire") == "RT");
+    assert(prompt("jump", {.mode = PromptBindingMode::Device}) == "A"); // the controller navigated last
+    tap(Key::S);
+    assert(!ui.controller_active());
+    assert(prompt("jump", {.mode = PromptBindingMode::Device}) == "Space");
+    GamepadState sony{.connected = true, .family = GamepadFamily::PlayStation};
+    input.begin_frame();
+    input.set_gamepad(sony);
+    ui.begin(input, renderer, 0.016f);
+    assert(ui.prompt_for_action("jump", {.mode = PromptBindingMode::All}) == "Space / Cross");
+    assert(ui.prompt_for_action("fire") == "R2");
+    assert(ui.prompt_for_action("fire", {.family = GamepadFamily::Nintendo}) == "ZR");
+    ui.end();
+}
+
 void test_controller_and_semantic_ui() {
     using namespace kin;
     using namespace kin::ui2;
@@ -9103,6 +9210,7 @@ void test_semantic_text_edit() {
 
 int main() {
     test_controller_and_semantic_ui();
+    test_navigation_by_actions_and_players();
     test_semantic_elements_follow_each_frame();
     test_semantics_respect_modals_and_clipping();
     test_semantic_text_edit();

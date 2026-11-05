@@ -58,6 +58,7 @@ struct Meter {
 enum class PromptBindingMode {
     First,
     All,
+    Device, // a controller's binding while the controller navigates (Context::controller_active), else a key's
 };
 
 struct PromptOptions {
@@ -66,6 +67,8 @@ struct PromptOptions {
     bool compact = true;
     bool brackets = false;
     std::string fallback;
+    // Whose labels a controller's buttons get; Generic: the controller's own (Input::gamepad().family).
+    GamepadFamily family = GamepadFamily::Generic;
 };
 
 struct PromptLabel {

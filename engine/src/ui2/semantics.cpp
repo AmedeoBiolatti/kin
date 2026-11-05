@@ -380,10 +380,27 @@ void Context::begin_navigation() {
     if (!_input) {
         return;
     }
-    const auto& pad = _input->gamepad();
-    if (_controller_options.enabled && pad.connected) {
-        _controller_accept = _input->pad_frame_pressed(PadControl::A);
-        _controller_back = _input->pad_frame_pressed(PadControl::B);
+    const i32 player = _controller_options.player;
+    const auto& pad = player < 0 ? _input->gamepad() : _input->player_gamepad(player);
+    // The map's menu actions, held: a direction when the controller gives none.
+    NavDirection held_action = NavDirection::None;
+    if (_controller_options.enabled && _controller_options.actions) {
+        held_action = _input->held(player, "menu_up")      ? NavDirection::Up
+                      : _input->held(player, "menu_right") ? NavDirection::Right
+                      : _input->held(player, "menu_down")  ? NavDirection::Down
+                      : _input->held(player, "menu_left")  ? NavDirection::Left
+                                                           : NavDirection::None;
+    }
+    const bool accept_action = _controller_options.enabled && _controller_options.actions && _input->frame_pressed(player, "accept");
+    const bool back_action = _controller_options.enabled && _controller_options.actions && _input->frame_pressed(player, "quit");
+    if (_controller_options.enabled && (pad.connected || held_action != NavDirection::None || accept_action || back_action)) {
+        const auto pad_pressed = [&](PadControl control) {
+            return pad.connected && (player < 0 ? _input->pad_frame_pressed(control) : _input->pad_frame_pressed(control, player));
+        };
+        const bool pad_accept = pad_pressed(PadControl::A);
+        const bool pad_back = pad_pressed(PadControl::B);
+        _controller_accept = pad_accept || accept_action;
+        _controller_back = pad_back || back_action;
         NavDirection direction = NavDirection::None;
         const f32 dead = std::clamp(_controller_options.dead_zone, 0.1f, 0.99f);
         if (pad.button(GamepadButton::DPadUp)) {
@@ -394,10 +411,14 @@ void Context::begin_navigation() {
             direction = NavDirection::Down;
         } else if (pad.button(GamepadButton::DPadLeft)) {
             direction = NavDirection::Left;
-        } else if (std::max(std::abs(pad.left_x), std::abs(pad.left_y)) >= dead) {
+        } else if (pad.connected && std::max(std::abs(pad.left_x), std::abs(pad.left_y)) >= dead) {
             direction = std::abs(pad.left_x) > std::abs(pad.left_y)
                             ? (pad.left_x > 0 ? NavDirection::Right : NavDirection::Left)
                             : (pad.left_y > 0 ? NavDirection::Up : NavDirection::Down);
+        }
+        const bool by_pad = direction != NavDirection::None;
+        if (!by_pad) {
+            direction = held_action;
         }
         if (direction != _held_direction) {
             _controller_direction = direction;
@@ -410,8 +431,10 @@ void Context::begin_navigation() {
             }
         }
         _held_direction = direction;
-        if (_controller_direction != NavDirection::None || _controller_accept || _controller_back) {
+        if ((by_pad && _controller_direction != NavDirection::None) || pad_accept || pad_back) {
             _controller_active = true;
+        } else if ((!by_pad && _controller_direction != NavDirection::None) || accept_action || back_action) {
+            _controller_active = false; // the keys (or whatever the actions are bound to) navigate now
         }
     } else {
         _held_direction = NavDirection::None;

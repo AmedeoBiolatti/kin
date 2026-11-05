@@ -403,6 +403,20 @@ dead zone and repeat timing with `set_controller_navigation({.dead_zone = 0.5f,
 Accept and back read the controller's presses this rendered frame
 (`Input::pad_frame_pressed`), as keys do; held directions repeat.
 
+The input map's `menu_up`, `menu_down`, `menu_left` and `menu_right` move the
+focus the same way, on whatever they are bound to (WASD, the arrows), and
+`accept` and `quit` accept and back out. Moving that way turns
+`controller_active()` off again; `{.actions = false}` leaves them to the
+widgets that read them. A widget that takes a direction (a slider's right,
+a list's down) uses it up, so the focus does not move that way as well. In a
+game for several players at one screen, `{.player = 1}` lets only that
+player's controller (`Input::player_gamepad`) and actions navigate.
+
+`prompt_for_action` names a controller binding as the controller labels it
+("Cross" on a PlayStation pad, "RT" or "R2"); `PromptOptions::family` picks
+the labels instead. `PromptBindingMode::Device` names the controller's binding
+while the controller navigates (`controller_active()`), else a key's.
+
 ## Charts
 
 `kin/ui2/charts.hpp` plots numbers the app keeps: a widget holds spans of them
