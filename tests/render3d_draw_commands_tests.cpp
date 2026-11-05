@@ -62,11 +62,13 @@ void check(Renderer2D& renderer) {
         for (u32 i = 0; i < 384; ++i) {
             auto m = materials[(i + u32(edit)) % materials.size()];
             // Texture/sampling and culling changes split consecutive runs.
-            if (i % 91 == 0) m.double_sided = true;
-            if (i % 71 == 0) m.texture_samplers[0] = TextureSampler3D{};
-            assert(scene.draw(box, Mat4f::translation({f32(i % 24) * .65f - 7.5f,
-                                                       f32(i / 24) * .65f - 5.f, edit ? -.5f : 0}),
-                              m, colors::white, i + 1));
+            if (i % 91 == 0)
+                m.double_sided = true;
+            if (i % 71 == 0)
+                m.texture_samplers[0] = TextureSampler3D{};
+            assert(scene.draw(
+                box, Mat4f::translation({f32(i % 24) * .65f - 7.5f, f32(i / 24) * .65f - 5.f, edit ? -.5f : 0}), m,
+                colors::white, i + 1));
         }
         // Same mesh and textures, different scalar material values, equal depth:
         // the later source must still win, including inside a merged draw.
@@ -125,19 +127,18 @@ void check(Renderer2D& renderer) {
     shoot(true, view);
     compare(view);
     auto warm = shoot(true, view);
-    assert(warm.stats.draw_plan_hits == 1 && warm.stats.draw_plan_builds == 0 &&
-           warm.stats.draw_pipeline_misses == 0 && warm.stats.draw_pipeline_hits > 0 &&
-           warm.stats.draw_material_upload_bytes == 0);
+    assert(warm.stats.draw_plan_hits == 1 && warm.stats.draw_plan_builds == 0 && warm.stats.draw_pipeline_misses == 0 &&
+           warm.stats.draw_pipeline_hits > 0 && warm.stats.draw_material_upload_bytes == 0);
     compare(second); // different sample count, same retained source
-    compare(hdr); // different target format and output transform
+    compare(hdr);    // different target format and output transform
     compare(view);
     scene.sky.enabled = true;
     compare(view);
     scene.fog.density = .025f;
     scene.fog.enabled = true;
     compare(view); // fog shader with a material table
-    scene.lights.spots.push_back({.position = {2, 4, 8}, .direction = normalize(Vec3f{-2, -4, -8}),
-                                  .radius = 30, .shadow_enabled = true});
+    scene.lights.spots.push_back(
+        {.position = {2, 4, 8}, .direction = normalize(Vec3f{-2, -4, -8}), .radius = 30, .shadow_enabled = true});
     scene.lights.max_shadowed_spots = 1;
     scene.lights.local_shadow_resolution = 128;
     assert(r.warm_up(view, scene));
@@ -157,7 +158,8 @@ void check(Renderer2D& renderer) {
         renderer.set_scale_mode(texture, mode);
         compare(view);
     }
-    for (u32 i = 0; i < 64; ++i) texels[4 * i + 3] = 255;
+    for (u32 i = 0; i < 64; ++i)
+        texels[4 * i + 3] = 255;
     assert(renderer.update_texture(texture, {}, {8, 8}, texels.data()));
     warm = shoot(true, view);
     assert(warm.stats.draw_plan_hits == 1 && warm.stats.draw_material_upload_bytes == 0);
@@ -248,8 +250,8 @@ void check(Renderer2D& renderer) {
     scene.cull = false;
     scene.camera = Camera3D::look_at({0, 0, 13}, {});
     const std::array<MeshInstance3D, 3> copies{{{Mat4f::identity(), colors::white, 7},
-                                              {Mat4f::identity(), colors::white, 7},
-                                              {Mat4f::identity(), colors::white, 7}}};
+                                                {Mat4f::identity(), colors::white, 7},
+                                                {Mat4f::identity(), colors::white, 7}}};
     for (u32 i = 0; i < 3073; ++i) {
         Material3D material;
         for (u32 map = 0; map < material.texture_samplers.size(); ++map) {
@@ -280,9 +282,11 @@ int main() {
     bool ready = false;
     try {
         App app;
-        auto& window = app.create_window({.title = "draw commands", .width = extent.x, .height = extent.y, .hidden = true});
+        auto& window =
+            app.create_window({.title = "draw commands", .width = extent.x, .height = extent.y, .hidden = true});
         auto backend = make_render_backend(window, false, true);
-        if (!backend || backend->name() != "SDL_GPU") throw std::runtime_error("SDL_GPU unavailable");
+        if (!backend || backend->name() != "SDL_GPU")
+            throw std::runtime_error("SDL_GPU unavailable");
         Renderer2D renderer{std::move(backend)};
         ready = true;
         check(renderer);

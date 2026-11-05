@@ -38,11 +38,10 @@ void check(Renderer2D& renderer) {
     const auto mask = renderer.create_texture_from_rgba(texels.data(), {4, 4});
     assert(mask);
     const std::array<Material3D, 3> materials{
-        Material3D{.color = Color::rgb(220, 40, 65)},
-        Material3D{.color = Color::rgb(30, 190, 95)},
+        Material3D{.color = Color::rgb(220, 40, 65)}, Material3D{.color = Color::rgb(30, 190, 95)},
         Material3D{.color = colors::white, .blend = Blend3D::Mask, .texture = mask}};
-    auto explicit_batch = InstanceBatch3D::create(
-        mesh, std::vector<MeshInstance3D>(16, {Mat4f::translation({-6, -3, 0})})).value_or({});
+    auto explicit_batch =
+        InstanceBatch3D::create(mesh, std::vector<MeshInstance3D>(16, {Mat4f::translation({-6, -3, 0})})).value_or({});
     Scene3D scene;
     scene.debug.cache_draw_commands = false; // isolate instance/local selection caches in this fixture
     scene.camera = Camera3D::look_at({0, 1, 13}, {});
@@ -56,8 +55,7 @@ void check(Renderer2D& renderer) {
             if (i == 128 || i == 384)
                 assert(scene.draw_instanced(explicit_batch, materials[0]));
             const Vec3f at{f32(i % 32) * .65f - 10.f, f32(i / 32) * .65f - 5.f, changed ? -.4f : 0.f};
-            assert(scene.draw(mesh, Mat4f::translation(at), materials[(i + u32(changed)) % 3], colors::white,
-                              i + 1));
+            assert(scene.draw(mesh, Mat4f::translation(at), materials[(i + u32(changed)) % 3], colors::white, i + 1));
         }
         // Equal-depth, differently coloured surfaces must retain their source order.
         assert(scene.draw(mesh, Mat4f::scaling({2, 2, 2}), materials[0], colors::white, 900));
@@ -132,10 +130,14 @@ void check(Renderer2D& renderer) {
     const auto original_spot = scene.lights.spots.front();
     for (u32 edit = 0; edit < 4; ++edit) {
         auto& spot = scene.lights.spots.front();
-        if (edit == 0) spot.position.x += 2;
-        if (edit == 1) spot.radius = 12;
-        if (edit == 2) spot.shadow_near_plane = .4f;
-        if (edit == 3) spot.direction = normalize(Vec3f{-1, -2, -8});
+        if (edit == 0)
+            spot.position.x += 2;
+        if (edit == 1)
+            spot.radius = 12;
+        if (edit == 2)
+            spot.shadow_near_plane = .4f;
+        if (edit == 3)
+            spot.direction = normalize(Vec3f{-1, -2, -8});
         const auto changed = compare();
         assert(changed.stats.local_gather_cache_hits == 0 && changed.stats.local_gather_cache_misses == 1);
         compare(); // admit the unchanged projection
@@ -342,8 +344,8 @@ int main() {
     bool ready = false;
     try {
         App app;
-        auto& window = app.create_window({.title = "direct scene cache", .width = extent.x,
-                                          .height = extent.y, .hidden = true});
+        auto& window =
+            app.create_window({.title = "direct scene cache", .width = extent.x, .height = extent.y, .hidden = true});
         auto backend = make_render_backend(window, false, true);
         if (!backend || backend->name() != "SDL_GPU")
             throw std::runtime_error("SDL_GPU unavailable");

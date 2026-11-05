@@ -1086,7 +1086,7 @@ private:
         u32 group_first = 0, group_count = 0; // in _cull_groups, preserved through draw merging
         u32 retained = ~0u;                   // bounded retained-table cache entry, or immediate path
         u32 retained_first = 0;               // direct draws share a scene table; explicit batches start at zero
-        bool direct = false;                 // this render reads an immutable direct-scene table
+        bool direct = false;                  // this render reads an immutable direct-scene table
         u32 prepared_first = 0;
         const GpuInstance3D* prepared_records = nullptr;
         const f32* prepared_scales = nullptr;

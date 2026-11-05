@@ -7,12 +7,12 @@
 #include <ctime>
 #include <iomanip>
 #include <iostream>
-#include <map>
 #include <kin/assets/image.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/core/json.hpp>
 #include <kin/render3d/renderer3d.hpp>
 #include <kin/runtime/scene_app.hpp>
+#include <map>
 
 namespace {
 using namespace kin;
@@ -140,17 +140,15 @@ public:
                  << _sums[2] << ',' << std::chrono::duration<double, std::milli>(begin.time_since_epoch()).count()
                  << ',' << st.direct_retained_instances << ',' << st.direct_cache_hits << ',' << st.direct_upload_bytes
                  << ',' << st.direct_bounds_rebuilt << ',' << st.bounds_instance_tests << ',' << st.retained_gpu_bytes
-                 << ',' << st.device_waits
-                 << ',' << st.local_instance_tests << ',' << st.local_task_bytes << ',' << st.local_gather_cache_hits
-                 << ',' << st.local_gather_cache_misses << ',' << st.local_gather_cache_builds
-                 << ',' << st.local_gather_cached_tests << ',' << st.local_gather_cached_copies
-                 << ',' << st.local_gather_cache_bytes << ',' << st.local_sort_cache_hits
-                 << ',' << st.local_sort_cache_misses << ',' << st.local_sort_cached_entries
-                 << ',' << st.draw_plan_hits << ',' << st.draw_plan_builds << ',' << st.draw_pipeline_hits
-                 << ',' << st.draw_pipeline_misses << ',' << st.main_batched_draws << ',' << st.main_merged_draws
-                 << ',' << st.draw_plan_bytes << ',' << st.draw_material_gpu_bytes << ',' << st.draw_material_upload_bytes
-                 << ',' << st.draw_index_gpu_bytes << ',' << st.draw_index_upload_bytes
-                 << '\n';
+                 << ',' << st.device_waits << ',' << st.local_instance_tests << ',' << st.local_task_bytes << ','
+                 << st.local_gather_cache_hits << ',' << st.local_gather_cache_misses << ','
+                 << st.local_gather_cache_builds << ',' << st.local_gather_cached_tests << ','
+                 << st.local_gather_cached_copies << ',' << st.local_gather_cache_bytes << ','
+                 << st.local_sort_cache_hits << ',' << st.local_sort_cache_misses << ',' << st.local_sort_cached_entries
+                 << ',' << st.draw_plan_hits << ',' << st.draw_plan_builds << ',' << st.draw_pipeline_hits << ','
+                 << st.draw_pipeline_misses << ',' << st.main_batched_draws << ',' << st.main_merged_draws << ','
+                 << st.draw_plan_bytes << ',' << st.draw_material_gpu_bytes << ',' << st.draw_material_upload_bytes
+                 << ',' << st.draw_index_gpu_bytes << ',' << st.draw_index_upload_bytes << '\n';
         }
         if (!_o.capture.empty() && _frame >= _o.warmup + _o.capture_from &&
             _frame < _o.warmup + _o.capture_from + _o.capture_count) {
@@ -472,23 +470,24 @@ int main(int argc, char** argv) {
             else if (a == "--batch-static-props")
                 o.batch_static_props = true;
             else if (a == "--receive-shadows" || a == "--animation" || a == "--motion" || a == "--glass" ||
-                     a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" || a == "--cache-draw-commands" ||
-                     a == "--structures" || a == "--local-shadows" || a == "--taa" || a == "--ao" || a == "--contact") {
+                     a == "--retain-scene-instances" || a == "--cache-local-shadow-gather" ||
+                     a == "--cache-draw-commands" || a == "--structures" || a == "--local-shadows" || a == "--taa" ||
+                     a == "--ao" || a == "--contact") {
                 auto v = value();
                 if (v != "0" && v != "1")
                     throw std::runtime_error("yard booleans require 0 or 1");
-                bool* p = a == "--retain-scene-instances" ? &o.retain_scene_instances
+                bool* p = a == "--retain-scene-instances"      ? &o.retain_scene_instances
                           : a == "--cache-local-shadow-gather" ? &o.cache_local_shadow_gather
-                          : a == "--cache-draw-commands" ? &o.cache_draw_commands
-                          : a == "--receive-shadows" ? &o.receives
-                          : a == "--animation"     ? &o.animation
-                          : a == "--motion"        ? &o.motion
-                          : a == "--glass"         ? &o.glass
-                          : a == "--structures"    ? &o.structures
-                          : a == "--local-shadows" ? &o.shadows
-                          : a == "--taa"           ? &o.taa
-                          : a == "--ao"            ? &o.ao
-                                                   : &o.contact;
+                          : a == "--cache-draw-commands"       ? &o.cache_draw_commands
+                          : a == "--receive-shadows"           ? &o.receives
+                          : a == "--animation"                 ? &o.animation
+                          : a == "--motion"                    ? &o.motion
+                          : a == "--glass"                     ? &o.glass
+                          : a == "--structures"                ? &o.structures
+                          : a == "--local-shadows"             ? &o.shadows
+                          : a == "--taa"                       ? &o.taa
+                          : a == "--ao"                        ? &o.ao
+                                                               : &o.contact;
                 *p = v == "1";
             } else if (a == "--rebuild-scene")
                 o.rebuild = true;
