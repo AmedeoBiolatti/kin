@@ -359,6 +359,40 @@ void test_controller() {
         assert(near(ridden.pos.x, lifted.pos.x, 0.5f) && near(lifted.pos.y - ridden.pos.y, above, 0.5f));
     }
 
+    // Standing on a one-sided platform (a box; a chain, which Box2D makes
+    // one-sided itself), drop_through lets it fall through: the simulation's
+    // contact with what it stood on doesn't hold it up.
+    for (const bool chain : {false, true}) {
+        kin::EcsWorld world;
+        kin::register_physics_components(world);
+        kin::PhysicsWorld sim = points_world({0.0f, 9.8f * ppm});
+        kin::EcsPhysicsBridge links{world, sim};
+        kin::PhysicsShape top = chain ? kin::PhysicsShape::chain({{-60.0f, 0.0f}, {60.0f, 0.0f}}) : kin::PhysicsShape::box({60.0f, 12.0f}, {0.0f, 12.0f});
+        top.one_sided = true;
+        world.entity("Ledge")
+            .set(kin::Transform2D{})
+            .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Static}})
+            .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = top}}}});
+        world.entity("Floor")
+            .set(kin::Transform2D{.pos = {0.0f, 216.0f}})
+            .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Static}})
+            .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = kin::PhysicsShape::box({200.0f, 16.0f})}}}});
+        kin::EcsEntity dropper = world.entity("Dropper")
+                                     .set(kin::Transform2D{.pos = {0.0f, -40.0f}})
+                                     .set(kin::PhysicsBodyComponent{})
+                                     .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = kin::PhysicsShape::box({8.0f, 16.0f})}}}})
+                                     .set(kin::CharacterController2D{.gravity = 2000.0f});
+        for (int i = 0; i < 40; ++i) {
+            kin::update_physics_world(world, sim, dt);
+        }
+        assert(dropper.get<kin::CharacterController2D>()->on_floor && near(dropper.get<kin::Transform2D>()->pos.y, -17.0f, 1.0f));
+        dropper.get_mut<kin::CharacterController2D>()->drop_through = 0.25f;
+        for (int i = 0; i < 60; ++i) {
+            kin::update_physics_world(world, sim, dt);
+        }
+        assert(dropper.get<kin::CharacterController2D>()->on_floor && near(dropper.get<kin::Transform2D>()->pos.y, 183.0f, 1.0f));
+    }
+
     // Described to scenes (and tools): its settings, and what it found (read only).
     kin::EcsWorld described;
     kin::register_builtin_editor_components(described);

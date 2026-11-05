@@ -188,6 +188,7 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
         u32 generation = 1;
         u64 user_id = 0;
         std::vector<u32> fixtures;
+        bool character = false;
     };
 
     struct FixtureSlot {
@@ -434,8 +435,20 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
         }
     }
 
+    bool character(const b2Body* body) const {
+        const PhysicsBody handle = handle_for(body);
+        return handle && bodies[handle.index].character;
+    }
+
     void PreSolve(b2Contact* contact, const b2Manifold*) override {
         if (!passing.empty() && passing.contains(contact)) {
+            contact->SetEnabled(false);
+            return;
+        }
+        // A character keeps clear of what doesn't move by itself: nothing it touches pushes it.
+        const b2Body* a = contact->GetFixtureA()->GetBody();
+        const b2Body* b = contact->GetFixtureB()->GetBody();
+        if ((character(a) && b->GetType() != b2_dynamicBody) || (character(b) && a->GetType() != b2_dynamicBody)) {
             contact->SetEnabled(false);
         }
     }
@@ -1039,6 +1052,7 @@ PhysicsBody PhysicsWorld::create_body(const PhysicsBodyDef& def) {
     Impl::BodySlot& slot = _impl->bodies[index];
     slot.body = _impl->world.CreateBody(&body_def);
     slot.user_id = def.user_id;
+    slot.character = def.character;
     slot.fixtures.clear();
     slot.body->GetUserData().pointer = static_cast<uintptr_t>(index) + 1;
     return {index, slot.generation};
@@ -1062,6 +1076,7 @@ void PhysicsWorld::destroy_body(PhysicsBody body) {
     slot.fixtures.clear();
     slot.body = nullptr;
     slot.user_id = 0;
+    slot.character = false;
     slot.generation++;
     _impl->free_bodies.push_back(body.index);
     _impl->rebuild_current_contacts();

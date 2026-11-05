@@ -62,8 +62,10 @@ steps:
 - Its shape is its first collider that is not a sensor: a box (its corners a
   little round, so it slides over seams), a circle or a capsule.
 - Its body is made for it: dynamic, never turning, never asleep and with no
-  gravity of the world's. Sensors see it (coins), dynamic bodies bump into it,
-  and scripts' `on_contact` hears it.
+  gravity of the world's (`PhysicsBodyDef::character`). Sensors see it
+  (coins), dynamic bodies bump into it, and scripts' `on_contact` hears it.
+  Static and kinematic bodies don't push it: it keeps clear of them itself,
+  and drops through a one-sided platform it stood on.
 - Each step it goes along `velocity`, with `gravity` (its own, along -up)
   added while it is not on a floor. What stops it is a floor when it is at
   most `max_slope` steep (degrees), a ceiling when it is that close to facing

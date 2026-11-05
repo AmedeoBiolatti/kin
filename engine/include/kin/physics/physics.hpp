@@ -94,6 +94,11 @@ struct PhysicsBodyDef {
     // A body at rest falls asleep (and stops being simulated) unless this is
     // off; one that never sleeps keeps seeing what comes to touch it.
     bool allow_sleep = true;
+    // A character's (moved by move_character, which keeps it clear of what
+    // stops it): static and kinematic bodies don't push it (dropping through
+    // a one-sided platform it stood on, nothing holds it up). Dynamic bodies
+    // still bump into it, and sensors see it.
+    bool character = false;
 };
 
 // A shape on a body, from the body's origin: centred at `offset` and turned
