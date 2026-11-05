@@ -1534,6 +1534,56 @@ variant is. A `shader` takes the surface's place. Not yet: the shadow, pick and 
 the base colour's alpha (not the surface's); surface materials skip the retained-instance and merged-draw paths
 (one draw each, as custom shaders); WebGL2 has no surface shaders.
 
+### Material graphs
+
+A material graph (`kin.material-graph/1`, JSON; `kin/render3d/material_graph3d.hpp`) wires nodes into what a surface
+is, as Godot's visual shaders and Unreal's material editor do, and compiles into a surface shader (above): lit,
+shadowed, fogged and GI-lit as kin's own materials are.
+
+```json
+{"schema": "kin.material-graph/1", "name": "Rust",
+ "parameters": [{"name": "tint", "type": "color", "default": [0.45, 0.2, 0.08, 1]},
+                {"name": "scale", "type": "float", "default": 4},
+                {"name": "albedo", "type": "texture", "slot": "base"}],
+ "nodes": [{"id": "map", "type": "texture", "texture": "albedo"},
+           {"id": "scaled", "type": "multiply", "inputs": {"a": "position", "b": "scale"}},
+           {"id": "rust", "type": "fbm", "inputs": {"p": "scaled"}},
+           {"id": "amount", "type": "smoothstep", "inputs": {"edge0": 0.45, "edge1": 0.6, "x": "rust"}},
+           {"id": "color", "type": "mix", "inputs": {"a": "map.rgb", "b": "tint.rgb", "t": "amount"}},
+           {"id": "rough", "type": "mix", "inputs": {"a": "surface.roughness", "b": 0.95, "t": "amount"}}],
+ "outputs": {"base_color": "color", "roughness": "rough"}}
+```
+
+- **Inputs** are references or values. A reference names a node (`"map"`), a component of one (`"map.rgb"`,
+  `"map.a"`: swizzles of xyzw or rgba), a parameter, or a built-in input: `uv` (with the material's UV transform),
+  `position` (world), `normal` (the mesh's, before maps), `view` (toward the camera), `vertex_color`, `time`
+  (`Scene3D::time`), `screen` (the pixel, 0 to 1), `camera_distance`, and `surface.<field>`: what kin's material makes
+  of the surface before the graph (`base_color`, `alpha`, `normal`, `metallic`, `roughness`, `occlusion`,
+  `emission`). A value is a number or an array of 2 to 4. Types are float, vec2, vec3, vec4: a float widens to any
+  vector; a vector narrows to its first components, or widens with 0 (and 1 for the fourth), as Unreal's do.
+- **Outputs** (`base_color`, `alpha`, `normal` in world space, `metallic`, `roughness`, `occlusion`, `emission`)
+  replace the surface's; those not given keep what the material makes. Roughness is kept within [0.045, 1], the
+  normal unit, colours non-negative.
+- **Parameters** (`float`, `vec2`, `vec3`, `vec4`, `color`: linear RGBA) take `Material3D::shader_params`' 16 floats,
+  vec3 and vec4 each a vec4 of their own; `material_graph_params3d(graph, {{"name", value}})` fills them from the
+  defaults and the values given. Textures take one of the material's map slots (`"slot"`: `base`, `metallic_roughness`,
+  `normal`, `occlusion`, `emissive`: the material's `texture`, `metallic_roughness`, ... fields bind them), sampled as
+  sRGB (`base`, `emissive`) or linear, or as `"color_space"` says. A texture that isn't the slot's map
+  (`"role": "data"`: a noise in the occlusion slot) undoes kin's own reading of the slot (the occlusion then 1).
+- **Nodes** (`material_graph_nodes3d()` lists them): `constant`; `add`, `subtract`, `multiply`, `divide`, `min`,
+  `max`, `power`, `mod`, `step`, `mix` (Unreal's Lerp), `clamp`, `smoothstep`, `remap`; `abs`, `floor`, `ceil`,
+  `fract`, `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `sign`, `negate`, `one_minus`, `saturate`, `normalize`,
+  `length`, `dot`, `distance`, `cross`, `reflect`, `combine`; `texture`, `normal_map` (a normal map's texel as the
+  world normal, with a `strength`), `tangent_to_world`, `triplanar`; `noise_value`, `noise_gradient`,
+  `noise_cellular`, `fbm`, `checker` (deterministic: hash-based, the same picture on every GPU); `fresnel`,
+  `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs.
+- **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to
+  nothing, too many parameters, two textures in a slot.
+
+`compile_material_graph3d(text)` writes the surface shader's GLSL (`CompiledMaterialGraph3D::surface`, for
+`kin_compile_surface_shader` at build time) and the parameters' layout; `r3d.compile_material_graph(path)` compiles it
+now (development). Nodes not wired to an output are left out.
+
 ### Custom lighting responses
 
 A custom native material can replace the direct-light response while retaining stock material sampling, ambient/IBL, emission and output handling. Define `KIN_DIRECT_LIGHT` before including `kin_material.inc.glsl`, then implement the named function with signature `vec3 response(Surface surface, KinLight light)`. No new sampler or uniform slots are required. Existing custom shaders and stock shaders keep their original path when the macro is absent.

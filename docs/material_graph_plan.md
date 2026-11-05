@@ -197,3 +197,17 @@ glass as BistroUE has it). `unreal_probe.py` builds 7 materials of other shapes 
 
 Tier 1 is done for the three engines. Next: P2 (the graph and its compiler), with the node set the three share, so
 that Tier 2 (Godot VisualShader, Unity Shader Graph, Unreal material graphs beyond affine terms) maps onto it.
+
+**P2 (done, first cut).** `kin.material-graph/1` and its compiler (`material_graph3d.hpp/.cpp`): 48 node types
+(Godot / Unity / Unreal's common math, texture, procedural and effect nodes, a raw GLSL node), references with
+swizzles, built-in inputs (uv, position, normal, view, vertex colour, time, screen, camera distance, the stock
+surface's fields), Unreal-like implicit casts, parameters packed into shader_params, textures in the five map slots
+(a "data" role undoing the slot's stock reading), dead nodes left out, errors naming their node. Shader helpers in
+`kin_graph.inc.glsl` (deterministic hash noises, triplanar, the UV tangent frame for normal maps). `Scene3D::time`
+(frame.time.x). `Renderer3D::compile_material_graph`. Tests: `kin_material_graph3d_tests` (layout, GLSL, errors;
+every node type compiled by glslc in all 8 variants); `test_gpu_material_graph` (a graph of no outputs and one
+remaking the base colour byte-identical to the material; a checker, its parameter and time; the normal map node
+within a few pixels of kin's own; errors).
+
+Next: P3 (`.kinmaterials` naming a graph and its parameters' values, cooking graphs at build time, hot reload) and the
+Tier 2 graph imports onto these nodes; P4 the studio's editor.

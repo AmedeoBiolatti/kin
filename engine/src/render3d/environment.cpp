@@ -202,55 +202,81 @@ Result3D<SurfaceShader3D> Renderer3D::compile_surface_shader(const std::filesyst
 
 SurfaceShader3D Renderer3D::compile_surface_shader_operation(const std::filesystem::path& source) {
     _errors.clear();
+    std::ifstream in(source, std::ios::binary);
+    if (!in) {
+        fail3d(_errors, "Renderer3D::compile_surface_shader(" + source.string() + ")", "the surface could not be read");
+        return {};
+    }
+    const std::string surface{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    return compile_surface_text_operation(surface, "Renderer3D::compile_surface_shader(" + source.string() + ")");
+}
+
+SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& surface, const std::string& label) {
+    _errors.clear();
     std::string why;
     SurfaceShader3D shader;
     if (!_backend) {
         why = "3D is not available";
     } else {
-        std::ifstream in(source, std::ios::binary);
-        const std::string surface{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
-        if (!in.good() && !in.eof()) {
-            why = "the surface could not be read";
-        } else {
-            // glslc compiles files: the wrapped source goes to one beside the others it makes.
-            static std::atomic<u32> counter{0};
-            const std::filesystem::path wrapped =
-                std::filesystem::temp_directory_path() /
-                ("kin-surface-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + "-" +
-                 std::to_string(counter++) + ".frag.glsl");
-            {
-                std::ofstream out(wrapped, std::ios::binary);
-                out << surface_shader_source(surface);
-            }
-            std::array<std::vector<u8>, surface_variant_count3d> compiled;
-            bool ok = true;
-            for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
-                auto spirv =
-                    compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)));
-                ok = spirv.has_value();
-                if (ok)
-                    compiled[i] = std::move(*spirv);
-            }
-            std::error_code ignored;
-            std::filesystem::remove(wrapped, ignored);
-            if (ok) {
-                std::array<std::span<const u8>, surface_variant_count3d> views;
-                for (u32 i = 0; i < surface_variant_count3d; ++i)
-                    views[i] = compiled[i];
-                shader = create_surface_shader_operation(views);
-                if (!shader)
-                    why = "the device refused the surface shader";
-            }
+        // glslc compiles files: the wrapped source goes to one beside the others it makes.
+        static std::atomic<u32> counter{0};
+        const std::filesystem::path wrapped = std::filesystem::temp_directory_path() /
+                                              ("kin-surface-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) +
+                                               "-" + std::to_string(counter++) + ".frag.glsl");
+        {
+            std::ofstream out(wrapped, std::ios::binary);
+            out << surface_shader_source(surface);
+        }
+        std::array<std::vector<u8>, surface_variant_count3d> compiled;
+        bool ok = true;
+        for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
+            auto spirv =
+                compile_glsl(wrapped, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)));
+            ok = spirv.has_value();
+            if (ok)
+                compiled[i] = std::move(*spirv);
+        }
+        std::error_code ignored;
+        std::filesystem::remove(wrapped, ignored);
+        if (ok) {
+            std::array<std::span<const u8>, surface_variant_count3d> views;
+            for (u32 i = 0; i < surface_variant_count3d; ++i)
+                views[i] = compiled[i];
+            shader = create_surface_shader_operation(views);
+            if (!shader)
+                why = "the device refused the surface shader";
         }
     }
     if (!shader.valid())
         KIN_LOG_WARN_F("render", "3D: surface shader not made",
-                       (LogFields{{.name = "path", .value = source.string()}, {.name = "reason", .value = why}}));
+                       (LogFields{{.name = "what", .value = label}, {.name = "reason", .value = why}}));
     if (!shader)
-        fail3d(_errors, "Renderer3D::compile_surface_shader(" + source.string() + ")", why);
+        fail3d(_errors, label, why);
     else
         _errors.clear();
     return shader;
+}
+
+Result3D<MaterialGraphShader3D> Renderer3D::compile_material_graph(const std::filesystem::path& graph) {
+    _errors.clear();
+    const std::string label = "Renderer3D::compile_material_graph(" + graph.string() + ")";
+    std::ifstream in(graph, std::ios::binary);
+    if (!in) {
+        fail3d(_errors, label, "the graph could not be read");
+        return result3d(MaterialGraphShader3D{}, _errors);
+    }
+    MaterialGraphShader3D made;
+    made.graph =
+        compile_material_graph3d(std::string{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}});
+    if (!made.graph.ok()) {
+        for (const auto& e : made.graph.errors)
+            fail3d(_errors, label, (e.node.empty() ? std::string() : e.node + ": ") + e.message);
+        return result3d(MaterialGraphShader3D{}, _errors);
+    }
+    made.surface = compile_surface_text_operation(made.graph.surface, label);
+    if (!made.surface)
+        return result3d(MaterialGraphShader3D{}, _errors);
+    return result3d(std::move(made), {});
 }
 
 } // namespace kin
