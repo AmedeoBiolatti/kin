@@ -422,6 +422,11 @@ public:
     // A native component's field, to read and write on its data; none for a
     // data component's, or one not described.
     std::optional<ComponentFieldAccess> field_access(std::string_view component, std::string_view field) const;
+    // A data component's field values on `entity`, in its descriptor's order,
+    // read and written in place (a value written must keep its field's kind):
+    // for code that reaches many each frame (scripts). Null when the entity has
+    // no such component, or `id` is not a data component's.
+    std::vector<ComponentFieldValue>* data_values(EcsEntity entity, ComponentId id);
     // Optional owner policy for live field edits (e.g. transactional asset and
     // physics updates). Installed only after scene construction. The handler
     // performs the edit and returns an error on failure; nullopt leaves normal

@@ -358,13 +358,14 @@ EcsComponentRegistry::DataComponentBuilder EcsComponentRegistry::data(std::strin
         }
     };
     record->remove = [component_id = record->descriptor.id](EcsEntity entity) {
+        // The tag first: what observes its removal (OnRemove) still reads the values.
+        entity.raw().remove(static_cast<flecs::id_t>(component_id));
         if (detail::DataComponentPayload* payload = entity.get_mut<detail::DataComponentPayload>()) {
             payload->values.erase(component_id);
             if (payload->values.empty()) {
                 entity.remove<detail::DataComponentPayload>();
             }
         }
-        entity.raw().remove(static_cast<flecs::id_t>(component_id));
     };
     record->mutable_ptr = [component_id = record->descriptor.id](EcsEntity entity) -> void* {
         return data_values_for(entity, component_id);
@@ -400,6 +401,22 @@ const ComponentDescriptor* EcsComponentRegistry::find(ComponentId id) const {
 const ComponentDescriptor* EcsComponentRegistry::find(std::string_view name) const {
     const detail::ComponentRecord* record = find_record(name);
     return record ? &record->descriptor : nullptr;
+}
+
+std::vector<ComponentFieldValue>* EcsComponentRegistry::data_values(EcsEntity entity, ComponentId id) {
+    if (!entity) {
+        return nullptr;
+    }
+    const detail::ComponentRecord* record = find_record(id);
+    if (!record || record->descriptor.kind != ComponentKind::Data) {
+        return nullptr;
+    }
+    detail::DataComponentPayload* payload = entity.raw().get_mut<detail::DataComponentPayload>();
+    if (!payload) {
+        return nullptr;
+    }
+    const auto found = payload->values.find(id);
+    return found == payload->values.end() ? nullptr : &found->second;
 }
 
 std::optional<ComponentFieldAccess> EcsComponentRegistry::field_access(std::string_view component, std::string_view field) const {

@@ -157,3 +157,5 @@ kin_declare_component(RENDER_PROBE DEFAULT ${_kin_developer_default} LEGACY_PRES
     TESTS kin-render-probe)
 kin_declare_component(DETERMINISM_CHECK DEFAULT ${_kin_developer_default} LEGACY_PRESENCE DESCRIPTION "Build the determinism check (--check-determinism)"
     TESTS kin-determinism)
+kin_declare_component(PYTHON DEFAULT OFF DESCRIPTION "Build the experimental Python scripting (PocketPy)"
+    EXTERNAL_DEPENDENCIES PocketPy TESTS kin-python-scripts)

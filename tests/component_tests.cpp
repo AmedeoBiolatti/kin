@@ -10,6 +10,7 @@ static_assert(kin::components::development == bool(KIN_ENABLE_DEVELOPMENT));
 static_assert(kin::components::debug_overlay == bool(KIN_ENABLE_DEBUG_OVERLAY));
 static_assert(kin::components::runtime_profiling == bool(KIN_ENABLE_RUNTIME_PROFILING));
 static_assert(kin::components::runtime_assets == bool(KIN_ENABLE_RUNTIME_ASSETS));
+static_assert(kin::components::python == bool(KIN_ENABLE_PYTHON));
 #ifdef KIN_ENABLE_RENDER_PROBE
 static_assert(KIN_HAS_RENDER_PROBE == 1);
 #else

@@ -3,21 +3,22 @@
 
 string(REPLACE "|" ";" files "${FILES}")
 
-set(entries)
+# Sorted by name alone, as the lookup's lower_bound needs: "a.py" before
+# "a.pyi" (sorting "name|path" put them the other way round).
+set(sorted_names)
 foreach(file IN LISTS files)
     get_filename_component(name "${file}" NAME)
-    list(APPEND entries "${name}|${file}")
+    list(APPEND sorted_names "${name}")
+    set("path_of_${name}" "${file}")
 endforeach()
-list(SORT entries)
+list(SORT sorted_names)
 
 set(arrays "")
 set(table "")
 set(names "")
 set(index 0)
-foreach(entry IN LISTS entries)
-    string(REPLACE "|" ";" parts "${entry}")
-    list(GET parts 0 name)
-    list(GET parts 1 file)
+foreach(name IN LISTS sorted_names)
+    set(file "${path_of_${name}}")
     file(READ "${file}" hex HEX)
     string(LENGTH "${hex}" hex_length)
     math(EXPR size "${hex_length} / 2")

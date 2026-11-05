@@ -1,5 +1,8 @@
 # Scripting
 
+Gameplay in Python, experimental and separate from Lua, is in
+[Python scripting](python_scripting.md).
+
 Kin runs Lua 5.4 (through sol2) in these hosts:
 
 - **`ScriptScene`** (`kin/scripting/script_scene.hpp`): a scene written in Lua.

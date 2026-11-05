@@ -634,6 +634,17 @@ endif()
 if(TARGET kin_entity_scripts_tests AND KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_entity_scripts_tests PRIVATE kin::physics_ecs) # a character's script
 endif()
+kin_add_component_test(PYTHON kin_python_scripts_tests kin-python-scripts SOURCES python_tests.cpp
+    LINK_TARGET kin::python_scripts)
+if(TARGET kin_python_scripts_tests AND KIN_ENABLE_PHYSICS)
+    target_link_libraries(kin_python_scripts_tests PRIVATE kin::physics_ecs) # contacts
+endif()
+# Python systems against plain C++, per update (docs/python_scripting.md).
+# Built on request (ninja kin_python_bench), not by CI.
+if(KIN_ENABLE_PYTHON)
+    add_executable(kin_python_bench EXCLUDE_FROM_ALL python_bench.cpp)
+    target_link_libraries(kin_python_bench PRIVATE kin::python_scripts)
+endif()
 kin_add_component_test(SCRIPTING kin_scripting_tests kin-scripting
     SOURCES scripting_tests.cpp LINK_TARGET kin::scripting_scenes
     DEFINITIONS KIN_TEST_LUA_RELEASE_NUMERICS=$<NOT:$<CONFIG:Debug>>)
