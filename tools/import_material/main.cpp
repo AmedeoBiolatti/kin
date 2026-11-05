@@ -1,11 +1,11 @@
 // kin_import_material: other engines' materials as kin's .kinmaterials (kin/render3d/material_import3d.hpp).
 //
-//   kin_import_material godot <material.tres | folder> --project <godot project> --content <kin content root>
+//   kin_import_material godot|unity <material | folder> --project <its project> --content <kin content root>
 //                       --out <folder in the content> [--dry-run] [--quiet]
 //
-// A folder is searched for StandardMaterial3D / ORMMaterial3D resources; each is written to <out>, in the folder it
-// is in under the one searched. Every material's notes (what kin does not show as the source does) are printed; the
-// exit status is 1 when one could not be imported.
+// A folder is searched for Godot's StandardMaterial3D / ORMMaterial3D resources (.tres) or Unity's materials (.mat);
+// each is written to <out>, in the folder it is in under the one searched. Every material's notes (what kin does not
+// show as the source does) are printed; the exit status is 1 when one could not be imported.
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -22,8 +22,9 @@ namespace fs = std::filesystem;
 namespace {
 
 int usage() {
-    std::cerr << "usage: kin_import_material godot <material.tres | folder> --project <dir> --content <dir> --out <dir>"
-                 " [--dry-run] [--quiet]\n";
+    std::cerr
+        << "usage: kin_import_material godot|unity <material | folder> --project <dir> --content <dir> --out <dir>"
+           " [--dry-run] [--quiet]\n";
     return 2;
 }
 
@@ -39,8 +40,9 @@ bool godot_material(const fs::path& file) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3 || std::string_view(argv[1]) != "godot")
+    if (argc < 3 || (std::string_view(argv[1]) != "godot" && std::string_view(argv[1]) != "unity"))
         return usage();
+    const bool unity = std::string_view(argv[1]) == "unity";
     const fs::path input = argv[2];
     kin::MaterialImportOptions3D options;
     bool quiet = false;
@@ -66,7 +68,9 @@ int main(int argc, char** argv) {
     std::vector<std::pair<fs::path, fs::path>> jobs; // the source, where its import goes
     if (fs::is_directory(input)) {
         for (const auto& entry : fs::recursive_directory_iterator(input))
-            if (entry.is_regular_file() && entry.path().extension() == ".tres" && godot_material(entry.path()))
+            if (entry.is_regular_file() &&
+                (unity ? entry.path().extension() == ".mat"
+                       : entry.path().extension() == ".tres" && godot_material(entry.path())))
                 jobs.emplace_back(entry.path(), options.out / entry.path().parent_path().lexically_relative(input));
         std::sort(jobs.begin(), jobs.end());
     } else {
@@ -78,7 +82,7 @@ int main(int argc, char** argv) {
     for (const auto& [source, out] : jobs) {
         auto job = options;
         job.out = out;
-        const auto result = kin::import_godot_material(source, job);
+        const auto result = unity ? kin::import_unity_material(source, job) : kin::import_godot_material(source, job);
         if (!result) {
             ++failed;
             for (const auto& d : result.diagnostics)

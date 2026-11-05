@@ -174,3 +174,13 @@ need a DDS map repacked.
 pass; the Bistro byte-identical; `test_gpu_material_uv_transform`: offset and scale equal to the shifted or repeated
 texture, lit, unlit, cut-out and its shadow, to the pixel). Decoding BC-compressed DDS to repack; backlight,
 subsurface, clearcoat, refraction, detail maps (graph territory).
+
+**Done: Unity Tier 1.** `import_unity_material()` (`kin_import_material unity`): URP Lit / Simple Lit / Baked Lit /
+Unlit, Standard, HDRP Lit, by properties; GUIDs through `.meta`; packed metallic/smoothness (factor baked in),
+HDRP's remapped mask map, occlusion from G, emission (keyword; gamma colours to linear, HDRP's linear), surfaces;
+tiling through the material UV transform. TIFF (LZW, Deflate, PackBits, predictor) and PSD decoded
+(image_decode3d.cpp, import_decode.c: stb_image's PSD and zlib, static). Corpus: Unity's open BoatAttack (URP; its
+`.mat` and `.meta` only, fetched sparse into kin-wt/material-graph/out/corpus): 36 of 36 import; one material's three
+4096 x 4096 LZW TIFFs fetched and imported end to end (maps checked by eye). Not verifiable here (no Unity): that
+colour properties are stored in gamma as the inspector shows them and become linear by the sRGB curve (assumed,
+not checked against Unity), HDR emission colours the same: to check on a Unity install before relying on emission.

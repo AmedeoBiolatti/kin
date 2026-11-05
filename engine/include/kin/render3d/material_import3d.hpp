@@ -14,7 +14,7 @@
 namespace kin {
 
 struct MaterialImportOptions3D {
-    // The source project's root: Godot's project.godot folder (where res:// starts).
+    // The source project's root: Godot's project.godot folder (where res:// starts); Unity's, holding Assets/.
     std::filesystem::path project;
     // kin's content root: the paths written are relative to it, as .kinmaterials files' are.
     std::filesystem::path content;
@@ -38,6 +38,16 @@ struct ImportedMaterial3D {
 // with the project's physical light units), transparency (alpha, scissor, hash as a cut-out), cull mode, unshaded,
 // the blend mode's add, texture filter and repeat.
 Result3D<ImportedMaterial3D> import_godot_material(const std::filesystem::path& source,
+                                                   const MaterialImportOptions3D& options);
+
+// A Unity material (.mat), by its shader's properties: the built-in pipeline's Standard, URP's Lit (Simple Lit and
+// Baked Lit as dielectrics, Unlit unlit), HDRP's Lit; a custom shader or Shader Graph by the usual property names
+// (noted). Textures are found by GUID through the project's .meta files (`project`: the folder holding Assets/). Base
+// colour and map, its tiling and offset (every map's), metallic and smoothness (kin's map made: roughness 1 -
+// smoothness, from the metallic map's or the albedo's alpha; HDRP's mask map remapped), normal map, occlusion (Unity's
+// G), emission (the _EMISSION keyword; HDRP's linear), opaque / cut-out / transparent (alpha, additive), faces,
+// receiving shadows.
+Result3D<ImportedMaterial3D> import_unity_material(const std::filesystem::path& source,
                                                    const MaterialImportOptions3D& options);
 
 } // namespace kin
