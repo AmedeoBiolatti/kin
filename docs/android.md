@@ -76,8 +76,15 @@ Settings: `KIN_ANDROID_SDK`, `KIN_ANDROID_JAVA_HOME`, `KIN_HOST_TOOLS_DIR`,
   in points too. A game drawn at a fixed logical size is scaled to the screen
   as before. To see a game at a phone's scale on a desktop, run it with
   `KIN_WINDOW_POINT_SCALE=2.8`.
-- **Frame rate:** always presented with vsync, at the display's rate (120 Hz on
-  the A55); `App::set_max_fps` lowers it.
+- **Frame rate:** 60 fps unless the game sets another (`phone_max_fps`),
+  presented with vsync. kin asks the display to run at the game's rate
+  (`Window::hint_frame_rate`, Android 11 and newer), so a 120 Hz screen
+  switches to 60 Hz and nothing waits in between. A 2D scene does not move
+  between its 60 steps a second, so 120 fps would draw each picture twice:
+  on the A55 that costs about a third more of the game's CPU, and the
+  compositor's work doubles. A game that wants the display's whole rate sets
+  it with `App::set_max_fps(120)` or `WindowedAppConfig::max_fps`, at any
+  time (a setting in its options, say), and the display follows.
 - **Saves:** `user_data_dir` is the app's private files folder
   (`/data/user/0/<id>/files`), removed with the app.
 - **Fonts:** the system UI font is Roboto from `/system/fonts`.

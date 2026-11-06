@@ -400,6 +400,8 @@ public:
     const ComponentDescriptor* find(ComponentId id) const;
     const ComponentDescriptor* find(std::string_view name) const;
     std::vector<ComponentDescriptor> descriptors() const;
+    // How many descriptors() has, without making them.
+    std::size_t descriptor_count() const { return _records.size(); }
     void copy_schema_to(EcsComponentRegistry& destination) const;
     bool has_field_patch_handler() const { return static_cast<bool>(_field_patch_handler); }
 

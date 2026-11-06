@@ -255,6 +255,20 @@ void test_app_events() {
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
 }
 
+// The frame rate cap: as set, or the system's default for 0 (none on a
+// desktop; phone_max_fps on a phone, the build this runs in is not one).
+void test_max_fps_default() {
+    kin::App app{{.mode = kin::AppMode::Headless, .max_fps = 144.0f}};
+    assert(app.max_fps() == 144.0f);
+    app.set_max_fps(30.0f);
+    assert(app.max_fps() == 30.0f);
+    app.set_max_fps(0.0f);
+    assert(app.max_fps() == 0.0f);
+    app.set_max_fps(std::nanf(""));
+    assert(app.max_fps() == 0.0f);
+    static_assert(kin::phone_max_fps == 60.0f);
+}
+
 void test_close_held() {
     {
         kin::App app{{.mode = kin::AppMode::Headless}};
@@ -665,6 +679,7 @@ int main() {
     // Its own App, before the one below: each App inits and quits SDL.
     test_mouse_wheel_reaches_one_step();
     test_close_held();
+    test_max_fps_default();
     test_app_events();
     test_mouse_motion_reaches_one_step();
 

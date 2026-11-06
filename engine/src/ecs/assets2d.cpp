@@ -472,7 +472,7 @@ u64 Assets2D::shader_version(std::string_view path) const {
 
 const PropertyRegistry& Assets2D::properties(EcsWorld& world) {
     Properties& made = _properties[&world];
-    const std::size_t described = world.components().descriptors().size();
+    const std::size_t described = world.components().descriptor_count(); // each frame: no copies
     if (!made.registry || made.described != described) {
         made.registry = std::make_shared<PropertyRegistry>();
         register_builtin_properties(*made.registry, world);
@@ -523,15 +523,15 @@ bool Assets2D::bind(EcsWorld& world) {
         };
         world.raw().each(
             [&](flecs::entity e, const TextureRenderer& r) { note(r.texture, owner(e) + ".TextureRenderer.asset"); });
-        world.raw().each([&](flecs::entity e, const NormalSpriteRenderer2D& r) {
+        world.each([&](flecs::entity e, const NormalSpriteRenderer2D& r) {
             note(r.gpu_textures.albedo, owner(e) + ".NormalSpriteRenderer2D.albedo_asset");
             note(r.gpu_textures.normal, owner(e) + ".NormalSpriteRenderer2D.normal_asset");
             note(r.gpu_textures.specular, owner(e) + ".NormalSpriteRenderer2D.specular_asset");
         });
-        world.raw().each([&](flecs::entity e, const SkeletonRenderer2D& r) {
+        world.each([&](flecs::entity e, const SkeletonRenderer2D& r) {
             note(r.texture, owner(e) + ".SkeletonRenderer2D.asset -> " + r.asset.id);
         });
-        world.raw().each([&](flecs::entity e, const SpriteRenderer& r) {
+        world.each([&](flecs::entity e, const SpriteRenderer& r) {
             if (r.sprite.catalog)
                 for (const auto& [id, image] : r.sprite.catalog->textures())
                     note(image.texture, owner(e) + ".SpriteRenderer.asset -> " + r.asset.id);
@@ -618,7 +618,7 @@ std::vector<std::string> Assets2D::reload_changed() {
 
 void bind_sprite_renderers(EcsWorld& world, Assets2D& assets) {
     std::vector<std::pair<flecs::entity, const SpriteCatalog*>> rebound;
-    world.raw().each([&](flecs::entity entity, const SpriteRenderer& renderer) {
+    world.each([&](flecs::entity entity, const SpriteRenderer& renderer) {
         if (renderer.asset.id.empty()) {
             return;
         }
@@ -640,7 +640,7 @@ void bind_sprite_renderers(EcsWorld& world, Assets2D& assets) {
 void bind_audio_emitters([[maybe_unused]] EcsWorld& world, [[maybe_unused]] Assets2D& assets) {
 #if KIN_ENABLE_AUDIO
     std::vector<std::pair<flecs::entity, const AudioCatalog*>> rebound;
-    world.raw().each([&](flecs::entity entity, const AudioEmitter& emitter) {
+    world.each([&](flecs::entity entity, const AudioEmitter& emitter) {
         if (emitter.asset.id.empty()) {
             return;
         }
@@ -663,7 +663,7 @@ void bind_audio_emitters([[maybe_unused]] EcsWorld& world, [[maybe_unused]] Asse
 void bind_texture_renderers(EcsWorld& world, Assets2D& assets) {
     // Read only, so nothing is marked written; those to change, changed after.
     std::vector<std::pair<flecs::entity, Texture>> rebound;
-    world.raw().each([&](flecs::entity entity, const TextureRenderer& renderer) {
+    world.each([&](flecs::entity entity, const TextureRenderer& renderer) {
         if (renderer.asset.id.empty()) {
             return; // set from C++, if at all
         }
@@ -689,7 +689,7 @@ void bind_particle_systems(EcsWorld& world, Assets2D& assets) {
         const SpriteCatalog* sprites = nullptr;
     };
     std::vector<Rebound> rebound;
-    world.raw().each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
+    world.each([&](flecs::entity entity, const ParticleSystemComponent& particles) {
         Rebound item{.entity = entity, .catalog = std::nullopt, .sprites = particles.sprites};
         if (!particles.asset.id.empty()) {
             std::shared_ptr<const ParticleCatalog> catalog = assets.particle_catalog(particles.asset.id);
@@ -726,7 +726,7 @@ void bind_particle_fields(EcsWorld& world, Assets2D& assets) {
         const SpriteCatalog* sprites = nullptr;
     };
     std::vector<Rebound> rebound;
-    world.raw().each([&](flecs::entity entity, const ParticleFieldComponent& component) {
+    world.each([&](flecs::entity entity, const ParticleFieldComponent& component) {
         Rebound item{.entity = entity, .catalog = nullptr, .field = component.bound, .sprites = component.sprites};
         if (!component.asset.id.empty()) {
             item.catalog = assets.particle_catalog(component.asset.id);
@@ -763,7 +763,7 @@ void bind_particle_fields(EcsWorld& world, Assets2D& assets) {
 
 void bind_tilemaps(EcsWorld& world, Assets2D& assets) {
     std::vector<std::pair<flecs::entity, std::shared_ptr<const TilemapAsset>>> rebound;
-    world.raw().each([&](flecs::entity entity, const TilemapComponent& tilemap) {
+    world.each([&](flecs::entity entity, const TilemapComponent& tilemap) {
         if (tilemap.asset.id.empty()) {
             return; // set from C++, if at all
         }
@@ -788,7 +788,7 @@ void bind_shape_renderers(EcsWorld& world, Assets2D& assets) {
         std::shared_ptr<const Shape> svg;
     };
     std::vector<Remade> remade;
-    world.raw().each([&](flecs::entity entity, const ShapeRenderer& shape) {
+    world.each([&](flecs::entity entity, const ShapeRenderer& shape) {
         if (shape.spec.kind == ShapeKind::None) {
             return; // its mesh is the game's own
         }
@@ -813,7 +813,7 @@ void bind_shape_renderers(EcsWorld& world, Assets2D& assets) {
 
 void bind_text_renderers(EcsWorld& world, Assets2D& assets) {
     std::vector<std::pair<flecs::entity, ui2::Font>> rebound;
-    world.raw().each([&](flecs::entity entity, const TextRenderer& text) {
+    world.each([&](flecs::entity entity, const TextRenderer& text) {
         ui2::Font face = assets.font(text.font.id, text.size);
         if (face.identity() != text.face.identity()) {
             rebound.emplace_back(entity, std::move(face));
@@ -835,7 +835,7 @@ void bind_animators(EcsWorld& world, Assets2D& assets) {
         std::shared_ptr<AnimationAssetLibrary> library;
     };
     std::vector<flecs::entity> animated;
-    world.raw().each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
+    world.each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
     if (animated.empty()) {
         return;
     }
@@ -874,7 +874,7 @@ void bind_lights(EcsWorld& world, Assets2D& assets) {
     // The shape's image only for forward lighting, which shades with it.
     const SceneLighting* lighting = scene_lighting(world);
     const bool forward = lighting && lighting->forward_sprites;
-    world.raw().each([&](flecs::entity entity, const LightComponent& light) {
+    world.each([&](flecs::entity entity, const LightComponent& light) {
         // The image first: the texture is made from the pixels it decoded.
         std::shared_ptr<const Image> image = forward ? assets.image(light.shape_asset.id) : nullptr;
         Texture shape = assets.texture(light.shape_asset.id);
@@ -893,7 +893,7 @@ void bind_lights(EcsWorld& world, Assets2D& assets) {
 
 void bind_color_grades(EcsWorld& world, Assets2D& assets) {
     std::vector<std::pair<flecs::entity, std::shared_ptr<const ColorLut>>> rebound;
-    world.raw().each([&](flecs::entity entity, const ColorGrade& grade) {
+    world.each([&](flecs::entity entity, const ColorGrade& grade) {
         std::shared_ptr<const ColorLut> lut = assets.color_lut(grade.lut_asset.id);
         if (lut != grade.lut) {
             rebound.emplace_back(entity, std::move(lut));
@@ -914,7 +914,7 @@ void bind_shader_effects(EcsWorld& world, Assets2D& assets) {
         Texture texture;
     };
     std::vector<Rebound> rebound;
-    world.raw().each([&](flecs::entity entity, const ShaderEffect& effect) {
+    world.each([&](flecs::entity entity, const ShaderEffect& effect) {
         const ShaderHandle shader = assets.shader(effect.asset.id);
         const u64 version = assets.shader_version(effect.asset.id);
         Texture texture = assets.texture(effect.texture_asset.id);

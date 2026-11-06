@@ -32,7 +32,7 @@ struct WindowedAppConfig {
     i32 max_steps = 8;
     bool vsync = false;
     bool yield_when_unpaced = true;
-    // Most frames a second (0: no cap; see AppConfig::max_fps).
+    // Most frames a second (0: the system's default: no cap, 60 on a phone; see AppConfig::max_fps).
     f32 max_fps = 0.0f;
     // Frame times this near whole fixed steps count as whole (see AppConfig).
     f32 snap_tolerance = 0.001f;
