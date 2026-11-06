@@ -132,6 +132,14 @@ class Exporter:
                     n[k] = float(v)
         elif cls == "MaterialExpressionComponentMask":
             n["mask"] = [bool(prop(c)) for c in ("r", "g", "b", "a")]
+        elif cls == "MaterialExpressionCollectionParameter":  # its default (a game may set it while it runs)
+            c = prop("collection")
+            for p in (c.get_editor_property("scalar_parameters") if c else []):
+                if str(p.get_editor_property("parameter_name")) == str(name):
+                    n["value"] = float(p.get_editor_property("default_value"))
+            for p in (c.get_editor_property("vector_parameters") if c else []):
+                if str(p.get_editor_property("parameter_name")) == str(name):
+                    n["value"] = colour(p.get_editor_property("default_value"))
         elif cls == "MaterialExpressionTextureCoordinate":
             n["index"] = int(prop("coordinate_index") or 0)
             n["u_tiling"] = float(prop("u_tiling") or 1.0)
@@ -168,7 +176,11 @@ class Exporter:
                  "default_value_bool", "x", "y", "z", "w", "fraction", "const_fraction", "power", "const_min",
                  "const_max", "const_value", "const_x", "const_y", "material_function", "declaration", "input_name",
                  "input_type", "preview_value", "use_preview_value_as_default", "sort_priority", "output_name",
-                 "value", "bias", "clamp_result")
+                 "value", "bias", "clamp_result",
+                 # Transform / TransformPosition, BumpOffset, DepthFade, LandscapeLayerCoords, CollectionParameter
+                 "transform_source_type", "transform_type", "height_ratio", "reference_plane", "fade_distance_default",
+                 "opacity_default", "mapping_type", "custom_uv_type", "mapping_scale", "mapping_rotation",
+                 "mapping_pan_u", "mapping_pan_v", "collection")
         for key in sorted(set(dir(expression)) | set(named)):
             if key.startswith("_") or key in skip:
                 continue
@@ -199,6 +211,16 @@ class Exporter:
                 out[key] = self.texture(v)
             elif isinstance(v, unreal.MaterialFunctionInterface):
                 out[key] = self.function(v)  # its path; its graph in the document's "functions"
+            elif isinstance(v, unreal.MaterialParameterCollection):
+                # A collection parameter's default (the game may set it while it runs): "collection_value".
+                out[key] = v.get_path_name()
+                name = str(expression.get_editor_property("parameter_name"))
+                for p in v.get_editor_property("scalar_parameters"):
+                    if str(p.get_editor_property("parameter_name")) == name:
+                        out["collection_value"] = float(p.get_editor_property("default_value"))
+                for p in v.get_editor_property("vector_parameters"):
+                    if str(p.get_editor_property("parameter_name")) == name:
+                        out["collection_value"] = colour(p.get_editor_property("default_value"))
             elif isinstance(v, unreal.MaterialExpression):
                 out[key] = v.get_name()  # an expression it refers to (a named reroute's declaration)
         return out

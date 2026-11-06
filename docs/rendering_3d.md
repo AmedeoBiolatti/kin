@@ -3638,9 +3638,21 @@ kin, or samples more than the five textures kin's material has slots for, falls 
 - Unreal: `unreal_export.py` writes the whole graph, and the graphs of the Material Functions it calls (inlined by
   the import: a function input left unconnected takes its preview value); World Position is centimetres (scaled from
   kin's metres) in Unreal's axes, Z up: kin's (x, z, y), as Unreal's glTF exporter maps them (so are the camera's
-  position and vector, the reflection vector and the normals); normal maps are DirectX's (flipped). A Static Switch takes the material's or instance's value, else
-  its default: an instance that changes one gets a graph of its own, named for the switches on and off
-  (`M_Rock__Moss_on.kingraph`). Named Reroutes are followed to their declarations.
+  position and vector, the reflection vector and the normals); normal maps are DirectX's (flipped); Power clamps its
+  base at 0, as Unreal's. A Static Switch takes the material's or instance's value, else its default: an instance
+  that changes one gets a graph of its own, named for the switches on and off (`M_Rock__Moss_on.kingraph`). Named
+  Reroutes are followed to their declarations. Read as Unreal computes them: Bump Offset (the UVs moved along the
+  view in the frame the UVs make), Transform between tangent, world and view space (the view's frame from the
+  camera's forward, as if it did not roll), If, a parameter collection's value (its default: a game may change it).
+  Approximated, each said in the notes: local space as world space (Transform, TransformPosition) and the object's
+  position as the origin (kin's graphs do not see the object's transform); Depth Fade as its opacity, Scene Depth as
+  10 km (kin's graphs see no scene depth: nothing behind); a cube map as the scene's environment; Landscape Layer
+  Coords from the world position; Parallax Occlusion Mapping as its UVs (no parallax); a second UV set as the
+  first; a particle's colour as the vertex colour, a dynamic parameter as its default. A graph that gives the base
+  colour (or alpha) makes the material's colour white (or opaque): a graph's vertex colour includes it.
+  Where the graph cannot be used, the Tier 1 import reads approximately too, said: a map behind UVs it cannot follow
+  at the mesh's UVs, a Lerp by a varying alpha as its side with a map, an expression it does not know as its first
+  input (a Lerp by a constant is read exactly).
 - Unity: Shader Graph 10 and later (`.shadergraph`, sub-graphs inlined; older files fall back to Tier 1); Unity's
   vector widths are kept (an unconnected default is cut to what it is added to); a Keyword node follows the
   material's keywords (the graph is written per set of keywords on: `Lit__GLOW.kingraph`); a texture's colour space

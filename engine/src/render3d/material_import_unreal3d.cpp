@@ -3,11 +3,13 @@
 #include "material_import3d_impl.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <kin/core/json_value.hpp>
 #include <kin/render3d/material_graph3d.hpp>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <set>
 #include <string_view>
 
@@ -25,7 +27,13 @@ struct Term {
     int channel = -1;    // -1: RGB(A) as the texture's; 0..3: one channel for every one
     Vec2f tiling{1, 1};  // a TextureCoordinate's
     std::string why;     // not read: why
+    std::string approx;  // read, but approximately: how
     bool constant() const { return why.empty() && texture.empty(); }
+    Term& approximately(const std::string& how) {
+        if (approx.find(how) == std::string::npos)
+            approx += (approx.empty() ? "" : "; ") + how;
+        return *this;
+    }
 };
 
 f32 srgb_of(f32 linear) {
@@ -93,11 +101,11 @@ public:
             if (connected(0)) { // its UV
                 const auto* uv = input(0);
                 const std::string uv_class = uv->find("class") ? uv->find("class")->as_string() : "";
-                if (uv_class != "MaterialExpressionTextureCoordinate" || uv->int_at("index", 0) != 0) {
-                    t.why = "UVs made by a " + uv_class.substr(std::min<size_t>(18, uv_class.size()));
-                    return t;
-                }
-                t.tiling = {f32(uv->number_at("u_tiling", 1)), f32(uv->number_at("v_tiling", 1))};
+                if (uv_class != "MaterialExpressionTextureCoordinate" || uv->int_at("index", 0) != 0)
+                    t.approximately("a map at UVs made by a " + uv_class.substr(std::min<size_t>(18, uv_class.size())) +
+                                    ": read at the mesh's");
+                else
+                    t.tiling = {f32(uv->number_at("u_tiling", 1)), f32(uv->number_at("v_tiling", 1))};
             }
             return pick(t);
         }
@@ -120,11 +128,15 @@ public:
         if (kind == "Multiply" || kind == "Add" || kind == "Subtract") {
             const Term a = connected(0) ? term(input(0), depth + 1) : constant(f32(n->number_at("const_a", 0)));
             const Term b = connected(1) ? term(input(1), depth + 1) : constant(f32(n->number_at("const_b", 1)));
-            if (!a.why.empty() || !b.why.empty())
-                return a.why.empty() ? b : a;
+            if (!a.why.empty() && !b.why.empty())
+                return a;
+            if (!a.why.empty() || !b.why.empty()) { // the side kin reads, alone
+                Term one = a.why.empty() ? a : b;
+                return one.approximately("a " + kind + " by " + (a.why.empty() ? b.why : a.why) + ": left out");
+            }
             if (!a.texture.empty() && !b.texture.empty()) {
-                t.why = "a " + kind + " of two textures";
-                return t;
+                Term first = a;
+                return first.approximately("a " + kind + " of two maps: the first's");
             }
             Term out = a.texture.empty() ? b : a;
             const Term& k = a.texture.empty() ? a : b; // the constant one
@@ -182,13 +194,50 @@ public:
                 return connected(b ? 1 : 0) ? term(input(b ? 1 : 0), depth + 1)
                                             : constant(f32(n->number_at(b ? "const_b" : "const_a", b ? 1 : 0)));
             }
-            t.why = "a Lerp by " + (alpha.why.empty() ? std::string("a varying alpha") : alpha.why);
-            return t;
+            const Term a = connected(0) ? term(input(0), depth + 1) : constant(f32(n->number_at("const_a", 0)));
+            const Term b = connected(1) ? term(input(1), depth + 1) : constant(f32(n->number_at("const_b", 1)));
+            // A constant alpha, a map on one side at most: (1 - alpha) A + alpha B, exactly.
+            if (alpha.constant() && a.why.empty() && b.why.empty() && (a.texture.empty() || b.texture.empty())) {
+                const f32 k = alpha.bias[0];
+                Term out = a.texture.empty() ? b : a;
+                for (int i = 0; i < 4; ++i) {
+                    out.bias[i] = (1 - k) * a.bias[i] + k * b.bias[i];
+                    out.gain[i] = a.texture.empty() ? k * b.gain[i] : (1 - k) * a.gain[i];
+                }
+                if (out.texture.empty())
+                    out.gain = {0, 0, 0, 0};
+                out.approx = a.approx + (a.approx.empty() || b.approx.empty() ? "" : "; ") + b.approx;
+                return out;
+            }
+            // A varying alpha: the side with a map (A's first), else A.
+            const bool take_b = !(a.why.empty() && !a.texture.empty()) && b.why.empty() && !b.texture.empty();
+            Term side = take_b ? b : a;
+            if (!side.why.empty())
+                return side;
+            return side.approximately("a Lerp by " + (alpha.why.empty() ? std::string("a varying alpha") : alpha.why) +
+                                      ": its " + (take_b ? "B" : "A"));
         }
         if (kind == "CollectionParameter") {
+            if (const auto* v = n->find("value")) { // its default (a game may set it while it runs)
+                Term c = constant(0);
+                if (v->is_number())
+                    c = constant(f32(v->as_number()));
+                else
+                    for (size_t i = 0; i < std::min<size_t>(4, v->items().size()); ++i)
+                        c.bias[i] = f32(v->items()[i].as_number());
+                return pick(c).approximately("the parameter collection's " + param + ": its default");
+            }
             t.why = "the parameter collection's " + param + " (set while the game runs)";
             return t;
         }
+        // Another expression: its first input as it is (a guess, said), where it has one.
+        for (size_t i = 0; i < 4; ++i)
+            if (connected(i)) {
+                Term through = term(input(i), depth + 1);
+                if (through.why.empty())
+                    return through.approximately("a " + kind + ": its first input as it is");
+                break;
+            }
         t.why = "a " + kind;
         return t;
     }
@@ -248,6 +297,8 @@ Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path&
                 terms[key] = reader.term(n);
                 if (!terms[key].why.empty())
                     x.note(std::string(key) + ": " + terms[key].why + ": not read");
+                else if (!terms[key].approx.empty())
+                    x.note(std::string(key) + ": read approximately (" + terms[key].approx + ")");
             }
         }
         for (const char* key : {"WorldPositionOffset", "Refraction", "Anisotropy"})
@@ -544,6 +595,20 @@ private:
             why = name + ": material functions 16 deep";
             return std::nullopt;
         }
+        // Parallax occlusion mapping (Unreal's function, a Custom HLSL loop kin cannot read): the UVs as they come, no
+        // depth offset, unshadowed.
+        if (std::filesystem::path(path).filename().string().rfind("ParallaxOcclusionMapping", 0) == 0) {
+            _x.note(name + ": Parallax Occlusion Mapping: its UVs as they come (no parallax), no depth offset, no "
+                           "self-shadow");
+            if (pin.find("Depth") != std::string::npos || pin.find("Offset") != std::string::npos)
+                return std::string(
+                    pin.find("Offset") != std::string::npos && pin.find("UV") != std::string::npos ? "[0, 0]" : "0");
+            if (pin.find("Shadow") != std::string::npos)
+                return std::string("1");
+            if (const auto* uv = connected(n, "UVs"))
+                return source_value(*uv, why);
+            return GraphBuilder::quote("uv");
+        }
         auto& child = _children[name];
         if (!child)
             child = std::make_unique<UnrealGraph>(*this, n, *function);
@@ -630,11 +695,25 @@ private:
             c = char(std::tolower(static_cast<unsigned char>(c)));
         static const std::set<std::string> pins{"r", "g", "b", "a", "rg", "rgb", "rgba",
                                                 "x", "y", "z", "w", "xy", "xyz", "xyzw"};
-        if (pin.empty() || !pins.contains(pin) || ref.front() != '"')
+        if (pin.empty() || !pins.contains(pin))
             return ref;
         for (auto& c : pin)
             c = c == 'r' ? 'x' : c == 'g' ? 'y' : c == 'b' ? 'z' : c == 'a' ? 'w' : c;
-        return _b.member(ref, pin);
+        return pick(ref, pin);
+    }
+    // Components `m` (of xyzw) of a value: a reference's swizzle; a constant's own components (a number's, each one).
+    std::string pick(const std::string& ref, const std::string& m) {
+        if (ref.empty())
+            return ref;
+        if (ref.front() == '"')
+            return _b.member(ref, m);
+        const int w = _b.width(ref);
+        std::string out = m.size() == 1 ? "" : "[";
+        for (size_t i = 0; i < m.size(); ++i) {
+            const int k = int(std::string("xyzw").find(m[i]));
+            out += (i ? ", " : "") + (w == 1 ? ref : GraphBuilder::component(ref, std::min(k, w - 1)));
+        }
+        return m.size() == 1 ? out : out + "]";
     }
     const JsonValue* node(const std::string& name) const { return _nodes ? _nodes->find(name) : nullptr; }
     static f32 prop(const JsonValue& n, const char* key, f32 fallback) {
@@ -867,10 +946,9 @@ private:
             return flipped ? _b.add("multiply", {{"a", unpacked}, {"b", "[1, -1, 1]"}}) : unpacked;
         }
         if (kind == "TextureCoordinate") {
-            if (prop(n, "coordinate_index", 0) != 0) {
-                why = name + ": a second UV set (kin's meshes have one)";
-                return std::nullopt;
-            }
+            if (prop(n, "coordinate_index", 0) != 0)
+                _x.note(name + ": UV set " + num(prop(n, "coordinate_index", 0)) +
+                        ": the first (kin's meshes have one)");
             const f32 u = prop(n, "u_tiling", 1), v = prop(n, "v_tiling", 1);
             return u == 1 && v == 1 ? GraphBuilder::quote("uv")
                                     : _b.add("multiply", {{"a", GraphBuilder::quote("uv")},
@@ -900,7 +978,8 @@ private:
             const auto base = in({"Base"}), e = in({"Exponent", "Exp"}, num(prop(n, "const_exponent", 2)));
             if (!base || !e)
                 return std::nullopt;
-            return _b.add("power", {{"a", *base}, {"b", *e}});
+            // Unreal's Power clamps its base at 0 (PositiveClampedPow): GLSL's pow of a negative is undefined.
+            return _b.add("power", {{"a", _b.add("max", {{"a", *base}, {"b", "0"}})}, {"b", *e}});
         }
         if (kind == "Clamp") {
             const auto x = in({"", "None", "Input"}), lo = in({"Min"}, num(prop(n, "min_default", 0))),
@@ -951,11 +1030,11 @@ private:
             for (const auto& [c, k] : {std::pair{"r", 'x'}, {"g", 'y'}, {"b", 'z'}, {"a", 'w'}})
                 if (prop(n, c, 0))
                     m += k;
-            if (m.empty() || x->front() != '"') {
+            if (m.empty()) {
                 why = name + ": a mask of nothing";
                 return std::nullopt;
             }
-            return _b.member(*x, m);
+            return pick(*x, m);
         }
         if (kind == "AppendVector") {
             const auto a = in({"A"}), b = in({"B"});
@@ -1074,8 +1153,173 @@ private:
             }
             return in({*on ? "True" : "False", *on ? "A" : "B"});
         }
+        if (kind == "BumpOffset") {
+            // The coordinate shifted along the view as the tangent frame sees it, by the height above the reference
+            // plane (Unreal's: uv + view_tangent.xy x (height - reference) x ratio).
+            const auto uv = in({"Coordinate"}, GraphBuilder::quote("uv"));
+            const auto h = in({"Height"});
+            const auto ratio = in({"HeightRatioInput"}, num(prop(n, "height_ratio", 0.05f)));
+            if (!uv || !h || !ratio)
+                return std::nullopt;
+            return glsl("p + kin_graph_world_to_uv(kin_view(), kin_uv(), kin_graph_geometry_normal()).xy * "
+                        "((h - k) * r)",
+                        2,
+                        {{"p", _b.fit(*uv, 2)},
+                         {"h", _b.fit(*h, 1)},
+                         {"r", _b.fit(*ratio, 1)},
+                         {"k", num(prop(n, "reference_plane", 0.5f))}});
+        }
+        if (kind == "Transform") { // a vector from one space to another
+            const auto v = in({"", "None", "Input"});
+            if (!v)
+                return std::nullopt;
+            const std::string from = upper(text(n, "transform_source_type")), to = upper(text(n, "transform_type"));
+            const auto space = [](const std::string& e, const char* fallback) {
+                for (const char* s : {"TANGENT", "LOCAL", "WORLD", "VIEW", "CAMERA", "INSTANCE", "PARTICLE"})
+                    if (e.find(s) != std::string::npos)
+                        return std::string(s);
+                return std::string(fallback);
+            };
+            const std::string a = space(from, "TANGENT"), b = space(to, "WORLD");
+            // (View and camera space are the same for a vector.)
+            const auto known = [](std::string& s) {
+                if (s == "CAMERA")
+                    s = "VIEW";
+                return s == "TANGENT" || s == "LOCAL" || s == "WORLD" || s == "VIEW";
+            };
+            std::string from_space = a, to_space = b;
+            if (!known(from_space) || !known(to_space)) {
+                why = name + ": a Transform from " + a + " to " + b + " space (kin has tangent, local, world, view)";
+                return std::nullopt;
+            }
+            if (from_space == "LOCAL" || to_space == "LOCAL")
+                _x.note(name + ": a Transform from or to local space: as world space (kin's graphs do not see the "
+                               "object's transform)");
+            if (from_space == "VIEW" || to_space == "VIEW")
+                _x.note(name + ": a Transform from or to view space: the camera's, as if it did not roll");
+            if (from_space == to_space)
+                return _b.fit(*v, 3);
+            // Into kin's world (kin's axes; Unreal's world vectors are in its own: kin's x, z, y), then out of it.
+            const std::map<std::string, std::string> into{
+                {"TANGENT", "kin_graph_uv_to_world(v, kin_uv(), kin_graph_geometry_normal())"},
+                {"VIEW", "kin_graph_view_to_world(v)"},
+                {"WORLD", "v.xzy"},
+                {"LOCAL", "v.xzy"}};
+            const std::map<std::string, std::string> out_of{
+                {"TANGENT", "kin_graph_world_to_uv(@, kin_uv(), kin_graph_geometry_normal())"},
+                {"VIEW", "kin_graph_world_to_view(@)"},
+                {"WORLD", "(@).xzy"},
+                {"LOCAL", "(@).xzy"}};
+            std::string expr = out_of.at(to_space);
+            expr.replace(expr.find('@'), 1, into.at(from_space));
+            return glsl(expr, 3, {{"v", _b.fit(*v, 3)}});
+        }
+        if (kind == "TransformPosition") { // a position between local and world space: the same in kin's graphs
+            const std::string from = upper(text(n, "transform_source_type")), to = upper(text(n, "transform_type"));
+            const auto local_or_world = [](const std::string& e) {
+                return e.empty() || e.find("LOCAL") != std::string::npos ||
+                       (e.find("WORLD") != std::string::npos && e.find("TRANSLATED") == std::string::npos);
+            };
+            if (!local_or_world(from) || !local_or_world(to)) {
+                why = name + ": a TransformPosition from " + from + " to " + to + " (kin has local and world)";
+                return std::nullopt;
+            }
+            _x.note(name + ": a position from or to local space: as world space (kin's graphs do not see the object's "
+                           "transform)");
+            return in({"", "None", "Input"});
+        }
+        if (kind == "ParticleColor") { // a particle's colour: kin's particles give theirs as the vertex colour
+            _x.note(name + ": the particle's colour: the vertex colour");
+            return GraphBuilder::quote("vertex_color");
+        }
+        if (kind == "DynamicParameter") { // a particle emitter's: its default
+            _x.note(name + ": a dynamic parameter: its default (kin's particles set none)");
+            const auto c = colour(n, "default_value");
+            return GraphBuilder::vector({c.data(), 4});
+        }
+        if (kind == "PerInstanceFadeAmount") {
+            _x.note(name + ": the instance's fade: none");
+            return std::string("0");
+        }
+        if (kind == "ObjectPositionWS") {
+            _x.note(name + ": the object's position: the world's origin (kin's graphs do not see the object's "
+                           "transform)");
+            return std::string("[0, 0, 0]");
+        }
+        if (kind == "DepthFade") { // (its fade where the surface nears what is behind it: kin's graphs see no depth)
+            _x.note(name + ": Depth Fade: its opacity, without the fade near what is behind (kin's graphs see no "
+                           "scene depth)");
+            return in({"Opacity", "OpacityInput"}, num(prop(n, "opacity_default", 1)));
+        }
+        if (kind == "SceneDepth") {
+            _x.note(name + ": Scene Depth: 10 km, as if nothing were behind (kin's graphs see no scene depth)");
+            return std::string("1000000");
+        }
+        if (kind == "LandscapeLayerCoords") {
+            // A landscape's coordinates (its quads, a metre each at Unreal's default scale) by the world position:
+            // a landscape at the origin, unrotated. Scaled, turned and panned as the node's mapping says.
+            const std::string type = upper(text(n, "mapping_type"));
+            const std::string axes = type.find("XZ") != std::string::npos   ? "p.xy"
+                                     : type.find("YZ") != std::string::npos ? "p.zy"
+                                                                            : "p.xz";
+            f32 scale = prop(n, "mapping_scale", 0);
+            if (scale == 0)
+                scale = 1;
+            const f32 angle = prop(n, "mapping_rotation", 0) * std::numbers::pi_v<f32> / 180;
+            _x.note(name + ": landscape coordinates by the world position (a landscape at the origin, 1 m quads)");
+            return glsl("mat2(" + num(std::cos(angle)) + ", " + num(-std::sin(angle)) + ", " + num(std::sin(angle)) +
+                            ", " + num(std::cos(angle)) + ") * (" + axes + " / " + num(scale) + ") + vec2(" +
+                            num(prop(n, "mapping_pan_u", 0)) + ", " + num(prop(n, "mapping_pan_v", 0)) + ")",
+                        2, {{"p", GraphBuilder::quote("position")}});
+        }
+        if (kind == "TextureSampleParameterCube" || kind == "TextureSampleCube") {
+            _x.note(name + ": a cube map: the scene's environment in its direction");
+            const auto d = in({"UVs", "Coordinates"}, GraphBuilder::quote("view"));
+            if (!d)
+                return std::nullopt;
+            return glsl("vec4(kin_graph_environment(d.xzy), 1.0)", 4, {{"d", _b.fit(*d, 3)}});
+        }
+        if (kind == "CollectionParameter") {
+            const auto* p = n.find("props");
+            const auto* v = p ? p->find("collection_value") : nullptr;
+            if (!v) {
+                why = name + ": the parameter collection's " + text(n, "parameter_name") + " (no default exported)";
+                return std::nullopt;
+            }
+            _x.note(name + ": the parameter collection's " + text(n, "parameter_name") +
+                    ": its default (a game may set it while it runs)");
+            if (v->is_number())
+                return num(f32(v->as_number()));
+            const auto c = colour(n, "collection_value");
+            return GraphBuilder::vector({c.data(), 4});
+        }
+        if (kind == "If") { // A > B, A == B (within the threshold), A < B
+            const auto a = in({"A"}), b = in({"B"}, num(prop(n, "const_b", 0)));
+            const auto gt = in({"A > B"}), lt = in({"A < B"});
+            if (!a || !b || !gt || !lt)
+                return std::nullopt;
+            const auto eq = in({"A == B"}, *gt);
+            if (!eq)
+                return std::nullopt;
+            const int w = std::max({_b.width(*gt), _b.width(*lt), _b.width(*eq)});
+            static const char* types[] = {"float", "float", "vec2", "vec3", "vec4"};
+            const auto as = [&](const std::string& v) {
+                return _b.width(v) == w ? v : _b.width(v) == 1 ? v : _b.fit(v, w);
+            };
+            const std::string t = types[std::clamp(w, 1, 4)];
+            return glsl("abs(a - b) <= " + num(prop(n, "equals_threshold", 0.00001f)) + " ? " + t + "(e) : (a > b ? " +
+                            t + "(g) : " + t + "(l))",
+                        w,
+                        {{"a", _b.fit(*a, 1)}, {"b", _b.fit(*b, 1)}, {"g", as(*gt)}, {"e", as(*eq)}, {"l", as(*lt)}});
+        }
         why = name + ": a " + kind + " (kin has no node for it)";
         return std::nullopt;
+    }
+
+    static std::string upper(std::string s) {
+        for (auto& c : s)
+            c = char(std::toupper(static_cast<unsigned char>(c)));
+        return s;
     }
 
     const JsonValue& _doc;
@@ -1186,6 +1430,15 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         }
         auto& p = imported.asset.base.material;
         p.graph = imported.graph.lexically_relative(x.content);
+        // A graph's vertex colour is kin's (the mesh's times the material's colour): where the graph gives the base
+        // colour or the alpha, the material's is white or opaque, as Unreal's Vertex Color is the mesh's alone. (Where
+        // it does not, the Tier 1 colour stays: the surface starts from it.)
+        Color c = p.color.value_or(Color{255, 255, 255, 255});
+        if (b.outputs.contains("base_color"))
+            c.r = c.g = c.b = 255;
+        if (b.outputs.contains("alpha"))
+            c.a = 255;
+        p.color = c;
         // The graph reads the mesh's UV as its own nodes tile it: Tier 1's tiling (the material's UV transform, which
         // kin's "uv" input goes through) would tile it twice.
         p.uv_scale = Vec2f{1, 1};

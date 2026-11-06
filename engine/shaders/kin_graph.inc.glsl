@@ -34,6 +34,63 @@ vec3 kin_graph_tangent_to_world(vec3 m, vec2 uv, vec3 n) {
     return normalize(front * (t * m.x - b * m.y) + n * m.z);
 }
 
+// The frame the UVs make across the pixel, as kin_graph_tangent_to_world's: `t` along +u, `b` along +v (in the
+// direction v grows: down a picture), both on the viewer's side and square to `n`; false where the UVs do not change.
+bool kin_graph_uv_frame(vec2 uv, vec3 n, out vec3 t, out vec3 b) {
+    const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
+    const vec2 duv1 = dFdx(uv), duv2 = dFdy(uv);
+    const float det = duv1.x * duv2.y - duv2.x * duv1.y;
+    t = vec3(0.0);
+    b = vec3(0.0);
+    if (abs(det) < 1e-20) {
+        return false;
+    }
+    const float front = gl_FrontFacing ? 1.0 : -1.0;
+    t = (dp1 * duv2.y - dp2 * duv1.y) * sign(det);
+    b = (dp2 * duv1.x - dp1 * duv2.x) * sign(det);
+    t = front * normalize(t - n * dot(n, t));
+    b = front * normalize(b - n * dot(n, b));
+    return true;
+}
+
+// A world vector in that frame (x along +u, y along +v, z along `n`: Unreal's tangent space), and back; unscaled (not
+// normalized). Where the UVs do not change: z along `n` only.
+vec3 kin_graph_world_to_uv(vec3 v, vec2 uv, vec3 n) {
+    vec3 t, b;
+    kin_graph_uv_frame(uv, n, t, b);
+    return vec3(dot(v, t), dot(v, b), dot(v, n));
+}
+vec3 kin_graph_uv_to_world(vec3 v, vec2 uv, vec3 n) {
+    vec3 t, b;
+    kin_graph_uv_frame(uv, n, t, b);
+    return t * v.x + b * v.y + n * v.z;
+}
+
+// A world vector in the camera's frame (x right, y up, z ahead: Unreal's view space), and back; the frame from the
+// camera's forward and the world's up (a camera that does not roll; looking straight up or down: x along world x).
+mat3 kin_graph_view_frame() {
+    const vec3 f = normalize(frame.cascade_forward.xyz);
+    vec3 r = cross(f, vec3(0.0, 1.0, 0.0));
+    r = dot(r, r) < 1e-8 ? vec3(1.0, 0.0, 0.0) : normalize(r);
+    return mat3(r, cross(r, f), f);
+}
+vec3 kin_graph_view_to_world(vec3 v) {
+    return kin_graph_view_frame() * v;
+}
+vec3 kin_graph_world_to_view(vec3 v) {
+    return transpose(kin_graph_view_frame()) * v;
+}
+
+// The light the scene's surroundings send from direction `d` (world space): its environment's sharpest level, else
+// the hemisphere's ambient (the sky's above, the ground's below).
+vec3 kin_graph_environment(vec3 d) {
+    d = normalize(d);
+    if (frame.environment.w > 0.5) {
+        return textureLod(uEnvSpecular, environment_uv(d), 0.0).rgb * frame.environment.x;
+    }
+    return mix(frame.ground_ambient.rgb, frame.ambient.rgb, d.y * 0.5 + 0.5);
+}
+
 // A normal map's texel as a tangent-space normal, its slope times `strength` (two-channel maps: z rebuilt).
 vec3 kin_graph_unpack_normal(vec4 texel, float strength) {
     vec3 m = texel.xyz * 2.0 - 1.0;

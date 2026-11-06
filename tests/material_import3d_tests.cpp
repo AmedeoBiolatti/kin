@@ -21,6 +21,7 @@
 #include <kin/render3d/material_graph3d.hpp>
 #include <kin/render3d/material_import3d.hpp>
 #include <kin/renderer/color.hpp>
+#include <kin/renderer/shader_compiler.hpp>
 #include <string>
 
 namespace {
@@ -482,8 +483,11 @@ void unreal_materials() {
           glow.emission_color->g == 2.5f && glow.color->r == 0);
     const auto unlit = load("M_Unlit").asset.base.material;
     CHECK(*unlit.unlit && !unlit.texture->asset.empty());
+    // A Lerp by a constant (a parameter's 0.5) of a map and a constant: (1 - a) map + a b, exactly; the offset (a b)
+    // is said, as an offset to any base map.
     const auto lerp = load("M_Lerp");
-    CHECK(has_note(lerp, "BaseColor: a Lerp"));
+    const auto& l = lerp.asset.base.material;
+    CHECK(!l.texture->asset.empty() && l.color->r == 188 && has_note(lerp, "base colour: an offset added"));
     write(content / "bad.json", "{\"schema\": \"something else\"}");
     CHECK(!import_unreal_material(content / "bad.json", options).ok());
 }
@@ -736,6 +740,90 @@ void corpus() {
     CHECK(count > 0 && failed == 0);
 }
 
+// Tier 2: what Unreal's graphs reach for beyond kin's own nodes, read as exactly as kin can: Bump Offset (the UVs moved
+// along the view in the UVs' frame), Transforms (tangent, world, view), an If, masks of constants, a collection
+// parameter's default; and approximated, each said: Depth Fade (its opacity), Scene Depth (nothing behind), a cube map
+// (the environment), the object's position (the origin). No output falls back; with glslc, every variant compiles.
+void unreal_approximations() {
+    Scratch scratch;
+    const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto link = [](const char* node, const char* out = "") {
+        return std::string(R"({"node": ")") + node + R"(", "output": ")" + out + R"("})";
+    };
+    const std::string nodes = std::string(R"({
+      "Uv": {"class": "MaterialExpressionTextureCoordinate", "props": {"coordinate_index": 0, "u_tiling": 2, "v_tiling": 2}, "inputs": {}},
+      "Height": {"class": "MaterialExpressionTextureSample", "props": {"texture": "textures/Game/Probe/Textures/T_ORM.png", "sampler_type": "SAMPLERTYPE_LINEAR_COLOR"}, "inputs": {"UVs": )") + link("Uv") + R"(}},
+      "Bump": {"class": "MaterialExpressionBumpOffset", "props": {"height_ratio": 0.08, "reference_plane": 0.5}, "inputs": {"Coordinate": )" + link("Uv") + R"(, "Height": )" + link("Height", "R") + R"(}},
+      "Albedo": {"class": "MaterialExpressionTextureSampleParameter2D", "props": {"parameter_name": "Albedo", "texture": "textures/Game/Probe/Textures/T_Albedo.png", "sampler_type": "SAMPLERTYPE_COLOR"}, "inputs": {"UVs": )" + link("Bump") + R"(}},
+      "Reflect": {"class": "MaterialExpressionReflectionVectorWS", "props": {}, "inputs": {}},
+      "Cube": {"class": "MaterialExpressionTextureSampleParameterCube", "props": {"parameter_name": "Sky"}, "inputs": {"UVs": )" + link("Reflect") + R"(}},
+      "Depth": {"class": "MaterialExpressionSceneDepth", "props": {}, "inputs": {}},
+      "Far": {"class": "MaterialExpressionIf", "props": {"const_b": 5000}, "inputs": {"A": )" + link("Depth") + R"(, "A > B": )" + link("One") + R"(, "A < B": )" + link("Zero") + R"(}},
+      "One": {"class": "MaterialExpressionConstant", "props": {"r": 1}, "inputs": {}},
+      "Zero": {"class": "MaterialExpressionConstant", "props": {"r": 0}, "inputs": {}},
+      "Mix": {"class": "MaterialExpressionLinearInterpolate", "props": {}, "inputs": {"A": )" + link("Albedo", "RGB") + R"(, "B": )" + link("Cube", "RGB") + R"(, "Alpha": )" + link("Far") + R"(}},
+      "Up": {"class": "MaterialExpressionVertexNormalWS", "props": {}, "inputs": {}},
+      "ToTangent": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_WORLD", "transform_type": "TRANSFORM_TANGENT"}, "inputs": {"None": )" + link("Up") + R"(}},
+      "Ahead": {"class": "MaterialExpressionConstant3Vector", "props": {"constant": [0, 0, 1, 0]}, "inputs": {}},
+      "FromView": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_VIEW", "transform_type": "TRANSFORM_WORLD"}, "inputs": {"None": )" + link("Ahead") + R"(}},
+      "Origin": {"class": "MaterialExpressionObjectPositionWS", "props": {}, "inputs": {}},
+      "OriginX": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" + link("Origin") + R"(}},
+      "Glow": {"class": "MaterialExpressionMultiply", "props": {}, "inputs": {"A": )" + link("FromView") + R"(, "B": )" + link("OriginX") + R"(}},
+      "Wet": {"class": "MaterialExpressionCollectionParameter", "props": {"parameter_name": "Wetness", "collection_value": [0.25, 0, 0, 0]}, "inputs": {}},
+      "WetR": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" + link("Wet") + R"(}},
+      "Fade": {"class": "MaterialExpressionDepthFade", "props": {"fade_distance_default": 25, "opacity_default": 1}, "inputs": {"Opacity": )" + link("Half") + R"(}},
+      "Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.75}, "inputs": {}}
+    })";
+    const std::string doc = R"({"schema": "kin.unreal-material/1", "name": "M_Approx", "blend_mode": "BLEND_TRANSLUCENT",
+      "shading_model": "MSM_DEFAULTLIT", "parameters": {"scalar": {}, "vector": {}, "texture": {}, "switch": {}},
+      "inputs": {}, "textures": {"textures/Game/Probe/Textures/T_Albedo.png": {"srgb": true},
+                                 "textures/Game/Probe/Textures/T_ORM.png": {"srgb": false}},
+      "graph": {"nodes": )" + nodes + R"(, "outputs": {"BaseColor": )" + link("Mix") + R"(, "Normal": )" +
+                            link("ToTangent") + R"(, "Roughness": )" + link("WetR") + R"(, "EmissiveColor": )" +
+                            link("Glow") + R"(, "Opacity": )" + link("Fade") + R"(}}})";
+    write(content / "M_Approx.json", doc);
+    const auto m = import_unreal_graph(content / "M_Approx.json", options);
+    for (const auto& d : m.diagnostics)
+        std::cerr << d << '\n';
+    CHECK(m.ok() && !m->graph.empty());
+    const auto said = [&](std::string_view what) {
+        return std::any_of(m->notes.begin(), m->notes.end(),
+                           [&](const std::string& n) { return n.find(what) != std::string::npos; });
+    };
+    for (const auto& n : m->notes)
+        if (n.find("Tier 1 value kept") != std::string::npos || n.find("Tier 1 import only") != std::string::npos)
+            std::cerr << "fell back: " << n << '\n';
+    CHECK(!said("Tier 1 value kept") && !said("Tier 1 import only"));
+    CHECK(said("Depth Fade") && said("Scene Depth") && said("a cube map") && said("the object's position") &&
+          said("view space") && said("parameter collection's Wetness"));
+    // The graph gives the base colour and alpha: the material's colour (Tier 1's black, no input) white and opaque, as
+    // the graph's vertex colour includes it.
+    const auto c = m->asset.base.material.color;
+    CHECK(c && c->r == 255 && c->g == 255 && c->b == 255 && c->a == 255);
+    std::ifstream in(m->graph);
+    const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    in.close();
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok());
+    for (const char* expected : {"kin_graph_world_to_uv(kin_view(), kin_uv(), kin_graph_geometry_normal()).xy",
+                                 "kin_graph_environment(", "1000000", "kin_graph_view_to_world(",
+                                 "kin_graph_world_to_uv(v.xzy", "0.25", "0.75"}) {
+        if (g.surface.find(expected) == std::string::npos)
+            std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
+        CHECK(g.surface.find(expected) != std::string::npos);
+    }
+    if (shader_compiler_available()) {
+        std::string why;
+        const auto cooked = cook_material_graph3d(text, &why);
+        if (!cooked)
+            std::cerr << why << '\n';
+        CHECK(cooked.has_value());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -747,6 +835,7 @@ int main() {
     unreal_materials();
     safe_names();
     unreal_graphs();
+    unreal_approximations();
     unity_graphs();
     godot_graphs();
     corpus();
