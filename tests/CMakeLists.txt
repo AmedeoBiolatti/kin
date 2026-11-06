@@ -644,6 +644,10 @@ kin_add_component_test(PYTHON kin_python_scripts_tests kin-python-scripts SOURCE
 if(TARGET kin_python_scripts_tests AND KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_python_scripts_tests PRIVATE kin::physics_ecs) # contacts
 endif()
+# What kin's components add to flecs's everyday writes (set, modified,
+# spawn+destroy). Built on request (ninja kin_ecs_bench), not by CI.
+add_executable(kin_ecs_bench EXCLUDE_FROM_ALL ecs_bench.cpp)
+target_link_libraries(kin_ecs_bench PRIVATE kin::engine)
 # Python systems against plain C++, per update (docs/python_scripting.md).
 # Built on request (ninja kin_python_bench), not by CI.
 if(KIN_ENABLE_PYTHON)

@@ -161,6 +161,7 @@ void gpu_live_edits(Renderer2D& renderer) {
               left.get<ModelRenderer3D>()->model == model,
           "material edit lost sharing/isolation");
     const auto blue = left.get<ModelMaterials3D>()->binding;
+    world->events().record(true);
     auto before = world->events().dirty_state().last_event_sequence;
     check(!change(left, "ModelMaterials3D", "variant", std::string("missing")), "unknown material variant accepted");
     check(!change(left, "ModelMaterials3D", "variant", std::string(65537, 'x')), "oversized edit text accepted");

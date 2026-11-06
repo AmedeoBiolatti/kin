@@ -1,8 +1,25 @@
 # ECS Events
 
-Kin ECS records editor-facing changes in a retained per-world event log. The log
-is designed for polling from tools and scene-server snapshots; callback
+Kin ECS can record editor-facing changes in a retained per-world event log. The
+log is designed for polling from tools and scene-server snapshots; callback
 subscriptions are a later layer.
+
+## Recording
+
+The log is off until something turns it on:
+
+```cpp
+world.events().record(true);  // from now on
+world.events().recording();   // true
+world.events().record(false); // stops; what it holds stays
+```
+
+Off, it records nothing and watches nothing. On, it puts a Flecs observer on
+every add, set and remove of each registered component and records each one.
+That makes them about three times as slow: 3.0 ms against 0.85 for 10k `set()`
+calls, and 17.7 ms against 5.9 to spawn and destroy 10k entities with two
+components each. That's why only tools and tests turn it on. `tests/ecs_bench.cpp` (`ninja kin_ecs_bench`)
+measures it.
 
 ## Event Log
 
@@ -45,7 +62,9 @@ changes do not.
 
 ## Scene Server
 
-`world.snapshot` includes events in the Kin payload by default:
+`world.snapshot` includes events in the Kin payload by default. The first time it
+does for a world, it turns that world's log on. That answer has what was
+recorded before (often nothing), and the later answers have what happened since:
 
 ```json
 {

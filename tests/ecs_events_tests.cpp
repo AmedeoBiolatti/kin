@@ -43,6 +43,7 @@ void register_components(kin::EcsWorld& world) {
 
 void test_entity_events_and_dirty_flags() {
     kin::EcsWorld world;
+    world.events().record(true);
     kin::EcsEntity root = world.entities().create({.name = "root", .authored_id = "root"});
     kin::EcsEntity child = world.entities().create({.name = "child", .parent = root, .enabled = false});
     assert(world.entities().rename(child, "renamed"));
@@ -66,6 +67,7 @@ void test_entity_events_and_dirty_flags() {
 
 void test_component_events_deduplicate_kin_api_and_observers() {
     kin::EcsWorld world;
+    world.events().record(true);
     register_components(world);
     kin::EcsEntity entity = world.entity("actor");
 
@@ -87,6 +89,7 @@ void test_component_events_deduplicate_kin_api_and_observers() {
 
 void test_flecs_observer_component_events_for_raw_changes() {
     kin::EcsWorld world;
+    world.events().record(true);
     register_components(world);
     kin::EcsEntity entity = world.entity("raw");
     world.events().clear();
@@ -107,6 +110,7 @@ void test_flecs_observer_component_events_for_raw_changes() {
 
 void test_system_events_and_errors() {
     kin::EcsWorld world;
+    world.events().record(true);
     const kin::SystemId ok = world.systems().register_task({
         .id = "events.ok",
         .reads = {"Transform"},
@@ -138,6 +142,7 @@ void test_system_events_and_errors() {
 
 void test_since_clear_and_sequence_ordering() {
     kin::EcsWorld world;
+    world.events().record(true);
     kin::EcsEntity first = world.entity("first");
     const kin::u64 sequence = world.events().dirty_state().last_event_sequence;
     kin::EcsEntity second = world.entity("second");
@@ -161,6 +166,36 @@ void test_since_clear_and_sequence_ordering() {
     assert(world.events().snapshot().back().sequence > since[0].sequence);
 }
 
+// Off by default: no observers, no events. On (even after the components were
+// registered), raw flecs changes and kin's own are recorded; off again, the
+// observers go and what was recorded stays.
+void test_recording_is_opt_in() {
+    kin::EcsWorld world;
+    assert(!world.events().recording());
+    world.components().native<Transform>("Transform").field("rotation", &Transform::rotation);
+    kin::EcsEntity actor = world.entities().create({.name = "actor"});
+    actor.set(Transform{.rotation = 1.0f});
+    assert(world.components().patch_field(actor, "Transform", "rotation", kin::f32{2.0f}));
+    assert(world.events().snapshot().empty());
+    assert(world.events().dirty_state().last_event_sequence == 0);
+    assert(!world.raw().lookup("kin::ecs::events::Transform::on_set"));
+
+    world.events().record(true);
+    assert(world.raw().lookup("kin::ecs::events::Transform::on_set"));
+    actor.set(Transform{.rotation = 3.0f});
+    assert(world.components().patch_field(actor, "Transform", "rotation", kin::f32{4.0f}));
+    const std::vector<kin::EcsEvent>& events = world.events().snapshot();
+    assert(events.size() == 2);
+    assert(events[0].kind == kin::EcsEventKind::ComponentChanged && events[0].source == kin::EcsEventSource::FlecsObserver);
+    assert(events[1].source == kin::EcsEventSource::KinApi && events[1].field_name == "rotation");
+
+    world.events().record(false);
+    assert(!world.raw().lookup("kin::ecs::events::Transform::on_set"));
+    actor.set(Transform{.rotation = 5.0f});
+    world.entities().destroy(actor);
+    assert(world.events().snapshot().size() == 2);
+}
+
 } // namespace
 
 int main() {
@@ -169,5 +204,6 @@ int main() {
     test_flecs_observer_component_events_for_raw_changes();
     test_system_events_and_errors();
     test_since_clear_and_sequence_ordering();
+    test_recording_is_opt_in();
     return 0;
 }

@@ -292,6 +292,10 @@ public:
 
     std::string_view name() const override { return "KinSnapshot"; }
     kin::EcsWorld* world() override { return &_world; }
+    void update(kin::SceneContext&) override {
+        const kin::EcsEntity actor = _world.entities().find_by_name("server.actor");
+        _world.components().patch_field(actor, "ServerTransform", "hp", kin::i32{13});
+    }
 
 private:
     kin::EcsWorld _world;
@@ -468,7 +472,9 @@ void test_world_snapshot_reports_kin_metadata_and_payload_switches() {
         R"({"id":2,"method":"world.snapshot","params":{"raw":false,"animations":false}})" "\n"
         R"({"id":3,"method":"world.snapshot","params":{"kin":false,"animations":false}})" "\n"
         R"({"id":4,"method":"world.snapshot","params":{"raw":false,"animations":false,"events":false}})" "\n"
-        R"({"id":5,"method":"server.shutdown"})" "\n");
+        R"({"id":5,"method":"sim.tick","params":{"count":1}})" "\n"
+        R"({"id":6,"method":"world.snapshot","params":{"raw":false,"animations":false}})" "\n"
+        R"({"id":7,"method":"server.shutdown"})" "\n");
 
     const int code = kin::run_scene_server({
         .window = {.title = "server", .width = 64, .height = 64},
@@ -511,11 +517,17 @@ void test_world_snapshot_reports_kin_metadata_and_payload_switches() {
     const kin::JsonValue& batch = schedule->find("batches")->items()[0];
     assert(batch.string_at("execution_mode") == "parallel_batches");
     assert(batch.find("command_stats")->int_at("flushed") == 2);
+    // The log records once asked for: nothing yet, then the tick's edit.
     const kin::JsonValue* events = kin_snapshot->find("events");
     assert(events != nullptr);
-    assert(events->find("dirty")->bool_at("world"));
-    assert(events->find("dirty")->bool_at("systems"));
-    assert(!events->find("items")->items().empty());
+    assert(!events->find("dirty")->bool_at("world"));
+    assert(events->find("items")->items().empty());
+    const kin::JsonValue* later = response_result(text, 6)->find("kin")->find("events");
+    assert(later->find("dirty")->bool_at("components"));
+    const auto& items = later->find("items")->items();
+    assert(std::ranges::any_of(items, [](const kin::JsonValue& item) {
+        return item.string_at("component_name") == "ServerTransform" && item.string_at("field_name") == "hp";
+    }));
 
     const kin::JsonValue* kin_only = response_result(text, 2);
     assert(kin_only != nullptr);
