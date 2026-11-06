@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -3099,15 +3100,73 @@ void check_shapes(kin::Renderer2D& renderer) {
     expect(15, 49, black, "scaled mesh's far corner");
     expect(18, 46, white, "past the scaled mesh");
     expect(35, 55, black, "the bigger mesh");
-    // The circle's edge is soft: half way between red and white where the
-    // outline crosses the pixel (below the centre, 10.5 out at y = 26).
-    const kin::Color edge = at(16, 26);
+    // The circle's edge is soft over the half pixel past it (docs/rendering.md,
+    // "Shape edges"): partly red 0.12 px out (pixel 21, 24: its centre 10.12 from
+    // the circle's), clear 0.51 px out (pixel 16, 26). SDL's software driver,
+    // whose triangles snap to half pixels, fades over a whole pixel instead:
+    // half way there at 0.51 px.
+    const bool whole_pixel = renderer.backend_name() == "software";
+    const kin::Color edge = whole_pixel ? at(16, 26) : at(21, 24);
     if (!(edge.r > 240 && edge.g > 40 && edge.g < 215)) {
         throw std::runtime_error(std::string("check_shapes (") + std::string(renderer.backend_name()) +
                                  "): the circle's edge pixel is " + std::to_string(edge.g) + " green, not soft");
     }
-    // Ten times bigger, the edge is still one pixel soft: 1.5 pixels out is clear.
+    if (!whole_pixel) {
+        expect(16, 26, white, "half a pixel past the circle");
+        // Ten times bigger, the edge is still half a pixel soft: half a pixel out is clear.
+        expect(40, 55, white, "half a pixel past the bigger mesh");
+    }
     expect(41, 55, white, "1.5 px past the bigger mesh");
+}
+
+// Shape edges (docs/rendering.md, "Shape edges"): where an edge falls inside a
+// pixel, shapes that share an edge, and arcs drawn end to end.
+void check_shape_edges(kin::Renderer2D& renderer) {
+    const kin::Color white = kin::Color::rgb(255, 255, 255);
+    const kin::Color black = kin::Color::rgb(0, 0, 0);
+    kin::RenderTarget target = renderer.create_render_target({64, 64}, kin::ScaleMode::Nearest);
+    std::vector<kin::u8> px;
+    kin::Vec2i size{};
+    {
+        const auto bind = renderer.scoped_render_target(target);
+        renderer.clear(white);
+        // An edge at x = 4.7: pixel 4 (centre 4.5) is 0.2 px past it, pixel 5 inside.
+        renderer.fill_path(kin::Path::rect({4.7f, 2.0f, 10.0f, 10.0f}), black);
+        // Two squares meeting at x = 30.37, inside pixel 30: no seam on it.
+        renderer.fill_path(kin::Path::rect({20.0f, 2.0f, 10.37f, 10.0f}), black);
+        renderer.fill_path(kin::Path::rect({30.37f, 2.0f, 9.63f, 10.0f}), black);
+        // A ring of 16 arcs round (32, 42), 6 px wide, butt caps, end to end.
+        for (int k = 0; k < 16; ++k) {
+            renderer.draw_arc({32.0f, 42.0f}, 14.0f, 22.5f * static_cast<kin::f32>(k) + 3.0f,
+                              22.5f * static_cast<kin::f32>(k + 1) + 3.0f, black, {.width = 6.0f});
+        }
+        assert(renderer.read_rgba({0.0f, 0.0f, 64.0f, 64.0f}, px, size));
+    }
+    const auto gray = [&](int x, int y) { return px[(static_cast<std::size_t>(y) * size.x + x) * 4]; };
+    const auto fail = [&](const std::string& what, int x, int y) {
+        throw std::runtime_error(std::string("check_shape_edges (") + std::string(renderer.backend_name()) + "): " +
+                                 what + " at " + std::to_string(x) + "," + std::to_string(y) + " is " +
+                                 std::to_string(gray(x, y)));
+    };
+    // Where in a pixel an edge falls, on rasterizers that place triangles finer
+    // than SDL's software one (it snaps their corners to half pixels).
+    if (renderer.backend_name() != "software") {
+        if (!(gray(4, 6) > 20 && gray(4, 6) < 235)) fail("0.2 px past an edge, not soft", 4, 6);
+        if (gray(5, 6) > 3) fail("just inside an edge, not solid", 5, 6);
+        if (gray(3, 6) < 252) fail("1.2 px past an edge, not clear", 3, 6);
+    }
+    for (int y = 3; y < 11; ++y) {
+        if (gray(30, y) > 3) fail("the seam between two squares shows", 30, y);
+    }
+    // 1.5 px out from the ring's middle (1.5 in from its outer edge), solid all
+    // round, the joints too: caps square to the chords instead of the curve leave
+    // wedges that open outwards.
+    for (int i = 0; i < 360; ++i) {
+        const kin::f32 a = static_cast<kin::f32>(i) * std::numbers::pi_v<kin::f32> / 180.0f;
+        const int x = static_cast<int>(std::floor(32.0f + 15.5f * std::cos(a)));
+        const int y = static_cast<int>(std::floor(42.0f + 15.5f * std::sin(a)));
+        if (gray(x, y) > 8) fail("a gap in the ring of arcs", x, y);
+    }
 }
 
 // Primitives (drawn whole on SDL_GPU, tessellated on SDL_Renderer): the same
@@ -3799,6 +3858,7 @@ void test_shapes_on_software_backend() {
     kin::Window& window = app.create_window({.title = "shape-test", .width = 64, .height = 64, .hidden = true});
     kin::Renderer2D renderer{window};
     check_shapes(renderer);
+    check_shape_edges(renderer);
     check_primitives(renderer);
     check_sdf_text(renderer);
 }
@@ -3818,6 +3878,7 @@ void test_shapes_on_gpu_backend() {
         gpu_ready = true;
         assert(renderer->capabilities().shape_primitives);
         check_shapes(*renderer);
+        check_shape_edges(*renderer);
         check_primitives(*renderer);
         assert(renderer->capabilities().distance_fields);
         check_sdf_text(*renderer);
