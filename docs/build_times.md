@@ -1,0 +1,151 @@
+# Faster development builds
+
+Use a persistent build directory and build the game you are editing:
+
+```sh
+cmake --preset dev
+cmake --build --preset dev --target hex_demo
+```
+
+`dev-3d` enables the experimental 3D engine. Both presets use Release
+optimization, four build jobs, stable precompiled headers (PCH), and optional
+compiler-cache discovery. They omit examples and benchmarks; tests remain
+available as explicit targets. Choose the game target for the edit/build/run
+loop instead of rebuilding all games and tests. Use the shipping presets for
+packages and the existing CI presets for full validation.
+
+PCHs occupy additional disk space and take time to create on the first build.
+They help subsequent source edits by avoiding repeated header processing.
+Engine PCHs exclude Kin's own headers, so engine API edits do not invalidate
+them. Game PCHs include the common engine runtime API, which stays stable
+while editing game sources; they exclude game-owned headers. Each target gets
+its own PCH with its own compiler settings; a game's product/content
+definitions do not leak into another game. Small engine adapters and third-party libraries keep ordinary
+compilation. Sources with individual compiler options also keep ordinary
+compilation, as their settings may not match their target's PCH.
+
+For a game that adds Kin with `add_subdirectory` or `FetchContent`, configure
+its existing build directory with:
+
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DKIN_ENABLE_PCH=ON -DKIN_COMPILER_CACHE=auto
+cmake --build build --parallel 4 --target my_game
+```
+
+`kin_game(my_game ...)` applies the game settings. A target that does not call
+`kin_game` can call `kin_configure_game_build(my_game)` after linking
+`kin::engine`. An existing target PCH is preserved. To diagnose a compiler/PCH
+problem, reconfigure with `-DKIN_ENABLE_PCH=OFF`; headers are still included
+normally by the sources. CMake's `DISABLE_PRECOMPILE_HEADERS` and
+`SKIP_PRECOMPILE_HEADERS` properties also work for individual targets/sources.
+
+## Compiler caches
+
+Install `ccache` or `sccache` separately, then set `KIN_COMPILER_CACHE`:
+
+Use Ninja (including on Windows) or a Makefile generator for CMake's compiler
+launcher support.
+
+| Value | Behavior |
+|---|---|
+| `off` (default outside the development presets) | Leave compiler launchers alone |
+| `auto` | Use ccache, then sccache, if found |
+| `ccache` / `sccache` | Require that tool |
+
+Explicit CMake compiler launchers take precedence. Kin's CI already configures
+ccache through the launcher environment variables. Auto-discovery is not saved
+as a launcher cache entry, so switching `KIN_COMPILER_CACHE` back to `off`
+removes launchers it selected.
+
+A compiler cache helps when returning to previously compiled code, including
+branch switches and rebuilds. It cannot avoid compiling genuinely new code,
+and it does not cache the final link. Keep a persistent cache on a fast disk
+and check its hit/miss statistics rather than assuming it is working.
+
+For **ccache with GCC/Clang PCH**, ccache requires the following configuration:
+
+```sh
+export CCACHE_SLOPPINESS=pch_defines,time_macros
+cmake --preset dev
+cmake --build --preset dev --target hex_demo
+ccache --show-stats
+```
+
+This relaxes ccache's checks of macros inside the precompiled header, including
+time macros. Kin does not set it globally. Avoid time-dependent macros and
+source-local configuration macros for PCH headers. If this tradeoff is not
+suitable, use `KIN_ENABLE_PCH=OFF` with the cache, or PCH without caching.
+See the [ccache PCH requirements](https://ccache.dev/manual/latest.html#_precompiled_headers).
+
+## Linux linking
+
+After installing [mold](https://github.com/rui314/mold), a Linux development
+build can select it through CMake's normal executable linker flags:
+
+```sh
+cmake --preset dev -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
+cmake --build --preset dev --target hex_demo
+```
+
+This does not change C++ optimization. Keep LTO off for the edit loop, as the
+development presets do. The default linker remains available by configuring
+with `-DCMAKE_EXE_LINKER_FLAGS=` (retain any other linker flags you need).
+
+## Measure the edit loop
+
+Compare the same compiler, flags, sources, build filesystem and job count.
+Separate dependency downloads/configuration from compilation, and distinguish
+a cold compiler cache from a warm cache. Useful cases are:
+
+1. A no-change build (should run no compilers).
+2. A changed game `.cpp`, including its final link.
+3. A changed engine `.cpp`, including archive creation and the game's link.
+4. A changed public header and a changed shader include.
+5. An engine rebuild with third-party libraries already built.
+
+Repeat incremental cases and compare medians; other processes, memory pressure
+and filesystem caches can change elapsed time. More jobs are not always
+faster. Start with four, then compare two/eight while watching memory use.
+
+For header/template profiling, use Clang's `-ftime-trace` and
+[ClangBuildAnalyzer](https://github.com/aras-p/ClangBuildAnalyzer), or GCC's
+`-ftime-report`, in a separate build. PCH and unity builds address repeated
+frontend work; a faster linker addresses a different part of the wait.
+
+## Local measurements, 2026-11-06
+
+GCC 15.2, Release, Ninja with four jobs, a Linux source worktree and NTFS/FUSE
+build output. The compiler cache was disabled for source-edit trials. Medians
+of three runs, with existing PCHs and dependencies already built:
+
+| Edit/build | Before | PCH | PCH + mold |
+|---|---:|---:|---:|
+| `hex_demo` main `.cpp`, including link | 8.36 s | 7.61 s | 4.30 s |
+| ECS `system.cpp`, including engine archive and game link | 27.13 s | 17.67 s | not measured |
+
+The engine row uses the normal GNU linker in both columns. Background workloads
+were not controlled, so treat these as exploratory local results. These are
+incremental timings, not a like-for-like clean-build comparison. PCH creation
+costs additional time and disk space on the first build.
+
+In a shader-only fixture using the full 3D shader manifest, changing the GI
+sampling include went from 154 shader compiles in 9.39 s to 12 in 0.79 s
+(one run each; excludes C++ embedding and linking). Nested include changes and
+paths with spaces are covered by regression tests. If SPIR-V bytes are
+unchanged, the embedding generator preserves its C++ output's timestamp.
+
+With ccache/PCH enabled, recompiling one unchanged game source took 3.56 s cold
+and a median 0.036 s warm (three direct hits). This measures object compilation
+only; a changed game's link still takes time.
+
+The dependency setup also initializes the SDL codec/font libraries' PIC default
+before creating earlier targets. Previously that default arrived late in the
+cache and caused SDL/Lua/Box2D recompilation on the next configure. A fresh
+configure/reconfigure check now leaves all 975 compile commands unchanged.
+
+The [sample timings and configuration](build_times_2026-11-06.json) retain the
+individual runs and measurement limits. Validation included eight selected
+CTest tests, GCC/Clang parent-game fixtures, Ninja/Make shader dependency tests,
+and representative GCC 3D renderer/Lua compile checks. Windows and a full 3D
+runtime test suite were not run locally.

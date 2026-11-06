@@ -1,5 +1,16 @@
 include(FetchContent)
 
+# SDL_image/SDL_ttf cache this global option. Establish the same default before
+# creating SDL, Lua and Box2D, or the next configure changes those targets'
+# flags and recompiles them all. An explicit caller/toolchain setting wins.
+if(KIN_ENABLE_IMAGE_IO OR KIN_ENABLE_TTF)
+    set(_kin_pic_default ON)
+    if(EMSCRIPTEN)
+        set(_kin_pic_default OFF)
+    endif()
+    option(CMAKE_POSITION_INDEPENDENT_CODE "Build static libraries with -fPIC" ${_kin_pic_default})
+endif()
+
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)

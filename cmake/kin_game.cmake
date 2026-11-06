@@ -249,6 +249,7 @@ function(kin_game target)
 
     kin_enable_release_optimizations(${target})
     kin_enable_release_link_optimizations(${target})
+    kin_configure_game_build(${target})
 
     target_compile_definitions(${target} PRIVATE KIN_GAME_CONTENT_NAME="${ARG_NAME}")
     # Its title, version and icon (a path in its content, from INFO) for its

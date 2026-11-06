@@ -95,6 +95,11 @@ On Windows, run these from a Visual Studio developer prompt. Executables land in
 tests without a display, set `SDL_VIDEO_DRIVER=dummy` and
 `SDL_AUDIO_DRIVER=dummy`.
 
+For the edit/build/run loop, use `cmake --preset dev` (or `dev-3d`) and
+`cmake --build --preset dev --target hex_demo`. These enable precompiled
+headers and optional compiler-cache discovery. See [faster development builds](docs/build_times.md)
+for games using Kin as a subproject, cache setup, and measurements.
+
 | Option | Default | Effect |
 |---|---|---|
 | `KIN_BUILD_GAMES` | top-level only | Demos in `games/` |
