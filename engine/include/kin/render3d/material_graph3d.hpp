@@ -77,8 +77,9 @@ struct MaterialGraphShader3D {
 };
 
 // Material3D::shader_params for the graph's parameters: each one's default, or its value in `values` (by name).
-std::array<f32, surface_param_count3d> material_graph_params3d(const CompiledMaterialGraph3D& graph,
-                                            const std::map<std::string, std::array<f32, 4>>& values = {});
+std::array<f32, surface_param_count3d>
+material_graph_params3d(const CompiledMaterialGraph3D& graph,
+                        const std::map<std::string, std::array<f32, 4>>& values = {});
 
 // The parameters' layout as JSON (kin.material-graph-layout/1), and back: what a cooked graph carries beside its
 // SPIR-V, so that a game binds parameters without the graph's source.
