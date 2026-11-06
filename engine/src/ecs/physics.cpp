@@ -660,14 +660,23 @@ void sync_transforms_from_physics_raw(flecs::world& world, PhysicsWorld& physics
 }
 
 void collect_physics_contacts_raw(flecs::world& world, PhysicsWorld& physics) {
-    kin::each(world, [](PhysicsContactQueue& queue) {
+    // Who listens: few entities, while contacts can be many (a crowd has a
+    // couple for each body). Each contact is matched to its listeners, not
+    // each one's two bodies looked up in the world.
+    thread_local std::vector<std::pair<flecs::entity, PhysicsContactQueue*>> queue_entities;
+    thread_local std::vector<std::pair<flecs::entity, PhysicsOverlapSet*>> overlap_entities;
+    queue_entities.clear();
+    overlap_entities.clear();
+    kin::each(world, [](flecs::entity entity, PhysicsContactQueue& queue) {
         queue.events.clear();
+        queue_entities.emplace_back(entity, &queue);
     });
-    kin::each(world, [](PhysicsOverlapSet& overlaps) {
+    kin::each(world, [](flecs::entity entity, PhysicsOverlapSet& overlaps) {
         overlaps.contacts.clear();
+        overlap_entities.emplace_back(entity, &overlaps);
     });
 
-    if (physics.contacts().empty() && physics.current_contacts().empty()) {
+    if ((queue_entities.empty() || physics.contacts().empty()) && (overlap_entities.empty() || physics.current_contacts().empty())) {
         return;
     }
     // A body's entity is its user id unless the game gave it its own: those
@@ -690,21 +699,34 @@ void collect_physics_contacts_raw(flecs::world& world, PhysicsWorld& physics) {
         const auto found = map->find(PhysicsHandleKey{body});
         return found != map->end() && found->second.is_alive() ? found->second : flecs::entity{};
     };
+    // A listener hears its body's contacts when it is that body's entity.
+    const auto listening = [&]<typename T>(const std::vector<std::pair<flecs::entity, T*>>& listeners) {
+        std::unordered_map<PhysicsHandleKey, T*, PhysicsHandleKeyHash> by_body;
+        for (const auto& [entity, listener] : listeners) {
+            const PhysicsBodyComponent* body = entity.template get<PhysicsBodyComponent>();
+            if (body && physics.is_alive(body->body) && entity_of(body->body) == entity) {
+                by_body.emplace(PhysicsHandleKey{body->body}, listener);
+            }
+        }
+        return by_body;
+    };
 
-    for (const PhysicsContactEvent& event : physics.contacts()) {
-        for (const PhysicsBody body : {event.body_a, event.body_b}) {
-            if (const flecs::entity entity = entity_of(body)) {
-                if (PhysicsContactQueue* queue = entity.get_mut<PhysicsContactQueue>()) {
-                    queue->events.push_back(event);
+    if (!queue_entities.empty() && !physics.contacts().empty()) {
+        const auto queues = listening(queue_entities);
+        for (const PhysicsContactEvent& event : physics.contacts()) {
+            for (const PhysicsBody body : {event.body_a, event.body_b}) {
+                if (const auto found = queues.find(PhysicsHandleKey{body}); found != queues.end()) {
+                    found->second->events.push_back(event);
                 }
             }
         }
     }
-    for (const PhysicsContact& contact : physics.current_contacts()) {
-        for (const PhysicsBody body : {contact.body_a, contact.body_b}) {
-            if (const flecs::entity entity = entity_of(body)) {
-                if (PhysicsOverlapSet* overlaps = entity.get_mut<PhysicsOverlapSet>()) {
-                    overlaps->contacts.push_back(contact);
+    if (!overlap_entities.empty() && !physics.current_contacts().empty()) {
+        const auto sets = listening(overlap_entities);
+        for (const PhysicsContact& contact : physics.current_contacts()) {
+            for (const PhysicsBody body : {contact.body_a, contact.body_b}) {
+                if (const auto found = sets.find(PhysicsHandleKey{body}); found != sets.end()) {
+                    found->second->contacts.push_back(contact);
                 }
             }
         }
