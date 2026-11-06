@@ -1020,6 +1020,9 @@ void sample_animation_players(EcsWorld& world) {
     std::unordered_map<std::string, SpriteSample> sprite_samples;
     std::vector<AnimValue> values;
     std::vector<f32> weights;
+    // What was set on a player that announces, made known once the walk is over:
+    // flecs refuses `modified` on an entity of a table it is walking.
+    std::vector<std::pair<flecs::entity, flecs::id_t>> announced;
 
     world.each([&](flecs::entity entity, AnimationPlayer& player) {
         if (player.layers.empty()) {
@@ -1056,7 +1059,7 @@ void sample_animation_players(EcsWorld& world) {
                         }
                         accessor->set(component, sampled_value(track, *active.cursor, i));
                         if (player.announce) {
-                            target_entity.modified(accessor->component);
+                            announced.emplace_back(target_entity, accessor->component);
                         }
                     }
                 }
@@ -1189,7 +1192,7 @@ void sample_animation_players(EcsWorld& world) {
                 continue;
             }
             if (player.announce) {
-                flecs::entity{topmost.target_entity}.modified(accessor->component);
+                announced.emplace_back(flecs::entity{topmost.target_entity}, accessor->component);
             }
         }
 
@@ -1200,6 +1203,11 @@ void sample_animation_players(EcsWorld& world) {
             set_sprite_renderer_sprite(EcsEntity{sprite_sample.target_entity}, player.sprite_catalog, key.sprite_id, key.has_pivot, key.pivot);
         }
     });
+    for (const auto& [target, component] : announced) {
+        if (target.is_alive()) {
+            target.modified(component);
+        }
+    }
 }
 
 } // namespace kin
