@@ -1,8 +1,10 @@
 #include "compact_renderer2d_backend.hpp"
+#include "../platform/window_points.hpp"
 #include <kin/platform/window.hpp>
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <stdexcept>
 
 namespace kin {
@@ -25,7 +27,9 @@ public:
     Vec2i window_size() const override {
         Vec2i size;
         if (!SDL_GetWindowSize(_window, &size.x, &size.y)) sdl_error("SDL_GetWindowSize");
-        return size;
+        // In points, as the coordinates it maps (window_points.hpp).
+        const float scale = detail::window_units_per_point(_window);
+        return {static_cast<i32>(std::lround(size.x / scale)), static_cast<i32>(std::lround(size.y / scale))};
     }
     void present_rgba(std::span<const u8> pixels, Vec2i size) override {
         auto* surface = SDL_GetWindowSurface(_window); // re-fetch after every resize

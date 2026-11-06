@@ -1,5 +1,6 @@
 #include "sdl_renderer2d_backend.hpp"
 #include "rounded_rect_loop.hpp"
+#include "../platform/window_points.hpp"
 
 #include <kin/platform/log.hpp>
 
@@ -534,16 +535,19 @@ Vec2i SdlRenderer2DBackend::output_size() const {
     return size;
 }
 
+// kin's window coordinates are points; SDL's its own window units (window_points.hpp).
 Vec2f SdlRenderer2DBackend::window_to_logical(Vec2f window_px) const {
+    const f32 scale = detail::window_units_per_point(SDL_GetRenderWindow(_handle));
     Vec2f logical{};
-    SDL_RenderCoordinatesFromWindow(_handle, window_px.x, window_px.y, &logical.x, &logical.y);
+    SDL_RenderCoordinatesFromWindow(_handle, window_px.x * scale, window_px.y * scale, &logical.x, &logical.y);
     return logical;
 }
 
 Vec2f SdlRenderer2DBackend::logical_to_window(Vec2f logical) const {
+    const f32 scale = detail::window_units_per_point(SDL_GetRenderWindow(_handle));
     Vec2f window{};
     SDL_RenderCoordinatesToWindow(_handle, logical.x, logical.y, &window.x, &window.y);
-    return window;
+    return {window.x / scale, window.y / scale};
 }
 
 void SdlRenderer2DBackend::fill_rect(Rectf rect, Color color) {

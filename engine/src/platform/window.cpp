@@ -2,6 +2,8 @@
 
 #include <kin/assets/image.hpp>
 
+#include "window_points.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
@@ -21,6 +23,20 @@ SDL_Window* to_sdl_window(void* handle) {
 
 const SDL_Window* to_sdl_window(const void* handle) {
     return static_cast<const SDL_Window*>(handle);
+}
+
+using detail::window_units_per_point;
+
+[[maybe_unused]] bool window_point_scale_override_unset() {
+    return detail::window_point_scale_override() <= 0.0f;
+}
+
+i32 to_points(int units, float scale) {
+    return static_cast<i32>(std::lround(static_cast<float>(units) / scale));
+}
+
+int to_units(i32 points, float scale) {
+    return static_cast<int>(std::lround(static_cast<float>(points) * scale));
 }
 
 bool inside(Rectf r, Vec2f p) {
@@ -43,11 +59,13 @@ SDL_HitTestResult chrome_hit_test(SDL_Window* window, const SDL_Point* point, vo
     SDL_GetWindowSize(window, &size.x, &size.y);
     const SDL_WindowFlags flags = SDL_GetWindowFlags(window);
     const bool resizable = (flags & SDL_WINDOW_RESIZABLE) != 0 && (flags & (SDL_WINDOW_MAXIMIZED | SDL_WINDOW_FULLSCREEN)) == 0;
+    // The chrome is in points, SDL's point and size in its window units.
+    const f32 scale = window_units_per_point(window);
     WindowArea area = WindowArea::Client;
     {
         const std::scoped_lock lock(state->mutex);
-        area = window_area_at(state->chrome, {static_cast<f32>(point->x), static_cast<f32>(point->y)},
-                              {static_cast<f32>(size.x), static_cast<f32>(size.y)}, resizable);
+        area = window_area_at(state->chrome, {static_cast<f32>(point->x) / scale, static_cast<f32>(point->y) / scale},
+                              {static_cast<f32>(size.x) / scale, static_cast<f32>(size.y) / scale}, resizable);
     }
     switch (area) {
     case WindowArea::Client: return SDL_HITTEST_NORMAL;
@@ -101,7 +119,14 @@ Vec2i primary_display_size() {
     const SDL_DisplayID display = SDL_GetPrimaryDisplay();
     SDL_Rect bounds{};
     if (display != 0 && SDL_GetDisplayUsableBounds(display, &bounds)) {
-        out = {bounds.w, bounds.h};
+        float scale = window_units_per_point(static_cast<SDL_Window*>(nullptr));
+#if defined(SDL_PLATFORM_ANDROID)
+        if (window_point_scale_override_unset()) {
+            const float content = SDL_GetDisplayContentScale(display);
+            scale = std::isfinite(content) && content > 0.0f ? content : 1.0f;
+        }
+#endif
+        out = {to_points(bounds.w, scale), to_points(bounds.h, scale)}; // in points, as a window's size
     }
     // Leave the subsystem exactly as it was found.
     if (!had_video) {
@@ -151,7 +176,9 @@ Window::Window(const WindowConfig& config) {
 #endif
 
     const std::string title{config.title};
-    _handle = SDL_CreateWindow(title.c_str(), config.width, config.height, flags);
+    // The size asked for is in points (window_points.hpp).
+    const float scale = window_units_per_point(static_cast<SDL_Window*>(nullptr));
+    _handle = SDL_CreateWindow(title.c_str(), to_units(config.width, scale), to_units(config.height, scale), flags);
     if (!_handle) {
         throw std::runtime_error(std::string("SDL_CreateWindow failed: ") + SDL_GetError());
     }
@@ -188,9 +215,11 @@ Vec2i Window::size() const {
         return {};
     }
 
-    Vec2i result{};
-    SDL_GetWindowSize(to_sdl_window(_handle), &result.x, &result.y);
-    return result;
+    Vec2i units{};
+    SDL_Window* window = to_sdl_window(_handle);
+    SDL_GetWindowSize(window, &units.x, &units.y);
+    const float scale = window_units_per_point(window);
+    return {to_points(units.x, scale), to_points(units.y, scale)};
 }
 
 Vec2i Window::pixel_size() const {
@@ -206,21 +235,34 @@ Rectf Window::safe_area() const {
     if (!_handle || !SDL_GetWindowSafeArea(to_sdl_window(_handle), &rect) || rect.w <= 0 || rect.h <= 0) {
         return {0.0f, 0.0f, static_cast<f32>(whole.x), static_cast<f32>(whole.y)};
     }
-    return {static_cast<f32>(rect.x), static_cast<f32>(rect.y), static_cast<f32>(rect.w), static_cast<f32>(rect.h)};
+    const f32 scale = window_units_per_point(to_sdl_window(_handle));
+    return {static_cast<f32>(rect.x) / scale, static_cast<f32>(rect.y) / scale, static_cast<f32>(rect.w) / scale,
+            static_cast<f32>(rect.h) / scale};
 }
 
 f32 Window::display_scale() const {
+    if (const f32 forced = detail::window_point_scale_override(); forced > 0.0f && _handle) {
+        // A density set for the window's points (window_points.hpp): its pixels a point.
+        const f32 density = SDL_GetWindowPixelDensity(to_sdl_window(_handle));
+        return forced * (std::isfinite(density) && density > 0.0f ? density : 1.0f);
+    }
     const f32 scale = _handle ? SDL_GetWindowDisplayScale(to_sdl_window(_handle)) : 1.0f;
     return std::isfinite(scale) && scale > 0.0f ? scale : 1.0f;
 }
 
 void Window::set_minimum_size(Vec2i size) {
-    if (_handle) SDL_SetWindowMinimumSize(to_sdl_window(_handle), size.x, size.y);
+    if (_handle) {
+        SDL_Window* window = to_sdl_window(_handle);
+        const float scale = window_units_per_point(window);
+        SDL_SetWindowMinimumSize(window, to_units(size.x, scale), to_units(size.y, scale));
+    }
 }
 
 void Window::set_size(Vec2i size) {
     if (_handle) {
-        SDL_SetWindowSize(to_sdl_window(_handle), size.x, size.y);
+        SDL_Window* window = to_sdl_window(_handle);
+        const float scale = window_units_per_point(window);
+        SDL_SetWindowSize(window, to_units(size.x, scale), to_units(size.y, scale));
     }
 }
 
@@ -355,9 +397,10 @@ void Window::set_text_input_area(Rectf area, i32 cursor) {
     if (!_handle) {
         return;
     }
-    const SDL_Rect rect{static_cast<int>(area.x), static_cast<int>(area.y), std::max(1, static_cast<int>(area.w)),
-                        std::max(1, static_cast<int>(area.h))};
-    SDL_SetTextInputArea(to_sdl_window(_handle), &rect, cursor);
+    const f32 scale = window_units_per_point(to_sdl_window(_handle));
+    const SDL_Rect rect{static_cast<int>(area.x * scale), static_cast<int>(area.y * scale), std::max(1, static_cast<int>(area.w * scale)),
+                        std::max(1, static_cast<int>(area.h * scale))};
+    SDL_SetTextInputArea(to_sdl_window(_handle), &rect, static_cast<int>(static_cast<f32>(cursor) * scale));
 }
 
 bool Window::text_input_enabled() const {
