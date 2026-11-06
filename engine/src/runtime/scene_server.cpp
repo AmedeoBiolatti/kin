@@ -349,8 +349,11 @@ void write_kin_world_snapshot_json(JsonWriter& json, EcsWorld& world, bool inclu
     json.key("schedule");
     write_schedule_snapshot_json(json, world.systems().schedule_snapshot());
     if (include_events) {
+        // The log records only once asked for (EcsEventRegistry::record): the
+        // first answer has what happened since, the next ones more.
         json.key("events");
         write_events_json(json, world.events());
+        world.events().record(true);
     }
     json.end_object();
 }

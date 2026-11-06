@@ -2,7 +2,8 @@
 // kin's Transform2D and a script's Velocity, moved and bounced each update by
 //   - a Python @system over both;
 //   - a Python component's update(self, dt);
-//   - plain C++ over the same components.
+//   - plain C++ over the same components;
+//   - the @system again with the world's change log recording, as tools have it.
 // Run: ninja kin_python_bench && ./bin/kin_python_bench [entities] [updates]
 
 #include <kin/ecs/component.hpp>
@@ -82,13 +83,14 @@ void fail_on_problems(const kin::PythonScripts& scripts) {
     }
 }
 
-double run_python(const char* script, int count, int updates) {
+double run_python(const char* script, int count, int updates, bool recording = false) {
     const fs::path dir = fs::temp_directory_path() / "kin_python_bench";
     fs::remove_all(dir);
     fs::create_directories(dir / "scripts");
     std::ofstream(dir / "scripts/bench.py", std::ios::binary) << script;
     kin::EcsWorld world;
     kin::register_builtin_editor_components(world);
+    world.events().record(recording); // what tools turn on: costs each write
     kin::PythonScripts scripts{world, {.content = dir, .check_frames = 0, .instruction_limit = 0}};
     fail_on_problems(scripts);
     populate(world, count);
@@ -137,6 +139,7 @@ int main(int argc, char** argv) {
     std::printf("%d entities, %d updates, ms per update\n", count, updates);
     std::printf("  python @system      %8.3f\n", run_python(system_script, count, updates));
     std::printf("  python update(self) %8.3f\n", run_python(method_script, count, updates));
+    std::printf("  python @system, the world's change log recording %8.3f\n", run_python(system_script, count, updates, true));
     std::printf("  c++                 %8.3f\n", run_cpp(count, updates));
     return 0;
 }

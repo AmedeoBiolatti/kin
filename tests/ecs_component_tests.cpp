@@ -276,6 +276,7 @@ void test_data_add_remove_snapshot_and_patch() {
     assert(std::get<kin::ComponentEntityRef>(field<kin::ComponentEntityRef>(*snapshot, "target")->value).id == 0);
     assert(std::get<kin::ComponentAssetRef>(field<kin::ComponentAssetRef>(*snapshot, "asset")->value).id == "asset/default");
 
+    world.events().record(true);
     world.events().clear();
     assert(world.components().patch_field(entity, "DataStats", "hp", kin::i32{42}));
     snapshot = world.components().snapshot(entity, data_id);
@@ -508,6 +509,7 @@ void test_runtime_component_copy_and_owner_patch_policy() {
         ++calls;assert(e.id()==source.id()&&component=="Runtime"&&name=="value");
         assert(std::get<kin::i32>(value)==10);error="owner rejected edit";return false;
     });
+    original.events().record(true);
     const auto sequence=original.events().dirty_state().last_event_sequence;
     assert(!original.components().patch_field(source,"Runtime","value",kin::i32{10}));
     assert(calls==1&&original.components().last_error()=="owner rejected edit"&&source.get<Runtime>()->value==7);
@@ -515,6 +517,7 @@ void test_runtime_component_copy_and_owner_patch_policy() {
     original.components().set_field_patch_handler({});
     assert(original.components().patch_field(source,"Runtime","value",kin::i32{10}));
     assert(source.get<Runtime>()->value==10);
+    assert(!original.events().since(sequence).empty());
 }
 
 } // namespace

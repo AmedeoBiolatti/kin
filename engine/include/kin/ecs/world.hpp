@@ -257,6 +257,15 @@ public:
     EcsEventRegistry(const EcsEventRegistry&) = delete;
     EcsEventRegistry& operator=(const EcsEventRegistry&) = delete;
 
+    // Whether the log records. Off by default: watching every add, set and
+    // remove of a registered component makes each about three times as slow
+    // (tests/ecs_bench.cpp), and only tools read the log.
+    // A tool or a test turns it on and it records from then on (the scene
+    // server does when first asked for a world's events). Off, it removes its
+    // flecs observers and records nothing; what it holds stays.
+    void record(bool on);
+    bool recording() const { return _recording; }
+
     const std::vector<EcsEvent>& snapshot() const { return _events; }
     std::vector<EcsEvent> since(u64 sequence) const;
     const EcsDirtyState& dirty_state() const { return _dirty; }
@@ -300,18 +309,29 @@ private:
         ComponentId component_id = 0;
     };
 
+    // A registered component, whose observers record() installs.
+    struct Observed {
+        ComponentId component_id = 0;
+        std::string component_name;
+        void (*install)(EcsEventRegistry&, const Observed&) = nullptr;
+    };
+
+    template <typename T>
+    void install_observers(const Observed& observed);
     bool consume_observer_suppression(EcsEventKind kind, EcsId entity, ComponentId component_id);
     void apply_dirty_flags(const EcsEvent& event);
     void trim_events();
 
     EcsWorld* _world = nullptr;
     std::vector<EcsEvent> _events;
+    std::vector<Observed> _observed;
     std::vector<flecs::observer> _component_observers;
     std::vector<ObserverSuppression> _observer_suppressions;
     EcsDirtyState _dirty;
     u64 _next_sequence = 1;
     u64 _frame = 0;
     std::size_t _max_events = 16384;
+    bool _recording = false;
 };
 
 struct EcsEntityHandle {
@@ -672,6 +692,20 @@ flecs::query<Components...> kept_query(flecs::world& world, const void* key, Mak
 
 template <typename T>
 void EcsEventRegistry::observe_component(ComponentId component_id, std::string component_name) {
+    _observed.push_back({.component_id = component_id,
+                         .component_name = std::move(component_name),
+                         .install = [](EcsEventRegistry& events, const Observed& observed) {
+                             events.install_observers<T>(observed);
+                         }});
+    if (_recording) {
+        install_observers<T>(_observed.back());
+    }
+}
+
+template <typename T>
+void EcsEventRegistry::install_observers(const Observed& observed) {
+    const ComponentId component_id = observed.component_id;
+    const std::string& component_name = observed.component_name;
     const std::string base_name = "kin::ecs::events::" + component_name;
     _component_observers.push_back(_world->raw()
                                        .observer<T>((base_name + "::on_add").c_str())

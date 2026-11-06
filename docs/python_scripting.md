@@ -358,16 +358,15 @@ each with `Transform2D` and a script's `Velocity`, every update:
 
 | | ms per update |
 |---|---|
-| Python `@system` | 10.4 |
-| Python `update(self)` | 10.4 |
-| C++, the same components | 0.49 |
+| Python `@system` | 7.1 |
+| Python `update(self)` | 8.2 |
+| C++, the same components | 0.59 |
 
 The PocketPy prototype measured Lua's entity scripts at 37.7 ms on a similar
-test. The rest of the time is split:
-- PocketPy's interpreter and attribute lookups take about half;
-- kin's ECS change log takes about 15%: every component set records an event,
-  for Lua's writes and C++'s `set` too, so it is an engine-wide cost;
-- the rest is the views' field access.
+test. Most of the time goes to PocketPy's interpreter and attribute lookups,
+and the rest to the views' field access. With the world's change log recording
+(as when a tool asks for it, docs/ecs_events.md), the `@system` takes 9.4 ms,
+because every field it writes is then also recorded.
 
 A few hundred scripted entities cost well under a millisecond.
 

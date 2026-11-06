@@ -10,12 +10,27 @@ EcsEventRegistry::EcsEventRegistry(EcsWorld& world)
 }
 
 EcsEventRegistry::~EcsEventRegistry() {
+    record(false);
+}
+
+void EcsEventRegistry::record(bool on) {
+    if (on == _recording) {
+        return;
+    }
+    _recording = on;
+    if (on) {
+        for (const Observed& observed : _observed) {
+            observed.install(*this, observed);
+        }
+        return;
+    }
     for (flecs::observer& observer : _component_observers) {
         if (observer.is_valid() && observer.is_alive()) {
             observer.destruct();
         }
     }
     _component_observers.clear();
+    _observer_suppressions.clear();
 }
 
 std::vector<EcsEvent> EcsEventRegistry::since(u64 sequence) const {
@@ -43,6 +58,9 @@ void EcsEventRegistry::begin_frame() {
 }
 
 void EcsEventRegistry::emit(EcsEvent event) {
+    if (!_recording) {
+        return;
+    }
     event.sequence = _next_sequence++;
     event.frame = _frame;
     _dirty.last_event_sequence = event.sequence;
@@ -85,6 +103,9 @@ void EcsEventRegistry::emit_component(EcsEventKind kind,
                                       std::string component_name,
                                       std::string field_name,
                                       std::string message) {
+    if (!_recording) {
+        return;
+    }
     const EcsId entity_id = entity ? entity.id() : 0;
     if (source == EcsEventSource::FlecsObserver && consume_observer_suppression(kind, entity_id, component_id)) {
         return;
@@ -110,6 +131,9 @@ void EcsEventRegistry::emit_system(EcsEventKind kind, std::string system_id, std
 }
 
 void EcsEventRegistry::suppress_next_observer(EcsEventKind kind, EcsId entity, ComponentId component_id) {
+    if (!_recording) {
+        return; // no observer to suppress
+    }
     _observer_suppressions.push_back({
         .kind = kind,
         .entity = entity,
