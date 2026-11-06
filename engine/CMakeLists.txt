@@ -33,6 +33,20 @@ if(ANDROID)
 endif()
 kin_enable_release_optimizations(kin_foundation)
 
+# Keep reflection/template instantiations out of scene parsing and distribute
+# them across smaller files without changing the public registration sequence.
+set(_kin_scene_component_sources
+    src/scene/scene_components.cpp
+    src/scene/scene_components_render.cpp
+    src/scene/scene_components_particles.cpp
+    src/scene/scene_components_gameplay.cpp
+    src/scene/scene_components_lighting.cpp
+    src/scene/scene_components_view.cpp
+)
+if(KIN_ENABLE_PHYSICS)
+    list(APPEND _kin_scene_component_sources src/scene/scene_components_physics2d.cpp)
+endif()
+
 add_library(kin_engine STATIC
     src/anim/animation.cpp
     src/anim/anim_format.cpp
@@ -138,6 +152,7 @@ add_library(kin_engine STATIC
     src/runtime/scene_app.cpp
     src/runtime/windowed_app.cpp
     src/scene/scene_asset.cpp
+    ${_kin_scene_component_sources}
     src/scene/scene_asset_runtime.cpp
     src/scene/live_scene2d.cpp
     src/scene/scene_preload2d.cpp
@@ -368,7 +383,8 @@ if(MSVC)
     set_source_files_properties(src/scripting/script_engine.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
     set_source_files_properties(src/ecs/ui2.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
     # Every built-in component's registration, and the physics systems' queries.
-    set_source_files_properties(src/scene/scene_asset.cpp src/ecs/physics.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+    set_source_files_properties(src/scene/scene_asset.cpp ${_kin_scene_component_sources}
+        src/ecs/physics.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
 target_compile_definitions(kin_engine PUBLIC
     "$<$<OR:$<BOOL:${KIN_ENABLE_PROFILING}>,$<AND:$<CONFIG:Release>,$<BOOL:${KIN_ENABLE_RELEASE_PROFILING}>>>:KIN_ENABLE_PROFILING>"

@@ -215,8 +215,49 @@ whole-game performance or full 3D runtime behavior. The original compiler
 presets remain available. Individual samples and validation scope are in the
 [compiler comparison data](build_compilers_2026-11-06.json).
 
-The remaining structural hotspot is `register_builtin_editor_components` in
-`engine/src/scene/scene_asset.cpp`: a large set of component/schema template
-instantiations shares one translation unit with scene parsing. Separating the
-registrations into smaller groups is the next experiment for reducing peak
-memory and the longest compilation task on both compilers.
+### Scene registration split
+
+`scene_asset.cpp` now contains parsing, serialization and scene instantiation.
+`scene_components.cpp` dispatches the built-in registrations in their original
+order to six smaller files: rendering/audio, physics, particles/tilemaps,
+gameplay, lighting, and view/UI. Physics registration is compiled only when
+enabled. Component IDs, schemas and registration callbacks retain their
+existing behavior. Games using `kin::engine` pick up the change automatically.
+
+The following local measurements use the same Release/PCH settings as above,
+with compiler caching disabled. The original file was compiled once per
+compiler; the split measurements are medians of three runs:
+
+| Compilation workload | GCC before | GCC after | Clang before | Clang after |
+|---|---:|---:|---:|---:|
+| Parser source edit, compile only | 63.51 s | 12.80 s | 54.01 s | 9.24 s |
+| All scene files, synthetic four-job batch | 63.51 s | 31.10 s | 54.01 s | 34.63 s |
+| Largest per-process peak RSS across these files | 2,186 MiB | 841 MiB | 919 MiB | 438 MiB |
+
+The first row excludes rebuilding the registrations after a parser-only edit.
+The second rebuilds all eight resulting files with four workers, compared
+with the original single file. It excludes PCH creation, archive/link time
+and the rest of the engine; it is not a full clean-build measurement. Other
+builds were active on this machine, and the baseline has only one fresh sample
+per compiler, so treat the ratios as estimates.
+
+Splitting trades total work for shorter individual compilation tasks. Summed
+compiler CPU time for all scene files rose from 63.10 to 108.01 s with GCC,
+and from 53.91 to 110.87 s with Clang. Common template work is repeated across
+the smaller files. A build with little parallelism, or a clean engine build
+already using every core, can therefore get slower. Per-process memory
+reductions do not establish the total memory used by a parallel build.
+
+GCC and Clang each passed the nine selected game/runtime CTest tests. A
+before/after probe compared all 47 registered components' IDs, ordered field
+metadata and default values exactly. The permanent scene test also checks
+registration idempotence, ordering, default snapshots and preservation of
+caller-defined schemas. All seven scene files compiled with GCC without PCH,
+physics, scripting, audio, image I/O or TTF. All eight compiled with Clang's
+experimental 3D configuration. These additional checks cover compilation;
+Windows and a full 3D runtime suite were not tested.
+
+The [scene split data](build_scene_split_2026-11-07.json) includes individual
+samples, queue order, CPU totals and measurement limits. The next useful
+measurement is a paired full engine rebuild at the developer's usual job
+count, before choosing further splits of the Lua binding translation units.
