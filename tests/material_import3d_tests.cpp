@@ -1126,6 +1126,11 @@ void unreal_function_outputs() {
         const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
         const auto g = compile_material_graph3d(text);
         CHECK(g.ok() && g.surface.find("0.875") != std::string::npos && g.surface.find("0.125") == std::string::npos);
+        // Its base colour not connected: black, as Unreal's (not the vertex colour, kin's surface's start), the
+        // material's colour white (the graph's vertex colour the mesh's alone).
+        CHECK(text.find("\"base_color\": [0, 0, 0]") != std::string::npos);
+        const auto c = m->asset.base.material.color;
+        CHECK(c && c->r == 255 && c->g == 255 && c->b == 255);
     }
 }
 

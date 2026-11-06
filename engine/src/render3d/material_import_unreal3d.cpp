@@ -1756,6 +1756,10 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
                     v = b.add("multiply", {{"a", b.member(b.fit(*v, 3), "xzy")}, {"b", "0.01"}});
                 b.outputs[target] = *v;
             }
+            // A base colour not connected is black in Unreal (an unlit material's: its emissive colour), not kin's
+            // surface's (the vertex colour): the graph says so.
+            if (!(outputs && outputs->find(unlit ? "EmissiveColor" : "BaseColor")))
+                b.outputs["base_color"] = "[0, 0, 0]";
         };
         build(*graph);
         // Parameters past Material3D::shader_params' floats (as kin's compiler packs them): the material's values in a
@@ -1840,8 +1844,8 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         auto& p = imported.asset.base.material;
         p.graph = imported.graph.lexically_relative(x.content);
         // A graph's vertex colour is kin's (the mesh's times the material's colour): where the graph gives the base
-        // colour or the alpha, the material's is white or opaque, as Unreal's Vertex Color is the mesh's alone. (Where
-        // it does not, the Tier 1 colour stays: the surface starts from it.)
+        // colour (black where Unreal's is not connected) or the alpha, the material's is white or opaque, as Unreal's
+        // Vertex Color is the mesh's alone. (Where it does not, its reading failed: the Tier 1 colour stays.)
         Color c = p.color.value_or(Color{255, 255, 255, 255});
         if (b.outputs.contains("base_color"))
             c.r = c.g = c.b = 255;
