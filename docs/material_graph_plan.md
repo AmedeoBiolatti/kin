@@ -46,7 +46,8 @@ Two layers, as Godot has both visual shaders and text shaders:
    with typed, ordered statements, unused nodes dropped. Nodes, like Godot's and Unreal's:
    - Inputs: uv, position, normal, view, vertex colour, time, screen position, camera distance, the object's position.
    - Parameters: float, vec2/3/4, colour, texture.
-   - Textures: sample, sample with mip bias or level, triplanar, normal-map decode, texture arrays.
+   - Textures: sample, sample with mip bias or level, triplanar, equirectangular (by direction), normal-map decode,
+     texture arrays.
    - Maths: arithmetic, mix, clamp, smoothstep, remap, dot, cross, length, sin, cos, pow, frac, step, swizzle, split,
      join.
    - Procedural: value, gradient and cellular noise, fbm, checker, gradients.
@@ -272,6 +273,11 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   of each surface: kin_surface_vertex.inc.glsl, the stock vertex shaders' hook; every pass that places vertices; a
   view's previous time for the velocity), function calls' outputs by index (157 of 1231 references in the Fab corpus
   had the wrong name: the island landscape's normals were its base colour), OpenEXR maps in the import. BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
+  Then, from the 107-material comparison with Unreal's renders: cube maps as their export (run in the editor,
+  `unreal_export_editor.py`: the commandlet asserts unwrapping a cube) unwraps them, a Radiance HDR in longitude and
+  latitude, sampled by the `texture_equirect` node (kin's environment layout, seamless derivatives) in the direction
+  (-y, z, x) of Unreal's; Rotate About Axis; View Property (view size, camera, the temporal sample's index by the
+  time); Screen Position's PixelPosition; a domain not a surface's said.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

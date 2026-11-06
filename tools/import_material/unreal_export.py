@@ -64,11 +64,11 @@ class Exporter:
         self.used.add(path)
         if path in self.textures:
             return self.textures[path]["file"]
-        # PNG, else EXR (float sources), each by the exporter Unreal finds for the file type: it asks the exporter
-        # first, where forcing TextureExporterPNG asserts on a float texture (Assertion failed: SupportsTexture),
-        # taking the editor down.
+        # PNG, else EXR (float sources), else HDR (a cube: unwrapped to longitude and latitude), each by the exporter
+        # Unreal finds for the file type: it asks the exporter first, where forcing TextureExporterPNG asserts on a
+        # float texture (Assertion failed: SupportsTexture), taking the editor down.
         ok, rel = False, None
-        for ext in (".png", ".exr"):
+        for ext in ((".hdr",) if isinstance(tex, unreal.TextureCube) else (".png", ".exr")):
             rel = "textures" + path + ext
             file = os.path.join(self.out, rel)
             os.makedirs(os.path.dirname(file), exist_ok=True)
@@ -180,7 +180,9 @@ class Exporter:
                  # Transform / TransformPosition, BumpOffset, DepthFade, LandscapeLayerCoords, CollectionParameter
                  "transform_source_type", "transform_type", "height_ratio", "reference_plane", "fade_distance_default",
                  "opacity_default", "mapping_type", "custom_uv_type", "mapping_scale", "mapping_rotation",
-                 "mapping_pan_u", "mapping_pan_v", "collection")
+                 "mapping_pan_u", "mapping_pan_v", "collection",
+                 # ViewProperty
+                 "property")
         for key in sorted(set(dir(expression)) | set(named)):
             if key.startswith("_") or key in skip:
                 continue
@@ -454,6 +456,10 @@ class Exporter:
                 pass
         doc.update({"blend_mode": enum_name(blend), "shading_model": enum_name(model), "two_sided": bool(two_sided),
                     "opacity_mask_clip_value": float(clip)})
+        try:  # a surface's (MD_SURFACE), a post process's, a volume's, ...
+            doc["material_domain"] = enum_name(base.get_editor_property("material_domain"))
+        except Exception:
+            pass
         try:  # its Normal in tangent space (the default), else in the world's
             doc["tangent_space_normal"] = bool(base.get_editor_property("tangent_space_normal"))
         except Exception:

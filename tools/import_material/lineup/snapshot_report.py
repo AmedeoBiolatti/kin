@@ -101,6 +101,36 @@ def main():
     open(os.path.join(out_dir, "report.md"), "w").write("\n".join(lines) + "\n")
     print("\n".join(lines))
 
+    # Each material's verdict, worst first: close (mean difference within 4 levels on the quad and 8 on the sphere, whose
+    # edge's pixels differ the most), minor (10 and 15), else major; "not a surface" where the list says so (a post
+    # process's or a volume's material: a quad and a sphere don't picture it).
+    def verdict(r):
+        if r.get("missing"):
+            return "missing", 1e9
+        if "not-surface" in r["note"].split():
+            return "not a surface", -1.0
+        q, sph = r["objects"].get("quad"), r["objects"].get("sphere")
+        qm = q["mean"] if q else 0.0
+        sm = sph["mean"] if sph else 0.0
+        kind = "close" if qm <= 4 and sm <= 8 else "minor" if qm <= 10 and sm <= 15 else "major"
+        return kind, max(qm, sm / 2)
+    ranked = sorted(report, key=lambda r: -verdict(r)[1])
+    counts = {}
+    out = ["| verdict | material | note | quad mean | sphere mean | quad FLIP | sphere FLIP |", "|---|---|---|---:|---:|---:|---:|"]
+    for r in ranked:
+        kind, _ = verdict(r)
+        counts[kind] = counts.get(kind, 0) + 1
+        if r.get("missing"):
+            out.append(f"| missing | {r['material']} | {r['note']} | | | | |")
+            continue
+        q, sph = r["objects"].get("quad") or {}, r["objects"].get("sphere") or {}
+        cell = lambda o, k, f: (f % o[k]) if o and k in o else "-"
+        out.append(f"| {kind} | {r['material'].rsplit('/', 1)[-1]} | {r['note']} | {cell(q, 'mean', '%.1f')} | "
+                   f"{cell(sph, 'mean', '%.1f')} | {cell(q, 'flip', '%.3f')} | {cell(sph, 'flip', '%.3f')} |")
+    summary = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+    open(os.path.join(out_dir, "ranked.md"), "w").write(summary + "\n\n" + "\n".join(out) + "\n")
+    print("\n" + summary)
+
 
 if __name__ == "__main__":
     main()

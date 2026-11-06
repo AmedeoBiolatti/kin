@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -317,6 +318,125 @@ f32 half_to_float(u16 h) {
     return out;
 }
 
+// Float channels (`which`: each of R, G, B, A's plane, -1: none, then 0, alpha 1) as 8-bit RGBA, each channel fitted
+// into 0 to 1 over its least and largest value where they leave it (said in `range`).
+// With `log`, R, G and B (light: none below 0) by their logarithm, over the least to the largest (the least at most 16
+// stops below: darker reads as that).
+Image fit(const std::vector<std::vector<f32>>& planes, const std::array<int, 4>& which, size_t width, size_t height,
+          ImageRange* range, bool log = false) {
+    ImageRange fitted;
+    fitted.log = log;
+    const auto logarithmic = [&](int k) { return log && k < 3; };
+    for (int k = 0; k < 4; ++k) {
+        if (which[k] < 0)
+            continue;
+        const auto [lo, hi] = std::minmax_element(planes[size_t(which[k])].begin(), planes[size_t(which[k])].end());
+        if (logarithmic(k)) {
+            const f32 top = *hi > 0.0f ? *hi : 1.0f, bottom = std::max(*lo, top / 65536.0f);
+            fitted.bias[k] = std::log2(bottom);
+            fitted.scale[k] = top > bottom ? std::log2(top) - fitted.bias[k] : 1.0f;
+        } else if (*lo < 0.0f || *hi > 1.0f) {
+            fitted.bias[k] = *lo;
+            fitted.scale[k] = *hi > *lo ? *hi - *lo : 1.0f;
+        }
+    }
+    Image image{Vec2i{i32(width), i32(height)}, std::vector<u8>(width * height * 4)};
+    for (size_t i = 0; i < width * height; ++i)
+        for (int k = 0; k < 4; ++k) {
+            f32 v = which[k] < 0 ? (k == 3 ? 1.0f : 0.0f) : planes[size_t(which[k])][i];
+            if (which[k] >= 0)
+                v = ((logarithmic(k) ? std::log2(std::max(v, std::exp2(fitted.bias[k]))) : v) - fitted.bias[k]) /
+                    fitted.scale[k];
+            image.rgba[i * 4 + size_t(k)] = u8(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    if (range)
+        *range = fitted;
+    return image;
+}
+
+// Radiance RGBE (.hdr, Unreal's export of a cube map: unwrapped to longitude and latitude): its header, a "-Y h +X w"
+// size, then scanlines flat, in the old run-length coding or the new (each component's run-length coded apart). Its
+// colour fitted logarithmically (a sky's precision beside its sun's).
+Image decode_hdr(std::span<const u8> b, ImageRange* range) {
+    const auto fail = [](const std::string& why) { throw std::runtime_error("Radiance HDR: " + why); };
+    size_t at = 0;
+    const auto line = [&] {
+        std::string out;
+        while (at < b.size() && b[at] != '\n')
+            out += char(b[at++]);
+        if (at >= b.size())
+            fail("cut short in its header");
+        ++at;
+        return out;
+    };
+    bool rgbe = false;
+    for (std::string l = line(); !l.empty(); l = line())
+        if (l.starts_with("FORMAT=")) {
+            if (l != "FORMAT=32-bit_rle_rgbe")
+                fail(l + " (not RGBE)");
+            rgbe = true;
+        }
+    if (!rgbe)
+        fail("no FORMAT=32-bit_rle_rgbe");
+    int width = 0, height = 0;
+    if (std::sscanf(line().c_str(), "-Y %d +X %d", &height, &width) != 2 || width <= 0 || height <= 0 ||
+        width > 32768 || height > 32768)
+        fail("not a -Y h +X w picture");
+    const size_t w = size_t(width), h = size_t(height);
+    std::vector<u8> texels(w * h * 4);
+    const auto byte = [&] {
+        if (at >= b.size())
+            fail("cut short");
+        return b[at++];
+    };
+    for (size_t y = 0; y < h; ++y) {
+        u8* row = texels.data() + y * w * 4;
+        if (w >= 8 && w < 32768 && at + 4 <= b.size() && b[at] == 2 && b[at + 1] == 2 && (b[at + 2] & 0x80) == 0) {
+            if ((size_t(b[at + 2]) << 8 | b[at + 3]) != w)
+                fail("a scanline of the wrong width");
+            at += 4;
+            for (size_t c = 0; c < 4; ++c)
+                for (size_t x = 0; x < w;) {
+                    size_t count = byte();
+                    const bool run = count > 128;
+                    if (run)
+                        count -= 128;
+                    if (count == 0 || x + count > w)
+                        fail("a run past its scanline");
+                    const u8 v = run ? byte() : 0;
+                    for (size_t k = 0; k < count; ++k)
+                        row[(x++) * 4 + c] = run ? v : byte();
+                }
+            continue;
+        }
+        for (size_t x = 0, shift = 0; x < w;) { // flat, or the old coding (1, 1, 1, n: the last texel n << shift times)
+            u8 t[4] = {byte(), byte(), byte(), byte()};
+            if (t[0] == 1 && t[1] == 1 && t[2] == 1) {
+                if (x == 0)
+                    fail("a repeat with nothing before it");
+                const size_t count = size_t(t[3]) << shift;
+                if (x + count > w)
+                    fail("a run past its scanline");
+                for (size_t k = 0; k < count; ++k, ++x)
+                    std::memcpy(row + x * 4, row + (x - 1) * 4, 4);
+                shift += 8;
+                continue;
+            }
+            std::memcpy(row + x * 4, t, 4);
+            ++x;
+            shift = 0;
+        }
+    }
+    std::vector<std::vector<f32>> planes(3, std::vector<f32>(w * h));
+    for (size_t i = 0; i < w * h; ++i) {
+        const u8* t = texels.data() + i * 4;
+        const f32 f = t[3] ? std::ldexp(1.0f, int(t[3]) - (128 + 8)) : 0.0f;
+        for (size_t c = 0; c < 3; ++c)
+            planes[c][i] = t[3] ? (f32(t[c]) + 0.5f) * f : 0.0f;
+    }
+    return fit(planes, {0, 1, 2, -1}, w, h, range, true);
+}
+
 // OpenEXR, scanline images: no compression, RLE-free ZIPS or ZIP (zlib, a byte predictor and the bytes split in two
 // halves); HALF or FLOAT channels R, G, B, A (or Y: grey). Each channel fitted into 0 to 1 over its least and largest
 // value where they leave it (said in `range`).
@@ -459,26 +579,7 @@ Image decode_exr(std::span<const u8> b, ImageRange* range) {
         if (n == "A")
             which[3] = int(c);
     }
-    ImageRange fitted;
-    for (int k = 0; k < 4; ++k) {
-        if (which[k] < 0)
-            continue;
-        const auto [lo, hi] = std::minmax_element(planes[size_t(which[k])].begin(), planes[size_t(which[k])].end());
-        if (*lo < 0.0f || *hi > 1.0f) {
-            fitted.bias[k] = *lo;
-            fitted.scale[k] = *hi > *lo ? *hi - *lo : 1.0f;
-        }
-    }
-    Image image{Vec2i{i32(width), i32(height)}, std::vector<u8>(size_t(width * height) * 4)};
-    for (size_t i = 0; i < size_t(width * height); ++i)
-        for (int k = 0; k < 4; ++k) {
-            const f32 v = which[k] < 0 ? (k == 3 ? 1.0f : 0.0f)
-                                       : (planes[size_t(which[k])][i] - fitted.bias[k]) / fitted.scale[k];
-            image.rgba[i * 4 + size_t(k)] = u8(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
-        }
-    if (range)
-        *range = fitted;
-    return image;
+    return fit(planes, which, size_t(width), size_t(height), range);
 }
 } // namespace
 
@@ -488,6 +589,8 @@ std::optional<Image> decode_extra_image(std::span<const u8> bytes, std::string* 
             *range = {};
         if (bytes.size() >= 4 && bytes[0] == 0x76 && bytes[1] == 0x2f && bytes[2] == 0x31 && bytes[3] == 0x01)
             return decode_exr(bytes, range);
+        if (bytes.size() >= 2 && bytes[0] == '#' && bytes[1] == '?')
+            return decode_hdr(bytes, range);
         if (bytes.size() >= 4 && ((bytes[0] == 'I' && bytes[1] == 'I') || (bytes[0] == 'M' && bytes[1] == 'M')))
             return Tiff(bytes).decode();
         if (bytes.size() >= 4 && std::memcmp(bytes.data(), "8BPS", 4) == 0) {
@@ -499,7 +602,7 @@ std::optional<Image> decode_extra_image(std::span<const u8> bytes, std::string* 
             kin_import_free(pixels);
             return image;
         }
-        throw std::runtime_error("not a TIFF, PSD or OpenEXR");
+        throw std::runtime_error("not a TIFF, PSD, OpenEXR or Radiance HDR");
     } catch (const std::exception& e) {
         if (why)
             *why = e.what();

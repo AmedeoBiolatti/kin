@@ -2,6 +2,17 @@
 #define KIN_GRAPH_NOISE_INC
 // Material graphs' procedural nodes (kin_graph.inc.glsl, kin_cutout.inc.glsl): pure functions, no resources.
 
+// --- Directions ---
+
+// Where an equirectangular picture shows direction `d` (the environment's layout, environment_uv's without its turn:
+// the centre +x, the top +y, right toward +z): uv in .xy, and in .z its u half a turn round (its seam elsewhere: where
+// u wraps, the derivatives are that one's).
+vec3 kin_graph_equirect_uv(vec3 d) {
+    d = normalize(d);
+    const float u = 0.5 + atan(d.z, d.x) / 6.28318530718;
+    return vec3(u, acos(clamp(d.y, -1.0, 1.0)) / 3.14159265359, fract(u + 0.5));
+}
+
 // --- Noise: deterministic, hash-based (the same picture on every GPU) ---
 
 uint kin_graph_hash(uint x) {

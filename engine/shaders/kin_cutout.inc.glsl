@@ -32,6 +32,25 @@ vec4 kin_graph_sample(sampler2D map, vec2 uv, bool srgb) {
     return t;
 }
 #include "kin_graph_noise.inc.glsl"
+// The derivatives of an equirectangular uv (kin_graph_equirect_uv's) across the pixel: u's from its half-turned copy
+// where that one changes less (the seam, where u wraps: else the smallest level).
+void kin_graph_equirect_grads(vec3 uv, out vec2 dx, out vec2 dy) {
+    dx = dFdx(uv.xy);
+    dy = dFdy(uv.xy);
+    const float dx2 = dFdx(uv.z), dy2 = dFdy(uv.z);
+    dx.x = abs(dx2) < abs(dx.x) ? dx2 : dx.x;
+    dy.x = abs(dy2) < abs(dy.x) ? dy2 : dy.x;
+}
+vec4 kin_graph_sample_equirect(sampler2D map, vec3 d, bool srgb) {
+    const vec3 uv = kin_graph_equirect_uv(d);
+    vec2 dx, dy;
+    kin_graph_equirect_grads(uv, dx, dy);
+    vec4 t = textureGrad(map, uv.xy, dx, dy);
+    if (srgb && material.cutoff.y > 0.5) {
+        t.rgb = mix(t.rgb / 12.92, pow((t.rgb + 0.055) / 1.055, vec3(2.4)), step(0.04045, t.rgb));
+    }
+    return t;
+}
 float KIN_SURFACE_ALPHA(vec2 uv, vec3 position, float vertex_alpha);
 #endif
 

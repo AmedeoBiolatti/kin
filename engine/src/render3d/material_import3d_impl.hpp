@@ -112,7 +112,7 @@ public:
         }
         Image image;
         std::string why = "not a picture kin reads";
-        if (e == ".tif" || e == ".tiff" || e == ".psd" || e == ".exr") {
+        if (e == ".tif" || e == ".tiff" || e == ".psd" || e == ".exr" || e == ".hdr") {
             // Formats kin's images (SDL_image) don't read: the import's own decoder (an OpenEXR's values fitted
             // into 8 bits: its range kept, for what reads it to multiply back by).
             const std::string bytes = read_file(file);
@@ -224,7 +224,7 @@ public:
             {"texture", 4},     {"unpack_normal", 3},  {"tangent_to_world", 3}, {"fresnel", 1},
             {"noise_value", 1}, {"noise_gradient", 1}, {"noise_cellular", 1},   {"fbm", 1},
             {"checker", 1},     {"normal_map", 3},     {"triplanar", 4},        {"reflect", 3},
-            {"uv_panner", 2},   {"uv_rotate", 2}};
+            {"uv_panner", 2},   {"uv_rotate", 2},      {"texture_equirect", 4}};
         if (const auto f = fixed.find(type); f != fixed.end())
             w = f->second;
         if (type == "combine")

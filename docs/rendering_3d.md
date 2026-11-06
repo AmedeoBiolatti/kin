@@ -1603,7 +1603,8 @@ shadowed, fogged and GI-lit as kin's own materials are.
   `max`, `power`, `mod`, `step`, `mix` (Unreal's Lerp), `clamp`, `smoothstep`, `remap`; `abs`, `floor`, `ceil`,
   `fract`, `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `sign`, `negate`, `one_minus`, `saturate`, `normalize`,
   `length`, `dot`, `distance`, `cross`, `reflect`, `combine`; `texture`, `normal_map` (a normal map's texel as the
-  world normal, with a `strength`), `tangent_to_world`, `triplanar`; `noise_value`, `noise_gradient`,
+  world normal, with a `strength`), `tangent_to_world`, `triplanar`, `texture_equirect` (an equirectangular map's texel
+  in a `direction`: the environment's layout, seamless where u wraps); `noise_value`, `noise_gradient`,
   `noise_cellular`, `fbm`, `checker` (deterministic: hash-based, the same picture on every GPU); `fresnel`,
   `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs.
 - **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to

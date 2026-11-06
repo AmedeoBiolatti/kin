@@ -117,6 +117,14 @@ vec4 kin_graph_saturate(vec4 x) {
 }
 #include "kin_graph_noise.inc.glsl"
 
+// An equirectangular map's texel in direction `d` (kin_graph_equirect_uv's layout): its top level (no derivatives here).
+vec4 kin_graph_sample_equirect(sampler2D map, vec3 d, bool srgb) {
+    return kin_graph_sample(map, kin_graph_equirect_uv(d).xy, srgb);
+}
+vec4 kin_graph_sample_equirect(sampler2DArray maps, float layer, vec3 d, bool srgb) {
+    return kin_graph_sample(maps, layer, kin_graph_equirect_uv(d).xy, srgb);
+}
+
 // The graph's offset, in the world (kin's axes, metres): defined after this.
 vec3 kin_surface_offset();
 

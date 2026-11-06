@@ -143,3 +143,35 @@ vec4 kin_graph_saturate(vec4 x) {
 }
 
 #include "kin_graph_noise.inc.glsl"
+
+// The derivatives of an equirectangular uv (kin_graph_equirect_uv's) across the pixel: u's from its half-turned copy
+// where that one changes less (the seam, where u wraps: else the smallest level).
+void kin_graph_equirect_grads(vec3 uv, out vec2 dx, out vec2 dy) {
+    dx = dFdx(uv.xy);
+    dy = dFdy(uv.xy);
+    const float dx2 = dFdx(uv.z), dy2 = dFdy(uv.z);
+    dx.x = abs(dx2) < abs(dx.x) ? dx2 : dx.x;
+    dy.x = abs(dy2) < abs(dy.x) ? dy2 : dy.x;
+}
+
+// An equirectangular map's texel in direction `d` (kin_graph_equirect_uv's layout), seamless.
+vec4 kin_graph_sample_equirect(sampler2D map, vec3 d, bool srgb) {
+    const vec3 uv = kin_graph_equirect_uv(d);
+    vec2 dx, dy;
+    kin_graph_equirect_grads(uv, dx, dy);
+    vec4 t = textureGrad(map, uv.xy, dx, dy);
+    if (srgb && frame.flags.y > 0.5) {
+        t.rgb = decode(t.rgb);
+    }
+    return t;
+}
+vec4 kin_graph_sample_equirect(sampler2DArray maps, float layer, vec3 d, bool srgb) {
+    const vec3 uv = kin_graph_equirect_uv(d);
+    vec2 dx, dy;
+    kin_graph_equirect_grads(uv, dx, dy);
+    vec4 t = textureGrad(maps, vec3(uv.xy, layer), dx, dy);
+    if (srgb) {
+        t.rgb = decode(t.rgb);
+    }
+    return t;
+}

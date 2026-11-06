@@ -139,7 +139,7 @@ void every_node_compiles() {
             extra = R"(, "value": [0.1, 0.2, 0.3])";
         else if (n.type == "glsl")
             extra = R"(, "glsl": "x * 2.0", "result": "float", "inputs": {"x": "time"})";
-        if (n.type == "texture" || n.type == "normal_map" || n.type == "triplanar")
+        if (n.type == "texture" || n.type == "normal_map" || n.type == "triplanar" || n.type == "texture_equirect")
             extra = R"(, "texture": "map")";
         const std::string id = "n" + std::to_string(k++);
         nodes += std::string(nodes.empty() ? "" : ",\n") + R"({"id": ")" + id + R"(", "type": ")" + n.type + "\"" +
@@ -366,12 +366,11 @@ void layers_and_packing() {
                                             {"name": "b", "type": "texture", "slot": "layers", "layer": 1})",
                                           "", ""))
                .ok());
-    CHECK(!compile_material_graph3d(
-               graph(R"({"name": "a", "type": "texture", "slot": "layers", "layer": 16})", "", ""))
+    CHECK(!compile_material_graph3d(graph(R"({"name": "a", "type": "texture", "slot": "layers", "layer": 16})", "", ""))
                .ok());
-    const auto cut = compile_material_graph3d(graph(R"({"name": "mask", "type": "texture", "slot": "layers", "layer": 0})",
-                                                    R"({"id": "m", "type": "texture", "texture": "mask"})",
-                                                    R"("alpha": "m.r")"));
+    const auto cut =
+        compile_material_graph3d(graph(R"({"name": "mask", "type": "texture", "slot": "layers", "layer": 0})",
+                                       R"({"id": "m", "type": "texture", "texture": "mask"})", R"("alpha": "m.r")"));
     CHECK(cut.ok() && !cut.cutout && !cut.warnings.empty() && contains(cut.warnings[0].message, "base map's alpha"));
     if (!shader_compiler_available())
         return;
@@ -402,13 +401,15 @@ void offsets() {
     for (const auto& e : g.errors)
         std::cerr << e.node << ": " << e.message << '\n';
     CHECK(g.ok() && g.offset && g.warnings.empty());
-    CHECK(contains(g.surface, "#if defined(KIN_SURFACE_VERTEX)") && contains(g.surface, "vec3 kin_surface_offset() {") &&
-          contains(g.surface, "kin_v_time") && contains(g.surface, "kin_graph_sample(uGraphMaps, 0.0, kin_uv(), false)"));
+    CHECK(contains(g.surface, "#if defined(KIN_SURFACE_VERTEX)") &&
+          contains(g.surface, "vec3 kin_surface_offset() {") && contains(g.surface, "kin_v_time") &&
+          contains(g.surface, "kin_graph_sample(uGraphMaps, 0.0, kin_uv(), false)"));
     const auto inside = g.surface.find("vec3 kin_surface_offset() {");
     CHECK(g.surface.find("frame.time.x", inside) > g.surface.find("#else", inside)); // (its time is the vertex's)
-    const auto bad = compile_material_graph3d(graph("", R"({"id": "o", "type": "multiply", "inputs": {"a": "surface.normal", "b": 0.1}})",
-                                                    R"("offset": "o")"));
-    CHECK(bad.ok() && !bad.offset && bad.warnings.size() == 1 && contains(bad.warnings[0].message, "offset is not drawn"));
+    const auto bad = compile_material_graph3d(graph(
+        "", R"({"id": "o", "type": "multiply", "inputs": {"a": "surface.normal", "b": 0.1}})", R"("offset": "o")"));
+    CHECK(bad.ok() && !bad.offset && bad.warnings.size() == 1 &&
+          contains(bad.warnings[0].message, "offset is not drawn"));
     const auto none = compile_material_graph3d(graph("", "", R"("roughness": 0.5)"));
     CHECK(none.ok() && !none.offset && !contains(none.surface, "KIN_SURFACE_VERTEX"));
     if (!shader_compiler_available())

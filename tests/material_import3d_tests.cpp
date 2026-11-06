@@ -472,7 +472,9 @@ void pictures() {
     }
     // OpenEXR: half floats, uncompressed or ZIP; channels past 0 to 1 fitted into 8 bits, their range said.
     for (const bool zip : {false, true}) {
-        const auto value = [](int x, int y, int c) { return c == 0 ? float(x) - 2.0f : c == 1 ? 0.25f * float(y) : 0.5f; };
+        const auto value = [](int x, int y, int c) {
+            return c == 0 ? float(x) - 2.0f : c == 1 ? 0.25f * float(y) : 0.5f;
+        };
         const auto bytes = exr_file(5, 20, zip, value);
         std::string why;
         material_import::ImageRange range;
@@ -502,6 +504,43 @@ void pictures() {
                 const int want = int(std::lround((x * 13000 + y * 700) / 65535.0 * 255));
                 CHECK(std::abs(int(image->rgba[(y * 5 + x) * 4]) - want) <= 1);
             }
+    }
+    // Radiance HDR: a new run-length coded scanline (each component apart: dumps and runs) and an old one (a texel,
+    // then 1, 1, 1, n: it n times more); its colour fitted into 8 bits by its logarithm, the range said.
+    {
+        std::string hdr = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 8\n";
+        hdr += {2, 2, 0, 8};
+        hdr += char(8); // R: a dump of 8
+        for (int x = 0; x < 8; ++x)
+            hdr += char(16 * x + 8);
+        hdr += {char(128 + 8), char(64)};                      // G: a run of 8
+        hdr += {char(128 + 4), char(32), char(4), 0, 0, 0, 0}; // B: a run of 4, a dump of 4
+        hdr += {char(128 + 8), char(130)};                     // E: 2^(130 - 136) x (m + 0.5)
+        hdr += {char(100), char(50), char(25), char(129), 1, 1, 1, 7};
+        std::string why;
+        material_import::ImageRange range;
+        const auto image =
+            material_import::decode_extra_image({reinterpret_cast<const u8*>(hdr.data()), hdr.size()}, &why, &range);
+        if (!image)
+            std::cerr << "hdr: " << why << '\n';
+        CHECK(image && image->size == (Vec2i{8, 2}));
+        const auto value = [&](int x, int y, int c) {
+            static const int top[3] = {0, 64, 32}, bottom[3] = {100, 50, 25};
+            const int m = y ? bottom[c] : c == 0 ? 16 * x + 8 : c == 2 && x >= 4 ? 0 : top[c];
+            return (m + 0.5f) / (y ? 128.0f : 64.0f);
+        };
+        CHECK(range.log && std::abs(std::exp2(range.bias[0]) - 8.5f / 64.0f) < 1e-4f && range.bias[3] == 0.0f &&
+              range.scale[3] == 1.0f);
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 8; ++x) {
+                const u8* p = &image->rgba[size_t(y * 8 + x) * 4];
+                for (int c = 0; c < 3; ++c) {
+                    const f32 read = std::exp2(range.bias[size_t(c)] + range.scale[size_t(c)] * p[c] / 255.0f);
+                    CHECK(std::abs(std::log2(read / value(x, y, c))) <= range.scale[size_t(c)] / 510.0f + 1e-4f);
+                }
+                CHECK(p[3] == 255);
+            }
+        CHECK(!material_import::decode_extra_image({reinterpret_cast<const u8*>(hdr.data()), hdr.size() - 3}));
     }
     // A PSD of 2 x 2, RGB, raw: its composited picture.
     std::string psd = "8BPS";
@@ -599,9 +638,10 @@ void unreal_materials() {
 }
 
 // Tier 2: Unreal's graphs (tests/fixtures/unreal's M_GraphMix, made by unreal_probe.py) as kin material graphs: a
-// panned, tiled map lerped to a tint by a fresnel, times the vertex colour; one minus a clamped power of an ORM map's
-// G; the world position's XY (in Unreal's axes) and a sine of time appended; a DirectX normal map flattened half way.
-// An instance names the same graph with its own tint; a Custom node is noted and its output left to the Tier 1 import.
+// panned, tiled map lerped to a tint by a fresnel (by the material's normal, Unreal's Pixel Normal), times the vertex
+// colour; one minus a clamped power of an ORM map's G; the world position's XY (in Unreal's axes) and a sine of time
+// appended; a DirectX normal map flattened half way. An instance names the same graph with its own tint; a Custom node
+// is noted and its output left to the Tier 1 import.
 void unreal_graphs() {
     Scratch scratch;
     const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
@@ -626,9 +666,9 @@ void unreal_graphs() {
     const auto& s = g.surface;
     for (const char* expected :
          {"vec2(0.100000001, 0.0) * vec2(frame.time.x)", "(kin_uv() * vec2(4.0, 4.0))",
-          "pow(1.0 - clamp(dot(normalize(s.normal), kin_view()), 0.0, 1.0), 3.0)", "clamp(",
-          "0.100000001, 0.899999976)", "((kin_position()).xzy * vec3(100.0))", "* 6.28318531", "kin_graph_unpack_normal(",
-          "* vec3(1.0, -1.0, 1.0)", "kin_graph_tangent_to_world(", "* (vColor).xyz)",
+          "pow(1.0 - clamp(dot(normalize(n_n4), kin_view()), 0.0, 1.0), 3.0)", "clamp(", "0.100000001, 0.899999976)",
+          "((kin_position()).xzy * vec3(100.0))", "* 6.28318531", "kin_graph_unpack_normal(", "* vec3(1.0, -1.0, 1.0)",
+          "kin_graph_tangent_to_world(", "* (vColor).xyz)",
           "s.emission = ", "s.normal = ", "s.roughness = ", "s.base_color = "})
         if (!contains_text(s, expected)) {
             std::cerr << "missing: " << expected << '\n' << s << '\n';
@@ -862,40 +902,57 @@ void unreal_approximations() {
     };
     const std::string nodes = std::string(R"({
       "Uv": {"class": "MaterialExpressionTextureCoordinate", "props": {"coordinate_index": 0, "u_tiling": 2, "v_tiling": 2}, "inputs": {}},
-      "Height": {"class": "MaterialExpressionTextureSample", "props": {"texture": "textures/Game/Probe/Textures/T_ORM.png", "sampler_type": "SAMPLERTYPE_LINEAR_COLOR"}, "inputs": {"UVs": )") + link("Uv") + R"(}},
-      "Bump": {"class": "MaterialExpressionBumpOffset", "props": {"height_ratio": 0.08, "reference_plane": 0.5}, "inputs": {"Coordinate": )" + link("Uv") + R"(, "Height": )" + link("Height", "R") + R"(}},
-      "Albedo": {"class": "MaterialExpressionTextureSampleParameter2D", "props": {"parameter_name": "Albedo", "texture": "textures/Game/Probe/Textures/T_Albedo.png", "sampler_type": "SAMPLERTYPE_COLOR"}, "inputs": {"UVs": )" + link("Bump") + R"(}},
+      "Height": {"class": "MaterialExpressionTextureSample", "props": {"texture": "textures/Game/Probe/Textures/T_ORM.png", "sampler_type": "SAMPLERTYPE_LINEAR_COLOR"}, "inputs": {"UVs": )") +
+                              link("Uv") + R"(}},
+      "Bump": {"class": "MaterialExpressionBumpOffset", "props": {"height_ratio": 0.08, "reference_plane": 0.5}, "inputs": {"Coordinate": )" +
+                              link("Uv") + R"(, "Height": )" + link("Height", "R") + R"(}},
+      "Albedo": {"class": "MaterialExpressionTextureSampleParameter2D", "props": {"parameter_name": "Albedo", "texture": "textures/Game/Probe/Textures/T_Albedo.png", "sampler_type": "SAMPLERTYPE_COLOR"}, "inputs": {"UVs": )" +
+                              link("Bump") + R"(}},
       "Reflect": {"class": "MaterialExpressionReflectionVectorWS", "props": {}, "inputs": {}},
-      "Cube": {"class": "MaterialExpressionTextureSampleParameterCube", "props": {"parameter_name": "Sky"}, "inputs": {"UVs": )" + link("Reflect") + R"(}},
+      "Cube": {"class": "MaterialExpressionTextureSampleParameterCube", "props": {"parameter_name": "Sky"}, "inputs": {"UVs": )" +
+                              link("Reflect") + R"(}},
       "Depth": {"class": "MaterialExpressionSceneDepth", "props": {}, "inputs": {}},
-      "Far": {"class": "MaterialExpressionIf", "props": {"const_b": 5000}, "inputs": {"A": )" + link("Depth") + R"(, "A > B": )" + link("One") + R"(, "A < B": )" + link("Zero") + R"(}},
+      "Far": {"class": "MaterialExpressionIf", "props": {"const_b": 5000}, "inputs": {"A": )" +
+                              link("Depth") + R"(, "A > B": )" + link("One") + R"(, "A < B": )" + link("Zero") + R"(}},
       "One": {"class": "MaterialExpressionConstant", "props": {"r": 1}, "inputs": {}},
       "Zero": {"class": "MaterialExpressionConstant", "props": {"r": 0}, "inputs": {}},
-      "Mix": {"class": "MaterialExpressionLinearInterpolate", "props": {}, "inputs": {"A": )" + link("Albedo", "RGB") + R"(, "B": )" + link("Cube", "RGB") + R"(, "Alpha": )" + link("Far") + R"(}},
+      "Mix": {"class": "MaterialExpressionLinearInterpolate", "props": {}, "inputs": {"A": )" +
+                              link("Albedo", "RGB") + R"(, "B": )" + link("Cube", "RGB") + R"(, "Alpha": )" +
+                              link("Far") + R"(}},
       "Up": {"class": "MaterialExpressionVertexNormalWS", "props": {}, "inputs": {}},
-      "ToTangent": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_WORLD", "transform_type": "TRANSFORM_TANGENT"}, "inputs": {"None": )" + link("Up") + R"(}},
+      "ToTangent": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_WORLD", "transform_type": "TRANSFORM_TANGENT"}, "inputs": {"None": )" +
+                              link("Up") + R"(}},
       "Ahead": {"class": "MaterialExpressionConstant3Vector", "props": {"constant": [0, 0, 1, 0]}, "inputs": {}},
-      "FromView": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_VIEW", "transform_type": "TRANSFORM_WORLD"}, "inputs": {"None": )" + link("Ahead") + R"(}},
+      "FromView": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_VIEW", "transform_type": "TRANSFORM_WORLD"}, "inputs": {"None": )" +
+                              link("Ahead") + R"(}},
       "Origin": {"class": "MaterialExpressionObjectPositionWS", "props": {}, "inputs": {}},
-      "OriginX": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" + link("Origin") + R"(}},
-      "Glow": {"class": "MaterialExpressionMultiply", "props": {}, "inputs": {"A": )" + link("FromView") + R"(, "B": )" + link("OriginX") + R"(}},
+      "OriginX": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" +
+                              link("Origin") + R"(}},
+      "Glow": {"class": "MaterialExpressionMultiply", "props": {}, "inputs": {"A": )" +
+                              link("FromView") + R"(, "B": )" + link("OriginX") + R"(}},
       "Wet": {"class": "MaterialExpressionCollectionParameter", "props": {"parameter_name": "Wetness", "collection_value": [0.25, 0, 0, 0]}, "inputs": {}},
-      "WetR": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" + link("Wet") + R"(}},
-      "Fade": {"class": "MaterialExpressionDepthFade", "props": {"fade_distance_default": 25, "opacity_default": 1}, "inputs": {"Opacity": )" + link("Half") + R"(}},
+      "WetR": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" +
+                              link("Wet") + R"(}},
+      "Fade": {"class": "MaterialExpressionDepthFade", "props": {"fade_distance_default": 25, "opacity_default": 1}, "inputs": {"Opacity": )" +
+                              link("Half") + R"(}},
       "Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.75}, "inputs": {}},
       "Clock": {"class": "MaterialExpressionTime", "props": {}, "inputs": {}},
-      "Wave": {"class": "MaterialExpressionSine", "props": {}, "inputs": {"None": )" + link("Clock") + R"(}},
-      "WaveG": {"class": "MaterialExpressionComponentMask", "props": {"g": true}, "inputs": {"None": )" + link("Wave") + R"(}},
-      "Checker": {"class": "MaterialExpressionCustom", "props": {"code": "Mod( ((uint)(p.x) + 2 * (uint)(p.y)) , 5 ) / 5", "output_type": "CMOT_FLOAT1"}, "inputs": {"p": )" + link("Uv") + R"(}}
+      "Wave": {"class": "MaterialExpressionSine", "props": {}, "inputs": {"None": )" +
+                              link("Clock") + R"(}},
+      "WaveG": {"class": "MaterialExpressionComponentMask", "props": {"g": true}, "inputs": {"None": )" +
+                              link("Wave") + R"(}},
+      "Checker": {"class": "MaterialExpressionCustom", "props": {"code": "Mod( ((uint)(p.x) + 2 * (uint)(p.y)) , 5 ) / 5", "output_type": "CMOT_FLOAT1"}, "inputs": {"p": )" +
+                              link("Uv") + R"(}}
     })";
-    const std::string doc = R"({"schema": "kin.unreal-material/1", "name": "M_Approx", "blend_mode": "BLEND_TRANSLUCENT",
+    const std::string doc =
+        R"({"schema": "kin.unreal-material/1", "name": "M_Approx", "blend_mode": "BLEND_TRANSLUCENT",
       "shading_model": "MSM_DEFAULTLIT", "parameters": {"scalar": {}, "vector": {}, "texture": {}, "switch": {}},
       "inputs": {}, "textures": {"textures/Game/Probe/Textures/T_Albedo.png": {"srgb": true},
                                  "textures/Game/Probe/Textures/T_ORM.png": {"srgb": false}},
-      "graph": {"nodes": )" + nodes + R"(, "outputs": {"BaseColor": )" + link("Mix") + R"(, "Normal": )" +
-                            link("ToTangent") + R"(, "Roughness": )" + link("WetR") + R"(, "EmissiveColor": )" +
-                            link("Glow") + R"(, "Opacity": )" + link("Fade") + R"(, "Metallic": )" + link("Checker") +
-                            R"(, "AmbientOcclusion": )" + link("WaveG") + R"(}}})";
+      "graph": {"nodes": )" +
+        nodes + R"(, "outputs": {"BaseColor": )" + link("Mix") + R"(, "Normal": )" + link("ToTangent") +
+        R"(, "Roughness": )" + link("WetR") + R"(, "EmissiveColor": )" + link("Glow") + R"(, "Opacity": )" +
+        link("Fade") + R"(, "Metallic": )" + link("Checker") + R"(, "AmbientOcclusion": )" + link("WaveG") + R"(}}})";
     write(content / "M_Approx.json", doc);
     const auto m = import_unreal_graph(content / "M_Approx.json", options);
     for (const auto& d : m.diagnostics)
@@ -922,10 +979,10 @@ void unreal_approximations() {
     for (const auto& e : g.errors)
         std::cerr << e.node << ": " << e.message << '\n';
     CHECK(g.ok());
-    for (const char* expected : {"kin_graph_world_to_uv(kin_view(), kin_uv(), kin_graph_geometry_normal()).xy",
-                                 "kin_graph_environment(", "1000000", "kin_graph_view_to_world(",
-                                 "kin_graph_world_to_uv(v.xzy", "0.25", "0.75",
-                                 "mod( (trunc(p.x) + 2.0 * trunc(p.y)) , 5.0 ) / 5.0"}) {
+    for (const char* expected :
+         {"kin_graph_world_to_uv(kin_view(), kin_uv(), kin_graph_geometry_normal()).xy", "kin_graph_environment(",
+          "1000000", "kin_graph_view_to_world(", "kin_graph_world_to_uv(v.xzy", "0.25", "0.75",
+          "mod( (trunc(p.x) + 2.0 * trunc(p.y)) , 5.0 ) / 5.0"}) {
         if (g.surface.find(expected) == std::string::npos)
             std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
         CHECK(g.surface.find(expected) != std::string::npos);
@@ -939,10 +996,11 @@ void unreal_approximations() {
     }
     // HLSL beyond one expression of known words (a loop, an engine global) is refused: the output falls back, said.
     for (const char* code : {"float a = 0; for (int i = 0; i < 4; i++) a += i; return a;", "View.RealTime * 2"}) {
-        const std::string refused = R"({"schema": "kin.unreal-material/1", "name": "M_Refused", "blend_mode": "BLEND_OPAQUE",
+        const std::string refused =
+            R"({"schema": "kin.unreal-material/1", "name": "M_Refused", "blend_mode": "BLEND_OPAQUE",
           "shading_model": "MSM_DEFAULTLIT", "parameters": {}, "inputs": {}, "textures": {},
           "graph": {"nodes": {"C": {"class": "MaterialExpressionCustom", "props": {"code": ")" +
-                                    std::string(code) + R"(", "output_type": "CMOT_FLOAT3"}, "inputs": {}}},
+            std::string(code) + R"(", "output_type": "CMOT_FLOAT3"}, "inputs": {}}},
                     "outputs": {"BaseColor": {"node": "C", "output": ""}}}})";
         write(content / "M_Refused.json", refused);
         const auto r = import_unreal_graph(content / "M_Refused.json", options);
@@ -973,7 +1031,8 @@ void unreal_layers_and_folding() {
                  std::to_string(i) + R"(", "texture": "textures/Game/Probe/Textures/)" +
                  (i % 2 ? "T_ORM" : "T_Albedo") + R"(.png", "sampler_type": "SAMPLERTYPE_COLOR"}, "inputs": {}})";
         if (i)
-            nodes += R"(, "A)" + std::to_string(i) + R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
+            nodes += R"(, "A)" + std::to_string(i) +
+                     R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
                      (i == 1 ? std::string("T0") : "A" + std::to_string(i - 1)) +
                      R"(", "output": "RGB"}, "B": {"node": "T)" + std::to_string(i) + R"(", "output": "RGB"}}})";
     }
@@ -993,9 +1052,10 @@ void unreal_layers_and_folding() {
                  R"(": {"class": "MaterialExpressionScalarParameter", "props": {"parameter_name": "S)" +
                  std::to_string(i) + R"(", "default_value": 1}, "inputs": {}})";
         if (i)
-            nodes += R"(, "A)" + std::to_string(i) + R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
-                     (i == 1 ? std::string("S0") : "A" + std::to_string(i - 1)) + R"(", "output": ""}, "B": {"node": "S)" +
-                     std::to_string(i) + R"(", "output": ""}}})";
+            nodes += R"(, "A)" + std::to_string(i) +
+                     R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
+                     (i == 1 ? std::string("S0") : "A" + std::to_string(i - 1)) +
+                     R"(", "output": ""}, "B": {"node": "S)" + std::to_string(i) + R"(", "output": ""}}})";
     }
     write(content / "M_Many.json", doc("M_Many", nodes, "A69"));
     const auto many = import_unreal_graph(content / "M_Many.json", options);
@@ -1015,7 +1075,8 @@ void unreal_function_outputs() {
     const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
     const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
     for (const bool listed : {true, false}) {
-        const std::string doc = std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Pins", "blend_mode": "BLEND_OPAQUE",
+        const std::string doc =
+            std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Pins", "blend_mode": "BLEND_OPAQUE",
           "shading_model": "MSM_DEFAULTLIT", "parameters": {}, "inputs": {}, "textures": {},
           "functions": {"/Game/F": {"inputs": {}, "outputs": {"First": "O1", "Second": "O2"}, "nodes": {
             "O1": {"class": "MaterialExpressionFunctionOutput", "props": {"output_name": "First", "sort_priority": 0},
@@ -1025,7 +1086,7 @@ void unreal_function_outputs() {
             "A": {"class": "MaterialExpressionConstant", "props": {"r": 0.125}, "inputs": {}},
             "B": {"class": "MaterialExpressionConstant", "props": {"r": 0.875}, "inputs": {}}}}},
           "graph": {"nodes": {"Call": {"class": "MaterialExpressionMaterialFunctionCall", "props": {"material_function": "/Game/F")") +
-                                (listed ? R"(, "function_outputs": ["First", "Second"])" : "") + R"(}, "inputs": {}}},
+            (listed ? R"(, "function_outputs": ["First", "Second"])" : "") + R"(}, "inputs": {}}},
                     "outputs": {"Roughness": {"node": "Call", "output": "First", "output_index": 1}}}})";
         write(content / "M_Pins.json", doc);
         const auto m = import_unreal_graph(content / "M_Pins.json", options);
@@ -1035,6 +1096,73 @@ void unreal_function_outputs() {
         const auto g = compile_material_graph3d(text);
         CHECK(g.ok() && g.surface.find("0.875") != std::string::npos && g.surface.find("0.125") == std::string::npos);
     }
+}
+
+// A cube map the export unwrapped (a Radiance HDR: its values past 1 read back by their range) sampled in kin's
+// equirectangular layout by the direction (-y, z, x) of Unreal's; a cube map not exported: the environment. Rotate
+// About Axis as a World Position Offset (in the vertex variants too); Per Instance Random 0 (a mesh not instanced).
+void unreal_cubes_and_rotation() {
+    Scratch scratch;
+    const fs::path project = scratch.path / "export", content = scratch.path / "content";
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    fs::create_directories(project / "textures");
+    std::string hdr = "#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 2\n";
+    hdr += {char(200), char(100), char(50), char(130), char(10), char(20), char(30), char(128)};
+    write(project / "textures" / "T_Sky.hdr", hdr);
+    const std::string doc = R"({"schema": "kin.unreal-material/1", "name": "M_Cubes", "blend_mode": "BLEND_OPAQUE",
+      "shading_model": "MSM_DEFAULTLIT", "material_domain": "MD_SURFACE",
+      "parameters": {"scalar": {}, "vector": {}, "texture": {"Sky": "textures/T_Sky.hdr"}, "switch": {}},
+      "inputs": {}, "textures": {"textures/T_Sky.hdr": {"srgb": false, "compression_settings": "TC_HDR"}},
+      "graph": {"nodes": {
+        "Reflect": {"class": "MaterialExpressionReflectionVectorWS", "props": {}, "inputs": {}},
+        "Cube": {"class": "MaterialExpressionTextureSampleParameterCube", "props": {"parameter_name": "Sky", "texture": "textures/T_Sky.hdr"},
+                 "inputs": {"UVs": {"node": "Reflect", "output": ""}}},
+        "Gone": {"class": "MaterialExpressionTextureSampleCube", "props": {"texture": "textures/T_Missing.hdr"},
+                 "inputs": {"UVs": {"node": "Reflect", "output": ""}}},
+        "Up": {"class": "MaterialExpressionConstant3Vector", "props": {"constant": [0, 0, 1, 0]}, "inputs": {}},
+        "Random": {"class": "MaterialExpressionPerInstanceRandom", "props": {}, "inputs": {}},
+        "Angle": {"class": "MaterialExpressionTime", "props": {}, "inputs": {}},
+        "Turn": {"class": "MaterialExpressionRotateAboutAxis", "props": {"period": 4},
+                 "inputs": {"NormalizedRotationAxis": {"node": "Up", "output": ""}, "RotationAngle": {"node": "Angle", "output": ""}}}},
+      "outputs": {"BaseColor": {"node": "Cube", "output": "RGB"}, "EmissiveColor": {"node": "Gone", "output": "RGB"},
+                  "WorldPositionOffset": {"node": "Turn", "output": ""}, "Metallic": {"node": "Random", "output": ""}}}})";
+    write(content / "M_Cubes.json", doc);
+    const auto m = import_unreal_graph(content / "M_Cubes.json", options);
+    for (const auto& d : m.diagnostics)
+        std::cerr << d << '\n';
+    CHECK(m && !m->graph.empty());
+    CHECK(has_note(*m, "Cube: a cube map, as its export unwrapped to longitude and latitude") &&
+          has_note(*m, "Gone: a cube map not exported") &&
+          has_note(*m, "T_Sky.hdr: its light fitted into 8 bits by its logarithm") &&
+          has_note(*m, "Random: Per Instance Random: 0"));
+    CHECK(std::none_of(m->notes.begin(), m->notes.end(),
+                       [](const std::string& n) { return n.find("Tier 1 value kept") != std::string::npos; }));
+    std::ifstream in(m->graph);
+    const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    in.close();
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok() && g.offset);
+    for (const char* expected : {"kin_graph_sample_equirect(", "vec3(-d.y, d.z, d.x)", "vec4(exp2(v.xyz), v.w)",
+                                 "kin_graph_environment(", "cross(a, p - o - a * dot(a, p - o)) * sin(t)", "1.570796"})
+        if (g.surface.find(expected) == std::string::npos) {
+            std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
+            CHECK(false);
+        }
+    if (shader_compiler_available()) {
+        std::string why;
+        const auto cooked = cook_material_graph3d(text, &why);
+        if (!cooked)
+            std::cerr << why << '\n';
+        CHECK(cooked.has_value());
+    }
+    // A domain not a surface's is said.
+    std::string post = doc;
+    post.replace(post.find("MD_SURFACE"), 10, "MD_POSTPROCESS");
+    write(content / "M_Cubes.json", post);
+    const auto p = import_unreal_graph(content / "M_Cubes.json", options);
+    CHECK(p && has_note(*p, "its domain is MD_POSTPROCESS"));
 }
 
 } // namespace
@@ -1051,6 +1179,7 @@ int main() {
     unreal_approximations();
     unreal_layers_and_folding();
     unreal_function_outputs();
+    unreal_cubes_and_rotation();
     unity_graphs();
     godot_graphs();
     corpus();

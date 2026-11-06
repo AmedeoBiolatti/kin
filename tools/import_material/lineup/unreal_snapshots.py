@@ -59,8 +59,28 @@ def mesh(name):
             unreal.EditorAssetLibrary.list_assets(ROOT + "/Meshes/" + name, recursive=True)):
         a = unreal.load_asset(p)
         if isinstance(a, unreal.StaticMesh):
-            return a
+            return full_detail(a)
     raise RuntimeError("no mesh in " + name + ".glb")
+
+
+def full_detail(sm):
+    """The mesh as kin draws it: its own triangles, no Nanite (whose fallback, for translucent materials, is a mesh
+    reduced to a few per cent of them) and no reduced LODs."""
+    try:
+        ns = sm.get_editor_property("nanite_settings")
+        if ns.get_editor_property("enabled"):
+            ns.set_editor_property("enabled", False)
+            sm.set_editor_property("nanite_settings", ns)
+    except Exception as e:
+        unreal.log_warning("lineup: Nanite left as it is: " + str(e))
+    try:
+        sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        if sub.get_lod_count(sm) > 1:
+            sub.set_lod_count(sm, 1)
+    except Exception as e:
+        unreal.log_warning("lineup: LODs left as they are: " + str(e))
+    unreal.EditorAssetLibrary.save_loaded_asset(sm)
+    return sm
 
 
 def build():
@@ -86,6 +106,7 @@ def build():
         c = a.static_mesh_component
         c.set_mobility(unreal.ComponentMobility.MOVABLE)
         c.set_static_mesh(meshes[o["mesh"]])
+        c.set_forced_lod_model(1)  # (LOD 0)
         c.set_cast_shadow(False)
         components.append(c)
     t = SCENE["sun"]["toward"]

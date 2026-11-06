@@ -288,6 +288,11 @@ Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path&
         const std::string blend = doc.find("blend_mode") ? doc.find("blend_mode")->as_string() : "BLEND_OPAQUE";
         const std::string model = doc.find("shading_model") ? doc.find("shading_model")->as_string() : "MSM_DEFAULTLIT";
         const bool unlit = model == "MSM_UNLIT";
+        if (const auto* domain = doc.find("material_domain");
+            domain && domain->is_string() && domain->as_string() != "MD_SURFACE")
+            x.note("its domain is " + domain->as_string() +
+                   " (not a surface's: a post process, a volume, a light function, a decal or UI): imported as a "
+                   "surface, which is not what it draws");
 
         // Each output's term; said (once) when kin can't read it.
         std::map<std::string, Term> terms;
@@ -559,7 +564,7 @@ public:
         const JsonValue* n = this->node(node);
         const bool call =
             n && n->find("class") && n->find("class")->as_string() == "MaterialExpressionMaterialFunctionCall";
-        auto v = call ? function_call(node, *n, pin, why) : translate(node, why);
+        auto v = call ? function_call(node, *n, pin, why) : translate(node, pin, why);
         _visiting.erase(key);
         if (v && !call)
             v = swizzle(*v, pin);
@@ -570,6 +575,10 @@ public:
 
 private:
     UnrealGraph& root() { return _root ? *_root : *this; }
+    // The pixel's normal (kin's world): the material's Normal output's, once read, else the surface's.
+    std::string surface_normal() {
+        return root().pixel_normal.empty() ? GraphBuilder::quote("surface.normal") : root().pixel_normal;
+    }
     // What feeds `n`'s input `name` (its JSON), or null.
     static const JsonValue* connected(const JsonValue& n, const std::string& name) {
         const auto* inputs = n.find("inputs");
@@ -713,6 +722,9 @@ public:
     std::map<std::string, bool> switched;
     // The parameters as the material's values, in the graph (a graph of the material's own): where they don't fit.
     bool fold = false;
+    // The material's Normal output in the world (kin's axes), once read (it is read first): what Unreal's Pixel Normal,
+    // Reflection Vector and Fresnel see; before, or without one, the surface's.
+    std::string pixel_normal;
 
 private:
     // A GLSL expression of its own (kin's glsl node), `width` floats.
@@ -824,7 +836,8 @@ private:
         return GraphBuilder::quote(safe);
     }
 
-    std::optional<std::string> translate(const std::string& name, std::string& why) {
+    // `name`'s value, its output `pin` (the few nodes whose outputs differ by more than their channels read it).
+    std::optional<std::string> translate(const std::string& name, const std::string& pin, std::string& why) {
         const JsonValue* found = node(name);
         if (!found) {
             why = "no expression " + name;
@@ -833,6 +846,10 @@ private:
         const JsonValue& n = *found;
         const std::string cls = n.find("class") ? n.find("class")->as_string() : "";
         std::string kind = cls.rfind("MaterialExpression", 0) == 0 ? cls.substr(18) : cls;
+        // A Texture Sample of a cube texture (Unreal samples it by a direction; the export writes only cubes as
+        // Radiance HDR, unwrapped) is a cube sample.
+        if (kind == "TextureSample" && !connected(n, "Tex") && text(n, "texture").ends_with(".hdr"))
+            kind = "TextureSampleCube";
         const auto num = GraphBuilder::number;
         const auto in = [&](std::initializer_list<const char*> names, std::optional<std::string> fallback = {}) {
             return input(n, names, std::move(fallback), why);
@@ -1134,6 +1151,30 @@ private:
             return glsl("vec2(dot(vec2(cos(a), -sin(a)), p - c), dot(vec2(sin(a), cos(a)), p - c)) + c", 2,
                         {{"p", _b.fit(*c, 2)}, {"a", angle}, {"c", centre}});
         }
+        if (kind == "PerInstanceRandom") { // (an instance's random number: 0 on a mesh not instanced, as Unreal's)
+            _x.note(name + ": Per Instance Random: 0 (as Unreal's on a mesh not instanced)");
+            return std::string("0");
+        }
+        if (kind == "RotateAboutAxis") {
+            // The offset turning Position about the axis through PivotPoint by RotationAngle / Period turns (Unreal's
+            // RotateAboutAxis: u = from the axis to the position; u (cos - 1) + (axis x u) sin).
+            const auto axis = in({"NormalizedRotationAxis"}), angle = in({"RotationAngle"}),
+                       pivot = in({"PivotPoint"}, "[0, 0, 0]");
+            const auto position = in(
+                {"Position"}, _b.add("multiply", {{"a", unreal_axes(GraphBuilder::quote("position"))}, {"b", "100"}}));
+            if (!axis || !angle || !pivot || !position)
+                return std::nullopt;
+            f32 period = prop(n, "period", 1);
+            if (period == 0)
+                period = 1;
+            return glsl("(p - o - a * dot(a, p - o)) * (cos(t) - 1.0) + cross(a, p - o - a * dot(a, p - o)) * sin(t)",
+                        3,
+                        {{"p", _b.fit(*position, 3)},
+                         {"o", _b.fit(*pivot, 3)},
+                         {"a", _b.fit(*axis, 3)},
+                         {"t", _b.add("multiply",
+                                      {{"a", _b.fit(*angle, 1)}, {"b", num(2 * std::numbers::pi_v<f32> / period)}})}});
+        }
         if (kind == "FeatureLevelSwitch" || kind == "QualitySwitch") {
             // What a desktop GPU compiles (SM6's, SM5's) at the editor's quality (Epic's, High's), else the default.
             const auto* inputs = n.find("inputs");
@@ -1160,17 +1201,50 @@ private:
         }
         if (kind == "ReflectionVectorWS") // the view reflected about the pixel's normal (in Unreal's axes)
             return unreal_axes(_b.add("reflect", {{"direction", _b.add("negate", {{"x", GraphBuilder::quote("view")}})},
-                                                  {"normal", GraphBuilder::quote("surface.normal")}}));
-        if (kind == "ScreenPosition") // its ViewportUV: 0 to 1 across the view, from the top left (kin's screen)
-            return GraphBuilder::quote("screen");
+                                                  {"normal", surface_normal()}}));
+        if (kind == "ScreenPosition") // its ViewportUV: 0 to 1 across the view, from the top left (kin's screen);
+            return pin == "PixelPosition" ? glsl("gl_FragCoord.xy", 2, {}) // its PixelPosition: in pixels
+                                          : GraphBuilder::quote("screen");
+        if (kind == "ViewProperty") {
+            // The view's: its size (pixels), the camera (Unreal's axes and centimetres), the temporal sample's index
+            // (Unreal cycles 8 a frame: here 60 a second, by the time) and their count; its second output, the
+            // inverse.
+            const std::string property = upper(text(n, "property"));
+            std::optional<std::string> v;
+            int width = 1;
+            if (property == "MEVP_VIEWSIZE" || property == "MEVP_VIEW_SIZE")
+                v = "1.0 / frame.occlusion.zw", width = 2;
+            else if (property.find("CAMERA_POSITION") != std::string::npos ||
+                     property.find("VIEW_POSITION") != std::string::npos)
+                v = "frame.eye.xzy * 100.0", width = 3;
+            else if (property == "MEVP_TEMPORAL_SAMPLE_INDEX") {
+                _x.note(name + ": the temporal sample's index by the time (8 cycling 60 times a second)");
+                const std::string i = glsl("mod(floor(t * 60.0), 8.0)", 1, {{"t", GraphBuilder::quote("time")}});
+                return pin.find("Inv") != std::string::npos ? _b.add("divide", {{"a", "1"}, {"b", i}}) : i;
+            } else if (property == "MEVP_TEMPORAL_SAMPLE_COUNT")
+                v = "8.0";
+            else if (property == "MEVP_PRE_EXPOSURE" || property == "MEVP_RESOLUTION_FRACTION")
+                v = "1.0";
+            if (!v) {
+                why = name + ": the view's " + text(n, "property") + " (kin's graphs don't see it)";
+                return std::nullopt;
+            }
+            const std::string out = glsl(*v, width, {});
+            return pin.find("Inv") != std::string::npos ? _b.add("divide", {{"a", "1"}, {"b", out}}) : out;
+        }
         if (kind == "PixelNormalWS" || kind == "VertexNormalWS")
-            return unreal_axes(GraphBuilder::quote(kind == "PixelNormalWS" ? "surface.normal" : "normal"));
-        if (kind == "Fresnel") { // base + (1 - base) x (1 - n.v)^exponent
+            return unreal_axes(kind == "PixelNormalWS" ? surface_normal() : GraphBuilder::quote("normal"));
+        if (kind == "Fresnel") { // base + (1 - base) x (1 - n.v)^exponent, by its Normal (Unreal's axes) or the pixel's
             const auto e = in({"ExponentIn"}, num(prop(n, "exponent", 5)));
             const auto base = in({"BaseReflectFractionIn"}, num(prop(n, "base_reflect_fraction", 0.04f)));
-            if (!e || !base)
+            const auto normal = connected(n, "Normal") ? in({"Normal"}) : std::optional{std::string()};
+            if (!e || !base || !normal)
                 return std::nullopt;
-            const std::string f = _b.add("fresnel", {{"power", *e}});
+            const std::string f =
+                _b.add("fresnel",
+                       {{"power", *e},
+                        {"normal", normal->empty() ? surface_normal()
+                                                   : _b.add("normalize", {{"x", unreal_axes(_b.fit(*normal, 3))}})}});
             return _b.add("mix", {{"a", *base}, {"b", "1"}, {"t", f}});
         }
         if (kind == "Panner") { // the coordinate plus the speed times the time
@@ -1323,9 +1397,10 @@ private:
             const auto c = colour(n, "default_value");
             return GraphBuilder::vector({c.data(), 4});
         }
-        if (kind == "PerInstanceFadeAmount") {
-            _x.note(name + ": the instance's fade: none");
-            return std::string("0");
+        if (kind == "PerInstanceFadeAmount") { // (how far an instance has faded in: 1, as Unreal's on a mesh not
+                                               // instanced; its foliage multiplies its opacity by it)
+            _x.note(name + ": the instance's fade: 1 (none)");
+            return std::string("1");
         }
         if (kind == "ObjectPositionWS") {
             _x.note(name + ": the object's position: the world's origin (kin's graphs do not see the object's "
@@ -1359,11 +1434,39 @@ private:
                         2, {{"p", GraphBuilder::quote("position")}});
         }
         if (kind == "TextureSampleParameterCube" || kind == "TextureSampleCube") {
-            _x.note(name + ": a cube map: the scene's environment in its direction");
+            std::string file = text(n, "texture");
+            std::string pname = text(n, "parameter_name");
+            if (const auto* p = _doc.find("parameters"); p && !pname.empty())
+                if (const auto* t = p->find("texture"); t && t->find(pname) && t->find(pname)->is_string())
+                    file = t->find(pname)->as_string();
             const auto d = in({"UVs", "Coordinates"}, GraphBuilder::quote("view"));
             if (!d)
                 return std::nullopt;
-            return glsl("vec4(kin_graph_environment(d.xzy), 1.0)", 4, {{"d", _b.fit(*d, 3)}});
+            if (file.empty() || !std::filesystem::exists(_x.options.project / file)) {
+                _x.note(name + ": a cube map not exported: the scene's environment in its direction");
+                return glsl("vec4(kin_graph_environment(d.xzy), 1.0)", 4, {{"d", _b.fit(*d, 3)}});
+            }
+            // The export unwraps a cube to longitude and latitude (Unreal's: u = atan2(x, -y) / 2 pi - 1/2,
+            // v = acos(z) / pi in its axes): kin's equirectangular layout in the direction (-y, z, x).
+            if (pname.empty())
+                pname = "t_" + std::filesystem::path(file).stem().string();
+            const std::string source = pname;
+            if (const auto known = std::ranges::find(_b.params, source, &GraphBuilder::Param::source);
+                known != _b.params.end())
+                pname = known->name;
+            else
+                pname = _b.safe_name(source);
+            const auto* settings = _doc.find("textures") ? _doc.find("textures")->find(file) : nullptr;
+            auto& list = root().textures;
+            if (std::none_of(list.begin(), list.end(), [&](const Texture& t) { return t.param == pname; }))
+                list.push_back({pname, file, false, settings ? settings->bool_at("srgb", false) : false});
+            if (!_b.has_param(pname))
+                _b.params.push_back({pname, "texture", {}, "", false, source});
+            _x.note(name + ": a cube map, as its export unwrapped to longitude and latitude");
+            const std::string direction = glsl("vec3(-d.y, d.z, d.x)", 3, {{"d", _b.fit(*d, 3)}});
+            return ranged(
+                _b.add("texture_equirect", {{"direction", direction}}, {{"texture", GraphBuilder::quote(pname)}}),
+                file);
         }
         if (kind == "CollectionParameter") {
             const auto* p = n.find("props");
@@ -1531,7 +1634,7 @@ private:
     }
 
     // A sample of `file` as its values: an 8-bit texel times the range a file decoded from values past 0 to 1 has (an
-    // OpenEXR's), plus its least; the sample as it is for another.
+    // OpenEXR's), plus its least (a Radiance HDR's colour: 2 to the power of that); the sample as it is for another.
     std::string ranged(const std::string& sample, const std::string& file) {
         if (file.empty())
             return sample;
@@ -1541,9 +1644,12 @@ private:
         if (it == _x.ranges.end())
             return sample;
         _x.note(std::filesystem::path(file).filename().string() +
-                ": its values (past 0 to 1) fitted into 8 bits, read back by its range");
-        return _b.add("add", {{"a", _b.add("multiply", {{"a", sample}, {"b", GraphBuilder::vector(it->second.scale)}})},
-                              {"b", GraphBuilder::vector(it->second.bias)}});
+                (it->second.log ? ": its light fitted into 8 bits by its logarithm, read back by its range"
+                                : ": its values (past 0 to 1) fitted into 8 bits, read back by its range"));
+        const std::string linear =
+            _b.add("add", {{"a", _b.add("multiply", {{"a", sample}, {"b", GraphBuilder::vector(it->second.scale)}})},
+                           {"b", GraphBuilder::vector(it->second.bias)}});
+        return it->second.log ? glsl("vec4(exp2(v.xyz), v.w)", 4, {{"v", linear}}) : linear;
     }
 
     static std::string upper(std::string s) {
@@ -1590,10 +1696,11 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         const std::string blend = doc.find("blend_mode") ? doc.find("blend_mode")->as_string() : "";
         const bool unlit = model == "MSM_UNLIT";
         const auto* outputs = doc.find("graph")->find("outputs");
+        // (The Normal first: the others' Pixel Normal, Reflection Vector and Fresnel are by it.)
         static const std::vector<std::pair<const char*, const char*>> mapping{
-            {"BaseColor", "base_color"},   {"Metallic", "metallic"},          {"Roughness", "roughness"},
-            {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"}, {"Normal", "normal"},
-            {"Opacity", "alpha"},          {"OpacityMask", "alpha"},          {"WorldPositionOffset", "offset"}};
+            {"Normal", "normal"},       {"BaseColor", "base_color"},   {"Metallic", "metallic"},
+            {"Roughness", "roughness"}, {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"},
+            {"Opacity", "alpha"},       {"OpacityMask", "alpha"},      {"WorldPositionOffset", "offset"}};
         const auto build = [&](UnrealGraph& g) {
             for (const auto& [from, to] : mapping) {
                 const auto* o = outputs ? outputs->find(from) : nullptr;
@@ -1616,6 +1723,8 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
                     v = b.add("normalize", {{"x", b.member(*v, "xzy")}});
                 else if (target == "normal") // Unreal's tangent space (green down) as kin's (+y up), then the world's
                     v = b.add("tangent_to_world", {{"normal", b.add("multiply", {{"a", *v}, {"b", "[1, -1, 1]"}})}});
+                if (target == "normal")
+                    g.pixel_normal = *v;
                 else if (target == "offset") // Unreal's centimetres in its axes: kin's metres in its own
                     v = b.add("multiply", {{"a", b.member(b.fit(*v, 3), "xzy")}, {"b", "0.01"}});
                 b.outputs[target] = *v;

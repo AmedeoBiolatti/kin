@@ -265,6 +265,16 @@ const std::vector<NodeSpec>& specs() {
                                          (srgb ? "true" : "false") + ")",
                                      Type::Vec4);
                      }});
+        s.push_back({"texture_equirect",
+                     "an equirectangular texture parameter's texel in a world direction (vec4; the environment's "
+                     "layout: the centre +x, the top +y, right toward +z)",
+                     {{"direction", In::Vec3}},
+                     true,
+                     [](Compiler&, const std::vector<Value>& in, Type, const std::string& sampler, bool srgb) {
+                         return make("kin_graph_sample_equirect(" + sampler + ", " + in[0].expr + ", " +
+                                         (srgb ? "true" : "false") + ")",
+                                     Type::Vec4);
+                     }});
         s.push_back({"normal_map",
                      "a normal map's texel as the world normal",
                      {{"uv", In::Vec2, "\"uv\""}, {"strength", In::Float, "1"}},
