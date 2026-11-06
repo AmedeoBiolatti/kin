@@ -57,9 +57,13 @@ void test_capsules() {
     // Standing (taller than wide): round at its top and bottom.
     const PhysicsBody body = world.create_body({.type = PhysicsBodyType::Dynamic, .position = {0.0f, -3.0f}, .fixed_rotation = true});
     const PhysicsFixture capsule = world.add_fixture(body, {.shape = PhysicsShape::capsule({0.25f, 0.75f})});
+#if KIN_PHYSICS_BOX2D_V3
+    assert(world.shape_parts(capsule) == 1); // Box2D 3 has capsules (drawn as their outline)
+#else
     assert(world.shape_parts(capsule) == 3);
     const std::vector<kin::PhysicsDebugShape> shapes = world.debug_shapes();
     assert(std::ranges::count(shapes, kin::PhysicsDebugShapeType::Circle, &kin::PhysicsDebugShape::type) == 2);
+#endif
     run(world, 180);
     // It rests on its round bottom: its centre 0.75 above the floor.
     assert(near(world.position(body).y, -0.75f, 0.03f));

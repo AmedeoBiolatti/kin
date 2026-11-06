@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Experimental: kin's 2D physics on Box2D 3.2 with `-DKIN_PHYSICS_BOX2D_V3=ON` (off by default; Box2D 2.4 stays
+  the default). The same `PhysicsWorld` API, stepped on Box2D's own threads: `PhysicsWorldDef::workers` (0:
+  `KIN_PHYSICS_WORKERS`, else one per core up to 8), with the same results however many. A packed crowd of 900
+  bodies steps in 0.7 ms instead of 4.3; 20k take 11.5 ms on one thread and about 5 ms on 4 to 8 (2.4 took 3 s
+  for 10k). Differences: joint limits
+  are soft (a motor pushes a few degrees past, a rope pulls without a jerk), capsules are one shape, a contact a
+  one-sided platform refuses never begins touching.
+
 - 3D asset files have types of their own: `AssetType::Animator3D` (`.kinanimator`), `Collider3D` (`.kincollider`)
   and `Materials3D` (`.kinmaterials`), and `infer_asset_type` names them (they were Unknown). The fields naming them
   say so (`AnimatorAsset3D.asset`, `Collider3D.asset`, `ModelMaterials3D.asset`), so a tool's picker offers those
