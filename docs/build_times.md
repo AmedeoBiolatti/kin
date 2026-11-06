@@ -92,6 +92,30 @@ This does not change C++ optimization. Keep LTO off for the edit loop, as the
 development presets do. The default linker remains available by configuring
 with `-DCMAKE_EXE_LINKER_FLAGS=` (retain any other linker flags you need).
 
+## Linux compiler choice
+
+With Clang 18+ installed, `dev-clang` and `dev-3d-clang` select `clang` and
+`clang++` in separate build directories. They retain Release optimization,
+PCH and the same optional compiler-cache discovery:
+
+```sh
+cmake --preset dev-clang
+cmake --build --preset dev-clang --target hex_demo
+```
+
+The optional mold linker setting above works with these presets too. For an
+external game, select the compiler when configuring a fresh build directory:
+
+```sh
+CC=clang CXX=clang++ cmake -S . -B build-clang -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release -DKIN_ENABLE_PCH=ON -DKIN_COMPILER_CACHE=auto
+```
+
+Clang reduced compiler memory substantially in the local comparison below,
+but was slightly slower for the large Lua-binding translation unit. Compiler
+choice remains explicit; the original development/shipping presets retain
+their compiler selection.
+
 ## Measure the edit loop
 
 Compare the same compiler, flags, sources, build filesystem and job count.
@@ -149,3 +173,50 @@ individual runs and measurement limits. Validation included eight selected
 CTest tests, GCC/Clang parent-game fixtures, Ninja/Make shader dependency tests,
 and representative GCC 3D renderer/Lua compile checks. Windows and a full 3D
 runtime test suite were not run locally.
+
+### Compiler comparison
+
+GCC 15.2 and Clang 21.1.8, both with Release optimization and their own PCHs;
+compiler cache disabled. These are compile-only medians of three runs, with
+compiler order alternating between runs:
+
+| Translation unit | GCC | Clang | GCC peak RSS | Clang peak RSS |
+|---|---:|---:|---:|---:|
+| Hex demo main | 2.28 s | 1.61 s | 311 MiB | 189 MiB |
+| ECS system | 9.01 s | 7.29 s | 484 MiB | 272 MiB |
+| Scene asset/registration | 61.64 s | 53.98 s | 2,185 MiB | 920 MiB |
+| Lua bindings | 38.85 s | 40.70 s | 1,583 MiB | 882 MiB |
+
+A separately paired game edit/build/link comparison with mold on both sides
+gave 2.59 s for GCC and 1.91 s for Clang. These runs had different host load
+from the earlier measurements; do not multiply improvements across phases.
+The compiler memory savings were 39–58% in these four files. This can matter
+on a machine where parallel compilations compete with games/editors for RAM.
+
+These timings compare the installed toolchains: explicit Kin Release settings
+match, while implicit compiler defaults differ. In particular, this machine's
+GCC driver injects hardening and padding-initialization flags that Clang does
+not inject. The data records that limitation; this is not a universal compiler
+ranking or an isolated comparison of optimizer implementations.
+
+The complete selected Clang build succeeded, with 11/11 CTest tests passing
+(also 11/11 for GCC). Clang 3D checks compiled the renderer, GI and Lua scene
+translation units with their corresponding PCHs. Runtime CPU spot checks used
+three processes per compiler, 50 samples after three warmups, pinned to CPU 2:
+
+| Runtime case | GCC median | Clang median |
+|---|---:|---:|
+| ECS query, 10k entities | 1.744 ms | 1.794 ms |
+| Prefab spawn/destroy | 0.0604 ms | 0.0630 ms |
+| CPU collection of 100k sprites | 6.702 ms | 3.956 ms |
+
+Totals matched between compilers. These narrow checks do not establish
+whole-game performance or full 3D runtime behavior. The original compiler
+presets remain available. Individual samples and validation scope are in the
+[compiler comparison data](build_compilers_2026-11-06.json).
+
+The remaining structural hotspot is `register_builtin_editor_components` in
+`engine/src/scene/scene_asset.cpp`: a large set of component/schema template
+instantiations shares one translation unit with scene parsing. Separating the
+registrations into smaller groups is the next experiment for reducing peak
+memory and the longest compilation task on both compilers.
