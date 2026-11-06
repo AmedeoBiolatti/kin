@@ -29,6 +29,9 @@ std::string_view asset_type_name(AssetType type) {
     case AssetType::UiTheme: return "UiTheme";
     case AssetType::Skeleton2D:
         return "Skeleton2D";
+    case AssetType::Animator3D: return "Animator3D";
+    case AssetType::Collider3D: return "Collider3D";
+    case AssetType::Materials3D: return "Materials3D";
     }
     return "Unknown";
 }

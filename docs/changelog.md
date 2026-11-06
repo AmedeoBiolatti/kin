@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D asset files have types of their own: `AssetType::Animator3D` (`.kinanimator`), `Collider3D` (`.kincollider`)
+  and `Materials3D` (`.kinmaterials`), and `infer_asset_type` names them (they were Unknown). The fields naming them
+  say so (`AnimatorAsset3D.asset`, `Collider3D.asset`, `ModelMaterials3D.asset`), so a tool's picker offers those
+  files alone and a dropped one finds its component.
+
 - Edits in place for a tool's scene view: the scene server's `view.edit {entities: [{id, components}]}` hands the
   fields a tool changed (each entity by its id in the file, its components' fields written as the file writes them)
   to the new `Scene::view_edit`, in place of the whole file again (`view.scene`), which reads it all, the world and
