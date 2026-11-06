@@ -232,6 +232,8 @@ struct SceneSession3DOptions {
 
 enum class SceneSession3DReload { Unchanged, Activated };
 
+class JsonValue;
+
 struct SceneFieldEdit3D {
     EcsEntity entity;
     std::string component, field;
@@ -280,6 +282,11 @@ public:
     // Keeps compatible animation/particle state and rigid-body velocity.
     // Controller/ragdoll/rope physics edits and constrained bodies require reload.
     Status3D edit(std::span<const SceneFieldEdit3D> edits);
+    // The same batch written as a scene file writes it (a tool's view.edit:
+    // Scene::view_edit): an array of {"id": an authored entity's id,
+    // "components": {name: {field: value, ...}, ...}}. Unknown entities,
+    // components or fields, and values of the wrong kind, fail it whole.
+    Status3D edit_authored(const JsonValue& entities);
 
     // Synchronous C++ gameplay construction, between frames. Reuses the shared
     // prefab loader and binds only new entities. Failure removes partial objects

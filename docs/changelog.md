@@ -7,6 +7,13 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Edits in place for a tool's scene view: the scene server's `view.edit {entities: [{id, components}]}` hands the
+  fields a tool changed (each entity by its id in the file, its components' fields written as the file writes them)
+  to the new `Scene::view_edit`, in place of the whole file again (`view.scene`), which reads it all, the world and
+  its scripts made anew. `SceneSession3D::edit_authored` takes such a batch as `edit` does (all or nothing; unknown
+  entities, components or fields, or a value of the wrong kind, fail it with why). Kin Studio sends a dragged
+  handle so: a 26-entity 3D scene with a script took about 30 ms a step read again, 5 ms edited.
+
 - Fixed: a `SceneSession3D` scene now draws in the browser. Its new view is warmed up first (`warm_up`, on by
   default), and WebGL2 had no warm-up, so `Renderer3D::warm_up` failed ("scene GPU warm-up failed") and no scene
   loaded. WebGL2 has nothing to make ahead (its programs come with the renderer, its targets with the view), and

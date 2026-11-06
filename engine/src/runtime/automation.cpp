@@ -631,6 +631,7 @@ const JsonValue& automation_protocol() {
       "input.drop":{"effect":"input","inspect":false,"params":{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"space":{"type":"string","enum":["logical","window"]}}}},
       "view.screenshot":{"effect":"capture","inspect":false,"params":{"type":"object","properties":{"path":{"type":"string"}}}},
       "view.scene":{"effect":"scene","inspect":false,"params":{"type":"object","required":["path"],"properties":{"path":{"type":"string"},"content":{"type":"string"}}}},
+      "view.edit":{"effect":"scene","inspect":false,"params":{"type":"object","required":["entities"],"properties":{"entities":{"type":"array","items":{"type":"object","required":["id","components"],"properties":{"id":{"type":"string"},"components":{"type":"object"}}}}}}},
       "view.frame":{"effect":"capture","inspect":false,"params":{"type":"object","required":["width","height"],"properties":{"path":{"type":"string"},"width":{"type":"integer","minimum":1},"height":{"type":"integer","minimum":1},"x":{"type":"number"},"y":{"type":"number"},"zoom":{"type":"number","exclusiveMinimum":0},"rotation":{"type":"number"}}}},
       "server.status":{"effect":"read","inspect":true,"params":{"type":"object"}},
       "frame.timing":{"effect":"diagnostic","inspect":true,"params":{"type":"object","properties":{"since":{"type":"integer"},"reset":{"type":"boolean"}}}},

@@ -1153,13 +1153,24 @@ void test_view_screenshot() {
 // through (red: ten times its zoom, green: its centre's x).
 class ViewedScene final : public kin::Scene {
 public:
-    explicit ViewedScene(std::filesystem::path* shown) : _shown(shown) {}
+    ViewedScene(std::filesystem::path* shown, int* edits) : _shown(shown), _edits(edits) {}
     bool view_scene(const std::filesystem::path& file, const std::filesystem::path&, std::string& error) override {
         if (file.filename() == "broken.kinscene") {
             error = "broken.kinscene does not read";
             return false;
         }
         *_shown = file;
+        return true;
+    }
+    // (Takes edits to an entity "box"; others refused, with why.)
+    bool view_edit(const kin::JsonValue& entities, std::string& error) override {
+        for (const kin::JsonValue& item : entities.items()) {
+            if (item.string_at("id") != "box") {
+                error = "no entity '" + item.string_at("id") + "'";
+                return false;
+            }
+        }
+        ++*_edits;
         return true;
     }
     bool set_view_camera(const kin::Camera2D* camera) override {
@@ -1185,6 +1196,7 @@ public:
 
 private:
     std::filesystem::path* _shown;
+    int* _edits; // (the test's: the server destroys its scenes before it returns)
     std::optional<kin::Camera2D> _camera;
     std::optional<kin::Camera3D> _camera3d;
 };
@@ -1195,7 +1207,8 @@ void test_view_scene_and_frame() {
     std::filesystem::remove(frame_path);
     std::filesystem::path shown;
     kin::SceneManager scenes;
-    scenes.push(std::make_unique<ViewedScene>(&shown));
+    int edits = 0;
+    scenes.push(std::make_unique<ViewedScene>(&shown, &edits));
 
     std::ostringstream out;
     std::istringstream in(
@@ -1209,7 +1222,10 @@ void test_view_scene_and_frame() {
         R"(","width":8,"height":4,"camera3d":{"position":[0,4,2],"rotation":[0,0.6,0,0.8],"fov":50}}})" "\n"
         R"({"id":7,"method":"view.frame","params":{"width":8,"height":4,"camera3d":{"position":[0,1],"fov":50}}})" "\n"
         R"({"id":8,"method":"view.frame","params":{"width":8,"height":4,"camera3d":{"rotation":[0,0,0,0]}}})" "\n"
-        R"({"id":9,"method":"server.shutdown"})" "\n");
+        R"({"id":9,"method":"view.edit","params":{"entities":[{"id":"box","components":{"Transform3D":{"position":[1,2,3]}}}]}})" "\n"
+        R"({"id":10,"method":"view.edit","params":{"entities":[{"id":"ghost","components":{}}]}})" "\n"
+        R"({"id":11,"method":"view.edit","params":{"entities":{}}})" "\n"
+        R"({"id":12,"method":"server.shutdown"})" "\n");
     const int code = kin::run_scene_server({
         .window = {.title = "view", .width = 64, .height = 48},
         .mode = kin::ServerMode::Driven,
@@ -1248,6 +1264,12 @@ void test_view_scene_and_frame() {
     std::filesystem::remove(frame3d_path);
     assert(response_result(text, 7) == nullptr && text.find("camera3d needs position [x, y, z]") != std::string::npos);
     assert(response_result(text, 8) == nullptr && text.find("is not a turn") != std::string::npos);
+
+    // Edits in place: handed to the scene; one it refuses, or one that is not a list, fails with why.
+    const kin::JsonValue* edited = response_result(text, 9);
+    assert(edited != nullptr && edited->int_at("edited") == 1 && edits == 1);
+    assert(response_result(text, 10) == nullptr && text.find("no entity 'ghost'") != std::string::npos);
+    assert(response_result(text, 11) == nullptr && text.find("view.edit needs entities") != std::string::npos);
 }
 
 void test_view_scene_refused_by_default() {
@@ -1258,7 +1280,8 @@ void test_view_scene_refused_by_default() {
         R"({"id":1,"method":"view.scene","params":{"path":"edited.kinscene"}})" "\n"
         R"({"id":2,"method":"view.frame","params":{"width":8,"height":8}})" "\n"
         R"({"id":3,"method":"view.frame","params":{"width":8,"height":8,"camera3d":{}}})" "\n"
-        R"({"id":4,"method":"server.shutdown"})" "\n");
+        R"({"id":4,"method":"view.edit","params":{"entities":[]}})" "\n"
+        R"({"id":5,"method":"server.shutdown"})" "\n");
     const int code = kin::run_scene_server({
         .window = {.title = "view", .width = 64, .height = 48},
         .mode = kin::ServerMode::Driven,
@@ -1266,6 +1289,7 @@ void test_view_scene_refused_by_default() {
         .out = &out,
     }, scenes);
     assert(code == 0);
+    assert(response_result(out.str(), 4) == nullptr && out.str().find("takes no edits in place") != std::string::npos);
     // A scene that does not say how shows no other files, and has no world to
     // draw through another camera.
     assert(response_result(out.str(), 1) == nullptr && out.str().find("does not show other scene files") != std::string::npos);
