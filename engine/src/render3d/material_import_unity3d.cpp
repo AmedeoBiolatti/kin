@@ -1398,7 +1398,9 @@ Result3D<ImportedMaterial3D> import_unity_graph(const std::filesystem::path& sou
                 if (const auto srgb = unity_srgb(*tex); srgb && *srgb != param.srgb)
                     x.note(param.name + ": its texture is " + (*srgb ? "sRGB" : "linear") + " where its graph reads " +
                            (param.srgb ? "sRGB" : "linear") + " (the graph's default texture's)");
-                v.texture = MaterialTexture3D{.asset = *path};
+                // Repeated, filtered and mipmapped, as Unity's default sampling is (a graph's UVs often run
+                // past 0..1); a map without a sampler would take Material3D's legacy clamp.
+                v.texture = MaterialTexture3D{.asset = *path, .sampler = TextureSampler3D{}};
             } else if (param.type == "color") {
                 const auto c = ref.empty() ? std::nullopt : m.color(ref);
                 if (!c)

@@ -67,6 +67,15 @@ Image picture(u8 r, u8 g, u8 b, u8 a = 255) {
 bool contains_text(const std::string& text, std::string_view what) {
     return text.find(what) != std::string::npos;
 }
+// Every texture parameter of an imported graph repeats (the engines' default; a map without a sampler would clamp).
+bool graph_maps_repeat(const MaterialPatch3D& p) {
+    for (const auto& [name, v] : p.params)
+        if (v.texture && (!v.texture->sampler || v.texture->sampler->wrap_u != Wrap3D::Repeat ||
+                          v.texture->sampler->wrap_v != Wrap3D::Repeat))
+            return false;
+    return true;
+}
+
 bool has_note(const ImportedMaterial3D& m, std::string_view what) {
     return std::any_of(m.notes.begin(), m.notes.end(), [&](const std::string& n) { return n.find(what) == 0; });
 }
@@ -481,8 +490,8 @@ void unreal_materials() {
 
 // Tier 2: Unreal's graphs (tests/fixtures/unreal's M_GraphMix, made by unreal_probe.py) as kin material graphs: a
 // panned, tiled map lerped to a tint by a fresnel, times the vertex colour; one minus a clamped power of an ORM map's
-// G; the world position's XY and a sine of time appended; a DirectX normal map flattened half way. An instance names
-// the same graph with its own tint; a Custom node is noted and its output left to the Tier 1 import.
+// G; the world position's XY (in Unreal's axes) and a sine of time appended; a DirectX normal map flattened half way.
+// An instance names the same graph with its own tint; a Custom node is noted and its output left to the Tier 1 import.
 void unreal_graphs() {
     Scratch scratch;
     const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
@@ -508,7 +517,7 @@ void unreal_graphs() {
     for (const char* expected :
          {"vec2(0.100000001, 0.0) * vec2(frame.time.x)", "(kin_uv() * vec2(4.0, 4.0))",
           "pow(1.0 - clamp(dot(normalize(s.normal), kin_view()), 0.0, 1.0), 3.0)", "clamp(",
-          "0.100000001, 0.899999976)", "(kin_position() * vec3(100.0))", "* 6.28318531", "kin_graph_unpack_normal(",
+          "0.100000001, 0.899999976)", "((kin_position()).xzy * vec3(100.0))", "* 6.28318531", "kin_graph_unpack_normal(",
           "* vec3(1.0, -1.0, 1.0)", "kin_graph_tangent_to_world(", "* (vColor).xyz)",
           "s.emission = ", "s.normal = ", "s.roughness = ", "s.base_color = "})
         if (!contains_text(s, expected)) {
@@ -517,6 +526,7 @@ void unreal_graphs() {
         }
     CHECK(has_note(*mix, "World Position") && !has_note(*mix, "BaseColor"));
     const auto& params = mix->asset.base.material.params;
+    CHECK(graph_maps_repeat(mix->asset.base.material));
     CHECK(params.contains("Albedo") && params.at("Albedo").texture && params.contains("Tint") &&
           params.at("Tint").value[0] == 0.9f);
     const auto blue = import_unreal_graph(project / "Probe/MI_GraphMix_Blue.json", options);
@@ -619,6 +629,7 @@ void unity_graphs() {
     CHECK(p.params.at("_Smoothness").count == 1 && std::abs(p.params.at("_Smoothness").value[0] - 0.6f) < 1e-6f);
     CHECK(p.params.at("_BaseColor").value[0] == 1.0f && std::abs(p.params.at("_BaseColor").value[1] - 0.214f) < 1e-3f);
     CHECK(p.params.at("_BaseMap").texture && p.params.at("_BaseMap").texture->asset.filename() != "");
+    CHECK(graph_maps_repeat(p));
     CHECK(p.params.at("Texture2D_8E1D2A").texture && p.params.at("_NormalMap").texture);
     // Without the keyword: its Off branch (0), another file.
     const auto plain = import_unity_graph(project / "Assets/Plain.mat", options);
@@ -669,6 +680,7 @@ void godot_graphs() {
     const auto& p = mix->asset.base.material;
     CHECK(p.blend == Blend3D::Opaque && p.double_sided == false && p.unlit == false && mix->notes.empty());
     CHECK(p.params.at("albedo_tex").texture && p.params.at("albedo_tex").texture->asset.filename() == "albedo.png");
+    CHECK(graph_maps_repeat(p));
     CHECK(p.params.at("texture_15").texture); // the Texture node's own
     CHECK(p.params.at("tint").count == 4 && std::abs(p.params.at("tint").value[2] - srgb_to_linear(0.9f)) < 1e-5f);
     CHECK(!p.params.contains("rough")); // null in the material: the shader's default

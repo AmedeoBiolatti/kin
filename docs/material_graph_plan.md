@@ -260,7 +260,7 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
 - Unreal: `unreal_export.py` exports the whole expression graph (each node's class, properties, pins); constants,
   parameters, samples (normal maps unpacked, DirectX green flipped unless the texture flips it), coordinates and
   their tiling, the arithmetic and unary nodes, Lerp, Clamp, Power, Dot, Cross, Distance, masks, AppendVector, Time,
-  World Position (cm), Vertex Color, Camera Vector, normals, Fresnel, Panner, Desaturation, Reroute, Static Switch
+  World Position (cm, Unreal's axes), Vertex Color, Camera Vector, normals, Fresnel, Panner, Desaturation, Reroute, Static Switch
   (see below for functions and switch values). BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;

@@ -622,6 +622,9 @@ private:
             "glsl", std::move(inputs),
             {{"glsl", GraphBuilder::quote(expr)}, {"result", GraphBuilder::quote(types[std::clamp(width, 1, 4)])}});
     }
+    // A world vector of kin's (x, y, z) in Unreal's axes: (x, z, y), Z up (its glTF exporter's mapping, its own
+    // inverse).
+    std::string unreal_axes(const std::string& ref) { return _b.member(ref, "xzy"); }
     std::string swizzle(const std::string& ref, std::string pin) {
         for (auto& c : pin)
             c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -965,17 +968,19 @@ private:
             return period > 0 ? _b.add("mod", {{"a", GraphBuilder::quote("time")}, {"b", num(period)}})
                               : GraphBuilder::quote("time");
         }
+        // Unreal's world vectors in its axes (Z up: kin's y), as its glTF exporter maps them (X, Y, Z: kin's x, z,
+        // y), and its centimetres: a pattern on height, or along a side, stays on it.
         if (kind == "WorldPosition") {
-            _x.note("World Position: Unreal's centimetres, kin's metres x 100 (the patterns keep their scale)");
-            return _b.add("multiply", {{"a", GraphBuilder::quote("position")}, {"b", "100"}});
+            _x.note("World Position: Unreal's axes and centimetres, kin's (x, z, y) metres x 100");
+            return _b.add("multiply", {{"a", unreal_axes(GraphBuilder::quote("position"))}, {"b", "100"}});
         }
         if (kind == "VertexColor")
             return GraphBuilder::quote("vertex_color");
         if (kind == "CameraVectorWS")
-            return GraphBuilder::quote("view");
-        // Unreal's world in centimetres, as World Position: the eye, the view depth.
+            return unreal_axes(GraphBuilder::quote("view"));
+        // Unreal's world in its axes and centimetres, as World Position: the eye, the view depth.
         if (kind == "CameraPositionWS")
-            return glsl("frame.eye.xyz * 100.0", 3, {});
+            return glsl("frame.eye.xzy * 100.0", 3, {});
         if (kind == "PixelDepth")
             return glsl("dot(kin_position() - frame.eye.xyz, frame.cascade_forward.xyz) * 100.0", 1, {});
         if (kind == "Round") {
@@ -1016,13 +1021,13 @@ private:
                                                     {"b", _b.add("subtract", {{"a", *b}, {"b", *a}})}});
             return prop(n, "clamp_result", 0) != 0 ? _b.add("saturate", {{"x", t}}) : t;
         }
-        if (kind == "ReflectionVectorWS") // the view reflected about the pixel's normal
-            return _b.add("reflect", {{"direction", _b.add("negate", {{"x", GraphBuilder::quote("view")}})},
-                                      {"normal", GraphBuilder::quote("surface.normal")}});
+        if (kind == "ReflectionVectorWS") // the view reflected about the pixel's normal (in Unreal's axes)
+            return unreal_axes(_b.add("reflect", {{"direction", _b.add("negate", {{"x", GraphBuilder::quote("view")}})},
+                                                  {"normal", GraphBuilder::quote("surface.normal")}}));
         if (kind == "ScreenPosition") // its ViewportUV: 0 to 1 across the view, from the top left (kin's screen)
             return GraphBuilder::quote("screen");
         if (kind == "PixelNormalWS" || kind == "VertexNormalWS")
-            return GraphBuilder::quote(kind == "PixelNormalWS" ? "surface.normal" : "normal");
+            return unreal_axes(GraphBuilder::quote(kind == "PixelNormalWS" ? "surface.normal" : "normal"));
         if (kind == "Fresnel") { // base + (1 - base) x (1 - n.v)^exponent
             const auto e = in({"ExponentIn"}, num(prop(n, "exponent", 5)));
             const auto base = in({"BaseReflectFractionIn"}, num(prop(n, "base_reflect_fraction", 0.04f)));
@@ -1194,7 +1199,9 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
                 const auto path = x.readable(x.options.project / t->file, param.name);
                 if (!path)
                     continue;
-                v.texture = MaterialTexture3D{.asset = *path};
+                // Repeated, filtered and mipmapped, as Unreal's default sampling is (a graph's UVs often run
+                // past 0..1); a map without a sampler would take Material3D's legacy clamp.
+                v.texture = MaterialTexture3D{.asset = *path, .sampler = TextureSampler3D{}};
             } else {
                 const auto* group = values ? values->find(param.type == "float" ? "scalar" : "vector") : nullptr;
                 const auto* given = group ? group->find(param.source.empty() ? param.name : param.source) : nullptr;

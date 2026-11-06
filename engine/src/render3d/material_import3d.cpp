@@ -1326,7 +1326,9 @@ Result3D<ImportedMaterial3D> import_godot_graph(const std::filesystem::path& sou
                 const auto path = x.readable(*file, q.name);
                 if (!path)
                     continue;
-                v.texture = MaterialTexture3D{.asset = *path};
+                // Repeated, filtered and mipmapped, as Godot's default sampling is (a graph's UVs often run
+                // past 0..1); a map without a sampler would take Material3D's legacy clamp.
+                v.texture = MaterialTexture3D{.asset = *path, .sampler = TextureSampler3D{}};
             } else {
                 if (!given || given->kind == GodotValue::Kind::String)
                     continue;
