@@ -1,0 +1,70 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "hud",
+  "name": "hud",
+  "root": "root",
+  "entities": [
+    {
+      "id": "root",
+      "name": "score",
+      "components": {
+        "Transform2D": {},
+        "TextRenderer": {
+          "text": "",
+          "size": 22.0,
+          "pivot": {
+            "x": 0,
+            "y": 0
+          },
+          "color": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "outline": 2.0,
+          "outline_color": {
+            "r": 40,
+            "g": 50,
+            "b": 60,
+            "a": 255
+          }
+        }
+      }
+    },
+    {
+      "id": "message",
+      "name": "message",
+      "parent": "root",
+      "components": {
+        "Transform2D": {
+          "pos": {
+            "x": 0,
+            "y": 32
+          }
+        },
+        "TextRenderer": {
+          "text": "",
+          "size": 22.0,
+          "pivot": {
+            "x": 0,
+            "y": 0
+          },
+          "color": {
+            "r": 255,
+            "g": 255,
+            "b": 255,
+            "a": 255
+          },
+          "outline": 2.0,
+          "outline_color": {
+            "r": 40,
+            "g": 50,
+            "b": 60,
+            "a": 255
+          }
+        }
+      }
+    }
+  ]
+}

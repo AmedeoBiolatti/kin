@@ -44,6 +44,9 @@ namespace kin {
 class EcsWorld;
 class EcsEntity;
 class Input;
+class PhysicsWorld;
+class SceneFlow;
+class SceneSaves;
 
 struct PythonScriptsConfig {
     std::filesystem::path content;    // the content root: prefabs spawn from here
@@ -85,6 +88,14 @@ public:
 
     // Reads every module again, as if each had changed.
     void reload();
+
+    // What the game gives its scripts (null: none, and the scripts using it
+    // raise): its physics, for kin.physics's queries; its scene flow
+    // (kin/ecs/scene_flow.hpp), for kin.scene.go; its saves
+    // (kin/ecs/saving.hpp), for kin.save. They must outlive their use here.
+    void set_physics(PhysicsWorld* physics);
+    void set_flow(SceneFlow* flow);
+    void set_saves(SceneSaves* saves);
 
     // Problems by module (enemies), with why (enemies.py:12: what). A module's
     // goes once it reads and runs again.

@@ -400,7 +400,7 @@ bool write_field(Host& host, const View& view, std::size_t index, py_Ref value) 
         return gone(view);
     }
     if (info.data) {
-        std::vector<ComponentFieldValue>* values = host.data_values(view.entity, info.id);
+        std::vector<ComponentFieldValue>* values = host.writable_data_values(view.entity, info.id);
         if (!values || index >= values->size()) {
             return missing(host, view);
         }
@@ -607,14 +607,27 @@ void Host::entity_object(py_OutRef out, flecs::entity_t entity) {
     py_assign(out, &slot->second);
 }
 
-std::vector<ComponentFieldValue>* Host::data_values(flecs::entity_t entity, ComponentId id) const {
-    auto* payload =
-        static_cast<detail::DataComponentPayload*>(ecs_get_mut_id(world.raw().c_ptr(), entity, data_payload));
+const std::vector<ComponentFieldValue>* Host::data_values(flecs::entity_t entity, ComponentId id) const {
+    // Its own, or (a prefab instance) its prefab's.
+    const auto* payload =
+        static_cast<const detail::DataComponentPayload*>(ecs_get_id(world.raw().c_ptr(), entity, data_payload));
     if (!payload) {
         return nullptr;
     }
     const auto found = payload->values.find(id);
     return found == payload->values.end() ? nullptr : &found->second;
+}
+
+std::vector<ComponentFieldValue>* Host::writable_data_values(flecs::entity_t entity, ComponentId id) {
+    if (auto* payload =
+            static_cast<detail::DataComponentPayload*>(ecs_get_mut_id(world.raw().c_ptr(), entity, data_payload))) {
+        const auto found = payload->values.find(id);
+        if (found != payload->values.end()) {
+            return &found->second;
+        }
+    }
+    // Not its own yet (a prefab instance's): the registry makes it its own.
+    return world.components().data_values(EcsEntity{flecs::entity(world.raw().c_ptr(), entity)}, id);
 }
 
 flecs::entity_t entity_arg(Host& host, py_Ref value) {

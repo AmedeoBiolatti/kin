@@ -123,11 +123,18 @@ struct Host {
     PythonScriptsConfig config;
     int vm = 0;
     Input* input = nullptr;
+    // What the game gives its scripts (null: none).
+    PhysicsWorld* physics = nullptr;
+    SceneFlow* flow = nullptr;
+    SceneSaves* saves = nullptr;
 
     py_GlobalRef kin = nullptr;
     py_GlobalRef time = nullptr;
     py_GlobalRef input_module = nullptr;
     py_GlobalRef world_module = nullptr;
+    py_GlobalRef physics_module = nullptr;
+    py_GlobalRef scene_module = nullptr;
+    py_GlobalRef save_module = nullptr;
     py_Type entity_type = 0;
     // The prelude's (python_kin.py), kept to call.
     py_TValue spawn{}, due{}, step{}, fail{}, wake{}, cancel_module{}, running{}, tween{};
@@ -172,7 +179,9 @@ struct Host {
     void refresh_fields(ComponentInfo& info);
     void expose_components();
     // A data component's field values on `entity`, or null without it.
-    std::vector<ComponentFieldValue>* data_values(flecs::entity_t entity, ComponentId id) const;
+    // (Its own, or a prefab instance's prefab's; writable: made its own first.)
+    const std::vector<ComponentFieldValue>* data_values(flecs::entity_t entity, ComponentId id) const;
+    std::vector<ComponentFieldValue>* writable_data_values(flecs::entity_t entity, ComponentId id);
 
     // python_host.cpp
     bool call(py_Ref fn, int argc, py_Ref argv, std::string_view module, std::string_view what);
@@ -221,6 +230,8 @@ void set_up_view_type(Host& host, ComponentInfo& info);
 void set_up_entity_type(Host& host);
 // kin's native functions and modules (python_api.cpp).
 void bind_kin(Host& host);
+// kin.physics, kin.scene and kin.save (python_services.cpp).
+void bind_services(Host& host);
 // A @component class made a component (python_api.cpp).
 bool define_component(Host& host, py_Ref cls);
 

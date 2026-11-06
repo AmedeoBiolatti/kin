@@ -267,8 +267,62 @@ Each of these is a real operation, not component access:
   - `destroy()`, `emit`, `run`, `tween`, and the component calls above.
 - `print`, to kin's log.
 
-The next ones come when a game needs them: physics queries, scene changes,
-saves, UI. Each would be a small module like `input`.
+## What the game gives: physics, scenes, saves
+
+Three small modules reach what the game made. The game hands each one to the
+scripts, and a script using one it wasn't given raises:
+
+```cpp
+scripts.set_physics(&physics); // kin.physics
+scripts.set_flow(&flow);       // kin.scene (kin/ecs/scene_flow.hpp)
+scripts.set_saves(&saves);     // kin.save (kin/ecs/saving.hpp)
+```
+
+**`physics`**: what is where. Positions are in the world.
+- `raycast(start, end)` gives the nearest `Hit` on the line, or `None`.
+- `cast(start, end, radius=r)` or `cast(start, end, size=(w, h))` gives the
+  first `Hit` of a circle or a box moved along the line, centred on it and not
+  turning.
+- `overlap(at)`, `overlap(at, radius=r)` or `overlap(at, size=(w, h))` gives
+  the entities at a point, or in a circle or box centred there.
+- A `Hit` has `entity` (`None` when the body belongs to no entity), `point`,
+  `normal` and `fraction` (0 at the start, 1 at the end).
+- All three also take:
+  - `mask`: the collider categories to find (bits);
+  - `sensors=True`: find sensors too;
+  - `ignore=entity`: pass over that entity's body (usually the one asking).
+
+```python
+ground = physics.raycast(ahead, ahead + vec2(0, 16), mask=LEVEL)
+if ground is None:
+    self.speed *= -1       # the bed ends here: turn round
+```
+
+**`scene`**: going elsewhere. Doors (`SceneDoor`) are data and need no script.
+- `go(path, arrive="", transition="fade", seconds=0.5)` asks the game to go
+  to a scene file of the content. An empty `path` means a place in this scene.
+  `arrive` names the entity to arrive at. A `transition` of `"none"` or `None`
+  goes at once.
+- `going()` is true while a scene is asked for and not yet gone to.
+
+**`save`**: the game's saves.
+- `get(name, default=None)` and `set(name, value)` hold the game's own
+  values: `None`, `True`/`False`, numbers, text, and lists and dicts of them.
+  Setting `None` takes a value away, and a whole number comes back an `int`.
+  The values last from scene to scene and go into the slots.
+- `write(slot, title="", summary="")` writes a slot.
+- `read(slot)` asks the game to read a slot after this update.
+- `exists(slot)`, `delete(slot)`, and `slots()`, which lists `Slot`s (`id`,
+  `title`, `summary`, `updated`, `played`), the newest first.
+- `write`, `read` and `delete` raise `SaveError` when they can't.
+
+An entity marked `Saved` keeps the components it names while the player is
+in another scene and in the slots. A script's own components are among them
+(`"keep": "Transform2D, Beetle"`): its state is already there. Tasks aren't
+kept. A component's `start` runs again when the scene is read, so it can
+start them again.
+
+UI comes when a game needs it.
 
 ## Reload
 
@@ -334,22 +388,37 @@ new one).
 ## The sample: Python garden
 
 `examples/python_garden`: a platformer whose gameplay is all Python.
-- **The game.** The gardener picks the seeds on the beds while beetles walk
-  below; three lives, and R plays again.
-- **The C++ host** (`main.cpp`) makes the world, physics and scripts, steps
-  them and draws the world.
+- **The game.** The gardener picks the seeds of the garden and of its shed
+  while beetles walk about. There are three lives. E goes through a door, F5
+  saves, F9 reads the save back, and R plays again.
+- **The levels** are data: `scenes/garden.kinscene` and `scenes/shed.kinscene`,
+  and the seed, beetle, gardener and HUD prefabs. The scripts' components
+  (`Seed`, `Beetle`, `Gardener`, `Game`) sit in them like kin's own.
+- **The C++ host** (`main.cpp`):
+  - reads a scene into a world of its own, with that world's physics and
+    scripts;
+  - gives the scripts the physics, the scene flow and the saves;
+  - steps and draws it all.
+  - Through a door, it keeps the scene's `Saved` entities and reads the other
+    scene. After a save is read, it reads the scene the save was written in.
 - **The scripts:**
-  - `garden.py` builds the garden from kin's components;
-  - `gardener.py` holds the character controller, keys and autoplay;
-  - `seeds.py` and `beetles.py` hold the pickups and the enemies;
-  - `game.py` holds the rules, lives and messages;
-  - `hud.py` keeps two `TextRenderer`s up to date.
+  - `game.py` holds the rules. Seeds and lives are `save` values, kept across
+    scenes and in the slots; quick save and load live here too.
+  - `gardener.py` holds the character controller, keys and autoplay. After a
+    hit, it goes home once `physics.overlap` finds no beetle there.
+  - `beetles.py`: each beetle turns where a `physics.raycast` a step ahead
+    finds no ground, or finds a wall.
+  - `seeds.py`: the pickups. They are `Saved`, so a picked seed stays picked.
+  - `hud.py` keeps the HUD prefab's texts up to date.
 
 Run it with `python_garden`, edit a script while it runs, and the change is
 read within half a second. CTest's `kin-python-garden` runs 900 headless
-updates with the gardener playing itself (`autoplay`). It fails when a script
-raises, when nothing is picked in 600 updates, or when R does not start the
-garden again.
+updates with the gardener playing itself (the `autoplay` value). It fails
+when:
+- a script raises;
+- nothing is picked in 600 updates;
+- or one of these doesn't do what it should: saving, starting again, reading
+  the save back, or going to the shed and back.
 
 ## Cost
 
@@ -372,11 +441,12 @@ A few hundred scripted entities cost well under a millisecond.
 
 ## Next
 
-What the sample showed it could use, in the order a second game would likely
-need them:
-- physics queries (`raycast`, overlaps);
-- scene changes and prefab-built levels (the garden is built in code);
-- saves (components flagged to save).
+What the sample showed it could use next:
+- transitions: the host goes from scene to scene at once, and doesn't yet play
+  the doors' fades;
+- UI screens (`kin/ecs/ui_screens.hpp`), for a title and a pause menu;
+- a kin.components/1 schema written from the scripts' components, so Studio
+  can place them in scenes (the garden's scenes were written by hand).
 
 Further off: Studio's view of scripts, a debugger, browser builds (PocketPy
 compiles with Emscripten, untried here) and MSVC (built by CI only).

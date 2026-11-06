@@ -411,12 +411,12 @@ std::vector<ComponentFieldValue>* EcsComponentRegistry::data_values(EcsEntity en
     if (!record || record->descriptor.kind != ComponentKind::Data) {
         return nullptr;
     }
-    detail::DataComponentPayload* payload = entity.raw().get_mut<detail::DataComponentPayload>();
-    if (!payload) {
+    if (!entity.raw().has(static_cast<flecs::id_t>(id))) {
         return nullptr;
     }
-    const auto found = payload->values.find(id);
-    return found == payload->values.end() ? nullptr : &found->second;
+    // A prefab instance's own copy, made from its prefab's the first time
+    // (as every write of the registry does).
+    return data_values_for(entity, id);
 }
 
 std::optional<ComponentFieldAccess> EcsComponentRegistry::field_access(std::string_view component, std::string_view field) const {

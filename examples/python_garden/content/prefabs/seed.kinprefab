@@ -1,0 +1,44 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "seed",
+  "name": "seed",
+  "root": "root",
+  "entities": [
+    {
+      "id": "root",
+      "name": "seed",
+      "components": {
+        "Transform2D": {},
+        "RectRenderer": {
+          "size": {
+            "x": 10,
+            "y": 10
+          },
+          "offset": {
+            "x": -5,
+            "y": -5
+          },
+          "color": {
+            "r": 250,
+            "g": 240,
+            "b": 90,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {
+          "type": "static"
+        },
+        "PhysicsColliderComponent": {
+          "shape": "circle",
+          "radius": 8.0,
+          "sensor": true
+        },
+        "Seed": {},
+        "Saved": {
+          "keep": "",
+          "script": false
+        }
+      }
+    }
+  ]
+}

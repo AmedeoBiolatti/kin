@@ -7,10 +7,13 @@
 // stopping the others and are cancelled with their entity; a changed module
 // is read again (its components' values kept, its importers too), a broken
 // edit keeps the last good one; the sandbox has no files, eval or os, and a
-// runaway loop or allocation stops its call; two worlds have their own.
+// runaway loop or allocation stops its call; two worlds have their own;
+// physics queries, scene travel and saves reach what the game gives.
 
 #include <kin/ecs/component.hpp>
 #include <kin/ecs/render.hpp>
+#include <kin/ecs/saving.hpp>
+#include <kin/ecs/scene_flow.hpp>
 #include <kin/ecs/world.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/scene/scene_asset.hpp>
@@ -752,6 +755,169 @@ def left(e, other):
 #endif
 }
 
+// What the game gives its scripts: physics queries find the entities of
+// bodies (sensors only when asked, `ignore` passed over, `mask` filtering);
+// scene.go asks the flow; save keeps values (back the same kinds), writes,
+// lists and asks to read slots, and raises SaveError; a Saved entity's script
+// component comes back in the scene read again. Without them, they raise.
+void test_services() {
+    const fs::path dir = fresh_directory("kin_python_services");
+    write(dir / "scripts/a_record.py", record_module);
+    write(dir / "scripts/b_game.py", R"py(from kin import component, on, physics, scene, save, world, vec2, SaveError
+from a_record import note
+
+@component
+class Bag:
+    coins: int = 0
+
+def names(entities):
+    return ",".join(sorted([e.name for e in entities]))
+
+@on("query")
+def query(e, data):
+    hit = physics.raycast(vec2(0, 0), vec2(0, 200))
+    note(hit.entity.name + " " + str(round(hit.point.y)) + " " + str(round(hit.normal.y)))
+    note(physics.raycast((0, 0), (0, 50)) is None)
+    note(physics.raycast(vec2(50, 0), vec2(50, 200)).entity.name)
+    note(physics.raycast(vec2(50, 0), vec2(50, 200), ignore=world.find("Crate")).entity.name)
+    note(physics.cast(vec2(0, 0), vec2(0, 200), radius=5).entity.name)
+    note(physics.cast(vec2(0, 50), vec2(80, 50), size=vec2(4, 4)).entity.name)
+    note(names(physics.overlap(vec2(-50, 50), radius=30)))
+    note(names(physics.overlap(vec2(-50, 50), radius=30, sensors=True)))
+    note(names(physics.overlap(vec2(0, 50), size=(200, 120), sensors=True)))
+    note(names(physics.overlap(vec2(50, 50))))
+    note(names(physics.overlap(vec2(50, 50), mask=2)))
+
+@on("travel")
+def travel(e, data):
+    note(scene.going())
+    scene.go("scenes/b.kinscene", arrive="Start", transition="iris", seconds=0.8)
+    note(scene.going())
+
+@on("travel_now")
+def travel_now(e, data):
+    scene.go(arrive="Ladder", transition=None)
+
+@on("save")
+def saving(e, data):
+    save.set("coins", 3)
+    save.set("bag", ["seed", 2, 1.5, True, None, {"k": "v"}])
+    b = save.get("bag")
+    note(save.get("coins") + 1)
+    note(b[1] == 2 and type(b[1]) is int and b[2] == 1.5 and b[3] is True and b[4] is None and b[5]["k"] == "v")
+    note(save.get("missing", "none"))
+    world.find("hero")[Bag].coins = 7
+    save.write("slot_a", title="In A", summary="3 coins")
+    note(save.exists("slot_a") and not save.exists("slot_b"))
+    s = save.slots()
+    note(str(len(s)) + " " + s[0].id + " " + s[0].title + " " + s[0].summary)
+    save.read("slot_a")
+    try:
+        save.read("slot_b")
+    except SaveError as error:
+        note("no slot_b")
+    try:
+        save.write("not a slot!")
+    except SaveError:
+        note("bad name")
+    try:
+        save.set("where", vec2(1, 2))
+    except TypeError:
+        note("no vec2")
+    save.set("coins", None)
+    note(save.get("coins"))
+
+@on("bag")
+def bag(e, data):
+    note(world.find("hero")[Bag].coins)
+
+@on("bare")
+def bare(e, data):
+    physics.raycast(vec2(0, 0), vec2(0, 1))
+)py");
+    const std::string scene_text = R"({
+  "schema": "kin.scene/1",
+  "entities": [
+    {"id": "hero", "name": "hero", "components": {"Transform2D": {}, "Saved": {"keep": "Bag"}, "Bag": {"coins": 1}}}
+  ]
+})";
+    kin::Input input;
+    kin::SceneSaves saves{{.game_id = "python_services", .game_version = "1", .root_override = dir / "store"}, dir};
+    kin::SceneFlow flow;
+    {
+        kin::EcsWorld world;
+        kin::register_builtin_editor_components(world);
+        kin::PythonScripts scripts{world, {.content = dir, .check_frames = 0}};
+        assert_clean(scripts);
+        make_record(world);
+        const kin::SceneLoadResult read = kin::parse_scene_asset(scene_text, world.components());
+        assert(read.ok());
+        assert(kin::instantiate_scene_asset(world, *read.scene, dir, world.components()).ok());
+        scripts.set_flow(&flow);
+        scripts.set_saves(&saves);
+        saves.enter(world, "scenes/a.kinscene");
+
+#if KIN_ENABLE_PHYSICS
+        kin::PhysicsWorld physics{{.gravity = {0.0f, 0.0f}, .units_per_meter = 32.0f}};
+        kin::EcsPhysicsBridge bridge{world, physics};
+        const auto solid = [&](const char* name, kin::Vec2f at, kin::PhysicsShape shape, bool sensor = false) {
+            world.entity(name)
+                .set(kin::Transform2D{.pos = at})
+                .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Static}})
+                .set(kin::PhysicsColliderComponent{.colliders = {{.def = {.shape = shape, .sensor = sensor}}}});
+        };
+        solid("Floor", {0.0f, 100.0f}, kin::PhysicsShape::box({200.0f, 10.0f}));
+        solid("Crate", {50.0f, 50.0f}, kin::PhysicsShape::box({10.0f, 10.0f}));
+        solid("Ghost", {-50.0f, 50.0f}, kin::PhysicsShape::circle(10.0f), true);
+        kin::update_physics_world(world, physics, 1.0f / 60.0f);
+        scripts.set_physics(&physics);
+        scripts.emit("query");
+        step(scripts, input, 1);
+        assert_clean(scripts);
+        assert(record_text(world) == "Floor 90 -1;True;Crate;Floor;Floor;Crate;;Ghost;Crate,Floor,Ghost;Crate;;");
+        assert(world.components().patch_field(world.entities().find_by_name("record"), "Record", "text", std::string{}));
+        scripts.set_physics(nullptr);
+#endif
+
+        scripts.emit("travel");
+        step(scripts, input, 1);
+        assert_clean(scripts);
+        std::optional<kin::SceneTravel> go = flow.take();
+        assert(go && go->scene == "scenes/b.kinscene" && go->arrive == "Start" && !go->door);
+        assert(go->transition == kin::TransitionKind::Iris && near(go->duration, 0.8f));
+        scripts.emit("travel_now");
+        step(scripts, input, 1);
+        go = flow.take();
+        assert(go && go->scene.empty() && go->arrive == "Ladder" && !go->transition);
+
+        scripts.emit("save");
+        step(scripts, input, 1);
+        assert_clean(scripts);
+        assert(record_text(world) == "False;True;4;True;none;True;1 slot_a In A 3 coins;no slot_b;bad name;no vec2;None;");
+        assert(saves.take_read() == std::optional<std::string>("slot_a"));
+        assert(!saves.value("coins") && saves.value("bag"));
+        saves.keep(world);
+
+        scripts.emit("bare");
+        step(scripts, input, 1);
+        assert(contains(problem_of(scripts, "b_game"), "physics"));
+    }
+    // The scene read again: the hero's Bag as the script left it.
+    kin::EcsWorld world;
+    kin::register_builtin_editor_components(world);
+    kin::PythonScripts scripts{world, {.content = dir, .check_frames = 0}};
+    make_record(world);
+    const kin::SceneLoadResult read = kin::parse_scene_asset(scene_text, world.components());
+    assert(read.ok() && kin::instantiate_scene_asset(world, *read.scene, dir, world.components()).ok());
+    scripts.set_saves(&saves);
+    saves.enter(world, "scenes/a.kinscene");
+    assert(saves.problems().empty());
+    scripts.emit("bag");
+    step(scripts, input, 1);
+    assert_clean(scripts);
+    assert(record_text(world) == "7;");
+}
+
 } // namespace
 
 int main() {
@@ -763,6 +929,7 @@ int main() {
     test_engine_events();
     test_sandbox();
     test_two_worlds();
+    test_services();
     std::puts("python scripting tests passed");
     return 0;
 }
