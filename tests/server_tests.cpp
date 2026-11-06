@@ -1153,7 +1153,7 @@ void test_view_screenshot() {
 // through (red: ten times its zoom, green: its centre's x).
 class ViewedScene final : public kin::Scene {
 public:
-    explicit ViewedScene(std::filesystem::path* shown) : _shown(shown) {}
+    ViewedScene(std::filesystem::path* shown, int* edits) : _shown(shown), _edits(edits) {}
     bool view_scene(const std::filesystem::path& file, const std::filesystem::path&, std::string& error) override {
         if (file.filename() == "broken.kinscene") {
             error = "broken.kinscene does not read";
@@ -1170,10 +1170,9 @@ public:
                 return false;
             }
         }
-        ++_edits;
+        ++*_edits;
         return true;
     }
-    int edits() const { return _edits; }
     bool set_view_camera(const kin::Camera2D* camera) override {
         _camera = camera ? std::optional<kin::Camera2D>(*camera) : std::nullopt;
         _camera3d.reset();
@@ -1197,7 +1196,7 @@ public:
 
 private:
     std::filesystem::path* _shown;
-    int _edits = 0;
+    int* _edits; // (the test's: the server destroys its scenes before it returns)
     std::optional<kin::Camera2D> _camera;
     std::optional<kin::Camera3D> _camera3d;
 };
@@ -1208,9 +1207,8 @@ void test_view_scene_and_frame() {
     std::filesystem::remove(frame_path);
     std::filesystem::path shown;
     kin::SceneManager scenes;
-    auto viewed = std::make_unique<ViewedScene>(&shown);
-    const ViewedScene* viewed_scene = viewed.get();
-    scenes.push(std::move(viewed));
+    int edits = 0;
+    scenes.push(std::make_unique<ViewedScene>(&shown, &edits));
 
     std::ostringstream out;
     std::istringstream in(
@@ -1269,7 +1267,7 @@ void test_view_scene_and_frame() {
 
     // Edits in place: handed to the scene; one it refuses, or one that is not a list, fails with why.
     const kin::JsonValue* edited = response_result(text, 9);
-    assert(edited != nullptr && edited->int_at("edited") == 1 && viewed_scene->edits() == 1);
+    assert(edited != nullptr && edited->int_at("edited") == 1 && edits == 1);
     assert(response_result(text, 10) == nullptr && text.find("no entity 'ghost'") != std::string::npos);
     assert(response_result(text, 11) == nullptr && text.find("view.edit needs entities") != std::string::npos);
 }
