@@ -7,6 +7,11 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Fixed: a `SceneSession3D` scene now draws in the browser. Its new view is warmed up first (`warm_up`, on by
+  default), and WebGL2 had no warm-up, so `Renderer3D::warm_up` failed ("scene GPU warm-up failed") and no scene
+  loaded. WebGL2 has nothing to make ahead (its programs come with the renderer, its targets with the view), and
+  now says so; the browser fixture checks it.
+
 - Touch ([input](input.md#touch)). Fingers from the system (`SDL_EVENT_FINGER_*`) are `Input::touches()` (id,
   position, where and when each went down) and `touches_ended()`. The first unclaimed finger is the pointer: it moves
   the mouse and holds its left button, so ui2 and mouse-reading code work with a finger. Its press lands a frame

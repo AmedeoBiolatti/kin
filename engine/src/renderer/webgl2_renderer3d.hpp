@@ -20,6 +20,8 @@ public:
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
     bool resize_view(IViewBackend3D& view, Vec2i size) override;
     bool render(IViewBackend3D& view, const Scene3D& scene, RenderDebugStats3D& stats) override;
+    // Nothing to make ahead: the programs are made with the renderer, the targets with the view.
+    bool warm_up(IViewBackend3D& view, const Scene3D& scene) override;
     Result3D<PickResult3D> pick(IViewBackend3D&, Vec2i) override;
 
 private:

@@ -319,7 +319,8 @@ public:
     // What `pixel` of the view's last render shows; waits for the GPU.
     virtual Result3D<PickResult3D> pick(IViewBackend3D& view, Vec2i pixel) = 0;
     // Makes what rendering `scene` into `view` would make on first use (pipelines, targets), without drawing. False
-    // where there is nothing to make.
+    // when it could not, which Renderer3D::warm_up reports as failure (the default: a backend that has none); a
+    // backend with nothing to make ahead says true.
     virtual bool warm_up(IViewBackend3D& view, const Scene3D& scene) {
         static_cast<void>(view);
         static_cast<void>(scene);
