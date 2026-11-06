@@ -69,7 +69,9 @@ void check_webgl_geometry2d(Renderer2D& r) {
                  .fill = Color::rgb(255, 0, 0),
                  .stroke = Color::rgb(0, 255, 0),
                  .stroke_width = 2,
-                 .transform = Affine2::translation({16, 16})});
+                 // 0.3 px right of a pixel boundary, so the stroke's outer edge
+                 // (x = 27.3) falls inside pixel 27: 0.2 px past it, soft.
+                 .transform = Affine2::translation({16.3f, 16})});
     r.draw_shape(rounded);
     r.draw_texture(texture, {40, 8, 16, 16});
     ShapeMesh ellipse;
@@ -90,8 +92,10 @@ void check_webgl_geometry2d(Renderer2D& r) {
     check(16, 16, Color::rgb(255, 0, 0), "Analytic rounded rectangles must preserve the fill");
     check(26, 16, Color::rgb(0, 255, 0), "Analytic strokes must be centered on the outline");
     check(5, 5, colors::black, "Analytic rounded corners must discard outside fragments");
+    // Pixel 27's centre is 0.2 px past the stroke's edge: 0.3 coverage under the
+    // half-pixel fade (docs/rendering.md, "Shape edges").
     const int edge = pixels[(16 * 64 + 27) * 4 + 1];
-    require(edge > 50 && edge < 220, "Analytic strokes must retain a soft one-pixel edge");
+    require(edge > 50 && edge < 220, "Analytic strokes must keep a soft edge");
     check(48, 20, Color::rgb(0, 0, 255), "Analytic ellipses must combine primitive and renderer transforms");
     check(48, 16, colors::white, "Textured geometry after analytic shapes must preserve submission order");
     check(40, 9, Color::rgb(255, 0, 0), "Analytic shapes after textures must preserve submission order");
