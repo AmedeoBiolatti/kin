@@ -850,10 +850,10 @@ void headless() {
     ok(session.edit_authored(authored(R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[3,0,0]}}}])")),
        "authored edit failed");
     check(barrel.get<Transform3D>()->position == Vec3f{3, 0, 0}, "authored edit did not move the barrel");
-    for (const char* bad : {R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0]}}},{"id":"ghost","components":{}}])",
-                            R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0],"wobble":1}}}])",
-                            R"([{"id":"blue-barrel","components":{"Transform3D":{"position":"left"}}}])",
-                            R"({"id":"blue-barrel"})"}) {
+    for (const char* bad :
+         {R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0]}}},{"id":"ghost","components":{}}])",
+          R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0],"wobble":1}}}])",
+          R"([{"id":"blue-barrel","components":{"Transform3D":{"position":"left"}}}])", R"({"id":"blue-barrel"})"}) {
         check(!session.edit_authored(authored(bad)) && barrel.get<Transform3D>()->position == Vec3f{3, 0, 0},
               "a bad authored edit was taken");
     }

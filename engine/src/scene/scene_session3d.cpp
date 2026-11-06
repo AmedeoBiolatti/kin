@@ -1259,7 +1259,10 @@ Status3D SceneSession3D::edit_authored(const JsonValue& entities) {
             }
             for (const auto& [component, fields] : components->members()) {
                 for (ComponentFieldSnapshot& field : parse_component_fields(component, fields, registry, errors)) {
-                    edits.push_back({.entity = target, .component = component, .field = std::move(field.name), .value = std::move(field.value)});
+                    edits.push_back({.entity = target,
+                                     .component = component,
+                                     .field = std::move(field.name),
+                                     .value = std::move(field.value)});
                 }
             }
         }
