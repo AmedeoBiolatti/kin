@@ -88,6 +88,25 @@ class Exporter:
                 info[key] = v if isinstance(v, bool) else enum_name(v)
             except Exception:
                 pass
+        # The texture's colour adjustments (applied as Unreal builds it, not in the source the file holds), where they
+        # are not their defaults; and a legacy gamma (2.2, not sRGB's curve).
+        adjust = {}
+        for key, default in (("adjust_brightness", 1.0), ("adjust_brightness_curve", 1.0), ("adjust_vibrance", 0.0),
+                             ("adjust_saturation", 1.0), ("adjust_rgb_curve", 1.0), ("adjust_hue", 0.0),
+                             ("adjust_min_alpha", 0.0), ("adjust_max_alpha", 1.0)):
+            try:
+                v = float(tex.get_editor_property(key))
+                if abs(v - default) > 1e-5:
+                    adjust[key[len("adjust_"):]] = v
+            except Exception:
+                pass
+        if adjust:
+            info["adjust"] = adjust
+        try:
+            if tex.get_editor_property("use_legacy_gamma"):
+                info["legacy_gamma"] = True
+        except Exception:
+            pass
         self.textures[path] = info
         return info["file"]
 

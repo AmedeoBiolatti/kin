@@ -134,13 +134,24 @@ public:
             note(role + ": " + file.filename().string() + " can't be decoded (" + why + "): left out");
             return std::nullopt;
         }
+        if (const auto it = adjusts.find(key(file)); it != adjusts.end() && !ranges.contains(file)) {
+            adjust_image(image, it->second);
+            note(file.filename().string() + ": its colour adjustments (as its engine builds it) applied");
+        }
         return image;
+    }
+    // A file's colour adjustments (an Unreal texture's: applied as it is decoded; then never used as it is), by its
+    // absolute path.
+    std::map<std::filesystem::path, ImageAdjust> adjusts;
+    static std::filesystem::path key(const std::filesystem::path& file) {
+        return std::filesystem::absolute(file).lexically_normal();
     }
     // A map kin reads as it is: in place or copied when kin reads its format, else decoded into a PNG (said when
     // neither can be done: none then).
     std::optional<std::filesystem::path> readable(const std::filesystem::path& file, const std::string& role) {
         const std::string e = extension(file);
-        if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga" || e == ".bmp" || e == ".dds" || e == ".ktx2")
+        if ((e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga" || e == ".bmp" || e == ".dds" || e == ".ktx2") &&
+            !adjusts.contains(key(file)))
             return place(file);
         if (const auto image = load(file, role))
             return made("_" + file.stem().string(), *image);

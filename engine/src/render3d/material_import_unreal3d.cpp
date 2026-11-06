@@ -262,6 +262,31 @@ std::optional<std::array<u8, 4>> uniform(const Image& image) {
     return std::array<u8, 4>{image.rgba[0], image.rgba[1], image.rgba[2], image.rgba[3]};
 }
 
+// The export's textures' colour adjustments (Unreal applies them building a texture; its file is the source), for the
+// import to apply as it decodes them.
+void read_adjustments(const JsonValue& doc, Context& x) {
+    const auto* textures = doc.find("textures");
+    if (!textures || !textures->is_object())
+        return;
+    for (const auto& [file, settings] : textures->members()) {
+        ImageAdjust a;
+        a.srgb = settings.bool_at("srgb", true);
+        a.legacy_gamma = settings.bool_at("legacy_gamma", false);
+        if (const auto* j = settings.find("adjust"); j && j->is_object()) {
+            a.brightness = f32(j->number_at("brightness", 1));
+            a.brightness_curve = f32(j->number_at("brightness_curve", 1));
+            a.vibrance = f32(j->number_at("vibrance", 0));
+            a.saturation = f32(j->number_at("saturation", 1));
+            a.rgb_curve = f32(j->number_at("rgb_curve", 1));
+            a.hue = f32(j->number_at("hue", 0));
+            a.min_alpha = f32(j->number_at("min_alpha", 0));
+            a.max_alpha = f32(j->number_at("max_alpha", 1));
+        }
+        if (!a.identity())
+            x.adjusts[Context::key(x.options.project / file)] = a;
+    }
+}
+
 } // namespace
 
 Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path& source,
@@ -277,6 +302,7 @@ Result3D<ImportedMaterial3D> import_unreal_material(const std::filesystem::path&
         ImportedMaterial3D imported;
         imported.name = doc.find("name") ? doc.find("name")->as_string() : source.stem().string();
         Context x(imported, options, source.stem().string());
+        read_adjustments(doc, x);
         const Reader reader(doc);
         const fs::path root = fs::absolute(options.project).lexically_normal(); // the export's folder
         const JsonValue* inputs = doc.find("inputs");
@@ -1684,6 +1710,7 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         const JsonValue& doc = *parsed.value;
         ImportedMaterial3D& imported = *result.value;
         material_import::Context x(imported, options, source.stem().string());
+        read_adjustments(doc, x);
         if (!doc.find("graph")) {
             x.note("the export has no graph (an older unreal_export.py): its Tier 1 import only");
             return result;

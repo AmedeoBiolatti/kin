@@ -277,7 +277,11 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   `unreal_export_editor.py`: the commandlet asserts unwrapping a cube) unwraps them, a Radiance HDR in longitude and
   latitude, sampled by the `texture_equirect` node (kin's environment layout, seamless derivatives) in the direction
   (-y, z, x) of Unreal's; Rotate About Axis; View Property (view size, camera, the temporal sample's index by the
-  time); Screen Position's PixelPosition; a domain not a surface's said.
+  time); Screen Position's PixelPosition; a domain not a surface's said. Textures' colour adjustments (brightness,
+  saturation, curves, hue: Unreal applies them building a texture, its exported source has none) and legacy gamma
+  baked into the imported maps as Unreal applies them (linear, HSV): the landscapes' rock and snow were 50% too
+  bright and coloured. Unreal's snapshots cached (`unreal_snapshot_cache.py`: the editor only for pictures out of
+  date). Now close 51, minor 18, major 30, 8 not surfaces.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

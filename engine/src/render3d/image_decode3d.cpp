@@ -583,6 +583,60 @@ Image decode_exr(std::span<const u8> b, ImageRange* range) {
 }
 } // namespace
 
+void adjust_image(Image& image, const ImageAdjust& a) {
+    const auto to_linear = [&](f32 c) {
+        if (!a.srgb)
+            return c;
+        if (a.legacy_gamma)
+            return std::pow(c, 2.2f);
+        return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    };
+    const auto to_texel = [&](f32 c) {
+        c = std::clamp(c, 0.0f, 1.0f);
+        if (a.srgb)
+            c = c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
+        return u8(std::clamp(c, 0.0f, 1.0f) * 255.0f + 0.5f);
+    };
+    const bool hsv = a.brightness != 1 || a.brightness_curve != 1 || a.vibrance != 0 || a.saturation != 1 || a.hue != 0;
+    for (size_t i = 0; i + 3 < image.rgba.size(); i += 4) {
+        u8* p = &image.rgba[i];
+        f32 r = to_linear(p[0] / 255.0f), g = to_linear(p[1] / 255.0f), b = to_linear(p[2] / 255.0f);
+        if (hsv) { // (FLinearColor's LinearRGBToHSV and HSVToLinearRGB)
+            const f32 hi = std::max({r, g, b}), lo = std::min({r, g, b}), range = hi - lo;
+            f32 h = hi == lo  ? 0.0f
+                    : hi == r ? std::fmod((g - b) / range * 60.0f + 360.0f, 360.0f)
+                    : hi == g ? (b - r) / range * 60.0f + 120.0f
+                              : (r - g) / range * 60.0f + 240.0f;
+            f32 s = hi == 0 ? 0.0f : range / hi, v = hi;
+            v *= a.brightness;
+            if (a.brightness_curve != 1 && a.brightness_curve != 0)
+                v = std::pow(std::max(v, 0.0f), a.brightness_curve);
+            if (a.vibrance != 0)
+                s += std::clamp(a.vibrance, 0.0f, 1.0f) * 0.5f * std::pow(1.0f - s, 5.0f);
+            s *= a.saturation;
+            h = std::fmod(h + a.hue, 360.0f);
+            if (h < 0)
+                h += 360.0f;
+            s = std::clamp(s, 0.0f, 1.0f);
+            v = std::clamp(v, 0.0f, 1.0f);
+            const f32 sixth = h / 60.0f, whole = std::floor(sixth), f = sixth - whole;
+            const f32 values[4] = {v, v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)};
+            static const int swizzle[6][3] = {{0, 3, 1}, {2, 0, 1}, {1, 0, 3}, {1, 2, 0}, {3, 1, 0}, {0, 1, 2}};
+            const int k = int(whole) % 6;
+            r = values[swizzle[k][0]], g = values[swizzle[k][1]], b = values[swizzle[k][2]];
+        }
+        if (a.rgb_curve != 1 && a.rgb_curve != 0) {
+            r = std::pow(std::max(r, 0.0f), a.rgb_curve);
+            g = std::pow(std::max(g, 0.0f), a.rgb_curve);
+            b = std::pow(std::max(b, 0.0f), a.rgb_curve);
+        }
+        p[0] = to_texel(r), p[1] = to_texel(g), p[2] = to_texel(b);
+        if (a.min_alpha != 0 || a.max_alpha != 1)
+            p[3] =
+                u8(std::clamp(a.min_alpha + (a.max_alpha - a.min_alpha) * (p[3] / 255.0f), 0.0f, 1.0f) * 255.0f + 0.5f);
+    }
+}
+
 std::optional<Image> decode_extra_image(std::span<const u8> bytes, std::string* why, ImageRange* range) {
     try {
         if (range)

@@ -542,6 +542,37 @@ void pictures() {
             }
         CHECK(!material_import::decode_extra_image({reinterpret_cast<const u8*>(hdr.data()), hdr.size() - 3}));
     }
+    // Unreal's colour adjustments, in linear colour: red's value halved (sRGB 188), its saturation 0 (grey); a legacy
+    // gamma's texel as sRGB's (32: 0.125^2.2 linear, sRGB 26); a data texture's in its values; alpha remapped.
+    {
+        Image red{Vec2i{1, 1}, {255, 0, 0, 255}};
+        material_import::ImageAdjust half;
+        half.brightness = 0.5f;
+        material_import::adjust_image(red, half);
+        CHECK(red.rgba[0] == 188 && red.rgba[1] == 0 && red.rgba[2] == 0 && red.rgba[3] == 255);
+        material_import::ImageAdjust grey;
+        grey.saturation = 0;
+        grey.min_alpha = 0.5f;
+        material_import::adjust_image(red, grey);
+        CHECK(red.rgba[0] == 188 && red.rgba[1] == 188 && red.rgba[2] == 188 && red.rgba[3] == 255);
+        Image legacy{Vec2i{1, 1}, {32, 32, 32, 0}};
+        material_import::ImageAdjust gamma;
+        gamma.legacy_gamma = true;
+        CHECK(!gamma.identity());
+        material_import::adjust_image(legacy, gamma);
+        CHECK(std::abs(int(legacy.rgba[0]) - 26) <= 1 && legacy.rgba[3] == 0);
+        Image data{Vec2i{1, 1}, {100, 50, 25, 255}};
+        material_import::ImageAdjust linear;
+        linear.srgb = false;
+        linear.brightness = 0.5f;
+        material_import::adjust_image(data, linear);
+        CHECK(data.rgba[0] == 50 && data.rgba[1] == 25 && std::abs(int(data.rgba[2]) - 13) <= 1);
+        material_import::ImageAdjust alpha;
+        alpha.min_alpha = 0.5f;
+        Image clear{Vec2i{1, 1}, {0, 0, 0, 0}};
+        material_import::adjust_image(clear, alpha);
+        CHECK(clear.rgba[3] == 128);
+    }
     // A PSD of 2 x 2, RGB, raw: its composited picture.
     std::string psd = "8BPS";
     const auto u16be = [&](int v) { psd += char(v >> 8), psd += char(v & 255); };
