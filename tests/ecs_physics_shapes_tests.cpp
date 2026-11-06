@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cmath>
 #include <sstream>
 #include <string>
@@ -149,7 +150,12 @@ void test_joint_components() {
         kin::update_physics_world(world, physics, dt);
     }
     assert(door.get<kin::PhysicsJointComponent>()->joint == before); // the same joint, changed
+#if KIN_PHYSICS_BOX2D_V3
+    // Box2D 3's limits are soft: a motor of this torque pushes a few degrees past.
+    assert(near(door.get<kin::Transform2D>()->rotation, 0.0f, 6.0f));
+#else
     assert(near(door.get<kin::Transform2D>()->rotation, 0.0f, 1.0f));
+#endif
 
     // A weight on a slack rope that breaks: it would hold it hanging (its
     // weight, 0.2 kg at 10 m/s^2, is 63 in points), not the jerk of its fall.
@@ -159,10 +165,16 @@ void test_joint_components() {
                                           .other_anchor = {0.0f, -64.0f},
                                           .limit = true,
                                           .upper = 96.0f,
+#if KIN_PHYSICS_BOX2D_V3
+                                          // Box2D 3's limits are soft: no jerk, it is pulled
+                                          // to its length; a rope weaker than the weight breaks.
+                                          .break_force = 50.0f});
+#else
                                           .break_force = 100.0f});
+#endif
     kin::update_physics_world(world, physics, dt);
     assert(physics.is_alive(weight.get<kin::PhysicsJointComponent>()->joint));
-    for (int i = 0; i < 60; ++i) {
+    for (int i = 0; i < 90; ++i) {
         kin::update_physics_world(world, physics, dt);
     }
     assert(weight.get<kin::PhysicsJointComponent>()->broken);

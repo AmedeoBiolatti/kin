@@ -1,10 +1,13 @@
 #include <kin/ecs/physics.hpp>
 
+#include <kin/core/jobs.hpp>
 #include <kin/ecs/tilemap.hpp>
 #include <kin/platform/log.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <functional>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -233,60 +236,190 @@ void destroy_unclaimed_fixtures(flecs::world& world, PhysicsWorld& physics) {
     });
 }
 
+// Rows of a query's tables, walked in pieces: on the job system's workers
+// too when there are enough to pay for waking them. Only for walks that read
+// the physics world and write their own rows.
+struct RowPiece {
+    i32 table = 0;
+    i32 begin = 0;
+    i32 end = 0;
+};
+constexpr i32 rows_per_piece = 1024;
+constexpr i32 rows_for_workers = 4096;
+
+std::vector<RowPiece> split_rows(const std::vector<i32>& table_rows) {
+    std::vector<RowPiece> pieces;
+    for (i32 table = 0; table < static_cast<i32>(table_rows.size()); ++table) {
+        for (i32 begin = 0; begin < table_rows[table]; begin += rows_per_piece) {
+            pieces.push_back({table, begin, std::min(begin + rows_per_piece, table_rows[table])});
+        }
+    }
+    return pieces;
+}
+
+void for_each_piece(const std::vector<RowPiece>& pieces, i32 rows, const std::function<void(i32)>& work) {
+    if (rows < rows_for_workers || pieces.size() < 2) {
+        for (i32 piece = 0; piece < static_cast<i32>(pieces.size()); ++piece) {
+            work(piece);
+        }
+        return;
+    }
+    default_job_system().parallel_for(static_cast<i32>(pieces.size()), work);
+}
+
+// How many fixtures a body's colliders have (its own, then those of entities
+// with no body under it): a body with more has one no collider has.
+struct Claimed {
+    PhysicsBody body;
+    u32 fixtures = 0;
+};
+
+// A body made for its entity, where the entity is.
+PhysicsBody make_body(flecs::entity entity, const PhysicsBodyComponent& body, PhysicsWorld& physics) {
+    PhysicsBodyDef def = body.def;
+    if (const Transform2D* transform = entity.get<Transform2D>()) {
+        const WorldTransform pose = world_pose(entity, *transform);
+        def.position = pose.pos;
+        def.rotation = to_physics_angle(pose.rotation);
+        if (pose.scale != Vec2f{1.0f, 1.0f}) {
+            static bool warned = false;
+            if (!std::exchange(warned, true)) {
+                KIN_LOG_WARN("physics", "a physics body's entity is scaled; bodies ignore scale (size the colliders instead)");
+            }
+        }
+    }
+    if (def.user_id == 0) {
+        def.user_id = static_cast<u64>(entity.id());
+    }
+    if (entity.has<CharacterController2D>()) {
+        // The controller moves it: seen by sensors, bumped by bodies, never asleep.
+        def.type = PhysicsBodyType::Dynamic;
+        def.fixed_rotation = true;
+        def.gravity_scale = 0.0f;
+        def.allow_sleep = false;
+        def.character = true;
+    }
+    return physics.create_body(def);
+}
+
+// Its body and its colliders' fixtures, made if missing; how many fixtures
+// its colliders have.
+u32 place_body(flecs::entity entity, PhysicsBodyComponent& body, PhysicsColliderComponent* colliders, PhysicsWorld& physics) {
+    if (!physics.is_alive(body.body)) {
+        body.body = make_body(entity, body, physics);
+    }
+    if (!colliders) {
+        return 0;
+    }
+    colliders->body = {};
+    u32 fixtures = 0;
+    for (PhysicsCollider& collider : colliders->colliders) {
+        if (!physics.is_alive(collider.fixture)) {
+            collider.fixture = physics.add_fixture(body.body, collider.def);
+        }
+        fixtures += physics.is_alive(collider.fixture) ? 1 : 0;
+    }
+    return fixtures;
+}
+
+// Most steps nearly every body is there with its fixtures. Which are not is
+// looked for on the workers (reading only); those are then made here, in walk
+// order. `differing` gets the bodies whose fixtures are not just their own
+// colliders' (those of colliders below them, or one no collider has). False
+// when a body or collider comes from a prefab: the walk (which owns them
+// first) does it all.
+bool place_bodies(flecs::world& world, PhysicsWorld& physics, std::vector<Claimed>& differing) {
+    struct Rows {
+        PhysicsBodyComponent* bodies = nullptr;
+        PhysicsColliderComponent* colliders = nullptr; // none in this table
+        const ecs_entity_t* entities = nullptr;
+    };
+    struct Row {
+        i32 table = 0;
+        i32 row = 0;
+    };
+    std::vector<Rows> tables;
+    std::vector<i32> table_rows;
+    i32 rows = 0;
+    bool shared = false;
+    static const char key = 0;
+    kin::kept_query<PhysicsBodyComponent, PhysicsColliderComponent*>(world, &key, [](flecs::world& w) {
+        return w.query_builder<PhysicsBodyComponent, PhysicsColliderComponent*>().cached().build();
+    }).run([&](flecs::iter& it) {
+        while (it.next()) {
+            if (it.count() == 0) {
+                continue;
+            }
+            if (!it.is_self(0) || (it.is_set(1) && !it.is_self(1))) {
+                shared = true;
+                continue;
+            }
+            tables.push_back({.bodies = &it.field<PhysicsBodyComponent>(0)[0],
+                              .colliders = it.is_set(1) ? &it.field<PhysicsColliderComponent>(1)[0] : nullptr,
+                              .entities = it.c_ptr()->entities});
+            table_rows.push_back(static_cast<i32>(it.count()));
+            rows += static_cast<i32>(it.count());
+        }
+    });
+    if (shared) {
+        return false;
+    }
+    const std::vector<RowPiece> pieces = split_rows(table_rows);
+    std::vector<std::vector<Claimed>> found(pieces.size());
+    std::vector<std::vector<Row>> missing(pieces.size());
+    for_each_piece(pieces, rows, [&](i32 index) {
+        const RowPiece& piece = pieces[static_cast<std::size_t>(index)];
+        const Rows& table = tables[static_cast<std::size_t>(piece.table)];
+        for (i32 i = piece.begin; i < piece.end; ++i) {
+            const PhysicsBody body = table.bodies[i].body;
+            bool whole = physics.is_alive(body);
+            u32 fixtures = 0;
+            if (whole && table.colliders) {
+                const PhysicsColliderComponent& colliders = table.colliders[i];
+                whole = !colliders.body; // else it was below a body before it had its own
+                for (const PhysicsCollider& collider : colliders.colliders) {
+                    whole = whole && physics.is_alive(collider.fixture);
+                }
+                fixtures = static_cast<u32>(colliders.colliders.size());
+            }
+            if (!whole) {
+                missing[static_cast<std::size_t>(index)].push_back({piece.table, i});
+            } else if (physics.fixture_count(body) != fixtures) {
+                found[static_cast<std::size_t>(index)].push_back({body, fixtures});
+            }
+        }
+    });
+    for (std::size_t index = 0; index < pieces.size(); ++index) {
+        for (const Row& at : missing[index]) {
+            const Rows& table = tables[static_cast<std::size_t>(at.table)];
+            PhysicsBodyComponent& body = table.bodies[at.row];
+            const flecs::entity entity{world, table.entities[at.row]};
+            const u32 fixtures = place_body(entity, body, table.colliders ? &table.colliders[at.row] : nullptr, physics);
+            if (physics.fixture_count(body.body) != fixtures) {
+                differing.push_back({body.body, fixtures});
+            }
+        }
+        differing.insert(differing.end(), found[index].begin(), found[index].end());
+    }
+    return true;
+}
+
 void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
     own_inherited_physics(world);
-    // How many fixtures each body's colliders have (its own, then those of
-    // entities with no body under it): a body with more has one no collider
-    // has, and only then are they looked for. Kept from step to step.
-    struct Claimed {
-        PhysicsBody body;
-        u32 fixtures = 0;
-    };
+    // How many fixtures each body's colliders have: kept from step to step.
     thread_local std::vector<Claimed> claimed;
     thread_local std::vector<PhysicsBody> claimed_below; // a fixture each, of colliders with no body
     claimed.clear();
     claimed_below.clear();
-    // Its colliders in the same walk (an optional term), not looked up for each body.
-    kin::each(world, [&](flecs::entity entity, PhysicsBodyComponent& body, PhysicsColliderComponent* collider_component) {
-        if (!physics.is_alive(body.body)) {
-            PhysicsBodyDef def = body.def;
-            if (const Transform2D* transform = entity.get<Transform2D>()) {
-                const WorldTransform pose = world_pose(entity, *transform);
-                def.position = pose.pos;
-                def.rotation = to_physics_angle(pose.rotation);
-                if (pose.scale != Vec2f{1.0f, 1.0f}) {
-                    static bool warned = false;
-                    if (!std::exchange(warned, true)) {
-                        KIN_LOG_WARN("physics", "a physics body's entity is scaled; bodies ignore scale (size the colliders instead)");
-                    }
-                }
-            }
-            if (def.user_id == 0) {
-                def.user_id = static_cast<u64>(entity.id());
-            }
-            if (entity.has<CharacterController2D>()) {
-                // The controller moves it: seen by sensors, bumped by bodies, never asleep.
-                def.type = PhysicsBodyType::Dynamic;
-                def.fixed_rotation = true;
-                def.gravity_scale = 0.0f;
-                def.allow_sleep = false;
-                def.character = true;
-            }
-            body.body = physics.create_body(def);
-        }
-
-        Claimed& own = claimed.emplace_back(Claimed{.body = body.body});
-        if (!collider_component) {
-            return;
-        }
-        collider_component->body = {};
-        for (PhysicsCollider& collider : collider_component->colliders) {
-            if (!physics.is_alive(collider.fixture)) {
-                collider.fixture = physics.add_fixture(body.body, collider.def);
-            }
-            own.fixtures += physics.is_alive(collider.fixture) ? 1 : 0;
-        }
-    });
+    const bool quick = place_bodies(world, physics, claimed);
+    if (!quick) {
+        claimed.clear();
+        // Its colliders in the same walk (an optional term), not looked up for each body.
+        kin::each(world, [&](flecs::entity entity, PhysicsBodyComponent& body, PhysicsColliderComponent* colliders) {
+            const u32 fixtures = place_body(entity, body, colliders, physics);
+            claimed.push_back({body.body, fixtures});
+        });
+    }
 
     // Colliders of entities with no body: on the body above them.
     static const char bodiless = 0;
@@ -325,6 +458,18 @@ void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
         if (physics.fixture_count(own.body) != own.fixtures + static_cast<u32>(last - first)) {
             destroy_unclaimed_fixtures(world, physics);
             return;
+        }
+    }
+    if (quick) {
+        // Only bodies with other than their own colliders' fixtures were looked
+        // at: one with colliders below it and no more than its own has too few.
+        std::ranges::sort(claimed, {}, [](const Claimed& c) { return std::pair{c.body.index, c.body.generation}; });
+        for (const PhysicsBody target : claimed_below) {
+            if (!std::ranges::binary_search(claimed, std::pair{target.index, target.generation}, {},
+                                            [](const Claimed& c) { return std::pair{c.body.index, c.body.generation}; })) {
+                destroy_unclaimed_fixtures(world, physics);
+                return;
+            }
         }
     }
 }
@@ -636,20 +781,62 @@ void sync_transforms_from_physics_raw(flecs::world& world, PhysicsWorld& physics
         WorldTransform pose;
     };
     std::vector<Placed> parented;
-    kin::each(world, 
-        [&](flecs::entity entity, const PhysicsBodyComponent& body, Transform2D& transform) {
-            if (!body.sync_from_physics || !physics.is_alive(body.body)) {
-                return;
+    // Those with no parent (nearly all) in pieces, on the workers when many:
+    // each piece reads the physics world and writes its own rows.
+    struct Rows {
+        const PhysicsBodyComponent* bodies = nullptr;
+        Transform2D* transforms = nullptr;
+    };
+    std::vector<Rows> tables;
+    std::vector<i32> table_rows;
+    i32 rows = 0;
+    static const char key = 0;
+    kin::kept_query<const PhysicsBodyComponent, Transform2D>(world, &key, [](flecs::world& w) {
+        return w.query_builder<const PhysicsBodyComponent, Transform2D>().cached().build();
+    }).run([&](flecs::iter& it) {
+        while (it.next()) {
+            if (it.count() == 0) {
+                continue;
             }
-            const Vec2f pos = physics.position(body.body);
-            const f32 rotation = from_physics_angle(physics.rotation(body.body));
-            if (!entity.parent()) {
-                transform.pos = pos;
-                transform.rotation = rotation;
-                return;
+            const flecs::field<const PhysicsBodyComponent> bodies = it.field<const PhysicsBodyComponent>(0);
+            const flecs::field<Transform2D> transforms = it.field<Transform2D>(1);
+            const bool own = it.is_self(0) && it.is_self(1);
+            if (own && !it.entity(0).parent()) { // a table's entities have one parent
+                tables.push_back({&bodies[0], &transforms[0]});
+                table_rows.push_back(static_cast<i32>(it.count()));
+                rows += static_cast<i32>(it.count());
+                continue;
             }
-            parented.push_back({depth_of(entity), entity, {pos, rotation, {1.0f, 1.0f}}});
-        });
+            for (const auto i : it) {
+                const PhysicsBodyComponent& body = bodies[it.is_self(0) ? i : 0];
+                Transform2D& transform = transforms[it.is_self(1) ? i : 0];
+                if (!body.sync_from_physics || !physics.is_alive(body.body)) {
+                    continue;
+                }
+                const Vec2f pos = physics.position(body.body);
+                const f32 rotation = from_physics_angle(physics.rotation(body.body));
+                const flecs::entity entity = it.entity(i);
+                if (!entity.parent()) {
+                    transform.pos = pos;
+                    transform.rotation = rotation;
+                    continue;
+                }
+                parented.push_back({depth_of(entity), entity, {pos, rotation, {1.0f, 1.0f}}});
+            }
+        }
+    });
+    const std::vector<RowPiece> pieces = split_rows(table_rows);
+    for_each_piece(pieces, rows, [&](i32 index) {
+        const RowPiece& piece = pieces[static_cast<std::size_t>(index)];
+        const Rows& table = tables[static_cast<std::size_t>(piece.table)];
+        for (i32 i = piece.begin; i < piece.end; ++i) {
+            const PhysicsBodyComponent& body = table.bodies[i];
+            if (body.sync_from_physics && physics.is_alive(body.body)) {
+                table.transforms[i].pos = physics.position(body.body);
+                table.transforms[i].rotation = from_physics_angle(physics.rotation(body.body));
+            }
+        }
+    });
     std::stable_sort(parented.begin(), parented.end(), [](const Placed& a, const Placed& b) { return a.depth < b.depth; });
     for (const Placed& placed : parented) {
         Transform2D* transform = placed.entity.get_mut<Transform2D>();

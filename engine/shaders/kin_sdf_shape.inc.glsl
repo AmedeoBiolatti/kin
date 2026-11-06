@@ -1,4 +1,12 @@
-// Shared native/WebGL analytic shape distance, one-pixel coverage and compositing.
+// Shared native/WebGL analytic shape distance, edge coverage and compositing.
+
+// The edge rule of every vector shape (shape.frag.glsl does the same for the
+// tessellated ones; docs/rendering.md, "Shape edges"): solid up to the outline,
+// then from half coverage to none over the half pixel past it. `past`: pixels
+// past the outline (negative inside).
+float kin_edge_cover(float past) {
+    return past > 0.0 ? clamp(0.5 - past, 0.0, 1.0) : 1.0;
+}
 float kin_shape_box(vec2 p, vec2 half_size, float r, bool sharp) {
     vec2 q = abs(p) - half_size + r;
     if (sharp) return max(q.x, q.y);
@@ -14,8 +22,8 @@ float kin_shape_ellipse(vec2 p, vec2 ab) {
 vec4 kin_shape_color(vec2 p, vec4 size, float kind, vec4 fill, vec4 stroke) {
     float d = kind > 1.5 ? kin_shape_ellipse(p, size.xy) : kin_shape_box(p, size.xy, size.z, kind > 0.5);
     float pixel = max(length(vec2(dFdx(d), dFdy(d))), 1e-6);
-    float fill_cover = clamp(1.0 - d / pixel, 0.0, 1.0);
-    float stroke_cover = size.w > 0.0 ? clamp(1.0 - (abs(d) - size.w) / pixel, 0.0, 1.0) : 0.0;
+    float fill_cover = kin_edge_cover(d / pixel);
+    float stroke_cover = size.w > 0.0 ? kin_edge_cover((abs(d) - size.w) / pixel) : 0.0;
     vec4 f = vec4(fill.rgb, 1.0) * fill.a * fill_cover;
     vec4 s = vec4(stroke.rgb, 1.0) * stroke.a * stroke_cover;
     vec4 c = s + f * (1.0 - s.a);

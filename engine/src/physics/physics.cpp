@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <unordered_set>
 
 namespace kin {
@@ -256,7 +258,11 @@ struct PhysicsWorld::Impl : b2ContactListener, b2DestructionListener {
     std::vector<PhysicsContactEvent> events;
     // For each pair of fixtures touching: how many of their shapes' contacts touch.
     std::map<ContactKey, u32> touching;
+    // Every pair touching now, made when first asked for after it changed
+    // (a crowd has many, and most steps nobody asks).
     std::vector<PhysicsContact> current;
+    std::atomic<bool> current_stale{false};
+    std::mutex current_mutex;
     // Contacts of one-sided shapes that let what they touch through, until they end.
     std::unordered_set<b2Contact*> passing;
     f32 last_dt = 0.0f;
@@ -1079,7 +1085,7 @@ void PhysicsWorld::destroy_body(PhysicsBody body) {
     slot.character = false;
     slot.generation++;
     _impl->free_bodies.push_back(body.index);
-    _impl->rebuild_current_contacts();
+    _impl->current_stale.store(true, std::memory_order_release);
 }
 
 bool PhysicsWorld::is_alive(PhysicsBody body) const {
@@ -1146,7 +1152,7 @@ void PhysicsWorld::destroy_fixture(PhysicsFixture fixture) {
 
     _impl->erase_touching_with(fixture);
     _impl->free_fixture(fixture.index);
-    _impl->rebuild_current_contacts();
+    _impl->current_stale.store(true, std::memory_order_release);
 }
 
 bool PhysicsWorld::is_alive(PhysicsFixture fixture) const {
@@ -1371,7 +1377,7 @@ void PhysicsWorld::step(f32 dt, i32 velocity_iterations, i32 position_iterations
     _impl->events.clear();
     _impl->last_dt = dt;
     _impl->world.Step(dt, velocity_iterations, position_iterations);
-    _impl->rebuild_current_contacts();
+    _impl->current_stale.store(true, std::memory_order_release);
 }
 
 std::span<const PhysicsContactEvent> PhysicsWorld::contacts() const {
@@ -1379,6 +1385,13 @@ std::span<const PhysicsContactEvent> PhysicsWorld::contacts() const {
 }
 
 std::span<const PhysicsContact> PhysicsWorld::current_contacts() const {
+    if (_impl->current_stale.load(std::memory_order_acquire)) {
+        const std::scoped_lock lock(_impl->current_mutex);
+        if (_impl->current_stale.load(std::memory_order_relaxed)) {
+            _impl->rebuild_current_contacts();
+            _impl->current_stale.store(false, std::memory_order_release);
+        }
+    }
     return _impl->current;
 }
 

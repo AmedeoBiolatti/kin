@@ -370,6 +370,27 @@ void Path::flatten(std::vector<PathContour>& out, f32 tolerance, const Affine2& 
     // A lone point is kept too: a round or square cap draws it as a dot.
     const auto finish = [&] { contour = nullptr; };
     const auto current = [&] { return contour->points.back(); };
+    // The first non-zero of the candidates: a curve's direction at an end, from
+    // its control points (the next one along when one sits on the end).
+    const auto first_of = [](std::initializer_list<Vec2f> candidates) {
+        for (const Vec2f d : candidates) {
+            if (std::abs(d.x) + std::abs(d.y) > 1e-9f) {
+                return d;
+            }
+        }
+        return Vec2f{};
+    };
+    // A piece from `from` leaving in `out_dir` and arriving in `in_dir`: the
+    // contour's start tangent if it is the first, its end tangent so far.
+    const auto tangents = [&](Vec2f out_dir, Vec2f in_dir) {
+        if (contour->start_tangent == Vec2f{}) {
+            contour->start_tangent = out_dir;
+        }
+        if (in_dir != Vec2f{}) {
+            contour->end_tangent = in_dir;
+        }
+    };
+    const auto minus = [](Vec2f a, Vec2f b) { return Vec2f{a.x - b.x, a.y - b.y}; };
     for (const Verb verb : _verbs) {
         switch (verb) {
         case Verb::Move:
@@ -378,17 +399,26 @@ void Path::flatten(std::vector<PathContour>& out, f32 tolerance, const Affine2& 
             contour = &out.back();
             contour->points.push_back(next());
             break;
-        case Verb::Line:
-            contour->points.push_back(next());
+        case Verb::Line: {
+            const Vec2f from = current(), p = next();
+            const Vec2f d = minus(p, from);
+            if (d != Vec2f{}) {
+                tangents(d, d);
+            }
+            contour->points.push_back(p);
             break;
+        }
         case Verb::Quad: {
-            const Vec2f c = next(), p = next();
-            flatten_quad(contour->points, current(), c, p, tolerance);
+            const Vec2f from = current(), c = next(), p = next();
+            tangents(first_of({minus(c, from), minus(p, from)}), first_of({minus(p, c), minus(p, from)}));
+            flatten_quad(contour->points, from, c, p, tolerance);
             break;
         }
         case Verb::Cubic: {
-            const Vec2f c1 = next(), c2 = next(), p = next();
-            flatten_cubic(contour->points, current(), c1, c2, p, tolerance);
+            const Vec2f from = current(), c1 = next(), c2 = next(), p = next();
+            tangents(first_of({minus(c1, from), minus(c2, from), minus(p, from)}),
+                     first_of({minus(p, c2), minus(p, c1), minus(p, from)}));
+            flatten_cubic(contour->points, from, c1, c2, p, tolerance);
             break;
         }
         case Verb::Close:
