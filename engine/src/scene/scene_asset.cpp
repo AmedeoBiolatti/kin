@@ -20,6 +20,7 @@
 #include <kin/ecs/ui_screens.hpp>
 #include <kin/ecs/sprite_animator.hpp>
 #include <kin/ecs/text.hpp>
+#include <kin/ecs/time.hpp>
 #include <kin/pathfinding/navigation2d.hpp>
 #if KIN_ENABLE_AUDIO
 #include <kin/ecs/audio.hpp>
@@ -1207,17 +1208,18 @@ void register_builtin_editor_components(EcsWorld& world) {
             .field("y_sort", &TextRenderer::y_sort)
             .field("visible", &TextRenderer::visible);
     }
+    // kin's own (update_timers and update_lifetimes count them), so one a
+    // scene or prefab file gives is one they see.
     if (!world.components().find("Timer")) {
-        world.components().data("Timer")
-            .field_f32("duration", 0.0f)
-            .field_f32("elapsed", 0.0f)
-            .field_bool("repeating", false)
-            .field_bool("finished", false)
-            .field_i32("ticks", 0);
+        world.components().native<kin::Timer>("Timer")
+            .field("duration", &kin::Timer::duration)
+            .field("elapsed", &kin::Timer::elapsed)
+            .field("repeating", &kin::Timer::repeating)
+            .field("finished", &kin::Timer::finished)
+            .field("ticks", &kin::Timer::ticks);
     }
     if (!world.components().find("Lifetime")) {
-        world.components().data("Lifetime")
-            .field_f32("remaining", 0.0f);
+        world.components().native<kin::Lifetime>("Lifetime").field("remaining", &kin::Lifetime::remaining);
     }
 }
 
