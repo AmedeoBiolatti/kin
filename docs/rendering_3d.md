@@ -3668,7 +3668,8 @@ parameters fill more than the 64 floats gets their values (the material's) as co
   World Position Offset is the graph's `offset` (Unreal's axes and centimetres as kin's). A function call's output is
   taken by its index (the export lists each call's outputs from Unreal's T3D: the editor's pin names are not always
   the outputs'); an OpenEXR map (HDR, displacements: vertex animation textures) is decoded by the import into 8 bits,
-  each channel fitted to its range, and read back by it in the graph. Approximated, each said in the notes: local or
+  each channel fitted to its range, and read back by it in the graph. A mask (or a pin) of a scalar is the scalar, as
+  Unreal masks one (its G, or a vector of it). Approximated, each said in the notes: local or
   an instance's space as world space (Transform, TransformPosition) and the object's
   position as the origin (kin's graphs do not see the object's transform); Depth Fade as its opacity, Scene Depth as
   10 km (kin's graphs see no scene depth: nothing behind); a cube map as the scene's environment; Landscape Layer

@@ -66,16 +66,18 @@ def mesh(name):
 def build():
     meshes = {"quad": mesh("quad"), "sphere": mesh("sphere")}
     level = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
-    # A fresh level: new_level fails on an existing map, and the editor reopens the last run's (which cannot be
-    # deleted while open), so of two names, the one that is not open.
-    for name in ("SnapshotMap", "SnapshotMapB"):
-        path = ROOT + "/" + name
-        if unreal.EditorAssetLibrary.does_asset_exist(path):
-            unreal.EditorAssetLibrary.delete_asset(path)
-        if not unreal.EditorAssetLibrary.does_asset_exist(path) and level.new_level(path):
-            break
-    else:
-        raise RuntimeError("cannot make the level " + ROOT + "/SnapshotMap")
+    # A fresh level of a name of its own each run (new_level fails on an existing map, and the editor reopens the last
+    # run's, which cannot be deleted while open); the runs' others deleted where they can be.
+    import time
+    name = ROOT + "/Snapshot_" + time.strftime("%Y%m%d_%H%M%S")
+    for old in unreal.EditorAssetLibrary.list_assets(ROOT, recursive=False):
+        if "/Snapshot" in old and isinstance(unreal.load_asset(old), unreal.World):
+            try:
+                unreal.EditorAssetLibrary.delete_asset(old)
+            except Exception:
+                pass
+    if not level.new_level(name):
+        raise RuntimeError("cannot make the level " + name)
     actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
     components = []
     for o in SCENE["objects"]:

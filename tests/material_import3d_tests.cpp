@@ -851,7 +851,8 @@ void corpus() {
 // Tier 2: what Unreal's graphs reach for beyond kin's own nodes, read as exactly as kin can: Bump Offset (the UVs moved
 // along the view in the UVs' frame), Transforms (tangent, world, view), an If, masks of constants, a collection
 // parameter's default; and approximated, each said: Depth Fade (its opacity), Scene Depth (nothing behind), a cube map
-// (the environment), the object's position (the origin). No output falls back; with glslc, every variant compiles.
+// (the environment), the object's position (the origin). A scalar's G is the scalar (as Unreal masks one). No output
+// falls back; with glslc, every variant compiles.
 void unreal_approximations() {
     Scratch scratch;
     const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
@@ -882,6 +883,9 @@ void unreal_approximations() {
       "WetR": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" + link("Wet") + R"(}},
       "Fade": {"class": "MaterialExpressionDepthFade", "props": {"fade_distance_default": 25, "opacity_default": 1}, "inputs": {"Opacity": )" + link("Half") + R"(}},
       "Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.75}, "inputs": {}},
+      "Clock": {"class": "MaterialExpressionTime", "props": {}, "inputs": {}},
+      "Wave": {"class": "MaterialExpressionSine", "props": {}, "inputs": {"None": )" + link("Clock") + R"(}},
+      "WaveG": {"class": "MaterialExpressionComponentMask", "props": {"g": true}, "inputs": {"None": )" + link("Wave") + R"(}},
       "Checker": {"class": "MaterialExpressionCustom", "props": {"code": "Mod( ((uint)(p.x) + 2 * (uint)(p.y)) , 5 ) / 5", "output_type": "CMOT_FLOAT1"}, "inputs": {"p": )" + link("Uv") + R"(}}
     })";
     const std::string doc = R"({"schema": "kin.unreal-material/1", "name": "M_Approx", "blend_mode": "BLEND_TRANSLUCENT",
@@ -891,7 +895,7 @@ void unreal_approximations() {
       "graph": {"nodes": )" + nodes + R"(, "outputs": {"BaseColor": )" + link("Mix") + R"(, "Normal": )" +
                             link("ToTangent") + R"(, "Roughness": )" + link("WetR") + R"(, "EmissiveColor": )" +
                             link("Glow") + R"(, "Opacity": )" + link("Fade") + R"(, "Metallic": )" + link("Checker") +
-                            R"(}}})";
+                            R"(, "AmbientOcclusion": )" + link("WaveG") + R"(}}})";
     write(content / "M_Approx.json", doc);
     const auto m = import_unreal_graph(content / "M_Approx.json", options);
     for (const auto& d : m.diagnostics)

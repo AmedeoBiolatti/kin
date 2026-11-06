@@ -740,6 +740,13 @@ private:
     std::string pick(const std::string& ref, const std::string& m) {
         if (ref.empty())
             return ref;
+        // (A scalar's channels are all itself, as Unreal masks one: its G, or its RG as a vec2 of it.)
+        if (_b.width(ref) == 1 && ref.front() == '"') {
+            if (m.size() == 1)
+                return m == "x" ? _b.member(ref, m) : ref;
+            static const char* types[] = {"float", "float", "vec2", "vec3", "vec4"};
+            return glsl(std::string(types[m.size()]) + "(v)", int(m.size()), {{"v", ref}});
+        }
         if (ref.front() == '"')
             return _b.member(ref, m);
         const int w = _b.width(ref);
