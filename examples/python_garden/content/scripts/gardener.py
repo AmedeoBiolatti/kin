@@ -1,7 +1,8 @@
-# The gardener: kin's character controller does the walking and the falling;
-# this says where to go, from the keys or, with Autoplay, by itself.
-from kin import component, on, system, wait, world, input, vec2, color, Transform2D, RectRenderer, \
-    PhysicsBodyComponent, PhysicsColliderComponent, PhysicsContactQueue, CharacterController2D
+# The gardener (a prefab in each scene): kin's character controller does the
+# walking and the falling, kin's scene flow the doors; this says where to go,
+# from the keys or, with the game's "autoplay" value, by itself.
+from kin import component, on, system, until, world, input, physics, save, vec2, color, Transform2D, \
+    RectRenderer, CharacterController2D
 
 SPEED = 220.0
 JUMP = 760.0
@@ -9,7 +10,10 @@ JUMP = 760.0
 
 @component
 class Gardener:
-    home: vec2 = vec2(480, 460)
+    home: vec2 = vec2(0, 0)   # where it came into the scene: back there when hurt
+
+    def start(self):
+        self.home = self.entity[Transform2D].pos
 
 
 @component
@@ -17,25 +21,11 @@ class Unhurt:
     """Just hit: beetles go through it for a while."""
 
 
-def arrive(at):
-    e = world.create("gardener")
-    e.add(Transform2D, pos=at)
-    e.add(RectRenderer, size=vec2(18, 30), offset=vec2(-9, -15), color=color(240, 210, 120, 255))
-    e.add(PhysicsBodyComponent)
-    e.add(PhysicsColliderComponent, shape="box", half_extents=vec2(9, 15))
-    e.add(PhysicsContactQueue)
-    e.add(CharacterController2D, gravity=1400.0, snap=4.0)
-    e.add(Gardener, home=at)
-    return e
-
-
 def steer(e):
     """(-1 to 1 across, jump, drop): the keys, or the autoplayer's guess."""
-    import game
-    if game.game().entity.has(game.Autoplay):
+    if save.get("autoplay", False):
         return autopilot(e)
-    across = input.axis("move")
-    return across, input.pressed("jump"), input.held("down")
+    return input.axis("move"), input.pressed("jump"), input.held("down")
 
 
 def autopilot(e):
@@ -69,14 +59,26 @@ def move(dt, body, g):
         body.drop_through = 0.25
 
 
+def beetle_near(at):
+    import beetles
+    return [b for b in physics.overlap(at, radius=48, sensors=True) if b.has(beetles.Beetle)]
+
+
+def faded(e, alpha):
+    c = e[RectRenderer].color
+    return color(c.r, c.g, c.b, alpha)
+
+
 def recover(e):
-    """Back home, blinking, and safe from beetles for a while."""
+    """Back home once no beetle is there, blinking, and safe for a while."""
     e.add(Unhurt)
-    e[Transform2D].pos = e[Gardener].home
+    home = e[Gardener].home
+    yield until(lambda: not beetle_near(home))
+    e[Transform2D].pos = home
     e[CharacterController2D].velocity = vec2(0, 0)
     for _ in range(6):
-        yield e.tween("RectRenderer.color", color(240, 210, 120, 60), 0.12, ease="linear")
-        yield e.tween("RectRenderer.color", color(240, 210, 120, 255), 0.12, ease="linear")
+        yield e.tween("RectRenderer.color", faded(e, 60), 0.12, ease="linear")
+        yield e.tween("RectRenderer.color", faded(e, 255), 0.12, ease="linear")
     e.remove(Unhurt)
 
 

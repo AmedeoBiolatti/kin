@@ -319,6 +319,7 @@ if(KIN_ENABLE_PYTHON)
     add_library(kin_python_scripts STATIC
         src/scripting/python_api.cpp
         src/scripting/python_host.cpp
+        src/scripting/python_services.cpp
         src/scripting/python_values.cpp)
     add_library(kin::python_scripts ALIAS kin_python_scripts)
     target_link_libraries(kin_python_scripts PUBLIC kin_engine PRIVATE kin_pocketpy)

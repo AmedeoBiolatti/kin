@@ -1,0 +1,50 @@
+{
+  "schema": "kin.prefab/1",
+  "id": "gardener",
+  "name": "gardener",
+  "root": "root",
+  "entities": [
+    {
+      "id": "root",
+      "name": "gardener",
+      "components": {
+        "Transform2D": {},
+        "RectRenderer": {
+          "size": {
+            "x": 18,
+            "y": 30
+          },
+          "offset": {
+            "x": -9,
+            "y": -15
+          },
+          "color": {
+            "r": 240,
+            "g": 210,
+            "b": 120,
+            "a": 255
+          }
+        },
+        "PhysicsBodyComponent": {},
+        "PhysicsColliderComponent": {
+          "shape": "box",
+          "half_extents": {
+            "x": 9,
+            "y": 15
+          }
+        },
+        "PhysicsContactQueue": {},
+        "CharacterController2D": {
+          "gravity": 1400.0,
+          "snap": 4.0
+        },
+        "SceneTraveller": {},
+        "Gardener": {},
+        "Saved": {
+          "keep": "Transform2D",
+          "script": false
+        }
+      }
+    }
+  ]
+}

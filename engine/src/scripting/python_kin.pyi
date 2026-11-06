@@ -94,6 +94,24 @@ class Tween(Awaitable):
 
 class Cancelled(Exception): ...
 class TaskFailed(Exception): ...
+class SaveError(Exception): ...
+
+
+class Hit:
+    """What a raycast or a cast ran into."""
+    entity: Optional[Entity]
+    point: vec2
+    normal: vec2
+    fraction: float
+
+
+class Slot:
+    """A save slot: updated in Unix seconds, played in seconds."""
+    id: str
+    title: str
+    summary: str
+    updated: int
+    played: int
 
 
 def field(default: Any = None, min: Optional[float] = None, max: Optional[float] = None, label: str = "",
@@ -141,8 +159,51 @@ class _Time:
     now: float
     frame: int
 
+Point = Union[vec2, tuple[float, float]]
+
+class _Physics:
+    """What is where, in the game's physics (positions in the world). `mask`: the
+    kinds of collider to find (bits); `sensors`: find sensors too; `ignore`: an
+    entity whose body is passed over (the one asking, say)."""
+    def raycast(self, start: Point, end: Point, mask: int = 0xFFFF, sensors: bool = False,
+                ignore: Optional[Entity] = None) -> Optional[Hit]:
+        """The nearest thing on the line from start to end."""
+    def cast(self, start: Point, end: Point, radius: float = 0.0, size: Optional[Point] = None, mask: int = 0xFFFF,
+             sensors: bool = False, ignore: Optional[Entity] = None) -> Optional[Hit]:
+        """The first thing a circle (radius) or a box (size: width, height), centred on the point and not
+        turning, runs into going from start to end."""
+    def overlap(self, at: Point, radius: float = 0.0, size: Optional[Point] = None, mask: int = 0xFFFF,
+                sensors: bool = False, ignore: Optional[Entity] = None) -> list[Entity]:
+        """The entities at a point, or in a circle (radius) or a box (size) centred there."""
+
+class _Scene:
+    def go(self, path: str = "", arrive: str = "", transition: Optional[str] = "fade", seconds: float = 0.5) -> None:
+        """Asks the game to go to a scene file of the content (empty: a place of this one), arriving at the
+        entity named `arrive`. transition: "fade", "crossfade", "dissolve", "pixelate", "wipe", "iris",
+        or "none"/None."""
+    def going(self) -> bool:
+        """Whether a scene is asked for and not yet gone to."""
+
+class _Save:
+    """The game's saves: slots, and its own values, kept from scene to scene and in the slots."""
+    def write(self, slot: str, title: str = "", summary: str = "") -> None:
+        """The game written to the slot (SaveError when it can't be)."""
+    def read(self, slot: str) -> None:
+        """Asks the game to read the slot, after this update (SaveError when there is none)."""
+    def exists(self, slot: str) -> bool: ...
+    def delete(self, slot: str) -> None: ...
+    def slots(self) -> list[Slot]:
+        """The slots, the newest first."""
+    def get(self, name: str, default: Any = None) -> Any:
+        """A value of the game's (a whole number comes back an int)."""
+    def set(self, name: str, value: Any) -> None:
+        """None, True/False, numbers, text, and lists and dicts of them; None takes it away."""
+
 world: _World
 input: _Input
 time: _Time
+physics: _Physics
+scene: _Scene
+save: _Save
 
 # The components kin describes:

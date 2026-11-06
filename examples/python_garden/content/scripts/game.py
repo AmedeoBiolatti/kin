@@ -1,88 +1,98 @@
-# The game's own state, on one entity ("game"): what the HUD shows and the
-# rules read. Everything that must survive a reload is here, in components.
-from kin import component, on, run, emit, wait, world
-import garden
-import gardener
-import seeds
-import beetles
+# The game's rules. What lasts the whole game (seeds picked, lives) is in
+# save's values, kept from scene to scene and in the save slots; what a scene
+# shows (its welcome, the message) is its "game" entity's Game component.
+from kin import component, on, system, emit, wait, world, input, save, SaveError
+
+TOTAL = 12  # seeds: 9 in the garden, 3 in the shed
 
 
 @component
 class Game:
-    seeds: int = 0        # picked so far
-    total: int = 0        # in the garden
-    lives: int = 3
-    over: bool = False
+    welcome: str = ""     # said as the scene begins
     message: str = ""     # the line across the screen, when there is one
 
-
-@component
-class Autoplay:
-    """On the game entity, the gardener plays itself (the headless smoke test)."""
+    def start(self):
+        if self.welcome:
+            self.entity.run(say(self.welcome, 4))
 
 
 def game():
     return world.single(Game)
 
 
-def say(text, seconds):
+def seeds():
+    return save.get("seeds", 0)
+
+
+def lives():
+    return save.get("lives", 3)
+
+
+def over():
+    return lives() <= 0 or seeds() == TOTAL
+
+
+def say(text, seconds=1.5):
     """A message for a while: a task, so a newer one simply replaces it."""
-    game().message = text
-    yield wait(seconds)
-    if game().message == text:
-        game().message = ""
-
-
-def fill():
-    for e in world.query(seeds.Seed) + world.query(beetles.Beetle) + world.query(gardener.Gardener):
-        e.entity.destroy()
     g = game()
-    g.seeds = 0
-    g.lives = 3
-    g.over = False
-    g.total = len(garden.SEEDS)
-    for at in garden.SEEDS:
-        seeds.plant(at)
-    for at, walk in garden.BEETLES:
-        beetles.hatch(at, walk)
-    gardener.arrive(garden.START)
-    run(say("Pick every seed!  Arrows or A/D, W or Space to jump, S to drop", 4))
+    g.message = text
+    yield wait(seconds)
+    if g.entity.alive and g.message == text:
+        g.message = ""
 
 
-@on("start")
-def start(e, data):
-    garden.build()
-    world.create("game").add(Game)
-    fill()
-
-
-@on("autoplay")
-def autoplay(e, data):
-    game().entity.add(Autoplay)
-
-
-@on("restart")
-def restart(e, data):
-    fill()
+def tell(text, seconds=1.5):
+    game().entity.run(say(text, seconds))
 
 
 @on("seed_picked")
 def picked(e, data):
-    g = game()
-    g.seeds += 1
-    if g.seeds == g.total:
-        g.over = True
-        run(say("The garden is planted!  R plays again", 1000))
+    save.set("seeds", seeds() + 1)
+    if seeds() == TOTAL:
+        tell("The garden is planted!  R plays again", 1000)
 
 
 @on("gardener_lost")
 def lost(e, data):
-    g = game()
-    g.lives -= 1
-    if g.lives <= 0:
-        g.over = True
+    import gardener
+    save.set("lives", lives() - 1)
+    if lives() <= 0:
         e.destroy()
-        run(say("The beetles won.  R plays again", 1000))
+        tell("The beetles won.  R plays again", 1000)
     else:
-        run(say("Ouch!  " + str(g.lives) + " left", 1.5))
+        tell("Ouch!  " + str(lives()) + " left")
         e.run(gardener.recover(e))
+
+
+@system(Game)
+def keys(dt, g):
+    if input.pressed("save"):
+        emit("quicksave")
+    if input.pressed("load"):
+        emit("quickload")
+
+
+@on("quicksave")
+def quicksave(e, data):
+    if over():
+        tell("The game is over: R plays again")
+        return
+    try:
+        save.write("quick", title="Garden", summary=str(seeds()) + "/" + str(TOTAL) + " seeds, " +
+                   str(lives()) + " lives")
+        tell("Saved  (F9 reads it back)")
+    except SaveError as error:
+        tell("Not saved: " + str(error), 3)
+
+
+@on("quickload")
+def quickload(e, data):
+    if save.exists("quick"):
+        save.read("quick")  # the game reads it after this update, then says "loaded"
+    else:
+        tell("Nothing saved yet: F5 saves")
+
+
+@on("loaded")
+def loaded(e, data):
+    tell("Read back: " + str(seeds()) + "/" + str(TOTAL) + " seeds")

@@ -13,6 +13,40 @@ class TaskFailed(Exception):
     """Raised by `yield from task` when the task raised: its message."""
 
 
+class SaveError(Exception):
+    """Raised by save.write, save.read and save.delete when they can't: why."""
+
+
+class Hit:
+    """What physics.raycast and physics.cast ran into: the entity (None when
+    the body is no entity's), where, the surface's normal there, and how far
+    along the way (0 at the start, 1 at the end)."""
+
+    def __init__(self, entity, point, normal, fraction):
+        self.entity = entity
+        self.point = point
+        self.normal = normal
+        self.fraction = fraction
+
+    def __repr__(self):
+        return "<Hit " + repr(self.entity) + " at " + repr(self.point) + ">"
+
+
+class Slot:
+    """A save slot, as save.slots() lists them: its id, title, summary, when it
+    was last written (Unix seconds) and the time played in it (seconds)."""
+
+    def __init__(self, id, title, summary, updated, played):
+        self.id = id
+        self.title = title
+        self.summary = summary
+        self.updated = updated
+        self.played = played
+
+    def __repr__(self):
+        return "<Slot " + self.id + ">"
+
+
 class field:
     """A component field with options: `hp: int = field(100, min=0)`."""
 

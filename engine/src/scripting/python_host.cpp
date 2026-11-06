@@ -424,7 +424,11 @@ void set_up_interpreter(Host& host) {
     host.time = py_newmodule("kin.time");
     host.input_module = py_newmodule("kin.input");
     host.world_module = py_newmodule("kin.world");
+    host.physics_module = py_newmodule("kin.physics");
+    host.scene_module = py_newmodule("kin.scene");
+    host.save_module = py_newmodule("kin.save");
     bind_kin(host);
+    bind_services(host);
 
     const std::span<const unsigned char> prelude = kin_python_embedded("python_kin.py");
     const std::string source(reinterpret_cast<const char*>(prelude.data()), prelude.size());
@@ -1037,6 +1041,18 @@ void PythonScripts::emit(std::string_view name) {
 
 void PythonScripts::emit(std::string_view name, EcsEntity entity) {
     _impl->host.queue(std::string(name), entity.raw().id(), nullptr);
+}
+
+void PythonScripts::set_physics(PhysicsWorld* physics) {
+    _impl->host.physics = physics;
+}
+
+void PythonScripts::set_flow(SceneFlow* flow) {
+    _impl->host.flow = flow;
+}
+
+void PythonScripts::set_saves(SceneSaves* saves) {
+    _impl->host.saves = saves;
 }
 
 void PythonScripts::reload() {
