@@ -510,6 +510,7 @@ response is one line: `{"id": <echoed>, "result": {...}}` or
 | `automation.snapshot {world?}` | Scene reports/UI and optionally registered ECS state for trace checkpoints. |
 | `view.screenshot {path?}` | Render the current scene and save a PNG; returns path + dimensions. |
 | `view.scene {path, content?}` | The top scene shows another scene file (`Scene::view_scene`); for tools' scene views. |
+| `view.edit {entities}` | The scene shown takes changed fields in place (`Scene::view_edit`); a tool's dragged handle, without reading the file again. |
 | `view.frame {path?, width, height, x?, y?, zoom?, rotation?}` | Draw the top scene through the given camera and write raw RGBA; returns path + dimensions. |
 | `sim.tick {count}` | Advance N fixed-timestep frames; returns the frame counter. |
 | `sim.reset {seed?}` | Rebuild the scene stack from the game's factory; zero frame/report; optionally reseed. |

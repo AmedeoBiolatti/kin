@@ -656,6 +656,31 @@ ServerResponse handle_view_scene(ServerContext& ctx, const JsonValue& params) {
     return ok_result(out.str());
 }
 
+// view.edit {entities: [{id, components: {name: {field: value}}}]}: the scene
+// shown (view.scene) changed in place, as a tool changed it since it sent the
+// file (Scene::view_edit). An error when the scene can't: the tool sends the
+// file again.
+ServerResponse handle_view_edit(ServerContext& ctx, const JsonValue& params) {
+    Scene* scene = ctx.scenes().top_mut();
+    if (!scene) {
+        return error_result("no active scene");
+    }
+    const JsonValue* entities = params.find("entities");
+    if (!entities || !entities->is_array()) {
+        return error_result("view.edit needs entities: an array of {id, components}");
+    }
+    std::string error;
+    if (!scene->view_edit(*entities, error)) {
+        return error_result(error.empty() ? std::string("the scene did not take the edit") : error);
+    }
+    std::ostringstream out;
+    JsonWriter json(out, false);
+    json.begin_object();
+    json.field("edited", static_cast<i64>(entities->items().size()));
+    json.end_object();
+    return ok_result(out.str());
+}
+
 // view.frame {path, width, height, x, y, zoom, rotation}: the top scene drawn
 // at `width` x `height` through a camera centred on world point (x, y), `zoom`
 // screen units a world unit, turned `rotation` degrees; its pixels written to
@@ -1511,6 +1536,9 @@ static ServerResponse dispatch_server_command_impl(ServerContext& ctx, const Gam
     }
     if (method == "view.scene") {
         return handle_view_scene(ctx, params);
+    }
+    if (method == "view.edit") {
+        return handle_view_edit(ctx, params);
     }
     if (method == "view.frame") {
         return handle_view_frame(ctx, params);

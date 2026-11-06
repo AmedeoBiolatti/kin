@@ -12,6 +12,8 @@
 
 namespace kin {
 
+class JsonValue;
+
 namespace ui2 { class Context; }
 
 class SceneManager;
@@ -112,6 +114,18 @@ public:
         (void)file;
         (void)content;
         error = "the scene does not show other scene files (Scene::view_scene)";
+        return false;
+    }
+    // Changes to the scene shown, made in place (view.edit): what the tool
+    // changed since it sent the file, without reading it all again (a handle
+    // dragged). `entities` is an array of {"id": an entity's id in the file,
+    // "components": {name: {field: value, ...}, ...}}, written as the file
+    // writes them; the fields named take those values, the others keep
+    // theirs. False, with why in `error`, when it can't (the default): the
+    // tool then sends the whole file again (view.scene).
+    virtual bool view_edit(const JsonValue& entities, std::string& error) {
+        (void)entities;
+        error = "the scene takes no edits in place (Scene::view_edit)";
         return false;
     }
     // The world drawn through `camera` instead of the scene's own cameras;

@@ -1238,6 +1238,38 @@ Status3D SceneSession3D::edit(std::span<const SceneFieldEdit3D> edits) {
     return status3d(std::move(value), _data->errors);
 }
 
+Status3D SceneSession3D::edit_authored(const JsonValue& entities) {
+    if (!active()) {
+        return status3d(false, {"no active scene to edit"});
+    }
+    std::vector<SceneFieldEdit3D> edits;
+    std::vector<std::string> errors;
+    if (!entities.is_array()) {
+        errors.push_back("the edits must be an array of {id, components}");
+    } else {
+        const EcsComponentRegistry& registry = world()->components();
+        for (const JsonValue& item : entities.items()) {
+            const std::string id = item.is_object() ? item.string_at("id") : std::string{};
+            const JsonValue* components = item.is_object() ? item.find("components") : nullptr;
+            const EcsEntity target = id.empty() ? EcsEntity{} : entity(id);
+            if (!target || !components || !components->is_object()) {
+                errors.push_back(id.empty() ? std::string("an edit names no entity, or no components")
+                                            : "no entity '" + id + "' to edit, or no components");
+                continue;
+            }
+            for (const auto& [component, fields] : components->members()) {
+                for (ComponentFieldSnapshot& field : parse_component_fields(component, fields, registry, errors)) {
+                    edits.push_back({.entity = target, .component = component, .field = std::move(field.name), .value = std::move(field.value)});
+                }
+            }
+        }
+    }
+    if (!errors.empty()) {
+        return status3d(false, std::move(errors));
+    }
+    return edit(edits);
+}
+
 // Own only one edit's staging state. Phase order is deliberate: no live fields
 // or ordinary field events are published until all validation/resources succeed.
 struct SceneSession3D::Data::EditTransaction {

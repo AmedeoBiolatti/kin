@@ -844,6 +844,19 @@ void headless() {
     check(hit && session.queries().resolve(*hit).id() == crate_entity.id(), "headless query did not find the crate");
     const SceneFieldEdit3D move[] = {{barrel, "Transform3D", "position", Vec3f{2.5f, 0, 0}}};
     ok(session.edit(move), "headless edit failed");
+    // The same written as the scene file writes it (a tool's view.edit); a batch naming an entity, component or
+    // field that is not there fails whole, changing nothing.
+    const auto authored = [](std::string_view text) { return *parse_json(text).value; };
+    ok(session.edit_authored(authored(R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[3,0,0]}}}])")),
+       "authored edit failed");
+    check(barrel.get<Transform3D>()->position == Vec3f{3, 0, 0}, "authored edit did not move the barrel");
+    for (const char* bad : {R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0]}}},{"id":"ghost","components":{}}])",
+                            R"([{"id":"blue-barrel","components":{"Transform3D":{"position":[1,0,0],"wobble":1}}}])",
+                            R"([{"id":"blue-barrel","components":{"Transform3D":{"position":"left"}}}])",
+                            R"({"id":"blue-barrel"})"}) {
+        check(!session.edit_authored(authored(bad)) && barrel.get<Transform3D>()->position == Vec3f{3, 0, 0},
+              "a bad authored edit was taken");
+    }
     ok(session.despawn(pooled) && session.despawn(crate) && session.runtime_prefabs() == 1 &&
            session.pool_stats(pool).available == 2,
        "headless despawn");
