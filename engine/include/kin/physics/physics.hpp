@@ -302,6 +302,7 @@ public:
     void destroy_fixture(PhysicsFixture fixture);
     bool is_alive(PhysicsFixture fixture) const;
     std::vector<PhysicsFixture> fixtures(PhysicsBody body) const;
+    std::size_t fixture_count(PhysicsBody body) const; // fixtures(body).size(), with no list made
     PhysicsBody body_of(PhysicsFixture fixture) const; // none when it is gone
     u32 shape_parts(PhysicsFixture fixture) const;
 

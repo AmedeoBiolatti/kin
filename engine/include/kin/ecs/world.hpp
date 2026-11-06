@@ -565,8 +565,8 @@ public:
     }
 
     // A query `make` builds (from a query_builder: terms each() cannot say,
-    // such as without<T>()) made once and kept, one per `key`: the address of
-    // a static at the call site.
+    // such as without<T>(); end it .cached().build() for a walk each frame)
+    // made once and kept, one per `key`: the address of a static at the call site.
     //
     //     static const char key = 0;
     //     world.kept_query<TilemapCollider>(&key, [](flecs::world& w) {
@@ -639,7 +639,9 @@ private:
         const std::scoped_lock lock(_kept_queries_mutex); // systems may walk the world from several threads
         std::unique_ptr<KeptQuery>& slot = _kept_queries[std::type_index(typeid(KeptQueryOf<Components...>))];
         if (!slot) {
-            slot = std::make_unique<KeptQueryOf<Components...>>(_world.query<Components...>());
+            // Cached: flecs keeps the tables it matches as they are made, so a
+            // walk visits those, not every table of the world.
+            slot = std::make_unique<KeptQueryOf<Components...>>(_world.query_builder<Components...>().cached().build());
         }
         return static_cast<KeptQueryOf<Components...>*>(slot.get())->query;
     }

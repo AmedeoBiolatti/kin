@@ -189,6 +189,78 @@ void test_removed_collider_destroys_fixture() {
     assert(physics.fixtures(body).size() == 1);
 }
 
+// A collider of an entity with no body, on the body above it: its fixtures
+// count as that body's (none destroyed), and one taken out of its list goes.
+void test_colliders_below_a_body_keep_their_fixtures() {
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics;
+    kin::EcsEntity owner = world.entity("cart")
+                               .set(kin::Transform2D{})
+                               .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic}})
+                               .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(4.0f))}});
+    kin::EcsEntity wheel = world.entity("wheel")
+                               .set(kin::Transform2D{.pos = {6.0f, 0.0f}})
+                               .set(kin::PhysicsColliderComponent{
+                                   .colliders = {collider(kin::PhysicsShape::circle(2.0f)), collider(kin::PhysicsShape::circle(1.0f))}});
+    wheel.child_of(owner);
+    kin::sync_physics_bodies(world, physics);
+    const kin::PhysicsBody body = owner.get<kin::PhysicsBodyComponent>()->body;
+    assert(physics.fixtures(body).size() == 3 && physics.fixture_count(body) == 3);
+    kin::sync_physics_bodies(world, physics); // nothing changed: nothing goes
+    assert(physics.fixture_count(body) == 3);
+    const kin::PhysicsFixture removed = wheel.get<kin::PhysicsColliderComponent>()->colliders[1].fixture;
+    wheel.get_mut<kin::PhysicsColliderComponent>()->colliders.pop_back();
+    kin::sync_physics_bodies(world, physics);
+    assert(!physics.is_alive(removed) && physics.fixture_count(body) == 2);
+}
+
+// Contacts reach the entity whose body it is, found by the body's user id,
+// or, for a body the game gave an id of its own, through every body.
+void test_contacts_reach_bodies_with_their_own_ids() {
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics;
+    kin::EcsEntity trigger = world.entity("trigger")
+                                 .set(kin::Transform2D{})
+                                 .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Static, .user_id = 777}})
+                                 .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::box({10.0f, 10.0f}), true)}})
+                                 .set(kin::PhysicsContactQueue{});
+    kin::EcsEntity actor = world.entity("actor")
+                               .set(kin::Transform2D{})
+                               .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic}})
+                               .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(4.0f))}})
+                               .set(kin::PhysicsContactQueue{});
+    kin::sync_physics_bodies(world, physics);
+    assert(physics.user_id(trigger.get<kin::PhysicsBodyComponent>()->body) == 777);
+    kin::step_physics(world, physics, 1.0f / 60.0f);
+    kin::collect_physics_contacts(world, physics);
+    assert(trigger.get<kin::PhysicsContactQueue>()->events.size() == 1);
+    assert(actor.get<kin::PhysicsContactQueue>()->events.size() == 1);
+}
+
+// A body the simulation leads goes where its entity is when teleported, once.
+void test_teleport_places_the_body_once() {
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics;
+    kin::EcsEntity actor = body_entity(world, "actor", {.pos = {0.0f, 0.0f}}, kin::PhysicsBodyType::Dynamic);
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    actor.set(kin::Transform2D{.pos = {50.0f, 20.0f}});
+    actor.raw().add<kin::PhysicsTeleport>();
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    const kin::PhysicsBody body = actor.get<kin::PhysicsBodyComponent>()->body;
+    assert(near(physics.position(body), kin::Vec2f{50.0f, 20.0f}, 1.0f));
+    assert(!actor.raw().has<kin::PhysicsTeleport>());
+    // Moved again without one: the simulation leads, the entity goes back.
+    actor.set(kin::Transform2D{.pos = {0.0f, 0.0f}});
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    assert(near(physics.position(body), kin::Vec2f{50.0f, 20.0f}, 1.0f));
+}
+
 void test_contact_and_overlap_collection() {
     kin::EcsWorld world;
     kin::register_physics_components(world);
@@ -461,6 +533,9 @@ int main() {
     test_nested_bodies_place_parents_first();
     test_removed_collider_destroys_fixture();
     test_contact_and_overlap_collection();
+    test_colliders_below_a_body_keep_their_fixtures();
+    test_contacts_reach_bodies_with_their_own_ids();
+    test_teleport_places_the_body_once();
     test_entity_removal_destroys_physics_body();
     test_component_removal_cleans_up_physics_objects();
     test_described_components_make_bodies();
