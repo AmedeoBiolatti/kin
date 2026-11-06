@@ -56,6 +56,16 @@ struct AnimValueKindOf<std::string> {
     static constexpr AnimValueKind value = AnimValueKind::String;
 };
 
+template <>
+struct AnimValueKindOf<Vec3f> {
+    static constexpr AnimValueKind value = AnimValueKind::Vec3;
+};
+
+template <>
+struct AnimValueKindOf<Quatf> {
+    static constexpr AnimValueKind value = AnimValueKind::Quat;
+};
+
 class PropertyRegistry {
 public:
     template <typename C, typename T>

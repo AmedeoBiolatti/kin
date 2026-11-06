@@ -79,6 +79,13 @@ struct AnimatorAsset3D {
 // Called by resolve_render3d_assets after models bind, or separately by tools.
 Status3D resolve_animator3d_assets(EcsWorld& world, const std::filesystem::path& content_root,
                                    std::span<const EcsId> entities = {});
+// Each Animator (kin/ecs/animator.hpp: an animation, or a state machine, of a .kinanim played on the entity, its
+// tracks setting its components' fields: Transform3D.position, .rotation and .scale, any described field) given
+// its file, read from content_root, and the fields its tracks can set. update_animators plays them (SceneFrame3D
+// does, in its animation phase). A file read again as it was keeps its animators where they are; one that can't be
+// read keeps the one bound before. SceneSession3D calls it; tools call it after making or loading a world.
+Status3D resolve_animators3d(EcsWorld& world, const std::filesystem::path& content_root,
+                             std::span<const EcsId> entities = {});
 // Atomic per entity, renderer thread. Called by resolve_render3d_assets.
 // Invalid replacements retain the last good binding; empty refs clear it.
 Status3D resolve_materials3d_assets(EcsWorld& world, Assets3D& assets, std::span<const EcsId> entities = {});

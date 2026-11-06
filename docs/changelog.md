@@ -7,6 +7,14 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
+  quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
+  `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
+  scene plays `kin::Animator`s: `resolve_animators3d` binds them (`SceneSession3D` does, at load, for spawned prefabs
+  and live edits, and watches their files) and `SceneFrame3D` plays them in its animation phase.
+  `update_animators(world, dt, announce)` and `AnimationPlayer::announce` mark the fields they set as set, for a
+  world that watches for changes.
+
 - 3D asset files have types of their own: `AssetType::Animator3D` (`.kinanimator`), `Collider3D` (`.kincollider`)
   and `Materials3D` (`.kinmaterials`), and `infer_asset_type` names them (they were Unknown). The fields naming them
   say so (`AnimatorAsset3D.asset`, `Collider3D.asset`, `ModelMaterials3D.asset`), so a tool's picker offers those

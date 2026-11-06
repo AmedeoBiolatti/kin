@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 #include <kin/assets/content.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/log.hpp>
@@ -730,6 +731,10 @@ struct SceneSession3D::Data {
             if (animator.configuration)
                 watch(state, animator.configuration->machine_asset);
         });
+        inspect_components<Animator>(state.world.raw(), [&](flecs::entity, const Animator& animator) {
+            if (!animator.asset.id.empty())
+                watch(state, animator.asset.id);
+        });
         for (const auto& source : state.dependencies)
             watch(state, source);
         if (state.script)
@@ -765,6 +770,8 @@ struct SceneSession3D::Data {
             if (c->configuration)
                 watch(state, c->configuration->machine_asset);
         }
+        if (const auto* c = entity.get<Animator>(); c && !c->asset.id.empty())
+            watch(state, c->asset.id);
         if (const auto* c = entity.get<Collider3D>()) {
             watch(state, c->asset.id);
             if (c->asset_binding)
@@ -864,6 +871,7 @@ struct SceneSession3D::Data {
         if (options.limits.max_entities && state.world.entities().all().size() > options.limits.max_entities)
             throw std::runtime_error("initialization exceeds scene entity limit");
         append(errors, resolve_render3d_assets(state.world, assets, options.particle_limits).diagnostics);
+        append(errors, resolve_animators3d(state.world, assets.root()).diagnostics);
         if (!errors.empty())
             return false;
         if (state.bodies)
@@ -1062,6 +1070,7 @@ bool SceneSession3D::prepare_operation(const std::filesystem::path& path, bool r
             return false;
         }
         append(d.errors, resolve_render3d_assets(candidate->world, d.assets, d.options.particle_limits).diagnostics);
+        append(d.errors, resolve_animators3d(candidate->world, d.assets.root()).diagnostics);
         if (!d.errors.empty())
             return false;
         if (d.options.physics) {
@@ -1287,6 +1296,7 @@ struct SceneSession3D::Data::EditTransaction {
     };
     std::map<EcsId, Entry> entries;
     bool models = false, materials = false, animation = false, particles = false, physics = false;
+    bool animators = false; // an Animator edited (kin/ecs/animator.hpp): its file bound again
 
     EditTransaction(Data& data, std::span<const SceneFieldEdit3D> changes)
         : d(data), active(*data.current), edits(changes) {
@@ -1379,6 +1389,7 @@ struct SceneSession3D::Data::EditTransaction {
             models |= has("ModelRenderer3D") || has("SkinnedMeshRenderer");
             materials |= has("ModelMaterials3D");
             animation |= has("AnimatorAsset3D");
+            animators |= has("Animator");
             particles |= has("ParticleEmitter3D");
             entry.body = d.options.physics && (entry.pose || has("Collider3D") || has("RigidBody3D"));
             if (d.options.physics && (has("CharacterController3D") || has("Ragdoll3D") || has("Rope3D") ||
@@ -1411,6 +1422,16 @@ struct SceneSession3D::Data::EditTransaction {
                 append(d.errors,
                        resolve_particles3d_assets(staging.world, d.assets, d.options.particle_limits).diagnostics);
         }
+        if (animators) // their files read here first, to refuse an edit naming one that can't be
+            append(d.errors, resolve_animators3d(staging.world, d.assets.root(), animated(true)).diagnostics);
+    }
+    // The entities whose Animator was edited: their copies, or the running world's.
+    std::vector<EcsId> animated(bool copies) const {
+        std::vector<EcsId> ids;
+        for (const auto& [id, entry] : entries)
+            if (entry.full && entry.changed.contains("Animator"))
+                ids.push_back(copies ? entry.copy.id() : id);
+        return ids;
     }
     void validate_capacity() {
         // Combine staged capacities with untouched live emitters without copying
@@ -1502,6 +1523,8 @@ struct SceneSession3D::Data::EditTransaction {
                     active.world.events().suppress_next_observer(EcsEventKind::ComponentChanged, id, descriptor->id);
                 staging.world.components().copy_component(entry.copy, name, active.world.components(), entry.source);
             }
+        if (animators) // as read above: kept as they were bound, or bound again
+            (void)resolve_animators3d(active.world, d.assets.root(), animated(false));
         active.watches.merge(staging.watches);
         if (new_view) {
             active.view = std::move(new_view);
@@ -1833,6 +1856,8 @@ ScenePrefab3D SceneSession3D::spawn_now(const std::filesystem::path& path, Scene
             if (state.bodies)
                 append(d.errors, resolve_physics3d_assets(state.world, d.collision_assets, ids).diagnostics);
         }
+        if (!ids.empty())
+            append(d.errors, resolve_animators3d(state.world, d.assets.root(), ids).diagnostics);
         std::map<std::filesystem::path, SourceStamp> dependencies;
         if (!prepared) {
             for (const auto& file : source->source_files)
