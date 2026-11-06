@@ -961,6 +961,10 @@ bool WebGLRenderer3D::resize_view(IViewBackend3D& backend, Vec2i size) {
     *view = static_cast<View&>(*next);
     return true;
 }
+bool WebGLRenderer3D::warm_up(IViewBackend3D& backend, const Scene3D&) {
+    const auto* view = dynamic_cast<const View*>(&backend);
+    return view && view->surface && view->surface->alive == _impl->device.alive();
+}
 bool WebGLRenderer3D::render(IViewBackend3D& backend, const Scene3D& scene, RenderDebugStats3D& stats) {
     auto* view = dynamic_cast<View*>(&backend);
     if (!view || !view->surface || view->surface->alive != _impl->device.alive() ||

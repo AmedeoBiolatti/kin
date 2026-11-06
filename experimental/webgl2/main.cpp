@@ -98,6 +98,8 @@ public:
                 "Near draw failed");
         // Far geometry submitted last must not paint over the nearer green square.
         require(bool(scene.draw(_quad, {}, {.unlit = true, .texture = _texture})), "Far draw failed");
+        // SceneSession3D warms a new view up before its first render; WebGL2 has nothing to make, and says so.
+        require(bool(r3d.warm_up(_view, scene)), "Warm-up failed");
         require(bool(r3d.render(_view, scene)), "Depth/texture view render failed");
         require(r3d.stats().draws == 2 && r3d.stats().instances == 3 && r3d.stats().culled == 3,
                 "CPU cull/instance counters are wrong");
