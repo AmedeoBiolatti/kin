@@ -155,6 +155,10 @@ private:
     GeometryBatch _batch;
     BlendMode _blend = BlendMode::Alpha;
     bool _min_max_blend = false;  // the driver takes BlendMode::Max and Min
+    // How wide shapes' soft edges fade, in pixels: half a pixel (docs/rendering.md,
+    // "Shape edges"), a whole one on SDL's software driver, whose triangles snap
+    // their corners to half pixels (a half pixel band would come and go).
+    f32 _soft_edge_pixels = 0.5f;
     bool _warned_min_max = false;
     RendererBackendStats _stats;
     bool _texture_batching_enabled = true;

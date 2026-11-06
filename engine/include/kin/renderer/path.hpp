@@ -46,9 +46,15 @@ struct PathPrimitive {
 };
 
 // A flattened subpath: its points, and whether it closes back to the first.
+// start_tangent / end_tangent: the direction the path leaves its first point
+// in and reaches its last in (any length; zero: not known, the first and last
+// straight pieces are used). Butt and square caps are square to them, so a
+// curve's cap is square to the curve, not to the chord it was flattened into.
 struct PathContour {
     std::vector<Vec2f> points;
     bool closed = false;
+    Vec2f start_tangent{};
+    Vec2f end_tangent{};
 };
 
 class Path {

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <numbers>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -207,6 +208,50 @@ void test_strokes() {
     assert(near(rim, -2.0f, 1e-4f));
 }
 
+// Caps are square to the curve where it ends, not to the last straight piece it
+// was flattened into: arcs drawn end to end meet without a wedge between them.
+void test_cap_tangents() {
+    // A quarter circle from (r, 0) to (0, r) round the origin, as one cubic.
+    const kin::f32 r = 40.0f, k = 4.0f / 3.0f * std::tan(pi / 8.0f) * r;
+    kin::Path quarter;
+    quarter.move_to({r, 0}).cubic_to({r, k}, {k, r}, {0, r});
+    std::vector<kin::PathContour> contours;
+    quarter.flatten(contours, 0.25f);
+    assert(contours.size() == 1);
+    const kin::Vec2f t0 = contours[0].start_tangent, t1 = contours[0].end_tangent;
+    assert(near(t0.x, 0.0f, 1e-4f) && t0.y > 0.0f); // leaves straight up
+    assert(t1.x < 0.0f && near(t1.y, 0.0f, 1e-4f)); // arrives heading left
+    // Lines know their tangents too; a path with none (a point) keeps zeros.
+    std::vector<kin::PathContour> line;
+    kin::Path::line({0, 0}, {3, 4}).flatten(line, 0.25f);
+    assert(near(line[0].start_tangent, {3, 4}) && near(line[0].end_tangent, {3, 4}));
+    // Stroked with butt caps and the usual tolerance (a few pieces only): every
+    // vertex near an end lies on the line through it square to the curve, x = r
+    // at the start and y = r at the end, as far as the stroke's half width.
+    kin::ShapeMesh mesh;
+    kin::tessellate_stroke(mesh, contours, {.width = 6}, kin::colors::white, 1.0f, 0.25f);
+    int at_start = 0, at_end = 0;
+    for (const kin::ShapeVertex& v : mesh.vertices) {
+        if (v.edge != 0.0f) {
+            continue;
+        }
+        if (std::abs(v.position.y) < 1.0f && std::abs(v.position.x - r) <= 3.01f) {
+            assert(near(v.position.y, 0.0f, 1e-3f));
+            ++at_start;
+        }
+        if (std::abs(v.position.x) < 1.0f && std::abs(v.position.y - r) <= 3.01f) {
+            assert(near(v.position.x, 0.0f, 1e-3f));
+            ++at_end;
+        }
+    }
+    assert(at_start == 2 && at_end == 2);
+    // A tangent far from the first piece (a cusp at the end) is not trusted.
+    kin::PathContour cusp{.points = {{0, 0}, {10, 0}}, .closed = false, .start_tangent = {0, 1}, .end_tangent = {}};
+    kin::ShapeMesh cusp_mesh;
+    kin::tessellate_stroke(cusp_mesh, std::span{&cusp, 1}, {.width = 2}, kin::colors::white, 1.0f, 0.25f);
+    expect_area("cusp", core_area(cusp_mesh), 20.0f, 0.01f);
+}
+
 // Circles, ellipses and rounded rectangles are kept as primitives, to be drawn
 // whole: in paths while they are nothing else, in meshes where their paint
 // allows, in paint order with the triangles.
@@ -384,6 +429,7 @@ int main() {
     test_svg_path_data();
     test_fills();
     test_strokes();
+    test_cap_tangents();
     test_primitives();
     test_composition();
     test_svg_reading();
