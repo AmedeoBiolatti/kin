@@ -154,7 +154,7 @@ void SceneSaves::enter(EcsWorld& world, std::string scene) {
     _problems.clear();
     _noted.clear();
     std::vector<std::pair<std::string, EcsEntity>> marked;
-    world.raw().each([&](flecs::entity raw, const Saved&) {
+    world.each([&](flecs::entity raw, const Saved&) {
         const EcsEntity entity{raw};
         if (std::optional<std::string> id = authored_id_of(world, entity)) {
             marked.emplace_back(std::move(*id), entity);
@@ -214,7 +214,7 @@ void SceneSaves::keep(EcsWorld& world) {
     JsonValue::Object entities;
     JsonValue::Array spawned;
     std::vector<std::pair<EcsEntity, Saved>> marked;
-    world.raw().each([&](flecs::entity raw, const Saved& saved) {
+    world.each([&](flecs::entity raw, const Saved& saved) {
         marked.emplace_back(EcsEntity{raw}, saved);
     });
     for (const auto& [entity, saved] : marked) {

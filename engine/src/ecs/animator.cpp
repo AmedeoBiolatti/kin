@@ -104,7 +104,7 @@ void own_named(flecs::entity root, AnimationRegistry& registry, const std::strin
 void update_animators(EcsWorld& world, f32 dt) {
     flecs::world& raw = world.raw();
     std::vector<flecs::entity> animated;
-    raw.each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
+    world.each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
     for (const flecs::entity found : animated) {
         EcsEntity entity{found};
         Animator* animator = entity.get_mut<Animator>(); // its own, when it is a prefab's

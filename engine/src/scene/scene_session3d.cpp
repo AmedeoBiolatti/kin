@@ -32,7 +32,7 @@ std::vector<flecs::entity> children_of(flecs::entity entity) {
 // so an expected configuration failure cannot strand a locked table.
 template <class T, class F> void inspect_components(flecs::world& world, F&& inspect) {
     std::vector<flecs::entity> entities;
-    world.each([&](flecs::entity entity, const T&) { entities.push_back(entity); });
+    kin::each(world, [&](flecs::entity entity, const T&) { entities.push_back(entity); });
     for (auto entity : entities)
         if (const auto* value = entity.get<T>())
             inspect(entity, *value);
@@ -938,19 +938,19 @@ struct SceneSession3D::Data {
         if (!state.bodies)
             return;
         state.bodies->sync_bodies();
-        state.world.raw().each([&](flecs::entity entity, const Transform3D&, const Collider3D&) {
+        state.world.each([&](flecs::entity entity, const Transform3D&, const Collider3D&) {
             if (!entity.has<CharacterController3D>() && !state.bodies->body_of(entity))
                 errors.push_back("physics body creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
-        state.world.raw().each([&](flecs::entity entity, const CharacterController3D&) {
+        state.world.each([&](flecs::entity entity, const CharacterController3D&) {
             if (!state.bodies->character_of(entity))
                 errors.push_back("character creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
-        state.world.raw().each([&](flecs::entity entity, const Ragdoll3D&) {
+        state.world.each([&](flecs::entity entity, const Ragdoll3D&) {
             if (!state.bodies->ragdoll_of(entity))
                 errors.push_back("ragdoll creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
-        state.world.raw().each([&](flecs::entity entity, const Rope3D&) {
+        state.world.each([&](flecs::entity entity, const Rope3D&) {
             if (!state.bodies->rope_of(entity))
                 errors.push_back("rope creation failed for entity '" + EcsEntity{entity}.name() + "'");
         });
@@ -970,7 +970,7 @@ struct SceneSession3D::Data {
         }
         flecs::entity found;
         const auto scan = [&]<class T>() {
-            state.world.raw().each([&](flecs::entity e, const T& r) {
+            state.world.each([&](flecs::entity e, const T& r) {
                 if (r.visible && r.id == id && (!found || e.id() < found.id()))
                     found = e;
             });
@@ -1040,7 +1040,7 @@ bool SceneSession3D::prepare_operation(const std::filesystem::path& path, bool r
             }
             // Also invalidate owning models if bounded cache metadata was evicted.
             const auto invalidate = [&]<class T>() {
-                d.current->world.raw().each([&](flecs::entity, const T& component) {
+                d.current->world.each([&](flecs::entity, const T& component) {
                     if (!component.model || component.asset.id.empty())
                         return;
                     for (const auto& file : changed)
@@ -1419,7 +1419,7 @@ struct SceneSession3D::Data::EditTransaction {
             append(d.errors, validate_particles3d(staging.world, d.options.particle_limits).diagnostics);
             u64 capacity = 0;
             size_t emitters = 0;
-            active.world.raw().each([&](flecs::entity e, const ParticleEmitter3D& original) {
+            active.world.each([&](flecs::entity e, const ParticleEmitter3D& original) {
                 const auto it = entries.find(e.id());
                 const auto* emitter =
                     it != entries.end() && it->second.full ? it->second.copy.get<ParticleEmitter3D>() : &original;
@@ -1460,7 +1460,7 @@ struct SceneSession3D::Data::EditTransaction {
     void prepare_view(View3D& new_view, ViewOptions3D& new_options) {
         i32 priority = std::numeric_limits<i32>::min();
         EcsId selected = 0;
-        active.world.raw().each([&](flecs::entity entity, const SceneEnvironment3D& original) {
+        active.world.each([&](flecs::entity entity, const SceneEnvironment3D& original) {
             const auto it = entries.find(entity.id());
             const auto* c =
                 it != entries.end() && it->second.full ? it->second.copy.get<SceneEnvironment3D>() : &original;

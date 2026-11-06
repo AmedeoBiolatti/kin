@@ -18,7 +18,7 @@ void own_inherited_animators(flecs::world& world) {
         return; // copied onto instances when they are made
     }
     std::vector<flecs::entity> inheriting;
-    world.each([&](flecs::entity entity, const SpriteAnimator&) {
+    kin::each(world, [&](flecs::entity entity, const SpriteAnimator&) {
         if (!entity.owns<SpriteAnimator>() || (entity.has<SpriteRenderer>() && !entity.owns<SpriteRenderer>())) {
             inheriting.push_back(entity);
         }
@@ -37,7 +37,7 @@ void own_inherited_animators(flecs::world& world) {
 void update_sprite_animators(EcsWorld& world, f32 dt) {
     flecs::world& raw = world.raw();
     own_inherited_animators(raw);
-    raw.each([dt](SpriteAnimator& animator, SpriteRenderer& renderer) {
+    world.each([dt](SpriteAnimator& animator, SpriteRenderer& renderer) {
         if (animator.animation != animator.current) {
             animator.current = animator.animation;
             animator.time = 0.0f;

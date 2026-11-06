@@ -80,7 +80,7 @@ ShaderParams make_shader_params(const Renderer2D& renderer, ShaderHandle shader,
 }
 
 void update_shader_effects(EcsWorld& world, f32 dt) {
-    world.raw().each([&](ShaderEffect& effect) { effect.time += dt; });
+    world.each([&](ShaderEffect& effect) { effect.time += dt; });
 }
 
 } // namespace kin

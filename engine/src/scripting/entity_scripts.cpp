@@ -598,7 +598,7 @@ struct EntityScripts::Impl {
         camera_table["trauma"] = [this]() {
             f32 most = 0.0f;
             if (world) {
-                world->raw().each([&](const CameraComponent& camera) {
+                world->each([&](const CameraComponent& camera) {
                     if (camera.current) {
                         most = std::max(most, camera.trauma);
                     }
@@ -1122,7 +1122,7 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     }
     // The scripted entities now (a script may make or destroy some as it runs).
     std::vector<std::pair<flecs::entity, std::string>> scripted;
-    world.raw().each([&](flecs::entity entity, const ScriptComponent& script) {
+    world.each([&](flecs::entity entity, const ScriptComponent& script) {
         if (script.enabled && !script.asset.id.empty() && entity.enabled()) {
             scripted.emplace_back(entity, script.asset.id);
         }
@@ -1218,13 +1218,13 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
             }
             for (const PhysicsBody body : touched) {
                 flecs::entity other;
-                world.raw().each([&](flecs::entity candidate, const PhysicsBodyComponent& component) {
+                world.each([&](flecs::entity candidate, const PhysicsBodyComponent& component) {
                     if (!other && component.body == body) {
                         other = candidate;
                     }
                 });
                 if (!other) { // a tilemap's solid cells
-                    world.raw().each([&](flecs::entity candidate, const TilemapCollider& component) {
+                    world.each([&](flecs::entity candidate, const TilemapCollider& component) {
                         if (!other && component.body == body) {
                             other = candidate;
                         }

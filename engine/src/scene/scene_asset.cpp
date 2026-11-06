@@ -1584,7 +1584,7 @@ SceneSaveResult build_scene_asset(EcsWorld& world, const SceneSaveOptions& optio
         };
         for (auto entity : world.entities().all()) include(entity);
         for (auto entity : world.components().entities()) include(entity);
-        world.raw().each([&](flecs::entity raw) { include(EcsEntity{raw}); });
+        world.each([&](flecs::entity raw) { include(EcsEntity{raw}); });
     }
     std::unordered_map<std::string, const SceneEntityDocument*> documents;
     for (const auto& item : document.entities) if (entities.contains(item.id)) documents.emplace(item.id, &item);

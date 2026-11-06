@@ -410,8 +410,23 @@ bool App::wait_for_change() {
     return true;
 }
 
+void App::set_max_fps(f32 fps) {
+    if (std::isfinite(fps) && fps > 0.0f) {
+        _max_fps = fps;
+        return;
+    }
+#if defined(SDL_PLATFORM_ANDROID)
+    _max_fps = phone_max_fps;
+#else
+    _max_fps = 0.0f;
+#endif
+}
+
 void App::pace_frame(u64& next_frame_ns) {
     _frame_stats.pacing_wait = 0.0f;
+    for (const auto& window : _windows) {
+        window->hint_frame_rate(_max_fps); // a phone's display runs at it
+    }
     if (_max_fps <= 0.0f) {
         next_frame_ns = 0;
         if (!_config.vsync && _config.yield_when_unpaced) {

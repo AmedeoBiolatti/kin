@@ -436,17 +436,42 @@ EcsWorld::EcsWorld()
       _components(std::make_unique<EcsComponentRegistry>(*this)),
       _entities(std::make_unique<EcsEntityRegistry>(*this)),
       _systems(std::make_unique<EcsSystemRegistry>(*this)) {
+    own_world();
 }
 
-EcsWorld::~EcsWorld() = default;
+void EcsWorld::own_world() {
+    if (_world.c_ptr()) {
+        ecs_set_binding_ctx(_world.c_ptr(), this, nullptr);
+    }
+}
+
+EcsWorld* owner_of(const flecs::world& world) {
+    ecs_world_t* raw = world.c_ptr();
+    // A stage's binding context is not the world's: only the world itself.
+    if (!raw || ecs_get_world(raw) != raw) {
+        return nullptr;
+    }
+    return static_cast<EcsWorld*>(ecs_get_binding_ctx(raw));
+}
+
+EcsWorld::~EcsWorld() {
+    // Before the members go: the world's own end (observers removing
+    // components) must not find this one half gone through owner_of.
+    if (_world.c_ptr()) {
+        ecs_set_binding_ctx(_world.c_ptr(), nullptr, nullptr);
+    }
+}
 
 EcsWorld::EcsWorld(EcsWorld&& other) noexcept
     : _world(std::move(other._world)),
+      _kept_queries(std::move(other._kept_queries)), // of that world, now this one
+      _keyed_queries(std::move(other._keyed_queries)),
       _events(std::make_unique<EcsEventRegistry>(*this)),
       _relations(std::make_unique<EcsRelationRegistry>(*this)),
       _components(std::make_unique<EcsComponentRegistry>(*this)),
       _entities(std::make_unique<EcsEntityRegistry>(*this)),
       _systems(std::make_unique<EcsSystemRegistry>(*this)) {
+    own_world();
 }
 
 EcsWorld& EcsWorld::operator=(EcsWorld&& other) noexcept {
@@ -458,7 +483,12 @@ EcsWorld& EcsWorld::operator=(EcsWorld&& other) noexcept {
     _components.reset();
     _entities.reset();
     _systems.reset();
+    _kept_queries.clear(); // of the world about to go
+    _keyed_queries.clear();
     _world = std::move(other._world);
+    _kept_queries = std::move(other._kept_queries);
+    _keyed_queries = std::move(other._keyed_queries);
+    own_world();
     _events = std::make_unique<EcsEventRegistry>(*this);
     _relations = std::make_unique<EcsRelationRegistry>(*this);
     _components = std::make_unique<EcsComponentRegistry>(*this);

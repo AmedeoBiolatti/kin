@@ -102,8 +102,8 @@ std::vector<std::string> resolve_physics3d_assets_impl(EcsWorld& world, PhysicsA
     std::vector<std::string> errors;
     std::vector<EcsEntity> colliders, characters;
     if (selected.empty()) {
-        world.raw().each([&](flecs::entity e, const Collider3D&) { colliders.emplace_back(e); });
-        world.raw().each([&](flecs::entity e, const CharacterController3D&) { characters.emplace_back(e); });
+        world.each([&](flecs::entity e, const Collider3D&) { colliders.emplace_back(e); });
+        world.each([&](flecs::entity e, const CharacterController3D&) { characters.emplace_back(e); });
     } else
         for (auto id : selected)
             if (auto e = world.entity_by_id(id); e) {

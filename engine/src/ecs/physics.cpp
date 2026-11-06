@@ -35,7 +35,7 @@ using BodyEntityMap = std::unordered_map<PhysicsHandleKey, flecs::entity, Physic
 
 BodyEntityMap build_body_entity_map(flecs::world& world, PhysicsWorld& physics) {
     BodyEntityMap map;
-    world.query<PhysicsBodyComponent>().each([&](flecs::entity entity, const PhysicsBodyComponent& body) {
+    kin::each(world, [&](flecs::entity entity, const PhysicsBodyComponent& body) {
         if (physics.is_alive(body.body)) {
             map.emplace(PhysicsHandleKey{body.body}, entity);
         }
@@ -101,7 +101,10 @@ void own_inherited(flecs::world& world, Fresh fresh) {
         return; // copied onto instances when they are made (flecs will not look up for it)
     }
     std::vector<std::pair<flecs::entity, T>> inherited;
-    world.template query_builder<const T>().term_at(0).up(flecs::IsA).build().each([&](flecs::entity entity, const T& value) {
+    static const char key = 0; // one per T
+    kin::kept_query<const T>(world, &key, [](flecs::world& w) {
+        return w.template query_builder<const T>().term_at(0).up(flecs::IsA).build();
+    }).each([&](flecs::entity entity, const T& value) {
         if (!entity.template owns<T>()) { // matched by its prefab's even once it has its own
             inherited.emplace_back(entity, value);
         }
@@ -234,7 +237,7 @@ flecs::entity body_above(flecs::entity entity) {
 void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
     own_inherited_physics(world);
     std::unordered_set<u64> claimed; // the fixtures colliders have
-    world.query<PhysicsBodyComponent>().each([&](flecs::entity entity, PhysicsBodyComponent& body) {
+    kin::each(world, [&](flecs::entity entity, PhysicsBodyComponent& body) {
         if (!physics.is_alive(body.body)) {
             PhysicsBodyDef def = body.def;
             if (const Transform2D* transform = entity.get<Transform2D>()) {
@@ -276,7 +279,10 @@ void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
     });
 
     // Colliders of entities with no body: on the body above them.
-    world.query_builder<PhysicsColliderComponent>().without<PhysicsBodyComponent>().build().each(
+    static const char bodiless = 0;
+    kin::kept_query<PhysicsColliderComponent>(world, &bodiless, [](flecs::world& w) {
+        return w.query_builder<PhysicsColliderComponent>().without<PhysicsBodyComponent>().build();
+    }).each(
         [&](flecs::entity entity, PhysicsColliderComponent& colliders) {
             const flecs::entity owner = body_above(entity);
             const PhysicsBodyComponent* body = owner ? owner.get<PhysicsBodyComponent>() : nullptr;
@@ -300,7 +306,7 @@ void sync_bodies_and_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
         });
 
     // A fixture no collider has (one taken out of a component's list) goes.
-    world.query<const PhysicsBodyComponent>().each([&](const PhysicsBodyComponent& body) {
+    kin::each(world, [&](const PhysicsBodyComponent& body) {
         for (PhysicsFixture fixture : physics.fixtures(body.body)) {
             if (!claimed.contains(fixture_key(fixture))) {
                 physics.destroy_fixture(fixture);
@@ -335,7 +341,7 @@ bool same_tuning(const PhysicsJointDef& a, const PhysicsJointDef& b) {
 }
 
 void sync_physics_joints_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query<PhysicsJointComponent>().each([&](flecs::entity entity, PhysicsJointComponent& joint) {
+    kin::each(world, [&](flecs::entity entity, PhysicsJointComponent& joint) {
         const PhysicsBodyComponent* body = entity.get<PhysicsBodyComponent>();
         if (!body || !physics.is_alive(body->body)) {
             physics.destroy_joint(joint.joint);
@@ -409,12 +415,15 @@ void sync_physics_joints_raw(flecs::world& world, PhysicsWorld& physics) {
 }
 
 void sync_tilemap_colliders_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query_builder<TilemapCollider>().without<TilemapComponent>().build().each([&](TilemapCollider& collider) {
+    static const char mapless = 0;
+    kin::kept_query<TilemapCollider>(world, &mapless, [](flecs::world& w) {
+        return w.query_builder<TilemapCollider>().without<TilemapComponent>().build();
+    }).each([&](TilemapCollider& collider) {
         physics.destroy_body(collider.body);
         collider.body = {};
         collider.built_from.reset();
     });
-    world.query<const TilemapComponent, TilemapCollider>().each(
+    kin::each(world, 
         [&](flecs::entity entity, const TilemapComponent& tiles, TilemapCollider& collider) {
             const Vec2f at = current_world_transform(entity).pos; // maps are not turned or scaled
             if (physics.is_alive(collider.body) && collider.built_from == tiles.tilemap) {
@@ -460,7 +469,7 @@ void sync_physics_bodies_raw(flecs::world& world, PhysicsWorld& physics) {
 }
 
 void break_physics_joints_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query<PhysicsJointComponent>().each([&](PhysicsJointComponent& joint) {
+    kin::each(world, [&](PhysicsJointComponent& joint) {
         if (joint.break_force > 0.0f && physics.is_alive(joint.joint)) {
             const Vec2f force = physics.joint_force(joint.joint);
             if (std::hypot(force.x, force.y) > joint.break_force) {
@@ -476,7 +485,7 @@ void sync_transforms_to_physics_raw(flecs::world& world, PhysicsWorld& physics) 
     // The entity leads: a body under a parent follows it. One teleported goes
     // where its entity is, once.
     std::vector<flecs::entity> teleported;
-    world.query<PhysicsBodyComponent, const Transform2D>().each(
+    kin::each(world, 
         [&](flecs::entity entity, PhysicsBodyComponent& body, const Transform2D& transform) {
             const bool teleport = entity.has<PhysicsTeleport>();
             if (teleport) {
@@ -504,7 +513,7 @@ Vec2f unit_or(Vec2f v, Vec2f fallback) {
 // it where its move ends (the step moves it there, and what it carries,
 // pushes or touches sees it go).
 void move_characters_raw(flecs::world& world, PhysicsWorld& physics, f32 dt) {
-    world.query<CharacterController2D, const PhysicsBodyComponent>().each(
+    kin::each(world, 
         [&](flecs::entity entity, CharacterController2D& character, const PhysicsBodyComponent& body) {
             if (!physics.is_alive(body.body) || !(dt > 0.0f)) {
                 return;
@@ -574,7 +583,7 @@ void move_characters_raw(flecs::world& world, PhysicsWorld& physics, f32 dt) {
 
 // Where each character's floor is after the step: what carries it next.
 void note_character_floors_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query<CharacterController2D>().each([&](CharacterController2D& character) {
+    kin::each(world, [&](CharacterController2D& character) {
         if (character.on_floor && physics.is_alive(character.floor)) {
             character.floor_position = physics.position(character.floor);
             character.floor_rotation = physics.rotation(character.floor);
@@ -585,7 +594,7 @@ void note_character_floors_raw(flecs::world& world, PhysicsWorld& physics) {
 }
 
 void step_physics_raw(flecs::world& world, PhysicsWorld& physics, f32 dt, i32 velocity_iterations, i32 position_iterations) {
-    world.query<PhysicsBodyComponent, const PhysicsVelocity>().each([&](const PhysicsBodyComponent& body, const PhysicsVelocity& velocity) {
+    kin::each(world, [&](const PhysicsBodyComponent& body, const PhysicsVelocity& velocity) {
         if (physics.is_alive(body.body)) {
             physics.set_linear_velocity(body.body, velocity.linear);
         }
@@ -607,7 +616,7 @@ void sync_transforms_from_physics_raw(flecs::world& world, PhysicsWorld& physics
         WorldTransform pose;
     };
     std::vector<Placed> parented;
-    world.query<PhysicsBodyComponent, Transform2D>().each(
+    kin::each(world, 
         [&](flecs::entity entity, const PhysicsBodyComponent& body, Transform2D& transform) {
             if (!body.sync_from_physics || !physics.is_alive(body.body)) {
                 return;
@@ -631,10 +640,10 @@ void sync_transforms_from_physics_raw(flecs::world& world, PhysicsWorld& physics
 }
 
 void collect_physics_contacts_raw(flecs::world& world, PhysicsWorld& physics) {
-    world.query<PhysicsContactQueue>().each([](PhysicsContactQueue& queue) {
+    kin::each(world, [](PhysicsContactQueue& queue) {
         queue.events.clear();
     });
-    world.query<PhysicsOverlapSet>().each([](PhysicsOverlapSet& overlaps) {
+    kin::each(world, [](PhysicsOverlapSet& overlaps) {
         overlaps.contacts.clear();
     });
 

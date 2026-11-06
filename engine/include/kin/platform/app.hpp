@@ -23,6 +23,12 @@ enum class AppMode {
 // their run-loop fallbacks.
 inline constexpr f32 default_fixed_dt = 1.0f / 60.0f;
 
+// A phone's frame rate unless the game sets one (AppConfig::max_fps): a 60 Hz
+// game on a 120 Hz screen would draw each picture twice, as 2D scenes do not
+// move between steps, at twice the cost in battery and heat. A game that wants
+// the display's whole rate sets it (App::set_max_fps(120)).
+inline constexpr f32 phone_max_fps = 60.0f;
+
 struct AppConfig {
     AppMode mode = AppMode::Windowed;
     f32 fixed_dt = default_fixed_dt;
@@ -30,8 +36,10 @@ struct AppConfig {
     i32 max_steps = 8;
     bool vsync = false;
     bool yield_when_unpaced = true;
-    // Most frames a second a windowed run draws (0: no cap). Frames are paced
-    // to deadlines, so the rate holds without drift; headless runs ignore it.
+    // Most frames a second a windowed run draws (0: the system's default: no
+    // cap on a desktop, phone_max_fps on a phone). Frames are paced to
+    // deadlines, so the rate holds without drift; headless runs ignore it. On
+    // a phone the display is asked to run at it (Window::hint_frame_rate).
     f32 max_fps = 0.0f;
     // A frame time within this many seconds of a whole number of fixed steps
     // counts as exactly that many (0: off): see FrameTimeSnapper.
@@ -159,9 +167,10 @@ public:
     // WITHOUT changing fixed_dt or the per-step contents. Determinism is
     // unaffected (the headless run_for path ignores this entirely). Effective
     // fast-forward is bounded by max_steps. Clamped to >= 0.
-    // The frame rate cap (0: none); a game's settings may change it at any time.
+    // The frame rate cap (0: none); a game's settings may change it at any
+    // time. Set to 0, it is the system's default (AppConfig::max_fps).
     f32 max_fps() const { return _max_fps; }
-    void set_max_fps(f32 fps) { _max_fps = fps > 0.0f ? fps : 0.0f; }
+    void set_max_fps(f32 fps);
 
     // Draw only when something changes (see AppConfig::wait_for_events).
     bool waits_for_events() const { return _wait_for_events; }

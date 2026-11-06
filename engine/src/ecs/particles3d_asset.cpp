@@ -313,7 +313,7 @@ static std::vector<std::string> resolve_particles3d_assets_impl(EcsWorld& world,
         return errors;
     std::vector<EcsEntity> entities;
     if (selected.empty())
-        world.raw().each([&](flecs::entity entity, const ParticleEmitter3D&) { entities.emplace_back(entity); });
+        world.each([&](flecs::entity entity, const ParticleEmitter3D&) { entities.emplace_back(entity); });
     else
         for (auto id : selected)
             if (auto e = world.entity_by_id(id); e && e.has<ParticleEmitter3D>())

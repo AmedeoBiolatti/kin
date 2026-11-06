@@ -1366,7 +1366,7 @@ Vec2f parallax_shift(const Parallax& layer, Vec2f view_centre) {
 
 void update_parallax(EcsWorld& world, f32 dt) {
     std::vector<flecs::entity> moving;
-    world.raw().each([&](flecs::entity entity, const Parallax& layer) {
+    world.each([&](flecs::entity entity, const Parallax& layer) {
         if (layer.scroll.x != 0.0f || layer.scroll.y != 0.0f) {
             moving.push_back(entity);
         }
@@ -1381,7 +1381,7 @@ void update_parallax(EcsWorld& world, f32 dt) {
 
 void update_tilemaps(EcsWorld& world, f32 dt) {
     std::vector<flecs::entity> animated_maps;
-    world.raw().each([&](flecs::entity entity, const TilemapComponent& tilemap) {
+    world.each([&](flecs::entity entity, const TilemapComponent& tilemap) {
         if (animated(tilemap)) {
             animated_maps.push_back(entity);
         }

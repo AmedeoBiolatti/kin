@@ -161,7 +161,7 @@ void bind_skeletons2d(EcsWorld& world, Assets2D& assets) {
         Texture texture;
     };
     std::vector<Bound> rebound;
-    world.raw().each([&](flecs::entity entity, const SkeletonRenderer2D& renderer) {
+    world.each([&](flecs::entity entity, const SkeletonRenderer2D& renderer) {
         std::shared_ptr<const SkeletonAsset2D> rig =
             renderer.asset.id.empty() ? renderer.skeleton : assets.skeleton2d(renderer.asset.id);
         if (!rig) {
@@ -193,7 +193,7 @@ void update_skeletons2d(EcsWorld& world, f32 dt) {
         throw std::invalid_argument("invalid skeletal animation dt");
     }
     std::vector<flecs::entity> entities;
-    world.raw().each([&](flecs::entity e, const SkeletonRenderer2D&) { entities.push_back(e); });
+    world.each([&](flecs::entity e, const SkeletonRenderer2D&) { entities.push_back(e); });
     for (const flecs::entity raw : entities) {
         EcsEntity e{raw};
         if (!e.get<SkeletonRenderer2D>()->skeleton) {
@@ -249,7 +249,7 @@ void update_skeletons2d(EcsWorld& world, f32 dt) {
         }
     }
     std::vector<std::pair<flecs::entity, Transform2D>> attachments;
-    world.raw().each([&](flecs::entity e, const SkeletonAttachment2D& attached) {
+    world.each([&](flecs::entity e, const SkeletonAttachment2D& attached) {
         const flecs::entity parent = e.parent();
         const SkeletonRenderer2D* r = parent ? parent.get<SkeletonRenderer2D>() : nullptr;
         if (!r || !r->skeleton) {

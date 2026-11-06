@@ -149,6 +149,13 @@ public:
     void set_relative_mouse(bool enabled);
     bool relative_mouse() const;
 
+    // Tells the system the rate the game draws at (0: none), so a phone's
+    // display can run at it: a 120 Hz screen showing a 60 fps game switches
+    // to 60 Hz, and vsync paces the game with no waiting of its own. App
+    // gives it App::set_max_fps's rate. Android 11 and newer; elsewhere
+    // nothing. Made again when the system gives the window a new surface.
+    void hint_frame_rate(f32 fps);
+
     void set_text_input_enabled(bool enabled);
     bool text_input_enabled() const;
     // Where text is being typed, in window coordinates, so an input method
@@ -180,6 +187,8 @@ private:
     Rectf _text_input_area{};
     std::array<void*, 11> _cursors{}; // made on first use, one per SystemCursor
     std::unique_ptr<Chrome> _chrome; // read by the system's hit test, from the event thread
+    void* _rate_surface = nullptr;   // the surface hint_frame_rate last told, at _rate
+    f32 _rate = -1.0f;
 };
 
 } // namespace kin

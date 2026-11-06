@@ -917,7 +917,7 @@ void clear_overrides(AnimationPlayer& player) {
 }
 
 void update_animation_state_machines(EcsWorld& world) {
-    world.raw().each([](AnimationPlayer& player) {
+    world.each([](AnimationPlayer& player) {
         run_state_machine(player);
     });
 }
@@ -925,7 +925,7 @@ void update_animation_state_machines(EcsWorld& world) {
 void advance_animation_players(EcsWorld& world, f32 dt) {
     std::vector<QueuedAnimationEvent> queued_events;
 
-    world.raw().each([dt, &queued_events](flecs::entity entity, AnimationPlayer& player) {
+    world.each([dt, &queued_events](flecs::entity entity, AnimationPlayer& player) {
         // SM step fused into the advance pass (formerly a separate full-world
         // iteration). Per-player and independent, so interleaving is equivalent.
         run_state_machine(player);

@@ -140,7 +140,7 @@ void SceneScreens::draw(EcsWorld& world, ui2::Context& ui, Renderer2D& renderer,
         std::string path;
     };
     std::vector<Shown> shown;
-    world.raw().each([&](const UiScreenComponent& screen) {
+    world.each([&](const UiScreenComponent& screen) {
         if (screen.visible && !screen.asset.id.empty()) {
             shown.push_back({screen.order, shown.size(), screen.asset.id});
         }

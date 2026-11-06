@@ -291,7 +291,7 @@ static std::vector<std::string> resolve_animator3d_assets_impl(EcsWorld& world,
                                                                std::span<const EcsId> selected) {
     std::vector<EcsEntity> entities;
     if (selected.empty())
-        world.raw().each([&](flecs::entity entity, const AnimatorAsset3D&) { entities.emplace_back(entity); });
+        world.each([&](flecs::entity entity, const AnimatorAsset3D&) { entities.emplace_back(entity); });
     else
         for (auto id : selected)
             if (auto e = world.entity_by_id(id); e && e.has<AnimatorAsset3D>())

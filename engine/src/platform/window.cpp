@@ -1,10 +1,16 @@
 #include <kin/platform/window.hpp>
 
 #include <kin/assets/image.hpp>
+#include <kin/platform/log.hpp>
 
 #include "window_points.hpp"
 
 #include <SDL3/SDL.h>
+
+#if defined(SDL_PLATFORM_ANDROID)
+#include <android/native_window.h>
+#include <dlfcn.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -378,6 +384,40 @@ void Window::set_cursor(SystemCursor cursor) {
 
 bool Window::relative_mouse() const {
     return _handle && SDL_GetWindowRelativeMouseMode(to_sdl_window(_handle));
+}
+
+void Window::hint_frame_rate(f32 fps) {
+#if defined(SDL_PLATFORM_ANDROID)
+    if (!_handle) {
+        return;
+    }
+    fps = std::isfinite(fps) && fps > 0.0f ? fps : 0.0f;
+    void* surface = SDL_GetPointerProperty(SDL_GetWindowProperties(to_sdl_window(_handle)), SDL_PROP_WINDOW_ANDROID_WINDOW_POINTER, nullptr);
+    if (!surface || (surface == _rate_surface && fps == _rate)) {
+        return;
+    }
+    // Android 11 (API 30) has it; kin runs from Android 10, so it is looked up.
+    using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+    static const auto set_frame_rate = [] {
+        for (const char* library : {"libandroid.so", "libnativewindow.so"}) {
+            if (void* handle = dlopen(library, RTLD_NOW | RTLD_NOLOAD); handle || (handle = dlopen(library, RTLD_NOW))) {
+                if (void* found = dlsym(handle, "ANativeWindow_setFrameRate")) {
+                    return reinterpret_cast<SetFrameRate>(found);
+                }
+            }
+        }
+        return SetFrameRate{};
+    }();
+    const int32_t result = set_frame_rate ? set_frame_rate(static_cast<ANativeWindow*>(surface), fps, 0 /* ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT */) : -1;
+    KIN_LOG_INFO_F("runtime",
+                   "display frame rate asked",
+                   (LogFields{{.name = "fps", .value = std::to_string(fps)},
+                              {.name = "result", .value = set_frame_rate ? std::to_string(result) : std::string("unsupported")}}));
+    _rate_surface = surface;
+    _rate = fps;
+#else
+    (void)fps;
+#endif
 }
 
 void Window::set_text_input_enabled(bool enabled) {
