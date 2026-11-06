@@ -526,6 +526,75 @@ void test_bridge_takes_its_observers_with_it() {
 
 } // namespace
 
+// Enough bodies that their sync is done in pieces on the job system's
+// workers: what is missing is still made, what no collider claims still
+// goes, and every entity is placed where its body is.
+void test_many_bodies_sync_in_pieces() {
+    kin::EcsWorld world;
+    kin::register_physics_components(world);
+    world.component<kin::Transform2D>("Transform2D");
+    kin::PhysicsWorld physics{kin::PhysicsWorldDef{.gravity = {0.0f, 0.0f}}};
+    std::vector<kin::EcsEntity> crowd;
+    for (int i = 0; i < 6000; ++i) {
+        crowd.push_back(world.entity()
+                            .set(kin::Transform2D{.pos = {static_cast<kin::f32>(i % 100) * 20.0f, static_cast<kin::f32>(i / 100) * 20.0f}})
+                            .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic, .gravity_scale = 0.0f}})
+                            .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(4.0f))}})
+                            .set(kin::PhysicsVelocity{.linear = {static_cast<kin::f32>(i % 7) - 3.0f, 2.0f}}));
+    }
+    kin::EcsEntity cart = world.entity("cart")
+                              .set(kin::Transform2D{.pos = {-100.0f, -100.0f}})
+                              .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic}})
+                              .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(4.0f))}});
+    kin::EcsEntity wheel = world.entity("wheel")
+                               .set(kin::Transform2D{.pos = {6.0f, 0.0f}})
+                               .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(2.0f))}});
+    wheel.child_of(cart);
+
+    kin::sync_physics_bodies(world, physics);
+    for (const kin::EcsEntity& one : crowd) {
+        assert(physics.is_alive(one.get<kin::PhysicsBodyComponent>()->body));
+        assert(physics.fixture_count(one.get<kin::PhysicsBodyComponent>()->body) == 1);
+    }
+    const kin::PhysicsBody cart_body = cart.get<kin::PhysicsBodyComponent>()->body;
+    assert(physics.fixture_count(cart_body) == 2);
+    kin::sync_physics_bodies(world, physics); // nothing changed: nothing goes
+    assert(physics.fixture_count(cart_body) == 2);
+
+    for (int step = 0; step < 3; ++step) {
+        kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    }
+    for (const kin::EcsEntity& one : crowd) {
+        const kin::Vec2f at = physics.position(one.get<kin::PhysicsBodyComponent>()->body);
+        assert(one.get<kin::Transform2D>()->pos.x == at.x && one.get<kin::Transform2D>()->pos.y == at.y);
+    }
+    assert(crowd[5].get<kin::Transform2D>()->pos.y > 0.0f); // they moved
+
+    // A few more among many: made, in the step they came.
+    std::vector<kin::EcsEntity> late;
+    for (int i = 0; i < 3; ++i) {
+        late.push_back(world.entity()
+                           .set(kin::Transform2D{.pos = {-300.0f - static_cast<kin::f32>(i) * 20.0f, 0.0f}})
+                           .set(kin::PhysicsBodyComponent{.def = {.type = kin::PhysicsBodyType::Dynamic}})
+                           .set(kin::PhysicsColliderComponent{.colliders = {collider(kin::PhysicsShape::circle(4.0f))}}));
+    }
+    // A fixture no collider has, one taken out of a collider list, one of a collider below a body.
+    const kin::PhysicsBody stray_body = crowd[4000].get<kin::PhysicsBodyComponent>()->body;
+    const kin::PhysicsFixture stray = physics.add_fixture(stray_body, {.shape = kin::PhysicsShape::circle(1.0f)});
+    const kin::PhysicsFixture dropped = crowd[2500].get<kin::PhysicsColliderComponent>()->colliders[0].fixture;
+    crowd[2500].get_mut<kin::PhysicsColliderComponent>()->colliders.clear();
+    const kin::PhysicsFixture wheel_fixture = wheel.get<kin::PhysicsColliderComponent>()->colliders[0].fixture;
+    wheel.get_mut<kin::PhysicsColliderComponent>()->colliders.clear();
+    kin::update_physics_world(world, physics, 1.0f / 60.0f);
+    for (const kin::EcsEntity& one : late) {
+        assert(physics.is_alive(one.get<kin::PhysicsBodyComponent>()->body));
+        assert(physics.fixture_count(one.get<kin::PhysicsBodyComponent>()->body) == 1);
+    }
+    assert(!physics.is_alive(stray) && physics.fixture_count(stray_body) == 1);
+    assert(!physics.is_alive(dropped) && physics.fixture_count(crowd[2500].get<kin::PhysicsBodyComponent>()->body) == 0);
+    assert(!physics.is_alive(wheel_fixture) && physics.fixture_count(cart_body) == 1);
+}
+
 int main() {
     test_body_creation_multiple_colliders_and_transform_sync();
     test_velocity_step_and_transform_sync_from_physics();
@@ -541,5 +610,6 @@ int main() {
     test_described_components_make_bodies();
     test_prefab_instances_get_their_own_bodies();
     test_bridge_takes_its_observers_with_it();
+    test_many_bodies_sync_in_pieces();
     return 0;
 }
