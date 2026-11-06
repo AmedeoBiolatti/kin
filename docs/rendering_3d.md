@@ -1457,7 +1457,7 @@ weather (P3c)" section and `--preset rain|snow|storm|fire`.
 ## Custom shaders
 
 A material can have a fragment shader of its own (`Material3D::shader`,
-`shader_params`: four vec4s), in place of kin's, for a hologram, a force
+`shader_params`: its first four vec4s), in place of kin's, for a hologram, a force
 field, water. It is GLSL for Vulkan, compiled against kin's include, which
 declares the inputs and uniforms and has the lighting in it:
 
@@ -1497,6 +1497,138 @@ too, and skips `*.inc.glsl`; see `examples/CMakeLists.txt`);
 development. Resource layouts are reflected and validated; automatic 3D shader hot reload is not provided.
 Signal Breach's hit shields (`examples/shaders/shield.frag.glsl`: Fresnel rim
 and climbing lines, additive) are one. For a custom HDR pipeline, use explicit surface attachments and the public bloom/output operations below.
+
+### Surface shaders
+
+A custom shader replaces kin's whole fragment shader, and with it what kin's own shaders have and it does not: the
+global illumination, the light grid (it keeps the 16 strongest point and spot lights), the fog and light variants
+and the velocity for temporal anti-aliasing. A surface shader (`Material3D::surface`) keeps all of that: it is one
+function, compiled into each of kin's mesh fragment shaders, that changes the surface kin shades. The material
+graph (docs/material_graph_plan.md) is built on it.
+
+```glsl
+// rust.surface.glsl: no #version, no main
+void kin_surface(inout KinSurface s) {
+    const float rust = smoothstep(0.4, 0.6, fract(sin(dot(floor(kin_position().xz * 8.0), vec2(12.9, 78.2))) * 43758.5));
+    s.base_color = mix(s.base_color, kin_surface_param(0).rgb, rust);
+    s.roughness = mix(s.roughness, 0.9, rust);
+    s.metallic *= 1.0 - rust;
+}
+```
+
+`s` arrives as kin's material makes it (`kin_stock_surface()`: the colours times the base map, the normal bent by
+the normal map, metallic and roughness times their map, the occlusion map, the emission), so a function that
+changes nothing draws exactly what the material draws without one. Its fields: `base_color` (linear), `alpha`
+(straight: a `Blend3D::Mask` discards below the cutoff), `normal` (unit, world space, on the viewer's side),
+`metallic`, `roughness` (keep it within [0.045, 1]), `occlusion` and `emission` (linear light of its own). After
+the function, kin lights it (`kin_lit`) and adds the emission, or, for an `unlit` material, shows its colour plus
+its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
+(`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
+`uNormalMap`, `uOcclusion`, `uEmissive`), and reads `Material3D::shader_params` (`surface_param_count3d`: 64 floats) as `kin_surface_param(0..15)`.
+
+`r3d.compile_surface_shader(path)` compiles the file now with glslc (development); a game ships its variants
+compiled at build time with `kin_compile_surface_shader(<var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl)`
+(`cmake/kin_embed.cmake`), which lists the twelve `.spv` files in `SurfaceVariant3D`'s order for
+`r3d.create_surface_shader(variants)`. `surface_shader_source()` and `surface_variant_defines()` say what each
+variant is. A `shader` takes the surface's place. WebGL2 has no surface shaders.
+
+**Cut-outs.** A `Blend3D::Mask` surface cuts its shadow, its occlusion (the pre-passes), its picks and the visibility
+queries by its own alpha where it defines `float kin_surface_alpha(vec2 uv, vec3 position, float vertex_alpha)` under
+`#ifdef KIN_SURFACE_MASK` (the UV as the maps read it, the world position, the copy's and vertex's alpha; it may
+sample the material's five maps, `kin_surface_param` and the noise of `kin_graph_noise.inc.glsl`;
+`material.cutoff.z` is `Scene3D::time`): five more variants (`SurfaceVariant3D::ShadowMask` ...
+`VisibilityMask`, made when the text has it; `CUTOUTS` for `kin_compile_surface_shader`). Without it those passes cut
+by the base map's alpha, as kin's own materials do. Material graphs write it for their `alpha` output when it uses
+only what those passes have (see Material graphs).
+
+Surface materials take kin's batched paths as its own do: a static batch's copies are retained, draws are planned and
+cached, and separate draws of one mesh and surface merge into one (the merged draws' four variants, mesh_material's,
+read each copy's `shader_params` from a table of their own beside the draws' material records, made only for a scene
+with surface draws). Twelve variants in all; the last four are optional (a surface without them draws unmerged).
+
+### Material graphs
+
+A material graph (`kin.material-graph/1`, JSON; `kin/render3d/material_graph3d.hpp`) wires nodes into what a surface
+is, as Godot's visual shaders and Unreal's material editor do, and compiles into a surface shader (above): lit,
+shadowed, fogged and GI-lit as kin's own materials are.
+
+```json
+{"schema": "kin.material-graph/1", "name": "Rust",
+ "parameters": [{"name": "tint", "type": "color", "default": [0.45, 0.2, 0.08, 1]},
+                {"name": "scale", "type": "float", "default": 4},
+                {"name": "albedo", "type": "texture", "slot": "base"}],
+ "nodes": [{"id": "map", "type": "texture", "texture": "albedo"},
+           {"id": "scaled", "type": "multiply", "inputs": {"a": "position", "b": "scale"}},
+           {"id": "rust", "type": "fbm", "inputs": {"p": "scaled"}},
+           {"id": "amount", "type": "smoothstep", "inputs": {"edge0": 0.45, "edge1": 0.6, "x": "rust"}},
+           {"id": "color", "type": "mix", "inputs": {"a": "map.rgb", "b": "tint.rgb", "t": "amount"}},
+           {"id": "rough", "type": "mix", "inputs": {"a": "surface.roughness", "b": 0.95, "t": "amount"}}],
+ "outputs": {"base_color": "color", "roughness": "rough"}}
+```
+
+- **Inputs** are references or values. A reference names a node (`"map"`), a component of one (`"map.rgb"`,
+  `"map.a"`: swizzles of xyzw or rgba), a parameter, or a built-in input: `uv` (with the material's UV transform),
+  `position` (world), `normal` (the mesh's, before maps), `view` (toward the camera), `vertex_color`, `time`
+  (`Scene3D::time`), `screen` (the pixel, 0 to 1), `camera_distance`, and `surface.<field>`: what kin's material makes
+  of the surface before the graph (`base_color`, `alpha`, `normal`, `metallic`, `roughness`, `occlusion`,
+  `emission`). A value is a number or an array of 2 to 4. Types are float, vec2, vec3, vec4: a float widens to any
+  vector; a vector narrows to its first components, or widens with 0 (and 1 for the fourth), as Unreal's do.
+- **Outputs** (`base_color`, `alpha`, `normal` in world space, `metallic`, `roughness`, `occlusion`, `emission`)
+  replace the surface's; those not given keep what the material makes. Roughness is kept within [0.045, 1], the
+  normal unit, colours non-negative.
+- **Parameters** (`float`, `vec2`, `vec3`, `vec4`, `color`: linear RGBA) take `Material3D::shader_params`' 64 floats
+  (`surface_param_count3d`; enough for Unreal's master materials: 102 of 107 free Fab materials before unused ones
+  are left out), vec3 and vec4 each a vec4 of their own; `material_graph_params3d(graph, {{"name", value}})` fills them from the
+  defaults and the values given. Textures take one of the material's map slots (`"slot"`: `base`, `metallic_roughness`,
+  `normal`, `occlusion`, `emissive`: the material's `texture`, `metallic_roughness`, ... fields bind them), sampled as
+  sRGB (`base`, `emissive`) or linear, or as `"color_space"` says. A texture that isn't the slot's map
+  (`"role": "data"`: a noise in the occlusion slot) undoes kin's own reading of the slot (the occlusion then 1).
+- **Nodes** (`material_graph_nodes3d()` lists them): `constant`; `add`, `subtract`, `multiply`, `divide`, `min`,
+  `max`, `power`, `mod`, `step`, `mix` (Unreal's Lerp), `clamp`, `smoothstep`, `remap`; `abs`, `floor`, `ceil`,
+  `fract`, `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `sign`, `negate`, `one_minus`, `saturate`, `normalize`,
+  `length`, `dot`, `distance`, `cross`, `reflect`, `combine`; `texture`, `normal_map` (a normal map's texel as the
+  world normal, with a `strength`), `tangent_to_world`, `triplanar`; `noise_value`, `noise_gradient`,
+  `noise_cellular`, `fbm`, `checker` (deterministic: hash-based, the same picture on every GPU); `fresnel`,
+  `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs.
+- **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to
+  nothing, too many parameters, two textures in a slot.
+- **Cut-outs**: a graph's `alpha` is compiled again for the shadow, occluder, pick, pre- and visibility passes when
+  it uses only what they have: `uv`, `position`, `time`, `vertex_color`'s alpha, `surface.alpha` (the base map's),
+  parameters, textures, noise and maths (`CompiledMaterialGraph3D::cutout`). One that uses more (the view, a normal,
+  `fresnel`, `triplanar`, `normal_map`, a `glsl` node) compiles with a warning naming the node
+  (`CompiledMaterialGraph3D::warnings`), and its cut-outs in those passes follow the base map's alpha.
+
+`compile_material_graph3d(text)` writes the surface shader's GLSL (`CompiledMaterialGraph3D::surface`) and the
+parameters' layout; `r3d.compile_material_graph(path)` compiles it now (development). Nodes not wired to an output are
+left out.
+
+**As assets.** A `.kinmaterials` file names a graph and its parameters' values, which merge one by one across the
+base, part and variant layers (a variant can change only the tint):
+
+```json
+{"schema": "kin.materials3d/1",
+ "material": {"graph": "materials/rust.kingraph",
+              "params": {"tint": [0.45, 0.2, 0.08, 1], "scale": 4, "albedo": "textures/iron.png"}},
+ "variants": {"wet": {"material": {"params": {"scale": 8}}}, "plain": {"material": {"graph": null}}}}
+```
+
+Numbers go into `shader_params` (a graph's parameters take its place; unnamed ones keep their defaults); a texture
+(a path, or `{"asset", "sampler"}`) is bound in its parameter's slot, sRGB or linear as the graph says. Unknown names,
+a number for a texture, too many numbers and parameters without a graph are errors; `"graph": null` clears the
+surface (and what its parameters did). `Assets3D::load_material_graph(path)` loads graphs, cached by path:
+
+- **cooked**, `<graph>.spv` beside the source: the layout and every variant's SPIR-V (optimised: glslc -O, as
+  surface shaders compiled at run time are too), deflated, with a hash of what it holds, in one file (about 330 KB:
+  twelve shaders of kin's lighting), made by
+  `kin_material_graph cook <graph>` or at build time by `kin_cook_material_graph(<var> SOURCE <graph> [OUTPUT
+  <file>])` (`cmake/kin_embed.cmake`), when it is at least as new as the source, or the source is gone: what a
+  shipped game, which has no glslc, loads;
+- else the source, compiled now with glslc (development); without glslc and no cooked file, an error saying so.
+
+Invalidating the graph or its cooked file (`SceneSession3D` does, for watched material files' dependencies) rebinds
+the materials that use it: editing a graph reloads it. `kin_material_graph check <graph>` prints its errors (each
+naming its node) or its parameters; `kin_material_graph glsl <graph> <out>` its GLSL; `kin_material_graph nodes` the
+node types.
 
 ### Custom lighting responses
 
@@ -3415,6 +3547,135 @@ variant and a blue variant selected by a standard prefab override. Both share on
 barrel model. The fire pit selects the ember variant from the same material asset.
 The expedition's existing imported appearance remains unchanged.
 
+### Tiling (a material's UV transform)
+
+`Material3D::uv_scale` and `uv_offset` move where every map of the material is read: the mesh's UV times the scale,
+plus the offset (Godot's `uv1_scale` / `uv1_offset`, Unity's tiling and offset), in every pass: the lit and unlit
+colour, the normal map's frame, a cut-out's coverage in the main, shadow, pick, pre- and visibility passes and the
+temporal anti-aliasing's coverage. `.kinmaterials` take them as `"uv_scale": [x, y]` and `"uv_offset": [x, y]`. A
+glTF model's `KHR_texture_transform` is applied to its UVs when it loads, as before; these apply on top. Not yet: the
+GI's voxels read the base map untransformed (a tiled map's mean colour is much the same), and WebGL2 ignores them.
+Identity (the default) reads exactly what it read before.
+
+### Importing other engines' materials
+
+`kin_import_material godot <material.tres | folder> --project <godot project> --content <kin content root> --out
+<folder>` turns Godot 4 `StandardMaterial3D` and `ORMMaterial3D` resources into `.kinmaterials` files (one each, a
+folder's in its layout), and `import_godot_material()` (`kin/render3d/material_import3d.hpp`) does it for tools such
+as the studio. Every field kin has is written, so the file replaces a model's imported material as a whole:
+
+- albedo colour and map; metallic and roughness, their maps' selected channels packed into kin's one map (G
+  roughness, B metallic; ORM maps as they are); normal map and scale (only with `normal_enabled`); ambient
+  occlusion (its channel moved to R); emission: its colour and map by its operator (an added colour is put into a
+  map with the map, scaled by the brightest texel), its energy times, with the project's physical light units, its
+  intensity in nits;
+- transparency (alpha; scissor as a cut-out at its threshold; hash as a cut-out at a half; depth pre-pass as alpha),
+  the add blend mode, cull mode (disabled is double-sided), unshaded, receiving shadows, `uv1_scale` and `uv1_offset`
+  (`Material3D::uv_scale`, `uv_offset`), and the texture filter and repeat as every map's sampler.
+
+Maps inside the content root are referenced where they are; others are copied into `<out>/textures`, beside the
+maps made. What kin does not show as Godot does is printed as a note for each material (backlight, subsurface
+scattering, proximity and distance fade, refraction, detail maps, front-face culling,
+subtract and multiply blending, ...), not dropped silently. Maps a material needs repacked but kin cannot decode (DDS,
+KTX) are left out with their factor kept, and said. Every file written is read back through
+`parse_materials3d_asset` first.
+
+`kin_import_material unity <material.mat | folder> --project <the folder holding Assets/> ...` (and
+`import_unity_material()`) does the same for Unity's materials, read by their shader's properties: URP's Lit (Simple
+Lit and Baked Lit as dielectrics of their smoothness, Unlit unlit), the built-in pipeline's Standard, HDRP's Lit; a
+custom shader's or Shader Graph's material by the usual property names, with a note. Textures are found by GUID
+through the project's `.meta` files. Mapped:
+
+- base colour and map, and the base map's tiling and offset as the material's UV transform (Unity reads every map
+  with it; a map tiled differently is noted);
+- metallic and smoothness: kin's roughness is 1 - smoothness. With the metallic map (R metallic, A smoothness, or the
+  albedo's alpha by `_SmoothnessTextureChannel`) the import makes kin's map from it, the smoothness factor (Standard's
+  gloss map scale) in it; HDRP's mask map is remapped by its `_MetallicRemap`, `_SmoothnessRemap` and `_AORemap`
+  ranges;
+- normal map and scale; occlusion (Unity's G, moved to R) and its strength; emission with the `_EMISSION` keyword
+  (the colour in linear light, times its map; HDRP's colour is linear already, in its physical units: noted);
+- opaque, cut-out (`_AlphaClip`, Standard's Cutout), transparent (alpha; additive; premultiplied and multiply noted),
+  `_Cull` (off: double-sided; HDRP's `_DoubleSidedEnable`), `_ReceiveShadows`.
+
+TIFF and PSD maps (frequent in Unity projects; kin's images don't read them) are decoded by the import's own reader
+(baseline TIFF: strips or tiles, uncompressed, LZW, PackBits, Deflate, the horizontal predictor, 8/16-bit and float;
+PSD's composited picture) and written as PNG. Unity's Shader Graphs themselves (see `--graphs` below), its HLSL
+shaders, detail, parallax and clear-coat maps are noted.
+
+Unreal's materials are read in two steps. Inside Unreal's editor, `tools/import_material/unreal_export.py` (its
+Python, headless: `UnrealEditor-Cmd <Project.uproject> -run=pythonscript -EnablePlugins=PythonScriptPlugin
+-script="unreal_export.py --content /Game/Path --out <folder>" -nullrhi`) writes each Material and Material Instance
+as a `kin.unreal-material/1` file: its blend mode, shading model, two-sidedness and clip value, its parameters' values
+(an instance's own over its parents'), and the expressions feeding each output a few deep, with the textures they
+name exported as PNG (with their sRGB and green-flip settings). Then `kin_import_material unreal <export.json |
+folder> --project <the export folder> ...` (`import_unreal_material()`) reads each output as bias + gain x one
+texture channel:
+
+- constants, scalar and vector parameters, texture samples (and their TextureCoordinate tiling), Multiply, Add,
+  Subtract, One Minus, Component Mask, and a Lerp whose alpha is exactly 0 or 1; anything else (a varying Lerp, two
+  textures multiplied, a parameter collection, custom HLSL) is noted and that output left at kin's default;
+- base colour (Unreal's colours are linear), metallic and roughness (an ORM map laid out as kin's, R occlusion, G
+  roughness, B metallic, is used as it is; others are packed, bias and gain baked in), occlusion, normal (Unreal's are
+  DirectX's, green down: flipped, unless the texture flips green on import, whose source is then as kin's),
+  emission, opacity from the base map's alpha (masked: a cut-out at the clip value), blend mode (opaque, masked,
+  translucent, additive), two-sided, unlit (its emissive as its colour);
+- one-colour maps (Unreal's white, black and flat-normal placeholders) are folded into their factor; a uniform normal
+  map that isn't flat is kept.
+
+`tools/import_material/unreal_probe.py` makes the test materials (`tests/fixtures/unreal`) in a scratch project.
+
+#### Node graphs (`--graphs`)
+
+With `--graphs` (`import_unreal_graph()`, `import_unity_graph()`, `import_godot_graph()`) a material's node graph is
+imported too, as a [material graph](#material-graphs) beside it: `<graph>.kingraph`, named by the material's
+`"graph"`, its parameters' values (an Unreal instance's, a Unity material's properties, a Godot material's
+`shader_parameter/`s) in its `"params"`. A common subset of nodes is read (the math, texture samples and their UVs,
+parameters, time, vertex colour, position, normals and view, fresnel, panning, lerps, clamps, steps, remaps, splits
+and combines; the headers list them); an output fed by a node kin has no counterpart for keeps its Tier 1 value
+(Unreal, Unity: Godot's ShaderMaterials have none) and is noted, naming the node. A graph that doesn't compile in
+kin, or samples more than the five textures kin's material has slots for, falls back to Tier 1, said.
+
+- Unreal: `unreal_export.py` writes the whole graph, and the graphs of the Material Functions it calls (inlined by
+  the import: a function input left unconnected takes its preview value); World Position is centimetres (scaled from
+  kin's metres), normal maps are DirectX's (flipped). A Static Switch takes the material's or instance's value, else
+  its default: an instance that changes one gets a graph of its own, named for the switches on and off
+  (`M_Rock__Moss_on.kingraph`). Named Reroutes are followed to their declarations.
+- Unity: Shader Graph 10 and later (`.shadergraph`, sub-graphs inlined; older files fall back to Tier 1); Unity's
+  vector widths are kept (an unconnected default is cut to what it is added to); a Keyword node follows the
+  material's keywords (the graph is written per set of keywords on: `Lit__GLOW.kingraph`); a texture's colour space
+  is its default texture's import setting. Colours are taken as gamma, as Unity's inspector shows them (unchecked
+  against Unity).
+- Godot 4: a `ShaderMaterial` whose shader is a `VisualShader` (its own `.tres` or inline; text `.gdshader`s are
+  refused); its fragment stage; Normal Map is read as Godot reads it (the texel, its depth the strength); Godot's
+  vertex, normal and view are in view space, kin's in the world's (noted: the same where only angles count, as in a
+  fresnel); an Expression node of one assignment becomes a `glsl` node.
+
+`tools/import_material/godot_probe.gd` (headless Godot) and `make_unity_fixture.py` make the Tier 2 test fixtures.
+
+#### Comparing with the source engines (the material lineup)
+
+`tools/import_material/lineup` renders one small scene in kin, Godot 4 and Unreal 5, so imported materials can be
+compared with the pictures their own engines make. `lineup.json` lays it out: four unlit quads (graph math, textures,
+colour spaces: these should match to the pixel) over four lit spheres (one sun, no ambient), with eight materials
+described in words and made as graphs in both engines.
+
+1. `python3 make_assets.py <folder>`: the textures (PNG) and meshes (`.glb`) all three engines load.
+2. Godot: in a project holding the assets and `godot_lineup.gd`, `godot --headless --path <project> --import`, then
+   `godot --path <project> --script res://godot_lineup.gd -- --out godot.png` (windowed: it renders). It saves the
+   materials as VisualShaders.
+3. Unreal: `unreal_lineup.py` in the editor of a project with AA, GI, reflections, AO and grain off
+   (`LINEUP_DIR=<folder> LINEUP_OUT=unreal.png`; see its header). It saves the materials under `/Game/Lineup`;
+   export them with `unreal_export.py`.
+4. Import each engine's materials with `kin_import_material godot|unreal ... --graphs`, then
+   `kin_material_lineup --scene lineup.json --content <root> --materials <folder> --out kin.png`.
+5. `python3 compare.py lineup.json <reference.png> <candidate.png> <sheet.png>`: each object's mean and largest
+   difference in 8-bit levels, the pixels off by more than 2, PSNR (and FLIP with `flip_evaluator`), and a sheet of
+   the two pictures and their difference.
+
+All three draw linear light encoded to sRGB, with no tone curve. Measured (2026-11-05): kin with Godot's materials
+against Godot, unlit row: at most 1 level apart; kin with Unreal's materials is byte-identical to kin with Godot's;
+the lit spheres differ by about 3-4 levels, from the engines' BRDFs (Godot's Burley diffuse, kin's multiscatter
+boost on metals).
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,

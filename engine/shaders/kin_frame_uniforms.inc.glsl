@@ -30,4 +30,5 @@ layout(set = 3, binding = KIN_FRAME_BINDING) uniform Frame {
     vec4 grid;          // x: 1 when the light grid lights this pass (KIN_LIGHT_GRID), y: a tile's side (pixels), z: the
                         // first slice's near depth, w: slices per unit of the log of depth
     vec4 grid_size;     // x, y: tiles across and down, z: slices, w: cells (where the lists start)
+    vec4 time;          // x: Scene3D::time (seconds), for materials that move
 } frame;

@@ -407,7 +407,7 @@ if(KIN_EXPERIMENTAL_3D)
         "$<$<CXX_COMPILER_ID:GNU,Clang>:-w>;$<$<CXX_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${meshoptimizer_SOURCE_DIR}/src")
     set(KIN_THIRD_PARTY_LICENSES "${KIN_THIRD_PARTY_LICENSES};meshoptimizer.txt|${meshoptimizer_SOURCE_DIR}/LICENSE.md" CACHE INTERNAL "")
-    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
+    target_sources(kin_engine PRIVATE src/render3d/model.cpp src/render3d/assets3d.cpp src/render3d/material_asset3d.cpp src/render3d/material_graph3d.cpp src/render3d/material_import3d.cpp src/render3d/material_import_unity3d.cpp src/render3d/material_import_unreal3d.cpp src/render3d/image_decode3d.cpp src/render3d/import_decode.c src/render3d/model_batch3d.cpp src/render3d/mesh_lod.cpp src/render3d/mesh_clusters.cpp
                                       src/render3d/skeleton.cpp src/render3d/animation3d.cpp src/render3d/ik.cpp)
     target_sources(kin_engine PRIVATE
         src/render3d/camera3d.cpp src/render3d/mesh.cpp src/render3d/renderer3d.cpp
@@ -439,7 +439,7 @@ if(KIN_EXPERIMENTAL_3D)
     # translation unit; other engine sources and floating-point flags stay put.
     set_property(SOURCE src/renderer/gpu/gpu_renderer3d.cpp APPEND PROPERTY COMPILE_OPTIONS
         "$<$<AND:$<BOOL:${KIN_RENDERER3D_O3}>,$<CONFIG:Release>,$<CXX_COMPILER_ID:GNU,Clang>>:-O3>")
-    set_source_files_properties(src/render3d/hdr_decode.c PROPERTIES COMPILE_OPTIONS
+    set_source_files_properties(src/render3d/hdr_decode.c src/render3d/import_decode.c PROPERTIES COMPILE_OPTIONS
         "$<$<C_COMPILER_ID:GNU,Clang>:-w>;$<$<C_COMPILER_ID:MSVC>:/w>")
     target_include_directories(kin_engine SYSTEM PRIVATE "${stb_SOURCE_DIR}")
     target_compile_definitions(kin_engine PUBLIC KIN_EXPERIMENTAL_3D)

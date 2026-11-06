@@ -1,0 +1,9 @@
+[gd_resource type="ShaderMaterial" format=3]
+
+[ext_resource type="Shader" path="res://VS_Mix.tres" id="1_mqarx"]
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_mqarx")
+shader_parameter/tint = null
+shader_parameter/rough = null

@@ -30,6 +30,7 @@
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/ik3d.hpp>
 #include <kin/render3d/local_lights3d.hpp>
+#include <kin/render3d/material_graph3d.hpp>
 #include <kin/render3d/mesh_clusters3d.hpp>
 #include <kin/render3d/mesh_lod3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -4651,6 +4652,582 @@ void test_gpu_material_shader() {
         const Pixels flat_picture = shoot(unlit);
         const Color left_side = flat_picture.at(70, 60), right_side = flat_picture.at(90, 60);
         assert(left_side.g > 100 && left_side.r < 10 && right_side.g > left_side.g); // brighter toward +x
+    });
+}
+
+#ifdef KIN_TEST_SURFACE_SPIRV
+#include "surface_test_shaders.hpp"
+#endif
+
+// A material graph (kin/render3d/material_graph3d.hpp) compiled into a surface shader by
+// Renderer3D::compile_material_graph: a graph of no outputs, and one that remakes kin's base colour (its map times the
+// vertex colour), draw exactly what the material draws; a checker of nodes is drawn in squares; its parameters
+// (shader_params by material_graph_params3d) and Scene3D::time move it; its normal map node shades as kin's normal
+// map does; a broken graph is refused naming its node.
+void test_gpu_material_graph() {
+    with_gpu("test_gpu_material_graph", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_material_graph", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_material_graph_test";
+        std::filesystem::create_directories(dir);
+        const auto graph = [&](const std::string& name, const std::string& parameters, const std::string& nodes,
+                               const std::string& outputs) {
+            const auto file = dir / (name + ".kingraph.json");
+            std::ofstream{file} << R"({"schema": "kin.material-graph/1", "name": ")" << name << R"(", "parameters": [)"
+                                << parameters << R"(], "nodes": [)" << nodes << R"(], "outputs": {)" << outputs << "}}";
+            auto made = r3d.compile_material_graph(file);
+            if (!made) {
+                std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+                assert(false && "the graph did not compile");
+            }
+            return std::move(*made);
+        };
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](const kin::Material3D& material, float time = 0.0f) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
+            scene.lights.ambient = {0.1f, 0.12f, 0.2f};
+            scene.time = time;
+            (void)scene.draw(sphere, Mat4f::identity(), material);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        // A texture of colours, and a normal map of bumps.
+        std::vector<kin::u8> colours(16 * 16 * 4), bumps(16 * 16 * 4);
+        for (int y = 0; y < 16; ++y)
+            for (int x = 0; x < 16; ++x) {
+                kin::u8* c = &colours[(y * 16 + x) * 4];
+                c[0] = kin::u8(40 + 12 * x), c[1] = kin::u8(200 - 10 * y), c[2] = kin::u8(90 + 5 * (x ^ y)), c[3] = 255;
+                kin::u8* n = &bumps[(y * 16 + x) * 4];
+                n[0] = kin::u8(128 + 60 * std::sin(x * 0.8)), n[1] = kin::u8(128 + 60 * std::cos(y * 0.8)), n[2] = 220;
+                n[3] = 255;
+            }
+        const kin::Texture texture = renderer.create_texture_from_rgba(colours.data(), {16, 16});
+        const kin::Texture normal = renderer.create_texture_from_rgba(bumps.data(), {16, 16});
+        const kin::Material3D plain{
+            .color = Color::rgb(230, 200, 180), .texture = texture, .metallic = 0.2f, .roughness = 0.5f};
+        const Pixels stock = shoot(plain);
+        const auto same = [](const Pixels& a, const Pixels& b) { return a.rgba == b.rgba; };
+
+        kin::Material3D empty = plain;
+        empty.surface = graph("empty", "", "", "").surface;
+        assert(same(shoot(empty), stock) && "a graph of no outputs draws the material");
+        // Cooked (optimised SPIR-V, compressed), as a shipped game loads it: the same picture.
+        {
+            std::string why;
+            const auto cooked =
+                kin::cook_material_graph3d(R"({"schema": "kin.material-graph/1", "nodes": [], "outputs": {}})", &why);
+            assert(cooked.has_value());
+            const auto packed = kin::pack_cooked_material_graph3d(*cooked);
+            const auto unpacked = kin::unpack_cooked_material_graph3d(packed, &why);
+            assert(unpacked.has_value());
+            kin::Material3D shipped = plain;
+            shipped.surface = r3d.create_material_graph(*unpacked).value_or({}).surface;
+            assert(shipped.surface.valid() && same(shoot(shipped), stock) &&
+                   "a cooked graph draws what the material draws");
+        }
+        kin::Material3D remade = plain;
+        remade.surface = graph("remade", R"({"name": "albedo", "type": "texture", "slot": "base"})",
+                               R"({"id": "map", "type": "texture", "texture": "albedo"},
+                     {"id": "base", "type": "multiply", "inputs": {"a": "map.rgb", "b": "vertex_color.rgb"}})",
+                               R"("base_color": "base")")
+                             .surface;
+        assert(same(shoot(remade), stock) && "a graph remaking the base colour draws the material");
+
+        // A checker, its colour a parameter.
+        const auto checker = graph("checker", R"({"name": "tint", "type": "color", "default": [1, 0, 0, 1]})",
+                                   R"({"id": "squares", "type": "checker", "inputs": {"uv": "moving", "scale": 8}},
+               {"id": "moving", "type": "uv_panner", "inputs": {"speed": [0.0625, 0]}},
+               {"id": "color", "type": "mix", "inputs": {"a": [0.05, 0.05, 0.05], "b": "tint.rgb", "t": "squares"}})",
+                                   R"("base_color": "color", "roughness": 1)");
+        kin::Material3D squares{.unlit = true};
+        squares.surface = checker.surface;
+        squares.shader_params = kin::material_graph_params3d(checker.graph);
+        const Pixels red = shoot(squares);
+        int bright = 0, dark = 0;
+        for (int x = 40; x < 120; ++x) {
+            const Color c = red.at(x, 60);
+            bright += c.r > 150 && c.g < 40 ? 1 : 0;
+            dark += c.r < 100 && c.r == c.g && c.g == c.b ? 1 : 0; // linear 0.05 grey: sRGB 63
+        }
+        assert(bright > 15 && dark > 15 && "the checker's squares");
+        squares.shader_params = kin::material_graph_params3d(checker.graph, {{"tint", {0, 0, 1, 1}}});
+        const Color blue = shoot(squares).at(80, 60);
+        assert(((blue.b > 150 && blue.r < 40) || (blue.r < 100 && blue.r == blue.b)) &&
+               "the parameter reaches the graph");
+        int blues = 0;
+        const Pixels tinted = shoot(squares);
+        for (int x = 40; x < 120; ++x)
+            blues += tinted.at(x, 60).b > 150 && tinted.at(x, 60).r < 40 ? 1 : 0;
+        assert(blues == bright && "the parameter reaches the graph");
+        squares.shader_params = kin::material_graph_params3d(checker.graph);
+        assert(!same(shoot(squares, 1.0f), red) && same(shoot(squares, 0.0f), red) && "time moves it, and only time");
+
+        // The normal map node shades as kin's own normal map.
+        kin::Material3D mapped = plain;
+        mapped.normal = normal;
+        const Pixels kin_mapped = shoot(mapped);
+        kin::Material3D graphed = plain;
+        graphed.normal = normal;
+        graphed.surface = graph("bumps", R"({"name": "bumps", "type": "texture", "slot": "normal"})",
+                                R"({"id": "n", "type": "normal_map", "texture": "bumps"})", R"("normal": "n")")
+                              .surface;
+        const Pixels graph_mapped = shoot(graphed);
+        int differ = 0;
+        for (int y = 0; y < 120; ++y)
+            for (int x = 0; x < 160; ++x) {
+                const Color a = kin_mapped.at(x, y), b = graph_mapped.at(x, y);
+                differ += std::abs(int(a.r) - b.r) + std::abs(int(a.g) - b.g) + std::abs(int(a.b) - b.b) > 3 ? 1 : 0;
+            }
+        assert(differ < 20 && !same(kin_mapped, stock) && "the graph's normal map is kin's");
+
+        const auto broken = dir / "broken.kingraph.json";
+        std::ofstream{broken} << R"({"schema": "kin.material-graph/1", "nodes": [{"id": "bad", "type": "warp"}],
+                                    "outputs": {"base_color": "bad"}})";
+        assert(!r3d.compile_material_graph(broken).value_or({}).surface.valid());
+        assert(kin::diagnostics3d_text(r3d.diagnostics()).find("bad: unknown node type") != std::string::npos);
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    });
+}
+
+// Surface materials in kin's batched paths: hundreds of separate draws of one mesh merge into few (the draw plan's
+// material tables, their parameters a table of their own) and draw what they draw unmerged, and what stock materials
+// draw where the surface changes nothing, plain, fogged and with the light shaders; a static batch's copies are
+// retained and draw what the same copies draw streamed.
+void test_gpu_surface_batching() {
+    with_gpu("test_gpu_surface_batching", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_surface_batching", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+        const kin::SurfaceShader3D identity =
+            r3d.compile_surface_shader(dir / "surface_identity.surface.glsl").value_or({});
+        const kin::SurfaceShader3D tint = r3d.compile_surface_shader(dir / "surface_tint.surface.glsl").value_or({});
+        // The same, reading the last of shader_params' 64 floats (56 to 63).
+        const kin::SurfaceShader3D tint_high =
+            r3d.compile_surface_shader(dir / "surface_tint_high.surface.glsl").value_or({});
+        assert(identity.valid() && tint.valid() && tint_high.valid());
+        const kin::Mesh3D box = r3d.create_mesh(kin::meshes::box({0.6f, 0.6f, 0.6f})).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .background = kin::colors::black}).value_or({});
+        enum class Kind { Stock, Identity, Tint, TintHigh };
+        const auto scene_of = [&](Kind kind, bool fog, bool spot) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 1, 14}, {});
+            scene.lights.ambient = {0.3f, 0.3f, 0.3f};
+            scene.lights.sun.direction = normalize(kin::Vec3f{0.5f, 1, 0.4f});
+            scene.lights.cache_shadows = false;
+            if (fog)
+                scene.fog = {.enabled = true, .density = 0.025f};
+            if (spot)
+                scene.add_spot_light({.position = {0, 0, 6},
+                                      .direction = {0, 0, -1},
+                                      .color = {2, 1, 0.5f},
+                                      .radius = 14,
+                                      .inner_angle = 20,
+                                      .outer_angle = 35});
+            for (kin::u32 i = 0; i < 384; ++i) {
+                kin::Material3D m{.color = Color::rgb(kin::u8(230 - (i % 4) * 45), kin::u8(40 + (i % 4) * 60), 90)};
+                m.roughness = 0.2f + (i % 4) * 0.2f;
+                if (kind == Kind::Identity)
+                    m.surface = identity;
+                if (kind == Kind::Tint || kind == Kind::TintHigh) {
+                    const float params[8] = {
+                        float(i % 3 == 0), float(i % 3 == 1), float(i % 3 == 2), 0.5f, float(i % 5) * 0.2f, 0, 0, 0};
+                    m.surface = kind == Kind::Tint ? tint : tint_high;
+                    std::copy(std::begin(params), std::end(params),
+                              m.shader_params.begin() + (kind == Kind::Tint ? 0 : 56));
+                }
+                (void)scene.draw(box,
+                                 Mat4f::translation({float(i % 24) * 0.65f - 7.5f, float(i / 24) * 0.65f - 5.0f, 0}), m,
+                                 kin::colors::white, i + 1);
+            }
+            return scene;
+        };
+        const auto shoot = [&](kin::Scene3D& scene, bool cached) {
+            scene.debug.cache_draw_commands = cached;
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return std::pair{p, r3d.debug_stats()};
+        };
+        for (const auto& [fog, spot] :
+             {std::pair{false, false}, std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+            auto stock = scene_of(Kind::Stock, fog, spot), same = scene_of(Kind::Identity, fog, spot),
+                 tinted = scene_of(Kind::Tint, fog, spot);
+            // Each scene drawn in a row (the draw plan is the last scene's: an unchanged one is planned once).
+            const auto settled = [&](kin::Scene3D& scene, bool cached) {
+                shoot(scene, cached);
+                shoot(scene, cached);
+                return shoot(scene, cached);
+            };
+            const auto [stock_merged, stock_stats] = settled(stock, true);
+            const auto [same_merged, same_stats] = settled(same, true);
+            assert(stock_stats.main_merged_draws > 200 && "stock draws merge");
+            assert(same_stats.main_merged_draws > 200 && same_stats.main_batched_draws > 0 && "surface draws merge");
+            assert(same_merged.rgba == stock_merged.rgba && "a merged identity surface draws the stock material");
+            const auto [tint_merged, tint_stats] = settled(tinted, true);
+            const auto [tint_alone, tint_alone_stats] = settled(tinted, false);
+            assert(tint_stats.main_merged_draws > 200 && tint_alone_stats.main_merged_draws == 0);
+            assert(tint_merged.rgba == tint_alone.rgba && "merged surface draws take each copy's parameters");
+            // Parameters at the end of shader_params' 64 floats: the same, through the material block and the
+            // merged draws' table.
+            auto tinted_high = scene_of(Kind::TintHigh, fog, spot);
+            const auto [high_merged, high_stats] = settled(tinted_high, true);
+            const auto [high_alone, high_alone_stats] = settled(tinted_high, false);
+            assert(high_stats.main_merged_draws > 200 && high_alone_stats.main_merged_draws == 0);
+            assert(high_merged.rgba == tint_merged.rgba && high_alone.rgba == tint_alone.rgba &&
+                   "a surface reads parameters 56 to 63, merged and not");
+            assert(!(tint_merged.rgba == stock_merged.rgba));
+        }
+        // A static batch of a surface material: retained, drawing what the same copies streamed draw.
+        std::vector<kin::MeshInstance3D> copies;
+        for (kin::u32 i = 0; i < 256; ++i)
+            copies.push_back({Mat4f::translation({float(i % 16) * 0.7f - 5.5f, float(i / 16) * 0.5f - 4.0f, 0}),
+                              kin::colors::white, 7});
+        auto batch = kin::InstanceBatch3D::create(box, copies, {{0, kin::u32(copies.size())}}).value_or({});
+        kin::Material3D m{.color = Color::rgb(200, 180, 90)};
+        m.surface = tint;
+        m.shader_params = {0.2f, 1, 0.4f, 0.6f, 0.5f, 0, 0, 0};
+        const auto batched = [&](bool retained) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0, 0, 12}, {});
+            scene.lights.ambient = {0.3f, 0.3f, 0.3f};
+            if (retained)
+                (void)scene.draw_instanced(batch, m);
+            else
+                (void)scene.draw_instanced_group(box, copies, kin::instance_bounds(box, copies), m);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return std::pair{p, r3d.debug_stats().retained_instances};
+        };
+        batched(true);
+        const auto [retained, kept] = batched(true);
+        const auto [streamed, none] = batched(false);
+        assert(kept == 256 && none == 0 && "the surface material's batch is retained");
+        assert(retained.rgba == streamed.rgba && "a retained surface batch draws what it draws streamed");
+    });
+}
+
+// A material graph's alpha in the cut-out passes: a plane cut into squares by a checker of nodes (no texture) draws,
+// shadows, occludes (ambient occlusion's pre-pass, the velocity pre-pass of temporal anti-aliasing) and picks as the
+// same plane cut by a checker texture's alpha (a stock cut-out) does; and its shadow has the holes (a plane cut by
+// nothing casts another).
+void test_gpu_material_graph_cutout() {
+    with_gpu("test_gpu_material_graph_cutout", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_material_graph_cutout", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_graph_cutout_test";
+        std::filesystem::create_directories(dir);
+        // The checker's scale a parameter at the last of shader_params' 64 floats (after 15 vec4s and a vec3 of
+        // padding): the cut-out passes read it from the end of their block.
+        std::string padding;
+        for (int i = 0; i < 15; ++i)
+            padding += R"({"name": "pad)" + std::to_string(i) + R"(", "type": "vec4"}, )";
+        std::ofstream{dir / "holes.kingraph"}
+            << R"({"schema": "kin.material-graph/1", "name": "holes",
+            "parameters": [)" +
+                   padding + R"({"name": "rest", "type": "vec3"}, {"name": "scale", "type": "float", "default": 4}],
+            "nodes": [{"id": "squares", "type": "checker", "inputs": {"scale": "scale"}}],
+            "outputs": {"alpha": "squares"}})";
+        auto holes = r3d.compile_material_graph(dir / "holes.kingraph");
+        if (!holes) {
+            std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+            assert(false);
+        }
+        assert(holes->graph.cutout && holes->graph.parameters.back().offset == 63);
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
+        // The checker as a texture's alpha: texel (x, y) opaque where x + y is odd, as kin_graph_checker.
+        std::array<kin::u8, 4 * 4 * 4> texels{};
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x) {
+                kin::u8* t = &texels[(y * 4 + x) * 4];
+                t[0] = t[1] = t[2] = 255;
+                t[3] = (x + y) & 1 ? 255 : 0;
+            }
+        const kin::Texture checker = renderer.create_texture_from_rgba(texels.data(), {4, 4});
+        const kin::TextureSampler3D nearest{.wrap_u = kin::Wrap3D::Repeat,
+                                            .wrap_v = kin::Wrap3D::Repeat,
+                                            .min = kin::TextureFilter3D::Nearest,
+                                            .mag = kin::TextureFilter3D::Nearest,
+                                            .mip = kin::MipFilter3D::None};
+        kin::Material3D stock{
+            .color = Color::rgb(220, 120, 60), .double_sided = true, .blend = kin::Blend3D::Mask, .texture = checker};
+        stock.texture_samplers[0] = nearest;
+        kin::Material3D graphed{.color = Color::rgb(220, 120, 60), .double_sided = true, .blend = kin::Blend3D::Mask};
+        graphed.surface = holes->surface;
+        graphed.shader_params = kin::material_graph_params3d(holes->graph); // the scale, 4, at float 63
+        kin::Material3D whole = graphed;
+        whole.blend = kin::Blend3D::Opaque;
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+        struct Setup {
+            const char* name;
+            bool ao, taa;
+        };
+        const auto shoot = [&](const kin::Material3D& m, const Setup& setup) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, -4.0f}, {0.0f, 0.0f, -0.6f}, 50.0f);
+            scene.lights.sun = {.direction = {0.0f, 1.0f, 0.6f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.shadow_area = {{-4, -2, -4}, {4, 3, 4}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+            scene.ambient_occlusion = {.enabled = setup.ao, .radius = 1.0f};
+            scene.taa = {.enabled = setup.taa};
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({6.0f, 1.0f, 6.0f}),
+                             {.color = Color::rgb(200, 200, 200)}, kin::colors::white, 1);
+            (void)scene.draw(plane, Mat4f::translation({0.0f, 1.0f, 0.0f}) * Mat4f::scaling({1.6f, 1.0f, 1.6f}), m,
+                             kin::colors::white, 7);
+            kin::View3D fresh = r3d.create_view({160, 120}, {.samples = 1, .pick = true}).value_or({});
+            kin::View3D& v = setup.taa ? fresh : view;
+            Pixels p = shoot_view(renderer, r3d, v, scene);
+            renderer.present();
+            std::vector<kin::u32> picks;
+            for (int y = 10; y < 120; y += 6)
+                for (int x = 10; x < 160; x += 6) {
+                    const auto hit = r3d.pick(v, {x, y});
+                    picks.push_back(hit && hit->hit ? hit->id : 0);
+                }
+            return std::pair{p, picks};
+        };
+        const auto differing = [](const Pixels& a, const Pixels& b) {
+            int n = 0;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x) {
+                    const Color p = a.at(x, y), q = b.at(x, y);
+                    n += std::abs(int(p.r) - q.r) + std::abs(int(p.g) - q.g) + std::abs(int(p.b) - q.b) > 6 ? 1 : 0;
+                }
+            return n;
+        };
+        for (const Setup& setup : {Setup{"plain", false, false}, Setup{"ambient occlusion", true, false},
+                                   Setup{"temporal anti-aliasing", false, true}}) {
+            const auto [a, a_picks] = shoot(stock, setup);
+            const auto [b, b_picks] = shoot(graphed, setup);
+            const auto [c, c_picks] = shoot(whole, setup);
+            int pick_differ = 0, through = 0;
+            for (size_t i = 0; i < a_picks.size(); ++i) {
+                pick_differ += a_picks[i] != b_picks[i] ? 1 : 0;
+                through += b_picks[i] == 1 && c_picks[i] == 7 ? 1 : 0; // the ground, through a hole
+            }
+            const int cut = differing(a, b), solid = differing(b, c);
+            std::cerr << "graph cut-out (" << setup.name << "): " << cut << " pixels from the stock cut-out, " << solid
+                      << " from the uncut plane; picks: " << pick_differ << " differ, " << through
+                      << " through holes\n";
+            assert(cut < 40 && "the graph's cut-out draws, shadows and occludes as the stock one");
+            assert(solid > 400 && "the holes are there (in the plane and its shadow)");
+            assert(pick_differ <= 2 && through > 5 && "picks go through the graph's holes");
+        }
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    });
+}
+
+// A material's UV transform (Material3D::uv_scale, uv_offset) moves where every pass reads its maps: offset by half,
+// a texture of two texels draws what the swapped texture draws without it; scaled by two, what the texture repeated
+// twice does: the lit colour (lit and unlit), a cut-out's coverage in the main pass and in the sun's shadow it casts.
+// (Up to the pixels whose UV falls on a texel's edge.) Without one, nothing moves.
+void test_gpu_material_uv_transform() {
+    with_gpu("test_gpu_material_uv_transform", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh3D plane = r3d.create_mesh(kin::meshes::plane({1.0f, 1.0f})).value_or({});
+        // Red and opaque | green and clear; and the same swapped, and repeated twice.
+        const kin::u8 halves[8] = {220, 40, 30, 255, 40, 200, 60, 0};
+        const kin::u8 swapped[8] = {40, 200, 60, 0, 220, 40, 30, 255};
+        const kin::u8 twice[16] = {220, 40, 30, 255, 40, 200, 60, 0, 220, 40, 30, 255, 40, 200, 60, 0};
+        const kin::Texture t_halves = renderer.create_texture_from_rgba(halves, {2, 1});
+        const kin::Texture t_swapped = renderer.create_texture_from_rgba(swapped, {2, 1});
+        const kin::Texture t_twice = renderer.create_texture_from_rgba(twice, {4, 1});
+        const kin::TextureSampler3D nearest{.wrap_u = kin::Wrap3D::Repeat,
+                                            .wrap_v = kin::Wrap3D::Repeat,
+                                            .min = kin::TextureFilter3D::Nearest,
+                                            .mag = kin::TextureFilter3D::Nearest,
+                                            .mip = kin::MipFilter3D::None};
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto shoot = [&](const kin::Texture& texture, kin::Vec2f scale, kin::Vec2f offset, bool unlit) {
+            kin::Material3D m{.unlit = unlit, .texture = texture};
+            m.texture_samplers[0] = nearest;
+            m.uv_scale = scale;
+            m.uv_offset = offset;
+            kin::Material3D cut = m;
+            cut.blend = kin::Blend3D::Mask;
+            cut.double_sided = true;
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 3.0f, -4.0f}, {0.0f, 0.0f, -0.6f}, 50.0f);
+            scene.lights.sun = {.direction = {0.0f, 1.0f, 0.6f}, .color = {1.0f, 1.0f, 1.0f}};
+            scene.lights.shadow_area = {{-4, -2, -4}, {4, 3, 4}};
+            scene.lights.ambient = {0.2f, 0.2f, 0.2f};
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({6.0f, 1.0f, 6.0f}),
+                             {.color = Color::rgb(200, 200, 200)});
+            (void)scene.draw(plane, Mat4f::translation({0.0f, 1.0f, 0.0f}) * Mat4f::scaling({1.6f, 1.0f, 1.6f}), cut);
+            (void)scene.draw(box, Mat4f::translation({-1.6f, 0.5f, -1.2f}) * Mat4f::scaling({0.8f, 0.8f, 0.8f}), m);
+            Pixels p = shoot_view(renderer, r3d, view, scene);
+            renderer.present();
+            return p;
+        };
+        const auto differing = [](const Pixels& a, const Pixels& b) {
+            int n = 0;
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x) {
+                    const Color p = a.at(x, y), q = b.at(x, y);
+                    n += std::abs(int(p.r) - q.r) + std::abs(int(p.g) - q.g) + std::abs(int(p.b) - q.b) > 6 ? 1 : 0;
+                }
+            return n;
+        };
+        for (const bool unlit : {false, true}) {
+            const Pixels moved = shoot(t_halves, {1, 1}, {0.5f, 0}, unlit),
+                         shifted = shoot(t_swapped, {1, 1}, {0, 0}, unlit);
+            const Pixels scaled = shoot(t_halves, {2, 1}, {0, 0}, unlit),
+                         repeated = shoot(t_twice, {1, 1}, {0, 0}, unlit);
+            const Pixels plain = shoot(t_halves, {1, 1}, {0, 0}, unlit);
+            const int offset_errors = differing(moved, shifted), scale_errors = differing(scaled, repeated),
+                      moved_from_plain = differing(moved, plain);
+            std::cerr << "uv transform (unlit " << unlit << "): offset " << offset_errors << ", scale " << scale_errors
+                      << " pixels differ; moving it changes " << moved_from_plain << '\n';
+            assert(moved_from_plain > 400 && "the offset moves the maps, the cut-out and its shadow");
+            assert(offset_errors < 40 && scale_errors < 40 && "only texel edges differ");
+        }
+    });
+}
+
+// A surface shader (Material3D::surface; tests/shaders/*.surface.glsl, compiled by glslc now into every variant of
+// kin's mesh shader): one that leaves the surface as it is draws exactly what the material draws without it, plain,
+// fogged, with the light shaders (a shadowed spot light) and with the velocity's (temporal anti-aliasing); one that
+// changes it is lit as kin lights its own (its parameters reach it); unlit, it is its colour plus its emission; a
+// surface that doesn't compile is refused with glslc's messages.
+void test_gpu_surface_shader() {
+    with_gpu("test_gpu_surface_shader", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_surface_shader", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+        const kin::SurfaceShader3D identity =
+            r3d.compile_surface_shader(dir / "surface_identity.surface.glsl").value_or({});
+        if (!identity.valid()) {
+            std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+            assert(false && "the identity surface did not compile");
+        }
+        const kin::SurfaceShader3D tint = r3d.compile_surface_shader(dir / "surface_tint.surface.glsl").value_or({});
+        assert(tint.valid() && !(tint == identity));
+        const std::filesystem::path broken = std::filesystem::temp_directory_path() / "kin_broken.surface.glsl";
+        std::ofstream{broken} << "void kin_surface(inout KinSurface s) { s.base_color = nonsense; }\n";
+        assert(!r3d.compile_surface_shader(broken).value_or({}).valid());
+        const std::string why = kin::diagnostics3d_text(r3d.diagnostics());
+        assert(why.find("nonsense") != std::string::npos && "glslc's message names the error");
+        std::filesystem::remove(broken);
+
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(1.0f, 48, 24)).value_or({});
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        struct Setup {
+            const char* name;
+            bool fog, spot, taa;
+        };
+        const auto shoot = [&](const kin::Material3D& material, const Setup& setup) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 0.0f, 6.0f}, {0.0f, 0.0f, 0.0f}, 30.0f);
+            scene.lights.sun = {.direction = {0.5f, 0.6f, 1.0f}, .color = {1.0f, 0.95f, 0.9f}};
+            scene.lights.ambient = {0.1f, 0.12f, 0.2f};
+            scene.add_point_light({.position = {-2.0f, 0.0f, 2.0f}, .color = {3.0f, 1.0f, 0.5f}, .radius = 6.0f});
+            if (setup.spot)
+                scene.add_spot_light({.position = {1.5f, 1.5f, 3.0f},
+                                      .direction = {-0.4f, -0.4f, -1.0f},
+                                      .color = {0.5f, 2.0f, 3.0f},
+                                      .radius = 8.0f,
+                                      .inner_angle = 10.0f,
+                                      .outer_angle = 25.0f,
+                                      .shadow_enabled = true});
+            if (setup.fog)
+                scene.fog = {.enabled = true, .density = 0.2f, .start = 3.0f};
+            scene.taa = {.enabled = setup.taa};
+            (void)scene.draw(sphere, Mat4f::identity(), material);
+            // With temporal anti-aliasing, a view of its own: no history of the picture before (another material's,
+            // which this one's would not take).
+            kin::View3D fresh = setup.taa ? r3d.create_view({160, 120}, {.samples = 1}).value_or({}) : kin::View3D{};
+            Pixels p = shoot_view(renderer, r3d, setup.taa ? fresh : view, scene);
+            renderer.present();
+            if (setup.spot)
+                assert(r3d.debug_stats().lights_variant && "the light shaders drew it");
+            return p;
+        };
+        const kin::Material3D plain{
+            .color = Color::rgb(220, 120, 80), .emissive = 0.2f, .metallic = 0.3f, .roughness = 0.4f};
+        kin::Material3D same = plain;
+        same.surface = identity;
+        for (const Setup& setup :
+             {Setup{"plain", false, false, false}, Setup{"fog", true, false, false},
+              Setup{"lights", false, true, false}, Setup{"lights and fog", true, true, false},
+              Setup{"velocity", false, false, true}, Setup{"velocity and lights", true, true, true}}) {
+            const Pixels stock = shoot(plain, setup), surfaced = shoot(same, setup);
+            for (int y = 0; y < 120; ++y)
+                for (int x = 0; x < 160; ++x) {
+                    const Color a = stock.at(x, y), b = surfaced.at(x, y);
+                    if (a.r != b.r || a.g != b.g || a.b != b.b || a.a != b.a) {
+                        std::cerr << setup.name << ": (" << x << ", " << y << ") stock " << int(a.r) << ' ' << int(a.g)
+                                  << ' ' << int(a.b) << ", surface " << int(b.r) << ' ' << int(b.g) << ' ' << int(b.b)
+                                  << '\n';
+                        assert(false && "the identity surface draws what the material draws");
+                    }
+                }
+        }
+
+        // A surface of its own: only green, rough, glowing red toward +x.
+        kin::Material3D tinted = plain;
+        tinted.surface = tint;
+        tinted.shader_params = {0.0f, 1.0f, 0.0f, 1.0f, 0.8f, 0.0f, 0.0f, 0.0f};
+        const Pixels green = shoot(tinted, {"tint", false, true, false});
+        const Color middle = green.at(80, 60), right = green.at(100, 60), left = green.at(60, 60);
+        assert(middle.g > 40 && middle.b < middle.g && "the base colour's green, lit");
+        assert(right.r > left.r + 30 && "the glow where the surface faces +x");
+        tinted.shader_params[4] = 0.0f;
+        const Color dark = shoot(tinted, {"tint", false, true, false}).at(100, 60);
+        assert(dark.r + 20 < right.r && "the parameters reach the surface");
+
+#ifdef KIN_TEST_SURFACE_SPIRV
+        // The same surface, its variants made at build time (kin_compile_surface_shader): the same picture.
+        {
+            std::array<std::span<const kin::u8>, kin::surface_variant_count3d> variants;
+            // (Its variants without the cut-outs': the tint surface defines no alpha of its own.)
+            const std::array<const char*, kin::surface_mask_variant3d> names{
+                "surface_tint.plain.spv",           "surface_tint.fog.spv",
+                "surface_tint.lights.spv",          "surface_tint.lights_fog.spv",
+                "surface_tint.velocity.spv",        "surface_tint.velocity_fog.spv",
+                "surface_tint.velocity_lights.spv", "surface_tint.velocity_lights_fog.spv",
+                "surface_tint.material.spv",        "surface_tint.material_fog.spv",
+                "surface_tint.material_lights.spv", "surface_tint.material_lights_fog.spv"};
+            for (kin::u32 i = 0; i < names.size(); ++i) {
+                const auto bytes = surface_test_shaders(names[i]);
+                assert(!bytes.empty());
+                variants[i] = {reinterpret_cast<const kin::u8*>(bytes.data()), bytes.size()};
+            }
+            kin::Material3D built = tinted;
+            built.surface = r3d.create_surface_shader(variants).value_or({});
+            assert(built.surface.valid());
+            built.shader_params[4] = 0.8f;
+            tinted.shader_params[4] = 0.8f;
+            for (const Setup& setup :
+                 {Setup{"built", true, true, false}, Setup{"built velocity", false, false, true}}) {
+                const Pixels a = shoot(tinted, setup), b = shoot(built, setup);
+                assert(a.rgba == b.rgba && "a surface made at build time draws what it does compiled at run time");
+            }
+        }
+#endif
+
+        // Unlit: the surface's colour as it is, plus its emission.
+        kin::Material3D flat{.color = Color::rgb(50, 100, 200), .unlit = true};
+        flat.surface = identity;
+        const Color shown = shoot(flat, {"unlit", false, false, false}).at(80, 60);
+        expect(shown, Color::rgb(50, 100, 200), "an unlit surface's colour", 1);
     });
 }
 
@@ -22793,6 +23370,11 @@ int main(int argc, char** argv) {
     RUN(test_gpu_environment());
     RUN(test_gpu_environment_levels_written());
     RUN(test_gpu_material_shader());
+    RUN(test_gpu_surface_shader());
+    RUN(test_gpu_material_uv_transform());
+    RUN(test_gpu_material_graph());
+    RUN(test_gpu_surface_batching());
+    RUN(test_gpu_material_graph_cutout());
     RUN(test_gpu_skinned_matches_cpu());
     RUN(test_gpu_skinned_shadow_out_of_view());
     RUN(test_gpu_skinned_cutout_shadow());

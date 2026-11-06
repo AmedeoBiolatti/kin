@@ -95,6 +95,62 @@ private:
     std::shared_ptr<IMaterialShaderBackend3D> _backend;
 };
 
+// A surface shader's variants (docs/material_graph_plan.md): the function that sets what kin shades, compiled into
+// each of kin's own mesh fragment shaders, in this order. The defines each is compiled with, after #version, are
+// surface_variant_defines's (and surface_shader_source(surface, variant)'s wrapper). After the eight every surface has:
+// the merged draws' four (mesh_material.frag's: without them a surface's draws are not merged with others of the same
+// mesh) and the cut-outs' five (shadow_mask.frag ... visibility_mask.frag's, for a surface that defines
+// kin_surface_alpha: without them its cut-outs in those passes follow the base map's alpha), all optional.
+enum class SurfaceVariant3D : u8 {
+    Plain,
+    Fog,
+    Lights,
+    LightsFog,
+    Velocity,
+    VelocityFog,
+    VelocityLights,
+    VelocityLightsFog,
+    Material,
+    MaterialFog,
+    MaterialLights,
+    MaterialLightsFog,
+    ShadowMask,
+    PickMask,
+    PrepassMask,
+    PrepassVelocityMask,
+    VisibilityMask,
+    Count
+};
+inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask);
+inline constexpr u32 surface_variant_count3d = u32(SurfaceVariant3D::Count);
+
+// The backend's copy of a surface shader (Renderer3D::create_surface_shader).
+class ISurfaceShaderBackend3D {
+public:
+    virtual ~ISurfaceShaderBackend3D() = default;
+    virtual bool valid() const { return true; }
+};
+
+// What a material's surface is, in place of its maps' (Material3D::surface): a function `void kin_surface(inout
+// KinSurface s)` that changes the surface kin's material makes (kin_stock_surface: colour, alpha, normal, metallic,
+// roughness, occlusion, emission) before kin lights, fogs and shadows it, in every variant kin draws (the fog's, the
+// lights', the global illumination's, the velocity's). Made by Renderer3D::create_surface_shader or
+// compile_surface_shader; cheap to copy (copies share it).
+class SurfaceShader3D {
+public:
+    SurfaceShader3D() = default;
+    explicit SurfaceShader3D(std::shared_ptr<ISurfaceShaderBackend3D> backend) : _backend(std::move(backend)) {}
+
+    bool valid() const { return _backend && _backend->valid(); }
+    explicit operator bool() const { return valid(); }
+    const std::shared_ptr<ISurfaceShaderBackend3D>& backend() const { return _backend; }
+
+    friend bool operator==(const SurfaceShader3D& a, const SurfaceShader3D& b) { return a._backend == b._backend; }
+
+private:
+    std::shared_ptr<ISurfaceShaderBackend3D> _backend;
+};
+
 inline constexpr u32 max_material_input_textures3d = 4, max_material_input_buffers3d = 8;
 class IMaterialInputsBackend3D {
 public:
@@ -122,6 +178,10 @@ public:
 private:
     std::shared_ptr<const IMaterialInputsBackend3D> _backend;
 };
+
+// Material3D::shader_params' floats: a custom `shader` reads the first 16 (four vec4s), a `surface` all of them
+// (kin_surface_param(0..15): a material graph's parameters).
+inline constexpr u32 surface_param_count3d = 64;
 
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
@@ -172,16 +232,27 @@ struct Material3D {
     Wrap3D wrap_v = Wrap3D::Clamp;
     // A fragment shader of its own in place of kin's (docs/rendering_3d.md,
     // Custom shaders), which may light itself as kin's does or not. It reads
-    // `shader_params` (four vec4s) and all the material's fields above. The
+    // `shader_params`' first 16 floats (four vec4s) and all the material's fields above. The
     // shadow and pick passes treat the material as they would without it.
     MaterialShader3D shader{};
-    std::array<f32, 16> shader_params{};
+    std::array<f32, surface_param_count3d> shader_params{};
     MaterialInputs3D inputs{}; // optional extra sampled textures/read-only buffers for shader
 
     LinearRgb emission_color{1, 1, 1}; // linear factor, times the decoded emissive map (white when absent)
     EmissionMode3D emission_mode = EmissionMode3D::BaseRelative;
     // Independent of the image. Omitted entries inherit wrap_u/v and the Texture's legacy scale mode.
     std::array<std::optional<TextureSampler3D>, u32(MaterialMap3D::Count)> texture_samplers{};
+    // A surface of its own (SurfaceShader3D: docs/rendering_3d.md, Surface shaders): a function that changes what
+    // the fields and maps above make before kin shades it, as kin shades its own (lit or `unlit`, fogged, its
+    // lights, global illumination and velocity). It reads `shader_params` (kin_surface_param(0..15)) and the maps
+    // above. A `shader` takes its place. The shadow, pick and pre-passes still cut a Blend3D::Mask out by the base
+    // colour's alpha, not the surface's.
+    SurfaceShader3D surface{};
+    // Where every map is read: the mesh's UV times `uv_scale`, plus `uv_offset` (tiling, as Godot's uv1_scale and
+    // Unity's tiling and offset). A transform the model's glTF gives (KHR_texture_transform) is in its UVs already.
+    Vec2f uv_scale{1.0f, 1.0f};
+    Vec2f uv_offset{0.0f, 0.0f};
+    bool uv_identity() const { return uv_scale.x == 1 && uv_scale.y == 1 && uv_offset.x == 0 && uv_offset.y == 0; }
 
     void set_emission(LinearRgb color, f32 strength = 1.0f) {
         emission_color = color;
@@ -630,6 +701,9 @@ public:
     AmbientOcclusion3D ambient_occlusion{};
     ContactShadows3D contact_shadows{};
     TemporalAA3D taa{};
+    // Seconds, for materials that move with it (a material graph's time; kin_frame_uniforms' frame.time.x). The
+    // application sets it (a game's clock, or a fixed value for a still); kin never advances it.
+    f32 time = 0.0f;
     // Anisotropic filtering of the materials' mipmapped textures: where a surface is seen at a slant (a street, a
     // floor, a wall along the view), its texture is read with up to this many samples along the slant, from the mip
     // that fits the slant's short side, instead of with one from the mip that fits its long side (which blurs it into

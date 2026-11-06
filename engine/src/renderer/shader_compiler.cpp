@@ -93,7 +93,8 @@ bool shader_compiler_available() {
 }
 
 std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source, ShaderStage stage,
-                                            std::string* error) {
+                                            std::string* error, std::span<const char* const> defines,
+                                            bool optimize) {
     const auto fail = [&](std::string why) -> std::optional<std::vector<u8>> {
         if (error) {
             *error = std::move(why);
@@ -122,6 +123,10 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     options.args = {glslc_path().string(),
                     stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment",
                     "-o", out.string(), compiled_source.string()};
+    for (const char* define : defines)
+        options.args.insert(options.args.end() - 1, std::string("-D") + define);
+    if (optimize)
+        options.args.insert(options.args.end() - 1, "-O");
 #ifdef KIN_SHADER_INCLUDE_DIR
     // `#include "kin_material.inc.glsl"` (3D material shaders) from the engine's own.
     options.args.insert(options.args.begin() + 2, {"-I", KIN_SHADER_INCLUDE_DIR});

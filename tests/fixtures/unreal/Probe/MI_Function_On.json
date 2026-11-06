@@ -1,0 +1,214 @@
+{
+ "schema": "kin.unreal-material/1",
+ "name": "MI_Function_On",
+ "path": "/Game/Probe/MI_Function_On",
+ "class": "MaterialInstanceConstant",
+ "parents": [
+  "/Game/Probe/M_Function"
+ ],
+ "base": "/Game/Probe/M_Function",
+ "blend_mode": "BLEND_OPAQUE",
+ "shading_model": "MSM_DEFAULT_LIT",
+ "two_sided": false,
+ "opacity_mask_clip_value": 0.33329999446868896,
+ "parameters": {
+  "scalar": {},
+  "vector": {
+   "Tint": [
+    0.800000011920929,
+    0.4000000059604645,
+    0.20000000298023224,
+    1.0
+   ]
+  },
+  "texture": {},
+  "switch": {
+   "Green": true
+  }
+ },
+ "inputs": {
+  "BaseColor": {
+   "class": "MaterialExpressionStaticSwitchParameter",
+   "output": "",
+   "parameter": "Green",
+   "inputs": [
+    {
+     "class": "MaterialExpressionConstant3Vector",
+     "output": "",
+     "value": [
+      0.0,
+      1.0,
+      0.0,
+      1.0
+     ]
+    },
+    {
+     "class": "MaterialExpressionMaterialFunctionCall",
+     "output": "Result",
+     "inputs": [
+      null,
+      {
+       "class": "MaterialExpressionVectorParameter",
+       "output": "RGB",
+       "parameter": "Tint",
+       "value": [
+        0.800000011920929,
+        0.4000000059604645,
+        0.20000000298023224,
+        1.0
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ },
+ "graph": {
+  "nodes": {
+   "MaterialExpressionStaticSwitchParameter_0": {
+    "class": "MaterialExpressionStaticSwitchParameter",
+    "props": {
+     "default_value": false,
+     "parameter_name": "Green",
+     "sort_priority": 32
+    },
+    "inputs": {
+     "True": {
+      "node": "MaterialExpressionConstant3Vector_0",
+      "output": "RGB",
+      "output_index": 0
+     },
+     "False": {
+      "node": "MaterialExpressionMaterialFunctionCall_0",
+      "output": "Result",
+      "output_index": 0
+     }
+    }
+   },
+   "MaterialExpressionConstant3Vector_0": {
+    "class": "MaterialExpressionConstant3Vector",
+    "props": {
+     "constant": [
+      0.0,
+      1.0,
+      0.0,
+      1.0
+     ]
+    },
+    "inputs": {}
+   },
+   "MaterialExpressionMaterialFunctionCall_0": {
+    "class": "MaterialExpressionMaterialFunctionCall",
+    "props": {
+     "material_function": "/Game/Probe/MF_Tint"
+    },
+    "inputs": {
+     "Color": {
+      "node": "MaterialExpressionVectorParameter_0",
+      "output": "RGB",
+      "output_index": 0
+     }
+    }
+   },
+   "MaterialExpressionVectorParameter_0": {
+    "class": "MaterialExpressionVectorParameter",
+    "props": {
+     "default_value": [
+      0.800000011920929,
+      0.4000000059604645,
+      0.20000000298023224,
+      1.0
+     ],
+     "parameter_name": "Tint",
+     "sort_priority": 32
+    },
+    "inputs": {}
+   }
+  },
+  "outputs": {
+   "BaseColor": {
+    "node": "MaterialExpressionStaticSwitchParameter_0",
+    "output": ""
+   }
+  }
+ },
+ "functions": {
+  "/Game/Probe/MF_Tint": {
+   "nodes": {
+    "MaterialExpressionFunctionInput_0": {
+     "class": "MaterialExpressionFunctionInput",
+     "props": {
+      "input_name": "Color",
+      "input_type": "FUNCTION_INPUT_VECTOR3",
+      "preview_value": [
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "sort_priority": 0,
+      "use_preview_value_as_default": false
+     },
+     "inputs": {}
+    },
+    "MaterialExpressionFunctionInput_1": {
+     "class": "MaterialExpressionFunctionInput",
+     "props": {
+      "input_name": "Amount",
+      "input_type": "FUNCTION_INPUT_SCALAR",
+      "preview_value": [
+       0.5,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "sort_priority": 0,
+      "use_preview_value_as_default": true
+     },
+     "inputs": {}
+    },
+    "MaterialExpressionFunctionOutput_0": {
+     "class": "MaterialExpressionFunctionOutput",
+     "props": {
+      "output_name": "Result",
+      "sort_priority": 0
+     },
+     "inputs": {
+      "None": {
+       "node": "MaterialExpressionMultiply_0",
+       "output": "",
+       "output_index": 0
+      }
+     }
+    },
+    "MaterialExpressionMultiply_0": {
+     "class": "MaterialExpressionMultiply",
+     "props": {
+      "const_a": 0.0,
+      "const_b": 1.0
+     },
+     "inputs": {
+      "A": {
+       "node": "MaterialExpressionFunctionInput_0",
+       "output": "",
+       "output_index": 0
+      },
+      "B": {
+       "node": "MaterialExpressionFunctionInput_1",
+       "output": "",
+       "output_index": 0
+      }
+     }
+    }
+   },
+   "inputs": {
+    "Color": "MaterialExpressionFunctionInput_0",
+    "Amount": "MaterialExpressionFunctionInput_1"
+   },
+   "outputs": {
+    "Result": "MaterialExpressionFunctionOutput_0"
+   }
+  }
+ },
+ "textures": {}
+}

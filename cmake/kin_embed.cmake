@@ -8,6 +8,23 @@
 #     machines without glslc. With neither, it skips the shaders and <out_var>
 #     lists only those it has.
 #
+#   kin_compile_surface_shader(<out_var> OUTPUT_DIR <dir> SOURCE <name>.surface.glsl [CUTOUTS])
+#     A 3D surface shader (Material3D::surface; docs/rendering_3d.md, Surface
+#     shaders): its eight variants, each kin's mesh fragment shader with the
+#     source's kin_surface() between its halves, compiled with that variant's
+#     defines, as <dir>/<name>.<variant>.spv. <out_var> lists them in
+#     SurfaceVariant3D's order, as Renderer3D::create_surface_shader takes them
+#     (the merged draws' four after the eight); with CUTOUTS (a surface
+#     defining kin_surface_alpha) the cut-out passes' five after those.
+#     Needs glslc (no KIN_SPIRV_DIR form yet).
+#
+#   kin_cook_material_graph(<out_var> SOURCE <graph> [OUTPUT <file>])
+#     A material graph (kin.material-graph/1) cooked at build time by the
+#     kin_material_graph tool (glslc): its layout and every variant's SPIR-V in
+#     one file, by default <binary dir>/<graph's name>.spv. A game ships it
+#     beside the graph in its content as <graph>.spv, where
+#     Assets3D::load_material_graph looks.
+#
 #   kin_embed_files(<target> NAME <function> [NAMESPACE <ns>] FILES <file> ...)
 #     Builds the files into <target>, readable by file name through
 #       #include "<function>.hpp"
@@ -74,6 +91,115 @@ function(kin_compile_glsl out_var)
         endforeach()
     endif()
     set(${out_var} "${outputs}" PARENT_SCOPE)
+endfunction()
+
+# The variants (SurfaceVariant3D) and their defines, as surface_variant_defines (render3d/environment.cpp) gives them.
+set(_KIN_SURFACE_VARIANTS plain fog lights lights_fog velocity velocity_fog velocity_lights velocity_lights_fog
+    material material_fog material_lights material_lights_fog)
+set(_KIN_SURFACE_DEFINES_plain "")
+set(_KIN_SURFACE_DEFINES_fog KIN_FOG)
+set(_KIN_SURFACE_DEFINES_lights KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
+set(_KIN_SURFACE_DEFINES_lights_fog KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG)
+set(_KIN_SURFACE_DEFINES_velocity KIN_VELOCITY)
+set(_KIN_SURFACE_DEFINES_velocity_fog KIN_VELOCITY KIN_FOG)
+set(_KIN_SURFACE_DEFINES_velocity_lights KIN_VELOCITY KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
+set(_KIN_SURFACE_DEFINES_velocity_lights_fog KIN_VELOCITY KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG)
+set(_KIN_SURFACE_DEFINES_material KIN_DRAW_MATERIALS)
+set(_KIN_SURFACE_DEFINES_material_fog KIN_DRAW_MATERIALS KIN_FOG)
+set(_KIN_SURFACE_DEFINES_material_lights KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID)
+set(_KIN_SURFACE_DEFINES_material_lights_fog KIN_DRAW_MATERIALS KIN_LIGHTS KIN_GI KIN_LIGHT_GRID KIN_FOG)
+# The cut-outs' (CUTOUTS: a surface defining kin_surface_alpha), each its pass's body (kin_<pass>.inc.glsl).
+set(_KIN_SURFACE_MASKS shadow_mask pick_mask prepass_mask prepass_velocity_mask visibility_mask)
+
+function(kin_compile_surface_shader out_var)
+    cmake_parse_arguments(ARG "CUTOUTS" "OUTPUT_DIR;SOURCE" "" ${ARGN})
+    if(NOT ARG_OUTPUT_DIR OR NOT ARG_SOURCE)
+        message(FATAL_ERROR "kin_compile_surface_shader: OUTPUT_DIR and SOURCE are required")
+    endif()
+    if(NOT KIN_GLSLC)
+        message(WARNING "kin_compile_surface_shader: no glslc for ${ARG_SOURCE}")
+        set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
+    get_filename_component(source "${ARG_SOURCE}" ABSOLUTE)
+    get_filename_component(name "${source}" NAME)
+    get_filename_component(folder "${source}" DIRECTORY)
+    string(REGEX REPLACE "(\\.surface)?\\.glsl$" "" stem "${name}")
+    file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")
+    # The same shader as surface_shader_source() writes, the surface included rather than pasted in.
+    set(wrapper "${ARG_OUTPUT_DIR}/${stem}.surface.frag.glsl")
+    file(CONFIGURE OUTPUT "${wrapper}" CONTENT
+"#version 450 core
+#define KIN_SURFACE kin_surface
+#include \"kin_mesh_surface.inc.glsl\"
+#include \"${name}\"
+#include \"kin_mesh_main.inc.glsl\"
+")
+    set(outputs)
+    foreach(variant IN LISTS _KIN_SURFACE_VARIANTS)
+        set(defines)
+        foreach(define IN LISTS _KIN_SURFACE_DEFINES_${variant})
+            list(APPEND defines "-D${define}")
+        endforeach()
+        set(output "${ARG_OUTPUT_DIR}/${stem}.${variant}.spv")
+        add_custom_command(
+            OUTPUT "${output}"
+            COMMAND "${KIN_GLSLC}" -fshader-stage=fragment -I "${KIN_SHADER_INCLUDE_DIR}" -I "${folder}" ${defines}
+                    -o "${output}"
+                    "${wrapper}"
+            DEPENDS "${source}" "${wrapper}" ${_KIN_SHADER_INCLUDES}
+            COMMENT "glslc: ${name} (${variant}) -> ${stem}.${variant}.spv"
+            VERBATIM)
+        list(APPEND outputs "${output}")
+    endforeach()
+    if(ARG_CUTOUTS)
+        foreach(mask IN LISTS _KIN_SURFACE_MASKS)
+            set(mask_wrapper "${ARG_OUTPUT_DIR}/${stem}.${mask}.frag.glsl")
+            file(CONFIGURE OUTPUT "${mask_wrapper}" CONTENT
+"#version 450 core
+#define KIN_SURFACE_MASK
+#define KIN_SURFACE_ALPHA kin_surface_alpha
+#include \"kin_${mask}.inc.glsl\"
+#include \"${name}\"
+")
+            set(output "${ARG_OUTPUT_DIR}/${stem}.${mask}.spv")
+            add_custom_command(
+                OUTPUT "${output}"
+                COMMAND "${KIN_GLSLC}" -fshader-stage=fragment -I "${KIN_SHADER_INCLUDE_DIR}" -I "${folder}"
+                        -o "${output}" "${mask_wrapper}"
+                DEPENDS "${source}" "${mask_wrapper}" ${_KIN_SHADER_INCLUDES}
+                COMMENT "glslc: ${name} (${mask}) -> ${stem}.${mask}.spv"
+                VERBATIM)
+            list(APPEND outputs "${output}")
+        endforeach()
+    endif()
+    set(${out_var} "${outputs}" PARENT_SCOPE)
+endfunction()
+
+function(kin_cook_material_graph out_var)
+    cmake_parse_arguments(ARG "" "SOURCE;OUTPUT" "" ${ARGN})
+    if(NOT ARG_SOURCE)
+        message(FATAL_ERROR "kin_cook_material_graph: SOURCE is required")
+    endif()
+    if(NOT TARGET kin_material_graph OR NOT KIN_GLSLC)
+        message(WARNING "kin_cook_material_graph: no kin_material_graph tool or glslc for ${ARG_SOURCE}")
+        set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
+    get_filename_component(source "${ARG_SOURCE}" ABSOLUTE)
+    get_filename_component(name "${source}" NAME)
+    set(output "${ARG_OUTPUT}")
+    if(NOT output)
+        set(output "${CMAKE_CURRENT_BINARY_DIR}/${name}.spv")
+    endif()
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${CMAKE_COMMAND}" -E env "KIN_GLSLC=${KIN_GLSLC}" $<TARGET_FILE:kin_material_graph> cook "${source}"
+                "${output}"
+        DEPENDS "${source}" kin_material_graph ${_KIN_SHADER_INCLUDES}
+        COMMENT "kin_material_graph: ${name} -> ${name}.spv"
+        VERBATIM)
+    set(${out_var} "${output}" PARENT_SCOPE)
 endfunction()
 
 function(kin_embed_files target)
