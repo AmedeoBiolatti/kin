@@ -1170,6 +1170,17 @@ std::vector<PhysicsFixture> PhysicsWorld::fixtures(PhysicsBody body) const {
     return result;
 }
 
+std::size_t PhysicsWorld::fixture_count(PhysicsBody body) const {
+    if (!is_alive(body)) {
+        return 0;
+    }
+    std::size_t count = 0;
+    for (u32 fixture_index : _impl->bodies[body.index].fixtures) {
+        count += _impl->fixture_handle(fixture_index) ? 1 : 0;
+    }
+    return count;
+}
+
 PhysicsBody PhysicsWorld::body_of(PhysicsFixture fixture) const {
     const Impl::FixtureSlot* slot = _impl->fixture_slot(fixture);
     return slot ? slot->body : PhysicsBody{};

@@ -1260,7 +1260,17 @@ bool GpuFrame::acquire_swapchain() {
     }
     if (!SDL_WaitAndAcquireGPUSwapchainTexture(_command_buffer, _device->_window, &_swapchain_texture,
                                                &_swapchain_width, &_swapchain_height)) {
-        throw sdl_error("SDL_WaitAndAcquireGPUSwapchainTexture failed");
+        // The window's surface is going or being made again (a phone turning
+        // to landscape, put to sleep): this frame shows nothing, the next
+        // tries again. Said once, then every 300 frames while it lasts.
+        static u64 failures = 0;
+        if (failures++ % 300 == 0) {
+            KIN_LOG_WARN_F("render", "no swapchain image this frame",
+                           (LogFields{{.name = "error", .value = std::string(SDL_GetError())},
+                                      {.name = "times", .value = std::to_string(failures)}}));
+        }
+        _swapchain_texture = nullptr;
+        return false;
     }
     return _swapchain_texture != nullptr;
 }
