@@ -225,7 +225,7 @@ static std::vector<std::string> resolve_render3d_assets_impl(EcsWorld& world, As
     const auto bind = [&]<typename Renderer>(bool skinned) {
         std::vector<EcsEntity> entities;
         if (selected.empty())
-            world.raw().each([&](flecs::entity entity, const Renderer&) { entities.emplace_back(entity); });
+            world.each([&](flecs::entity entity, const Renderer&) { entities.emplace_back(entity); });
         else
             for (auto id : selected)
                 if (auto e = world.entity_by_id(id); e && e.has<Renderer>())
@@ -310,7 +310,7 @@ static std::vector<std::string> resolve_materials3d_assets_impl(EcsWorld& world,
     std::vector<std::string> diagnostics;
     std::vector<EcsEntity> entities;
     if (selected.empty())
-        world.raw().each([&](flecs::entity entity, const ModelMaterials3D&) { entities.emplace_back(entity); });
+        world.each([&](flecs::entity entity, const ModelMaterials3D&) { entities.emplace_back(entity); });
     else
         for (auto id : selected)
             if (auto e = world.entity_by_id(id); e && e.has<ModelMaterials3D>())

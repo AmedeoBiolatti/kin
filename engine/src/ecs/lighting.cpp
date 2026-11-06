@@ -73,7 +73,7 @@ const SceneLighting* scene_lighting(EcsWorld& world) {
 
 const SceneLighting* scene_lighting(flecs::world& world) {
     const SceneLighting* found = nullptr;
-    world.each([&](const SceneLighting& lighting) {
+    kin::each(world, [&](const SceneLighting& lighting) {
         if (!found && lighting.enabled) {
             found = &lighting;
         }
@@ -87,7 +87,7 @@ std::vector<Light2D> scene_lights(EcsWorld& world, const Affine2& to_screen) {
     const f32 view_scale = std::sqrt(to_screen.a * to_screen.a + to_screen.b * to_screen.b);
     const f32 view_turn = std::atan2(to_screen.b, to_screen.a) * degrees;
     std::vector<Light2D> lights;
-    world.raw().each([&](flecs::entity entity, const LightComponent& light) {
+    world.each([&](flecs::entity entity, const LightComponent& light) {
         if (!shining(light)) {
             return;
         }
@@ -109,7 +109,7 @@ std::vector<Light2D> scene_lights(EcsWorld& world, const Affine2& to_screen) {
 
 std::vector<SurfaceLight2D> scene_surface_lights(flecs::world& world) {
     std::vector<SurfaceLight2D> lights;
-    world.each([&](flecs::entity entity, const LightComponent& light) {
+    kin::each(world, [&](flecs::entity entity, const LightComponent& light) {
         if (!shining(light)) {
             return;
         }
@@ -126,7 +126,7 @@ std::vector<SurfaceLight2D> scene_surface_lights(flecs::world& world) {
                           .shape = light.shape_image,
                           .rotation = placed.rotation});
     });
-    world.each([&](flecs::entity entity, const DirectionalLight2D& light) {
+    kin::each(world, [&](flecs::entity entity, const DirectionalLight2D& light) {
         if (!light.enabled || light.intensity <= 0.0f) {
             return;
         }
@@ -222,7 +222,7 @@ std::vector<LightOccluder2D> scene_occluders(EcsWorld& world, const Affine2& to_
 
 std::vector<LightOccluder2D> scene_occluders(flecs::world& world, const Affine2& to_screen) {
     std::vector<flecs::entity> occluding;
-    world.each([&](flecs::entity entity, const LightOccluder& occluder) {
+    kin::each(world, [&](flecs::entity entity, const LightOccluder& occluder) {
         if (occluder.enabled) {
             occluding.push_back(entity);
         }
@@ -248,7 +248,7 @@ bool apply_scene_lighting(Renderer2D& renderer, LightLayer& layer, EcsWorld& wor
 
 std::optional<ColorOutput> scene_color_output(EcsWorld& world) {
     std::optional<ColorOutput> output;
-    world.raw().each([&](const ColorGrade& grade) {
+    world.each([&](const ColorGrade& grade) {
         if (output || !grade.enabled) {
             return;
         }

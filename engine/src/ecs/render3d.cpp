@@ -390,7 +390,7 @@ ActionStatus3D action_status3d(EcsEntity actor, ActionToken3D token) {
 
 u32 dispatch_animation_events3d(EcsWorld& world, const AnimationEventDispatch& dispatch) {
     u32 unhandled = 0;
-    world.raw().each([&](flecs::entity entity, Animator3D& animator) {
+    world.each([&](flecs::entity entity, Animator3D& animator) {
         // The batch retains its actual source table, even after a native table
         // replacement or a handler replacing the animator.
         const auto batch = animator.events;

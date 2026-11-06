@@ -248,7 +248,7 @@ template <typename T>
 void append_ui2_widget_records(flecs::world& world,
                                std::vector<Ui2WorldRecord>& records,
                                Ui2WorldRenderOptions options) {
-    world.each([&](flecs::entity entity, T& widget) {
+    kin::each(world, [&](flecs::entity entity, T& widget) {
         if (!include_ui2_entity(entity, options)) {
             return;
         }
@@ -306,7 +306,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     // the stored prompt/items — resolve the binding into the component before layout
     // so the allocated bounds include the chip run() will draw. Change-detected so an
     // idle tree (stable keybinds) does not re-solve every frame.
-    world.each([&](flecs::entity entity, ui2::PromptLabel& widget) {
+    kin::each(world, [&](flecs::entity entity, ui2::PromptLabel& widget) {
         if (widget.action.empty()) {
             return;
         }
@@ -316,7 +316,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
             ui2_mark_dirty(entity);
         }
     });
-    world.each([&](flecs::entity entity, ui2::PromptRow& widget) {
+    kin::each(world, [&](flecs::entity entity, ui2::PromptRow& widget) {
         bool changed = false;
         for (ui2::PromptRowItem& item : widget.items) {
             if (item.action.empty()) {
@@ -334,7 +334,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     });
 
     bool layout_dirty = false;
-    world.each([&](flecs::entity root_entity, const Ui2Root& root) {
+    kin::each(world, [&](flecs::entity root_entity, const Ui2Root& root) {
         const Ui2LayoutCache* cache = root_entity.get<Ui2LayoutCache>();
         if (!cache || cache->root_bounds != root.bounds || cache->solved_version != cache->tree_version ||
             cache->solved_direction != ui2::ui_direction()) {
@@ -349,7 +349,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     layouts.reserve(32);
     std::unordered_map<EcsId, std::vector<std::size_t>> children_by_parent;
 
-    world.each([&](flecs::entity entity, Ui2Layout& layout) {
+    kin::each(world, [&](flecs::entity entity, Ui2Layout& layout) {
         layouts.push_back({entity, &layout});
     });
 
@@ -377,7 +377,7 @@ void solve_ui2_layout(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
         });
     }
 
-    world.each([&](flecs::entity root_entity, Ui2Root& root) {
+    kin::each(world, [&](flecs::entity root_entity, Ui2Root& root) {
         Ui2LayoutCache& cache = root_entity.ensure<Ui2LayoutCache>();
         const bool root_bounds_changed = cache.root_bounds != root.bounds;
         if (!root_bounds_changed && cache.solved_version == cache.tree_version &&
@@ -1052,7 +1052,7 @@ std::size_t apply_ui2_text(EcsWorld& world) {
 std::size_t apply_ui2_text(flecs::world& world) {
     std::vector<flecs::entity> changed;
     std::vector<MessageArg> args;
-    world.each([&](flecs::entity entity, Ui2Text& text) {
+    kin::each(world, [&](flecs::entity entity, Ui2Text& text) {
         if (apply_ui2_text_to(entity, text, args)) {
             changed.push_back(entity);
         }
@@ -1102,7 +1102,7 @@ void update_ui2_world(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
     // Container surfaces participate in the same
     // ordered draw stream as widgets, mirroring the immediate front-end. Only entities
     // that actually paint something are emitted, so transparent containers cost nothing.
-    world.each([&](flecs::entity entity, Ui2Layout& layout) {
+    kin::each(world, [&](flecs::entity entity, Ui2Layout& layout) {
         if (!include_ui2_entity(entity, options)) {
             return;
         }
@@ -1161,7 +1161,7 @@ void update_ui2_world(flecs::world& world, ui2::Context& ui, Ui2WorldRenderScrat
         }
     }
 
-    world.each([&](flecs::entity entity, Ui2ScrollContainer& scroll) {
+    kin::each(world, [&](flecs::entity entity, Ui2ScrollContainer& scroll) {
         if (!include_ui2_entity(entity, options) || !scroll.show_scrollbar || scroll.scrollbar_thickness <= 0.0f) {
             return;
         }

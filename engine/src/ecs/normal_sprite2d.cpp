@@ -227,7 +227,7 @@ void bind_normal_sprites2d(EcsWorld& world, Assets2D& assets) {
     };
     const bool gpu = normal_lighting2d_gpu_supported(assets.renderer().capabilities());
     std::vector<Bound> rebound;
-    world.raw().each([&](flecs::entity entity, const NormalSpriteRenderer2D& sprite) {
+    world.each([&](flecs::entity entity, const NormalSpriteRenderer2D& sprite) {
         Bound bound{entity, sprite.albedo, sprite.normal, sprite.specular, sprite.gpu_textures};
         const auto bind = [&](const ComponentAssetRef& asset, std::shared_ptr<const Image>& image, Texture& texture) {
             if (asset.id.empty()) {

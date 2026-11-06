@@ -243,7 +243,7 @@ static std::vector<std::string> apply_scene3d_settings_impl(EcsWorld& world, Sce
             return only.has<T>() ? only : EcsEntity{};
         EcsEntity selected;
         i32 priority = std::numeric_limits<i32>::min();
-        world.raw().each([&](flecs::entity entity, const T& settings) {
+        world.each([&](flecs::entity entity, const T& settings) {
             if (settings.enabled && (!selected || settings.priority > priority ||
                                      (settings.priority == priority && entity.id() < selected.id()))) {
                 selected = EcsEntity{entity};

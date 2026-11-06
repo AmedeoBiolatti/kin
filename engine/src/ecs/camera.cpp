@@ -87,7 +87,7 @@ Camera2D camera_of(const EcsEntity& entity, Vec2f viewport) {
 
 std::optional<Camera2D> scene_camera(EcsWorld& world, Vec2f viewport) {
     flecs::entity found;
-    world.raw().each([&](flecs::entity entity, const CameraComponent& camera) {
+    world.each([&](flecs::entity entity, const CameraComponent& camera) {
         if (!found && camera.current) {
             found = entity;
         }
@@ -101,7 +101,7 @@ std::optional<Camera2D> scene_camera(EcsWorld& world, Vec2f viewport) {
 void update_cameras(EcsWorld& world, f32 dt) {
     flecs::world& raw = world.raw();
     std::vector<flecs::entity> moving;
-    raw.each([&](flecs::entity entity, const CameraComponent& camera) {
+    world.each([&](flecs::entity entity, const CameraComponent& camera) {
         if (follows(camera) || camera.placed || camera.zoom_smoothing > 0.0f || camera.shown_zoom > 0.0f || camera.trauma > 0.0f ||
             camera.shake_offset.x != 0.0f || camera.shake_offset.y != 0.0f) {
             moving.push_back(entity);
@@ -187,7 +187,7 @@ void shake_camera(EcsEntity camera, f32 trauma) {
 
 void shake_camera(EcsWorld& world, f32 trauma) {
     std::vector<flecs::entity> current;
-    world.raw().each([&](flecs::entity entity, const CameraComponent& camera) {
+    world.each([&](flecs::entity entity, const CameraComponent& camera) {
         if (camera.current) {
             current.push_back(entity);
         }

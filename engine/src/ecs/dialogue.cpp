@@ -264,7 +264,7 @@ bool SceneDialogue::restore(std::string_view path, const DialogueStateSnapshot& 
 
 std::optional<EcsEntity> talk_target(EcsWorld& world) {
     std::optional<Vec2f> talker;
-    world.raw().each([&](flecs::entity entity, const Talker& who) {
+    world.each([&](flecs::entity entity, const Talker& who) {
         if (!talker && who.enabled) {
             talker = current_world_transform(entity).pos;
         }
@@ -274,7 +274,7 @@ std::optional<EcsEntity> talk_target(EcsWorld& world) {
     }
     std::optional<EcsEntity> best;
     f32 nearest = std::numeric_limits<f32>::max();
-    world.raw().each([&](flecs::entity entity, const TalkComponent& talk) {
+    world.each([&](flecs::entity entity, const TalkComponent& talk) {
         if (!talk.enabled || talk.asset.id.empty()) {
             return;
         }

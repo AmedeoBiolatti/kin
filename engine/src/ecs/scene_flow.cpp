@@ -31,7 +31,7 @@ bool door_contains(const SceneDoor& door, const WorldTransform& at, Vec2f point)
 
 std::vector<SceneFlow::Inside> SceneFlow::standing(EcsWorld& world) const {
     std::vector<std::pair<EcsId, Vec2f>> travellers;
-    world.raw().each([&](flecs::entity entity, const SceneTraveller& traveller) {
+    world.each([&](flecs::entity entity, const SceneTraveller& traveller) {
         if (traveller.enabled && entity.enabled()) {
             travellers.emplace_back(static_cast<EcsId>(entity.id()), current_world_transform(entity).pos);
         }
@@ -40,7 +40,7 @@ std::vector<SceneFlow::Inside> SceneFlow::standing(EcsWorld& world) const {
     if (travellers.empty()) {
         return inside;
     }
-    world.raw().each([&](flecs::entity entity, const SceneDoor& door) {
+    world.each([&](flecs::entity entity, const SceneDoor& door) {
         if (!door.enabled || !entity.enabled()) {
             return;
         }
@@ -109,7 +109,7 @@ bool SceneFlow::arrive(EcsWorld& world, std::string_view arrive) {
         at.pos.y += door->exit.y * at.scale.y;
     }
     std::vector<flecs::entity> travellers;
-    world.raw().each([&](flecs::entity entity, const SceneTraveller& traveller) {
+    world.each([&](flecs::entity entity, const SceneTraveller& traveller) {
         if (traveller.enabled && entity.id() != target.raw().id()) {
             travellers.push_back(entity);
         }

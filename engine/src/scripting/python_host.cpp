@@ -643,7 +643,7 @@ void Host::watch_event(ComponentInfo& info, std::string_view event) {
 void Host::collect_contacts() {
 #if KIN_ENABLE_PHYSICS
     std::vector<flecs::entity> touched;
-    world.raw().each([&](flecs::entity entity, const PhysicsContactQueue& queue) {
+    world.each([&](flecs::entity entity, const PhysicsContactQueue& queue) {
         if (!queue.events.empty()) {
             touched.push_back(entity);
         }
@@ -652,8 +652,8 @@ void Host::collect_contacts() {
         return;
     }
     std::vector<std::pair<PhysicsBody, flecs::entity_t>> bodies;
-    world.raw().each([&](flecs::entity entity, const PhysicsBodyComponent& body) { bodies.emplace_back(body.body, entity.id()); });
-    world.raw().each([&](flecs::entity entity, const TilemapCollider& map) { bodies.emplace_back(map.body, entity.id()); });
+    world.each([&](flecs::entity entity, const PhysicsBodyComponent& body) { bodies.emplace_back(body.body, entity.id()); });
+    world.each([&](flecs::entity entity, const TilemapCollider& map) { bodies.emplace_back(map.body, entity.id()); });
     const auto entity_of = [&](PhysicsBody body) -> flecs::entity_t {
         for (const auto& [candidate, entity] : bodies) {
             if (candidate == body) {

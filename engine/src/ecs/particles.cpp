@@ -76,7 +76,7 @@ void emit_authored(flecs::entity entity, ParticleSystemComponent& particles, f32
 // Internal flecs-typed implementations; the public EcsWorld& API forwards here.
 
 void update_particles_raw(flecs::world& world, f32 dt) {
-    world.each([dt](flecs::entity entity, ParticleSystemComponent& particles) {
+    kin::each(world, [dt](flecs::entity entity, ParticleSystemComponent& particles) {
         if (const ParticleEffect* effect = authored(particles); effect && effect->streams()) {
             follow(entity, particles);
         } else if (particles.streaming) { // its effect streams no more (the catalog changed)
@@ -87,7 +87,7 @@ void update_particles_raw(flecs::world& world, f32 dt) {
         particles.system.update(dt);
         emit_authored(entity, particles, dt); // after: a burst shows where it is made
     });
-    world.each([dt](ParticleFieldComponent& field) {
+    kin::each(world, [dt](ParticleFieldComponent& field) {
         update_particle_field(field.state, dt);
     });
 }

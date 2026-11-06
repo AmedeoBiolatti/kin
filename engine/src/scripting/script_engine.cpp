@@ -1045,7 +1045,7 @@ struct ScriptSceneApi {
     sol::object find(sol::this_state state, std::string_view name) {
         flecs::entity found = scene->ecs().raw().lookup(std::string{name}.c_str());
         if (!found.is_valid() || !found.is_alive()) {
-            scene->ecs().raw().each([&](flecs::entity entity) {
+            scene->ecs().each([&](flecs::entity entity) {
                 if (found.is_valid() && found.is_alive()) {
                     return;
                 }
@@ -1078,7 +1078,7 @@ struct ScriptSceneApi {
         sol::state_view lua{state};
         sol::table result = lua.create_table();
         i32 index = 1;
-        scene->ecs().raw().each([&](flecs::entity entity) {
+        scene->ecs().each([&](flecs::entity entity) {
             if (entity.is_valid() && entity.is_alive() && !entity.has<flecs::Component>()) {
                 result[index++] = ScriptEntityApi{scene, EcsEntity{entity}};
             }
@@ -1249,7 +1249,7 @@ private:
         };
 
         if (components.empty()) {
-            scene->ecs().raw().each([&](flecs::entity raw) {
+            scene->ecs().each([&](flecs::entity raw) {
                 visit(EcsEntity{raw});
             });
             return;

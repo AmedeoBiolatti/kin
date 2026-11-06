@@ -167,7 +167,7 @@ std::vector<EntityAnimationSnapshot> animation_snapshots(flecs::world& world) {
     if (!world.lookup("AnimationPlayer")) {
         return snapshots;
     }
-    world.each([&](flecs::entity entity, AnimationPlayer& player) {
+    kin::each(world, [&](flecs::entity entity, AnimationPlayer& player) {
         const char* name = entity.name();
         snapshots.push_back({
             .id = entity.id(),

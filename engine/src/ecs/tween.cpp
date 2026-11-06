@@ -169,7 +169,7 @@ void update_tweens(EcsWorld& world, f32 dt) {
     flecs::world& raw = world.raw();
     raw.component<Tweens>("Tweens");
     std::vector<flecs::entity> moving;
-    raw.each([&](flecs::entity entity, Tweens& tweens) {
+    world.each([&](flecs::entity entity, Tweens& tweens) {
         tweens.ended.clear();
         if (!tweens.running.empty()) {
             moving.push_back(entity);
