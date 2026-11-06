@@ -126,6 +126,15 @@ AssetType infer_asset_type(const std::filesystem::path& path) {
     if (ext == ".kintheme") {
         return AssetType::UiTheme;
     }
+    if (ext == ".kinanimator") {
+        return AssetType::Animator3D;
+    }
+    if (ext == ".kincollider") {
+        return AssetType::Collider3D;
+    }
+    if (ext == ".kinmaterials") {
+        return AssetType::Materials3D;
+    }
     return AssetType::Unknown;
 }
 
