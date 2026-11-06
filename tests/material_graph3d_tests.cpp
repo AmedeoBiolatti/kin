@@ -254,6 +254,16 @@ void cooked() {
     wrong[0] = 'X';
     CHECK(!unpack_cooked_material_graph3d(wrong));
     CHECK(!read_material_graph_layout3d("{\"schema\": \"x\"}"));
+    // Parameters anywhere in the 64 floats (a cooked graph's past the first 16 once refused it), none past them.
+    const auto at = [](u32 offset) {
+        return "{\"schema\": \"kin.material-graph-layout/1\", \"parameters\": [{\"name\": \"far\", \"type\": "
+               "\"vec4\", \"offset\": " +
+               std::to_string(offset) + ", \"size\": 4, \"value\": [1, 2, 3, 4]}]}";
+    };
+    const auto far = read_material_graph_layout3d(at(surface_param_count3d - 4), &why);
+    CHECK(far && far->parameters.size() == 1 && far->parameters[0].offset == surface_param_count3d - 4 &&
+          far->parameters[0].value[3] == 4);
+    CHECK(!read_material_graph_layout3d(at(surface_param_count3d - 3), &why) && contains(why, "beyond"));
     if (shader_compiler_available()) {
         const auto now = cook_material_graph3d(graph("", "", R"("roughness": 0.25)"), &why);
         CHECK(now.has_value());

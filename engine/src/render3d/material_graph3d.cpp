@@ -1022,7 +1022,7 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
         } else {
             p.offset = u32(item.int_at("offset", 0));
             p.size = u32(item.int_at("size", 1));
-            if (p.offset + p.size > 16 || p.size < 1 || p.size > 4)
+            if (p.offset + p.size > surface_param_count3d || p.size < 1 || p.size > 4)
                 return fail("a parameter beyond shader_params");
             if (const auto* v = item.find("value"); v && v->is_array())
                 for (size_t i = 0; i < std::min<size_t>(4, v->items().size()); ++i)
