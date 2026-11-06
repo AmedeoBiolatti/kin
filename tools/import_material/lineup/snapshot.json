@@ -1,0 +1,11 @@
+{
+  "schema": "kin.material-lineup/1",
+  "about": "One material's snapshot: a quad facing the camera and a sphere, lit as the lineup is (one sun, no ambient, a black background). \"*\" is the material pictured: kin_material_lineup --material, unreal_snapshots.py's list. Coordinates as lineup.json's.",
+  "size": [1024, 512],
+  "camera": {"eye": [0, 0, 5], "target": [0, 0, 0], "fov_y": 30},
+  "sun": {"toward": [-0.45, 0.55, 0.7], "intensity": 1.0},
+  "objects": [
+    {"mesh": "quad",   "position": [-1.1, 0, 0], "material": "*"},
+    {"mesh": "sphere", "position": [ 1.1, 0, 0], "material": "*"}
+  ]
+}

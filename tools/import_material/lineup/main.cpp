@@ -2,8 +2,11 @@
 // from Godot or Unreal by kin_import_material --graphs, for comparing with those engines' own pictures.
 //
 //   kin_material_lineup --scene lineup.json --content <root> --materials <folder in it> --out picture.png
+//   kin_material_lineup --scene snapshot.json --content <root> --meshes <folder> --material <path> --out picture.png
 //
-// <root> holds quad.glb and sphere.glb (make_assets.py) and <folder>/<Material>.kinmaterials. As the other engines'
+// <root> holds quad.glb and sphere.glb (make_assets.py; or --meshes, a folder of them anywhere) and
+// <folder>/<Material>.kinmaterials. --material names the material of the objects whose material is "*" (a snapshot of
+// one material: snapshot.json), a path in <folder> without .kinmaterials. As the other engines'
 // scripts: an LDR view in the linear 2D pipeline (no tone curve, linear light encoded to sRGB), no MSAA, one sun
 // without shadow, no ambient, a black background.
 #include <filesystem>
@@ -25,8 +28,10 @@ using namespace kin;
 namespace fs = std::filesystem;
 
 struct Options {
-    fs::path scene, content, materials, out;
+    fs::path scene, content, materials, meshes, out;
+    std::string material; // the material of the objects whose material is "*"
     int frames = 8;
+    f32 time = 0; // the scene's clock (a material's time)
 };
 
 Vec3f vec3(const JsonValue& v) {
@@ -55,6 +60,7 @@ public:
         if (!_r)
             load(ctx);
         _scene.clear();
+        _scene.time = _o.time;
         for (const auto& d : _draws)
             (void)_scene.draw(d.mesh, d.transform, d.material);
         const auto& cam = *_doc.find("camera");
@@ -98,8 +104,17 @@ private:
         _view = _r->create_view({_width, _height}, {.samples = 1, .background = Color::rgb(0, 0, 0), .hdr = false})
                     .value_or({});
         for (const auto& o : _doc.find("objects")->items()) {
-            const std::string mesh = o.find("mesh")->as_string(), name = o.find("material")->as_string();
-            auto model = _assets->load_model(mesh + ".glb").value_or({});
+            const std::string mesh = o.find("mesh")->as_string();
+            std::string name = o.find("material")->as_string();
+            if (name == "*") {
+                if (_o.material.empty())
+                    throw std::runtime_error("the scene's \"*\" needs --material");
+                name = _o.material;
+            }
+            auto model = _assets
+                             ->load_model(_o.meshes.empty() ? fs::path(mesh + ".glb")
+                                                            : fs::absolute(_o.meshes / (mesh + ".glb")))
+                             .value_or({});
             if (!model)
                 throw std::runtime_error(diagnostics3d_text(_assets->diagnostics()));
             const auto binding =
@@ -149,8 +164,14 @@ int main(int argc, char** argv) {
                 o.content = value();
             else if (a == "--materials")
                 o.materials = value();
+            else if (a == "--meshes")
+                o.meshes = value();
+            else if (a == "--material")
+                o.material = value();
             else if (a == "--out")
                 o.out = value();
+            else if (a == "--time")
+                o.time = std::stof(value());
             else if (a == "--frames")
                 o.frames = std::stoi(value());
             else
@@ -158,7 +179,7 @@ int main(int argc, char** argv) {
         }
         if (o.scene.empty() || o.content.empty() || o.out.empty() || o.frames < 1) {
             std::cerr << "usage: kin_material_lineup --scene lineup.json --content <root> --materials <folder> "
-                         "--out picture.png\n";
+                         "--out picture.png [--meshes <folder>] [--material <path>]\n";
             return 2;
         }
         auto lineup = std::make_unique<Lineup>(o);

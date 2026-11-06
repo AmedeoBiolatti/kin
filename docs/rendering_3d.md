@@ -3637,7 +3637,8 @@ kin, or samples more than the five textures kin's material has slots for, falls 
 
 - Unreal: `unreal_export.py` writes the whole graph, and the graphs of the Material Functions it calls (inlined by
   the import: a function input left unconnected takes its preview value); World Position is centimetres (scaled from
-  kin's metres), normal maps are DirectX's (flipped). A Static Switch takes the material's or instance's value, else
+  kin's metres) in Unreal's axes, Z up: kin's (x, z, y), as Unreal's glTF exporter maps them (so are the camera's
+  position and vector, the reflection vector and the normals); normal maps are DirectX's (flipped). A Static Switch takes the material's or instance's value, else
   its default: an instance that changes one gets a graph of its own, named for the switches on and off
   (`M_Rock__Moss_on.kingraph`). Named Reroutes are followed to their declarations.
 - Unity: Shader Graph 10 and later (`.shadergraph`, sub-graphs inlined; older files fall back to Tier 1); Unity's
@@ -3676,6 +3677,21 @@ All three draw linear light encoded to sRGB, with no tone curve. Measured (2026-
 against Godot, unlit row: at most 1 level apart; kin with Unreal's materials is byte-identical to kin with Godot's;
 the lit spheres differ by about 3-4 levels, from the engines' BRDFs (Godot's Burley diffuse, kin's multiscatter
 boost on metals).
+
+Snapshots do the same for materials that already exist in an Unreal project (a Fab pack, say), a picture a material:
+`snapshot.json` puts the material on a quad and a sphere, lit as the lineup is, placed in Unreal by its glTF axes (as
+the import maps World Position). List the materials a line each, by
+their imported path (`m/<pack>/.../<name>`, a note after it if wanted), then:
+
+1. Unreal: `unreal_snapshots.py` in that project's editor, with the lineup project's render settings and
+   `Content/Python/init_unreal.py`, and texture streaming off (`r.TextureStreaming=0`: full-size maps, as kin's).
+   `LINEUP_SCRIPT=unreal_snapshots.py SNAP_SCENE=snapshot.json SNAP_ASSETS=<quad.glb, sphere.glb> SNAP_LIST=<list>
+   SNAP_OUT=<folder>`.
+2. kin, each material: `kin_material_lineup --scene snapshot.json --content <import root> --meshes <quad.glb,
+   sphere.glb> --material <path> --out <folder>/<path, / as __>.png`, with `--time <seconds>` the clock Unreal's log
+   gives the picture (`lineup: time`) for a material that moves with time.
+3. `python3 snapshot_report.py snapshot.json <list> <unreal folder> <kin folder> <out>`: a sheet (a row a material:
+   Unreal, kin, their difference) and a table of `compare.py`'s measures for each quad and sphere.
 ### Authored particle emitters
 
 `ParticleEmitter3D` uses the same scene/prefab registry, field overrides, inspection,

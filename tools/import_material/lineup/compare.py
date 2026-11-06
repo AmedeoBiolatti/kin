@@ -44,7 +44,7 @@ def main():
     try:
         import flip_evaluator as flip
         fa, fb = a.astype(np.float32) / 255, b.astype(np.float32) / 255
-        flip_map = flip.evaluate(fa, fb, "LDR")[0]
+        flip_map = flip.evaluate(fa, fb, "LDR", applyMagma=False)[0][..., 0]  # the error, not its colour map
     except Exception:
         flip_map = None
     d = np.abs(a - b)
@@ -53,7 +53,7 @@ def main():
         ra, rb, rd = a[y0:y1, x0:x1], b[y0:y1, x0:x1], d[y0:y1, x0:x1]
         lit = (ra.max(axis=2) > 4) | (rb.max(axis=2) > 4)  # the object, not the black around a sphere
         px = rd[lit]
-        mse = float(((ra[lit] - rb[lit]) ** 2).mean()) if px.size else 0.0
+        mse = float(((ra[lit] - rb[lit]).astype(np.float64) ** 2).mean()) if px.size else 0.0
         row = {
             "material": name, "mesh": mesh, "pixels": int(lit.sum()),
             "mean": float(px.mean()) if px.size else 0.0, "max": int(px.max()) if px.size else 0,
