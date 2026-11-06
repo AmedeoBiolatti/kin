@@ -121,7 +121,9 @@ std::optional<std::vector<u8>> compile_glsl(const std::filesystem::path& source,
     Process glslc;
     ProcessOptions options;
     options.args = {glslc_path().string(),
-                    stage == ShaderStage::Compute ? "-fshader-stage=compute" : "-fshader-stage=fragment",
+                    stage == ShaderStage::Compute  ? "-fshader-stage=compute"
+                    : stage == ShaderStage::Vertex ? "-fshader-stage=vertex"
+                                                   : "-fshader-stage=fragment",
                     "-o", out.string(), compiled_source.string()};
     for (const char* define : defines)
         options.args.insert(options.args.end() - 1, std::string("-D") + define);

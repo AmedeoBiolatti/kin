@@ -112,11 +112,17 @@ public:
         }
         Image image;
         std::string why = "not a picture kin reads";
-        if (e == ".tif" || e == ".tiff" || e == ".psd") {
-            // Formats kin's images (SDL_image) don't read: the import's own decoder.
+        if (e == ".tif" || e == ".tiff" || e == ".psd" || e == ".exr") {
+            // Formats kin's images (SDL_image) don't read: the import's own decoder (an OpenEXR's values fitted
+            // into 8 bits: its range kept, for what reads it to multiply back by).
             const std::string bytes = read_file(file);
-            if (auto decoded = decode_extra_image({reinterpret_cast<const u8*>(bytes.data()), bytes.size()}, &why))
+            ImageRange range;
+            if (auto decoded =
+                    decode_extra_image({reinterpret_cast<const u8*>(bytes.data()), bytes.size()}, &why, &range)) {
                 image = std::move(*decoded);
+                if (!range.identity())
+                    ranges[file] = range;
+            }
         } else {
             try {
                 image = load_image(file);
@@ -142,6 +148,8 @@ public:
     }
 
     std::map<std::filesystem::path, std::optional<Image>> _decoded; // each file decoded once a material
+    // The files decoded into 8 bits from values past 0 to 1 (an OpenEXR's): what their texels stand for.
+    std::map<std::filesystem::path, ImageRange> ranges;
 
     // The .kinmaterials, read back by kin's parser before it is written.
     void finish() {
@@ -171,6 +179,7 @@ public:
         std::string slot; // a texture's
         bool srgb = false;
         std::string source; // its name in the source engine, where it isn't a name kin's graphs take
+        int layer = -1;     // a texture's in the graph maps (slot "layers")
     };
     std::vector<Param> params;
 
@@ -332,9 +341,12 @@ public:
     }
     // The texture parameters in kin's five map slots: a normal map (by `normal`) in the normal slot, the rest in
     // order. False when there are more than five.
+    // The textures in kin's five slots (a normal map in the normal slot where it can), the rest in the graph maps'
+    // layers (Material3D::graph_maps); false past max_graph_map_layers3d of those.
     template <class Normal> bool assign_slots(Normal&& normal) {
         static const char* names[] = {"base", "normal", "metallic_roughness", "occlusion", "emissive"};
         std::array<bool, 5> taken{};
+        int layers = 0;
         for (auto& p : params) {
             if (p.type != "texture")
                 continue;
@@ -344,8 +356,13 @@ public:
                     slot = k;
             if (slot == 5 && !taken[1])
                 slot = 1;
-            if (slot == 5)
-                return false;
+            if (slot == 5) {
+                if (layers >= int(max_graph_map_layers3d))
+                    return false;
+                p.slot = "layers";
+                p.layer = layers++;
+                continue;
+            }
             taken[slot] = true;
             p.slot = names[slot];
         }
@@ -361,8 +378,9 @@ public:
             const auto& p = params[i];
             out += std::string(i ? ",\n  " : "\n  ") + "{\"name\": " + quote(p.name) + ", \"type\": " + quote(p.type);
             if (p.type == "texture")
-                out += ", \"slot\": " + quote(p.slot) + ", \"color_space\": " + quote(p.srgb ? "srgb" : "linear") +
-                       ", \"role\": \"data\"";
+                out += ", \"slot\": " + quote(p.slot) +
+                       (p.layer >= 0 ? ", \"layer\": " + std::to_string(p.layer) : "") +
+                       ", \"color_space\": " + quote(p.srgb ? "srgb" : "linear") + ", \"role\": \"data\"";
             else {
                 const size_t n = p.type == "float" ? 1 : p.type == "vec2" ? 2 : p.type == "vec3" ? 3 : 4;
                 out += ", \"default\": " + (n == 1 ? number(p.value[0]) : vector({p.value.data(), n}));

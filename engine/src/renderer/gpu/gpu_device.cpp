@@ -304,6 +304,46 @@ GpuTexture GpuDevice::create_target_array(u32 width, u32 height, u32 layers, SDL
     return GpuTexture{_shared, texture, width, height, format, usage};
 }
 
+GpuTexture GpuDevice::create_texture_array(u32 width, u32 height, std::span<const u8* const> layers) {
+    if (width == 0 || height == 0 || layers.empty()) {
+        throw std::runtime_error("create_texture_array failed: invalid arguments");
+    }
+    const u32 levels = complete_mip_levels(width, height);
+    SDL_GPUTextureCreateInfo info{};
+    info.type = SDL_GPU_TEXTURETYPE_2D_ARRAY;
+    info.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER | SDL_GPU_TEXTUREUSAGE_COLOR_TARGET; // generating mips needs both
+    info.width = width;
+    info.height = height;
+    info.layer_count_or_depth = static_cast<u32>(layers.size());
+    info.num_levels = levels;
+    info.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    SDL_GPUTexture* texture = tracked_create_texture(_device, &info);
+    if (!texture) {
+        throw sdl_error("SDL_CreateGPUTexture (texture array) failed");
+    }
+    const u64 bytes64 = static_cast<u64>(width) * height * 4;
+    try {
+        if (bytes64 > 0xFFFFFFFFull) {
+            throw std::runtime_error("texture array layer too large");
+        }
+        for (u32 layer = 0; layer < layers.size(); ++layer) {
+            if (!layers[layer]) {
+                throw std::runtime_error("create_texture_array failed: a layer without pixels");
+            }
+            stage_upload(UploadDestination{.texture = texture, .w = width, .h = height, .layer = layer},
+                         static_cast<u32>(bytes64), layers[layer], false, nullptr);
+        }
+        if (levels > 1) {
+            generate_mipmaps(texture);
+        }
+    } catch (...) {
+        tracked_release_texture(_device, texture);
+        throw;
+    }
+    return GpuTexture{_shared, texture, width, height, info.format, info.usage}; // not pooled: a kind of its own
+}
+
 GpuTexture GpuDevice::create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
                                     SDL_GPUTextureUsageFlags usage) {
     SDL_GPUTextureCreateInfo info{};
@@ -633,6 +673,7 @@ void GpuDevice::stage_upload(const UploadDestination& to, u32 bytes, const void*
         SDL_GPUTextureRegion destination{};
         destination.texture = to.texture;
         destination.mip_level = to.level;
+        destination.layer = to.layer;
         destination.x = to.x;
         destination.y = to.y;
         destination.w = to.w;

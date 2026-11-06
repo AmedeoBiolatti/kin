@@ -281,6 +281,9 @@ public:
     create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d>) {
         return {};
     }
+    // A mipmapped RGBA8 2D array of `layers` (RGBA8, one size, tightly packed): Material3D::graph_maps. None where
+    // surface shaders aren't supported.
+    virtual Texture create_map_array(Vec2i, std::span<const u8* const>) { return {}; }
     virtual Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
                                                               std::span<const DataBuffer>) {
         return {std::nullopt, {"material inputs unavailable"}};

@@ -296,8 +296,198 @@ private:
 
 } // namespace
 
-std::optional<Image> decode_extra_image(std::span<const u8> bytes, std::string* why) {
+namespace {
+f32 half_to_float(u16 h) {
+    const u32 sign = u32(h >> 15) << 31, exponent = (h >> 10) & 31, mantissa = h & 1023;
+    u32 bits = 0;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else { // subnormal
+            f32 v = std::ldexp(f32(mantissa), -24);
+            return (h >> 15) ? -v : v;
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7f800000u | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
+    }
+    f32 out;
+    std::memcpy(&out, &bits, 4);
+    return out;
+}
+
+// OpenEXR, scanline images: no compression, RLE-free ZIPS or ZIP (zlib, a byte predictor and the bytes split in two
+// halves); HALF or FLOAT channels R, G, B, A (or Y: grey). Each channel fitted into 0 to 1 over its least and largest
+// value where they leave it (said in `range`).
+Image decode_exr(std::span<const u8> b, ImageRange* range) {
+    const auto fail = [](const std::string& why) { throw std::runtime_error("OpenEXR: " + why); };
+    const auto u32_at = [&](size_t at) {
+        if (at + 4 > b.size())
+            fail("cut short");
+        u32 v;
+        std::memcpy(&v, b.data() + at, 4);
+        return v;
+    };
+    if (b.size() < 8 || u32_at(0) != 20000630u)
+        fail("not an OpenEXR file");
+    if (u32_at(4) & 0x200u)
+        fail("tiled images");
+    size_t at = 8;
+    struct Channel {
+        std::string name;
+        u32 type;
+    };
+    std::vector<Channel> channels;
+    i32 window[4] = {0, 0, -1, -1};
+    int compression = -1;
+    const auto text = [&]() {
+        const auto* start = b.data() + at;
+        const auto* end = static_cast<const u8*>(std::memchr(start, 0, b.size() - at));
+        if (!end)
+            fail("cut short");
+        std::string s(reinterpret_cast<const char*>(start), size_t(end - start));
+        at += s.size() + 1;
+        return s;
+    };
+    while (true) {
+        const std::string name = text();
+        if (name.empty())
+            break;
+        const std::string type = text();
+        const u32 size = u32_at(at);
+        at += 4;
+        if (at + size > b.size())
+            fail("cut short");
+        const u8* value = b.data() + at;
+        if (name == "channels" && type == "chlist") {
+            size_t p = 0;
+            while (p < size && value[p]) {
+                const auto* end = static_cast<const u8*>(std::memchr(value + p, 0, size - p));
+                if (!end || size_t(end - value) + 17 > size)
+                    fail("a broken channel list");
+                std::string channel(reinterpret_cast<const char*>(value + p), size_t(end - (value + p)));
+                u32 t;
+                std::memcpy(&t, end + 1, 4);
+                channels.push_back({channel, t});
+                p = size_t(end - value) + 17;
+            }
+        } else if (name == "dataWindow" && type == "box2i" && size == 16) {
+            std::memcpy(window, value, 16);
+        } else if (name == "compression" && size == 1) {
+            compression = value[0];
+        }
+        at += size;
+    }
+    const i64 width = i64(window[2]) - window[0] + 1, height = i64(window[3]) - window[1] + 1;
+    if (width <= 0 || height <= 0 || width > 16384 || height > 16384)
+        fail("an unusable size");
+    if (compression != 0 && compression != 2 && compression != 3)
+        fail("compression " + std::to_string(compression) + " (none, ZIPS and ZIP are read)");
+    for (const auto& c : channels)
+        if (c.type != 1 && c.type != 2)
+            fail("a channel of unsigned integers (" + c.name + ")");
+    if (channels.empty())
+        fail("no channels");
+    // (Channels are stored in the order of their names: A, B, G, R.)
+    const int lines = compression == 3 ? 16 : 1;
+    const i64 blocks = (height + lines - 1) / lines;
+    std::vector<std::vector<f32>> planes(channels.size(), std::vector<f32>(size_t(width * height)));
+    for (i64 k = 0; k < blocks; ++k) {
+        u64 offset;
+        if (at + 8 * size_t(k) + 8 > b.size())
+            fail("cut short");
+        std::memcpy(&offset, b.data() + at + 8 * size_t(k), 8);
+        if (offset + 8 > b.size())
+            fail("a block past the end");
+        const i32 y = i32(u32_at(size_t(offset))) - window[1];
+        const u32 bytes = u32_at(size_t(offset) + 4);
+        if (offset + 8 + bytes > b.size() || y < 0 || y >= height)
+            fail("a broken block");
+        const i64 rows = std::min<i64>(lines, height - y);
+        size_t expected = 0;
+        for (const auto& c : channels)
+            expected += size_t(width) * size_t(rows) * (c.type == 1 ? 2 : 4);
+        std::vector<u8> raw;
+        const u8* data = b.data() + offset + 8;
+        if (compression != 0 && bytes < expected) {
+            int size = 0;
+            char* out = kin_zlib_inflate(reinterpret_cast<const char*>(data), int(bytes), int(expected), &size);
+            if (!out || size_t(size) != expected) {
+                kin_import_free(out);
+                fail("a block that does not inflate");
+            }
+            std::vector<u8> t(out, out + size);
+            kin_import_free(out);
+            for (size_t i = 1; i < t.size(); ++i) // the predictor undone
+                t[i] = u8(t[i - 1] + t[i] - 128);
+            raw.resize(t.size());
+            const size_t half = (t.size() + 1) / 2;
+            for (size_t i = 0; i < t.size(); ++i) // the two halves interleaved again
+                raw[i] = (i % 2 == 0) ? t[i / 2] : t[half + i / 2];
+            data = raw.data();
+        } else if (bytes != expected) {
+            fail("a block of the wrong size");
+        }
+        size_t p = 0;
+        for (i64 r = 0; r < rows; ++r)
+            for (size_t c = 0; c < channels.size(); ++c)
+                for (i64 x = 0; x < width; ++x) {
+                    f32 v;
+                    if (channels[c].type == 1) {
+                        u16 h;
+                        std::memcpy(&h, data + p, 2);
+                        v = half_to_float(h);
+                        p += 2;
+                    } else {
+                        std::memcpy(&v, data + p, 4);
+                        p += 4;
+                    }
+                    planes[c][size_t((y + r) * width + x)] = std::isfinite(v) ? v : 0.0f;
+                }
+    }
+    // R, G, B, A from the channels by name (Y: grey; none: 0, alpha 1).
+    std::array<int, 4> which{-1, -1, -1, -1};
+    for (size_t c = 0; c < channels.size(); ++c) {
+        const std::string& n = channels[c].name;
+        if (n == "R" || n == "Y")
+            which[0] = int(c);
+        if (n == "G" || n == "Y")
+            which[1] = int(c);
+        if (n == "B" || n == "Y")
+            which[2] = int(c);
+        if (n == "A")
+            which[3] = int(c);
+    }
+    ImageRange fitted;
+    for (int k = 0; k < 4; ++k) {
+        if (which[k] < 0)
+            continue;
+        const auto [lo, hi] = std::minmax_element(planes[size_t(which[k])].begin(), planes[size_t(which[k])].end());
+        if (*lo < 0.0f || *hi > 1.0f) {
+            fitted.bias[k] = *lo;
+            fitted.scale[k] = *hi > *lo ? *hi - *lo : 1.0f;
+        }
+    }
+    Image image{Vec2i{i32(width), i32(height)}, std::vector<u8>(size_t(width * height) * 4)};
+    for (size_t i = 0; i < size_t(width * height); ++i)
+        for (int k = 0; k < 4; ++k) {
+            const f32 v = which[k] < 0 ? (k == 3 ? 1.0f : 0.0f)
+                                       : (planes[size_t(which[k])][i] - fitted.bias[k]) / fitted.scale[k];
+            image.rgba[i * 4 + size_t(k)] = u8(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    if (range)
+        *range = fitted;
+    return image;
+}
+} // namespace
+
+std::optional<Image> decode_extra_image(std::span<const u8> bytes, std::string* why, ImageRange* range) {
     try {
+        if (range)
+            *range = {};
+        if (bytes.size() >= 4 && bytes[0] == 0x76 && bytes[1] == 0x2f && bytes[2] == 0x31 && bytes[3] == 0x01)
+            return decode_exr(bytes, range);
         if (bytes.size() >= 4 && ((bytes[0] == 'I' && bytes[1] == 'I') || (bytes[0] == 'M' && bytes[1] == 'M')))
             return Tiff(bytes).decode();
         if (bytes.size() >= 4 && std::memcmp(bytes.data(), "8BPS", 4) == 0) {
@@ -309,7 +499,7 @@ std::optional<Image> decode_extra_image(std::span<const u8> bytes, std::string* 
             kin_import_free(pixels);
             return image;
         }
-        throw std::runtime_error("not a TIFF or PSD");
+        throw std::runtime_error("not a TIFF, PSD or OpenEXR");
     } catch (const std::exception& e) {
         if (why)
             *why = e.what();

@@ -294,7 +294,7 @@ class Exporter:
         path = asset.get_path_name()
         if path in self.declarations:
             return self.declarations[path]
-        found = {"declarations": {}, "inputs": {}}
+        found = {"declarations": {}, "inputs": {}, "function_outputs": {}}
         file = os.path.join(self.out, ".asset.t3d")
         task = unreal.AssetExportTask()
         task.object = asset
@@ -317,6 +317,10 @@ class Exporter:
                         continue
                     if not current:
                         continue
+                    # A function call's outputs, in the order an input's OutputIndex counts them.
+                    f = re.search(r'^\s*FunctionOutputs\((\d+)\)=.*?OutputName="([^"]*)"', line)
+                    if f:
+                        found["function_outputs"].setdefault(current, {})[int(f.group(1))] = f.group(2)
                     d = re.search(r"^\s*Declaration=\S*'[^']*:([A-Za-z0-9_]+)'", line)
                     if d:
                         found["declarations"][current] = d.group(1)
@@ -359,7 +363,12 @@ class Exporter:
                                 break
         # Every input's channels by its mask (renamed channels, "UV scale_H", are R, G, B or A to the import), and
         # its output's index: the k-th input from a source is the k-th the T3D lists from it.
-        t3d = self.t3d(asset)["inputs"]
+        found = self.t3d(asset)
+        t3d = found["inputs"]
+        # A function call's outputs by index (the pin's name the editor gives is not always the output's).
+        for k, outputs in found.get("function_outputs", {}).items():
+            if k in nodes and outputs:
+                nodes[k]["props"]["function_outputs"] = [outputs.get(i, "") for i in range(max(outputs) + 1)]
         for k, n in nodes.items():
             listed = t3d.get(k, [])
             if not listed or not n["inputs"]:
@@ -445,6 +454,10 @@ class Exporter:
                 pass
         doc.update({"blend_mode": enum_name(blend), "shading_model": enum_name(model), "two_sided": bool(two_sided),
                     "opacity_mask_clip_value": float(clip)})
+        try:  # its Normal in tangent space (the default), else in the world's
+            doc["tangent_space_normal"] = bool(base.get_editor_property("tangent_space_normal"))
+        except Exception:
+            pass
         # The parameters' values as this asset has them (an instance's own, else its parents', else the defaults).
         params = {"scalar": {}, "vector": {}, "texture": {}}
         instance = isinstance(asset, unreal.MaterialInstance)

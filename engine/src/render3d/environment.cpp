@@ -132,7 +132,25 @@ bool surface_has_alpha(std::string_view surface) {
     return surface.find("kin_surface_alpha") != std::string_view::npos;
 }
 
+bool surface_has_offset(std::string_view surface) {
+    return surface.find("vec3 kin_surface_offset() {") != std::string_view::npos;
+}
+
 std::string surface_shader_source(std::string_view surface, SurfaceVariant3D variant) {
+    if (u32(variant) >= surface_vertex_variant3d && variant != SurfaceVariant3D::Count) {
+        // A vertex variant: the offset's prelude, the surface's offset, then the stock vertex shader's body.
+        static constexpr const char* bodies[] = {"kin_mesh_vertex.inc.glsl",    "kin_mesh_vertex.inc.glsl",
+                                                 "kin_mesh_vertex.inc.glsl",    "kin_prepass_vertex.inc.glsl",
+                                                 "kin_prepass_vertex.inc.glsl", "kin_prepass_velocity_vertex.inc.glsl",
+                                                 "kin_shadow_vertex.inc.glsl",  "kin_shadow_vertex.inc.glsl"};
+        std::string source = "#version 450 core\n#define KIN_SURFACE_VERTEX\n#include \"kin_surface_vertex.inc.glsl\"\n"
+                             "#line 1\n";
+        source += surface;
+        if (!surface.empty() && surface.back() != '\n')
+            source += '\n';
+        source += std::string("#include \"") + bodies[u32(variant) - surface_vertex_variant3d] + "\"\n";
+        return source;
+    }
     if (u32(variant) >= surface_mask_variant3d && variant != SurfaceVariant3D::Count) {
         // A cut-out pass's shader: its body (inputs, the cut-out's resources, main), then the surface's alpha.
         static constexpr const char* bodies[] = {"kin_shadow_mask.inc.glsl", "kin_pick_mask.inc.glsl",
@@ -194,7 +212,19 @@ std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant) {
         return std::span<const char* const>{materials}.first(4);
     case SurfaceVariant3D::MaterialLightsFog:
         return materials;
-    default: // the cut-outs' (their wrapper defines what they need)
+    case SurfaceVariant3D::VertexMeshVelocity:
+    case SurfaceVariant3D::VertexPrepassVelocity: // (the pre-pass's body is its own; the define does no harm)
+        return moving.first(1);
+    case SurfaceVariant3D::VertexMeshIndexed:
+    case SurfaceVariant3D::VertexPrepassIndexed: {
+        static constexpr std::array<const char*, 1> indexed{"KIN_INDEXED"};
+        return indexed;
+    }
+    case SurfaceVariant3D::VertexShadowMask: {
+        static constexpr std::array<const char*, 1> shadow_mask{"KIN_SHADOW_MASK"};
+        return shadow_mask;
+    }
+    default: // the cut-outs' (their wrapper defines what they need), the plain vertex variants'
         break;
     case SurfaceVariant3D::Count:
         break;
@@ -253,24 +283,25 @@ SurfaceShader3D Renderer3D::compile_surface_text_operation(const std::string& su
         static std::atomic<u32> counter{0};
         const std::string stem =
             "kin-surface-" + std::to_string(reinterpret_cast<std::uintptr_t>(this)) + "-" + std::to_string(counter++);
-        const bool alpha = surface_has_alpha(surface);
+        const bool alpha = surface_has_alpha(surface), offset = surface_has_offset(surface);
         std::array<std::vector<u8>, surface_variant_count3d> compiled;
         std::vector<std::filesystem::path> files;
         bool ok = true;
         for (u32 i = 0; i < surface_variant_count3d && ok; ++i) { // (all of them, the merged draws' too)
-            const bool mask = i >= surface_mask_variant3d;
-            if (mask && !alpha)
+            const bool vertex = i >= surface_vertex_variant3d, mask = i >= surface_mask_variant3d && !vertex;
+            if ((mask && !alpha) || (vertex && !offset))
                 continue;
             const auto file = std::filesystem::temp_directory_path() /
-                              (stem + (mask ? "-" + std::to_string(i) : std::string()) + ".frag.glsl");
+                              (stem + (mask || vertex ? "-" + std::to_string(i) : std::string()) +
+                               (vertex ? ".vert.glsl" : ".frag.glsl"));
             if (std::ranges::find(files, file) == files.end()) {
                 std::ofstream out(file, std::ios::binary);
                 out << surface_shader_source(surface, SurfaceVariant3D(i));
                 files.push_back(file);
             }
             // Optimised, as cooked graphs are: what development sees is what a game ships.
-            auto spirv =
-                compile_glsl(file, ShaderStage::Fragment, &why, surface_variant_defines(SurfaceVariant3D(i)), true);
+            auto spirv = compile_glsl(file, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, &why,
+                                      surface_variant_defines(SurfaceVariant3D(i)), true);
             ok = spirv.has_value();
             if (ok)
                 compiled[i] = std::move(*spirv);

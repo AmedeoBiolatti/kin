@@ -37,7 +37,8 @@ namespace kin {
 enum class GraphType3D : u8 { Float = 1, Vec2, Vec3, Vec4, Texture };
 
 // A parameter: a value in Material3D::shader_params (`offset` floats in, `size` of them), or a texture bound in one of
-// the material's map slots (Material3D::texture, metallic_roughness, normal, occlusion, emissive_texture).
+// the material's map slots (Material3D::texture, metallic_roughness, normal, occlusion, emissive_texture), or in a
+// layer of its graph maps (Material3D::graph_maps: slot "layers", `layer`; `slot` is then MaterialMap3D::Count).
 struct MaterialGraphParameter3D {
     std::string name;
     GraphType3D type = GraphType3D::Float;
@@ -46,6 +47,8 @@ struct MaterialGraphParameter3D {
     MaterialMap3D slot = MaterialMap3D::BaseColor;
     bool srgb = true;  // a texture's colour space
     bool data = false; // a texture that isn't the slot's own map (kin's stock reading of the slot is undone)
+    u32 layer = ~0u;   // a texture in the graph maps: its layer (else ~0u)
+    bool layered() const { return layer != ~0u; }
 };
 
 struct MaterialGraphError3D {
@@ -63,6 +66,10 @@ struct CompiledMaterialGraph3D {
     std::vector<MaterialGraphError3D> warnings;
     // Its alpha, in the shadow, occluder, pick, pre- and visibility passes too (kin_surface_alpha in `surface`).
     bool cutout = false;
+    // Its `offset` output (World Position Offset: a vector added to each vertex's world position, in metres) compiled
+    // for the vertex variants too (`vec3 kin_surface_offset()` under KIN_SURFACE_VERTEX in `surface`); false with none,
+    // or one a vertex can't compute (then a warning, naming the node).
+    bool offset = false;
     bool ok() const { return errors.empty(); }
 };
 

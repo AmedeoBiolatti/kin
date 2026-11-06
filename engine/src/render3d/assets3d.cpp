@@ -2,6 +2,7 @@
 #include "model_bounds3d.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <kin/assets/content.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/assets/texture_file.hpp>
@@ -87,6 +88,11 @@ struct Assets3D::Data {
         bool nearest, srgb;
         std::weak_ptr<ITextureBackend> texture;
     };
+    struct MapArrayEntry {
+        std::vector<std::filesystem::path> paths;
+        std::weak_ptr<ITextureBackend> texture;
+    };
+    std::list<MapArrayEntry> map_arrays;
     struct MaterialEntry {
         std::filesystem::path path;
         std::string variant;
@@ -119,6 +125,10 @@ Assets3D::Assets3D(Renderer3D& renderer, std::filesystem::path root, Limits limi
     _data->limits = limits;
 }
 Assets3D::~Assets3D() = default;
+
+Renderer3D& Assets3D::renderer() const {
+    return *_data->renderer;
+}
 
 const std::filesystem::path& Assets3D::root() const {
     return _data->root;
@@ -196,6 +206,84 @@ AssetHandle<Model3D> Assets3D::load_model_operation(const std::filesystem::path&
         fail3d(_data->errors, "Assets3D::load_model(" + path.string() + ")", why.empty() ? "model load failed" : why);
     return result;
 }
+namespace {
+// `image` resampled (bilinearly, as a pixel's centre falls) to `size`.
+Image resampled(const Image& image, Vec2i size) {
+    if (image.size == size)
+        return image;
+    Image out{size, std::vector<u8>(size_t(size.x) * size_t(size.y) * 4)};
+    const auto at = [&](i32 x, i32 y, int c) {
+        x = std::clamp(x, 0, image.size.x - 1);
+        y = std::clamp(y, 0, image.size.y - 1);
+        return f32(image.rgba[(size_t(y) * size_t(image.size.x) + size_t(x)) * 4 + size_t(c)]);
+    };
+    for (i32 y = 0; y < size.y; ++y)
+        for (i32 x = 0; x < size.x; ++x) {
+            const f32 u = (f32(x) + 0.5f) * f32(image.size.x) / f32(size.x) - 0.5f;
+            const f32 v = (f32(y) + 0.5f) * f32(image.size.y) / f32(size.y) - 0.5f;
+            const i32 x0 = i32(std::floor(u)), y0 = i32(std::floor(v));
+            const f32 fx = u - f32(x0), fy = v - f32(y0);
+            for (int c = 0; c < 4; ++c) {
+                const f32 top = at(x0, y0, c) * (1 - fx) + at(x0 + 1, y0, c) * fx;
+                const f32 bottom = at(x0, y0 + 1, c) * (1 - fx) + at(x0 + 1, y0 + 1, c) * fx;
+                out.rgba[(size_t(y) * size_t(size.x) + size_t(x)) * 4 + size_t(c)] =
+                    u8(std::clamp(top * (1 - fy) + bottom * fy + 0.5f, 0.0f, 255.0f));
+            }
+        }
+    return out;
+}
+} // namespace
+
+Result3D<Texture> Assets3D::load_map_array(std::span<const std::filesystem::path> maps) {
+    auto& d = *_data;
+    const auto fail = [&](const std::string& why) {
+        fail3d(d.errors, "Assets3D::load_map_array", why);
+        return Result3D<Texture>{std::nullopt, d.errors};
+    };
+    d.errors.clear();
+    if (maps.empty() || maps.size() > max_graph_map_layers3d)
+        return fail("1 to " + std::to_string(max_graph_map_layers3d) + " maps");
+    std::vector<std::filesystem::path> paths;
+    for (const auto& m : maps)
+        paths.push_back(m.empty() ? m : (d.root / m).lexically_normal());
+    for (auto it = d.map_arrays.begin(); it != d.map_arrays.end();) {
+        auto texture = it->texture.lock();
+        if (!texture) {
+            it = d.map_arrays.erase(it);
+            continue;
+        }
+        if (it->paths == paths)
+            return {Texture{std::move(texture)}, {}};
+        ++it;
+    }
+    std::vector<Image> images;
+    Vec2i size{1, 1};
+    for (const auto& path : paths) {
+        if (path.empty()) {
+            images.push_back(Image{{1, 1}, {255, 255, 255, 255}});
+            continue;
+        }
+        const auto bytes = read_content_file(path);
+        Image image =
+            bytes ? decode_image({reinterpret_cast<const u8*>(bytes->data()), bytes->size()}, path.string()) : Image{};
+        if (!image.valid())
+            return fail("cannot read " + path.string());
+        size = {std::max(size.x, image.size.x), std::max(size.y, image.size.y)};
+        images.push_back(std::move(image));
+    }
+    size = {std::min(size.x, 4096), std::min(size.y, 4096)};
+    std::vector<const u8*> layers;
+    for (auto& image : images) {
+        image = resampled(image, size);
+        layers.push_back(image.rgba.data());
+    }
+    Texture texture = d.renderer->create_map_array(size, layers);
+    if (!texture)
+        return fail("the map array cannot be made here (no surface shaders, or too large)");
+    d.map_arrays.push_back({std::move(paths), texture.backend()});
+    return {std::move(texture), {}};
+}
+
 Result3D<Texture> Assets3D::load_texture(const std::filesystem::path& path, bool nearest, bool srgb) {
     auto value = load_texture_operation(path, nearest, srgb);
     return result3d(std::move(value), _data->errors);

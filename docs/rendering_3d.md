@@ -1575,14 +1575,30 @@ shadowed, fogged and GI-lit as kin's own materials are.
   vector; a vector narrows to its first components, or widens with 0 (and 1 for the fourth), as Unreal's do.
 - **Outputs** (`base_color`, `alpha`, `normal` in world space, `metallic`, `roughness`, `occlusion`, `emission`)
   replace the surface's; those not given keep what the material makes. Roughness is kept within [0.045, 1], the
-  normal unit, colours non-negative.
+  normal unit, colours non-negative. `offset` (Unreal's World Position Offset) moves each vertex in the world, in
+  metres: compiled again for the surface's vertex variants (`SurfaceVariant3D::VertexMesh` ...: mesh.vert,
+  mesh_velocity.vert, mesh_indexed.vert, the pre-passes' and the shadows', each with `kin_surface_vertex.inc.glsl`
+  before it), so the main pass, the pre-passes, the sun's and lights' shadows, pick and visibility all place the
+  vertices alike, and the velocity's previous position takes the view's time of the frame before. At a vertex it reads
+  `uv`, `position`, `normal` (the mesh's), `view`, `vertex_color`, `time`, `camera_distance`, the parameters and the
+  maps (their top level: a vertex has no derivatives; no tangent frame, nor the environment); `surface.*`, `screen`,
+  `normal_map`, `tangent_to_world` and `fresnel` it does not have: such an offset is not drawn, warned
+  (`CompiledMaterialGraph3D::offset` false). A surface that moves its vertices is not merged with others, and its
+  shadow caches redraw as its time, parameters or maps change. Not moved: a skinned mesh's vertices, the GI scene's
+  voxels; a mesh is culled by its unmoved bounds.
 - **Parameters** (`float`, `vec2`, `vec3`, `vec4`, `color`: linear RGBA) take `Material3D::shader_params`' 64 floats
   (`surface_param_count3d`; enough for Unreal's master materials: 102 of 107 free Fab materials before unused ones
-  are left out), vec3 and vec4 each a vec4 of their own; `material_graph_params3d(graph, {{"name", value}})` fills them from the
-  defaults and the values given. Textures take one of the material's map slots (`"slot"`: `base`, `metallic_roughness`,
-  `normal`, `occlusion`, `emissive`: the material's `texture`, `metallic_roughness`, ... fields bind them), sampled as
-  sRGB (`base`, `emissive`) or linear, or as `"color_space"` says. A texture that isn't the slot's map
-  (`"role": "data"`: a noise in the occlusion slot) undoes kin's own reading of the slot (the occlusion then 1).
+  are left out), vec3 and vec4 each a vec4 of their own, packed in the first place free in the order declared (a float
+  in a vec3's fourth); `material_graph_params3d(graph, {{"name", value}})` fills them from the defaults and the values
+  given. Textures take one of the material's map slots (`"slot"`: `base`, `metallic_roughness`, `normal`, `occlusion`,
+  `emissive`: the material's `texture`, `metallic_roughness`, ... fields bind them), sampled as sRGB (`base`,
+  `emissive`) or linear, or as `"color_space"` says. A texture that isn't the slot's map (`"role": "data"`: a noise in
+  the occlusion slot) undoes kin's own reading of the slot (the occlusion then 1). Past the five, `"slot": "layers"`
+  with `"layer"` (0 to 15, `max_graph_map_layers3d`): a layer of `Material3D::graph_maps`, one 2D array of the
+  material's further maps (`Renderer3D::create_map_array`; a materials file's params build it with
+  `Assets3D::load_map_array`: each map resampled to the largest size among them), read repeated, filtered and
+  mipmapped, decoded in the shader when sRGB. A layer the material lacks reads white. Not in the cut-out passes: an
+  alpha that reads one cuts by the base map's alpha (warned).
 - **Nodes** (`material_graph_nodes3d()` lists them): `constant`; `add`, `subtract`, `multiply`, `divide`, `min`,
   `max`, `power`, `mod`, `step`, `mix` (Unreal's Lerp), `clamp`, `smoothstep`, `remap`; `abs`, `floor`, `ceil`,
   `fract`, `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `sign`, `negate`, `one_minus`, `saturate`, `normalize`,
@@ -3633,7 +3649,9 @@ imported too, as a [material graph](#material-graphs) beside it: `<graph>.kingra
 parameters, time, vertex colour, position, normals and view, fresnel, panning, lerps, clamps, steps, remaps, splits
 and combines; the headers list them); an output fed by a node kin has no counterpart for keeps its Tier 1 value
 (Unreal, Unity: Godot's ShaderMaterials have none) and is noted, naming the node. A graph that doesn't compile in
-kin, or samples more than the five textures kin's material has slots for, falls back to Tier 1, said.
+kin, or samples more than 21 textures (the five slots and 16 layers), falls back to Tier 1, said. One whose
+parameters fill more than the 64 floats gets their values (the material's) as constants in a graph of its own
+(`<graph>__<material>.kingraph`), said: they are not parameters then.
 
 - Unreal: `unreal_export.py` writes the whole graph, and the graphs of the Material Functions it calls (inlined by
   the import: a function input left unconnected takes its preview value); World Position is centimetres (scaled from
@@ -3641,10 +3659,17 @@ kin, or samples more than the five textures kin's material has slots for, falls 
   position and vector, the reflection vector and the normals); normal maps are DirectX's (flipped); Power clamps its
   base at 0, as Unreal's. A Static Switch takes the material's or instance's value, else its default: an instance
   that changes one gets a graph of its own, named for the switches on and off (`M_Rock__Moss_on.kingraph`). Named
-  Reroutes are followed to their declarations. Read as Unreal computes them: Bump Offset (the UVs moved along the
+  Reroutes are followed to their declarations. A material with Tangent Space Normal off gives its normal in the world
+  (Unreal's axes). A Custom node of one HLSL expression (or `return` one) of its inputs, numbers and common intrinsics
+  (`lerp`, `frac`, `saturate`, `Mod`, `float3`, integer casts as truncation, ...) is read as GLSL, said; anything
+  more (statements, loops, textures, engine globals) is refused. Read as Unreal computes them: Bump Offset (the UVs moved along the
   view in the frame the UVs make), Transform between tangent, world and view space (the view's frame from the
   camera's forward, as if it did not roll), If, a parameter collection's value (its default: a game may change it).
-  Approximated, each said in the notes: local space as world space (Transform, TransformPosition) and the object's
+  World Position Offset is the graph's `offset` (Unreal's axes and centimetres as kin's). A function call's output is
+  taken by its index (the export lists each call's outputs from Unreal's T3D: the editor's pin names are not always
+  the outputs'); an OpenEXR map (HDR, displacements: vertex animation textures) is decoded by the import into 8 bits,
+  each channel fitted to its range, and read back by it in the graph. Approximated, each said in the notes: local or
+  an instance's space as world space (Transform, TransformPosition) and the object's
   position as the origin (kin's graphs do not see the object's transform); Depth Fade as its opacity, Scene Depth as
   10 km (kin's graphs see no scene depth: nothing behind); a cube map as the scene's environment; Landscape Layer
   Coords from the world position; Parallax Occlusion Mapping as its UVs (no parallax); a second UV set as the

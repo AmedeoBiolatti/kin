@@ -325,9 +325,105 @@ void cutouts() {
     if (!cooked)
         std::cerr << why << '\n';
     CHECK(cooked.has_value() && cooked->graph.cutout);
-    for (u32 i = 0; i < surface_variant_count3d; ++i)
+    for (u32 i = 0; i < surface_vertex_variant3d; ++i)
         CHECK(cooked->spirv[i].size() > 20);
     std::cout << "a graph's alpha compiles into the 5 cut-out passes\n";
+}
+
+// Parameters packed in the first place free (a float in a vec3's fourth); textures past the five slots in the graph
+// maps' layers (Material3D::graph_maps): read from the array, kept in the cooked layout, refused twice in a layer or
+// past the last, and not in the cut-out passes (their alpha falls back to the base map's, said). With glslc, every
+// variant compiles.
+void layers_and_packing() {
+    const auto packed = compile_material_graph3d(graph(
+        R"({"name": "a", "type": "vec3", "default": [1, 2, 3]}, {"name": "b", "type": "float", "default": 4},
+           {"name": "c", "type": "float", "default": 5})",
+        "", R"("base_color": "a", "roughness": "b", "metallic": "c")"));
+    CHECK(packed.ok() && packed.parameters[0].offset == 0 && packed.parameters[1].offset == 3 &&
+          packed.parameters[2].offset == 4);
+    CHECK(material_graph_params3d(packed)[3] == 4 && material_graph_params3d(packed)[4] == 5);
+    const std::string params = R"({"name": "albedo", "type": "texture", "slot": "base"},
+           {"name": "moss", "type": "texture", "slot": "layers", "layer": 0, "color_space": "srgb"},
+           {"name": "foam", "type": "texture", "slot": "layers", "layer": 3, "color_space": "linear"})";
+    const std::string nodes = R"({"id": "m", "type": "texture", "texture": "moss"},
+           {"id": "f", "type": "texture", "texture": "foam"},
+           {"id": "t", "type": "triplanar", "texture": "moss"},
+           {"id": "n", "type": "normal_map", "texture": "foam"},
+           {"id": "mix", "type": "mix", "inputs": {"a": "m.rgb", "b": "t.rgb", "t": "f.r"}})";
+    const std::string text = graph(params, nodes, R"("base_color": "mix", "normal": "n")");
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok() && g.parameters.size() == 3 && !g.parameters[0].layered() && g.parameters[1].layer == 0 &&
+          g.parameters[2].layer == 3 && g.parameters[1].slot == MaterialMap3D::Count);
+    CHECK(contains(g.surface, "kin_graph_sample(uGraphMaps, 0.0, kin_uv(), true)") &&
+          contains(g.surface, "kin_graph_sample(uGraphMaps, 3.0, kin_uv(), false)") &&
+          contains(g.surface, "kin_graph_triplanar(uGraphMaps, 0.0, "));
+    std::string why;
+    const auto back = read_material_graph_layout3d(write_material_graph_layout3d(g), &why);
+    CHECK(back && back->parameters[2].layer == 3 && back->parameters[1].layered() && !back->parameters[0].layered());
+    CHECK(!compile_material_graph3d(graph(R"({"name": "a", "type": "texture", "slot": "layers", "layer": 1},
+                                            {"name": "b", "type": "texture", "slot": "layers", "layer": 1})",
+                                          "", ""))
+               .ok());
+    CHECK(!compile_material_graph3d(
+               graph(R"({"name": "a", "type": "texture", "slot": "layers", "layer": 16})", "", ""))
+               .ok());
+    const auto cut = compile_material_graph3d(graph(R"({"name": "mask", "type": "texture", "slot": "layers", "layer": 0})",
+                                                    R"({"id": "m", "type": "texture", "texture": "mask"})",
+                                                    R"("alpha": "m.r")"));
+    CHECK(cut.ok() && !cut.cutout && !cut.warnings.empty() && contains(cut.warnings[0].message, "base map's alpha"));
+    if (!shader_compiler_available())
+        return;
+    const auto cooked = cook_material_graph3d(text, &why);
+    if (!cooked)
+        std::cerr << why << '\n';
+    CHECK(cooked.has_value());
+    for (u32 i = 0; i < surface_mask_variant3d; ++i)
+        CHECK(cooked->spirv[i].size() > 20);
+    std::cout << "a graph's maps past the five slots compile into every variant\n";
+}
+
+// An offset (World Position Offset): a vertex function of what a vertex has (its position, normal, UV, colour, the
+// time, parameters and maps), compiled for the vertex variants; one that reads what a vertex has not (the surface's
+// normal) is not drawn, warned. With glslc, every vertex variant compiles.
+void offsets() {
+    const std::string text = graph(
+        R"({"name": "height", "type": "float", "default": 0.1},
+           {"name": "waves", "type": "texture", "slot": "layers", "layer": 0})",
+        R"({"id": "w", "type": "texture", "texture": "waves", "inputs": {"uv": "uv"}},
+           {"id": "phase", "type": "add", "inputs": {"a": "position.x", "b": "time"}},
+           {"id": "s", "type": "sin", "inputs": {"x": "phase"}},
+           {"id": "lift", "type": "multiply", "inputs": {"a": "s", "b": "height"}},
+           {"id": "up", "type": "multiply", "inputs": {"a": "normal", "b": "lift"}},
+           {"id": "moved", "type": "add", "inputs": {"a": "up", "b": "w.rgb"}})",
+        R"("base_color": [0.2, 0.4, 0.8], "offset": "moved")");
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok() && g.offset && g.warnings.empty());
+    CHECK(contains(g.surface, "#if defined(KIN_SURFACE_VERTEX)") && contains(g.surface, "vec3 kin_surface_offset() {") &&
+          contains(g.surface, "kin_v_time") && contains(g.surface, "kin_graph_sample(uGraphMaps, 0.0, kin_uv(), false)"));
+    const auto inside = g.surface.find("vec3 kin_surface_offset() {");
+    CHECK(g.surface.find("frame.time.x", inside) > g.surface.find("#else", inside)); // (its time is the vertex's)
+    const auto bad = compile_material_graph3d(graph("", R"({"id": "o", "type": "multiply", "inputs": {"a": "surface.normal", "b": 0.1}})",
+                                                    R"("offset": "o")"));
+    CHECK(bad.ok() && !bad.offset && bad.warnings.size() == 1 && contains(bad.warnings[0].message, "offset is not drawn"));
+    const auto none = compile_material_graph3d(graph("", "", R"("roughness": 0.5)"));
+    CHECK(none.ok() && !none.offset && !contains(none.surface, "KIN_SURFACE_VERTEX"));
+    if (!shader_compiler_available())
+        return;
+    std::string why;
+    const auto cooked = cook_material_graph3d(text, &why);
+    if (!cooked)
+        std::cerr << why << '\n';
+    CHECK(cooked.has_value());
+    for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+        CHECK(cooked->spirv[i].size() > 20);
+    const auto plain = cook_material_graph3d(graph("", "", R"("roughness": 0.5)"), &why);
+    CHECK(plain && plain->spirv[surface_vertex_variant3d].empty());
+    std::cout << "a graph's offset compiles into the " << surface_variant_count3d - surface_vertex_variant3d
+              << " vertex variants\n";
 }
 
 } // namespace
@@ -339,6 +435,8 @@ int main() {
     documented_example();
     cooked();
     cutouts();
+    layers_and_packing();
+    offsets();
     std::cout << "material graph tests passed\n";
     return 0;
 }

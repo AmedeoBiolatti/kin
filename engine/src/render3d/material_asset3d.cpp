@@ -11,6 +11,7 @@
 #include <kin/render3d/assets3d.hpp>
 #include <kin/render3d/material_asset3d.hpp>
 #include <kin/render3d/material_graph3d.hpp>
+#include <kin/render3d/renderer3d.hpp>
 #include <limits>
 #include <set>
 #include <sstream>
@@ -651,9 +652,17 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
         require(p.params.empty() || layout || (p.graph && p.graph->empty()), "params without a graph");
         if (layout) {
             std::map<std::string, std::array<f32, 4>> values;
+            std::vector<std::filesystem::path> layers; // the graph maps', by layer (an empty path: white)
             for (const auto& [name, v] : p.params) {
                 const auto param = std::ranges::find(layout->parameters, name, &MaterialGraphParameter3D::name);
                 require(param != layout->parameters.end(), "the graph has no parameter '" + name + "'");
+                if (param->type == GraphType3D::Texture && param->layered()) {
+                    require(v.texture.has_value(), "parameter '" + name + "' is a texture");
+                    if (layers.size() <= param->layer)
+                        layers.resize(param->layer + 1);
+                    layers[param->layer] = v.texture->asset;
+                    continue;
+                }
                 if (param->type == GraphType3D::Texture) {
                     require(v.texture.has_value(), "parameter '" + name + "' is a texture");
                     const u32 slot = u32(param->slot);
@@ -694,6 +703,16 @@ MaterialBinding3D build_materials3d_binding(const MaterialsAsset3D& asset, const
                 }
             }
             material.shader_params = material_graph_params3d(*layout, values);
+            // Its maps past the five slots, as one array (none without 3D: the graph's stand-in draws nothing).
+            material.graph_maps = {};
+            if (!layers.empty() && assets.renderer().available()) {
+                auto maps = assets.load_map_array(layers).value_or({});
+                require(bool(maps), "the graph maps: " + kin::diagnostics3d_text(assets.diagnostics()));
+                for (const auto& layer : layers)
+                    if (!layer.empty())
+                        result.source_files.push_back((assets.root() / layer).lexically_normal());
+                material.graph_maps = std::move(maps);
+            }
         }
         result.materials.push_back(std::move(material));
     }

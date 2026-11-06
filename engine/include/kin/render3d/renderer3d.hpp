@@ -97,6 +97,8 @@ std::string surface_shader_source(std::string_view surface, SurfaceVariant3D var
 // vertex_alpha)` (under KIN_SURFACE_MASK: kin_cutout.inc.glsl), as material graphs whose alpha the cut-out passes can
 // compute do.
 bool surface_has_alpha(std::string_view surface);
+// Whether a surface (its source) moves its vertices: a material graph's offset (kin_surface_offset).
+bool surface_has_offset(std::string_view surface);
 // The defines of a surface shader's variant: NAME or NAME=VALUE.
 std::span<const char* const> surface_variant_defines(SurfaceVariant3D variant);
 
@@ -166,6 +168,10 @@ public:
     Result3D<MaterialGraphShader3D> compile_material_graph(const std::filesystem::path& graph);
     // A cooked graph (unpack_cooked_material_graph3d) made into its surface shader: what a shipped game does.
     Result3D<MaterialGraphShader3D> create_material_graph(const CookedMaterialGraph3D& cooked);
+    // A material graph's maps past its five slots (Material3D::graph_maps): a 2D array, a picture a layer (RGBA8, all
+    // `size`, tightly packed; sRGB ones as they are: the graph decodes them), mipmapped on the GPU. None where surface
+    // shaders aren't supported, or for no layers or a wrong size.
+    Texture create_map_array(Vec2i size, std::span<const u8* const> layers);
     // Shader-specific immutable extra resource bindings. Sampled textures occupy
     // fragment set 2 slots 12..15; read-only storage follows the shader's sampler
     // count. Shapes/types/counts/ownership are validated once here. GPU contents

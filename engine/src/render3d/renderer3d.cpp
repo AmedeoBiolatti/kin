@@ -229,6 +229,12 @@ bool Renderer3D::resize_operation(View3D& view, Vec2i size) {
     return fail3d(_errors, "Renderer3D::resize", "device refused view resize");
 }
 
+Texture Renderer3D::create_map_array(Vec2i size, std::span<const u8* const> layers) {
+    if (!_backend || size.x <= 0 || size.y <= 0 || layers.empty())
+        return {};
+    return _backend->create_map_array(size, layers);
+}
+
 Result3D<MaterialInputs3D> Renderer3D::create_material_inputs(const MaterialShader3D& shader,
                                                               std::span<const Texture> textures,
                                                               std::span<const DataBuffer> buffers) {

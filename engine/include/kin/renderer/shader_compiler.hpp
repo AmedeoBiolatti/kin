@@ -24,7 +24,7 @@ namespace kin {
 
 class Renderer2D;
 
-enum class ShaderStage : u8 { Fragment, Compute };
+enum class ShaderStage : u8 { Fragment, Compute, Vertex };
 
 // Whether glslc can be found (KIN_GLSLC, or the one kin was built with).
 bool shader_compiler_available();

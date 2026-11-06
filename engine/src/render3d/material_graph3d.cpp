@@ -270,8 +270,8 @@ const std::vector<NodeSpec>& specs() {
                      {{"uv", In::Vec2, "\"uv\""}, {"strength", In::Float, "1"}},
                      true,
                      [](Compiler&, const std::vector<Value>& in, Type, const std::string& sampler, bool) {
-                         return make("kin_graph_tangent_to_world(kin_graph_unpack_normal(texture(" + sampler + ", " +
-                                         in[0].expr + "), " + in[1].expr + "), " + in[0].expr +
+                         return make("kin_graph_tangent_to_world(kin_graph_unpack_normal(kin_graph_sample(" + sampler +
+                                         ", " + in[0].expr + ", false), " + in[1].expr + "), " + in[0].expr +
                                          ", kin_graph_geometry_normal())",
                                      Type::Vec3);
                      }});
@@ -403,9 +403,11 @@ bool identifier(const std::string& s) {
 class Compiler {
 public:
     CompiledMaterialGraph3D out;
-    // The cut-out passes' compile (kin_surface_alpha): their inputs only, the alpha output only.
-    explicit Compiler(bool mask = false) : _mask(mask) {}
-    std::string alpha_function; // the mask compile's
+    // The cut-out passes' compile (kin_surface_alpha): their inputs only, the alpha output only. The vertex variants'
+    // (kin_surface_offset, `vertex`): a vertex's inputs only, the offset output only.
+    explicit Compiler(bool mask = false, bool vertex = false) : _mask(mask || vertex), _vertex(vertex) {}
+    std::string alpha_function;  // the mask compile's
+    std::string offset_function; // the vertex compile's
 
     void compile(std::string_view text) {
         const auto parsed = parse_json(text);
@@ -443,6 +445,38 @@ public:
             {"occlusion", {Type::Float, "clamp(%, 0.0, 1.0)"}},
             {"emission", {Type::Vec3, "max(%, vec3(0.0))"}}};
         std::vector<std::string> writes;
+        if (_vertex) { // only the offset, as kin_surface_offset returns it (kin_surface_vertex.inc.glsl)
+            const auto* outputs = g.find("outputs");
+            const auto* ref = outputs ? outputs->find("offset") : nullptr;
+            if (!ref)
+                return;
+            const Value v = value(*ref, "offset");
+            if (v.expr.empty() || !out.ok())
+                return;
+            std::ostringstream fn;
+            fn << "vec3 kin_surface_offset() {\n";
+            for (const auto& line : _prologue)
+                fn << line << '\n';
+            for (const auto& line : _statements)
+                fn << line << '\n';
+            fn << "    return " << cast(v, Type::Vec3) << ";\n}\n";
+            offset_function = fn.str();
+            // (A glsl node's frame values at a vertex are its block's; the time the vertex's, as the velocity's
+            // previous position takes another.)
+            for (const auto& [from, to] : std::initializer_list<std::pair<const char*, const char*>>{
+                     {"frame.time.x", "kin_v_time"},
+                     {"frame.eye", "kin_vs.eye"},
+                     {"frame.cascade_forward", "kin_vs.forward"}})
+                for (size_t at; (at = offset_function.find(from)) != std::string::npos;)
+                    offset_function.replace(at, std::strlen(from), to);
+            for (const char* fragment_only : {"frame.", "vWorld", "vColor", "vUV", "gl_FragCoord", "dFd", "fwidth"})
+                if (offset_function.find(fragment_only) != std::string::npos) {
+                    error("offset", std::string("reads what a vertex does not have (") + fragment_only + ")");
+                    offset_function.clear();
+                    return;
+                }
+            return;
+        }
         if (_mask) { // only the alpha, as kin_surface_alpha returns it
             const auto* outputs = g.find("outputs");
             const auto* ref = outputs ? outputs->find("alpha") : nullptr;
@@ -466,9 +500,12 @@ public:
         }
         if (const auto* outputs = g.find("outputs"); outputs && outputs->is_object()) {
             for (const auto& [name, ref] : outputs->members()) {
+                if (name == "offset")
+                    continue; // (the vertex variants', compiled below)
                 const auto f = fields.find(name);
                 if (f == fields.end()) {
-                    error(name, "not an output (base_color, alpha, normal, metallic, roughness, occlusion, emission)");
+                    error(name, "not an output (base_color, alpha, normal, metallic, roughness, occlusion, emission, "
+                                "offset)");
                     continue;
                 }
                 const Value v = value(ref, name);
@@ -501,11 +538,28 @@ public:
                                                             "material by its base map's alpha"});
             }
         }
+        // The offset, for the vertex variants (World Position Offset): what a vertex has.
+        std::string offset;
+        if (g.find("outputs") && g.find("outputs")->find("offset")) {
+            Compiler vertex(false, true);
+            vertex.compile(text);
+            if (vertex.out.ok() && !vertex.offset_function.empty()) {
+                offset = vertex.offset_function;
+                out.offset = true;
+            } else if (!vertex.out.errors.empty()) {
+                const auto& e = vertex.out.errors.front();
+                out.warnings.push_back({e.node, e.message + ": the offset is not drawn (a vertex cannot compute it)"});
+            }
+        }
         std::ostringstream glsl;
         glsl << "// Generated by kin's material graph compiler (kin.material-graph/1)" << (out.name.empty() ? "" : ": ")
              << out.name << ". Do not edit: edit the graph.\n";
+        if (!offset.empty())
+            glsl << "#if defined(KIN_SURFACE_VERTEX)\n" << offset;
         if (!cutout.empty())
-            glsl << "#ifdef KIN_SURFACE_MASK\n" << cutout << "#else\n";
+            glsl << (offset.empty() ? "#ifdef KIN_SURFACE_MASK\n" : "#elif defined(KIN_SURFACE_MASK)\n") << cutout;
+        if (!offset.empty() || !cutout.empty())
+            glsl << "#else\n";
         glsl << "#include \"kin_graph.inc.glsl\"\n\n"
              << "void kin_surface(inout KinSurface s) {\n";
         for (const auto& line : _prologue)
@@ -515,7 +569,7 @@ public:
         for (const auto& line : writes)
             glsl << line << '\n';
         glsl << "}\n";
-        if (!cutout.empty())
+        if (!offset.empty() || !cutout.empty())
             glsl << "#endif\n";
         out.surface = glsl.str();
     }
@@ -528,6 +582,24 @@ private:
             if (name == b.name)
                 return &b;
         return nullptr;
+    }
+    // A built-in input's value at a vertex (kin_surface_vertex.inc.glsl), or none.
+    static std::optional<Value> vertex_input(const std::string& name) {
+        if (name == "uv")
+            return make("kin_uv()", Type::Vec2);
+        if (name == "position")
+            return make("kin_position()", Type::Vec3);
+        if (name == "normal")
+            return make("kin_graph_geometry_normal()", Type::Vec3);
+        if (name == "view")
+            return make("kin_view()", Type::Vec3);
+        if (name == "vertex_color")
+            return make("kin_v_color", Type::Vec4);
+        if (name == "time")
+            return make("kin_v_time", Type::Float);
+        if (name == "camera_distance")
+            return make("length(kin_vs.eye.xyz - kin_v_world)", Type::Float);
+        return std::nullopt;
     }
     // A built-in input's value in the cut-out passes (kin_surface_alpha's arguments and the cut-out block), or none.
     static std::optional<Value> mask_input(const std::string& name) {
@@ -549,7 +621,7 @@ private:
             error("", "'parameters' must be an array");
             return;
         }
-        u32 used = 0; // floats of shader_params taken
+        std::array<bool, surface_param_count3d> taken{}; // the floats of shader_params taken
         std::array<bool, 5> slots{};
         for (const auto& p : list->items()) {
             MaterialGraphParameter3D param;
@@ -572,18 +644,31 @@ private:
                     {"emissive", MaterialMap3D::Emissive}};
                 const std::string slot = p.find("slot") ? p.find("slot")->as_string() : "";
                 const auto it = slot_names.find(slot);
-                if (it == slot_names.end()) {
+                if (slot == "layers") { // a layer of the graph maps (Material3D::graph_maps)
+                    const i64 layer = p.find("layer") ? p.find("layer")->as_int(-1) : -1;
+                    if (layer < 0 || layer >= i64(max_graph_map_layers3d)) {
+                        error(param.name, "a texture in the layers needs 'layer': 0 to " +
+                                              std::to_string(max_graph_map_layers3d - 1));
+                        continue;
+                    }
+                    if (std::ranges::any_of(out.parameters, [&](const auto& q) { return q.layer == u32(layer); })) {
+                        error(param.name, "two textures in layer " + std::to_string(layer));
+                        continue;
+                    }
+                    param.layer = u32(layer);
+                    param.slot = MaterialMap3D::Count;
+                } else if (it == slot_names.end()) {
                     error(param.name,
-                          "a texture needs a slot: base, metallic_roughness, normal, occlusion or emissive");
+                          "a texture needs a slot: base, metallic_roughness, normal, occlusion, emissive or layers");
                     continue;
-                }
-                if (slots[u32(it->second)]) {
+                } else if (slots[u32(it->second)]) {
                     error(param.name, "two textures in the " + slot + " slot");
                     continue;
+                } else {
+                    slots[u32(it->second)] = true;
+                    param.slot = it->second;
                 }
-                slots[u32(it->second)] = true;
                 param.type = Type::Texture;
-                param.slot = it->second;
                 param.size = 0;
                 const std::string space = p.find("color_space")                    ? p.find("color_space")->as_string()
                                           : (slot == "base" || slot == "emissive") ? "srgb"
@@ -626,16 +711,25 @@ private:
                 }
                 param.type = t->second.first;
                 param.size = t->second.second;
-                // vec3 and vec4 start a vec4 of their own, vec2 an even float: each read in one access.
+                // vec3 and vec4 start a vec4 of their own, vec2 an even float: each read in one access. The first
+                // place free so (a float in a vec3's fourth, or after a lone float), in the order they are declared.
                 const u32 align = param.size >= 3 ? 4 : param.size;
-                used = (used + align - 1) / align * align;
-                if (used + param.size > surface_param_count3d) {
+                u32 at = surface_param_count3d;
+                for (u32 o = 0; o + param.size <= surface_param_count3d && at == surface_param_count3d; o += align) {
+                    bool free = true;
+                    for (u32 k = o; k < o + param.size; ++k)
+                        free = free && !taken[k];
+                    if (free)
+                        at = o;
+                }
+                if (at == surface_param_count3d) {
                     error(param.name, "the parameters fill more than Material3D::shader_params' " +
                                           std::to_string(surface_param_count3d) + " floats");
                     continue;
                 }
-                param.offset = used;
-                used += param.size;
+                param.offset = at;
+                for (u32 k = at; k < at + param.size; ++k)
+                    taken[k] = true;
                 if (const auto* d = p.find("default")) {
                     if (d->is_number())
                         param.value[0] = f32(d->as_number());
@@ -679,6 +773,10 @@ private:
         const std::string base = text.substr(0, dot), member = dot == std::string::npos ? "" : text.substr(dot + 1);
         Value v;
         if (base == "surface") {
+            if (_vertex) {
+                error(who, "surface." + member + " is not at a vertex");
+                return {};
+            }
             if (_mask) {
                 if (member == "alpha")
                     return make("(vertex_alpha * texture(uBase, uv).a)", Type::Float);
@@ -691,7 +789,14 @@ private:
             error(who, "surface has no field '" + member + "'");
             return {};
         } else if (const auto* b = built_in(base)) {
-            if (_mask) {
+            if (_vertex) {
+                const auto m = vertex_input(base);
+                if (!m) {
+                    error(who, "'" + base + "' is not at a vertex");
+                    return {};
+                }
+                v = *m;
+            } else if (_mask) {
                 const auto m = mask_input(base);
                 if (!m) {
                     error(who, "'" + base + "' is not in the cut-out passes");
@@ -743,8 +848,14 @@ private:
         const JsonValue& n = *_nodes.at(id);
         const std::string type = n.find("type") ? n.find("type")->as_string() : "";
         Value result;
-        if (_mask && (type == "normal_map" || type == "tangent_to_world" || type == "triplanar" || type == "fresnel" ||
-                      type == "glsl" || type == "unpack_normal")) {
+        if (_vertex && (type == "normal_map" || type == "tangent_to_world" || type == "fresnel")) {
+            error(id, "a " + type + " node is not at a vertex");
+            _visiting.erase(id);
+            return {};
+        }
+        if (_mask && !_vertex &&
+            (type == "normal_map" || type == "tangent_to_world" || type == "triplanar" || type == "fresnel" ||
+             type == "glsl" || type == "unpack_normal")) {
             error(id, "a " + type + " node is not in the cut-out passes");
             _visiting.erase(id);
             return {};
@@ -853,7 +964,15 @@ private:
             }
             const auto& param = out.parameters[p->second];
             static const char* samplers[] = {"uBase", "uMetalRough", "uNormalMap", "uOcclusion", "uEmissive"};
-            sampler = samplers[u32(param.slot)];
+            if (param.layered()) { // (kin_graph.inc.glsl's overloads take the array and the layer)
+                if (_mask && !_vertex) {
+                    error(id, "a texture in the graph maps' layers is not in the cut-out passes");
+                    return {};
+                }
+                sampler = "uGraphMaps, " + std::to_string(param.layer) + ".0";
+            } else {
+                sampler = samplers[u32(param.slot)];
+            }
             srgb = param.srgb;
         }
         Value made = sp.emit(*this, in, widest, sampler, srgb);
@@ -895,7 +1014,8 @@ private:
         return make(temp, types.at(result));
     }
 
-    bool _mask = false;
+    bool _mask = false;   // the cut-outs' compile, or the vertex's (both: no surface, a restricted set of inputs)
+    bool _vertex = false; // the vertex's
     std::map<std::string, const JsonValue*> _nodes;
     std::map<std::string, size_t> _params;
     std::map<std::string, Value> _values;
@@ -970,7 +1090,11 @@ std::string write_material_graph_layout3d(const CompiledMaterialGraph3D& graph) 
     for (const auto& p : graph.parameters) {
         json.begin_object().field("name", p.name).field("type", type_name(p.type));
         if (p.type == GraphType3D::Texture) {
-            json.field("slot", slot_names[u32(p.slot)]).field("srgb", p.srgb).field("data", p.data);
+            if (p.layered())
+                json.field("slot", "layers").field("layer", p.layer);
+            else
+                json.field("slot", slot_names[u32(p.slot)]);
+            json.field("srgb", p.srgb).field("data", p.data);
         } else {
             json.field("offset", p.offset).field("size", p.size);
             json.key("value").begin_array();
@@ -1013,9 +1137,16 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
         if (p.type == GraphType3D::Texture) {
             const std::string slot = item.find("slot") ? item.find("slot")->as_string() : "";
             const auto* at = std::find(std::begin(slot_names), std::end(slot_names), slot);
-            if (at == std::end(slot_names))
+            if (slot == "layers") {
+                const i64 layer = item.int_at("layer", -1);
+                if (layer < 0 || layer >= i64(max_graph_map_layers3d))
+                    return fail("a texture in the layers without its layer");
+                p.layer = u32(layer);
+                p.slot = MaterialMap3D::Count;
+            } else if (at == std::end(slot_names))
                 return fail("a texture of unknown slot");
-            p.slot = MaterialMap3D(at - std::begin(slot_names));
+            else
+                p.slot = MaterialMap3D(at - std::begin(slot_names));
             p.srgb = item.bool_at("srgb", true);
             p.data = item.bool_at("data", false);
             p.size = 0;
@@ -1169,16 +1300,18 @@ std::optional<CookedMaterialGraph3D> cook_material_graph3d(std::string_view text
     std::string w;
     bool ok = true;
     for (u32 i = 0; i < surface_variant_count3d && ok; ++i) {
-        // The cut-outs' variants only for a graph whose alpha they can compute.
-        if (i >= surface_mask_variant3d && !cooked.graph.cutout)
+        // The cut-outs' variants only for a graph whose alpha they can compute; the vertex ones for one with an offset.
+        const bool vertex = i >= surface_vertex_variant3d;
+        if ((i >= surface_mask_variant3d && !vertex && !cooked.graph.cutout) || (vertex && !cooked.graph.offset))
             continue;
-        const std::filesystem::path file =
-            std::filesystem::temp_directory_path() / (stem + "-" + std::to_string(i) + ".frag.glsl");
+        const std::filesystem::path file = std::filesystem::temp_directory_path() /
+                                           (stem + "-" + std::to_string(i) + (vertex ? ".vert.glsl" : ".frag.glsl"));
         {
             std::ofstream out(file, std::ios::binary);
             out << surface_shader_source(cooked.graph.surface, SurfaceVariant3D(i));
         }
-        auto spirv = compile_glsl(file, ShaderStage::Fragment, &w, surface_variant_defines(SurfaceVariant3D(i)), true);
+        auto spirv = compile_glsl(file, vertex ? ShaderStage::Vertex : ShaderStage::Fragment, &w,
+                                  surface_variant_defines(SurfaceVariant3D(i)), true);
         std::error_code ignored;
         std::filesystem::remove(file, ignored);
         ok = spirv.has_value();

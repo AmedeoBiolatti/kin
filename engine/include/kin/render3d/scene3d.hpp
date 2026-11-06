@@ -119,9 +119,22 @@ enum class SurfaceVariant3D : u8 {
     PrepassMask,
     PrepassVelocityMask,
     VisibilityMask,
+    // A surface's vertex variants, for one with an offset (World Position Offset: kin_surface_offset), all optional:
+    // mesh.vert, mesh_velocity.vert, mesh_indexed.vert, prepass.vert, prepass_indexed.vert, prepass_velocity.vert,
+    // shadow.vert and shadow_mask.vert's (kin_surface_vertex.inc.glsl before each). Without them the surface's vertices
+    // are not moved.
+    VertexMesh,
+    VertexMeshVelocity,
+    VertexMeshIndexed,
+    VertexPrepass,
+    VertexPrepassIndexed,
+    VertexPrepassVelocity,
+    VertexShadow,
+    VertexShadowMask,
     Count
 };
-inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask);
+inline constexpr u32 surface_required_variants3d = 8, surface_mask_variant3d = u32(SurfaceVariant3D::ShadowMask),
+                     surface_vertex_variant3d = u32(SurfaceVariant3D::VertexMesh);
 inline constexpr u32 surface_variant_count3d = u32(SurfaceVariant3D::Count);
 
 // The backend's copy of a surface shader (Renderer3D::create_surface_shader).
@@ -182,6 +195,8 @@ private:
 // Material3D::shader_params' floats: a custom `shader` reads the first 16 (four vec4s), a `surface` all of them
 // (kin_surface_param(0..15): a material graph's parameters).
 inline constexpr u32 surface_param_count3d = 64;
+// The most layers of a material's graph maps (Material3D::graph_maps).
+inline constexpr u32 max_graph_map_layers3d = 16;
 
 struct Material3D {
     Color color = colors::white; // times the mesh's vertex colours and each instance's tint
@@ -248,6 +263,9 @@ struct Material3D {
     // above. A `shader` takes its place. The shadow, pick and pre-passes still cut a Blend3D::Mask out by the base
     // colour's alpha, not the surface's.
     SurfaceShader3D surface{};
+    // A surface's maps past the five above (a material graph's, past its five slots): a 2D array, a map a layer
+    // (Renderer3D::create_map_array), read repeated, filtered and mipmapped. None: a white layer.
+    Texture graph_maps{};
     // Where every map is read: the mesh's UV times `uv_scale`, plus `uv_offset` (tiling, as Godot's uv1_scale and
     // Unity's tiling and offset). A transform the model's glTF gives (KHR_texture_transform) is in its UVs already.
     Vec2f uv_scale{1.0f, 1.0f};

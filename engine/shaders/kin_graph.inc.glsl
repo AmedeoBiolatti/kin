@@ -10,6 +10,16 @@ vec4 kin_graph_sample(sampler2D map, vec2 uv, bool srgb) {
     return t;
 }
 
+// A map of Material3D::graph_maps (the array, its layer `layer`): sRGB decoded when `srgb` (the array holds its texels
+// as stored, whatever the pipeline).
+vec4 kin_graph_sample(sampler2DArray maps, float layer, vec2 uv, bool srgb) {
+    vec4 t = texture(maps, vec3(uv, layer));
+    if (srgb) {
+        t.rgb = decode(t.rgb);
+    }
+    return t;
+}
+
 // The surface's normal before any map: the mesh's, on the viewer's side (a face's own where the mesh has none).
 vec3 kin_graph_geometry_normal() {
     const vec3 dp1 = dFdx(vWorld), dp2 = dFdy(vWorld);
@@ -107,6 +117,29 @@ vec4 kin_graph_triplanar(sampler2D map, vec3 p, vec3 n, float scale, float sharp
     w /= max(w.x + w.y + w.z, 1e-6);
     return kin_graph_sample(map, p.zy * scale, srgb) * w.x + kin_graph_sample(map, p.xz * scale, srgb) * w.y +
            kin_graph_sample(map, p.xy * scale, srgb) * w.z;
+}
+
+// The same of a layer of the graph maps.
+vec4 kin_graph_triplanar(sampler2DArray maps, float layer, vec3 p, vec3 n, float scale, float sharpness, bool srgb) {
+    vec3 w = pow(abs(n), vec3(max(sharpness, 1.0)));
+    w /= max(w.x + w.y + w.z, 1e-6);
+    return kin_graph_sample(maps, layer, p.zy * scale, srgb) * w.x +
+           kin_graph_sample(maps, layer, p.xz * scale, srgb) * w.y +
+           kin_graph_sample(maps, layer, p.xy * scale, srgb) * w.z;
+}
+
+// HLSL's saturate (imported Custom nodes).
+float kin_graph_saturate(float x) {
+    return clamp(x, 0.0, 1.0);
+}
+vec2 kin_graph_saturate(vec2 x) {
+    return clamp(x, 0.0, 1.0);
+}
+vec3 kin_graph_saturate(vec3 x) {
+    return clamp(x, 0.0, 1.0);
+}
+vec4 kin_graph_saturate(vec4 x) {
+    return clamp(x, 0.0, 1.0);
 }
 
 #include "kin_graph_noise.inc.glsl"

@@ -1,3 +1,5 @@
+#ifndef KIN_GRAPH_NOISE_INC
+#define KIN_GRAPH_NOISE_INC
 // Material graphs' procedural nodes (kin_graph.inc.glsl, kin_cutout.inc.glsl): pure functions, no resources.
 
 // --- Noise: deterministic, hash-based (the same picture on every GPU) ---
@@ -80,3 +82,4 @@ float kin_graph_checker(vec2 uv, float scale) {
     const ivec2 c = ivec2(floor(uv * scale));
     return float((c.x + c.y) & 1);
 }
+#endif

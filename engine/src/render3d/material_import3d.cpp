@@ -1263,8 +1263,8 @@ Result3D<ImportedMaterial3D> import_godot_graph(const std::filesystem::path& sou
             return *std::ranges::find(g.textures, q.name, &VisualShaderGraph::Texture::param);
         };
         if (!b.assign_slots([&](const GraphBuilder::Param& q) { return texture(q).normal; }))
-            throw std::runtime_error("its visual shader samples more than five textures (kin's material has five map "
-                                     "slots)");
+            throw std::runtime_error("its visual shader samples more than 21 textures (kin's five map slots and 16 "
+                                     "layers)");
         for (auto& q : b.params)
             if (q.type == "texture")
                 q.srgb = texture(q).srgb;

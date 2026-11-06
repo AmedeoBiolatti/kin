@@ -13,8 +13,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <kin/assets/image.hpp>
 #include <kin/render3d/material_asset3d.hpp>
@@ -364,6 +366,89 @@ void unity_materials() {
 
 // TIFF (made by PIL: LZW with the horizontal predictor, Deflate, PackBits, uncompressed, 16-bit grey) and PSD (made
 // here) as 8-bit RGBA.
+extern "C" {
+unsigned char* kin_zlib_deflate(const unsigned char* bytes, int size, int* out_size);
+void kin_deflate_free(void* bytes);
+}
+
+namespace {
+// An OpenEXR file (scanlines, HALF channels B, G, R) of `value(x, y, channel)`: uncompressed, or ZIP (16 lines a
+// block: the bytes split in halves, the byte predictor, zlib).
+std::vector<u8> exr_file(int w, int h, bool zip, const std::function<float(int, int, int)>& value) {
+    std::vector<u8> out;
+    const auto put = [&](const void* p, size_t n) {
+        out.insert(out.end(), static_cast<const u8*>(p), static_cast<const u8*>(p) + n);
+    };
+    const auto i32v = [&](i32 v) { put(&v, 4); };
+    const auto text = [&](const std::string& t) { put(t.c_str(), t.size() + 1); };
+    const auto half = [](float f) { // (exact for the test's values)
+        u32 b;
+        std::memcpy(&b, &f, 4);
+        const u32 sign = (b >> 16) & 0x8000u;
+        const i32 e = i32((b >> 23) & 255) - 127 + 15;
+        if ((b & 0x7fffffffu) == 0)
+            return u16(sign);
+        return u16(sign | u32(e) << 10 | ((b >> 13) & 1023));
+    };
+    i32v(20000630);
+    i32v(2);
+    text("channels");
+    text("chlist");
+    i32v(3 * 18 + 1);
+    for (const char* c : {"B", "G", "R"}) {
+        text(c);
+        i32v(1); // HALF
+        const u8 linear[4] = {0, 0, 0, 0};
+        put(linear, 4);
+        i32v(1);
+        i32v(1);
+    }
+    out.push_back(0);
+    text("compression");
+    text("compression");
+    i32v(1);
+    out.push_back(zip ? 3 : 0);
+    text("dataWindow");
+    text("box2i");
+    i32v(16);
+    for (const i32 v : {0, 0, w - 1, h - 1})
+        i32v(v);
+    out.push_back(0);
+    const int lines = zip ? 16 : 1, blocks = (h + lines - 1) / lines;
+    const size_t table = out.size();
+    out.resize(out.size() + 8 * size_t(blocks));
+    for (int k = 0; k < blocks; ++k) {
+        const u64 at = out.size();
+        std::memcpy(out.data() + table + 8 * size_t(k), &at, 8);
+        std::vector<u8> raw;
+        for (int y = k * lines; y < std::min(h, (k + 1) * lines); ++y)
+            for (int c = 0; c < 3; ++c) // B, G, R: channel 2, 1, 0
+                for (int x = 0; x < w; ++x) {
+                    const u16 v = half(value(x, y, 2 - c));
+                    raw.push_back(u8(v & 255));
+                    raw.push_back(u8(v >> 8));
+                }
+        std::vector<u8> data = raw;
+        if (zip) {
+            std::vector<u8> split(raw.size());
+            const size_t first = (raw.size() + 1) / 2;
+            for (size_t i = 0; i < raw.size(); ++i)
+                (i % 2 == 0 ? split[i / 2] : split[first + i / 2]) = raw[i];
+            for (size_t i = split.size() - 1; i > 0; --i)
+                split[i] = u8(split[i] - split[i - 1] + 128);
+            int size = 0;
+            unsigned char* z = kin_zlib_deflate(split.data(), int(split.size()), &size);
+            data.assign(z, z + size);
+            kin_deflate_free(z);
+        }
+        i32v(k * lines);
+        i32v(i32(data.size()));
+        put(data.data(), data.size());
+    }
+    return out;
+}
+} // namespace
+
 void pictures() {
     const fs::path dir = KIN_TEST_IMAGES;
     for (const char* name : {"rgba_lzw_predictor.tif", "rgba_deflate.tif", "rgba_packbits.tif", "rgb_raw.tif"}) {
@@ -383,6 +468,27 @@ void pictures() {
                 const u8* p = &image->rgba[(y * 5 + x) * 4];
                 CHECK(p[0] == x * 50 && p[1] == y * 100 && p[2] == 255 - x * 40 &&
                       p[3] == (alpha ? 128 + y * 40 : 255));
+            }
+    }
+    // OpenEXR: half floats, uncompressed or ZIP; channels past 0 to 1 fitted into 8 bits, their range said.
+    for (const bool zip : {false, true}) {
+        const auto value = [](int x, int y, int c) { return c == 0 ? float(x) - 2.0f : c == 1 ? 0.25f * float(y) : 0.5f; };
+        const auto bytes = exr_file(5, 20, zip, value);
+        std::string why;
+        material_import::ImageRange range;
+        const auto image = material_import::decode_extra_image(bytes, &why, &range);
+        if (!image)
+            std::cerr << "exr: " << why << '\n';
+        CHECK(image && image->size == (Vec2i{5, 20}));
+        CHECK(range.bias[0] == -2.0f && range.scale[0] == 4.0f && range.bias[1] == 0.0f && range.scale[1] == 4.75f &&
+              range.bias[2] == 0.0f && range.scale[2] == 1.0f && range.scale[3] == 1.0f);
+        for (int y = 0; y < 20; ++y)
+            for (int x = 0; x < 5; ++x) {
+                const u8* p = &image->rgba[size_t(y * 5 + x) * 4];
+                for (int c = 0; c < 3; ++c)
+                    CHECK(std::abs(range.bias[size_t(c)] + range.scale[size_t(c)] * p[c] / 255.0f - value(x, y, c)) <
+                          range.scale[size_t(c)] / 255.0f);
+                CHECK(p[3] == 255);
             }
     }
     {
@@ -536,8 +642,10 @@ void unreal_graphs() {
     const auto blue = import_unreal_graph(project / "Probe/MI_GraphMix_Blue.json", options);
     CHECK(blue && blue->graph == mix->graph && blue->asset.base.material.params.at("Tint").value[2] == 0.9f &&
           std::abs(blue->asset.base.material.params.at("Tint").value[0] - 0.1f) < 1e-6f);
+    // A Custom node of one expression read as GLSL (`return float3(1, 0, 0);`), said.
     const auto custom = import_unreal_graph(project / "Probe/M_Custom.json", options);
-    CHECK(custom && has_note(*custom, "BaseColor: MaterialExpressionCustom_0: a Custom"));
+    CHECK(custom && has_note(*custom, "MaterialExpressionCustom_0: a Custom node's HLSL read as GLSL") &&
+          !has_note(*custom, "BaseColor:"));
     // A material function inlined (MF_Tint: Color x Amount, Amount left to its preview value 0.5) behind a static
     // switch that is off; an instance that turns it on gets a graph of its own (green), not its parent's.
     const auto surface_of = [](const fs::path& graph) {
@@ -773,7 +881,8 @@ void unreal_approximations() {
       "Wet": {"class": "MaterialExpressionCollectionParameter", "props": {"parameter_name": "Wetness", "collection_value": [0.25, 0, 0, 0]}, "inputs": {}},
       "WetR": {"class": "MaterialExpressionComponentMask", "props": {"r": true}, "inputs": {"None": )" + link("Wet") + R"(}},
       "Fade": {"class": "MaterialExpressionDepthFade", "props": {"fade_distance_default": 25, "opacity_default": 1}, "inputs": {"Opacity": )" + link("Half") + R"(}},
-      "Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.75}, "inputs": {}}
+      "Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.75}, "inputs": {}},
+      "Checker": {"class": "MaterialExpressionCustom", "props": {"code": "Mod( ((uint)(p.x) + 2 * (uint)(p.y)) , 5 ) / 5", "output_type": "CMOT_FLOAT1"}, "inputs": {"p": )" + link("Uv") + R"(}}
     })";
     const std::string doc = R"({"schema": "kin.unreal-material/1", "name": "M_Approx", "blend_mode": "BLEND_TRANSLUCENT",
       "shading_model": "MSM_DEFAULTLIT", "parameters": {"scalar": {}, "vector": {}, "texture": {}, "switch": {}},
@@ -781,7 +890,8 @@ void unreal_approximations() {
                                  "textures/Game/Probe/Textures/T_ORM.png": {"srgb": false}},
       "graph": {"nodes": )" + nodes + R"(, "outputs": {"BaseColor": )" + link("Mix") + R"(, "Normal": )" +
                             link("ToTangent") + R"(, "Roughness": )" + link("WetR") + R"(, "EmissiveColor": )" +
-                            link("Glow") + R"(, "Opacity": )" + link("Fade") + R"(}}})";
+                            link("Glow") + R"(, "Opacity": )" + link("Fade") + R"(, "Metallic": )" + link("Checker") +
+                            R"(}}})";
     write(content / "M_Approx.json", doc);
     const auto m = import_unreal_graph(content / "M_Approx.json", options);
     for (const auto& d : m.diagnostics)
@@ -810,7 +920,8 @@ void unreal_approximations() {
     CHECK(g.ok());
     for (const char* expected : {"kin_graph_world_to_uv(kin_view(), kin_uv(), kin_graph_geometry_normal()).xy",
                                  "kin_graph_environment(", "1000000", "kin_graph_view_to_world(",
-                                 "kin_graph_world_to_uv(v.xzy", "0.25", "0.75"}) {
+                                 "kin_graph_world_to_uv(v.xzy", "0.25", "0.75",
+                                 "mod( (trunc(p.x) + 2.0 * trunc(p.y)) , 5.0 ) / 5.0"}) {
         if (g.surface.find(expected) == std::string::npos)
             std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
         CHECK(g.surface.find(expected) != std::string::npos);
@@ -821,6 +932,104 @@ void unreal_approximations() {
         if (!cooked)
             std::cerr << why << '\n';
         CHECK(cooked.has_value());
+    }
+    // HLSL beyond one expression of known words (a loop, an engine global) is refused: the output falls back, said.
+    for (const char* code : {"float a = 0; for (int i = 0; i < 4; i++) a += i; return a;", "View.RealTime * 2"}) {
+        const std::string refused = R"({"schema": "kin.unreal-material/1", "name": "M_Refused", "blend_mode": "BLEND_OPAQUE",
+          "shading_model": "MSM_DEFAULTLIT", "parameters": {}, "inputs": {}, "textures": {},
+          "graph": {"nodes": {"C": {"class": "MaterialExpressionCustom", "props": {"code": ")" +
+                                    std::string(code) + R"(", "output_type": "CMOT_FLOAT3"}, "inputs": {}}},
+                    "outputs": {"BaseColor": {"node": "C", "output": ""}}}})";
+        write(content / "M_Refused.json", refused);
+        const auto r = import_unreal_graph(content / "M_Refused.json", options);
+        CHECK(r && has_note(*r, "BaseColor: C: a Custom node's HLSL kin cannot read"));
+    }
+}
+
+// Tier 2's limits: textures past kin's five slots go to the graph maps' layers; parameters past shader_params' 64
+// floats are the material's values in a graph of its own (said; not parameters then).
+void unreal_layers_and_folding() {
+    Scratch scratch;
+    const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto doc = [](const std::string& name, const std::string& nodes, const std::string& last) {
+        return R"({"schema": "kin.unreal-material/1", "name": ")" + name +
+               R"(", "blend_mode": "BLEND_OPAQUE", "shading_model": "MSM_DEFAULTLIT",
+          "parameters": {"scalar": {"S3": 0.25}, "vector": {}, "texture": {}, "switch": {}}, "inputs": {},
+          "textures": {"textures/Game/Probe/Textures/T_Albedo.png": {"srgb": true},
+                       "textures/Game/Probe/Textures/T_ORM.png": {"srgb": false}},
+          "graph": {"nodes": {)" +
+               nodes + R"(}, "outputs": {"BaseColor": {"node": ")" + last + R"(", "output": ""}}}})";
+    };
+    // Seven maps summed.
+    std::string nodes;
+    for (int i = 0; i < 7; ++i) {
+        nodes += std::string(i ? ", " : "") + R"("T)" + std::to_string(i) +
+                 R"(": {"class": "MaterialExpressionTextureSampleParameter2D", "props": {"parameter_name": "Map)" +
+                 std::to_string(i) + R"(", "texture": "textures/Game/Probe/Textures/)" +
+                 (i % 2 ? "T_ORM" : "T_Albedo") + R"(.png", "sampler_type": "SAMPLERTYPE_COLOR"}, "inputs": {}})";
+        if (i)
+            nodes += R"(, "A)" + std::to_string(i) + R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
+                     (i == 1 ? std::string("T0") : "A" + std::to_string(i - 1)) +
+                     R"(", "output": "RGB"}, "B": {"node": "T)" + std::to_string(i) + R"(", "output": "RGB"}}})";
+    }
+    write(content / "M_Seven.json", doc("M_Seven", nodes, "A6"));
+    const auto seven = import_unreal_graph(content / "M_Seven.json", options);
+    CHECK(seven && !seven->graph.empty() && !has_note(*seven, "its graph samples more"));
+    std::ifstream in(seven->graph);
+    const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    in.close();
+    const auto g = compile_material_graph3d(text);
+    CHECK(g.ok() && std::ranges::count_if(g.parameters, [](const auto& p) { return p.layered(); }) == 2);
+    CHECK(seven->asset.base.material.params.size() == 7 && seven->asset.base.material.params.at("Map6").texture);
+    // Seventy scalars summed: folded, this material's value (S3's 0.25, an instance's) in its own graph.
+    nodes.clear();
+    for (int i = 0; i < 70; ++i) {
+        nodes += std::string(i ? ", " : "") + R"("S)" + std::to_string(i) +
+                 R"(": {"class": "MaterialExpressionScalarParameter", "props": {"parameter_name": "S)" +
+                 std::to_string(i) + R"(", "default_value": 1}, "inputs": {}})";
+        if (i)
+            nodes += R"(, "A)" + std::to_string(i) + R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
+                     (i == 1 ? std::string("S0") : "A" + std::to_string(i - 1)) + R"(", "output": ""}, "B": {"node": "S)" +
+                     std::to_string(i) + R"(", "output": ""}}})";
+    }
+    write(content / "M_Many.json", doc("M_Many", nodes, "A69"));
+    const auto many = import_unreal_graph(content / "M_Many.json", options);
+    CHECK(many && !many->graph.empty() && has_note(*many, "its parameters fill more than"));
+    CHECK(many->graph.filename().string().find("__M_Many") != std::string::npos &&
+          many->asset.base.material.params.empty());
+    std::ifstream many_in(many->graph);
+    const std::string many_text{std::istreambuf_iterator<char>{many_in}, std::istreambuf_iterator<char>{}};
+    const auto folded = compile_material_graph3d(many_text);
+    CHECK(folded.ok() && folded.parameters.empty() && folded.surface.find("0.25") != std::string::npos);
+}
+
+// A function call's output by its index (the editor's pin names are not always the outputs'): by the call's own
+// list of outputs where the export has it, else by the function's outputs' sort priorities.
+void unreal_function_outputs() {
+    Scratch scratch;
+    const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    for (const bool listed : {true, false}) {
+        const std::string doc = std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Pins", "blend_mode": "BLEND_OPAQUE",
+          "shading_model": "MSM_DEFAULTLIT", "parameters": {}, "inputs": {}, "textures": {},
+          "functions": {"/Game/F": {"inputs": {}, "outputs": {"First": "O1", "Second": "O2"}, "nodes": {
+            "O1": {"class": "MaterialExpressionFunctionOutput", "props": {"output_name": "First", "sort_priority": 0},
+                   "inputs": {"None": {"node": "A", "output": ""}}},
+            "O2": {"class": "MaterialExpressionFunctionOutput", "props": {"output_name": "Second", "sort_priority": 1},
+                   "inputs": {"None": {"node": "B", "output": ""}}},
+            "A": {"class": "MaterialExpressionConstant", "props": {"r": 0.125}, "inputs": {}},
+            "B": {"class": "MaterialExpressionConstant", "props": {"r": 0.875}, "inputs": {}}}}},
+          "graph": {"nodes": {"Call": {"class": "MaterialExpressionMaterialFunctionCall", "props": {"material_function": "/Game/F")") +
+                                (listed ? R"(, "function_outputs": ["First", "Second"])" : "") + R"(}, "inputs": {}}},
+                    "outputs": {"Roughness": {"node": "Call", "output": "First", "output_index": 1}}}})";
+        write(content / "M_Pins.json", doc);
+        const auto m = import_unreal_graph(content / "M_Pins.json", options);
+        CHECK(m && !m->graph.empty());
+        std::ifstream in(m->graph);
+        const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+        const auto g = compile_material_graph3d(text);
+        CHECK(g.ok() && g.surface.find("0.875") != std::string::npos && g.surface.find("0.125") == std::string::npos);
     }
 }
 
@@ -836,6 +1045,8 @@ int main() {
     safe_names();
     unreal_graphs();
     unreal_approximations();
+    unreal_layers_and_folding();
+    unreal_function_outputs();
     unity_graphs();
     godot_graphs();
     corpus();

@@ -1297,7 +1297,7 @@ Result3D<ImportedMaterial3D> import_unity_graph(const std::filesystem::path& sou
             return *std::ranges::find(shared.textures, p.name, &GraphShared::Texture::param);
         };
         if (!b.assign_slots([&](const GraphBuilder::Param& p) { return texture(p).normal; })) {
-            x.note("its graph samples more than five textures (kin's material has five map slots): its Tier 1 import "
+            x.note("its graph samples more than 21 textures (kin's five map slots and 16 layers): its Tier 1 import "
                    "only");
             x.finish();
             return result;

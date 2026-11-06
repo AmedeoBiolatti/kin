@@ -182,23 +182,35 @@ class GpuSurfaceShader3D final : public ISurfaceShaderBackend3D {
 public:
     std::array<GpuShader, surface_variant_count3d> variants;
     SharedDevice device;
+    // Its variants (but the cut-outs) sample Material3D::graph_maps, the sampler after the stock layout's (made from
+    // kin_material.inc.glsl since graph maps; older SPIR-V has the stock layout as it was).
+    bool graph_maps = false;
     bool valid() const override {
         for (u32 i = 0; i < surface_required_variants3d; ++i)
             if (!variants[i])
                 return false;
         return true;
     }
-    // Its merged draws' variants (mesh_material.frag's): optional; without them its draws are not merged.
+    // Its merged draws' variants (mesh_material.frag's): optional; without them its draws are not merged. (Nor are
+    // they where it moves its vertices: mesh_material.vert has no offset.)
     bool merges() const {
         for (u32 i = surface_required_variants3d; i < surface_mask_variant3d; ++i)
             if (!variants[i])
                 return false;
+        return !offsets();
+    }
+    // Its vertex variants (a surface with an offset: World Position Offset): optional, all or none.
+    bool offsets() const {
+        for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+            if (!variants[i])
+                return false;
         return true;
     }
+    SDL_GPUShader* vertex(SurfaceVariant3D v) const { return variants[u32(v)].handle(); }
     // Its cut-outs' variants (a surface defining kin_surface_alpha): optional; without them its cut-outs in the
     // shadow, occluder, pick, pre- and visibility passes follow the base map's alpha.
     bool masks() const {
-        for (u32 i = surface_mask_variant3d; i < surface_variant_count3d; ++i)
+        for (u32 i = surface_mask_variant3d; i < surface_vertex_variant3d; ++i)
             if (!variants[i])
                 return false;
         return true;
@@ -249,6 +261,9 @@ public:
 
 private:
     friend class GpuRenderer3D;
+    // Scene3D::time of its frame and of the frame before (a moving surface's previous position, for the velocity).
+    f32 _offset_clock[2] = {0.0f, 0.0f};
+    bool _offset_clock_seen = false;
     ResourceGraphCompiler _graph_compiler;
     ResourceGraphCompiler _geometry_compiler;
     ResourceGraphDesc _geometry_recipe;
@@ -465,6 +480,7 @@ public:
     std::shared_ptr<IMaterialShaderBackend3D> create_material_shader(std::span<const u8> spirv) override;
     std::shared_ptr<ISurfaceShaderBackend3D>
     create_surface_shader(std::span<const std::span<const u8>, surface_variant_count3d> spirv) override;
+    Texture create_map_array(Vec2i size, std::span<const u8* const> layers) override;
     Result3D<MaterialInputs3D> create_material_inputs(const MaterialShader3D&, std::span<const Texture>,
                                                       std::span<const DataBuffer>) override;
     std::shared_ptr<IViewBackend3D> create_view(Vec2i size, const ViewOptions3D& options) override;
@@ -686,7 +702,20 @@ private:
     void age_targets(FrameCtx& ctx);
     // The surface whose cut-out variants a cut-out material's passes use (none: the stock cut-out shaders).
     static const GpuSurfaceShader3D* cutout_surface(const Material3D& material);
+    // A material's surface that moves its vertices (an offset: its vertex variants), or null.
+    static const GpuSurfaceShader3D* moving_surface(const Material3D& material);
+    // What a geometry pass (shadow, occluder, pick, pre-, visibility) needs of a material's surface: its cut-out's
+    // variants, or its vertex variants (a pipeline of its own), or null.
+    static const GpuSurfaceShader3D* pass_surface(const Material3D& material) {
+        if (const auto* s = cutout_surface(material))
+            return s;
+        return moving_surface(material);
+    }
     f32 _cutout_time = 0; // Scene3D::time, for surface cut-outs (bind_cutout)
+    // For moving surfaces' vertices (bind_offset): Scene3D::time now and the time of the frame before (the
+    // velocity's previous position), the camera and its forward.
+    f32 _offset_time[2] = {0.0f, 0.0f};
+    Vec3f _offset_eye{}, _offset_forward{0.0f, 0.0f, -1.0f};
     SDL_GPUGraphicsPipeline* geometry_pipeline(SDL_GPUTextureFormat depth, bool cull, bool mask, bool skinned,
                                                bool indexed, const GpuSurfaceShader3D* surface = nullptr) const;
     bool draw_geometry(FrameCtx&, SDL_GPURenderPass*, SDL_GPUTextureFormat depth, bool second);
@@ -810,6 +839,9 @@ private:
     SDL_GPUTextureSamplerBinding texture_binding(const Texture& texture, Wrap3D wrap_u, Wrap3D wrap_v,
                                                  std::optional<TextureSampler3D> sampler = {});
     void bind_cutout(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material);
+    // A moving surface's vertex block (its parameters, the clock, the camera, the maps' transform) and its maps as the
+    // vertex samplers, for a draw with its vertex variant (moving_surface, not skinned); nothing for another.
+    void bind_offset(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const Material3D& material, bool skinned);
 
     GpuRenderer2DBackend* _owner = nullptr;
     GpuDevice* _device = nullptr;
@@ -1016,6 +1048,7 @@ private:
     u32 _shadow_layers = 0;
     u32 _shadow_layers_limit = max_shadow_cascades; // lowered when the device would not make more
     GpuTexture _no_shadow;                          // 1 x 1, all far: every comparison lit
+    Texture _white_maps; // 1 x 1, one white layer: graph maps for a surface whose material has none
     // P3b. The local array: a layer a spot light's map and six a point light's, `_local_side` texels a side (a light
     // draws into a corner of it); the moon's cascades are an array of their own. `_*_generation` changes when one is
     // made again (nothing cached is in it).
@@ -1212,7 +1245,7 @@ private:
         bool operator==(const PreparedKey&) const = default;
     };
     struct DrawBindingKey {
-        std::array<const ITextureBackend*, 5> textures{};
+        std::array<const ITextureBackend*, 6> textures{}; // the five maps, then Material3D::graph_maps
         Wrap3D u{}, v{};
         decltype(Material3D::texture_samplers) sampling{};
         bool operator==(const DrawBindingKey&) const = default;

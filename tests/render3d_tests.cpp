@@ -4787,11 +4787,155 @@ void test_gpu_material_graph() {
             }
         assert(differ < 20 && !same(kin_mapped, stock) && "the graph's normal map is kin's");
 
+        // Maps past the five slots: a layer of the graph maps (Material3D::graph_maps), each layer its own; none on the
+        // material: white; an sRGB layer decoded as the graph says.
+        {
+            std::vector<kin::u8> red(4 * 4 * 4), green(4 * 4 * 4);
+            for (int i = 0; i < 16; ++i) {
+                red[i * 4] = 200, red[i * 4 + 3] = 255;
+                green[i * 4 + 1] = 180, green[i * 4 + 3] = 255;
+            }
+            const kin::u8* const layers[] = {red.data(), green.data()};
+            const kin::Texture maps = r3d.create_map_array({4, 4}, layers);
+            assert(maps && maps.array_layers() == 2);
+            const auto layered = [&](int layer, const char* space) {
+                return graph(std::string("layer") + std::to_string(layer) + space,
+                             std::string(R"({"name": "far", "type": "texture", "slot": "layers", "layer": )") +
+                                 std::to_string(layer) + R"(, "color_space": ")" + space + R"("})",
+                             R"({"id": "t", "type": "texture", "texture": "far"})", R"("base_color": "t.rgb")")
+                    .surface;
+            };
+            kin::Material3D far{.unlit = true, .graph_maps = maps};
+            far.surface = layered(1, "linear");
+            const Color g = shoot(far).at(80, 60);
+            assert(g.g > 150 && g.r < 5 && g.b < 5 && "layer 1's green");
+            far.surface = layered(0, "linear");
+            const Color r = shoot(far).at(80, 60);
+            assert(r.r > 150 && r.g < 5 && r.b < 5 && "layer 0's red");
+            far.surface = layered(0, "srgb");
+            const Color decoded = shoot(far).at(80, 60);
+            assert(decoded.r < r.r && decoded.g < 5 && "an sRGB layer decoded: darker than read as linear");
+            kin::Material3D none{.unlit = true};
+            none.surface = layered(1, "linear");
+            const Color white = shoot(none).at(80, 60);
+            assert(white.r > 250 && white.g > 250 && white.b > 250 && "no graph maps: a white layer");
+        }
+
+        // An offset (World Position Offset) moves the vertices: up half a unit, the sphere's picture moves up; nothing,
+        // the picture of no offset to the bit.
+        {
+            const auto lifted = [&](const char* name, const char* offset) {
+                kin::Material3D m{.unlit = true};
+                m.surface =
+                    graph(name, "", "", std::string(R"("base_color": [0.9, 0.5, 0.2], "offset": )") + offset).surface;
+                return shoot(m);
+            };
+            kin::Material3D still{.unlit = true};
+            still.surface = graph("still", "", "", R"("base_color": [0.9, 0.5, 0.2])").surface;
+            const Pixels flat = shoot(still), zero = lifted("zero", "[0, 0, 0]"), up = lifted("up", "[0, 0.5, 0]");
+            assert(same(zero, flat) && "a zero offset draws what no offset draws");
+            const auto top = [](const Pixels& p) {
+                for (int y = 0; y < 120; ++y)
+                    for (int x = 0; x < 160; ++x)
+                        if (p.at(x, y).r > 100)
+                            return y;
+                return 120;
+            };
+            assert(top(up) < top(flat) - 3 && "the offset lifts the sphere");
+        }
+
         const auto broken = dir / "broken.kingraph.json";
         std::ofstream{broken} << R"({"schema": "kin.material-graph/1", "nodes": [{"id": "bad", "type": "warp"}],
                                     "outputs": {"base_color": "bad"}})";
         assert(!r3d.compile_material_graph(broken).value_or({}).surface.valid());
         assert(kin::diagnostics3d_text(r3d.diagnostics()).find("bad: unknown node type") != std::string::npos);
+        std::error_code ignored;
+        std::filesystem::remove_all(dir, ignored);
+    });
+}
+
+// A surface's offset (World Position Offset) in every pass that places its vertices: the main pass started from the
+// pre-pass's depth draws what it draws clearing its own, to the bit, with ambient occlusion (the pre-pass) and temporal
+// anti-aliasing (its velocity pre-pass); and the sun's shadow of a lifted sphere moves with it.
+void test_gpu_material_graph_offset() {
+    with_gpu("test_gpu_material_graph_offset", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_material_graph_offset", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "kin_material_graph_offset_test";
+        std::filesystem::create_directories(dir);
+        const auto surface = [&](const std::string& name, const std::string& offset) {
+            const auto file = dir / (name + ".kingraph.json");
+            std::ofstream{file} << R"({"schema": "kin.material-graph/1", "name": ")" << name << R"(", "parameters": [],
+              "nodes": [{"id": "p", "type": "multiply", "inputs": {"a": "position.x", "b": 3}},
+                        {"id": "q", "type": "add", "inputs": {"a": "p", "b": "time"}},
+                        {"id": "s", "type": "sin", "inputs": {"x": "q"}},
+                        {"id": "wave", "type": "multiply", "inputs": {"a": "normal", "b": "s"}},
+                        {"id": "small", "type": "multiply", "inputs": {"a": "wave", "b": 0.15}}],
+              "outputs": {"base_color": [0.8, 0.45, 0.25], "roughness": 0.6, "offset": )"
+                                << offset << "}}";
+            auto made = r3d.compile_material_graph(file);
+            if (!made) {
+                std::cerr << kin::diagnostics3d_text(r3d.diagnostics()) << '\n';
+                assert(false && "the graph did not compile");
+            }
+            return made->surface;
+        };
+        const kin::SurfaceShader3D waving = surface("waving", R"("small")"), lifted = surface("lifted", "[0, 0.8, 0]"),
+                                   still = surface("still", "[0, 0, 0]");
+        const kin::Mesh3D box = make_box(r3d, {1.0f, 1.0f, 1.0f});
+        const kin::Mesh3D sphere = r3d.create_mesh(kin::meshes::sphere(0.7f, 48, 24)).value_or({});
+        const auto scene_of = [&](const kin::SurfaceShader3D& s, bool taa, bool from_prepass, float time) {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.5f, 6.0f}, {0.0f, 0.8f, 0.0f}, 55.0f);
+            scene.lights.sun.direction = {-0.7f, 1.0f, 0.2f};
+            scene.lights.shadow_area = kin::Bounds3D{{-4.0f, -1.0f, -4.0f}, {4.0f, 3.0f, 4.0f}};
+            scene.ambient_occlusion = {.enabled = true, .radius = 1.0f};
+            scene.taa = {.enabled = taa};
+            scene.debug.prepass_depth = from_prepass;
+            scene.time = time;
+            (void)scene.draw(box, Mat4f::translation({0.0f, -0.5f, 0.0f}) * Mat4f::scaling({8.0f, 1.0f, 8.0f}),
+                             {.color = Color::rgb(160, 150, 140)});
+            kin::Material3D m;
+            m.surface = s;
+            (void)scene.draw(sphere, Mat4f::translation({0.0f, 0.9f, 0.0f}), m);
+            return scene;
+        };
+        const auto shoot = [&](const kin::SurfaceShader3D& s, bool taa, bool from_prepass) {
+            kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+            Pixels last;
+            for (int i = 0; i < (taa ? 5 : 1); ++i) {
+                last = shoot_view(renderer, r3d, view, scene_of(s, taa, from_prepass, 0.25f * float(i)));
+                renderer.present();
+            }
+            return last;
+        };
+        for (const bool taa : {false, true}) {
+            const Pixels from = shoot(waving, taa, true), cleared = shoot(waving, taa, false);
+            int differing = 0;
+            for (std::size_t i = 0; i < from.rgba.size(); ++i)
+                differing += from.rgba[i] != cleared.rgba[i] ? 1 : 0;
+            std::cerr << "offset, main depth from the pre-pass (taa " << taa << "): " << differing
+                      << " channels differ\n";
+            assert(differing == 0 && "the pre-pass places a moving surface's vertices as the main pass does");
+        }
+        // The shadow on the ground moves with the sphere (the sun from the left: away to the right as it rises).
+        const Pixels low = shoot(still, false, false), high = shoot(lifted, false, false);
+        const auto shadow_x = [](const Pixels& p) {
+            double sum = 0, count = 0;
+            for (int y = 60; y < 100; ++y)
+                for (int x = 0; x < 160; ++x)
+                    if (const Color c = p.at(x, y);
+                        brightness(c) < 300 && brightness(c) > 15 && c.r < 120) { // (the shadow; not the black)
+                        sum += x;
+                        ++count;
+                    }
+            return count > 0 ? sum / count : -1.0;
+        };
+        std::cerr << "offset shadow: centre x " << shadow_x(low) << " -> " << shadow_x(high) << "\n";
+        assert(shadow_x(low) >= 0 && std::abs(shadow_x(high) - shadow_x(low)) > 3 && "the shadow follows the offset");
         std::error_code ignored;
         std::filesystem::remove_all(dir, ignored);
     });
@@ -23373,6 +23517,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_surface_shader());
     RUN(test_gpu_material_uv_transform());
     RUN(test_gpu_material_graph());
+    RUN(test_gpu_material_graph_offset());
     RUN(test_gpu_surface_batching());
     RUN(test_gpu_material_graph_cutout());
     RUN(test_gpu_skinned_matches_cpu());

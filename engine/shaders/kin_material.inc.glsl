@@ -45,6 +45,20 @@ layout(set = 2, binding = 14) uniform sampler2D uGiCoverage; // share of probe l
                                                              // the rest ambient; with frame.gi.y, rgb: the area
                                                              // lights' irradiance over pi (gi_area.comp)
 #endif
+#ifdef KIN_SURFACE
+// A surface's maps past its five (Material3D::graph_maps: a material graph's, a layer each), the sampler after the
+// variant's others: its storage buffers bind one later than the stock shader's (KIN_STORAGE_SHIFT).
+#if defined(KIN_GI)
+layout(set = 2, binding = 15) uniform sampler2DArray uGraphMaps;
+#elif defined(KIN_LIGHTS)
+layout(set = 2, binding = 12) uniform sampler2DArray uGraphMaps;
+#else
+layout(set = 2, binding = 10) uniform sampler2DArray uGraphMaps;
+#endif
+#define KIN_STORAGE_SHIFT 1
+#else
+#define KIN_STORAGE_SHIFT 0
+#endif
 #ifdef KIN_LIGHT_GRID
 // The light grid (the stock light variants, with KIN_LIGHTS): every point and spot light in view, and for each cell of
 // the view (frame.grid: tiles of pixels by slices of view depth) those whose reach touches it, so that a fragment
@@ -59,17 +73,17 @@ struct KinGridLight {
 // The area lights' reflections (GlobalIllumination3D::area_lights; kin_area_specular): linearly transformed cosines'
 // two GGX tables (64 x 64 each, rows by sqrt(1 - cos(view, normal)), roughness along), and the emitters, 5 vec4 each as
 // gi_area.comp reads them but their radiance at this render's strength.
-layout(std430, set = 2, binding = 17) readonly buffer KinAreaLtc { vec4 kin_area_ltc[]; };
-layout(std430, set = 2, binding = 18) readonly buffer KinAreaShading { vec4 kin_area_shading[]; };
-layout(std430, set = 2, binding = 15) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+layout(std430, set = 2, binding = 17 + KIN_STORAGE_SHIFT) readonly buffer KinAreaLtc { vec4 kin_area_ltc[]; };
+layout(std430, set = 2, binding = 18 + KIN_STORAGE_SHIFT) readonly buffer KinAreaShading { vec4 kin_area_shading[]; };
+layout(std430, set = 2, binding = 15 + KIN_STORAGE_SHIFT) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
 #else
-layout(std430, set = 2, binding = 14) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
+layout(std430, set = 2, binding = 14 + KIN_STORAGE_SHIFT) readonly buffer KinGridLights { KinGridLight grid_lights[]; };
 #endif
 // A cell (slice by row by column): the first of its list << 12 | its count; the lists after the cells.
 #ifdef KIN_GI
-layout(std430, set = 2, binding = 16) readonly buffer KinGridCells { uint grid_cells[]; };
+layout(std430, set = 2, binding = 16 + KIN_STORAGE_SHIFT) readonly buffer KinGridCells { uint grid_cells[]; };
 #else
-layout(std430, set = 2, binding = 15) readonly buffer KinGridCells { uint grid_cells[]; };
+layout(std430, set = 2, binding = 15 + KIN_STORAGE_SHIFT) readonly buffer KinGridCells { uint grid_cells[]; };
 #endif
 #endif
 

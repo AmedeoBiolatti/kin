@@ -66,6 +66,10 @@ public:
     // layer; a shader samples the array): cascaded shadow maps.
     GpuTexture create_target_array(u32 width, u32 height, u32 layers, SDL_GPUTextureFormat format,
                                    SDL_GPUTextureUsageFlags usage);
+    // A sampled RGBA8 (UNORM) 2D array of `layers.size()` width x height pictures (tightly packed, a layer each), with
+    // a mip chain of complete_mip_levels() levels generated on the GPU with the uploads: a material graph's maps past
+    // its five slots. Not pooled.
+    GpuTexture create_texture_array(u32 width, u32 height, std::span<const u8* const> layers);
     // A 3D texture of `format`, width x height x depth (the GI scene's voxels); its texels are not set.
     GpuTexture create_volume(u32 width, u32 height, u32 depth, SDL_GPUTextureFormat format,
                              SDL_GPUTextureUsageFlags usage);
@@ -212,6 +216,7 @@ private:
         SDL_GPUTexture* texture = nullptr;
         u32 x = 0, y = 0, w = 0, h = 0;
         u32 level = 0;
+        u32 layer = 0; // of a 2D array
         bool blocks = false; // block-compressed texels, tightly packed: Vulkan wants a row length of 0 (or whole blocks)
         SDL_GPUBuffer* buffer = nullptr;
         u32 buffer_offset = 0;

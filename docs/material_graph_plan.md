@@ -264,7 +264,14 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   (see below for functions and switch values), Bump Offset, Transform (tangent, world, view), If, collection
   parameters' defaults; approximated and said (2026-11-06): local space, the object's position, Depth Fade, Scene
   Depth, cube maps, landscape coordinates, Parallax Occlusion Mapping, a second UV set, particle inputs. Fab corpus
-  (107 materials): full graphs 39 -> 75, partial 50 -> 14, Tier 1 only 18 (more than five textures, or 64 floats). BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
+  (107 materials): full graphs 39 -> 75, partial 50 -> 14, Tier 1 only 18 (more than five textures, or 64 floats).
+  Then: maps past the five slots in `Material3D::graph_maps` (a 2D array, `"slot": "layers"`; the sampler after the
+  stock ones in the surface variants, their storage bindings one later; older SPIR-V detected and bound as before),
+  parameters packed first-fit, and folded into a material's own graph past 64 floats; Custom nodes of one expression;
+  Tangent Space Normal off. Later the same day: World Position Offset (the graph's `offset`, eight vertex variants
+  of each surface: kin_surface_vertex.inc.glsl, the stock vertex shaders' hook; every pass that places vertices; a
+  view's previous time for the velocity), function calls' outputs by index (157 of 1231 references in the Fab corpus
+  had the wrong name: the island landscape's normals were its base colour), OpenEXR maps in the import. BistroUE: 121 of 121 with graphs; the probe's M_GraphMix checked node by node.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

@@ -11,12 +11,15 @@ struct KinDrawMaterial {
     vec4 uv; // xy: the maps' scale, zw: their offset (Material3D::uv_scale, uv_offset)
 };
 layout(location = 9) flat in uint vMaterial;
+#ifndef KIN_STORAGE_SHIFT
+#define KIN_STORAGE_SHIFT 0 // (a surface's storage binds one later: kin_material.inc.glsl)
+#endif
 #if defined(KIN_LIGHT_GRID) && defined(KIN_GI)
-#define KIN_DRAW_MATERIAL_BINDING 19 // after the light grid's two and the area lights' two
+#define KIN_DRAW_MATERIAL_BINDING (19 + KIN_STORAGE_SHIFT) // after the light grid's two and the area lights' two
 #elif defined(KIN_LIGHT_GRID)
-#define KIN_DRAW_MATERIAL_BINDING 17
+#define KIN_DRAW_MATERIAL_BINDING (17 + KIN_STORAGE_SHIFT)
 #else
-#define KIN_DRAW_MATERIAL_BINDING 10
+#define KIN_DRAW_MATERIAL_BINDING (10 + KIN_STORAGE_SHIFT)
 #endif
 layout(std430, set = 2, binding = KIN_DRAW_MATERIAL_BINDING) readonly buffer KinDrawMaterials {
     KinDrawMaterial draw_materials[];

@@ -576,8 +576,39 @@ private:
         return inputs && inputs->is_object() ? inputs->find(name) : nullptr;
     }
     std::optional<std::string> source_value(const JsonValue& in, std::string& why) {
-        return value(in.find("node") ? in.find("node")->as_string() : "",
-                     in.find("output") ? in.find("output")->as_string() : "", why);
+        return value(in.find("node") ? in.find("node")->as_string() : "", pin_of(in), why);
+    }
+    // The output an input reads: its name, but a function call's by its index (the editor's name for such a pin is
+    // not always the output's): the call's outputs in order (function_outputs, exported), else the function's
+    // outputs by sort priority where those differ, else the name as exported.
+    std::string pin_of_input(const JsonValue& in) const {
+        const std::string name = in.find("output") ? in.find("output")->as_string() : "";
+        const auto* index = in.find("output_index");
+        const JsonValue* call = node(in.find("node") ? in.find("node")->as_string() : "");
+        if (!index || !index->is_number() || !call || !call->find("class") ||
+            call->find("class")->as_string() != "MaterialExpressionMaterialFunctionCall")
+            return name;
+        const size_t k = size_t(index->as_int(0));
+        if (const auto* listed = call->find("props") ? call->find("props")->find("function_outputs") : nullptr;
+            listed && listed->is_array())
+            return k < listed->items().size() ? listed->items()[k].as_string(name) : name;
+        const auto* functions = _doc.find("functions");
+        const JsonValue* function = functions ? functions->find(text(*call, "material_function")) : nullptr;
+        const auto* outputs = function ? function->find("outputs") : nullptr;
+        const auto* nodes = function ? function->find("nodes") : nullptr;
+        if (!outputs || !outputs->is_object() || !nodes)
+            return name;
+        std::vector<std::pair<f64, std::string>> order;
+        for (const auto& [output, at] : outputs->members()) {
+            const auto* n = nodes->find(at.as_string());
+            const auto* props = n ? n->find("props") : nullptr;
+            order.emplace_back(props ? props->number_at("sort_priority", 0) : 0, output);
+        }
+        std::ranges::stable_sort(order, {}, &std::pair<f64, std::string>::first);
+        for (size_t i = 1; i < order.size(); ++i)
+            if (order[i].first == order[i - 1].first)
+                return name; // (tied: the order is not known)
+        return k < order.size() ? order[k].second : name;
     }
     // A material function's call: the function's graph inlined (one per call: its inputs are the call's), the value of
     // its output `pin` (its first where the pin is unnamed).
@@ -676,8 +707,12 @@ private:
     }
 
 public:
+    // The output an input (or one of the material's outputs) reads: pin_of_input's.
+    std::string pin_of(const JsonValue& in) const { return pin_of_input(in); }
     // The static switches set otherwise than their defaults (they make another graph: its file is named by them).
     std::map<std::string, bool> switched;
+    // The parameters as the material's values, in the graph (a graph of the material's own): where they don't fit.
+    bool fold = false;
 
 private:
     // A GLSL expression of its own (kin's glsl node), `width` floats.
@@ -758,10 +793,22 @@ private:
             return fallback;
         }
         const std::string from = in->find("node") ? in->find("node")->as_string() : "";
-        const std::string pin = in->find("output") ? in->find("output")->as_string() : "";
-        return value(from, pin, why);
+        return value(from, pin_of(*in), why);
     }
     std::string param(const std::string& name, const char* type, std::array<f32, 4> value) {
+        if (root().fold) { // the material's value (its instance's, else the default) in the graph
+            const auto* values = _doc.find("parameters");
+            const auto* group = values ? values->find(std::string(type) == "float" ? "scalar" : "vector") : nullptr;
+            if (const auto* given = group ? group->find(name) : nullptr) {
+                if (given->is_number())
+                    value[0] = f32(given->as_number());
+                else
+                    for (size_t i = 0; i < std::min<size_t>(4, given->items().size()); ++i)
+                        value[i] = f32(given->items()[i].as_number());
+            }
+            return std::string(type) == "float" ? GraphBuilder::number(value[0])
+                                                : GraphBuilder::vector({value.data(), 4});
+        }
         const auto found = std::ranges::find(_b.params, name, &GraphBuilder::Param::source);
         if (found != _b.params.end())
             return GraphBuilder::quote(found->name);
@@ -825,10 +872,13 @@ private:
                     entry->normal = true;
                     entry->srgb = false;
                 }
+                // (Its file now: the UVs' nodes may add textures to the list, which may move.)
+                const std::string entry_file = entry != list.end() ? entry->file : std::string();
                 const auto uv = in({"UVs", "Coordinates"}, GraphBuilder::quote("uv"));
                 if (!uv)
                     return std::nullopt;
-                const std::string sample = _b.add("texture", {{"uv", *uv}}, {{"texture", GraphBuilder::quote(pname)}});
+                const std::string sample =
+                    ranged(_b.add("texture", {{"uv", *uv}}, {{"texture", GraphBuilder::quote(pname)}}), entry_file);
                 if (!normal)
                     return sample;
                 const std::string unpacked = _b.add("unpack_normal", {{"texel", sample}});
@@ -936,7 +986,8 @@ private:
             const auto uv = in({"UVs", "Coordinates"}, GraphBuilder::quote("uv"));
             if (!uv)
                 return std::nullopt;
-            const std::string sample = _b.add("texture", {{"uv", *uv}}, {{"texture", GraphBuilder::quote(pname)}});
+            const std::string sample =
+                ranged(_b.add("texture", {{"uv", *uv}}, {{"texture", GraphBuilder::quote(pname)}}), file);
             if (!normal)
                 return sample;
             // Unreal unpacks a normal map's texel; in its tangent space (DirectX's: green down): kin's source turned so
@@ -1153,6 +1204,32 @@ private:
             }
             return in({*on ? "True" : "False", *on ? "A" : "B"});
         }
+        if (kind == "Custom") { // HLSL of one expression, its inputs by name: as GLSL where every word is known
+            const std::string code = text(n, "code");
+            std::vector<std::pair<std::string, std::string>> inputs;
+            if (const auto* given = n.find("inputs"); given && given->is_object())
+                for (const auto& [input, from] : given->members()) {
+                    if (!from.find("node"))
+                        continue;
+                    const auto v = source_value(from, why);
+                    if (!v)
+                        return std::nullopt;
+                    inputs.emplace_back(input, *v);
+                }
+            const auto glsl_code = custom_as_glsl(code, inputs);
+            if (!glsl_code) {
+                why = name + ": a Custom node's HLSL kin cannot read";
+                return std::nullopt;
+            }
+            const std::string type = text(n, "output_type");
+            const int width = type.find("FLOAT2") != std::string::npos   ? 2
+                              : type.find("FLOAT3") != std::string::npos ? 3
+                              : type.find("FLOAT4") != std::string::npos ? 4
+                                                                         : 1;
+            static const char* types[] = {"float", "float", "vec2", "vec3", "vec4"};
+            _x.note(name + ": a Custom node's HLSL read as GLSL (" + code.substr(0, 60) + ")");
+            return glsl(std::string(types[width]) + "(" + *glsl_code + ")", width, std::move(inputs));
+        }
         if (kind == "BumpOffset") {
             // The coordinate shifted along the view as the tangent frame sees it, by the height above the reference
             // plane (Unreal's: uv + view_tangent.xy x (height - reference) x ratio).
@@ -1185,6 +1262,8 @@ private:
             const auto known = [](std::string& s) {
                 if (s == "CAMERA")
                     s = "VIEW";
+                if (s == "INSTANCE") // (an instance's space: its object's, as local)
+                    s = "LOCAL";
                 return s == "TANGENT" || s == "LOCAL" || s == "WORLD" || s == "VIEW";
             };
             std::string from_space = a, to_space = b;
@@ -1217,7 +1296,7 @@ private:
         if (kind == "TransformPosition") { // a position between local and world space: the same in kin's graphs
             const std::string from = upper(text(n, "transform_source_type")), to = upper(text(n, "transform_type"));
             const auto local_or_world = [](const std::string& e) {
-                return e.empty() || e.find("LOCAL") != std::string::npos ||
+                return e.empty() || e.find("LOCAL") != std::string::npos || e.find("INSTANCE") != std::string::npos ||
                        (e.find("WORLD") != std::string::npos && e.find("TRANSLATED") == std::string::npos);
             };
             if (!local_or_world(from) || !local_or_world(to)) {
@@ -1316,6 +1395,150 @@ private:
         return std::nullopt;
     }
 
+    // A Custom node's code as one GLSL expression, or none: an expression (or `return` one;) of its inputs, numbers
+    // (made floats) and the functions below (HLSL's renamed), a member only after a name or ')'. Anything else (a
+    // statement, a loop, a texture, an engine global) is refused.
+    static std::optional<std::string> custom_as_glsl(std::string code,
+                                                     const std::vector<std::pair<std::string, std::string>>& inputs) {
+        const auto trim = [](std::string& t) {
+            while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back())))
+                t.pop_back();
+            size_t i = 0;
+            while (i < t.size() && std::isspace(static_cast<unsigned char>(t[i])))
+                ++i;
+            t.erase(0, i);
+        };
+        trim(code);
+        if (code.rfind("return", 0) == 0 && code.size() > 6 && !std::isalnum(static_cast<unsigned char>(code[6]))) {
+            code.erase(0, 6);
+            trim(code);
+            if (code.empty() || code.back() != ';')
+                return std::nullopt;
+            code.pop_back();
+            trim(code);
+        }
+        if (code.empty() || code.find_first_of(";{}[]#\"'?:") != std::string::npos)
+            return std::nullopt;
+        static const std::map<std::string, std::string> functions{{"abs", "abs"},
+                                                                  {"sin", "sin"},
+                                                                  {"cos", "cos"},
+                                                                  {"tan", "tan"},
+                                                                  {"asin", "asin"},
+                                                                  {"acos", "acos"},
+                                                                  {"atan", "atan"},
+                                                                  {"atan2", "atan"},
+                                                                  {"sqrt", "sqrt"},
+                                                                  {"rsqrt", "inversesqrt"},
+                                                                  {"pow", "pow"},
+                                                                  {"exp", "exp"},
+                                                                  {"exp2", "exp2"},
+                                                                  {"log", "log"},
+                                                                  {"log2", "log2"},
+                                                                  {"floor", "floor"},
+                                                                  {"ceil", "ceil"},
+                                                                  {"round", "round"},
+                                                                  {"trunc", "trunc"},
+                                                                  {"frac", "fract"},
+                                                                  {"clamp", "clamp"},
+                                                                  {"min", "min"},
+                                                                  {"max", "max"},
+                                                                  {"lerp", "mix"},
+                                                                  {"step", "step"},
+                                                                  {"smoothstep", "smoothstep"},
+                                                                  {"dot", "dot"},
+                                                                  {"cross", "cross"},
+                                                                  {"length", "length"},
+                                                                  {"distance", "distance"},
+                                                                  {"normalize", "normalize"},
+                                                                  {"sign", "sign"},
+                                                                  {"reflect", "reflect"},
+                                                                  {"Mod", "mod"},
+                                                                  {"fmod", "mod"},
+                                                                  {"float", "float"},
+                                                                  {"float2", "vec2"},
+                                                                  {"float3", "vec3"},
+                                                                  {"float4", "vec4"},
+                                                                  {"saturate", "kin_graph_saturate"}};
+        std::string out;
+        char last = 0; // the last significant character written
+        for (size_t i = 0; i < code.size();) {
+            const char c = code[i];
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                out += ' ';
+                ++i;
+                continue;
+            }
+            if (std::isdigit(static_cast<unsigned char>(c)) ||
+                (c == '.' && i + 1 < code.size() && std::isdigit(static_cast<unsigned char>(code[i + 1])))) {
+                size_t j = i;
+                bool real = false;
+                while (j < code.size() && (std::isalnum(static_cast<unsigned char>(code[j])) || code[j] == '.')) {
+                    real = real || code[j] == '.' || code[j] == 'e' || code[j] == 'E';
+                    ++j;
+                }
+                std::string number = code.substr(i, j - i);
+                if (!number.empty() && (number.back() == 'f' || number.back() == 'F'))
+                    number.pop_back();
+                if (number.find_first_not_of("0123456789.eE") != std::string::npos)
+                    return std::nullopt;
+                out += real ? number : number + ".0";
+                last = '0';
+                i = j;
+                continue;
+            }
+            if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') {
+                size_t j = i;
+                while (j < code.size() && (std::isalnum(static_cast<unsigned char>(code[j])) || code[j] == '_'))
+                    ++j;
+                const std::string word = code.substr(i, j - i);
+                i = j;
+                if (last == '.') { // a member: a swizzle
+                    if (word.find_first_not_of("xyzwrgba") != std::string::npos || word.size() > 4)
+                        return std::nullopt;
+                    out += word;
+                } else if (std::ranges::any_of(inputs, [&](const auto& in) { return in.first == word; })) {
+                    out += word;
+                } else if (const auto f = functions.find(word); f != functions.end()) {
+                    out += f->second;
+                } else {
+                    return std::nullopt;
+                }
+                last = 'a';
+                continue;
+            }
+            if (c == '(' && (code.compare(i, 6, "(uint)") == 0 || code.compare(i, 5, "(int)") == 0)) {
+                out += "trunc"; // a cast of what follows (a bracket) to an integer
+                i += code[i + 1] == 'u' ? 6 : 5;
+                last = 'a';
+                continue;
+            }
+            if (c == '.' && last != 'a' && last != ')')
+                return std::nullopt;
+            if (std::string("+-*/(),.").find(c) == std::string::npos)
+                return std::nullopt;
+            out += c;
+            last = c;
+            ++i;
+        }
+        return out;
+    }
+
+    // A sample of `file` as its values: an 8-bit texel times the range a file decoded from values past 0 to 1 has (an
+    // OpenEXR's), plus its least; the sample as it is for another.
+    std::string ranged(const std::string& sample, const std::string& file) {
+        if (file.empty())
+            return sample;
+        const auto path = _x.options.project / file;
+        (void)_x.load(path, file); // (decoded once: its range known)
+        const auto it = _x.ranges.find(path);
+        if (it == _x.ranges.end())
+            return sample;
+        _x.note(std::filesystem::path(file).filename().string() +
+                ": its values (past 0 to 1) fitted into 8 bits, read back by its range");
+        return _b.add("add", {{"a", _b.add("multiply", {{"a", sample}, {"b", GraphBuilder::vector(it->second.scale)}})},
+                              {"b", GraphBuilder::vector(it->second.bias)}});
+    }
+
     static std::string upper(std::string s) {
         for (auto& c : s)
             c = char(std::toupper(static_cast<unsigned char>(c)));
@@ -1355,7 +1578,7 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         GraphBuilder b;
         const std::string base = doc.find("base") ? doc.find("base")->as_string() : source.stem().string();
         b.name = std::filesystem::path(base).filename().string();
-        UnrealGraph g(doc, b, x);
+        auto graph = std::make_unique<UnrealGraph>(doc, b, x);
         const std::string model = doc.find("shading_model") ? doc.find("shading_model")->as_string() : "";
         const std::string blend = doc.find("blend_mode") ? doc.find("blend_mode")->as_string() : "";
         const bool unlit = model == "MSM_UNLIT";
@@ -1363,30 +1586,73 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         static const std::vector<std::pair<const char*, const char*>> mapping{
             {"BaseColor", "base_color"},   {"Metallic", "metallic"},          {"Roughness", "roughness"},
             {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"}, {"Normal", "normal"},
-            {"Opacity", "alpha"},          {"OpacityMask", "alpha"}};
-        for (const auto& [from, to] : mapping) {
-            const auto* o = outputs ? outputs->find(from) : nullptr;
-            if (!o)
-                continue;
-            if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED") ||
-                (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED"))
-                continue;
-            std::string why;
-            // (The graph's word on this output replaces the Tier 1 import's.)
-            std::erase_if(imported.notes,
-                          [&](const std::string& n) { return n.rfind(std::string(from) + ": ", 0) == 0; });
-            auto v =
-                g.value(o->find("node")->as_string(), o->find("output") ? o->find("output")->as_string() : "", why);
-            if (!v) {
-                x.note(std::string(from) + ": " + why + ": its Tier 1 value kept");
-                continue;
+            {"Opacity", "alpha"},          {"OpacityMask", "alpha"},          {"WorldPositionOffset", "offset"}};
+        const auto build = [&](UnrealGraph& g) {
+            for (const auto& [from, to] : mapping) {
+                const auto* o = outputs ? outputs->find(from) : nullptr;
+                if (!o)
+                    continue;
+                if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED") ||
+                    (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED"))
+                    continue;
+                std::string why;
+                // (The graph's word on this output replaces the Tier 1 import's.)
+                std::erase_if(imported.notes,
+                              [&](const std::string& n) { return n.rfind(std::string(from) + ": ", 0) == 0; });
+                auto v = g.value(o->find("node")->as_string(), g.pin_of(*o), why);
+                if (!v) {
+                    x.note(std::string(from) + ": " + why + ": its Tier 1 value kept");
+                    continue;
+                }
+                std::string target = unlit && std::string(from) == "EmissiveColor" ? "base_color" : to;
+                if (target == "normal" && !doc.bool_at("tangent_space_normal", true)) // the world's (Unreal's axes)
+                    v = b.add("normalize", {{"x", b.member(*v, "xzy")}});
+                else if (target == "normal") // Unreal's tangent space (green down) as kin's (+y up), then the world's
+                    v = b.add("tangent_to_world", {{"normal", b.add("multiply", {{"a", *v}, {"b", "[1, -1, 1]"}})}});
+                else if (target == "offset") // Unreal's centimetres in its axes: kin's metres in its own
+                    v = b.add("multiply", {{"a", b.member(b.fit(*v, 3), "xzy")}, {"b", "0.01"}});
+                b.outputs[target] = *v;
             }
-            std::string target = unlit && std::string(from) == "EmissiveColor" ? "base_color" : to;
-            if (target == "normal") // Unreal's tangent space (green down) as kin's (+y up), then the world's
-                v = b.add("tangent_to_world", {{"normal", b.add("multiply", {{"a", *v}, {"b", "[1, -1, 1]"}})}});
-            b.outputs[target] = *v;
+        };
+        build(*graph);
+        // Parameters past Material3D::shader_params' floats (as kin's compiler packs them): the material's values in a
+        // graph of its own.
+        {
+            std::array<bool, surface_param_count3d> taken{};
+            bool fits = true;
+            for (const auto& p : b.params) {
+                if (p.type == "texture")
+                    continue;
+                const u32 size = p.type == "float" ? 1 : p.type == "vec2" ? 2 : p.type == "vec3" ? 3 : 4;
+                const u32 align = size >= 3 ? 4 : size;
+                u32 at = surface_param_count3d;
+                for (u32 o = 0; o + size <= surface_param_count3d && at == surface_param_count3d; o += align) {
+                    bool free = true;
+                    for (u32 k = o; k < o + size; ++k)
+                        free = free && !taken[k];
+                    if (free)
+                        at = o;
+                }
+                if (at == surface_param_count3d) {
+                    fits = false;
+                    break;
+                }
+                for (u32 k = at; k < at + size; ++k)
+                    taken[k] = true;
+            }
+            if (!fits) {
+                x.note("its parameters fill more than Material3D::shader_params' " +
+                       std::to_string(surface_param_count3d) +
+                       " floats: their values (this material's) in a graph of its own, not changeable as parameters");
+                b = GraphBuilder{};
+                b.name = std::filesystem::path(base).filename().string() + "__" + source.stem().string();
+                graph = std::make_unique<UnrealGraph>(doc, b, x);
+                graph->fold = true;
+                build(*graph);
+            }
         }
-        for (const char* other : {"WorldPositionOffset", "Refraction", "Anisotropy", "Specular"})
+        UnrealGraph& g = *graph;
+        for (const char* other : {"Refraction", "Anisotropy", "Specular"})
             if (outputs && outputs->find(other))
                 x.note(std::string(other) + ": not in kin's graph outputs");
         // The textures in kin's five slots (as graph data: the graph reads them; kin's own reading of a slot undone).
@@ -1394,7 +1660,7 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
             return *std::ranges::find(g.textures, p.name, &UnrealGraph::Texture::param);
         };
         if (!b.assign_slots([&](const GraphBuilder::Param& p) { return texture(p).normal; })) {
-            x.note("its graph samples more than five textures (kin's material has five map slots): its Tier 1 import "
+            x.note("its graph samples more than 21 textures (kin's five map slots and 16 layers): its Tier 1 import "
                    "only");
             x.finish();
             return result;

@@ -63,6 +63,10 @@ public:
     // Shares the colour/data image cache with imported glTF maps. This legacy API
     // also keys on nearest: glTF maps use full-mip images and independent samplers.
     Result3D<Texture> load_texture(const std::filesystem::path& path, bool nearest = false, bool srgb = true);
+    // A material graph's maps past its five slots as one 2D array (Material3D::graph_maps), a map a layer in order
+    // (an empty path: a white layer): each decoded and resampled to the largest width and height among them (4096 at
+    // most). Shared while a handle to it lives (by the list of paths). None without 3D, or when a map can't be read.
+    Result3D<Texture> load_map_array(std::span<const std::filesystem::path> maps);
     // Checked SPIR-V made into a shader. Without 3D, a stand-in handle that nothing draws with, so that materials
     // naming a shader still bind.
     Result3D<MaterialShader3D> load_material_shader(const std::filesystem::path& path);
@@ -86,6 +90,8 @@ public:
     void invalidate(const std::filesystem::path& source);
     Stats stats() const;
     const std::filesystem::path& root() const;
+    // The renderer it loads for.
+    Renderer3D& renderer() const;
     // Last load's diagnostic, including cache hits (which clear it).
     const Diagnostics3D& diagnostics() const;
 
