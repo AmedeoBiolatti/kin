@@ -408,17 +408,19 @@ constexpr BuiltIn built_ins[] = {
     {"time", "frame.time.x", Type::Float},
     {"screen", "(gl_FragCoord.xy * frame.occlusion.zw)", Type::Vec2},
     {"camera_distance", "length(frame.eye.xyz - vWorld)", Type::Float},
-    {"object_position", "kin_object_position()", Type::Vec3}, // the copy's origin (a flat varying; at a vertex, its own)
+    {"object_position", "kin_object_position()",
+     Type::Vec3}, // the copy's origin (a flat varying; at a vertex, its own)
 };
 struct Field {
     const char* name;
     Type type;
 };
-constexpr Field surface_fields[] = {{"base_color", Type::Vec3}, {"alpha", Type::Float},     {"normal", Type::Vec3},
-                                    {"metallic", Type::Float},  {"roughness", Type::Float}, {"occlusion", Type::Float},
-                                    {"emission", Type::Vec3},   {"backlight", Type::Vec3},  {"clearcoat", Type::Float},
-                                    {"clearcoat_roughness", Type::Float}, {"specular", Type::Float},
-                                    {"diffuse_wrap", Type::Float}};
+constexpr Field surface_fields[] = {{"base_color", Type::Vec3}, {"alpha", Type::Float},
+                                    {"normal", Type::Vec3},     {"metallic", Type::Float},
+                                    {"roughness", Type::Float}, {"occlusion", Type::Float},
+                                    {"emission", Type::Vec3},   {"backlight", Type::Vec3},
+                                    {"clearcoat", Type::Float}, {"clearcoat_roughness", Type::Float},
+                                    {"specular", Type::Float},  {"diffuse_wrap", Type::Float}};
 
 bool identifier(const std::string& s) {
     if (s.empty() || s.size() > 64 || std::isdigit(static_cast<unsigned char>(s[0])))

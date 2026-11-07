@@ -1739,15 +1739,24 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         const bool coated = model == "MSM_CLEAR_COAT" || model == "MSM_CLEARCOAT";
         const std::string lighting =
             doc.find("translucency_lighting_mode") ? doc.find("translucency_lighting_mode")->as_string() : "";
-        const bool volume_lit = !unlit && lighting.starts_with("TLM_VOLUMETRIC") &&
-                                (blend == "BLEND_TRANSLUCENT" || blend == "BLEND_ADDITIVE" || blend == "BLEND_MODULATE");
+        const bool volume_lit =
+            !unlit && lighting.starts_with("TLM_VOLUMETRIC") &&
+            (blend == "BLEND_TRANSLUCENT" || blend == "BLEND_ADDITIVE" || blend == "BLEND_MODULATE");
         const auto* outputs = doc.find("graph")->find("outputs");
         // (The Normal first: the others' Pixel Normal, Reflection Vector and Fresnel are by it.)
         static const std::vector<std::pair<const char*, const char*>> mapping{
-            {"Normal", "normal"},       {"BaseColor", "base_color"},   {"Metallic", "metallic"},
-            {"Roughness", "roughness"}, {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"},
-            {"Opacity", "alpha"},       {"OpacityMask", "alpha"},      {"WorldPositionOffset", "offset"},
-            {"SubsurfaceColor", "backlight"}, {"ClearCoat", "clearcoat"}, {"ClearCoatRoughness", "clearcoat_roughness"},
+            {"Normal", "normal"},
+            {"BaseColor", "base_color"},
+            {"Metallic", "metallic"},
+            {"Roughness", "roughness"},
+            {"EmissiveColor", "emission"},
+            {"AmbientOcclusion", "occlusion"},
+            {"Opacity", "alpha"},
+            {"OpacityMask", "alpha"},
+            {"WorldPositionOffset", "offset"},
+            {"SubsurfaceColor", "backlight"},
+            {"ClearCoat", "clearcoat"},
+            {"ClearCoatRoughness", "clearcoat_roughness"},
             {"Specular", "specular"}};
         const auto build = [&](UnrealGraph& g) {
             for (const auto& [from, to] : mapping) {
@@ -1849,7 +1858,8 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
             x.note("clear coat: kin's (glTF's): the layer below dimmed by the coat's Fresnel once (Unreal's twice), "
                    "a metal not tinted again through it at a slant");
         if (volume_lit)
-            x.note("translucency lit by " + lighting + ": diffuse alone, wrapped as the light volume's (kin's diffuse_wrap " +
+            x.note("translucency lit by " + lighting +
+                   ": diffuse alone, wrapped as the light volume's (kin's diffuse_wrap " +
                    (lighting.find("NON_DIRECTIONAL") != std::string::npos ? "1" : "0.5") +
                    "), per pixel; no highlight, no reflection");
         if (b.outputs.contains("specular")) // (the Tier 1 import's word on it: kin's graph has it)
