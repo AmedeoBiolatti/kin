@@ -1,3 +1,4 @@
+include("${CMAKE_CURRENT_LIST_DIR}/kin_build.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kin_packaging.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kin_android.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/kin_web.cmake")

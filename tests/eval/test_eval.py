@@ -341,7 +341,11 @@ class EvaluationTests(unittest.TestCase):
             pid = int(pid_file.read_text())
             status = Path(f"/proc/{pid}/stat")
             for _ in range(10):
-                if not status.exists() or status.read_text().split()[2] == "Z":
+                try:
+                    state = status.read_text().split()[2]
+                except (FileNotFoundError, ProcessLookupError):
+                    break  # The child was reaped while checking procfs.
+                if state == "Z":
                     break
                 time.sleep(0.02)
             else:

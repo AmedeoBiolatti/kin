@@ -39,7 +39,7 @@ class BuildConfigTests(unittest.TestCase):
             '#include <vector>\nint value() { return std::vector<int>{1, 2}.size(); }\n')
         (source / "kin/plain.c").write_text("int plain(void) { return 0; }\n")
         (source / "kin/CMakeLists.txt").write_text('''
-include("${KIN_ROOT}/cmake/kin_build.cmake")
+include("${KIN_ROOT}/cmake/kin_game.cmake")
 add_library(engine STATIC engine.cpp plain.c)
 kin_precompile_target(engine)
 ''')
