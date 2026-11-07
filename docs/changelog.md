@@ -7,6 +7,22 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Material graphs for 3D (native renderers; WebGL2 draws a graph material's stock fallback). A surface shader
+  (`Material3D::surface`) is a `kin_surface(inout KinSurface)` function inside the stock mesh shader, lit, fogged,
+  shadowed and GI'd as a stock material, in every pass (cut-outs by its alpha included) and in the batched paths.
+  A material graph (`kin.material-graph/1`, `material_graph3d.hpp`) compiles to one: 53 node types, five map slots,
+  64 floats of parameters, a world-position offset, and surface outputs beyond the stock material's (backlight for
+  two-sided foliage, clear coat, specular, diffuse wrap). `.kinmaterials` files name a `"graph"` and its `"params"`;
+  `Assets3D::load_material_graph` loads a graph cooked at build time (`kin_material_graph cook`, cmake's
+  `kin_cook_material_graph`) or compiles it with glslc, and reloads it on edits. `Scene3D::specular_multiscatter`
+  (on) can be turned off to draw rough metals as Unreal's legacy shading does.
+- `kin_import_material godot|unity|unreal` imports other engines' materials as `.kinmaterials`: the standard PBR
+  materials of all three, and with `--graphs` their node graphs (Unreal material graphs with their Material
+  Functions and static switches, Unity Shader Graph 10+, Godot 4 VisualShaders), noting each node it can't express.
+  `kin_material_lineup` renders the same scene in kin, Godot and Unreal to compare the imports.
+- Material UV transform (`Material3D::uv_scale`, `uv_offset`) in every pass. TIFF and PSD textures decode for
+  imports, and 16-bit greyscale PNGs no longer overflow SDL_image's surface.
+
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
   precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
   and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).
