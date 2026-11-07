@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <deque>
+#include <functional>
 #include <sol/sol.hpp>
 #include <stdexcept>
 #include <type_traits>
@@ -420,6 +421,8 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         auto& p = *get()->_impl;
         return p.follow(tween_target(p.world, std::move(target), state), id);
     };
+    // Repeated std::function signatures share sol2 invocation adapters.
+    // Keep unique signatures as lambdas to avoid adding another wrapper.
     auto contexts = lua.create_named_table("input_contexts");
     contexts["push"] = [get](const std::string& name, const std::string& text, sol::optional<bool> modal,
                              sol::optional<bool> consume) {
@@ -433,25 +436,29 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
             throw sol::error("input context already exists: " + name);
         p.router.push({name, std::move(map), true, consume.value_or(true), modal.value_or(false)});
     };
-    contexts["remove"] = [get](const std::string& name) {
-        mutable_call();
-        return get()->_impl->router.remove(name);
-    };
+    contexts["remove"] = std::function<bool(const std::string&)>{
+        [get](const std::string& name) {
+            mutable_call();
+            return get()->_impl->router.remove(name);
+        }};
     contexts["enable"] = [get](const std::string& name, bool enabled) {
         mutable_call();
         auto& p = *get()->_impl;
         p.layer(name);
         p.router.set_enabled(name, enabled);
     };
-    contexts["held"] = [get](const std::string& name, const std::string& action) {
-        return get()->_impl->router.action(name, action).held;
-    };
-    contexts["pressed"] = [get](const std::string& name, const std::string& action) {
-        return get()->_impl->router.action(name, action).pressed;
-    };
-    contexts["released"] = [get](const std::string& name, const std::string& action) {
-        return get()->_impl->router.action(name, action).released;
-    };
+    contexts["held"] = std::function<bool(const std::string&, const std::string&)>{
+        [get](const std::string& name, const std::string& action) {
+            return get()->_impl->router.action(name, action).held;
+        }};
+    contexts["pressed"] = std::function<bool(const std::string&, const std::string&)>{
+        [get](const std::string& name, const std::string& action) {
+            return get()->_impl->router.action(name, action).pressed;
+        }};
+    contexts["released"] = std::function<bool(const std::string&, const std::string&)>{
+        [get](const std::string& name, const std::string& action) {
+            return get()->_impl->router.action(name, action).released;
+        }};
     contexts["axis"] = [get](const std::string& name, const std::string& axis) {
         return get()->_impl->router.axis(name, axis);
     };
@@ -459,15 +466,16 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         const auto& layer = get()->_impl->layer(name);
         return serialize_input_overrides(layer.defaults, layer.map);
     };
-    contexts["apply_overrides"] = [get](const std::string& name, const std::string& text) {
-        mutable_call();
-        auto& p = *get()->_impl;
-        InputMap map;
-        std::string error;
-        if (!apply_input_overrides(text, p.layer(name).defaults, map, error))
-            throw sol::error(error);
-        p.router.set_map(name, std::move(map));
-    };
+    contexts["apply_overrides"] = std::function<void(const std::string&, const std::string&)>{
+        [get](const std::string& name, const std::string& text) {
+            mutable_call();
+            auto& p = *get()->_impl;
+            InputMap map;
+            std::string error;
+            if (!apply_input_overrides(text, p.layer(name).defaults, map, error))
+                throw sol::error(error);
+            p.router.set_map(name, std::move(map));
+        }};
     // The running game's own profile folder (input_profile_path), beside its saves.
     auto save_path = [](const std::string& profile) {
         std::string error;
@@ -476,20 +484,22 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
             throw sol::error(error);
         return path;
     };
-    contexts["save"] = [get, save_path](const std::string& name, const std::string& profile) {
-        mutable_call();
-        const auto& layer = get()->_impl->layer(name);
-        return save_input_overrides(layer.defaults, layer.map, save_path(profile));
-    };
-    contexts["load"] = [get, save_path](const std::string& name, const std::string& profile) {
-        mutable_call();
-        auto& p = *get()->_impl;
-        std::string error;
-        InputMap map;
-        if (!load_input_overrides(p.layer(name).defaults, map, save_path(profile), error))
-            throw sol::error(error);
-        p.router.set_map(name, std::move(map));
-    };
+    contexts["save"] = std::function<bool(const std::string&, const std::string&)>{
+        [get, save_path](const std::string& name, const std::string& profile) {
+            mutable_call();
+            const auto& layer = get()->_impl->layer(name);
+            return save_input_overrides(layer.defaults, layer.map, save_path(profile));
+        }};
+    contexts["load"] = std::function<void(const std::string&, const std::string&)>{
+        [get, save_path](const std::string& name, const std::string& profile) {
+            mutable_call();
+            auto& p = *get()->_impl;
+            std::string error;
+            InputMap map;
+            if (!load_input_overrides(p.layer(name).defaults, map, save_path(profile), error))
+                throw sol::error(error);
+            p.router.set_map(name, std::move(map));
+        }};
     auto rebind = lua.create_named_table("rebind");
     rebind["begin"] = [get](const std::string& action, sol::optional<f32> timeout) {
         mutable_call();
@@ -593,12 +603,13 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         return LuaLease2D{found->second, *lease, std::move(finalizer)};
     };
     pools["active"] = [get](const std::string& name) { return get()->_impl->pools.at(name)->active(); };
-    pools["destroy"] = [get](const std::string& name) {
-        mutable_call();
-        auto& p = *get()->_impl;
-        p.pool_sources.erase(name);
-        return p.pools.erase(name) != 0;
-    };
+    pools["destroy"] = std::function<bool(const std::string&)>{
+        [get](const std::string& name) {
+            mutable_call();
+            auto& p = *get()->_impl;
+            p.pool_sources.erase(name);
+            return p.pools.erase(name) != 0;
+        }};
     // clang-format off
     scripting_detail::new_api_type<LuaPreload2D>(lua, "KinScenePreload2D",
         sol::no_constructor,
@@ -633,17 +644,18 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
                             }};
     };
     auto controllers = lua.create_named_table("controllers");
-    controllers["devices"] = [get](sol::this_state state) {
-        sol::state_view lua{state};
-        auto result = lua.create_table();
-        const auto* pads = get()->_impl->gamepads;
-        if (pads) {
-            std::size_t i = 0;
-            for (const auto& d : pads->devices())
-                result[++i] = lua.create_table_with("id", d.id, "name", d.name, "connected", d.state.connected);
-        }
-        return result;
-    };
+    controllers["devices"] = std::function<sol::table(sol::this_state)>{
+        [get](sol::this_state state) {
+            sol::state_view lua{state};
+            auto result = lua.create_table();
+            const auto* pads = get()->_impl->gamepads;
+            if (pads) {
+                std::size_t i = 0;
+                for (const auto& d : pads->devices())
+                    result[++i] = lua.create_table_with("id", d.id, "name", d.name, "connected", d.state.connected);
+            }
+            return result;
+        }};
     controllers["join"] = [get](u32 device, std::size_t player) {
         mutable_call();
         auto* pads = get()->_impl->gamepads;
@@ -686,25 +698,28 @@ void bind_lua_workflows2d(sol::state& lua, std::function<std::shared_ptr<ScriptW
         assets.manager().set_memory_budget(cpu);
         assets.set_texture_budget(gpu);
     };
-    memory["report"] = [get](sol::this_state state) {
-        sol::state_view lua{state};
-        auto& assets = get()->_impl->asset_service();
-        return lua.create_table_with("cpu", memory_table(lua, assets.manager().memory_report()), "gpu",
-                                     memory_table(lua, assets.texture_memory_report()));
-    };
-    memory["residency"] = [get](sol::this_state state) {
-        sol::state_view lua{state};
-        auto& assets = get()->_impl->asset_service();
-        return lua.create_table_with("cpu", residency_table(lua, assets.manager().residency()), "gpu",
-                                     residency_table(lua, assets.texture_residency()));
-    };
-    memory["trim"] = [get](sol::this_state state) {
-        mutable_call();
-        sol::state_view lua{state};
-        auto& assets = get()->_impl->asset_service();
-        return lua.create_table_with("cpu", memory_table(lua, assets.manager().trim_memory()), "gpu",
-                                     memory_table(lua, assets.trim_texture_memory()));
-    };
+    memory["report"] = std::function<sol::table(sol::this_state)>{
+        [get](sol::this_state state) {
+            sol::state_view lua{state};
+            auto& assets = get()->_impl->asset_service();
+            return lua.create_table_with("cpu", memory_table(lua, assets.manager().memory_report()), "gpu",
+                                         memory_table(lua, assets.texture_memory_report()));
+        }};
+    memory["residency"] = std::function<sol::table(sol::this_state)>{
+        [get](sol::this_state state) {
+            sol::state_view lua{state};
+            auto& assets = get()->_impl->asset_service();
+            return lua.create_table_with("cpu", residency_table(lua, assets.manager().residency()), "gpu",
+                                         residency_table(lua, assets.texture_residency()));
+        }};
+    memory["trim"] = std::function<sol::table(sol::this_state)>{
+        [get](sol::this_state state) {
+            mutable_call();
+            sol::state_view lua{state};
+            auto& assets = get()->_impl->asset_service();
+            return lua.create_table_with("cpu", memory_table(lua, assets.manager().trim_memory()), "gpu",
+                                         memory_table(lua, assets.trim_texture_memory()));
+        }};
 }
 TweenDef scripting_detail::lua_tween_def(EcsWorld& world, const std::string& property, const sol::object& to,
                                          f32 seconds, const sol::object& easing_or_options,

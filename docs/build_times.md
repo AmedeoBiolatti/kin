@@ -1,9 +1,10 @@
 # Faster development builds
 
-Measurements below were collected on the original benchmarking branch before
-the build changes were applied to current `main`. Commit IDs in the data refer
-to that original history; absolute times and ratios should be remeasured for
-the current checkout and machine.
+The earlier measurement rounds, through dependency scheduling, used the original
+benchmarking branch before its build changes reached `main`. Their commit IDs
+refer to that history. The workflow callback follow-up starts from merged `main`
+at `66972da`. Each round records its scope and base; remeasure absolute times
+and ratios for your checkout and machine.
 
 Use a persistent build directory and build the game you are editing:
 
@@ -477,3 +478,63 @@ Those checks do not cover a full 3D runtime or Windows/MSVC build.
 The [scheduling and capacity data](build_scheduling_2026-11-07.json) retains
 all runs, Ninja timelines, activity/memory samples, edit-loop results, validation
 and reproduction scripts.
+
+### Workflow callback follow-up
+
+On merged `main` at `66972da`, a fresh Clang profile of
+`lua_workflows2d.cpp` took 15.19 seconds: 5.87 in the frontend and 9.27 in the
+backend. Twelve captured callbacks now use `std::function` with four repeated
+signatures, allowing sol2 to share their invocation adapters. Unique signatures
+retain their lambdas. Callback bodies, captures, safety settings and optimization
+flags are unchanged.
+
+Three uninstrumented pairs per compiler produced these local medians:
+
+| Workflow source compile, `-O2` | Original callbacks | Shared adapters |
+|---|---:|---:|
+| Clang 21.1.8 | 13.18 s | 12.30 s |
+| GCC 15.2.0 | 10.88 s | 10.89 s |
+
+Clang was faster in every pair; the reduction between medians is **6.7%**.
+GCC was effectively unchanged. An exploratory version that wrapped all 33
+captured callbacks, including unique signatures, barely helped Clang and slowed
+GCC, so it was discarded.
+
+Each timed command compiled only this source, pinned to performance-core CPU 2,
+with a matching prebuilt PCH, no compiler cache and no LTO. Run order reversed
+in the middle pair. Before/after source copies used the same NTFS/FUSE volume
+and private-header include path. Other user jobs were active during parts of the
+session; these are local estimates. PCH creation, dependencies, shaders, archives
+and links are excluded. **This is not a whole-build speedup measurement.**
+
+Lua probes measured binding 50 fresh VMs, 400,000 input queries and 40,000
+controller-table calls. Each compiler ran three processes per variant, with
+three warmups and 30 timed samples per workload. The retained `-O2` adapters
+showed no slowdown in these sampled medians, and all probe assertions passed.
+This does not establish whole-game performance or cover every workflow path.
+
+A separate trial compared optimization levels on the changed source, using
+separately built, matching PCHs:
+
+| Workflow source compile, shared adapters | `-O2` | `-O1` |
+|---|---:|---:|
+| Clang 21.1.8 | 11.79 s | 9.99 s |
+| GCC 15.2.0 | 11.14 s | 8.99 s |
+
+The observed reductions were **15.3%** and **19.3%**. These are separate runs
+from the callback comparison above; compare within each table. With only this
+translation unit built at `-O1`, sampled input-query medians rose by 3.8% with
+Clang and 3.4% with GCC relative to the changed `-O2` version. Other engine
+objects and Lua itself retained their normal optimization. `-O1` remains an
+experiment; no flag or preset was added. A broader opt-in mode needs a separate
+whole-target build comparison and game runtime measurements.
+
+GCC and Clang each passed 11 selected scripting, scene and game tests, and all
+four Lua API reports matched the original `main` reports. A mechanical check
+also verified that removing the twelve wrappers reproduces the original
+callback bodies and captures. Windows/MSVC and a full 3D runtime were not
+validated in this round.
+
+The [workflow measurement data](build_workflows_2026-11-07.json) contains the
+compile samples and per-process runtime medians, rejected prototype results,
+source hashes, validation results, original commands and reproduction scripts.
