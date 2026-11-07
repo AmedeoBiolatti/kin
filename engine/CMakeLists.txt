@@ -1,3 +1,9 @@
+# Static libraries need their own objects and generated prerequisites, not the
+# archives used at final link time. Let CMake prune those build dependencies.
+if(NOT DEFINED CMAKE_OPTIMIZE_DEPENDENCIES)
+    set(CMAKE_OPTIMIZE_DEPENDENCIES ON)
+endif()
+
 # Shared support has no dependency on optional components. In particular, the
 # default asset-loader registration in kin_engine may depend on audio, while
 # audio's logging/localization only depend on this lower layer.
@@ -45,6 +51,13 @@ set(_kin_scene_component_sources
 )
 if(KIN_ENABLE_PHYSICS)
     list(APPEND _kin_scene_component_sources src/scene/scene_components_physics2d.cpp)
+endif()
+
+# Give expensive scripting compilations an early position among equally ready
+# Ninja jobs after static-library dependency pruning.
+if(KIN_ENABLE_SCRIPTING)
+    add_library(kin_scripting STATIC)
+    add_library(kin_scripting_scenes STATIC)
 endif()
 
 add_library(kin_engine STATIC
@@ -293,7 +306,7 @@ if(KIN_ENABLE_PHYSICS)
     target_link_libraries(kin_engine_components INTERFACE kin_physics_render kin_physics_ecs)
 endif()
 if(KIN_ENABLE_SCRIPTING)
-    add_library(kin_scripting STATIC
+    target_sources(kin_scripting PRIVATE
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
         src/scripting/lua_script.cpp
@@ -304,7 +317,7 @@ if(KIN_ENABLE_SCRIPTING)
     target_link_libraries(kin_scripting PUBLIC kin_foundation Lua::Lua sol2::sol2)
     kin_enable_release_optimizations(kin_scripting)
 
-    add_library(kin_scripting_scenes STATIC
+    target_sources(kin_scripting_scenes PRIVATE
         src/scripting/script_engine.cpp
         src/scripting/script_reload.cpp
         src/scripting/lua_state_copy.cpp
@@ -572,7 +585,14 @@ if(KIN_HAS_GPU_RENDERER)
     include(kin_gpu_shaders)
     # The .spv files stay in the build too, for tests that read every engine shader.
     kin_compile_glsl(_kin_gpu_spv OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" SOURCES ${KIN_GPU_SHADER_SOURCES})
-    kin_embed_files(kin_engine NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
+    # Isolate generation so dependency pruning retains the small data target,
+    # rather than the full engine archive, as a build prerequisite.
+    add_library(kin_gpu_shader_data OBJECT)
+    kin_enable_release_optimizations(kin_gpu_shader_data)
+    kin_embed_files(kin_gpu_shader_data NAME embedded_gpu_shader NAMESPACE kin::gpu FILES ${_kin_gpu_spv})
+    target_include_directories(kin_engine PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/kin_embed/kin_gpu_shader_data")
+    target_link_libraries(kin_engine PRIVATE kin_gpu_shader_data)
     if(KIN_GLSLC AND NOT KIN_SHIPPING)
         # For runtime compiles of a game's shaders (kin/renderer/shader_compiler.hpp) on this machine.
         target_compile_definitions(kin_engine PRIVATE KIN_GLSLC_PATH="${KIN_GLSLC}" KIN_SHADER_INCLUDE_DIR="${KIN_SHADER_INCLUDE_DIR}")
