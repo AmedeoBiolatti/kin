@@ -291,9 +291,65 @@ headless/render smoke test.
 The task traces identify `script_engine.cpp` and `entity_scripts.cpp` among
 the last compilations before the final link in all four builds. In the GCC
 baseline, the scene file finished at 187.82 s, while the game linked at
-240.80 s. The next experiment should profile these Lua compilation tasks
-and their scheduling before adding more template-instantiation groups.
+240.80 s. These Lua compilation tasks and their scheduling were profiled
+in the following experiment.
 
 The [full rebuild data](build_full_rebuild_2026-11-07.json) retains the run
 order, CPU/RSS measurements, smoke results and complete Ninja task timelines.
 This phase adds measurement records without further engine behavior changes.
+
+### Lua binding template work
+
+The Lua binding files now share sol2 invocation adapters by callback
+signature. Captured callbacks use `std::function`; noncapturing entity
+callbacks use function pointers. Large scene type definitions register their
+members individually, keeping heterogeneous member tuples out of sol2's
+forwarding layers. Callback bodies, captures, member order and Lua API names
+are preserved. Optimization and sol2 safety settings are unchanged; no new
+build option is needed.
+
+Clang's [time profiler](https://clang.llvm.org/docs/ClangCommandLineReference.html#cmdoption-clang-ftime-trace)
+showed about 60–67% of the original files' compilation time in the backend,
+with substantial optimizer/inliner work. PCHs were already enabled. Reducing
+the number of adapter instantiations also reduces the generated wrapper code.
+
+The final direct Clang comparison used one core (CPU 2) for both versions,
+Release `-O2`, matching PCHs, no compiler cache, and no profiler instrumentation.
+There is one fresh before/after observation per file, with order alternating
+between files:
+
+| Translation unit | Before | After | Before peak RSS | After peak RSS |
+|---|---:|---:|---:|---:|
+| `script_engine.cpp` | 44.94 s | 35.18 s | 877 MiB | 743 MiB |
+| `entity_scripts.cpp` | 33.57 s | 26.10 s | 795 MiB | 707 MiB |
+
+Both files compiled about 22% faster in this pair. Pinning avoids switching
+between this machine's different core types, but does not isolate the SMT
+sibling, CPU frequency or background I/O. Treat the ratios as local estimates.
+
+A separate GCC full runtime rebuild pair used four jobs on four distinct
+performance cores (CPUs 0, 2, 4, 6), with dependencies/generated assets already
+built. The two binding tasks fell from 61.56 to 39.27 s and from 47.35 to
+29.36 s. However, the complete `hex_demo` rebuild rose from **366.23 to
+404.28 s**. Other projects were compiling concurrently, including on SMT
+siblings, and the 168 unchanged engine compilation tasks had a median
+19.8% slowdown in the after run. This pair does not establish a clean-build
+speedup; the retained change targets binding compilation work. These totals
+should not be compared directly with the preceding unpinned session.
+
+All four Lua API reports (scene, entity, test, scenario) matched baseline
+exactly on both compilers. GCC and Clang each passed nine selected scripting,
+runtime, tooling and game tests. Added checks cover constructors, read-only
+properties and forbidden entity construction. A mechanical reconstruction
+also confirms the old callback bodies and ordered registration definitions.
+Without PCH, both files passed Clang 3D syntax/template checks and GCC checks
+with physics/audio disabled. These additional checks cover compilation;
+Windows and a full 3D runtime suite were not run.
+
+Runtime spot checks used three processes per configuration, each taking
+30 samples after three warmups on CPU 2. Median scene/entity bridge-loop
+changes ranged from 1.2% faster to 2.3% slower, with identical resulting
+entity positions. These narrow cases do not establish whole-game performance.
+All process results, including an outlier, are retained in the
+[Lua binding measurement data](build_lua_bindings_2026-11-07.json), alongside
+the profiles, paired compile samples, full rebuild timelines and validation.

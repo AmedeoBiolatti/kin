@@ -41,6 +41,41 @@ sol::usertype<T> new_api_type(sol::state& lua, const char* name, Constructor&& c
     return type;
 }
 
+// Large bindings use individual statements to keep heterogeneous member tuples
+// out of sol2's forwarding layers and the optimizer. The callable types, order
+// and property metadata are the same as in new_api_type().
+template <typename T>
+class ApiTypeDefinition {
+public:
+    ApiTypeDefinition(sol::usertype<T>& type, std::vector<std::string>& properties)
+        : _type(type), _properties(properties) {}
+
+    template <typename Value>
+    void member(const char* name, Value&& value) {
+        if constexpr (sol::is_variable_binding<Value>::value) {
+            _properties.emplace_back(name);
+        }
+        _type.set(name, std::forward<Value>(value));
+    }
+
+private:
+    sol::usertype<T>& _type;
+    std::vector<std::string>& _properties;
+};
+
+template <typename T, typename Constructor, typename Define>
+sol::usertype<T> define_api_type(sol::state& lua, const char* name, Constructor&& constructor, Define&& define) {
+    auto type = lua.new_usertype<T>(name, std::forward<Constructor>(constructor));
+    std::vector<std::string> properties;
+    ApiTypeDefinition<T> definition(type, properties);
+    std::forward<Define>(define)(definition);
+    sol::table types = lua.registry()["kin.api_types"].get_or_create<sol::table>();
+    types[name] = lua.registry()[sol::usertype_traits<T>::metatable()];
+    sol::table fields = lua.registry()["kin.api_properties"].get_or_create<sol::table>();
+    fields[name] = sol::as_table(properties);
+    return type;
+}
+
 inline std::vector<std::string> api_members(const sol::table& table, bool bound_type) {
     std::vector<std::string> members;
     for (const auto& [key, value] : table) {

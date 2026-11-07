@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <optional>
 #include <system_error>
@@ -250,29 +251,32 @@ struct EntityScripts::Impl {
                 throw sol::error("foreign tween entity");
             return EcsEntity{entity.live()};
         };
+        // Function pointers and std::function give equal callback signatures
+        // equal types, so sol2 can reuse its invocation adapters. Captures stay
+        // owned by the Lua closure, including their original host pointer.
         sol::usertype<ScriptEntity> entity =
             scripting_detail::new_api_type<ScriptEntity>(lua, "Entity", sol::no_constructor);
-        entity["id"] = [](const ScriptEntity& e) { return static_cast<f64>(e.entity.id()); };
+        entity["id"] = +[](const ScriptEntity& e) { return static_cast<f64>(e.entity.id()); };
         entity["alive"] = &ScriptEntity::alive;
-        entity["name"] = [](const ScriptEntity& e) { return std::string(e.live().name().c_str()); };
-        entity["parent"] = [](const ScriptEntity& e) -> std::optional<ScriptEntity> {
+        entity["name"] = +[](const ScriptEntity& e) { return std::string(e.live().name().c_str()); };
+        entity["parent"] = +[](const ScriptEntity& e) -> std::optional<ScriptEntity> {
             const flecs::entity parent = e.live().parent();
             return parent ? std::optional(ScriptEntity{e.world, parent}) : std::nullopt;
         };
-        entity["child"] = [](const ScriptEntity& e, const std::string& name) -> std::optional<ScriptEntity> {
+        entity["child"] = +[](const ScriptEntity& e, const std::string& name) -> std::optional<ScriptEntity> {
             const flecs::entity child = e.live().lookup(name.c_str());
             return child ? std::optional(ScriptEntity{e.world, child}) : std::nullopt;
         };
-        entity["has"] = [](const ScriptEntity& e, const std::string& component) {
+        entity["has"] = +[](const ScriptEntity& e, const std::string& component) {
             return e.world->components().has(EcsEntity{e.live()}, component);
         };
-        entity["add"] = [](const ScriptEntity& e, const std::string& component) {
+        entity["add"] = +[](const ScriptEntity& e, const std::string& component) {
             return e.world->components().add(EcsEntity{e.live()}, component);
         };
-        entity["remove"] = [](const ScriptEntity& e, const std::string& component) {
+        entity["remove"] = +[](const ScriptEntity& e, const std::string& component) {
             return e.world->components().remove(EcsEntity{e.live()}, component);
         };
-        entity["get"] = [](const ScriptEntity& e, const std::string& component, sol::this_state state) -> sol::object {
+        entity["get"] = +[](const ScriptEntity& e, const std::string& component, sol::this_state state) -> sol::object {
             sol::state_view lua(state);
             sol::table fields = lua.create_table();
             const bool found = e.world->components().visit_fields(
@@ -282,7 +286,7 @@ struct EntityScripts::Impl {
                 });
             return found ? sol::object(fields) : sol::lua_nil;
         };
-        entity["set"] = [](const ScriptEntity& e, const std::string& component, const sol::table& values) {
+        entity["set"] = +[](const ScriptEntity& e, const std::string& component, const sol::table& values) {
             EcsComponentRegistry& registry = e.world->components();
             const ComponentDescriptor* descriptor = registry.find(component);
             if (!descriptor) {
@@ -304,18 +308,18 @@ struct EntityScripts::Impl {
                 }
             }
         };
-        entity["position"] = [](const ScriptEntity& e) {
+        entity["position"] = +[](const ScriptEntity& e) {
             const Transform2D* t = e.live().get<Transform2D>();
             return std::make_tuple(t ? t->pos.x : 0.0f, t ? t->pos.y : 0.0f);
         };
-        entity["set_position"] = [](const ScriptEntity& e, f32 x, f32 y) {
+        entity["set_position"] = +[](const ScriptEntity& e, f32 x, f32 y) {
             EcsEntity target{e.live()};
             Transform2D t = target.get<Transform2D>() ? *target.get<Transform2D>() : Transform2D{};
             t.pos = {x, y};
             target.set(t);
             teleport(target);
         };
-        entity["move"] = [](const ScriptEntity& e, f32 dx, f32 dy) {
+        entity["move"] = +[](const ScriptEntity& e, f32 dx, f32 dy) {
             EcsEntity target{e.live()};
             Transform2D t = target.get<Transform2D>() ? *target.get<Transform2D>() : Transform2D{};
             t.pos = {t.pos.x + dx, t.pos.y + dy};
@@ -323,7 +327,7 @@ struct EntityScripts::Impl {
             teleport(target);
         };
         // Its velocity: its character's (CharacterController2D), else its body's.
-        entity["velocity"] = [this](const ScriptEntity& e) {
+        entity["velocity"] = std::function{[this](const ScriptEntity& e) {
             Vec2f velocity{};
 #if KIN_ENABLE_PHYSICS
             const flecs::entity live = e.live();
@@ -339,8 +343,8 @@ struct EntityScripts::Impl {
             (void)this;
 #endif
             return std::make_tuple(velocity.x, velocity.y);
-        };
-        entity["set_velocity"] = [](const ScriptEntity& e, f32 x, f32 y) {
+        }};
+        entity["set_velocity"] = +[](const ScriptEntity& e, f32 x, f32 y) {
 #if KIN_ENABLE_PHYSICS
             flecs::entity live = e.live();
             if (CharacterController2D* character = live.get_mut<CharacterController2D>()) {
@@ -367,20 +371,20 @@ struct EntityScripts::Impl {
             return false;
 #endif
         };
-        entity["on_floor"] = [character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::floor); };
-        entity["on_wall"] = [character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::wall); };
-        entity["on_ceiling"] = [character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::ceiling); };
-        entity["rotation"] = [](const ScriptEntity& e) {
+        entity["on_floor"] = std::function{[character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::floor); }};
+        entity["on_wall"] = std::function{[character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::wall); }};
+        entity["on_ceiling"] = std::function{[character_found](const ScriptEntity& e) { return character_found(e, &CharacterFound::ceiling); }};
+        entity["rotation"] = +[](const ScriptEntity& e) {
             const Transform2D* t = e.live().get<Transform2D>();
             return t ? t->rotation : 0.0f;
         };
-        entity["set_rotation"] = [](const ScriptEntity& e, f32 degrees) {
+        entity["set_rotation"] = +[](const ScriptEntity& e, f32 degrees) {
             EcsEntity target{e.live()};
             Transform2D t = target.get<Transform2D>() ? *target.get<Transform2D>() : Transform2D{};
             t.rotation = degrees;
             target.set(t);
         };
-        entity["destroy"] = [](const ScriptEntity& e) {
+        entity["destroy"] = +[](const ScriptEntity& e) {
             const EcsEntity target{e.live()};
             if (e.world && e.world->entities().registered(target)) {
                 e.world->entities().destroy(target); // its authored id (and its children's) let go, and told
@@ -389,12 +393,12 @@ struct EntityScripts::Impl {
             }
         };
         // Its ParticleSystemComponent's effect burst (or another of its catalog).
-        entity["emit"] = [](const ScriptEntity& e, sol::optional<std::string> effect) {
+        entity["emit"] = +[](const ScriptEntity& e, sol::optional<std::string> effect) {
             return emit_particles(EcsEntity{e.live()}, effect.value_or(std::string{}));
         };
         // Its tweens (kin/ecs/tween.hpp, stepped with the world's script
         // services). self:tween calls this, then runs its `done` as a task.
-        entity["tween"] = [](const ScriptEntity& e, const std::string& property, const sol::object& to, f32 seconds,
+        entity["tween"] = +[](const ScriptEntity& e, const std::string& property, const sol::object& to, f32 seconds,
                              const sol::object& easing_or_options, const sol::object& options) {
             TweenDef def = scripting_detail::lua_tween_def(*e.world, property, to, seconds, easing_or_options, options);
             std::string error;
@@ -404,11 +408,11 @@ struct EntityScripts::Impl {
             }
             return id;
         };
-        entity["tweening"] = [](const ScriptEntity& e, sol::optional<std::string> property) {
+        entity["tweening"] = +[](const ScriptEntity& e, sol::optional<std::string> property) {
             return tweening(EcsEntity{e.live()}, property.value_or(""));
         };
-        entity["stop_tween"] = [](const ScriptEntity& e, u32 id) { return stop_tween(EcsEntity{e.live()}, id); };
-        entity["stop_tweens"] = [](const ScriptEntity& e, sol::optional<std::string> property) {
+        entity["stop_tween"] = +[](const ScriptEntity& e, u32 id) { return stop_tween(EcsEntity{e.live()}, id); };
+        entity["stop_tweens"] = +[](const ScriptEntity& e, sol::optional<std::string> property) {
             return stop_tweens(EcsEntity{e.live()}, property.value_or(""));
         };
         // Its Animator's.
@@ -419,8 +423,8 @@ struct EntityScripts::Impl {
             }
             return found;
         };
-        entity["play"] = [animator](const ScriptEntity& e, const std::string& animation) { animator(e)->animation = animation; };
-        entity["set_param"] = [animator](const ScriptEntity& e, const std::string& name, const sol::object& value) {
+        entity["play"] = std::function{[animator](const ScriptEntity& e, const std::string& animation) { animator(e)->animation = animation; }};
+        entity["set_param"] = std::function{[animator](const ScriptEntity& e, const std::string& name, const sol::object& value) {
             Animator* found = animator(e);
             if (value.get_type() == sol::type::boolean) {
                 found->params.set_bool(name, value.as<bool>());
@@ -429,31 +433,31 @@ struct EntityScripts::Impl {
             } else {
                 throw sol::error("set_param takes true, false or a number");
             }
-        };
-        entity["trigger"] = [animator](const ScriptEntity& e, const std::string& name) { animator(e)->params.set_trigger(name); };
-        entity["state"] = [animator](const ScriptEntity& e) { return animator(e)->state; };
+        }};
+        entity["trigger"] = std::function{[animator](const ScriptEntity& e, const std::string& name) { animator(e)->params.set_trigger(name); }};
+        entity["state"] = std::function{[animator](const ScriptEntity& e) { return animator(e)->state; }};
 
         sol::table input_table = lua.create_named_table("input");
         // Each takes a player last (1 the first, 0 anyone), or reads the
         // player its entity's ScriptComponent names.
-        input_table["held"] = [this](const std::string& action, sol::optional<i32> who) {
+        input_table["held"] = std::function{[this](const std::string& action, sol::optional<i32> who) {
             return input && input->held(player_of(who), action);
-        };
-        input_table["pressed"] = [this](const std::string& action, sol::optional<i32> who) {
+        }};
+        input_table["pressed"] = std::function{[this](const std::string& action, sol::optional<i32> who) {
             return input && input->pressed(player_of(who), action);
-        };
-        input_table["released"] = [this](const std::string& action, sol::optional<i32> who) {
+        }};
+        input_table["released"] = std::function{[this](const std::string& action, sol::optional<i32> who) {
             return input && input->released(player_of(who), action);
-        };
-        input_table["axis"] = [this](const std::string& name, sol::optional<i32> who) {
+        }};
+        input_table["axis"] = std::function{[this](const std::string& name, sol::optional<i32> who) {
             return input ? input->axis(player_of(who), name) : 0.0f;
-        };
+        }};
         // Whose input this script's entity reads (0: anyone).
-        input_table["player"] = [this]() { return player + 1; };
+        input_table["player"] = std::function{[this]() { return player + 1; }};
         // The fingers down, {id, x, y, start_x, start_y} each; two fingers'
         // pinch (1: none) and pan since the last step. Gestures are actions
         // an input file binds ("touch jump tap").
-        input_table["touches"] = [this](sol::this_state state) {
+        input_table["touches"] = std::function{[this](sol::this_state state) {
             sol::state_view lua{state};
             sol::table list = lua.create_table();
             if (input) {
@@ -464,20 +468,20 @@ struct EntityScripts::Impl {
                 }
             }
             return list;
-        };
-        input_table["pinch"] = [this]() { return input ? input->touch_pinch() : 1.0f; };
-        input_table["pan"] = [this]() {
+        }};
+        input_table["pinch"] = std::function{[this]() { return input ? input->touch_pinch() : 1.0f; }};
+        input_table["pan"] = std::function{[this]() {
             const Vec2f moved = input ? input->touch_pan() : Vec2f{};
             return std::make_tuple(moved.x, moved.y);
-        };
-        input_table["mouse"] = [this]() {
+        }};
+        input_table["mouse"] = std::function{[this]() {
             const Vec2f at = input ? input->mouse_pos() : Vec2f{};
             return std::make_tuple(at.x, at.y);
-        };
+        }};
 
         // The language, which game scripts may change (a language menu's).
         if (sol::optional<sol::table> l10n = lua["l10n"]) {
-            (*l10n)["set_locale"] = [](const std::string& tag) -> std::string {
+            (*l10n)["set_locale"] = +[](const std::string& tag) -> std::string {
                 if (scripting_detail::reload_staging) {
                     throw sol::error("live services are unavailable while preparing reload");
                 }
@@ -487,69 +491,69 @@ struct EntityScripts::Impl {
         }
 
         sol::table ui_table = lua.create_named_table("ui");
-        ui_table["clicked"] = [this](const std::string& id) { return screens && screens->clicked(id); };
-        ui_table["changed"] = [this](const std::string& id) { return screens && screens->changed(id); };
-        ui_table["value"] = [this](const std::string& id) { return screens ? screens->value(id) : 0.0f; };
-        ui_table["checked"] = [this](const std::string& id) { return screens && screens->checked(id); };
-        ui_table["text"] = [this](const std::string& id) { return screens ? screens->text(id) : std::string(); };
-        ui_table["set_text"] = [this](const std::string& id, const sol::object& text) {
+        ui_table["clicked"] = std::function{[this](const std::string& id) { return screens && screens->clicked(id); }};
+        ui_table["changed"] = std::function{[this](const std::string& id) { return screens && screens->changed(id); }};
+        ui_table["value"] = std::function{[this](const std::string& id) { return screens ? screens->value(id) : 0.0f; }};
+        ui_table["checked"] = std::function{[this](const std::string& id) { return screens && screens->checked(id); }};
+        ui_table["text"] = std::function{[this](const std::string& id) { return screens ? screens->text(id) : std::string(); }};
+        ui_table["set_text"] = std::function{[this](const std::string& id, const sol::object& text) {
             if (screens) {
                 screens->set_text(id, text.is<std::string>() ? text.as<std::string>()
                                                             : text.is<double>() ? format_number(text.as<double>()) : std::string());
             }
-        };
-        ui_table["set_value"] = [this](const std::string& id, f32 value) {
+        }};
+        ui_table["set_value"] = std::function{[this](const std::string& id, f32 value) {
             if (screens) screens->set_value(id, value);
-        };
-        ui_table["set_checked"] = [this](const std::string& id, bool checked) {
+        }};
+        ui_table["set_checked"] = std::function{[this](const std::string& id, bool checked) {
             if (screens) screens->set_checked(id, checked);
-        };
-        ui_table["show"] = [this](const std::string& id, sol::optional<bool> shown) {
+        }};
+        ui_table["show"] = std::function{[this](const std::string& id, sol::optional<bool> shown) {
             if (screens) screens->set_visible(id, shown.value_or(true));
-        };
-        ui_table["hide"] = [this](const std::string& id) {
+        }};
+        ui_table["hide"] = std::function{[this](const std::string& id) {
             if (screens) screens->set_visible(id, false);
-        };
-        ui_table["set_image"] = [this](const std::string& id, const std::string& path) {
+        }};
+        ui_table["set_image"] = std::function{[this](const std::string& id, const std::string& path) {
             if (screens) screens->set_image(id, path);
-        };
-        ui_table["set_enabled"] = [this](const std::string& id, bool enabled) {
+        }};
+        ui_table["set_enabled"] = std::function{[this](const std::string& id, bool enabled) {
             if (screens) screens->set_enabled(id, enabled);
-        };
+        }};
 
         sol::table dialogue_table = lua.create_named_table("dialogue");
-        dialogue_table["start"] = [this](const std::string& path, sol::optional<std::string> node) {
+        dialogue_table["start"] = std::function{[this](const std::string& path, sol::optional<std::string> node) {
             return dialogue && dialogue->start(path, node.value_or(""));
-        };
-        dialogue_table["stop"] = [this]() {
+        }};
+        dialogue_table["stop"] = std::function{[this]() {
             if (dialogue) dialogue->stop();
-        };
-        dialogue_table["active"] = [this]() { return dialogue && dialogue->active(); };
-        dialogue_table["advance"] = [this]() {
+        }};
+        dialogue_table["active"] = std::function{[this]() { return dialogue && dialogue->active(); }};
+        dialogue_table["advance"] = std::function{[this]() {
             if (dialogue) dialogue->advance();
-        };
-        dialogue_table["choose"] = [this](const sol::object& which) {
+        }};
+        dialogue_table["choose"] = std::function{[this](const sol::object& which) {
             if (!dialogue) return false;
             if (which.is<std::string>()) return dialogue->choose(std::string_view(which.as<std::string>()));
             return which.is<double>() && dialogue->choose(static_cast<i32>(which.as<double>()) - 1); // Lua counts from 1
-        };
-        dialogue_table["node"] = [this]() { return dialogue && dialogue->active() ? dialogue->view().node_id : std::string(); };
-        dialogue_table["get"] = [this](sol::this_state state, const std::string& name) -> sol::object {
+        }};
+        dialogue_table["node"] = std::function{[this]() { return dialogue && dialogue->active() ? dialogue->view().node_id : std::string(); }};
+        dialogue_table["get"] = std::function{[this](sol::this_state state, const std::string& name) -> sol::object {
             if (!dialogue) return sol::make_object(state, sol::lua_nil);
             const DialogueVariable value = dialogue->variable(name);
             if (const auto* b = std::get_if<bool>(&value.value)) return sol::make_object(state, *b);
             if (const auto* n = std::get_if<f64>(&value.value)) return sol::make_object(state, *n);
             return sol::make_object(state, std::get<std::string>(value.value));
-        };
-        dialogue_table["set"] = [this](const std::string& name, const sol::object& value) {
+        }};
+        dialogue_table["set"] = std::function{[this](const std::string& name, const sol::object& value) {
             if (!dialogue) return;
             if (value.is<bool>()) dialogue->set_variable(name, {.value = value.as<bool>()});
             else if (value.is<double>()) dialogue->set_variable(name, {.value = value.as<double>()});
             else if (value.is<std::string>()) dialogue->set_variable(name, {.value = value.as<std::string>()});
-        };
+        }};
 
         sol::table scene_table = lua.create_named_table("scene");
-        scene_table["go"] = [this](const std::string& path, sol::optional<std::string> arrive, sol::optional<std::string> transition,
+        scene_table["go"] = std::function{[this](const std::string& path, sol::optional<std::string> arrive, sol::optional<std::string> transition,
                                    sol::optional<f32> duration) {
             if (!flow) {
                 return false;
@@ -567,15 +571,15 @@ struct EntityScripts::Impl {
             travel.duration = std::max(duration.value_or(travel.duration), 0.0f);
             flow->go(std::move(travel));
             return true;
-        };
-        scene_table["going"] = [this]() { return flow && flow->pending(); };
+        }};
+        scene_table["going"] = std::function{[this]() { return flow && flow->pending(); }};
 
         sol::table world_table = lua.create_named_table("world");
-        world_table["find"] = [this](const std::string& name) -> std::optional<ScriptEntity> {
+        world_table["find"] = std::function{[this](const std::string& name) -> std::optional<ScriptEntity> {
             const EcsEntity found = world ? world->entities().find_by_name(name) : EcsEntity{};
             return found.valid() ? std::optional(ScriptEntity{world, found.raw()}) : std::nullopt;
-        };
-        world_table["spawn"] = [this](const std::string& prefab, sol::optional<f32> x, sol::optional<f32> y) -> std::optional<ScriptEntity> {
+        }};
+        world_table["spawn"] = std::function{[this](const std::string& prefab, sol::optional<f32> x, sol::optional<f32> y) -> std::optional<ScriptEntity> {
             const std::shared_ptr<const PrefabAsset> asset = prefab_of(prefab);
             if (!asset || !world) {
                 throw sol::error("the prefab '" + prefab + "' could not be read");
@@ -587,15 +591,15 @@ struct EntityScripts::Impl {
             }
             made.root.raw().set<SpawnedPrefab>({.prefab = prefab}); // a save makes it again from it
             return ScriptEntity{world, made.root.raw()};
-        };
+        }};
 
         sol::table camera_table = lua.create_named_table("camera");
-        camera_table["shake"] = [this](f32 trauma) {
+        camera_table["shake"] = std::function{[this](f32 trauma) {
             if (world) {
                 shake_camera(*world, trauma);
             }
-        };
-        camera_table["trauma"] = [this]() {
+        }};
+        camera_table["trauma"] = std::function{[this]() {
             f32 most = 0.0f;
             if (world) {
                 world->each([&](const CameraComponent& camera) {
@@ -605,7 +609,7 @@ struct EntityScripts::Impl {
                 });
             }
             return most;
-        };
+        }};
 
 #if KIN_ENABLE_PHYSICS
         bind_physics(lua);
@@ -618,7 +622,7 @@ struct EntityScripts::Impl {
             }
             return *saves;
         };
-        save_table["write"] = [this, saves_or_throw](const std::string& slot, sol::optional<std::string> title,
+        save_table["write"] = std::function{[this, saves_or_throw](const std::string& slot, sol::optional<std::string> title,
                                                      sol::optional<std::string> summary, sol::this_state state) {
             SceneSaves& kept = saves_or_throw();
             if (!world) {
@@ -630,8 +634,8 @@ struct EntityScripts::Impl {
                 return std::make_tuple(sol::make_object(lua, true), sol::make_object(lua, sol::lua_nil));
             }
             return std::make_tuple(sol::make_object(lua, sol::lua_nil), sol::make_object(lua, written.message));
-        };
-        save_table["read"] = [saves_or_throw](const std::string& slot) {
+        }};
+        save_table["read"] = std::function{[saves_or_throw](const std::string& slot) {
             SceneSaves& kept = saves_or_throw();
             if (!valid_save_id(slot)) {
                 return std::make_tuple(false, std::string("'" + slot + "' is not a slot's name"));
@@ -641,14 +645,14 @@ struct EntityScripts::Impl {
             }
             kept.ask_read(slot);
             return std::make_tuple(true, std::string());
-        };
-        save_table["exists"] = [saves_or_throw](const std::string& slot) {
+        }};
+        save_table["exists"] = std::function{[saves_or_throw](const std::string& slot) {
             return valid_save_id(slot) && saves_or_throw().store().slot_exists(slot);
-        };
-        save_table["delete"] = [saves_or_throw](const std::string& slot) {
+        }};
+        save_table["delete"] = std::function{[saves_or_throw](const std::string& slot) {
             return valid_save_id(slot) && saves_or_throw().store().delete_slot(slot).ok;
-        };
-        save_table["slots"] = [saves_or_throw](sol::this_state state) {
+        }};
+        save_table["slots"] = std::function{[saves_or_throw](sol::this_state state) {
             sol::state_view lua(state);
             std::vector<SaveSlotInfo> slots = saves_or_throw().store().list_slots();
             std::ranges::stable_sort(slots, [](const SaveSlotInfo& a, const SaveSlotInfo& b) { return a.updated_at_unix > b.updated_at_unix; });
@@ -658,12 +662,12 @@ struct EntityScripts::Impl {
                                                       "updated", static_cast<f64>(slots[i].updated_at_unix));
             }
             return listed;
-        };
-        save_table["get"] = [saves_or_throw](const std::string& name, sol::object fallback, sol::this_state state) -> sol::object {
+        }};
+        save_table["get"] = std::function{[saves_or_throw](const std::string& name, sol::object fallback, sol::this_state state) -> sol::object {
             const JsonValue* value = saves_or_throw().value(name);
             return value ? json_to_lua(state, *value) : fallback;
-        };
-        save_table["set"] = [saves_or_throw](const std::string& name, sol::object value) {
+        }};
+        save_table["set"] = std::function{[saves_or_throw](const std::string& name, sol::object value) {
             SceneSaves& kept = saves_or_throw();
             if (value.get_type() == sol::type::lua_nil || value.get_type() == sol::type::none) {
                 kept.set_value(name, JsonValue{});
@@ -674,7 +678,7 @@ struct EntityScripts::Impl {
                 throw sol::error("save.set: '" + name + "' is not kept (true/false, numbers, text and tables of them are)");
             }
             kept.set_value(name, std::move(*json));
-        };
+        }};
         lua.safe_script(self_prelude);
     }
 
@@ -775,14 +779,14 @@ struct EntityScripts::Impl {
 
     void bind_physics(sol::state& lua) {
         sol::table table = lua.create_named_table("physics");
-        table["raycast"] = [this](f32 x1, f32 y1, f32 x2, f32 y2, sol::optional<sol::table> options, sol::this_state state) -> sol::object {
+        table["raycast"] = std::function{[this](f32 x1, f32 y1, f32 x2, f32 y2, sol::optional<sol::table> options, sol::this_state state) -> sol::object {
             const std::vector<PhysicsRaycastHit> hits = physics_or_throw().raycast({x1, y1}, {x2, y2}, filter_of(options));
             if (hits.empty()) {
                 return sol::lua_nil;
             }
             const PhysicsRaycastHit& hit = hits.front();
             return hit_table(state, hit.body, hit.point, hit.normal, hit.fraction);
-        };
+        }};
         const auto cast = [this](const PhysicsShape& shape, Vec2f from, Vec2f to, const sol::optional<sol::table>& options,
                                  sol::this_state state) -> sol::object {
             const std::optional<PhysicsShapeHit> hit = physics_or_throw().cast_shape(shape, from, to, filter_of(options));
@@ -791,23 +795,23 @@ struct EntityScripts::Impl {
             }
             return hit_table(state, hit->body, hit->point, hit->normal, hit->fraction);
         };
-        table["cast_circle"] = [cast](f32 x1, f32 y1, f32 x2, f32 y2, f32 radius, sol::optional<sol::table> options, sol::this_state state) {
+        table["cast_circle"] = std::function{[cast](f32 x1, f32 y1, f32 x2, f32 y2, f32 radius, sol::optional<sol::table> options, sol::this_state state) {
             return cast(PhysicsShape::circle(radius), {x1, y1}, {x2, y2}, options, state);
-        };
-        table["cast_box"] = [cast](f32 x1, f32 y1, f32 x2, f32 y2, f32 width, f32 height, sol::optional<sol::table> options,
+        }};
+        table["cast_box"] = std::function{[cast](f32 x1, f32 y1, f32 x2, f32 y2, f32 width, f32 height, sol::optional<sol::table> options,
                                    sol::this_state state) {
             return cast(PhysicsShape::box({0.5f * width, 0.5f * height}), {x1, y1}, {x2, y2}, options, state);
-        };
-        table["overlap_point"] = [this](f32 x, f32 y, sol::optional<sol::table> options, sol::this_state state) {
+        }};
+        table["overlap_point"] = std::function{[this](f32 x, f32 y, sol::optional<sol::table> options, sol::this_state state) {
             return entities_table(state, physics_or_throw().query_point({x, y}, filter_of(options)));
-        };
-        table["overlap_circle"] = [this](f32 x, f32 y, f32 radius, sol::optional<sol::table> options, sol::this_state state) {
+        }};
+        table["overlap_circle"] = std::function{[this](f32 x, f32 y, f32 radius, sol::optional<sol::table> options, sol::this_state state) {
             return entities_table(state, physics_or_throw().query_shape(PhysicsShape::circle(radius), {x, y}, filter_of(options)));
-        };
-        table["overlap_box"] = [this](f32 x, f32 y, f32 width, f32 height, sol::optional<sol::table> options, sol::this_state state) {
+        }};
+        table["overlap_box"] = std::function{[this](f32 x, f32 y, f32 width, f32 height, sol::optional<sol::table> options, sol::this_state state) {
             return entities_table(state,
                                   physics_or_throw().query_shape(PhysicsShape::box({0.5f * width, 0.5f * height}), {x, y}, filter_of(options)));
-        };
+        }};
     }
 #endif
 
