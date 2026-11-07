@@ -1435,20 +1435,22 @@ template <class Method, class C, class... A> decltype(auto) script_invoke(Method
     }
     return std::invoke(method, self, std::forward<A>(args)...);
 }
+// Share sol2's invocation code by Lua-visible signature, instead of generating
+// another adapter for each native class's wrapper lambda.
 template <class R, class C, class... A> auto script_method(R (C::*method)(A...)) {
-    return [method](sol::stack_object self, A... arguments) -> R {
+    return std::function{[method](sol::stack_object self, A... arguments) -> R {
         return script_invoke(method, script_self<C>(self), std::forward<A>(arguments)...);
-    };
+    }};
 }
 template <class R, class C, class... A> auto script_method(R (C::*method)(A...) const) {
-    return [method](sol::stack_object self, A... arguments) -> R {
+    return std::function{[method](sol::stack_object self, A... arguments) -> R {
         return script_invoke(method, script_self<C>(self), std::forward<A>(arguments)...);
-    };
+    }};
 }
 template <class R, class C> auto script_property(R (C::*method)() const) {
-    return sol::property([method](sol::this_state state) -> R {
+    return sol::property(std::function{[method](sol::this_state state) -> R {
         return std::invoke(method, script_self<C>(sol::stack_object(state, 1), true));
-    });
+    }});
 }
 
 
@@ -1863,101 +1865,101 @@ void ScriptEngine::register_bindings() {
     };
     scripting_detail::bind_l10n(lua, true);
     scripting_detail::bind_services(lua);
-    using scripting_detail::new_api_type;
+    using scripting_detail::define_api_type;
     // clang-format off
-    new_api_type<ScriptEntityApi>(lua, "KinEntity",
-        sol::no_constructor,
-        "id", script_method(&ScriptEntityApi::id),
-        "name", script_method(&ScriptEntityApi::name),
-        "valid", script_method(&ScriptEntityApi::valid),
-        "alive", script_method(&ScriptEntityApi::alive),
-        "destroy", script_method(&ScriptEntityApi::destroy),
-        "has", script_method(&ScriptEntityApi::has),
-        "get", script_method(&ScriptEntityApi::get),
-        "component", script_method(&ScriptEntityApi::component),
-        "timer", script_method(&ScriptEntityApi::timer),
-        "cooldown", script_method(&ScriptEntityApi::cooldown),
-        "ready", script_method(&ScriptEntityApi::ready),
-        "child", script_method(&ScriptEntityApi::child),
-        "patch", script_method(&ScriptEntityApi::patch),
-        "add_script_owned", script_method(&ScriptEntityApi::add_script_owned),
-        "remove", script_method(&ScriptEntityApi::remove),
-        "set_transform", script_method(&ScriptEntityApi::set_transform),
-        "get_transform", script_method(&ScriptEntityApi::get_transform),
-        "translate", script_method(&ScriptEntityApi::translate),
-        "set_rect", script_method(&ScriptEntityApi::set_rect),
-        "get_rect", script_method(&ScriptEntityApi::get_rect),
-        "set_line", script_method(&ScriptEntityApi::set_line),
-        "get_line", script_method(&ScriptEntityApi::get_line));
+    define_api_type<ScriptEntityApi>(lua, "KinEntity", sol::no_constructor, [](auto& type) {
+        type.member("id", script_method(&ScriptEntityApi::id));
+        type.member("name", script_method(&ScriptEntityApi::name));
+        type.member("valid", script_method(&ScriptEntityApi::valid));
+        type.member("alive", script_method(&ScriptEntityApi::alive));
+        type.member("destroy", script_method(&ScriptEntityApi::destroy));
+        type.member("has", script_method(&ScriptEntityApi::has));
+        type.member("get", script_method(&ScriptEntityApi::get));
+        type.member("component", script_method(&ScriptEntityApi::component));
+        type.member("timer", script_method(&ScriptEntityApi::timer));
+        type.member("cooldown", script_method(&ScriptEntityApi::cooldown));
+        type.member("ready", script_method(&ScriptEntityApi::ready));
+        type.member("child", script_method(&ScriptEntityApi::child));
+        type.member("patch", script_method(&ScriptEntityApi::patch));
+        type.member("add_script_owned", script_method(&ScriptEntityApi::add_script_owned));
+        type.member("remove", script_method(&ScriptEntityApi::remove));
+        type.member("set_transform", script_method(&ScriptEntityApi::set_transform));
+        type.member("get_transform", script_method(&ScriptEntityApi::get_transform));
+        type.member("translate", script_method(&ScriptEntityApi::translate));
+        type.member("set_rect", script_method(&ScriptEntityApi::set_rect));
+        type.member("get_rect", script_method(&ScriptEntityApi::get_rect));
+        type.member("set_line", script_method(&ScriptEntityApi::set_line));
+        type.member("get_line", script_method(&ScriptEntityApi::get_line));
+    });
 
-    new_api_type<ScriptDeferredEntityApi>(lua, "KinDeferredEntity",
-        sol::no_constructor,
-        "index", script_property(&ScriptDeferredEntityApi::index));
+    define_api_type<ScriptDeferredEntityApi>(lua, "KinDeferredEntity", sol::no_constructor, [](auto& type) {
+        type.member("index", script_property(&ScriptDeferredEntityApi::index));
+    });
 
-    new_api_type<ScriptCommandBufferApi>(lua, "KinCommandBuffer",
-        sol::no_constructor,
-        "valid", script_property(&ScriptCommandBufferApi::valid),
-        "size", script_property(&ScriptCommandBufferApi::size),
-        "create", script_method(&ScriptCommandBufferApi::create),
-        "destroy", script_method(&ScriptCommandBufferApi::destroy),
-        "add", script_method(&ScriptCommandBufferApi::add),
-        "remove", script_method(&ScriptCommandBufferApi::remove),
-        "patch", script_method(&ScriptCommandBufferApi::patch));
+    define_api_type<ScriptCommandBufferApi>(lua, "KinCommandBuffer", sol::no_constructor, [](auto& type) {
+        type.member("valid", script_property(&ScriptCommandBufferApi::valid));
+        type.member("size", script_property(&ScriptCommandBufferApi::size));
+        type.member("create", script_method(&ScriptCommandBufferApi::create));
+        type.member("destroy", script_method(&ScriptCommandBufferApi::destroy));
+        type.member("add", script_method(&ScriptCommandBufferApi::add));
+        type.member("remove", script_method(&ScriptCommandBufferApi::remove));
+        type.member("patch", script_method(&ScriptCommandBufferApi::patch));
+    });
 
-    new_api_type<ScriptSystemContextApi>(lua, "KinSystemContext",
-        sol::no_constructor,
-        "dt", script_property(&ScriptSystemContextApi::dt),
-        "system_id", script_property(&ScriptSystemContextApi::system_id),
-        "phase", script_property(&ScriptSystemContextApi::phase),
-        "running_parallel", script_property(&ScriptSystemContextApi::running_parallel),
-        "commands", script_property(&ScriptSystemContextApi::commands));
+    define_api_type<ScriptSystemContextApi>(lua, "KinSystemContext", sol::no_constructor, [](auto& type) {
+        type.member("dt", script_property(&ScriptSystemContextApi::dt));
+        type.member("system_id", script_property(&ScriptSystemContextApi::system_id));
+        type.member("phase", script_property(&ScriptSystemContextApi::phase));
+        type.member("running_parallel", script_property(&ScriptSystemContextApi::running_parallel));
+        type.member("commands", script_property(&ScriptSystemContextApi::commands));
+    });
 
-    new_api_type<ScriptSceneApi>(lua, "KinScene",
-        sol::no_constructor,
-        "entity", script_method(&ScriptSceneApi::entity),
-        "find", script_method(&ScriptSceneApi::find),
-        "authored", script_method(&ScriptSceneApi::authored),
-        "entities", script_method(&ScriptSceneApi::entities),
-        "with", script_method(&ScriptSceneApi::with),
-        "count", script_method(&ScriptSceneApi::count),
-        "register_system", script_method(&ScriptSceneApi::register_system),
-        "clear_script_entities", script_method(&ScriptSceneApi::clear_script_entities),
-        "set_clear_color", script_method(&ScriptSceneApi::set_clear_color),
-        "mark_render_cache_dirty", script_method(&ScriptSceneApi::mark_render_cache_dirty));
+    define_api_type<ScriptSceneApi>(lua, "KinScene", sol::no_constructor, [](auto& type) {
+        type.member("entity", script_method(&ScriptSceneApi::entity));
+        type.member("find", script_method(&ScriptSceneApi::find));
+        type.member("authored", script_method(&ScriptSceneApi::authored));
+        type.member("entities", script_method(&ScriptSceneApi::entities));
+        type.member("with", script_method(&ScriptSceneApi::with));
+        type.member("count", script_method(&ScriptSceneApi::count));
+        type.member("register_system", script_method(&ScriptSceneApi::register_system));
+        type.member("clear_script_entities", script_method(&ScriptSceneApi::clear_script_entities));
+        type.member("set_clear_color", script_method(&ScriptSceneApi::set_clear_color));
+        type.member("mark_render_cache_dirty", script_method(&ScriptSceneApi::mark_render_cache_dirty));
+    });
 
-    new_api_type<ScriptInputApi>(lua, "KinInput",
-        sol::no_constructor,
-        "pressed", script_method(&ScriptInputApi::pressed),
-        "held", script_method(&ScriptInputApi::held),
-        "released", script_method(&ScriptInputApi::released));
+    define_api_type<ScriptInputApi>(lua, "KinInput", sol::no_constructor, [](auto& type) {
+        type.member("pressed", script_method(&ScriptInputApi::pressed));
+        type.member("held", script_method(&ScriptInputApi::held));
+        type.member("released", script_method(&ScriptInputApi::released));
+    });
 
-    new_api_type<ScriptAppApi>(lua, "KinApp",
-        sol::no_constructor,
-        "quit", script_method(&ScriptAppApi::quit));
+    define_api_type<ScriptAppApi>(lua, "KinApp", sol::no_constructor, [](auto& type) {
+        type.member("quit", script_method(&ScriptAppApi::quit));
+    });
 
-    new_api_type<ScriptContextApi>(lua, "KinContext",
-        sol::no_constructor,
-        "dt", script_property(&ScriptContextApi::dt),
-        "input", script_property(&ScriptContextApi::input),
-        "app", script_property(&ScriptContextApi::app));
+    define_api_type<ScriptContextApi>(lua, "KinContext", sol::no_constructor, [](auto& type) {
+        type.member("dt", script_property(&ScriptContextApi::dt));
+        type.member("input", script_property(&ScriptContextApi::input));
+        type.member("app", script_property(&ScriptContextApi::app));
+    });
 
-    new_api_type<ScriptActionsApi>(lua, "KinActions",
-        sol::no_constructor,
-        "add", script_method(&ScriptActionsApi::add));
+    define_api_type<ScriptActionsApi>(lua, "KinActions", sol::no_constructor, [](auto& type) {
+        type.member("add", script_method(&ScriptActionsApi::add));
+    });
 
-    new_api_type<ScriptDialoguePlayerApi>(lua, "KinDialoguePlayer",
-        sol::constructors<ScriptDialoguePlayerApi()>(),
-        "load", script_method(&ScriptDialoguePlayerApi::load),
-        "start", script_method(&ScriptDialoguePlayerApi::start),
-        "advance", script_method(&ScriptDialoguePlayerApi::advance),
-        "choose_index", script_method(&ScriptDialoguePlayerApi::choose_index),
-        "choose_id", script_method(&ScriptDialoguePlayerApi::choose_id),
-        "skip_line", script_method(&ScriptDialoguePlayerApi::skip_line),
-        "reset", script_method(&ScriptDialoguePlayerApi::reset),
-        "ended", script_property(&ScriptDialoguePlayerApi::ended),
-        "current_node", script_property(&ScriptDialoguePlayerApi::current_node),
-        "view", script_method(&ScriptDialoguePlayerApi::view),
-        "consume_events", script_method(&ScriptDialoguePlayerApi::consume_events));
+    define_api_type<ScriptDialoguePlayerApi>(lua, "KinDialoguePlayer", sol::constructors<ScriptDialoguePlayerApi()>(), [](auto& type) {
+        type.member("load", script_method(&ScriptDialoguePlayerApi::load));
+        type.member("start", script_method(&ScriptDialoguePlayerApi::start));
+        type.member("advance", script_method(&ScriptDialoguePlayerApi::advance));
+        type.member("choose_index", script_method(&ScriptDialoguePlayerApi::choose_index));
+        type.member("choose_id", script_method(&ScriptDialoguePlayerApi::choose_id));
+        type.member("skip_line", script_method(&ScriptDialoguePlayerApi::skip_line));
+        type.member("reset", script_method(&ScriptDialoguePlayerApi::reset));
+        type.member("ended", script_property(&ScriptDialoguePlayerApi::ended));
+        type.member("current_node", script_property(&ScriptDialoguePlayerApi::current_node));
+        type.member("view", script_method(&ScriptDialoguePlayerApi::view));
+        type.member("consume_events", script_method(&ScriptDialoguePlayerApi::consume_events));
+    });
     // clang-format on
 }
 

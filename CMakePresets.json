@@ -7,6 +7,57 @@
   },
   "configurePresets": [
     {
+      "name": "dev",
+      "displayName": "Development: 2D, precompiled headers and optional compiler cache",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-dev",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "KIN_EXPERIMENTAL_3D": "OFF",
+        "KIN_ENABLE_PCH": "ON",
+        "KIN_COMPILER_CACHE": "auto",
+        "KIN_ENABLE_LTO": "OFF",
+        "KIN_BUILD_EXAMPLES": "OFF",
+        "KIN_BUILD_2D_WORKFLOW": "OFF",
+        "KIN_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "dev-3d",
+      "displayName": "Development: experimental 3D",
+      "inherits": "dev",
+      "binaryDir": "${sourceDir}/build-dev-3d",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON"
+      }
+    },
+    {
+      "name": "dev-clang",
+      "displayName": "Development: Linux Clang",
+      "description": "Release development build with Clang (clang and clang++ must be on PATH), PCH and optional compiler cache.",
+      "inherits": "dev",
+      "binaryDir": "${sourceDir}/build-dev-clang",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
+      "name": "dev-3d-clang",
+      "displayName": "Development: experimental 3D, Linux Clang",
+      "inherits": "dev-clang",
+      "binaryDir": "${sourceDir}/build-dev-3d-clang",
+      "cacheVariables": {
+        "KIN_EXPERIMENTAL_3D": "ON"
+      }
+    },
+    {
       "name": "ship",
       "displayName": "Shipping (Ninja)",
       "description": "Games for players: KIN_SHIPPING, Release, no tests, no experimental 3D engine. On Windows, run from a Visual Studio developer prompt.",
@@ -411,6 +462,26 @@
   ],
   "buildPresets": [
     {
+      "name": "dev",
+      "configurePreset": "dev",
+      "jobs": 4
+    },
+    {
+      "name": "dev-3d",
+      "configurePreset": "dev-3d",
+      "jobs": 4
+    },
+    {
+      "name": "dev-clang",
+      "inherits": "dev",
+      "configurePreset": "dev-clang"
+    },
+    {
+      "name": "dev-3d-clang",
+      "inherits": "dev-3d",
+      "configurePreset": "dev-3d-clang"
+    },
+    {
       "name": "ship",
       "configurePreset": "ship",
       "configuration": "Release"
@@ -538,6 +609,26 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "dev",
+      "inherits": "2d",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "dev-3d",
+      "inherits": "3d",
+      "configurePreset": "dev-3d"
+    },
+    {
+      "name": "dev-clang",
+      "inherits": "dev",
+      "configurePreset": "dev-clang"
+    },
+    {
+      "name": "dev-3d-clang",
+      "inherits": "dev-3d",
+      "configurePreset": "dev-3d-clang"
+    },
     {
       "name": "2d",
       "configurePreset": "2d",
