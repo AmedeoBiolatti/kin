@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Lua API metadata and inspection share one implementation file, reducing repeated registration
+  compilation and narrowing metadata implementation edits from five Lua source files to one.
+  See [Lua API bookkeeping measurements](build_times.md#shared-lua-api-bookkeeping).
+
 - Native ECS fields keep member accessors typed until their stored registry callback, reducing reflected
   registration compilation and removing redundant `std::function` adapters and allocations. Custom
   properties retain their callback API. See [field callback measurements](build_times.md#native-component-field-callbacks).

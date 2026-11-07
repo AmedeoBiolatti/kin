@@ -1134,3 +1134,97 @@ allocation/runtime observation, header hash, validation result and reproduction
 script. It also records recovery of the successful baseline after a C/C++ action
 counting bug, and recovery of the completed first trace after adapting its
 parser to Clang 21 async Source events; neither run was discarded or repeated.
+
+### Shared Lua API bookkeeping
+
+Follow-up measured on 2026-11-07 from `c002068`. The private Lua API header now
+calls one non-template `record_api_type` function for the registry's type and
+property metadata. API inspection and member enumeration also move into
+`lua_api_surface.cpp`, compiled by the base `kin_scripting` library. The five
+Lua consumer sources, binding lists, callback bodies, receiver/liveness checks,
+constructors, properties and public headers are unchanged. The inspection
+function bodies move unchanged; the recording statements receive the existing
+metatable name and read the property-name vector through a const reference.
+
+This reduces repeated template/optimizer work and gives the moved implementation
+a narrower edit scope. It adds ordinary calls during VM registration and API
+inspection; it changes no per-frame Lua callback body or invocation adapter.
+Normal engine/game Release `-O2`, sol2 safety settings and
+`KIN_DEV_FAST_SCRIPTING=OFF` are retained. PCH is on; compiler cache and LTO are
+off, with mold linking. Source is on Linux; build/output/TMPDIR use NTFS/FUSE.
+
+A focused uninstrumented Clang 21.1.8 comparison uses matching target PCHs and
+stable source/header copies, with one ABBA then one BAAB block. Each of the
+four observations/version compiles `script_engine.cpp` on CPU 2, bracketed by
+an unchanged `core/json.cpp` compile on that same CPU:
+
+| `script_engine.cpp` | Before | After |
+|---|---:|---:|
+| Median | 32.465 s | 31.515 s |
+| Range | 31.76–35.07 s | 31.13–31.82 s |
+
+That observes about **2.9% lower time for this file**, a modest local estimate.
+All control brackets took 0.90–0.93 s except the first pre-compile control at
+1.49 s; that sample and every measured binding compile are retained. Fresh
+instrumented traces also retain frontend/backend, optimizer, template and
+function-event totals separately. Nested trace categories overlap, and traced
+runs are diagnostic rather than the source of the percentage above.
+
+The newly added source takes 1.55 s in the direct pilot and is included in the
+complete affected-set comparison. Eight alternating four-worker batches compile
+all five Lua consumers, plus the shared source in the changed version and an
+unchanged JSON control, then link replacement Lua objects into a cached
+`hex_demo`. Per-source CPU affinity is fixed to CPUs 0, 2, 4 and 6. The median
+batch times are 42.65 s before and 38.955 s after. However, the control's medians
+also change from 1.45 to 1.135 s and individual observations vary substantially.
+This parallel ratio is unsuitable as a causal speedup claim. Those runs prompted
+the serial bracketed comparison above; none were discarded. Other engine/game
+objects, third parties and shaders are prebuilt, and explicit replacement
+objects force the Lua units into the link. These batches do not measure a full
+clean Kin build or its ordinary dependency scheduling. No whole-project or
+cumulative speedup is inferred.
+
+The five directly compiled original Lua objects total 6,889,752 bytes; the six
+changed objects, including the new shared file, total 6,740,976 bytes, about
+2.2% less. These are object-file sizes, not a final executable-size comparison.
+
+Edits to the moved metadata/inspection implementation previously changed the
+private header consumed by five Lua sources. They now change one source file.
+Three real trailing-comment edits each rebuilt exactly the one planned
+`kin_scripting` object, its archive and the final game link, taking 1.95, 1.97
+and 1.95 s. Source bytes and nanosecond timestamps are restored after each
+sample. This result concerns edits to the moved implementation: binding-list
+edits still compile their containing Lua source, and private declaration or
+template-header edits reach all six consumers.
+
+Clang and GCC each pass 39 selected ECS, rendering, scene, scripting, UI2,
+platform and game tests, and all four Lua API reports match the baseline per
+compiler. Twelve no-PCH syntax/template checks pass: the five consumers and new
+shared source with Clang 3D enabled, and the same six with GCC physics/audio
+disabled. Mechanical reconstruction checks the moved bodies, registration
+wrappers, unchanged consumer sources and the single CMake source addition.
+
+Runtime spot checks use three processes/version in alternating order, with
+30 samples after three warmups on CPU 2. Fresh scene VM creation, 20,000 scene
+bridge calls and 50,000 entity bridge calls complete with identical resulting
+positions. Across the three process medians, scene/entity bridge-loop medians
+change by less than 0.4%;
+all raw observations are retained. These probes do not establish full-game FPS.
+The canonical shared source is recompiled after restoring the comment probe;
+four smoke tests and four API comparisons pass again per compiler. No-change
+`hex_demo`, `shapes_demo` and `kin_lua` builds compile and link nothing. Optional
+3D checks cover compilation, not full native desktop/3D/GPU runtime or MSVC.
+
+The custom benchmark harness initially omitted Ninja's `builddir`, appending
+60 unique benchmark-output records to the canonical build log. No configure or
+other Ninja process overlapped, and canonical object records were retained.
+The canonical clean-plan assertion passed before the implementation-edit probes.
+Future manifests isolate logs per sample. Ninja compaction retained existing
+benchmark outputs, so final cleanup filters exactly those 60 output records,
+preserves every canonical record and passes no-change builds again. The original
+harness and log snapshots are retained.
+
+The [Lua API bookkeeping data](build_lua_surface_2026-11-07.json) records every
+initial/pilot, parallel and serial sample, controls/load, fresh trace totals,
+implementation edits, runtime samples, hashes, compiler flags, validation,
+workflow correction and reproduction scripts.

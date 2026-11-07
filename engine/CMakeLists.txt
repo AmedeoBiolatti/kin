@@ -307,6 +307,7 @@ if(KIN_ENABLE_PHYSICS)
 endif()
 if(KIN_ENABLE_SCRIPTING)
     target_sources(kin_scripting PRIVATE
+        src/scripting/lua_api_surface.cpp
         src/scripting/lua_l10n.cpp
         src/scripting/lua_paths.cpp
         src/scripting/lua_script.cpp
