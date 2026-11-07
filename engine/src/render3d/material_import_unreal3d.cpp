@@ -1740,19 +1740,22 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         const std::string model = doc.find("shading_model") ? doc.find("shading_model")->as_string() : "";
         const std::string blend = doc.find("blend_mode") ? doc.find("blend_mode")->as_string() : "";
         const bool unlit = model == "MSM_UNLIT";
+        const bool foliage = model == "MSM_TWO_SIDED_FOLIAGE" || model == "MSM_TWOSIDED_FOLIAGE";
         const auto* outputs = doc.find("graph")->find("outputs");
         // (The Normal first: the others' Pixel Normal, Reflection Vector and Fresnel are by it.)
         static const std::vector<std::pair<const char*, const char*>> mapping{
             {"Normal", "normal"},       {"BaseColor", "base_color"},   {"Metallic", "metallic"},
             {"Roughness", "roughness"}, {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"},
-            {"Opacity", "alpha"},       {"OpacityMask", "alpha"},      {"WorldPositionOffset", "offset"}};
+            {"Opacity", "alpha"},       {"OpacityMask", "alpha"},      {"WorldPositionOffset", "offset"},
+            {"SubsurfaceColor", "backlight"}};
         const auto build = [&](UnrealGraph& g) {
             for (const auto& [from, to] : mapping) {
                 const auto* o = outputs ? outputs->find(from) : nullptr;
                 if (!o)
                     continue;
                 if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED") ||
-                    (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED"))
+                    (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED") ||
+                    (std::string(from) == "SubsurfaceColor" && !foliage)) // (skin's and subsurface's: not kin's)
                     continue;
                 std::string why;
                 // (The graph's word on this output replaces the Tier 1 import's.)
@@ -1780,6 +1783,10 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
             // surface's (the vertex colour): the graph says so.
             if (!(outputs && outputs->find(unlit ? "EmissiveColor" : "BaseColor")))
                 b.outputs["base_color"] = "[0, 0, 0]";
+            // Two-sided foliage: lit as kin's default, and lets light through from behind by its Subsurface Color
+            // (kin's backlight, Unreal's formula), white where it is not connected.
+            if (foliage && !b.outputs.contains("backlight"))
+                b.outputs["backlight"] = "[1, 1, 1]";
         };
         build(*graph);
         // Parameters past Material3D::shader_params' floats (as kin's compiler packs them): the material's values in a
@@ -1819,6 +1826,11 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
             }
         }
         UnrealGraph& g = *graph;
+        if (foliage) {
+            std::erase_if(imported.notes, [](const std::string& n) { return n.rfind("shading model ", 0) == 0; });
+            x.note("two-sided foliage: lit as kin's default, with its Subsurface Color as kin's backlight (light let "
+                   "through from behind)");
+        }
         for (const char* other : {"Refraction", "Anisotropy", "Specular"})
             if (outputs && outputs->find(other))
                 x.note(std::string(other) + ": not in kin's graph outputs");

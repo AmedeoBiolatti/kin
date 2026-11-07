@@ -51,12 +51,24 @@ struct Surface {
     vec3 diffuse; // the colour it scatters
     vec3 f0;      // what it reflects head on
     vec3 boost;   // the light a rough specular loses to a second bounce, put back
+    vec3 backlight; // a thin surface's (a leaf's) colour for the light it lets through from behind; 0: none
 };
+
+// The light a thin surface lets through from `l` (Unreal's two-sided foliage): the light on its back, wrapped by half
+// (McAuley's energy-conserving wrap: some still where the front is lit at a slant), scattered on mostly the way it
+// went, by a GGX lobe of alpha 0.6 about it, in kin's units (a light of colour 1 on white: 1, as the diffuse is).
+vec3 transmitted(Surface s, vec3 l, float n_l) {
+    float wrap = clamp((0.5 - n_l) / 2.25, 0.0, 1.0);
+    float on = clamp(-dot(s.v, l), 0.0, 1.0);
+    float d = on * on * (0.36 - 1.0) + 1.0;
+    return s.backlight * (wrap * 0.36 / (d * d));
+}
 
 vec3 shade(Surface s, vec3 l, vec3 radiance) {
     float n_l = dot(s.n, l);
+    vec3 through = transmitted(s, l, n_l) * radiance;
     if (n_l <= 0.0) {
-        return vec3(0.0);
+        return through;
     }
     vec3 h = normalize(l + s.v);
     float n_h = clamp(dot(s.n, h), 0.0, 1.0);
@@ -66,5 +78,5 @@ vec3 shade(Surface s, vec3 l, vec3 radiance) {
     // a dielectric's Fresnel (the diffuse of a metal is already gone from
     // `diffuse`; between, glTF mixes the two materials).
     vec3 specular = s.boost * f * (distribution(n_h, s.alpha) * visibility(n_l, max(s.n_v, 1e-4), s.alpha) * PI);
-    return (s.diffuse * (1.0 - fresnel(vec3(0.04), v_h)) + specular) * radiance * n_l;
+    return (s.diffuse * (1.0 - fresnel(vec3(0.04), v_h)) + specular) * radiance * n_l + through;
 }

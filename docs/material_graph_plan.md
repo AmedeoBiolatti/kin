@@ -288,7 +288,10 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   the placing: every mesh vertex shader would have to pass it on). The snapshots' kin side filters textures 8x anisotropically
   (`kin_material_lineup --anisotropy 8`), as Unreal's default (r.MaxAnisotropy): a landscape's world-aligned UVs on
   an upright quad change along one screen axis only, which trilinear filtering blurs (Mountain 13.9 -> 4.2). Now close
-  52, minor 21, major 26, 8 not surfaces.
+  52, minor 21, major 26, 8 not surfaces. Two-sided foliage: the surface's `backlight` (a graph output; Unreal's
+  Subsurface Color, exported now, white where not connected), lit as Unreal's foliage is (each light on the back,
+  wrapped by half, through a GGX lobe of alpha 0.6; the ambient light from behind): the Megascan plant's sphere, its
+  inside lit from behind, 29.8 -> 3.4. Now close 53, minor 21, major 25 (PlantsGrass's thin blades: their edges).
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

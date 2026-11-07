@@ -1520,8 +1520,11 @@ void kin_surface(inout KinSurface s) {
 the normal map, metallic and roughness times their map, the occlusion map, the emission), so a function that
 changes nothing draws exactly what the material draws without one. Its fields: `base_color` (linear), `alpha`
 (straight: a `Blend3D::Mask` discards below the cutoff), `normal` (unit, world space, on the viewer's side),
-`metallic`, `roughness` (keep it within [0.045, 1]), `occlusion` and `emission` (linear light of its own). After
-the function, kin lights it (`kin_lit`) and adds the emission, or, for an `unlit` material, shows its colour plus
+`metallic`, `roughness` (keep it within [0.045, 1]), `occlusion`, `emission` (linear light of its own) and `backlight`
+(0 as kin's material makes it: the colour a thin surface, a leaf, lets light through in from behind, as Unreal's
+two-sided foliage, Godot's backlight: each light on its back side, wrapped by half, scattered forward by a GGX lobe
+of alpha 0.6, and the ambient light from behind; a backlit surface is lit, and its shadows read, from either side).
+After the function, kin lights it (`kin_lit_backlit`) and adds the emission, or, for an `unlit` material, shows its colour plus
 its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
 (`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
 `uNormalMap`, `uOcclusion`, `uEmissive`), and reads `Material3D::shader_params` (`surface_param_count3d`: 64 floats) as `kin_surface_param(0..15)`.

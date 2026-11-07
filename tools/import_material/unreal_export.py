@@ -24,6 +24,7 @@ PROPERTIES = {
     "Roughness": "MP_ROUGHNESS", "EmissiveColor": "MP_EMISSIVE_COLOR", "Opacity": "MP_OPACITY",
     "OpacityMask": "MP_OPACITY_MASK", "Normal": "MP_NORMAL", "AmbientOcclusion": "MP_AMBIENT_OCCLUSION",
     "WorldPositionOffset": "MP_WORLD_POSITION_OFFSET", "Anisotropy": "MP_ANISOTROPY", "Refraction": "MP_REFRACTION",
+    "SubsurfaceColor": "MP_SUBSURFACE_COLOR",
 }
 MEL = unreal.MaterialEditingLibrary
 

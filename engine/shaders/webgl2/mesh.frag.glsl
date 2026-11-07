@@ -67,6 +67,7 @@ vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusio
     s.f0 = mix(vec3(0.04), base, metallic);
     vec2 ab = environment_brdf(roughness, s.n_v);
     s.boost = vec3(1.0) + s.f0 * (1.0 / max(ab.x + ab.y, 1e-3) - 1.0);
+    s.backlight = vec3(0.0);
     vec3 light = shade(s, uSunDirection, uSunColor*sunlight()) + shade(s, uFillDirection, uFillColor);
     for (int i=0; i<uPointCount; ++i) {
         vec4 at = uPoints[2*i], color = uPoints[2*i+1];

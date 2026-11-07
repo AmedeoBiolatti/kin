@@ -19,7 +19,7 @@ void main() {
     }
     const vec3 c = material.params.y > 0.5
                        ? s.base_color + s.emission
-                       : kin_lit(s.base_color, s.normal, s.metallic, s.roughness, s.occlusion) + s.emission;
+                       : kin_lit_backlit(s.base_color, s.normal, s.metallic, s.roughness, s.occlusion, s.backlight) + s.emission;
 #else
     const vec4 color = kin_base_color();
     float alpha = color.a;

@@ -1254,6 +1254,46 @@ void unreal_object_space() {
     }
 }
 
+// Two-sided foliage: its Subsurface Color as kin's backlight (white where not connected); another model's (skin's,
+// subsurface's) not read as one.
+void unreal_foliage() {
+    Scratch scratch;
+    const fs::path project = scratch.path, content = scratch.path / "content";
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto import = [&](const char* model, bool connected) {
+        const std::string doc =
+            std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Leaf", "blend_mode": "BLEND_OPAQUE",
+          "shading_model": ")") + model + R"(", "parameters": {}, "inputs": {}, "textures": {},
+          "graph": {"nodes": {"Green": {"class": "MaterialExpressionConstant3Vector", "props": {"constant": [0.25, 0.5, 0.125, 1]}, "inputs": {}}},
+                    "outputs": {"BaseColor": {"node": "Green", "output": ""})" +
+            (connected ? R"(, "SubsurfaceColor": {"node": "Green", "output": ""})" : "") + "}}}";
+        write(content / "M_Leaf.json", doc);
+        auto m = import_unreal_graph(content / "M_Leaf.json", options);
+        CHECK(m && !m->graph.empty());
+        std::ifstream in(m->graph);
+        const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+        const auto g = compile_material_graph3d(text);
+        for (const auto& e : g.errors)
+            std::cerr << e.node << ": " << e.message << '\n';
+        CHECK(g.ok());
+        if (shader_compiler_available()) {
+            std::string why;
+            const auto cooked = cook_material_graph3d(text, &why);
+            if (!cooked)
+                std::cerr << why << '\n';
+            CHECK(cooked.has_value());
+        }
+        return std::make_pair(std::move(m), g.surface);
+    };
+    const auto [leaf, surface] = import("MSM_TWO_SIDED_FOLIAGE", true);
+    CHECK(contains_text(surface, "s.backlight = max(") && contains_text(surface, "0.5"));
+    CHECK(has_note(*leaf, "two-sided foliage:") && !has_note(*leaf, "shading model "));
+    const auto [white, white_surface] = import("MSM_TWO_SIDED_FOLIAGE", false);
+    CHECK(contains_text(white_surface, "s.backlight = max(vec3(1.0, 1.0, 1.0)"));
+    const auto [skin, skin_surface] = import("MSM_SUBSURFACE", true);
+    CHECK(!contains_text(skin_surface, "backlight"));
+}
+
 } // namespace
 
 int main() {
@@ -1270,6 +1310,7 @@ int main() {
     unreal_function_outputs();
     unreal_cubes_and_rotation();
     unreal_object_space();
+    unreal_foliage();
     unity_graphs();
     godot_graphs();
     corpus();
