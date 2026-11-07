@@ -116,6 +116,7 @@ set(_KIN_SURFACE_MASKS shadow_mask pick_mask prepass_mask prepass_velocity_mask 
 
 function(kin_compile_surface_shader out_var)
     cmake_parse_arguments(ARG "CUTOUTS" "OUTPUT_DIR;SOURCE" "" ${ARGN})
+    set(depfile_tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_shader_depfile.cmake")
     if(NOT ARG_OUTPUT_DIR OR NOT ARG_SOURCE)
         message(FATAL_ERROR "kin_compile_surface_shader: OUTPUT_DIR and SOURCE are required")
     endif()
@@ -145,12 +146,15 @@ function(kin_compile_surface_shader out_var)
             list(APPEND defines "-D${define}")
         endforeach()
         set(output "${ARG_OUTPUT_DIR}/${stem}.${variant}.spv")
+        set(depfile "${output}.d")
         add_custom_command(
             OUTPUT "${output}"
             COMMAND "${KIN_GLSLC}" -fshader-stage=fragment -I "${KIN_SHADER_INCLUDE_DIR}" -I "${folder}" ${defines}
-                    -o "${output}"
+                    -MD -MF "${depfile}" -MT "${output}" -o "${output}"
                     "${wrapper}"
-            DEPENDS "${source}" "${wrapper}" ${_KIN_SHADER_INCLUDES}
+            COMMAND "${CMAKE_COMMAND}" "-DDEPFILE=${depfile}" "-DOUTPUT=${output}" -P "${depfile_tool}"
+            DEPENDS "${source}" "${wrapper}" "${depfile_tool}"
+            DEPFILE "${depfile}"
             COMMENT "glslc: ${name} (${variant}) -> ${stem}.${variant}.spv"
             VERBATIM)
         list(APPEND outputs "${output}")
@@ -166,11 +170,14 @@ function(kin_compile_surface_shader out_var)
 #include \"${name}\"
 ")
             set(output "${ARG_OUTPUT_DIR}/${stem}.${mask}.spv")
+            set(depfile "${output}.d")
             add_custom_command(
                 OUTPUT "${output}"
                 COMMAND "${KIN_GLSLC}" -fshader-stage=fragment -I "${KIN_SHADER_INCLUDE_DIR}" -I "${folder}"
-                        -o "${output}" "${mask_wrapper}"
-                DEPENDS "${source}" "${mask_wrapper}" ${_KIN_SHADER_INCLUDES}
+                        -MD -MF "${depfile}" -MT "${output}" -o "${output}" "${mask_wrapper}"
+                COMMAND "${CMAKE_COMMAND}" "-DDEPFILE=${depfile}" "-DOUTPUT=${output}" -P "${depfile_tool}"
+                DEPENDS "${source}" "${mask_wrapper}" "${depfile_tool}"
+                DEPFILE "${depfile}"
                 COMMENT "glslc: ${name} (${mask}) -> ${stem}.${mask}.spv"
                 VERBATIM)
             list(APPEND outputs "${output}")
@@ -195,11 +202,14 @@ function(kin_cook_material_graph out_var)
     if(NOT output)
         set(output "${CMAKE_CURRENT_BINARY_DIR}/${name}.spv")
     endif()
+    # The tool writes its shaders to temporary files and has glslc read the engine's
+    # includes from KIN_SHADER_INCLUDE_DIR, so there is no depfile: it follows them all.
+    file(GLOB includes CONFIGURE_DEPENDS "${KIN_SHADER_INCLUDE_DIR}/*.inc.glsl")
     add_custom_command(
         OUTPUT "${output}"
         COMMAND "${CMAKE_COMMAND}" -E env "KIN_GLSLC=${KIN_GLSLC}" $<TARGET_FILE:kin_material_graph> cook "${source}"
                 "${output}"
-        DEPENDS "${source}" kin_material_graph ${_KIN_SHADER_INCLUDES}
+        DEPENDS "${source}" kin_material_graph ${includes}
         COMMENT "kin_material_graph: ${name} -> ${name}.spv"
         VERBATIM)
     set(${out_var} "${output}" PARENT_SCOPE)
