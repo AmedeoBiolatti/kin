@@ -103,7 +103,9 @@ file(WRITE "${CMAKE_BINARY_DIR}/settings.txt"
             self.configure(source, build, "-DKIN_COMPILER_CACHE=ccache",
                            f"-DCMAKE_PROGRAM_PATH={tools.as_posix()}")
             settings = (build / "settings.txt").read_text().splitlines()
-            self.assertEqual(settings[:2], [cache.as_posix()] * 2)
+            for launcher in settings[:2]:
+                self.assertTrue(cache.samefile(launcher),
+                                f"{launcher} does not refer to {cache}")
             self.assertEqual(settings[2], "custom-launcher")
             self.configure(source, build, "-DKIN_COMPILER_CACHE=off")
             settings = (build / "settings.txt").read_text().splitlines()
