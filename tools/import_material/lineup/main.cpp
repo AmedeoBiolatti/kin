@@ -8,7 +8,8 @@
 // <folder>/<Material>.kinmaterials. --material names the material of the objects whose material is "*" (a snapshot of
 // one material: snapshot.json), a path in <folder> without .kinmaterials. As the other engines'
 // scripts: an LDR view in the linear 2D pipeline (no tone curve, linear light encoded to sRGB), no MSAA, one sun
-// without shadow, no ambient, a black background.
+// without shadow, no ambient, a black background. --anisotropy N filters the materials' textures as Unreal's default
+// does (8; kin's default is off).
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -31,7 +32,8 @@ struct Options {
     fs::path scene, content, materials, meshes, out;
     std::string material; // the material of the objects whose material is "*"
     int frames = 8;
-    f32 time = 0; // the scene's clock (a material's time)
+    f32 time = 0;       // the scene's clock (a material's time)
+    u32 anisotropy = 1; // Scene3D::anisotropy (Unreal's default, r.MaxAnisotropy: 8)
 };
 
 Vec3f vec3(const JsonValue& v) {
@@ -61,6 +63,7 @@ public:
             load(ctx);
         _scene.clear();
         _scene.time = _o.time;
+        _scene.anisotropy = _o.anisotropy;
         for (const auto& d : _draws)
             (void)_scene.draw(d.mesh, d.transform, d.material);
         const auto& cam = *_doc.find("camera");
@@ -174,12 +177,15 @@ int main(int argc, char** argv) {
                 o.time = std::stof(value());
             else if (a == "--frames")
                 o.frames = std::stoi(value());
+            else if (a == "--anisotropy")
+                o.anisotropy = u32(std::stoi(value()));
             else
                 runtime.push_back(argv[i]);
         }
         if (o.scene.empty() || o.content.empty() || o.out.empty() || o.frames < 1) {
             std::cerr << "usage: kin_material_lineup --scene lineup.json --content <root> --materials <folder> "
-                         "--out picture.png [--meshes <folder>] [--material <path>]\n";
+                         "--out picture.png [--meshes <folder>] [--material <path>] [--time s] [--frames n] "
+                         "[--anisotropy n]\n";
             return 2;
         }
         auto lineup = std::make_unique<Lineup>(o);

@@ -285,7 +285,10 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   the object's space in offsets (`object_position`, `object_to_world`, `world_to_object`: the copy's model matrix,
   passed to kin_vertex_offset): Unreal's Object Position, local Transform and Transform Position read as they are in
   World Position Offset (the plants' wind: Megascan's quad 19 -> 3.6), approximated beyond it (a fragment does not have
-  the placing: every mesh vertex shader would have to pass it on).
+  the placing: every mesh vertex shader would have to pass it on). The snapshots' kin side filters textures 8x anisotropically
+  (`kin_material_lineup --anisotropy 8`), as Unreal's default (r.MaxAnisotropy): a landscape's world-aligned UVs on
+  an upright quad change along one screen axis only, which trilinear filtering blurs (Mountain 13.9 -> 4.2). Now close
+  52, minor 21, major 26, 8 not surfaces.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the
