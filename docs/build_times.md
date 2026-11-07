@@ -1,5 +1,10 @@
 # Faster development builds
 
+Measurements below were collected on the original benchmarking branch before
+the build changes were applied to current `main`. Commit IDs in the data refer
+to that original history; absolute times and ratios should be remeasured for
+the current checkout and machine.
+
 Use a persistent build directory and build the game you are editing:
 
 ```sh
