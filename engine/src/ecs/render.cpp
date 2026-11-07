@@ -1,5 +1,7 @@
 #include <kin/ecs/render.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
 #include "render_internal.hpp"
 
 #include <kin/core/affine.hpp>

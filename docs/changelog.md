@@ -20,6 +20,11 @@ releases may change APIs.
   Window and Renderer2D header edits. Consumers calling service methods include their headers directly.
   See [header dependency measurements](build_times.md#scene-and-scripting-header-dependencies).
 
+- Rendering data headers use Renderer2D forward declarations, reducing renderer-header rebuilds.
+  Code constructing or calling the renderer includes its header directly; `Flip` helpers have a small
+  standalone header. Rendering fields, method bodies and helper behavior are preserved.
+  See [renderer header measurements](build_times.md#renderer-data-header-dependencies).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D

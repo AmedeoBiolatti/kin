@@ -1,5 +1,7 @@
 #include <kin/renderer/normal_lighting2d.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
 #include "normal_lighting2d_internal.hpp"
 
 #include <algorithm>

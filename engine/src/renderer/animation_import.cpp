@@ -1,5 +1,7 @@
 #include <kin/renderer/animation_import.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
 #include <utility>
 #include <vector>
 #include <variant>

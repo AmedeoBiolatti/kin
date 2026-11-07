@@ -1,5 +1,7 @@
 #include <kin/ecs/ecs_scene.hpp>
 
+#include <kin/renderer/renderer2d.hpp>
+
 #include <kin/assets/content.hpp>
 #include <kin/ecs/camera.hpp>
 #include <kin/ecs/lighting.hpp>

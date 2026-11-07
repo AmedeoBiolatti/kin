@@ -140,6 +140,24 @@ target_link_libraries(kin_scene_headers_check PRIVATE kin::components)
 target_compile_features(kin_scene_headers_check PRIVATE cxx_std_23)
 set_target_properties(kin_scene_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
 
+# Compile each renderer data header on its own. PCH/unity builds must not
+# hide missing direct includes.
+add_library(kin_renderer_headers_check OBJECT
+    ecs_render_header_check.cpp
+    renderer_command_header_check.cpp
+    renderer_sprite_catalog_header_check.cpp
+    renderer_lighting_header_check.cpp
+    particle_system_header_check.cpp
+    tilemap_header_check.cpp
+    normal_lighting2d_header_check.cpp
+    renderer_flip_header_check.cpp
+    renderer_backend_header_check.cpp
+)
+target_include_directories(kin_renderer_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+target_link_libraries(kin_renderer_headers_check PRIVATE kin::components flecs::flecs_static)
+target_compile_features(kin_renderer_headers_check PRIVATE cxx_std_23)
+set_target_properties(kin_renderer_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
+
 kin_add_test(kin_component_tests kin-component-config SOURCES component_tests.cpp)
 # Platform services (kin/platform/services.hpp). The Steam backend opens a
 # stand-in for Steam's library, built here with the same file name.

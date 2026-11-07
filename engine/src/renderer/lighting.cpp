@@ -1,4 +1,5 @@
 #include <kin/renderer/lighting.hpp>
+#include <kin/renderer/renderer2d.hpp>
 
 #include <algorithm>
 #include <cmath>

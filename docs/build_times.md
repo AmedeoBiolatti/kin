@@ -167,6 +167,15 @@ This keeps edits to concrete service headers from rebuilding consumers that
 only need scene or scripting declarations. Two separate translation units check
 that the public headers compile on their own, with PCH and unity disabled.
 
+Renderer data headers follow the same rule: `ecs/render.hpp`, render commands,
+sprite catalogs, lighting, particles and tilemaps declare Renderer2D references
+without importing its definition. Code that constructs a Renderer2D or calls its
+methods includes `<kin/renderer/renderer2d.hpp>` directly. `Flip` and its helpers
+live in `<kin/renderer/flip.hpp>`; backend/renderer headers still expose them.
+Normal-lighting declarations include their DataBuffer and Flip value types
+directly and forward-declare backend capabilities used by reference. Nine
+standalone renderer-header translation units check these include contracts.
+
 ## Measure the edit loop
 
 Compare the same compiler, flags, sources, build filesystem and job count.
@@ -719,3 +728,76 @@ no compilation or linking.
 The [header dependency data](build_headers_2026-11-07.json) retains the complete
 rebuild plans, timing samples, skipped object sets, syntax source lists,
 validation, mechanical comparison and reproduction scripts.
+
+### Renderer data header dependencies
+
+Starting from `38439f5`, six data/service headers stop including the full
+Renderer2D definition: ECS rendering, render commands, sprite catalogs, lighting,
+particle systems and tilemaps. They forward-declare the renderer used by
+reference. Render commands include their ClipRegion/Flip types directly;
+normal lighting includes DataBuffer/Flip and forward-declares backend
+capabilities used by reference. ECS rendering includes draw-trace declarations
+directly. Implementations and tests that construct or call Renderer2D include
+its definition explicitly.
+
+The existing Flip enum/operators/mirroring helpers moved byte-for-byte from
+`backend.hpp` to `flip.hpp`; the backend still includes that header. A mechanical
+comparison verifies unchanged fields, signatures, function bodies and assertions
+in all 23 existing C++ files touched by the cleanup. Sizes/alignments of eleven
+rendering data types and Flip values match before/after with both compilers and
+render-probe mode on/off. RenderCommand remains 152 bytes in those checks.
+
+GCC and Clang produce the same `hex_demo` rebuild plans:
+
+| Edited header | Before: C++ steps | After: C++ steps |
+|---|---:|---:|
+| `renderer/renderer2d.hpp` | 99 | 62 |
+| `renderer/backend.hpp` | 101 | 97 |
+| `platform/window.hpp` | 115 | 83 |
+
+Each row includes one game PCH. `shapes_demo` has identical counts. Renderer
+edits drop from 95 to 60 source compilations for `kin_lua`, without a game PCH.
+For the games, 37 fewer source compilations means **37.4% fewer C++ steps**;
+runtime archive updates also drop from five to two. The skipped work includes
+four Lua binding sources, animation, pathfinding, prefabs, particle simulation,
+tilemaps and several component registrations. Entity-script compilation remains
+in the renderer dependency set through its UI dependencies.
+
+Plans use the same alternate-manifest dry-run method as the preceding round.
+Each completed real renderer-header edit produced exactly its planned object
+set. Both versions use normal Release `-O2`, PCH on, compiler cache/LTO off,
+four workers pinned to CPUs 0, 2, 4 and 6, and the same prebuilt dependencies,
+shaders and unaffected objects. One completed observation per compiler/version
+measured the edit through the final game link:
+
+| Renderer header edit through `hex_demo` link | Before | After |
+|---|---:|---:|
+| Clang 21.1.8 | 126.06 s | 63.10 s |
+| GCC 15.2.0 | 284.37 s | 78.69 s |
+
+These are exploratory individual observations, not medians or controlled
+speedup ratios. External host load rose above 50 during the original GCC run;
+the later runs had much lower contention. An additional original GCC repeat
+was interrupted to avoid continuing repeated profiling under that load. Both
+completed originals and the interrupted attempt are retained in the data.
+Versions were measured in separate phases, not interleaved. The rebuild-count
+reduction is the primary result; no percentage wall-time improvement, complete
+build improvement or ordinary game-source-edit improvement is claimed here.
+
+Both compilers passed 25 selected rendering, ECS, sprite animation, particle,
+tilemap, scripting, scene, UI2, development and game tests. Four Lua API reports
+matched the baseline. No-PCH syntax/template checks passed for 346 Clang 2D,
+332 GCC 2D and 436 Clang 3D translation units. The initial audit identified 13
+consumers needing direct includes; all passed their recheck. Nine standalone
+renderer-header units also compiled with each compiler, component definitions,
+and PCH/unity disabled. This is not full
+Windows/MSVC or 3D/GPU runtime validation.
+
+After timing, the renderer header's original bytes/attributes were restored,
+each measured game PCH was rebuilt against that header, rendering/game/Lua
+smoke tests and API checks passed again, and a no-change game build compiled
+and linked nothing.
+
+The [renderer header data](build_renderer_headers_2026-11-07.json) retains plans,
+skipped object sets, individual timing samples, host load, the interrupted
+repeat, layout results, source lists, validation and reproduction scripts.
