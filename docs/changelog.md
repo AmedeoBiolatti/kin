@@ -7,6 +7,20 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- ui2 apps on a phone, from a workout tracker built on it and run on a Samsung A55: a finger dragged across a
+  scroll box scrolls it and a flick glides (`ScrollBoxOptions::touch_drag`, on by default; the drag is then no
+  click). Text fields open the keyboard for what they take: `TextInputKind` (`Text`, `Number`, `Decimal`),
+  `Window::set_text_input_enabled(on, kind)`, `ValueFieldOptions::keyboard`; `number_field` and `NumberInput` show
+  the number pad when their range has no negatives, and numbers take a decimal comma. `ValueFieldOptions::select_all`
+  (`number_field`'s) makes typing replace the value wherever the caret landed. Enter and Esc commit and cancel a
+  one-line field without an input map binding `accept` and `quit`. A value field of a fixed height centres its
+  text in it from top to bottom. `TtfFontOptions::embolden`, used for Android's bold, whose files link to its
+  regular variable font.
+- Fixed: `wait_for_events` on Android spun a whole core (SDL's event wait does there); kin checks for events
+  every 8 to 25 ms instead: idle 101% of a core to 3-4%. The first frames after the loop starts and after
+  coming back to the screen are drawn without waiting (the window stayed blank until touched, and that touch was
+  lost). `WindowedAppConfig::max_idle_wait` (0: never wake without a reason).
+
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
   precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
   and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).

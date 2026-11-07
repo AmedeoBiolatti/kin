@@ -270,7 +270,7 @@ UiTextInputResult edit_text_input(Context& ctx,
     // While an input method composes, the keys are its own.
     const bool composing = state.active && !ctx.text_composition().empty();
     if (state.active) {
-        ctx.request_text_input();
+        ctx.request_text_input(state.keyboard);
         // Typed (or committed by an input method) text, even mid-composition.
         const std::string_view input_text = ctx.text_input();
         if (!input_text.empty() && !ctx.modifier_held(KeyModifiers::Ctrl)) {
@@ -368,14 +368,18 @@ UiTextInputResult edit_text_input(Context& ctx,
             }
         }
         // Leaving it drops keyboard focus too, so it does not take the keys again.
-        if (was_active && ctx.action_pressed("accept")) {
+        // Enter leaves a line field however the actions are bound (an app with
+        // no input map has no "accept": a phone keyboard's Enter is Enter), and
+        // Esc gives it up.
+        const bool enter = ctx.key_pressed(Key::Enter) || ctx.key_pressed(Key::KeypadEnter);
+        if (was_active && (enter || ctx.action_pressed("accept"))) {
             state.active = false;
             state.clear_selection();
             result.committed = true;
             if (it.focused) {
                 ctx.state().clear_focused();
             }
-        } else if (was_active && ctx.action_pressed("quit")) {
+        } else if (was_active && (ctx.key_pressed(Key::Escape) || ctx.action_pressed("quit"))) {
             state.active = false;
             state.clear_selection();
             result.cancelled = true;

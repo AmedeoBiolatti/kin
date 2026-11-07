@@ -381,6 +381,17 @@ void Context::begin(Input& input, Renderer2D& renderer, f32 dt) {
     _pixel_scale = renderer.content_scale();
     _any_press = input.mouse_frame_pressed(MouseButton::Left) || input.mouse_frame_pressed(MouseButton::Right) ||
                  input.mouse_frame_pressed(MouseButton::Middle);
+    // A finger down: perhaps a drag that scrolls (layout_compose decides once
+    // it has moved). On a box still gliding it stops the glide, and when the
+    // glide was quick it is not a press on what it stopped over.
+    if (input.pointer_is_touch() && input.mouse_frame_pressed(MouseButton::Left)) {
+        const Vec2f v = _touch_scroll.velocity;
+        const bool caught = _touch_scroll.target && !_touch_scroll.down && v.x * v.x + v.y * v.y > 250.0f * 250.0f;
+        _touch_scroll = {.down = true, .origin = pointer()};
+        if (caught && !_state.active()) {
+            _state.set_active(make_id("ui2.touch_scroll.caught"), MouseButton::Left);
+        }
+    }
     begin_navigation();
     begin_semantics();
     // State not asked for all last frame belonged to something no longer built.
@@ -1192,8 +1203,8 @@ void Context::apply_text_input(Window& window) const {
         _text_input_dismissed = true;
         return;
     }
-    if (on != _wants_text_input) {
-        window.set_text_input_enabled(_wants_text_input);
+    if (on != _wants_text_input || (_wants_text_input && window.text_input_kind() != _wants_text_input_kind)) {
+        window.set_text_input_enabled(_wants_text_input, _wants_text_input_kind);
     }
     _text_input_on = _wants_text_input;
     if (_wants_text_input && _text_input_area) {

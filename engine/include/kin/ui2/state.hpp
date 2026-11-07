@@ -2,6 +2,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/platform/input.hpp> // MouseButton
+#include <kin/platform/text_input_kind.hpp>
 
 #include <concepts>
 #include <filesystem>
@@ -61,6 +62,8 @@ struct UiTextInputState {
     // How far text longer than the field is slid left, so the caret stays in view
     // while editing (0 when not: the field shows the text's start). Kept by the widget.
     f32 scroll_x = 0.0f;
+    // The keyboard a phone shows for it (set by the app or the field: a number's pad).
+    TextInputKind keyboard = TextInputKind::Text;
 
     bool has_selection() const { return selection_anchor != unset_selection && selection_anchor != caret; }
     std::size_t selection_start() const { return !has_selection() ? caret : (selection_anchor < caret ? selection_anchor : caret); }

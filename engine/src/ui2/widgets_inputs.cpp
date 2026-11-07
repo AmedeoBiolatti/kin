@@ -146,6 +146,9 @@ void run(Context& ctx, NumberInput& widget) {
         show(); // the value, unless typed in (an undo, another pick changed it)
     }
 
+    if (widget.text.keyboard == TextInputKind::Text && widget.min >= 0.0f) {
+        widget.text.keyboard = TextInputKind::Decimal; // a phone's number pad (it has no minus)
+    }
     const Interaction it = ctx.region(widget.id, widget.bounds, widget.z);
     widget.interaction = it;
     const bool was_active = widget.text.active;
