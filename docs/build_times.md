@@ -353,3 +353,45 @@ entity positions. These narrow cases do not establish whole-game performance.
 All process results, including an outlier, are retained in the
 [Lua binding measurement data](build_lua_bindings_2026-11-07.json), alongside
 the profiles, paired compile samples, full rebuild timelines and validation.
+
+### UI2 dirty observer compilation
+
+`ecs/ui2.cpp` now uses one non-template helper and one shared entity-only
+callback to register dirty observers. The old helper instantiated Flecs
+builders and typed callback adapters for every widget type, although the
+callback only needed the entity. Passing the component ID keeps the same
+query term while sharing those adapters. Layout, widget synchronization,
+rendering and public APIs are unchanged; no build option is needed.
+
+The original Clang profile spent 20.32 of 27.77 seconds in the backend,
+including substantial optimizer work. Reducing repeated adapters cuts both
+template work and generated code. Final measurements used the original
+`ae92ca1` implementation and this change, matching Release `-O2` commands,
+PCHs enabled, no compiler cache and no profiler flags. Each compilation ran
+serially on CPU 2, with three samples per version/compiler and alternating
+before/after order. The table reports medians:
+
+| Toolchain | Before | After | Compile time reduction | Before peak RSS | After peak RSS |
+|---|---:|---:|---:|---:|---:|
+| GCC 15.2 | 36.98 s | 29.85 s | 19.3% | 1,002 MiB | 876 MiB |
+| Clang 21.1.8 | 31.18 s | 23.84 s | 23.5% | 503 MiB | 440 MiB |
+
+These are translation-unit results, not a measured clean engine/game build
+speedup. CPU pinning does not isolate SMT siblings, thermals or background
+I/O. RSS is per compiler process, not total parallel-build memory.
+
+All 111 observer descriptors matched the original exactly, including names,
+IDs, events, query terms and access flags. GCC and Clang each passed nine
+selected UI2, scripting and game tests. New lifecycle assertions cover dirty
+version counts, deferred changes, destruction, OnSet behavior and observer
+re-registration; they also pass when linked against the original UI2 object.
+Without PCH, the file passed Clang 3D and GCC physics/audio-disabled syntax
+and template checks. Windows and full 3D runtime tests were not run.
+
+A warmed event stress test added/removed a label 100,000 times per sample,
+with three warmups and 30 measured samples per process. Across three
+processes per version on CPU 2, the median rose from 109.977 to 111.653 ms
+(1.5% slower); every process verified the exact final dirty version. This
+narrow test does not establish whole-game performance or a runtime speedup.
+The [UI2 measurement data](build_ui2_2026-11-07.json) retains all compile and
+runtime samples, descriptor data, validation details and reproduction scripts.
