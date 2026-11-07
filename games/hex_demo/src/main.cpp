@@ -5,6 +5,7 @@
 //   Right click  move the unit         O    odd / even offset
 //   R            reset                 Esc  quit
 
+#include <kin/platform/window.hpp>
 #include "hex_game.hpp"
 #include <kin/platform/input.hpp>
 #include <kin/runtime/game_info.hpp>

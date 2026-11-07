@@ -1,5 +1,6 @@
 // Exercise the shipped scene directly: the same controls, map and HUD.
 #define KIN_HEX_DEMO_TEST
+#include <kin/platform/window.hpp>
 #include <kin/renderer/backend.hpp>
 #include "../games/hex_demo/src/main.cpp"
 #include <kin/core/json_value.hpp>

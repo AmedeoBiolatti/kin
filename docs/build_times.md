@@ -938,7 +938,11 @@ have passing results. The shape source passed after its direct-include repair.
 One optional 3D shipping-feature check reported invalid UTF-8 in the system
 `cstddef` header followed by a Clang frontend crash. The file was valid UTF-8 on
 inspection; the same check passed twice in isolation without source or flag
-changes. The cause is undetermined, and the incident and retries are retained.
+changes. The dependency probes had rewritten headers while that syntax audit
+was still running; that input-file race is a plausible explanation, although
+the cause is unproven. The incident and retries are retained. Subsequent
+header-edit probes run after all compiler checks and reject active worktree
+compiler processes.
 
 Mechanical checks confirm unchanged fields, signatures and function bodies,
 including byte-for-byte movement of the five value definitions and preservation
@@ -957,3 +961,86 @@ again per compiler, and no-change game builds compiled and linked nothing.
 The [renderer interface data](build_renderer_interface_2026-11-07.json) retains
 exact plans, skipped objects, timing samples/load, layout comparisons, source
 lists, the compiler incident, validation and reproduction scripts.
+
+### Window value dependencies
+
+Follow-up measured on 2026-11-07 from `6bf787e`. The Window ID alias,
+`WindowConfig`, `SystemCursor`, `WindowChrome` and `WindowArea` now live in
+`platform/window_types.hpp`. Their original definitions, defaults, comments and
+ordering were copied unchanged. The pure `window_area_at` declaration moves
+with its argument/result types; its implementation stays in `window.cpp`.
+`window.hpp` includes the new header, retaining its existing exports.
+
+App, Input and UI2 include the values they need. App, UI2 and the windowed app
+interface forward-declare Window; the GPU device header also forward-declares
+its Window reference arguments. Sources constructing Window or calling its
+methods include `platform/window.hpp` directly, including demo callbacks using
+`ctx.window.close_requested()`. Existing fields, signatures, assertions,
+function bodies and inline definitions are preserved. This pass adds no new
+forwarding calls or allocations and changes no optimization flags.
+
+Clang and GCC agree on the `hex_demo` and `shapes_demo` plans:
+
+| Edited header | Before: C++ steps | After: C++ steps |
+|---|---:|---:|
+| `platform/window.hpp` | 60 | 14 |
+| `platform/app.hpp` | 18 | 18 |
+| `platform/input.hpp` | 51 | 51 |
+| `ui2/context.hpp` | 29 | 29 |
+
+A Window-class header edit avoids 45 source compilations and the game PCH:
+**76.7% fewer C++ steps**. The game main still compiles because its callback
+calls Window methods. Runtime archive updates drop from two to one. For
+`kin_lua`, Window-header edits drop from 59 to 13 source compilations.
+The newly introduced value header still triggers 57 C++ steps per game,
+including its PCH, and 56 for `kin_lua`. Changes to shared configuration, ID,
+cursor or chrome contracts still rebuild their consumers; the improvement
+above specifically concerns edits to the Window class header.
+
+Dependency plans use the alternate Ninja manifest method, with header bytes
+and nanosecond timestamps restored after each probe. All compiler checks and
+builds finish before header probes start. The probe scripts also reject active
+compiler, CMake and Ninja processes using this worktree/build directories.
+Both real Clang Window-header edits rebuilt exactly their planned object sets.
+
+The two versions use normal Release `-O2`, `KIN_DEV_FAST_SCRIPTING=OFF`, PCH on,
+compiler cache/LTO off, mold, and four workers pinned to CPUs 0, 2, 4 and 6.
+Dependencies, shaders and unaffected objects were already built. One Clang
+21.1.8 observation per version measured the Window edit through the final
+`hex_demo` link: **87.72 s before, 20.45 s after**. These are exploratory single
+observations under varying external activity, not controlled speedup ratios
+or clean-build comparisons. Host load is retained in the data. GCC received
+dependency and functional validation, with no new wall-time samples.
+
+Both compilers passed 28 selected tests: the earlier rendering, scene,
+scripting, UI2 and game set plus platform, window-point scaling and input
+workflows. All four Lua API reports match the baseline. Six separate platform,
+UI and windowed-app header units compile with component/Flecs definitions and
+PCH/unity disabled; the existing renderer contracts also build. A transitive
+include audit selected affected sources for no-PCH syntax/template checks:
+113 Clang 2D, 109 GCC 2D and 136 Clang 3D units have passing results. Nine initial
+Clang findings were direct-include repairs, and all passed rechecks. A later
+coverage check also compiled the newly configured windowed-app header unit.
+
+Sizes and alignments of 31 types, including App, Input, UI2 Context/BoxStyle,
+Window and the moved values, match before/after with both compilers and
+render-probe on/off. Cursor, WindowArea and Flip numeric values also match.
+This does not provide cross-platform ABI certification or full native desktop,
+3D/GPU runtime or Windows/MSVC validation.
+
+The previous renderer-interface record now documents that its header probes
+overlapped syntax checks: rewriting compiler inputs is a plausible explanation
+for that round's transient Clang crash, although the cause remains unproven.
+This round also caught stale GCC Ninja log records after a separate configure
+overlapped its build. The clean-plan assertion rejected that state before any
+changed-version timing. A serialized rebuild refreshed the logs and passed
+all tests/API comparisons again. Configuration, builds, syntax checks and
+header probes are now kept in separate phases; the data retains this incident.
+
+After timing, benchmark headers were restored, game PCHs were rebuilt against
+the restored inputs, nine smoke tests and four API comparisons passed again
+per compiler, and no-change game builds compiled and linked nothing.
+
+The [Window value data](build_window_values_2026-11-07.json) retains exact plans,
+skipped objects, timing samples/load, layouts/enums, affected source lists,
+validation, workflow corrections and reproduction scripts.

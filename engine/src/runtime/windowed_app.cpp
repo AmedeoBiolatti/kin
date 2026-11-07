@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/renderer/backend.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/platform/log.hpp>

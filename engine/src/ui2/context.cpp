@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/ui2/context.hpp>
 
 #include <kin/platform/app.hpp>

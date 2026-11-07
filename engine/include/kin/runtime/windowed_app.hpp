@@ -4,7 +4,6 @@
 #include <kin/core/types.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <filesystem>
 #include <memory>
@@ -13,6 +12,7 @@
 
 namespace kin {
 
+class Window;
 struct FrameContext;
 
 struct WindowedAppConfig {

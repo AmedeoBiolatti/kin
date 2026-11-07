@@ -2,7 +2,7 @@
 
 #include <kin/core/types.hpp>
 #include <kin/platform/input.hpp>
-#include <kin/platform/window.hpp>
+#include <kin/platform/window_types.hpp>
 #include <kin/renderer/render_view.hpp>
 #include <kin/renderer/renderer2d.hpp>
 #include <kin/ui2/layout.hpp>
@@ -31,6 +31,7 @@
 
 namespace kin {
 class App;
+class Window;
 }
 
 namespace kin::ui2 {

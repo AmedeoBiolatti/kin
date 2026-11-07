@@ -162,6 +162,21 @@ target_link_libraries(kin_renderer_headers_check PRIVATE kin::components flecs::
 target_compile_features(kin_renderer_headers_check PRIVATE cxx_std_23)
 set_target_properties(kin_renderer_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
 
+# Public platform/UI headers must compile without transitive Window definitions.
+# Compile them independently of PCH and unity builds.
+add_library(kin_platform_headers_check OBJECT
+    window_types_header_check.cpp
+    windowed_app_header_check.cpp
+    window_header_check.cpp
+    input_header_check.cpp
+    app_header_check.cpp
+    ui2_context_header_check.cpp
+)
+target_include_directories(kin_platform_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+target_link_libraries(kin_platform_headers_check PRIVATE kin::components flecs::flecs_static)
+target_compile_features(kin_platform_headers_check PRIVATE cxx_std_23)
+set_target_properties(kin_platform_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
+
 kin_add_test(kin_component_tests kin-component-config SOURCES component_tests.cpp)
 # Platform services (kin/platform/services.hpp). The Steam backend opens a
 # stand-in for Steam's library, built here with the same file name.

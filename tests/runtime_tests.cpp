@@ -1,3 +1,4 @@
+#include <kin/platform/window.hpp>
 #include <kin/assets/file_watcher.hpp>
 #include <kin/core/json.hpp>
 #include <kin/core/profile.hpp>

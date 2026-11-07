@@ -34,6 +34,11 @@ releases may change APIs.
   callers using backend or Window definitions include their headers directly.
   See [renderer interface measurements](build_times.md#renderer-interface-dependencies).
 
+- Window IDs, configuration and cursor/chrome values have a lightweight `window_types.hpp` header.
+  App, Input, UI2, the windowed app interface and GPU device use narrower dependencies, reducing
+  Window-class rebuilds while preserving fields, function bodies and inline definitions.
+  See [Window value measurements](build_times.md#window-value-dependencies).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
