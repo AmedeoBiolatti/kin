@@ -1381,27 +1381,30 @@ void unreal_specular_and_volume_lighting() {
 
 } // namespace
 
+// Each test's name before it runs (std::cerr, unbuffered): a crash names the test it was in.
+#define RUN(test) (std::cerr << "material import: " #test "\n", test())
+
 int main() {
-    standard_material();
-    orm_and_refusals();
-    writer_round_trip();
-    unity_materials();
-    pictures();
-    unreal_materials();
-    safe_names();
-    unreal_graphs();
-    unreal_approximations();
-    unreal_layers_and_folding();
-    unreal_function_outputs();
-    unreal_cubes_and_rotation();
-    unreal_object_space();
-    unreal_foliage();
-    unreal_clear_coat();
-    unreal_specular_and_volume_lighting();
-    unity_graphs();
-    godot_graphs();
-    corpus();
-    unity_corpus();
+    RUN(standard_material);
+    RUN(orm_and_refusals);
+    RUN(writer_round_trip);
+    RUN(unity_materials);
+    RUN(pictures);
+    RUN(unreal_materials);
+    RUN(safe_names);
+    RUN(unreal_graphs);
+    RUN(unreal_approximations);
+    RUN(unreal_layers_and_folding);
+    RUN(unreal_function_outputs);
+    RUN(unreal_cubes_and_rotation);
+    RUN(unreal_object_space);
+    RUN(unreal_foliage);
+    RUN(unreal_clear_coat);
+    RUN(unreal_specular_and_volume_lighting);
+    RUN(unity_graphs);
+    RUN(godot_graphs);
+    RUN(corpus);
+    RUN(unity_corpus);
     std::cout << "material import tests passed\n";
     return 0;
 }
