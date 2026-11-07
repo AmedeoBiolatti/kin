@@ -1526,7 +1526,11 @@ two-sided foliage, Godot's backlight: each light on its back side, wrapped by ha
 of alpha 0.6, and the ambient light from behind; a backlit surface is lit, and its shadows read, from either side),
 `clearcoat` and `clearcoat_roughness` (0 and 0.045 as kin's material makes them: a clear coat over the surface, as
 glTF's KHR_materials_clearcoat: a dielectric of IOR 1.5 with a GGX highlight of its own roughness, its reflection of the
-environment too, the layer below dimmed by the coat's Fresnel). After the function, kin lights it
+environment too, the layer below dimmed by the coat's Fresnel), `specular` (0.5: a dielectric's reflectance head on is
+0.08 times it, 4% by default, as Unreal's Specular; 0: no highlight, no reflection) and `diffuse_wrap` (0: Lambert's
+diffuse; 0.5: the light's first two spherical harmonic bands, 1/4 + n.l / 2, lighting the side facing away a little, as
+Unreal's directional volume lighting of translucency; 1: the first alone, 1/4 from every side, the ambient light the mean
+of both sides'). After the function, kin lights it
 (`kin_lit_surface(s)`; `kin_lit(base, n, metallic, roughness, occlusion)` for a surface without either) and adds the emission, or, for an `unlit` material, shows its colour plus
 its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
 (`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,

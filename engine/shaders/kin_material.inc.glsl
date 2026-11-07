@@ -301,6 +301,9 @@ struct KinSurface {
                      // two-sided foliage, Godot's backlight); 0, none, but in a surface shader's
     float clearcoat; // a clear coat's strength over it (glTF's KHR_materials_clearcoat, Unreal's Clear Coat); 0: none
     float clearcoat_roughness; // the coat's, within [0.045, 1]
+    float specular;     // a dielectric's reflectance head on, 0.08 times it (0.5: 4%, kin's own; Unreal's Specular)
+    float diffuse_wrap; // how far the diffuse light wraps round: 0 Lambert's (kin's own), 0.5 and 1 Unreal's volume
+                        // lighting of translucency, directional and not (wrapped_diffuse); no reflection with it
 };
 
 #ifdef KIN_SURFACE
@@ -329,6 +332,8 @@ KinSurface kin_stock_surface() {
     s.backlight = vec3(0.0);
     s.clearcoat = 0.0;
     s.clearcoat_roughness = 0.045;
+    s.specular = 0.5;
+    s.diffuse_wrap = 0.0;
     return s;
 }
 
@@ -577,6 +582,7 @@ vec3 kin_coated(vec3 under, float coat, vec2 ab, float n_v, vec3 coat_above) {
 vec3 kin_lit_surface(KinSurface surface) {
     const vec3 base = surface.base_color, n = surface.normal, backlight = surface.backlight;
     const float metallic = surface.metallic, occlusion = surface.occlusion, coat = surface.clearcoat;
+    const float wrap = surface.diffuse_wrap, f0_dielectric = 0.08 * surface.specular;
     float roughness = surface.roughness, coat_roughness = surface.clearcoat_roughness;
     // Specular anti-aliasing (Scene3D::specular_aa; Tokuyoshi and Kaplanyan's, as Godot's roughness limiter): where
     // the normal turns within the pixel, a highlight can be thinner than the pixel, very bright where a sample hits it
@@ -595,7 +601,7 @@ vec3 kin_lit_surface(KinSurface surface) {
     s.n_v = clamp(dot(n, v), 0.0, 1.0);
     s.alpha = roughness * roughness;
     s.diffuse = base * (1.0 - metallic);
-    s.f0 = mix(vec3(0.04), base, metallic);
+    s.f0 = mix(vec3(f0_dielectric), base, metallic);
     // A rough microsurface lights itself with a bounce that single
     // scattering leaves out, most of all a metal's (Fdez-Aguera's
     // multiple-scattering fit): put back in the specular, taken from the diffuse.
@@ -605,6 +611,8 @@ vec3 kin_lit_surface(KinSurface surface) {
     s.backlight = backlight;
     s.coat = coat;
     s.coat_alpha = coat_roughness * coat_roughness;
+    s.dielectric = f0_dielectric;
+    s.wrap = wrap;
     const bool backlit = kin_backlit(s);
 
     vec3 light = vec3(0.0);
@@ -619,7 +627,7 @@ vec3 kin_lit_surface(KinSurface surface) {
 #ifdef KIN_DIRECT_LIGHT
     if (dot(frame.sun_color.rgb, vec3(1.0)) > 0.0) {
 #else
-    if (sun > 0.0 || backlit) {
+    if (sun > 0.0 || backlit || wrap > 0.0) {
 #endif
         // (A back-lit thin surface's shadow from its side facing the sun: the point pushed off that way.)
         float lit = sunlight(sun > 0.0 || !backlit ? n : -n, world_dx, world_dy);
@@ -712,7 +720,7 @@ vec3 kin_lit_surface(KinSurface surface) {
     vec3 around, above, behind = vec3(0.0), coat_above = vec3(0.0);
     if (frame.environment.w > 0.5) {
         around = textureLod(uEnvIrradiance, environment_uv(n), 0.0).rgb * frame.environment.x;
-        if (backlit) {
+        if (backlit || wrap > 0.5) {
             behind = textureLod(uEnvIrradiance, environment_uv(-n), 0.0).rgb * frame.environment.x;
         }
         if (coat > 0.0) {
@@ -755,7 +763,11 @@ vec3 kin_lit_surface(KinSurface surface) {
         }
     }
 #endif
-    const vec3 dielectric = sky_reflectance(vec3(0.04), ab);
+    // A diffuse wrapped past 0.5 sees the ambient light less by its normal: toward the mean of the two sides'.
+    if (wrap > 0.5) {
+        around = mix(around, 0.5 * (around + behind), 2.0 * wrap - 1.0);
+    }
+    const vec3 dielectric = sky_reflectance(vec3(f0_dielectric), ab);
     const vec2 coat_ab = coat > 0.0 ? environment_brdf(coat_roughness, s.n_v) : vec2(0.0);
     const vec3 reflectance = mix(dielectric, sky_reflectance(base, ab), metallic);
 #ifdef KIN_GI
@@ -799,6 +811,8 @@ vec3 kin_lit(vec3 base, vec3 n, float metallic, float roughness, float occlusion
     s.backlight = vec3(0.0);
     s.clearcoat = 0.0;
     s.clearcoat_roughness = 0.045;
+    s.specular = 0.5;
+    s.diffuse_wrap = 0.0;
     return kin_lit_surface(s);
 }
 

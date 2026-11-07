@@ -70,6 +70,8 @@ vec3 lighting(vec3 base, vec3 n, float metallic, float roughness, float occlusio
     s.backlight = vec3(0.0);
     s.coat = 0.0;
     s.coat_alpha = 1.0;
+    s.dielectric = 0.04;
+    s.wrap = 0.0;
     vec3 light = shade(s, uSunDirection, uSunColor*sunlight()) + shade(s, uFillDirection, uFillColor);
     for (int i=0; i<uPointCount; ++i) {
         vec4 at = uPoints[2*i], color = uPoints[2*i+1];

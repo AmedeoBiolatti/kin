@@ -1335,6 +1335,49 @@ void unreal_clear_coat() {
     CHECK(!contains_text(lit_surface, "clearcoat"));
 }
 
+// Specular as kin's (0.08 times it a dielectric's reflectance); a translucency lit from Unreal's light volume: diffuse
+// alone, wrapped (0.5 directional, 1 not), its Specular 0; a surface-lit one, or an opaque one, as it is.
+void unreal_specular_and_volume_lighting() {
+    Scratch scratch;
+    const fs::path project = scratch.path, content = scratch.path / "content";
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto import = [&](const char* blend, const char* lighting) {
+        const std::string doc =
+            std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Water", "blend_mode": ")") + blend +
+            R"(", "shading_model": "MSM_DEFAULT_LIT", "translucency_lighting_mode": ")" + lighting +
+            R"(", "parameters": {}, "inputs": {}, "textures": {},
+          "graph": {"nodes": {"Shine": {"class": "MaterialExpressionConstant", "props": {"r": 0.375}, "inputs": {}}},
+                    "outputs": {"Specular": {"node": "Shine", "output": ""}, "Opacity": {"node": "Shine", "output": ""}}}})";
+        write(content / "M_Water.json", doc);
+        auto m = import_unreal_graph(content / "M_Water.json", options);
+        CHECK(m && !m->graph.empty());
+        std::ifstream in(m->graph);
+        const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+        const auto g = compile_material_graph3d(text);
+        for (const auto& e : g.errors)
+            std::cerr << e.node << ": " << e.message << '\n';
+        CHECK(g.ok());
+        if (shader_compiler_available()) {
+            std::string why;
+            const auto cooked = cook_material_graph3d(text, &why);
+            if (!cooked)
+                std::cerr << why << '\n';
+            CHECK(cooked.has_value());
+        }
+        return std::make_pair(std::move(m), g.surface);
+    };
+    const auto [surface_lit, a] = import("BLEND_TRANSLUCENT", "TLM_SURFACE");
+    CHECK(contains_text(a, "s.specular = clamp(0.375,") && !contains_text(a, "diffuse_wrap"));
+    CHECK(!has_note(*surface_lit, "Specular"));
+    const auto [directional, b] = import("BLEND_TRANSLUCENT", "TLM_VOLUMETRIC_PER_VERTEX_DIRECTIONAL");
+    CHECK(contains_text(b, "s.specular = clamp(0.0,") && contains_text(b, "s.diffuse_wrap = clamp(0.5,"));
+    CHECK(has_note(*directional, "translucency lit by TLM_VOLUMETRIC_PER_VERTEX_DIRECTIONAL"));
+    const auto [flat, c] = import("BLEND_TRANSLUCENT", "TLM_VOLUMETRIC_NON_DIRECTIONAL");
+    CHECK(contains_text(c, "s.diffuse_wrap = clamp(1.0,"));
+    const auto [opaque, d] = import("BLEND_OPAQUE", "TLM_VOLUMETRIC_NON_DIRECTIONAL");
+    CHECK(!contains_text(d, "diffuse_wrap"));
+}
+
 } // namespace
 
 int main() {
@@ -1353,6 +1396,7 @@ int main() {
     unreal_object_space();
     unreal_foliage();
     unreal_clear_coat();
+    unreal_specular_and_volume_lighting();
     unity_graphs();
     godot_graphs();
     corpus();

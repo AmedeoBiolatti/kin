@@ -54,7 +54,17 @@ struct Surface {
     vec3 backlight; // a thin surface's (a leaf's) colour for the light it lets through from behind; 0: none
     float coat;       // a clear coat's strength over it (glTF's KHR_materials_clearcoat); 0: none
     float coat_alpha; // the coat's roughness squared
+    float dielectric; // what a dielectric reflects head on (0.04: KinSurface::specular 0.5)
+    float wrap;       // how far the diffuse light wraps round (KinSurface::diffuse_wrap); 0: Lambert's
 };
+
+// The diffuse light's share at `n_l` (the cosine to the light), wrapped by `wrap`: Lambert's at 0; at 0.5 the light's
+// first two spherical harmonic bands (1/4 + n.l / 2: some to the side facing away, as Unreal's directional volume
+// lighting); at 1 the first alone (1/4 from every side, its non-directional). The same on average over every way a
+// surface faces.
+float wrapped_diffuse(float n_l, float wrap) {
+    return max(min(0.5 * wrap, 0.25) + (1.0 - wrap) * n_l, 0.0);
+}
 
 // The light a thin surface lets through from `l` (Unreal's two-sided foliage): the light on its back, wrapped by half
 // (McAuley's energy-conserving wrap: some still where the front is lit at a slant), scattered on mostly the way it
@@ -69,6 +79,9 @@ vec3 transmitted(Surface s, vec3 l, float n_l) {
 vec3 shade(Surface s, vec3 l, vec3 radiance) {
     float n_l = dot(s.n, l);
     vec3 through = transmitted(s, l, n_l) * radiance;
+    if (s.wrap > 0.0) {
+        through += s.diffuse * (wrapped_diffuse(n_l, s.wrap) * (1.0 - s.dielectric)) * radiance;
+    }
     if (n_l <= 0.0) {
         return through;
     }
@@ -80,7 +93,8 @@ vec3 shade(Surface s, vec3 l, vec3 radiance) {
     // a dielectric's Fresnel (the diffuse of a metal is already gone from
     // `diffuse`; between, glTF mixes the two materials).
     vec3 specular = s.boost * f * (distribution(n_h, s.alpha) * visibility(n_l, max(s.n_v, 1e-4), s.alpha) * PI);
-    vec3 lit = s.diffuse * (1.0 - fresnel(vec3(0.04), v_h)) + specular;
+    // (A wrapped diffuse is in `through`, weighed by the reflectance head on: Lambert's here.)
+    vec3 lit = (s.wrap > 0.0 ? vec3(0.0) : s.diffuse * (1.0 - fresnel(vec3(s.dielectric), v_h))) + specular;
     if (s.coat > 0.0) {
         // A clear coat (a dielectric of IOR 1.5, glTF's KHR_materials_clearcoat): its own highlight, and what it
         // reflects the layer below does not get.

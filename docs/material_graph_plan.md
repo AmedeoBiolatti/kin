@@ -299,6 +299,16 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   Metallic Red major -> minor; now close 54, minor 21, major 24. The majors left of them are rough full metals 12-20%
   brighter in kin: its multiple-scattering compensation, which Unreal's legacy shading (Substrate off:
   USE_ENERGY_CONSERVATION 0) does not have.
+  Specular and translucency lighting: the surface's `specular` (0.08 times it a dielectric's reflectance, Unreal's
+  Specular, now imported) and `diffuse_wrap` (0 Lambert's; 0.5 and 1 the light's first two spherical harmonic bands or
+  the first alone). The export writes a material's translucency_lighting_mode: a translucency lit from Unreal's light
+  volume (TLM_VOLUMETRIC_*: the Cheaper water, the ocean, the splash) is diffuse alone (Specular 0) and wrapped (0.5
+  directional, 1 not); per pixel, not per vertex. Waterfall Cheaper's quad 27.5 -> 3.1, Waterfall Arc Cheaper's 25.6 ->
+  12.1, Pond Scum Cheaper (both) and WaterSplash close, River Cheaper minor; now close 57, minor 19, major 23. Left
+  as test artefacts: the lake/river spheres (their offset folds the sphere into overlapping translucent petals,
+  blended in index order, which Unreal's mesh build reorders: reversed in kin, they look like Unreal's) and the
+  Desert's quad (its world-aligned UVs on an upright quad read one texel row at v = 0, a wrap edge: 3 mm of depth
+  changes it more than the gap to Unreal).
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

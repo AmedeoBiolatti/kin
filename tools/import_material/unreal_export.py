@@ -497,6 +497,10 @@ class Exporter:
             doc["material_domain"] = enum_name(base.get_editor_property("material_domain"))
         except Exception:
             pass
+        try:  # how a translucent one is lit: TLM_SURFACE (as an opaque one), or from the light volume (diffuse only)
+            doc["translucency_lighting_mode"] = enum_name(base.get_editor_property("translucency_lighting_mode"))
+        except Exception:
+            pass
         try:  # its Normal in tangent space (the default), else in the world's
             doc["tangent_space_normal"] = bool(base.get_editor_property("tangent_space_normal"))
         except Exception:
