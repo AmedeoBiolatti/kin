@@ -150,6 +150,23 @@ intended for iteration; use normal development or shipping presets to assess
 optimized game performance. See the whole-target measurements below for the
 observed compilation/runtime tradeoff and its limits.
 
+## Include the interfaces you use
+
+`scene.hpp` declares `SceneContext` with references to App, Input, Window and
+Renderer2D; it forward-declares those classes. A source that calls their methods
+includes the corresponding header directly. For example, calling
+`ctx.input.pressed(...)` needs `<kin/platform/input.hpp>`, and drawing through
+`ctx.renderer` needs `<kin/renderer/renderer2d.hpp>`.
+
+`script_engine.hpp` supplies the scripting interface, runtime statistics and
+Color. It forward-declares SceneContext and the borrowed service classes. Code
+that accesses SceneContext fields includes `<kin/scene/scene.hpp>`; code that
+uses App methods includes `<kin/platform/app.hpp>`.
+
+This keeps edits to concrete service headers from rebuilding consumers that
+only need scene or scripting declarations. Two separate translation units check
+that the public headers compile on their own, with PCH and unity disabled.
+
 ## Measure the edit loop
 
 Compare the same compiler, flags, sources, build filesystem and job count.
@@ -630,3 +647,75 @@ representative real-game frame times.
 The [whole-target data](build_scripting_o1_2026-11-07.json) includes all build
 samples and raw runtime timings, command comparisons, validation, source hashes
 and reproduction scripts.
+
+### Scene and scripting header dependencies
+
+Starting from `71255e5`, `scene.hpp` forward-declares the services that
+SceneContext borrows instead of including App, Input, Window and Renderer2D.
+`script_engine.hpp` includes the small Color/types interfaces and forward-declares
+SceneContext and its borrowed services. Its consumers no longer inherit the
+scene implementation's dependencies. The two implementation files that call App
+methods include App directly, and a Lua runtime test now includes Input directly.
+Consumers outside this repository may need the same explicit service includes.
+
+The fields, method signatures, method bodies and test assertions are unchanged;
+a mechanical comparison verifies that the five existing C++ files differ only
+in includes and forward declarations. These measurements use normal Release
+optimization, with `KIN_DEV_FAST_SCRIPTING=OFF`, PCH on, cache off and LTO off.
+
+Ninja rebuild plans for `hex_demo` changed as follows. GCC and Clang agree:
+
+| Edited header | Before: C++ steps | After: C++ steps |
+|---|---:|---:|
+| `platform/app.hpp` | 27 | 18 |
+| `platform/input.hpp` | 55 | 51 |
+| `platform/window.hpp` | 116 | 115 |
+| `renderer/renderer2d.hpp` | 102 | 99 |
+
+Each row includes one game PCH compilation. `shapes_demo` has the same counts.
+For `kin_lua`, App edits dropped from 26 to 16 source compilations, with no game
+PCH. Plans were obtained from copies of the generated Ninja manifests, avoiding
+dry-run termination at CMake's always-checked glob rule. Header edits were
+temporary trailing comments; original bytes and timestamps were restored.
+
+App edits no longer rebuild nine engine sources, including entity scripts,
+workflow bindings, script reload/runtime, ECS scenes, scene flow/preload and menu
+scenes. The App edit still rebuilds the game PCH and its main source, archives
+two runtime libraries, and links the game. Three real App-edit builds per
+compiler and version produced these local medians:
+
+| App header edit through `hex_demo` link | Before | After |
+|---|---:|---:|
+| Clang 21.1.8 | 40.36 s | 20.36 s |
+| GCC 15.2.0 | 51.34 s | 21.54 s |
+
+The observed wall-time reductions are 49.6% and 58.0%. Each real run's object
+set matched its rebuild plan. Builds ran serially with four workers pinned to
+CPUs 0, 2, 4 and 6, with other objects, dependencies, shaders and engine PCHs
+already built. Compiler order alternated between rounds and reversed for the
+changed version. All original-version samples preceded the changed-version
+samples; the versions were not interleaved.
+
+Timing ratios are exploratory shared-host estimates. A separate workload drove
+load above 140 during the final original GCC run, which took 118.38 seconds;
+that sample is retained. The other two original GCC runs took 48.92 and 51.34
+seconds. Host activity also varied across the measurement phases. The reduction
+from 27 to 18 rebuild steps is the stronger structural result. These are App
+header-edit measurements, not complete-build or ordinary game-source-edit gains.
+
+GCC and Clang each passed 18 selected scripting, scene, UI2, development and game
+tests; all four Lua API reports matched the baseline. A no-PCH syntax audit
+passed for 337 Clang 2D translation units (including the two new header checks),
+330 GCC 2D units and 436 Clang 3D units after fixing the test's indirect Input
+include. The standalone header checks also compiled with both compilers and
+the configured component definitions, with PCH and unity disabled.
+This does not constitute Windows/MSVC or full 3D runtime validation.
+
+After timing, the original App header was restored and each measured game's
+PCH rebuilt to match its original input bytes/attributes. Game/Lua runtime
+smoke tests and API reports passed again, and a subsequent game build performed
+no compilation or linking.
+
+The [header dependency data](build_headers_2026-11-07.json) retains the complete
+rebuild plans, timing samples, skipped object sets, syntax source lists,
+validation, mechanical comparison and reproduction scripts.

@@ -16,6 +16,10 @@ releases may change APIs.
   Lua bindings during development. It is off by default and rejected for shipping builds.
   See [compilation/runtime measurements](build_times.md#opt-in-optimization-for-the-whole-binding-target).
 
+- Scene and scripting headers forward-declare borrowed services to reduce rebuilds after App, Input,
+  Window and Renderer2D header edits. Consumers calling service methods include their headers directly.
+  See [header dependency measurements](build_times.md#scene-and-scripting-header-dependencies).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D

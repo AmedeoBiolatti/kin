@@ -5,6 +5,7 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/script.hpp>
 #include <kin/ecs/system.hpp>
+#include <kin/platform/input.hpp>
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>

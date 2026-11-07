@@ -1,12 +1,14 @@
 #pragma once
 
-#include <kin/scene/scene.hpp>
+#include <kin/core/types.hpp>
+#include <kin/renderer/color.hpp>
 #include <kin/scripting/lua_runtime.hpp>
 
 #include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace sol {
@@ -16,6 +18,11 @@ class state;
 namespace kin {
 
 class JsonWriter;
+class App;
+class EcsWorld;
+class Input;
+class InputActionContext;
+struct SceneContext;
 class ScriptScene;
 class ScriptComponentRegistry;
 class ScriptWorkflows2D;

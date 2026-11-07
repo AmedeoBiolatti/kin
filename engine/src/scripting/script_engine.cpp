@@ -17,6 +17,7 @@
 #include <kin/ecs/render.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/ecs/time.hpp>
+#include <kin/platform/app.hpp>
 #include <kin/platform/input.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/scene/scene_manager.hpp>

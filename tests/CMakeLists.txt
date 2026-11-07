@@ -132,6 +132,14 @@ function(kin_add_component_test component target test_name)
     endif()
 endfunction()
 
+# Each translation unit includes just one public header. Keep the checks
+# independent of PCH/unity builds so missing includes cannot be hidden.
+add_library(kin_scene_headers_check OBJECT scene_header_check.cpp script_engine_header_check.cpp)
+target_include_directories(kin_scene_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
+target_link_libraries(kin_scene_headers_check PRIVATE kin::components)
+target_compile_features(kin_scene_headers_check PRIVATE cxx_std_23)
+set_target_properties(kin_scene_headers_check PROPERTIES DISABLE_PRECOMPILE_HEADERS ON UNITY_BUILD OFF)
+
 kin_add_test(kin_component_tests kin-component-config SOURCES component_tests.cpp)
 # Platform services (kin/platform/services.hpp). The Steam backend opens a
 # stand-in for Steam's library, built here with the same file name.
