@@ -1294,6 +1294,47 @@ void unreal_foliage() {
     CHECK(!contains_text(skin_surface, "backlight"));
 }
 
+// Clear coat: Clear Coat and Clear Coat Roughness as kin's clear coat (1 and 0.1 where not connected, as Unreal's);
+// another model's custom data not read as one.
+void unreal_clear_coat() {
+    Scratch scratch;
+    const fs::path project = scratch.path, content = scratch.path / "content";
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto import = [&](const char* model, bool connected) {
+        const std::string doc =
+            std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Coat", "blend_mode": "BLEND_OPAQUE",
+          "shading_model": ")") + model + R"(", "parameters": {}, "inputs": {}, "textures": {},
+          "graph": {"nodes": {"Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.625}, "inputs": {}}},
+                    "outputs": {"Roughness": {"node": "Half", "output": ""})" +
+            (connected ? R"(, "ClearCoat": {"node": "Half", "output": ""}, "ClearCoatRoughness": {"node": "Half", "output": ""})" : "") + "}}}";
+        write(content / "M_Coat.json", doc);
+        auto m = import_unreal_graph(content / "M_Coat.json", options);
+        CHECK(m && !m->graph.empty());
+        std::ifstream in(m->graph);
+        const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+        const auto g = compile_material_graph3d(text);
+        for (const auto& e : g.errors)
+            std::cerr << e.node << ": " << e.message << '\n';
+        CHECK(g.ok());
+        if (shader_compiler_available()) {
+            std::string why;
+            const auto cooked = cook_material_graph3d(text, &why);
+            if (!cooked)
+                std::cerr << why << '\n';
+            CHECK(cooked.has_value());
+        }
+        return std::make_pair(std::move(m), g.surface);
+    };
+    const auto [coat, surface] = import("MSM_CLEAR_COAT", true);
+    CHECK(contains_text(surface, "s.clearcoat = clamp(") && contains_text(surface, "s.clearcoat_roughness = clamp("));
+    CHECK(has_note(*coat, "clear coat:") && !has_note(*coat, "shading model "));
+    const auto [plain, plain_surface] = import("MSM_CLEAR_COAT", false);
+    CHECK(contains_text(plain_surface, "s.clearcoat = clamp(1.0,") &&
+          contains_text(plain_surface, "s.clearcoat_roughness = clamp(0.1,"));
+    const auto [lit, lit_surface] = import("MSM_DEFAULT_LIT", true);
+    CHECK(!contains_text(lit_surface, "clearcoat"));
+}
+
 } // namespace
 
 int main() {
@@ -1311,6 +1352,7 @@ int main() {
     unreal_cubes_and_rotation();
     unreal_object_space();
     unreal_foliage();
+    unreal_clear_coat();
     unity_graphs();
     godot_graphs();
     corpus();

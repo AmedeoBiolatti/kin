@@ -52,6 +52,8 @@ struct Surface {
     vec3 f0;      // what it reflects head on
     vec3 boost;   // the light a rough specular loses to a second bounce, put back
     vec3 backlight; // a thin surface's (a leaf's) colour for the light it lets through from behind; 0: none
+    float coat;       // a clear coat's strength over it (glTF's KHR_materials_clearcoat); 0: none
+    float coat_alpha; // the coat's roughness squared
 };
 
 // The light a thin surface lets through from `l` (Unreal's two-sided foliage): the light on its back, wrapped by half
@@ -78,5 +80,12 @@ vec3 shade(Surface s, vec3 l, vec3 radiance) {
     // a dielectric's Fresnel (the diffuse of a metal is already gone from
     // `diffuse`; between, glTF mixes the two materials).
     vec3 specular = s.boost * f * (distribution(n_h, s.alpha) * visibility(n_l, max(s.n_v, 1e-4), s.alpha) * PI);
-    return (s.diffuse * (1.0 - fresnel(vec3(0.04), v_h)) + specular) * radiance * n_l + through;
+    vec3 lit = s.diffuse * (1.0 - fresnel(vec3(0.04), v_h)) + specular;
+    if (s.coat > 0.0) {
+        // A clear coat (a dielectric of IOR 1.5, glTF's KHR_materials_clearcoat): its own highlight, and what it
+        // reflects the layer below does not get.
+        float fc = s.coat * fresnel(vec3(0.04), v_h).x;
+        lit = lit * (1.0 - fc) + vec3(fc * distribution(n_h, s.coat_alpha) * visibility(n_l, max(s.n_v, 1e-4), s.coat_alpha) * PI);
+    }
+    return lit * radiance * n_l + through;
 }

@@ -416,7 +416,8 @@ struct Field {
 };
 constexpr Field surface_fields[] = {{"base_color", Type::Vec3}, {"alpha", Type::Float},     {"normal", Type::Vec3},
                                     {"metallic", Type::Float},  {"roughness", Type::Float}, {"occlusion", Type::Float},
-                                    {"emission", Type::Vec3},   {"backlight", Type::Vec3}};
+                                    {"emission", Type::Vec3},   {"backlight", Type::Vec3},  {"clearcoat", Type::Float},
+                                    {"clearcoat_roughness", Type::Float}};
 
 bool identifier(const std::string& s) {
     if (s.empty() || s.size() > 64 || std::isdigit(static_cast<unsigned char>(s[0])))
@@ -469,7 +470,9 @@ public:
             {"roughness", {Type::Float, "clamp(%, 0.045, 1.0)"}},
             {"occlusion", {Type::Float, "clamp(%, 0.0, 1.0)"}},
             {"emission", {Type::Vec3, "max(%, vec3(0.0))"}},
-            {"backlight", {Type::Vec3, "max(%, vec3(0.0))"}}};
+            {"backlight", {Type::Vec3, "max(%, vec3(0.0))"}},
+            {"clearcoat", {Type::Float, "clamp(%, 0.0, 1.0)"}},
+            {"clearcoat_roughness", {Type::Float, "clamp(%, 0.045, 1.0)"}}};
         std::vector<std::string> writes;
         if (_vertex) { // only the offset, as kin_surface_offset returns it (kin_surface_vertex.inc.glsl)
             const auto* outputs = g.find("outputs");
@@ -531,7 +534,7 @@ public:
                 const auto f = fields.find(name);
                 if (f == fields.end()) {
                     error(name, "not an output (base_color, alpha, normal, metallic, roughness, occlusion, emission, "
-                                "backlight, offset)");
+                                "backlight, clearcoat, clearcoat_roughness, offset)");
                     continue;
                 }
                 const Value v = value(ref, name);

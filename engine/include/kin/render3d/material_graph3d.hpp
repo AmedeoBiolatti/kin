@@ -20,7 +20,8 @@
 // "position", "normal", "view", "vertex_color", "time", "screen", "camera_distance", "surface.<field>"; in the offset
 // only, "object_position": the copy's origin, and object_to_world / world_to_object nodes) or a value (a number, an
 // array of 2 to 4). The outputs: base_color, alpha, normal, metallic, roughness, occlusion, emission, backlight (the
-// colour a thin surface, a leaf, lets light through in from behind: KinSurface::backlight; 0 by default) and offset.
+// colour a thin surface, a leaf, lets light through in from behind: KinSurface::backlight; 0 by default), clearcoat
+// and clearcoat_roughness (a clear coat over it, glTF's KHR_materials_clearcoat; 0 by default) and offset.
 // Outputs not given keep what kin's material makes (the stock surface). Types are float,
 // vec2, vec3, vec4: a float widens to any; a vector narrows to its first components, or widens with 0 (and 1 for the
 // fourth). material_graph_nodes3d() lists the node types.

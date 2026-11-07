@@ -24,7 +24,7 @@ PROPERTIES = {
     "Roughness": "MP_ROUGHNESS", "EmissiveColor": "MP_EMISSIVE_COLOR", "Opacity": "MP_OPACITY",
     "OpacityMask": "MP_OPACITY_MASK", "Normal": "MP_NORMAL", "AmbientOcclusion": "MP_AMBIENT_OCCLUSION",
     "WorldPositionOffset": "MP_WORLD_POSITION_OFFSET", "Anisotropy": "MP_ANISOTROPY", "Refraction": "MP_REFRACTION",
-    "SubsurfaceColor": "MP_SUBSURFACE_COLOR",
+    "SubsurfaceColor": "MP_SUBSURFACE_COLOR", "ClearCoat": "MP_CUSTOM_DATA0", "ClearCoatRoughness": "MP_CUSTOM_DATA1",
 }
 MEL = unreal.MaterialEditingLibrary
 
@@ -312,11 +312,12 @@ class Exporter:
 
     def t3d(self, asset):
         """What Python can't read of an asset's expressions, from its T3D text (ObjectExporterT3D), once an asset:
-        each named reroute usage's declaration, and each expression's inputs in order (source, output index, mask)."""
+        each named reroute usage's declaration, each expression's inputs in order (source, output index, mask), and the
+        material's own inputs by name ("root": ClearCoat's, which unreal.MaterialProperty does not list)."""
         path = asset.get_path_name()
         if path in self.declarations:
             return self.declarations[path]
-        found = {"declarations": {}, "inputs": {}, "function_outputs": {}}
+        found = {"declarations": {}, "inputs": {}, "function_outputs": {}, "root": {}}
         file = os.path.join(self.out, ".asset.t3d")
         task = unreal.AssetExportTask()
         task.object = asset
@@ -343,6 +344,11 @@ class Exporter:
                     f = re.search(r'^\s*FunctionOutputs\((\d+)\)=.*?OutputName="([^"]*)"', line)
                     if f:
                         found["function_outputs"].setdefault(current, {})[int(f.group(1))] = f.group(2)
+                    if current.endswith("EditorOnlyData"):
+                        r = re.search(r"^\s*([A-Za-z]+)=\(.*Expression=\"[^\"]*'[^']*?([A-Za-z0-9_]+)'\"([^)]*)", line)
+                        if r:
+                            index = re.search(r"OutputIndex=(\d+)", r.group(3))
+                            found["root"][r.group(1)] = (r.group(2), int(index.group(1)) if index else 0)
                     d = re.search(r"^\s*Declaration=\S*'[^']*:([A-Za-z0-9_]+)'", line)
                     if d:
                         found["declarations"][current] = d.group(1)
@@ -427,6 +433,17 @@ class Exporter:
         for key, prop in PROPERTIES.items():
             p = getattr(unreal.MaterialProperty, prop, None)
             if p is None:
+                # (Not in Python's enum, ClearCoat's: from the T3D, the expression and its output by index.)
+                link = self.t3d(base)["root"].get(key)
+                if link:
+                    path = base.get_path_name()
+                    for where in (path + ":" + link[0], path + ":MaterialEditorOnlyData_0." + link[0]):
+                        e = unreal.find_object(None, where)
+                        if e is not None:
+                            outputs[key] = {"node": visit(e), "output": "", "output_index": link[1]}
+                            break
+                    else:
+                        unreal.log_warning("unreal_export: %s of %s: %s not found" % (key, path, link[0]))
                 continue
             try:
                 node = MEL.get_material_property_input_node(base, p)

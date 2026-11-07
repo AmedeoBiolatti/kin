@@ -1741,13 +1741,14 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         const std::string blend = doc.find("blend_mode") ? doc.find("blend_mode")->as_string() : "";
         const bool unlit = model == "MSM_UNLIT";
         const bool foliage = model == "MSM_TWO_SIDED_FOLIAGE" || model == "MSM_TWOSIDED_FOLIAGE";
+        const bool coated = model == "MSM_CLEAR_COAT" || model == "MSM_CLEARCOAT";
         const auto* outputs = doc.find("graph")->find("outputs");
         // (The Normal first: the others' Pixel Normal, Reflection Vector and Fresnel are by it.)
         static const std::vector<std::pair<const char*, const char*>> mapping{
             {"Normal", "normal"},       {"BaseColor", "base_color"},   {"Metallic", "metallic"},
             {"Roughness", "roughness"}, {"EmissiveColor", "emission"}, {"AmbientOcclusion", "occlusion"},
             {"Opacity", "alpha"},       {"OpacityMask", "alpha"},      {"WorldPositionOffset", "offset"},
-            {"SubsurfaceColor", "backlight"}};
+            {"SubsurfaceColor", "backlight"}, {"ClearCoat", "clearcoat"}, {"ClearCoatRoughness", "clearcoat_roughness"}};
         const auto build = [&](UnrealGraph& g) {
             for (const auto& [from, to] : mapping) {
                 const auto* o = outputs ? outputs->find(from) : nullptr;
@@ -1755,7 +1756,8 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
                     continue;
                 if ((std::string(from) == "Opacity" && blend == "BLEND_MASKED") ||
                     (std::string(from) == "OpacityMask" && blend != "BLEND_MASKED") ||
-                    (std::string(from) == "SubsurfaceColor" && !foliage)) // (skin's and subsurface's: not kin's)
+                    (std::string(from) == "SubsurfaceColor" && !foliage) || // (skin's and subsurface's: not kin's)
+                    (std::string(from).starts_with("ClearCoat") && !coated))
                     continue;
                 std::string why;
                 // (The graph's word on this output replaces the Tier 1 import's.)
@@ -1787,6 +1789,12 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
             // (kin's backlight, Unreal's formula), white where it is not connected.
             if (foliage && !b.outputs.contains("backlight"))
                 b.outputs["backlight"] = "[1, 1, 1]";
+            // Clear coat: Clear Coat and Clear Coat Roughness as kin's clear coat (1 and 0.1 where not connected, as
+            // Unreal's).
+            if (coated && !b.outputs.contains("clearcoat"))
+                b.outputs["clearcoat"] = "1";
+            if (coated && !b.outputs.contains("clearcoat_roughness"))
+                b.outputs["clearcoat_roughness"] = "0.1";
         };
         build(*graph);
         // Parameters past Material3D::shader_params' floats (as kin's compiler packs them): the material's values in a
@@ -1826,11 +1834,14 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
             }
         }
         UnrealGraph& g = *graph;
-        if (foliage) {
+        if (foliage || coated)
             std::erase_if(imported.notes, [](const std::string& n) { return n.rfind("shading model ", 0) == 0; });
+        if (foliage)
             x.note("two-sided foliage: lit as kin's default, with its Subsurface Color as kin's backlight (light let "
                    "through from behind)");
-        }
+        if (coated)
+            x.note("clear coat: kin's (glTF's): the layer below dimmed by the coat's Fresnel once (Unreal's twice), "
+                   "a metal not tinted again through it at a slant");
         for (const char* other : {"Refraction", "Anisotropy", "Specular"})
             if (outputs && outputs->find(other))
                 x.note(std::string(other) + ": not in kin's graph outputs");

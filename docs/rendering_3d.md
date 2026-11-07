@@ -1523,8 +1523,11 @@ changes nothing draws exactly what the material draws without one. Its fields: `
 `metallic`, `roughness` (keep it within [0.045, 1]), `occlusion`, `emission` (linear light of its own) and `backlight`
 (0 as kin's material makes it: the colour a thin surface, a leaf, lets light through in from behind, as Unreal's
 two-sided foliage, Godot's backlight: each light on its back side, wrapped by half, scattered forward by a GGX lobe
-of alpha 0.6, and the ambient light from behind; a backlit surface is lit, and its shadows read, from either side).
-After the function, kin lights it (`kin_lit_backlit`) and adds the emission, or, for an `unlit` material, shows its colour plus
+of alpha 0.6, and the ambient light from behind; a backlit surface is lit, and its shadows read, from either side),
+`clearcoat` and `clearcoat_roughness` (0 and 0.045 as kin's material makes them: a clear coat over the surface, as
+glTF's KHR_materials_clearcoat: a dielectric of IOR 1.5 with a GGX highlight of its own roughness, its reflection of the
+environment too, the layer below dimmed by the coat's Fresnel). After the function, kin lights it
+(`kin_lit_surface(s)`; `kin_lit(base, n, metallic, roughness, occlusion)` for a surface without either) and adds the emission, or, for an `unlit` material, shows its colour plus
 its emission; then fog and output as ever. The function may call every `kin_*` function of the custom shaders
 (`kin_uv()`, `kin_position()`, `kin_view()`, `kin_normal()`, the material's maps through `uBase`, `uMetalRough`,
 `uNormalMap`, `uOcclusion`, `uEmissive`), and reads `Material3D::shader_params` (`surface_param_count3d`: 64 floats) as `kin_surface_param(0..15)`.

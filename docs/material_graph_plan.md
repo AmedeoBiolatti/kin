@@ -292,6 +292,13 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   Subsurface Color, exported now, white where not connected), lit as Unreal's foliage is (each light on the back,
   wrapped by half, through a GGX lobe of alpha 0.6; the ambient light from behind): the Megascan plant's sphere, its
   inside lit from behind, 29.8 -> 3.4. Now close 53, minor 21, major 25 (PlantsGrass's thin blades: their edges).
+  Clear coat: the surface's `clearcoat` and `clearcoat_roughness` (graph outputs; glTF's KHR_materials_clearcoat: a
+  GGX highlight of the coat's roughness, the layer below dimmed by the coat's Fresnel once, Unreal's twice), Unreal's
+  Clear Coat and Clear Coat Roughness (1 and 0.1 where not connected). unreal.MaterialProperty has no CustomData0/1:
+  the export reads those two inputs from the material's T3D. The 15 FancyDev materials: Fancy Markup minor -> close,
+  Metallic Red major -> minor; now close 54, minor 21, major 24. The majors left of them are rough full metals 12-20%
+  brighter in kin: its multiple-scattering compensation, which Unreal's legacy shading (Substrate off:
+  USE_ENERGY_CONSERVATION 0) does not have.
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the
