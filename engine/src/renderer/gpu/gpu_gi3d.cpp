@@ -483,6 +483,7 @@ void GpuRenderer3D::make_gi() {
 }
 
 void GpuRenderer3D::release_gi_pipelines() {
+    release_gi_proxies();
     SDL_GPUDevice* handle = _device->handle();
     for (SDL_GPUComputePipeline** compute :
          {&_gi_clear, &_gi_voxelize, &_gi_attributes, &_gi_flood, &_gi_light, &_gi_place, &_gi_trace, &_gi_update,
@@ -503,6 +504,237 @@ void GpuRenderer3D::release_gi_pipelines() {
 
 void GpuRenderer3D::release_gi(GpuView3D& view) {
     view._gi = {};
+}
+
+namespace {
+
+// A GI stand-in's picture: gi_proxy_side texels a side (and its mips), over a UV square gi_proxy_extent units a side
+// (what a world-aligned surface, a ground most, sees of the world). At most gi_proxy_bakes are made a render (the rest
+// the next); one unused for gi_proxy_idle frames is let go.
+constexpr u32 gi_proxy_side = 64;
+constexpr u32 gi_proxy_levels = 7;
+constexpr f32 gi_proxy_extent = 4.0f;
+constexpr u32 gi_proxy_bakes = 32;
+constexpr u64 gi_proxy_idle = 600;
+
+} // namespace
+
+bool GpuRenderer3D::gi_proxied(const Material3D& m) {
+    // As the GI scene takes draws in (gi_scene): lit, opaque or cut out. A custom shader stands in for a surface.
+    return !m.shader.backend() && dynamic_cast<const GpuSurfaceShader3D*>(m.surface.backend().get()) && !m.unlit &&
+           !m.wireframe && (m.blend == Blend3D::Opaque || m.blend == Blend3D::Mask);
+}
+
+u64 GpuRenderer3D::gi_proxy_key(const Material3D& m) {
+    // All a surface can read of its material but the lighting's own (a surface shader is kept as long as the
+    // renderer: its address is its own).
+    GiKey key;
+    key.add(m.surface.backend().get());
+    key.add(m.shader_params);
+    key.add(m.color);
+    key.add(m.emissive);
+    key.add(m.emission_mode);
+    key.add(m.emission_color);
+    key.add(m.blend);
+    key.add(m.alpha_cutoff);
+    key.add(m.metallic);
+    key.add(m.roughness);
+    key.add(m.normal_scale);
+    key.add(m.occlusion_strength);
+    key.add(m.uv_scale);
+    key.add(m.uv_offset);
+    key.add(m.wrap_u);
+    key.add(m.wrap_v);
+    for (const Texture* texture :
+         {&m.texture, &m.metallic_roughness, &m.normal, &m.occlusion, &m.emissive_texture, &m.graph_maps}) {
+        key.add(texture->backend().get());
+        if (const auto* gpu = dynamic_cast<const GpuTextureBackend*>(texture->backend().get())) {
+            key.add(gpu->version());
+            key.add(gpu->scale_mode());
+        }
+    }
+    for (const auto& sampler : m.texture_samplers) {
+        key.add(bool(sampler));
+        if (sampler) {
+            key.add(sampler->wrap_u);
+            key.add(sampler->wrap_v);
+            key.add(sampler->min);
+            key.add(sampler->mag);
+            key.add(sampler->mip);
+        }
+    }
+    return key.value;
+}
+
+const GpuRenderer3D::GiProxy* GpuRenderer3D::gi_proxy(const Material3D& material) {
+    if (_gi_proxies.empty() || !gi_proxied(material)) {
+        return nullptr;
+    }
+    const auto it = _gi_proxies.find(gi_proxy_key(material));
+    if (it == _gi_proxies.end() || !it->second.base) {
+        return nullptr;
+    }
+    it->second.used = _owner->_frame_serial;
+    return &it->second;
+}
+
+void GpuRenderer3D::bake_gi_proxies(const Scene3D& scene) {
+    const u64 frame = _owner->_frame_serial;
+    std::erase_if(_gi_proxies, [&](const auto& entry) { return entry.second.used + gi_proxy_idle < frame; });
+    if (!scene.global_illumination.enabled || !_gi_available || !_capabilities.surface_pass || _gi_proxy_broken) {
+        return;
+    }
+    u32 baked = 0;
+    for (const Scene3D::Draw& draw : scene.draws()) {
+        if (draw.count == 0 || !gi_proxied(draw.material)) {
+            continue;
+        }
+        const auto [it, fresh] = _gi_proxies.try_emplace(gi_proxy_key(draw.material));
+        it->second.used = frame;
+        if (!fresh) {
+            continue;
+        }
+        if (baked == gi_proxy_bakes) {
+            _gi_proxies.erase(it); // the next render's
+            continue;
+        }
+        ++baked;
+        // One that cannot be made stays, empty (the material's maps then, as without): not tried again each render.
+        if (!bake_gi_proxy(draw.material, scene.time, it->second) && _gi_proxy_broken) {
+            return;
+        }
+    }
+}
+
+bool GpuRenderer3D::bake_gi_proxy(const Material3D& material, f32 time, GiProxy& out) {
+    constexpr SDL_GPUTextureUsageFlags target = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    constexpr SDL_GPUTextureFormat linear = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_FLOAT;
+    const SDL_GPUTextureFormat colour = _owner->_color_texture_format;
+    const f32 h = 0.5f * gi_proxy_extent;
+    if (!_gi_proxy_quad) {
+        try {
+            if (!SDL_GPUTextureSupportsFormat(_device->handle(), colour, SDL_GPU_TEXTURETYPE_2D, target)) {
+                throw std::runtime_error("the maps' colour format is no render target here");
+            }
+            _gi_proxy_shader = GpuShader::from_embedded(*_device, SDL_GPU_SHADERSTAGE_FRAGMENT, "gi_proxy.frag.spv",
+                                                        /*uniform_buffers=*/1, /*samplers=*/2, /*storage_buffers=*/0);
+            if (!_gi_proxy_shader) {
+                throw std::runtime_error("gi_proxy.frag not made");
+            }
+            // u along x and v along z, so that from above (up -z) the picture's columns and rows are the UV's.
+            MeshData3D quad;
+            const Vec3f up{0.0f, 1.0f, 0.0f};
+            quad.vertices = {{{-h, 0.0f, -h}, up, {0.0f, 0.0f}},
+                             {{h, 0.0f, -h}, up, {1.0f, 0.0f}},
+                             {{h, 0.0f, h}, up, {1.0f, 1.0f}},
+                             {{-h, 0.0f, h}, up, {0.0f, 1.0f}}};
+            quad.indices = {0, 2, 1, 0, 3, 2};
+            auto mesh = create_mesh(quad, nullptr, {});
+            if (!mesh) {
+                throw std::runtime_error("the square not made");
+            }
+            for (Texture* scratch : {&_gi_proxy_unlit, &_gi_proxy_dark}) {
+                *scratch = Texture{std::make_shared<GpuTextureBackend>(
+                    _device->create_target(gi_proxy_side, gi_proxy_side, linear, target), false, ScaleMode::Nearest,
+                    TextureFormat::Rgba16Float)};
+            }
+            _gi_proxy_depth = Texture{std::make_shared<GpuTextureBackend>(
+                _device->create_target(gi_proxy_side, gi_proxy_side, SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+                                       SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER),
+                false, ScaleMode::Nearest, TextureFormat::Depth32Float)};
+            _gi_proxy_quad = Mesh3D{std::move(mesh), 4, 6, Bounds3D{{-h, 0.0f, -h}, {h, 0.0f, h}}};
+        } catch (const std::exception& e) {
+            KIN_LOG_WARN_F("render", "3D: surface materials' GI stand-ins not made: the GI reads their maps",
+                           (LogFields{{.name = "reason", .value = e.what()}}));
+            release_gi_proxies();
+            _gi_proxy_broken = true;
+            return false;
+        }
+    }
+    // The material drawn into `into` over the square, seen from above, lit by nothing: unlit, its base colour plus its
+    // emission; lit, its emission alone (nothing reaches it to reflect).
+    RenderDebugStats3D stats;
+    const auto draw = [&](bool unlit, const Texture& into) {
+        Scene3D scene;
+        scene.camera = Camera3D::look_at({0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 60.0f, {0.0f, 0.0f, -1.0f});
+        scene.camera.projection = Projection3D::Orthographic;
+        scene.camera.height = gi_proxy_extent;
+        scene.camera.z_near = 0.5f;
+        scene.camera.z_far = 2.0f;
+        scene.lights.sun.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.fill.color = {0.0f, 0.0f, 0.0f};
+        scene.lights.ambient = {0.0f, 0.0f, 0.0f};
+        scene.lights.ground_ambient.enabled = false;
+        scene.time = time;
+        Material3D look = material;
+        look.unlit = unlit;
+        look.double_sided = true;
+        look.casts_shadow = false;
+        look.receives_shadow = false;
+        if (!scene.draw(_gi_proxy_quad, Mat4f::identity(), look).ok()) {
+            return false;
+        }
+        const auto prepared = prepare(scene, PrepareOptions3D{}, stats);
+        return prepared &&
+               render_surface({.depth = _gi_proxy_depth, .linear_colour = into}, *prepared, SurfaceOptions3D{}, stats);
+    };
+    // The emission is kept (with its mips) only for a material that emits by its own fields; else drawn in scratch.
+    const bool emits = material.emits_light();
+    GpuTexture base =
+        _device->create_target(gi_proxy_side, gi_proxy_side, colour, target, SDL_GPU_SAMPLECOUNT_1, gi_proxy_levels);
+    Texture lit = _gi_proxy_dark;
+    if (emits) {
+        GpuTexture emission = _device->create_target(gi_proxy_side, gi_proxy_side, linear, target,
+                                                     SDL_GPU_SAMPLECOUNT_1, gi_proxy_levels);
+        if (!emission) {
+            return false;
+        }
+        lit = Texture{std::make_shared<GpuTextureBackend>(std::move(emission), false, ScaleMode::Mipmapped,
+                                                          TextureFormat::Rgba16Float, true)};
+    }
+    if (!base || !draw(true, _gi_proxy_unlit) || !draw(false, lit)) {
+        return false;
+    }
+    // The base colour: the one less the other, a texel each; then both pictures' mips.
+    _owner->ensure_frame();
+    _owner->flush_to_frame();
+    SDL_GPUCommandBuffer* commands = _owner->_frame->command_buffer();
+    SDL_GPUColorTargetInfo info{};
+    info.texture = base.handle();
+    info.load_op = SDL_GPU_LOADOP_DONT_CARE;
+    info.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &info, 1, nullptr);
+    if (!pass) {
+        return false;
+    }
+    const auto* unlit = static_cast<const GpuTextureBackend*>(_gi_proxy_unlit.backend().get());
+    const auto* dark = static_cast<const GpuTextureBackend*>(lit.backend().get());
+    SDL_BindGPUGraphicsPipeline(pass, fullscreen(_gi_proxy_shader.handle(), colour));
+    const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
+        SDL_GPUTextureSamplerBinding{unlit->texture().handle(), _gi_sampler},
+        SDL_GPUTextureSamplerBinding{dark->texture().handle(), _gi_sampler}};
+    SDL_BindGPUFragmentSamplers(pass, 0, samplers.data(), static_cast<u32>(samplers.size()));
+    const std::array<f32, 4> flags{colour == SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+    SDL_PushGPUFragmentUniformData(commands, 0, flags.data(), sizeof(flags));
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    SDL_GenerateMipmapsForGPUTexture(commands, base.handle());
+    if (emits) {
+        SDL_GenerateMipmapsForGPUTexture(commands, dark->texture().handle());
+        out.emission = std::move(lit);
+    }
+    out.base = Texture{
+        std::make_shared<GpuTextureBackend>(std::move(base), false, ScaleMode::Mipmapped, TextureFormat::Rgba8, true)};
+    return true;
+}
+
+void GpuRenderer3D::release_gi_proxies() {
+    _gi_proxies.clear();
+    _gi_proxy_quad = {};
+    _gi_proxy_unlit = {};
+    _gi_proxy_dark = {};
+    _gi_proxy_depth = {};
+    _gi_proxy_shader = {};
 }
 
 void GpuRenderer3D::gi_uniforms(const GpuView3D& view, f32 intensity, bool lit, f32* scene, f32* probes) const {
@@ -663,7 +895,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         const GpuMesh3D* mesh;
         u32 triangles, index_first, base_vertex;
         bool skinned;
-        u32 emitter; // its emitter's number, 0: none (its emission's strength is in its voxels)
+        u32 emitter;          // its emitter's number, 0: none (its emission's strength is in its voxels)
+        const GiProxy* proxy; // a surface material's stand-in (its maps' place), or null
     };
     struct Copy {
         u32 job;
@@ -747,13 +980,18 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         }
         material.add(m.wrap_u);
         material.add(m.wrap_v);
+        // A surface material is seen through its stand-in, whose emission holds its strength (as its surface makes it).
+        const GiProxy* proxy = gi_proxy(m);
+        material.add(proxy ? proxy->base.backend().get() : nullptr);
+        material.add(proxy ? proxy->emission.backend().get() : nullptr);
+        const f32 strength = proxy && proxy->emission ? 1.0f : m.emissive;
         // An emissive draw's voxels hold its emission at a strength of one, and its emitter's number: the GI's light
         // takes the strength from the emitters' list each render, so a strength that changes (a lamp dimmed, a game's
         // exposure applied to its emissives) makes nothing again. Without a number to give, its strength stays in its
         // voxels, and a change of it is a change of what they are made of.
-        const u32 emitter = m.emits_light() ? emitter_for(material.value, m.emissive) : 0u;
+        const u32 emitter = m.emits_light() ? emitter_for(material.value, strength) : 0u;
         if (m.emits_light() && emitter == 0) {
-            material.add(m.emissive);
+            material.add(strength);
         }
         const u32 job = static_cast<u32>(jobs.size());
         const Bounds3D rest = draw.mesh.bounds();
@@ -802,7 +1040,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             any_skinned = any_skinned || skinned;
             jobs.push_back({&draw, mesh, mesh->levels[0].index_count / 3,
                             static_cast<u32>(mesh->index_offset / sizeof(u32)) + mesh->levels[0].first_index,
-                            static_cast<u32>(mesh->vertex_offset / sizeof(GpuMeshVertex)), skinned, emitter});
+                            static_cast<u32>(mesh->vertex_offset / sizeof(GpuMeshVertex)), skinned, emitter, proxy});
         }
     }
     // A copy as the voxelizer reads it (made only for those voxelized).
@@ -818,10 +1056,11 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
         std::memcpy(record.normal, normal, sizeof(record.normal));
         const Color tint = c.instance->tint;
-        record.colour[0] = srgb_to_linear(m.color.r) * srgb_to_linear(tint.r);
-        record.colour[1] = srgb_to_linear(m.color.g) * srgb_to_linear(tint.g);
-        record.colour[2] = srgb_to_linear(m.color.b) * srgb_to_linear(tint.b);
-        record.colour[3] = static_cast<f32>(m.color.a) / 255.0f * static_cast<f32>(tint.a) / 255.0f;
+        const Color colour = jobs[c.job].proxy ? colors::white : m.color; // (a stand-in has the material's in it)
+        record.colour[0] = srgb_to_linear(colour.r) * srgb_to_linear(tint.r);
+        record.colour[1] = srgb_to_linear(colour.g) * srgb_to_linear(tint.g);
+        record.colour[2] = srgb_to_linear(colour.b) * srgb_to_linear(tint.b);
+        record.colour[3] = static_cast<f32>(colour.a) / 255.0f * static_cast<f32>(tint.a) / 255.0f;
         record.skin[0] = c.skin;
         return record;
     };
@@ -1026,8 +1265,8 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             const Mat4f& t = c.instance->transform;
             const Material3D& m = j.draw->material;
             const bool independent = m.emission_mode == EmissionMode3D::Independent;
-            if (m.emissive_texture.backend() || (!independent && m.texture.backend())) {
-                continue;
+            if (j.proxy || m.emissive_texture.backend() || (!independent && m.texture.backend())) {
+                continue; // (an emissive map's light is the voxels', as a surface's stand-in's)
             }
             const Color tint = c.instance->tint;
             const Vec3f radiance = independent ? Vec3f{m.emission_color.r, m.emission_color.g, m.emission_color.b}
@@ -1444,9 +1683,13 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
             for (const LevelJob& lj : list) {
                 const Job& job = jobs[lj.job];
                 const Material3D& m = job.draw->material;
+                const GiProxy* proxy = job.proxy;
+                const bool proxy_emits = proxy && proxy->emission;
                 const std::array<SDL_GPUTextureSamplerBinding, 2> samplers{
-                    texture_binding(m.texture, m.wrap_u, m.wrap_v, m.texture_samplers[0]),
-                    texture_binding(m.emissive_texture, m.wrap_u, m.wrap_v, m.texture_samplers[4])};
+                    proxy ? texture_binding(proxy->base, Wrap3D::Repeat, Wrap3D::Repeat)
+                          : texture_binding(m.texture, m.wrap_u, m.wrap_v, m.texture_samplers[0]),
+                    proxy_emits ? texture_binding(proxy->emission, Wrap3D::Repeat, Wrap3D::Repeat)
+                                : texture_binding(m.emissive_texture, m.wrap_u, m.wrap_v, m.texture_samplers[4])};
                 SDL_BindGPUComputeSamplers(pass, 0, samplers.data(), 2);
                 const std::array<SDL_GPUBuffer*, 8> buffers{job.mesh->vertices,
                                                             job.mesh->indices,
@@ -1475,15 +1718,15 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 u.flags[0] = job.skinned ? 1u : 0u;
                 u.flags[1] = m.blend == Blend3D::Mask ? 1u : 0u;
                 u.flags[2] = decode ? 1u : 0u;
-                u.flags[3] = m.emissive_texture.backend() ? 1u : 0u;
-                u.material[0] = m.emits_light() ? m.emissive : 0.0f;
+                u.flags[3] = proxy_emits ? 2u : m.emissive_texture.backend() ? 1u : 0u; // (2: linear, not encoded)
+                u.material[0] = m.emits_light() ? (proxy_emits ? 1.0f : m.emissive) : 0.0f;
                 u.material[3] = static_cast<f32>(job.emitter);
                 u.material[1] = m.alpha_cutoff;
                 u.material[2] = m.double_sided ? 1.0f : 0.0f;
-                u.emission[0] = m.emission_color.r;
-                u.emission[1] = m.emission_color.g;
-                u.emission[2] = m.emission_color.b;
-                u.emission[3] = m.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f;
+                u.emission[0] = proxy_emits ? 1.0f : m.emission_color.r;
+                u.emission[1] = proxy_emits ? 1.0f : m.emission_color.g;
+                u.emission[2] = proxy_emits ? 1.0f : m.emission_color.b;
+                u.emission[3] = proxy_emits || m.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f;
                 u.first[0] = lj.copy_first;
                 u.first[1] = k * words;
                 u.first[2] = lj.pair_first;

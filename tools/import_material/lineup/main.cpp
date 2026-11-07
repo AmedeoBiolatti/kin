@@ -11,6 +11,9 @@
 // without shadow, no ambient, a black background. --anisotropy N filters the materials' textures as Unreal's default
 // does (8; kin's default is off). --single-scatter leaves out the light rough specular surfaces reflect more than once
 // (Scene3D::specular_multiscatter off), as Unreal's legacy shading does (Substrate off: no energy conservation).
+// --gi-view albedo|emission pictures what kin's GI sees of the materials instead: the GI scene over the objects (one
+// level, about 120 voxels across them, no probes) as RenderDebugOptions3D::gi_view shows it.
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -36,6 +39,7 @@ struct Options {
     f32 time = 0;       // the scene's clock (a material's time)
     u32 anisotropy = 1; // Scene3D::anisotropy (Unreal's default, r.MaxAnisotropy: 8)
     bool single_scatter = false; // Scene3D::specular_multiscatter off
+    std::string gi_view;         // "albedo" or "emission": the GI scene pictured (RenderDebugOptions3D::gi_view)
 };
 
 Vec3f vec3(const JsonValue& v) {
@@ -79,6 +83,18 @@ public:
         l.fill.color = {0, 0, 0};
         l.ambient = {0, 0, 0};
         l.shadow_area = {}; // no shadow
+        if (!_o.gi_view.empty()) {
+            const Vec3f size = _bounds.size();
+            const f32 cell = std::max({size.x / 120.0f, size.z / 120.0f, size.y / 56.0f});
+            _scene.global_illumination = {.enabled = true,
+                                          .area = _bounds,
+                                          .cell = cell,
+                                          .levels = 1,
+                                          .side = 128,
+                                          .height = 64,
+                                          .probes = {.enabled = false}};
+            _scene.debug.gi_view = _o.gi_view == "emission" ? GiView3D::Emission : GiView3D::Albedo;
+        }
         if (!_r->render(_view, _scene))
             throw std::runtime_error("render failed");
         ctx.renderer.clear(Color::rgb(0, 0, 0));
@@ -133,6 +149,17 @@ private:
                 m.casts_shadow = false;
                 m.receives_shadow = false;
                 _draws.push_back({model->parts[i].mesh, at * model->parts[i].transform, m});
+                // The objects' box, a little larger (the GI scene's area).
+                const Bounds3D b = model->parts[i].mesh.bounds();
+                const Mat4f& t = _draws.back().transform;
+                for (int c = 0; c < 8; ++c) {
+                    const Vec3f p = t.apply({c & 1 ? b.max.x : b.min.x, c & 2 ? b.max.y : b.min.y,
+                                             c & 4 ? b.max.z : b.min.z});
+                    _bounds.min = {std::min(_bounds.min.x, p.x - 0.1f), std::min(_bounds.min.y, p.y - 0.1f),
+                                   std::min(_bounds.min.z, p.z - 0.1f)};
+                    _bounds.max = {std::max(_bounds.max.x, p.x + 0.1f), std::max(_bounds.max.y, p.y + 0.1f),
+                                   std::max(_bounds.max.z, p.z + 0.1f)};
+                }
             }
             _models.push_back(model.shared());
             _bindings.push_back(binding.shared());
@@ -147,6 +174,7 @@ private:
     View3D _view;
     Scene3D _scene;
     std::vector<Draw> _draws;
+    Bounds3D _bounds{{1e30f, 1e30f, 1e30f}, {-1e30f, -1e30f, -1e30f}};
     std::vector<std::shared_ptr<const Model3D>> _models;
     std::vector<std::shared_ptr<const MaterialBinding3D>> _bindings;
 };
@@ -184,13 +212,16 @@ int main(int argc, char** argv) {
                 o.anisotropy = u32(std::stoi(value()));
             else if (a == "--single-scatter")
                 o.single_scatter = true;
+            else if (a == "--gi-view")
+                o.gi_view = value();
             else
                 runtime.push_back(argv[i]);
         }
-        if (o.scene.empty() || o.content.empty() || o.out.empty() || o.frames < 1) {
+        if (o.scene.empty() || o.content.empty() || o.out.empty() || o.frames < 1 ||
+            (!o.gi_view.empty() && o.gi_view != "albedo" && o.gi_view != "emission")) {
             std::cerr << "usage: kin_material_lineup --scene lineup.json --content <root> --materials <folder> "
                          "--out picture.png [--meshes <folder>] [--material <path>] [--time s] [--frames n] "
-                         "[--anisotropy n] [--single-scatter]\n";
+                         "[--anisotropy n] [--single-scatter] [--gi-view albedo|emission]\n";
             return 2;
         }
         auto lineup = std::make_unique<Lineup>(o);

@@ -12400,6 +12400,9 @@ bool GpuRenderer3D::render_scene(IViewBackend3D& base, const Scene3D& scene, Ren
     if (view->_output_format != _owner->_target_format && !make_targets(*view)) {
         return false;
     }
+    // The GI scene's stand-ins for surface materials it has none of yet, drawn before this render's passes (each a
+    // render of its own into the frame's commands).
+    bake_gi_proxies(scene);
     const std::size_t pipelines_before = _owner->_pipelines.size();
     u64 input_signature = 0;
     const std::array material_outputs{view->texture()};

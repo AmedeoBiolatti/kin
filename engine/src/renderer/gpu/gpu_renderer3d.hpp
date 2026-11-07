@@ -767,6 +767,29 @@ private:
                       SDL_GPUTextureFormat velocity_format, bool encode);
     bool read_gi_scene(IViewBackend3D& view, GiScene3D& out) override;
     void release_gi(GpuView3D& view);
+    // A surface material's stand-in in the GI scene: what its surface (a graph's, a surface shader's) makes of it over
+    // its UV square, gi_proxy_side texels a side, read by the voxelizer in place of the material's base and emissive
+    // maps (which may hold whatever a graph samples: a mask, a normal map). `base`: its base colour and alpha, in the
+    // colour format of materials' maps; `emission`: its emission (linear RGBA16F), made only for a material whose own
+    // fields say it emits (Material3D::emits_light), as the GI's emitters are those alone. bake_gi_proxies makes those
+    // a render's GI scene lacks, before its passes (each material drawn twice into the 2D frame's commands, unlit and
+    // lit by nothing, and gi_proxy.frag takes the second from the first), once a look (gi_proxy_key); the unused are
+    // let go. An animated surface is pictured at the time of its bake.
+    struct GiProxy {
+        Texture base, emission;
+        u64 used = 0; // the 2D frame that last asked for it
+    };
+    static bool gi_proxied(const Material3D& material);
+    static u64 gi_proxy_key(const Material3D& material);
+    const GiProxy* gi_proxy(const Material3D& material); // null: none (not a surface material, or none made)
+    void bake_gi_proxies(const Scene3D& scene);
+    bool bake_gi_proxy(const Material3D& material, f32 time, GiProxy& out);
+    void release_gi_proxies();
+    std::unordered_map<u64, GiProxy> _gi_proxies;
+    Mesh3D _gi_proxy_quad;                                    // the UV square, facing +y
+    Texture _gi_proxy_unlit, _gi_proxy_dark, _gi_proxy_depth; // the bake's scratch targets
+    GpuShader _gi_proxy_shader;                               // gi_proxy.frag
+    bool _gi_proxy_broken = false;                            // what a bake needs could not be made: none are
     bool _gi_available = false;
     bool _gi_warned = false;
     SDL_GPUComputePipeline* _gi_clear = nullptr;      // gi_clear.comp

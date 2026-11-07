@@ -15,7 +15,9 @@ releases may change APIs.
   two-sided foliage, clear coat, specular, diffuse wrap). `.kinmaterials` files name a `"graph"` and its `"params"`;
   `Assets3D::load_material_graph` loads a graph cooked at build time (`kin_material_graph cook`, cmake's
   `kin_cook_material_graph`) or compiles it with glslc, and reloads it on edits. `Scene3D::specular_multiscatter`
-  (on) can be turned off to draw rough metals as Unreal's legacy shading does.
+  (on) can be turned off to draw rough metals as Unreal's legacy shading does. The GI scene sees a surface material
+  through a stand-in the renderer draws from it (its base colour and emission over its UV square), not through its
+  maps, which a graph may fill with masks or normal maps.
 - `kin_import_material godot|unity|unreal` imports other engines' materials as `.kinmaterials`: the standard PBR
   materials of all three, and with `--graphs` their node graphs (Unreal material graphs with their Material
   Functions and static switches, Unity Shader Graph 10+, Godot 4 VisualShaders), noting each node it can't express.

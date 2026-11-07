@@ -3376,6 +3376,79 @@ void test_gpu_gi_scene() {
     });
 }
 
+// A surface material in the GI scene (gpu_gi3d.cpp's stand-ins): its colour and light as its surface makes them, not as
+// its maps hold them (a material graph's base map may hold a mask or a normal map). A floor whose surface paints it
+// (0.6, 0.2, 0.1) over a blue base map, and a wall whose surface glows (0, 3, 0) over a red emissive map: the voxels
+// have the surface's (read through the maps they were blue and red). The stand-ins last: the next render builds
+// nothing; a parameter changed is a new stand-in, and the floor's voxels follow.
+void test_gpu_gi_proxy() {
+    with_gpu("test_gpu_gi_proxy", [](kin::Renderer2D& renderer) {
+        kin::Renderer3D r3d{renderer};
+        if (lacks(r3d.capabilities().global_illumination, "global illumination")) {
+            return;
+        }
+        if (!kin::shader_compiler_available()) {
+            skip_or_require_gpu_test("test_gpu_gi_proxy", "no glslc");
+            return;
+        }
+        const std::filesystem::path dir{KIN_TEST_MATERIAL_SHADERS};
+        const kin::SurfaceShader3D own = r3d.compile_surface_shader(dir / "surface_gi.surface.glsl").value_or({});
+        assert(own.valid());
+        const GiLevel level{r3d, renderer};
+        const kin::u8 blue[4] = {0, 0, 255, 255}, red[4] = {255, 0, 0, 255};
+        kin::Material3D floor, wall;
+        floor.texture = renderer.create_texture_from_rgba(blue, {1, 1});
+        floor.surface = own;
+        floor.shader_params[0] = 0.6f, floor.shader_params[1] = 0.2f, floor.shader_params[2] = 0.1f;
+        wall.surface = own;
+        wall.set_emission({1.0f, 1.0f, 1.0f});
+        wall.emissive_texture = renderer.create_texture_from_rgba(red, {1, 1});
+        wall.shader_params[0] = wall.shader_params[1] = wall.shader_params[2] = 0.5f;
+        wall.shader_params[5] = 3.0f;
+        kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        const auto scene_of = [&] {
+            kin::Scene3D scene;
+            scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
+            scene.global_illumination = GiLevel::settings();
+            (void)scene.draw(level.plane, Mat4f::translation({0.0f, 0.27f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}),
+                             floor);
+            (void)scene.draw(level.plane, GiLevel::wall(), wall);
+            return scene;
+        };
+        render_ok(r3d, view, scene_of());
+        renderer.present();
+        assert(r3d.debug_stats().gi_built);
+        GiVoxels g;
+        assert(r3d.read_gi_scene(view, g.s).value_or(false));
+        const auto floor_at = g.of({3.2f, 0.27f, 1.0f});
+        const std::size_t f = g.index(floor_at[0], floor_at[1], floor_at[2]);
+        const auto [wx, wy, wz] = g.of(GiLevel::wall().apply({0.0f, 0.0f, 0.0f}));
+        const std::size_t w = g.index(wx, wy, wz);
+        std::cerr << "gi proxy: the floor's voxel " << g.channel(f, 0) << ' ' << g.channel(f, 1) << ' '
+                  << g.channel(f, 2) << ", the wall's " << g.channel(w, 0) << ' ' << g.channel(w, 1) << ' '
+                  << g.channel(w, 2) << ", its light " << g.s.emission[w * 3] << ' ' << g.s.emission[w * 3 + 1] << ' '
+                  << g.s.emission[w * 3 + 2] << '\n';
+        const auto near = [&](std::size_t i, int c, float linear) {
+            return std::abs(g.channel(i, c) - static_cast<int>(std::lround(linear * 255.0f))) <= 2;
+        };
+        assert(near(f, 0, 0.6f) && near(f, 1, 0.2f) && near(f, 2, 0.1f) && g.channel(f, 3) == 255);
+        assert(near(w, 0, 0.5f) && near(w, 1, 0.5f) && near(w, 2, 0.5f));
+        assert(std::abs(g.s.emission[w * 3 + 1] - 3.0f) < 0.03f && g.s.emission[w * 3] < 0.01f &&
+               g.s.emission[w * 3 + 2] < 0.01f);
+        assert(g.s.emission[f * 3 + 1] == 0.0f);
+
+        render_ok(r3d, view, scene_of());
+        renderer.present();
+        assert(!r3d.debug_stats().gi_built);
+        floor.shader_params[0] = 0.1f, floor.shader_params[1] = 0.5f, floor.shader_params[2] = 0.2f;
+        render_ok(r3d, view, scene_of());
+        renderer.present();
+        assert(r3d.debug_stats().gi_built);
+        assert(r3d.read_gi_scene(view, g.s).value_or(false));
+        assert(near(f, 0, 0.1f) && near(f, 1, 0.5f) && near(f, 2, 0.2f));
+    });
+}
+
 // When the GI scene is built: once, and again only where something it is made of changes (a copy moving, a pose, a
 // material: the blocks round it, not all of them; a change that goes on every render, every fourth render); two views
 // of one scene build it to the byte alike, and a scene made again where it changed is to the byte the one built
@@ -23534,6 +23607,7 @@ int main(int argc, char** argv) {
     RUN(test_gpu_anisotropy());
     RUN(test_gpu_texture_lod_bias());
     RUN(test_gpu_gi_scene());
+    RUN(test_gpu_gi_proxy());
     RUN(test_gpu_gi_scene_builds());
     RUN(test_gpu_gi_submission_order());
     RUN(test_gpu_gi_emitter_strength());

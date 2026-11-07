@@ -224,6 +224,20 @@ source, a stale cooked file refused), material_graph3d (layout and pack round tr
 at build time). Not yet: cut-outs by the
 graph's alpha in shadow/pick passes, the retained draw paths.
 
+**GI proxy (2026-11-07).** Not the planned mean colour found at cook time: a stand-in made by the renderer, per
+material (its parameters and maps are the instance's), the first time a render's GI scene takes it in
+(`GpuRenderer3D::bake_gi_proxies`, gpu_gi3d.cpp): the material drawn over its UV square (64 x 64, a square 4 units
+across seen from above) unlit and again lit by nothing, `gi_proxy.frag` taking the second (its emission) from the
+first (base colour plus emission); the voxelizer reads the base colour (and alpha) in the base map's place, and the
+emission in the emissive map's for a material whose own fields emit. Before, the GI read the material's own maps: an
+imported Unreal graph's base slot holds whatever the graph samples (59 graph textures there, 41 of them normal maps,
+masks or noise), so the landscapes bounced their normal map's lavender and the stone tiles yellow. Checked: the
+voxels of a surface painting (0.6, 0.2, 0.1) over a blue base map and glowing (0, 3, 0) over a red emissive map hold
+the surface's, blue and red without the stand-ins (`test_gpu_gi_proxy`); `kin_material_lineup --gi-view albedo` on
+eight Fab imports (the landscapes sand, earth and snow; the dev grids, stone tiles and zombie skin their own colours).
+Limits: as on flat ground facing up (a slope's rock is not seen), an animated surface at its bake's time, a graph's
+emission only where the material's own emission fields are set.
+
 **Cooked size.** 669 KB to about 220 KB: the variants optimised (glslc -O, which also drops the debug names; run-time
 surface compiles too, so development draws what ships: an optimised cooked graph of no outputs is byte-identical to
 the stock material) and the payload deflated (stb_image_write's zlib; inflated by stb_image's), with an FNV-1a hash

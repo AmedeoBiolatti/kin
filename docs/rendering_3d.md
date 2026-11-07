@@ -983,6 +983,16 @@ the plan's G5b results.
   by the GI but neither shades nor lights it, as Godot's SDFGI holds static geometry only), a cut-out only where its
   texture's alpha at the voxel's size passes its cutoff; not the overlay, nor blended, additive, wireframe or unlit
   draws. Beyond the last window there is nothing (rays that leave it see the sky).
+- **Surface materials** (a surface shader's or a material graph's: `Material3D::surface`) are seen through a stand-in:
+  what the surface makes of the material over its UV square (64 texels a side, a square 4 units across seen from
+  above), its base colour and alpha in the base map's place and, for a material whose own fields say it emits
+  (`emits_light`), its emission in the emissive map's, made before the first render that needs it (the material
+  drawn unlit, and again lit by nothing, which leaves its emission alone) and again when the material changes (its
+  surface, parameters, maps or colour). Its maps themselves are not read: a graph's base map may hold a mask or a
+  normal map. Its limits: a surface that depends on where it is or which way it faces (world-aligned maps, a slope's
+  rock over a flat ground's sand) is seen as on flat ground facing up; an animated one at the time of its stand-in;
+  a graph's emission is not light the GI has unless the material's own emission fields are set, and then its
+  emission is the voxels' (an emissive map's, not an area light); a World Position Offset does not move its voxels.
 - **How it is built:** in compute, before the passes that draw. Every voxel a triangle touches (Schwarz and Seidel's
   conservative surface voxelization), so a wall of no thickness has no gap a ray can pass. A voxel's owner, which
   writes its colour, normal and emission, is the touching triangle drawn first, an emissive one before any other (a
