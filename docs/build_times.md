@@ -1427,3 +1427,78 @@ samples, controls/load, runtime probes, binary sizes, source hashes, compiler
 flags, validation and reproduction scripts. The initial baseline dry-run stopped
 at a pending CMake regeneration after branch creation; the source was restored
 and the build settled before the three recorded edit samples.
+
+### Shared UI2 record collection
+
+Follow-up measured over 2026-11-07–08 from `5b425e4`. Widget-record collection in
+`ecs/ui2.cpp` now shares its query cache holder type and iteration adapter across
+51 widget types. Each type retains a private key/query per Kin-owned world and
+uses the original typed `query_builder<T&>()` factory; standalone Flecs worlds
+still build an uncached query per call. Record assignment and drawing remain
+typed. `field_at` handles sparse storage, with row zero for shared inherited
+fields. Code outside this collection helper, including registrations, builders,
+layout, sorting and clipping, is byte-identical. Public headers/CMake are unchanged.
+
+This removes repeated compiler work without introducing more translation units.
+The Clang object contains 8 cache holder vtables instead of 56, because the
+other UI2 query paths retain their own typed caches. Runtime query instances
+are still per widget/world. Collection now uses private keys instead of sharing
+the typed `each()` cache with other callers: querying the same signature
+elsewhere can retain another query, including the layout's prompt queries.
+
+Fresh diagnostic Clang compilations take 23.41 s before and 18.77 s after. Instrumented
+profiles are separate from the following normal Release `-O2` samples. Existing
+PCH is on; compiler cache/LTO and `KIN_DEV_FAST_SCRIPTING` are off, with mold
+linking and unchanged safety settings.
+
+Five observations/version/compiler use stable original/final source/private
+header copies and matching commands/PCHs without profiling. Before/after order
+alternates, reversing on every second pair. UI2 compiles on CPU 2 while an
+unchanged JSON control compiles on CPU 4. No owned validation compilers overlap
+the benchmark. Medians are:
+
+| Compiler | Compile before | Compile after | Compiler CPU before → after | Peak compiler RSS before → after |
+|---|---:|---:|---:|---:|
+| Clang 21.1.8 | 22.09 s | 18.99 s | 22.05 → 18.94 s | 503 → 426 MiB |
+| GCC 15.2 | 29.08 s | 24.24 s | 28.76 → 23.90 s | 988 → 866 MiB |
+
+Background activity and SMT siblings are uncontrolled. Load/control variation
+prompted two additional pairs per compiler; all initial samples, including
+33.89 s Clang and 42.33 s GCC before outliers, remain in the summary/data.
+These observed ratios are local estimates, not precise causal percentages or
+clean-project/cumulative speedups. RSS is per compiler, not total build memory.
+
+Three real implementation-only comment edits per version rebuild through the
+Clang `hex_demo` archive/link, with four workers pinned to CPUs 0/2/4/6.
+The median is **22.44 → 19.07 s**, an observed **15.0% less wall time**.
+Each plan and actual build compiles exactly one expected C++ object. Source
+bytes and nanosecond timestamps are restored after every sample, then the
+canonical object is recompiled from restored bytes. Rebuild fanout is unchanged.
+Host conditions also limit the precision of this edit-loop comparison.
+
+Renderer checks use three alternating processes/version/compiler/world mode,
+each with 30 measured samples after three warmups on CPU 2. Each sample renders
+20 frames of 500 panels, 500 empty labels and 500 spacers through an identity
+backend, asserting all 1,500 records and representative pointers/IDs/bounds.
+Across process medians, Clang's owned-world case is 2.8% faster; standalone
+Flecs is 3.1% slower. GCC cases are 2.2–2.7% slower. Dynamic field lookup and
+record assignment add per-row work. These narrow CPU probes have no GPU work,
+layout trees or non-empty text and do not establish whole-game FPS.
+
+Clang and GCC each pass 39 selected tests and all four Lua API reports match
+their baseline. All 111 dirty-observer descriptors match, including IDs, names,
+events and query/access flags. New regression coverage exercises sparse panels,
+shared inherited labels, disabled entities/components, deferred additions/
+removals, toggles and refreshed table matches in both owned and standalone
+worlds. The full UI2 suite, including the new regression, also passes when
+linked against the original object on both compilers.
+
+Four no-PCH syntax/template cases compile the implementation and test file
+with Clang 3D enabled and GCC physics/audio disabled. Seven final UI2/game smoke
+tests and API comparisons pass per compiler; no-change builds compile and link
+nothing. Windows/MSVC and native desktop/3D/GPU runtime are untested.
+
+The [UI2 collection data](build_ui2_collection_2026-11-08.json) retains all
+profiles, timing/control/load observations, real edit plans, runtime samples,
+object/cache holder counts, observer descriptors, validation, hashes, flags and
+reproduction scripts.

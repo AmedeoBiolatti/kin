@@ -7,6 +7,9 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- UI2 widget collection reuses Flecs query cache types and iteration code across widget types,
+  reducing compiler work and peak compiler memory. See [UI2 collection measurements](build_times.md#shared-ui2-record-collection) for timings and runtime tradeoffs.
+
 - Entity scripting separates runtime/reload/scheduling, entity methods and game-service bindings,
   shortening independent edit rebuilds and exposing parallel compilation. Normal optimization
   and safety settings remain enabled. See [entity split measurements](build_times.md#split-entity-scripting-translation-unit) for timings and CPU/runtime tradeoffs.

@@ -1,0 +1,2072 @@
+{
+  "date": "2026-11-08",
+  "base_commit": "5b425e4d0b8f4e8dd73a3d994a4a542489a907f0",
+  "source_sha256": {
+    "engine/src/ecs/ui2.cpp": {
+      "before": "fe5f0fc522b21be9742cba116e3135522ddc4f371d21927ed3ec65dd3997962f",
+      "after": "6a363980d99019ec0f130498485fa77788d81d4bccde9a48f5d3b9293decf975"
+    },
+    "tests/ui2_tests.cpp": {
+      "before": "c249d9459635c874bfa6b87a5b4853f4dfac7140c24b6b417db400cf31e8942b",
+      "after": "416ff1b3cc867b20ed5f219d1f1236f841c6506b496e1420e9559e316fe7efc3"
+    },
+    "engine/CMakeLists.txt": {
+      "before": "1cac0f43e18d4718710841f2e0ce58dfa73239cfe1acea67f20a93680ae8e126",
+      "after": "1cac0f43e18d4718710841f2e0ce58dfa73239cfe1acea67f20a93680ae8e126"
+    }
+  },
+  "environment": {
+    "host": [
+      "Linux",
+      "bamedeo-Legion-Pro-7-16IRX8H",
+      "7.0.0-42-generic",
+      "#42-Ubuntu SMP PREEMPT_DYNAMIC Thu Oct 15 08:06:44 UTC 2026",
+      "x86_64"
+    ],
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "logical_cpus": 32,
+    "memtotal": "MemTotal:       15571804 kB",
+    "versions": {
+      "clang++": "Ubuntu clang version 21.1.8 (6ubuntu1)",
+      "c++": "c++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "cmake": "cmake version 4.2.3",
+      "ninja": "1.13.2"
+    },
+    "source_directory": "/home/bamedeo/kin-wt/build-time",
+    "build_outputs_and_temp": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench",
+    "worker_cpu_siblings": {
+      "0": "0-1",
+      "2": "2-3",
+      "4": "4-5",
+      "6": "6-7"
+    }
+  },
+  "change": "Share the UI2 widget-record query cache-holder type and iteration adapter across 51 widget types. Retain one private cache key/query per widget type/world, typed query_builder<T&>() factories and typed record/draw assignment. Sparse and shared fields use field_at with row zero for shared storage. Public headers, build graph/flags and all other UI2 implementation code remain unchanged.",
+  "configuration": "Normal Release target -O2, existing PCH on, compiler cache/LTO off, KIN_DEV_FAST_SCRIPTING=OFF, mold. No lower optimization or safety settings.",
+  "compile_commands": {
+    "clang": "/usr/bin/clang++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_GLSLC_PATH=\\\"/bin/glslc\\\" -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DKIN_SHADER_INCLUDE_DIR=\\\"/tmp/kin-build-time/cmake/../engine/shaders\\\" -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/kin_embed/kin_gpu_shader_data -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/earcut-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -Winvalid-pch -Xclang -include-pch -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_engine.dir/cmake_pch.hxx.pch -Xclang -include -Xclang /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-clang/engine/CMakeFiles/kin_engine.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o -c /tmp/kin-build-time/engine/src/ecs/ui2.cpp",
+    "gcc": "/usr/bin/c++ -DKIN_ENABLE_AGENT_SERVER -DKIN_ENABLE_AUDIO=1 -DKIN_ENABLE_DEBUG_OVERLAY=1 -DKIN_ENABLE_DETERMINISM_CHECK -DKIN_ENABLE_DEVELOPMENT=1 -DKIN_ENABLE_IMAGE_IO=1 -DKIN_ENABLE_PHYSICS3D=1 -DKIN_ENABLE_PHYSICS=1 -DKIN_ENABLE_PROFILING -DKIN_ENABLE_PYTHON=0 -DKIN_ENABLE_RENDER_PROBE -DKIN_ENABLE_RUNTIME_ASSETS=1 -DKIN_ENABLE_RUNTIME_PROFILING=1 -DKIN_ENABLE_SCENE3D_RUNTIME=1 -DKIN_ENABLE_SCENE_SERVER=1 -DKIN_ENABLE_SCRIPTING=1 -DKIN_ENABLE_THREADS=1 -DKIN_ENABLE_TTF=1 -DKIN_GLSLC_PATH=\\\"/bin/glslc\\\" -DKIN_HAS_COMPACT_RENDERER=0 -DKIN_HAS_GPU_RENDERER=1 -DKIN_HAS_SDL_RENDERER=1 -DKIN_HAS_WEBGL2_RENDERER=0 -DKIN_SHADER_INCLUDE_DIR=\\\"/tmp/kin-build-time/cmake/../engine/shaders\\\" -DNDEBUG -Dflecs_STATIC -I/tmp/kin-build-time/engine/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/kin_embed/kin_gpu_shader_data -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/generated/kin/include -I/mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/_deps/sdl3-build/include-revision -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_ttf-src/include -I/home/bamedeo/kin-wt/asset-types/build/_deps/sdl3_image-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/flecs-src/include -isystem /home/bamedeo/kin-wt/asset-types/build/_deps/earcut-src/include -O3 -DNDEBUG -std=c++23 -fPIC -O2 -fpch-preprocess -Winvalid-pch -include /mnt/windows/Users/amedeo/Desktop/gamedev/kin-build-time-out/engine/CMakeFiles/kin_engine.dir/cmake_pch.hxx -o engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o -c /tmp/kin-build-time/engine/src/ecs/ui2.cpp"
+  },
+  "diagnostic_traces": {
+    "before": {
+      "totals_seconds": {
+        "Total ExecuteCompiler": 23.302406,
+        "Total Backend": 15.905783,
+        "Total Optimizer": 10.231464,
+        "Total ModuleInlinerWrapperPass": 7.880946,
+        "Total ModuleToPostOrderCGSCCPassAdaptor": 7.821466,
+        "Total DevirtSCCRepeatedPass": 7.695738,
+        "Total PassManager<Function>": 7.692524,
+        "Total PassManager<LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &, CGSCCUpdateResult &>": 7.647971,
+        "Total Frontend": 7.347674,
+        "Total CGSCCToFunctionPassAdaptor": 5.91738,
+        "Total CodeGenPasses": 5.670661,
+        "Total OptModule": 5.669036,
+        "Total OptFunction": 5.59884,
+        "Total RunPass": 5.552487,
+        "Total InstantiateFunction": 4.38497,
+        "Total PerformPendingInstantiations": 3.611281,
+        "Total InstantiateClass": 3.214746,
+        "Total Source": 2.485732,
+        "Total ParseDeclarationOrFunctionDefinition": 2.232754,
+        "Total ParseClass": 1.989816,
+        "Total ModuleToFunctionPassAdaptor": 1.905432,
+        "Total InstCombinePass": 1.799137,
+        "Total InlinerPass": 1.451813,
+        "Total FunctionToLoopPassAdaptor": 1.051769,
+        "Total CodeGen Function": 0.917512,
+        "Total PassManager<Loop, LoopAnalysisManager, LoopStandardAnalysisResults &, LPMUpdater &>": 0.708761,
+        "Total ParseFunctionDefinition": 0.585133,
+        "Total GVNPass": 0.543165,
+        "Total SimplifyCFGPass": 0.511503,
+        "Total DSEPass": 0.493764,
+        "Total EarlyCSEPass": 0.459308,
+        "Total RunLoopPass": 0.397061,
+        "Total SROAPass": 0.341814,
+        "Total CorrelatedValuePropagationPass": 0.294963,
+        "Total MemorySSAAnalysis": 0.282107,
+        "Total JumpThreadingPass": 0.277617,
+        "Total BlockFrequencyAnalysis": 0.262857,
+        "Total ConstraintEliminationPass": 0.227203,
+        "Total IndVarSimplifyPass": 0.222925,
+        "Total AAManager": 0.218213,
+        "Total SLPVectorizerPass": 0.19996,
+        "Total BranchProbabilityAnalysis": 0.182246,
+        "Total EvaluateAsConstantExpr": 0.178029,
+        "Total MemCpyOptPass": 0.167158,
+        "Total PostOrderFunctionAttrsPass": 0.158552,
+        "Total Load External Specializations for ": 0.157718,
+        "Total SCCPPass": 0.151021,
+        "Total IPSCCPPass": 0.142362,
+        "Total ADCEPass": 0.138417,
+        "Total GlobalOptPass": 0.130316,
+        "Total LoopIdiomRecognizePass": 0.128368,
+        "Total LoopUnrollPass": 0.11828,
+        "Total LICMPass": 0.113268,
+        "Total EvaluateAsRValue": 0.108275,
+        "Total LoopAnalysis": 0.107984,
+        "Total LoopDeletionPass": 0.098948,
+        "Total DominatorTreeAnalysis": 0.097392,
+        "Total BDCEPass": 0.096001,
+        "Total LoopSimplifyPass": 0.084601,
+        "Total ReassociatePass": 0.084522,
+        "Total LoopRotatePass": 0.072276,
+        "Total TailCallElimPass": 0.069147,
+        "Total BasicAA": 0.066024,
+        "Total PostDominatorTreeAnalysis": 0.064811,
+        "Total AlwaysInlinerPass": 0.06011,
+        "Total ScalarEvolutionAnalysis": 0.059414,
+        "Total CalledValuePropagationPass": 0.055392,
+        "Total LoopFullUnrollPass": 0.052841,
+        "Total EvaluateForOverflow": 0.052025,
+        "Total AssumptionAnalysis": 0.041044,
+        "Total LoopVectorizePass": 0.03712,
+        "Total AggressiveInstCombinePass": 0.034872,
+        "Total CallGraphAnalysis": 0.033267,
+        "Total LCSSAPass": 0.033221,
+        "Total RequireAnalysisPass<llvm::GlobalsAA, llvm::Module, llvm::AnalysisManager<Module>>": 0.031648,
+        "Total GlobalsAA": 0.03164,
+        "Total InstSimplifyPass": 0.030867,
+        "Total EvaluateAsInitializer": 0.027639,
+        "Total InferAlignmentPass": 0.026535,
+        "Total EvaluateAsInt": 0.026455,
+        "Total TargetIRAnalysis": 0.026315,
+        "Total Float2IntPass": 0.024383,
+        "Total VectorCombinePass": 0.024033,
+        "Total EvaluateAsBooleanCondition": 0.022966,
+        "Total LoopInstSimplifyPass": 0.020549,
+        "Total Stable Hash for Template Arguments": 0.02012,
+        "Total FunctionAnalysisManagerCGSCCProxy": 0.019481,
+        "Total LazyCallGraphAnalysis": 0.018784,
+        "Total DeadArgumentEliminationPass": 0.018092,
+        "Total GlobalDCEPass": 0.018059,
+        "Total InnerAnalysisManagerProxy<CGSCCAnalysisManager, Module>": 0.015896,
+        "Total LoopDistributePass": 0.015695,
+        "Total RecomputeGlobalsAAPass": 0.0144,
+        "Total LoopLoadEliminationPass": 0.014118,
+        "Total LowerExpectIntrinsicPass": 0.013376,
+        "Total ReversePostOrderFunctionAttrsPass": 0.013303,
+        "Total RequireAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis, llvm::Function, llvm::AnalysisManager<Function>>": 0.01282,
+        "Total LastRunTrackingAnalysis": 0.012741,
+        "Total TargetLibraryAnalysis": 0.012001,
+        "Total CoroAnnotationElidePass": 0.011962,
+        "Total MemoryDependenceAnalysis": 0.01088,
+        "Total LoopSimplifyCFGPass": 0.010233,
+        "Total OuterAnalysisManagerProxy<ModuleAnalysisManager, Function>": 0.009271,
+        "Total LazyValueAnalysis": 0.008789,
+        "Total PromotePass": 0.00878,
+        "Total EphemeralValuesAnalysis": 0.008417,
+        "Total LibCallsShrinkWrapPass": 0.008173,
+        "Total ScopedNoAliasAA": 0.008107,
+        "Total OptimizationRemarkEmitterAnalysis": 0.008102,
+        "Total MergedLoadStoreMotionPass": 0.008052,
+        "Total DemandedBitsAnalysis": 0.007928,
+        "Total LoopAccessAnalysis": 0.007809,
+        "Total TypeBasedAA": 0.007578,
+        "Total SimpleLoopUnswitchPass": 0.007245,
+        "Total LowerConstantIntrinsicsPass": 0.007244,
+        "Total AssignmentTrackingPass": 0.007059,
+        "Total CoroSplitPass": 0.006232,
+        "Total MoveAutoInitPass": 0.005611,
+        "Total OuterAnalysisManagerProxy<ModuleAnalysisManager, LazyCallGraph::SCC, LazyCallGraph &>": 0.004729,
+        "Total CoroElidePass": 0.004665,
+        "Total OpenMPOptCGSCCPass": 0.004614,
+        "Total CGProfilePass": 0.004517,
+        "Total EvaluateKnownConstInt": 0.004483,
+        "Total SpeculativeExecutionPass": 0.004136,
+        "Total InvalidateAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis>": 0.003867,
+        "Total InjectTLIMappings": 0.003632,
+        "Total EntryExitInstrumenterPass": 0.003233,
+        "Total ShouldNotRunFunctionPassesAnalysis": 0.002755,
+        "Total WarnMissedTransformationsPass": 0.002523,
+        "Total InvalidateAnalysisPass<llvm::AAManager>": 0.002502,
+        "Total DivRemPairsPass": 0.00235,
+        "Total InnerAnalysisManagerProxy<LoopAnalysisManager, Function>": 0.002283,
+        "Total AnnotationRemarksPass": 0.002129,
+        "Total InferFunctionAttrsPass": 0.002008,
+        "Total ReadAST": 0.001715,
+        "Total isIntegerConstantExpr": 0.001653,
+        "Total OuterAnalysisManagerProxy<FunctionAnalysisManager, Loop, LoopStandardAnalysisResults &>": 0.001355,
+        "Total AlignmentFromAssumptionsPass": 0.001188,
+        "Total ExtraLoopPassManager<llvm::ShouldRunExtraSimpleLoopUnswitch>": 0.001087,
+        "Total LoopSinkPass": 0.000576,
+        "Total Read Loaded AST": 0.000396,
+        "Total ConstantMergePass": 0.000311,
+        "Total EliminateAvailableExternallyPass": 0.000178,
+        "Total EvaluateAsLValue": 0.000111,
+        "Total RelLookupTableConverterPass": 7.7e-05,
+        "Total ShouldRunExtraSimpleLoopUnswitch": 2.3e-05,
+        "Total CoroEarlyPass": 1e-05,
+        "Total InnerAnalysisManagerProxy<FunctionAnalysisManager, Module>": 3e-06,
+        "Total CoroCleanupPass": 3e-06,
+        "Total Annotation2MetadataPass": 2e-06,
+        "Total ProfileSummaryAnalysis": 2e-06,
+        "Total ShouldRunExtraVectorPasses": 1e-06,
+        "Total OpenMPOptPass": 1e-06,
+        "Total ForceFunctionAttrsPass": 0.0,
+        "Total RequireAnalysisPass<llvm::ProfileSummaryAnalysis, llvm::Module, llvm::AnalysisManager<Module>>": 0.0,
+        "Total InlineAdvisorAnalysis": 0.0
+      },
+      "instrumented_stats": {
+        "wall_seconds": 23.41,
+        "user_seconds": 23.0,
+        "system_seconds": 0.34,
+        "max_rss_kib": 521312
+      }
+    },
+    "after": {
+      "totals_seconds": {
+        "Total ExecuteCompiler": 18.688084,
+        "Total Backend": 12.916669,
+        "Total Optimizer": 8.222075,
+        "Total ModuleInlinerWrapperPass": 6.286199,
+        "Total ModuleToPostOrderCGSCCPassAdaptor": 6.234635,
+        "Total PassManager<Function>": 6.21444,
+        "Total DevirtSCCRepeatedPass": 6.128382,
+        "Total PassManager<LazyCallGraph::SCC, CGSCCAnalysisManager, LazyCallGraph &, CGSCCUpdateResult &>": 6.088774,
+        "Total Frontend": 5.732519,
+        "Total CGSCCToFunctionPassAdaptor": 4.760205,
+        "Total CodeGenPasses": 4.691155,
+        "Total OptModule": 4.690072,
+        "Total OptFunction": 4.633126,
+        "Total RunPass": 4.592946,
+        "Total InstantiateFunction": 3.056431,
+        "Total Source": 2.361365,
+        "Total InstantiateClass": 2.319633,
+        "Total PerformPendingInstantiations": 2.31583,
+        "Total ParseDeclarationOrFunctionDefinition": 2.125485,
+        "Total ParseClass": 1.890606,
+        "Total ModuleToFunctionPassAdaptor": 1.563542,
+        "Total InstCombinePass": 1.436256,
+        "Total InlinerPass": 1.112574,
+        "Total FunctionToLoopPassAdaptor": 0.808189,
+        "Total CodeGen Function": 0.740804,
+        "Total ParseFunctionDefinition": 0.557721,
+        "Total PassManager<Loop, LoopAnalysisManager, LoopStandardAnalysisResults &, LPMUpdater &>": 0.539903,
+        "Total DSEPass": 0.455313,
+        "Total GVNPass": 0.453051,
+        "Total SimplifyCFGPass": 0.407695,
+        "Total EarlyCSEPass": 0.371957,
+        "Total RunLoopPass": 0.332389,
+        "Total SROAPass": 0.255337,
+        "Total CorrelatedValuePropagationPass": 0.236912,
+        "Total MemorySSAAnalysis": 0.227137,
+        "Total JumpThreadingPass": 0.214069,
+        "Total BlockFrequencyAnalysis": 0.198807,
+        "Total ConstraintEliminationPass": 0.189197,
+        "Total IndVarSimplifyPass": 0.170306,
+        "Total SLPVectorizerPass": 0.169745,
+        "Total AAManager": 0.168423,
+        "Total MemCpyOptPass": 0.140321,
+        "Total BranchProbabilityAnalysis": 0.13794,
+        "Total EvaluateAsConstantExpr": 0.134089,
+        "Total PostOrderFunctionAttrsPass": 0.122399,
+        "Total SCCPPass": 0.118013,
+        "Total Load External Specializations for ": 0.116582,
+        "Total IPSCCPPass": 0.115158,
+        "Total ADCEPass": 0.110852,
+        "Total GlobalOptPass": 0.101076,
+        "Total LoopUnrollPass": 0.099006,
+        "Total LoopIdiomRecognizePass": 0.09351,
+        "Total EvaluateAsRValue": 0.085654,
+        "Total LoopAnalysis": 0.083545,
+        "Total LICMPass": 0.080069,
+        "Total LoopDeletionPass": 0.078547,
+        "Total DominatorTreeAnalysis": 0.078264,
+        "Total BDCEPass": 0.077763,
+        "Total ReassociatePass": 0.06798,
+        "Total LoopSimplifyPass": 0.067214,
+        "Total LoopRotatePass": 0.061185,
+        "Total AlwaysInlinerPass": 0.058648,
+        "Total TailCallElimPass": 0.057324,
+        "Total BasicAA": 0.051603,
+        "Total PostDominatorTreeAnalysis": 0.050185,
+        "Total ScalarEvolutionAnalysis": 0.047107,
+        "Total EvaluateForOverflow": 0.0439,
+        "Total CalledValuePropagationPass": 0.042901,
+        "Total LoopFullUnrollPass": 0.037045,
+        "Total LoopVectorizePass": 0.033809,
+        "Total AssumptionAnalysis": 0.032432,
+        "Total CallGraphAnalysis": 0.028602,
+        "Total AggressiveInstCombinePass": 0.027634,
+        "Total LCSSAPass": 0.027513,
+        "Total RequireAnalysisPass<llvm::GlobalsAA, llvm::Module, llvm::AnalysisManager<Module>>": 0.027382,
+        "Total GlobalsAA": 0.027375,
+        "Total InstSimplifyPass": 0.025414,
+        "Total EvaluateAsInitializer": 0.024658,
+        "Total Float2IntPass": 0.023417,
+        "Total InferAlignmentPass": 0.02283,
+        "Total EvaluateAsInt": 0.021629,
+        "Total TargetIRAnalysis": 0.021396,
+        "Total VectorCombinePass": 0.019915,
+        "Total DeadArgumentEliminationPass": 0.018708,
+        "Total EvaluateAsBooleanCondition": 0.017923,
+        "Total GlobalDCEPass": 0.017196,
+        "Total LoopInstSimplifyPass": 0.015832,
+        "Total Stable Hash for Template Arguments": 0.015457,
+        "Total LazyCallGraphAnalysis": 0.015163,
+        "Total FunctionAnalysisManagerCGSCCProxy": 0.014969,
+        "Total LoopDistributePass": 0.013786,
+        "Total InnerAnalysisManagerProxy<CGSCCAnalysisManager, Module>": 0.012509,
+        "Total ReversePostOrderFunctionAttrsPass": 0.012341,
+        "Total RecomputeGlobalsAAPass": 0.012194,
+        "Total LoopLoadEliminationPass": 0.01179,
+        "Total LowerExpectIntrinsicPass": 0.010727,
+        "Total RequireAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis, llvm::Function, llvm::AnalysisManager<Function>>": 0.010415,
+        "Total LastRunTrackingAnalysis": 0.009994,
+        "Total TargetLibraryAnalysis": 0.00949,
+        "Total CoroAnnotationElidePass": 0.009285,
+        "Total MemoryDependenceAnalysis": 0.008748,
+        "Total LoopSimplifyCFGPass": 0.00823,
+        "Total OuterAnalysisManagerProxy<ModuleAnalysisManager, Function>": 0.007381,
+        "Total PromotePass": 0.006946,
+        "Total LoopAccessAnalysis": 0.006931,
+        "Total LazyValueAnalysis": 0.006907,
+        "Total ScopedNoAliasAA": 0.006699,
+        "Total DemandedBitsAnalysis": 0.006681,
+        "Total LibCallsShrinkWrapPass": 0.006649,
+        "Total EphemeralValuesAnalysis": 0.006565,
+        "Total OptimizationRemarkEmitterAnalysis": 0.006542,
+        "Total LowerConstantIntrinsicsPass": 0.006328,
+        "Total MergedLoadStoreMotionPass": 0.006002,
+        "Total TypeBasedAA": 0.005846,
+        "Total AssignmentTrackingPass": 0.00574,
+        "Total SimpleLoopUnswitchPass": 0.005343,
+        "Total CoroSplitPass": 0.004746,
+        "Total MoveAutoInitPass": 0.004624,
+        "Total CGProfilePass": 0.004298,
+        "Total EvaluateKnownConstInt": 0.004185,
+        "Total CoroElidePass": 0.003814,
+        "Total OpenMPOptCGSCCPass": 0.003725,
+        "Total OuterAnalysisManagerProxy<ModuleAnalysisManager, LazyCallGraph::SCC, LazyCallGraph &>": 0.003619,
+        "Total InvalidateAnalysisPass<llvm::ShouldNotRunFunctionPassesAnalysis>": 0.003524,
+        "Total SpeculativeExecutionPass": 0.003384,
+        "Total InjectTLIMappings": 0.00306,
+        "Total EntryExitInstrumenterPass": 0.002622,
+        "Total ShouldNotRunFunctionPassesAnalysis": 0.002108,
+        "Total AnnotationRemarksPass": 0.00201,
+        "Total DivRemPairsPass": 0.002008,
+        "Total InvalidateAnalysisPass<llvm::AAManager>": 0.001798,
+        "Total WarnMissedTransformationsPass": 0.001778,
+        "Total InnerAnalysisManagerProxy<LoopAnalysisManager, Function>": 0.001757,
+        "Total isIntegerConstantExpr": 0.001651,
+        "Total ReadAST": 0.001586,
+        "Total InferFunctionAttrsPass": 0.001527,
+        "Total AlignmentFromAssumptionsPass": 0.001055,
+        "Total OuterAnalysisManagerProxy<FunctionAnalysisManager, Loop, LoopStandardAnalysisResults &>": 0.000989,
+        "Total ExtraLoopPassManager<llvm::ShouldRunExtraSimpleLoopUnswitch>": 0.000809,
+        "Total LoopSinkPass": 0.000492,
+        "Total Read Loaded AST": 0.000348,
+        "Total ConstantMergePass": 0.000303,
+        "Total EliminateAvailableExternallyPass": 0.000163,
+        "Total RelLookupTableConverterPass": 7.3e-05,
+        "Total ShouldRunExtraSimpleLoopUnswitch": 2.3e-05,
+        "Total EvaluateAsLValue": 1.7e-05,
+        "Total CoroEarlyPass": 1e-05,
+        "Total CoroCleanupPass": 3e-06,
+        "Total InnerAnalysisManagerProxy<FunctionAnalysisManager, Module>": 3e-06,
+        "Total ProfileSummaryAnalysis": 2e-06,
+        "Total Annotation2MetadataPass": 2e-06,
+        "Total ShouldRunExtraVectorPasses": 1e-06,
+        "Total OpenMPOptPass": 1e-06,
+        "Total ForceFunctionAttrsPass": 0.0,
+        "Total InlineAdvisorAnalysis": 0.0,
+        "Total RequireAnalysisPass<llvm::ProfileSummaryAnalysis, llvm::Module, llvm::AnalysisManager<Module>>": 0.0
+      },
+      "instrumented_stats": {
+        "wall_seconds": 18.77,
+        "user_seconds": 18.46,
+        "system_seconds": 0.25,
+        "max_child_rss_kib": 443844
+      }
+    }
+  },
+  "paired_compile_method": "Five observations/version/compiler: initial before/after, after/before, before/after pairs, then after/before and before/after. The additional block followed substantial host-load/control variation; every initial observation, including the 33.89s Clang and 42.33s GCC before outliers, is retained. Matching target commands/PCHs, stable original/final source and private-header copies, no profiler flags, each UI2 compiler on CPU 2. An unchanged core/json.cpp compile runs on CPU 4 each observation. No owned validation compilers overlap the benchmark. Host activity, SMT siblings, thermals and I/O remain uncontrolled; these are local estimates, not a precise causal percentage. This measures one translation unit, not a clean whole project.",
+  "paired_compile_samples": [
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "sample": 0,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 21.55,
+      "user_seconds": 21.19,
+      "system_seconds": 0.32,
+      "max_child_rss_kib": 516668,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.94,
+        "user_seconds": 0.87,
+        "system_seconds": 0.06,
+        "max_child_rss_kib": 144176
+      },
+      "load_before": [
+        3.41943359375,
+        3.23828125,
+        2.86767578125
+      ],
+      "load_after": [
+        3.37353515625,
+        3.23876953125,
+        2.876953125
+      ]
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "sample": 0,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 19.06,
+      "user_seconds": 18.79,
+      "system_seconds": 0.24,
+      "max_child_rss_kib": 439768,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.34,
+        "user_seconds": 1.25,
+        "system_seconds": 0.08,
+        "max_child_rss_kib": 144252
+      },
+      "load_before": [
+        3.37353515625,
+        3.23876953125,
+        2.876953125
+      ],
+      "load_after": [
+        3.63720703125,
+        3.3056640625,
+        2.90771484375
+      ]
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "sample": 1,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 18.99,
+      "user_seconds": 18.65,
+      "system_seconds": 0.29,
+      "max_child_rss_kib": 436560,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.06,
+        "user_seconds": 0.99,
+        "system_seconds": 0.05,
+        "max_child_rss_kib": 142156
+      },
+      "load_before": [
+        3.63720703125,
+        3.3056640625,
+        2.90771484375
+      ],
+      "load_after": [
+        3.8544921875,
+        3.38232421875,
+        2.9423828125
+      ]
+    },
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "sample": 1,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 23.29,
+      "user_seconds": 22.87,
+      "system_seconds": 0.33,
+      "max_child_rss_kib": 513084,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.94,
+        "user_seconds": 0.86,
+        "system_seconds": 0.07,
+        "max_child_rss_kib": 141776
+      },
+      "load_before": [
+        3.8544921875,
+        3.38232421875,
+        2.9423828125
+      ],
+      "load_after": [
+        6.52587890625,
+        4.0224609375,
+        3.16259765625
+      ]
+    },
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "sample": 2,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 33.89,
+      "user_seconds": 33.39,
+      "system_seconds": 0.42,
+      "max_child_rss_kib": 512488,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.15,
+        "user_seconds": 1.06,
+        "system_seconds": 0.06,
+        "max_child_rss_kib": 141720
+      },
+      "load_before": [
+        6.52587890625,
+        4.0224609375,
+        3.16259765625
+      ],
+      "load_after": [
+        9.21044921875,
+        4.99560546875,
+        3.5224609375
+      ]
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "sample": 2,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 20.46,
+      "user_seconds": 20.04,
+      "system_seconds": 0.31,
+      "max_child_rss_kib": 436024,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.0,
+        "user_seconds": 0.9,
+        "system_seconds": 0.06,
+        "max_child_rss_kib": 142140
+      },
+      "load_before": [
+        9.21044921875,
+        4.99560546875,
+        3.5224609375
+      ],
+      "load_after": [
+        10.0947265625,
+        5.46728515625,
+        3.70947265625
+      ]
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "sample": 0,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 39.78,
+      "user_seconds": 38.56,
+      "system_seconds": 0.81,
+      "max_child_rss_kib": 1011268,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.57,
+        "user_seconds": 1.22,
+        "system_seconds": 0.15,
+        "max_child_rss_kib": 162504
+      },
+      "load_before": [
+        10.0947265625,
+        5.46728515625,
+        3.70947265625
+      ],
+      "load_after": [
+        11.13623046875,
+        6.31884765625,
+        4.07177734375
+      ]
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "sample": 0,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 32.58,
+      "user_seconds": 31.59,
+      "system_seconds": 0.71,
+      "max_child_rss_kib": 887136,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.02,
+        "user_seconds": 0.87,
+        "system_seconds": 0.1,
+        "max_child_rss_kib": 162808
+      },
+      "load_before": [
+        11.13623046875,
+        6.31884765625,
+        4.07177734375
+      ],
+      "load_after": [
+        11.31396484375,
+        6.8876953125,
+        4.34619140625
+      ]
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "sample": 1,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 31.88,
+      "user_seconds": 30.72,
+      "system_seconds": 0.82,
+      "max_child_rss_kib": 887024,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.39,
+        "user_seconds": 1.24,
+        "system_seconds": 0.12,
+        "max_child_rss_kib": 162780
+      },
+      "load_before": [
+        11.31396484375,
+        6.8876953125,
+        4.34619140625
+      ],
+      "load_after": [
+        10.8017578125,
+        7.18701171875,
+        4.52734375
+      ]
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "sample": 1,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 42.33,
+      "user_seconds": 41.12,
+      "system_seconds": 0.89,
+      "max_child_rss_kib": 1011304,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.35,
+        "user_seconds": 1.21,
+        "system_seconds": 0.11,
+        "max_child_rss_kib": 162616
+      },
+      "load_before": [
+        10.8017578125,
+        7.18701171875,
+        4.52734375
+      ],
+      "load_after": [
+        10.3349609375,
+        7.62939453125,
+        4.8076171875
+      ]
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "sample": 2,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 28.99,
+      "user_seconds": 27.94,
+      "system_seconds": 0.72,
+      "max_child_rss_kib": 1011272,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.85,
+        "user_seconds": 0.74,
+        "system_seconds": 0.09,
+        "max_child_rss_kib": 162528
+      },
+      "load_before": [
+        10.3349609375,
+        7.62939453125,
+        4.8076171875
+      ],
+      "load_after": [
+        7.814453125,
+        7.255859375,
+        4.7587890625
+      ]
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "sample": 2,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 23.55,
+      "user_seconds": 22.68,
+      "system_seconds": 0.62,
+      "max_child_rss_kib": 886992,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.84,
+        "user_seconds": 0.73,
+        "system_seconds": 0.09,
+        "max_child_rss_kib": 162520
+      },
+      "load_before": [
+        7.814453125,
+        7.255859375,
+        4.7587890625
+      ],
+      "load_after": [
+        6.44384765625,
+        6.9775390625,
+        4.732421875
+      ]
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "sample": 3,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 17.63,
+      "user_seconds": 17.3,
+      "system_seconds": 0.28,
+      "max_child_rss_kib": 436980,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.93,
+        "user_seconds": 0.85,
+        "system_seconds": 0.06,
+        "max_child_rss_kib": 142556
+      },
+      "load_before": [
+        3.7939453125,
+        6.189453125,
+        4.79931640625
+      ],
+      "load_after": [
+        3.34619140625,
+        5.93310546875,
+        4.744140625
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "sample": 3,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 21.53,
+      "user_seconds": 21.19,
+      "system_seconds": 0.29,
+      "max_child_rss_kib": 515464,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.92,
+        "user_seconds": 0.85,
+        "system_seconds": 0.06,
+        "max_child_rss_kib": 143492
+      },
+      "load_before": [
+        3.34619140625,
+        5.93310546875,
+        4.744140625
+      ],
+      "load_after": [
+        3.03125,
+        5.69384765625,
+        4.68994140625
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "clang",
+      "phase": "before",
+      "sample": 4,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 22.09,
+      "user_seconds": 21.68,
+      "system_seconds": 0.37,
+      "max_child_rss_kib": 516572,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 1.44,
+        "user_seconds": 1.35,
+        "system_seconds": 0.08,
+        "max_child_rss_kib": 143680
+      },
+      "load_before": [
+        3.03125,
+        5.69384765625,
+        4.68994140625
+      ],
+      "load_after": [
+        3.48974609375,
+        5.61767578125,
+        4.68603515625
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "clang",
+      "phase": "after",
+      "sample": 4,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 17.71,
+      "user_seconds": 17.41,
+      "system_seconds": 0.26,
+      "max_child_rss_kib": 436164,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.92,
+        "user_seconds": 0.83,
+        "system_seconds": 0.07,
+        "max_child_rss_kib": 141980
+      },
+      "load_before": [
+        3.48974609375,
+        5.61767578125,
+        4.68603515625
+      ],
+      "load_after": [
+        3.35009765625,
+        5.44677734375,
+        4.64892578125
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "sample": 3,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 24.24,
+      "user_seconds": 23.32,
+      "system_seconds": 0.58,
+      "max_child_rss_kib": 887028,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.85,
+        "user_seconds": 0.74,
+        "system_seconds": 0.09,
+        "max_child_rss_kib": 162604
+      },
+      "load_before": [
+        3.35009765625,
+        5.44677734375,
+        4.64892578125
+      ],
+      "load_after": [
+        4.087890625,
+        5.44482421875,
+        4.6689453125
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "sample": 3,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 28.81,
+      "user_seconds": 27.86,
+      "system_seconds": 0.63,
+      "max_child_rss_kib": 1011336,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.94,
+        "user_seconds": 0.84,
+        "system_seconds": 0.07,
+        "max_child_rss_kib": 162516
+      },
+      "load_before": [
+        4.087890625,
+        5.44482421875,
+        4.6689453125
+      ],
+      "load_after": [
+        3.97119140625,
+        5.28857421875,
+        4.64013671875
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "gcc",
+      "phase": "before",
+      "sample": 4,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-before/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 29.08,
+      "user_seconds": 28.08,
+      "system_seconds": 0.68,
+      "max_child_rss_kib": 1011248,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.88,
+        "user_seconds": 0.78,
+        "system_seconds": 0.07,
+        "max_child_rss_kib": 162516
+      },
+      "load_before": [
+        3.97119140625,
+        5.28857421875,
+        4.64013671875
+      ],
+      "load_after": [
+        4.00244140625,
+        5.18505859375,
+        4.62353515625
+      ],
+      "additional_block_after_observed_host_variation": true
+    },
+    {
+      "compiler": "gcc",
+      "phase": "after",
+      "sample": 4,
+      "source": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/snapshot-after/ui2.cpp",
+      "cpu": 2,
+      "wall_seconds": 23.64,
+      "user_seconds": 22.8,
+      "system_seconds": 0.64,
+      "max_child_rss_kib": 887028,
+      "unchanged_json_control_cpu": 4,
+      "unchanged_json_control": {
+        "wall_seconds": 0.86,
+        "user_seconds": 0.74,
+        "system_seconds": 0.1,
+        "max_child_rss_kib": 162456
+      },
+      "load_before": [
+        4.00244140625,
+        5.18505859375,
+        4.62353515625
+      ],
+      "load_after": [
+        3.6611328125,
+        5.00830078125,
+        4.57958984375
+      ],
+      "additional_block_after_observed_host_variation": true
+    }
+  ],
+  "paired_compile_summary": {
+    "clang": {
+      "before": {
+        "wall_seconds": {
+          "median": 22.09,
+          "min": 21.53,
+          "max": 33.89
+        },
+        "compiler_cpu_seconds": {
+          "median": 22.05,
+          "min": 21.48,
+          "max": 33.81
+        },
+        "max_child_rss_kib": {
+          "median": 515464,
+          "min": 512488,
+          "max": 516668
+        },
+        "unchanged_control_wall_seconds": {
+          "median": 0.94,
+          "min": 0.92,
+          "max": 1.44
+        }
+      },
+      "after": {
+        "wall_seconds": {
+          "median": 18.99,
+          "min": 17.63,
+          "max": 20.46
+        },
+        "compiler_cpu_seconds": {
+          "median": 18.939999999999998,
+          "min": 17.580000000000002,
+          "max": 20.349999999999998
+        },
+        "max_child_rss_kib": {
+          "median": 436560,
+          "min": 436024,
+          "max": 439768
+        },
+        "unchanged_control_wall_seconds": {
+          "median": 1.0,
+          "min": 0.92,
+          "max": 1.34
+        }
+      }
+    },
+    "gcc": {
+      "before": {
+        "wall_seconds": {
+          "median": 29.08,
+          "min": 28.81,
+          "max": 42.33
+        },
+        "compiler_cpu_seconds": {
+          "median": 28.759999999999998,
+          "min": 28.49,
+          "max": 42.01
+        },
+        "max_child_rss_kib": {
+          "median": 1011272,
+          "min": 1011248,
+          "max": 1011336
+        },
+        "unchanged_control_wall_seconds": {
+          "median": 0.94,
+          "min": 0.85,
+          "max": 1.57
+        }
+      },
+      "after": {
+        "wall_seconds": {
+          "median": 24.24,
+          "min": 23.55,
+          "max": 32.58
+        },
+        "compiler_cpu_seconds": {
+          "median": 23.9,
+          "min": 23.3,
+          "max": 32.3
+        },
+        "max_child_rss_kib": {
+          "median": 887028,
+          "min": 886992,
+          "max": 887136
+        },
+        "unchanged_control_wall_seconds": {
+          "median": 0.86,
+          "min": 0.84,
+          "max": 1.39
+        }
+      }
+    }
+  },
+  "cache_holder_symbols_and_objects": {
+    "clang": {
+      "before": {
+        "object_file_bytes": 2391008,
+        "cache_holder_vtables": [
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Layout&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root const&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2ScrollContainer&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Text&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::AdvancedText&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::AnimatedValue&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::AssetBrowser&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::BreadcrumbBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Button&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ColorPicker&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ComboBox&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::DialogBox&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::DialogueView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::DockPanel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::FloatingText&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconButton&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconGrid&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconMeter&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconSlot&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Image&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Label&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::LabeledBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ListView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::LogConsole&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::MenuBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::MenuList&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Meter&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Nameplate&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::NineSlicePanel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::NodeGraph&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::NumberInput&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Panel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ProgressBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptLabel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptRow&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PropertyGrid&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PropertyInspector&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ResourceRow&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::RichTextLine&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ScrollView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::SelectionRect&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Separator&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Slider&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Spacer&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Splitter&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::StatusBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TabBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Table&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TargetReticle&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TextArea&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TextInput&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ToastStack&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Toggle&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TreeView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::WrappedText&>"
+        ],
+        "cache_holder_vtable_count": 56
+      },
+      "after": {
+        "object_file_bytes": 2102192,
+        "cache_holder_vtables": [
+          "kin::EcsWorld::KeptQueryOf<>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Layout&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root const&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2ScrollContainer&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Text&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptLabel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptRow&>"
+        ],
+        "cache_holder_vtable_count": 8
+      }
+    },
+    "gcc": {
+      "before": {
+        "object_file_bytes": 2353888,
+        "cache_holder_vtables": [
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Layout&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root const&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2ScrollContainer&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Text&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::AdvancedText&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::AnimatedValue&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::AssetBrowser&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::BreadcrumbBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Button&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ColorPicker&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ComboBox&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::DialogBox&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::DialogueView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::DockPanel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::FloatingText&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconButton&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconGrid&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconMeter&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::IconSlot&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Image&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Label&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::LabeledBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ListView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::LogConsole&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::MenuBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::MenuList&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Meter&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Nameplate&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::NineSlicePanel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::NodeGraph&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::NumberInput&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Panel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ProgressBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptLabel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptRow&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PropertyGrid&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PropertyInspector&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ResourceRow&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::RichTextLine&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ScrollView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::SelectionRect&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Separator&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Slider&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Spacer&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Splitter&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::StatusBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TabBar&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Table&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TargetReticle&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TextArea&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TextInput&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::ToastStack&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::Toggle&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::TreeView&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::WrappedText&>"
+        ],
+        "cache_holder_vtable_count": 56
+      },
+      "after": {
+        "object_file_bytes": 1889840,
+        "cache_holder_vtables": [
+          "kin::EcsWorld::KeptQueryOf<>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Layout&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root const&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Root&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2ScrollContainer&>",
+          "kin::EcsWorld::KeptQueryOf<kin::Ui2Text&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptLabel&>",
+          "kin::EcsWorld::KeptQueryOf<kin::ui2::PromptRow&>"
+        ],
+        "cache_holder_vtable_count": 8
+      }
+    }
+  },
+  "real_edit_method": "Three Clang trailing-comment source edits/version through the canonical hex_demo archive/link with four workers pinned 0/2/4/6. Assert exactly one planned and actual C++ output. Restore bytes and nanosecond mtimes after every observation. Recompile final canonical object from restored bytes afterward. The implementation remains one source; rebuild fanout is unchanged.",
+  "real_edit_samples": {
+    "before": [
+      {
+        "phase": "before",
+        "source": "engine/src/ecs/ui2.cpp",
+        "sample": 0,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o"
+        ],
+        "load_before": [
+          3.77490234375,
+          2.982421875,
+          2.6630859375
+        ],
+        "load_after": [
+          4.13916015625,
+          3.13037109375,
+          2.720703125
+        ],
+        "wall_seconds": 22.45,
+        "user_seconds": 21.48,
+        "system_seconds": 0.5,
+        "max_child_rss_kib": 516924
+      },
+      {
+        "phase": "before",
+        "source": "engine/src/ecs/ui2.cpp",
+        "sample": 1,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o"
+        ],
+        "load_before": [
+          4.13916015625,
+          3.13037109375,
+          2.720703125
+        ],
+        "load_after": [
+          4.1875,
+          3.21630859375,
+          2.75830078125
+        ],
+        "wall_seconds": 22.44,
+        "user_seconds": 21.64,
+        "system_seconds": 0.47,
+        "max_child_rss_kib": 516496
+      },
+      {
+        "phase": "before",
+        "source": "engine/src/ecs/ui2.cpp",
+        "sample": 2,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o"
+        ],
+        "load_before": [
+          4.1875,
+          3.21630859375,
+          2.75830078125
+        ],
+        "load_after": [
+          3.5703125,
+          3.1494140625,
+          2.748046875
+        ],
+        "wall_seconds": 21.94,
+        "user_seconds": 21.12,
+        "system_seconds": 0.47,
+        "max_child_rss_kib": 516600
+      }
+    ],
+    "after": [
+      {
+        "phase": "after",
+        "source": "engine/src/ecs/ui2.cpp",
+        "sample": 0,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o"
+        ],
+        "load_before": [
+          6.30224609375,
+          6.91455078125,
+          4.74755859375
+        ],
+        "load_after": [
+          8.37353515625,
+          7.35498046875,
+          4.95166015625
+        ],
+        "wall_seconds": 22.39,
+        "user_seconds": 21.01,
+        "system_seconds": 0.51,
+        "max_child_rss_kib": 439808
+      },
+      {
+        "phase": "after",
+        "source": "engine/src/ecs/ui2.cpp",
+        "sample": 1,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o"
+        ],
+        "load_before": [
+          8.37353515625,
+          7.35498046875,
+          4.95166015625
+        ],
+        "load_after": [
+          8.46728515625,
+          7.44482421875,
+          5.03271484375
+        ],
+        "wall_seconds": 19.07,
+        "user_seconds": 18.17,
+        "system_seconds": 0.47,
+        "max_child_rss_kib": 438760
+      },
+      {
+        "phase": "after",
+        "source": "engine/src/ecs/ui2.cpp",
+        "sample": 2,
+        "planned_and_actual_cpp_outputs": [
+          "engine/CMakeFiles/kin_engine.dir/src/ecs/ui2.cpp.o"
+        ],
+        "load_before": [
+          8.46728515625,
+          7.44482421875,
+          5.03271484375
+        ],
+        "load_after": [
+          7.169921875,
+          7.208984375,
+          4.99365234375
+        ],
+        "wall_seconds": 18.31,
+        "user_seconds": 17.5,
+        "system_seconds": 0.43,
+        "max_child_rss_kib": 439660
+      }
+    ]
+  },
+  "real_edit_summary": {
+    "before": {
+      "median": 22.44,
+      "min": 21.94,
+      "max": 22.45
+    },
+    "after": {
+      "median": 19.07,
+      "min": 18.31,
+      "max": 22.39
+    }
+  },
+  "runtime_probe": {
+    "method": "Same assertions-enabled -O2 probe object linked before changes and after validation for each compiler. Three alternating processes/version/compiler/world mode, each 30 samples after three warmups; CPU 2. Each sample runs 20 update_ui2_world frames over 500 panels, 500 empty labels and 500 spacers using an identity/no-op renderer. Assert 1500 sorted records and representative component pointers/IDs/bounds every frame. Test Kin-owned cached worlds and standalone Flecs worlds. These are narrow CPU bridge/render probes without GPU rendering, layout trees or non-empty text and do not establish whole-game FPS or bound all widget workloads.",
+    "samples": [
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "world": "owned",
+        "sample": 0,
+        "frames_20_ms": 9.152555,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "world": "raw",
+        "sample": 0,
+        "frames_20_ms": 9.773953,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "world": "owned",
+        "sample": 0,
+        "frames_20_ms": 8.907493,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "world": "raw",
+        "sample": 0,
+        "frames_20_ms": 10.07399,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "world": "owned",
+        "sample": 1,
+        "frames_20_ms": 8.889935,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "world": "raw",
+        "sample": 1,
+        "frames_20_ms": 10.106016,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "world": "owned",
+        "sample": 1,
+        "frames_20_ms": 9.150453,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "world": "raw",
+        "sample": 1,
+        "frames_20_ms": 9.779073,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "world": "owned",
+        "sample": 2,
+        "frames_20_ms": 8.61928,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "world": "raw",
+        "sample": 2,
+        "frames_20_ms": 9.252234,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "world": "owned",
+        "sample": 2,
+        "frames_20_ms": 8.877023,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "world": "raw",
+        "sample": 2,
+        "frames_20_ms": 9.529589,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "world": "owned",
+        "sample": 0,
+        "frames_20_ms": 8.432252,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "world": "raw",
+        "sample": 0,
+        "frames_20_ms": 9.170844,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "world": "owned",
+        "sample": 0,
+        "frames_20_ms": 8.645271,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "world": "raw",
+        "sample": 0,
+        "frames_20_ms": 9.414325,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "world": "owned",
+        "sample": 1,
+        "frames_20_ms": 8.616409,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "world": "raw",
+        "sample": 1,
+        "frames_20_ms": 9.427284,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "world": "owned",
+        "sample": 1,
+        "frames_20_ms": 8.653578,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "world": "raw",
+        "sample": 1,
+        "frames_20_ms": 9.065792,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "world": "owned",
+        "sample": 2,
+        "frames_20_ms": 8.452713,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "world": "raw",
+        "sample": 2,
+        "frames_20_ms": 9.181228,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "world": "owned",
+        "sample": 2,
+        "frames_20_ms": 8.638387,
+        "record_and_widget_assertions_pass": true
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "world": "raw",
+        "sample": 2,
+        "frames_20_ms": 9.3884,
+        "record_and_widget_assertions_pass": true
+      }
+    ],
+    "process_median_summary": {
+      "clang": {
+        "owned": {
+          "before": {
+            "median": 9.150453,
+            "min": 8.61928,
+            "max": 9.152555
+          },
+          "after": {
+            "median": 8.889935,
+            "min": 8.877023,
+            "max": 8.907493
+          }
+        },
+        "raw": {
+          "before": {
+            "median": 9.773953,
+            "min": 9.252234,
+            "max": 9.779073
+          },
+          "after": {
+            "median": 10.07399,
+            "min": 9.529589,
+            "max": 10.106016
+          }
+        }
+      },
+      "gcc": {
+        "owned": {
+          "before": {
+            "median": 8.452713,
+            "min": 8.432252,
+            "max": 8.653578
+          },
+          "after": {
+            "median": 8.638387,
+            "min": 8.616409,
+            "max": 8.645271
+          }
+        },
+        "raw": {
+          "before": {
+            "median": 9.170844,
+            "min": 9.065792,
+            "max": 9.181228
+          },
+          "after": {
+            "median": 9.414325,
+            "min": 9.3884,
+            "max": 9.427284
+          }
+        }
+      }
+    },
+    "executable_sizes": [
+      {
+        "compiler": "clang",
+        "phase": "before",
+        "file_bytes": 13210528,
+        "text_and_readonly_bytes": 10227182,
+        "data_bytes": 199592,
+        "bss_bytes": 46352
+      },
+      {
+        "compiler": "clang",
+        "phase": "after",
+        "file_bytes": 13061912,
+        "text_and_readonly_bytes": 10114862,
+        "data_bytes": 196128,
+        "bss_bytes": 47464
+      },
+      {
+        "compiler": "gcc",
+        "phase": "before",
+        "file_bytes": 14638456,
+        "text_and_readonly_bytes": 11806342,
+        "data_bytes": 204280,
+        "bss_bytes": 46833
+      },
+      {
+        "compiler": "gcc",
+        "phase": "after",
+        "file_bytes": 14386616,
+        "text_and_readonly_bytes": 11621682,
+        "data_bytes": 193752,
+        "bss_bytes": 49553
+      }
+    ]
+  },
+  "observer_descriptors": {
+    "clang": {
+      "all_111_descriptors_match": true,
+      "before_sha256": "0aae07d4c863834a0bf0ba7a0eda76fa037319f752fa2cf035b5d2e69e31be00",
+      "after_sha256": "0aae07d4c863834a0bf0ba7a0eda76fa037319f752fa2cf035b5d2e69e31be00",
+      "descriptors": [
+        "ui2_dirty_advanced_text_add 661 1 296 1 1 126892032 1 1 1 60 9511602413006487821 9367487224930631740 0 0 0 0 0 2208",
+        "ui2_dirty_advanced_text_remove 662 1 297 1 1 126892032 1 1 1 60 9511602413006487821 9367487224930631740 0 0 0 0 0 2208",
+        "ui2_dirty_animated_value_add 667 1 296 1 1 126892032 1 1 1 63 9511602413006487821 9367487224930631743 0 0 0 0 0 2208",
+        "ui2_dirty_animated_value_remove 668 1 297 1 1 126892032 1 1 1 63 9511602413006487821 9367487224930631743 0 0 0 0 0 2208",
+        "ui2_dirty_asset_browser_add 629 1 296 1 1 126892032 1 1 1 44 9511602413006487821 9367487224930631724 0 0 0 0 0 2208",
+        "ui2_dirty_asset_browser_remove 630 1 297 1 1 126892032 1 1 1 44 9511602413006487821 9367487224930631724 0 0 0 0 0 2208",
+        "ui2_dirty_breadcrumb_bar_add 627 1 296 1 1 126892032 1 1 1 43 9511602413006487821 9367487224930631723 0 0 0 0 0 2208",
+        "ui2_dirty_breadcrumb_bar_remove 628 1 297 1 1 126892032 1 1 1 43 9511602413006487821 9367487224930631723 0 0 0 0 0 2208",
+        "ui2_dirty_button_add 593 1 296 1 1 126892032 1 1 1 26 9511602413006487821 9367487224930631706 0 0 0 0 0 2208",
+        "ui2_dirty_button_remove 594 1 297 1 1 126892032 1 1 1 26 9511602413006487821 9367487224930631706 0 0 0 0 0 2208",
+        "ui2_dirty_color_picker_add 675 1 296 1 1 126892032 1 1 1 67 9511602413006487821 9367487224930631747 0 0 0 0 0 2208",
+        "ui2_dirty_color_picker_remove 676 1 297 1 1 126892032 1 1 1 67 9511602413006487821 9367487224930631747 0 0 0 0 0 2208",
+        "ui2_dirty_combo_box_add 673 1 296 1 1 126892032 1 1 1 66 9511602413006487821 9367487224930631746 0 0 0 0 0 2208",
+        "ui2_dirty_combo_box_remove 674 1 297 1 1 126892032 1 1 1 66 9511602413006487821 9367487224930631746 0 0 0 0 0 2208",
+        "ui2_dirty_dialog_box_add 639 1 296 1 1 126892032 1 1 1 49 9511602413006487821 9367487224930631729 0 0 0 0 0 2208",
+        "ui2_dirty_dialog_box_remove 640 1 297 1 1 126892032 1 1 1 49 9511602413006487821 9367487224930631729 0 0 0 0 0 2208",
+        "ui2_dirty_dialogue_view_add 641 1 296 1 1 126892032 1 1 1 50 9511602413006487821 9367487224930631730 0 0 0 0 0 2208",
+        "ui2_dirty_dialogue_view_remove 642 1 297 1 1 126892032 1 1 1 50 9511602413006487821 9367487224930631730 0 0 0 0 0 2208",
+        "ui2_dirty_dock_panel_add 625 1 296 1 1 126892032 1 1 1 42 9511602413006487821 9367487224930631722 0 0 0 0 0 2208",
+        "ui2_dirty_dock_panel_remove 626 1 297 1 1 126892032 1 1 1 42 9511602413006487821 9367487224930631722 0 0 0 0 0 2208",
+        "ui2_dirty_floating_text_add 665 1 296 1 1 126892032 1 1 1 62 9511602413006487821 9367487224930631742 0 0 0 0 0 2208",
+        "ui2_dirty_floating_text_remove 666 1 297 1 1 126892032 1 1 1 62 9511602413006487821 9367487224930631742 0 0 0 0 0 2208",
+        "ui2_dirty_icon_button_add 607 1 296 1 1 126892032 1 1 1 33 9511602413006487821 9367487224930631713 0 0 0 0 0 2208",
+        "ui2_dirty_icon_button_remove 608 1 297 1 1 126892032 1 1 1 33 9511602413006487821 9367487224930631713 0 0 0 0 0 2208",
+        "ui2_dirty_icon_grid_add 677 1 296 1 1 126892032 1 1 1 68 9511602413006487821 9367487224930631748 0 0 0 0 0 2208",
+        "ui2_dirty_icon_grid_remove 678 1 297 1 1 126892032 1 1 1 68 9511602413006487821 9367487224930631748 0 0 0 0 0 2208",
+        "ui2_dirty_icon_meter_add 655 1 296 1 1 126892032 1 1 1 57 9511602413006487821 9367487224930631737 0 0 0 0 0 2208",
+        "ui2_dirty_icon_meter_remove 656 1 297 1 1 126892032 1 1 1 57 9511602413006487821 9367487224930631737 0 0 0 0 0 2208",
+        "ui2_dirty_icon_slot_add 609 1 296 1 1 126892032 1 1 1 34 9511602413006487821 9367487224930631714 0 0 0 0 0 2208",
+        "ui2_dirty_icon_slot_remove 610 1 297 1 1 126892032 1 1 1 34 9511602413006487821 9367487224930631714 0 0 0 0 0 2208",
+        "ui2_dirty_image_add 601 1 296 1 1 126892032 1 1 1 30 9511602413006487821 9367487224930631710 0 0 0 0 0 2208",
+        "ui2_dirty_image_remove 602 1 297 1 1 126892032 1 1 1 30 9511602413006487821 9367487224930631710 0 0 0 0 0 2208",
+        "ui2_dirty_label_add 587 1 296 1 1 126892032 1 1 1 23 9511602413006487821 9367487224930631703 0 0 0 0 0 2208",
+        "ui2_dirty_label_remove 588 1 297 1 1 126892032 1 1 1 23 9511602413006487821 9367487224930631703 0 0 0 0 0 2208",
+        "ui2_dirty_labeled_bar_add 653 1 296 1 1 126892032 1 1 1 56 9511602413006487821 9367487224930631736 0 0 0 0 0 2208",
+        "ui2_dirty_labeled_bar_remove 654 1 297 1 1 126892032 1 1 1 56 9511602413006487821 9367487224930631736 0 0 0 0 0 2208",
+        "ui2_dirty_layout_add 579 1 296 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+        "ui2_dirty_layout_remove 580 1 297 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+        "ui2_dirty_layout_set 581 1 298 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+        "ui2_dirty_list_view_add 679 1 296 1 1 126892032 1 1 1 69 9511602413006487821 9367487224930631749 0 0 0 0 0 2208",
+        "ui2_dirty_list_view_remove 680 1 297 1 1 126892032 1 1 1 69 9511602413006487821 9367487224930631749 0 0 0 0 0 2208",
+        "ui2_dirty_log_console_add 633 1 296 1 1 126892032 1 1 1 46 9511602413006487821 9367487224930631726 0 0 0 0 0 2208",
+        "ui2_dirty_log_console_remove 634 1 297 1 1 126892032 1 1 1 46 9511602413006487821 9367487224930631726 0 0 0 0 0 2208",
+        "ui2_dirty_menu_bar_add 619 1 296 1 1 126892032 1 1 1 39 9511602413006487821 9367487224930631719 0 0 0 0 0 2208",
+        "ui2_dirty_menu_bar_remove 620 1 297 1 1 126892032 1 1 1 39 9511602413006487821 9367487224930631719 0 0 0 0 0 2208",
+        "ui2_dirty_menu_list_add 617 1 296 1 1 126892032 1 1 1 38 9511602413006487821 9367487224930631718 0 0 0 0 0 2208",
+        "ui2_dirty_menu_list_remove 618 1 297 1 1 126892032 1 1 1 38 9511602413006487821 9367487224930631718 0 0 0 0 0 2208",
+        "ui2_dirty_meter_add 611 1 296 1 1 126892032 1 1 1 35 9511602413006487821 9367487224930631715 0 0 0 0 0 2208",
+        "ui2_dirty_meter_remove 612 1 297 1 1 126892032 1 1 1 35 9511602413006487821 9367487224930631715 0 0 0 0 0 2208",
+        "ui2_dirty_nameplate_add 643 1 296 1 1 126892032 1 1 1 51 9511602413006487821 9367487224930631731 0 0 0 0 0 2208",
+        "ui2_dirty_nameplate_remove 644 1 297 1 1 126892032 1 1 1 51 9511602413006487821 9367487224930631731 0 0 0 0 0 2208",
+        "ui2_dirty_nine_slice_add 603 1 296 1 1 126892032 1 1 1 31 9511602413006487821 9367487224930631711 0 0 0 0 0 2208",
+        "ui2_dirty_nine_slice_remove 604 1 297 1 1 126892032 1 1 1 31 9511602413006487821 9367487224930631711 0 0 0 0 0 2208",
+        "ui2_dirty_node_graph_add 637 1 296 1 1 126892032 1 1 1 48 9511602413006487821 9367487224930631728 0 0 0 0 0 2208",
+        "ui2_dirty_node_graph_remove 638 1 297 1 1 126892032 1 1 1 48 9511602413006487821 9367487224930631728 0 0 0 0 0 2208",
+        "ui2_dirty_number_input_add 671 1 296 1 1 126892032 1 1 1 65 9511602413006487821 9367487224930631745 0 0 0 0 0 2208",
+        "ui2_dirty_number_input_remove 672 1 297 1 1 126892032 1 1 1 65 9511602413006487821 9367487224930631745 0 0 0 0 0 2208",
+        "ui2_dirty_panel_add 585 1 296 1 1 126892032 1 1 1 22 9511602413006487821 9367487224930631702 0 0 0 0 0 2208",
+        "ui2_dirty_panel_remove 586 1 297 1 1 126892032 1 1 1 22 9511602413006487821 9367487224930631702 0 0 0 0 0 2208",
+        "ui2_dirty_progress_bar_add 599 1 296 1 1 126892032 1 1 1 29 9511602413006487821 9367487224930631709 0 0 0 0 0 2208",
+        "ui2_dirty_progress_bar_remove 600 1 297 1 1 126892032 1 1 1 29 9511602413006487821 9367487224930631709 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_label_add 613 1 296 1 1 126892032 1 1 1 36 9511602413006487821 9367487224930631716 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_label_remove 614 1 297 1 1 126892032 1 1 1 36 9511602413006487821 9367487224930631716 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_row_add 615 1 296 1 1 126892032 1 1 1 37 9511602413006487821 9367487224930631717 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_row_remove 616 1 297 1 1 126892032 1 1 1 37 9511602413006487821 9367487224930631717 0 0 0 0 0 2208",
+        "ui2_dirty_property_grid_add 685 1 296 1 1 126892032 1 1 1 72 9511602413006487821 9367487224930631752 0 0 0 0 0 2208",
+        "ui2_dirty_property_grid_remove 686 1 297 1 1 126892032 1 1 1 72 9511602413006487821 9367487224930631752 0 0 0 0 0 2208",
+        "ui2_dirty_property_inspector_add 635 1 296 1 1 126892032 1 1 1 47 9511602413006487821 9367487224930631727 0 0 0 0 0 2208",
+        "ui2_dirty_property_inspector_remove 636 1 297 1 1 126892032 1 1 1 47 9511602413006487821 9367487224930631727 0 0 0 0 0 2208",
+        "ui2_dirty_resource_row_add 651 1 296 1 1 126892032 1 1 1 55 9511602413006487821 9367487224930631735 0 0 0 0 0 2208",
+        "ui2_dirty_resource_row_remove 652 1 297 1 1 126892032 1 1 1 55 9511602413006487821 9367487224930631735 0 0 0 0 0 2208",
+        "ui2_dirty_rich_text_line_add 657 1 296 1 1 126892032 1 1 1 58 9511602413006487821 9367487224930631738 0 0 0 0 0 2208",
+        "ui2_dirty_rich_text_line_remove 658 1 297 1 1 126892032 1 1 1 58 9511602413006487821 9367487224930631738 0 0 0 0 0 2208",
+        "ui2_dirty_root_add 576 1 296 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+        "ui2_dirty_root_remove 577 1 297 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+        "ui2_dirty_root_set 578 1 298 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_container_add 582 1 296 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_container_remove 583 1 297 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_container_set 584 1 298 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_view_add 649 1 296 1 1 126892032 1 1 1 54 9511602413006487821 9367487224930631734 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_view_remove 650 1 297 1 1 126892032 1 1 1 54 9511602413006487821 9367487224930631734 0 0 0 0 0 2208",
+        "ui2_dirty_selection_rect_add 645 1 296 1 1 126892032 1 1 1 52 9511602413006487821 9367487224930631732 0 0 0 0 0 2208",
+        "ui2_dirty_selection_rect_remove 646 1 297 1 1 126892032 1 1 1 52 9511602413006487821 9367487224930631732 0 0 0 0 0 2208",
+        "ui2_dirty_separator_add 591 1 296 1 1 126892032 1 1 1 25 9511602413006487821 9367487224930631705 0 0 0 0 0 2208",
+        "ui2_dirty_separator_remove 592 1 297 1 1 126892032 1 1 1 25 9511602413006487821 9367487224930631705 0 0 0 0 0 2208",
+        "ui2_dirty_slider_add 597 1 296 1 1 126892032 1 1 1 28 9511602413006487821 9367487224930631708 0 0 0 0 0 2208",
+        "ui2_dirty_slider_remove 598 1 297 1 1 126892032 1 1 1 28 9511602413006487821 9367487224930631708 0 0 0 0 0 2208",
+        "ui2_dirty_spacer_add 605 1 296 1 1 126892032 1 1 1 32 9511602413006487821 9367487224930631712 0 0 0 0 0 2208",
+        "ui2_dirty_spacer_remove 606 1 297 1 1 126892032 1 1 1 32 9511602413006487821 9367487224930631712 0 0 0 0 0 2208",
+        "ui2_dirty_splitter_add 623 1 296 1 1 126892032 1 1 1 41 9511602413006487821 9367487224930631721 0 0 0 0 0 2208",
+        "ui2_dirty_splitter_remove 624 1 297 1 1 126892032 1 1 1 41 9511602413006487821 9367487224930631721 0 0 0 0 0 2208",
+        "ui2_dirty_status_bar_add 631 1 296 1 1 126892032 1 1 1 45 9511602413006487821 9367487224930631725 0 0 0 0 0 2208",
+        "ui2_dirty_status_bar_remove 632 1 297 1 1 126892032 1 1 1 45 9511602413006487821 9367487224930631725 0 0 0 0 0 2208",
+        "ui2_dirty_tab_bar_add 621 1 296 1 1 126892032 1 1 1 40 9511602413006487821 9367487224930631720 0 0 0 0 0 2208",
+        "ui2_dirty_tab_bar_remove 622 1 297 1 1 126892032 1 1 1 40 9511602413006487821 9367487224930631720 0 0 0 0 0 2208",
+        "ui2_dirty_table_add 681 1 296 1 1 126892032 1 1 1 70 9511602413006487821 9367487224930631750 0 0 0 0 0 2208",
+        "ui2_dirty_table_remove 682 1 297 1 1 126892032 1 1 1 70 9511602413006487821 9367487224930631750 0 0 0 0 0 2208",
+        "ui2_dirty_target_reticle_add 647 1 296 1 1 126892032 1 1 1 53 9511602413006487821 9367487224930631733 0 0 0 0 0 2208",
+        "ui2_dirty_target_reticle_remove 648 1 297 1 1 126892032 1 1 1 53 9511602413006487821 9367487224930631733 0 0 0 0 0 2208",
+        "ui2_dirty_text_area_add 659 1 296 1 1 126892032 1 1 1 59 9511602413006487821 9367487224930631739 0 0 0 0 0 2208",
+        "ui2_dirty_text_area_remove 660 1 297 1 1 126892032 1 1 1 59 9511602413006487821 9367487224930631739 0 0 0 0 0 2208",
+        "ui2_dirty_text_input_add 669 1 296 1 1 126892032 1 1 1 64 9511602413006487821 9367487224930631744 0 0 0 0 0 2208",
+        "ui2_dirty_text_input_remove 670 1 297 1 1 126892032 1 1 1 64 9511602413006487821 9367487224930631744 0 0 0 0 0 2208",
+        "ui2_dirty_toast_stack_add 663 1 296 1 1 126892032 1 1 1 61 9511602413006487821 9367487224930631741 0 0 0 0 0 2208",
+        "ui2_dirty_toast_stack_remove 664 1 297 1 1 126892032 1 1 1 61 9511602413006487821 9367487224930631741 0 0 0 0 0 2208",
+        "ui2_dirty_toggle_add 595 1 296 1 1 126892032 1 1 1 27 9511602413006487821 9367487224930631707 0 0 0 0 0 2208",
+        "ui2_dirty_toggle_remove 596 1 297 1 1 126892032 1 1 1 27 9511602413006487821 9367487224930631707 0 0 0 0 0 2208",
+        "ui2_dirty_tree_view_add 683 1 296 1 1 126892032 1 1 1 71 9511602413006487821 9367487224930631751 0 0 0 0 0 2208",
+        "ui2_dirty_tree_view_remove 684 1 297 1 1 126892032 1 1 1 71 9511602413006487821 9367487224930631751 0 0 0 0 0 2208",
+        "ui2_dirty_wrapped_text_add 589 1 296 1 1 126892032 1 1 1 24 9511602413006487821 9367487224930631704 0 0 0 0 0 2208",
+        "ui2_dirty_wrapped_text_remove 590 1 297 1 1 126892032 1 1 1 24 9511602413006487821 9367487224930631704 0 0 0 0 0 2208"
+      ]
+    },
+    "gcc": {
+      "all_111_descriptors_match": true,
+      "before_sha256": "0aae07d4c863834a0bf0ba7a0eda76fa037319f752fa2cf035b5d2e69e31be00",
+      "after_sha256": "0aae07d4c863834a0bf0ba7a0eda76fa037319f752fa2cf035b5d2e69e31be00",
+      "descriptors": [
+        "ui2_dirty_advanced_text_add 661 1 296 1 1 126892032 1 1 1 60 9511602413006487821 9367487224930631740 0 0 0 0 0 2208",
+        "ui2_dirty_advanced_text_remove 662 1 297 1 1 126892032 1 1 1 60 9511602413006487821 9367487224930631740 0 0 0 0 0 2208",
+        "ui2_dirty_animated_value_add 667 1 296 1 1 126892032 1 1 1 63 9511602413006487821 9367487224930631743 0 0 0 0 0 2208",
+        "ui2_dirty_animated_value_remove 668 1 297 1 1 126892032 1 1 1 63 9511602413006487821 9367487224930631743 0 0 0 0 0 2208",
+        "ui2_dirty_asset_browser_add 629 1 296 1 1 126892032 1 1 1 44 9511602413006487821 9367487224930631724 0 0 0 0 0 2208",
+        "ui2_dirty_asset_browser_remove 630 1 297 1 1 126892032 1 1 1 44 9511602413006487821 9367487224930631724 0 0 0 0 0 2208",
+        "ui2_dirty_breadcrumb_bar_add 627 1 296 1 1 126892032 1 1 1 43 9511602413006487821 9367487224930631723 0 0 0 0 0 2208",
+        "ui2_dirty_breadcrumb_bar_remove 628 1 297 1 1 126892032 1 1 1 43 9511602413006487821 9367487224930631723 0 0 0 0 0 2208",
+        "ui2_dirty_button_add 593 1 296 1 1 126892032 1 1 1 26 9511602413006487821 9367487224930631706 0 0 0 0 0 2208",
+        "ui2_dirty_button_remove 594 1 297 1 1 126892032 1 1 1 26 9511602413006487821 9367487224930631706 0 0 0 0 0 2208",
+        "ui2_dirty_color_picker_add 675 1 296 1 1 126892032 1 1 1 67 9511602413006487821 9367487224930631747 0 0 0 0 0 2208",
+        "ui2_dirty_color_picker_remove 676 1 297 1 1 126892032 1 1 1 67 9511602413006487821 9367487224930631747 0 0 0 0 0 2208",
+        "ui2_dirty_combo_box_add 673 1 296 1 1 126892032 1 1 1 66 9511602413006487821 9367487224930631746 0 0 0 0 0 2208",
+        "ui2_dirty_combo_box_remove 674 1 297 1 1 126892032 1 1 1 66 9511602413006487821 9367487224930631746 0 0 0 0 0 2208",
+        "ui2_dirty_dialog_box_add 639 1 296 1 1 126892032 1 1 1 49 9511602413006487821 9367487224930631729 0 0 0 0 0 2208",
+        "ui2_dirty_dialog_box_remove 640 1 297 1 1 126892032 1 1 1 49 9511602413006487821 9367487224930631729 0 0 0 0 0 2208",
+        "ui2_dirty_dialogue_view_add 641 1 296 1 1 126892032 1 1 1 50 9511602413006487821 9367487224930631730 0 0 0 0 0 2208",
+        "ui2_dirty_dialogue_view_remove 642 1 297 1 1 126892032 1 1 1 50 9511602413006487821 9367487224930631730 0 0 0 0 0 2208",
+        "ui2_dirty_dock_panel_add 625 1 296 1 1 126892032 1 1 1 42 9511602413006487821 9367487224930631722 0 0 0 0 0 2208",
+        "ui2_dirty_dock_panel_remove 626 1 297 1 1 126892032 1 1 1 42 9511602413006487821 9367487224930631722 0 0 0 0 0 2208",
+        "ui2_dirty_floating_text_add 665 1 296 1 1 126892032 1 1 1 62 9511602413006487821 9367487224930631742 0 0 0 0 0 2208",
+        "ui2_dirty_floating_text_remove 666 1 297 1 1 126892032 1 1 1 62 9511602413006487821 9367487224930631742 0 0 0 0 0 2208",
+        "ui2_dirty_icon_button_add 607 1 296 1 1 126892032 1 1 1 33 9511602413006487821 9367487224930631713 0 0 0 0 0 2208",
+        "ui2_dirty_icon_button_remove 608 1 297 1 1 126892032 1 1 1 33 9511602413006487821 9367487224930631713 0 0 0 0 0 2208",
+        "ui2_dirty_icon_grid_add 677 1 296 1 1 126892032 1 1 1 68 9511602413006487821 9367487224930631748 0 0 0 0 0 2208",
+        "ui2_dirty_icon_grid_remove 678 1 297 1 1 126892032 1 1 1 68 9511602413006487821 9367487224930631748 0 0 0 0 0 2208",
+        "ui2_dirty_icon_meter_add 655 1 296 1 1 126892032 1 1 1 57 9511602413006487821 9367487224930631737 0 0 0 0 0 2208",
+        "ui2_dirty_icon_meter_remove 656 1 297 1 1 126892032 1 1 1 57 9511602413006487821 9367487224930631737 0 0 0 0 0 2208",
+        "ui2_dirty_icon_slot_add 609 1 296 1 1 126892032 1 1 1 34 9511602413006487821 9367487224930631714 0 0 0 0 0 2208",
+        "ui2_dirty_icon_slot_remove 610 1 297 1 1 126892032 1 1 1 34 9511602413006487821 9367487224930631714 0 0 0 0 0 2208",
+        "ui2_dirty_image_add 601 1 296 1 1 126892032 1 1 1 30 9511602413006487821 9367487224930631710 0 0 0 0 0 2208",
+        "ui2_dirty_image_remove 602 1 297 1 1 126892032 1 1 1 30 9511602413006487821 9367487224930631710 0 0 0 0 0 2208",
+        "ui2_dirty_label_add 587 1 296 1 1 126892032 1 1 1 23 9511602413006487821 9367487224930631703 0 0 0 0 0 2208",
+        "ui2_dirty_label_remove 588 1 297 1 1 126892032 1 1 1 23 9511602413006487821 9367487224930631703 0 0 0 0 0 2208",
+        "ui2_dirty_labeled_bar_add 653 1 296 1 1 126892032 1 1 1 56 9511602413006487821 9367487224930631736 0 0 0 0 0 2208",
+        "ui2_dirty_labeled_bar_remove 654 1 297 1 1 126892032 1 1 1 56 9511602413006487821 9367487224930631736 0 0 0 0 0 2208",
+        "ui2_dirty_layout_add 579 1 296 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+        "ui2_dirty_layout_remove 580 1 297 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+        "ui2_dirty_layout_set 581 1 298 1 1 126892032 1 1 1 77 9511602413006487821 9367487224930631757 0 0 0 0 0 2208",
+        "ui2_dirty_list_view_add 679 1 296 1 1 126892032 1 1 1 69 9511602413006487821 9367487224930631749 0 0 0 0 0 2208",
+        "ui2_dirty_list_view_remove 680 1 297 1 1 126892032 1 1 1 69 9511602413006487821 9367487224930631749 0 0 0 0 0 2208",
+        "ui2_dirty_log_console_add 633 1 296 1 1 126892032 1 1 1 46 9511602413006487821 9367487224930631726 0 0 0 0 0 2208",
+        "ui2_dirty_log_console_remove 634 1 297 1 1 126892032 1 1 1 46 9511602413006487821 9367487224930631726 0 0 0 0 0 2208",
+        "ui2_dirty_menu_bar_add 619 1 296 1 1 126892032 1 1 1 39 9511602413006487821 9367487224930631719 0 0 0 0 0 2208",
+        "ui2_dirty_menu_bar_remove 620 1 297 1 1 126892032 1 1 1 39 9511602413006487821 9367487224930631719 0 0 0 0 0 2208",
+        "ui2_dirty_menu_list_add 617 1 296 1 1 126892032 1 1 1 38 9511602413006487821 9367487224930631718 0 0 0 0 0 2208",
+        "ui2_dirty_menu_list_remove 618 1 297 1 1 126892032 1 1 1 38 9511602413006487821 9367487224930631718 0 0 0 0 0 2208",
+        "ui2_dirty_meter_add 611 1 296 1 1 126892032 1 1 1 35 9511602413006487821 9367487224930631715 0 0 0 0 0 2208",
+        "ui2_dirty_meter_remove 612 1 297 1 1 126892032 1 1 1 35 9511602413006487821 9367487224930631715 0 0 0 0 0 2208",
+        "ui2_dirty_nameplate_add 643 1 296 1 1 126892032 1 1 1 51 9511602413006487821 9367487224930631731 0 0 0 0 0 2208",
+        "ui2_dirty_nameplate_remove 644 1 297 1 1 126892032 1 1 1 51 9511602413006487821 9367487224930631731 0 0 0 0 0 2208",
+        "ui2_dirty_nine_slice_add 603 1 296 1 1 126892032 1 1 1 31 9511602413006487821 9367487224930631711 0 0 0 0 0 2208",
+        "ui2_dirty_nine_slice_remove 604 1 297 1 1 126892032 1 1 1 31 9511602413006487821 9367487224930631711 0 0 0 0 0 2208",
+        "ui2_dirty_node_graph_add 637 1 296 1 1 126892032 1 1 1 48 9511602413006487821 9367487224930631728 0 0 0 0 0 2208",
+        "ui2_dirty_node_graph_remove 638 1 297 1 1 126892032 1 1 1 48 9511602413006487821 9367487224930631728 0 0 0 0 0 2208",
+        "ui2_dirty_number_input_add 671 1 296 1 1 126892032 1 1 1 65 9511602413006487821 9367487224930631745 0 0 0 0 0 2208",
+        "ui2_dirty_number_input_remove 672 1 297 1 1 126892032 1 1 1 65 9511602413006487821 9367487224930631745 0 0 0 0 0 2208",
+        "ui2_dirty_panel_add 585 1 296 1 1 126892032 1 1 1 22 9511602413006487821 9367487224930631702 0 0 0 0 0 2208",
+        "ui2_dirty_panel_remove 586 1 297 1 1 126892032 1 1 1 22 9511602413006487821 9367487224930631702 0 0 0 0 0 2208",
+        "ui2_dirty_progress_bar_add 599 1 296 1 1 126892032 1 1 1 29 9511602413006487821 9367487224930631709 0 0 0 0 0 2208",
+        "ui2_dirty_progress_bar_remove 600 1 297 1 1 126892032 1 1 1 29 9511602413006487821 9367487224930631709 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_label_add 613 1 296 1 1 126892032 1 1 1 36 9511602413006487821 9367487224930631716 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_label_remove 614 1 297 1 1 126892032 1 1 1 36 9511602413006487821 9367487224930631716 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_row_add 615 1 296 1 1 126892032 1 1 1 37 9511602413006487821 9367487224930631717 0 0 0 0 0 2208",
+        "ui2_dirty_prompt_row_remove 616 1 297 1 1 126892032 1 1 1 37 9511602413006487821 9367487224930631717 0 0 0 0 0 2208",
+        "ui2_dirty_property_grid_add 685 1 296 1 1 126892032 1 1 1 72 9511602413006487821 9367487224930631752 0 0 0 0 0 2208",
+        "ui2_dirty_property_grid_remove 686 1 297 1 1 126892032 1 1 1 72 9511602413006487821 9367487224930631752 0 0 0 0 0 2208",
+        "ui2_dirty_property_inspector_add 635 1 296 1 1 126892032 1 1 1 47 9511602413006487821 9367487224930631727 0 0 0 0 0 2208",
+        "ui2_dirty_property_inspector_remove 636 1 297 1 1 126892032 1 1 1 47 9511602413006487821 9367487224930631727 0 0 0 0 0 2208",
+        "ui2_dirty_resource_row_add 651 1 296 1 1 126892032 1 1 1 55 9511602413006487821 9367487224930631735 0 0 0 0 0 2208",
+        "ui2_dirty_resource_row_remove 652 1 297 1 1 126892032 1 1 1 55 9511602413006487821 9367487224930631735 0 0 0 0 0 2208",
+        "ui2_dirty_rich_text_line_add 657 1 296 1 1 126892032 1 1 1 58 9511602413006487821 9367487224930631738 0 0 0 0 0 2208",
+        "ui2_dirty_rich_text_line_remove 658 1 297 1 1 126892032 1 1 1 58 9511602413006487821 9367487224930631738 0 0 0 0 0 2208",
+        "ui2_dirty_root_add 576 1 296 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+        "ui2_dirty_root_remove 577 1 297 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+        "ui2_dirty_root_set 578 1 298 1 1 126892032 1 1 1 75 9511602413006487821 9367487224930631755 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_container_add 582 1 296 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_container_remove 583 1 297 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_container_set 584 1 298 1 1 126892032 1 1 1 78 9511602413006487821 9367487224930631758 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_view_add 649 1 296 1 1 126892032 1 1 1 54 9511602413006487821 9367487224930631734 0 0 0 0 0 2208",
+        "ui2_dirty_scroll_view_remove 650 1 297 1 1 126892032 1 1 1 54 9511602413006487821 9367487224930631734 0 0 0 0 0 2208",
+        "ui2_dirty_selection_rect_add 645 1 296 1 1 126892032 1 1 1 52 9511602413006487821 9367487224930631732 0 0 0 0 0 2208",
+        "ui2_dirty_selection_rect_remove 646 1 297 1 1 126892032 1 1 1 52 9511602413006487821 9367487224930631732 0 0 0 0 0 2208",
+        "ui2_dirty_separator_add 591 1 296 1 1 126892032 1 1 1 25 9511602413006487821 9367487224930631705 0 0 0 0 0 2208",
+        "ui2_dirty_separator_remove 592 1 297 1 1 126892032 1 1 1 25 9511602413006487821 9367487224930631705 0 0 0 0 0 2208",
+        "ui2_dirty_slider_add 597 1 296 1 1 126892032 1 1 1 28 9511602413006487821 9367487224930631708 0 0 0 0 0 2208",
+        "ui2_dirty_slider_remove 598 1 297 1 1 126892032 1 1 1 28 9511602413006487821 9367487224930631708 0 0 0 0 0 2208",
+        "ui2_dirty_spacer_add 605 1 296 1 1 126892032 1 1 1 32 9511602413006487821 9367487224930631712 0 0 0 0 0 2208",
+        "ui2_dirty_spacer_remove 606 1 297 1 1 126892032 1 1 1 32 9511602413006487821 9367487224930631712 0 0 0 0 0 2208",
+        "ui2_dirty_splitter_add 623 1 296 1 1 126892032 1 1 1 41 9511602413006487821 9367487224930631721 0 0 0 0 0 2208",
+        "ui2_dirty_splitter_remove 624 1 297 1 1 126892032 1 1 1 41 9511602413006487821 9367487224930631721 0 0 0 0 0 2208",
+        "ui2_dirty_status_bar_add 631 1 296 1 1 126892032 1 1 1 45 9511602413006487821 9367487224930631725 0 0 0 0 0 2208",
+        "ui2_dirty_status_bar_remove 632 1 297 1 1 126892032 1 1 1 45 9511602413006487821 9367487224930631725 0 0 0 0 0 2208",
+        "ui2_dirty_tab_bar_add 621 1 296 1 1 126892032 1 1 1 40 9511602413006487821 9367487224930631720 0 0 0 0 0 2208",
+        "ui2_dirty_tab_bar_remove 622 1 297 1 1 126892032 1 1 1 40 9511602413006487821 9367487224930631720 0 0 0 0 0 2208",
+        "ui2_dirty_table_add 681 1 296 1 1 126892032 1 1 1 70 9511602413006487821 9367487224930631750 0 0 0 0 0 2208",
+        "ui2_dirty_table_remove 682 1 297 1 1 126892032 1 1 1 70 9511602413006487821 9367487224930631750 0 0 0 0 0 2208",
+        "ui2_dirty_target_reticle_add 647 1 296 1 1 126892032 1 1 1 53 9511602413006487821 9367487224930631733 0 0 0 0 0 2208",
+        "ui2_dirty_target_reticle_remove 648 1 297 1 1 126892032 1 1 1 53 9511602413006487821 9367487224930631733 0 0 0 0 0 2208",
+        "ui2_dirty_text_area_add 659 1 296 1 1 126892032 1 1 1 59 9511602413006487821 9367487224930631739 0 0 0 0 0 2208",
+        "ui2_dirty_text_area_remove 660 1 297 1 1 126892032 1 1 1 59 9511602413006487821 9367487224930631739 0 0 0 0 0 2208",
+        "ui2_dirty_text_input_add 669 1 296 1 1 126892032 1 1 1 64 9511602413006487821 9367487224930631744 0 0 0 0 0 2208",
+        "ui2_dirty_text_input_remove 670 1 297 1 1 126892032 1 1 1 64 9511602413006487821 9367487224930631744 0 0 0 0 0 2208",
+        "ui2_dirty_toast_stack_add 663 1 296 1 1 126892032 1 1 1 61 9511602413006487821 9367487224930631741 0 0 0 0 0 2208",
+        "ui2_dirty_toast_stack_remove 664 1 297 1 1 126892032 1 1 1 61 9511602413006487821 9367487224930631741 0 0 0 0 0 2208",
+        "ui2_dirty_toggle_add 595 1 296 1 1 126892032 1 1 1 27 9511602413006487821 9367487224930631707 0 0 0 0 0 2208",
+        "ui2_dirty_toggle_remove 596 1 297 1 1 126892032 1 1 1 27 9511602413006487821 9367487224930631707 0 0 0 0 0 2208",
+        "ui2_dirty_tree_view_add 683 1 296 1 1 126892032 1 1 1 71 9511602413006487821 9367487224930631751 0 0 0 0 0 2208",
+        "ui2_dirty_tree_view_remove 684 1 297 1 1 126892032 1 1 1 71 9511602413006487821 9367487224930631751 0 0 0 0 0 2208",
+        "ui2_dirty_wrapped_text_add 589 1 296 1 1 126892032 1 1 1 24 9511602413006487821 9367487224930631704 0 0 0 0 0 2208",
+        "ui2_dirty_wrapped_text_remove 590 1 297 1 1 126892032 1 1 1 24 9511602413006487821 9367487224930631704 0 0 0 0 0 2208"
+      ]
+    }
+  },
+  "mechanical_checks": {
+    "transformation_regenerates_exactly": true,
+    "all_code_outside_collection_helper_byte_identical": true,
+    "widget_count": 51,
+    "ordered_widget_types": [
+      "Panel",
+      "Label",
+      "WrappedText",
+      "Separator",
+      "Button",
+      "Toggle",
+      "Slider",
+      "ProgressBar",
+      "Image",
+      "NineSlicePanel",
+      "Spacer",
+      "IconButton",
+      "IconSlot",
+      "Meter",
+      "PromptLabel",
+      "PromptRow",
+      "MenuList",
+      "MenuBar",
+      "TabBar",
+      "Splitter",
+      "DockPanel",
+      "BreadcrumbBar",
+      "AssetBrowser",
+      "StatusBar",
+      "LogConsole",
+      "PropertyInspector",
+      "NodeGraph",
+      "DialogBox",
+      "DialogueView",
+      "Nameplate",
+      "SelectionRect",
+      "TargetReticle",
+      "ScrollView",
+      "ResourceRow",
+      "LabeledBar",
+      "IconMeter",
+      "RichTextLine",
+      "TextArea",
+      "AdvancedText",
+      "ToastStack",
+      "FloatingText",
+      "AnimatedValue",
+      "TextInput",
+      "NumberInput",
+      "ComboBox",
+      "ColorPicker",
+      "IconGrid",
+      "ListView",
+      "Table",
+      "TreeView",
+      "PropertyGrid"
+    ],
+    "registration_layout_builders_sorting_clipping_draw_functions_unchanged": true,
+    "public_headers_and_cmake_unchanged": true
+  },
+  "validation": [
+    {
+      "compiler": "clang",
+      "selected_tests_passed": 39,
+      "test_regex": "^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$",
+      "api_matches_baseline": {
+        "scene": "08470f48946f2eaa38dde430c5535d8caf01a02b13d7d911acc55092a635cc7b",
+        "entity": "54894ae4057667ea1ababbb13dfe12ec019adbab7c4129c4280e532dca48b786",
+        "test": "7dd4d5cd07817d20596c66b7186d0a126c67dd1b929afc918b3950d6997a3bc8",
+        "scenario": "06a2650d93f6bf9ddb4ada71fdbaf95941cef05d64f1eba5cb7151cbf7ce3d28"
+      }
+    },
+    {
+      "compiler": "gcc",
+      "selected_tests_passed": 39,
+      "test_regex": "^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$",
+      "api_matches_baseline": {
+        "scene": "08470f48946f2eaa38dde430c5535d8caf01a02b13d7d911acc55092a635cc7b",
+        "entity": "54894ae4057667ea1ababbb13dfe12ec019adbab7c4129c4280e532dca48b786",
+        "test": "7dd4d5cd07817d20596c66b7186d0a126c67dd1b929afc918b3950d6997a3bc8",
+        "scenario": "06a2650d93f6bf9ddb4ada71fdbaf95941cef05d64f1eba5cb7151cbf7ce3d28"
+      }
+    }
+  ],
+  "original_implementation_controls": [
+    {
+      "compiler": "clang",
+      "original_ui2_object": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/paired-clang-before-0.o",
+      "full_ui2_suite_including_new_regression_passed": true
+    },
+    {
+      "compiler": "gcc",
+      "original_ui2_object": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench/paired-gcc-before-0.o",
+      "full_ui2_suite_including_new_regression_passed": true
+    }
+  ],
+  "no_pch_optional_configuration_checks": [
+    {
+      "configuration": "clang-3d",
+      "source": "/ecs/ui2.cpp",
+      "pch": false,
+      "exit_code": 0
+    },
+    {
+      "configuration": "clang-3d",
+      "source": "/tests/ui2_tests.cpp",
+      "pch": false,
+      "exit_code": 0
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "/ecs/ui2.cpp",
+      "pch": false,
+      "exit_code": 0
+    },
+    {
+      "configuration": "gcc-no-physics-audio",
+      "source": "/tests/ui2_tests.cpp",
+      "pch": false,
+      "exit_code": 0
+    }
+  ],
+  "final_state": [
+    {
+      "compiler": "clang",
+      "final_smoke_tests": 7,
+      "api_reports_match": {
+        "scene": "90edda75b78327c28b64e94bab6a149d12de2c4d63ceec4acaea706070c5ff9b",
+        "entity": "859eefd052c74a1cefd56f4ba47b1a91267ad88b462ceafd77294a6e5f0370b1",
+        "test": "c9c81cdb99307e41f0f871e2672813ca045882444fef20e683b9ae26f582ff59",
+        "scenario": "a84f5a7a59be91d8149640d2e8e8a66ef94c8afeb3b744024a67e8156e7e9167"
+      },
+      "no_change_compiles_and_links": 0,
+      "canonical_source_matches": true
+    },
+    {
+      "compiler": "gcc",
+      "final_smoke_tests": 7,
+      "api_reports_match": {
+        "scene": "90edda75b78327c28b64e94bab6a149d12de2c4d63ceec4acaea706070c5ff9b",
+        "entity": "859eefd052c74a1cefd56f4ba47b1a91267ad88b462ceafd77294a6e5f0370b1",
+        "test": "c9c81cdb99307e41f0f871e2672813ca045882444fef20e683b9ae26f582ff59",
+        "scenario": "a84f5a7a59be91d8149640d2e8e8a66ef94c8afeb3b744024a67e8156e7e9167"
+      },
+      "no_change_compiles_and_links": 0,
+      "canonical_source_matches": true
+    }
+  ],
+  "limits": [
+    "No whole-project or cumulative speedup claim. Cache/PCH invalidation scope and ordinary project scheduling remain unchanged. RSS is per compiler process, not total build memory.",
+    "Query cache identity changes from the shared typed each() cache to a private key per widget collection call site/world. Code elsewhere querying that same widget signature may now keep another query. Query caching for Kin-owned worlds, standalone fallback and world-owned lifetimes remain intact.",
+    "No Windows/MSVC or native desktop/3D/GPU runtime validation. Optional feature variants are syntax/template checks only.",
+    "Renderer probe medians move in both directions. Dynamic field lookup and record-assignment dispatch add per-row work; faster compilation does not imply faster rendering."
+  ],
+  "development_notes": [
+    "The initial standalone benchmark incorrectly assumed Spacer has an id; its pointer/bounds assertion was corrected before baseline capture.",
+    "The first added regression-test compile encountered Flecs global EcsWorld/EcsId name clashes; explicit kin:: qualification fixed the test. All recorded suite/control runs pass.",
+    "Substantial load/control changes in the first compilation block prompted two additional observations/version/compiler. The initial block remains in the combined summary and complete raw sample list."
+  ],
+  "reproduction": {
+    "artifact_directory": "/mnt/windows/Users/amedeo/Desktop/gamedev/kin-ui2-followup-bench",
+    "steps": [
+      "At base_commit configure the normal Clang/GCC builds and prebuild UI2 tests, games and kin_lua with PCH on, cache/LTO off and normal -O2 targets. Adjust script paths/TMPDIR/affinity. Save original engine/src/ecs/ui2.cpp to before-ui2.cpp and write base-commit in the artifact directory.",
+      "Collect the before diagnostic with the matching compile command plus -ftime-trace on CPU 2, then run ui2_follow_before.py to preserve before render/observer probes, API reports and three implementation edits. Settle CMake first.",
+      "Run ui2_follow_transform.py and ui2_follow_regression_apply.py. Build and test ui2_follow_validate.py clang gcc, then ui2_follow_probe_build.py after. Optionally collect the final diagnostic trace separately; pilot-trace files correspond to the final production source.",
+      "Run ui2_follow_measure.py to collect alternating runtime/compile samples, no-PCH variants, original-object controls, real edits and final canonical/smoke/API/no-change checks. Serialize source/header/configuration/log edits with owned compilers.",
+      "Run ui2_follow_record.py. Keep all samples and separate diagnostic instrumentation from uninstrumented timing."
+    ],
+    "scripts": {
+      "ui2_follow_common.py": "import json, os, pathlib, shlex, subprocess, sys\nfrom bench_compiler_guard import assert_no_active_compilers\n\nrepo = pathlib.Path('/home/bamedeo/kin-wt/build-time')\nbase = pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev')\nout = base / 'kin-ui2-followup-bench'\nenv = {**os.environ, 'TMPDIR': str(out/'tmp'), 'SDL_VIDEODRIVER': 'dummy', 'SDL_AUDIODRIVER': 'dummy'}\n\ndef build_dir(compiler='clang'):\n    return base / ('kin-build-time-out' if compiler == 'gcc' else 'kin-build-time-clang')\n\ndef compile_args(name, obj, compiler='clang', source=None):\n    build = build_dir(compiler)\n    db = json.loads((build/'compile_commands.json').read_text())\n    entry = next(e for e in db if e['file'].endswith('/ecs/'+name+'.cpp'))\n    args = shlex.split(entry['command'])\n    args[args.index('-o')+1] = str(obj)\n    if source is not None:\n        args[args.index('-c')+1] = str(source)\n        args += ['-iquote', str(repo/'engine/src/ecs')]\n    return args\n\ndef run(args, label, cwd=None, cpus=None, timed=False):\n    command = (['taskset', '-c', cpus] if cpus else []) + list(map(str,args))\n    if timed:\n        command = ['/usr/bin/time', '-f', '{\"wall_seconds\":%e,\"user_seconds\":%U,\"system_seconds\":%S,\"max_child_rss_kib\":%M}', '-o', str(out/(label+'.stats.json'))] + command\n    with (out/(label+'.log')).open('w') as log:\n        result = subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT)\n    if result.returncode:\n        print((out/(label+'.log')).read_text()[-8000:], flush=True)\n        raise RuntimeError((label,result.returncode))\n    return json.loads((out/(label+'.stats.json')).read_text()) if timed else None\n\ndef save(name,value):\n    (out/(name+'.json')).write_text(json.dumps(value,indent=2)+'\\n')\n\ndef edit_samples(phase, name='ui2', count=3):\n    import re, shutil\n    assert_no_active_compilers()\n    build=build_dir(); source=repo/('engine/src/ecs/'+name+'.cpp')\n    original=source.read_bytes(); stat=source.stat(); rows=[]\n    manifest=out/(phase+'-'+name+'-edit.ninja')\n    shutil.copy2(build/'build.ninja',manifest)\n    clean=subprocess.check_output(['ninja','-C',str(build),'-f',str(manifest),'-n','hex_demo'],env=env,text=True)\n    assert 'Building C' not in clean and 'Linking C' not in clean, clean\n    try:\n        for sample in range(count):\n            assert_no_active_compilers()\n            source.write_bytes(original+f'\\n// UI2 implementation edit probe {phase} {sample}.\\n'.encode())\n            label=f'{phase}-{name}-edit-{sample}'\n            plan=subprocess.check_output(['ninja','-C',str(build),'-f',str(manifest),'-n','hex_demo'],env=env,text=True)\n            (out/(label+'-plan.log')).write_text(plan)\n            planned=re.findall(r'Building CXX object ([^\\n]+)',plan)\n            assert planned==['engine/CMakeFiles/kin_engine.dir/src/ecs/'+name+'.cpp.o'],planned\n            load=os.getloadavg()\n            stats=run(['ninja','-C',build,'-j4','hex_demo'],label,cpus='0,2,4,6',timed=True)\n            actual=re.findall(r'Building CXX object ([^\\n]+)',(out/(label+'.log')).read_text())\n            assert actual==planned\n            row={'phase':phase,'source':str(source.relative_to(repo)),'sample':sample,'planned_and_actual_cpp_outputs':actual,'load_before':load,'load_after':os.getloadavg(),**stats}\n            rows.append(row); save(phase+'-'+name+'-edits',rows); print(json.dumps(row),flush=True)\n            source.write_bytes(original);os.utime(source,ns=(stat.st_atime_ns,stat.st_mtime_ns))\n    finally:\n        source.write_bytes(original);os.utime(source,ns=(stat.st_atime_ns,stat.st_mtime_ns))\n    return rows\n",
+      "ui2_follow_before.py": "from ui2_follow_common import *\nassert_no_active_compilers()\nsubprocess.run([sys.executable,'/tmp/kin-build-bench/ui2_follow_probe_build.py','before'],check=True)\nrun(['ninja','-C',build_dir(),'-j4','hex_demo'],'before-settle')\nedit_samples('before','ui2',3)\n",
+      "ui2_follow_probe.cpp": "#include <kin/ecs/ui2.hpp>\n#include <kin/platform/input.hpp>\n#include <kin/renderer/backend.hpp>\n#include <algorithm>\n#include <cassert>\n#include <chrono>\n#include <cmath>\n#include <cstdio>\n#include <memory>\n#include <vector>\nusing namespace kin;\nclass IdentityBackend : public IRenderer2DBackend {\npublic:\n    explicit IdentityBackend(std::vector<Rectf>* fills = nullptr)\n        : fills(fills) {}\n    IdentityBackend(std::vector<Rectf>* fills, std::vector<Color>* fill_colors)\n        : fills(fills),\n          fill_colors(fill_colors) {}\n    IdentityBackend(std::vector<Rectf>* fills, std::vector<Color>* fill_colors, i32* rounded_fills, i32* rounded_outlines)\n        : fills(fills),\n          fill_colors(fill_colors),\n          rounded_fills(rounded_fills),\n          rounded_outlines(rounded_outlines) {}\n    IdentityBackend(std::vector<Rectf>* fills,\n                    std::vector<Color>* fill_colors,\n                    i32* rounded_fills,\n                    i32* rounded_outlines,\n                    std::vector<Rectf>* rounded_outline_rects,\n                    std::vector<Rectf>* clips)\n        : fills(fills),\n          fill_colors(fill_colors),\n          rounded_fills(rounded_fills),\n          rounded_outlines(rounded_outlines),\n          rounded_outline_rects(rounded_outline_rects),\n          clips(clips) {}\n\n    std::string_view name() const override { return \"identity\"; }\n    void clear(Color) override {}\n    void present() override {}\n    void set_logical_size(Vec2i) override {}\n    void set_integer_logical_size(Vec2i) override {}\n    Vec2i output_size() const override { return {640, 360}; }\n    Vec2f window_to_logical(Vec2f v) const override { return v; }\n    Vec2f logical_to_window(Vec2f v) const override { return v; }\n    Texture create_texture_from_rgba(const u8*, Vec2i) override { return {}; }\n    void draw_texture(const Texture&, Rectf dest) override {\n        if (fills) {\n            fills->push_back(dest);\n        }\n    }\n    void draw_texture(const Texture&, Rectf, Rectf dest) override {\n        if (fills) {\n            fills->push_back(dest);\n        }\n    }\n    void fill_rect(Rectf rect, Color color) override {\n        if (fills) {\n            fills->push_back(rect);\n        }\n        if (fill_colors) {\n            fill_colors->push_back(color);\n        }\n    }\n    void draw_rect(Rectf, Color) override {}\n    void fill_rounded_rect(Rectf rect, f32, Color color) override {\n        if (rounded_fills) {\n            ++*rounded_fills;\n        }\n        fill_rect(rect, color);\n    }\n    void draw_rounded_rect(Rectf rect, f32, Color, f32) override {\n        if (rounded_outlines) {\n            ++*rounded_outlines;\n        }\n        if (rounded_outline_rects) {\n            rounded_outline_rects->push_back(rect);\n        }\n    }\n    void draw_line(Vec2f a, Vec2f b, Color) override {\n        if (fills) {\n            fills->push_back({std::min(a.x, b.x), std::min(a.y, b.y), std::fabs(a.x - b.x), std::fabs(a.y - b.y)});\n        }\n    }\n    void set_viewport(Rectf) override {}\n    void reset_viewport() override {}\n    void push_clip(Rectf rect) override {\n        if (clips) {\n            clips->push_back(rect);\n        }\n    }\n    void push_viewport(Rectf) override {}\n    void pop_viewport() override {}\n\nprivate:\n    std::vector<Rectf>* fills = nullptr;\n    std::vector<Color>* fill_colors = nullptr;\n    i32* rounded_fills = nullptr;\n    i32* rounded_outlines = nullptr;\n    std::vector<Rectf>* rounded_outline_rects = nullptr;\n    std::vector<Rectf>* clips = nullptr;\n};\n\n\nint main(int argc,char**argv) {\n    assert(argc==2);\n    bool owned=std::string_view(argv[1])==\"owned\";\n    kin::EcsWorld owner; flecs::world raw;\n    flecs::world& world=owned?owner.raw():raw;\n    register_ui2_components(world);\n    for(int i=0;i<500;++i) {\n        world.entity().set(ui2::Panel{.bounds={0,0,10,10}});\n        world.entity().set(ui2::Label{.bounds={0,0,10,10}});\n        world.entity().set(ui2::Spacer{.bounds={0,0,10,10}});\n    }\n    Input input; Renderer2D renderer{std::make_unique<IdentityBackend>()};\n    ui2::Context ui; Ui2WorldRenderScratch scratch;\n    std::vector<double> samples;\n    for(int sample=0;sample<33;++sample) {\n        auto start=std::chrono::steady_clock::now();\n        for(int frame=0;frame<20;++frame) {\n            input.begin_frame();ui.begin(input,renderer);\n            update_ui2_world(world,ui,scratch);ui.end();\n            assert(scratch.size()==1500);\n            assert(scratch.records[0].panel && scratch.records[0].panel->id);\n            assert(scratch.records[1].label && scratch.records[1].label->id);\n            assert(scratch.records[2].spacer && scratch.records[2].spacer->bounds.w==10);\n        }\n        if(sample>=3)samples.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());\n    }\n    std::sort(samples.begin(),samples.end());\n    std::printf(\"frames_20_ms %.6f\\n\",samples[samples.size()/2]);\n}\n",
+      "ui2_probe.cpp": "#include <kin/ecs/ui2.hpp>\n#include <algorithm>\n#include <cassert>\n#include <chrono>\n#include <iostream>\n#include <string>\n#include <vector>\nint main(int argc,char**argv) {\n    kin::EcsWorld world;\n    kin::register_ui2_components(world);\n    if(argc>1 && std::string(argv[1])==\"bench\") {\n        auto root=world.raw().entity().set(kin::Ui2Root{{0,0,100,100}});\n        auto child=world.raw().entity().child_of(root);\n        std::vector<double> samples;\n        for(int r=0;r<33;++r) {\n            auto start=std::chrono::steady_clock::now();\n            for(int i=0;i<100000;++i) {child.add<kin::ui2::Label>();child.remove<kin::ui2::Label>();}\n            if(r>=3)samples.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());\n        }\n        assert(root.get<kin::Ui2LayoutCache>()->tree_version==6600003);\n        std::sort(samples.begin(),samples.end());\n        std::cout<<\"add_remove_100000_ms \"<<samples[samples.size()/2]<<'\\n';\n        return 0;\n    }\n    world.raw().each(flecs::Observer,[&](flecs::entity e) {\n        std::string name=e.name().c_str();if(!name.starts_with(\"ui2_dirty_\"))return;\n        const auto* o=ecs_observer_get(world.raw().c_ptr(),e.id());assert(o&&o->query);\n        const auto* q=o->query;\n        std::cout<<name<<' '<<e.id()<<' '<<o->event_count;\n        for(int i=0;i<o->event_count;++i)std::cout<<' '<<o->events[i];\n        std::cout<<' '<<int(q->term_count)<<' '<<int(q->field_count)<<' '<<q->flags<<' '<<q->read_fields<<' '<<q->write_fields<<' '<<q->data_fields;\n        for(int i=0;i<q->term_count;++i) {\n            const auto&t=q->terms[i];\n            std::cout<<' '<<t.id<<' '<<t.src.id<<' '<<t.first.id<<' '<<t.second.id<<' '<<t.trav<<' '<<t.inout<<' '<<t.oper<<' '<<int(t.field_index)<<' '<<t.flags_;\n        }\n        std::cout<<'\\n';\n    });\n}\n",
+      "ui2_follow_probe_build.py": "from ui2_follow_common import *\n\nassert_no_active_compilers()\nphase=sys.argv[1]\nfor compiler in ['clang','gcc']:\n    build=build_dir(compiler);db=json.loads((build/'compile_commands.json').read_text())\n    entry=next(e for e in db if e['file'].endswith('/tests/ui2_tests.cpp'))\n    commands=subprocess.check_output(['ninja','-C',str(build),'-t','commands','kin_ui2_tests'],text=True).splitlines()\n    line=next(line for line in commands if '-o bin/kin_ui2_tests ' in line)\n    words=shlex.split(line);start=next(i for i,v in enumerate(words) if v in ['/usr/bin/c++','/usr/bin/clang++']);end=next((i for i in range(start,len(words)) if words[i]=='&&'),len(words))\n    for kind,source in [('render','ui2_follow_probe.cpp'),('observers','ui2_probe.cpp')]:\n        obj=out/(kind+'-'+compiler+'.o');label=kind+'-'+compiler+'-'+phase\n        if not obj.exists():\n            args=shlex.split(entry['command']);args[args.index('-o')+1]=str(obj);args[args.index('-c')+1]='/tmp/kin-build-bench/'+source;args+=['-O2']\n            run(args,label+'-compile',cwd=build)\n        args=words[start:end];args[args.index('-o')+1]=str(out/label);args[args.index('tests/CMakeFiles/kin_ui2_tests.dir/ui2_tests.cpp.o')]=str(obj)\n        args=[('--dependency-file='+str(out/(label+'.link.d'))) if a.startswith('--dependency-file=') else a for a in args]\n        run(args,label+'-link',cwd=build)\n        if kind=='observers':\n            text=subprocess.check_output([str(out/label)],env=env,text=True)\n            (out/(label+'.txt')).write_text(''.join(sorted(text.splitlines(True))))\n        else:\n            for mode in ['owned','raw']:run([str(out/label),mode],label+'-'+mode,cpus='2')\n    for host in ['scene','entity','test','scenario']:\n        if phase=='before':\n            report=subprocess.check_output([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True)\n            (out/f'before-api-{compiler}-{host}.json').write_text(report)\n    print('Preserved '+compiler+' '+phase+' render/observer probes',flush=True)\n",
+      "ui2_follow_transform.py": "from ui2_follow_common import *\n\ndef transform():\n    original=(out/'before-ui2.cpp').read_text()\n    start=original.index('template <typename T>\\nvoid append_ui2_widget_records')\n    end=original.index('template <typename Fn>\\nbool visit_first_ui2_widget',start)\n    replacement='''using MakeUi2WidgetQuery = flecs::query<> (*)(flecs::world&, bool);\nusing AssignUi2WidgetRecord = void (*)(Ui2WorldRecord&, void*);\n\nvoid append_ui2_widget_records(flecs::world& world,\n                               std::vector<Ui2WorldRecord>& records,\n                               Ui2WorldRenderOptions options,\n                               const void* query_key,\n                               MakeUi2WidgetQuery make_query,\n                               Ui2WorldRecordKind kind,\n                               AssignUi2WidgetRecord assign) {\n    // Keep one query per widget/world, but share its cache holder and iteration\n    // adapter. The typed factory retains Flecs's original term/access settings.\n    const bool cached = owner_of(world) != nullptr;\n    auto query = kin::kept_query<>(world, query_key, [make_query, cached](flecs::world& w) {\n        return make_query(w, cached);\n    });\n    query.each([&](flecs::iter& it, std::size_t row) {\n        const flecs::entity entity = it.entity(row);\n        if (!include_ui2_entity(entity, options)) {\n            return;\n        }\n        Ui2WorldRecord record{\n            .kind = kind,\n            .entity_id = static_cast<EcsId>(entity.id()),\n            .order = ui2_order(entity),\n        };\n        // Shared inherited fields have one value; sparse fields are resolved\n        // by field_at rather than assuming a contiguous component array.\n        assign(record, it.field_at(0, it.is_self(0) ? row : 0));\n        records.push_back(record);\n    });\n}\n\ntemplate <typename T>\nvoid append_ui2_widget_records(flecs::world& world,\n                               std::vector<Ui2WorldRecord>& records,\n                               Ui2WorldRenderOptions options) {\n    static const char query_key = 0;\n    append_ui2_widget_records(world, records, options, &query_key,\n        +[](flecs::world& w, bool cached) -> flecs::query<> {\n            auto builder = w.query_builder<T&>();\n            if (cached) {\n                builder.cached();\n            }\n            return builder.build();\n        },\n        Ui2RecordTraits<T>::kind,\n        +[](Ui2WorldRecord& record, void* value) {\n            Ui2RecordTraits<T>::assign(record, *static_cast<T*>(value));\n        });\n}\n\n'''\n    return original[:start]+replacement+original[end:]\n\nif __name__=='__main__':\n    assert_no_active_compilers()\n    (repo/'engine/src/ecs/ui2.cpp').write_text(transform())\n    print('Shared UI2 record query/cache/iteration adapters; typed factories and assignment retained.',flush=True)\n",
+      "ui2_follow_regression.txt": "void test_ecs_bridge_query_storage_and_worlds() {\n    for (const bool owned : {true, false}) {\n        kin::EcsWorld owner;\n        flecs::world standalone;\n        flecs::world& world = owned ? owner.raw() : standalone;\n        register_ui2_components(world);\n        world.component<ui2::Panel>().add(flecs::Sparse);\n        world.component<ui2::Label>()\n            .add(flecs::CanToggle)\n            .add(flecs::OnInstantiate, flecs::Inherit);\n\n        const auto first_panel = world.entity().set(ui2::Panel{.bounds = {0, 0, 10, 10}});\n        const auto second_panel = world.entity().set(ui2::Panel{.bounds = {10, 0, 10, 10}});\n        const auto base = world.prefab().set(ui2::Label{.bounds = {0, 0, 10, 10}, .text = \"Shared\"});\n        const auto first_instance = world.entity().is_a(base);\n        const auto second_instance = world.entity().is_a(base);\n        const auto local = world.entity().set(ui2::Label{.bounds = {0, 0, 10, 10}, .text = \"Local\"});\n        world.entity().set(ui2::Label{.text = \"Disabled entity\"}).disable();\n        const auto toggled = world.entity().set(ui2::Label{.text = \"Disabled component\"});\n        toggled.disable<ui2::Label>();\n\n        Input input;\n        Renderer2D renderer = make_renderer();\n        ui2::Context ui;\n        Ui2WorldRenderScratch scratch;\n        const auto frame = [&]() {\n            input.begin_frame();\n            ui.begin(input, renderer);\n            update_ui2_world(world, ui, scratch);\n            ui.end();\n        };\n        const auto record_for = [&](flecs::entity entity) -> const Ui2WorldRecord& {\n            const auto found = std::ranges::find(scratch.records, static_cast<kin::EcsId>(entity.id()),\n                                                 &Ui2WorldRecord::entity_id);\n            assert(found != scratch.records.end());\n            return *found;\n        };\n\n        frame();\n        assert(scratch.size() == 5);\n        assert(record_for(first_panel).panel == first_panel.get<ui2::Panel>());\n        assert(record_for(second_panel).panel == second_panel.get<ui2::Panel>());\n        assert(record_for(first_instance).label == base.get<ui2::Label>());\n        assert(record_for(second_instance).label == base.get<ui2::Label>());\n        assert(record_for(local).label == local.get<ui2::Label>());\n        assert(record_for(first_panel).widget == record_for(first_panel).panel);\n        assert(record_for(first_instance).widget == record_for(first_instance).label);\n\n        // Kept queries must observe new tables, deferred removals and toggles.\n        world.defer_begin();\n        const auto added = world.entity().set(ui2::Spacer{.bounds = {0, 0, 10, 10}});\n        first_panel.remove<ui2::Panel>();\n        world.defer_end();\n        toggled.enable<ui2::Label>();\n        frame();\n        assert(scratch.size() == 6);\n        assert(record_for(added).spacer == added.get<ui2::Spacer>());\n        assert(record_for(toggled).label == toggled.get<ui2::Label>());\n        assert(std::ranges::none_of(scratch.records, [&](const auto& record) {\n            return record.entity_id == first_panel.id();\n        }));\n    }\n}\n\n",
+      "ui2_follow_regression_apply.py": "from ui2_follow_common import *\nassert_no_active_compilers()\npath=repo/'tests/ui2_tests.cpp'\noriginal=subprocess.check_output(['git','show',(out/'base-commit').read_text().strip()+':tests/ui2_tests.cpp'],cwd=repo,text=True)\n(out/'before-ui2_tests.cpp').write_text(original)\nbody=pathlib.Path('/tmp/kin-build-bench/ui2_follow_regression.txt').read_text()\nafter=original.replace('void test_ecs_sync_stable_keys_sweep_and_state() {',body+'void test_ecs_sync_stable_keys_sweep_and_state() {',1)\nafter=after.replace('    test_ecs_bridge_static_dynamic_filtering();','    test_ecs_bridge_static_dynamic_filtering();\\n    test_ecs_bridge_query_storage_and_worlds();',1)\nassert path.read_text() in [original,after]\npath.write_text(after)\n",
+      "ui2_follow_validate.py": "import re\nfrom ui2_follow_common import *\nassert_no_active_compilers()\nscript=pathlib.Path('/tmp/kin-build-bench/scene_split_validate.py').read_text()\nscript=script[:script.index(\" if compiler=='gcc':\\n  subprocess.run([sys.executable,'/tmp/kin-build-bench/scene_split_runtime.py','after','gcc']\")]\nscript=script.replace(\" if compiler=='gcc' and not (out/'runtime-gcc-before').exists():subprocess.run([sys.executable,'/tmp/kin-build-bench/scene_split_runtime.py','before','gcc'],check=True)\\n\",'')\nscript=script.replace(\"out=base/'kin-scene-split-bench'\", \"out=base/'kin-ui2-followup-bench'\")\nscript=script.replace(\"(base/'kin-workflow-build-bench'/('api-after-'+compiler)/(host+'.json'))\", \"(out/('before-api-'+compiler+'-'+host+'.json'))\")\n(out/'validate.py').write_text(script)\nsubprocess.run([sys.executable,str(out/'validate.py'),*(sys.argv[1:] or ['clang','gcc'])],env={**env,'PYTHONPATH':'/tmp/kin-build-bench'},check=True)\n",
+      "ui2_follow_pairs.py": "import concurrent.futures, shutil\nfrom ui2_follow_common import *\nassert_no_active_compilers()\nsources={}\nfor phase in ['before','after']:\n    folder=out/('snapshot-'+phase);folder.mkdir(exist_ok=True)\n    (folder/'ui2.cpp').write_bytes((out/'before-ui2.cpp' if phase=='before' else repo/'engine/src/ecs/ui2.cpp').read_bytes())\n    shutil.copy2(repo/'engine/src/ecs/ui2_internal.hpp',folder/'ui2_internal.hpp')\n    sources[phase]=folder/'ui2.cpp'\nrows=[]\nfor compiler in ['clang','gcc']:\n    build=build_dir(compiler);db=json.loads((build/'compile_commands.json').read_text());control=next(e for e in db if e['file'].endswith('/core/json.cpp'))\n    for sample in range(3):\n        for phase in (['before','after'] if sample%2==0 else ['after','before']):\n            assert_no_active_compilers();label=f'paired-{compiler}-{phase}-{sample}'\n            args=compile_args('ui2',out/(label+'.o'),compiler=compiler,source=sources[phase])\n            other=shlex.split(control['command']);other[other.index('-o')+1]=str(out/(label+'-control.o'))\n            load=os.getloadavg()\n            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:\n                work=pool.submit(run,args,label,cwd=build,cpus='2',timed=True)\n                unchanged=pool.submit(run,other,label+'-control',cwd=build,cpus='4',timed=True)\n                stats=work.result();control_stats=unchanged.result()\n            row={'compiler':compiler,'phase':phase,'sample':sample,'source':str(sources[phase]),'cpu':2,**stats,'unchanged_json_control_cpu':4,'unchanged_json_control':control_stats,'load_before':load,'load_after':os.getloadavg()}\n            rows.append(row);save('paired-compiles',rows);print(json.dumps(row),flush=True)\n",
+      "ui2_follow_more_pairs.py": "import concurrent.futures\nfrom ui2_follow_common import *\nassert_no_active_compilers()\nrows=json.loads((out/'paired-compiles.json').read_text());assert len(rows)==12\nfor compiler in ['clang','gcc']:\n    build=build_dir(compiler);db=json.loads((build/'compile_commands.json').read_text());control=next(e for e in db if e['file'].endswith('/core/json.cpp'))\n    for sample in [3,4]:\n        for phase in (['before','after'] if sample%2==0 else ['after','before']):\n            assert_no_active_compilers();label=f'paired-{compiler}-{phase}-{sample}'\n            source=out/('snapshot-'+phase)/'ui2.cpp';args=compile_args('ui2',out/(label+'.o'),compiler=compiler,source=source)\n            other=shlex.split(control['command']);other[other.index('-o')+1]=str(out/(label+'-control.o'))\n            load=os.getloadavg()\n            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:\n                work=pool.submit(run,args,label,cwd=build,cpus='2',timed=True)\n                unchanged=pool.submit(run,other,label+'-control',cwd=build,cpus='4',timed=True)\n                stats=work.result();control_stats=unchanged.result()\n            row={'compiler':compiler,'phase':phase,'sample':sample,'source':str(source),'cpu':2,**stats,'unchanged_json_control_cpu':4,'unchanged_json_control':control_stats,'load_before':load,'load_after':os.getloadavg(),'additional_block_after_observed_host_variation':True}\n            rows.append(row);save('paired-compiles',rows);print(json.dumps(row),flush=True)\n",
+      "ui2_follow_runtime.py": "import re\nfrom ui2_follow_common import *\nassert_no_active_compilers();rows=[]\nfor compiler in ['clang','gcc']:\n    before=(out/('observers-'+compiler+'-before.txt')).read_text();after=(out/('observers-'+compiler+'-after.txt')).read_text();assert before==after and len(before.splitlines())==111\n    for sample in range(3):\n        for phase in (['before','after'] if sample%2==0 else ['after','before']):\n            for mode in ['owned','raw']:\n                label=f'render-{compiler}-{phase}-{mode}-{sample}'\n                run([str(out/('render-'+compiler+'-'+phase)),mode],label,cpus='2')\n                data=(out/(label+'.log')).read_text();match=re.search(r'^frames_20_ms ([0-9.]+)$',data,re.M);assert match,data\n                row={'compiler':compiler,'phase':phase,'world':mode,'sample':sample,'frames_20_ms':float(match[1]),'record_and_widget_assertions_pass':True}\n                rows.append(row);save('runtime-results',rows);print(json.dumps(row),flush=True)\n",
+      "ui2_follow_syntax.py": "import concurrent.futures\nfrom ui2_follow_common import *\nassert_no_active_compilers()\ndef no_pch(args):\n    result=[];i=0\n    while i<len(args):\n        if args[i:i+2] in [['-Xclang','-include-pch'],['-Xclang','-include']] and i+3<len(args) and args[i+2]=='-Xclang' and 'cmake_pch.' in args[i+3]:i+=4;continue\n        if args[i] in ['-include','-include-pch'] and i+1<len(args) and 'cmake_pch.' in args[i+1]:i+=2;continue\n        if args[i]=='-o':i+=2;continue\n        if args[i] in ['-c','-fpch-preprocess','-Winvalid-pch','-fpch-instantiate-templates']:i+=1;continue\n        result.append(args[i]);i+=1\n    return result\n\nif __name__=='__main__':\n    run(['cmake','-S','/tmp/kin-build-time','-B',base/'kin-build-time-3d-clang','-DKIN_DEV_FAST_SCRIPTING=OFF','-DKIN_COMPILER_CACHE=off','-DKIN_ENABLE_PCH=ON','-DKIN_ENABLE_LTO=OFF'],'3d-configure')\n    tasks=[]\n    for mode,build in [('clang-3d',base/'kin-build-time-3d-clang'),('gcc-no-physics-audio',build_dir('gcc'))]:\n        db=json.loads((build/'compile_commands.json').read_text())\n        for suffix in ['/ecs/ui2.cpp','/tests/ui2_tests.cpp']:\n            entry=next(e for e in db if e['file'].endswith(suffix));args=no_pch(shlex.split(entry['command']))\n            if mode=='gcc-no-physics-audio':args=[a for a in args if a.split('=')[0] not in ['-DKIN_ENABLE_PHYSICS','-DKIN_ENABLE_AUDIO']]+['-UKIN_ENABLE_PHYSICS','-UKIN_ENABLE_AUDIO']\n            tasks.append((mode,suffix,build,args+['-fsyntax-only']))\n    def check(task):\n        mode,source,build,args=task;run(args,'syntax-'+mode+'-'+pathlib.Path(source).name,cwd=build)\n        return {'configuration':mode,'source':source,'pch':False,'exit_code':0}\n    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:rows=list(pool.map(check,tasks))\n    save('syntax-results',rows);print(json.dumps(rows),flush=True)\n",
+      "ui2_follow_original_control.py": "from ui2_follow_common import *\nassert_no_active_compilers();rows=[]\nfor compiler in ['clang','gcc']:\n    build=build_dir(compiler)\n    original=out/('paired-'+compiler+'-before-0.o')\n    assert original.exists()\n    line=next(line for line in subprocess.check_output(['ninja','-C',str(build),'-t','commands','kin_ui2_tests'],text=True).splitlines() if '-o bin/kin_ui2_tests ' in line)\n    args=shlex.split(line);start=next(i for i,x in enumerate(args) if x in ['/usr/bin/c++','/usr/bin/clang++']);end=next((i for i in range(start,len(args)) if args[i]=='&&'),len(args));args=args[start:end]\n    label='original-control-'+compiler;args[args.index('-o')+1]=str(out/label)\n    args=[('--dependency-file='+str(out/(label+'.link.d'))) if a.startswith('--dependency-file=') else a for a in args]\n    args.insert(args.index('tests/CMakeFiles/kin_ui2_tests.dir/ui2_tests.cpp.o')+1,str(original))\n    run(args,label+'-link',cwd=build)\n    run([str(out/label)],label+'-tests')\n    rows.append({'compiler':compiler,'original_ui2_object':str(original),'full_ui2_suite_including_new_regression_passed':True})\nsave('original-controls',rows);print(json.dumps(rows),flush=True)\n",
+      "ui2_follow_measure.py": "from ui2_follow_common import *\nfor script in ['ui2_follow_runtime.py','ui2_follow_pairs.py','ui2_follow_syntax.py','ui2_follow_original_control.py']:\n    subprocess.run([sys.executable,'/tmp/kin-build-bench/'+script],check=True)\nedit_samples('after','ui2',3)\nassert_no_active_compilers();(repo/'engine/src/ecs/ui2.cpp').touch()\nsubprocess.run([sys.executable,'/tmp/kin-build-bench/ui2_follow_final.py'],check=True)\nsubprocess.run([sys.executable,'/tmp/kin-build-bench/ui2_follow_more_pairs.py'],check=True)\n",
+      "ui2_follow_final.py": "import hashlib\nfrom ui2_follow_common import *\nfrom ui2_follow_transform import transform\nassert_no_active_compilers()\nassert (repo/'engine/src/ecs/ui2.cpp').read_text()==transform()\ntargets=['kin_ui2_tests','kin_ui2_text_edit_tests','kin_ui2_touch_controls_tests','kin_ui2_text_tests','kin_ui2_theme_file_tests','hex_demo','shapes_demo','kin_lua']\nrows=[]\nfor compiler in ['clang','gcc']:\n    build=build_dir(compiler)\n    run(['cmake','--build',build,'--parallel','4','--target',*targets],'final-build-'+compiler)\n    run(['ctest','--test-dir',build,'--output-on-failure','-R','^(kin-ui2(|-text-edit|-touch-controls|-text|-theme-file)|hex-demo|shapes-demo)$'],'final-tests-'+compiler)\n    assert '100% tests passed, 0 tests failed out of 7' in (out/('final-tests-'+compiler+'.log')).read_text()\n    apis={}\n    for host in ['scene','entity','test','scenario']:\n        report=json.loads(subprocess.check_output([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True))\n        assert report==json.loads((out/f'before-api-{compiler}-{host}.json').read_text())\n        apis[host]=hashlib.sha256(json.dumps(report,sort_keys=True).encode()).hexdigest()\n    run(['cmake','--build',build,'--parallel','4','--target',*targets],'final-no-change-'+compiler)\n    text=(out/('final-no-change-'+compiler+'.log')).read_text();assert 'Building C' not in text and 'Linking C' not in text,text\n    rows.append({'compiler':compiler,'final_smoke_tests':7,'api_reports_match':apis,'no_change_compiles_and_links':0,'canonical_source_matches':True});save('final-results',rows)\n    print('Seven final smoke tests, API reports and no-change builds pass: '+compiler,flush=True)\n",
+      "ui2_follow_record.py": "import hashlib, re, statistics\nfrom ui2_follow_common import *\nfrom ui2_follow_transform import transform\nassert_no_active_compilers()\ndef read(name):return json.loads((out/(name+'.json')).read_text())\ndef stats(values):return {'median':statistics.median(values),'min':min(values),'max':max(values)}\nbase_commit=(out/'base-commit').read_text().strip()\nold=(out/'before-ui2.cpp').read_text();current=(repo/'engine/src/ecs/ui2.cpp').read_text();assert current==transform()\nold_start=old.index('template <typename T>\\nvoid append_ui2_widget_records');old_end=old.index('template <typename Fn>\\nbool visit_first_ui2_widget',old_start)\nnew_start=current.index('using MakeUi2WidgetQuery =');new_end=current.index('template <typename Fn>\\nbool visit_first_ui2_widget',new_start)\nassert old[:old_start]==current[:new_start] and old[old_end:]==current[new_end:]\nwidgets=re.findall(r'^KIN_UI2_RECORD_TRAIT\\(([^,]+),',old,re.M);assert len(widgets)==51\nhashes={}\nfor rel in ['engine/src/ecs/ui2.cpp','tests/ui2_tests.cpp','engine/CMakeLists.txt']:\n    before=subprocess.check_output(['git','show',base_commit+':'+rel],cwd=repo)\n    hashes[rel]={'before':hashlib.sha256(before).hexdigest(),'after':hashlib.sha256((repo/rel).read_bytes()).hexdigest()}\nassert hashes['engine/CMakeLists.txt']['before']==hashes['engine/CMakeLists.txt']['after']\nassert not subprocess.check_output(['git','diff',base_commit,'--','engine/include'],cwd=repo)\npairs=read('paired-compiles');assert len(pairs)==20\ncompile_summary={}\nfor compiler in ['clang','gcc']:\n    compile_summary[compiler]={}\n    for phase in ['before','after']:\n        rows=[row for row in pairs if row['compiler']==compiler and row['phase']==phase];assert len(rows)==5\n        compile_summary[compiler][phase]={'wall_seconds':stats([row['wall_seconds'] for row in rows]),'compiler_cpu_seconds':stats([row['user_seconds']+row['system_seconds'] for row in rows]),'max_child_rss_kib':stats([row['max_child_rss_kib'] for row in rows]),'unchanged_control_wall_seconds':stats([row['unchanged_json_control']['wall_seconds'] for row in rows])}\nruntime=read('runtime-results');assert len(runtime)==24 and all(row['record_and_widget_assertions_pass'] for row in runtime)\nruntime_summary={compiler:{mode:{phase:stats([row['frames_20_ms'] for row in runtime if (row['compiler'],row['world'],row['phase'])==(compiler,mode,phase)]) for phase in ['before','after']} for mode in ['owned','raw']} for compiler in ['clang','gcc']}\nedits={phase:read(phase+'-ui2-edits') for phase in ['before','after']}\nassert all(len(rows)==3 and all(len(row['planned_and_actual_cpp_outputs'])==1 for row in rows) for rows in edits.values())\nedit_summary={phase:stats([row['wall_seconds'] for row in rows]) for phase,rows in edits.items()}\nobserved={};sizes=[];holders={}\nfor compiler in ['clang','gcc']:\n    before=(out/('observers-'+compiler+'-before.txt')).read_text();after=(out/('observers-'+compiler+'-after.txt')).read_text();assert before==after and len(before.splitlines())==111\n    observed[compiler]={'all_111_descriptors_match':True,'before_sha256':hashlib.sha256(before.encode()).hexdigest(),'after_sha256':hashlib.sha256(after.encode()).hexdigest(),'descriptors':before.splitlines()}\n    holders[compiler]={}\n    for phase in ['before','after']:\n        exe=out/('render-'+compiler+'-'+phase);values=subprocess.check_output(['size','-B',str(exe)],text=True).splitlines()[-1].split()\n        sizes.append({'compiler':compiler,'phase':phase,'file_bytes':exe.stat().st_size,'text_and_readonly_bytes':int(values[0]),'data_bytes':int(values[1]),'bss_bytes':int(values[2])})\n        obj=out/('paired-'+compiler+'-'+phase+'-0.o');nm=subprocess.check_output(['nm','-C',str(obj)],text=True)\n        vtables=sorted(set(line.split('vtable for ',1)[1] for line in nm.splitlines() if 'vtable for kin::EcsWorld::KeptQueryOf<' in line))\n        holders[compiler][phase]={'object_file_bytes':obj.stat().st_size,'cache_holder_vtables':vtables,'cache_holder_vtable_count':len(vtables)}\ntrace={}\nfor phase,name in [('before','before-trace'),('after','pilot-trace')]:\n    es=json.loads((out/(name+'.json')).read_text())['traceEvents'];trace[phase]={'totals_seconds':{row['name']:row['dur']/1e6 for row in es if row['name'].startswith('Total ')},'instrumented_stats':read(name+'-stats' if phase=='before' else name+'.stats')}\nvalidation=read('validation-results');syntax=read('syntax-results');original=read('original-controls');final=read('final-results')\nassert len(validation)==2 and all(row['selected_tests_passed']==39 for row in validation)\nassert len(syntax)==4 and all(row['exit_code']==0 and not row['pch'] for row in syntax)\nassert len(original)==2 and all(row['full_ui2_suite_including_new_regression_passed'] for row in original)\nassert len(final)==2 and all(row['final_smoke_tests']==7 and row['no_change_compiles_and_links']==0 for row in final)\nscripts=['ui2_follow_common.py','ui2_follow_before.py','ui2_follow_probe.cpp','ui2_probe.cpp','ui2_follow_probe_build.py','ui2_follow_transform.py','ui2_follow_regression.txt','ui2_follow_regression_apply.py','ui2_follow_validate.py','ui2_follow_pairs.py','ui2_follow_more_pairs.py','ui2_follow_runtime.py','ui2_follow_syntax.py','ui2_follow_original_control.py','ui2_follow_measure.py','ui2_follow_final.py','ui2_follow_record.py','ui2_follow_docs.py','bench_compiler_guard.py']\nrecord={\n    'date':'2026-11-08','base_commit':base_commit,'source_sha256':hashes,\n    'environment':{'host':list(os.uname()),'cpu':next(line.split(':',1)[1].strip() for line in pathlib.Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')),'logical_cpus':os.cpu_count(),'memtotal':pathlib.Path('/proc/meminfo').read_text().splitlines()[0],'versions':{name:subprocess.check_output([name,'--version'],text=True).splitlines()[0] for name in ['clang++','c++','cmake','ninja']},'source_directory':str(repo),'build_outputs_and_temp':str(out),'worker_cpu_siblings':{str(cpu):pathlib.Path(f'/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list').read_text().strip() for cpu in [0,2,4,6]}},\n    'change':'Share the UI2 widget-record query cache-holder type and iteration adapter across 51 widget types. Retain one private cache key/query per widget type/world, typed query_builder<T&>() factories and typed record/draw assignment. Sparse and shared fields use field_at with row zero for shared storage. Public headers, build graph/flags and all other UI2 implementation code remain unchanged.',\n    'configuration':'Normal Release target -O2, existing PCH on, compiler cache/LTO off, KIN_DEV_FAST_SCRIPTING=OFF, mold. No lower optimization or safety settings.',\n    'compile_commands':{compiler:next(entry['command'] for entry in json.loads((build_dir(compiler)/'compile_commands.json').read_text()) if entry['file'].endswith('/ecs/ui2.cpp')) for compiler in ['clang','gcc']},\n    'diagnostic_traces':trace,\n    'paired_compile_method':'Five observations/version/compiler: initial before/after, after/before, before/after pairs, then after/before and before/after. The additional block followed substantial host-load/control variation; every initial observation, including the 33.89s Clang and 42.33s GCC before outliers, is retained. Matching target commands/PCHs, stable original/final source and private-header copies, no profiler flags, each UI2 compiler on CPU 2. An unchanged core/json.cpp compile runs on CPU 4 each observation. No owned validation compilers overlap the benchmark. Host activity, SMT siblings, thermals and I/O remain uncontrolled; these are local estimates, not a precise causal percentage. This measures one translation unit, not a clean whole project.',\n    'paired_compile_samples':pairs,'paired_compile_summary':compile_summary,'cache_holder_symbols_and_objects':holders,\n    'real_edit_method':'Three Clang trailing-comment source edits/version through the canonical hex_demo archive/link with four workers pinned 0/2/4/6. Assert exactly one planned and actual C++ output. Restore bytes and nanosecond mtimes after every observation. Recompile final canonical object from restored bytes afterward. The implementation remains one source; rebuild fanout is unchanged.',\n    'real_edit_samples':edits,'real_edit_summary':edit_summary,\n    'runtime_probe':{'method':'Same assertions-enabled -O2 probe object linked before changes and after validation for each compiler. Three alternating processes/version/compiler/world mode, each 30 samples after three warmups; CPU 2. Each sample runs 20 update_ui2_world frames over 500 panels, 500 empty labels and 500 spacers using an identity/no-op renderer. Assert 1500 sorted records and representative component pointers/IDs/bounds every frame. Test Kin-owned cached worlds and standalone Flecs worlds. These are narrow CPU bridge/render probes without GPU rendering, layout trees or non-empty text and do not establish whole-game FPS or bound all widget workloads.','samples':runtime,'process_median_summary':runtime_summary,'executable_sizes':sizes},\n    'observer_descriptors':observed,\n    'mechanical_checks':{'transformation_regenerates_exactly':True,'all_code_outside_collection_helper_byte_identical':True,'widget_count':len(widgets),'ordered_widget_types':widgets,'registration_layout_builders_sorting_clipping_draw_functions_unchanged':True,'public_headers_and_cmake_unchanged':True},\n    'validation':validation,'original_implementation_controls':original,'no_pch_optional_configuration_checks':syntax,'final_state':final,\n    'limits':['No whole-project or cumulative speedup claim. Cache/PCH invalidation scope and ordinary project scheduling remain unchanged. RSS is per compiler process, not total build memory.','Query cache identity changes from the shared typed each() cache to a private key per widget collection call site/world. Code elsewhere querying that same widget signature may now keep another query. Query caching for Kin-owned worlds, standalone fallback and world-owned lifetimes remain intact.','No Windows/MSVC or native desktop/3D/GPU runtime validation. Optional feature variants are syntax/template checks only.','Renderer probe medians move in both directions. Dynamic field lookup and record-assignment dispatch add per-row work; faster compilation does not imply faster rendering.'],\n    'development_notes':['The initial standalone benchmark incorrectly assumed Spacer has an id; its pointer/bounds assertion was corrected before baseline capture.','The first added regression-test compile encountered Flecs global EcsWorld/EcsId name clashes; explicit kin:: qualification fixed the test. All recorded suite/control runs pass.','Substantial load/control changes in the first compilation block prompted two additional observations/version/compiler. The initial block remains in the combined summary and complete raw sample list.'],\n    'reproduction':{'artifact_directory':str(out),'steps':['At base_commit configure the normal Clang/GCC builds and prebuild UI2 tests, games and kin_lua with PCH on, cache/LTO off and normal -O2 targets. Adjust script paths/TMPDIR/affinity. Save original engine/src/ecs/ui2.cpp to before-ui2.cpp and write base-commit in the artifact directory.','Collect the before diagnostic with the matching compile command plus -ftime-trace on CPU 2, then run ui2_follow_before.py to preserve before render/observer probes, API reports and three implementation edits. Settle CMake first.','Run ui2_follow_transform.py and ui2_follow_regression_apply.py. Build and test ui2_follow_validate.py clang gcc, then ui2_follow_probe_build.py after. Optionally collect the final diagnostic trace separately; pilot-trace files correspond to the final production source.','Run ui2_follow_measure.py to collect alternating runtime/compile samples, no-PCH variants, original-object controls, real edits and final canonical/smoke/API/no-change checks. Serialize source/header/configuration/log edits with owned compilers.','Run ui2_follow_record.py. Keep all samples and separate diagnostic instrumentation from uninstrumented timing.'],'scripts':{name:pathlib.Path('/tmp/kin-build-bench',name).read_text() for name in scripts},'validation_script':(out/'validate.py').read_text()}\n}\n(repo/'docs/build_ui2_collection_2026-11-08.json').write_text(json.dumps(record,indent=2)+'\\n')\nprint(json.dumps({'compile':compile_summary,'edits':edit_summary,'runtime':runtime_summary,'sizes':sizes,'cache_holder_counts':{c:{phase:v['cache_holder_vtable_count'] for phase,v in rows.items()} for c,rows in holders.items()}},indent=2),flush=True)\n",
+      "ui2_follow_docs.py": "from ui2_follow_common import *\nassert_no_active_compilers()\nd=json.loads((repo/'docs/build_ui2_collection_2026-11-08.json').read_text())\nsummary=d['paired_compile_summary'];edit=d['real_edit_summary']\ntable=[]\nfor compiler,title in [('clang','Clang 21.1.8'),('gcc','GCC 15.2')]:\n    a=summary[compiler]['before'];b=summary[compiler]['after']\n    table.append(f\"| {title} | {a['wall_seconds']['median']:.2f} s | {b['wall_seconds']['median']:.2f} s | {a['compiler_cpu_seconds']['median']:.2f} \u2192 {b['compiler_cpu_seconds']['median']:.2f} s | {a['max_child_rss_kib']['median']/1024:.0f} \u2192 {b['max_child_rss_kib']['median']/1024:.0f} MiB |\")\na=edit['before']['median'];b=edit['after']['median']\ntext='''### Shared UI2 record collection\n\nFollow-up measured over 2026-11-07\u201308 from `5b425e4`. Widget-record collection in\n`ecs/ui2.cpp` now shares its query cache holder type and iteration adapter across\n51 widget types. Each type retains a private key/query per Kin-owned world and\nuses the original typed `query_builder<T&>()` factory; standalone Flecs worlds\nstill build an uncached query per call. Record assignment and drawing remain\ntyped. `field_at` handles sparse storage, with row zero for shared inherited\nfields. Code outside this collection helper, including registrations, builders,\nlayout, sorting and clipping, is byte-identical. Public headers/CMake are unchanged.\n\nThis removes repeated compiler work without introducing more translation units.\nThe Clang object contains 8 cache holder vtables instead of 56, because the\nother UI2 query paths retain their own typed caches. Runtime query instances\nare still per widget/world. Collection now uses private keys instead of sharing\nthe typed `each()` cache with other callers: querying the same signature\nelsewhere can retain another query, including the layout's prompt queries.\n\nFresh diagnostic Clang compilations take 23.41 s before and 18.77 s after. Instrumented\nprofiles are separate from the following normal Release `-O2` samples. Existing\nPCH is on; compiler cache/LTO and `KIN_DEV_FAST_SCRIPTING` are off, with mold\nlinking and unchanged safety settings.\n\nFive observations/version/compiler use stable original/final source/private\nheader copies and matching commands/PCHs without profiling. Before/after order\nalternates, reversing on every second pair. UI2 compiles on CPU 2 while an\nunchanged JSON control compiles on CPU 4. No owned validation compilers overlap\nthe benchmark. Medians are:\n\n| Compiler | Compile before | Compile after | Compiler CPU before \u2192 after | Peak compiler RSS before \u2192 after |\n|---|---:|---:|---:|---:|\n'''+ '\\n'.join(table)+'''\n\nBackground activity and SMT siblings are uncontrolled. Load/control variation\nprompted two additional pairs per compiler; all initial samples, including\n33.89 s Clang and 42.33 s GCC before outliers, remain in the summary/data.\nThese observed ratios are local estimates, not precise causal percentages or\nclean-project/cumulative speedups. RSS is per compiler, not total build memory.\n\n'''+f'''Three real implementation-only comment edits per version rebuild through the\nClang `hex_demo` archive/link, with four workers pinned to CPUs 0/2/4/6.\nThe median is **{a:.2f} \u2192 {b:.2f} s**, an observed **{100*(1-b/a):.1f}% less wall time**.\n'''+'''Each plan and actual build compiles exactly one expected C++ object. Source\nbytes and nanosecond timestamps are restored after every sample, then the\ncanonical object is recompiled from restored bytes. Rebuild fanout is unchanged.\nHost conditions also limit the precision of this edit-loop comparison.\n\nRenderer checks use three alternating processes/version/compiler/world mode,\neach with 30 measured samples after three warmups on CPU 2. Each sample renders\n20 frames of 500 panels, 500 empty labels and 500 spacers through an identity\nbackend, asserting all 1,500 records and representative pointers/IDs/bounds.\nAcross process medians, Clang's owned-world case is 2.8% faster; standalone\nFlecs is 3.1% slower. GCC cases are 2.2\u20132.7% slower. Dynamic field lookup and\nrecord assignment add per-row work. These narrow CPU probes have no GPU work,\nlayout trees or non-empty text and do not establish whole-game FPS.\n\nClang and GCC each pass 39 selected tests and all four Lua API reports match\ntheir baseline. All 111 dirty-observer descriptors match, including IDs, names,\nevents and query/access flags. New regression coverage exercises sparse panels,\nshared inherited labels, disabled entities/components, deferred additions/\nremovals, toggles and refreshed table matches in both owned and standalone\nworlds. The full UI2 suite, including the new regression, also passes when\nlinked against the original object on both compilers.\n\nFour no-PCH syntax/template cases compile the implementation and test file\nwith Clang 3D enabled and GCC physics/audio disabled. Seven final UI2/game smoke\ntests and API comparisons pass per compiler; no-change builds compile and link\nnothing. Windows/MSVC and native desktop/3D/GPU runtime are untested.\n\nThe [UI2 collection data](build_ui2_collection_2026-11-08.json) retains all\nprofiles, timing/control/load observations, real edit plans, runtime samples,\nobject/cache holder counts, observer descriptors, validation, hashes, flags and\nreproduction scripts.\n'''\npath=repo/'docs/build_times.md';existing=path.read_text();heading='### Shared UI2 record collection'\nif heading in existing:existing=existing[:existing.index(heading)].rstrip()+'\\n'\npath.write_text(existing.rstrip()+'\\n\\n'+text)\npath=repo/'docs/changelog.md';old=path.read_text();bullet='''- UI2 widget collection reuses Flecs query cache types and iteration code across widget types,\n  reducing compiler work and peak compiler memory. See [UI2 collection measurements](build_times.md#shared-ui2-record-collection) for timings and runtime tradeoffs.\n\n'''\nif bullet not in old:path.write_text(old.replace('## [Unreleased]\\n\\n','## [Unreleased]\\n\\n'+bullet,1))\n",
+      "bench_compiler_guard.py": "\"\"\"Keep header-edit experiments separate from worktree compiler processes.\"\"\"\nimport os\nfrom pathlib import Path\n\nROOTS = (b'/tmp/kin-build-time/', b'/home/bamedeo/kin-wt/build-time/')\nBUILD_ROOTS = tuple(b'/mnt/windows/Users/amedeo/Desktop/gamedev/' + name for name in (b'kin-build-time-clang', b'kin-build-time-out', b'kin-build-time-3d-clang'))\n\ndef active_compilers():\n    found = []\n    for process in Path('/proc').iterdir():\n        if not process.name.isdigit() or int(process.name) == os.getpid():\n            continue\n        try:\n            arguments = (process / 'cmdline').read_bytes().split(b'\\0')\n            program = arguments[0].rsplit(b'/', 1)[-1]\n            is_compiler = b'clang' in program or program in (b'g++', b'c++', b'cc1plus', b'cc1') or program.endswith(b'-g++')\n            is_build_tool = program in (b'ninja', b'ninja-build', b'cmake')\n            build_match = False\n            if is_build_tool:\n                cwd = os.fsencode(os.readlink(process / 'cwd'))\n                build_match = any(root in argument for argument in arguments for root in BUILD_ROOTS) or any(cwd.startswith(root) for root in BUILD_ROOTS) or any(root.rstrip(b'/') in argument for argument in arguments for root in ROOTS)\n            if (is_compiler and any(root in argument for argument in arguments for root in ROOTS)) or build_match:\n                found.append((int(process.name), program.decode(errors='replace')))\n        except (FileNotFoundError, PermissionError, ProcessLookupError):\n            continue\n    return sorted(found)\n\ndef assert_no_active_compilers():\n    found = active_compilers()\n    if found:\n        raise RuntimeError(f'Wait for worktree compiler/configure/build processes before experiments: {found}')\n"
+    },
+    "validation_script": "import hashlib,json,os,pathlib,re,subprocess,sys\nfrom bench_compiler_guard import assert_no_active_compilers\nassert_no_active_compilers()\nbase=pathlib.Path('/mnt/windows/Users/amedeo/Desktop/gamedev');out=base/'kin-ui2-followup-bench';results=json.loads((out/'validation-results.json').read_text()) if (out/'validation-results.json').exists() else []\npattern='^(kin-(scripting|entity-scripts|lua-script|lua-workflows2d|lua-runtime|lua-tooling|scene|scene-asset|scene-flow|scene-workflow2d|development|ui2|ui2-text-edit|ui2-touch-controls|ui2-text|ui2-theme-file|renderer|rendering|ecs-render|sprite-animation|particles|tilemap|animation-lighting2d|platform|window-points|input-workflow|ecs|ecs-entity|ecs-events|ecs-component|ecs-inspection|ecs-editor|ecs-system|ecs-animation|ecs-time|ecs-spawn|ecs-lifecycle)|hex-demo|shapes-demo)$'\ntargets=['kin_ecs_tests','kin_ecs_entity_tests','kin_ecs_events_tests','kin_ecs_component_tests','kin_ecs_inspection_tests','kin_ecs_editor_tests','kin_ecs_system_tests','kin_ecs_animation_tests','kin_ecs_time_tests','kin_ecs_spawn_tests','kin_ecs_lifecycle_tests','kin_platform_headers_check','kin_platform_tests','kin_window_points_tests','kin_input_workflow_tests','kin_renderer_headers_check','kin_renderer_tests','kin_rendering_tests','kin_ecs_render_tests','kin_sprite_animation_tests','kin_particle_tests','kin_tilemap_tests','kin_animation_lighting2d_tests','kin_scene_headers_check','kin_lua','kin_lua_script_tests','kin_scripting_tests','kin_entity_scripts_tests','kin_lua_workflows2d_tests','kin_lua_runtime_tests','kin_scene_tests','kin_scene_asset_tests','kin_scene_flow_tests','kin_scene_workflow2d_tests','kin_development_tests','kin_ui2_tests','kin_ui2_text_edit_tests','kin_ui2_touch_controls_tests','kin_ui2_text_tests','kin_ui2_theme_file_tests','hex_demo','shapes_demo']\nfor compiler in sys.argv[1:] or ['clang','gcc']:\n build=base/('kin-build-time-clang' if compiler=='clang' else 'kin-build-time-out');env={**os.environ,'TMPDIR':str(out/'tmp'),'SDL_VIDEODRIVER':'dummy','SDL_AUDIODRIVER':'dummy'}\n with (out/(compiler+'-validation-build.log')).open('w') as log:\n  subprocess.run(['cmake','-S','/tmp/kin-build-time','-B',str(build),'-DKIN_DEV_FAST_SCRIPTING=OFF','-DKIN_COMPILER_CACHE=off','-DKIN_ENABLE_PCH=ON','-DKIN_ENABLE_LTO=OFF'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n  subprocess.run(['cmake','--build',str(build),'--parallel','4','--target',*targets,'--','-k','0'],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n with (out/(compiler+'-tests.log')).open('w') as log:subprocess.run(['ctest','--test-dir',str(build),'--output-on-failure','-j','2','-R',pattern],env=env,stdout=log,stderr=subprocess.STDOUT,check=True)\n count=re.search(r'100% tests passed, 0 tests failed out of (\\d+)',(out/(compiler+'-tests.log')).read_text());assert count and int(count[1])==39\n reports={}\n for host in ['scene','entity','test','scenario']:\n  p=subprocess.run([str(build/'bin/kin_lua'),'api','--host',host],env=env,text=True,capture_output=True,check=True);actual=json.loads(p.stdout);reference=json.loads((out/('before-api-'+compiler+'-'+host+'.json')).read_text());assert actual==reference,(compiler,host);(out/(compiler+'-api-'+host+'.json')).write_text(p.stdout);reports[host]=hashlib.sha256(json.dumps(actual,sort_keys=True,separators=(',',':')).encode()).hexdigest()\n row={'compiler':compiler,'selected_tests_passed':39,'test_regex':pattern,'api_matches_baseline':reports};results=[r for r in results if r['compiler']!=compiler]+[row];(out/'validation-results.json').write_text(json.dumps(results,indent=2)+'\\n');print('39 tests and four API reports pass: '+compiler,flush=True)\n"
+  }
+}

@@ -247,22 +247,56 @@ KIN_UI2_RECORD_TRAIT(PropertyGrid, PropertyGrid, property_grid, "Ui2PropertyGrid
 
 #undef KIN_UI2_RECORD_TRAIT
 
-template <typename T>
+using MakeUi2WidgetQuery = flecs::query<> (*)(flecs::world&, bool);
+using AssignUi2WidgetRecord = void (*)(Ui2WorldRecord&, void*);
+
 void append_ui2_widget_records(flecs::world& world,
                                std::vector<Ui2WorldRecord>& records,
-                               Ui2WorldRenderOptions options) {
-    kin::each(world, [&](flecs::entity entity, T& widget) {
+                               Ui2WorldRenderOptions options,
+                               const void* query_key,
+                               MakeUi2WidgetQuery make_query,
+                               Ui2WorldRecordKind kind,
+                               AssignUi2WidgetRecord assign) {
+    // Keep one query per widget/world, but share its cache holder and iteration
+    // adapter. The typed factory retains Flecs's original term/access settings.
+    const bool cached = owner_of(world) != nullptr;
+    auto query = kin::kept_query<>(world, query_key, [make_query, cached](flecs::world& w) {
+        return make_query(w, cached);
+    });
+    query.each([&](flecs::iter& it, std::size_t row) {
+        const flecs::entity entity = it.entity(row);
         if (!include_ui2_entity(entity, options)) {
             return;
         }
         Ui2WorldRecord record{
-            .kind = Ui2RecordTraits<T>::kind,
+            .kind = kind,
             .entity_id = static_cast<EcsId>(entity.id()),
             .order = ui2_order(entity),
         };
-        Ui2RecordTraits<T>::assign(record, widget);
+        // Shared inherited fields have one value; sparse fields are resolved
+        // by field_at rather than assuming a contiguous component array.
+        assign(record, it.field_at(0, it.is_self(0) ? row : 0));
         records.push_back(record);
     });
+}
+
+template <typename T>
+void append_ui2_widget_records(flecs::world& world,
+                               std::vector<Ui2WorldRecord>& records,
+                               Ui2WorldRenderOptions options) {
+    static const char query_key = 0;
+    append_ui2_widget_records(world, records, options, &query_key,
+        +[](flecs::world& w, bool cached) -> flecs::query<> {
+            auto builder = w.query_builder<T&>();
+            if (cached) {
+                builder.cached();
+            }
+            return builder.build();
+        },
+        Ui2RecordTraits<T>::kind,
+        +[](Ui2WorldRecord& record, void* value) {
+            Ui2RecordTraits<T>::assign(record, *static_cast<T*>(value));
+        });
 }
 
 template <typename Fn>
