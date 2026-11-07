@@ -281,7 +281,11 @@ composed, the five slots. Two node types added for them: `append` (Unreal's Appe
   saturation, curves, hue: Unreal applies them building a texture, its exported source has none) and legacy gamma
   baked into the imported maps as Unreal applies them (linear, HSV): the landscapes' rock and snow were 50% too
   bright and coloured. Unreal's snapshots cached (`unreal_snapshot_cache.py`: the editor only for pictures out of
-  date). Now close 51, minor 18, major 30, 8 not surfaces.
+  date). Now close 51, minor 18, major 30, 8 not surfaces. Then an unconnected Base Colour black (WaterSplash), and
+  the object's space in offsets (`object_position`, `object_to_world`, `world_to_object`: the copy's model matrix,
+  passed to kin_vertex_offset): Unreal's Object Position, local Transform and Transform Position read as they are in
+  World Position Offset (the plants' wind: Megascan's quad 19 -> 3.6), approximated beyond it (a fragment does not have
+  the placing: every mesh vertex shader would have to pass it on).
 - Unity: Shader Graph 10+ (the multi-JSON format), sub-graphs inlined (their properties bound to the node's slots),
   the dynamic slots' widths as Unity concretizes them (cut to the narrowest connected vector), fixed slots cut;
   Keyword nodes by the material's keywords (the graph file named for the keywords on); colour spaces from the

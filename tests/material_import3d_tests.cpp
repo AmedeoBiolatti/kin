@@ -1201,6 +1201,59 @@ void unreal_cubes_and_rotation() {
     CHECK(p && has_note(*p, "its domain is MD_POSTPROCESS"));
 }
 
+// The object's space: in the offset (a vertex's) as it is, the copy's placing: its position, a local point and
+// direction in the world; beyond it (a fragment's), approximated and said. A node feeding both is read in each mode.
+void unreal_object_space() {
+    Scratch scratch;
+    const fs::path project = scratch.path, content = scratch.path / "content";
+    const MaterialImportOptions3D options{.project = project, .content = content, .out = content / "kin"};
+    const auto link = [](const char* node) { return std::string(R"({"node": ")") + node + R"(", "output": ""})"; };
+    const std::string doc = R"({"schema": "kin.unreal-material/1", "name": "M_Object", "blend_mode": "BLEND_OPAQUE",
+      "shading_model": "MSM_DEFAULTLIT", "parameters": {}, "inputs": {}, "textures": {},
+      "graph": {"nodes": {
+        "Origin": {"class": "MaterialExpressionObjectPositionWS", "props": {}, "inputs": {}},
+        "Up": {"class": "MaterialExpressionConstant3Vector", "props": {"constant": [0, 0, 10, 0]}, "inputs": {}},
+        "Placed": {"class": "MaterialExpressionTransformPosition", "props": {"transform_source_type": "TRANSFORMPOSSOURCE_LOCAL", "transform_type": "TRANSFORMPOSSOURCE_WORLD"}, "inputs": {"Input": )" +
+                            link("Up") + R"(}},
+        "Turned": {"class": "MaterialExpressionTransform", "props": {"transform_source_type": "TRANSFORMSOURCE_LOCAL", "transform_type": "TRANSFORM_WORLD"}, "inputs": {"Input": )" +
+                            link("Up") + R"(}},
+        "Lift": {"class": "MaterialExpressionSubtract", "props": {}, "inputs": {"A": )" +
+                            link("Placed") + R"(, "B": )" + link("Origin") + R"(}},
+        "Move": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": )" +
+                            link("Lift") + R"(, "B": )" + link("Turned") + R"(}}},
+      "outputs": {"WorldPositionOffset": )" +
+                            link("Move") + R"(, "BaseColor": )" + link("Origin") + R"(}}})";
+    write(content / "M_Object.json", doc);
+    const auto m = import_unreal_graph(content / "M_Object.json", options);
+    for (const auto& d : m.diagnostics)
+        std::cerr << d << '\n';
+    CHECK(m && !m->graph.empty());
+    CHECK(has_note(*m, "Origin: the object's position, beyond the offset: the world's origin"));
+    CHECK(!has_note(*m, "Placed:") && !has_note(*m, "Turned:"));
+    std::ifstream in(m->graph);
+    const std::string text{std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+    in.close();
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok() && g.offset);
+    const auto vertex = g.surface.substr(0, g.surface.find("#else"));
+    for (const char* expected : {"kin_object_position().xzy * 100.0", "kin_graph_object_to_world(v.xzy * 0.01, 1.0)",
+                                 "kin_graph_object_to_world(v.xzy, 0.0)"})
+        if (!contains_text(vertex, expected)) {
+            std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
+            CHECK(false);
+        }
+    CHECK(g.surface.find("kin_object_position", g.surface.find("#else")) == std::string::npos);
+    if (shader_compiler_available()) {
+        std::string why;
+        const auto cooked = cook_material_graph3d(text, &why);
+        if (!cooked)
+            std::cerr << why << '\n';
+        CHECK(cooked.has_value());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -1216,6 +1269,7 @@ int main() {
     unreal_layers_and_folding();
     unreal_function_outputs();
     unreal_cubes_and_rotation();
+    unreal_object_space();
     unity_graphs();
     godot_graphs();
     corpus();

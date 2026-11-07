@@ -230,12 +230,27 @@ public:
         for (const auto& [k, v] : inputs)
             if (!(type == "mix" && k == "t"))
                 w = std::max(w, width(v));
-        static const std::map<std::string, int> fixed{
-            {"dot", 1},         {"length", 1},         {"distance", 1},         {"cross", 3},
-            {"texture", 4},     {"unpack_normal", 3},  {"tangent_to_world", 3}, {"fresnel", 1},
-            {"noise_value", 1}, {"noise_gradient", 1}, {"noise_cellular", 1},   {"fbm", 1},
-            {"checker", 1},     {"normal_map", 3},     {"triplanar", 4},        {"reflect", 3},
-            {"uv_panner", 2},   {"uv_rotate", 2},      {"texture_equirect", 4}};
+        static const std::map<std::string, int> fixed{{"dot", 1},
+                                                      {"length", 1},
+                                                      {"distance", 1},
+                                                      {"cross", 3},
+                                                      {"texture", 4},
+                                                      {"unpack_normal", 3},
+                                                      {"tangent_to_world", 3},
+                                                      {"fresnel", 1},
+                                                      {"noise_value", 1},
+                                                      {"noise_gradient", 1},
+                                                      {"noise_cellular", 1},
+                                                      {"fbm", 1},
+                                                      {"checker", 1},
+                                                      {"normal_map", 3},
+                                                      {"triplanar", 4},
+                                                      {"reflect", 3},
+                                                      {"uv_panner", 2},
+                                                      {"uv_rotate", 2},
+                                                      {"texture_equirect", 4},
+                                                      {"object_to_world", 3},
+                                                      {"world_to_object", 3}};
         if (const auto f = fixed.find(type); f != fixed.end())
             w = f->second;
         if (type == "combine")

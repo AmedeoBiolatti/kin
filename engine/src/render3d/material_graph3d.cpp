@@ -183,6 +183,20 @@ const std::vector<NodeSpec>& specs() {
                      [](Compiler&, const std::vector<Value>& in, Type, const std::string&, bool) {
                          return make("cross(" + in[0].expr + ", " + in[1].expr + ")", Type::Vec3);
                      }});
+        for (const bool into_world : {true, false})
+            s.push_back({into_world ? "object_to_world" : "world_to_object",
+                         into_world ? "a point (w 1) or a direction (w 0) in the object's space, in the world's (at a "
+                                      "vertex only: the offset)"
+                                    : "a point (w 1) or a direction (w 0) in the world, in the object's space (at a "
+                                      "vertex only: the offset)",
+                         {{"x", In::Vec3}, {"w", In::Float, "1"}},
+                         false,
+                         [into_world](Compiler&, const std::vector<Value>& in, Type, const std::string&, bool) {
+                             return make(
+                                 std::string(into_world ? "kin_graph_object_to_world(" : "kin_graph_world_to_object(") +
+                                     in[0].expr + ", " + in[1].expr + ")",
+                                 Type::Vec3);
+                         }});
         s.push_back({"reflect",
                      "the direction mirrored about the normal",
                      {{"direction", In::Vec3}, {"normal", In::Vec3}},
@@ -394,6 +408,7 @@ constexpr BuiltIn built_ins[] = {
     {"time", "frame.time.x", Type::Float},
     {"screen", "(gl_FragCoord.xy * frame.occlusion.zw)", Type::Vec2},
     {"camera_distance", "length(frame.eye.xyz - vWorld)", Type::Float},
+    {"object_position", "", Type::Vec3}, // (at a vertex only: vertex_input's)
 };
 struct Field {
     const char* name;
@@ -609,6 +624,8 @@ private:
             return make("kin_v_time", Type::Float);
         if (name == "camera_distance")
             return make("length(kin_vs.eye.xyz - kin_v_world)", Type::Float);
+        if (name == "object_position")
+            return make("kin_object_position()", Type::Vec3);
         return std::nullopt;
     }
     // A built-in input's value in the cut-out passes (kin_surface_alpha's arguments and the cut-out block), or none.
@@ -814,6 +831,10 @@ private:
                 }
                 v = *m;
             } else {
+                if (!*b->expr) {
+                    error(who, "'" + base + "' is only at a vertex (in the offset)");
+                    return {};
+                }
                 v = make(b->expr, b->type);
             }
         } else if (const auto p = _params.find(base); p != _params.end()) {
@@ -858,6 +879,13 @@ private:
         const JsonValue& n = *_nodes.at(id);
         const std::string type = n.find("type") ? n.find("type")->as_string() : "";
         Value result;
+        if (!_vertex && (type == "object_to_world" || type == "world_to_object")) {
+            error(id, "a " + type +
+                          " node is only at a vertex (in the offset: the fragments don't have the object's "
+                          "placing)");
+            _visiting.erase(id);
+            return {};
+        }
         if (_vertex && (type == "normal_map" || type == "tangent_to_world" || type == "fresnel")) {
             error(id, "a " + type + " node is not at a vertex");
             _visiting.erase(id);

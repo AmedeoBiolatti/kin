@@ -123,6 +123,8 @@ void every_node_compiles() {
     std::string nodes, sum;
     int k = 0;
     for (const auto& n : material_graph_nodes3d()) {
+        if (n.type == "object_to_world" || n.type == "world_to_object")
+            continue; // (at a vertex only: offset_reads_the_object's)
         std::string inputs, extra;
         for (const auto& i : n.inputs) {
             if (i == "z" || i == "w")
@@ -427,6 +429,39 @@ void offsets() {
               << " vertex variants\n";
 }
 
+// The object's space in an offset: the copy's origin and its model matrix (a point local to it, swayed by its height
+// above the origin, back to the world); in a fragment's output, refused (the fragments don't have the placing). With
+// glslc, every vertex variant compiles.
+void offset_reads_the_object() {
+    const std::string text = graph("",
+                                   R"({"id": "local", "type": "world_to_object", "inputs": {"x": "position"}},
+           {"id": "sway", "type": "multiply", "inputs": {"a": "local.y", "b": [0.1, 0, 0]}},
+           {"id": "turned", "type": "object_to_world", "inputs": {"x": "sway", "w": 0}},
+           {"id": "far", "type": "distance", "inputs": {"a": "position", "b": "object_position"}},
+           {"id": "moved", "type": "multiply", "inputs": {"a": "turned", "b": "far"}})",
+                                   R"("roughness": 0.5, "offset": "moved")");
+    const auto g = compile_material_graph3d(text);
+    for (const auto& e : g.errors)
+        std::cerr << e.node << ": " << e.message << '\n';
+    CHECK(g.ok() && g.offset && g.warnings.empty());
+    CHECK(contains(g.surface, "kin_graph_world_to_object(kin_position(), 1.0)") &&
+          contains(g.surface, "kin_graph_object_to_world(") && contains(g.surface, "kin_object_position()"));
+    for (const char* output : {R"("base_color": "object_position")", R"("emission": "o")"}) {
+        const auto bad = compile_material_graph3d(
+            graph("", R"({"id": "o", "type": "object_to_world", "inputs": {"x": [0, 1, 0]}})", output));
+        CHECK(!bad.ok() && contains(bad.errors.front().message, "only at a vertex"));
+    }
+    if (!shader_compiler_available())
+        return;
+    std::string why;
+    const auto cooked = cook_material_graph3d(text, &why);
+    if (!cooked)
+        std::cerr << why << '\n';
+    CHECK(cooked.has_value());
+    for (u32 i = surface_vertex_variant3d; i < surface_variant_count3d; ++i)
+        CHECK(cooked->spirv[i].size() > 20);
+}
+
 } // namespace
 
 int main() {
@@ -438,6 +473,7 @@ int main() {
     cutouts();
     layers_and_packing();
     offsets();
+    offset_reads_the_object();
     std::cout << "material graph tests passed\n";
     return 0;
 }

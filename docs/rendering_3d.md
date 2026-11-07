@@ -1581,7 +1581,10 @@ shadowed, fogged and GI-lit as kin's own materials are.
   before it), so the main pass, the pre-passes, the sun's and lights' shadows, pick and visibility all place the
   vertices alike, and the velocity's previous position takes the view's time of the frame before. At a vertex it reads
   `uv`, `position`, `normal` (the mesh's), `view`, `vertex_color`, `time`, `camera_distance`, the parameters and the
-  maps (their top level: a vertex has no derivatives; no tangent frame, nor the environment); `surface.*`, `screen`,
+  maps (their top level: a vertex has no derivatives; no tangent frame, nor the environment), and the object's space,
+  which only a vertex has: `object_position` (the copy's origin) and the `object_to_world` / `world_to_object` nodes (a
+  point, `w` 1, or a direction, `w` 0, through the copy's model matrix: wind swaying a plant by its height, a vertex
+  animation's local offsets; the frame before's matrix for the velocity); `surface.*`, `screen`,
   `normal_map`, `tangent_to_world` and `fresnel` it does not have: such an offset is not drawn, warned
   (`CompiledMaterialGraph3D::offset` false). A surface that moves its vertices is not merged with others, and its
   shadow caches redraw as its time, parameters or maps change. Not moved: a skinned mesh's vertices, the GI scene's

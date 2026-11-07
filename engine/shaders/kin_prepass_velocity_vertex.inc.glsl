@@ -50,8 +50,9 @@ void main() {
     // A surface's World Position Offset (kin_surface_vertex.inc.glsl): now, and at the frame before's time.
     const vec4 colour = instance.color * vec4(decode(aColor.rgb), aColor.a);
     world.xyz = kin_vertex_offset(world.xyz, mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal,
-                                  aUV, colour, kin_vs.time.x);
-    previous_world.xyz = kin_vertex_offset(previous_world.xyz, mat3(before) * aNormal, aUV, colour, kin_vs.time.y);
+                                  aUV, colour, kin_vs.time.x, instance.model);
+    previous_world.xyz =
+        kin_vertex_offset(previous_world.xyz, mat3(before) * aNormal, aUV, colour, kin_vs.time.y, before);
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;

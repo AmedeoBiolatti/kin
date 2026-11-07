@@ -579,7 +579,7 @@ public:
 
     // `node`'s value at `pin`, or none, with why.
     std::optional<std::string> value(const std::string& node, const std::string& pin, std::string& why) {
-        const auto key = node + "|" + pin;
+        const auto key = node + "|" + pin + (_vertex ? "|vertex" : "");
         if (const auto it = _done.find(key); it != _done.end())
             return it->second;
         if (_visiting.contains(key)) {
@@ -675,9 +675,11 @@ private:
                 return source_value(*uv, why);
             return GraphBuilder::quote("uv");
         }
-        auto& child = _children[name];
-        if (!child)
+        auto& child = _children[name + (_vertex ? "|vertex" : "")];
+        if (!child) {
             child = std::make_unique<UnrealGraph>(*this, n, *function);
+            child->_vertex = _vertex;
+        }
         const auto* outputs = function->find("outputs");
         const JsonValue* out = nullptr;
         if (outputs && outputs->is_object()) {
@@ -748,6 +750,9 @@ public:
     std::map<std::string, bool> switched;
     // The parameters as the material's values, in the graph (a graph of the material's own): where they don't fit.
     bool fold = false;
+    // Reading the offset (World Position Offset), whose values are a vertex's: the object's space read as it is (its
+    // copy's placing, which the fragments don't have: there it is approximated). Each mode's values apart.
+    void vertex(bool on) { _vertex = on; }
     // The material's Normal output in the world (kin's axes), once read (it is read first): what Unreal's Pixel Normal,
     // Reflection Vector and Fresnel see; before, or without one, the surface's.
     std::string pixel_normal;
@@ -1378,9 +1383,9 @@ private:
                 why = name + ": a Transform from " + a + " to " + b + " space (kin has tangent, local, world, view)";
                 return std::nullopt;
             }
-            if (from_space == "LOCAL" || to_space == "LOCAL")
-                _x.note(name + ": a Transform from or to local space: as world space (kin's graphs do not see the "
-                               "object's transform)");
+            if ((from_space == "LOCAL" || to_space == "LOCAL") && !_vertex)
+                _x.note(name + ": a Transform from or to local space, beyond the offset: as world space (a fragment "
+                               "does not have the object's placing)");
             if (from_space == "VIEW" || to_space == "VIEW")
                 _x.note(name + ": a Transform from or to view space: the camera's, as if it did not roll");
             if (from_space == to_space)
@@ -1390,12 +1395,12 @@ private:
                 {"TANGENT", "kin_graph_uv_to_world(v, kin_uv(), kin_graph_geometry_normal())"},
                 {"VIEW", "kin_graph_view_to_world(v)"},
                 {"WORLD", "v.xzy"},
-                {"LOCAL", "v.xzy"}};
+                {"LOCAL", _vertex ? "kin_graph_object_to_world(v.xzy, 0.0)" : "v.xzy"}};
             const std::map<std::string, std::string> out_of{
                 {"TANGENT", "kin_graph_world_to_uv(@, kin_uv(), kin_graph_geometry_normal())"},
                 {"VIEW", "kin_graph_world_to_view(@)"},
                 {"WORLD", "(@).xzy"},
-                {"LOCAL", "(@).xzy"}};
+                {"LOCAL", _vertex ? "kin_graph_world_to_object(@, 0.0).xzy" : "(@).xzy"}};
             std::string expr = out_of.at(to_space);
             expr.replace(expr.find('@'), 1, into.at(from_space));
             return glsl(expr, 3, {{"v", _b.fit(*v, 3)}});
@@ -1410,9 +1415,19 @@ private:
                 why = name + ": a TransformPosition from " + from + " to " + to + " (kin has local and world)";
                 return std::nullopt;
             }
-            _x.note(name + ": a position from or to local space: as world space (kin's graphs do not see the object's "
-                           "transform)");
-            return in({"", "None", "Input"});
+            const auto v = in({"", "None", "Input"});
+            const auto local = [](const std::string& e) {
+                return e.find("LOCAL") != std::string::npos || e.find("INSTANCE") != std::string::npos;
+            };
+            if (!v || local(from) == local(to))
+                return v;
+            if (_vertex) // (Unreal's spaces in its axes and centimetres; kin's in its own and metres)
+                return glsl(local(from) ? "kin_graph_object_to_world(v.xzy * 0.01, 1.0).xzy * 100.0"
+                                        : "kin_graph_world_to_object(v.xzy * 0.01, 1.0).xzy * 100.0",
+                            3, {{"v", _b.fit(*v, 3)}});
+            _x.note(name + ": a position from or to local space, beyond the offset: as world space (a fragment does "
+                           "not have the object's placing)");
+            return v;
         }
         if (kind == "ParticleColor") { // a particle's colour: kin's particles give theirs as the vertex colour
             _x.note(name + ": the particle's colour: the vertex colour");
@@ -1428,9 +1443,11 @@ private:
             _x.note(name + ": the instance's fade: 1 (none)");
             return std::string("1");
         }
-        if (kind == "ObjectPositionWS") {
-            _x.note(name + ": the object's position: the world's origin (kin's graphs do not see the object's "
-                           "transform)");
+        if (kind == "ObjectPositionWS") { // (Unreal's world: its axes and centimetres)
+            if (_vertex)
+                return glsl("kin_object_position().xzy * 100.0", 3, {});
+            _x.note(name + ": the object's position, beyond the offset: the world's origin (a fragment does not have "
+                           "the object's placing)");
             return std::string("[0, 0, 0]");
         }
         if (kind == "DepthFade") { // (its fade where the surface nears what is behind it: kin's graphs see no depth)
@@ -1692,7 +1709,8 @@ private:
     UnrealGraph* _caller = nullptr;   // a function's: the graph calling it
     const JsonValue* _call = nullptr; // and the call (its inputs)
     int _depth = 0;
-    std::map<std::string, std::unique_ptr<UnrealGraph>> _children; // the functions inlined, by call
+    std::map<std::string, std::unique_ptr<UnrealGraph>> _children; // the functions inlined, by call (and mode)
+    bool _vertex = false; // reading the offset (World Position Offset): what a vertex has, the object's space too
     std::map<std::string, std::string> _done;
     std::set<std::string> _visiting;
 };
@@ -1740,7 +1758,9 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
                 // (The graph's word on this output replaces the Tier 1 import's.)
                 std::erase_if(imported.notes,
                               [&](const std::string& n) { return n.rfind(std::string(from) + ": ", 0) == 0; });
+                g.vertex(std::string(to) == "offset");
                 auto v = g.value(o->find("node")->as_string(), g.pin_of(*o), why);
+                g.vertex(false);
                 if (!v) {
                     x.note(std::string(from) + ": " + why + ": its Tier 1 value kept");
                     continue;

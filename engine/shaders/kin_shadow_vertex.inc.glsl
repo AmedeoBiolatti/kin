@@ -39,7 +39,8 @@ void main() {
 #ifdef KIN_SURFACE_VERTEX
     // A surface's World Position Offset (kin_surface_vertex.inc.glsl), at this frame's time.
     world.xyz = kin_vertex_offset(world.xyz, mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal,
-                                  aUV, instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.x);
+                                  aUV, instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.x,
+                                  instance.model);
 #endif
     gl_Position = draw.view_projection * world;
 #ifdef KIN_SHADOW_MASK

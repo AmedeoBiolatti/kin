@@ -84,7 +84,8 @@ void main() {
 #ifdef KIN_SURFACE_VERTEX
     // A surface's World Position Offset (kin_surface_vertex.inc.glsl), at this frame's time.
     world.xyz = kin_vertex_offset(world.xyz, mat3(instance.normal0.xyz, instance.normal1.xyz, instance.normal2.xyz) * aNormal,
-                                  aUV, instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.x);
+                                  aUV, instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.x,
+                                  instance.model);
 #endif
     vWorld = world.xyz;
     gl_Position = draw.view_projection * world;
@@ -117,7 +118,7 @@ void main() {
     vec4 previous_world = before * vec4(aPos, 1.0);
 #ifdef KIN_SURFACE_VERTEX
     previous_world.xyz = kin_vertex_offset(previous_world.xyz, mat3(before) * aNormal, aUV,
-                                           instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.y);
+                                           instance.color * vec4(decode(aColor.rgb), aColor.a), kin_vs.time.y, before);
 #endif
     vPrevious = (draw.prior * previous_world).xyw;
     vOldInCurrent = (draw.current * previous_world).xyw;
