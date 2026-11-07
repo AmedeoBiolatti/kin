@@ -25,6 +25,10 @@ releases may change APIs.
   standalone header. Rendering fields, method bodies and helper behavior are preserved.
   See [renderer header measurements](build_times.md#renderer-data-header-dependencies).
 
+- Render queues include the lightweight `sprite_instance.hpp` instead of the full backend interface,
+  reducing backend-header rebuilds. The backend still exports `SpriteInstance` with unchanged fields
+  and defaults. See [queue dependency measurements](build_times.md#render-queue-backend-dependency).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D

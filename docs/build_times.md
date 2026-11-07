@@ -801,3 +801,74 @@ and linked nothing.
 The [renderer header data](build_renderer_headers_2026-11-07.json) retains plans,
 skipped object sets, individual timing samples, host load, the interrupted
 repeat, layout results, source lists, validation and reproduction scripts.
+
+### Render queue backend dependency
+
+Follow-up measured on 2026-11-07, starting at `0447dc4`. `render_queue.hpp`
+needed the full backend header only for the small `SpriteInstance` value.
+That definition now lives in `renderer/sprite_instance.hpp`, with its original
+fields, defaults and comments. The backend includes the new header, retaining
+its existing export; the queue includes the lightweight header directly.
+Consumers using unrelated backend types include `backend.hpp` themselves.
+The tilemap test's fake backend needed that direct include; production sources
+needed no repairs. A mechanical comparison confirms that existing fields,
+signatures, function bodies and assertions are unchanged, and that the sprite
+instance definition moved byte-for-byte.
+
+Clang and GCC produce identical dependency counts:
+
+| Backend header edit | Before: C++ steps | After: C++ steps |
+|---|---:|---:|
+| `hex_demo` | 97 | 64 |
+| `shapes_demo` | 97 | 64 |
+| `kin_lua` | 93 | 62 |
+
+Each game count includes one game PCH. The games compile 33 fewer sources,
+**34.0% fewer C++ steps**, and update two runtime archives instead of five.
+Skipped work includes four Lua binding sources, animation, pathfinding,
+particles, tilemaps and component registrations. `kin_lua` skips 31 sources.
+Renderer2D-header and Window-header counts stay at 62 and 83 respectively for
+each game; this change specifically reduces the backend dependency.
+
+Plans use the alternate Ninja manifest method described above. Every completed
+real backend-header edit rebuilt exactly its planned object set. Both versions
+use normal Release `-O2`, `KIN_DEV_FAST_SCRIPTING=OFF`, PCH on, compiler cache
+and LTO off, mold, and four workers pinned to CPUs 0, 2, 4 and 6. Dependencies,
+shaders and unaffected objects were already built. One observation per version
+and compiler measured the edit through the final `hex_demo` link:
+
+| Backend header edit through game link | Before | After |
+|---|---:|---:|
+| Clang 21.1.8 | 137.49 s | 72.60 s |
+| GCC 15.2.0 | 143.23 s | 85.58 s |
+
+These are exploratory single observations, not medians or controlled speedup
+ratios. Unrelated compilation and video rendering were active on the host;
+load averages are retained with each sample. Versions were measured in
+separate phases, without agent-owned validation compilations overlapping the
+timed builds. The rebuild-count reduction is the primary result. No percentage
+wall-time improvement, complete-build improvement or ordinary game-source-edit
+improvement is claimed here.
+
+Both compilers passed 25 selected rendering, ECS, sprite animation, particle,
+tilemap, scripting, scene, UI2, development and game tests; all four Lua API
+reports matched the baseline. Eleven standalone renderer-header units,
+including the queue and sprite-instance headers, compiled with PCH and unity
+disabled for each compiler. A transitive repository-include audit selected
+consumers of the queue or sprite-instance headers for no-PCH syntax/template
+checks: 176 Clang 2D, 172 GCC 2D and 204 Clang 3D units all passed. These are
+affected-consumer checks, not a whole-repository or 3D/GPU runtime test run.
+
+Sizes and alignments of 14 types, including `SpriteInstance`, `RenderQueue` and
+`PreparedSprite`, and Flip numeric values match before/after with both compilers
+and render-probe mode on/off. `SpriteInstance` remains 52 bytes. This is not a
+cross-platform ABI certification or Windows/MSVC validation.
+
+After timing, the backend header's original bytes and timestamps were restored,
+each measured game PCH was rebuilt against the restored header, six smoke
+tests and the Lua API checks passed again per compiler, and a no-change game
+build compiled and linked nothing.
+
+The [queue/backend data](build_queue_backend_2026-11-07.json) retains exact plans,
+skipped object sets, timing samples and host load, layout comparisons, affected
+source lists, validation results and reproduction scripts.

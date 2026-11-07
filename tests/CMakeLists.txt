@@ -145,6 +145,8 @@ set_target_properties(kin_scene_headers_check PROPERTIES DISABLE_PRECOMPILE_HEAD
 add_library(kin_renderer_headers_check OBJECT
     ecs_render_header_check.cpp
     renderer_command_header_check.cpp
+    renderer_queue_header_check.cpp
+    renderer_sprite_instance_header_check.cpp
     renderer_sprite_catalog_header_check.cpp
     renderer_lighting_header_check.cpp
     particle_system_header_check.cpp

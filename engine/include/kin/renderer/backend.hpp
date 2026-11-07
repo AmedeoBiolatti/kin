@@ -17,6 +17,7 @@
 #include <kin/renderer/shader.hpp>
 #include <kin/renderer/shader_reflect.hpp>
 #include <kin/renderer/shape.hpp>
+#include <kin/renderer/sprite_instance.hpp>
 #include <kin/renderer/texture.hpp>
 #include <memory>
 #include <optional>
@@ -30,17 +31,6 @@ namespace kin {
 class JobSystem;
 class IRendererBackend3D;
 struct CompressedImage;
-
-// One quad of a draw_sprites() call: what draw_texture(texture, source, dest,
-// tint, rotation, pivot, flip) would draw.
-struct SpriteInstance {
-    Rectf dest{};
-    Rectf source{}; // texture pixels; empty means the whole texture
-    Color tint = colors::white;
-    f32 rotation = 0.0f;     // degrees, clockwise, about the pivot
-    Vec2f pivot{0.5f, 0.5f}; // normalized within dest
-    Flip flip = Flip::None;
-};
 
 // How Renderer2D::draw_distance_field reads a distance-field texture: its
 // alpha is 0.5 on the outline, rising inside and falling outside by 0.5 over
