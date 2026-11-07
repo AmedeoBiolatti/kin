@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <algorithm>
 #include <cassert>
 #include <cmath>

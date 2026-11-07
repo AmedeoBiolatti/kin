@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <cassert>
 // Times drawing many quads a frame on the SDL_GPU backend, three ways:
 // draw_texture calls, fill_rect calls, and one draw_sprites batch.

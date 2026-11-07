@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "attachment_graph_shaders.hpp"
 
 #include <array>

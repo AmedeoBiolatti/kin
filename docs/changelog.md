@@ -29,6 +29,11 @@ releases may change APIs.
   reducing backend-header rebuilds. The backend still exports `SpriteInstance` with unchanged fields
   and defaults. See [queue dependency measurements](build_times.md#render-queue-backend-dependency).
 
+- Renderer2D uses shared backend value types and forward declarations for the backend and Window,
+  reducing header rebuilds. Four small backend forwarding methods now live in the implementation;
+  callers using backend or Window definitions include their headers directly.
+  See [renderer interface measurements](build_times.md#renderer-interface-dependencies).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D

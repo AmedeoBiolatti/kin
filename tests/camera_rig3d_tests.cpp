@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <cassert>
 #include <chrono>
 #include <cstdlib>

@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "surface_stage_shaders.hpp"
 
 #include <algorithm>

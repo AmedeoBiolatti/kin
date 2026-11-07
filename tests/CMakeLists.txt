@@ -154,6 +154,8 @@ add_library(kin_renderer_headers_check OBJECT
     normal_lighting2d_header_check.cpp
     renderer_flip_header_check.cpp
     renderer_backend_header_check.cpp
+    renderer_interface_header_check.cpp
+    renderer_backend_types_header_check.cpp
 )
 target_include_directories(kin_renderer_headers_check PRIVATE "${PROJECT_SOURCE_DIR}/engine/include")
 target_link_libraries(kin_renderer_headers_check PRIVATE kin::components flecs::flecs_static)

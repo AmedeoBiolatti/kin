@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "material_input_shaders.hpp"
 
 #include <algorithm>

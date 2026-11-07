@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "local_graph_shaders.hpp"
 
 #include <algorithm>

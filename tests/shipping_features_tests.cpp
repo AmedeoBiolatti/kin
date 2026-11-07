@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/build.hpp>
 #include <kin/renderer/renderer2d.hpp>

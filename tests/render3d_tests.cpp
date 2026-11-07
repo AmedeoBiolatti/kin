@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "../engine/src/renderer/gpu/gpu_shadow_cull.hpp"
 #include "../engine/src/renderer/gpu/gpu_shadow_reach.hpp"
 #include "../engine/src/renderer/gpu/gpu_sphere_cull4.hpp"

@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "geometry_probe.hpp"
 
 #include <algorithm>

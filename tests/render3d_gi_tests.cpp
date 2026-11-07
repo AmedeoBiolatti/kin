@@ -1,4 +1,5 @@
 // Raw GI resolve checks use controlled probe fields so beauty shading cannot hide leakage.
+#include <kin/renderer/backend.hpp>
 #include "../engine/src/renderer/gpu/gpu_device.hpp"
 #include "gi_test_shaders.hpp"
 

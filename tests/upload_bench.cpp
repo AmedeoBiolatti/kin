@@ -1,5 +1,6 @@
 // Times texture uploads on the SDL_GPU backend: the request's case (many data
 // textures created and updated in one frame).
+#include <kin/renderer/backend.hpp>
 #include <kin/core/jobs.hpp>
 #include <kin/platform/app.hpp>
 #include <kin/renderer/renderer2d.hpp>

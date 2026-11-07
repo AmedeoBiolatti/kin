@@ -872,3 +872,88 @@ build compiled and linked nothing.
 The [queue/backend data](build_queue_backend_2026-11-07.json) retains exact plans,
 skipped object sets, timing samples and host load, layout comparisons, affected
 source lists, validation results and reproduction scripts.
+
+### Renderer interface dependencies
+
+Follow-up measured on 2026-11-07 from `3f88125`. `renderer2d.hpp` no longer
+includes the complete backend or Window definitions. It forward-declares the
+borrowed/owned services and includes its rendering values directly.
+`DistanceFieldStyle`, `RendererBackendCapabilities`, `GpuScopeTiming`,
+`ComputeBindings` and `RendererBackendStats` moved unchanged into
+`renderer/backend_types.hpp`; the backend still exports them through that header.
+The four methods that accessed the backend inline (`renderer_3d`,
+`set_overdraw_view`, `pipeline_record`, `prewarm_pipelines`) now have the same
+bodies in `renderer2d.cpp`.
+
+Custom backend implementations and callers owning a `make_render_backend()`
+result include `renderer/backend.hpp` directly. Code constructing or calling
+Window includes `platform/window.hpp`. Repository consumers now own those
+includes, including optional 3D tests. The audit also found the renderer's shape
+implementation accessing the private backend; its direct include was added.
+
+Clang and GCC agree on the `hex_demo` and `shapes_demo` plans:
+
+| Edited header | Before: C++ steps | After: C++ steps |
+|---|---:|---:|
+| `renderer/backend.hpp` | 64 | 7 |
+| `platform/window.hpp` | 83 | 60 |
+| `renderer/renderer2d.hpp` | 62 | 62 |
+
+A backend edit now compiles only seven implementation files, avoiding the game
+PCH and main-source compilation. That is **89.1% fewer C++ steps**: 56 fewer
+source compilations and one fewer PCH. Runtime archive updates drop from two
+to one. Window edits retain the game PCH and avoid 23 source compilations,
+**27.7% fewer C++ steps**. For `kin_lua`, the backend plan drops from 62 to 7
+compilations and the Window plan from 82 to 59; renderer-header edits remain
+at 60. These counts describe these specific header edits, not clean-build or
+ordinary game-source-edit improvements.
+
+Plans use a copy of the generated Ninja manifest, avoiding the dry-run CMake
+glob-regeneration stop. All four real Clang header edits rebuilt exactly the
+planned object sets. Both versions use Release with normal `-O2`,
+`KIN_DEV_FAST_SCRIPTING=OFF`, PCH on, compiler cache and LTO off, mold, and four
+workers pinned to CPUs 0, 2, 4 and 6. Dependencies, shaders and unaffected
+objects were already built. Clang 21.1.8 measured each edit through the final
+`hex_demo` link:
+
+| Edited header | Before | After |
+|---|---:|---:|
+| `renderer/backend.hpp` | 103.84 s | 14.71 s |
+| `platform/window.hpp` | 116.94 s | 74.40 s |
+
+These are exploratory single observations per header/version under varying
+background activity. Versions were measured in separate phases, without
+agent-owned validation compilations overlapping the timed builds. The data
+retains per-sample host load. Counts are the primary result; these observations
+are not controlled wall-time speedup ratios. GCC received dependency and
+functional validation, with no new wall-time samples in this round.
+
+Both compilers passed 25 selected rendering, ECS, sprite animation, particle,
+tilemap, scripting, scene, UI2, development and game tests, and all four Lua API
+reports matched the baseline. Thirteen standalone renderer-header units,
+including Renderer2D and the new value header, compiled with PCH and unity
+disabled. A transitive repository-include audit selected affected consumers for
+no-PCH syntax/template checks: 111 Clang 2D, 107 GCC 2D and 140 Clang 3D units
+have passing results. The shape source passed after its direct-include repair.
+One optional 3D shipping-feature check reported invalid UTF-8 in the system
+`cstddef` header followed by a Clang frontend crash. The file was valid UTF-8 on
+inspection; the same check passed twice in isolation without source or flag
+changes. The cause is undetermined, and the incident and retries are retained.
+
+Mechanical checks confirm unchanged fields, signatures and function bodies,
+including byte-for-byte movement of the five value definitions and preservation
+of the four forwarding bodies. Sizes/alignments of 21 types, including Renderer2D
+and the moved values, and Flip numeric values match before/after with both
+compilers and render-probe on/off. Renderer2D remains 832 bytes with the probe
+and 776 without it. Four forwarding methods become out-of-line; without LTO,
+callers lose their previous opportunity to inline them. Runtime performance at
+that boundary was not benchmarked. This round does not provide full 3D/GPU
+runtime or Windows/MSVC validation.
+
+After timing, all benchmark headers were restored, the game PCHs were rebuilt
+against the restored inputs, six smoke tests and four API comparisons passed
+again per compiler, and no-change game builds compiled and linked nothing.
+
+The [renderer interface data](build_renderer_interface_2026-11-07.json) retains
+exact plans, skipped objects, timing samples/load, layout comparisons, source
+lists, the compiler incident, validation and reproduction scripts.

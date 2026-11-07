@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "result3d_helpers.hpp"
 
 #include <algorithm>

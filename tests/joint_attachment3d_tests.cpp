@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "skin_fixtures.hpp"
 
 #include <chrono>

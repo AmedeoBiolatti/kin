@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include <kin/assets/image.hpp>
 #include <kin/platform/log.hpp>
 #include <kin/runtime/windowed_app.hpp>

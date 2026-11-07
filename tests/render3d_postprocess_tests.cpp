@@ -1,3 +1,4 @@
+#include <kin/renderer/backend.hpp>
 #include "postprocess_shaders.hpp"
 
 #include <algorithm>
