@@ -76,6 +76,11 @@ struct CompiledMaterialGraph3D {
     // for the vertex variants too (`vec3 kin_surface_offset()` under KIN_SURFACE_VERTEX in `surface`); false with none,
     // or one a vertex can't compute (then a warning, naming the node).
     bool offset = false;
+    // What the GI scene's stand-in needs of it (SurfaceTraits3D): `emission` with an emission output (not a constant
+    // black); `vertex_color` / `vertex_alpha` where its base colour / alpha reads the vertex colour (the input, a glsl
+    // node's vColor, the stock surface's colour, alpha or emission) or is not an output (the stock surface's is kept).
+    // The surfaces Renderer3D and Assets3D make of it carry them; a cooked graph's layout has them.
+    SurfaceTraits3D traits{};
     bool ok() const { return errors.empty(); }
 };
 

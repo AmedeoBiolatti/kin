@@ -770,11 +770,13 @@ private:
     // A surface material's stand-in in the GI scene: what its surface (a graph's, a surface shader's) makes of it over
     // its UV square, gi_proxy_side texels a side, read by the voxelizer in place of the material's base and emissive
     // maps (which may hold whatever a graph samples: a mask, a normal map). `base`: its base colour and alpha, in the
-    // colour format of materials' maps; `emission`: its emission (linear RGBA16F), made only for a material whose own
-    // fields say it emits (Material3D::emits_light), as the GI's emitters are those alone. bake_gi_proxies makes those
-    // a render's GI scene lacks, before its passes (each material drawn twice into the 2D frame's commands, unlit and
-    // lit by nothing, and gi_proxy.frag takes the second from the first), once a look (gi_proxy_key); the unused are
-    // let go. An animated surface is pictured at the time of its bake.
+    // colour format of materials' maps; `emission`: its emission (linear RGBA16F), made only for a material that emits,
+    // by its own fields (Material3D::emits_light) or its surface's (SurfaceTraits3D::emission): the GI's emitters are
+    // those alone. Drawn with a white vertex colour: the voxelizer multiplies it by the copy's where the surface reads
+    // it (SurfaceTraits3D::vertex_color, vertex_alpha). bake_gi_proxies makes those a render's GI scene lacks, before
+    // its passes (each material drawn twice into the 2D frame's commands, unlit and lit by nothing, and gi_proxy.frag
+    // takes the second from the first), once a look (gi_proxy_key); the unused are let go. An animated surface is
+    // pictured at the time of its bake.
     struct GiProxy {
         Texture base, emission;
         u64 used = 0; // the 2D frame that last asked for it

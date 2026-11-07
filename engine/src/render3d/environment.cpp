@@ -344,7 +344,8 @@ Result3D<MaterialGraphShader3D> Renderer3D::compile_material_graph(const std::fi
             fail3d(_errors, label, (e.node.empty() ? std::string() : e.node + ": ") + e.message);
         return result3d(MaterialGraphShader3D{}, _errors);
     }
-    made.surface = compile_surface_text_operation(made.graph.surface, label);
+    made.surface =
+        SurfaceShader3D{compile_surface_text_operation(made.graph.surface, label).backend(), made.graph.traits};
     if (!made.surface)
         return result3d(MaterialGraphShader3D{}, _errors);
     return result3d(std::move(made), {});
@@ -354,7 +355,8 @@ Result3D<MaterialGraphShader3D> Renderer3D::create_material_graph(const CookedMa
     std::array<std::span<const u8>, surface_variant_count3d> views;
     for (u32 i = 0; i < surface_variant_count3d; ++i)
         views[i] = cooked.spirv[i];
-    MaterialGraphShader3D made{create_surface_shader_operation(views), cooked.graph};
+    MaterialGraphShader3D made{SurfaceShader3D{create_surface_shader_operation(views).backend(), cooked.graph.traits},
+                               cooked.graph};
     if (!made.surface)
         return result3d(MaterialGraphShader3D{}, _errors);
     return result3d(std::move(made), {});

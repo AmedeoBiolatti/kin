@@ -235,8 +235,14 @@ masks or noise), so the landscapes bounced their normal map's lavender and the s
 voxels of a surface painting (0.6, 0.2, 0.1) over a blue base map and glowing (0, 3, 0) over a red emissive map hold
 the surface's, blue and red without the stand-ins (`test_gpu_gi_proxy`); `kin_material_lineup --gi-view albedo` on
 eight Fab imports (the landscapes sand, earth and snow; the dev grids, stone tiles and zombie skin their own colours).
-Limits: as on flat ground facing up (a slope's rock is not seen), an animated surface at its bake's time, a graph's
-emission only where the material's own emission fields are set.
+Limits: as on flat ground facing up (a slope's rock is not seen), an animated surface at its bake's time. The
+compiler's `SurfaceTraits3D` (2026-11-07, same day): a graph with an emission output glows in the GI whatever the
+material's emission fields say (8 Fab materials had lost theirs: lakes, rivers, pond scum, riverbank, sand, whose
+Tier 1 reading found no plain emissive colour), and the voxels take the copy's vertex colour and tint only where the
+graph's colour or alpha reads them (they multiplied a graph's own colour by them). Checked by `traits` in
+kin_material_graph3d_tests and `test_gpu_gi_proxy` (the glow with the fields off; a tinted copy). Left (a follow-up):
+re-baking animated stand-ins, and the surface run in the voxelizer itself for what depends on position, normal or a
+vertex-colour mask (in the 65 Fab graphs, time reaches the colour or glow of 35, position 24, the normal 23).
 
 **Cooked size.** 669 KB to about 220 KB: the variants optimised (glslc -O, which also drops the debug names; run-time
 surface compiles too, so development draws what ships: an optimised cooked graph of no outputs is byte-identical to

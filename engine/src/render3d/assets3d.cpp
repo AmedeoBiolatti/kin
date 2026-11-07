@@ -337,7 +337,7 @@ MaterialGraphShader3D Assets3D::load_material_graph_impl(const std::filesystem::
                 d.graphs.splice(d.graphs.end(), d.graphs, it);
                 if (error)
                     error->clear();
-                return {SurfaceShader3D{std::move(surface)}, it->graph};
+                return {SurfaceShader3D{std::move(surface), it->graph.traits}, it->graph};
             }
     ++d.counters.graph_loads;
     const std::filesystem::path cooked_path = path.string() + ".spv";
@@ -365,7 +365,7 @@ MaterialGraphShader3D Assets3D::load_material_graph_impl(const std::filesystem::
                 return fail(cooked_path.string() + ": the surface shader was refused");
             made = std::move(*r);
         } else {
-            made = {SurfaceShader3D{std::make_shared<CpuSurfaceShader>()}, cooked->graph};
+            made = {SurfaceShader3D{std::make_shared<CpuSurfaceShader>(), cooked->graph.traits}, cooked->graph};
         }
     } else if (source_size) {
         const auto text = read_content_file(path);
@@ -376,7 +376,7 @@ MaterialGraphShader3D Assets3D::load_material_graph_impl(const std::filesystem::
             if (!made.graph.ok())
                 return fail(path.string() + ": " + made.graph.errors.front().node + ": " +
                             made.graph.errors.front().message);
-            made.surface = SurfaceShader3D{std::make_shared<CpuSurfaceShader>()};
+            made.surface = SurfaceShader3D{std::make_shared<CpuSurfaceShader>(), made.graph.traits};
         } else if (!shader_compiler_available()) {
             return fail(path.string() + ": not cooked (" + cooked_path.filename().string() +
                         ": kin_material_graph cook, kin_cook_material_graph) and no glslc to compile it");

@@ -144,24 +144,47 @@ public:
     virtual bool valid() const { return true; }
 };
 
+// What a surface does that kin can't read in its SPIR-V, for the GI scene, which sees a surface material through a
+// stand-in: the surface drawn once over its UV square, with a white vertex colour (docs/rendering_3d.md, Global
+// illumination). A material graph's are its compiler's (CompiledMaterialGraph3D::traits); a surface of your own has
+// these defaults (as kin's stock surface: what its material's fields emit, its colour times the vertex colour) unless
+// it is made with others.
+struct SurfaceTraits3D {
+    // It makes its own emission: the GI scene takes in the stand-in's, whatever the material's emission fields say.
+    // Off, a surface material glows there only where those fields emit (Material3D::emits_light).
+    bool emission = false;
+    // Its base colour reads the vertex colour (the mesh's, times the material's colour and the copy's tint; kin's
+    // stock surface does), and its alpha: the GI scene multiplies the stand-in's by the copy's. Off, it doesn't.
+    bool vertex_color = true;
+    bool vertex_alpha = true;
+
+    friend bool operator==(const SurfaceTraits3D&, const SurfaceTraits3D&) = default;
+};
+
 // What a material's surface is, in place of its maps' (Material3D::surface): a function `void kin_surface(inout
 // KinSurface s)` that changes the surface kin's material makes (kin_stock_surface: colour, alpha, normal, metallic,
 // roughness, occlusion, emission) before kin lights, fogs and shadows it, in every variant kin draws (the fog's, the
 // lights', the global illumination's, the velocity's). Made by Renderer3D::create_surface_shader or
-// compile_surface_shader; cheap to copy (copies share it).
+// compile_surface_shader; cheap to copy (copies share it). `traits` (SurfaceTraits3D) are a copy's own:
+// SurfaceShader3D{shader.backend(), traits} is the same shader with others.
 class SurfaceShader3D {
 public:
     SurfaceShader3D() = default;
-    explicit SurfaceShader3D(std::shared_ptr<ISurfaceShaderBackend3D> backend) : _backend(std::move(backend)) {}
+    explicit SurfaceShader3D(std::shared_ptr<ISurfaceShaderBackend3D> backend, SurfaceTraits3D traits = {})
+        : _backend(std::move(backend)), _traits(traits) {}
 
     bool valid() const { return _backend && _backend->valid(); }
     explicit operator bool() const { return valid(); }
     const std::shared_ptr<ISurfaceShaderBackend3D>& backend() const { return _backend; }
+    const SurfaceTraits3D& traits() const { return _traits; }
 
-    friend bool operator==(const SurfaceShader3D& a, const SurfaceShader3D& b) { return a._backend == b._backend; }
+    friend bool operator==(const SurfaceShader3D& a, const SurfaceShader3D& b) {
+        return a._backend == b._backend && a._traits == b._traits;
+    }
 
 private:
     std::shared_ptr<ISurfaceShaderBackend3D> _backend;
+    SurfaceTraits3D _traits{};
 };
 
 inline constexpr u32 max_material_input_textures3d = 4, max_material_input_buffers3d = 8;

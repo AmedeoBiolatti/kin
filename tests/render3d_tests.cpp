@@ -3406,12 +3406,13 @@ void test_gpu_gi_proxy() {
         wall.shader_params[0] = wall.shader_params[1] = wall.shader_params[2] = 0.5f;
         wall.shader_params[5] = 3.0f;
         kin::View3D view = r3d.create_view({160, 120}, {.samples = 1}).value_or({});
+        kin::Color floor_tint = kin::colors::white;
         const auto scene_of = [&] {
             kin::Scene3D scene;
             scene.camera = kin::Camera3D::look_at({0.0f, 2.0f, 6.0f}, {0.0f, 1.0f, 0.0f}, 60.0f);
             scene.global_illumination = GiLevel::settings();
             (void)scene.draw(level.plane, Mat4f::translation({0.0f, 0.27f, 0.0f}) * Mat4f::scaling({7.0f, 1.0f, 7.0f}),
-                             floor);
+                             floor, floor_tint);
             (void)scene.draw(level.plane, GiLevel::wall(), wall);
             return scene;
         };
@@ -3446,6 +3447,35 @@ void test_gpu_gi_proxy() {
         assert(r3d.debug_stats().gi_built);
         assert(r3d.read_gi_scene(view, g.s).value_or(false));
         assert(near(f, 0, 0.1f) && near(f, 1, 0.5f) && near(f, 2, 0.2f));
+
+        // The surface's own emission with the material's fields off: in the GI scene only where its traits say it
+        // makes one (SurfaceTraits3D::emission, as a graph with an emission output has). A change near one in the
+        // last four renders waits for its turn (one in four renders): rendered till it is made.
+        const auto rebuilt = [&] {
+            bool built = false;
+            for (int i = 0; i < 4 && !built; ++i) {
+                render_ok(r3d, view, scene_of());
+                renderer.present();
+                built = r3d.debug_stats().gi_built;
+            }
+            assert(built);
+            assert(r3d.read_gi_scene(view, g.s).value_or(false));
+        };
+        wall.emissive = 0.0f;
+        rebuilt();
+        assert(g.s.emission[w * 3 + 1] == 0.0f);
+        wall.surface = kin::SurfaceShader3D{own.backend(), {.emission = true}};
+        rebuilt();
+        std::cerr << "gi proxy: the wall's own light " << g.s.emission[w * 3 + 1] << '\n';
+        assert(std::abs(g.s.emission[w * 3 + 1] - 3.0f) < 0.03f && g.s.emission[w * 3] < 0.01f);
+        // A tinted copy: the tint in its voxels where the surface reads the vertex colour (a surface's default), not
+        // where it doesn't (as this one: its colour is its parameters').
+        floor_tint = kin::Color::rgb(128, 128, 128); // 0.2159 linear
+        rebuilt();
+        assert(near(f, 1, 0.5f * 0.2159f) && near(f, 2, 0.2f * 0.2159f));
+        floor.surface = kin::SurfaceShader3D{own.backend(), {.vertex_color = false}};
+        rebuilt();
+        assert(near(f, 0, 0.1f) && near(f, 1, 0.5f) && near(f, 2, 0.2f) && g.channel(f, 3) == 255);
     });
 }
 

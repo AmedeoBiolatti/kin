@@ -60,8 +60,9 @@ struct GiVoxelizeUniforms {
     i32 window[4];
     i32 low[4], high[4]; // xyz: the box round the blocks to make; low.w: every block inside the box is dirty
     f32 emission[4];
+    f32 vertex[4]; // the vertex colour's share in the base colour (rgb) and alpha: 1, or 0 (a stand-in's surface's)
 };
-static_assert(sizeof(GiVoxelizeUniforms) == 160);
+static_assert(sizeof(GiVoxelizeUniforms) == 176);
 
 // gi_clear.comp's.
 struct GiClearUniforms {
@@ -530,6 +531,7 @@ u64 GpuRenderer3D::gi_proxy_key(const Material3D& m) {
     // renderer: its address is its own).
     GiKey key;
     key.add(m.surface.backend().get());
+    key.add(m.surface.traits().emission); // (whether its emission is kept)
     key.add(m.shader_params);
     key.add(m.color);
     key.add(m.emissive);
@@ -678,8 +680,9 @@ bool GpuRenderer3D::bake_gi_proxy(const Material3D& material, f32 time, GiProxy&
         return prepared &&
                render_surface({.depth = _gi_proxy_depth, .linear_colour = into}, *prepared, SurfaceOptions3D{}, stats);
     };
-    // The emission is kept (with its mips) only for a material that emits by its own fields; else drawn in scratch.
-    const bool emits = material.emits_light();
+    // The emission is kept (with its mips) only for a material that emits, by its own fields or its surface's
+    // (SurfaceTraits3D::emission); else drawn in scratch.
+    const bool emits = material.emits_light() || material.surface.traits().emission;
     GpuTexture base =
         _device->create_target(gi_proxy_side, gi_proxy_side, colour, target, SDL_GPU_SAMPLECOUNT_1, gi_proxy_levels);
     Texture lit = _gi_proxy_dark;
@@ -984,13 +987,18 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         const GiProxy* proxy = gi_proxy(m);
         material.add(proxy ? proxy->base.backend().get() : nullptr);
         material.add(proxy ? proxy->emission.backend().get() : nullptr);
+        if (proxy) {
+            material.add(m.surface.traits().vertex_color);
+            material.add(m.surface.traits().vertex_alpha);
+        }
+        const bool emits = m.emits_light() || (proxy && proxy->emission); // (a surface's own: its stand-in's)
         const f32 strength = proxy && proxy->emission ? 1.0f : m.emissive;
         // An emissive draw's voxels hold its emission at a strength of one, and its emitter's number: the GI's light
         // takes the strength from the emitters' list each render, so a strength that changes (a lamp dimmed, a game's
         // exposure applied to its emissives) makes nothing again. Without a number to give, its strength stays in its
         // voxels, and a change of it is a change of what they are made of.
-        const u32 emitter = m.emits_light() ? emitter_for(material.value, strength) : 0u;
-        if (m.emits_light() && emitter == 0) {
+        const u32 emitter = emits ? emitter_for(material.value, strength) : 0u;
+        if (emits && emitter == 0) {
             material.add(strength);
         }
         const u32 job = static_cast<u32>(jobs.size());
@@ -1055,8 +1063,18 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
         const Vec3f n0 = x * sign, n1 = cross(c2, c0) * sign, n2 = cross(c0, c1) * sign;
         const f32 normal[12] = {n0.x, n0.y, n0.z, 0.0f, n1.x, n1.y, n1.z, 0.0f, n2.x, n2.y, n2.z, 0.0f};
         std::memcpy(record.normal, normal, sizeof(record.normal));
-        const Color tint = c.instance->tint;
-        const Color colour = jobs[c.job].proxy ? colors::white : m.color; // (a stand-in has the material's in it)
+        // A stand-in has the material's colour in it, and takes the copy's tint (and vertex colour: p.vertex) only
+        // where its surface reads them (SurfaceTraits3D).
+        const bool proxied = jobs[c.job].proxy != nullptr;
+        const SurfaceTraits3D traits = proxied ? m.surface.traits() : SurfaceTraits3D{};
+        const Color colour = proxied ? colors::white : m.color;
+        Color tint = c.instance->tint;
+        if (!traits.vertex_color) {
+            tint.r = tint.g = tint.b = 255;
+        }
+        if (!traits.vertex_alpha) {
+            tint.a = 255;
+        }
         record.colour[0] = srgb_to_linear(colour.r) * srgb_to_linear(tint.r);
         record.colour[1] = srgb_to_linear(colour.g) * srgb_to_linear(tint.g);
         record.colour[2] = srgb_to_linear(colour.b) * srgb_to_linear(tint.b);
@@ -1719,7 +1737,7 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 u.flags[1] = m.blend == Blend3D::Mask ? 1u : 0u;
                 u.flags[2] = decode ? 1u : 0u;
                 u.flags[3] = proxy_emits ? 2u : m.emissive_texture.backend() ? 1u : 0u; // (2: linear, not encoded)
-                u.material[0] = m.emits_light() ? (proxy_emits ? 1.0f : m.emissive) : 0.0f;
+                u.material[0] = proxy_emits ? 1.0f : m.emits_light() ? m.emissive : 0.0f;
                 u.material[3] = static_cast<f32>(job.emitter);
                 u.material[1] = m.alpha_cutoff;
                 u.material[2] = m.double_sided ? 1.0f : 0.0f;
@@ -1727,6 +1745,9 @@ bool GpuRenderer3D::gi_scene(SDL_GPUCommandBuffer* commands, GpuView3D& view, co
                 u.emission[1] = proxy_emits ? 1.0f : m.emission_color.g;
                 u.emission[2] = proxy_emits ? 1.0f : m.emission_color.b;
                 u.emission[3] = proxy_emits || m.emission_mode == EmissionMode3D::Independent ? 1.0f : 0.0f;
+                const SurfaceTraits3D traits = proxy ? m.surface.traits() : SurfaceTraits3D{};
+                u.vertex[0] = u.vertex[1] = u.vertex[2] = traits.vertex_color ? 1.0f : 0.0f;
+                u.vertex[3] = traits.vertex_alpha ? 1.0f : 0.0f;
                 u.first[0] = lj.copy_first;
                 u.first[1] = k * words;
                 u.first[2] = lj.pair_first;

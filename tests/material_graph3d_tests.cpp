@@ -462,6 +462,49 @@ void offset_reads_the_object() {
         CHECK(cooked->spirv[i].size() > 20);
 }
 
+// What the GI scene's stand-in needs (SurfaceTraits3D): an emission output of its own unless a constant black; the
+// vertex colour in its colour and alpha where they read it (through any node, a glsl node's vColor, the stock
+// surface's fields) or are not outputs; kept in the layout, and defaults for a layout from before them.
+void traits() {
+    const auto of = [](const std::string& nodes, const std::string& outputs) {
+        const auto g = compile_material_graph3d(graph(R"({"name": "albedo", "type": "texture", "slot": "base"})",
+                                                      R"({"id": "map", "type": "texture", "texture": "albedo"})" +
+                                                          std::string(nodes.empty() ? "" : ", ") + nodes,
+                                                      outputs));
+        for (const auto& e : g.errors)
+            std::cerr << e.node << ": " << e.message << '\n';
+        CHECK(g.ok());
+        return g.traits;
+    };
+    const SurfaceTraits3D stock = of("", R"("roughness": 0.5)");
+    CHECK(!stock.emission && stock.vertex_color && stock.vertex_alpha);
+    const SurfaceTraits3D own = of("", R"("base_color": "map.rgb", "alpha": "map.a", "emission": [0, 0, 0])");
+    CHECK(!own.emission && !own.vertex_color && !own.vertex_alpha);
+    // Two steps from the vertex colour; a node the alpha shares with the colour, which doesn't read it.
+    const SurfaceTraits3D tinted = of(R"({"id": "tint", "type": "multiply", "inputs": {"a": "map.rgb", "b": "vertex_color.rgb"}},
+           {"id": "twice", "type": "multiply", "inputs": {"a": "tint", "b": 2}},
+           {"id": "faded", "type": "multiply", "inputs": {"a": "map.a", "b": "vertex_color.a"}})",
+                                      R"("base_color": "twice", "alpha": "faded", "emission": "map.rgb")");
+    CHECK(tinted.emission && tinted.vertex_color && tinted.vertex_alpha);
+    const SurfaceTraits3D shared = of(R"({"id": "grey", "type": "multiply", "inputs": {"a": "map.r", "b": 0.5}},
+           {"id": "faded", "type": "multiply", "inputs": {"a": "grey", "b": "vertex_color.a"}})",
+                                      R"("base_color": "grey", "alpha": "faded", "emission": 2)");
+    CHECK(shared.emission && !shared.vertex_color && shared.vertex_alpha);
+    const SurfaceTraits3D raw = of(R"({"id": "g", "type": "glsl", "glsl": "vColor.rgb * 0.5", "result": "vec3"})",
+                                   R"("base_color": "g", "alpha": 1)");
+    CHECK(raw.vertex_color && !raw.vertex_alpha);
+    const SurfaceTraits3D kept = of(R"({"id": "dim", "type": "multiply", "inputs": {"a": "surface.base_color", "b": 0.5}})",
+                                    R"("base_color": "dim", "alpha": "surface.alpha")");
+    CHECK(kept.vertex_color && kept.vertex_alpha);
+    // The layout keeps them; one from before them reads as the defaults.
+    auto g = compile_material_graph3d(graph("", "", R"("base_color": [1, 0, 0], "alpha": 1, "emission": [0, 1, 0])"));
+    CHECK(g.ok() && g.traits.emission && !g.traits.vertex_color && !g.traits.vertex_alpha);
+    const auto back = read_material_graph_layout3d(write_material_graph_layout3d(g));
+    CHECK(back && back->traits == g.traits);
+    const auto old = read_material_graph_layout3d(R"({"schema": "kin.material-graph-layout/1", "parameters": []})");
+    CHECK(old && old->traits == SurfaceTraits3D{});
+}
+
 } // namespace
 
 int main() {
@@ -474,6 +517,7 @@ int main() {
     layers_and_packing();
     offsets();
     offset_reads_the_object();
+    traits();
     std::cout << "material graph tests passed\n";
     return 0;
 }

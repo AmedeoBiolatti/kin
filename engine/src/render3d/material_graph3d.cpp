@@ -15,6 +15,7 @@
 #include <kin/renderer/shader_compiler.hpp>
 #include <set>
 #include <sstream>
+#include <utility>
 
 extern "C" {
 char* kin_zlib_inflate(const char* bytes, int size, int expected, int* out_size);
@@ -429,6 +430,27 @@ bool identifier(const std::string& s) {
                        [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; });
 }
 
+// Whether a glsl node's expression reads the vertex colour: vColor, or what kin makes of it (kin_base_color, the stock
+// surface's colour, alpha or emission).
+bool reads_vertex_colour(const std::string& glsl) {
+    for (const char* name : {"vColor", "kin_base_color", "kin_stock_surface", "s.base_color", "s.alpha", "s.emission"})
+        if (glsl.find(name) != std::string::npos)
+            return true;
+    return false;
+}
+
+// An output given as a constant black (its first three numbers none above 0).
+bool black(const JsonValue& ref) {
+    if (ref.is_number())
+        return ref.as_number() <= 0.0;
+    if (!ref.is_array())
+        return false;
+    for (size_t i = 0; i < std::min<size_t>(3, ref.items().size()); ++i)
+        if (!ref.items()[i].is_number() || ref.items()[i].as_number() > 0.0)
+            return false;
+    return true;
+}
+
 class Compiler {
 public:
     CompiledMaterialGraph3D out;
@@ -542,9 +564,18 @@ public:
                                 "backlight, clearcoat, clearcoat_roughness, specular, diffuse_wrap, offset)");
                     continue;
                 }
+                _colour_read = false;
                 const Value v = value(ref, name);
                 if (v.expr.empty())
                     continue;
+                // What the GI scene's stand-in needs (SurfaceTraits3D): its own emission, and whether its colour and
+                // alpha read the vertex colour (outputs not given keep the stock surface's, which do).
+                if (name == "base_color")
+                    out.traits.vertex_color = _colour_read;
+                else if (name == "alpha")
+                    out.traits.vertex_alpha = _colour_read;
+                else if (name == "emission")
+                    out.traits.emission = !black(ref);
                 if (v.type == Type::Texture) {
                     error(name, "a texture is not a value: sample it (a texture node)");
                     continue;
@@ -820,8 +851,12 @@ private:
                 return {};
             }
             for (const auto& f : surface_fields)
-                if (member == f.name)
+                if (member == f.name) {
+                    // (The stock surface's colour, alpha and emission are the vertex colour's times its maps'.)
+                    if (member == "base_color" || member == "alpha" || member == "emission")
+                        _colour_read = true;
                     return make("s." + member, f.type);
+                }
             error(who, "surface has no field '" + member + "'");
             return {};
         } else if (const auto* b = built_in(base)) {
@@ -846,13 +881,17 @@ private:
                 }
                 v = make(b->expr, b->type);
             }
+            if (base == "vertex_color")
+                _colour_read = true;
         } else if (const auto p = _params.find(base); p != _params.end()) {
             const auto& param = out.parameters[p->second];
             v = param.type == Type::Texture ? make(base, Type::Texture) : make("p_" + base, param.type);
         } else if (_nodes.contains(base)) {
+            const bool outer = std::exchange(_colour_read, false);
             v = node(base);
             if (v.expr.empty())
                 return {};
+            _colour_read = outer || _colour_reads[base];
         } else {
             error(who, "'" + base + "' is no node, parameter or built-in input");
             return {};
@@ -922,6 +961,7 @@ private:
         _visiting.erase(id);
         if (result.expr.empty())
             return {};
+        _colour_reads[id] = _colour_read; // (what its inputs read, its own glsl's too)
         const std::string name = "n_" + id;
         _statements.push_back("    const " + std::string(glsl_type(result.type)) + " " + name + " = " + result.expr +
                               ";");
@@ -1040,6 +1080,8 @@ private:
             error(id, "a glsl node needs 'glsl' (one expression: no ; { }) and 'result' (float, vec2, vec3, vec4)");
             return {};
         }
+        if (reads_vertex_colour(expr))
+            _colour_read = true;
         std::string body;
         if (const auto* given = n.find("inputs"); given && given->is_object())
             for (const auto& [name, ref] : given->members()) {
@@ -1068,6 +1110,10 @@ private:
     std::map<std::string, Value> _values;
     std::set<std::string> _visiting;
     std::vector<std::string> _prologue, _statements;
+    // Whether the value being compiled reads the vertex colour, and each node's (SurfaceTraits3D's vertex_color and
+    // vertex_alpha).
+    bool _colour_read = false;
+    std::map<std::string, bool> _colour_reads;
 };
 
 } // namespace
@@ -1151,7 +1197,14 @@ std::string write_material_graph_layout3d(const CompiledMaterialGraph3D& graph) 
         }
         json.end_object();
     }
-    json.end_array().end_object();
+    json.end_array();
+    json.key("traits")
+        .begin_object()
+        .field("emission", graph.traits.emission)
+        .field("vertex_color", graph.traits.vertex_color)
+        .field("vertex_alpha", graph.traits.vertex_alpha)
+        .end_object();
+    json.end_object();
     return out.str();
 }
 
@@ -1207,6 +1260,12 @@ std::optional<CompiledMaterialGraph3D> read_material_graph_layout3d(std::string_
                     p.value[i] = f32(v->items()[i].as_number());
         }
         g.parameters.push_back(p);
+    }
+    // (A layout from before them: the defaults, what the GI scene took then.)
+    if (const auto* traits = parsed.value->find("traits"); traits && traits->is_object()) {
+        g.traits.emission = traits->bool_at("emission", false);
+        g.traits.vertex_color = traits->bool_at("vertex_color", true);
+        g.traits.vertex_alpha = traits->bool_at("vertex_alpha", true);
     }
     return g;
 }
