@@ -1648,7 +1648,9 @@ shadowed, fogged and GI-lit as kin's own materials are.
   `noise_cellular`, `fbm`, `checker` (deterministic: hash-based, the same picture on every GPU); `fresnel`,
   `uv_panner` (with time), `uv_rotate`; and `glsl`, an expression of its own over named inputs.
 - **Errors** name their node: an unknown type or input, a missing input, a cycle, a bad swizzle, a reference to
-  nothing, too many parameters, two textures in a slot.
+  nothing, too many parameters, two textures in a slot, nodes chained more than 1024 deep (a node's inputs, theirs,
+  and so on: the compiler follows them on a stack of its own, 256 MB reserved, as a 1 MB main thread's, Windows',
+  overflowed in a few hundred; 128 where no thread can be made, as in a browser). Fab's deepest graphs chain 56.
 - **Cut-outs**: a graph's `alpha` is compiled again for the shadow, occluder, pick, pre- and visibility passes when
   it uses only what they have: `uv`, `position`, `time`, `vertex_color`'s alpha, `surface.alpha` (the base map's),
   parameters, textures, noise and maths (`CompiledMaterialGraph3D::cutout`). One that uses more (the view, a normal,
@@ -1679,7 +1681,10 @@ surface (and what its parameters did). `Assets3D::load_material_graph(path)` loa
   twelve shaders of kin's lighting), made by
   `kin_material_graph cook <graph>` or at build time by `kin_cook_material_graph(<var> SOURCE <graph> [OUTPUT
   <file>])` (`cmake/kin_embed.cmake`), when it is at least as new as the source, or the source is gone: what a
-  shipped game, which has no glslc, loads;
+  shipped game, which has no glslc, loads. `kin_game` cooks every graph in a game's content so, beside it
+  (`kin_cook_material_graphs(<var> CONTENT <dir>)`), and its package and content pack wait for them; a build that
+  can't cook (no glslc, or Android's cross-compile, whose tools don't run on the build machine) needs them cooked
+  already, by a desktop build, and kept with the content: a shipping build does not configure without them;
 - else the source, compiled now with glslc (development); without glslc and no cooked file, an error saying so.
 
 Invalidating the graph or its cooked file (`SceneSession3D` does, for watched material files' dependencies) rebinds
@@ -3690,7 +3695,8 @@ imported too, as a [material graph](#material-graphs) beside it: `<graph>.kingra
 parameters, time, vertex colour, position, normals and view, fresnel, panning, lerps, clamps, steps, remaps, splits
 and combines; the headers list them); an output fed by a node kin has no counterpart for keeps its Tier 1 value
 (Unreal, Unity: Godot's ShaderMaterials have none) and is noted, naming the node. A graph that doesn't compile in
-kin, or samples more than 21 textures (the five slots and 16 layers), falls back to Tier 1, said. One whose
+kin, or samples more than 21 textures (the five slots and 16 layers), falls back to Tier 1, said, as does an output
+whose nodes chain more than 1024 deep (the import, like the compiler, runs on a stack of its own). One whose
 parameters fill more than the 64 floats gets their values (the material's) as constants in a graph of its own
 (`<graph>__<material>.kingraph`), said: they are not parameters then.
 

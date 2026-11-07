@@ -213,6 +213,8 @@ private:
                 v.kind = GodotValue::Kind::Number;
                 v.number = name == "inf" ? INFINITY : NAN;
             } else if (peek() == '(') {
+                if (++_calls > 64) // (a constructor's arguments: a file's values nest a few deep)
+                    fail("calls nested more than 64 deep");
                 ++_at;
                 v.kind = GodotValue::Kind::Call;
                 v.text = name;
@@ -227,6 +229,7 @@ private:
                     skip_space();
                 }
                 ++_at;
+                --_calls;
             } else {
                 v.kind = GodotValue::Kind::Raw;
                 v.text = name;
@@ -237,6 +240,7 @@ private:
 
     std::string_view _text;
     size_t _at = 0;
+    int _calls = 0; // calls being read, one in another's arguments
 };
 
 using material_import::byte;
@@ -684,9 +688,12 @@ public:
             why = "a cycle";
             return std::nullopt;
         }
+        if (!_x.deeper("node " + std::to_string(node), why))
+            return std::nullopt;
         _visiting.insert(key);
         auto v = translate(node, port, why);
         _visiting.erase(key);
+        --_x.depth;
         if (v)
             _done[key] = *v;
         return v;
@@ -1143,8 +1150,9 @@ struct GodotFile {
 
 } // namespace
 
-Result3D<ImportedMaterial3D> import_godot_graph(const std::filesystem::path& source,
-                                                const MaterialImportOptions3D& options) {
+// The import, on this thread's stack (import_godot_graph runs it on a large one).
+static Result3D<ImportedMaterial3D> godot_graph_here(const std::filesystem::path& source,
+                                                     const MaterialImportOptions3D& options) {
     Result3D<ImportedMaterial3D> result;
     try {
         const fs::path project = fs::absolute(options.project).lexically_normal();
@@ -1352,6 +1360,14 @@ Result3D<ImportedMaterial3D> import_godot_graph(const std::filesystem::path& sou
     } catch (const std::exception& error) {
         result.diagnostics.push_back(source.string() + ": " + error.what());
     }
+    return result;
+}
+
+Result3D<ImportedMaterial3D> import_godot_graph(const std::filesystem::path& source,
+                                                const MaterialImportOptions3D& options) {
+    // (On a stack of its own: a node's translation recurses into its inputs', as deep as the graph's chains go.)
+    Result3D<ImportedMaterial3D> result;
+    detail::run_on_large_stack([&](bool) { result = godot_graph_here(source, options); });
     return result;
 }
 

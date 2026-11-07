@@ -4,6 +4,7 @@
 // map is read from (in place inside the content, else copied), the maps made (packed, recombined), decoding with a
 // note where it can't be done, the notes, and the .kinmaterials written after it is read back.
 
+#include "../core/large_stack.hpp"
 #include "image_decode3d.hpp"
 
 #include <algorithm>
@@ -60,6 +61,19 @@ public:
     const MaterialImportOptions3D& options;
     const std::filesystem::path content, out;
     const std::string stem;
+    // How deep a graph's translation goes now (each node's inputs translated within its own; material functions' and
+    // sub-graphs' nodes in the same count), and how deep it may: the graph importers run on run_on_large_stack's stack.
+    int depth = 0;
+    const int depth_limit = detail::recursion_limit(detail::on_large_stack());
+    // One level deeper (true; leave it with --depth), or none past the limit (false, with why, naming `node`).
+    bool deeper(const std::string& node, std::string& why) {
+        if (depth >= depth_limit) {
+            why = node + ": nodes chained more than " + std::to_string(depth_limit) + " deep";
+            return false;
+        }
+        ++depth;
+        return true;
+    }
 
     void note(std::string what) {
         auto& notes = imported.notes;

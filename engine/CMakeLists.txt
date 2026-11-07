@@ -15,6 +15,7 @@ add_library(kin_foundation STATIC
     src/core/hash.cpp
     src/core/jobs.cpp
     src/core/json_value.cpp
+    src/core/large_stack.cpp
     src/core/profile.cpp
     src/core/script_debugger.cpp
     src/core/utf8.cpp

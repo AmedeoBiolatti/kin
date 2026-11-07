@@ -1041,7 +1041,7 @@ void unreal_approximations() {
 }
 
 // Tier 2's limits: textures past kin's five slots go to the graph maps' layers; parameters past shader_params' 64
-// floats are the material's values in a graph of its own (said; not parameters then).
+// floats are the material's values in a graph of its own (said; not parameters then); chains of nodes 1024 deep.
 void unreal_layers_and_folding() {
     Scratch scratch;
     const fs::path project = KIN_TEST_UNREAL, content = scratch.path;
@@ -1098,6 +1098,33 @@ void unreal_layers_and_folding() {
     const std::string many_text{std::istreambuf_iterator<char>{many_in}, std::istreambuf_iterator<char>{}};
     const auto folded = compile_material_graph3d(many_text);
     CHECK(folded.ok() && folded.parameters.empty() && folded.surface.find("0.25") != std::string::npos);
+    // A chain of a thousand nodes imports and compiles (on a stack of their own: a 1 MB main thread's, Windows',
+    // overflowed in 70); a chain past 1024 is said, its output left as Tier 1 has it.
+    for (const int n : {1000, 1100}) {
+        nodes =
+            R"("Uv": {"class": "MaterialExpressionTextureCoordinate", "props": {"coordinate_index": 0}, "inputs": {}},
+                   "K": {"class": "MaterialExpressionConstant", "props": {"r": 0.001}, "inputs": {}})";
+        for (int i = 0; i < n; ++i)
+            nodes += R"(, "A)" + std::to_string(i) +
+                     R"(": {"class": "MaterialExpressionAdd", "props": {}, "inputs": {"A": {"node": ")" +
+                     (i ? "A" + std::to_string(i - 1) : std::string("Uv")) +
+                     R"(", "output": ""}, "B": {"node": "K", "output": ""}}})";
+        write(content / "M_Deep.json", doc("M_Deep", nodes, "A" + std::to_string(n - 1)));
+        const auto deep = import_unreal_graph(content / "M_Deep.json", options);
+        CHECK(deep);
+        const bool said = std::ranges::any_of(deep->notes, [](const std::string& note) {
+            return note.find("nodes chained more than 1024 deep") != std::string::npos;
+        });
+        if (said != (n > 1024))
+            for (const auto& note : deep->notes)
+                std::cerr << "M_Deep " << n << ": " << note << '\n';
+        CHECK(said == (n > 1024));
+        if (n <= 1024) {
+            std::ifstream deep_in(deep->graph);
+            const std::string deep_text{std::istreambuf_iterator<char>{deep_in}, std::istreambuf_iterator<char>{}};
+            CHECK(compile_material_graph3d(deep_text).ok());
+        }
+    }
 }
 
 // A function call's output by its index (the editor's pin names are not always the outputs'): by the call's own
@@ -1239,8 +1266,9 @@ void unreal_object_space() {
         std::cerr << e.node << ": " << e.message << '\n';
     CHECK(g.ok() && g.offset);
     const auto vertex = g.surface.substr(0, g.surface.find("#else"));
-    for (const char* expected : {"(kin_object_position()).xzy * vec3(100.0)",
-                                 "kin_graph_object_to_world(v.xzy * 0.01, 1.0)", "kin_graph_object_to_world(v.xzy, 0.0)"})
+    for (const char* expected :
+         {"(kin_object_position()).xzy * vec3(100.0)", "kin_graph_object_to_world(v.xzy * 0.01, 1.0)",
+          "kin_graph_object_to_world(v.xzy, 0.0)"})
         if (!contains_text(vertex, expected)) {
             std::cerr << "missing: " << expected << '\n' << g.surface << '\n';
             CHECK(false);
@@ -1264,7 +1292,8 @@ void unreal_foliage() {
     const auto import = [&](const char* model, bool connected) {
         const std::string doc =
             std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Leaf", "blend_mode": "BLEND_OPAQUE",
-          "shading_model": ")") + model + R"(", "parameters": {}, "inputs": {}, "textures": {},
+          "shading_model": ")") +
+            model + R"(", "parameters": {}, "inputs": {}, "textures": {},
           "graph": {"nodes": {"Green": {"class": "MaterialExpressionConstant3Vector", "props": {"constant": [0.25, 0.5, 0.125, 1]}, "inputs": {}}},
                     "outputs": {"BaseColor": {"node": "Green", "output": ""})" +
             (connected ? R"(, "SubsurfaceColor": {"node": "Green", "output": ""})" : "") + "}}}";
@@ -1304,10 +1333,14 @@ void unreal_clear_coat() {
     const auto import = [&](const char* model, bool connected) {
         const std::string doc =
             std::string(R"({"schema": "kin.unreal-material/1", "name": "M_Coat", "blend_mode": "BLEND_OPAQUE",
-          "shading_model": ")") + model + R"(", "parameters": {}, "inputs": {}, "textures": {},
+          "shading_model": ")") +
+            model + R"(", "parameters": {}, "inputs": {}, "textures": {},
           "graph": {"nodes": {"Half": {"class": "MaterialExpressionConstant", "props": {"r": 0.625}, "inputs": {}}},
                     "outputs": {"Roughness": {"node": "Half", "output": ""})" +
-            (connected ? R"(, "ClearCoat": {"node": "Half", "output": ""}, "ClearCoatRoughness": {"node": "Half", "output": ""})" : "") + "}}}";
+            (connected
+                 ? R"(, "ClearCoat": {"node": "Half", "output": ""}, "ClearCoatRoughness": {"node": "Half", "output": ""})"
+                 : "") +
+            "}}}";
         write(content / "M_Coat.json", doc);
         auto m = import_unreal_graph(content / "M_Coat.json", options);
         CHECK(m && !m->graph.empty());

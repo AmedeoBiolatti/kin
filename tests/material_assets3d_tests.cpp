@@ -487,6 +487,9 @@ void material_gpu(Renderer2D& renderer) {
     Scratch packed;
     const auto archive = packed.path / "art.kinpak";
     write(scratch.path / "colors.kinmaterials", materials);
+    // The graph as a game ships it: cooked beside it in its pack (its source left out, as the cooked file is enough).
+    const bool cooked_graph = std::filesystem::exists(scratch.path / "glow.kingraph.spv");
+    std::filesystem::remove(scratch.path / "glow.kingraph");
     check(write_content_pack(scratch.path, archive).ok, "material pack write failed");
     const auto mount = packed.path / "virtual";
     mount_content_pack(mount, ContentPack::open(archive));
@@ -494,6 +497,16 @@ void material_gpu(Renderer2D& renderer) {
         Assets3D packed_assets{r3d, mount};
         SceneSession3D packed_session{r3d, packed_assets, options};
         check(packed_session.load("test.kinscene"), "packed material references failed");
+        if (cooked_graph) {
+            const char* glslc = std::getenv("KIN_GLSLC");
+            const std::string kept = glslc ? glslc : "";
+            set_env("KIN_GLSLC", "/nonexistent/glslc");
+            const auto shipped = packed_assets.load_materials("graph.kinmaterials", model, {}).value_or({});
+            error = kin::diagnostics3d_text(packed_assets.diagnostics());
+            set_env("KIN_GLSLC", kept.empty() ? nullptr : kept.c_str());
+            check(shipped && shipped->materials[0].surface && shipped->materials[0].shader_params[1] == 1,
+                  "the cooked graph in a pack did not load without glslc");
+        }
 #ifdef KIN_TEST_MATERIAL_SHADER
         const auto packed_shader = packed_assets.load_materials("shader.kinmaterials", model, {}).value_or({});
         error = kin::diagnostics3d_text(packed_assets.diagnostics());

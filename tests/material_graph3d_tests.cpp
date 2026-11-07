@@ -214,7 +214,7 @@ void documented_example() {
 
 // The layout a cooked graph carries, and the cooked file: read back as written; damaged files refused. With glslc, a
 // graph cooked now (every variant SPIR-V); with cmake's kin_cook_material_graph (KIN_TEST_COOKED_GRAPH), one cooked at
-// build time, which reads back with its parameters.
+// build time, which reads back with its parameters, and a content folder's (KIN_TEST_COOKED_CONTENT).
 void cooked() {
     const auto g = compile_material_graph3d(graph(
         R"({"name": "tint", "type": "color", "default": [0.25, 0.5, 0.75, 1]},
@@ -285,6 +285,14 @@ void cooked() {
         std::cerr << why << '\n';
     CHECK(built && built->graph.parameters.size() == 1 && built->graph.parameters[0].name == "tint");
     std::cout << "the graph cooked at build time reads back\n";
+#endif
+#ifdef KIN_TEST_COOKED_CONTENT
+    // A content folder's graphs (cmake's kin_cook_material_graphs), each cooked beside it.
+    std::ifstream folder_in(fs::path(KIN_TEST_COOKED_CONTENT) / "sub/tinted.kingraph.spv", std::ios::binary);
+    const std::vector<u8> folder_file{std::istreambuf_iterator<char>{folder_in}, std::istreambuf_iterator<char>{}};
+    const auto beside = unpack_cooked_material_graph3d(folder_file, &why);
+    CHECK(beside && beside->graph.parameters.size() == 1 && beside->graph.parameters[0].name == "tint");
+    std::cout << "a content folder's graph cooked beside it reads back\n";
 #endif
 }
 
@@ -481,10 +489,11 @@ void traits() {
     const SurfaceTraits3D own = of("", R"("base_color": "map.rgb", "alpha": "map.a", "emission": [0, 0, 0])");
     CHECK(!own.emission && !own.vertex_color && !own.vertex_alpha);
     // Two steps from the vertex colour; a node the alpha shares with the colour, which doesn't read it.
-    const SurfaceTraits3D tinted = of(R"({"id": "tint", "type": "multiply", "inputs": {"a": "map.rgb", "b": "vertex_color.rgb"}},
+    const SurfaceTraits3D tinted =
+        of(R"({"id": "tint", "type": "multiply", "inputs": {"a": "map.rgb", "b": "vertex_color.rgb"}},
            {"id": "twice", "type": "multiply", "inputs": {"a": "tint", "b": 2}},
            {"id": "faded", "type": "multiply", "inputs": {"a": "map.a", "b": "vertex_color.a"}})",
-                                      R"("base_color": "twice", "alpha": "faded", "emission": "map.rgb")");
+           R"("base_color": "twice", "alpha": "faded", "emission": "map.rgb")");
     CHECK(tinted.emission && tinted.vertex_color && tinted.vertex_alpha);
     const SurfaceTraits3D shared = of(R"({"id": "grey", "type": "multiply", "inputs": {"a": "map.r", "b": 0.5}},
            {"id": "faded", "type": "multiply", "inputs": {"a": "grey", "b": "vertex_color.a"}})",
@@ -493,8 +502,9 @@ void traits() {
     const SurfaceTraits3D raw = of(R"({"id": "g", "type": "glsl", "glsl": "vColor.rgb * 0.5", "result": "vec3"})",
                                    R"("base_color": "g", "alpha": 1)");
     CHECK(raw.vertex_color && !raw.vertex_alpha);
-    const SurfaceTraits3D kept = of(R"({"id": "dim", "type": "multiply", "inputs": {"a": "surface.base_color", "b": 0.5}})",
-                                    R"("base_color": "dim", "alpha": "surface.alpha")");
+    const SurfaceTraits3D kept =
+        of(R"({"id": "dim", "type": "multiply", "inputs": {"a": "surface.base_color", "b": 0.5}})",
+           R"("base_color": "dim", "alpha": "surface.alpha")");
     CHECK(kept.vertex_color && kept.vertex_alpha);
     // The layout keeps them; one from before them reads as the defaults.
     auto g = compile_material_graph3d(graph("", "", R"("base_color": [1, 0, 0], "alpha": 1, "emission": [0, 1, 0])"));
@@ -503,6 +513,23 @@ void traits() {
     CHECK(back && back->traits == g.traits);
     const auto old = read_material_graph_layout3d(R"({"schema": "kin.material-graph-layout/1", "parameters": []})");
     CHECK(old && old->traits == SurfaceTraits3D{});
+}
+
+// Chains of nodes as deep as 1024 compile, on a stack of their own (a 1 MB main thread's, Windows', overflowed in a
+// few hundred), in the alpha's and the offset's compiles too; deeper ones are an error naming a node, not a crash.
+void deep_chains() {
+    const auto chain = [](int n, const std::string& output) {
+        std::string nodes = R"({"id": "n0", "type": "add", "inputs": {"a": "uv.x", "b": 0.001}})";
+        for (int i = 1; i < n; ++i)
+            nodes += R"(, {"id": "n)" + std::to_string(i) + R"(", "type": "add", "inputs": {"a": "n)" +
+                     std::to_string(i - 1) + R"(", "b": 0.001}})";
+        return compile_material_graph3d(graph("", nodes, "\"" + output + "\": \"n" + std::to_string(n - 1) + "\""));
+    };
+    CHECK(chain(1024, "roughness").ok());
+    CHECK(chain(1024, "alpha").cutout);
+    CHECK(chain(1024, "offset").offset);
+    CHECK(error_at(chain(1025, "roughness"), "n0", "nodes chained more than 1024 deep"));
+    CHECK(error_at(chain(20000, "roughness"), "n18975", "nodes chained more than 1024 deep"));
 }
 
 } // namespace
@@ -518,6 +545,7 @@ int main() {
     offsets();
     offset_reads_the_object();
     traits();
+    deep_chains();
     std::cout << "material graph tests passed\n";
     return 0;
 }

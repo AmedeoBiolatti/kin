@@ -1,4 +1,6 @@
 // Material graphs into surface shaders (kin/render3d/material_graph3d.hpp).
+#include "../core/large_stack.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -455,8 +457,10 @@ class Compiler {
 public:
     CompiledMaterialGraph3D out;
     // The cut-out passes' compile (kin_surface_alpha): their inputs only, the alpha output only. The vertex variants'
-    // (kin_surface_offset, `vertex`): a vertex's inputs only, the offset output only.
-    explicit Compiler(bool mask = false, bool vertex = false) : _mask(mask || vertex), _vertex(vertex) {}
+    // (kin_surface_offset, `vertex`): a vertex's inputs only, the offset output only. `limit`: how long a chain of
+    // nodes may be (detail::recursion_limit: each node's inputs are compiled within its own compile).
+    explicit Compiler(int limit, bool mask = false, bool vertex = false)
+        : _mask(mask || vertex), _vertex(vertex), _limit(limit) {}
     std::string alpha_function;  // the mask compile's
     std::string offset_function; // the vertex compile's
 
@@ -592,7 +596,7 @@ public:
         // The alpha again, for the cut-out passes, where they have what it needs.
         std::string cutout;
         if (g.find("outputs") && g.find("outputs")->find("alpha")) {
-            Compiler mask(true);
+            Compiler mask(_limit, true);
             mask.compile(text);
             if (mask.out.ok() && !mask.alpha_function.empty()) {
                 cutout = mask.alpha_function;
@@ -606,7 +610,7 @@ public:
         // The offset, for the vertex variants (World Position Offset): what a vertex has.
         std::string offset;
         if (g.find("outputs") && g.find("outputs")->find("offset")) {
-            Compiler vertex(false, true);
+            Compiler vertex(_limit, false, true);
             vertex.compile(text);
             if (vertex.out.ok() && !vertex.offset_function.empty()) {
                 offset = vertex.offset_function;
@@ -923,6 +927,10 @@ private:
             error(id, "the node feeds itself (a cycle)");
             return {};
         }
+        if (_visiting.size() >= size_t(_limit)) {
+            error(id, "nodes chained more than " + std::to_string(_limit) + " deep (each node's inputs, theirs, ...)");
+            return {};
+        }
         _visiting.insert(id);
         const JsonValue& n = *_nodes.at(id);
         const std::string type = n.find("type") ? n.find("type")->as_string() : "";
@@ -1105,6 +1113,7 @@ private:
 
     bool _mask = false;   // the cut-outs' compile, or the vertex's (both: no surface, a restricted set of inputs)
     bool _vertex = false; // the vertex's
+    int _limit = 0;
     std::map<std::string, const JsonValue*> _nodes;
     std::map<std::string, size_t> _params;
     std::map<std::string, Value> _values;
@@ -1119,11 +1128,16 @@ private:
 } // namespace
 
 CompiledMaterialGraph3D compile_material_graph3d(std::string_view graph) {
-    Compiler c;
-    c.compile(graph);
-    if (!c.out.ok())
-        c.out.surface.clear();
-    return std::move(c.out);
+    // (On a stack of its own: a node's compile recurses into its inputs', as deep as the graph's chains go.)
+    CompiledMaterialGraph3D out;
+    detail::run_on_large_stack([&](bool large) {
+        Compiler c(detail::recursion_limit(large));
+        c.compile(graph);
+        if (!c.out.ok())
+            c.out.surface.clear();
+        out = std::move(c.out);
+    });
+    return out;
 }
 
 std::array<f32, surface_param_count3d>

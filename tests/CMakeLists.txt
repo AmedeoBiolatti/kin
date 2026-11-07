@@ -448,6 +448,15 @@ if(KIN_EXPERIMENTAL_3D AND KIN_ENABLE_SCENE3D_RUNTIME)
         add_dependencies(kin_material_graph3d_tests kin_material_graph_cooked)
         target_compile_definitions(kin_material_graph3d_tests PRIVATE KIN_TEST_COOKED_GRAPH="${_cooked_graph}")
     endif()
+    # A content folder's graphs, every one cooked beside it (kin_cook_material_graphs: what kin_game ships).
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/shaders/tinted.kingraph" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/graph_content/sub")
+    kin_cook_material_graphs(_cooked_folder CONTENT "${CMAKE_CURRENT_BINARY_DIR}/graph_content")
+    if(_cooked_folder)
+        add_custom_target(kin_material_graph_cooked_folder DEPENDS ${_cooked_folder})
+        add_dependencies(kin_material_graph3d_tests kin_material_graph_cooked_folder)
+        target_compile_definitions(kin_material_graph3d_tests PRIVATE
+            KIN_TEST_COOKED_CONTENT="${CMAKE_CURRENT_BINARY_DIR}/graph_content")
+    endif()
     # Other engines' materials as kin's (material_import3d.hpp), on the CPU.
     kin_add_test(kin_material_import3d_tests kin-material-import3d SOURCES material_import3d_tests.cpp
         DEFINITIONS KIN_TEST_IMAGES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/images"

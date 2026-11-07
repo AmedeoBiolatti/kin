@@ -586,12 +586,15 @@ public:
             why = node + " feeds itself";
             return std::nullopt;
         }
+        if (!_x.deeper(node, why))
+            return std::nullopt;
         _visiting.insert(key);
         const JsonValue* n = this->node(node);
         const bool call =
             n && n->find("class") && n->find("class")->as_string() == "MaterialExpressionMaterialFunctionCall";
         auto v = call ? function_call(node, *n, pin, why) : translate(node, pin, why);
         _visiting.erase(key);
+        --_x.depth;
         if (v && !call)
             v = swizzle(*v, pin);
         if (v)
@@ -1712,8 +1715,9 @@ private:
 
 } // namespace
 
-Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& source,
-                                                 const MaterialImportOptions3D& options) {
+// The import, on this thread's stack (import_unreal_graph runs it on a large one).
+static Result3D<ImportedMaterial3D> unreal_graph_here(const std::filesystem::path& source,
+                                                      const MaterialImportOptions3D& options) {
     // The Tier 1 import first: what the graph can't express keeps its values.
     auto result = import_unreal_material(source, options);
     if (!result)
@@ -1952,6 +1956,14 @@ Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& so
         result.value.reset();
         result.diagnostics.push_back(source.string() + ": " + error.what());
     }
+    return result;
+}
+
+Result3D<ImportedMaterial3D> import_unreal_graph(const std::filesystem::path& source,
+                                                 const MaterialImportOptions3D& options) {
+    // (On a stack of its own: a node's translation recurses into its inputs', as deep as the graph's chains go.)
+    Result3D<ImportedMaterial3D> result;
+    detail::run_on_large_stack([&](bool) { result = unreal_graph_here(source, options); });
     return result;
 }
 

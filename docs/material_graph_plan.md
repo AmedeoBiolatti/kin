@@ -244,6 +244,23 @@ kin_material_graph3d_tests and `test_gpu_gi_proxy` (the glow with the fields off
 re-baking animated stand-ins, and the surface run in the voxelizer itself for what depends on position, normal or a
 vertex-colour mask (in the 65 Fab graphs, time reaches the colour or glow of 35, position 24, the normal 23).
 
+**Deep graphs and shipping (2026-11-08).** The Windows CI crashed in kin_material_import3d_tests: the importers and
+the compiler follow a node's inputs recursively, and MSVC's frames (about 15 KB a level in the Unreal importer's
+translate) overflowed Windows' 1 MB main thread at a chain of 70 (Fab's deepest graphs chain 56 kin nodes, more in
+Unreal's with reroutes and functions). The compiler crashed too, past about 500 at 1 MB on Linux, and at 5000 at 8 MB.
+Now the compile and the three graph imports run on a thread with a stack of its own (`detail::run_on_large_stack`,
+256 MB reserved; on the caller's where there are no threads, a browser) and chains past 1024 (128 on a caller's
+stack) are an error naming the node (the compiler) or a note keeping the output's Tier 1 value (the importers); the
+Godot reader also stops at calls nested 64 deep. Checked: chains of 1024 (compiler) and 1000 (Unreal) compile and
+import, past them said, by kin_material_graph3d_tests and kin_material_import3d_tests (also passing with a 256 KB
+main stack); Godot and Unity chains of 1000 import and 1100 are said, by hand, on a 1 MB stack. Shipping: `kin_game`
+cooks its content's graphs beside them (`kin_cook_material_graphs`, one target for each content folder) and its pack
+waits for them; where it can't cook (Android's cross-compile, no glslc) a shipping build stops at configure naming
+the graphs not cooked. Checked: a test folder cooked by the function; a cooked graph loaded from a content pack with
+glslc gone (kin_material_assets3d_tests); a graph dropped into the Summit content cooked, and all four games on that
+content (and their packs) depending on it. Not fixed: kin's JSON reader recurses into nested arrays and objects with
+no limit (a pre-existing core matter: a file nested a million deep would still overflow).
+
 **Cooked size.** 669 KB to about 220 KB: the variants optimised (glslc -O, which also drops the debug names; run-time
 surface compiles too, so development draws what ships: an optimised cooked graph of no outputs is byte-identical to
 the stock material) and the payload deflated (stb_image_write's zlib; inflated by stb_image's), with an FNV-1a hash

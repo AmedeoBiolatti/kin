@@ -18,7 +18,10 @@ releases may change APIs.
   (on) can be turned off to draw rough metals as Unreal's legacy shading does. The GI scene sees a surface material
   through a stand-in the renderer draws from it (its base colour and emission over its UV square), not through its
   maps, which a graph may fill with masks or normal maps; `SurfaceTraits3D` (filled in by the graph compiler) says
-  whether a surface glows by itself and whether its colour reads the vertex colour.
+  whether a surface glows by itself and whether its colour reads the vertex colour. `kin_game` cooks a game's
+  graphs at build time (`kin_cook_material_graphs`), and a shipping build that can't (Android's) needs them
+  cooked already. Graphs and their imports run on a stack of their own: chains of nodes up to 1024 deep, deeper
+  ones an error naming the node.
 - `kin_import_material godot|unity|unreal` imports other engines' materials as `.kinmaterials`: the standard PBR
   materials of all three, and with `--graphs` their node graphs (Unreal material graphs with their Material
   Functions and static switches, Unity Shader Graph 10+, Godot 4 VisualShaders), noting each node it can't express.

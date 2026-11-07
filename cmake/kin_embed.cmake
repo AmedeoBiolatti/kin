@@ -25,6 +25,16 @@
 #     beside the graph in its content as <graph>.spv, where
 #     Assets3D::load_material_graph looks.
 #
+#   kin_cook_material_graphs(<out_var> CONTENT <dir> [MISSING <var>])
+#     Every material graph in a content folder (*.kingraph, in its subfolders
+#     too) cooked as kin_cook_material_graph cooks one, each beside its graph
+#     as <graph>.spv: where Assets3D::load_material_graph looks, so whatever
+#     ships the folder ships them (its content pack, the folder installed, an
+#     Android or web package). <out_var>: the cooked files. Where it cannot
+#     cook (no kin_material_graph tool or glslc, or a cross-compile: Android's,
+#     whose tools don't run here) it cooks none, and MISSING lists the graphs
+#     with no cooked file as new as they are. kin_game cooks its content's.
+#
 #   kin_embed_files(<target> NAME <function> [NAMESPACE <ns>] FILES <file> ...)
 #     Builds the files into <target>, readable by file name through
 #       #include "<function>.hpp"
@@ -213,6 +223,33 @@ function(kin_cook_material_graph out_var)
         COMMENT "kin_material_graph: ${name} -> ${name}.spv"
         VERBATIM)
     set(${out_var} "${output}" PARENT_SCOPE)
+endfunction()
+
+function(kin_cook_material_graphs out_var)
+    cmake_parse_arguments(ARG "" "CONTENT;MISSING" "" ${ARGN})
+    if(NOT ARG_CONTENT)
+        message(FATAL_ERROR "kin_cook_material_graphs: CONTENT is required")
+    endif()
+    get_filename_component(content "${ARG_CONTENT}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    file(GLOB_RECURSE graphs CONFIGURE_DEPENDS "${content}/*.kingraph")
+    set(cooked "")
+    set(missing "")
+    if(graphs AND TARGET kin_material_graph AND KIN_GLSLC AND NOT CMAKE_CROSSCOMPILING)
+        foreach(graph IN LISTS graphs)
+            kin_cook_material_graph(spv SOURCE "${graph}" OUTPUT "${graph}.spv")
+            list(APPEND cooked "${spv}")
+        endforeach()
+    else()
+        foreach(graph IN LISTS graphs)
+            if(NOT EXISTS "${graph}.spv" OR "${graph}" IS_NEWER_THAN "${graph}.spv")
+                list(APPEND missing "${graph}")
+            endif()
+        endforeach()
+    endif()
+    set(${out_var} "${cooked}" PARENT_SCOPE)
+    if(ARG_MISSING)
+        set(${ARG_MISSING} "${missing}" PARENT_SCOPE)
+    endif()
 endfunction()
 
 function(kin_embed_files target)
