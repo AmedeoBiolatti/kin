@@ -9855,10 +9855,11 @@ void GpuRenderer3D::prepare_draw_plan(FrameCtx& ctx) {
         struct Hash {
             std::size_t operator()(const DrawBindingKey& key) const {
                 u64 h = u32(key.u) | (u64(key.v) << 8);
-                for (u32 i = 0; i < key.textures.size(); ++i) {
-                    h = (h ^ reinterpret_cast<std::uintptr_t>(key.textures[i])) * 0x9e3779b97f4a7c15ull;
-                    h = (h ^ sampler_identity(key.sampling[i])) * 0x9e3779b97f4a7c15ull;
-                }
+                // (Six textures, the graph maps last, but five samplers: each array by its own length.)
+                for (const ITextureBackend* texture : key.textures)
+                    h = (h ^ reinterpret_cast<std::uintptr_t>(texture)) * 0x9e3779b97f4a7c15ull;
+                for (const auto& sampler : key.sampling)
+                    h = (h ^ sampler_identity(sampler)) * 0x9e3779b97f4a7c15ull;
                 return static_cast<std::size_t>(h ^ (h >> 32));
             }
         };
