@@ -1337,3 +1337,93 @@ layout/trait and body-preservation checks, flags, hashes and reproduction script
 The initial missing direct includes for preloaded scenes and workflow binding
 declarations are repaired; their failed pilot logs are retained. All source,
 configuration and Ninja-log probes are serialized with compilation.
+
+### Split entity scripting translation unit
+
+Follow-up measured on 2026-11-07 from `2398342`. The former 1,252-line
+`entity_scripts.cpp` now separates runtime/file loading/reload/scheduling from
+`entity_script_bindings.cpp` (entity methods and pool/tween bridge) and
+`entity_service_bindings.cpp` (game services, physics queries and the Lua self
+prelude). A private header shares the original state fields and live-service
+guard. Public C++ headers and Lua registration names are unchanged.
+
+The 15 moved helper/runtime method bodies, all 14 public member definitions,
+the concatenated binding body/registration order, userdata fields/constructor/
+`alive`/`live` bodies, service guard and Lua self prelude are preserved. Public
+member definitions remain byte-identical. The shared userdata uses the compact
+hidden `kin::s::ScriptEntity` identity; a regression checks both sol2 primary
+and reference registry keys stay within the bundled Lua 40-byte short-string
+limit. Internal C++/sol identities change; public API reports match.
+
+Measurements retain normal Release target `-O2`, the existing PCH, mold,
+compiler cache/LTO off and `KIN_DEV_FAST_SCRIPTING=OFF`. Safety checks and Lua
+limits are unchanged. A fresh diagnostic Clang trace spends 24.66 s overall,
+10.34 s in the frontend and 14.25 s in the backend. The instrumented trace is
+kept separate from timing samples.
+
+A focused Clang comparison runs two ABBA blocks, four observations per version,
+compiling stable original or final source/header snapshots with matching flags
+and four fixed workers. The original combined file and final longest service
+file use CPU 2; final entity/runtime units use CPUs 0/6. An unchanged JSON
+compile uses CPU 4. No worktree compilers overlap the experiment. Host activity
+remains uncontrolled, and every observation/load is retained.
+
+| Entity compilation set | Before | After |
+|---|---:|---:|
+| Median elapsed time | 22.80 s | 10.91 s |
+| Median combined compiler CPU | 22.76 s | 26.83 s |
+| Median unchanged JSON control | 0.94 s | 0.94 s |
+
+This set takes **52.1% less wall time**, about **2.1 times faster**, but uses
+**17.9% more compiler CPU**. Before ranges from 22.63–23.28 s; after from
+10.77–11.08 s. The before control's 1.39 s outlier is retained. This experiment
+measures compilation only, without archive/link work or ordinary clean-project
+scheduling. It does not establish a whole-project or cumulative speedup.
+
+Real implementation-only edits use the canonical Ninja graph, four workers
+pinned to CPUs 0/2/4/6, and rebuild through the final `hex_demo` archive/link.
+Each plan and actual build compiles exactly its one expected C++ object:
+
+| Implementation edit | Original combined file | Split file | After observations |
+|---|---:|---:|---:|
+| Runtime, reload and scheduling | 26.44 s median | 7.51 s median | 3 |
+| Entity methods and bridge | 26.44 s median | 9.54 s | 1 |
+| Game-service bindings and physics | 26.44 s median | 11.53 s | 1 |
+
+The original three observations are 24.31, 26.53 and 26.44 s. Final runtime
+observations are 7.47, 7.51 and 7.56 s: **71.6% less wall time**, about
+**3.5 times faster**, for that edit scope. The other two final timings are
+single exploratory observations. Source bytes and nanosecond timestamps are
+restored after each probe; canonical objects are then rebuilt from original
+source bytes. Shared private-header edits reach three production sources and
+the entity regression test; game-main implementation scope remains unchanged.
+
+Parallelism and smaller edit scopes provide the gain. Repeated frontend work
+and templates increase aggregate CPU; a single-worker rebuild of the full set
+can be slower. Several units may use memory simultaneously, and individual
+max-child RSS does not measure the combined concurrent peak. No lower
+optimization/safety settings or whole-build CPU/memory reduction are claimed.
+
+Runtime probes use both compilers, three processes/version/compiler in
+alternating order, with 30 measured samples after three warmups on CPU 2.
+Entity bridge-loop medians across processes are 36.033 to 36.732 ms with Clang
+and 36.593 to 36.990 ms with GCC, approximately **1.9% and 1.1% slower**.
+Unchanged scene VM/control-loop medians vary by up to about 2%; all final entity
+positions match. These narrow probes do not establish whole-game FPS or bound
+every service/query operation. The probe's code/read-only sections grow about
+0.07% with Clang and 0.22% with GCC; unstripped file size barely changes.
+
+Clang and GCC each pass 39 selected tests and all four Lua API reports match
+their baseline. Eight no-PCH assertions per compiler compare original/new
+userdata size, alignment and six type traits. Eight further no-PCH cases compile
+the three sources/private header with Clang 3D enabled and GCC physics/audio
+disabled. Mechanical checks regenerate the four source/header files and CMake
+exactly and verify body/field/order preservation. Final entity/runtime/game
+smoke tests and API comparisons pass per compiler; no-change builds compile
+and link nothing. Windows/MSVC and native desktop/3D/GPU runtime are untested.
+
+The [entity split data](build_entity_bindings_split_2026-11-07.json) records all
+samples, controls/load, runtime probes, binary sizes, source hashes, compiler
+flags, validation and reproduction scripts. The initial baseline dry-run stopped
+at a pending CMake regeneration after branch creation; the source was restored
+and the build settled before the three recorded edit samples.

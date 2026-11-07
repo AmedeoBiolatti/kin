@@ -16,6 +16,7 @@
 #include <kin/scene/scene_asset.hpp>
 #include <kin/scripting/entity_scripts.hpp>
 #include <kin/scripting/lua_script.hpp>
+#include "../engine/src/scripting/entity_scripts_internal.hpp"
 #if KIN_ENABLE_PHYSICS
 #include <kin/ecs/physics.hpp>
 #include <kin/physics/physics.hpp>
@@ -41,6 +42,14 @@ void write(const fs::path& file, const std::string& text) {
 
 bool near(float a, float b) {
     return std::abs(a - b) < 1e-3f;
+}
+
+void test_entity_userdata_registry_keys_stay_short() {
+    // sol2 looks these up when converting Lua receivers. Longer keys cross
+    // the bundled Lua short-string limit and slow hot entity calls.
+    using Traits = sol::usertype_traits<kin::s::ScriptEntity>;
+    assert(Traits::metatable().size() <= 40);
+    assert(Traits::user_metatable().size() <= 40);
 }
 
 void test_entity_scripts() {
@@ -551,6 +560,7 @@ end
 #endif
 
 int main() {
+    test_entity_userdata_registry_keys_stay_short();
     test_entity_scripts();
     test_player_scripts();
     test_entity_emit();

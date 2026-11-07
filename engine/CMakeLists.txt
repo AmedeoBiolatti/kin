@@ -328,7 +328,9 @@ if(KIN_ENABLE_SCRIPTING)
         src/scripting/lua_workflows2d.cpp
         src/scripting/script_scene.cpp
         src/scripting/script_runtime.cpp
-        src/scripting/entity_scripts.cpp)
+        src/scripting/entity_scripts.cpp
+        src/scripting/entity_script_bindings.cpp
+        src/scripting/entity_service_bindings.cpp)
     if(KIN_ENABLE_AUDIO)
         target_sources(kin_scripting_scenes PRIVATE src/scripting/lua_audio.cpp)
     endif()

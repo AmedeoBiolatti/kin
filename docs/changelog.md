@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Entity scripting separates runtime/reload/scheduling, entity methods and game-service bindings,
+  shortening independent edit rebuilds and exposing parallel compilation. Normal optimization
+  and safety settings remain enabled. See [entity split measurements](build_times.md#split-entity-scripting-translation-unit) for timings and CPU/runtime tradeoffs.
+
 - Scene scripting separates runtime/file loading, native API methods and binding registration into
   three implementation files, shortening independent edit rebuilds. Shared private userdata types
   use compact sol registry keys with a regression check. See [scene split measurements](build_times.md#split-scene-scripting-translation-unit).
