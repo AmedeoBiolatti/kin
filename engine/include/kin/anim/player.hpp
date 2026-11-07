@@ -131,6 +131,9 @@ struct AnimationPlayer {
     std::vector<PlayerLayer> fading;
     std::unordered_map<std::string, EcsId, TransparentStringHash, std::equal_to<>> target_cache;
     bool playing = true;
+    // Each field it sets marked as set (flecs's OnSet, as EcsEntity::modified), for a world that watches its
+    // components for changes: a 3D one's drawing (WorldRenderState3D) does. Off: written in place, unannounced.
+    bool announce = false;
 };
 
 struct AnimationLayerSnapshot {

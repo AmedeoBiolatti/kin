@@ -7,6 +7,13 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
+  quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
+  `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
+  scene plays `kin::Animator`s: `resolve_animators3d` binds them (`SceneSession3D` does, at load, for spawned prefabs
+  and live edits, and watches their files) and `SceneFrame3D` plays them in its animation phase.
+  `update_animators(world, dt, announce)` and `AnimationPlayer::announce` mark the fields they set as set, for a
+  world that watches for changes.
 - Experimental: kin's 2D physics on Box2D 3.2 with `-DKIN_PHYSICS_BOX2D_V3=ON` (off by default; Box2D 2.4 stays
   the default). The same `PhysicsWorld` API, stepped on Box2D's own threads: `PhysicsWorldDef::workers` (0:
   `KIN_PHYSICS_WORKERS`, else one per core up to 8), with the same results however many. A packed crowd of 900

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <kin/core/math3d.hpp>
 #include <kin/core/types.hpp>
 #include <kin/renderer/color.hpp>
 
@@ -17,9 +18,11 @@ enum class AnimValueKind : u8 {
     Int,
     Bool,
     String,
+    Vec3, // a 3D place or size ("Transform3D.position"): eased as each of its parts
+    Quat, // a 3D turn ("Transform3D.rotation"): eased the short way round, at a steady speed
 };
 
-using AnimValue = std::variant<f32, Vec2f, Color, i32, bool, std::string>;
+using AnimValue = std::variant<f32, Vec2f, Color, i32, bool, std::string, Vec3f, Quatf>;
 
 AnimValueKind value_kind(const AnimValue& value);
 std::string_view anim_value_kind_name(AnimValueKind kind);

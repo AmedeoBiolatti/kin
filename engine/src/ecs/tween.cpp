@@ -14,7 +14,8 @@ std::optional<AnimValue> anim_value_of(const ComponentFieldValue& value) {
         [](const auto& typed) -> std::optional<AnimValue> {
             using V = std::decay_t<decltype(typed)>;
             if constexpr (std::is_same_v<V, f32> || std::is_same_v<V, Vec2f> || std::is_same_v<V, Color> || std::is_same_v<V, i32> ||
-                          std::is_same_v<V, bool> || std::is_same_v<V, std::string>) {
+                          std::is_same_v<V, bool> || std::is_same_v<V, std::string> || std::is_same_v<V, Vec3f> ||
+                          std::is_same_v<V, Quatf>) {
                 return AnimValue{typed};
             } else {
                 return std::nullopt;
@@ -55,6 +56,12 @@ AnimValue plus(const AnimValue& a, const AnimValue& b) {
     if (const auto* x = std::get_if<Vec2f>(&a); x && std::holds_alternative<Vec2f>(b)) {
         const Vec2f y = std::get<Vec2f>(b);
         return Vec2f{x->x + y.x, x->y + y.y};
+    }
+    if (const auto* x = std::get_if<Vec3f>(&a); x && std::holds_alternative<Vec3f>(b)) {
+        return *x + std::get<Vec3f>(b);
+    }
+    if (const auto* x = std::get_if<Quatf>(&a); x && std::holds_alternative<Quatf>(b)) {
+        return (*x * std::get<Quatf>(b)).normalized();
     }
     return b;
 }

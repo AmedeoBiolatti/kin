@@ -47,6 +47,8 @@ std::string_view anim_value_kind_name(AnimValueKind kind) {
     case AnimValueKind::Int: return "int";
     case AnimValueKind::Bool: return "bool";
     case AnimValueKind::String: return "string";
+    case AnimValueKind::Vec3: return "vec3";
+    case AnimValueKind::Quat: return "quat";
     }
     return "unknown";
 }
@@ -64,6 +66,10 @@ bool parse_anim_value_kind(std::string_view text, AnimValueKind& out) {
         out = AnimValueKind::Bool;
     } else if (text == "string") {
         out = AnimValueKind::String;
+    } else if (text == "vec3") {
+        out = AnimValueKind::Vec3;
+    } else if (text == "quat") {
+        out = AnimValueKind::Quat;
     } else {
         return false;
     }
@@ -204,6 +210,12 @@ AnimValue interpolate(const AnimValue& a, const AnimValue& b, f32 t, Easing easi
         return lerp(std::get<Vec2f>(a), std::get<Vec2f>(b), eased);
     case AnimValueKind::Color:
         return lerp(std::get<Color>(a), std::get<Color>(b), eased);
+    case AnimValueKind::Vec3: {
+        const Vec3f from = std::get<Vec3f>(a);
+        return from + (std::get<Vec3f>(b) - from) * eased;
+    }
+    case AnimValueKind::Quat:
+        return slerp(std::get<Quatf>(a), std::get<Quatf>(b), eased);
     case AnimValueKind::Int:
     case AnimValueKind::Bool:
     case AnimValueKind::String:
