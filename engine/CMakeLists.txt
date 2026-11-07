@@ -320,6 +320,8 @@ if(KIN_ENABLE_SCRIPTING)
 
     target_sources(kin_scripting_scenes PRIVATE
         src/scripting/script_engine.cpp
+        src/scripting/script_scene_api.cpp
+        src/scripting/script_scene_bindings.cpp
         src/scripting/script_reload.cpp
         src/scripting/lua_state_copy.cpp
         src/scripting/lua_values.cpp

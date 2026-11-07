@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Scene scripting separates runtime/file loading, native API methods and binding registration into
+  three implementation files, shortening independent edit rebuilds. Shared private userdata types
+  use compact sol registry keys with a regression check. See [scene split measurements](build_times.md#split-scene-scripting-translation-unit).
+
 - Lua API metadata and inspection share one implementation file, reducing repeated registration
   compilation and narrowing metadata implementation edits from five Lua source files to one.
   See [Lua API bookkeeping measurements](build_times.md#shared-lua-api-bookkeeping).

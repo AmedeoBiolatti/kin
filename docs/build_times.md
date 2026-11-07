@@ -1228,3 +1228,112 @@ The [Lua API bookkeeping data](build_lua_surface_2026-11-07.json) records every
 initial/pilot, parallel and serial sample, controls/load, fresh trace totals,
 implementation edits, runtime samples, hashes, compiler flags, validation,
 workflow correction and reproduction scripts.
+
+### Split scene scripting translation unit
+
+Follow-up measured on 2026-11-07 from `82043ec`. Scene scripting now has three
+implementation files: `script_engine.cpp` retains runtime lifetime, file/module
+loading and public callback scheduling; `script_scene_api.cpp` owns native API
+methods, component/query helpers, typed invocation and reload migration;
+`script_scene_bindings.cpp` owns the ordered registrations and receiver adapters.
+Both added sources belong to `kin_scripting_scenes` and use its existing PCH and
+normal Release `-O2`. Compiler cache/LTO are off, mold is used, and
+`KIN_DEV_FAST_SCRIPTING=OFF`; sol2 safety settings are unchanged.
+
+Forty-eight native method bodies move out of class definitions; 21 small methods,
+including entity receiver/liveness checks, stay inline. Host/Impl definitions,
+userdata fields/defaults/access and all 27 ScriptEngine member bodies are
+preserved. Three explicit instantiations keep typed `call_optional` invocation
+out of the runtime unit, without an extra Lua object wrapper/allocation per
+callback. Outlining can remove previous inlining opportunities; runtime probes
+below bound only the sampled operations. Guard/command TLS definitions stay
+with native execution so direct accesses retain known static initialization.
+Public C++ headers and Lua registration names are unchanged.
+
+The userdata types require one shared C++ identity across translation units.
+An initial `kin::scripting_detail` definition caused about a 5% scene-bridge
+slowdown with both compilers. Sol2 strips anonymous-namespace text from the old
+type names; the new explicit prefix made registry keys longer, crossing the
+bundled Lua `LUAI_MAXSHORTLEN` limit of 40. Hidden visibility alone reduced but
+did not remove the Clang regression. The final shared types use a compact hidden
+`kin::s` namespace and readable aliases in `scripting_detail`. The existing
+receiver/liveness bodies are retained. A regression test checks all ten primary
+and reference keys are at most 40 bytes. Its negative control links the measured
+long-name prototype and must fail the length assertion. Internal C++/sol registry
+identities change; public Lua type names/reports remain the same.
+
+A focused Clang rebuild/link comparison uses one ABBA block, two observations
+per version, with four workers pinned to CPUs 0, 2, 4 and 6. The original combined
+source and the new registration unit both run on CPU 2; native API/runtime work
+can run on CPUs 0 and 6. An unchanged JSON compile uses CPU 4. Stable source and
+private-header copies use matching target flags/PCH, with dependency files
+checking header selection. Linker dependency output and Ninja logs are isolated.
+All other objects/dependencies/shaders are cached, and explicit replacement Lua
+objects are linked into `hex_demo`, whose headless report matches in every run.
+This forces archive members an ordinary game might omit and does not model a
+complete clean project or its normal scheduling.
+
+The median scene compilation-set/game-link time falls from **30.865 to 18.240 s**,
+about **40.9% less**. It uses more combined compiler CPU: **30.680 to 33.155 s**,
+about **8.1% more**. Parallelism and smaller edit scopes provide the gain; a
+single-worker rebuild of the whole scene set can be slower. Individual child
+RSS does not measure simultaneous total memory, and several split units may run
+at once. All per-source CPU/RSS observations and controls, including a 1.39 s
+before control outlier, are retained.
+
+Real implementation-only edits use the canonical Ninja graph and rebuild through
+the final `hex_demo` link. Each rebuild compiles exactly its one planned object;
+bytes and nanosecond source timestamps are restored after every sample:
+
+| Implementation edit | Original combined file | Split file | After observations |
+|---|---:|---:|---:|
+| Runtime/file loading | 32.68 s median | 5.71 s median | 3 |
+| Native API/reload/typed dispatch | 32.68 s median | 10.01 s | 1 |
+| Registration list/adapters | 32.68 s median | 18.50 s | 1 |
+
+The original median has three observations (31.66–33.07 s). Runtime-only edits
+use **82.5% less wall time**, about **5.7 times faster**, in these local samples.
+Native API and registration timings are single exploratory observations.
+
+The original combined file contained all three roles. Shared private declaration
+or inline-definition edits now compile three sources; ordinary game-main edits
+still have their original source scope. After probes, all three canonical scene
+objects are rebuilt from the restored source bytes.
+
+A fresh clean-own-output pair recompiles 222 original or 224 split C/C++/PCH/
+generated-data outputs through the game link, with dependencies and shader
+generation prebuilt. Wall time is 232.81 s before and 202.17 s for the final split.
+The 221 unchanged compile tasks have a median after/before wall-time ratio of
+0.873: they also became substantially faster. Background activity and scheduling
+confound this pair, so its 13.2% gap is not attributed to the refactor. A retained
+long-name prototype clean run took 222.45 s. All timelines and loads are recorded;
+none provide a precise clean-project or cumulative speedup.
+
+Final runtime checks use both compilers, three processes/version/compiler in
+alternating order, and 30 measured samples after three warmups on CPU 2. They
+measure fresh VM creation, 20,000 scene bridge calls and 50,000 entity calls.
+Scene/entity medians across process medians range from 3.4% faster to 1.6% slower;
+VM creation is about 2.1–2.2% slower. Final entity positions match in every run.
+These narrow, noisy probes do not establish whole-game FPS. The final probe's
+code/read-only sections grow by about 0.48% on each compiler; unstripped file and
+individual object sizes also include symbol/COMDAT overhead.
+
+Clang and GCC each pass 39 selected ECS, rendering, scene, scripting, UI2,
+platform and game tests, including the registry-key regression, and all four Lua
+API reports match the baseline per compiler. Clang and GCC each pass 80 no-PCH
+assertions comparing all ten original/new userdata sizes, alignments and six
+type traits. Twelve further no-PCH cases compile the three sources and three
+private headers with Clang 3D enabled and GCC physics/audio disabled. Mechanical
+checks preserve the 48 moved/21 inline bodies and all 27 ScriptEngine member
+bodies; the transformation regenerates all six implementation/header files and
+CMake exactly. Four final smoke tests and API comparisons pass again per compiler;
+no-change game/Lua builds compile and link nothing. This does not provide
+Windows/MSVC or full native desktop/3D/GPU runtime validation.
+
+The [scene split data](build_scene_bindings_split_2026-11-07.json) records complete
+clean-build timelines and unchanged-task controls, isolated rebuild/link samples,
+real edit plans/timings, runtime probes for both compilers, prototype regressions,
+layout/trait and body-preservation checks, flags, hashes and reproduction scripts.
+The initial missing direct includes for preloaded scenes and workflow binding
+declarations are repaired; their failed pilot logs are retained. All source,
+configuration and Ninja-log probes are serialized with compilation.
