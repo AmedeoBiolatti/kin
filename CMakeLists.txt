@@ -59,6 +59,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+include(kin_build)
 include(kin_release_contract)
 
 # Built by default only when kin is the top-level project: a game that adds
@@ -78,6 +79,9 @@ option(KIN_ENABLE_PROFILING "Enable Kin manual profiling macros" OFF)
 option(KIN_ENABLE_RELEASE_PROFILING "Enable Kin manual profiling macros in Release builds" ${_kin_developer_default})
 option(KIN_EXPERIMENTAL_3D "Build kin's experimental 3D rendering" OFF)
 option(KIN_ENABLE_PHYSICS3D "Build the experimental Jolt physics and ECS adapters" ON)
+# Experimental: kin's 2D physics on Box2D 3.2 (engine/src/physics/physics_box2d3.cpp)
+# in place of Box2D 2.4. Its source: FETCHCONTENT_SOURCE_DIR_BOX2D3, else fetched.
+option(KIN_PHYSICS_BOX2D_V3 "Experimental: 2D physics on Box2D v3" OFF)
 option(KIN_ENABLE_SCENE3D_RUNTIME "Build the experimental scripted 3D scene runtime" ON)
 option(KIN_BUILD_WEBGL2_FIXTURE "Build the standalone browser 2D/3D rendering fixture" OFF)
 option(KIN_BUILD_WEB_SUMMIT "Build Summit's experimental browser export" OFF)

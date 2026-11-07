@@ -15,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <cstring>
 
 namespace kin {
@@ -278,6 +279,10 @@ SdlRenderer2DBackend::SdlRenderer2DBackend(Window& window, bool vsync) {
 
     if (vsync) {
         SDL_SetRenderVSync(_handle, 1);
+    }
+    const char* driver_name = SDL_GetRendererName(_handle);
+    if (driver_name && std::string_view{driver_name} == "software") {
+        _soft_edge_pixels = 1.0f; // its triangles snap to half pixels: a half pixel fade would come and go
     }
     // Max and Min are custom blend modes, which only some drivers take (not
     // the software one): ask once.
@@ -720,8 +725,11 @@ void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
     }
     _shape_vertices.clear();
     _shape_vertices.reserve(vertices.size());
-    // A soft edge wider than a pixel is pulled in to one, along `outward`.
-    const f32 rim = -1.0f / std::max(pixels_per_unit, 1e-6f);
+    // A soft edge wider than half a pixel (a whole one on the software driver)
+    // is pulled in to it, along `outward`, and faded across it: the outline's
+    // vertices are shared with the inside, so the fade starts whole there rather
+    // than at half as the GPU shader's does (docs/rendering.md, "Shape edges").
+    const f32 rim = -_soft_edge_pixels / std::max(pixels_per_unit, 1e-6f);
     for (const ShapeVertex& v : vertices) {
         Vec2f p = v.position;
         f32 edge = v.edge;
@@ -730,7 +738,7 @@ void SdlRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
             edge = rim;
         }
         p = _transformed ? _transform.apply(p) : p;
-        const f32 cover = std::clamp(1.0f + edge * pixels_per_unit, 0.0f, 1.0f);
+        const f32 cover = std::clamp(1.0f + edge * pixels_per_unit / _soft_edge_pixels, 0.0f, 1.0f);
         _shape_vertices.push_back(SDL_Vertex{
             .position = {p.x, p.y},
             .color = {static_cast<f32>(v.color.r) * static_cast<f32>(tint.r) / 65025.0f,

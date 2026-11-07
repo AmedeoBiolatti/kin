@@ -326,11 +326,13 @@ Vector shapes are drawn anti-aliased, crisp at any zoom or turn, two ways:
   are drawn whole on SDL_GPU: one quad each, the outline computed per pixel
   from its distance, fill and stroke together.
 - **Everything else** is tessellated into triangles: each outline gets a thin
-  soft edge whose vertices carry their distance past it, faded over one
-  screen pixel by the shape shader.
+  soft edge whose vertices carry their distance past it, faded by the shape
+  shader.
 
-The SDL_Renderer fallback tessellates primitives too, pulls soft edges in to a
-pixel on the CPU and fades them with vertex alpha.
+Both are solid up to the outline and fade out over the half screen pixel past
+it ([Shape edges](#shape-edges)). The SDL_Renderer fallback tessellates
+primitives too, pulls soft edges in to half a pixel on the CPU (a whole one on
+SDL's software driver) and fades them with vertex alpha.
 
 ### Drawing as you go
 
@@ -383,8 +385,8 @@ renderer.draw_shape(mesh, kin::Affine2::translation(pos) * kin::Affine2::rotatio
 ```
 
 `ShapeBuildOptions` sets the curve tolerance and the soft edge's width in shape
-units (2 by default, enough for drawing down to half size; the edge stays one
-pixel wide however large the mesh is drawn). `ShapeMesh::append(mesh,
+units (2 by default, enough for drawing down to a quarter size; the fade stays
+half a pixel wide however large the mesh is drawn). `ShapeMesh::append(mesh,
 transform)` merges meshes into one. Stroke widths scale with their element's
 transform, as in SVG.
 
@@ -395,6 +397,54 @@ triangles (`ShapeMesh::runs`). Two strokes stay triangles: a bevelled sharp
 corner, and an ellipse's stroke thicker than half its smaller radius (its
 distance is estimated, close only near the outline). `write_svg` writes
 primitives back as `<rect>`, `<circle>` and `<ellipse>`.
+
+### Shape edges
+
+Every vector shape, tessellated or primitive, filled or stroked, is solid up
+to its outline and fades from half coverage to none over the half pixel past
+it. For the pixels outside the outline that is exact coverage, what Cairo,
+Skia and browsers draw; the half pixel inside the outline is solid, an eighth
+of a pixel of extra ink along each edge at most. In return two shapes that
+share an edge never show a seam: each is solid up to it. The CPU paths (the
+GPU backend without its shape shader, SDL_Renderer) cannot start the fade at
+half on the outline's vertices, which the inside shares, and fade from whole
+to none over the half pixel instead: a quarter of a pixel of extra ink. SDL's
+software driver keeps a whole pixel: its triangles snap their corners to half
+pixels, too coarse for a half pixel band.
+
+Until November 2026 the fade was a whole pixel wide and started whole at the
+outline: every shape half a pixel larger all round, so heavier the smaller it
+was drawn. Measured against exact coverage (the same shapes drawn 8 times
+larger and averaged down 8 x 8):
+
+| | whole pixel past (before) | half pixel past (now) | exact |
+|---|---|---|---|
+| ink of text, 10 px em | 2.4x | 1.4x | 1x |
+| ink of text, 45 px em | 1.37x | 1.09x | 1x |
+| a 1 px line, drawn as | 2.0 px | 1.2 px | 1.05 px |
+| a dot of 2 px radius, area | 1.43x | 1.01x | 1x |
+| two opaque shapes sharing an edge, darkest pixel on it (1: no seam) | 1.0 | 1.0 | 0.77 |
+| two half-transparent shapes sharing an edge (0.5: no line) | 0.72 | 0.59 | 0.5 |
+| mean error per pixel, of 255 | 5.6 | 1.6 | 0 |
+
+**Going to exact coverage**, if it is ever wanted (the fade centred on the
+outline, `clamp(0.5 - d, 0, 1)` from half a pixel inside to half a pixel past,
+as Skia, Cairo and NanoVG draw): the rule is one function for the primitives
+(`kin_edge_cover` in `kin_sdf_shape.inc.glsl`, whose distance is exact on both
+sides) and one line in `shape.frag.glsl`, but the tessellated shapes need their
+distance inside the outline too, which they do not carry. The tessellator's
+outline vertices would get `outward` vectors as the rim's have (zero today) and
+the vertex shader would pull them in by half a pixel along them while the rim
+goes half a pixel out, NanoVG's way; the inside's triangles share those
+vertices and shrink with them. Strips thinner than a pixel need the pull
+clamped so they lose coverage instead of crossing over, and the CPU paths do
+the same pull on the CPU. The price is the seams in the table's last rows:
+shapes that share an edge each cover part of the pixels on it, as in every
+exact renderer, so a per-mesh or per-draw choice would keep both.
+
+A butt or square cap is square to the curve where it ends, not to the last
+straight piece the curve was flattened into (`PathContour::start_tangent` and
+`end_tangent`): arcs drawn end to end meet without a wedge between them.
 
 ### SVG-lite
 

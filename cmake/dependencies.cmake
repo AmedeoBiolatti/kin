@@ -1,5 +1,16 @@
 include(FetchContent)
 
+# SDL_image/SDL_ttf cache this global option. Establish the same default before
+# creating SDL, Lua and Box2D, or the next configure changes those targets'
+# flags and recompiles them all. An explicit caller/toolchain setting wins.
+if(KIN_ENABLE_IMAGE_IO OR KIN_ENABLE_TTF)
+    set(_kin_pic_default ON)
+    if(EMSCRIPTEN)
+        set(_kin_pic_default OFF)
+    endif()
+    option(CMAKE_POSITION_INDEPENDENT_CODE "Build static libraries with -fPIC" ${_kin_pic_default})
+endif()
+
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 set(SDL_TESTS OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -170,13 +181,29 @@ if(KIN_ENABLE_PHYSICS)
     set(BOX2D_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(BOX2D_USER_SETTINGS OFF CACHE BOOL "" FORCE)
 
-    FetchContent_Declare(box2d
-        GIT_REPOSITORY https://github.com/erincatto/box2d.git
-        GIT_TAG v2.4.1
-        GIT_SHALLOW TRUE
-    )
+    if(KIN_PHYSICS_BOX2D_V3)
+        set(BOX2D_SAMPLES OFF CACHE BOOL "" FORCE)
+        set(BOX2D_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+        set(BOX2D_BENCHMARKS OFF CACHE BOOL "" FORCE)
+        set(BOX2D_DOCS OFF CACHE BOOL "" FORCE)
+        set(BOX2D_VALIDATE OFF CACHE BOOL "" FORCE)
+        set(BOX2D_PROFILE OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(box2d3
+            GIT_REPOSITORY https://github.com/erincatto/box2d.git
+            GIT_TAG v3.2.0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(box2d3)
+        set(box2d_SOURCE_DIR "${box2d3_SOURCE_DIR}")
+    else()
+        FetchContent_Declare(box2d
+            GIT_REPOSITORY https://github.com/erincatto/box2d.git
+            GIT_TAG v2.4.1
+            GIT_SHALLOW TRUE
+        )
 
-    FetchContent_MakeAvailable(box2d)
+        FetchContent_MakeAvailable(box2d)
+    endif()
 endif()
 
 if(KIN_ENABLE_SCRIPTING)

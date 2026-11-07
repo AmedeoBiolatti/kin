@@ -1199,9 +1199,12 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
     if (!_shape_shader.handle() || !_shape_vertex_shader.handle()) {
         // Without the shape shader: the soft edge as vertex alpha, in pixels
         // from the transform's scale.
-        // A soft edge wider than a pixel is pulled in to one, along `outward`.
+        // A soft edge wider than half a pixel is pulled in to half a pixel, along
+        // `outward`, and faded across it: the outline's vertices are shared with
+        // the inside, so the fade starts whole there rather than at half as the
+        // shader's does (docs/rendering.md, "Shape edges").
         const f32 pixels_per_unit = coordinates_to_pixels() * std::sqrt(std::abs(_transform.determinant()));
-        const f32 rim = -1.0f / std::max(pixels_per_unit, 1e-6f);
+        const f32 rim = -0.5f / std::max(pixels_per_unit, 1e-6f);
         _scratch_verts.clear();
         for (const u32 i : indices) {
             const ShapeVertex& v = vertices[i - index_base];
@@ -1211,7 +1214,8 @@ void GpuRenderer2DBackend::draw_shape_mesh(std::span<const ShapeVertex> vertices
                 p = {p.x + v.outward.x * (edge - rim), p.y + v.outward.y * (edge - rim)};
                 edge = rim;
             }
-            _scratch_verts.push_back(gv(p, shade(v.color, std::clamp(1.0f + edge * pixels_per_unit, 0.0f, 1.0f))));
+            _scratch_verts.push_back(
+                gv(p, shade(v.color, std::clamp(1.0f + 2.0f * edge * pixels_per_unit, 0.0f, 1.0f))));
         }
         place(_scratch_verts);
         _batch.push(_scratch_verts, nullptr, nullptr, current_scissor(), resolve_blend(gpu::GpuBlendMode::Alpha));

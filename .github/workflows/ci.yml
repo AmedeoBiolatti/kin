@@ -118,6 +118,40 @@ jobs:
             build-2d/examples/2d_workflow/development
           if-no-files-found: ignore
 
+  # The experimental Box2D 3 backend (KIN_PHYSICS_BOX2D_V3): kin's 2D physics
+  # tests on it, and its results the same on one Box2D thread as on four.
+  physics-box2d-v3:
+    needs: select-run
+    if: needs.select-run.outputs.run == 'true'
+    name: Linux 2D physics on Box2D 3
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/linux-deps
+        with:
+          packages: glslc
+      - uses: ./.github/actions/ccache
+        with:
+          key: Linux 2D physics on Box2D 3
+      - name: Configure
+        env:
+          CC: gcc-13
+          CXX: g++-13
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DKIN_PHYSICS_BOX2D_V3=ON
+          -DKIN_BUILD_EXAMPLES=OFF -DKIN_EXPERIMENTAL_3D=OFF
+      - name: Build
+        run: >-
+          cmake --build build --target kin_physics_tests kin_physics_component_tests kin_physics_shapes_tests
+          kin_ecs_physics_tests kin_ecs_physics_shapes_tests kin_physics_character_tests kin_physics2d_bench
+      - name: Test
+        run: ctest --test-dir build -L '^component:PHYSICS$' --output-on-failure --timeout 300
+      - name: Same results on 1 and 4 Box2D threads
+        run: |
+          one=$(KIN_PHYSICS_WORKERS=1 build/bin/kin_physics2d_bench 300 300 3000 | tee /dev/stderr | grep 'positions hash')
+          four=$(KIN_PHYSICS_WORKERS=4 build/bin/kin_physics2d_bench 300 300 3000 | tee /dev/stderr | grep 'positions hash')
+          test "$one" = "$four"
+
   build:
     needs: select-run
     if: needs.select-run.outputs.run == 'true'

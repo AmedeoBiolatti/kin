@@ -18,8 +18,9 @@ file of the game's content on an entity. Scene files name the file (`asset`, a
 samples every other `AnimationPlayer`, so call it instead of those two.
 - **What tracks set:** an Animator's property tracks can set any field of the
   world's described native components that holds a number, a pair, a colour, a
-  whole number, a check or text (`register_described_properties`:
-  `"Transform2D.pos"`, `"TextRenderer.color"`, `"CameraComponent.zoom"`).
+  whole number, a check, text, a 3D vector or a 3D turn
+  (`register_described_properties`: `"Transform2D.pos"`, `"TextRenderer.color"`,
+  `"CameraComponent.zoom"`, `"Transform3D.position"`, `"Transform3D.rotation"`).
 - **Children:** a track's `target` names a child, by its name.
 - **Sprites:** sprite tracks set the entity's `SpriteRenderer` sprite, from its
   catalog.
@@ -33,6 +34,28 @@ samples every other `AnimationPlayer`, so call it instead of those two.
 door.set(kin::Animator{.asset = {"animations/door.kinanim"}, .animation = "open"});
 kin::update_animators(world, dt); // each frame
 ```
+
+In a 3D scene, `SceneSession3D` binds them (`resolve_animators3d`, from the
+content folder: at load, for spawned prefabs and for live edits) and
+`SceneFrame3D` plays them in its animation phase, before the models' clips, so
+a door, a platform or a camera rail moves as authored. Their writes are
+announced (`update_animators(world, dt, true)`: each field set marked as set),
+as the 3D drawing watches for changes. A 3D track's keys are `vec3 x y z` (a
+place or a size, eased by its parts) and `quat x y z w` (a turn, made whole as
+read, eased the short way round at a steady speed):
+
+```text
+animation door.open
+  clip 1
+    track Transform3D.rotation target=hinge
+      key 0 quat 0 0 0 1 linear
+      key 1 quat 0 0.7071068 0 0.7071068 easeout
+    track Transform3D.position
+      key 0 vec3 0 0 0 linear
+      key 1 vec3 0 0.1 0 linear
+```
+
+A relative quat track turns from where the entity was, in its own frame.
 
 ## Tweens
 
@@ -240,7 +263,7 @@ Layer 0 is the base animation. `push(...)` adds override layers above it:
 kin::push(player, "hero.attack", {.weight = 0.5f, .blend_in = 0.15f});
 ```
 
-Numeric property tracks (`float`, `vec2`, `color`, `int`) blend per property
+Numeric property tracks (`float`, `vec2`, `color`, `int`, `vec3`, `quat`) blend per property
 using normalized positive layer weights. `blend_in` ramps an override's effective
 weight from `0` to its target weight. Sprite tracks, events, strings, and bools
 remain topmost-wins.

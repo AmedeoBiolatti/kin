@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <kin/assets/asset_manager.hpp>
 #include <kin/assets/content.hpp>
 #include <kin/ecs/component_schema.hpp>
 #include <kin/ecs/editor.hpp>
@@ -79,6 +80,17 @@ void codecs_and_shared_tools() {
     };
     check(field("ModelRenderer3D", "asset").asset_type == "Model", "ModelRenderer3D.asset is not a Model");
     check(field("SkinnedMeshRenderer", "asset").asset_type == "Model", "SkinnedMeshRenderer.asset is not a Model");
+    check(field("AnimatorAsset3D", "asset").asset_type == "Animator3D", "AnimatorAsset3D.asset is not an Animator3D");
+    check(field("Collider3D", "asset").asset_type == "Collider3D", "Collider3D.asset is not a Collider3D");
+    check(field("ModelMaterials3D", "asset").asset_type == "Materials3D", "ModelMaterials3D.asset is not a Materials3D");
+    // Their files' types, as tools find them by name.
+    check(infer_asset_type("animations/hero.kinanimator") == AssetType::Animator3D &&
+              infer_asset_type("colliders/rock.kincollider") == AssetType::Collider3D &&
+              infer_asset_type("materials/camp.KINMATERIALS") == AssetType::Materials3D,
+          "3D asset files' types are not inferred");
+    check(asset_type_name(AssetType::Animator3D) == "Animator3D" && asset_type_name(AssetType::Collider3D) == "Collider3D" &&
+              asset_type_name(AssetType::Materials3D) == "Materials3D",
+          "3D asset types are not named");
     check(field("ParticleEmitter3D", "texture").asset_type == "Image", "ParticleEmitter3D.texture is not an Image");
     check(field("SceneCamera3D", "projection").choices.size() == 2, "SceneCamera3D.projection has no choices");
     check(field("SceneCamera3D", "fov").units == "degrees", "SceneCamera3D.fov has no units");

@@ -53,8 +53,8 @@ struct Animator {
     std::string current;
     std::string state; // the machine's state now
 
-    // Set by Assets2D (bind_animators) from `asset`: the file's animations,
-    // and the fields tracks can set.
+    // Set by Assets2D (bind_animators) from `asset`, or in a 3D scene by
+    // resolve_animators3d: the file's animations, and the fields tracks can set.
     std::shared_ptr<AnimationAssetLibrary> library;
     const PropertyRegistry* properties = nullptr;
     const void* bound = nullptr; // the library `current` was started with
@@ -64,7 +64,9 @@ struct Animator {
 // fields its animation's tracks name set; then every other AnimationPlayer of
 // the world too (call this instead of advance_ and sample_animation_players).
 // One on an entity made from a prefab gets its own copy first, as do the
-// components its tracks set.
-void update_animators(EcsWorld& world, f32 dt);
+// components its tracks set. `announce`: each field set marked as set (OnSet),
+// for a world that watches its components for changes, as a 3D one's drawing
+// does (SceneFrame3D passes it).
+void update_animators(EcsWorld& world, f32 dt, bool announce = false);
 
 } // namespace kin

@@ -1,5 +1,6 @@
 #include <cmath>
 #include <kin/audio/audio.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/physics3d.hpp>
 #include <kin/render3d/renderer3d.hpp>
@@ -58,6 +59,9 @@ bool SceneFrame3D::after_phase_operation(SystemPhase phase, f32 dt) {
         case SystemPhase::Animation:
             if (!validate())
                 return false;
+            // Animators' tracks first (resolve_animators3d bound them): they place entities the models' clips are
+            // then played on.
+            update_animators(_world, dt, true);
             _rendering.animate(dt);
             _rendering.advance_time_of_day(dt);
             _rendering.advance_weather(dt);

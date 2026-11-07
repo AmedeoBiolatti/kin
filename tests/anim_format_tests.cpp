@@ -3,6 +3,7 @@
 #include <kin/platform/log.hpp>
 
 #include <cassert>
+#include <cmath>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -298,8 +299,60 @@ void test_library_stores_and_updates_diagnostics() {
 
 } // namespace
 
+// 3D values: a vec3's and a quat's keys read, written and read back the same; a quat made whole; eased between
+// (a vec3 by its parts, a quat the short way round); a quat of no length refused.
+void test_3d_values() {
+    const char* text = R"(
+animation door.swing
+  clip 1
+    track Transform3D.position
+      key 0 vec3 0 1 -2 linear
+      key 1 vec3 4 1 2 easeout
+    track Transform3D.rotation relative target=panel
+      key 0 quat 0 0 0 2 linear
+      key 1 quat 0 1 0 1 linear
+)";
+    kin::AnimationRegistryFragment first;
+    std::string error;
+    assert(kin::parse_animation_registry_fragment(text, first, error));
+    assert(first.animations.size() == 1 && first.animations[0].name == "door.swing");
+    const kin::Clip& clip = std::get<kin::Clip>(first.animations[0].root.value);
+    assert(clip.properties.size() == 2);
+    const kin::PropertyTrack& place = clip.properties[0];
+    assert(kin::value_kind(place.keys[0].value) == kin::AnimValueKind::Vec3);
+    assert((std::get<kin::Vec3f>(place.keys[0].value) == kin::Vec3f{0, 1, -2}));
+    const kin::PropertyTrack& turn = clip.properties[1];
+    assert(kin::value_kind(turn.keys[0].value) == kin::AnimValueKind::Quat);
+    assert((std::get<kin::Quatf>(turn.keys[0].value) == kin::Quatf{0, 0, 0, 1})); // made whole
+    const std::string serialized = kin::serialize_animation_registry_fragment(first);
+    assert(serialized.find("vec3 4 1 2 easeout") != std::string::npos);
+    kin::AnimationRegistryFragment second;
+    assert(kin::parse_animation_registry_fragment(serialized, second, error));
+    assert(kin::serialize_animation_registry_fragment(second) == serialized);
+
+    const kin::AnimValue middle = kin::interpolate(kin::Vec3f{0, 0, 0}, kin::Vec3f{2, 4, -6}, 0.5f, kin::Easing::Linear);
+    assert((std::get<kin::Vec3f>(middle) == kin::Vec3f{1, 2, -3}));
+    const kin::Quatf quarter = kin::Quatf::axis_angle({0, 1, 0}, 90.0f);
+    const kin::Quatf eighth = std::get<kin::Quatf>(kin::interpolate(kin::Quatf{}, quarter, 0.5f, kin::Easing::Linear));
+    const kin::Quatf want = kin::Quatf::axis_angle({0, 1, 0}, 45.0f);
+    assert(std::abs(eighth.y - want.y) < 1e-4f && std::abs(eighth.w - want.w) < 1e-4f);
+    // The short way: a quarter turn written negated is the same turn.
+    const kin::Quatf negated{-quarter.x, -quarter.y, -quarter.z, -quarter.w};
+    const kin::Quatf short_way = std::get<kin::Quatf>(kin::interpolate(kin::Quatf{}, negated, 0.5f, kin::Easing::Linear));
+    assert(std::abs(std::abs(short_way.y) - want.y) < 1e-4f && std::abs(std::abs(short_way.w) - want.w) < 1e-4f);
+    kin::AnimValueKind kind{};
+    assert(kin::parse_anim_value_kind("vec3", kind) && kind == kin::AnimValueKind::Vec3);
+    assert(kin::parse_anim_value_kind("quat", kind) && kind == kin::AnimValueKind::Quat);
+    assert(kin::anim_value_kind_name(kin::AnimValueKind::Quat) == "quat");
+
+    kin::AnimationRegistryFragment bad;
+    assert(!kin::parse_animation_registry_fragment("animation a\n  clip 1\n    track Transform3D.rotation\n      key 0 quat 0 0 0 0 linear\n", bad, error));
+    assert(!kin::parse_animation_registry_fragment("animation a\n  clip 1\n    track Transform3D.position\n      key 0 vec3 1 2 linear\n", bad, error));
+}
+
 int main() {
     test_parse_serialize_round_trip();
+    test_3d_values();
     test_fragment_merge_and_template_resolve();
     test_state_machine_conditions_parse();
     test_fragment_diagnostics_report_refs_sprites_and_state_targets();

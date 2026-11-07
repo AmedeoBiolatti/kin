@@ -236,7 +236,7 @@ struct Ring {
 // A stroke as one strip: two vertices a point where the path bends gently
 // (the miters, shared by both segments), more where a join or cap needs them.
 void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeStyle& style, f32 fringe,
-                    f32 tolerance) {
+                    f32 tolerance, Vec2f start_tangent = {}, Vec2f end_tangent = {}) {
     clean(pts, closed);
     const f32 hw = style.width * 0.5f;
     if (pts.empty() || hw <= 0.0f) {
@@ -275,9 +275,22 @@ void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeS
         dir[k] = mul(d, 1.0f / len[k]);
         nrm[k] = perp(dir[k]);
     }
+    // The ends' directions: the curve's own where it is known (and within 45
+    // degrees of the first or last piece: past that, at a cusp, the piece's),
+    // so a cap is square to the curve, not to the chord it was flattened into.
+    const auto end_direction = [](Vec2f tangent, Vec2f piece) {
+        const f32 l = length(tangent);
+        if (l <= 0.0f) {
+            return piece;
+        }
+        const Vec2f t = mul(tangent, 1.0f / l);
+        return dot(t, piece) > 0.7071f ? t : piece;
+    };
+    const Vec2f start_dir = end_direction(start_tangent, dir[0]);
+    const Vec2f end_dir = end_direction(end_tangent, dir[segments - 1]);
     if (!closed && style.cap == LineCap::Square) { // a square cap is the line run on by half its width
-        pts[0] = sub(pts[0], mul(dir[0], hw));
-        pts[n - 1] = add(pts[n - 1], mul(dir[segments - 1], hw));
+        pts[0] = sub(pts[0], mul(start_dir, hw));
+        pts[n - 1] = add(pts[n - 1], mul(end_dir, hw));
     }
     const f32 step = arc_step(hw, tolerance);
     // Points on a circle round `p` from direction `u` towards `w` (unit,
@@ -315,7 +328,7 @@ void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeS
     for (std::size_t i = 0; i < n; ++i) {
         const Vec2f p = pts[i];
         if (!closed && (i == 0 || i == n - 1)) {
-            const Vec2f o = mul(nrm[i == 0 ? 0 : segments - 1], hw);
+            const Vec2f o = mul(perp(i == 0 ? start_dir : end_dir), hw);
             keep(left_spans, i, {out.vertex(add(p, o))});
             keep(right_spans, i, {out.vertex(sub(p, o))});
             continue;
@@ -406,8 +419,8 @@ void stroke_contour(Out& out, std::vector<Vec2f> pts, bool closed, const StrokeS
     std::vector<u32> end_cap, start_cap;
     if (style.cap == LineCap::Round) {
         const Vec2f pe = pts[n - 1], p0 = pts[0];
-        end_cap = arc(pe, nrm[segments - 1], dir[segments - 1], pi);
-        start_cap = arc(p0, mul(nrm[0], -1.0f), mul(dir[0], -1.0f), pi);
+        end_cap = arc(pe, perp(end_dir), end_dir, pi);
+        start_cap = arc(p0, mul(perp(start_dir), -1.0f), mul(start_dir, -1.0f), pi);
         const auto fan = [&](Vec2f center, u32 from, const std::vector<u32>& between, u32 to) {
             const u32 hub = out.vertex(center);
             u32 previous = from;
@@ -601,7 +614,8 @@ void tessellate_stroke(ShapeMesh& mesh, std::span<const PathContour> contours, c
     const std::size_t first_index = mesh.indices.size();
     Out out{mesh, color};
     for (const PathContour& contour : contours) {
-        stroke_contour(out, contour.points, contour.closed, style, fringe / min_scale, tolerance / max_scale);
+        stroke_contour(out, contour.points, contour.closed, style, fringe / min_scale, tolerance / max_scale,
+                       contour.start_tangent, contour.end_tangent);
     }
     if (!transform.is_identity()) {
         // Stroked in its own units: the edges, made `fringe / min_scale` wide,

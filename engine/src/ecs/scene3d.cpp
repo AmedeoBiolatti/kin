@@ -35,6 +35,7 @@ void register_render3d_components(EcsWorld& world) {
     if (!registry.find("ModelMaterials3D"))
         registry.native<ModelMaterials3D>("ModelMaterials3D")
             .field("asset", &ModelMaterials3D::asset)
+            .asset_type("Materials3D")
             .description("A .kinmaterials file: changes to its model's materials.")
             .field("variant", &ModelMaterials3D::variant)
             .description("Which of the file's variants; empty: its base.");
@@ -64,7 +65,8 @@ void register_render3d_components(EcsWorld& world) {
     if (!registry.find("AnimatorAsset3D"))
         registry.native<AnimatorAsset3D>("AnimatorAsset3D")
             .field("asset", &AnimatorAsset3D::asset)
-            .description("A kin.animator3d/1 file: its states, blends, layers and IK.");
+            .asset_type("Animator3D")
+            .description("A kin.animator3d/1 file (.kinanimator): its states, blends, layers and IK.");
     const auto light_fields = [&]<class T>(const char* name) {
         if (registry.find(name))
             return;
@@ -163,6 +165,9 @@ void register_physics3d_components(EcsWorld& world) {
                 })
             .choices({"box", "sphere", "capsule", "cylinder"})
             .field("asset", &Collider3D::asset)
+            .asset_type("Collider3D")
+            .description(
+                "A kin.collider3d/1 recipe (.kincollider): a hull, a mesh or a compound, in place of the kind's shape.")
             .field("half_extents", &Collider3D::half_extents)
             .units("m")
             .field("radius", &Collider3D::radius)

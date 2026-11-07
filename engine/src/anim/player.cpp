@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -257,6 +258,11 @@ AnimValue add_values(const AnimValue& a, const AnimValue& b) {
     }
     case AnimValueKind::Int:
         return std::get<i32>(a) + std::get<i32>(b);
+    case AnimValueKind::Vec3:
+        return std::get<Vec3f>(a) + std::get<Vec3f>(b);
+    case AnimValueKind::Quat:
+        // A relative turn: the track's, made in the base's own frame.
+        return (std::get<Quatf>(b) * std::get<Quatf>(a)).normalized();
     case AnimValueKind::Bool:
     case AnimValueKind::String:
         return a;
@@ -269,7 +275,9 @@ bool is_relative_supported(const AnimValue& value) {
     return kind == AnimValueKind::Float
         || kind == AnimValueKind::Vec2
         || kind == AnimValueKind::Color
-        || kind == AnimValueKind::Int;
+        || kind == AnimValueKind::Int
+        || kind == AnimValueKind::Vec3
+        || kind == AnimValueKind::Quat;
 }
 
 bool is_blendable(const AnimValue& value) {
@@ -310,6 +318,11 @@ bool blend_values(const std::vector<AnimValue>& values, const std::vector<f32>& 
     f32 color_b = 0.0f;
     f32 color_a = 0.0f;
     f32 int_sum = 0.0f;
+    Vec3f vec3_sum{};
+    // Turns blended as a weighted sum of quaternions on one side (the first's), then made whole again: close to
+    // slerp for the near poses blends mix, and the same for any number of them.
+    Quatf quat_sum{0.0f, 0.0f, 0.0f, 0.0f};
+    std::optional<Quatf> quat_first;
     bool contributed = false;
     for (std::size_t i = 0; i < values.size(); ++i) {
         if (value_kind(values[i]) != kind || weights[i] <= 0.0f) {
@@ -338,6 +351,20 @@ bool blend_values(const std::vector<AnimValue>& values, const std::vector<f32>& 
         case AnimValueKind::Int:
             int_sum += static_cast<f32>(std::get<i32>(values[i])) * normalized;
             break;
+        case AnimValueKind::Vec3:
+            vec3_sum += std::get<Vec3f>(values[i]) * normalized;
+            break;
+        case AnimValueKind::Quat: {
+            Quatf q = std::get<Quatf>(values[i]);
+            if (!quat_first) {
+                quat_first = q;
+            } else if (q.x * quat_first->x + q.y * quat_first->y + q.z * quat_first->z + q.w * quat_first->w < 0.0f) {
+                q = {-q.x, -q.y, -q.z, -q.w};
+            }
+            quat_sum = {quat_sum.x + q.x * normalized, quat_sum.y + q.y * normalized, quat_sum.z + q.z * normalized,
+                        quat_sum.w + q.w * normalized};
+            break;
+        }
         case AnimValueKind::Bool:
         case AnimValueKind::String:
             return false;
@@ -364,6 +391,16 @@ bool blend_values(const std::vector<AnimValue>& values, const std::vector<f32>& 
         return true;
     case AnimValueKind::Int:
         out = static_cast<i32>(std::lround(int_sum));
+        return true;
+    case AnimValueKind::Vec3:
+        out = vec3_sum;
+        return true;
+    case AnimValueKind::Quat:
+        if (!(quat_sum.x * quat_sum.x + quat_sum.y * quat_sum.y + quat_sum.z * quat_sum.z + quat_sum.w * quat_sum.w > 0.0f)) {
+            out = *quat_first;
+        } else {
+            out = quat_sum.normalized();
+        }
         return true;
     case AnimValueKind::Bool:
     case AnimValueKind::String:
@@ -983,6 +1020,9 @@ void sample_animation_players(EcsWorld& world) {
     std::unordered_map<std::string, SpriteSample> sprite_samples;
     std::vector<AnimValue> values;
     std::vector<f32> weights;
+    // What was set on a player that announces, made known once the walk is over:
+    // flecs refuses `modified` on an entity of a table it is walking.
+    std::vector<std::pair<flecs::entity, flecs::id_t>> announced;
 
     world.each([&](flecs::entity entity, AnimationPlayer& player) {
         if (player.layers.empty()) {
@@ -1018,6 +1058,9 @@ void sample_animation_players(EcsWorld& world) {
                             continue;
                         }
                         accessor->set(component, sampled_value(track, *active.cursor, i));
+                        if (player.announce) {
+                            announced.emplace_back(target_entity, accessor->component);
+                        }
                     }
                 }
                 for (const SpriteTrack& track : active.clip->sprites) {
@@ -1145,6 +1188,11 @@ void sample_animation_players(EcsWorld& world) {
                 accessor->set(component, blended);
             } else if (values.empty()) {
                 accessor->set(component, sampled_value(*topmost.track, *topmost.cursor, topmost.index));
+            } else {
+                continue;
+            }
+            if (player.announce) {
+                announced.emplace_back(flecs::entity{topmost.target_entity}, accessor->component);
             }
         }
 
@@ -1155,6 +1203,11 @@ void sample_animation_players(EcsWorld& world) {
             set_sprite_renderer_sprite(EcsEntity{sprite_sample.target_entity}, player.sprite_catalog, key.sprite_id, key.has_pivot, key.pivot);
         }
     });
+    for (const auto& [target, component] : announced) {
+        if (target.is_alive()) {
+            target.modified(component);
+        }
+    }
 }
 
 } // namespace kin

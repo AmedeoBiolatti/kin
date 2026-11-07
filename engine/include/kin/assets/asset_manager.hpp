@@ -57,6 +57,9 @@ enum class AssetType {
     UiScreen, // .kinui: a UI screen
     UiTheme,  // .kintheme: a UI look
     Skeleton2D, // .kinskel: a 2D skeleton, weighted mesh and clips
+    Animator3D,  // .kinanimator: a 3D animator's machine, blends, layers, actions, events and IK (kin.animator3d/1)
+    Collider3D,  // .kincollider: a 3D collider recipe, a hull, a mesh or a compound (kin.collider3d/1)
+    Materials3D, // .kinmaterials: changes to a 3D model's materials, and its variants
 };
 
 enum class AssetStatus {

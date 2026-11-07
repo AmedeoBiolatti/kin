@@ -22,12 +22,10 @@ set(KIN_SPIRV_DIR "" CACHE PATH "Already-compiled .spv files to use instead of g
 # Shaders may #include the engine's (kin_material.inc.glsl: custom 3D material
 # shaders): glslc finds them here, and a rebuild follows their change.
 set(KIN_SHADER_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/../engine/shaders" CACHE INTERNAL "")
-file(GLOB _KIN_SHADER_INCLUDES CONFIGURE_DEPENDS "${KIN_SHADER_INCLUDE_DIR}/*.inc.glsl")
-
-set(_KIN_EMBED_GENERATOR "${CMAKE_CURRENT_LIST_DIR}/kin_embed_generate.cmake")
 
 function(kin_compile_glsl out_var)
     cmake_parse_arguments(ARG "" "OUTPUT_DIR" "SOURCES" ${ARGN})
+    set(depfile_tool "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_shader_depfile.cmake")
     set(outputs)
     if(KIN_SPIRV_DIR)
         file(MAKE_DIRECTORY "${ARG_OUTPUT_DIR}")
@@ -64,10 +62,15 @@ function(kin_compile_glsl out_var)
             endif()
             string(REGEX REPLACE "\\.glsl$" ".spv" spv_name "${name}")
             set(output "${ARG_OUTPUT_DIR}/${spv_name}")
+            set(depfile "${output}.d")
             add_custom_command(
                 OUTPUT "${output}"
-                COMMAND "${KIN_GLSLC}" -fshader-stage=${stage} -I "${KIN_SHADER_INCLUDE_DIR}" -o "${output}" "${source}"
-                DEPENDS "${source}" ${_KIN_SHADER_INCLUDES}
+                COMMAND "${KIN_GLSLC}" -fshader-stage=${stage} -I "${KIN_SHADER_INCLUDE_DIR}"
+                    -MD -MF "${depfile}" -MT "${output}" -o "${output}" "${source}"
+                COMMAND "${CMAKE_COMMAND}" "-DDEPFILE=${depfile}" "-DOUTPUT=${output}"
+                    -P "${depfile_tool}"
+                DEPENDS "${source}" "${depfile_tool}"
+                DEPFILE "${depfile}"
                 COMMENT "glslc: ${name} -> ${spv_name}"
                 VERBATIM)
             list(APPEND outputs "${output}")
@@ -78,6 +81,7 @@ endfunction()
 
 function(kin_embed_files target)
     cmake_parse_arguments(ARG "" "NAME;NAMESPACE" "FILES" ${ARGN})
+    set(generator "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/kin_embed_generate.cmake")
     if(NOT ARG_NAME)
         message(FATAL_ERROR "kin_embed_files: NAME is required")
     endif()
@@ -106,8 +110,8 @@ ${close_ns}")
     add_custom_command(
         OUTPUT "${source}"
         COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${source}" "-DHEADER=${ARG_NAME}.hpp" "-DNAME=${ARG_NAME}"
-                "-DNAMESPACE=${ARG_NAMESPACE}" "-DFILES=${files_arg}" -P "${_KIN_EMBED_GENERATOR}"
-        DEPENDS ${ARG_FILES} "${_KIN_EMBED_GENERATOR}"
+                "-DNAMESPACE=${ARG_NAMESPACE}" "-DFILES=${files_arg}" -P "${generator}"
+        DEPENDS ${ARG_FILES} "${generator}"
         COMMENT "Embedding ${ARG_NAME} in ${target}"
         VERBATIM)
     target_sources(${target} PRIVATE "${source}")

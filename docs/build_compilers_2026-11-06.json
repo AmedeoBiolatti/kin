@@ -1,0 +1,641 @@
+{
+  "date": "2026-11-06",
+  "base_commit": "b087496",
+  "environment": {
+    "platform": "Linux x86_64",
+    "gcc": "15.2.0",
+    "clang": "21.1.8",
+    "cmake": "4.2.3",
+    "configuration": "Release, engine/game -O2, C++23, PCH enabled, LTO disabled",
+    "source_filesystem": "Linux partition",
+    "output_filesystem": "NTFS/FUSE",
+    "compiler_cache": "disabled",
+    "compiler_order_by_run": [
+      [
+        "gcc",
+        "clang"
+      ],
+      [
+        "clang",
+        "gcc"
+      ],
+      [
+        "gcc",
+        "clang"
+      ]
+    ]
+  },
+  "compile_only_summary": {
+    "game": {
+      "gcc": {
+        "median_wall_seconds": 2.28,
+        "median_user_seconds": 2.05,
+        "median_peak_rss_mib": 310.992
+      },
+      "clang": {
+        "median_wall_seconds": 1.61,
+        "median_user_seconds": 1.52,
+        "median_peak_rss_mib": 188.789
+      }
+    },
+    "ecs": {
+      "gcc": {
+        "median_wall_seconds": 9.01,
+        "median_user_seconds": 8.51,
+        "median_peak_rss_mib": 483.961
+      },
+      "clang": {
+        "median_wall_seconds": 7.29,
+        "median_user_seconds": 7.09,
+        "median_peak_rss_mib": 271.781
+      }
+    },
+    "scene_asset": {
+      "gcc": {
+        "median_wall_seconds": 61.64,
+        "median_user_seconds": 59.92,
+        "median_peak_rss_mib": 2185.453
+      },
+      "clang": {
+        "median_wall_seconds": 53.98,
+        "median_user_seconds": 53.16,
+        "median_peak_rss_mib": 920.0
+      }
+    },
+    "lua_bindings": {
+      "gcc": {
+        "median_wall_seconds": 38.85,
+        "median_user_seconds": 37.68,
+        "median_peak_rss_mib": 1582.789
+      },
+      "clang": {
+        "median_wall_seconds": 40.7,
+        "median_user_seconds": 40.08,
+        "median_peak_rss_mib": 881.816
+      }
+    }
+  },
+  "compile_only_samples": [
+    {
+      "label": "game-gcc-0",
+      "compiler": "gcc",
+      "source": "games/hex_demo/src/main.cpp",
+      "elapsed_seconds": 2.708,
+      "exit_code": 0,
+      "user_seconds": 2.05,
+      "system_seconds": 0.22,
+      "wall_seconds": 2.7,
+      "max_rss_kib": 316568,
+      "major_faults": 1438
+    },
+    {
+      "label": "game-clang-0",
+      "compiler": "clang",
+      "source": "games/hex_demo/src/main.cpp",
+      "elapsed_seconds": 1.621,
+      "exit_code": 0,
+      "user_seconds": 1.52,
+      "system_seconds": 0.05,
+      "wall_seconds": 1.61,
+      "max_rss_kib": 193640,
+      "major_faults": 132
+    },
+    {
+      "label": "ecs-gcc-0",
+      "compiler": "gcc",
+      "source": "engine/src/ecs/system.cpp",
+      "elapsed_seconds": 9.275,
+      "exit_code": 0,
+      "user_seconds": 8.51,
+      "system_seconds": 0.36,
+      "wall_seconds": 9.27,
+      "max_rss_kib": 495576,
+      "major_faults": 765
+    },
+    {
+      "label": "ecs-clang-0",
+      "compiler": "clang",
+      "source": "engine/src/ecs/system.cpp",
+      "elapsed_seconds": 7.302,
+      "exit_code": 0,
+      "user_seconds": 7.07,
+      "system_seconds": 0.13,
+      "wall_seconds": 7.29,
+      "max_rss_kib": 278096,
+      "major_faults": 10
+    },
+    {
+      "label": "scene_asset-gcc-0",
+      "compiler": "gcc",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "elapsed_seconds": 61.648,
+      "exit_code": 0,
+      "user_seconds": 59.92,
+      "system_seconds": 1.47,
+      "wall_seconds": 61.64,
+      "max_rss_kib": 2237656,
+      "major_faults": 0
+    },
+    {
+      "label": "scene_asset-clang-0",
+      "compiler": "clang",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "elapsed_seconds": 53.983,
+      "exit_code": 0,
+      "user_seconds": 53.16,
+      "system_seconds": 0.59,
+      "wall_seconds": 53.98,
+      "max_rss_kib": 942080,
+      "major_faults": 5
+    },
+    {
+      "label": "lua_bindings-gcc-0",
+      "compiler": "gcc",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "elapsed_seconds": 40.641,
+      "exit_code": 0,
+      "user_seconds": 39.02,
+      "system_seconds": 1.17,
+      "wall_seconds": 40.63,
+      "max_rss_kib": 1619752,
+      "major_faults": 1432
+    },
+    {
+      "label": "lua_bindings-clang-0",
+      "compiler": "clang",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "elapsed_seconds": 43.118,
+      "exit_code": 0,
+      "user_seconds": 42.42,
+      "system_seconds": 0.59,
+      "wall_seconds": 43.11,
+      "max_rss_kib": 903816,
+      "major_faults": 3
+    },
+    {
+      "label": "game-clang-1",
+      "compiler": "clang",
+      "source": "games/hex_demo/src/main.cpp",
+      "elapsed_seconds": 2.035,
+      "exit_code": 0,
+      "user_seconds": 1.94,
+      "system_seconds": 0.06,
+      "wall_seconds": 2.02,
+      "max_rss_kib": 193320,
+      "major_faults": 0
+    },
+    {
+      "label": "game-gcc-1",
+      "compiler": "gcc",
+      "source": "games/hex_demo/src/main.cpp",
+      "elapsed_seconds": 2.293,
+      "exit_code": 0,
+      "user_seconds": 2.11,
+      "system_seconds": 0.15,
+      "wall_seconds": 2.28,
+      "max_rss_kib": 318484,
+      "major_faults": 0
+    },
+    {
+      "label": "ecs-clang-1",
+      "compiler": "clang",
+      "source": "engine/src/ecs/system.cpp",
+      "elapsed_seconds": 7.495,
+      "exit_code": 0,
+      "user_seconds": 7.28,
+      "system_seconds": 0.16,
+      "wall_seconds": 7.49,
+      "max_rss_kib": 278324,
+      "major_faults": 0
+    },
+    {
+      "label": "ecs-gcc-1",
+      "compiler": "gcc",
+      "source": "engine/src/ecs/system.cpp",
+      "elapsed_seconds": 9.022,
+      "exit_code": 0,
+      "user_seconds": 8.58,
+      "system_seconds": 0.3,
+      "wall_seconds": 9.01,
+      "max_rss_kib": 495560,
+      "major_faults": 0
+    },
+    {
+      "label": "scene_asset-clang-1",
+      "compiler": "clang",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "elapsed_seconds": 56.251,
+      "exit_code": 0,
+      "user_seconds": 55.4,
+      "system_seconds": 0.73,
+      "wall_seconds": 56.24,
+      "max_rss_kib": 941364,
+      "major_faults": 0
+    },
+    {
+      "label": "scene_asset-gcc-1",
+      "compiler": "gcc",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "elapsed_seconds": 62.179,
+      "exit_code": 0,
+      "user_seconds": 60.45,
+      "system_seconds": 1.47,
+      "wall_seconds": 62.17,
+      "max_rss_kib": 2237904,
+      "major_faults": 0
+    },
+    {
+      "label": "lua_bindings-clang-1",
+      "compiler": "clang",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "elapsed_seconds": 40.707,
+      "exit_code": 0,
+      "user_seconds": 40.08,
+      "system_seconds": 0.55,
+      "wall_seconds": 40.7,
+      "max_rss_kib": 902976,
+      "major_faults": 0
+    },
+    {
+      "label": "lua_bindings-gcc-1",
+      "compiler": "gcc",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "elapsed_seconds": 38.856,
+      "exit_code": 0,
+      "user_seconds": 37.68,
+      "system_seconds": 1.02,
+      "wall_seconds": 38.85,
+      "max_rss_kib": 1620776,
+      "major_faults": 0
+    },
+    {
+      "label": "game-gcc-2",
+      "compiler": "gcc",
+      "source": "games/hex_demo/src/main.cpp",
+      "elapsed_seconds": 2.18,
+      "exit_code": 0,
+      "user_seconds": 1.98,
+      "system_seconds": 0.16,
+      "wall_seconds": 2.17,
+      "max_rss_kib": 318456,
+      "major_faults": 0
+    },
+    {
+      "label": "game-clang-2",
+      "compiler": "clang",
+      "source": "games/hex_demo/src/main.cpp",
+      "elapsed_seconds": 1.6,
+      "exit_code": 0,
+      "user_seconds": 1.5,
+      "system_seconds": 0.06,
+      "wall_seconds": 1.59,
+      "max_rss_kib": 193240,
+      "major_faults": 0
+    },
+    {
+      "label": "ecs-gcc-2",
+      "compiler": "gcc",
+      "source": "engine/src/ecs/system.cpp",
+      "elapsed_seconds": 8.83,
+      "exit_code": 0,
+      "user_seconds": 8.41,
+      "system_seconds": 0.31,
+      "wall_seconds": 8.82,
+      "max_rss_kib": 496680,
+      "major_faults": 0
+    },
+    {
+      "label": "ecs-clang-2",
+      "compiler": "clang",
+      "source": "engine/src/ecs/system.cpp",
+      "elapsed_seconds": 7.283,
+      "exit_code": 0,
+      "user_seconds": 7.09,
+      "system_seconds": 0.14,
+      "wall_seconds": 7.27,
+      "max_rss_kib": 278304,
+      "major_faults": 0
+    },
+    {
+      "label": "scene_asset-gcc-2",
+      "compiler": "gcc",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "elapsed_seconds": 61.054,
+      "exit_code": 0,
+      "user_seconds": 59.3,
+      "system_seconds": 1.47,
+      "wall_seconds": 61.05,
+      "max_rss_kib": 2238244,
+      "major_faults": 0
+    },
+    {
+      "label": "scene_asset-clang-2",
+      "compiler": "clang",
+      "source": "engine/src/scene/scene_asset.cpp",
+      "elapsed_seconds": 51.784,
+      "exit_code": 0,
+      "user_seconds": 51.08,
+      "system_seconds": 0.61,
+      "wall_seconds": 51.78,
+      "max_rss_kib": 942656,
+      "major_faults": 0
+    },
+    {
+      "label": "lua_bindings-gcc-2",
+      "compiler": "gcc",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "elapsed_seconds": 38.633,
+      "exit_code": 0,
+      "user_seconds": 37.5,
+      "system_seconds": 0.99,
+      "wall_seconds": 38.63,
+      "max_rss_kib": 1621568,
+      "major_faults": 0
+    },
+    {
+      "label": "lua_bindings-clang-2",
+      "compiler": "clang",
+      "source": "engine/src/scripting/script_engine.cpp",
+      "elapsed_seconds": 40.22,
+      "exit_code": 0,
+      "user_seconds": 39.59,
+      "system_seconds": 0.55,
+      "wall_seconds": 40.21,
+      "max_rss_kib": 902980,
+      "major_faults": 0
+    }
+  ],
+  "game_edit_with_link": {
+    "target": "hex_demo",
+    "jobs": 4,
+    "linker": "mold 2.40.4 for both compilers",
+    "gcc_median_seconds": 2.585,
+    "clang_median_seconds": 1.912,
+    "samples": [
+      {
+        "compiler": "gcc",
+        "label": "paired-edit-gcc-0",
+        "seconds": 3.124,
+        "exit_code": 0
+      },
+      {
+        "compiler": "clang",
+        "label": "paired-edit-clang-0",
+        "seconds": 1.918,
+        "exit_code": 0
+      },
+      {
+        "compiler": "clang",
+        "label": "paired-edit-clang-1",
+        "seconds": 1.912,
+        "exit_code": 0
+      },
+      {
+        "compiler": "gcc",
+        "label": "paired-edit-gcc-1",
+        "seconds": 2.577,
+        "exit_code": 0
+      },
+      {
+        "compiler": "gcc",
+        "label": "paired-edit-gcc-2",
+        "seconds": 2.585,
+        "exit_code": 0
+      },
+      {
+        "compiler": "clang",
+        "label": "paired-edit-clang-2",
+        "seconds": 1.904,
+        "exit_code": 0
+      }
+    ]
+  },
+  "runtime_spot_checks": {
+    "iterations_per_process": 50,
+    "warmup_per_process": 3,
+    "processes_per_compiler_per_case": 3,
+    "cpu_affinity": 2,
+    "sample_totals_match": true,
+    "samples": [
+      {
+        "compiler": "gcc",
+        "suite": "ecs",
+        "case": "query_10k",
+        "run": 0,
+        "cpu_affinity": 2,
+        "median_ms": 1.745907,
+        "total": 212000,
+        "allocations": 750,
+        "allocated_bytes": 19352800
+      },
+      {
+        "compiler": "clang",
+        "suite": "ecs",
+        "case": "query_10k",
+        "run": 0,
+        "cpu_affinity": 2,
+        "median_ms": 1.787652,
+        "total": 212000,
+        "allocations": 750,
+        "allocated_bytes": 19352800
+      },
+      {
+        "compiler": "gcc",
+        "suite": "prefab",
+        "case": "spawn_destroy",
+        "run": 0,
+        "cpu_affinity": 2,
+        "median_ms": 0.06019,
+        "total": 212,
+        "allocations": 7524,
+        "allocated_bytes": 1321386
+      },
+      {
+        "compiler": "clang",
+        "suite": "prefab",
+        "case": "spawn_destroy",
+        "run": 0,
+        "cpu_affinity": 2,
+        "median_ms": 0.062659,
+        "total": 212,
+        "allocations": 7524,
+        "allocated_bytes": 1321386
+      },
+      {
+        "compiler": "gcc",
+        "suite": "render",
+        "case": "ecs_sprites_collect_100k",
+        "run": 0,
+        "cpu_affinity": 2,
+        "median_ms": 6.698393,
+        "total": 5300000,
+        "allocations": 0,
+        "allocated_bytes": 0
+      },
+      {
+        "compiler": "clang",
+        "suite": "render",
+        "case": "ecs_sprites_collect_100k",
+        "run": 0,
+        "cpu_affinity": 2,
+        "median_ms": 3.930629,
+        "total": 5300000,
+        "allocations": 0,
+        "allocated_bytes": 0
+      },
+      {
+        "compiler": "clang",
+        "suite": "ecs",
+        "case": "query_10k",
+        "run": 1,
+        "cpu_affinity": 2,
+        "median_ms": 1.794436,
+        "total": 212000,
+        "allocations": 750,
+        "allocated_bytes": 19352800
+      },
+      {
+        "compiler": "gcc",
+        "suite": "ecs",
+        "case": "query_10k",
+        "run": 1,
+        "cpu_affinity": 2,
+        "median_ms": 1.738787,
+        "total": 212000,
+        "allocations": 750,
+        "allocated_bytes": 19352800
+      },
+      {
+        "compiler": "clang",
+        "suite": "prefab",
+        "case": "spawn_destroy",
+        "run": 1,
+        "cpu_affinity": 2,
+        "median_ms": 0.06305,
+        "total": 212,
+        "allocations": 7524,
+        "allocated_bytes": 1321386
+      },
+      {
+        "compiler": "gcc",
+        "suite": "prefab",
+        "case": "spawn_destroy",
+        "run": 1,
+        "cpu_affinity": 2,
+        "median_ms": 0.060384,
+        "total": 212,
+        "allocations": 7524,
+        "allocated_bytes": 1321386
+      },
+      {
+        "compiler": "clang",
+        "suite": "render",
+        "case": "ecs_sprites_collect_100k",
+        "run": 1,
+        "cpu_affinity": 2,
+        "median_ms": 3.955912,
+        "total": 5300000,
+        "allocations": 0,
+        "allocated_bytes": 0
+      },
+      {
+        "compiler": "gcc",
+        "suite": "render",
+        "case": "ecs_sprites_collect_100k",
+        "run": 1,
+        "cpu_affinity": 2,
+        "median_ms": 6.706024,
+        "total": 5300000,
+        "allocations": 0,
+        "allocated_bytes": 0
+      },
+      {
+        "compiler": "gcc",
+        "suite": "ecs",
+        "case": "query_10k",
+        "run": 2,
+        "cpu_affinity": 2,
+        "median_ms": 1.743978,
+        "total": 212000,
+        "allocations": 750,
+        "allocated_bytes": 19352800
+      },
+      {
+        "compiler": "clang",
+        "suite": "ecs",
+        "case": "query_10k",
+        "run": 2,
+        "cpu_affinity": 2,
+        "median_ms": 1.801524,
+        "total": 212000,
+        "allocations": 750,
+        "allocated_bytes": 19352800
+      },
+      {
+        "compiler": "gcc",
+        "suite": "prefab",
+        "case": "spawn_destroy",
+        "run": 2,
+        "cpu_affinity": 2,
+        "median_ms": 0.060432,
+        "total": 212,
+        "allocations": 7524,
+        "allocated_bytes": 1321386
+      },
+      {
+        "compiler": "clang",
+        "suite": "prefab",
+        "case": "spawn_destroy",
+        "run": 2,
+        "cpu_affinity": 2,
+        "median_ms": 0.062992,
+        "total": 212,
+        "allocations": 7524,
+        "allocated_bytes": 1321386
+      },
+      {
+        "compiler": "gcc",
+        "suite": "render",
+        "case": "ecs_sprites_collect_100k",
+        "run": 2,
+        "cpu_affinity": 2,
+        "median_ms": 6.701694,
+        "total": 5300000,
+        "allocations": 0,
+        "allocated_bytes": 0
+      },
+      {
+        "compiler": "clang",
+        "suite": "render",
+        "case": "ecs_sprites_collect_100k",
+        "run": 2,
+        "cpu_affinity": 2,
+        "median_ms": 4.029883,
+        "total": 5300000,
+        "allocations": 0,
+        "allocated_bytes": 0
+      }
+    ],
+    "benchmark_driver_optimization": "CMake Release default (-O3); engine -O2"
+  },
+  "validation": {
+    "gcc_selected_ctest": "11/11 passed",
+    "clang_selected_ctest": "11/11 passed",
+    "clang_3d_compile_checks": [
+      "kin_engine PCH",
+      "kin_scene3d_runtime PCH",
+      "gpu_gi3d.cpp",
+      "gpu_renderer3d.cpp",
+      "lua_scene3d.cpp"
+    ]
+  },
+  "notes": [
+    "Compile-only samples execute canonical CMake compile_commands.json commands; only object output paths are redirected. Each compiler uses its own PCH.",
+    "Three runs with alternating compiler order. The benchmark launches one compiler process at a time; host background load and CPU frequency are not controlled.",
+    "The installed GCC driver injects fortify, stack protection, stack-clash, control-flow protection and zero-init-padding flags which the installed Clang driver does not. Results compare these installed toolchains, not identical implicit defaults.",
+    "Game edit samples append different comments to force compilation with the compiler cache disabled. Original source restored afterwards.",
+    "The game edit comparison includes linking and is separately paired; do not combine its absolute timings with the earlier build_times_2026-11-06.json runs.",
+    "Runtime spot checks measure single-core CPU kernels, including a NullBackend sprite collection case, not GPU rendering or whole-game FPS.",
+    "No like-for-like full clean-build timing comparison, full 3D runtime suite, or Windows validation was performed."
+  ]
+}

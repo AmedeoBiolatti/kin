@@ -27,7 +27,8 @@ set(KIN_CONFIG_INDEPENDENT_TESTS
     kin-ecs-inspection kin-ecs-lifecycle kin-ecs-spawn kin-ecs-system kin-ecs-time
     # Python tests of the tools.
     kin-asset-cooking kin-asset-report kin-bundled-fonts kin-components kin-eval-python
-    kin-release-acceptance-tools kin-release-publishing kin-rendering-ci-python)
+    kin-release-acceptance-tools kin-release-publishing kin-rendering-ci-python
+    kin-build-config kin-shader-build)
 
 function(kin_test_registered test_name result)
     if(KIN_TEST_PROFILE STREQUAL "config" AND test_name IN_LIST KIN_CONFIG_INDEPENDENT_TESTS)
@@ -47,6 +48,19 @@ endfunction()
 
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+    kin_add_script_test(kin-build-config
+        "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/build_config_tests.py"
+            --cmake "${CMAKE_COMMAND}" --generator "${CMAKE_GENERATOR}")
+    if(KIN_GLSLC)
+        kin_add_script_test(kin-shader-build
+            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/shader_build_tests.py"
+                --cmake "${CMAKE_COMMAND}" --glslc "${KIN_GLSLC}" --generator "${CMAKE_GENERATOR}")
+    endif()
+    foreach(test kin-build-config kin-shader-build)
+        if(TEST ${test})
+            set_tests_properties(${test} PROPERTIES TIMEOUT 120)
+        endif()
+    endforeach()
     add_test(NAME kin-development-python COMMAND "${Python3_EXECUTABLE}" -m unittest discover -s "${CMAKE_CURRENT_SOURCE_DIR}/development" -v)
     set_tests_properties(kin-development-python PROPERTIES TIMEOUT 60)
     add_test(NAME kin-automation-python

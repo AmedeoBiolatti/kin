@@ -9,6 +9,7 @@
 #include <iostream>
 #include <kin/assets/content.hpp>
 #include <kin/audio/audio.hpp>
+#include <kin/ecs/animator.hpp>
 #include <kin/ecs/audio.hpp>
 #include <kin/ecs/system.hpp>
 #include <kin/platform/app.hpp>
@@ -700,6 +701,78 @@ void gpu_prepared_requests(Renderer2D& renderer) {
 }
 // Without a GPU (an SDL_Renderer over the dummy video driver: what a server or a CI job without a GPU has, no 3D): the
 // whole session but drawing, on CPU-only models, over the real camp and its prefabs.
+// Animators in a 3D scene: a .kinanim's tracks place, turn and size entities (Transform3D's fields, by vec3 and quat
+// keys), a child's too, as the session steps; their world placings follow. An edit to what plays plays that from its
+// start; one naming a file that can't be read is refused.
+void animators() {
+    Scratch scratch;
+    write(scratch.path / "door.kinanim", R"(
+animation swing
+  clip 1
+    track Transform3D.position
+      key 0 vec3 0 0 0 linear
+      key 1 vec3 2 0 0 linear
+    track Transform3D.rotation target=panel
+      key 0 quat 0 0 0 1 linear
+      key 1 quat 0 0.7071068 0 0.7071068 linear
+
+animation lift
+  clip 1
+    track Transform3D.scale
+      key 0 vec3 1 1 1 linear
+      key 1 vec3 1 3 1 linear
+)");
+    write(scratch.path / "door.kinscene", R"({"entities":[
+      {"id":"door","name":"door","components":{"Transform3D":{},"Animator":{"asset":"door.kinanim","animation":"swing"}}},
+      {"id":"panel","name":"panel","parent":"door","components":{"Transform3D":{"position":[1,0,0]}}}]})");
+    App app{{.mode = AppMode::Headless}};
+    auto& window = app.create_window({.title = "scene-session-animators", .width = 64, .height = 64, .hidden = true});
+    Renderer2D renderer{window};
+    Renderer3D r3d{renderer};
+    Assets3D assets{r3d, scratch.path};
+    SceneSession3DOptions options;
+    options.viewport = {64, 64};
+    SceneSession3D session{r3d, assets, options};
+    const auto ok = [&](const auto& result, const char* message) {
+        if (!result)
+            for (const auto& e : session.diagnostics())
+                std::cerr << e << '\n';
+        check(result, message);
+    };
+    ok(session.load("door.kinscene"), "animated scene load failed");
+    const auto door = session.entity("door"), panel = session.entity("panel");
+    check(door && panel && door.get<Animator>()->library, "the door's Animator is not bound");
+    const auto near = [](f32 a, f32 b) { return std::abs(a - b) < 1e-3f; };
+    for (int i = 0; i < 5; ++i)
+        ok(session.step(0.1f), "animated step failed");
+    const auto half = std::sqrt(0.5f);
+    const Vec3f at = door.get<Transform3D>()->position;
+    const Quatf turned = panel.get<Transform3D>()->rotation;
+    // Halfway: a metre along, a quarter turn's half (a turn eased the short way at a steady speed).
+    check(near(at.x, 1.0f) && near(at.y, 0.0f) && near(at.z, 0.0f), "a vec3 track did not place the door");
+    const f32 eighth = std::sin(3.14159265f / 8.0f);
+    check(near(turned.y, eighth) && near(turned.w, std::cos(3.14159265f / 8.0f)) && near(turned.x, 0.0f),
+          "a quat track did not turn the panel");
+    // The panel's world place: the door's, then its own a metre along, turned.
+    const Mat4f world = panel.get<WorldTransform3D>()->matrix;
+    check(near(world.at(0, 3), 2.0f), "the panel's world place did not follow its animated parent");
+    for (int i = 0; i < 10; ++i)
+        ok(session.step(0.1f), "animated step failed");
+    check(near(door.get<Transform3D>()->position.x, 2.0f) && near(panel.get<Transform3D>()->rotation.y, half) &&
+              door.get<Animator>()->finished,
+          "an animation that ends stays on its last frame");
+
+    const SceneFieldEdit3D lift[] = {{door, "Animator", "animation", std::string{"lift"}}};
+    ok(session.edit(lift), "an edit to what an Animator plays was refused");
+    ok(session.step(0.5f), "animated step failed");
+    check(door.get<Animator>()->library && near(door.get<Transform3D>()->scale.y, 2.0f) &&
+              !door.get<Animator>()->finished,
+          "the edited Animator did not play its new animation from its start");
+    const SceneFieldEdit3D missing[] = {{door, "Animator", "asset", std::string{"absent.kinanim"}}};
+    check(!session.edit(missing) && door.get<Animator>()->asset.id == "door.kinanim",
+          "an Animator naming a file that can't be read was accepted");
+}
+
 void headless() {
     App app{{.mode = AppMode::Headless}};
     auto& window = app.create_window({.title = "scene-session-headless", .width = 64, .height = 64, .hidden = true});
@@ -1098,6 +1171,7 @@ int main(int argc, char** argv) {
     // The CPU and headless checks run everywhere (CI's jobs without a GPU too); only the GPU checks are skipped there.
     try {
         cpu();
+        animators();
         headless();
         std::cout << "Headless scene session checks passed\n";
     } catch (const std::exception& error) {

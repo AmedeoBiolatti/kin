@@ -89,4 +89,12 @@ set(content
 
 ${open_ns}${body}${close_ns}")
 
+# A shader may rebuild to identical bytes (for example after a comment edit).
+# Preserve the source's timestamp so Ninja/Make can skip C++ compilation.
+if(EXISTS "${OUTPUT}")
+    file(READ "${OUTPUT}" previous)
+    if(previous STREQUAL content)
+        return()
+    endif()
+endif()
 file(WRITE "${OUTPUT}" "${content}")

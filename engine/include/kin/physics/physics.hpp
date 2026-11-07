@@ -78,6 +78,10 @@ struct PhysicsJoint {
 struct PhysicsWorldDef {
     Vec2f gravity{};
     f32 units_per_meter = 1.0f;
+    // Threads a step is solved on, the calling one included (Box2D 3 only,
+    // KIN_PHYSICS_BOX2D_V3: 2.4 has one). 0: KIN_PHYSICS_WORKERS when set,
+    // else one per core, up to 8. Its results are the same however many.
+    i32 workers = 0;
 };
 
 struct PhysicsBodyDef {

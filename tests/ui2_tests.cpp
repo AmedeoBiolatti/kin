@@ -7543,6 +7543,75 @@ void test_ecs_sync_explicit_keys_survive_reorder() {
     assert(button_id("B") == b);
 }
 
+void test_ecs_dirty_observer_lifecycle() {
+    kin::EcsWorld world;
+    register_ui2_components(world);
+    auto root = world.raw().entity().set(Ui2Root{{0, 0, 200, 100}});
+    auto other = world.raw().entity().set(Ui2Root{{0, 0, 100, 100}});
+    auto child = world.raw().entity().child_of(root);
+    const auto version = [&] { return root.get<Ui2LayoutCache>()->tree_version; };
+    const auto other_version = other.get<Ui2LayoutCache>()->tree_version;
+    auto before = version();
+
+    child.add<ui2::Label>();
+    assert(version() == before + 1);
+    before = version();
+    child.add<ui2::Label>();
+    child.set(ui2::Label{.text = "Changed"});
+    child.modified<ui2::Label>();
+    assert(version() == before); // widget edits use explicit dirty marking
+    child.remove<ui2::Label>();
+    assert(version() == before + 1);
+    before = version();
+    child.remove<ui2::Label>();
+    assert(version() == before);
+
+    // Removing a nontrivial widget and destroying its entity both invalidate
+    // its root without accessing the removed component's value.
+    child.set(ui2::NodeGraph{});
+    assert(version() == before + 1);
+    before = version();
+    child.destruct();
+    assert(version() == before + 1);
+
+    auto deferred = world.raw().entity().child_of(root);
+    before = version();
+    world.raw().defer([&] {
+        deferred.add<ui2::Button>();
+        assert(version() == before);
+    });
+    assert(version() == before + 1);
+    before = version();
+    world.raw().defer([&] { deferred.remove<ui2::Button>(); });
+    assert(version() == before + 1);
+
+    // Layout-related components additionally observe OnSet.
+    before = version();
+    deferred.set(Ui2Layout{});
+    assert(version() == before + 2);
+    before = version();
+    deferred.modified<Ui2Layout>();
+    root.modified<Ui2Root>();
+    assert(version() == before + 2);
+    before = version();
+    deferred.set(Ui2ScrollContainer{});
+    assert(version() == before + 2);
+    before = version();
+    deferred.modified<Ui2ScrollContainer>();
+    assert(version() == before + 1);
+    assert(other.get<Ui2LayoutCache>()->tree_version == other_version);
+
+    // Re-registering the named observers must not duplicate notifications.
+    register_ui2_components(world);
+    before = version();
+    deferred.add<ui2::Label>();
+    assert(version() == before + 1);
+    auto orphan = world.raw().entity().add<ui2::Label>();
+    orphan.remove<ui2::Label>();
+    assert(version() == before + 1);
+    assert(other.get<Ui2LayoutCache>()->tree_version == other_version);
+}
+
 void test_ecs_lazy_layout_solve_cache_and_dirty_mark() {
     kin::EcsWorld world;
     register_ui2_components(world);
@@ -9462,6 +9531,7 @@ int main() {
     test_ecs_bridge_static_dynamic_filtering();
     test_ecs_sync_stable_keys_sweep_and_state();
     test_ecs_sync_explicit_keys_survive_reorder();
+    test_ecs_dirty_observer_lifecycle();
     test_ecs_lazy_layout_solve_cache_and_dirty_mark();
     test_ecs_sync_matches_builder_layout();
     test_ecs_sync_document_order_survives_recreate();

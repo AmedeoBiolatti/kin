@@ -104,6 +104,25 @@ bool parse_value(const Line& line, std::size_t start, AnimValue& value, Easing& 
         }
         value = v;
         start += 3;
+    } else if (kind == "vec3") {
+        Vec3f v{};
+        if (start + 3 >= line.tok.size() || !parse_number(line.tok[start + 1], v.x) || !parse_number(line.tok[start + 2], v.y)
+            || !parse_number(line.tok[start + 3], v.z)) {
+            return fail(line, "malformed vec3 value", error);
+        }
+        value = v;
+        start += 4;
+    } else if (kind == "quat") {
+        Quatf q{};
+        if (start + 4 >= line.tok.size() || !parse_number(line.tok[start + 1], q.x) || !parse_number(line.tok[start + 2], q.y)
+            || !parse_number(line.tok[start + 3], q.z) || !parse_number(line.tok[start + 4], q.w)) {
+            return fail(line, "malformed quat value", error);
+        }
+        if (!(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w > 0.0f)) {
+            return fail(line, "a quat value of no length", error);
+        }
+        value = q.normalized();
+        start += 5;
     } else if (kind == "color") {
         i32 r = 0;
         i32 g = 0;
@@ -518,6 +537,16 @@ void serialize_value(std::ostream& out, const AnimValue& value) {
     case AnimValueKind::String:
         out << "string " << std::get<std::string>(value);
         break;
+    case AnimValueKind::Vec3: {
+        const Vec3f v = std::get<Vec3f>(value);
+        out << "vec3 " << v.x << ' ' << v.y << ' ' << v.z;
+        break;
+    }
+    case AnimValueKind::Quat: {
+        const Quatf q = std::get<Quatf>(value);
+        out << "quat " << q.x << ' ' << q.y << ' ' << q.z << ' ' << q.w;
+        break;
+    }
     }
 }
 

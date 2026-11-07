@@ -1,0 +1,87 @@
+{
+  "date": "2026-11-06",
+  "base_commit": "65367ba",
+  "environment": {
+    "platform": "Linux x86_64",
+    "compiler": "GCC 15.2.0",
+    "cmake": "4.2.3",
+    "build_type": "Release",
+    "jobs": 4,
+    "build_filesystem": "NTFS via FUSE",
+    "compiler_cache_for_cpp_edits": "off",
+    "pch_warm": true,
+    "mold_version": "2.40.4",
+    "ccache_version": "4.12.3"
+  },
+  "game_edit": {
+    "source": "games/hex_demo/src/main.cpp",
+    "target": "hex_demo",
+    "includes_link": true,
+    "baseline_seconds": [
+      7.607,
+      8.969,
+      8.36
+    ],
+    "pch_seconds": [
+      7.878,
+      7.605,
+      6.086
+    ],
+    "pch_and_mold_seconds": [
+      4.297,
+      4.302,
+      4.027
+    ]
+  },
+  "engine_edit": {
+    "source": "engine/src/ecs/system.cpp",
+    "target": "hex_demo",
+    "includes_archive_and_link": true,
+    "linker": "GNU ld.bfd",
+    "baseline_seconds": [
+      19.85,
+      28.137,
+      27.129
+    ],
+    "pch_seconds": [
+      16.76,
+      18.081,
+      17.673
+    ]
+  },
+  "shader_include_edit": {
+    "source": "engine/shaders/kin_gi_sampling_params.inc.glsl",
+    "scope": "shader-only fixture using the full committed 3D shader manifest",
+    "baseline": {
+      "seconds": 9.39,
+      "shader_compiles": 154
+    },
+    "depfiles": {
+      "seconds": 0.788,
+      "shader_compiles": 12
+    }
+  },
+  "compiler_cache": {
+    "scope": "one unchanged game source, object compilation only; no linking",
+    "cold_seconds": 3.557,
+    "warm_seconds": [
+      0.044,
+      0.036,
+      0.033
+    ],
+    "direct_hits": 3,
+    "misses": 1
+  },
+  "reconfigure": {
+    "compile_commands": 975,
+    "changed_on_reconfigure": []
+  },
+  "notes": [
+    "C++ edit samples append a different comment, forcing real compilation with the compiler cache disabled; original source restored afterwards.",
+    "Medians use three runs; background workloads and filesystem caches were not controlled.",
+    "Shader timings are one run per configuration and exclude C++ embedding/linking.",
+    "PCH creation, dependency fetching and initial builds are excluded from edit timings.",
+    "A like-for-like full clean-build comparison was not performed.",
+    "GCC 3D compile checks cover gpu_gi3d.cpp, gpu_renderer3d.cpp, lua_scene3d.cpp and their relevant PCHs; not a complete 3D runtime test."
+  ]
+}

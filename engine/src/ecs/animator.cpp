@@ -101,7 +101,7 @@ void own_named(flecs::entity root, AnimationRegistry& registry, const std::strin
 
 } // namespace
 
-void update_animators(EcsWorld& world, f32 dt) {
+void update_animators(EcsWorld& world, f32 dt, bool announce) {
     flecs::world& raw = world.raw();
     std::vector<flecs::entity> animated;
     world.each([&](flecs::entity entity, const Animator&) { animated.push_back(entity); });
@@ -109,7 +109,7 @@ void update_animators(EcsWorld& world, f32 dt) {
         EcsEntity entity{found};
         Animator* animator = entity.get_mut<Animator>(); // its own, when it is a prefab's
         if (!animator->library || !animator->properties) {
-            continue; // its file not bound yet (Assets2D)
+            continue; // its file not bound yet (Assets2D, resolve_animators3d)
         }
         // What it plays: a machine (by its name, marked apart from an animation's), or an animation.
         const std::string wanted = animator->machine.empty() ? animator->animation : "machine:" + animator->machine;
@@ -161,6 +161,7 @@ void update_animators(EcsWorld& world, f32 dt) {
         // A machine plays on through its states; an animation stops once played through.
         player->playing = animator->playing && (player->machine || !animator->finished);
         player->sprite_catalog = sprite_renderer_catalog(entity);
+        player->announce = announce;
         if (!player->layers.empty()) {
             player->layers.front().speed = animator->speed;
         }

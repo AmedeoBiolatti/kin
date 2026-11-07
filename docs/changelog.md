@@ -7,6 +7,36 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Fixed: spawning a prefab while an earlier copy lived aborted the game when it named its entities (two siblings
+  of one name; the names kin set itself were not in the registry it asked), and copies after the first renamed their
+  children (`Eye.<id>`, so `child("Eye")` found nothing). `Lifetime` and `Timer` given in scene or prefab files
+  are kin's own now, so `update_lifetimes` and `update_timers` count them down (they were data components nothing
+  counted).
+
+- Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
+  precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
+  and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).
+
+- 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
+  quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
+  `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
+  scene plays `kin::Animator`s: `resolve_animators3d` binds them (`SceneSession3D` does, at load, for spawned prefabs
+  and live edits, and watches their files) and `SceneFrame3D` plays them in its animation phase.
+  `update_animators(world, dt, announce)` and `AnimationPlayer::announce` mark the fields they set as set, for a
+  world that watches for changes.
+- Experimental: kin's 2D physics on Box2D 3.2 with `-DKIN_PHYSICS_BOX2D_V3=ON` (off by default; Box2D 2.4 stays
+  the default). The same `PhysicsWorld` API, stepped on Box2D's own threads: `PhysicsWorldDef::workers` (0:
+  `KIN_PHYSICS_WORKERS`, else one per core up to 8), with the same results however many. A packed crowd of 900
+  bodies steps in 0.7 ms instead of 4.3; 20k take 11.5 ms on one thread and about 5 ms on 4 to 8 (2.4 took 3 s
+  for 10k). Differences: joint limits
+  are soft (a motor pushes a few degrees past, a rope pulls without a jerk), capsules are one shape, a contact a
+  one-sided platform refuses never begins touching.
+
+- 3D asset files have types of their own: `AssetType::Animator3D` (`.kinanimator`), `Collider3D` (`.kincollider`)
+  and `Materials3D` (`.kinmaterials`), and `infer_asset_type` names them (they were Unknown). The fields naming them
+  say so (`AnimatorAsset3D.asset`, `Collider3D.asset`, `ModelMaterials3D.asset`), so a tool's picker offers those
+  files alone and a dropped one finds its component.
+
 - Edits in place for a tool's scene view: the scene server's `view.edit {entities: [{id, components}]}` hands the
   fields a tool changed (each entity by its id in the file, its components' fields written as the file writes them)
   to the new `Scene::view_edit`, in place of the whole file again (`view.scene`), which reads it all, the world and
