@@ -122,6 +122,34 @@ but was slightly slower for the large Lua-binding translation unit. Compiler
 choice remains explicit; the original development/shipping presets retain
 their compiler selection.
 
+## Faster Lua binding builds (opt-in)
+
+`dev-clang-fast` trades some Lua binding runtime speed for less compiler
+optimization work:
+
+```sh
+cmake --preset dev-clang-fast
+cmake --build --preset dev-clang-fast --target hex_demo
+```
+
+`dev-fast` uses the system compiler instead; both presets are available on
+Linux. They use separate build directories from the normal development presets.
+For an existing GCC/Clang build, keep its compiler and enable
+`-DKIN_DEV_FAST_SCRIPTING=ON` at configuration time. Turn it off with `OFF`;
+the normal development presets explicitly select `OFF`.
+
+This option appends `-O1` only to `kin_scripting_scenes` in Release and
+RelWithDebInfo, including its target-private PCH. Scene, entity and workflow
+bindings use it; other engine targets, Lua itself, and game sources retain their
+normal settings. Debug and MinSizeRel flags are unchanged. Applying the option
+to a shipping build or an unsupported compiler produces a configuration error.
+The default is `OFF`.
+
+Changing the option rebuilds the binding target and its PCH once. The mode is
+intended for iteration; use normal development or shipping presets to assess
+optimized game performance. See the whole-target measurements below for the
+observed compilation/runtime tradeoff and its limits.
+
 ## Measure the edit loop
 
 Compare the same compiler, flags, sources, build filesystem and job count.
@@ -526,8 +554,8 @@ from the callback comparison above; compare within each table. With only this
 translation unit built at `-O1`, sampled input-query medians rose by 3.8% with
 Clang and 3.4% with GCC relative to the changed `-O2` version. Other engine
 objects and Lua itself retained their normal optimization. `-O1` remains an
-experiment; no flag or preset was added. A broader opt-in mode needs a separate
-whole-target build comparison and game runtime measurements.
+experiment in this single-file round; the whole-target follow-up below evaluates
+the opt-in mode separately.
 
 GCC and Clang each passed 11 selected scripting, scene and game tests, and all
 four Lua API reports matched the original `main` reports. A mechanical check
@@ -538,3 +566,67 @@ validated in this round.
 The [workflow measurement data](build_workflows_2026-11-07.json) contains the
 compile samples and per-process runtime medians, rejected prototype results,
 source hashes, validation results, original commands and reproduction scripts.
+
+### Opt-in optimization for the whole binding target
+
+Starting from `7749e3b`, `KIN_DEV_FAST_SCRIPTING` applies `-O1` to all nine
+sources in `kin_scripting_scenes` and its PCH. This follows the single-file
+experiment above. The setting is private to this target and off by default.
+
+Three pairs per compiler rebuilt that entire target and relinked `hex_demo`:
+
+| Binding target rebuild + game link | Normal `-O2` | Opt-in `-O1` | Reduction |
+|---|---:|---:|---:|
+| Clang 21.1.8, median | 26.72 s | 22.94 s | 14.1% |
+| GCC 15.2.0, median | 27.55 s | 23.70 s | 14.0% |
+
+Every pair was faster with `-O1`. Each build used four workers pinned to CPUs
+0, 2, 4 and 6, one thread per performance core, with compiler cache and LTO off.
+Each run rebuilt the PCH and nine C++ objects, archived the target and linked
+the game: twelve compile/archive/link actions. CMake configuration was untimed;
+the normal Ninja glob check remained in the timed build. Dependencies, shaders,
+other engine targets and game objects were already built. These percentages
+describe a **binding-target rebuild**, not a complete Kin/game build or a game
+source edit. Existing includes and source files were identical between modes.
+
+Comparing all 999 compile database entries per compiler found exactly ten
+changes: the target's nine sources and its PCH each gained one trailing
+optimization flag, `-O1`. The other 989 commands were identical. Both modes used
+fresh, matching PCHs. Run order reversed in the middle pair. Other user jobs
+were active during parts of the session, and wall times varied; the data
+retains all pairs and CPU-time measurements.
+
+Runtime probes linked the same optimized engine/Lua libraries against either
+the complete `-O2` or complete `-O1` binding archive. Both compilers ran three
+processes per mode and workload group, pinned to CPU 2, with three warmups and
+30 timed samples per workload. The table shows the median of those per-process
+medians, in milliseconds:
+
+| Workload | Clang `-O2` | Clang `-O1` | GCC `-O2` | GCC `-O1` |
+|---|---:|---:|---:|---:|
+| Create one scene VM | 0.456 | 0.485 | 0.497 | 0.487 |
+| 20,000 scene calls | 4.31 | 4.27 | 4.35 | 4.20 |
+| 50,000 entity calls | 24.50 | 24.48 | 25.84 | 24.16 |
+| Bind/destroy 50 workflow VMs | 5.35 | 5.20 | 5.57 | 5.32 |
+| 400,000 input queries | 23.85 | 24.68 | 23.30 | 23.47 |
+| 40,000 controller-table calls | 17.90 | 16.89 | 16.03 | 17.03 |
+
+Sampled medians moved in both directions, with slowdowns up to 6.3% and gains
+up to 6.5%. Results vary by workload and overlap run-to-run variation; they do
+not establish a general runtime speedup or a game frame-time/FPS result. The
+scene/entity probes assert final positions; workflow probes assert input states,
+table contents and iteration counts. The mode stays opt-in for development.
+
+Both compilers passed twelve selected tests with the option enabled, including
+the scripting, workflow, scene and headless game checks. All four Lua API reports
+matched `-O2`. Configuration tests cover private flags, matching PCH compilation,
+turning the option off, Release/RelWithDebInfo versus Debug/MinSizeRel, and
+shipping/unsupported-compiler rejection. Both new Linux presets configured
+successfully in fresh directories using cached dependency sources. The existing
+benchmark builds were restored to `OFF` and their optimized game smoke tests
+passed. This round does not validate Windows, a full 3D runtime, LTO/PGO or
+representative real-game frame times.
+
+The [whole-target data](build_scripting_o1_2026-11-07.json) includes all build
+samples and raw runtime timings, command comparisons, validation, source hashes
+and reproduction scripts.

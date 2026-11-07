@@ -335,6 +335,7 @@ if(KIN_ENABLE_SCRIPTING)
         target_link_libraries(kin_scripting_scenes PUBLIC kin_physics) # entity scripts' `physics`
     endif()
     kin_enable_release_optimizations(kin_scripting_scenes)
+    kin_configure_scripting_build(kin_scripting_scenes)
     target_link_libraries(kin_engine_components INTERFACE kin_scripting_scenes)
 endif()
 if(KIN_ENABLE_PYTHON)

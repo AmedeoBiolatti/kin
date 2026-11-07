@@ -12,6 +12,10 @@ releases may change APIs.
   (including repeated 2D workflow signatures), and earlier independent runtime compilation with Ninja.
   See [build-time measurements and setup](build_times.md).
 
+- Optional `KIN_DEV_FAST_SCRIPTING` and Linux `dev-fast`/`dev-clang-fast` presets use `-O1` for scene/entity
+  Lua bindings during development. It is off by default and rejected for shipping builds.
+  See [compilation/runtime measurements](build_times.md#opt-in-optimization-for-the-whole-binding-target).
+
 - 3D property tracks: `.kinanim` keys of `vec3 x y z` and `quat x y z w` (`AnimValueKind::Vec3`, `Quat`), eased (a
   quat the short way round), added for relative tracks and blended by layers and blend spaces; the described
   `Vec3f` and `Quatf` fields (`Transform3D.position`, `.rotation`, `.scale`) are theirs to set, and tweens' too. A 3D
