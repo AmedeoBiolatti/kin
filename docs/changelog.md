@@ -7,6 +7,10 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Native ECS fields keep member accessors typed until their stored registry callback, reducing reflected
+  registration compilation and removing redundant `std::function` adapters and allocations. Custom
+  properties retain their callback API. See [field callback measurements](build_times.md#native-component-field-callbacks).
+
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
   precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters
   (including repeated 2D workflow signatures), and earlier independent runtime compilation with Ninja.

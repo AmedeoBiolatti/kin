@@ -1044,3 +1044,93 @@ per compiler, and no-change game builds compiled and linked nothing.
 The [Window value data](build_window_values_2026-11-07.json) retains exact plans,
 skipped objects, timing samples/load, layouts/enums, affected source lists,
 validation, workflow corrections and reproduction scripts.
+
+### Native component field callbacks
+
+Follow-up measured on 2026-11-07 from `12475f9`. A fresh clean Kin + `hex_demo`
+profile uses normal Release `-O2`, `KIN_DEV_FAST_SCRIPTING=OFF`, PCH on,
+compiler cache/LTO off, mold, and four workers pinned to CPUs 0, 2, 4 and 6.
+It recompiles 221 own C/C++/PCH/generated-data outputs through the final game
+link; third-party compilation and shader generation are already built.
+This is not a from-scratch dependency build.
+
+Fresh serial Clang traces identify substantial optimizer/code-generation work:
+`script_engine.cpp` spends 23.42 of 35.57 traced seconds in the backend;
+ECS `ui2.cpp` spends 16.62 of 25.05 seconds there. These are diagnostic,
+instrumented runs, separate from the ordinary timings below. Nested trace
+categories overlap and must not be added together. The clean build keeps four
+workers busy compiling; the final game link takes less than 0.2 seconds.
+
+Native reflected `.field()` accessors previously became `std::function`
+readers/writers, then another pair of `std::function` callbacks stored in the
+registry. Direct and nested member projections now stay typed until that final
+callback boundary. This removes an adapter layer and its template machinery.
+Custom `.property()` retains its public `std::function` parameters. The original
+validation order/error strings, descriptor construction, accessor/callback
+bodies, metadata methods and builder fields are preserved. The custom callback
+validity check is evaluated before moving the functions.
+
+Uninstrumented serial Clang 21.1.8 compiles use matching target PCHs and normal
+`-O2` on CPU 2. One ABBA then one BAAB block gives four observations per version
+and source. Stable include overlays select the two component-header versions;
+dependency files verify the selected header, with no worktree header rewrites.
+The unchanged JSON source is a control:
+
+| Source | Before median | After median | Reduction |
+|---|---:|---:|---:|
+| `scene_components_render.cpp` | 11.215 s | 9.945 s | 11.3% |
+| `scene_components_physics2d.cpp` | 10.845 s | 10.390 s | 4.2% |
+| `core/json.cpp` (unchanged control) | 0.895 s | 0.900 s | none |
+
+The rendering and physics registration object files shrink by 17.6% and 7.5%
+respectively. These are object sizes, not final executable-size reductions.
+
+All four clean-build observations are retained in order:
+
+| Run | Original callbacks | Typed field callbacks |
+|---|---:|---:|
+| Initial observation | 290.70 s | 207.78 s |
+| Return-to-baseline / optimized repeat | 204.98 s | 198.78 s |
+
+External GCC builds became active during the first baseline, making its large
+gap unsuitable as a speedup claim. The later pair observes about 3% lower wall
+time, but host activity remains uncontrolled and each row has one observation
+per version. It does not establish a precise whole-build speedup or a cumulative
+improvement since the optimization project began. No agent-owned validation
+compilers overlap timing; configuration, header writes and Ninja-log changes
+are also serialized with compilation.
+
+The game-edit loop still compiles exactly `hex_demo`'s main source and links.
+Three source-edit observations have medians of 2.15 s before and 1.88 s after;
+no-op medians are 0.27 s and 0.17 s. These separate-phase observations also
+include host/filesystem noise; no causal edit-loop improvement is claimed.
+
+An `-O2` runtime probe registers 1,000 integer fields of one private component
+and counts C++ `operator new` during field registration, excluding world/type
+creation. Calls fall from 2,022 to 22, and allocated bytes from 1,406,832 to
+1,342,832: two allocations and 64 bytes removed per field on this libstdc++
+configuration. Remaining calls include registration-vector growth. Small-buffer
+behavior may differ with other standard libraries. The probe visits a million
+integer fields per sample, with three warmups and ten measured samples per
+process, three processes/version. Process medians are 7.544–7.551 ms before
+and 5.703–6.707 ms after; checksums and direct/nested/string patches match.
+These synthetic callback results are not full-game FPS measurements.
+
+Clang and GCC each pass 39 selected ECS, rendering, scene, scripting, UI2,
+platform and game tests; all four Lua API reports match the baseline per compiler.
+The existing standalone renderer/platform header contracts also build. New
+regression coverage checks direct/nested/string/vector fields, custom callbacks,
+metadata, errors, rejected patches and callbacks copied to a world that outlives
+the original registry. Eleven optional 3D source/test units pass Clang syntax and
+template checks without PCH. After restoring the edit-probe source, the canonical
+game main is recompiled, game/component smoke tests and API comparisons pass
+again, and no-change `hex_demo`, `shapes_demo` and `kin_lua` builds compile/link
+nothing with either compiler. This does not provide Windows/MSVC or full native
+desktop/3D/GPU runtime validation.
+
+The [field callback data](build_field_callbacks_2026-11-07.json) retains every
+clean-build timeline, paired compiler sample, trace summary, edit-loop sample,
+allocation/runtime observation, header hash, validation result and reproduction
+script. It also records recovery of the successful baseline after a C/C++ action
+counting bug, and recovery of the completed first trace after adapting its
+parser to Clang 21 async Source events; neither run was discarded or repeated.
