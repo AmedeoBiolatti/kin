@@ -7,6 +7,12 @@ releases may change APIs.
 
 ## [Unreleased]
 
+- Lua scripts on many entities call faster: a file's callbacks are looked up once an update, not once an entity
+  (`LuaScript::function` and `call_function` for a host calling one function many times), `self`'s entity methods
+  are bound once each, and the scripts no longer running are found by a sorted search. A scripted foe walking to
+  the player costs 1.1 µs an update instead of 2.4 on a desktop (`kin_entity_scripts_bench`, built on request); a
+  horde game on a Samsung A55 holds 60 fps with about 1215 scripted foes instead of 1050.
+
 - Faster development builds: optional precompiled headers and compiler caches, Clang development presets,
   precise shader include dependencies, smaller scene registration files, shared Lua/UI2 template adapters,
   and earlier independent runtime compilation with Ninja. See [build-time measurements and setup](build_times.md).

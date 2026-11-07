@@ -64,7 +64,8 @@ struct ScriptEntity {
             lifetime = entity_lifetime(EcsEntity{entity});
         }
     }
-    bool alive() const { return entity && same_lifetime(EcsEntity{entity}, lifetime); }
+    // same_lifetime(), less a second check that it is alive (every binding asks).
+    bool alive() const { return entity && entity.is_alive() && entity_lifetime(EcsEntity{entity}) == lifetime; }
     flecs::entity live() const {
         if (scripting_detail::reload_staging)
             throw sol::error("live entity access is unavailable while preparing reload");
@@ -121,17 +122,22 @@ function own.tween(self, property, to, seconds, easing, options)
     return id
 end
 function __kin_self(entity)
-    return setmetatable({entity = entity}, {__index = function(_, key)
+    -- Its entity's methods, each bound to it once, when first used: then
+    -- self:position() is two table reads, not a new function each call.
+    local bound = setmetatable({}, {__index = function(bound, key)
         local mine = own[key]
         if mine then
             return mine
         end
         local method = entity[key]
         if type(method) == "function" then
-            return function(_, ...) return method(entity, ...) end
+            local call = function(_, ...) return method(entity, ...) end
+            rawset(bound, key, call)
+            return call
         end
         return nil
     end})
+    return setmetatable({entity = entity}, {__index = bound})
 end
 )lua";
 
@@ -204,6 +210,29 @@ struct EntityScripts::Impl {
         std::unique_ptr<LuaScript> script;
         std::vector<std::pair<std::filesystem::path, FileTime>> times;
         u64 generation = 0; // bumped by each read: its selves belong to one
+        // Its callbacks as found in the update numbered `found_in`: looked up
+        // once an update, not once an entity (a script that defines one
+        // anew has it called from the next update). Declared after `script`,
+        // they go first; forget() lets go of them before its state closes.
+        u64 found_in = 0;
+        sol::protected_function on_update, on_dialogue_event, on_contact, on_contact_end;
+        void find_callbacks(u64 update) {
+            if (found_in == update) {
+                return;
+            }
+            found_in = update;
+            on_update = script->function("on_update");
+            on_dialogue_event = script->function("on_dialogue_event");
+            on_contact = script->function("on_contact");
+            on_contact_end = script->function("on_contact_end");
+        }
+        void forget_callbacks() {
+            found_in = 0;
+            on_update = {};
+            on_dialogue_event = {};
+            on_contact = {};
+            on_contact_end = {};
+        }
     };
     // An entity running a script: its self, made in the file's state then.
     struct Running {
@@ -219,6 +248,7 @@ struct EntityScripts::Impl {
     std::map<std::string, std::string> problems;
     std::unordered_map<std::string, std::shared_ptr<const PrefabAsset>> prefabs;
     i32 frames = 0;
+    u64 updates = 0; // EntityScripts::update calls, numbering them for File::found_in
 
     // What the bindings reach, during an update.
     LiveService<EcsWorld> world;
@@ -869,6 +899,7 @@ struct EntityScripts::Impl {
     }
 
     bool reload(const std::string& path, File& made) {
+        made.forget_callbacks(); // found again in the state the file has after this
         if (!made.script->loaded()) {
             const bool loaded = made.script->load_file(config.content / path);
             if (loaded) {
@@ -1133,16 +1164,17 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
     });
     // Values given back to entities gone since (or running no script): let go.
     std::erase_if(impl.restored, [&](const auto& entry) { return !world.raw().is_alive(entry.first); });
+    std::ranges::sort(scripted, [](const auto& a, const auto& b) { return a.first.id() < b.first.id(); });
     // Those that no longer run theirs: gone.
     std::erase_if(impl.running, [&](const auto& entry) {
-        const auto found = std::ranges::find_if(scripted, [&](const auto& item) { return item.first.id() == entry.first; });
-        const bool remove = found == scripted.end() || found->second != entry.second.path;
+        const auto found = std::ranges::lower_bound(scripted, entry.first, {}, [](const auto& item) { return item.first.id(); });
+        const bool remove = found == scripted.end() || found->first.id() != entry.first || found->second != entry.second.path;
         if (remove) {
             impl.stop(entry.second, !world.raw().is_alive(entry.first) ? "destroyed" : "disabled_or_removed");
         }
         return remove;
     });
-    std::ranges::sort(scripted, [](const auto& a, const auto& b) { return a.first.id() < b.first.id(); });
+    const u64 update = ++impl.updates;
     for (const auto& [entity, path] : scripted) {
         if (!entity.is_alive()) {
             continue;
@@ -1191,22 +1223,24 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
                 }
             }
         }
+        file.find_callbacks(update);
         if (entity.is_alive()) {
-            file.script->call("on_update", run.self, dt);
+            file.script->call_function(file.on_update, "on_update", run.self, dt);
         }
         // What the dialogue told this step (the game clears them once the step has seen them).
-        if (impl.dialogue && entity.is_alive() && file.script->has("on_dialogue_event")) {
+        if (impl.dialogue && entity.is_alive() && file.on_dialogue_event.valid()) {
             const std::vector<DialogueEvent> told = impl.dialogue->events();
             for (const DialogueEvent& event : told) {
                 if (!entity.is_alive()) break;
-                file.script->call("on_dialogue_event", run.self, event.id, event.node_id);
+                file.script->call_function(file.on_dialogue_event, "on_dialogue_event", run.self, event.id, event.node_id);
             }
         }
 #if KIN_ENABLE_PHYSICS
         // What its body began touching this step, and stopped touching.
-        for (const auto& [type, callback] : {std::pair{PhysicsContactEventType::Begin, "on_contact"},
-                                             std::pair{PhysicsContactEventType::End, "on_contact_end"}}) {
-            if (!entity.is_alive() || !file.script->has(callback)) {
+        for (const auto& [type, callback, function] :
+             {std::tuple{PhysicsContactEventType::Begin, "on_contact", &file.on_contact},
+              std::tuple{PhysicsContactEventType::End, "on_contact_end", &file.on_contact_end}}) {
+            if (!entity.is_alive() || !function->valid()) {
                 continue;
             }
             const PhysicsContactQueue* queue = entity.get<PhysicsContactQueue>();
@@ -1235,7 +1269,7 @@ void EntityScripts::update(EcsWorld& world, Input& input, f32 dt) {
                     });
                 }
                 if (other && entity.is_alive()) {
-                    file.script->call(callback, run.self, ScriptEntity{&world, other});
+                    file.script->call_function(*function, callback, run.self, ScriptEntity{&world, other});
                 }
             }
         }
